@@ -14,7 +14,6 @@
 
 use hdf5::file::LibraryVersion;
 use hdf5_pure::{AttrValue, File, FileBuilder, MaxExtent, ScaleOffset};
-use tempfile::tempdir;
 
 use test_util_hdf5::{absence, file, fixtures};
 
@@ -89,7 +88,7 @@ fn assert_edits_applied(path: &std::path::Path) {
 
 #[test]
 fn pure_written_file_edited_then_read_by_c_library() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pure.h5");
     let mut b = FileBuilder::new();
     fixtures::edit_repack_starter(&mut b, &[7, 8]);
@@ -106,7 +105,7 @@ fn pure_written_file_edited_then_read_by_c_library() {
 
 #[test]
 fn c_written_v2_file_edited_in_place() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_v2.h5");
     fixtures::libhdf5_edit_repack_starter(&path, LibraryVersion::V18, LibraryVersion::V18, &[7, 8])
         .close()
@@ -124,7 +123,7 @@ fn c_written_v2_file_edited_in_place() {
 
 #[test]
 fn c_written_v3_file_edited_in_place() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_v3.h5");
     fixtures::libhdf5_edit_repack_starter(
         &path,
@@ -151,7 +150,7 @@ fn c_multichunk_group_header_is_collapsed_and_edited() {
     // enough messages; several root attributes reliably force that. The editor
     // must collapse the continuation chunks into one header on rewrite, preserve
     // the existing messages (the attributes), and apply the edit.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_multichunk.h5");
     {
         let file = fixtures::libhdf5_edit_repack_starter(
@@ -195,7 +194,7 @@ fn c_multichunk_group_header_is_collapsed_and_edited() {
 
 #[test]
 fn c_v0_symboltable_file_edited_then_read_by_c_library() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_v0.h5");
     // Earliest low bound yields a version 0 superblock with symbol-table groups.
     fixtures::libhdf5_edit_repack_starter(
@@ -278,7 +277,7 @@ fn c_v0_root_attributes_survive_conversion() {
     // A version-0 root is a symbol-table (v1) group; editing converts it to v2.
     // Its existing attributes must survive that conversion, verified by the C
     // library reading them back.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_v0_attrs.h5");
     {
         let file = hdf5::File::with_options()
@@ -327,7 +326,7 @@ fn c_v0_root_attributes_survive_conversion() {
 
 #[test]
 fn c_library_reads_group_attributes_edited_in_place() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_group_attrs.h5");
     let mut b = FileBuilder::new();
     let mut g = b.create_group("grp");
@@ -381,7 +380,7 @@ fn free_space_reuse_and_truncation_stay_c_readable() {
     // then delete it. The freed blocks and superseded headers are reclaimed and
     // the file is truncated. libhdf5 must still read the survivor
     // correctly from the shrunken file, and its end-of-file must be consistent.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_freespace.h5");
     fixtures::libhdf5_edit_repack_starter(
         &path,
@@ -442,7 +441,7 @@ fn a_chunked_dataset_written_into_a_freed_hole_stays_c_readable() {
     // reader catches and a size assertion does not. So make the reference C
     // library resolve them: it reads the relocated dataset, and the survivors
     // above and below the hole, from a file it wrote itself.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_chunked_hole.h5");
     fixtures::libhdf5_edit_repack_starter(
         &path,
@@ -518,7 +517,7 @@ fn chunked_and_filtered_datasets_added_in_place_are_c_readable() {
     // file the editor did not write must be read back faithfully by the
     // reference C library — the real interop proof that their chunk data, index,
     // and filter pipeline are emitted correctly.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_chunked_edit.h5");
     fixtures::libhdf5_edit_repack_starter(
         &path,
@@ -660,7 +659,7 @@ fn deleting_chunked_datasets_in_place_stays_c_readable() {
     // in place, then churns an editor-written (Fixed Array) chunked dataset to
     // prove its storage is reclaimed and reused rather than leaked. Finally both
     // readers see only the contiguous survivor in the shrunken, valid file.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_chunked_delete.h5");
     {
         let file = hdf5::File::with_options()
@@ -759,7 +758,7 @@ fn overwriting_chunked_datasets_in_place_stays_c_readable() {
     //    its chunk slots without rewriting the index, so it stays B-tree v1; and
     //  - an editor-written deflate dataset whose values change compressibility is
     //    rebuilt and relocated, staying chunked + compressed.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_chunked_overwrite.h5");
     let btree: Vec<i32> = (0..2048).collect();
     {
@@ -859,7 +858,7 @@ fn fits_with_slack_filtered_overwrite_stays_c_readable() {
     // more-compressible values, the re-encoded chunks shrink and fit their slots,
     // so the chunk index is rebuilt *in place* to record the new sizes. The
     // reference C library must still read the rebuilt index and the new values.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_fits_with_slack.h5");
     fixtures::libhdf5_edit_repack_starter(
         &path,
@@ -935,7 +934,7 @@ fn copying_chunked_datasets_in_place_stays_c_readable() {
     // libhdf5 still reads, with the copy chunked + compressed. A
     // C-written B-tree-v1 source is reproduced with a v4 index (the writer emits
     // only single/fixed/extensible), which the C library reads as chunked too.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_chunked_copy.h5");
     let btree: Vec<i32> = (0..2048).collect();
     {
@@ -1019,7 +1018,7 @@ fn overwriting_multiply_linked_chunked_that_relocates_is_refused() {
     // change size) moves the object header, so only one of several hard links
     // could be repointed; it is refused when the object has more than one, and the
     // file is left untouched.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_chunked_multilink.h5");
     {
         let file = file::libhdf5_create_v110(&path);
@@ -1084,7 +1083,7 @@ fn deleting_one_of_several_hard_links_keeps_the_survivor() {
     // are reused. Covers a chunked (Fixed Array) object and a contiguous one,
     // each linked twice; one link of each is deleted, then churn forces the
     // allocator to reuse anything wrongly freed.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_hardlink_survivor.h5");
     let chunked: Vec<i32> = (0..512).collect();
     {
@@ -1163,7 +1162,7 @@ fn deleting_all_hard_links_to_an_object_in_one_commit_is_safe() {
     // in a single commit must not double-free its storage (a debug-build panic in
     // the free list) nor corrupt the file. The storage is conservatively left as
     // dead bytes; the file stays valid and the unrelated survivor reads back.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_hardlink_all.h5");
     {
         let file = file::libhdf5_create_v110(&path);
@@ -1208,7 +1207,7 @@ fn cross_file_copy_from_read_by_c_library() {
     // A cross-file `copy_from` must produce a destination libhdf5
     // can read: the copied object's verbatim headers, data, and attributes have to
     // be valid in the new file, not just resolvable by this crate's own reader.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src_path = dir.path().join("xsrc.h5");
     let dst_path = dir.path().join("xdst.h5");
 
@@ -1292,7 +1291,7 @@ fn cross_file_copy_from_c_written_attributed_dataset() {
     // also carries an Attribute Info message with an *undefined* heap address; the
     // copy path must treat that as compact (not dense), so `copy_from` succeeds and
     // the C library reads the copy back — attributes included.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src_path = dir.path().join("c_attr_src.h5");
     let dst_path = dir.path().join("c_attr_dst.h5");
     {
@@ -1362,7 +1361,7 @@ fn cross_file_copy_from_c_written_attributed_dataset() {
 fn same_file_copy_of_c_written_attributed_object() {
     // The same compact-attribute fix applies to the in-file `copy`: a C-written
     // attributed object is now copyable in place and read back by the C library.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_attr_infile.h5");
     {
         let file = file::libhdf5_create_v110(&path);
@@ -1406,7 +1405,7 @@ fn cross_file_copy_from_reproduces_c_written_dense_attributes() {
     // the source heap and a fresh heap is built in the destination, which the C
     // library then reads back. (A variable-length/reference dense set is still
     // refused cross-file; see `edit_dense_attr_copy.rs`.)
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src_path = dir.path().join("dense_src.h5");
     let dst_path = dir.path().join("dense_dst.h5");
     {
@@ -1460,7 +1459,7 @@ fn write_dataset_same_size_crosscheck() {
         (LibraryVersion::V18, LibraryVersion::V18),
         (LibraryVersion::V110, LibraryVersion::latest()),
     ] {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("w.h5");
         {
             let file = hdf5::File::with_options()
@@ -1508,7 +1507,7 @@ fn write_dataset_same_size_crosscheck() {
 #[test]
 #[cfg(target_endian = "little")]
 fn write_dataset_undefined_address_relocates_crosscheck() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("empty.h5");
     {
         let file = file::libhdf5_create_v110(&path);
@@ -1566,7 +1565,7 @@ fn write_dataset_undefined_address_relocates_crosscheck() {
 #[test]
 #[cfg(target_endian = "little")]
 fn write_dataset_shared_hard_link_crosscheck() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("shared.h5");
     {
         let file = file::libhdf5_create_v110(&path);
@@ -1621,7 +1620,7 @@ fn write_dataset_shared_hard_link_crosscheck() {
 #[test]
 #[cfg(target_endian = "little")]
 fn write_dataset_relocate_with_multiple_hard_links_is_refused() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("shared_relocate.h5");
     {
         let file = file::libhdf5_create_v110(&path);
@@ -1674,7 +1673,7 @@ fn a_replaced_object_is_read_by_the_c_library() {
             3,
         ),
     ] {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(name);
         fixtures::libhdf5_edit_repack_starter(&path, low, high, &[7, 8])
             .close()
@@ -1769,7 +1768,7 @@ fn write_hard_linked_group(path: &std::path::Path) {
 /// *dataset* writes have always had, applied where it was missing.
 #[test]
 fn editing_a_hard_linked_group_is_refused() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_hardlink_group.h5");
     write_hard_linked_group(&path);
     let before = std::fs::read(&path).unwrap();
@@ -1808,7 +1807,7 @@ fn editing_a_hard_linked_group_is_refused() {
 /// ancestor on the edited path is rebuilt too.
 #[test]
 fn editing_below_a_hard_linked_group_is_refused() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_hardlink_group_deep.h5");
     {
         let file = hdf5::File::create(&path).unwrap();
@@ -1838,7 +1837,7 @@ fn editing_below_a_hard_linked_group_is_refused() {
 /// than one. Everything else still edits.
 #[test]
 fn the_hard_link_rule_does_not_refuse_an_ordinary_group() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_hardlink_group_ok.h5");
     {
         let file = file::libhdf5_create_v18(&path);
@@ -1894,7 +1893,7 @@ fn the_hard_link_rule_does_not_refuse_an_ordinary_group() {
 /// edited: deletion does not relocate a header, so it is unaffected.
 #[test]
 fn deleting_a_link_to_a_hard_linked_group_still_works() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_hardlink_group_delete.h5");
     write_hard_linked_group(&path);
 
@@ -1923,7 +1922,7 @@ fn deleting_a_link_to_a_hard_linked_group_still_works() {
 /// looking for a second link that may not exist.
 #[test]
 fn editing_a_group_is_refused_when_the_links_cannot_be_walked() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_hardlink_group_damaged.h5");
     {
         let file = file::libhdf5_create_v18(&path);
@@ -1996,7 +1995,7 @@ fn a_never_written_dataset_is_copied_as_the_storage_it_never_had() {
     const N: usize = 100_000;
     const FILL: i32 = -12_345;
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("never_written_copy.h5");
     {
         // The copy path needs a version 2 object header, so the format is named
@@ -2166,7 +2165,7 @@ fn a_never_written_reference_dataset_copies_beside_a_delete() {
             TypeDescriptor::VarLenArray(Box::new(TypeDescriptor::Reference(Reference::Object))),
         ),
     ] {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("never_written_refs.h5");
         {
             // As above: the copy path needs a version 2 object header.
@@ -2218,7 +2217,7 @@ fn appending_into_a_staged_contiguous_dataset_stays_c_readable() {
     // builder is handed its whole shape at once — and what it produces is an
     // ordinary fixed-shape contiguous dataset, so the reference library is what
     // proves the two halves agree (issue #392).
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("staged_append.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("keep").with_i32_data(&[1]);

@@ -5,7 +5,7 @@
 //! read back with this crate. C-library interop lives in
 //! `crates/crosscheck/tests/main/append_writer.rs`.
 use hdf5_pure::{Error, File, FileAccessProperties, FileBuilder, ScaleOffset, SyncPolicy};
-use tempfile::tempdir;
+
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
 
 /// Run `f` against a read-write file scoped so its exclusive lock is released
@@ -31,7 +31,7 @@ fn with_writer<T>(path: &std::path::Path, f: impl FnOnce(&File) -> T) -> T {
 
 #[test]
 fn unfiltered_chunk_aligned() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).pure_create(&path); // 2 full chunks
     with_writer(&path, |w| {
@@ -48,7 +48,7 @@ fn unfiltered_chunk_aligned() {
 
 #[test]
 fn unfiltered_unaligned_partial_tail() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     // 6 elements, chunk 4 => 1 full chunk + a 2-of-4 partial on disk.
     Unlimited::new("d", &(0..6).collect::<Vec<i32>>(), 4).pure_create(&path);
@@ -68,7 +68,7 @@ fn unfiltered_unaligned_partial_tail() {
 
 #[test]
 fn deflate_shuffle_chunk_aligned() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
         .filters(&[Filter::Shuffle, Filter::Deflate(6)])
@@ -87,7 +87,7 @@ fn deflate_shuffle_chunk_aligned() {
 
 #[test]
 fn fletcher32_chunk_aligned() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     // Filtered appends must be chunk-aligned: start at 8 (2 full chunks of 4),
     // append 8 more (two whole chunks).
@@ -108,7 +108,7 @@ fn fletcher32_chunk_aligned() {
 
 #[test]
 fn scale_offset_f64_chunk_aligned() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     let init: Vec<f64> = (0..8).map(|i| i as f64 * 0.25).collect();
     Unlimited::new("d", &init, 4)
@@ -138,7 +138,7 @@ fn filtered_onto_a_partial_trailing_chunk() {
     // any other: the trailing chunk is decoded, extended, re-encoded into a
     // fresh allocation, and its index element repointed (issue #393). Across
     // separate sessions, so each append starts from what the last one left.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("b.h5");
     Unlimited::new("d", &(0..6).collect::<Vec<i32>>(), 4)
         .filters(&[Filter::Shuffle, Filter::Deflate(6)])
@@ -166,7 +166,7 @@ fn filtered_unaligned_length_onto_an_aligned_dataset() {
     // past the old dimension — invisible until the dimension is published, like
     // every whole chunk beside it. The next append then grows that partial
     // chunk, which is the other half of the pair.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("a.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
         .filters(&[Filter::Shuffle, Filter::Deflate(6)])
@@ -192,7 +192,7 @@ fn filtered_unaligned_length_onto_an_aligned_dataset() {
 
 #[test]
 fn many_small_appends_one_session() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     // chunk 1 (the streaming layout): every append is chunk-aligned, so this is
     // the fast insert-only path. Cross the inline -> direct -> super-block
@@ -216,7 +216,7 @@ fn many_small_appends_one_session() {
 
 #[test]
 fn repeated_partial_appends_one_session() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     // Start with a pure partial chunk (3 of 4), then repeatedly append amounts
     // that keep landing mid-chunk, forcing repeated in-place tail relocation.
@@ -240,7 +240,7 @@ fn repeated_partial_appends_one_session() {
 
 #[test]
 fn reopen_and_continue() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     // Unfiltered so the any-length (partial-tail) reopen path is exercised.
     Unlimited::new("d", &(0..6).collect::<Vec<i32>>(), 4).pure_create(&path);
@@ -268,7 +268,7 @@ fn reopen_and_continue() {
 
 #[test]
 fn multiple_datasets_one_writer() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     let mut b = FileBuilder::new();
     // "a" is filtered and appended chunk-aligned (start 4, chunk 2, whole-chunk
@@ -300,7 +300,7 @@ fn multiple_datasets_one_writer() {
 
 #[test]
 fn generic_and_raw_append() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     let fixture = dataset::AppendRefusalFixture::UnlimitedI32;
     fixture.write(&path);
@@ -336,7 +336,7 @@ fn assert_unsupported(r: Result<(), Error>) {
 
 #[test]
 fn refuse_contiguous() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     let fixture = dataset::AppendRefusalFixture::Contiguous;
     fixture.write(&path);
@@ -351,7 +351,7 @@ fn refuse_contiguous() {
 
 #[test]
 fn refuse_fixed_not_unlimited() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     let fixture = dataset::AppendRefusalFixture::FixedChunked;
     fixture.write(&path);
@@ -366,7 +366,7 @@ fn refuse_fixed_not_unlimited() {
 
 #[test]
 fn refuse_datatype_mismatch() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     let fixture = dataset::AppendRefusalFixture::UnlimitedI32;
     fixture.write(&path);
@@ -381,7 +381,7 @@ fn refuse_datatype_mismatch() {
 
 #[test]
 fn refuse_mixed_element_types() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     let fixture = dataset::AppendRefusalFixture::UnlimitedI32;
     fixture.write(&path);
@@ -398,7 +398,7 @@ fn refuse_mixed_element_types() {
 
 #[test]
 fn refuse_nonexistent_dataset() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     let fixture = dataset::AppendRefusalFixture::UnlimitedI32;
     fixture.write(&path);
@@ -415,7 +415,7 @@ fn refuse_nonexistent_dataset() {
 
 #[test]
 fn append_to_pure_empty_dataset() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     // This crate allocates the Extensible-Array index eagerly, so an empty
     // dataset can be grown in place from the first append. Filtered => the append
@@ -437,7 +437,7 @@ fn append_to_pure_empty_dataset() {
 
 #[test]
 fn zero_length_append_is_noop() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     let fixture = dataset::AppendRefusalFixture::UnlimitedI32;
     fixture.write(&path);

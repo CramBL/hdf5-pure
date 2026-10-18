@@ -8,7 +8,7 @@ use super::value::{Leaf, Value};
 use crate::mat::builder::{CellWriter, MatBuilder, StructWriter};
 use crate::mat::error::MatError;
 use crate::mat::options::{Options, StringClass};
-use crate::mat::transpose::transpose_scalars;
+use crate::mat::transpose as trans;
 use crate::mat::value::{ComplexVec, NumVec, ScalarNum};
 
 /// The complex dispatchers for the three write scopes, from one list.
@@ -273,39 +273,39 @@ fn emit_cell_matrix(
     let dims = [rows, cols];
     match v {
         NumVec::Bool(vec) => {
-            let col_major = transpose_scalars(rows, cols, &vec);
+            let col_major = trans::transpose_scalars(rows, cols, &vec);
             let bytes: Vec<u8> = col_major.into_iter().map(u8::from).collect();
             cw.push_logical(&dims, &bytes)?;
         }
         NumVec::F64(vec) => {
-            cw.push_f64(&dims, &transpose_scalars(rows, cols, &vec))?;
+            cw.push_f64(&dims, &trans::transpose_scalars(rows, cols, &vec))?;
         }
         NumVec::F32(vec) => {
-            cw.push_f32(&dims, &transpose_scalars(rows, cols, &vec))?;
+            cw.push_f32(&dims, &trans::transpose_scalars(rows, cols, &vec))?;
         }
         NumVec::I64(vec) => {
-            cw.push_i64(&dims, &transpose_scalars(rows, cols, &vec))?;
+            cw.push_i64(&dims, &trans::transpose_scalars(rows, cols, &vec))?;
         }
         NumVec::I32(vec) => {
-            cw.push_i32(&dims, &transpose_scalars(rows, cols, &vec))?;
+            cw.push_i32(&dims, &trans::transpose_scalars(rows, cols, &vec))?;
         }
         NumVec::I16(vec) => {
-            cw.push_i16(&dims, &transpose_scalars(rows, cols, &vec))?;
+            cw.push_i16(&dims, &trans::transpose_scalars(rows, cols, &vec))?;
         }
         NumVec::I8(vec) => {
-            cw.push_i8(&dims, &transpose_scalars(rows, cols, &vec))?;
+            cw.push_i8(&dims, &trans::transpose_scalars(rows, cols, &vec))?;
         }
         NumVec::U64(vec) => {
-            cw.push_u64(&dims, &transpose_scalars(rows, cols, &vec))?;
+            cw.push_u64(&dims, &trans::transpose_scalars(rows, cols, &vec))?;
         }
         NumVec::U32(vec) => {
-            cw.push_u32(&dims, &transpose_scalars(rows, cols, &vec))?;
+            cw.push_u32(&dims, &trans::transpose_scalars(rows, cols, &vec))?;
         }
         NumVec::U16(vec) => {
-            cw.push_u16(&dims, &transpose_scalars(rows, cols, &vec))?;
+            cw.push_u16(&dims, &trans::transpose_scalars(rows, cols, &vec))?;
         }
         NumVec::U8(vec) => {
-            cw.push_u8(&dims, &transpose_scalars(rows, cols, &vec))?;
+            cw.push_u8(&dims, &trans::transpose_scalars(rows, cols, &vec))?;
         }
     }
     Ok(())
@@ -453,20 +453,20 @@ fn emit_matrix_at_builder(
     let dims = [rows, cols];
     match v {
         NumVec::Bool(vec) => {
-            let col_major = transpose_scalars(rows, cols, &vec);
+            let col_major = trans::transpose_scalars(rows, cols, &vec);
             let bytes: Vec<u8> = col_major.into_iter().map(u8::from).collect();
             mb.write_logical(name, &dims, &bytes)
         }
-        NumVec::F64(vec) => mb.write_f64(name, &dims, &transpose_scalars(rows, cols, &vec)),
-        NumVec::F32(vec) => mb.write_f32(name, &dims, &transpose_scalars(rows, cols, &vec)),
-        NumVec::I64(vec) => mb.write_i64(name, &dims, &transpose_scalars(rows, cols, &vec)),
-        NumVec::I32(vec) => mb.write_i32(name, &dims, &transpose_scalars(rows, cols, &vec)),
-        NumVec::I16(vec) => mb.write_i16(name, &dims, &transpose_scalars(rows, cols, &vec)),
-        NumVec::I8(vec) => mb.write_i8(name, &dims, &transpose_scalars(rows, cols, &vec)),
-        NumVec::U64(vec) => mb.write_u64(name, &dims, &transpose_scalars(rows, cols, &vec)),
-        NumVec::U32(vec) => mb.write_u32(name, &dims, &transpose_scalars(rows, cols, &vec)),
-        NumVec::U16(vec) => mb.write_u16(name, &dims, &transpose_scalars(rows, cols, &vec)),
-        NumVec::U8(vec) => mb.write_u8(name, &dims, &transpose_scalars(rows, cols, &vec)),
+        NumVec::F64(vec) => mb.write_f64(name, &dims, &trans::transpose_scalars(rows, cols, &vec)),
+        NumVec::F32(vec) => mb.write_f32(name, &dims, &trans::transpose_scalars(rows, cols, &vec)),
+        NumVec::I64(vec) => mb.write_i64(name, &dims, &trans::transpose_scalars(rows, cols, &vec)),
+        NumVec::I32(vec) => mb.write_i32(name, &dims, &trans::transpose_scalars(rows, cols, &vec)),
+        NumVec::I16(vec) => mb.write_i16(name, &dims, &trans::transpose_scalars(rows, cols, &vec)),
+        NumVec::I8(vec) => mb.write_i8(name, &dims, &trans::transpose_scalars(rows, cols, &vec)),
+        NumVec::U64(vec) => mb.write_u64(name, &dims, &trans::transpose_scalars(rows, cols, &vec)),
+        NumVec::U32(vec) => mb.write_u32(name, &dims, &trans::transpose_scalars(rows, cols, &vec)),
+        NumVec::U16(vec) => mb.write_u16(name, &dims, &trans::transpose_scalars(rows, cols, &vec)),
+        NumVec::U8(vec) => mb.write_u8(name, &dims, &trans::transpose_scalars(rows, cols, &vec)),
     }
     .map(|_| ())
 }
@@ -481,20 +481,20 @@ fn emit_matrix_at_struct(
     let dims = [rows, cols];
     match v {
         NumVec::Bool(vec) => {
-            let col_major = transpose_scalars(rows, cols, &vec);
+            let col_major = trans::transpose_scalars(rows, cols, &vec);
             let bytes: Vec<u8> = col_major.into_iter().map(u8::from).collect();
             sw.write_logical(name, &dims, &bytes)
         }
-        NumVec::F64(vec) => sw.write_f64(name, &dims, &transpose_scalars(rows, cols, &vec)),
-        NumVec::F32(vec) => sw.write_f32(name, &dims, &transpose_scalars(rows, cols, &vec)),
-        NumVec::I64(vec) => sw.write_i64(name, &dims, &transpose_scalars(rows, cols, &vec)),
-        NumVec::I32(vec) => sw.write_i32(name, &dims, &transpose_scalars(rows, cols, &vec)),
-        NumVec::I16(vec) => sw.write_i16(name, &dims, &transpose_scalars(rows, cols, &vec)),
-        NumVec::I8(vec) => sw.write_i8(name, &dims, &transpose_scalars(rows, cols, &vec)),
-        NumVec::U64(vec) => sw.write_u64(name, &dims, &transpose_scalars(rows, cols, &vec)),
-        NumVec::U32(vec) => sw.write_u32(name, &dims, &transpose_scalars(rows, cols, &vec)),
-        NumVec::U16(vec) => sw.write_u16(name, &dims, &transpose_scalars(rows, cols, &vec)),
-        NumVec::U8(vec) => sw.write_u8(name, &dims, &transpose_scalars(rows, cols, &vec)),
+        NumVec::F64(vec) => sw.write_f64(name, &dims, &trans::transpose_scalars(rows, cols, &vec)),
+        NumVec::F32(vec) => sw.write_f32(name, &dims, &trans::transpose_scalars(rows, cols, &vec)),
+        NumVec::I64(vec) => sw.write_i64(name, &dims, &trans::transpose_scalars(rows, cols, &vec)),
+        NumVec::I32(vec) => sw.write_i32(name, &dims, &trans::transpose_scalars(rows, cols, &vec)),
+        NumVec::I16(vec) => sw.write_i16(name, &dims, &trans::transpose_scalars(rows, cols, &vec)),
+        NumVec::I8(vec) => sw.write_i8(name, &dims, &trans::transpose_scalars(rows, cols, &vec)),
+        NumVec::U64(vec) => sw.write_u64(name, &dims, &trans::transpose_scalars(rows, cols, &vec)),
+        NumVec::U32(vec) => sw.write_u32(name, &dims, &trans::transpose_scalars(rows, cols, &vec)),
+        NumVec::U16(vec) => sw.write_u16(name, &dims, &trans::transpose_scalars(rows, cols, &vec)),
+        NumVec::U8(vec) => sw.write_u8(name, &dims, &trans::transpose_scalars(rows, cols, &vec)),
     }
     .map(|_| ())
 }

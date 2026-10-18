@@ -24,7 +24,6 @@
 //! in `h5repack`'s tool code, not in the library.
 
 use hdf5_pure::{AttrValue, File, FileBuilder};
-use tempfile::tempdir;
 
 /// The C library's declared attribute count for `obj`, and the names it finds by
 /// iterating. A file this crate writes correctly makes these agree; the defect
@@ -83,7 +82,7 @@ fn attr_names(count: usize) -> Vec<String> {
 
 #[test]
 fn c_counts_a_single_compact_attribute_on_every_kind_of_object() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("one.h5");
     write_compact_attrs(&path, 1);
 
@@ -99,7 +98,7 @@ fn c_counts_a_single_compact_attribute_on_every_kind_of_object() {
 /// them would not notice a count that tracked the wrong quantity.
 #[test]
 fn c_counts_every_size_of_compact_attribute_set() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     for count in 1..=8 {
         let path = dir.path().join(format!("n{count}.h5"));
         write_compact_attrs(&path, count);
@@ -118,7 +117,7 @@ fn c_counts_every_size_of_compact_attribute_set() {
 /// this holds the side of the boundary the fix did not touch.
 #[test]
 fn c_counts_a_densely_stored_attribute_set() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dense.h5");
     let count = 12;
     write_compact_attrs(&path, count);
@@ -133,7 +132,7 @@ fn c_counts_a_densely_stored_attribute_set() {
 
 #[test]
 fn c_counts_the_attributes_an_edit_session_added() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("edited.h5");
 
     let mut b = FileBuilder::new();

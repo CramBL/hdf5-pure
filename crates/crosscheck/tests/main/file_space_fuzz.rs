@@ -33,7 +33,7 @@ use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
 
 use proptest::prelude::*;
-use tempfile::tempdir;
+
 use test_util::range;
 use test_util_hdf5::{dataset::Unlimited, file_space, session};
 
@@ -98,7 +98,7 @@ proptest! {
         // up to 8000 elements spans several pages even at the largest page size.
         lens in prop::collection::vec(1usize..=8000usize, 1..=3),
     ) {
-            let dir = tempdir().unwrap();
+            let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fuzz_strategy.h5");
 
         let datasets: Vec<Vec<i32>> =
@@ -159,7 +159,7 @@ proptest! {
         // 1..=5 append calls of 1..=1500 unfiltered (so any-length) rows each.
         appends in prop::collection::vec(1usize..=1500usize, 1..=5),
     ) {
-            let dir = tempdir().unwrap();
+            let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fuzz_append.h5");
 
         // Create a paged, persisting, unlimited chunked i32 dataset with one chunk.
@@ -226,7 +226,7 @@ proptest! {
         threshold in 1u64..=8192,
         datasets in prop::collection::vec((1usize..=2048usize, any::<bool>()), 3..=6),
     ) {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fuzz_threshold.h5");
         let data: Vec<Vec<i32>> = datasets
             .iter()

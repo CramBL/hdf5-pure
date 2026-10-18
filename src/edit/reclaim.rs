@@ -17,7 +17,7 @@ use crate::access_mode::AccessMode;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::attribute_info::AttributeInfoMessage;
-use crate::chunked_read::chunk_index_spans_from_source;
+use crate::chunked_read;
 use crate::data_layout::{ChunkIndexLayout, DataLayout};
 use crate::dataspace::Dataspace;
 use crate::error::{Error, FormatError};
@@ -26,7 +26,7 @@ use crate::fractal_heap_storage;
 use crate::fractal_heap_storage::FractalHeapAllocation;
 use crate::fractal_heap_storage::FractalHeapStorageError;
 use crate::global_heap;
-use crate::group_v2::resolve_group_entries_from_source;
+use crate::group_v2;
 use crate::link_info::LinkInfoMessage;
 use crate::link_message::LinkMessage;
 use crate::link_message::LinkTarget;
@@ -38,7 +38,6 @@ use crate::source::{BaseOffsetSource, Source, SourceMetadata};
 use super::GlobalHeapLiveness;
 use super::{
     MAX_COPY_DEPTH, MAX_LINK_GRAPH_NODES, ObjModel, OhRegion, SpaceOwnership, WriteEngine,
-    read_oh_chunks, spans_disjoint_in_bounds,
 };
 
 /// The spans `(address, length)` of the global heap collections that the objects a commit deletes
@@ -222,7 +221,7 @@ impl WriteEngine {
     /// header is not a plain v2 header this engine can fully account for, and
     /// the caller leaves it as dead bytes of unknown extent.
     pub(super) fn oh_chunk_spans(&self, addr: u64) -> Result<Vec<(u64, u64)>, Error> {
-        Ok(read_oh_chunks(&self.image(), addr, self.addresses)?
+        Ok(super::read_oh_chunks(&self.image(), addr, self.addresses)?
             .into_iter()
             .map(|chunk| chunk.span)
             .collect())
@@ -349,14 +348,14 @@ impl WriteEngine {
             .collect::<Option<Vec<_>>>()?;
         let mut proven = owned.to_vec();
         proven.extend(index_spans.iter().copied());
-        if !spans_disjoint_in_bounds(&mut proven, eof) {
+        if !super::spans_disjoint_in_bounds(&mut proven, eof) {
             return None;
         }
 
         let mut storage: Vec<(u64, u64, FreeClass)> = meta_spans(index_spans).collect();
         if let Some(heap_spans) = self.fractal_heap_spans(heap_address) {
             proven.extend(heap_spans.iter().map(|&(addr, len, _)| (addr, len)));
-            if spans_disjoint_in_bounds(&mut proven, eof) {
+            if super::spans_disjoint_in_bounds(&mut proven, eof) {
                 storage.extend(heap_spans);
             }
         }
@@ -407,7 +406,7 @@ impl WriteEngine {
     ///
     /// Walks the whole link graph from the root, following hard links through
     /// groups of any on-disk format (v0/v1 symbol-table, v2 compact, v2 dense)
-    /// via [`resolve_group_entries_from_source`], tallying each hard-link edge. Datasets and
+    /// via [`group_v2::resolve_group_entries_from_source`], tallying each hard-link edge. Datasets and
     /// other leaves contribute no edges. Returns `None` if the graph cannot be walked in full:
     /// an unparseable header, a group whose links cannot be enumerated, or
     /// more than [`MAX_LINK_GRAPH_NODES`] objects. Cycles are handled by visiting
@@ -451,7 +450,7 @@ impl WriteEngine {
             }
             // A group we cannot enumerate fully would undercount incoming links
             // and risk over-reclaim. Return the safe-leak fallback.
-            let entries = resolve_group_entries_from_source(
+            let entries = group_v2::resolve_group_entries_from_source(
                 &self.image(),
                 AccessMode::ReadWrite,
                 &header,
@@ -760,7 +759,7 @@ impl WriteEngine {
     /// Chunk data addresses and sizes come from the same index walkers the
     /// reader uses, so they match the bytes the writer laid down exactly. The
     /// per-layout enumeration lives in
-    /// [`chunked_read::collect_chunked_storage_spans`](crate::chunked_read::collect_chunked_storage_spans).
+    /// [`chunked_read::collect_chunked_storage_spans`].
     /// This method only locates the layout and dataspace messages and validates
     /// the result. The global heap collections that the chunks refer to are
     /// excluded, as in [`collect_free_spans`](Self::collect_free_spans).
@@ -848,7 +847,7 @@ impl WriteEngine {
         // Validate both halves together. They must be disjoint from each other and internally
         // before either is trusted, including by the proof.
         let mut plain: Vec<(u64, u64)> = data.iter().chain(index.iter()).copied().collect();
-        if !spans_disjoint_in_bounds(&mut plain, self.image.len()) {
+        if !super::spans_disjoint_in_bounds(&mut plain, self.image.len()) {
             return None;
         }
         let index_layout = match layout {
@@ -952,7 +951,7 @@ impl WriteEngine {
     ///
     /// This is the index-only counterpart of
     /// [`chunked_storage_spans`](Self::chunked_storage_spans), delegating to
-    /// [`chunk_index_spans_from_source`], which enumerates the index structure's
+    /// [`chunked_read::chunk_index_spans_from_source`], which enumerates the index structure's
     /// own blocks (B-tree v1/v2 nodes, or fixed- / extensible-array header, index,
     /// super, and data blocks) and never a chunk-data address, so the shared
     /// kept chunk data is never freed. Base-aware and validated
@@ -980,7 +979,7 @@ impl WriteEngine {
             return None;
         }
         let base = self.addresses;
-        let mut spans = chunk_index_spans_from_source(
+        let mut spans = chunked_read::chunk_index_spans_from_source(
             &BaseOffsetSource {
                 inner: &self.image(),
                 base: base.effective_base(),
@@ -992,7 +991,7 @@ impl WriteEngine {
         for (a, _) in &mut spans {
             *a = base.absolute(StoredAddress::new(*a)).ok()?;
         }
-        if !spans_disjoint_in_bounds(&mut spans, self.image.len()) {
+        if !super::spans_disjoint_in_bounds(&mut spans, self.image.len()) {
             return None;
         }
         Some(spans)

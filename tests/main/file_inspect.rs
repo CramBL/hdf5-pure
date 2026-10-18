@@ -2,7 +2,7 @@
 //! `is_hdf5` / `is_hdf5_bytes`, `File::file_size`, `File::libver_bound`, and
 //! `FileBuilder::with_libver_bounds`.
 
-use hdf5_pure::{File, FileBuilder, LibVer, is_hdf5, is_hdf5_bytes};
+use hdf5_pure::{File, FileBuilder, LibVer};
 
 use test_util::temp;
 
@@ -17,9 +17,9 @@ fn sample_file() -> Vec<u8> {
 #[test]
 fn is_hdf5_bytes_detects_signature() {
     let bytes = sample_file();
-    assert!(is_hdf5_bytes(&bytes));
-    assert!(!is_hdf5_bytes(&[0u8; 64]));
-    assert!(!is_hdf5_bytes(&[]));
+    assert!(hdf5_pure::is_hdf5_bytes(&bytes));
+    assert!(!hdf5_pure::is_hdf5_bytes(&[0u8; 64]));
+    assert!(!hdf5_pure::is_hdf5_bytes(&[]));
 }
 
 #[test]
@@ -33,11 +33,11 @@ fn is_hdf5_path_roundtrip() {
     std::fs::write(&h5, sample_file()).unwrap();
     std::fs::write(&other, b"not an hdf5 file at all").unwrap();
 
-    assert!(is_hdf5(&h5).unwrap());
-    assert!(!is_hdf5(&other).unwrap());
+    assert!(hdf5_pure::is_hdf5(&h5).unwrap());
+    assert!(!hdf5_pure::is_hdf5(&other).unwrap());
 
     // A missing file is an I/O error, not `Ok(false)`.
-    assert!(is_hdf5(dir.join("hdf5_pure_definitely_missing.h5")).is_err());
+    assert!(hdf5_pure::is_hdf5(dir.join("hdf5_pure_definitely_missing.h5")).is_err());
 }
 
 #[test]

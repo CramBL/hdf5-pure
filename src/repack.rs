@@ -125,7 +125,7 @@ use crate::chunked_write::{ChunkMeta, ChunkProvider, FilterKind, FilterSpec};
 use crate::convert::Narrow;
 use crate::data_layout::DataLayout;
 use crate::dataspace::MaxExtent;
-use crate::datatype::{Datatype, ReferenceType, embedded_reference_slots};
+use crate::datatype::{self, Datatype, ReferenceType};
 use crate::error::{Error, FormatError};
 use crate::filter_pipeline::{
     FILTER_DEFLATE, FILTER_FLETCHER32, FILTER_LZF, FILTER_SCALEOFFSET, FILTER_SHUFFLE,
@@ -141,10 +141,7 @@ use crate::type_builders::{
     AttrValue, DatasetBuilder, FinishedGroup, GroupBuilder, ObjectRefPatch, ObjectRefTarget,
     VlStringElement,
 };
-use crate::vl_data::{
-    EmbeddedVlSlot, VlByteObject, VlenStringReadOptions, embedded_vlen_slots,
-    is_vlen_string_datatype,
-};
+use crate::vl_data::{self, EmbeddedVlSlot, VlByteObject, VlenStringReadOptions};
 use crate::width::OffsetWidth;
 use crate::writer::FileBuilder;
 
@@ -765,7 +762,7 @@ fn emit_dataset(
     // variable-length or merely contains one through a compound member or array
     // entry. Both kinds are re-staged rather than copied, so both disqualify the
     // verbatim and fill-value paths below.
-    let vlen_slots = embedded_vlen_slots(&datatype).ok_or_else(|| {
+    let vlen_slots = vl_data::embedded_vlen_slots(&datatype).ok_or_else(|| {
         Error::RepackUnsupported(format!(
             "dataset {path}: datatype declares variable-length members its own element \
              size cannot hold"
@@ -774,7 +771,7 @@ fn emit_dataset(
     // Likewise every object-header address it reaches. Both kinds of address are
     // rewritten rather than copied, so both disqualify the paths that move
     // element bytes unchanged.
-    let reference_slots = embedded_reference_slots(&datatype).ok_or_else(|| {
+    let reference_slots = datatype::embedded_reference_slots(&datatype).ok_or_else(|| {
         Error::RepackUnsupported(format!(
             "dataset {path}: datatype declares object references this rewrite cannot locate in \
              its element bytes -- a width other than eight, an enumeration over one, a \
@@ -834,7 +831,7 @@ fn emit_dataset(
     // references point into the global heap, so they are re-emitted by reading
     // each element's exact heap bytes and re-staging them, not by copying raw
     // element bytes (whose stored heap addresses would go stale on rewrite).
-    if is_vlen_string_datatype(&datatype) {
+    if vl_data::is_vlen_string_datatype(&datatype) {
         emit_vlen_string_dataset(db, ds, path, &datatype, &dims, &layout, &pipeline)?;
         // VL-string datasets carry attributes the same way as any other.
         copy_dataset_attrs(db, ds, path, drop, addr_map)?;
@@ -1537,7 +1534,7 @@ fn check_datatype(dt: &Datatype, owner: &str) -> Result<(), Error> {
         // MATLAB VLEN-of-1-byte-ASCII-string shape) are reproduced by reading
         // each element's exact heap bytes and re-staging them through the
         // writer's VL-string path; the layout/filter checks gate chunked ones.
-        Datatype::VariableLength { .. } if is_vlen_string_datatype(dt) => Ok(()),
+        Datatype::VariableLength { .. } if vl_data::is_vlen_string_datatype(dt) => Ok(()),
         // Non-string VL (sequences of arbitrary base types) are re-staged the
         // same way, but only when the base type's bytes carry no embedded heap or
         // file addresses that a verbatim copy would leave stale.
@@ -1575,7 +1572,7 @@ fn check_datatype(dt: &Datatype, owner: &str) -> Result<(), Error> {
 /// re-emitted by [`emit_vlen_sequence_dataset`]. Excludes the string-shaped VL
 /// datatypes, which [`emit_vlen_string_dataset`] handles.
 fn is_nonstring_vlen(dt: &Datatype) -> bool {
-    matches!(dt, Datatype::VariableLength { .. }) && !is_vlen_string_datatype(dt)
+    matches!(dt, Datatype::VariableLength { .. }) && !vl_data::is_vlen_string_datatype(dt)
 }
 
 /// A non-string VL sequence is repacked by re-staging each element's exact heap
@@ -1864,7 +1861,7 @@ fn resolve_reference_address(
 ///
 /// The C library sizes an object reference at `H5R_OBJ_REF_BUF_SIZE`,
 /// `sizeof(haddr_t)` (`H5Rpublic.h`, HDF5 2.2.0), so the element is eight bytes
-/// whatever address width the file declares, and [`embedded_reference_slots`]
+/// whatever address width the file declares, and [`datatype::embedded_reference_slots`]
 /// locates no other form: an undefined reference has all eight of those bytes
 /// set.
 const OBJECT_REFERENCE_WIDTH: OffsetWidth = OffsetWidth::Eight;

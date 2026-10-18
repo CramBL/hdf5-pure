@@ -20,21 +20,19 @@ use crate::address::BaseAddressExt;
 #[cfg(test)]
 use crate::address::StoredAddressExt;
 use crate::address::{AddressContext, StoredAddress};
-use crate::btree_v2::{
-    BTreeV2Header, collect_btree_v2_records, collect_btree_v2_records_from_source,
-};
+use crate::btree_v2::{self, BTreeV2Header};
 use crate::convert::Narrow;
 use crate::dense_storage::{self, DenseIndex};
 use crate::error::{FormatError, ResolveError};
 use crate::fractal_heap::HeapObjectReader;
 use crate::group_v1::{self, GroupEntry};
 use crate::link_info::LinkInfoMessage;
-use crate::link_message::{LinkMessage, LinkTarget, link_is_named};
+use crate::link_message::{self, LinkMessage, LinkTarget};
 use crate::message_type::MessageType;
 use crate::object_header::{MessageFilter, ObjectHeader};
 use crate::object_path::{LinkName, ObjectPath};
 use crate::source::SourceMetadata;
-use crate::source::{BaseOffsetSource, Source, frame};
+use crate::source::{self, BaseOffsetSource, Source};
 use crate::superblock::Superblock;
 use crate::symbol_table::SymbolTableMessage;
 use crate::width::{FormatWidths, OffsetWidth};
@@ -91,7 +89,7 @@ pub fn resolve_v2_group_entries(
 
     if let Some(fh_addr) = link_info.fractal_heap_address {
         // Dense storage
-        let framed = frame(file_data, addresses.effective_base())?;
+        let framed = source::frame(file_data, addresses.effective_base())?;
         resolve_dense_entries(framed, access_mode, addresses, &link_info, fh_addr, widths)
     } else {
         // Compact storage: links are stored directly as Link messages
@@ -267,7 +265,7 @@ fn wanted_link_only<'a>(
             return true;
         }
         *saw_link = true;
-        link_is_named(body, name.as_str())
+        link_message::link_is_named(body, name.as_str())
     }
 }
 
@@ -376,7 +374,7 @@ fn resolve_dense_entries(
         .ok_or_else(|| FormatError::PathNotFound(String::from("no B-tree v2 name index")))?;
     let btree_hdr =
         BTreeV2Header::parse_with_widths(file_data, btree_addr.get().to_usize()?, widths)?;
-    let records = collect_btree_v2_records(file_data, &btree_hdr, widths.offsets)?;
+    let records = btree_v2::collect_btree_v2_records(file_data, &btree_hdr, widths.offsets)?;
 
     let layout = FractalHeapIdLayout::new(&fh, widths.offsets, widths.lengths);
     let mut heap = HeapObjectReader::new(&fh, addresses, fh_addr, access_mode, widths);
@@ -663,7 +661,8 @@ pub(crate) fn resolve_dense_entries_from_source<S: Source + ?Sized>(
         btree_addr.get(),
         widths,
     )?;
-    let records = collect_btree_v2_records_from_source(source, &btree_hdr, widths.offsets)?;
+    let records =
+        btree_v2::collect_btree_v2_records_from_source(source, &btree_hdr, widths.offsets)?;
 
     let layout = FractalHeapIdLayout::new(&fh, widths.offsets, widths.lengths);
     let mut heap = HeapObjectReader::new(&fh, addresses, fh_addr, access_mode, widths);
@@ -764,7 +763,7 @@ mod tests {
             superblock.length_size,
         );
         let raw = data_read::read_raw_data(
-            frame(&bytes, addresses.effective_base()).unwrap(),
+            source::frame(&bytes, addresses.effective_base()).unwrap(),
             &layout,
             &dataspace,
             &datatype,
@@ -1331,7 +1330,7 @@ mod tests {
 #[cfg(test)]
 mod huge_link_tests {
     use super::*;
-    use crate::fractal_heap::{huge_index_decodes, reset_huge_index_decodes};
+    use crate::fractal_heap;
     use crate::source::BytesSource;
 
     fn test_widths(superblock: &Superblock) -> FormatWidths {
@@ -1388,7 +1387,7 @@ mod huge_link_tests {
         let bytes = file_with_huge_links(COUNT);
         let (link_info, fh_addr, offset_size, length_size) = dense_link_info(&bytes);
 
-        reset_huge_index_decodes();
+        fractal_heap::reset_huge_index_decodes();
         let buffered = resolve_dense_entries(
             &bytes,
             AccessMode::ReadOnly,
@@ -1400,12 +1399,12 @@ mod huge_link_tests {
         .unwrap();
         assert_eq!(buffered.len(), COUNT, "the walk must still read every link");
         assert_eq!(
-            huge_index_decodes(),
+            fractal_heap::huge_index_decodes(),
             1,
             "the buffered walk parsed the huge-object index per link rather than per walk"
         );
 
-        reset_huge_index_decodes();
+        fractal_heap::reset_huge_index_decodes();
         let source = BytesSource::new(bytes);
         let streamed = resolve_dense_entries_from_source(
             &source,
@@ -1418,7 +1417,7 @@ mod huge_link_tests {
         .unwrap();
         assert_eq!(streamed.len(), COUNT);
         assert_eq!(
-            huge_index_decodes(),
+            fractal_heap::huge_index_decodes(),
             1,
             "the streaming walk parsed the huge-object index per link rather than per walk"
         );

@@ -30,7 +30,7 @@ use hdf5_pure_format::__private::LinkMessage;
 use hdf5_pure_format::__private::LinkTarget;
 use hdf5_pure_format::__private::ObjectHeader;
 use rstest::rstest;
-use tempfile::tempdir;
+
 use test_util::btree_v2;
 use test_util::fractal_heap;
 use test_util::free_space;
@@ -73,7 +73,7 @@ fn attribute_names_by_name(path: &Path, object: &str) -> Vec<String> {
 
 #[test]
 fn c_library_accepts_persisted_reclaimed_dense_attribute_indexes() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let attribute_names = creation_order::names(12);
 
     for indexed in [Indexing::No, Indexing::Yes] {
@@ -302,7 +302,7 @@ fn fractal_heap_headers(path: &Path) -> Vec<u64> {
 
 #[test]
 fn c_library_accepts_reclaimed_dense_group_indexes() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     for (indexed, paged) in [
         (Indexing::No, false),
         (Indexing::Yes, false),
@@ -412,7 +412,7 @@ fn c_library_accepts_reclaimed_dense_group_indexes() {
 
 #[test]
 fn a_surviving_dense_group_hard_link_keeps_its_indexes_live() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dense_group_surviving_alias.h5");
     write_dense_link_reclaim_fixture(&path, Indexing::Yes, false, true);
     let index_anchors = dense_link_tree_anchor_spans(&path);
@@ -927,7 +927,7 @@ fn c_written_dense_heaps_are_reclaimed_with_their_owners(
     file_space: FileSpace,
     #[values(false, true)] managed_fsm: bool,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let names = if managed_fsm {
         DenseNames::new()
     } else {
@@ -992,7 +992,7 @@ fn c_written_heap_ghost_sections_have_only_physical_manager_ownership(
     )]
     file_space: FileSpace,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let names = DenseNames {
         links: (0..300)
             .map(|index| format!("link_{index:03}_{}", "x".repeat(100)))
@@ -1055,7 +1055,7 @@ fn rewriting_a_c_written_dense_attribute_set_reclaims_its_old_heap(
     #[values("a", "d")] owner: &str,
     #[values(FileSpace::Managers, FileSpace::Pages(DENSE_PAGE_SIZE))] file_space: FileSpace,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let names = exactly_filling_names(dir.path(), 1);
     let path = dir.path().join("dense_attribute_rewrite.h5");
     {
@@ -1136,7 +1136,7 @@ fn rewriting_a_c_written_dense_attribute_set_reclaims_its_old_heap(
 
 #[rstest]
 fn a_surviving_hard_link_keeps_a_dense_heap_live(#[values(false, true)] managed_fsm: bool) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let names = if managed_fsm {
         DenseNames::new()
     } else {
@@ -1186,7 +1186,7 @@ fn a_surviving_hard_link_keeps_a_dense_heap_live(#[values(false, true)] managed_
 fn repeated_dense_storage_create_and_delete_on_a_paged_file_settles_at_a_steady_size(
     #[values(false, true)] managed_fsm: bool,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let names = if managed_fsm {
         DenseNames::new()
     } else {
@@ -1243,7 +1243,7 @@ fn c_written_filtered_link_heaps_are_reclaimed_with_their_group(
     file_space: FileSpace,
     #[values(DIRECT_ROOT_LINKS, INDIRECT_ROOT_LINKS)] links: usize,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("filtered_heap_reclaim.h5");
     write_filtered_link_fixture(&path, file_space, links);
     let heaps = dense_heaps(&path);

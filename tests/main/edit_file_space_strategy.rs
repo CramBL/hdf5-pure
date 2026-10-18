@@ -10,7 +10,6 @@ use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_core::__private::FileSpaceInfoFields;
 use hdf5_pure_format::__private::FormatWidths;
 use rstest::rstest;
-use tempfile::tempdir;
 
 use test_util::file_space_info;
 use test_util::range;
@@ -52,7 +51,7 @@ fn a_replacement_reuses_a_deleted_extent_only_where_a_free_space_manager_tracks_
     #[case] threshold: u64,
     #[case] reuses: bool,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("strategy.h5");
     file_space::write_strategy_triplet(&path, strategy, persist, threshold);
 
@@ -82,7 +81,7 @@ fn a_deletion_discards_its_extent_without_a_free_space_manager(
     #[case] strategy: FileSpaceStrategy,
     #[case] has_aggregate: bool,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("strategy.h5");
     file_space::write_strategy_triplet(&path, strategy, false, 1);
 
@@ -106,7 +105,7 @@ fn a_deletion_discards_its_extent_without_a_free_space_manager(
 fn persisted_free_space_is_not_reused_under_a_strategy_without_a_free_space_manager(
     #[case] strategy: FileSpaceStrategy,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("strategy.h5");
     // An FsmAggr file's persisted free space, relabeled with `strategy` below.
     file_space::write_strategy_triplet(&path, FileSpaceStrategy::FsmAggr, true, 1);
@@ -172,7 +171,7 @@ fn persisted_free_space_is_not_reused_under_a_strategy_without_a_free_space_mana
 
 #[test]
 fn a_file_whose_strategy_cannot_be_read_reuses_no_deleted_extent() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("strategy.h5");
     file_space::write_strategy_triplet(&path, FileSpaceStrategy::FsmAggr, false, 1);
     let extension = {
@@ -205,7 +204,7 @@ fn a_file_whose_strategy_cannot_be_read_reuses_no_deleted_extent() {
 
 #[test]
 fn editing_a_non_persisting_version_0_file_reuses_a_deleted_extent() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("v0_non_persistent.h5");
     file_space::write_strategy_triplet(&path, FileSpaceStrategy::FsmAggr, false, 1);
     let extension = {
@@ -285,7 +284,7 @@ fn a_deleted_extent_is_tracked_from_the_threshold_up(
     #[case] persist: bool,
     #[values(DELETED_LEN - 1, DELETED_LEN, DELETED_LEN + 1)] threshold: u64,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("strategy.h5");
     file_space::write_strategy_triplet(&path, strategy, persist, threshold);
 
@@ -327,7 +326,7 @@ fn a_sub_threshold_extent_is_tracked_only_beside_a_tracked_extent(
     #[case] commits: Vec<Vec<&str>>,
     #[case] tracked: u64,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("strategy.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("a").with_i32_data(&[1; 100]);
@@ -387,7 +386,7 @@ fn persisted_or_reused_sections(path: &Path, persist: bool) -> Vec<(u64, u64)> {
 
 #[test]
 fn sub_threshold_extents_that_end_the_file_are_given_back_in_one_commit() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("strategy.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("a").with_i32_data(&[1; 100]);

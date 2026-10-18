@@ -11,7 +11,6 @@
 //! own C calls through an internal lock, so these tests need no extra guard.
 
 use hdf5_pure::mat::{Block, Blocking, DataProducer, MatBuilder, MatError, Options};
-use tempfile::tempdir;
 
 /// Generates `f64` elements from their linear index, so a multi-block dataset
 /// costs nothing to produce and its expected values are computable.
@@ -39,7 +38,7 @@ fn c_reads_a_produced_dataset_streamed_to_disk() {
     const DIMS: [usize; 2] = [4, 100_001];
     let n = (DIMS[0] * DIMS[1]) as u64;
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("produced.mat");
 
     let blocking = Blocking::plan::<f64>(&DIMS).unwrap();

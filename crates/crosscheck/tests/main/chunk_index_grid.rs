@@ -14,7 +14,7 @@
 
 use hdf5::dataset::AllocTime;
 use hdf5_pure::{ChunkIndex, File, FileBuilder, MaxExtent};
-use tempfile::tempdir;
+
 use test_util::extensible_array;
 use test_util_hdf5::{dataset, file};
 
@@ -248,7 +248,7 @@ fn pure_read(path: &std::path::Path) -> Vec<u32> {
 /// the broken writer, which is exactly how the defect survived 2,000 tests.
 #[test]
 fn c_reads_every_maxshape_this_crate_writes() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     for (label, shape, chunks, maxshape) in cases() {
         let path = dir.path().join("pure.h5");
         pure_write(&path, &shape, &chunks, &maxshape);
@@ -266,7 +266,7 @@ fn c_reads_every_maxshape_this_crate_writes() {
 /// crate must read.
 #[test]
 fn pure_reads_every_maxshape_the_c_library_writes() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let mut skipped = 0;
     for (label, shape, chunks, maxshape) in cases() {
         if !c_library_accepts(&shape, &chunks) {
@@ -286,7 +286,7 @@ fn pure_reads_every_maxshape_the_c_library_writes() {
 
 #[test]
 fn pure_reads_an_implicit_index_numbered_over_the_maximum_grid() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("implicit.h5");
     let dst = dir.path().join("repacked.h5");
     let shape = [4u64, 4];
@@ -335,7 +335,7 @@ fn pure_reads_an_implicit_index_numbered_over_the_maximum_grid() {
 /// what states the rule.
 #[test]
 fn the_index_kind_matches_what_the_reference_library_chooses() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let mut skipped = 0;
     for (label, shape, chunks, maxshape) in cases() {
         if !c_library_accepts(&shape, &chunks) {
@@ -371,7 +371,7 @@ fn the_index_kind_matches_what_the_reference_library_chooses() {
 /// chunk?" test would get wrong in the obvious way.
 #[test]
 fn one_stored_chunk_with_room_for_more_is_not_the_single_chunk_layout() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let fixed = dir.path().join("fixed.h5");
     let growable = dir.path().join("growable.h5");
     pure_write(
@@ -411,7 +411,7 @@ fn one_stored_chunk_with_room_for_more_is_not_the_single_chunk_layout() {
 /// by nothing but this crate.
 #[test]
 fn two_unlimited_dimensions_are_refused() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("two.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("d")
@@ -430,7 +430,7 @@ fn two_unlimited_dimensions_are_refused() {
 /// arrives from `create_dataset` itself and nothing is ever staged to commit.
 #[test]
 fn two_unlimited_dimensions_are_refused_in_a_session_too() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("seed").with_u32_data(&[1, 2, 3]);
@@ -478,7 +478,7 @@ fn two_unlimited_dimensions_are_refused_in_a_session_too() {
 /// The refusal names where the unused elements come from.
 #[test]
 fn a_maximum_shape_needing_a_mostly_empty_index_is_refused() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("huge.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("d")
@@ -526,7 +526,7 @@ fn a_maximum_shape_needing_a_mostly_empty_index_is_refused() {
 /// source, and one step wider it was refused outright.
 #[test]
 fn repack_of_a_c_written_sparse_dataset_stays_the_same_order_of_size() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     for wide in [65_536u64, 131_072, 1_000_000] {
         let src = dir.path().join("c.h5");
         let dst = dir.path().join("repacked.h5");
@@ -562,7 +562,7 @@ fn repack_of_a_c_written_sparse_dataset_stays_the_same_order_of_size() {
 /// right for the original extent and wrong for the extended one.
 #[test]
 fn a_grown_multidimensional_dataset_reads_back_through_both_libraries() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("grown.h5");
 
     // Written by the C library, since this crate's own resize is rank-1 only.
@@ -591,7 +591,7 @@ fn a_grown_multidimensional_dataset_reads_back_through_both_libraries() {
 /// that had no shape to number over at all.
 #[test]
 fn repack_preserves_a_resizable_multidimensional_dataset() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src.h5");
     let dst = dir.path().join("dst.h5");
 
@@ -626,7 +626,7 @@ fn repack_preserves_a_resizable_multidimensional_dataset() {
 /// rebuilt index is the same length either way.
 #[test]
 fn a_shrinking_inplace_overwrite_keeps_each_chunk_in_its_slot() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("shrink.h5");
 
     // Incompressible first, so the chunk slots are large.
@@ -682,7 +682,7 @@ fn a_shrinking_inplace_overwrite_keeps_each_chunk_in_its_slot() {
 /// the cheapest this defect can be reproduced for.
 #[test]
 fn a_paged_data_block_with_an_empty_first_page_keeps_its_chunks() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("paged.h5");
     let shape = [40u64, 40];
     let data = values(&shape);
@@ -707,7 +707,7 @@ fn a_paged_data_block_with_an_empty_first_page_keeps_its_chunks() {
 /// different code, same rule.
 #[test]
 fn pure_reads_a_c_written_block_whose_pages_are_not_leading() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_paged.h5");
     let shape = [40u64, 40];
     let data = values(&shape);
@@ -745,7 +745,7 @@ fn pure_reads_a_c_written_block_whose_pages_are_not_leading() {
 /// so one passing says nothing about the other.
 #[test]
 fn a_shrinking_inplace_overwrite_keeps_ea_chunks_in_their_slots() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("shrink_ea.h5");
 
     let noisy: Vec<u32> = (0..64u32)
@@ -806,7 +806,7 @@ fn a_shrinking_inplace_overwrite_keeps_ea_chunks_in_their_slots() {
 /// perfectly through both libraries (issue #299).
 #[test]
 fn a_sparse_extensible_array_matches_the_c_library_block_statistics() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     for (shape, wide) in [
         ([16u64, 16], 1024u64),
         ([16, 16], 8192),

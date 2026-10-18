@@ -49,17 +49,17 @@ use hdf5_pure_space::__private::AllocationClass;
 use crate::address::AddressContext;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
-use crate::checksum::jenkins_lookup3;
-use crate::chunked_write::split_into_chunks;
+use crate::checksum;
+use crate::chunked_write;
 use crate::convert::Narrow;
 use crate::data_layout::{ChunkIndexLayout, DataLayout};
 use crate::dataspace::{Dataspace, MaxExtent};
 use crate::datatype::Datatype;
-use crate::edit::{LOSSY_TAIL_REFUSAL, pipeline_lossless};
+use crate::edit::{self, LOSSY_TAIL_REFUSAL};
 use crate::error::{Error, FormatError};
 use crate::fill_value::FillPattern;
 use crate::filter_pipeline::FilterPipeline;
-use crate::filters::{ChunkContext, FilterScratch, compress_chunk_with, decompress_chunk};
+use crate::filters::{self, ChunkContext, FilterScratch};
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::source::Source;
@@ -238,7 +238,7 @@ pub(crate) trait Store: Source {
         let mut bytes = self.read_exact_at(start, span)?;
         bytes[from..from + value.len()].copy_from_slice(value);
         let (body, cks_field) = bytes.split_at_mut(span - 4);
-        cks_field.copy_from_slice(&jenkins_lookup3(body).to_le_bytes());
+        cks_field.copy_from_slice(&checksum::jenkins_lookup3(body).to_le_bytes());
         self.write_at(at, &bytes[from..])
     }
 }
@@ -1114,7 +1114,7 @@ pub(crate) fn plan_ea_append<F: Store>(
                  Dataset::append_staged, or append whole chunks",
             ));
         }
-        if !pipeline_lossless(pl) {
+        if !edit::pipeline_lossless(pl) {
             return Err(Error::AppendUnsupported(LOSSY_TAIL_REFUSAL));
         }
     }
@@ -1145,7 +1145,7 @@ pub(crate) fn plan_ea_append<F: Store>(
         let stored = file.read_exact_at(rec.addr.get(), stored_len)?;
         let full = if let Some(pl) = pipeline {
             let ctx = ChunkContext::from_datatype(spatial, datatype)?;
-            decompress_chunk(&stored, pl, ctx, rec.filter_mask).map_err(Error::Format)?
+            filters::decompress_chunk(&stored, pl, ctx, rec.filter_mask).map_err(Error::Format)?
         } else {
             stored
         };
@@ -1165,15 +1165,18 @@ pub(crate) fn plan_ea_append<F: Store>(
     // pipeline when filtered. The final chunk's slots past the new dimension
     // take the dataset's fill value (issue #296).
     let tail_len_elems = new_dim - n_full * chunk_elems;
-    let split = split_into_chunks(&tail_raw, &[tail_len_elems], spatial, element_size, fill)
-        .map_err(Error::Format)?;
+    let split =
+        chunked_write::split_into_chunks(&tail_raw, &[tail_len_elems], spatial, element_size, fill)
+            .map_err(Error::Format)?;
     let new_chunk_bytes: Vec<Vec<u8>> = if let Some(pl) = pipeline {
         let ctx = ChunkContext::from_datatype(spatial, datatype)?;
         let mut out = Vec::with_capacity(split.len());
         // One encoder across the appended tail; see `FilterScratch`.
         let mut scratch = FilterScratch::new();
         for buf in &split {
-            out.push(compress_chunk_with(&mut scratch, buf, pl, ctx).map_err(Error::Format)?);
+            out.push(
+                filters::compress_chunk_with(&mut scratch, buf, pl, ctx).map_err(Error::Format)?,
+            );
         }
         out
     } else {

@@ -13,7 +13,6 @@
 
 use hdf5::types::{TypeDescriptor, VarLenAscii, VarLenUnicode};
 use hdf5_pure::{AttrValue, File, FileBuilder, FixedPointLayout};
-use tempfile::tempdir;
 
 /// The four values under test, one per variant, keyed by the attribute name
 /// each is written under.
@@ -116,7 +115,7 @@ fn assert_pure_reads_the_cases(attrs: &std::collections::HashMap<String, AttrVal
 /// get instead failed with "no appropriate function for conversion path".
 #[test]
 fn the_c_library_reads_every_variant_as_a_variable_length_string() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("vl.h5");
     write_cases(&path);
 
@@ -150,7 +149,7 @@ fn the_c_library_reads_every_variant_as_a_variable_length_string() {
 /// existing encoding.
 #[test]
 fn the_matlab_shape_keeps_its_own_datatype() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("both.h5");
     let words = vec!["alpha".to_string(), "beta".to_string()];
 
@@ -200,7 +199,7 @@ fn the_matlab_shape_keeps_its_own_datatype() {
 /// than dropping the attribute.
 #[test]
 fn an_empty_variable_length_string_round_trips() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("empty.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("d").with_f64_data(&[1.0]);
@@ -242,7 +241,7 @@ fn an_empty_variable_length_string_round_trips() {
 /// placeholder addresses patched afterwards — so it needs its own coverage.
 #[test]
 fn an_edit_session_writes_the_standard_datatype() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("edit.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("d").with_f64_data(&[1.0]);
@@ -289,7 +288,7 @@ fn an_edit_session_writes_the_standard_datatype() {
 /// global heap collection the same commit placed.
 #[test]
 fn a_dense_rebuild_keeps_the_standard_datatype() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dense.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("d").with_f64_data(&[1.0]);
@@ -346,7 +345,7 @@ fn a_dense_rebuild_keeps_the_standard_datatype() {
 /// the decode used to report for them.
 #[test]
 fn repack_keeps_the_standard_datatype() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src.h5");
     let dst = dir.path().join("dst.h5");
     write_cases(&src);
@@ -379,7 +378,7 @@ fn repack_keeps_the_standard_datatype() {
 fn a_committed_datatype_attribute_stages_its_heap() {
     use hdf5_pure::{CharacterSet, Datatype, DatatypeByteOrder, StringPadding};
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("committed.h5");
     let standard = Datatype::VariableLength {
         is_string: true,

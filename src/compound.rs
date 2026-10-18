@@ -8,10 +8,7 @@ use crate::datatype::byte_order::DatatypeByteOrder;
 use crate::datatype::layout::{FixedPointLayout, FloatingPointLayout};
 use crate::datatype::{CompoundMember, Datatype};
 use crate::error::FormatError;
-use crate::type_builders::{
-    make_f32_type, make_f64_type, make_i8_type, make_i16_type, make_i32_type, make_i64_type,
-    make_u8_type, make_u16_type, make_u32_type, make_u64_type,
-};
+use crate::type_builders;
 
 /// A type that can occupy one field of an HDF5 compound value.
 ///
@@ -150,7 +147,7 @@ fn ordered<const N: usize>(bytes: &[u8], order: DatatypeByteOrder) -> Result<[u8
 }
 
 macro_rules! impl_integer_field {
-    ($ty:ty, $make:ident, $size:expr, $signed:expr) => {
+    ($ty:ty, $make:path, $size:expr, $signed:expr) => {
         impl CompoundField for $ty {
             fn datatype() -> Result<Datatype, FormatError> {
                 Ok($make())
@@ -168,17 +165,17 @@ macro_rules! impl_integer_field {
     };
 }
 
-impl_integer_field!(i8, make_i8_type, 1, true);
-impl_integer_field!(i16, make_i16_type, 2, true);
-impl_integer_field!(i32, make_i32_type, 4, true);
-impl_integer_field!(i64, make_i64_type, 8, true);
-impl_integer_field!(u8, make_u8_type, 1, false);
-impl_integer_field!(u16, make_u16_type, 2, false);
-impl_integer_field!(u32, make_u32_type, 4, false);
-impl_integer_field!(u64, make_u64_type, 8, false);
+impl_integer_field!(i8, type_builders::make_i8_type, 1, true);
+impl_integer_field!(i16, type_builders::make_i16_type, 2, true);
+impl_integer_field!(i32, type_builders::make_i32_type, 4, true);
+impl_integer_field!(i64, type_builders::make_i64_type, 8, true);
+impl_integer_field!(u8, type_builders::make_u8_type, 1, false);
+impl_integer_field!(u16, type_builders::make_u16_type, 2, false);
+impl_integer_field!(u32, type_builders::make_u32_type, 4, false);
+impl_integer_field!(u64, type_builders::make_u64_type, 8, false);
 
 macro_rules! impl_float_field {
-    ($ty:ty, $make:ident, $size:expr) => {
+    ($ty:ty, $make:path, $size:expr) => {
         impl CompoundField for $ty {
             fn datatype() -> Result<Datatype, FormatError> {
                 Ok($make())
@@ -196,8 +193,8 @@ macro_rules! impl_float_field {
     };
 }
 
-impl_float_field!(f32, make_f32_type, 4);
-impl_float_field!(f64, make_f64_type, 8);
+impl_float_field!(f32, type_builders::make_f32_type, 4);
+impl_float_field!(f64, type_builders::make_f64_type, 8);
 
 fn compound_parts<'a>(
     datatype: &'a Datatype,

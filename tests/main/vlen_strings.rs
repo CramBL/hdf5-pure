@@ -1,5 +1,4 @@
 use hdf5_pure::{Error, File, FormatError, VlenStringReadOptions};
-use tempfile::tempdir;
 
 const FIXTURE: &str = "tests/data/unattributed/vl_strings.h5";
 
@@ -135,7 +134,7 @@ fn vlen_dataset_spans_multiple_heap_collections() {
 /// patches the references in a separate pass, so it needs its own coverage.
 #[test]
 fn paged_vlen_dataset_spans_multiple_heap_collections() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("paged.h5");
     let values = labels(SPLIT_COUNT);
     let refs: Vec<&str> = values.iter().map(String::as_str).collect();
@@ -154,7 +153,7 @@ fn paged_vlen_dataset_spans_multiple_heap_collections() {
 /// (they need not land contiguously), so it needs its own coverage.
 #[test]
 fn edit_session_vlen_dataset_spans_multiple_heap_collections() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("edit.h5");
     let mut builder = hdf5_pure::FileBuilder::new();
     builder.create_dataset("d").with_f64_data(&[1.0]);
@@ -181,7 +180,7 @@ fn edit_session_vlen_dataset_spans_multiple_heap_collections() {
 /// whose data spans several of them must survive the round trip.
 #[test]
 fn repack_preserves_multi_collection_vlen_dataset() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src.h5");
     let dst = dir.path().join("dst.h5");
     let values = labels(SPLIT_COUNT);
@@ -205,7 +204,7 @@ fn repack_preserves_multi_collection_vlen_dataset() {
 /// two heaps are independent, which is what this pins.
 #[test]
 fn a_vlen_attribute_past_the_compact_message_size_is_stored_in_a_heap() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ga.h5");
     let mut builder = hdf5_pure::FileBuilder::new();
     builder.create_dataset("d").with_f64_data(&[1.0]);

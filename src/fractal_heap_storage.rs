@@ -539,11 +539,12 @@ fn extent_in_source<S: Source + ?Sized>(
 mod tests {
     use core::cell::RefCell;
 
+    use hdf5_pure_format::__private;
     use hdf5_pure_format::__private::FilterDescription;
     use hdf5_pure_format::__private::FilterPipeline;
     use hdf5_pure_format::__private::FractalHeapFiltering;
     use hdf5_pure_format::__private::FractalHeapSectionClass;
-    use hdf5_pure_format::__private::btree_v2_header_size;
+
     use test_util::btree_v2;
     use test_util::fractal_heap;
     use test_util::free_space;
@@ -1978,8 +1979,11 @@ mod tests {
         file[usize::try_from(PAYLOAD_C).unwrap()..usize::try_from(PAYLOAD_C + 41).unwrap()].fill(3);
 
         let storage = collect_storage(&file).unwrap();
-        let tree_header_len =
-            u64::try_from(btree_v2_header_size(OffsetWidth::Eight, LengthWidth::Eight)).unwrap();
+        let tree_header_len = u64::try_from(__private::btree_v2_header_size(
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+        ))
+        .unwrap();
         let node_len = u64::try_from(NODE_SIZE).unwrap();
         let mut expected = vec![
             allocation(
@@ -2050,8 +2054,11 @@ mod tests {
                 ),
                 allocation(
                     TREE,
-                    u64::try_from(btree_v2_header_size(OffsetWidth::Eight, LengthWidth::Eight))
-                        .unwrap(),
+                    u64::try_from(__private::btree_v2_header_size(
+                        OffsetWidth::Eight,
+                        LengthWidth::Eight,
+                    ))
+                    .unwrap(),
                     FractalHeapAllocation::HugeObjectIndex,
                 ),
                 allocation(

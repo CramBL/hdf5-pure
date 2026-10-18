@@ -15,7 +15,6 @@ use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::types::FixedAscii;
 use hdf5_pure::{AttrValue, Error, File};
 use rstest::rstest;
-use tempfile::tempdir;
 
 use test_util_hdf5::absence;
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
@@ -28,7 +27,7 @@ use test_util_hdf5::session;
 #[case::paged_mirror(true, false)]
 #[case::paged_bounded(true, true)]
 fn libhdf5_reads_appends_across_new_array_blocks(#[case] paged: bool, #[case] bounded: bool) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("array_blocks.h5");
     let expected: Vec<String> = (0..340).map(|value| format!("{value:03}")).collect();
     {
@@ -109,7 +108,7 @@ fn libhdf5_reads_appends_across_new_array_blocks(#[case] paged: bool, #[case] bo
 #[test]
 #[cfg(target_endian = "little")]
 fn append_inplace_to_c_dataset_both_read() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).libhdf5_create(&path);
 
@@ -132,7 +131,7 @@ fn append_inplace_to_c_dataset_both_read() {
 #[test]
 #[cfg(target_endian = "little")]
 fn append_inplace_grows_a_filtered_partial_tail_both_read() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("filtered_tail.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
         .filters(&[Filter::Shuffle, Filter::Deflate(4)])
@@ -158,7 +157,7 @@ fn append_inplace_grows_a_filtered_partial_tail_both_read() {
 #[test]
 #[cfg(target_endian = "little")]
 fn append_inplace_grows_a_c_written_filtered_partial_tail() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_filtered_tail.h5");
     Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 4)
         .filters(&[Filter::Shuffle, Filter::Deflate(4)])
@@ -183,7 +182,7 @@ fn hard_link_aliasing_append_inplace_stays_coherent() {
     // Two hard links to one dataset: appending in place via either path must stay
     // coherent, because the geometry cache is keyed by object-header address, not
     // by path (both links share the one header).
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("alias.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).libhdf5_create(&path);
     {
@@ -212,7 +211,7 @@ fn c_dataset_with_attribute_info_accepts_set_dataset_attr() {
     // Info message (creation-order metadata, not dense storage). `set_dataset_attr`
     // must accept it, preserve the existing attribute, and add the new one — read
     // back by both libraries.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_ds_attr.h5");
     {
         let file = file::libhdf5_create_v110(&path);
@@ -254,7 +253,7 @@ fn c_group_with_attribute_info_accepts_set_group_attr() {
     // carrying an attribute also has an undefined-address Attribute Info message,
     // and `set_group_attr` (which pre-dates this fix) must no longer spuriously
     // refuse it.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_grp_attr.h5");
     {
         let file = file::libhdf5_create_v110(&path);
@@ -295,7 +294,7 @@ fn set_dataset_attr_on_chunked_dataset_c_reads() {
     // and index stay in place. Both libraries must read the grown-attribute dataset
     // and its data correctly, and a subsequent in-place append must still work
     // (the header address changed, so the geometry cache re-locates).
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_chunked_attr.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).libhdf5_create(&path);
 
@@ -325,7 +324,7 @@ fn set_dataset_attr_on_chunked_dataset_c_reads() {
 
 #[test]
 fn set_dataset_attr_multi_hard_link_refused() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_ds_multilink.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).libhdf5_create(&path);
     {
@@ -364,7 +363,7 @@ fn combined_mixed_edits_c_readable() {
     // creation, a staged dataset-attribute edit, and a staged recursive delete —
     // then more in-place appends after the commit. libhdf5 reads
     // every result correctly.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("combined.h5");
     {
         let file = file::libhdf5_create_v110(&path);
@@ -444,7 +443,7 @@ fn combined_mixed_edits_c_readable() {
 /// header, so both links keep naming the grown dataset.
 #[test]
 fn a_filtered_partial_tail_with_two_hard_links_appends_in_place() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("aliased_tail.h5");
     {
         let mut b = hdf5_pure::FileBuilder::new();
@@ -484,7 +483,7 @@ fn a_filtered_partial_tail_with_two_hard_links_appends_in_place() {
 #[test]
 #[cfg(target_endian = "little")]
 fn an_append_into_freed_space_stays_c_readable() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("reuse.h5");
     let payload: Vec<i32> = (4..8196).collect();
     {

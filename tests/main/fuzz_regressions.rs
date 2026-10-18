@@ -9,7 +9,7 @@ use std::io::Cursor;
 
 use hdf5_pure::{Error, File, FormatError, Group, ReadSeekSource};
 use rstest::rstest;
-use test_util::fuzz::fixture_with_recorded_extent;
+use test_util::fuzz;
 
 #[rstest]
 #[case::buffered(false)]
@@ -47,7 +47,7 @@ fn shared_message_heap_ids_have_the_reference_length(#[case] streaming: bool) {
 /// error, which the per-chunk logical-size guard raises before any allocation.
 #[test]
 fn oom_chunked_string_huge_elem_is_refused() {
-    let bytes = fixture_with_recorded_extent("oom_chunked_string_huge_elem.h5");
+    let bytes = fuzz::fixture_with_recorded_extent("oom_chunked_string_huge_elem.h5");
 
     let file = File::from_bytes(bytes).expect("file parses; only the data read is malformed");
 
@@ -75,7 +75,7 @@ fn oom_chunked_string_huge_elem_is_refused() {
 /// element type reports it and none of them divides.
 #[test]
 fn zero_width_element_type_is_refused_not_divided_by() {
-    let bytes = fixture_with_recorded_extent("zero_width_elem_chunked_string.h5");
+    let bytes = fuzz::fixture_with_recorded_extent("zero_width_elem_chunked_string.h5");
 
     let file = File::from_bytes(bytes).expect("file parses; only the datatype is malformed");
 

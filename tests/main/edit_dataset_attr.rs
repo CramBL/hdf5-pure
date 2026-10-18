@@ -7,7 +7,7 @@
 //! `edit_dense_attr.rs`.
 
 use hdf5_pure::{AttrValue, Error, File, FileBuilder, FormatError};
-use tempfile::tempdir;
+
 use test_util::fractal_heap;
 use test_util_hdf5::dataset::Unlimited;
 
@@ -23,7 +23,7 @@ fn build_chunked(path: &std::path::Path, n: i32, chunk: u64) {
 
 #[test]
 fn set_fixed_attrs_preserves_data() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     build_contig(&p);
 
@@ -50,7 +50,7 @@ fn set_fixed_attrs_preserves_data() {
 
 #[test]
 fn update_and_remove_attr() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     build_contig(&p);
 
@@ -84,7 +84,7 @@ fn update_and_remove_attr() {
 
 #[test]
 fn set_vlstring_attr() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     build_contig(&p);
 
@@ -113,7 +113,7 @@ fn set_vlstring_attr() {
 
 #[test]
 fn attr_edit_on_chunked_preserves_data_and_index() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     build_chunked(&p, 8, 4);
 
@@ -140,7 +140,7 @@ fn attr_edit_on_chunked_preserves_data_and_index() {
 
 #[test]
 fn guard_refuses_append_after_staged_dataset_attr() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     build_chunked(&p, 4, 4);
 
@@ -158,7 +158,7 @@ fn guard_refuses_append_after_staged_dataset_attr() {
 
 #[test]
 fn attr_edit_plus_append_dataset_same_commit_refused() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     build_chunked(&p, 8, 4);
 
@@ -179,7 +179,7 @@ fn attr_edit_plus_append_dataset_same_commit_refused() {
 
 #[test]
 fn the_ninth_attribute_moves_the_set_out_of_the_header() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     {
         let mut b = FileBuilder::new();
@@ -231,7 +231,7 @@ fn the_ninth_attribute_moves_the_set_out_of_the_header() {
 
 #[test]
 fn set_attr_on_missing_dataset_refused() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     build_contig(&p);
 

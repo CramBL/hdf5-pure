@@ -12,7 +12,7 @@ use hdf5_pure::{
     Error, File, FileAccessProperties, FileBuilder, FileLocking, FileSpaceStrategy, MemoryStrategy,
     WriteMarkPolicy,
 };
-use tempfile::tempdir;
+
 use test_util::superblock;
 use test_util_hdf5::{dataset::Unlimited, session};
 
@@ -52,7 +52,7 @@ fn assert_marked_in_use(err: Error, what: &str) {
 /// writer that (as far as the file records) still holds it.
 #[test]
 fn a_flagged_file_is_refused_by_the_reading_and_writing_opens() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("flagged.h5");
     build_swmr(&path);
     flag_as_if_crashed(&path);
@@ -83,7 +83,7 @@ fn a_flagged_file_is_refused_by_the_reading_and_writing_opens() {
 /// same engine, and a strategy that picks a backing must not pick a rule.
 #[test]
 fn both_edit_backings_refuse_a_flagged_file() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("flagged.h5");
     build_swmr(&path);
     flag_as_if_crashed(&path);
@@ -102,7 +102,7 @@ fn both_edit_backings_refuse_a_flagged_file() {
 /// data a live writer has already appended.
 #[test]
 fn a_swmr_reader_follows_a_flagged_file() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("live.h5");
     build_swmr(&path);
 
@@ -126,7 +126,7 @@ fn a_swmr_reader_follows_a_flagged_file() {
 /// has to work afterwards — including the SWMR writer, whose own flag it cleared.
 #[test]
 fn clearing_the_flag_restores_every_open() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("recovered.h5");
     build_swmr(&path);
     flag_as_if_crashed(&path);
@@ -160,7 +160,7 @@ fn clearing_the_flag_restores_every_open() {
 /// in-memory driver, so this is a deliberate divergence, not parity.
 #[test]
 fn from_bytes_reads_a_flagged_file() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("flagged.h5");
     build_swmr(&path);
     flag_as_if_crashed(&path);
@@ -204,7 +204,7 @@ fn build_paged(path: &std::path::Path) {
 /// refused by every later open.
 #[test]
 fn a_page_buffered_session_marks_the_file_for_its_lifetime() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("buffered.h5");
     build_paged(&path);
     assert_eq!(
@@ -264,7 +264,7 @@ fn a_page_buffered_session_marks_the_file_for_its_lifetime() {
 /// budget flushes on its own.
 #[test]
 fn a_commit_in_a_page_buffered_session_leaves_the_mark_standing() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("committed.h5");
     build_paged(&path);
 
@@ -312,7 +312,7 @@ fn a_commit_in_a_page_buffered_session_leaves_the_mark_standing() {
 /// whole trade: without the mark this file opens and reads clean.
 #[test]
 fn a_crashed_page_buffered_session_leaves_a_file_every_open_refuses() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("crashed.h5");
     build_paged(&path);
 
@@ -381,7 +381,7 @@ fn live_page_buffered_writer(path: &std::path::Path) {
 /// same mark itself.
 #[test]
 fn a_write_marked_file_names_a_recovery_that_works() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("live.h5");
     live_page_buffered_writer(&path);
 
@@ -416,7 +416,7 @@ fn a_write_marked_file_names_a_recovery_that_works() {
 /// through a source, none of which copies the file as `File::from_bytes` does.
 #[test]
 fn the_opt_in_reads_a_flushed_write_marked_file() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("live.h5");
     live_page_buffered_writer(&path);
 
@@ -449,7 +449,7 @@ fn the_opt_in_reads_a_flushed_write_marked_file() {
 /// writer holds, whichever backing that writer would take.
 #[test]
 fn the_opt_in_does_not_unlock_a_read_write_open() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("live.h5");
     live_page_buffered_writer(&path);
 
@@ -472,7 +472,7 @@ fn the_opt_in_does_not_unlock_a_read_write_open() {
 /// cannot.
 #[test]
 fn the_opt_in_does_not_unlock_a_swmr_pair() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("swmr.h5");
     build_swmr(&path);
     let writer = File::open_swmr_writer(&path).unwrap();
@@ -506,7 +506,7 @@ fn the_opt_in_does_not_unlock_a_swmr_pair() {
 /// which on Windows is *mandatory* and would block the read below.
 #[test]
 fn an_unbuffered_editor_raises_no_mark() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("plain.h5");
     build_paged(&path);
 
@@ -539,7 +539,7 @@ fn an_unbuffered_editor_raises_no_mark() {
 /// no crash behind it. Both teardowns write, and both must finish the job.
 #[test]
 fn dropping_a_page_buffered_session_takes_the_mark_down() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dropped.h5");
     build_paged(&path);
 

@@ -7,7 +7,7 @@
 //! `Group` handles. Plus the post-`close` seal (`Error::FileClosed`).
 
 use hdf5_pure::{AttrValue, Error, File, FileAccessProperties, FileBuilder, FileLocking};
-use tempfile::tempdir;
+
 use test_util_hdf5::{
     dataset::{Filter, Unlimited},
     file_builder,
@@ -20,7 +20,7 @@ use test_util_hdf5::{
 /// land, which is what the rest of this test pins.
 #[test]
 fn append_staged_grows_filtered_any_length() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("f.h5");
     Unlimited::new("d", &(0..3).collect::<Vec<i32>>(), 4)
         .filters(&[Filter::Deflate(6)])
@@ -54,7 +54,7 @@ fn append_staged_grows_filtered_any_length() {
 
 #[test]
 fn copy_from_another_file() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src_path = dir.path().join("src.h5");
     let dst_path = dir.path().join("dst.h5");
     {
@@ -86,7 +86,7 @@ fn copy_from_another_file() {
 
 #[test]
 fn group_attrs_on_subgroup_and_root() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("g.h5");
     file_builder::write_i32_dataset(&path, "d", &[1]);
 
@@ -124,7 +124,7 @@ fn group_attrs_on_subgroup_and_root() {
 
 #[test]
 fn space_accounting_and_read_only_refusal() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.h5");
     file_builder::write_i32_dataset(&path, "d", &[1, 2, 3, 4, 5]);
 
@@ -141,7 +141,7 @@ fn space_accounting_and_read_only_refusal() {
 
 #[test]
 fn open_rw_with_locking_disabled_edits() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("l.h5");
     file_builder::write_i32_dataset(&path, "d", &[1, 2, 3]);
 
@@ -159,7 +159,7 @@ fn open_rw_with_locking_disabled_edits() {
 /// `Error::FileClosed`, while reads still work.
 #[test]
 fn writes_after_close_are_sealed() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c.h5");
     file_builder::write_i32_dataset(&path, "d", &[1, 2, 3]);
 

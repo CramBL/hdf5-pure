@@ -6,12 +6,12 @@
 use hdf5_pure::{
     AppendBuilder, AttrValue, Error, File, FileBuilder, FormatError, MaxExtent, ScaleOffset,
 };
-use tempfile::tempdir;
+
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
 
 #[test]
 fn append_deflate_shuffle_chunk_aligned() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     // 8 elements, chunk 4 => 2 full chunks. Append 8 more (2 chunks): aligned.
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
@@ -26,7 +26,7 @@ fn append_deflate_shuffle_chunk_aligned() {
 
 #[test]
 fn append_unaligned_crosses_chunk_boundary() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     // 6 elements, chunk 4 => 1 full chunk + a partial (2 of 4). Append 5 => 11:
     // the partial chunk is rewritten and the tail grows to 3 chunks.
@@ -42,7 +42,7 @@ fn append_unaligned_crosses_chunk_boundary() {
 
 #[test]
 fn append_repeated_partial_then_partial() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     Unlimited::new("d", &(0..3).collect::<Vec<i32>>(), 4)
         .filters(&[Filter::Deflate(6)])
@@ -58,7 +58,7 @@ fn append_repeated_partial_then_partial() {
 
 #[test]
 fn append_unfiltered() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     Unlimited::new("d", &(0..6).collect::<Vec<i32>>(), 3).pure_create(&path);
     dataset::pure_append_staged(&path, "d", &(6..13).collect::<Vec<_>>()); // unaligned (6->13)
@@ -70,7 +70,7 @@ fn append_unfiltered() {
 
 #[test]
 fn append_fletcher32() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     Unlimited::new("d", &(0..5).collect::<Vec<i32>>(), 4)
         .filters(&[Filter::Deflate(6), Filter::Fletcher32])
@@ -84,7 +84,7 @@ fn append_fletcher32() {
 
 #[test]
 fn append_scale_offset_f64() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     // Float D-scale is lossy, so the length has to be chunk-aligned: growing a
     // partial trailing chunk is refused (see the test below).
@@ -134,7 +134,7 @@ fn append_scale_offset_f64() {
 /// part of this test is that other edits survive.
 #[test]
 fn a_staged_append_onto_a_lossy_partial_tail_is_refused() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     // Clear of the default fill value's tolerance window, so every element is
     // stored as itself.
     let written = [1.05f64, 1.15, 1.25, 1.35, 1.45, 1.55];
@@ -233,7 +233,7 @@ fn a_staged_append_onto_a_lossy_partial_tail_is_refused() {
 
 #[test]
 fn append_generic_and_raw() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     let fixture = dataset::AppendRefusalFixture::UnlimitedI32;
     fixture.write(&path);
@@ -271,7 +271,7 @@ fn append_generic_and_raw() {
 
 #[test]
 fn append_to_userblock_file() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ub.h5");
     // A 512-byte userblock (as a .mat file has) makes the superblock base nonzero,
     // so every stored address is base-relative. The append must place and index
@@ -291,7 +291,7 @@ fn append_to_userblock_file() {
 
 #[test]
 fn zero_length_append_is_noop() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     Unlimited::new("d", &(0..5).collect::<Vec<i32>>(), 4)
         .filters(&[Filter::Deflate(6)])
@@ -314,7 +314,7 @@ fn zero_length_append_is_noop() {
 
 #[test]
 fn many_appends_do_not_rewrite_existing_data() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     // Incompressible base data so its on-disk size dominates the per-append index
     // overhead: if each append rewrote the whole dataset the file would grow by
@@ -364,7 +364,7 @@ fn many_appends_do_not_rewrite_existing_data() {
 
 #[test]
 fn introspection_reports_eligibility() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
         .filters(&[Filter::Shuffle, Filter::Deflate(6)])
@@ -380,7 +380,7 @@ fn introspection_reports_eligibility() {
 
 #[test]
 fn introspection_on_contiguous_dataset() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     let fixture = dataset::AppendRefusalFixture::Contiguous;
     fixture.write(&path);
@@ -420,7 +420,7 @@ fn assert_append_unsupported(res: Result<(), Error>) {
 
 #[test]
 fn refuse_contiguous() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     let fixture = dataset::AppendRefusalFixture::Contiguous;
     fixture.write(&path);
@@ -435,7 +435,7 @@ fn refuse_contiguous() {
 
 #[test]
 fn refuse_fixed_chunked_not_unlimited() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     // Chunked but a finite maximum (not unlimited) => fixed-array index, refused.
     let fixture = dataset::AppendRefusalFixture::FixedChunked;
@@ -451,7 +451,7 @@ fn refuse_fixed_chunked_not_unlimited() {
 
 #[test]
 fn refuse_rank2() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     // 2-D dataset with one unlimited axis (EA index) — refused as rank > 1.
     dataset::AppendRefusalFixture::Rank2.write(&path);
@@ -462,7 +462,7 @@ fn refuse_rank2() {
 
 #[test]
 fn refuse_datatype_mismatch() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     let fixture = dataset::AppendRefusalFixture::UnlimitedI32;
     fixture.write(&path);
@@ -477,7 +477,7 @@ fn refuse_datatype_mismatch() {
 
 #[test]
 fn refuse_raw_wrong_length() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     let fixture = dataset::AppendRefusalFixture::UnlimitedI32;
     fixture.write(&path);
@@ -492,7 +492,7 @@ fn refuse_raw_wrong_length() {
 
 #[test]
 fn refuse_mixed_element_types() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     let fixture = dataset::AppendRefusalFixture::UnlimitedI32;
     fixture.write(&path);
@@ -507,7 +507,7 @@ fn refuse_mixed_element_types() {
 
 #[test]
 fn refuse_nonexistent_dataset() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     let fixture = dataset::AppendRefusalFixture::UnlimitedI32;
     fixture.write(&path);

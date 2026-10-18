@@ -15,7 +15,7 @@ use std::path::Path;
 
 #[cfg(any(feature = "__hdf5-1.14", feature = "__hdf5-2"))]
 use hdf5::file::LibraryVersion;
-use tempfile::tempdir;
+
 use test_util::bytes;
 use test_util::object_header::{MessageType, v1};
 use test_util::superblock::v0;
@@ -277,7 +277,7 @@ fn read_with_pure_streaming(path: &Path) -> Result<Vec<i32>, hdf5_pure::Error> {
 fn a_v1_message_body_overrun_is_rejected_by_all_readers() {
     hdf5::silence_errors(true);
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let valid_path = dir.path().join("valid.h5");
     let malformed_path = dir.path().join("malformed.h5");
 
@@ -355,7 +355,7 @@ fn a_v1_message_body_overrun_is_rejected_by_all_readers() {
 fn a_v1_continuation_with_a_trailing_partial_prefix_has_versioned_libhdf5_behavior() {
     hdf5::silence_errors(true);
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let valid_path = dir.path().join("valid.h5");
     let malformed_path = dir.path().join("malformed.h5");
 
@@ -423,7 +423,7 @@ fn a_v1_continuation_with_a_trailing_partial_prefix_has_versioned_libhdf5_behavi
 fn a_v1_continuation_partial_prefix_rejection_is_independent_of_libver_bounds() {
     hdf5::silence_errors(true);
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let valid_path = dir.path().join("valid.h5");
     let malformed_path = dir.path().join("malformed.h5");
 
@@ -542,7 +542,7 @@ fn a_v1_continuation_partial_prefix_rejection_is_independent_of_libver_bounds() 
 fn a_v1_message_size_not_aligned_to_eight_has_versioned_libhdf5_behavior() {
     hdf5::silence_errors(true);
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let source_path = dir.path().join("source.h5");
     let valid_path = dir.path().join("valid.h5");
     let malformed_path = dir.path().join("malformed.h5");
@@ -645,7 +645,7 @@ fn a_v1_message_size_not_aligned_to_eight_has_versioned_libhdf5_behavior() {
 fn a_v1_message_size_alignment_validation_is_independent_of_libver_bounds() {
     hdf5::silence_errors(true);
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let source_path = dir.path().join("source.h5");
     let valid_path = dir.path().join("valid.h5");
     let malformed_path = dir.path().join("malformed.h5");

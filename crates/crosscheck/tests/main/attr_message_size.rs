@@ -11,7 +11,7 @@
 //! this writes right up against it and reads the values back through libhdf5.
 
 use hdf5_pure::{AttrValue, FileBuilder, OBJECT_HEADER_MESSAGE_MAX};
-use tempfile::tempdir;
+
 use test_util::fractal_heap;
 
 /// Whether a root `i64` attribute of `n` elements is stored compactly.
@@ -49,7 +49,7 @@ fn largest_compact_i64_attr() -> Vec<i64> {
 #[test]
 fn c_reads_the_largest_accepted_root_attribute() {
     let values = largest_compact_i64_attr();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("boundary_root.h5");
 
     let mut builder = FileBuilder::new();
@@ -73,7 +73,7 @@ fn c_reads_one_element_past_the_compact_boundary() {
     let mut values = largest_compact_i64_attr();
     values.push(values.len() as i64);
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("past_boundary.h5");
 
     let mut builder = FileBuilder::new();
@@ -95,7 +95,7 @@ fn c_reads_one_element_past_the_compact_boundary() {
 #[test]
 fn c_reads_the_largest_accepted_dataset_attribute() {
     let values = largest_compact_i64_attr();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("boundary_dataset.h5");
 
     let mut builder = FileBuilder::new();

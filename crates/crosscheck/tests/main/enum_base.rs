@@ -13,8 +13,7 @@
 //! own C calls through an internal lock, so these tests need no extra guard.
 
 use hdf5::types::TypeDescriptor;
-use hdf5_pure::{EnumTypeBuilder, FileBuilder, make_i16_type, make_u16_type, make_u64_type};
-use tempfile::tempdir;
+use hdf5_pure::{EnumTypeBuilder, FileBuilder};
 
 /// Read the enumeration descriptor the C library recovers for dataset `name`.
 fn c_enum_descriptor(path: &std::path::Path, name: &str) -> hdf5::types::EnumType {
@@ -29,10 +28,10 @@ fn c_enum_descriptor(path: &std::path::Path, name: &str) -> hdf5::types::EnumTyp
 #[test]
 #[cfg(target_endian = "little")]
 fn c_library_agrees_on_an_unsigned_16_bit_enum() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("u16_enum.h5");
 
-    let dt = EnumTypeBuilder::with_base(make_u16_type())
+    let dt = EnumTypeBuilder::with_base(hdf5_pure::make_u16_type())
         .value("low", 1)
         .value("high", 40_000)
         .build()
@@ -65,10 +64,10 @@ fn c_library_agrees_on_an_unsigned_16_bit_enum() {
 #[test]
 #[cfg(target_endian = "little")]
 fn c_library_agrees_on_a_signed_16_bit_enum() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("i16_enum.h5");
 
-    let dt = EnumTypeBuilder::with_base(make_i16_type())
+    let dt = EnumTypeBuilder::with_base(hdf5_pure::make_i16_type())
         .value("neg", -2)
         .value("pos", 7)
         .build()
@@ -100,10 +99,10 @@ fn c_library_agrees_on_a_signed_16_bit_enum() {
 /// still recover the exact stored bytes.
 #[test]
 fn c_library_agrees_on_a_64_bit_enum_built_from_raw_bytes() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("u64_enum.h5");
 
-    let dt = EnumTypeBuilder::with_base(make_u64_type())
+    let dt = EnumTypeBuilder::with_base(hdf5_pure::make_u64_type())
         .raw_value("max", &u64::MAX.to_le_bytes())
         .raw_value("zero", &0u64.to_le_bytes())
         .build()

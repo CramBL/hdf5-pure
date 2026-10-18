@@ -275,7 +275,7 @@ fn zfp_dtype_is_sole_source_of_truth() {
     // overriding the dtype with `with_dtype(make_f32_type())` must produce a
     // valid ZFP-compressed f32 dataset. Before the refactor this errored
     // because `with_u8_data` never populated `chunk_options.zfp_element_type`.
-    use hdf5_pure::make_f32_type;
+
     let vals: Vec<f32> = (0..16).map(|i| i as f32 * 0.25).collect();
     let raw: Vec<u8> = vals.iter().flat_map(|v| v.to_le_bytes()).collect();
 
@@ -283,7 +283,7 @@ fn zfp_dtype_is_sole_source_of_truth() {
     builder
         .create_dataset("v")
         .with_u8_data(&raw)
-        .with_dtype(make_f32_type())
+        .with_dtype(hdf5_pure::make_f32_type())
         .with_shape(&[vals.len() as u64])
         .with_chunks(&[vals.len() as u64])
         .with_zfp(16.0);

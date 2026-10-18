@@ -13,7 +13,7 @@
 //! encodes is what the C library reads back.
 
 use hdf5_pure::{H5Element, ScaleOffset};
-use tempfile::tempdir;
+
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
 
 /// Appends `values` to `col` through a staged append.
@@ -33,7 +33,7 @@ fn append_to_col<T: H5Element>(path: &std::path::Path, values: &[T]) {
 /// dataset written by libhdf5 or h5py.
 #[test]
 fn the_c_library_records_a_defined_fill_value_even_without_one() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let filavail_and_filval = |fill: Option<u64>, name: &str| {
         let path = dir.path().join(name);
         c_create_typed(&path, &[1u64, 2, 3], 512, ScaleOffset::Integer(0), fill);
@@ -83,7 +83,7 @@ fn filter_parms(path: &std::path::Path) -> Vec<u32> {
 #[test]
 #[cfg(target_endian = "little")]
 fn a_dataset_this_crate_writes_carries_the_filter_parameters_the_c_library_records() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
 
     macro_rules! compare {
         ($name:literal, $ty:ty, $with:ident, $data:expr, $fill:expr) => {
@@ -215,7 +215,7 @@ fn a_dataset_this_crate_writes_carries_the_filter_parameters_the_c_library_recor
 /// is what this crate could not produce while its writer recorded none.
 #[test]
 fn a_recorded_fill_value_shrinks_a_mostly_fill_chunk() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     // Values near zero, a fill value far from them: without the fill value the
     // chunk's range spans all of it.
     let data: Vec<i32> = (0..64)
@@ -256,7 +256,7 @@ fn a_recorded_fill_value_shrinks_a_mostly_fill_chunk() {
 #[test]
 #[cfg(target_endian = "little")]
 fn appending_to_a_c_written_fill_defined_dataset() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("append.h5");
     c_create_typed(&path, &[1, 2, 3], 512, ScaleOffset::Integer(0), Some(0));
 
@@ -275,7 +275,7 @@ fn appending_to_a_c_written_fill_defined_dataset() {
 #[test]
 #[cfg(target_endian = "little")]
 fn appended_fill_valued_elements_round_trip() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("append_fill.h5");
     let fill = 7u64;
     c_create_typed(&path, &[10, 11, 12], 8, ScaleOffset::Integer(0), Some(fill));
@@ -299,7 +299,7 @@ fn appended_fill_valued_elements_round_trip() {
 #[test]
 #[cfg(target_endian = "little")]
 fn the_widest_value_in_a_chunk_is_not_mistaken_for_the_fill_value() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("sentinel.h5");
     let fill = 0u64;
     c_create_typed(&path, &[100], 8, ScaleOffset::Integer(0), Some(fill));
@@ -319,7 +319,7 @@ fn the_widest_value_in_a_chunk_is_not_mistaken_for_the_fill_value() {
 #[test]
 #[cfg(target_endian = "little")]
 fn signed_data_with_a_negative_fill_value() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("signed.h5");
     let fill = -9i32;
     c_create_typed(
@@ -411,7 +411,7 @@ where
     T: hdf5::H5Type + Copy + PartialEq + std::fmt::Debug,
     A: Fn(&std::path::Path, &[T]),
 {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let fill = values[0];
     let c_written = dir.path().join("c.h5");
     let appended = dir.path().join("appended.h5");
@@ -540,7 +540,7 @@ fn a_residual_just_below_one_half_rounds_the_way_the_c_library_rounds() {
 
     // The same divergence as a value, which is how a user meets it: this crate
     // stored 1.0 for an element the reference stores as 0.0.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("value.h5");
     c_create_typed(
         &path,
@@ -598,7 +598,7 @@ fn float32_dscale_encoding_matches_the_c_library_byte_for_byte() {
 #[test]
 #[cfg(target_endian = "little")]
 fn the_f32_tolerance_window_between_the_two_precisions_matches() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let fill = 0.0f32;
     // f32(0.01) — below the true 0.01 that the `double` comparison uses, and
     // equal to the `float` one, which the comparison is strict about.
@@ -626,7 +626,7 @@ fn the_f32_tolerance_window_between_the_two_precisions_matches() {
 #[test]
 #[cfg(target_endian = "little")]
 fn float_dscale_with_a_defined_fill_value() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("float.h5");
     let decimals = 3u8;
     let fill = -999.0f64;
@@ -750,7 +750,7 @@ fn first_chunk_header(path: &std::path::Path) -> Vec<u8> {
 #[test]
 #[cfg(target_endian = "little")]
 fn the_fallback_header_matches_the_c_library_at_every_width() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
 
     // Each fixture spreads past `width_max - 2` for its width, so the
     // full-precision fallback fires, with a minimum that is not zero.
@@ -839,7 +839,7 @@ fn an_all_fill_chunk_matches_the_c_library_byte_for_byte() {
 /// the C library.
 #[test]
 fn a_full_width_minbits_stores_the_chunk_unfiltered() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("noop.h5");
     let data: Vec<i32> = (0..64).map(|i| 100 + i % 9).collect();
     let mut b = hdf5_pure::FileBuilder::new();

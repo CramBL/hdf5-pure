@@ -43,8 +43,6 @@ use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::SECTION_CLASS_SIMPLE;
 use rstest::rstest;
 
-use tempfile::tempdir;
-
 use test_util::file_space_info;
 use test_util::range;
 use test_util::userblock::Userblock;
@@ -57,7 +55,7 @@ use test_util_hdf5::session;
 
 #[test]
 fn c_library_reads_our_strategy() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     for (i, (ours, expected)) in [
         (
             FileSpaceStrategy::FsmAggr,
@@ -114,7 +112,7 @@ fn libhdf5_reads_a_page_size_at_either_bound(
     #[case] strategy: FileSpaceStrategy,
     #[case] page_size: FileSpacePageSize,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("bound.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("d").with_i32_data(&[10, 20, 30]);
@@ -143,7 +141,7 @@ fn the_reader_reads_a_page_size_libhdf5_writes_at_either_bound(
     #[case] paged: bool,
     #[case] page_size: FileSpacePageSize,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("bound.h5");
     hdf5::FileBuilder::new()
         .with_fapl(|fapl| fapl.libver_v110())
@@ -174,7 +172,7 @@ fn we_read_c_library_persisted_free_space() {
     // The C library writes a persisted FSM file with real free space (a deleted
     // dataset). hdf5-pure must follow the File Space Info manager addresses to the
     // on-disk FSHD/FSSE blocks and recover the freed sections.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_persisted_fsm.h5");
     {
         let file = hdf5::FileBuilder::new()
@@ -239,7 +237,7 @@ fn c_library_reads_our_persisted_free_space() {
     // persisted file with real free space (a deleted dataset), and the reference
     // C library opens it, recovers the strategy, reads the survivors, and loads
     // the on-disk free-space managers we wrote.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ours_persisted.h5");
 
     // Create a persisted file, then free the interior dataset's storage in place.
@@ -293,7 +291,7 @@ fn c_library_reads_our_persisted_free_space() {
 
 #[test]
 fn c_library_accepts_reclaimed_v2_btree_chunk_storage_and_allocates_afterward() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("v2_btree_reclaim.h5");
     let raw_values = (0..40 * 40).collect::<Vec<i32>>();
     let filtered_values = vec![7i32; 40 * 40];
@@ -424,7 +422,7 @@ fn c_library_reads_managers_we_placed_mid_file() {
     // managers in it (issue #358). The C library then has to find the extension and managers
     // below live data and accept an `eoa_fsm_fsalloc` that spans the whole file. Several commits
     // ensure the final managers moved into space an earlier set vacated.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ours_persisted_mid_file.h5");
 
     let mut b = FileBuilder::new();
@@ -686,7 +684,7 @@ fn the_serializer_writes_the_message_libhdf5_writes_at_the_widths_of_its_file(
     #[values(Sizeof::Bytes2, Sizeof::Bytes4, Sizeof::Bytes8)] sizeof_addr: Sizeof,
     #[values(Sizeof::Bytes2, Sizeof::Bytes4, Sizeof::Bytes8)] sizeof_size: Sizeof,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_persisted_widths.h5");
     {
         let file = hdf5::FileBuilder::new()
@@ -786,7 +784,7 @@ fn libhdf5_truncates_the_maximum_section_size_and_writes_section_sizes_as_wide_a
     #[values(Sizeof::Bytes2, Sizeof::Bytes4, Sizeof::Bytes8)] sizeof_addr: Sizeof,
     #[values(Sizeof::Bytes2, Sizeof::Bytes4)] sizeof_size: Sizeof,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_truncated_maximum.h5");
     let freed = write_c_persisted_with_a_hole(&path, driver, sizeof_addr, sizeof_size, 0);
     let file = File::open(&path).unwrap();
@@ -842,7 +840,7 @@ fn the_free_sections_libhdf5_persists_are_read_at_the_widths_of_its_file(
     #[values(Sizeof::Bytes2, Sizeof::Bytes4, Sizeof::Bytes8)] sizeof_addr: Sizeof,
     #[values(Sizeof::Bytes2, Sizeof::Bytes4, Sizeof::Bytes8)] sizeof_size: Sizeof,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_persisted_sections.h5");
     let freed = write_c_persisted_with_a_hole(&path, driver, sizeof_addr, sizeof_size, 0);
     let free_c = hdf5::File::open(&path).unwrap().free_space();
@@ -860,7 +858,7 @@ fn the_free_sections_libhdf5_persists_are_read_at_the_widths_of_its_file(
 #[cfg(feature = "__hdf5-1.12")]
 #[test]
 fn the_sections_libhdf5_persists_in_an_oversized_section_list_are_read() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_oversized_section_list.h5");
     {
         let file = hdf5::FileBuilder::new()
@@ -949,7 +947,7 @@ fn libhdf5_loads_the_managers_the_serializer_writes_at_the_widths_of_its_file(
     #[values(Sizeof::Bytes2, Sizeof::Bytes4, Sizeof::Bytes8)] sizeof_addr: Sizeof,
     #[values(Sizeof::Bytes2, Sizeof::Bytes4, Sizeof::Bytes8)] sizeof_size: Sizeof,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ours_persisted_sections.h5");
     let freed = write_c_persisted_with_a_hole(&path, Driver::Sec2, sizeof_addr, sizeof_size, 0);
     let file = File::open(&path).unwrap();
@@ -1040,7 +1038,7 @@ fn libhdf5_loads_the_managers_the_serializer_writes_at_the_widths_of_its_file(
 #[case::plain(0)]
 #[case::userblock(512)]
 fn libhdf5_reads_a_section_list_whose_allocation_the_test_enlarges(#[case] userblock: u64) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("enlarged_section_list.h5");
     let (free, _) = enlarged_section_list_file(&path, userblock);
     let file = hdf5::File::open(&path).unwrap();
@@ -1061,7 +1059,7 @@ fn libhdf5_reads_a_section_list_whose_allocation_the_test_enlarges(#[case] userb
 
 #[test]
 fn an_editor_reclaims_the_complete_section_list_allocation_the_test_enlarges() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("reclaimed_section_list.h5");
     let (_, allocation) = enlarged_section_list_file(&path, 0);
     let session = File::open_rw(&path).unwrap();
@@ -1180,7 +1178,7 @@ fn a_libhdf5_manager_with_an_invalid_field_is_reported_and_seeds_no_free_space(
     #[case] value: Vec<u8>,
     #[case] reason: &str,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_invalid_manager.h5");
     let freed =
         write_c_persisted_with_a_hole(&path, Driver::Sec2, Sizeof::Bytes8, Sizeof::Bytes8, 0);
@@ -1209,7 +1207,7 @@ fn a_libhdf5_manager_with_an_invalid_field_is_reported_and_seeds_no_free_space(
 
 #[test]
 fn a_libhdf5_section_list_whose_checksum_does_not_match_is_reported_and_seeds_no_free_space() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_section_list_checksum.h5");
     write_c_persisted_with_a_hole(&path, Driver::Sec2, Sizeof::Bytes8, Sizeof::Bytes8, 0);
     let range = deleted_dataset_manager_block(&path, ManagerBlock::SectionList);
@@ -1232,7 +1230,7 @@ fn a_libhdf5_section_list_whose_checksum_does_not_match_is_reported_and_seeds_no
 
 #[test]
 fn an_editor_never_frees_the_live_bytes_a_libhdf5_header_points_to_as_its_section_list() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_header_into_live_data.h5");
     write_c_persisted_with_a_hole(&path, Driver::Sec2, Sizeof::Bytes8, Sizeof::Bytes8, 0);
     let live = hdf5::File::open(&path)
@@ -1298,7 +1296,7 @@ fn an_editor_never_frees_the_live_bytes_a_libhdf5_header_points_to_as_its_sectio
 
 #[test]
 fn a_libhdf5_section_list_of_another_header_is_reported_and_neither_seeded_nor_reclaimed() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_section_list_of_another_header.h5");
     write_c_persisted_with_a_hole(&path, Driver::Sec2, Sizeof::Bytes8, Sizeof::Bytes8, 0);
     let header = deleted_dataset_manager_block(&path, ManagerBlock::Header);
@@ -1462,7 +1460,7 @@ fn write_c_persisted_with_a_hole(
 
 #[test]
 fn we_read_c_library_strategy() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
 
     // Each case: a C-written strategy and what hdf5-pure should report. The C
     // library only writes a File Space Info message for non-default settings, so
@@ -1566,7 +1564,7 @@ fn a_version_0_strategy_reads_as_libhdf5_maps_it(
     #[case] strategy: FileSpaceStrategy,
     #[case] threshold: u64,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_version_0.h5");
     {
         let file = hdf5::FileBuilder::new()
@@ -1633,7 +1631,7 @@ fn assert_version_0_free_space_reads_as_libhdf5_reads_it(
     sizeof_size: Sizeof,
     userblock: u64,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_persisted_version_0.h5");
     let freed =
         write_c_persisted_with_a_hole(&path, Driver::Sec2, sizeof_addr, sizeof_size, userblock);
@@ -1676,7 +1674,7 @@ fn assert_version_0_free_space_reads_as_libhdf5_reads_it(
 
 #[test]
 fn libhdf5_reads_a_version_0_file_after_an_edit_reuses_its_persisted_free_space() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_persisted_version_0_edited.h5");
     let freed =
         write_c_persisted_with_a_hole(&path, Driver::Sec2, Sizeof::Bytes8, Sizeof::Bytes8, 0);
@@ -1732,7 +1730,7 @@ fn libhdf5_reads_a_version_0_file_after_an_edit_reuses_its_persisted_free_space(
 
 #[test]
 fn libhdf5_reads_a_non_persisting_version_0_file_after_an_edit() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_non_persisted_version_0_edited.h5");
     {
         let file = hdf5::FileBuilder::new()
@@ -1793,7 +1791,7 @@ fn libhdf5_reads_a_non_persisting_version_0_file_after_an_edit() {
 fn libhdf5_reads_its_file_after_an_edit_reuses_the_free_space_it_persisted(
     #[values(0, 512)] userblock: u64,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_persisted_edited.h5");
     let freed = write_c_persisted_with_a_hole(
         &path,
@@ -1858,7 +1856,7 @@ fn libhdf5_reads_its_file_after_an_edit_reuses_the_free_space_it_persisted(
 fn libhdf5_reads_relocated_persisted_free_space_and_writes_to_the_file(
     #[values(0, 512)] userblock: u64,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ours_persisted_relocated.h5");
     let mut builder = FileBuilder::new();
     if userblock > 0 {
@@ -1939,7 +1937,7 @@ fn libhdf5_reads_relocated_persisted_free_space_and_writes_to_the_file(
 fn libhdf5_reads_its_paged_file_after_an_edit_reuses_the_free_space_it_persisted(
     #[values(0, PAGE_SIZE)] userblock: u64,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_paged_persisted_edited.h5");
     write_c_paged(&path, userblock, 1, C_PAGED_DATASETS);
     let file = hdf5::File::open_rw(&path).unwrap();
@@ -2029,7 +2027,7 @@ fn libhdf5_reads_its_paged_file_after_an_edit_reuses_the_free_space_it_persisted
 
 #[rstest]
 fn libhdf5_reads_and_writes_our_edited_paged_file(#[values(0, PAGE_SIZE)] userblock: u64) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ours_paged_edited.h5");
     let mut builder = FileBuilder::new();
     if userblock > 0 {
@@ -2186,7 +2184,7 @@ fn c_library_reads_our_fresh_persisting_file() {
     // (H5Fsuper.c: `fs_persist => eoa_fsm_fsalloc != UNDEF`). No dataset is deleted,
     // so the file genuinely tracks no free space — the corner the strategy
     // crosschecks (persist = false, or persist = true only after a delete) missed.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ours_fresh_persist.h5");
 
     let mut b = FileBuilder::new();
@@ -2233,7 +2231,7 @@ fn c_library_reads_our_paged_file(#[case] page_size: u64) {
     // paged strategy, read every dataset, load the per-page-type free-space
     // managers (H5Fget_freespace parses our FSHD/FSSE blocks), and reopen the
     // file read-write to mutate it (proving the paged layout is consistent).
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ours_paged.h5");
 
     paged::write_small_large_i32(&path, page_size);
@@ -2312,7 +2310,7 @@ fn c_library_reads_our_paged_chunked_file() {
     // file with a small chunked dataset and a large compressed (shuffle+deflate)
     // chunked dataset whose data begins a page-aligned run. The C library must
     // read both, parse the managers, and reopen read-write.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ours_paged_chunked.h5");
 
     paged::write_chunked_f64(&path, 16384);
@@ -2373,7 +2371,7 @@ fn c_library_reads_our_bounded_mutated_paged_file() {
     // raw chunks (exercising page segregation). libhdf5 must then
     // recover the paged strategy, read every row, load the per-page-type managers
     // (H5Fget_freespace parses our FSHD/FSSE blocks), and reopen it read-write.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ours_paged_mutated.h5");
 
     // Create with one chunk, then bounded-append to 5000 rows.
@@ -2444,7 +2442,7 @@ fn c_library_reads_our_staged_mutated_paged_file() {
     // the rebuilt chunk index, the rewritten managers). libhdf5
     // must then recover the paged strategy, read every dataset, load the
     // per-page-type managers, and reopen the file read-write.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ours_paged_staged.h5");
 
     paged::write_unlimited_i32(&path, 4096, true, 64, 64);
@@ -2533,7 +2531,7 @@ fn c_library_reads_our_paged_file_after_free_space_reuse() {
     // it *can* do is prove the result is a well-formed paged file: recover the
     // strategy, read every dataset back, and re-parse the rewritten per-page-type
     // managers into the same free-space total we record.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ours_paged_reused.h5");
 
     let kept: Vec<f64> = (0..4096).map(|i| (i % 17) as f64).collect();
@@ -2644,7 +2642,7 @@ fn c_library_reads_our_paged_file_after_a_cross_page_type_claim() {
     // The shape below is what forces the claim: delete the chunked dataset to free
     // whole raw pages, then commit metadata too large for any metadata hole that
     // remains, so the allocator has to open one of those raw pages for it.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ours_paged_crosstype.h5");
 
     let kept: Vec<f64> = (0..512).map(|i| (i % 17) as f64).collect();
@@ -2737,7 +2735,7 @@ fn pure_bounded_mutates_c_created_paged_file() {
     // persisting file with an unlimited chunked dataset; hdf5-pure grows it through
     // the bounded backend; then both the C library and hdf5-pure read every row
     // back and the C library re-parses the rewritten managers.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_paged_pure_mutated.h5");
 
     {
@@ -2812,7 +2810,7 @@ fn c_library_reads_our_paged_file_after_group_churn() {
     // strategy, read the surviving objects, and report exactly the free space our
     // managers record, which it can only do by parsing the FSHD/FSSE blocks the
     // churn rewrote.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ours_paged_churn.h5");
 
     let mut b = FileBuilder::new();
@@ -2935,7 +2933,7 @@ fn c_library_reads_our_paged_file_after_group_churn() {
 /// file and hdf5-pure reads the result.
 #[test]
 fn c_library_reads_our_file_after_a_release_shortened_it() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     const ROWS: usize = 65536;
     let payload: Vec<i32> = (0..ROWS as i32).collect();
 
@@ -3047,7 +3045,7 @@ fn c_library_reads_our_file_after_a_release_shortened_it() {
 /// says the paged managers still segregate what they should.
 #[test]
 fn c_library_reads_our_file_after_an_append_reused_free_space() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
 
     // Comfortably more than one reserve batch, so the append draws from the hole
     // rather than declining it.
@@ -3200,7 +3198,7 @@ fn a_replacement_reuses_a_deleted_extent_where_libhdf5_does(
     #[case] strategy: CStrategy,
     #[case] reuses: bool,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let ours = dir.path().join("ours.h5");
     let theirs = dir.path().join("theirs.h5");
     file_space::libhdf5_write_strategy_triplet(&ours, strategy);
@@ -3244,7 +3242,7 @@ fn a_sub_threshold_extent_is_tracked_only_beside_a_tracked_extent_as_libhdf5_tra
     #[case] deletions: &[&str],
     #[case] tracked: u64,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let ours = dir.path().join("ours.h5");
     let theirs = dir.path().join("theirs.h5");
     {
@@ -3323,7 +3321,7 @@ fn a_sub_threshold_extent_is_tracked_only_beside_a_tracked_extent_as_libhdf5_tra
 fn a_persisting_edit_that_tracks_no_free_space_records_the_end_of_allocation_for_libhdf5(
     #[case] edit: fn(&Path),
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ours.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("a").with_i32_data(&[1; 100]);
@@ -3421,7 +3419,7 @@ fn a_paged_returned_extent_is_tracked_as_libhdf5_tracks_it(
     #[case] measured: &str,
     #[case] tracked: bool,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let ours = dir.path().join("ours.h5");
     let theirs = dir.path().join("theirs.h5");
     write_c_paged(&ours, 0, threshold, datasets);
@@ -3444,7 +3442,7 @@ fn a_paged_returned_extent_is_tracked_as_libhdf5_tracks_it(
 
 #[test]
 fn a_dropped_extent_of_whole_pages_that_ends_the_file_is_given_back_for_libhdf5() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ours.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("a").with_i32_data(&[1; EXTENT_ELEMENTS]);
@@ -3477,7 +3475,7 @@ fn a_dropped_extent_of_whole_pages_that_ends_the_file_is_given_back_for_libhdf5(
 
 #[test]
 fn a_dropped_extent_of_whole_pages_below_an_appended_tail_stays_tracked_for_libhdf5() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ours.h5");
     let page_size = FileSpacePageSize::MIN.get();
     let mut b = FileBuilder::new();
@@ -3515,7 +3513,7 @@ fn a_dropped_extent_of_whole_pages_below_an_appended_tail_stays_tracked_for_libh
 
 #[test]
 fn a_paged_returned_extent_beside_free_space_across_a_page_boundary_is_dropped_as_in_libhdf5() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let ours = dir.path().join("ours.h5");
     let theirs = dir.path().join("theirs.h5");
     write_c_paged(
@@ -3534,7 +3532,7 @@ fn a_paged_returned_extent_beside_free_space_across_a_page_boundary_is_dropped_a
     assert_eq!((f1.end, f1.end % PAGE_SIZE), (g.start, 0));
 
     let tracked = [&f1, &g].map(|extent| {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let (ours_copy, theirs_copy) = (dir.path().join("ours.h5"), dir.path().join("theirs.h5"));
         std::fs::copy(&ours, &ours_copy).unwrap();
         std::fs::copy(&theirs, &theirs_copy).unwrap();
@@ -3559,7 +3557,7 @@ fn a_page_tail_short_of_the_threshold_stays_tracked_as_libhdf5_tracks_it(
     #[case] theirs_edit: fn(&hdf5::File),
     #[case] tail_after: &str,
 ) {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let ours = dir.path().join("ours.h5");
     let theirs = dir.path().join("theirs.h5");
     write_c_paged(&ours, 0, THRESHOLD_IN_A_PAGE, datasets);
@@ -3607,7 +3605,7 @@ fn a_page_tail_short_of_the_threshold_stays_tracked_as_libhdf5_tracks_it(
 
 #[test]
 fn a_paged_persisting_edit_that_tracks_no_free_space_records_the_end_of_allocation_for_libhdf5() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let base = dir.path().join("base.h5");
     let path = dir.path().join("ours.h5");
     let mut b = FileBuilder::new();

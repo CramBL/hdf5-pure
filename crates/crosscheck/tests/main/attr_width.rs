@@ -24,7 +24,6 @@
 use hdf5::types::{FixedAscii, FixedUnicode, FloatSize, IntSize, TypeDescriptor};
 use hdf5_pure::{AttrValue, File, FileBuilder};
 use std::str::FromStr;
-use tempfile::tempdir;
 
 /// One attribute per width: the name, the value this crate writes, and the type
 /// the C library must report for it.
@@ -149,7 +148,7 @@ fn array_widths() -> Vec<(&'static str, AttrValue, TypeDescriptor)> {
 /// say what the file really holds.
 #[test]
 fn c_reads_every_width_this_crate_writes() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("widths.h5");
 
     let cases: Vec<_> = scalar_widths().into_iter().chain(array_widths()).collect();
@@ -201,7 +200,7 @@ fn c_reads_every_width_this_crate_writes() {
 /// and the half issues #350 and #354 reported.
 #[test]
 fn every_width_the_c_library_writes_reads_back_as_itself() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_widths.h5");
 
     {
@@ -281,7 +280,7 @@ fn every_width_the_c_library_writes_reads_back_as_itself() {
 /// and hand back the wrong text.
 #[test]
 fn c_reads_the_string_width_this_crate_declared() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("string_widths.h5");
 
     let mut builder = FileBuilder::new();
@@ -351,7 +350,7 @@ fn c_reads_the_string_width_this_crate_declared() {
 /// attribute arrived as its trimmed text, and the `STRSIZE` was gone.
 #[test]
 fn a_padded_slot_the_c_library_wrote_reads_back_carrying_its_width() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_string_widths.h5");
 
     {

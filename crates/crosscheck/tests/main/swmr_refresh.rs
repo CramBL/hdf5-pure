@@ -8,7 +8,7 @@
 //! boundary, so the chunk index grows structurally between refreshes.
 
 use hdf5_pure::{Error, File};
-use tempfile::tempdir;
+
 use test_util_hdf5::dataset::Unlimited;
 
 /// Reopen `path` read-write and grow the dataset to `new_total` rows valued
@@ -24,7 +24,7 @@ fn c_extend(path: &std::path::Path, new_total: usize) {
 
 #[test]
 fn refresh_follows_external_appends() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("swmr.h5");
 
     // Writer creates 100 rows (within the direct data blocks).
@@ -71,7 +71,7 @@ fn refresh_follows_external_appends() {
 
 #[test]
 fn refresh_requires_open_swmr() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("plain.h5");
     Unlimited::new("d", &(0..50).collect::<Vec<i32>>(), 1).libhdf5_create(&path);
     let bytes = std::fs::read(&path).unwrap();

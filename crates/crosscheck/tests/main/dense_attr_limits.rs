@@ -13,10 +13,10 @@
 //! observable, asserted outcome rather than a crash.
 
 use hdf5_pure::{AttrValue, FileBuilder};
-use tempfile::tempdir;
+
 use test_util::btree_v2;
 use test_util::fractal_heap;
-use test_util_hdf5::dense_attr::{largest_managed_payload, nine_attrs};
+use test_util_hdf5::dense_attr;
 
 /// Set on the child process to make it open `$DENSE_XCHECK_FILE` with libhdf5
 /// and report what it found on stdout.
@@ -311,11 +311,11 @@ fn c_inserts_managed_then_reads(path: &std::path::Path) -> CDetail {
 /// only if the heap ID, the huge-objects B-tree and the header fields all agree.
 #[test]
 fn c_reads_both_sides_of_the_managed_object_threshold() {
-    let payload = largest_managed_payload();
-    let dir = tempdir().unwrap();
+    let payload = dense_attr::largest_managed_payload();
+    let dir = tempfile::tempdir().unwrap();
 
     let managed = dir.path().join("managed.h5");
-    nine_attrs(payload).write(&managed).unwrap();
+    dense_attr::nine_attrs(payload).write(&managed).unwrap();
     let detail = c_reads_in_detail(&managed);
     assert_eq!(detail.verdict, CReads::Attrs(9));
     assert_eq!(
@@ -325,7 +325,7 @@ fn c_reads_both_sides_of_the_managed_object_threshold() {
     );
 
     let huge = dir.path().join("huge.h5");
-    nine_attrs(payload + 1).write(&huge).unwrap();
+    dense_attr::nine_attrs(payload + 1).write(&huge).unwrap();
     assert_eq!(
         fractal_heap::huge_object_count(&std::fs::read(&huge).unwrap()),
         1,
@@ -364,7 +364,7 @@ fn counting_sum(first: i64, len: usize) -> i64 {
 /// but the library itself settles whether it minds.
 #[test]
 fn c_reads_a_lone_huge_attribute() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let len = 12_000usize;
 
     for others in [0usize, 2] {
@@ -404,7 +404,7 @@ fn c_reads_a_lone_huge_attribute() {
 /// ID, which the C library tolerates, so this would not catch it.
 #[test]
 fn c_adds_a_huge_attribute_to_a_heap_this_crate_wrote() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("insert.h5");
     let len = 12_000usize;
 
@@ -435,7 +435,7 @@ fn c_adds_a_huge_attribute_to_a_heap_this_crate_wrote() {
 /// to follow each heap ID to a different kind of destination.
 #[test]
 fn c_reads_a_heap_mixing_managed_and_huge_objects() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("mixed.h5");
 
     let mut builder = FileBuilder::new();
@@ -480,7 +480,7 @@ fn c_reads_a_heap_mixing_managed_and_huge_objects() {
 /// reads back wrong rather than coincidentally right.
 #[test]
 fn c_reads_a_heap_of_many_huge_objects() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("many_huge.h5");
     let len = |i: usize| 9_000 + i * 100;
 
@@ -525,9 +525,11 @@ fn c_reads_a_heap_of_many_huge_objects() {
 /// prevents and proof that the child-process harness above can detect it.
 #[test]
 fn c_rejects_a_heap_whose_objects_exceed_its_declared_limit() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let good = dir.path().join("good.h5");
-    nine_attrs(largest_managed_payload()).write(&good).unwrap();
+    dense_attr::nine_attrs(dense_attr::largest_managed_payload())
+        .write(&good)
+        .unwrap();
     assert_eq!(c_reads(&good), CReads::Attrs(9));
 
     // Fractal heap header: "FRHP", version(1), heap ID length(2), I/O filter
@@ -556,7 +558,9 @@ fn c_rejects_a_heap_whose_objects_exceed_its_declared_limit() {
     // And the writer never produces that shape: one byte past the threshold the
     // attribute leaves the managed blocks entirely rather than overflowing the
     // declared limit.
-    let past = nine_attrs(largest_managed_payload() + 1).finish().unwrap();
+    let past = dense_attr::nine_attrs(dense_attr::largest_managed_payload() + 1)
+        .finish()
+        .unwrap();
     assert_eq!(fractal_heap::huge_object_count(&past), 1);
     assert_eq!(fractal_heap::managed_object_count(&past), 8);
 }
@@ -581,7 +585,7 @@ fn c_reads_attribute_counts_that_need_a_multi_level_index() {
         builder
     };
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     for count in [570, 10_260, 61_681, 70_000] {
         let path = dir.path().join(format!("count_{count}.h5"));
         build(count).write(&path).unwrap();
@@ -632,7 +636,7 @@ fn c_reads_attribute_counts_that_need_a_multi_level_index() {
 /// offset still yields a well-formed message from a neighbouring block.
 #[test]
 fn c_reads_a_heap_whose_managed_blocks_need_indirect_blocks() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
 
     // (name, elements per attribute, attribute count, indirect blocks expected)
     let shapes: [(&str, usize, usize, usize); 2] = [
@@ -714,7 +718,7 @@ fn c_reads_a_heap_whose_managed_blocks_need_indirect_blocks() {
 /// table of direct blocks the emitter grows to hold it.
 #[test]
 fn c_reads_a_multi_megabyte_dense_heap() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("big_total.h5");
 
     let mut builder = FileBuilder::new();
@@ -841,7 +845,7 @@ fn assert_a_colliding_name_is_promoted(bytes: &[u8], colliding: usize, context: 
 /// it down the branch that cannot hold what it is looking for.
 #[test]
 fn c_finds_colliding_names_in_a_multi_level_index() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("colliding_multi_level.h5");
 
     let (builder, names, values) = colliding_attrs(STRADDLING_TOTAL);
@@ -874,7 +878,7 @@ fn c_finds_colliding_names_in_a_multi_level_index() {
 /// own, and the tree deep enough that libhdf5 has to descend it.
 #[test]
 fn c_finds_colliding_names_after_a_repack() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("colliding_src.h5");
     let dst = dir.path().join("colliding_repacked.h5");
 
@@ -945,7 +949,7 @@ fn c_repairs_a_file_written_before_the_fix() {
     }
     drop(file);
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let repaired = dir.path().join("repaired.h5");
     hdf5_pure::repack(&affected, &repaired, &hdf5_pure::RepackOptions::default()).unwrap();
     c_finds_each(&repaired, &names, &values, "repaired");
@@ -974,7 +978,7 @@ fn c_finds_attributes_whose_names_hash_alike() {
     }
     builder.create_dataset("x").with_f64_data(&[1.0]);
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("colliding_names.h5");
     builder.write(&path).unwrap();
 

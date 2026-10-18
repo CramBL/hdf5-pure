@@ -108,9 +108,9 @@ mod tests {
     use core::cell::RefCell;
 
     use hdf5_pure_format::__private::IndexSlots;
-    use hdf5_pure_format::__private::build_fixed_array_at;
+
     use rstest::rstest;
-    use test_util::checksum::restamp;
+    use test_util::checksum;
 
     use super::*;
     use crate::address::StoredAddressExt;
@@ -145,7 +145,7 @@ mod tests {
     }
 
     fn image(n: u64, has_filters: bool) -> Vec<u8> {
-        let array = build_fixed_array_at(
+        let array = hdf5_pure_format::__private::build_fixed_array_at(
             &IndexSlots::dense(&chunks(n, has_filters)),
             8,
             WIDTHS.offsets,
@@ -292,7 +292,7 @@ mod tests {
         let mut bytes = image(4_000, false);
         let block = usize::try_from(ARRAY_AT + HEADER_LEN).unwrap();
         bytes[block + 4 + 2 + 8] = bitmap;
-        restamp(&mut bytes, block, 4 + 2 + 8 + 1 + 4);
+        checksum::restamp(&mut bytes, block, 4 + 2 + 8 + 1 + 4);
         let source = PlacedSource::new(512, bytes);
         let expected: Vec<(u64, ChunkRecord)> = slotted(chunks(4_000, false))
             .into_iter()
@@ -335,7 +335,7 @@ mod tests {
         let mut bytes = image(5, false);
         let header = usize::try_from(ARRAY_AT).unwrap();
         bytes[header + 16..header + 24].copy_from_slice(&u64::MAX.to_le_bytes());
-        restamp(&mut bytes, header, usize::try_from(HEADER_LEN).unwrap());
+        checksum::restamp(&mut bytes, header, usize::try_from(HEADER_LEN).unwrap());
         let source = PlacedSource::new(0, bytes);
         assert_eq!(source.records().unwrap(), Vec::new());
         assert_eq!(

@@ -22,7 +22,7 @@
 //! # What it reaches
 //!
 //! Two questions decide it, and both have to answer yes: **where** the bytes are
-//! stored, and **what** [`embedded_reference_slots`] can locate inside an
+//! stored, and **what** [`datatype::embedded_reference_slots`] can locate inside an
 //! element.
 //!
 //! Storage: an **inline attribute's value**, and a **contiguous** or **compact**
@@ -46,7 +46,7 @@
 //!   and an attribute held as a **shared (SOHM) record**, which is not stored in
 //!   the header either.
 //! - An **attribute's value** in a **version 1 object header** — the one
-//!   [`read_oh_chunks`] declines on a well-formed file (it declines a malformed
+//!   [`edit::read_oh_chunks`] declines on a well-formed file (it declines a malformed
 //!   one too). Such an object's *element data* is still reached, through the
 //!   parsed form that reads both versions ([`scan_parsed_header`]); what that
 //!   form does not hand back is the file offset an attribute inside the header
@@ -81,16 +81,13 @@ use crate::address::BaseAddressExt;
 use crate::address::StoredAddressExt;
 use crate::address::{AddressContext, StoredAddress};
 use crate::attribute::AttributeMessage;
-use crate::checksum::jenkins_lookup3;
+use crate::checksum;
 use crate::convert::Narrow;
 use crate::data_layout::{COMPACT_DATA_OFFSET, DataLayout};
-use crate::datatype::{
-    Datatype, class_may_hold_object_address, datatype_holds_object_address,
-    embedded_reference_slots, stored_object_references,
-};
-use crate::edit::read_oh_chunks;
+use crate::datatype::{self, Datatype};
+use crate::edit;
 use crate::error::Error;
-use crate::group_v2::resolve_group_entries_from_source;
+use crate::group_v2;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
@@ -200,7 +197,7 @@ impl Plan {
                 chunk[offset..end].copy_from_slice(&value.get().to_le_bytes());
                 from = from.min(offset);
             }
-            let checksum = jenkins_lookup3(&chunk[..body_len]);
+            let checksum = checksum::jenkins_lookup3(&chunk[..body_len]);
             chunk[body_len..].copy_from_slice(&checksum.to_le_bytes());
             target.write(at + from as u64, &chunk[from..])?;
         }
@@ -348,7 +345,7 @@ pub(crate) fn plan<S: Source + ?Sized>(
         if !outcome.header_located {
             saw_reference |= scan_parsed_header(src, &header, base, widths, relocations, &mut plan);
         }
-        let Ok(entries) = resolve_group_entries_from_source(
+        let Ok(entries) = group_v2::resolve_group_entries_from_source(
             src,
             AccessMode::ReadWrite,
             &header,
@@ -368,7 +365,7 @@ pub(crate) fn plan<S: Source + ?Sized>(
     Ok(plan)
 }
 
-/// Collect the byte edits owed by an object whose header [`read_oh_chunks`]
+/// Collect the byte edits owed by an object whose header [`edit::read_oh_chunks`]
 /// would not read — a version 1 header — from the parsed form that reads both.
 ///
 /// Version 1 is not a museum piece: it is what libhdf5 writes
@@ -450,7 +447,7 @@ fn scan_parsed_header<S: Source + ?Sized>(
     let Some(dt) = element_dt else {
         return false;
     };
-    let holds = datatype_holds_object_address(&dt);
+    let holds = datatype::datatype_holds_object_address(&dt);
     let (
         Some(slots),
         Some(DataLayout::Contiguous {
@@ -485,7 +482,7 @@ struct Scanned {
     /// holding a link, link-info, or symbol-table message — and *also* for one
     /// this could not read at all, which cannot be ruled out as a group and
     /// which `ObjectHeader::parse_from_source` may well manage where
-    /// [`read_oh_chunks`] did not. Not "this object is a group": the two answers
+    /// [`edit::read_oh_chunks`] did not. Not "this object is a group": the two results
     /// differ exactly where it matters, and the field is named for the
     /// instruction rather than for the fact.
     descend: bool,
@@ -497,7 +494,7 @@ struct Scanned {
     /// The object's header was read in full. False leaves the file's
     /// reference-free claim unproven, since what was not read might hold one.
     fully_read: bool,
-    /// [`read_oh_chunks`] read this header, so its messages were located *in the
+    /// [`edit::read_oh_chunks`] read this header, so its messages were located *in the
     /// file* and an attribute inside it can be edited. False for a version 1
     /// header, whose elements are reached the other way — see
     /// [`scan_parsed_header`].
@@ -523,7 +520,7 @@ fn scan_object<S: Source + ?Sized>(
     // is reported as a group so the caller still tries to descend through it:
     // `ObjectHeader::parse_from_source` reads both, so such a group does not
     // hide the objects below it from the walk.
-    let Ok(chunks) = read_oh_chunks(src, addr, base) else {
+    let Ok(chunks) = edit::read_oh_chunks(src, addr, base) else {
         return Ok(Scanned {
             descend: true,
             holds_a_reference: false,
@@ -604,13 +601,13 @@ fn scan_object<S: Source + ?Sized>(
                     // dataset in the file on every commit, so the encoded class
                     // decides first: it is a necessary condition for holding an
                     // address and costs one byte to read.
-                    if encoded.is_empty() || !class_may_hold_object_address(encoded[0]) {
+                    if encoded.is_empty() || !datatype::class_may_hold_object_address(encoded[0]) {
                         p = body_end;
                         continue;
                     }
                     match hdf5_pure_format::__private::parse_datatype(encoded) {
                         Ok((dt, _)) => {
-                            out.holds_a_reference |= datatype_holds_object_address(&dt);
+                            out.holds_a_reference |= datatype::datatype_holds_object_address(&dt);
                             element_dt = Some(dt);
                         }
                         // A datatype of a qualifying class that will not parse
@@ -651,7 +648,8 @@ fn scan_object<S: Source + ?Sized>(
                         p = body_end;
                         continue;
                     };
-                    out.holds_a_reference |= datatype_holds_object_address(&attr.datatype);
+                    out.holds_a_reference |=
+                        datatype::datatype_holds_object_address(&attr.datatype);
                     if let Some(slots) = element_slots(&attr.datatype) {
                         edits.clear();
                         collect_slots(
@@ -763,7 +761,7 @@ fn record_header_edits(plan: &mut Plan, span: (u64, u64), edits: &[(u64, StoredA
 /// Where the 8-byte object references sit within one element of `dt`, or `None`
 /// when there are none to rewrite.
 ///
-/// [`embedded_reference_slots`] answers in three ways and this collapses two of
+/// [`datatype::embedded_reference_slots`] returns three outcomes, and this combines two of
 /// them. `None` means the type reaches an address this cannot locate — wider
 /// than eight bytes, a dataset-region reference, a variable length of them, an
 /// enumeration over one. `Some([])` means the type holds no address at all. The
@@ -776,7 +774,7 @@ fn record_header_edits(plan: &mut Plan, span: (u64, u64), edits: &[(u64, StoredA
 /// with no slots to patch, which the walk would otherwise do once per dataset
 /// per commit.
 fn element_slots(dt: &Datatype) -> Option<Vec<usize>> {
-    embedded_reference_slots(dt).filter(|s| !s.is_empty())
+    datatype::embedded_reference_slots(dt).filter(|s| !s.is_empty())
 }
 
 /// Whether an attribute of this datatype holds object references *this walk can
@@ -807,7 +805,7 @@ pub(crate) fn attribute_references_are_repointable(dt: &Datatype) -> bool {
 /// know, and decides whether they are written directly or resealed inside a
 /// header chunk.
 ///
-/// Finding the addresses is [`stored_object_references`], shared with
+/// Finding the addresses is [`datatype::stored_object_references`], shared with
 /// `edit::screen_resolved_references`: the two do different things with an
 /// address and must not come to differ about where one is.
 fn collect_slots(
@@ -819,7 +817,8 @@ fn collect_slots(
     relocations: &BTreeMap<u64, u64>,
     out: &mut Vec<(u64, StoredAddress)>,
 ) {
-    for (offset, stored) in stored_object_references(raw, dt.type_size() as usize, slots) {
+    for (offset, stored) in datatype::stored_object_references(raw, dt.type_size() as usize, slots)
+    {
         // The two sentinels name no object and are never relocated; skipping
         // them keeps a zero-based file from matching a relocation whose old
         // address happened to be the base.
@@ -844,9 +843,9 @@ mod tests {
     use super::*;
     use crate::attribute::AttributeMessage;
     use crate::datatype::ReferenceType;
-    use crate::edit::build_v2_object_header;
+    use crate::edit;
     use crate::source::BytesSource;
-    use crate::type_builders::{AttrValue, build_attr_message, make_object_reference_type};
+    use crate::type_builders::{self, AttrValue};
     use test_util::attribute;
     use test_util::object_header::v2 as v2_bytes;
     use test_util::object_header::{Message, MessageType as RecordType};
@@ -882,8 +881,8 @@ mod tests {
     /// [`AttrValue`] has no reference variant, so a file carrying such an
     /// attribute was written by libhdf5.
     fn reference_attr(name: &str, address: u64) -> AttributeMessage {
-        let mut attr = build_attr_message(name, &AttrValue::U64(address));
-        attr.datatype = make_object_reference_type();
+        let mut attr = type_builders::build_attr_message(name, &AttrValue::U64(address));
+        attr.datatype = type_builders::make_object_reference_type();
         attr
     }
 
@@ -891,7 +890,7 @@ mod tests {
     /// [`HEADER_AT`], with the space before it filled with a byte that is not
     /// part of any address.
     fn image_with_header(region: &[u8]) -> (BytesSource<Vec<u8>>, Vec<u8>) {
-        let header = build_v2_object_header(&plain_region(region.to_vec())).unwrap();
+        let header = edit::build_v2_object_header(&plain_region(region.to_vec())).unwrap();
         let mut bytes = vec![0xAAu8; HEADER_AT as usize];
         bytes.extend_from_slice(&header);
         (BytesSource::new(bytes.clone()), bytes)
@@ -1006,7 +1005,7 @@ mod tests {
         let body = &chunk[..chunk.len() - 4];
         assert_eq!(
             u32::from_le_bytes(chunk[chunk.len() - 4..].try_into().unwrap()),
-            jenkins_lookup3(body),
+            checksum::jenkins_lookup3(body),
             "the header chunk must be resealed after its bytes change"
         );
     }
@@ -1018,7 +1017,9 @@ mod tests {
         // this is the only way the path is reached at all.
         let mut region = message_record(
             MessageType::DATATYPE,
-            &hdf5_pure_format::__private::serialize_datatype(&make_object_reference_type()),
+            &hdf5_pure_format::__private::serialize_datatype(
+                &type_builders::make_object_reference_type(),
+            ),
         );
         let mut layout = vec![3u8, 0];
         layout.extend_from_slice(&8u16.to_le_bytes());
@@ -1072,7 +1073,7 @@ mod tests {
         // The object still reports that it holds a reference, so no commit is
         // ever licensed to skip the walk on this file — and nothing is written,
         // because the address could not be located to begin with.
-        let mut attr = build_attr_message("target", &AttrValue::U64(300));
+        let mut attr = type_builders::build_attr_message("target", &AttrValue::U64(300));
         attr.datatype = Datatype::Reference {
             size: 16,
             ref_type: ReferenceType::Object,
@@ -1203,9 +1204,11 @@ mod tests {
             AddressContext::from_effective_base(BaseAddress::new(1024)),
         ] {
             const TYPE_AT: u64 = 2048;
-            let committed = build_v2_object_header(&plain_region(message_record(
+            let committed = edit::build_v2_object_header(&plain_region(message_record(
                 MessageType::DATATYPE,
-                &hdf5_pure_format::__private::serialize_datatype(&make_object_reference_type()),
+                &hdf5_pure_format::__private::serialize_datatype(
+                    &type_builders::make_object_reference_type(),
+                ),
             )))
             .unwrap();
 
@@ -1223,7 +1226,7 @@ mod tests {
             layout.extend_from_slice(&8u16.to_le_bytes());
             layout.extend_from_slice(&(300u64).to_le_bytes());
             shared.extend_from_slice(&message_record(MessageType::DATA_LAYOUT, &layout));
-            let dataset = build_v2_object_header(&plain_region(shared)).unwrap();
+            let dataset = edit::build_v2_object_header(&plain_region(shared)).unwrap();
 
             let mut bytes = vec![0xAAu8; TYPE_AT as usize];
             bytes.extend_from_slice(&committed);
@@ -1268,8 +1271,7 @@ mod tests {
     /// write into space the next allocation may take.
     #[test]
     fn a_vacated_header_is_not_scanned_even_when_a_link_still_names_it() {
-        use tempfile::tempdir;
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("vacated.h5");
         let mut b = crate::writer::FileBuilder::new();
         b.create_dataset("d").with_i32_data(&[1, 2, 3]);

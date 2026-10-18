@@ -15,7 +15,7 @@
 use hdf5::Extent;
 use hdf5::file::LibraryVersion;
 use hdf5_pure::{File, FileBuilder, FillTime, MaxExtent};
-use tempfile::tempdir;
+
 use test_util_hdf5::dataset::{Filter, Unlimited};
 
 /// Write a starter file and add one empty chunked dataset to it through the
@@ -44,7 +44,7 @@ fn edit_in_an_empty_chunked_dataset(path: &std::path::Path, unlimited: bool) {
 /// could read but not grow would pass a read-only check and fail here.
 #[test]
 fn c_grows_an_empty_chunked_dataset_added_in_place() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("edited.h5");
     edit_in_an_empty_chunked_dataset(&path, true);
 
@@ -77,7 +77,7 @@ fn c_grows_an_empty_chunked_dataset_added_in_place() {
 /// structure only its own reader understands.
 #[test]
 fn c_reads_a_fixed_shape_empty_chunked_dataset_added_in_place() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("edited_fixed.h5");
     edit_in_an_empty_chunked_dataset(&path, false);
 
@@ -116,7 +116,7 @@ fn c_opens_the_chunk_index_of_every_empty_chunked_dataset_we_write() {
         ("3-D fixed", &[0, 2, 3], &[4, 2, 3], false),
     ];
     for &(label, shape, chunks, unlimited) in cases {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("w.h5");
         let mut b = FileBuilder::new();
         {
@@ -183,7 +183,7 @@ fn an_empty_filtered_dataset_declares_the_width_its_first_chunk_needs() {
         })
         .collect();
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let empty = dir.path().join("empty.h5");
     let seeded = dir.path().join("seeded.h5");
     let write = |path: &std::path::Path, values: &[i32]| {
@@ -231,7 +231,7 @@ fn an_empty_filtered_dataset_accepts_an_append_that_fills_its_chunk() {
         })
         .collect();
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("append.h5");
     Unlimited::<i32>::new("col", &[], chunk_elems as u64)
         .filters(&[Filter::Deflate(6)])
@@ -258,7 +258,7 @@ fn an_empty_filtered_dataset_accepts_an_append_that_fills_its_chunk() {
 #[test]
 fn c_reads_the_whole_file_writers_empty_chunked_datasets() {
     for unlimited in [false, true] {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("whole.h5");
         let mut b = FileBuilder::new();
         {
@@ -292,7 +292,7 @@ fn c_reads_the_whole_file_writers_empty_chunked_datasets() {
 fn pure_reads_unallocated_empty_chunked_datasets_the_c_library_wrote() {
     for unlimited in [false, true] {
         for latest in [false, true] {
-            let dir = tempdir().unwrap();
+            let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("c.h5");
             {
                 let mut opts = hdf5::File::with_options();
@@ -353,7 +353,7 @@ fn pure_materializes_an_unallocated_dataset_that_owns_elements() {
     for fill in [None, Some(7i32)] {
         for chunked in [false, true] {
             let label = format!("fill={fill:?} chunked={chunked}");
-            let dir = tempdir().unwrap();
+            let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("unwritten.h5");
             {
                 let file = hdf5::File::create(&path).unwrap();
@@ -412,7 +412,7 @@ fn pure_materializes_an_unallocated_dataset_that_owns_elements() {
 fn pure_fills_the_gaps_of_a_partially_written_chunked_dataset() {
     for fill in [None, Some(7i32)] {
         let label = format!("fill={fill:?}");
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("partial.h5");
         {
             let file = hdf5::File::create(&path).unwrap();
@@ -483,7 +483,7 @@ fn a_fill_value_the_file_says_is_never_written_reads_as_zeros() {
         ("chunked, unwritten", true, false),
         ("chunked, partly written", true, true),
     ] {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("never.h5");
         {
             let file = hdf5::File::create(&path).unwrap();
@@ -554,7 +554,7 @@ fn a_fill_value_the_file_says_is_never_written_reads_as_zeros() {
 #[test]
 fn repack_preserves_a_never_written_dataset() {
     const N: usize = 1000;
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src.h5");
     let dst = dir.path().join("dst.h5");
     {
@@ -631,7 +631,7 @@ fn a_swept_typed_read_of_lazily_allocated_storage_reads_holes_as_fill() {
     const CHUNK: usize = 1000;
     const FILL: i32 = -12_345;
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let never = dir.path().join("never.h5");
     let partly = dir.path().join("partly.h5");
 

@@ -7,7 +7,7 @@ use core::ops::Range;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::bytes;
-use crate::bytes::{ensure_len, read_uint_width};
+
 use crate::convert::Narrow;
 use crate::datatype::CharacterSet;
 use crate::error::FormatError;
@@ -66,7 +66,7 @@ impl<'a> LinkPrefix<'a> {
     /// Parses a Link message up to its target data, which begins at
     /// [`target_pos`](Self::target_pos).
     fn parse(data: &'a [u8]) -> Result<Self, FormatError> {
-        ensure_len(data, 0, 2)?;
+        bytes::ensure_len(data, 0, 2)?;
 
         let version = data[0];
         if version != 1 {
@@ -85,7 +85,7 @@ impl<'a> LinkPrefix<'a> {
         let mut pos = 2;
 
         let link_type_code = if has_link_type {
-            ensure_len(data, pos, 1)?;
+            bytes::ensure_len(data, pos, 1)?;
             let v = data[pos];
             pos += 1;
             v
@@ -94,7 +94,7 @@ impl<'a> LinkPrefix<'a> {
         };
 
         let creation_order = if has_creation_order {
-            ensure_len(data, pos, 8)?;
+            bytes::ensure_len(data, pos, 8)?;
             let co = u64::from_le_bytes([
                 data[pos],
                 data[pos + 1],
@@ -112,7 +112,7 @@ impl<'a> LinkPrefix<'a> {
         };
 
         let charset = if has_charset {
-            ensure_len(data, pos, 1)?;
+            bytes::ensure_len(data, pos, 1)?;
             let cs = data[pos];
             pos += 1;
             match cs {
@@ -124,10 +124,10 @@ impl<'a> LinkPrefix<'a> {
             CharacterSet::Ascii
         };
 
-        let name_len = read_uint_width(data, pos, name_size_field_width)?.to_usize()?;
+        let name_len = bytes::read_uint_width(data, pos, name_size_field_width)?.to_usize()?;
         pos += usize::from(name_size_field_width.get());
 
-        ensure_len(data, pos, name_len)?;
+        bytes::ensure_len(data, pos, name_len)?;
         let name = &data[pos..pos + name_len];
         pos += name_len;
 
@@ -150,7 +150,7 @@ impl<'a> LinkPrefix<'a> {
         match self.link_type_code {
             HARD_LINK => {
                 let address = self.target_pos..self.target_pos + usize::from(offset_width.get());
-                ensure_len(data, address.start, address.len())?;
+                bytes::ensure_len(data, address.start, address.len())?;
                 Ok(Some(address))
             }
             SOFT_LINK | EXTERNAL_LINK => Ok(None),
@@ -392,18 +392,18 @@ impl LinkMessage {
                 }
             }
             SOFT_LINK => {
-                ensure_len(data, pos, 2)?;
+                bytes::ensure_len(data, pos, 2)?;
                 let soft_len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
                 pos += 2;
-                ensure_len(data, pos, soft_len)?;
+                bytes::ensure_len(data, pos, soft_len)?;
                 let target_path = String::from_utf8_lossy(&data[pos..pos + soft_len]).into_owned();
                 LinkTarget::Soft { target_path }
             }
             EXTERNAL_LINK => {
-                ensure_len(data, pos, 2)?;
+                bytes::ensure_len(data, pos, 2)?;
                 let ext_len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
                 pos += 2;
-                ensure_len(data, pos, ext_len)?;
+                bytes::ensure_len(data, pos, ext_len)?;
                 let ext_data = &data[pos..pos + ext_len];
                 // External link value: flags(1) + null-terminated filename + null-terminated obj path
                 // Skip the flags byte

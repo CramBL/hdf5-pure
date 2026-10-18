@@ -25,7 +25,7 @@ use crate::address::StoredAddressExt;
 use crate::chunk_cache::{CachePass, ChunkCache};
 use crate::chunk_grid::{self, ChunkGrid, GridOrder};
 use crate::chunk_span::ChunkSpanReader;
-use crate::convert::{Narrow, slice_range};
+use crate::convert::{self, Narrow};
 #[cfg(any(feature = "std", test))]
 use crate::data_layout::DataLayout;
 use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags};
@@ -33,7 +33,7 @@ use crate::dataspace::Dataspace;
 use crate::error::FormatError;
 use crate::fill_value::FillPattern;
 use crate::filter_pipeline::FilterPipeline;
-use crate::filters::{ChunkContext, FilterScratch, decompress_chunk_with};
+use crate::filters::{self, ChunkContext, FilterScratch};
 use crate::fixed_array;
 use crate::read_spec::{RawReadSpec, RawReadStorage};
 use crate::source::Source;
@@ -112,7 +112,7 @@ fn decode_chunk<'a>(
     let (Some(pipeline), ChunkFiltering::Filtered { filter_mask }) = (pipeline, filtering) else {
         return Ok(stored);
     };
-    Ok(Cow::Owned(decompress_chunk_with(
+    Ok(Cow::Owned(filters::decompress_chunk_with(
         scratch,
         &stored,
         pipeline,
@@ -1978,7 +1978,7 @@ pub fn read_chunked_data_cached(
         }
 
         // Cache miss: read the chunk's bytes from the file.
-        let r = slice_range(chunk_info.address.get(), chunk_info.chunk_size.get())?;
+        let r = convert::slice_range(chunk_info.address.get(), chunk_info.chunk_size.get())?;
         if r.end > file_data.len() {
             return Err(FormatError::UnexpectedEof {
                 expected: r.end,
@@ -2152,7 +2152,7 @@ mod tests {
     use super::*;
     use crate::FillTime;
     use crate::chunked_write::ChunkArrayKind;
-    use crate::convert::nz;
+    use crate::convert;
     use crate::dataspace::MaxExtent;
     #[cfg(feature = "std")]
     use crate::source::ReadSeekSource;
@@ -2165,10 +2165,13 @@ mod tests {
     #[test]
     fn chunk_bytes_within_limit_are_accepted() {
         // A realistic chunk: 256 KiB of f64 elements.
-        assert_eq!(bounded_chunk_len(&[128, 256], nz(8)).unwrap(), 262_144);
+        assert_eq!(
+            bounded_chunk_len(&[128, 256], convert::nz(8)).unwrap(),
+            262_144
+        );
         // A single chunk right at the 4 GiB limit is still representable.
         assert_eq!(
-            bounded_chunk_len(&[u32::MAX as usize], nz(1)).unwrap(),
+            bounded_chunk_len(&[u32::MAX as usize], convert::nz(1)).unwrap(),
             u32::MAX as usize
         );
     }
@@ -2177,11 +2180,11 @@ mod tests {
     fn chunk_bytes_over_limit_are_refused() {
         // The issue #185 shape: 10 elements of a ~2.86 GB fixed-length string
         // (0xAAAAAAAA bytes) is ~28.6 GB per chunk — impossible for the format.
-        let err = bounded_chunk_len(&[10], nz(0xAAAA_AAAA)).unwrap_err();
+        let err = bounded_chunk_len(&[10], convert::nz(0xAAAA_AAAA)).unwrap_err();
         assert!(matches!(err, FormatError::InvalidChunkGeometry(_)));
 
         // A geometry whose product overflows u64 is refused, not wrapped.
-        assert!(bounded_chunk_len(&[usize::MAX, usize::MAX], nz(usize::MAX)).is_err());
+        assert!(bounded_chunk_len(&[usize::MAX, usize::MAX], convert::nz(usize::MAX)).is_err());
     }
 
     /// A chunk grid with a *hole* — some chunks allocated, others never — reads
@@ -2245,7 +2248,7 @@ mod tests {
                 &dataspace,
                 &make_f64_type(),
                 None,
-                FillPattern::new(FillTime::IfSet, Some(&fill_bytes), nz(8)),
+                FillPattern::new(FillTime::IfSet, Some(&fill_bytes), convert::nz(8)),
             )
             .unwrap(),
             FORMAT_WIDTHS,
@@ -2305,13 +2308,13 @@ mod tests {
             (vec![0u64], FillPattern::ZERO, Vec::new()),
             (
                 vec![0],
-                FillPattern::new(FillTime::IfSet, Some(&seven), nz(8)),
+                FillPattern::new(FillTime::IfSet, Some(&seven), convert::nz(8)),
                 Vec::new(),
             ),
             (vec![3], FillPattern::ZERO, vec![0u8; 24]),
             (
                 vec![3],
-                FillPattern::new(FillTime::IfSet, Some(&seven), nz(8)),
+                FillPattern::new(FillTime::IfSet, Some(&seven), convert::nz(8)),
                 seven.repeat(3),
             ),
         ] {
@@ -3474,7 +3477,7 @@ mod tests {
     #[test]
     fn read_1d_two_chunks_with_deflate() {
         use crate::filter_pipeline::{FILTER_DEFLATE, FilterDescription, FilterPipeline};
-        use crate::filters::compress_chunk;
+        use crate::filters;
 
         let elem_size = 8usize;
         let ndims = 2;
@@ -3504,7 +3507,7 @@ mod tests {
             }
             let dims_u64 = [chunk_elems as u64];
             let ctx = crate::filters::ChunkContext::basic(&dims_u64, elem_size as u32);
-            let compressed = compress_chunk(&chunk_bytes, &pipeline, ctx).unwrap();
+            let compressed = filters::compress_chunk(&chunk_bytes, &pipeline, ctx).unwrap();
 
             file_data[data_offset..data_offset + compressed.len()].copy_from_slice(&compressed);
 
@@ -3565,7 +3568,7 @@ mod tests {
     #[test]
     fn filtered_btree_v2_reads_match_buffered_and_bounded_sources() {
         use crate::filter_pipeline::{FILTER_DEFLATE, FilterDescription, FilterPipeline};
-        use crate::filters::compress_chunk;
+        use crate::filters;
 
         let pipeline = FilterPipeline {
             version: 2,
@@ -3599,7 +3602,8 @@ mod tests {
                     }
                 }
                 let compressed =
-                    compress_chunk(&chunk, &pipeline, ChunkContext::basic(&chunk_dims, 8)).unwrap();
+                    filters::compress_chunk(&chunk, &pipeline, ChunkContext::basic(&chunk_dims, 8))
+                        .unwrap();
                 file_data[data_address..data_address + compressed.len()]
                     .copy_from_slice(&compressed);
                 records.push(btree_v2_chunk_record(
@@ -4324,7 +4328,7 @@ mod tests {
         let datatype = make_f64_type();
         for fill in [
             FillPattern::ZERO,
-            FillPattern::new(FillTime::IfSet, Some(&seven), nz(8)),
+            FillPattern::new(FillTime::IfSet, Some(&seven), convert::nz(8)),
         ] {
             let cache = ChunkCache::new();
             let spec = RawReadSpec::parse(&layout, &dataspace, &datatype, None, fill).unwrap();

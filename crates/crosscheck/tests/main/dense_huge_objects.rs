@@ -8,16 +8,16 @@
 
 use hdf5_pure::{AttrValue, File, FileBuilder};
 use hdf5_pure_core::__private::DecodedStoredAddress;
+use hdf5_pure_format::__private;
 use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::FreeSpaceManagerHeaderFrame;
 use hdf5_pure_format::__private::{
     BTREE_V2_HUGE_OBJECT, BTREE_V2_HUGE_OBJECT_DIRECT, BTreeV2Header, BTreeV2NodeInfo,
-    BTreeV2Record, FractalHeapHeader, LengthWidth, OffsetWidth, btree_v2_header_size,
-    parse_btree_v2_internal_child_pointers, parse_btree_v2_leaf_records,
+    BTreeV2Record, FractalHeapHeader, LengthWidth, OffsetWidth,
 };
 use std::num::NonZeroU16;
 use std::path::Path;
-use tempfile::tempdir;
+
 use test_util::fractal_heap;
 
 /// Returns a unique deterministic name of about `len` bytes that starts with `d{i}_`.
@@ -107,7 +107,11 @@ fn assert_huge_only_heap_ownership(path: &Path) -> u16 {
     );
     expected.push((
         tree_at,
-        u64::try_from(btree_v2_header_size(OffsetWidth::Eight, LengthWidth::Eight)).unwrap(),
+        u64::try_from(__private::btree_v2_header_size(
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+        ))
+        .unwrap(),
     ));
 
     let node_info = BTreeV2NodeInfo::compute(
@@ -179,12 +183,13 @@ fn inspect_huge_index_node(
 
     let Some(depth) = NonZeroU16::new(depth) else {
         records.extend(
-            parse_btree_v2_leaf_records(node, 0, records_in_node, tree.record_size).unwrap(),
+            __private::parse_btree_v2_leaf_records(node, 0, records_in_node, tree.record_size)
+                .unwrap(),
         );
         return;
     };
 
-    let children = parse_btree_v2_internal_child_pointers(
+    let children = __private::parse_btree_v2_internal_child_pointers(
         node,
         records_in_node,
         depth,
@@ -411,7 +416,7 @@ fn owned_storage_exactly_matches_pure_written_nested_indirect_root() {
 
 #[test]
 fn reads_dense_links_stored_as_huge_objects() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     // 4 KiB names push every link message just past the heap's 4096-byte managed
     // limit, so each is a huge object; 40 entries give the huge-objects B-tree
     // several records to search.
@@ -423,7 +428,7 @@ fn reads_dense_links_stored_as_huge_objects() {
 
 #[test]
 fn owned_storage_exactly_matches_c_written_dense_link_huge_objects() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let names: Vec<String> = (0..40).map(|i| long_name(i, 5000)).collect();
     let path = dir.path().join("owned_huge_links.h5");
     write_group(&path, &names);
@@ -436,7 +441,7 @@ fn owned_storage_exactly_matches_c_written_dense_link_huge_objects() {
 
 #[test]
 fn reads_dense_links_mixing_managed_and_huge() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     // Alternate short (managed) and very long (huge) names within one dense
     // group, so both heap-ID types are decoded from the same heap.
     let names: Vec<String> = (0..40)
@@ -455,7 +460,7 @@ fn reads_dense_links_mixing_managed_and_huge() {
 
 #[test]
 fn reads_dense_attributes_stored_as_huge_objects() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("huge_attrs.h5");
     {
         let file = hdf5::FileBuilder::new()
@@ -497,7 +502,7 @@ fn reads_dense_attributes_stored_as_huge_objects() {
 
 #[test]
 fn owned_storage_exactly_matches_c_written_dense_attribute_huge_objects() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("owned_huge_attrs.h5");
     {
         let file = hdf5::FileBuilder::new()
@@ -530,7 +535,7 @@ fn owned_storage_exactly_matches_c_written_dense_attribute_huge_objects() {
 
 #[test]
 fn owned_storage_includes_c_written_managed_heap_with_internal_fsm() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let names: Vec<String> = (0..16).map(|i| format!("short_{i}")).collect();
     let path = dir.path().join("owned_managed_links.h5");
     write_group(&path, &names);

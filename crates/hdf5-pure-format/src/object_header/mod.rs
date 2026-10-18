@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use crate::access_mode::AccessMode;
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
-use crate::bytes::ensure_len;
+use crate::bytes;
 use crate::error::FormatError;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
@@ -265,7 +265,7 @@ impl ObjectHeader {
             widths,
             base_address,
         };
-        ensure_len(data, offset, 4)?;
+        bytes::ensure_len(data, offset, 4)?;
         if data[offset..offset + 4] == OHDR_SIGNATURE {
             Self::parse_v2(data, context, offset, filter)
         } else {

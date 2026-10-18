@@ -3,7 +3,7 @@
 
 use crate::mat::class::MatClass;
 use crate::mat::error::MatError;
-use crate::mat::transpose::transpose_pairs;
+use crate::mat::transpose;
 
 /// A scalar numeric value tagged by its Rust type.
 #[derive(Debug, Clone, PartialEq)]
@@ -464,7 +464,7 @@ macro_rules! complex_kinds {
             pub(crate) fn transposed(self, rows: usize, cols: usize) -> Self {
                 match self {
                     $(ComplexVec::$variant(v) => {
-                        ComplexVec::$variant(transpose_pairs(rows, cols, &v))
+                        ComplexVec::$variant(transpose::transpose_pairs(rows, cols, &v))
                     })*
                 }
             }

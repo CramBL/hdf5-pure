@@ -1359,14 +1359,14 @@ fn checked_product_u64(values: &[u64]) -> Result<usize, MatError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mat::string_object::build_string_filewrapper_metadata;
+    use crate::mat::string_object;
 
     // The production string writer emits a FileWrapper blob that was
     // reverse-engineered from real MATLAB output, so parsing it validates the
     // parser against real-MATLAB-derived bytes (not against itself).
     #[test]
     fn parses_production_string_filewrapper_blob() {
-        let blob = build_string_filewrapper_metadata(1);
+        let blob = string_object::build_string_filewrapper_metadata(1);
         let fw = FileWrapper::parse(&blob).expect("production blob must parse");
 
         // Name heap: "any", "string".
@@ -1394,7 +1394,7 @@ mod tests {
 
     #[test]
     fn parses_multi_object_production_blob() {
-        let blob = build_string_filewrapper_metadata(3);
+        let blob = string_object::build_string_filewrapper_metadata(3);
         let fw = FileWrapper::parse(&blob).expect("production blob must parse");
         // Three objects after the reserved entry, each in the saveobj segment.
         assert_eq!(fw.objects.len(), 4);

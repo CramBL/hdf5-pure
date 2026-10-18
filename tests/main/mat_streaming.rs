@@ -14,7 +14,7 @@
 use hdf5_pure::File;
 use hdf5_pure::mat::{Block, Blocking, Compression, DataProducer, MatBuilder, MatError, Options};
 use std::sync::{Arc, Mutex};
-use tempfile::tempdir;
+
 use test_util_hdf5::mat_file;
 
 /// What a [`DataProducer`] did, observed from the outside.
@@ -208,7 +208,7 @@ fn both_serde_paths_stream_the_bytes_they_return() {
 fn a_refused_value_leaves_the_destination_alone() {
     use std::collections::HashMap;
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("existing.mat");
     std::fs::write(&path, b"an earlier file").unwrap();
 
@@ -238,7 +238,7 @@ fn a_refused_value_leaves_the_destination_alone() {
 #[test]
 fn every_finalizer_delivers_the_same_file() {
     const DIMS: [usize; 2] = [4, 100_001];
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("same.mat");
     let blocking = Blocking::plan::<f64>(&DIMS).unwrap();
     assert!(
@@ -358,7 +358,7 @@ fn blocks_are_pulled_once_each_in_order_during_the_write() {
 #[test]
 fn produced_elements_read_back_in_order() {
     const DIMS: [usize; 2] = [3, 7];
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ramp.mat");
 
     let (producer, _) = Ramp::new();
@@ -384,7 +384,7 @@ fn a_short_last_block_is_written_short() {
     // the last a partial remainder.
     const DIMS: [usize; 2] = [3, 100_001];
     let n = (DIMS[0] * DIMS[1]) as u64;
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("uneven.mat");
 
     let blocking = Blocking::plan::<f64>(&DIMS).unwrap();
@@ -412,7 +412,7 @@ fn a_short_last_block_is_written_short() {
 #[test]
 fn a_produced_dataset_can_live_inside_a_struct() {
     const DIMS: [usize; 2] = [2, 3];
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nested.mat");
 
     let (producer, _) = Ramp::new();
@@ -551,7 +551,7 @@ fn compression_is_refused_rather_than_ignored() {
 /// asks the producer for anything.
 #[test]
 fn an_empty_shape_writes_a_marker_and_asks_for_nothing() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("empty.mat");
 
     let materialized = {
@@ -635,7 +635,7 @@ fn every_element_type_matches_its_materialized_sibling() {
 
     // And the classes are what MATLAB reads them as, which the byte comparison
     // would also catch but says nothing about on its own.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("classes.mat");
     std::fs::write(&path, &produced).unwrap();
     assert_eq!(

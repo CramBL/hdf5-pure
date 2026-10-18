@@ -832,7 +832,7 @@ const MAX_CHUNK_SIZE_LEN: u8 = 8;
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
-    use test_util::checksum::restamp;
+    use test_util::checksum;
 
     use super::*;
 
@@ -951,14 +951,14 @@ mod tests {
         fn restamp_header(&mut self) {
             let at = self.header_at();
             let len = usize::try_from(header_len(self.widths)).unwrap();
-            restamp(&mut self.bytes, at, len);
+            checksum::restamp(&mut self.bytes, at, len);
         }
 
         fn restamp_prefix(&mut self) {
             let block = self.data_block();
             let at = self.local(block.range().start());
             let len = usize::try_from(block.parse_range().unwrap().length()).unwrap();
-            restamp(&mut self.bytes, at, len);
+            checksum::restamp(&mut self.bytes, at, len);
         }
 
         fn records(&self, chunk_byte_size: u64) -> Result<Vec<(u64, ChunkRecord)>, FormatError> {
@@ -1279,7 +1279,7 @@ mod tests {
         let end = fixture.local(range.end());
         fixture.bytes[end - 1] ^= 0x01;
         let stored = u32::from_le_bytes(fixture.bytes[end - 4..end].try_into().unwrap());
-        let computed = checksum::jenkins_lookup3(&fixture.bytes[start..end - 4]);
+        let computed = crate::checksum::jenkins_lookup3(&fixture.bytes[start..end - 4]);
         assert_eq!(
             fixture.records(8).unwrap_err(),
             FormatError::ChecksumMismatch {

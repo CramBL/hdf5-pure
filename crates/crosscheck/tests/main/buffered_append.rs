@@ -15,7 +15,7 @@
 //!    filtered dataset that starts on a partial trailing chunk.
 
 use hdf5_pure::File;
-use tempfile::tempdir;
+
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
 use test_util_hdf5::lock;
 
@@ -24,7 +24,7 @@ const SHUFFLE_DEFLATE: &[Filter] = &[Filter::Shuffle, Filter::Deflate(4)];
 #[test]
 fn c_library_reads_a_filtered_partial_last_chunk_written_in_place() {
     let _c = lock::libhdf5_guard();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("partial.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
         .filters(SHUFFLE_DEFLATE)
@@ -59,7 +59,7 @@ fn c_library_reads_a_filtered_partial_last_chunk_written_in_place() {
 #[test]
 fn c_library_reads_a_buffered_appended_dataset() {
     let _c = lock::libhdf5_guard();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("buffered.h5");
     // Start unaligned (10 of a chunk of 8), so the appender's first write
     // re-encodes the partial trailing chunk and its later ones extend from a
@@ -92,7 +92,7 @@ fn c_library_reads_a_buffered_appended_dataset() {
 #[cfg(target_endian = "little")]
 fn c_library_reads_a_buffered_append_onto_its_own_dataset() {
     let _c = lock::libhdf5_guard();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_written.h5");
 
     // The C library writes the file; this crate appends to it. The latest-format

@@ -8,7 +8,6 @@
 use hdf5::dataset::Layout;
 use hdf5::file::LibraryVersion;
 use hdf5_pure::{File, FileBuilder, MaxExtent};
-use tempfile::tempdir;
 
 use test_util_hdf5::absence;
 
@@ -38,7 +37,7 @@ fn c_userblock_file(path: &std::path::Path, build: impl FnOnce(&hdf5::File)) {
 
 #[test]
 fn pure_userblock_file_edited_then_read_by_c_library() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pure_ub.h5");
 
     let mut b = FileBuilder::new();
@@ -107,7 +106,7 @@ fn pure_userblock_file_edited_then_read_by_c_library() {
 
 #[test]
 fn real_mat_edited_then_read_by_c_library() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("real.mat");
     std::fs::copy(test_util::data("matlab/test_string_v73.mat"), &path).unwrap();
 
@@ -154,7 +153,7 @@ fn userblock_chunked_add_and_overwrite_read_by_c_library() {
     // userblock file both write chunk-index and chunk-data addresses relative to
     // the base. The C library reading the result back is the external proof that
     // every such address was stored correctly.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pure_ub_chunk.h5");
 
     let seed = vec![2.0f64; 300];
@@ -214,7 +213,7 @@ fn userblock_chunked_reclaimed_space_reused_read_by_c_library() {
     // in the same session reuses it. The C library reading every dataset back
     // confirms the reclaim freed only dead bytes (a base-address mistake in the
     // span enumerators would have corrupted a live region the reuse then wrote).
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pure_ub_reclaim.h5");
 
     let seed = vec![5.0f64; 600];
@@ -266,7 +265,7 @@ fn userblock_contiguous_undefined_address_relocates_read_by_c_library() {
     // data address, so overwriting it relocates the header and writes a fresh data
     // block. On a userblock file the new data address must be stored relative to
     // the base; the C library reading it back confirms it was.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ub_contig_reloc.h5");
     c_userblock_file(&path, |file| {
         // Created without a write: the contiguous data address stays undefined.
@@ -321,7 +320,7 @@ fn userblock_compact_overwrite_read_by_c_library() {
     // rewrites and relocates the header and relinks the parent. On a userblock file
     // that relink must be stored relative to the base; the C library reading the
     // new values back confirms it was.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ub_compact.h5");
     c_userblock_file(&path, |file| {
         file.new_dataset::<i32>()
@@ -374,7 +373,7 @@ fn userblock_delete_then_reuse_read_by_c_library() {
     // a later add reuses a freed hole. The C library reading every survivor back
     // confirms the reclaim freed only dead bytes — a base mistake in the subtree
     // walk would have freed a live region the reuse then overwrote, corrupting it.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ub_delete_reuse.h5");
     c_userblock_file(&path, |file| {
         let big: Vec<f64> = (0..256).map(|i| i as f64).collect();
@@ -439,7 +438,7 @@ fn userblock_copy_read_by_c_library() {
     // link addresses, all base-relative. The C library reading every copy back is
     // the external proof those addresses were stored correctly (a base mistake
     // would dangle the copy's data/index pointer and error or read garbage).
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ub_copy.h5");
     c_userblock_file(&path, |file| {
         file.new_dataset::<f64>()
@@ -507,7 +506,7 @@ fn userblock_extensible_array_add_read_by_c_library() {
     // embeds many internal addresses built off the planner base. Adding one to a
     // userblock file and reading it back through the C library confirms every EA
     // address was stored relative to the base correctly.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pure_ub_ea.h5");
 
     let mut b = FileBuilder::new();

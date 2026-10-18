@@ -15,7 +15,7 @@ use hdf5::Extent;
 use hdf5::dataset::Layout as CLayout;
 use hdf5::file::LibraryVersion;
 use hdf5_pure::{Chunk, ChunkIndex, File, Layout};
-use tempfile::tempdir;
+
 use test_util_hdf5::dataset;
 
 /// A reference-library file whose datasets are created under the given libver
@@ -47,7 +47,7 @@ fn chunk_i32_at(path: &std::path::Path, chunk: &Chunk) -> Vec<i32> {
 
 #[test]
 fn c_contiguous_classifies() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("contig.h5");
     {
         let file = c_file(&path, LibraryVersion::V110, LibraryVersion::latest());
@@ -71,7 +71,7 @@ fn c_contiguous_classifies() {
 
 #[test]
 fn c_compact_classifies() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("compact.h5");
     {
         let file = c_file(&path, LibraryVersion::V110, LibraryVersion::latest());
@@ -99,7 +99,7 @@ fn c_compact_classifies() {
 #[test]
 #[cfg(target_endian = "little")]
 fn c_single_chunk_classifies() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("single.h5");
     {
         let file = c_file(&path, LibraryVersion::V110, LibraryVersion::latest());
@@ -124,7 +124,7 @@ fn c_single_chunk_classifies() {
 #[test]
 #[cfg(target_endian = "little")]
 fn c_fixed_array_addresses_are_absolute() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("fixed.h5");
     {
         let file = c_file(&path, LibraryVersion::V110, LibraryVersion::latest());
@@ -156,7 +156,7 @@ fn c_fixed_array_addresses_are_absolute() {
 #[test]
 #[cfg(target_endian = "little")]
 fn c_extensible_array_supports_append() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ea.h5");
     {
         let file = c_file(&path, LibraryVersion::V110, LibraryVersion::latest());
@@ -188,7 +188,7 @@ fn c_extensible_array_supports_append() {
 #[test]
 #[cfg(target_endian = "little")]
 fn c_legacy_btree_v1_classifies_and_reads() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("btree_v1.h5");
     {
         // The 1.8 format uses a v1 B-tree for every chunked dataset.
@@ -224,7 +224,7 @@ fn c_legacy_btree_v1_classifies_and_reads() {
 
 #[test]
 fn c_shuffle_then_deflate_pipeline() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("filters.h5");
     {
         let file = c_file(&path, LibraryVersion::V110, LibraryVersion::latest());
@@ -274,7 +274,7 @@ fn c_shuffle_then_deflate_pipeline() {
 #[test]
 #[cfg(target_endian = "little")]
 fn c_btree_v2_unfiltered_enumerates_multi_level_tree() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("btree_v2.h5");
     let values = (0..24 * 24).collect::<Vec<i32>>();
     {
@@ -322,7 +322,7 @@ fn c_btree_v2_unfiltered_enumerates_multi_level_tree() {
 
 #[test]
 fn c_btree_v2_filtered_reads_type_11_records() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("btree_v2_filtered.h5");
     let values = vec![7i32; 40 * 40];
     {

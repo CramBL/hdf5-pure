@@ -284,7 +284,7 @@ impl DatasetByteLen {
 mod tests {
     use super::*;
     use crate::dataspace::DataspaceType;
-    use crate::type_builders::make_i32_type;
+    use crate::type_builders;
 
     fn four_i32s() -> Dataspace {
         Dataspace {
@@ -301,7 +301,7 @@ mod tests {
         let Err(err) = RawReadSpec::parse(
             &layout,
             &four_i32s(),
-            &make_i32_type(),
+            &type_builders::make_i32_type(),
             None,
             FillPattern::ZERO,
         ) else {
@@ -323,7 +323,7 @@ mod tests {
         let Err(err) = RawReadSpec::parse(
             &layout,
             &four_i32s(),
-            &make_i32_type(),
+            &type_builders::make_i32_type(),
             None,
             FillPattern::ZERO,
         ) else {

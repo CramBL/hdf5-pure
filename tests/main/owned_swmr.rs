@@ -6,7 +6,7 @@
 //! unfiltered, chunk-aligned SWMR subset), and the staged edit surface refused.
 
 use hdf5_pure::{AttrValue, Error, File};
-use tempfile::tempdir;
+
 use test_util::superblock;
 use test_util_hdf5::dataset::{Filter, Unlimited};
 
@@ -14,7 +14,7 @@ const SWMR_WRITE_FLAGS: u32 = 0x05;
 
 #[test]
 fn swmr_append_reads_back_and_flag_lifecycle() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&path);
 
@@ -41,7 +41,7 @@ fn swmr_append_reads_back_and_flag_lifecycle() {
 
 #[test]
 fn swmr_refuses_the_staged_surface() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&path);
 
@@ -97,7 +97,7 @@ fn swmr_refuses_the_staged_surface() {
 
 #[test]
 fn swmr_refuses_filtered_and_unaligned_appends() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
 
     // Unaligned: length 4 (chunk 4, aligned), append 3 -> not a whole chunk.
     let upath = dir.path().join("u.h5");
@@ -126,7 +126,7 @@ fn swmr_refuses_filtered_and_unaligned_appends() {
 
 #[test]
 fn swmr_post_close_append_is_sealed() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&path);
 
@@ -145,7 +145,7 @@ fn swmr_post_close_append_is_sealed() {
 #[test]
 #[cfg(unix)]
 fn clear_swmr_flag_recovers_a_stale_flag() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("r.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&path);
 
@@ -169,7 +169,7 @@ fn clear_swmr_flag_recovers_a_stale_flag() {
 #[test]
 #[cfg(unix)]
 fn swmr_holds_no_os_lock() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("l.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&path);
 

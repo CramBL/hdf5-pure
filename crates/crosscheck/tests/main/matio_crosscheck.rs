@@ -441,7 +441,7 @@ impl Drop for MatVar {
 use hdf5_pure::FixedPointLayout;
 use hdf5_pure::mat::{self, ComplexI16, Matrix};
 use serde::{Deserialize, Serialize};
-use tempfile::tempdir;
+
 use test_util_hdf5::lock;
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -454,7 +454,7 @@ struct Scalars {
 #[test]
 fn matio_reads_scalars_from_hdf5_pure() {
     let _g = lock::matio_lock();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("scalars.mat");
     mat::to_file(
         &Scalars {
@@ -481,7 +481,7 @@ struct Vectors {
 #[test]
 fn matio_reads_vectors_from_hdf5_pure() {
     let _g = lock::matio_lock();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("vectors.mat");
     mat::to_file(
         &Vectors {
@@ -515,7 +515,7 @@ struct MatrixOnly {
 #[test]
 fn matio_reads_2d_matrix_from_hdf5_pure() {
     let _g = lock::matio_lock();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("matrix.mat");
 
     // Rust row-major 2×3:
@@ -550,7 +550,7 @@ struct Nested {
 #[test]
 fn matio_reads_nested_struct_from_hdf5_pure() {
     let _g = lock::matio_lock();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nested.mat");
 
     mat::to_file(
@@ -583,7 +583,7 @@ fn matio_reads_nested_struct_from_hdf5_pure() {
 #[test]
 fn hdf5_pure_reads_scalars_written_by_matio() {
     let _g = lock::matio_lock();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("matio_scalars.mat");
     {
         let f = MatFile::create_v73(&path);
@@ -606,7 +606,7 @@ fn hdf5_pure_reads_scalars_written_by_matio() {
 #[test]
 fn hdf5_pure_reads_vectors_written_by_matio() {
     let _g = lock::matio_lock();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("matio_vectors.mat");
     {
         let f = MatFile::create_v73(&path);
@@ -627,7 +627,7 @@ fn hdf5_pure_reads_vectors_written_by_matio() {
 #[test]
 fn hdf5_pure_reads_matrix_written_by_matio() {
     let _g = lock::matio_lock();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("matio_matrix.mat");
     {
         let f = MatFile::create_v73(&path);
@@ -651,7 +651,7 @@ fn hdf5_pure_reads_matrix_written_by_matio() {
 #[test]
 fn hdf5_pure_reads_nested_struct_written_by_matio() {
     let _g = lock::matio_lock();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("matio_nested.mat");
     {
         let f = MatFile::create_v73(&path);
@@ -683,7 +683,7 @@ fn hdf5_pure_reads_nested_struct_written_by_matio() {
 #[test]
 fn full_roundtrip_via_matio() {
     let _g = lock::matio_lock();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path1 = dir.path().join("a.mat");
     let path2 = dir.path().join("b.mat");
 
@@ -720,7 +720,7 @@ fn full_roundtrip_via_matio() {
 fn hdf5_pure_reads_column_vector_matrix_from_matio() {
     use hdf5_pure::mat::Matrix;
     let _g = lock::matio_lock();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("colvec.mat");
     {
         let f = MatFile::create_v73(&path);
@@ -743,7 +743,7 @@ fn hdf5_pure_reads_column_vector_matrix_from_matio() {
 fn hdf5_pure_reads_row_vector_matrix_from_matio() {
     use hdf5_pure::mat::Matrix;
     let _g = lock::matio_lock();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("rowvec.mat");
     {
         let f = MatFile::create_v73(&path);
@@ -772,7 +772,7 @@ struct Capture {
 #[test]
 fn matio_reads_complex_int16_from_hdf5_pure() {
     let _g = lock::matio_lock();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("capture.mat");
 
     mat::to_file(
@@ -805,7 +805,7 @@ fn matio_reads_complex_int16_from_hdf5_pure() {
 #[test]
 fn hdf5_pure_reads_complex_int16_written_by_matio() {
     let _g = lock::matio_lock();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("matio_capture.mat");
     {
         let f = MatFile::create_v73(&path);
@@ -908,7 +908,7 @@ struct MaybeHolder {
 #[test]
 fn empty_struct_array_agrees_with_matio_and_across_both_emitters() {
     let _g = lock::matio_lock();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let v = MaybeHolder {
         maybe: None,
         tail: 7,
@@ -980,7 +980,7 @@ fn empty_struct_array_agrees_with_matio_and_across_both_emitters() {
 #[test]
 fn empty_struct_array_reads_back_as_none() {
     let _g = lock::matio_lock();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("maybe_roundtrip.mat");
     let v = MaybeHolder {
         maybe: None,

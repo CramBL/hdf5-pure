@@ -21,7 +21,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use hdf5::plist::group_create::{AttrPhaseChange, GroupCreate, GroupCreateBuilder};
 use hdf5_pure::{AttrValue, File};
-use tempfile::tempdir;
 
 use test_util_hdf5::file;
 
@@ -120,7 +119,7 @@ fn now_secs() -> i64 {
 /// other side, with the modification and change times moved to the edit.
 #[test]
 fn an_in_place_edit_keeps_a_headers_times_and_phase_change_thresholds() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("t.h5");
     write_fixture(&p);
 

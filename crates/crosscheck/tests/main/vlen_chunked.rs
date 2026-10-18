@@ -21,7 +21,6 @@ use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::types::VarLenUnicode;
 use hdf5_pure::{AttrValue, File, FileBuilder, FileSpaceStrategy, MaxExtent};
 use rstest::rstest;
-use tempfile::tempdir;
 
 use test_util_hdf5::{dataset, file, lock};
 
@@ -58,7 +57,7 @@ fn words(n: usize) -> Vec<String> {
 #[test]
 fn c_library_reads_chunked_vlen_strings() {
     let _c = lock::libhdf5_guard();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("chunked.h5");
     let data = words(10);
 
@@ -85,7 +84,7 @@ fn c_library_reads_chunked_vlen_strings() {
 #[test]
 fn c_library_reads_filtered_chunked_vlen_strings() {
     let _c = lock::libhdf5_guard();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("filtered.h5");
     let data = words(64);
 
@@ -110,7 +109,7 @@ fn c_library_reads_filtered_chunked_vlen_strings() {
 #[test]
 fn c_library_reads_resizable_vlen_strings() {
     let _c = lock::libhdf5_guard();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("resizable.h5");
     let data = words(7);
 
@@ -134,7 +133,7 @@ fn c_library_reads_resizable_vlen_strings() {
 #[test]
 fn c_library_reads_2d_chunked_vlen_strings() {
     let _c = lock::libhdf5_guard();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("grid.h5");
     let data = words(12); // 4 x 3
 
@@ -155,7 +154,7 @@ fn c_library_reads_2d_chunked_vlen_strings() {
 #[test]
 fn c_library_reads_chunked_vlen_strings_across_heap_collections() {
     let _c = lock::libhdf5_guard();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("many.h5");
     let data = words(70_000);
 
@@ -182,7 +181,7 @@ fn c_library_reads_chunked_vlen_strings_across_heap_collections() {
 #[test]
 fn c_library_reads_paged_chunked_vlen_strings() {
     let _c = lock::libhdf5_guard();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("paged.h5");
     let data = words(20);
 
@@ -202,7 +201,7 @@ fn c_library_reads_paged_chunked_vlen_strings() {
 #[test]
 fn c_library_reads_mixed_chunked_and_contiguous_vlen_strings() {
     let _c = lock::libhdf5_guard();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("mixed.h5");
     let chunked = words(9);
     let contiguous: Vec<String> = ["alpha", "beta", "gamma"]
@@ -234,7 +233,7 @@ fn c_library_reads_mixed_chunked_and_contiguous_vlen_strings() {
 #[test]
 fn c_library_reads_two_distinct_chunked_vlen_string_datasets() {
     let _c = lock::libhdf5_guard();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("two_early.h5");
 
     // Different lengths as well as different text, so a swap cannot survive by
@@ -265,7 +264,7 @@ fn c_library_reads_two_distinct_chunked_vlen_string_datasets() {
 #[test]
 fn c_library_reads_many_chunked_vlen_string_datasets() {
     let _c = lock::libhdf5_guard();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("many_early.h5");
 
     let sets: Vec<Vec<String>> = (0..5)
@@ -306,7 +305,7 @@ fn c_library_reads_many_chunked_vlen_string_datasets() {
 #[test]
 fn c_library_reads_an_overwritten_contiguous_vlen_string_dataset() {
     let _c = lock::libhdf5_guard();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("overwrite_contiguous.h5");
 
     let mut b = FileBuilder::new();
@@ -345,7 +344,7 @@ fn c_library_reads_an_overwritten_contiguous_vlen_string_dataset() {
 #[test]
 fn c_library_reads_an_overwritten_filtered_chunked_vlen_string_dataset() {
     let _c = lock::libhdf5_guard();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("overwrite_filtered.h5");
     let before = words(64);
 
@@ -393,7 +392,7 @@ fn c_library_reads_an_overwritten_filtered_chunked_vlen_string_dataset() {
 #[cfg(target_endian = "little")]
 fn a_c_written_vlen_string_dataset_can_be_overwritten() {
     let _c = lock::libhdf5_guard();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_written.h5");
 
     {
@@ -443,7 +442,7 @@ fn a_c_written_vlen_string_dataset_can_be_overwritten() {
 #[cfg(target_endian = "little")]
 fn c_library_reads_an_overwritten_compact_vlen_string_dataset() {
     let _c = lock::libhdf5_guard();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("overwrite_compact.h5");
 
     {
@@ -503,7 +502,7 @@ fn paged_global_heap_references_survive_creation_edit_and_reopen(
     #[case] persist: bool,
 ) {
     let _c = lock::libhdf5_guard();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("paged_global_heaps.h5");
     let mut builder = FileBuilder::new();
     builder.with_file_space_strategy(FileSpaceStrategy::Page, persist, 1);
@@ -633,7 +632,7 @@ fn libhdf5_reads_its_paged_vlen_dataset_after_a_raw_collection_replacement(
     #[case] userblock: u64,
 ) {
     let _c = lock::libhdf5_guard();
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("reference_paged_vlen.h5");
     {
         let reference = hdf5::FileBuilder::new()

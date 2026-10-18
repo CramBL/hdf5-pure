@@ -8,7 +8,7 @@
 //! blocked by the OS on Windows.
 
 use hdf5_pure::{Error, File, FileAccessProperties, FileBuilder, FileLocking};
-use tempfile::tempdir;
+
 use test_util_hdf5::dataset::Unlimited;
 
 /// A plain, in-place-editable starter file.
@@ -25,7 +25,7 @@ fn write_appendable(path: &std::path::Path) {
 
 #[test]
 fn editor_lock_blocks_a_second_editor() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("edit.h5");
     write_starter(&path);
 
@@ -46,7 +46,7 @@ fn editor_lock_blocks_a_second_editor() {
 
 #[test]
 fn disabled_locking_takes_no_lock() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("edit.h5");
     write_starter(&path);
 
@@ -67,7 +67,7 @@ fn disabled_locking_takes_no_lock() {
 
 #[test]
 fn swmr_writer_does_not_lock_so_a_reader_can_follow_it() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("swmr.h5");
     write_appendable(&path);
 

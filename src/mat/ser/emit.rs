@@ -8,12 +8,12 @@ use std::collections::VecDeque;
 
 use super::value::{Leaf, Value};
 use crate::file_writer::AttrValue;
-use crate::mat::builder::{RefsH5Path, refs_h5path};
+use crate::mat::builder::{self, RefsH5Path};
 use crate::mat::class::MatClass;
 use crate::mat::dims;
 use crate::mat::error::MatError;
 use crate::mat::options::Options;
-use crate::mat::transpose::transpose_scalars;
+use crate::mat::transpose;
 use crate::mat::userblock::{self, USERBLOCK_SIZE};
 use crate::mat::utf16;
 use crate::mat::value::{ComplexVec, NumVec, ScalarNum};
@@ -151,7 +151,7 @@ fn dataset_for<'a>(
 ) -> &'a mut DatasetBuilder {
     let ds = group.create_dataset(name);
     if h5path == RefsH5Path::Own {
-        ds.set_attr("H5PATH", refs_h5path(name));
+        ds.set_attr("H5PATH", builder::refs_h5path(name));
     }
     ds
 }
@@ -167,7 +167,7 @@ fn build_struct_group(
     if h5path == RefsH5Path::Own {
         // Before the struct's own attributes: MATLAB's order on a `#refs#`
         // struct group is H5PATH, then MATLAB_class, then MATLAB_fields.
-        group.set_attr("H5PATH", refs_h5path(name));
+        group.set_attr("H5PATH", builder::refs_h5path(name));
     }
     // Filter out Omit fields and record the surviving order.
     let mut live_names: Vec<String> = Vec::with_capacity(fields.len());
@@ -424,52 +424,52 @@ fn apply_matrix(ds: &mut DatasetBuilder, rows: usize, cols: usize, vec: NumVec) 
             set_logical_decode(ds);
         }
         NumVec::F64(row_major) => {
-            let col = transpose_scalars(rows, cols, &row_major);
+            let col = transpose::transpose_scalars(rows, cols, &row_major);
             ds.with_f64_data(&col).with_shape(&shape);
             set_class(ds, MatClass::Double);
         }
         NumVec::F32(row_major) => {
-            let col = transpose_scalars(rows, cols, &row_major);
+            let col = transpose::transpose_scalars(rows, cols, &row_major);
             ds.with_f32_data(&col).with_shape(&shape);
             set_class(ds, MatClass::Single);
         }
         NumVec::I64(row_major) => {
-            let col = transpose_scalars(rows, cols, &row_major);
+            let col = transpose::transpose_scalars(rows, cols, &row_major);
             ds.with_i64_data(&col).with_shape(&shape);
             set_class(ds, MatClass::Int64);
         }
         NumVec::I32(row_major) => {
-            let col = transpose_scalars(rows, cols, &row_major);
+            let col = transpose::transpose_scalars(rows, cols, &row_major);
             ds.with_i32_data(&col).with_shape(&shape);
             set_class(ds, MatClass::Int32);
         }
         NumVec::I16(row_major) => {
-            let col = transpose_scalars(rows, cols, &row_major);
+            let col = transpose::transpose_scalars(rows, cols, &row_major);
             ds.with_i16_data(&col).with_shape(&shape);
             set_class(ds, MatClass::Int16);
         }
         NumVec::I8(row_major) => {
-            let col = transpose_scalars(rows, cols, &row_major);
+            let col = transpose::transpose_scalars(rows, cols, &row_major);
             ds.with_i8_data(&col).with_shape(&shape);
             set_class(ds, MatClass::Int8);
         }
         NumVec::U64(row_major) => {
-            let col = transpose_scalars(rows, cols, &row_major);
+            let col = transpose::transpose_scalars(rows, cols, &row_major);
             ds.with_u64_data(&col).with_shape(&shape);
             set_class(ds, MatClass::UInt64);
         }
         NumVec::U32(row_major) => {
-            let col = transpose_scalars(rows, cols, &row_major);
+            let col = transpose::transpose_scalars(rows, cols, &row_major);
             ds.with_u32_data(&col).with_shape(&shape);
             set_class(ds, MatClass::UInt32);
         }
         NumVec::U16(row_major) => {
-            let col = transpose_scalars(rows, cols, &row_major);
+            let col = transpose::transpose_scalars(rows, cols, &row_major);
             ds.with_u16_data(&col).with_shape(&shape);
             set_class(ds, MatClass::UInt16);
         }
         NumVec::U8(row_major) => {
-            let col = transpose_scalars(rows, cols, &row_major);
+            let col = transpose::transpose_scalars(rows, cols, &row_major);
             ds.with_u8_data(&col).with_shape(&shape);
             set_class(ds, MatClass::UInt8);
         }

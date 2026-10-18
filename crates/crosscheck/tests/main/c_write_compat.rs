@@ -19,11 +19,10 @@
 //! own C calls through an internal lock, so these tests need no extra guard.
 
 use hdf5_pure::{File, FileBuilder};
-use tempfile::tempdir;
 
 #[test]
 fn c_library_adds_objects_to_our_file() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ours.h5");
 
     // hdf5-pure writes a root dataset and a subgroup holding a dataset.
@@ -82,7 +81,7 @@ fn c_library_writes_after_an_in_place_edit() {
     // A file hdf5-pure wrote and then edited in place must still be writable by
     // the C library: the edit engine rewrites the affected group headers, and
     // those rewrites must keep (or add) the Group Info message.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("edited.h5");
 
     let mut b = FileBuilder::new();
@@ -145,7 +144,7 @@ fn c_library_converts_our_large_group_to_dense() {
     // library build a multi-direct-block heap with indirect blocks, which the
     // fractal-heap reader cannot yet parse — a separate, pre-existing reader
     // limitation, independent of this write-side fix.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("large.h5");
 
     // hdf5-pure writes a group with 8 compact link messages (== max-compact).
@@ -199,7 +198,7 @@ fn pure_reads_every_attribute_encoding_the_c_library_writes() {
     use hdf5::types::{FixedAscii, FixedUnicode, VarLenAscii, VarLenUnicode};
     use hdf5_pure::AttrValue;
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_attrs.h5");
 
     {

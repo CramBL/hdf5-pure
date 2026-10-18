@@ -8,7 +8,6 @@
 use std::path::Path;
 
 use hdf5_pure::{Error, File};
-use tempfile::tempdir;
 
 /// A version 0 file whose root holds a dataset `d` and a soft link `pointer`
 /// to it, both in the root's symbol table.
@@ -29,7 +28,7 @@ fn write_soft_link_file(path: &Path) {
 
 #[test]
 fn a_soft_link_does_not_hide_hard_links_in_a_symbol_table_group() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("soft_v1.h5");
     write_soft_link_file(&path);
 
@@ -44,7 +43,7 @@ fn a_soft_link_does_not_hide_hard_links_in_a_symbol_table_group() {
 
 #[test]
 fn converting_a_symbol_table_group_holding_a_soft_link_refuses() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("soft_v1_edit.h5");
     write_soft_link_file(&path);
     let before = std::fs::read(&path).unwrap();

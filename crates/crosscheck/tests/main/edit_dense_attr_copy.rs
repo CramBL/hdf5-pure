@@ -13,7 +13,7 @@
 
 use hdf5_pure::{AttrValue, File, FileBuilder};
 use std::collections::HashMap;
-use tempfile::tempdir;
+
 use test_util::fractal_heap;
 use test_util_hdf5::file;
 
@@ -76,7 +76,7 @@ fn expected_attr_map() -> HashMap<String, i64> {
 
 #[test]
 fn same_file_copy_reproduces_dense_dataset_and_group_attrs() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dense_same.h5");
     write_dense_source(&path);
     assert_file_has_fractal_heap(&path);
@@ -123,7 +123,7 @@ fn same_file_copy_reproduces_dense_dataset_and_group_attrs() {
 #[test]
 fn copy_reproduces_a_multi_level_dense_name_index() {
     const COUNT: usize = 600;
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dense_many.h5");
 
     {
@@ -174,7 +174,7 @@ fn copy_reproduces_a_multi_level_dense_name_index() {
 /// exercises the relocation of every address inside it.
 #[test]
 fn copy_reproduces_huge_dense_attrs() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dense_huge_copy.h5");
 
     let big: Vec<i64> = (0..10_000).collect();
@@ -227,7 +227,7 @@ fn copy_reproduces_huge_dense_attrs() {
 
 #[test]
 fn cross_file_copy_reproduces_dense_attrs() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src_path = dir.path().join("dense_xsrc.h5");
     let dst_path = dir.path().join("dense_xdst.h5");
     write_dense_source(&src_path);
@@ -285,7 +285,7 @@ fn c_written_dense_attr_dataset_copies_in_place() {
     // The denseness comes from libhdf5 this time, so the read
     // path is exercised against genuine C-written fractal-heap attribute storage,
     // not only this crate's own emitter.
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_dense.h5");
     {
         let file = file::libhdf5_create_v110(&path);
@@ -335,7 +335,7 @@ fn cross_file_copy_refuses_variable_length_dense_attrs() {
     // addresses would dangle. The cross-file path must refuse it by name rather
     // than mis-encode. (Same-file copy keeps such attributes valid by sharing the
     // source heaps, so this restriction is cross-file only.)
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let src_path = dir.path().join("vlen_dense_src.h5");
     let dst_path = dir.path().join("vlen_dense_dst.h5");
     {

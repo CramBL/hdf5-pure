@@ -51,9 +51,8 @@ use crate::address::{BaseAddress, StoredAddress};
 use crate::attribute::AttributeMessage;
 use crate::attribute_info::AttributeInfoMessage;
 use crate::chunked_write::{
-    ByteSink, ChunkOptions, ChunkProvider, ChunkedMeasure, CompressedChunkSet, StorageAllocation,
-    VerbatimLayout, VerbatimPlan, assemble_chunked_at, compress_chunks, emit_chunked_data_verbatim,
-    measure_chunked_at, plan_chunked_data_verbatim,
+    self, ByteSink, ChunkOptions, ChunkProvider, ChunkedMeasure, CompressedChunkSet,
+    StorageAllocation, VerbatimLayout, VerbatimPlan,
 };
 use crate::convert::Narrow;
 use crate::data_layout::DataLayout;
@@ -81,8 +80,7 @@ use crate::object_header_writer::ObjectHeaderWriter;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::shared_message::DatatypeLocation;
 use crate::type_builders::{
-    AttrSpec, CommittedDatatype, DatasetBuilder, FinishedGroup, GroupBuilder, VlStringStaging,
-    build_global_heap_collections, patch_vl_refs, patch_vl_refs_masked, write_reference_address,
+    self, AttrSpec, CommittedDatatype, DatasetBuilder, FinishedGroup, GroupBuilder, VlStringStaging,
 };
 use crate::width::FormatWidths;
 use crate::width::LengthWidth;
@@ -1712,7 +1710,7 @@ impl FileWriter {
                         .provider
                         .0
                         .as_ref();
-                    emit_chunked_data_verbatim(sink, plan, provider)
+                    chunked_write::emit_chunked_data_verbatim(sink, plan, provider)
                 }
                 DsData::Produced {
                     total_bytes,
@@ -1798,7 +1796,7 @@ impl FileWriter {
                     plan,
                     layout_message,
                     pipeline_message,
-                } = plan_chunked_data_verbatim(
+                } = chunked_write::plan_chunked_data_verbatim(
                     &rc.meta,
                     &d.ds.dimensions,
                     &rc.chunk_dims,
@@ -1815,7 +1813,7 @@ impl FileWriter {
             } else {
                 let set = chunk_set
                     .expect("an encode-path chunked dataset must have a precomputed chunk set");
-                measure_chunked_at(set, data_address)
+                chunked_write::measure_chunked_at(set, data_address)
             }
         }
 
@@ -1846,7 +1844,7 @@ impl FileWriter {
                     plan,
                     layout_message,
                     pipeline_message,
-                } = plan_chunked_data_verbatim(
+                } = chunked_write::plan_chunked_data_verbatim(
                     &rc.meta,
                     &d.ds.dimensions,
                     &rc.chunk_dims,
@@ -1865,7 +1863,7 @@ impl FileWriter {
                 // the cached set out at this address (no recompression).
                 let set = chunk_set
                     .expect("an encode-path chunked dataset must have a precomputed chunk set");
-                let result = assemble_chunked_at(set, data_address)?;
+                let result = chunked_write::assemble_chunked_at(set, data_address)?;
                 Ok(ChunkedBuilt {
                     layout_message: result.layout_message,
                     pipeline_message: result.pipeline_message,
@@ -2232,7 +2230,7 @@ impl FileWriter {
             for (i, (_n, v)) in attrs_raw.iter().enumerate() {
                 if let Some(strings) = v.var_len_strings() {
                     patches.push(VlPatch {
-                        collections: build_global_heap_collections(strings),
+                        collections: type_builders::build_global_heap_collections(strings),
                         attr_index: i,
                     });
                 }
@@ -2597,18 +2595,24 @@ impl FileWriter {
             };
             for patch in &vl_root {
                 let addrs = place(&patch.collections)?;
-                patch_vl_refs(&mut root_attrs[patch.attr_index].raw_data, &addrs);
+                type_builders::patch_vl_refs(&mut root_attrs[patch.attr_index].raw_data, &addrs);
             }
             for (gi, patches) in grp_vl.iter().enumerate() {
                 for patch in patches {
                     let addrs = place(&patch.collections)?;
-                    patch_vl_refs(&mut groups[gi].attrs[patch.attr_index].raw_data, &addrs);
+                    type_builders::patch_vl_refs(
+                        &mut groups[gi].attrs[patch.attr_index].raw_data,
+                        &addrs,
+                    );
                 }
             }
             for (di, patches) in ds_vl.iter().enumerate() {
                 for patch in patches {
                     let addrs = place(&patch.collections)?;
-                    patch_vl_refs(&mut all_ds[di].attrs[patch.attr_index].raw_data, &addrs);
+                    type_builders::patch_vl_refs(
+                        &mut all_ds[di].attrs[patch.attr_index].raw_data,
+                        &addrs,
+                    );
                 }
             }
             for (i, dataset) in all_ds.iter_mut().enumerate() {
@@ -2617,7 +2621,11 @@ impl FileWriter {
                 }
                 if let Some(staging) = &dataset.vl_string_staging {
                     let addrs = place(&staging.collections)?;
-                    patch_vl_refs_masked(&mut dataset.raw, &staging.patch_offsets, &addrs);
+                    type_builders::patch_vl_refs_masked(
+                        &mut dataset.raw,
+                        &staging.patch_offsets,
+                        &addrs,
+                    );
                     early_gcol.push(i);
                 }
             }
@@ -2636,7 +2644,11 @@ impl FileWriter {
                     &mut aggregate_collection_addresses,
                     aggregated,
                 )?;
-                patch_vl_refs_masked(&mut all_ds[i].raw, &staging.patch_offsets, &addrs);
+                type_builders::patch_vl_refs_masked(
+                    &mut all_ds[i].raw,
+                    &staging.patch_offsets,
+                    &addrs,
+                );
                 all_ds[i].vl_string_staging = Some(staging);
                 early_gcol.push(i);
             }
@@ -2663,7 +2675,7 @@ impl FileWriter {
                     // partial chunk is filled rather than zeroed (issue #296).
                     let elem = ctx.element_size.narrow::<NonZeroUsize>()?;
                     let fill = FillPattern::new(d.fill_time, d.fill.as_deref(), elem);
-                    Ok(Some(compress_chunks(
+                    Ok(Some(chunked_write::compress_chunks(
                         &d.raw,
                         &d.ds.dimensions,
                         ctx,
@@ -3042,7 +3054,7 @@ impl FileWriter {
                         }
                         crate::type_builders::ObjectRefTarget::Raw(addr) => *addr,
                     };
-                    write_reference_address(&mut d.raw, patch.byte_offset, addr);
+                    type_builders::write_reference_address(&mut d.raw, patch.byte_offset, addr);
                 }
             }
         }
@@ -3654,7 +3666,7 @@ impl FileWriter {
                     &mut aggregate_collection_addresses,
                     aggregated,
                 )?;
-                patch_vl_refs(&mut root_attrs[patch.attr_index].raw_data, &addrs);
+                type_builders::patch_vl_refs(&mut root_attrs[patch.attr_index].raw_data, &addrs);
             }
             for (gi, patches) in grp_vl.iter().enumerate() {
                 for patch in patches {
@@ -3664,7 +3676,10 @@ impl FileWriter {
                         &mut aggregate_collection_addresses,
                         aggregated,
                     )?;
-                    patch_vl_refs(&mut groups[gi].attrs[patch.attr_index].raw_data, &addrs);
+                    type_builders::patch_vl_refs(
+                        &mut groups[gi].attrs[patch.attr_index].raw_data,
+                        &addrs,
+                    );
                 }
             }
             for (di, patches) in ds_vl.iter().enumerate() {
@@ -3675,7 +3690,10 @@ impl FileWriter {
                         &mut aggregate_collection_addresses,
                         aggregated,
                     )?;
-                    patch_vl_refs(&mut all_ds[di].attrs[patch.attr_index].raw_data, &addrs);
+                    type_builders::patch_vl_refs(
+                        &mut all_ds[di].attrs[patch.attr_index].raw_data,
+                        &addrs,
+                    );
                 }
             }
             // Patch dataset-element references in the contiguous element bytes moved into
@@ -3700,7 +3718,7 @@ impl FileWriter {
                         &mut aggregate_collection_addresses,
                         aggregated,
                     )?;
-                    patch_vl_refs_masked(bytes, &staging.patch_offsets, &addrs);
+                    type_builders::patch_vl_refs_masked(bytes, &staging.patch_offsets, &addrs);
                 }
             }
         }
@@ -4114,7 +4132,7 @@ mod tests {
     use crate::object_header::ObjectHeader;
     use crate::object_path::ObjectPath;
     use crate::superblock::Superblock;
-    use crate::type_builders::{build_attr_message, make_i32_type};
+    use crate::type_builders;
 
     #[test]
     fn small_paged_collections_can_place_metadata_above_four_gibibytes() {
@@ -4254,7 +4272,7 @@ mod tests {
     /// layout).
     #[test]
     fn a_committed_datatype_header_holds_only_its_type() {
-        let bytes = build_committed_datatype_oh(&make_i32_type(), 1).unwrap();
+        let bytes = build_committed_datatype_oh(&type_builders::make_i32_type(), 1).unwrap();
         let hdr =
             ObjectHeader::parse(&bytes, AccessMode::ReadOnly, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
 
@@ -4268,7 +4286,7 @@ mod tests {
             hdf5_pure_format::__private::parse_datatype(&hdr.messages[0].data)
                 .unwrap()
                 .0,
-            make_i32_type()
+            type_builders::make_i32_type()
         );
         assert_eq!(
             hdr.messages[0].flags,
@@ -4282,7 +4300,7 @@ mod tests {
     /// the difference between unlinking the name and destroying the type.
     #[test]
     fn a_committed_datatype_header_records_a_count_above_one() {
-        let bytes = build_committed_datatype_oh(&make_i32_type(), 4).unwrap();
+        let bytes = build_committed_datatype_oh(&type_builders::make_i32_type(), 4).unwrap();
         let hdr =
             ObjectHeader::parse(&bytes, AccessMode::ReadOnly, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
 
@@ -4304,7 +4322,7 @@ mod tests {
     #[test]
     fn the_reference_count_is_the_link_plus_every_user() {
         let mut w = FileWriter::new();
-        w.commit_datatype("mytype", make_i32_type());
+        w.commit_datatype("mytype", type_builders::make_i32_type());
         w.set_root_attr_committed("root_attr", AttrValue::I32(1), "mytype");
         let ds = w.create_dataset("typed");
         ds.with_i32_data(&[1, 2]);
@@ -4321,7 +4339,7 @@ mod tests {
     #[test]
     fn an_unreferenced_committed_type_stores_no_count() {
         let mut w = FileWriter::new();
-        w.commit_datatype("mytype", make_i32_type());
+        w.commit_datatype("mytype", type_builders::make_i32_type());
         let bytes = w.finish().unwrap();
 
         assert_eq!(committed_reference_count(&bytes, "mytype"), None);
@@ -4364,7 +4382,7 @@ mod tests {
     #[test]
     fn a_dataset_naming_a_committed_type_stores_a_reference_to_it() {
         let mut w = FileWriter::new();
-        w.commit_datatype("mytype", make_i32_type());
+        w.commit_datatype("mytype", type_builders::make_i32_type());
         let ds = w.create_dataset("typed");
         ds.with_i32_data(&[1, 2]);
         ds.with_committed_datatype("mytype");
@@ -4798,9 +4816,13 @@ mod tests {
         // empty string: a fixed-width string datatype is at least one byte wide,
         // so an empty value still carries a padding byte and would be measured
         // as overhead.
-        let probe = build_attr_message(name, &AttrValue::AsciiString("y".to_string()));
+        let probe =
+            type_builders::build_attr_message(name, &AttrValue::AsciiString("y".to_string()));
         let overhead = probe.serialize_v3(OFFSET_WIDTH, LENGTH_SIZE).unwrap().len() - 1;
-        let attr = build_attr_message(name, &AttrValue::AsciiString("y".repeat(size - overhead)));
+        let attr = type_builders::build_attr_message(
+            name,
+            &AttrValue::AsciiString("y".repeat(size - overhead)),
+        );
         assert_eq!(
             attr.serialize_v3(OFFSET_WIDTH, LENGTH_SIZE).unwrap().len(),
             size
@@ -5006,7 +5028,7 @@ mod tests {
         ];
         let forward: Vec<AttributeMessage> = names
             .iter()
-            .map(|n| build_attr_message(n, &AttrValue::I64(1)))
+            .map(|n| type_builders::build_attr_message(n, &AttrValue::I64(1)))
             .collect();
         let mut reversed = forward.clone();
         reversed.reverse();
@@ -5049,7 +5071,9 @@ mod tests {
     /// records can pass by reproducing a position.
     fn scrambled_creation_order() -> (Vec<AttributeMessage>, DenseAttrCreationOrder) {
         let attrs: Vec<AttributeMessage> = (0..SCRAMBLE.len())
-            .map(|i| build_attr_message(&format!("a{i:02}"), &AttrValue::I64(i as i64)))
+            .map(|i| {
+                type_builders::build_attr_message(&format!("a{i:02}"), &AttrValue::I64(i as i64))
+            })
             .collect();
         (
             attrs,
@@ -5372,7 +5396,8 @@ mod tests {
     /// message still fits the object header's 2-byte message-size field, derived
     /// from a measured probe rather than hard-coded so it tracks the encoder.
     fn largest_fitting_i64_attr_elements() -> usize {
-        let one = build_attr_message("boundary", &AttrValue::I64Array(vec![0i64; 1]));
+        let one =
+            type_builders::build_attr_message("boundary", &AttrValue::I64Array(vec![0i64; 1]));
         let overhead = one.serialize(OFFSET_WIDTH, LENGTH_SIZE).unwrap().len() - 8;
         (OBJECT_HEADER_MESSAGE_MAX - overhead) / 8
     }
@@ -5380,7 +5405,8 @@ mod tests {
     #[test]
     fn compact_attr_at_the_message_size_limit_is_written() {
         let n = largest_fitting_i64_attr_elements();
-        let attr = build_attr_message("boundary", &AttrValue::I64Array(vec![7i64; n]));
+        let attr =
+            type_builders::build_attr_message("boundary", &AttrValue::I64Array(vec![7i64; n]));
         // Pin the probe to the boundary itself: one more element must not fit,
         // or this test would still pass while exercising a tiny attribute.
         let size = attr.serialize(OFFSET_WIDTH, LENGTH_SIZE).unwrap().len();
@@ -5407,7 +5433,7 @@ mod tests {
     #[test]
     fn an_attr_past_the_message_size_limit_moves_to_dense_storage() {
         let n = largest_fitting_i64_attr_elements() + 1;
-        let attrs = vec![build_attr_message(
+        let attrs = vec![type_builders::build_attr_message(
             "boundary",
             &AttrValue::I64Array(vec![0i64; n]),
         )];
@@ -5439,7 +5465,7 @@ mod tests {
     #[test]
     fn an_attr_at_the_message_size_limit_stays_compact() {
         let n = largest_fitting_i64_attr_elements();
-        let attrs = vec![build_attr_message(
+        let attrs = vec![type_builders::build_attr_message(
             "boundary",
             &AttrValue::I64Array(vec![0i64; n]),
         )];

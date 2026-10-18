@@ -5,12 +5,12 @@ use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::{
     AttrValue, Datatype, DatatypeByteOrder, FileBuilder, FileSpaceStrategy, LibVer, MaxExtent,
-    RepackOptions, ScaleOffset, repack, repack_into, repack_to_path,
+    RepackOptions, ScaleOffset,
 };
 use hdf5_pure_core::__private::BaseAddressExt;
 use rstest::rstest;
 use test_util::file_space_info;
-use test_util::fuzz::fixture_with_recorded_extent;
+use test_util::fuzz;
 use test_util::widths::Widths;
 use test_util::{superblock, temp};
 use test_util_hdf5::dataset::{Filter, Unlimited};
@@ -37,7 +37,7 @@ fn carries_a_variable_length_attribute_without_re_encoding_it() {
     b.add_group(g.finish());
     b.write(&src).unwrap();
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let f = hdf5_pure::File::open(&dst).unwrap();
     assert_eq!(
@@ -62,7 +62,7 @@ fn drops_object_and_shrinks_file() {
     b.write(&src).unwrap();
     let src_size = std::fs::metadata(&src).unwrap().len();
 
-    repack(&src, &dst, &RepackOptions::new().drop_path("bulk")).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new().drop_path("bulk")).unwrap();
 
     let dst_size = std::fs::metadata(&dst).unwrap().len();
     assert!(
@@ -91,11 +91,11 @@ fn repack_into_and_repack_to_path_write_the_bytes_repack_writes() {
     b.write(&src).unwrap();
     let options = RepackOptions::new().drop_path("bulk");
 
-    repack(&src, &dst, &options).unwrap();
+    hdf5_pure::repack(&src, &dst, &options).unwrap();
     let source = File::open(&src).unwrap();
     let mut bytes = Vec::new();
-    repack_into(&source, &mut bytes, &options).unwrap();
-    repack_to_path(&source, &to_path, &options).unwrap();
+    hdf5_pure::repack_into(&source, &mut bytes, &options).unwrap();
+    hdf5_pure::repack_to_path(&source, &to_path, &options).unwrap();
 
     let expected = std::fs::read(&dst).unwrap();
     assert_eq!(bytes, expected);
@@ -112,7 +112,7 @@ fn a_failed_repack_into_writes_nothing() {
     let source = File::open(&src).unwrap();
 
     let mut bytes = Vec::new();
-    let err = repack_into(
+    let err = hdf5_pure::repack_into(
         &source,
         &mut bytes,
         &RepackOptions::new().drop_path("missing"),
@@ -136,7 +136,7 @@ fn repack_into_a_read_only_source_needs_its_writer_parse_opened_for_writing() {
     let source = File::open(&src).unwrap();
 
     let mut bytes = Vec::new();
-    let err = repack_into(
+    let err = hdf5_pure::repack_into(
         &source,
         &mut bytes,
         &RepackOptions::new().reject_unknown_messages_only_a_writer_must_understand(),
@@ -167,7 +167,7 @@ fn pure_compaction_preserves_everything() {
     b.add_group(g.finish());
     b.write(&src).unwrap();
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let f = hdf5_pure::File::open(&dst).unwrap();
     assert_eq!(
@@ -213,7 +213,7 @@ fn repacks_v1_symbol_table_source_with_attributes() {
     let src_root_attrs = source.root().attrs().unwrap();
     assert!(!src_data_attrs.is_empty() && !src_root_attrs.is_empty());
 
-    repack(src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(src, &dst, &RepackOptions::new()).unwrap();
 
     let f = hdf5_pure::File::open(&dst).unwrap();
     assert_eq!(f.dataset("data").unwrap().read_f64().unwrap(), src_data);
@@ -229,7 +229,7 @@ fn repacks_v1_nested_symbol_table_groups() {
     let dst = temp::temp_path("hdf5_pure_repack_v1_groups_dst.h5");
     let src = "tests/data/unattributed/two_groups.h5";
 
-    repack(src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(src, &dst, &RepackOptions::new()).unwrap();
 
     let f = hdf5_pure::File::open(&dst).unwrap();
     let mut groups = f.root().groups().unwrap();
@@ -256,7 +256,7 @@ fn carries_dataset_attributes() {
     ds.set_attr("label", AttrValue::String("voltage".to_string()));
     b.write(&src).unwrap();
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let f = hdf5_pure::File::open(&dst).unwrap();
     let attrs = f.dataset("signal").unwrap().attrs().unwrap();
@@ -283,7 +283,7 @@ fn drops_whole_group_subtree() {
     b.add_group(g.finish());
     b.write(&src).unwrap();
 
-    repack(&src, &dst, &RepackOptions::new().drop_path("/doomed")).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new().drop_path("/doomed")).unwrap();
 
     let f = hdf5_pure::File::open(&dst).unwrap();
     assert_eq!(f.root().datasets().unwrap(), vec!["root_ds".to_string()]);
@@ -307,7 +307,7 @@ fn preserves_chunked_and_compressed_dataset() {
 
     // Drop nothing; just compact. The chunked+filtered dataset must survive with
     // byte-exact values.
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let f = hdf5_pure::File::open(&dst).unwrap();
     assert_eq!(f.dataset("comp").unwrap().read_f64().unwrap(), data);
@@ -326,7 +326,7 @@ fn preserves_multidim_and_maxshape() {
         .with_chunks(&[1, 3]);
     b.write(&src).unwrap();
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let f = hdf5_pure::File::open(&dst).unwrap();
     let ds = f.dataset("grid").unwrap();
@@ -360,8 +360,8 @@ fn roundtrips_integer_scale_offset() {
         .with_chunks(&[512]);
     p.write(&plain_src).unwrap();
 
-    repack(&so_src, &so_dst, &RepackOptions::new()).unwrap();
-    repack(&plain_src, &plain_dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&so_src, &so_dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&plain_src, &plain_dst, &RepackOptions::new()).unwrap();
 
     // Values survive byte-exact.
     let f = hdf5_pure::File::open(&so_dst).unwrap();
@@ -373,7 +373,7 @@ fn roundtrips_integer_scale_offset() {
     let plain_size = std::fs::metadata(&plain_dst).unwrap().len();
     assert!(
         so_size < plain_size,
-        "repacked scale-offset file ({so_size}) should be smaller than the unfiltered repack ({plain_size}), proving the filter was re-applied"
+        "repacked scale-offset file ({so_size}) should be smaller than the unfiltered hdf5_pure::repack ({plain_size}), proving the filter was re-applied"
     );
 }
 
@@ -394,7 +394,7 @@ fn roundtrips_lossy_float_scale_offset_verbatim() {
         .with_scale_offset(ScaleOffset::FloatDScale(3));
     b.write(&src).unwrap();
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let src_vals = hdf5_pure::File::open(&src)
         .unwrap()
@@ -449,7 +449,7 @@ fn roundtrips_opaque_and_bitfield_datatypes() {
         .with_raw_data(bitfield_dt.clone(), bitfield_raw.clone(), 2);
     b.write(&src).unwrap();
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let f = hdf5_pure::File::open(&dst).unwrap();
     let blob = f.dataset("blob").unwrap();
@@ -487,7 +487,7 @@ fn repack_rejects_a_source_whose_file_space_info_message_does_not_parse() {
         ),
     );
 
-    let err = repack(&src, &dst, &RepackOptions::new()).unwrap_err();
+    let err = hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap_err();
     let Error::RepackUnsupported(reason) = &err else {
         panic!("expected RepackUnsupported, got {err:?}");
     };
@@ -512,7 +512,7 @@ fn preserves_file_space_strategy() {
         .with_file_space_page_size(8192);
     b.write(&src).unwrap();
 
-    repack(&src, &dst, &RepackOptions::new().drop_path("drop_me")).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new().drop_path("drop_me")).unwrap();
 
     let f = hdf5_pure::File::open(&dst).unwrap();
     // The strategy (and its page size / threshold) carries forward; persist is
@@ -563,7 +563,7 @@ fn a_repack_asked_to_reject_unknown_messages_only_a_writer_must_understand_repac
     b.set_attr("note", AttrValue::I64(7));
     b.write(&src).unwrap();
 
-    repack(
+    hdf5_pure::repack(
         &src,
         &dst,
         &RepackOptions::new().reject_unknown_messages_only_a_writer_must_understand(),
@@ -586,7 +586,7 @@ fn rejects_nonexistent_drop_path() {
     b.create_dataset("present").with_i32_data(&[1]);
     b.write(&src).unwrap();
 
-    let err = repack(&src, &dst, &RepackOptions::new().drop_path("absent")).unwrap_err();
+    let err = hdf5_pure::repack(&src, &dst, &RepackOptions::new().drop_path("absent")).unwrap_err();
     assert!(
         matches!(err, hdf5_pure::Error::RepackUnsupported(_)),
         "expected RepackUnsupported, got {err:?}"
@@ -615,7 +615,7 @@ fn verbatim_chunk_copy_preserves_compressed_bytes() {
         .with_deflate(6);
     b.write(&src).unwrap();
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let f = hdf5_pure::File::open(&dst).unwrap();
     let ds = f.dataset("vals").unwrap();
@@ -651,7 +651,7 @@ fn repacks_multichunk_2d_fixed_array() {
         .with_deflate(4);
     b.write(&src).unwrap();
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let f = hdf5_pure::File::open(&dst).unwrap();
     let ds = f.dataset("grid").unwrap();
@@ -671,7 +671,7 @@ fn repacks_resizable_extensible_array() {
         .filters(&[Filter::Deflate(3)])
         .pure_create(&src);
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let f = hdf5_pure::File::open(&dst).unwrap();
     let ds = f.dataset("series").unwrap();
@@ -698,7 +698,7 @@ fn roundtrips_zfp_verbatim() {
         .with_zfp(32.0);
     b.write(&src).unwrap();
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let src_vals = hdf5_pure::File::open(&src)
         .unwrap()
@@ -734,7 +734,7 @@ fn repacks_single_chunk_filtered_verbatim() {
         .with_deflate(6);
     b.write(&src).unwrap();
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let f = hdf5_pure::File::open(&dst).unwrap();
     let ds = f.dataset("vals").unwrap();
@@ -760,7 +760,7 @@ fn repacks_chunked_dataset_from_a_userblock_file() {
     b.create_dataset("plain").with_f64_data(&[1.0, 2.0, 3.0]);
     std::fs::write(&src, b.finish().unwrap()).unwrap();
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let f = hdf5_pure::File::open(&dst).unwrap();
     assert_eq!(f.dataset("chk").unwrap().read_f64().unwrap(), data);
@@ -787,7 +787,7 @@ fn preserves_the_source_on_disk_format() {
     b.write(&src).unwrap();
     assert_eq!(superblock::version(&src), 2, "the source is the 1.8 format");
 
-    repack(&src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     assert_eq!(superblock::version(&dst), 2, "repack rewrote the format");
     assert_eq!(
@@ -820,7 +820,7 @@ fn upgrades_only_where_the_source_format_cannot_hold_the_content() {
 
     // Contiguous content under a version 0 superblock: floored at the oldest
     // format this crate writes, and no further.
-    repack(
+    hdf5_pure::repack(
         "tests/data/unattributed/simple_dataset.h5",
         &dst,
         &RepackOptions::new(),
@@ -840,7 +840,7 @@ fn upgrades_only_where_the_source_format_cannot_hold_the_content() {
         .unwrap()
         .read_f64()
         .unwrap();
-    repack(
+    hdf5_pure::repack(
         "tests/data/unattributed/chunked_deflate.h5",
         &dst,
         &RepackOptions::new(),
@@ -877,7 +877,7 @@ fn an_explicit_bound_refuses_content_it_cannot_express() {
     let to_v18 = RepackOptions::new().with_libver_bounds(LibVer::Earliest, LibVer::V18);
     assert!(
         matches!(
-            repack(&src, &dst, &to_v18),
+            hdf5_pure::repack(&src, &dst, &to_v18),
             Err(hdf5_pure::Error::Format(
                 hdf5_pure::FormatError::LibverTooOldForContent { .. }
             ))
@@ -888,7 +888,7 @@ fn an_explicit_bound_refuses_content_it_cannot_express() {
     // And the same bound raised to 1.10 succeeds, so the refusal is about the
     // content and not about the option being set at all.
     let to_v110 = RepackOptions::new().with_libver_bounds(LibVer::Earliest, LibVer::V110);
-    repack(&src, &dst, &to_v110).unwrap();
+    hdf5_pure::repack(&src, &dst, &to_v110).unwrap();
     assert_eq!(superblock::version(&dst), 3);
 }
 
@@ -909,7 +909,7 @@ fn every_spelling_of_a_drop_path_drops_one_object(#[case] spelling: &str) {
     b.add_group(g.finish());
     b.write(&src).unwrap();
 
-    repack(&src, &dst, &RepackOptions::new().drop_path(spelling)).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new().drop_path(spelling)).unwrap();
 
     let f = hdf5_pure::File::open(&dst).unwrap();
     assert_eq!(
@@ -938,7 +938,7 @@ fn a_drop_of_the_root_group_is_rejected(#[case] spelling: &str) {
     b.create_dataset("keep").with_i32_data(&[1]);
     b.write(&src).unwrap();
 
-    let err = repack(&src, &dst, &RepackOptions::new().drop_path(spelling)).unwrap_err();
+    let err = hdf5_pure::repack(&src, &dst, &RepackOptions::new().drop_path(spelling)).unwrap_err();
     let hdf5_pure::Error::RepackUnsupported(reason) = &err else {
         panic!("expected RepackUnsupported, got {err:?}");
     };
@@ -955,10 +955,10 @@ fn a_source_link_whose_name_is_not_a_path_component_is_rejected() {
     let src = temp::temp_path("hdf5_pure_repack_nameless_link_src.h5");
     std::fs::write(
         &src,
-        fixture_with_recorded_extent("oom_chunked_string_huge_elem.h5"),
+        fuzz::fixture_with_recorded_extent("oom_chunked_string_huge_elem.h5"),
     )
     .unwrap();
-    let err = repack(&src, &dst, &RepackOptions::new()).unwrap_err();
+    let err = hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap_err();
     let hdf5_pure::Error::RepackUnsupported(reason) = &err else {
         panic!("expected RepackUnsupported, got {err:?}");
     };

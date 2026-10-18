@@ -5,7 +5,6 @@ use hdf5_pure::{
     ChunkCacheConfig, Error, File, FileAccessProperties, FileBuilder, FileCreateProperties,
     FileLocking, FileSpaceStrategy, FormatError, LibVer, MemoryStrategy,
 };
-use tempfile::tempdir;
 
 fn write_chunked(path: &std::path::Path) {
     let mut b = FileBuilder::new();
@@ -20,7 +19,7 @@ fn write_chunked(path: &std::path::Path) {
 /// both a read path and a read-write path.
 #[test]
 fn one_properties_value_serves_read_and_read_write_opens() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("shared.h5");
     write_chunked(&path);
 
@@ -61,7 +60,7 @@ fn one_properties_value_serves_read_and_read_write_opens() {
 /// `open_rw` did nothing. It now applies.
 #[test]
 fn open_rw_honors_the_configured_chunk_cache() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("cache.h5");
     write_chunked(&path);
 
@@ -96,7 +95,7 @@ fn open_rw_honors_the_configured_chunk_cache() {
 /// applies whichever engine the memory strategy selects.
 #[test]
 fn the_bounded_engine_honors_the_locking_policy() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("bounded_lock.h5");
     write_chunked(&path);
 
@@ -112,7 +111,7 @@ fn the_bounded_engine_honors_the_locking_policy() {
 
 #[test]
 fn the_bounded_engine_still_locks_by_default() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("bounded_default.h5");
     write_chunked(&path);
 
@@ -161,7 +160,7 @@ fn create_properties_are_reusable_across_files() {
         FileCreateProperties::new().with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 4)
     }
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     for name in ["a.h5", "b.h5"] {
         let path = dir.path().join(name);
         let mut b = FileBuilder::new();
@@ -183,7 +182,7 @@ fn create_properties_are_reusable_across_files() {
 /// through the owned-handle path, which always got the defaults.
 #[test]
 fn create_with_options_records_creation_properties() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("created.h5");
 
     let file = File::create_with_options(
@@ -205,7 +204,7 @@ fn create_with_options_records_creation_properties() {
 
 #[test]
 fn create_with_default_options_matches_create() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let a = dir.path().join("a.h5");
     let b = dir.path().join("b.h5");
 
@@ -319,7 +318,7 @@ fn create_properties_reset_the_properties_they_do_not_carry() {
 /// file they were overwriting *and* got an error.
 #[test]
 fn a_refused_build_does_not_touch_the_destination_file() {
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("existing.h5");
     let previous = b"the caller's existing file";
     std::fs::write(&path, previous).unwrap();
@@ -384,7 +383,7 @@ fn an_editing_session_honors_the_library_version_bound() {
             .unwrap();
     }
 
-    let dir = tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("v18.h5");
     let mut b = FileBuilder::new();
     b.with_libver_bounds(LibVer::Earliest, LibVer::V18);
