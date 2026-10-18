@@ -1,5 +1,7 @@
 //! Free-space reuse in an edit under each file-space strategy.
 
+use std::path::Path;
+
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpacePageSize;
@@ -297,7 +299,7 @@ fn a_deleted_extent_is_tracked_from_the_threshold_up(
             file.space_accounting().unwrap().reusable_free_space,
         )
     };
-    let reopened = File::open(&path).unwrap().persisted_free_space().unwrap();
+    let reopened = persisted_or_reused_sections(&path, persist);
 
     let tracked = if threshold <= DELETED_LEN {
         DELETED_LEN
@@ -355,7 +357,7 @@ fn a_sub_threshold_extent_is_tracked_only_beside_a_tracked_extent(
             file.space_accounting().unwrap().reusable_free_space,
         )
     };
-    let reopened = File::open(&path).unwrap().persisted_free_space().unwrap();
+    let reopened = persisted_or_reused_sections(&path, persist);
 
     let [b, c, e, g] = &extents;
     assert_eq!((b.end, c.end, e.end), (c.start, e.start, g.start));
@@ -369,6 +371,18 @@ fn a_sub_threshold_extent_is_tracked_only_beside_a_tracked_extent(
         (covered(&session), covered(&reopened)),
         (tracked, if persist { tracked } else { 0 })
     );
+}
+
+fn persisted_or_reused_sections(path: &Path, persist: bool) -> Vec<(u64, u64)> {
+    let mut sections = File::open(path).unwrap().persisted_free_space().unwrap();
+    if persist {
+        let file = File::open_rw(path).unwrap();
+        let ownership = file.__space_ownership().unwrap();
+        assert!(ownership.analysis_complete);
+        sections.extend(ownership.live_metadata_space);
+        sections.extend(ownership.free_space_manager_space);
+    }
+    sections
 }
 
 #[test]

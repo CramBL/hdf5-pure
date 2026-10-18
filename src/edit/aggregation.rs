@@ -16,14 +16,18 @@ use crate::error::Error;
 use crate::error::FormatError;
 use crate::image::FileImage;
 
+use super::FreeClass;
 use super::Placement;
 use super::WriteEngine;
+use super::free_space;
 
 /// Holds the aggregate windows and their stored end of allocation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct AggregateSpace {
     policy: ClassicAggregators,
     eoa: u64,
+    /// Whether abandoned aggregate spare requires a persistent manager rewrite.
+    manager_dirty: bool,
     /// Whether the cached root and EOA are safe to republish at teardown.
     ///
     /// Teardown preserves the root and EOA after an uncertain publication.
@@ -58,6 +62,7 @@ impl AggregateSpace {
         Self {
             policy: ClassicAggregators::new(),
             eoa,
+            manager_dirty: false,
             publication_confirmed: true,
         }
     }
@@ -106,6 +111,7 @@ impl AggregateSpace {
             && let Some((post, _)) = space.flat_post_free(next.eoa, [released])
         {
             space.adopt_flat_post_free(post);
+            next.manager_dirty = true;
         }
         *self = next;
         Ok(placement)
@@ -173,6 +179,22 @@ impl AggregateSpace {
         self.eoa
     }
 
+    /// Adopts the published EOA and records the manager rewrite as complete.
+    ///
+    /// Retains windows with unused space and forgets consumed windows beyond `eoa`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if unused aggregate space extends beyond `eoa`.
+    pub(super) fn reconcile(mut self, eoa: u64) -> Result<Self, Error> {
+        self.policy.reconcile_eoa(eoa).map_err(|error| {
+            FormatError::Internal(format!("published EOA excludes aggregate spare: {error}"))
+        })?;
+        self.eoa = eoa;
+        self.manager_dirty = false;
+        Ok(self)
+    }
+
     fn extend(image: &mut dyn FileImage, end: u64) -> Result<(), Error> {
         let padding = [0; 4096];
         while image.len() < end {
@@ -184,6 +206,106 @@ impl AggregateSpace {
 }
 
 impl WriteEngine {
+    /// Surrenders aggregate spare when it permits releasing an additional dead suffix.
+    ///
+    /// The editor retains both windows unless surrender extends the trailing free run by more
+    /// than the total spare length. Surrendered spare joins `to_free` for the persistent manager
+    /// rewrite, subject to the free-section threshold.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the image length cannot be converted to a stored address.
+    pub(super) fn release_aggregates_for_tail(
+        &mut self,
+        to_free: &mut Vec<(StoredAddress, u64, FreeClass)>,
+    ) -> Result<(), Error> {
+        let Some(aggregation) = self.aggregation else {
+            return Ok(());
+        };
+        let spare = aggregation.unused().collect::<Vec<_>>();
+        if spare.is_empty() || to_free.is_empty() {
+            return Ok(());
+        }
+        let Some(persist) = &self.persist else {
+            return Ok(());
+        };
+        let eoa = self.end_of_allocation()?.get();
+        let (mut post, eoa) = self.flat_post_free(eoa, to_free, &persist.old_blocks);
+        let retained_start = free_space::trailing_run_start([&post], eoa);
+        let released_eoa = post.release_all(persist.threshold, eoa, spare.iter().copied());
+        let released_start = free_space::trailing_run_start([&post], released_eoa);
+        let spare_len = spare.iter().map(|extent| extent.len()).sum::<u64>();
+        if retained_start.saturating_sub(released_start) <= spare_len {
+            return Ok(());
+        }
+        self.aggregation = Some(AggregateSpace {
+            policy: ClassicAggregators::new(),
+            manager_dirty: true,
+            ..aggregation
+        });
+        to_free.extend(spare.into_iter().map(|extent| {
+            (
+                StoredAddress::new(extent.start()),
+                extent.len(),
+                FreeClass::Dead,
+            )
+        }));
+        Ok(())
+    }
+
+    /// Returns unused aggregate space and immediate-append reserves through persistent managers.
+    ///
+    /// Publishes replacement managers with the current root before truncating. A failure before
+    /// publication restores the reservation state. An uncertain publication prevents further
+    /// aggregate cleanup.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if aggregate geometry, metadata serialization, or address
+    /// resolution fails. Returns [`Error::Io`] if writing, synchronizing, or truncating fails.
+    pub(super) fn finalize_persistent_aggregates(&mut self) -> Result<(), Error> {
+        self.synchronize_aggregates()?;
+        let Some(aggregation) = self.aggregation else {
+            return Ok(());
+        };
+        if !aggregation.publication_confirmed {
+            return Ok(());
+        }
+        let spare = aggregation.unused().collect::<Vec<_>>();
+        if spare.is_empty()
+            && !aggregation.manager_dirty
+            && self.image.len() == self.fsm_len
+            && self.reserved.is_empty()
+        {
+            return Ok(());
+        }
+        let root = self
+            .addresses
+            .absolute(self.superblock.root_group_address)?;
+        let snapshot = self.snapshot_free();
+        self.aggregation = Some(AggregateSpace::new(aggregation.eoa));
+        self.publish_attempted = false;
+        let result = self.commit_persisting_releasing_reserve(
+            root,
+            spare
+                .into_iter()
+                .map(|extent| {
+                    (
+                        StoredAddress::new(extent.start()),
+                        extent.len(),
+                        FreeClass::Dead,
+                    )
+                })
+                .collect(),
+        );
+        if result.is_err() && !self.publish_attempted {
+            self.restore_free(snapshot);
+        } else if let Some(state) = &mut self.aggregation {
+            state.publication_confirmed = result.is_ok();
+        }
+        result
+    }
+
     /// Advances the stored EOA to include writes outside the aggregate windows.
     ///
     /// Retains aggregate reservations beyond the current image length after an interrupted write.
@@ -293,6 +415,9 @@ mod immediate_tests;
 
 #[cfg(test)]
 mod fsm_tests;
+
+#[cfg(test)]
+mod persistent_tests;
 
 #[cfg(test)]
 mod tests {

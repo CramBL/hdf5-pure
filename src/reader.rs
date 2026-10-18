@@ -907,13 +907,13 @@ impl Drop for FileInner {
     /// - A read-write file that persists its free space rewrites its on-disk
     ///   free-space managers into canonical shape (issue #173), so a
     ///   dropped-without-`close` handle leaves the same file a clean `close`
-    ///   would (a no-op unless an immediate append grew the file past them). A
+    ///   would, including returned aggregate spare and unspent append reserves. A
     ///   true crash (`SIGKILL`, power loss) skips `drop` entirely; the appended
     ///   data is still durable, under the default
     ///   [`SyncPolicy::Always`](crate::SyncPolicy).
-    /// - A file using [`FileSpaceStrategy::Aggr`] or [`FileSpaceStrategy::FsmAggr`] with
-    ///   persistence disabled releases unused aggregate tails after publishing the shorter EOA
-    ///   with the current root. An uncertain publication prevents this cleanup.
+    /// - An ordinary read-write file using [`FileSpaceStrategy::Aggr`] or
+    ///   [`FileSpaceStrategy::FsmAggr`] releases unused aggregate tails after publishing the shorter
+    ///   EOA with the current root. An uncertain publication prevents this cleanup.
     ///
     /// Staged edits are *not* committed here: dropping a handle discards them,
     /// which is what `close` exists to distinguish.
@@ -3389,10 +3389,11 @@ impl File {
     ///
     /// After `close`, a write through any surviving [`Dataset`]/[`Group`] handle
     /// or [`File`] clone returns [`Error::FileClosed`], and
-    /// reads still work. Under [`FileSpaceStrategy::Aggr`] or [`FileSpaceStrategy::FsmAggr`] with
-    /// persistence disabled, an ordinary read-write session releases unused aggregate
-    /// tails after publishing the shorter EOA with the current root, provided publication
-    /// completed successfully.
+    /// reads still work. Under [`FileSpaceStrategy::Aggr`] or [`FileSpaceStrategy::FsmAggr`],
+    /// an ordinary read-write session releases unused aggregate tails after publishing the shorter
+    /// EOA with the current root, provided publication completed successfully. A persistent session
+    /// returns unused interior aggregate spare through replacement free-space managers, subject
+    /// to its free-section threshold.
     /// A handle reached by [`Dataset::dereference`] reports
     /// [`Error::StaleHandle`] after the commit, while a handle opened by path
     /// re-resolves and keeps reading.
