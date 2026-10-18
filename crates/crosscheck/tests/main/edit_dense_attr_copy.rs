@@ -9,7 +9,7 @@
 //! destination, and references it from the rebuilt header — both within one file
 //! (`copy`) and across two (`copy_from`). These tests build dense-attribute
 //! sources, copy them, and verify every attribute (name + value) survives, in
-//! this crate's reader and the reference C library.
+//! this crate's reader and libhdf5.
 
 use hdf5_pure::{AttrValue, File, FileBuilder};
 use std::collections::HashMap;
@@ -282,7 +282,7 @@ fn cross_file_copy_reproduces_dense_attrs() {
 
 #[test]
 fn c_written_dense_attr_dataset_copies_in_place() {
-    // The denseness comes from the reference C library this time, so the read
+    // The denseness comes from libhdf5 this time, so the read
     // path is exercised against genuine C-written fractal-heap attribute storage,
     // not only this crate's own emitter.
     let dir = tempdir().unwrap();

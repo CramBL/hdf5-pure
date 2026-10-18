@@ -94,7 +94,7 @@ The fixtures under `tests/data/` are grouped by the library that wrote them: `c`
 ### Portability, soundness and the API
 
 - `just portability` checks the `no_std`, WASM and bare-metal builds, and runs Clippy on a 32-bit target with the truncating casts denied.
-- `just portability::test-32bit` and `test-big-endian` run the suite under QEMU. `test-32bit-hdf5` and `test-big-endian-hdf5` repeat that linking the reference C library.
+- `just portability::test-32bit` and `test-big-endian` run the suite under QEMU. `test-32bit-hdf5` and `test-big-endian-hdf5` repeat that linking libhdf5.
 - `just portability::test-wasm` runs the in-memory round trips as wasm32 under Node. It needs the `wasm-bindgen-test-runner` of the wasm-bindgen release in `Cargo.lock`, which `just portability::wasm-bindgen-version` prints.
 - `just soundness::miri` runs [Miri](https://github.com/rust-lang/miri) over selected tests of the `unsafe` and other high-risk paths.
 - `just api::semver` runs [cargo-semver-checks](https://github.com/obi1kenobi/cargo-semver-checks) against the last release, and `just api::msrv` checks that every published crate builds on the `rust-version` in `Cargo.toml`.

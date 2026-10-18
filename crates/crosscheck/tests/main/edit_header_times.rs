@@ -4,7 +4,7 @@
 //!
 //! A version 2 object header may carry two blocks between its flags byte and its
 //! chunk-0 size field: four timestamps (access, modification, change, birth) and
-//! the attribute phase-change thresholds. The reference C library stores the
+//! the attribute phase-change thresholds. libhdf5 stores the
 //! timestamps on **every** v2 header it writes — `H5O_CRT_OHDR_FLAGS_DEF` is
 //! `H5O_HDR_STORE_TIMES` — so this reaches every file libhdf5, h5py or netCDF-4
 //! produces in the latest format, and `EditSession` used to drop both blocks on

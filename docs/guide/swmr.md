@@ -12,7 +12,7 @@ It writes and then reads in one process to show the mechanics. In practice the w
 
 The writer appends chunks and flushes them in dependency order, child structures before the parent metadata that references them, with a durability barrier after each step. The dataset's authoritative size (its dataspace dimension) is published last, as the single commit point: before it a reader sees the old length, after it the new one, and never a torn view. A reader therefore only ever observes a consistent prefix of the data. To pick up newly appended data, a reader re-reads with [`refresh()`](#following-a-growing-file).
 
-Because the on-disk format is standard HDF5, a reader opened by this crate can follow a file being written by the reference C library or h5py in SWMR mode, and vice versa.
+Because the on-disk format is standard HDF5, a reader opened by this crate can follow a file being written by libhdf5 or h5py in SWMR mode, and vice versa.
 
 A SWMR writer honors [`SyncPolicy`](crate::SyncPolicy) like any other read-write session, as [choosing the fsync cadence](crate::_guide::editing#choosing-the-fsync-cadence) sets out. A reader **on the same machine** is unaffected: what it sees is the operating system's view of the file, which every write reaches as it is made, in the order it was made. The `fsync` barriers carry that order across power loss, not across processes. [`SyncPolicy::OnClose`](crate::SyncPolicy::OnClose) therefore drops the per-append barriers, as the reference library's SWMR path does, while keeping the one at teardown that clears the flag below. One caveat comes with it: a reader on *another host* over NFS may not see writes a client is holding until a flush.
 
@@ -120,7 +120,7 @@ Each [`refresh()`](crate::File::refresh) re-reads the entire file from disk (`O(
 
 ## Recovering a flagged file
 
-While a [`File::open_swmr_writer`](crate::File::open_swmr_writer) is open, the file's superblock carries an active-SWMR-writer flag (matching the reference C library and h5py) so concurrent readers may open it accordingly. [`close()`](crate::File::close) or dropping the writer clears it. If a writer process exits without a clean close, the file is left flagged.
+While a [`File::open_swmr_writer`](crate::File::open_swmr_writer) is open, the file's superblock carries an active-SWMR-writer flag (matching libhdf5 and h5py) so concurrent readers may open it accordingly. [`close()`](crate::File::close) or dropping the writer clears it. If a writer process exits without a clean close, the file is left flagged.
 
 That flag is durable under every [`SyncPolicy`](crate::SyncPolicy): clearing it is one of the writes [`close`](crate::File::close) and `drop` force a barrier for, since a lost clear would leave every subsequent open failing until [`File::clear_swmr_flag`](crate::File::clear_swmr_flag) ran. It is what every other open consults: while it stands, [`File::open`](crate::File::open), [`File::open_streaming`](crate::File::open_streaming), [`File::from_source`](crate::File::from_source), [`File::open_rw`](crate::File::open_rw) and a second [`File::open_swmr_writer`](crate::File::open_swmr_writer) all fail with [`Error::FileMarkedInUse`](crate::Error::FileMarkedInUse), exactly as `H5Fopen` fails with *"file is already open for write"*. [`File::open_swmr`](crate::File::open_swmr) is the one open that follows the flag, and that pairing is what the flag is for. [`File::from_bytes`](crate::File::from_bytes) does not consult it, since its caller already holds a snapshot of the bytes.
 

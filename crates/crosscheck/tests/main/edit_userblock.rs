@@ -1,6 +1,6 @@
 #![cfg(feature = "__hdf5-1.10")]
 //! Cross-validation for editing files with a userblock (the userblock slice of
-//! issue #104) against the reference C library. A single off-by-base address in
+//! issue #104) against libhdf5. A single off-by-base address in
 //! an edited file makes the C library error or read garbage, so reading the
 //! result back through `hdf5` is the external tripwire that the editor stored
 //! every root/link/layout address relative to the base address correctly.
@@ -14,7 +14,7 @@ use test_util_hdf5::absence;
 
 const UB: u64 = 512;
 
-/// Create a userblock file with the reference C library. The closure adds
+/// Create a userblock file with libhdf5. The closure adds
 /// datasets; the file is created with a 512-byte userblock and the modern library
 /// bounds so its on-disk format matches what a real `.mat`-style file carries.
 fn c_userblock_file(path: &std::path::Path, build: impl FnOnce(&hdf5::File)) {

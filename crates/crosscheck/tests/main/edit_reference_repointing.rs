@@ -1,5 +1,5 @@
 #![cfg(feature = "__hdf5-1.10")]
-//! The reference C library's view of a file whose stored object references this
+//! libhdf5's view of a file whose stored object references this
 //! crate repointed across a commit (issue #324).
 //!
 //! Two things only the C library can establish here. It writes the shapes this
@@ -267,7 +267,7 @@ fn a_reference_dataset_through_a_committed_datatype_is_repointed() {
     }
 }
 
-/// The reference C library's **default** output format — earliest library
+/// libhdf5's **default** output format - earliest library
 /// bounds, so every object header is version 1 — is reached too.
 ///
 /// This is not a legacy corner. `H5Fcreate` without `H5Pset_libver_bounds` uses

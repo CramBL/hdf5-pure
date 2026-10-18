@@ -40,7 +40,7 @@ fn c_file_repacked_then_read_by_c_library() {
     );
     assert!(f.dataset("doomed").is_err());
 
-    // The reference C library agrees — the real interop proof.
+    // libhdf5 agrees - the real interop proof.
     let c = hdf5::File::open(&dst).unwrap();
     assert_eq!(
         c.dataset("alpha").unwrap().read_raw::<f64>().unwrap(),
@@ -132,7 +132,7 @@ fn repack_roundtrips_c_vlen_string_dataset() {
         "repacked datatype must stay variable-length"
     );
 
-    // The reference C library agrees on both values and that the datatype is
+    // libhdf5 agrees on both values and that the datatype is
     // variable-length — the real interop proof.
     let c = hdf5::File::open(&dst).unwrap();
     let cds = c.dataset("labels").unwrap();
@@ -289,7 +289,7 @@ fn repack_roundtrips_c_vlen_sequence_dataset() {
         "repacked datatype must stay a non-string variable-length sequence"
     );
 
-    // The reference C library reads the exact sequences back — the interop proof
+    // libhdf5 reads the exact sequences back - the interop proof
     // that the re-staged global heap and rebuilt references are valid.
     let c = hdf5::File::open(&dst).unwrap();
     let cds = c.dataset("seqs").unwrap();
@@ -353,7 +353,7 @@ fn repack_roundtrips_c_object_reference_dataset() {
         "repacked datatype must stay an object reference"
     );
 
-    // The reference C library dereferences each repacked reference to the right
+    // libhdf5 dereferences each repacked reference to the right
     // object — the proof that the addresses were rewritten to the new locations
     // rather than copied stale.
     let c = hdf5::File::open(&dst).unwrap();
@@ -715,7 +715,7 @@ fn repack_refuses_an_attribute_whose_address_it_cannot_rewrite() {
 
 #[test]
 fn c_deflate_dataset_repacked_verbatim_read_by_both() {
-    // The reference C library writes a chunked + shuffle + deflate dataset.
+    // libhdf5 writes a chunked + shuffle + deflate dataset.
     // hdf5-pure repacks it by copying the C library's *own* compressed chunk
     // streams verbatim (it never re-encodes them), then both readers decode the
     // result. That the C library reads its exact values back proves the copied
@@ -991,7 +991,7 @@ fn repack_roundtrips_c_compound_with_vlen_string_member() {
         other => panic!("expected a compound datatype, got {other:?}"),
     }
 
-    // The reference C library reads every row back — the interop proof that the
+    // libhdf5 reads every row back - the interop proof that the
     // embedded heap references name collections in the *destination*.
     let c = hdf5::File::open(&dst).unwrap();
     let cvals = c.dataset("rows").unwrap().read_raw::<Labelled>().unwrap();
@@ -1431,7 +1431,7 @@ fn repack_refuses_chunked_compound_with_both_vlen_and_reference_members() {
     }
 }
 
-/// The attribute encodings the reference C library can write and this crate
+/// The attribute encodings libhdf5 can write and this crate
 /// cannot, carried across a repack and read back by that same library
 /// (issue #241).
 ///

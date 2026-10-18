@@ -362,7 +362,7 @@ fn set_dataset_attr_multi_hard_link_refused() {
 fn combined_mixed_edits_c_readable() {
     // One long-lived session mixes an immediate in-place append, a staged group
     // creation, a staged dataset-attribute edit, and a staged recursive delete —
-    // then more in-place appends after the commit. The reference C library reads
+    // then more in-place appends after the commit. libhdf5 reads
     // every result correctly.
     let dir = tempdir().unwrap();
     let path = dir.path().join("combined.h5");
@@ -475,7 +475,7 @@ fn a_filtered_partial_tail_with_two_hard_links_appends_in_place() {
 }
 
 /// An immediate append that draws its chunks from freed space (issue #349)
-/// produces a file the reference C library reads in full — the appended
+/// produces a file libhdf5 reads in full - the appended
 /// dataset, and the neighbours whose bytes the reuse must not have reached.
 ///
 /// The free-space assertion is what stops this from passing vacuously: a C read

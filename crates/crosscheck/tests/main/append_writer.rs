@@ -1,7 +1,7 @@
 #![cfg(feature = "__hdf5-1.10")]
 //! Interop tests for in-place appends through an owned handle: append to a
 //! filtered, unlimited,
-//! Extensible-Array-indexed dataset and confirm the reference C library
+//! Extensible-Array-indexed dataset and confirm libhdf5
 //! (`hdf5-metno`) reads the grown dataset back exactly — including datasets the C
 //! library itself created, whose incompressible chunks carry a nonzero per-chunk
 //! filter mask that in-place appends must leave untouched. Because `File::open_rw` + `Dataset::append`

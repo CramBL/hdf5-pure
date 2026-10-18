@@ -122,7 +122,7 @@ proptest! {
             ours.persisted_free_space().unwrap().iter().map(|(_, l)| l).sum()
         };
 
-        // The reference C library recovers the strategy and reads every dataset.
+        // libhdf5 recovers the strategy and reads every dataset.
         // This includes a fresh `persist = true` non-paged file, which must record a
         // defined `eoa_pre_fsm` (issue #178) or an assertion-enabled libhdf5 aborts
         // on open (H5Fsuper.c: `fs_persist => eoa_fsm_fsalloc != UNDEF`).

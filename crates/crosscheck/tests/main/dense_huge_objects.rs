@@ -1,7 +1,7 @@
 #![cfg(feature = "__hdf5-1.10")]
 //! Crosschecks fractal-heap storage ownership against independently decoded allocations.
 //!
-//! The reference C library produces dense links and attributes stored as huge objects, including
+//! libhdf5 produces dense links and attributes stored as huge objects, including
 //! multi-node huge-object indexes. The hdf5-pure writer produces supported managed heaps with
 //! direct and nested indirect roots. Each ownership crosscheck reconstructs the complete expected
 //! extent set from the serialized structures and compares it with the ownership result.

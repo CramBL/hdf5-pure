@@ -1,4 +1,4 @@
-# The tests that check hdf5-pure against the reference C library. The only
+# The tests that check hdf5-pure against libhdf5. The only
 # package that turns libhdf5 on: the crate's own suite, its examples and every
 # other job build without a C toolchain or a C library.
 [package]

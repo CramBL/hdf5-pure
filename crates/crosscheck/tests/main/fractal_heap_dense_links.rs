@@ -1,5 +1,5 @@
 #![cfg(feature = "__hdf5-1.10")]
-//! Reading dense (fractal-heap) group link storage that the reference C library
+//! Reading dense (fractal-heap) group link storage that libhdf5
 //! writes, across group sizes that grow the heap's root indirect block past a
 //! single direct block.
 //!

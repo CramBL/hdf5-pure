@@ -25,7 +25,7 @@ use tempfile::tempdir;
 
 use test_util_hdf5::{dataset, file, lock};
 
-/// Read a VL-string dataset with the reference C library.
+/// Read a VL-string dataset with libhdf5.
 fn read_c(path: &std::path::Path, name: &str) -> Vec<String> {
     dataset::read_libhdf5::<VarLenUnicode>(path, name)
         .into_iter()

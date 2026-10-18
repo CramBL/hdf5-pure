@@ -59,7 +59,7 @@
 //! `DIMENSION_LIST` uses, whose addresses sit in a global heap collection), an
 //! **enumeration** over one, and any compound or array reaching one of those.
 //!
-//! A file whose objects all carry version 1 headers — the reference C library's
+//! A file whose objects all carry version 1 headers - libhdf5's
 //! default, and h5py's — can never be *proved* free of references, since an
 //! attribute in one of those headers is never read. Such a file is therefore
 //! walked on every commit rather than on the first.
@@ -371,7 +371,7 @@ pub(crate) fn plan<S: Source + ?Sized>(
 /// Collect the byte edits owed by an object whose header [`read_oh_chunks`]
 /// would not read — a version 1 header — from the parsed form that reads both.
 ///
-/// Version 1 is not a museum piece: it is what the reference C library writes
+/// Version 1 is not a museum piece: it is what libhdf5 writes
 /// under its default, earliest-format bounds, so a file that was never told to
 /// use the latest format carries these throughout. Leaving them out left #324
 /// unfixed for exactly those files.
@@ -880,7 +880,7 @@ mod tests {
     /// Relabels a `u64` attribute, whose value is already the eight little-endian
     /// bytes an object reference is stored as. No public API stages one:
     /// [`AttrValue`] has no reference variant, so a file carrying such an
-    /// attribute was written by the reference C library.
+    /// attribute was written by libhdf5.
     fn reference_attr(name: &str, address: u64) -> AttributeMessage {
         let mut attr = build_attr_message(name, &AttrValue::U64(address));
         attr.datatype = make_object_reference_type();

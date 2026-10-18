@@ -172,7 +172,7 @@ pub fn make_object_reference_type() -> Datatype {
 ///
 /// The character set and padding live in the variable-length datatype's own
 /// bitfields; the base element type is an 8-bit unsigned integer
-/// (`H5T_STD_U8LE`), exactly the shape the reference C library and h5py emit for
+/// (`H5T_STD_U8LE`), exactly the shape libhdf5 and h5py emit for
 /// a VL string (`H5Tvlen_create(H5T_C_S1)` stores the base as a 1-byte
 /// integer). Matching it byte-for-byte is what lets the C library read these
 /// datasets back into `VarLenUnicode`/`VarLenAscii` without a conversion-path
@@ -633,7 +633,7 @@ impl EnumTypeBuilder {
     ///
     /// Fails if the base type is not an integer, if a member's raw byte length
     /// disagrees with the base type's size, or if a member's integer value does
-    /// not fit — rather than emitting a datatype message the reference C library
+    /// not fit. This prevents writing a datatype message libhdf5
     /// cannot read.
     pub fn build(self) -> Result<Datatype, FormatError> {
         let size = self.base_type.type_size();
@@ -1200,7 +1200,7 @@ pub(crate) fn stage_vl_payloads<'a>(
             None => {
                 // A null VL reference: HDF5 marks "no heap object" with a zero
                 // heap address (`H5T__vlen_disk_isnull` tests addr == 0), not the
-                // all-ones "undefined address" sentinel — the reference C library
+                // all-ones "undefined address" value. libhdf5
                 // rejects the latter as a bad heap index when reading.
                 refs.extend_from_slice(&0u32.to_le_bytes()); // length 0
                 refs.extend_from_slice(&0u64.to_le_bytes()); // null heap address
@@ -1467,7 +1467,7 @@ pub(crate) fn simple_1d(n: u64) -> Dataspace {
 /// [`VarLenString`](AttrValue::VarLenString) and
 /// [`VarLenAsciiString`](AttrValue::VarLenAsciiString) variants write the
 /// standard `H5T_STRING` with `STRSIZE = H5T_VARIABLE`, which is what h5py and
-/// the reference C library write and read;
+/// libhdf5 write and read.
 /// [`VarLenAsciiCharArray`](AttrValue::VarLenAsciiCharArray) writes MATLAB's sequence
 /// of one-byte strings over identical element bytes (issue #383). Both keep
 /// their strings in a global heap collection rather than in the attribute
@@ -1647,7 +1647,7 @@ pub enum AttrValue {
     /// exactly this datatype.
     ///
     /// For the standard variable-length string — a `H5T_STRING` of variable size,
-    /// which is what h5py and the reference C library write — reach for
+    /// which is what h5py and libhdf5 write - reach for
     /// [`VarLenAsciiStringArray`](AttrValue::VarLenAsciiStringArray) instead.
     /// Its element bytes are identical to these; only the datatype differs. Both
     /// need a global heap collection in the file.
@@ -1655,7 +1655,7 @@ pub enum AttrValue {
     /// A variable-length UTF-8 string: `H5T_STRING` with
     /// `STRSIZE = H5T_VARIABLE`, `NULLTERM`, `CSET = UTF-8`.
     ///
-    /// The standard encoding — what h5py, the reference C library and this
+    /// The standard encoding - what h5py, libhdf5 and this
     /// crate's own `DatasetBuilder::with_vlen_strings` write, and what h5py
     /// hands back as a `str`. The value lives in a global heap collection, and
     /// the attribute holds one 16-byte reference to it.

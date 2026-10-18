@@ -1,6 +1,6 @@
 //! The files under `tests/data/c/` that the crate's unit tests read.
 //!
-//! The reference C library is a dependency of this package alone, so a unit
+//! libhdf5 is a dependency of this package alone, so a unit
 //! test that needs what only it writes reads a committed file, written here.
 //! `just test-data::c` rewrites them, and without `HDF5_PURE_UPDATE_TEST_DATA`
 //! set each test checks the committed copy instead, for every property the

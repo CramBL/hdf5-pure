@@ -4,7 +4,7 @@
 //! Reference-C-library interop for the dense (fractal-heap) attribute bounds
 //! (issue #191).
 //!
-//! The bound this crate enforces is one the reference C library enforces too, and
+//! The bound this crate enforces is one libhdf5 enforces too, and
 //! it enforces it by *aborting*: an assertion-enabled build hits
 //! `H5A__attr_release_table` and raises SIGABRT rather than returning an error.
 //! A test that opened such a file in-process would take the whole test binary

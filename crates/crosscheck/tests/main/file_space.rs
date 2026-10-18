@@ -2229,7 +2229,7 @@ fn c_library_reads_our_fresh_persisting_file() {
 #[case::not_a_power_of_two(3000)]
 fn c_library_reads_our_paged_file(#[case] page_size: u64) {
     // hdf5-pure writes a genuine paged (H5F_FSPACE_STRATEGY_PAGE) persisting file
-    // with small and large datasets. The reference C library must recover the
+    // with small and large datasets. libhdf5 must recover the
     // paged strategy, read every dataset, load the per-page-type free-space
     // managers (H5Fget_freespace parses our FSHD/FSSE blocks), and reopen the
     // file read-write to mutate it (proving the paged layout is consistent).
@@ -2370,7 +2370,7 @@ fn c_library_reads_our_bounded_mutated_paged_file() {
     // hdf5-pure creates a genuine paged persisting file, then grows it through the
     // bounded backend, appending enough rows to force
     // extensible-array index growth so the append allocates metadata as well as
-    // raw chunks (exercising page segregation). The reference C library must then
+    // raw chunks (exercising page segregation). libhdf5 must then
     // recover the paged strategy, read every row, load the per-page-type managers
     // (H5Fget_freespace parses our FSHD/FSSE blocks), and reopen it read-write.
     let dir = tempdir().unwrap();
@@ -2441,7 +2441,7 @@ fn c_library_reads_our_staged_mutated_paged_file() {
     // #198): hdf5-pure creates a genuine paged persisting file, then mutates it
     // through `File::open_rw` + staged edits + `commit`, which allocates both raw
     // data (a new dataset's values, appended chunks) and metadata (object headers,
-    // the rebuilt chunk index, the rewritten managers). The reference C library
+    // the rebuilt chunk index, the rewritten managers). libhdf5
     // must then recover the paged strategy, read every dataset, load the
     // per-page-type managers, and reopen the file read-write.
     let dir = tempdir().unwrap();
@@ -2733,7 +2733,7 @@ fn c_library_reads_our_paged_file_after_a_cross_page_type_claim() {
 #[test]
 #[cfg(target_endian = "little")]
 fn pure_bounded_mutates_c_created_paged_file() {
-    // The reverse direction: the reference C library creates a genuine paged
+    // The reverse direction: libhdf5 creates a genuine paged
     // persisting file with an unlimited chunked dataset; hdf5-pure grows it through
     // the bounded backend; then both the C library and hdf5-pure read every row
     // back and the C library re-parses the rewritten managers.

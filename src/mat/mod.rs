@@ -398,7 +398,7 @@
 //! In MATLAB this loads as `iscell(path) == true`, with elements addressed as `path{1}.x`, and so
 //! on. Empty `None` slots load as `struct([])` (`isempty(fieldnames(...))`).
 //!
-//! Cell arrays load correctly in MATLAB, libmatio (the reference C library), Julia's `MAT.jl`, and
+//! Cell arrays load correctly in MATLAB, libmatio (a C library), Julia's `MAT.jl`, and
 //! Python through `pymatreader` and `hdf5storage`. GNU Octave 11's `load` does not follow object
 //! references for v7.3 cells, warning "unknown datatype", so one of the other tools loads such a
 //! file.

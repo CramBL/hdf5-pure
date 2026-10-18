@@ -146,7 +146,7 @@ pub(crate) fn acquire_exclusive(
 }
 
 /// Superblock status-flag bit 0 (`H5F_SUPER_WRITE_ACCESS`): the file is open
-/// for write access. The reference C library raises it for *any* writer; this
+/// for write access. libhdf5 raises it for *any* writer. This
 /// crate raises it for two:
 ///
 /// - [`crate::File::open_swmr_writer`], alongside [`SWMR_WRITE_ACCESS`];

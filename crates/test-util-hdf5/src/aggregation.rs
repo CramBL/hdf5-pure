@@ -1,5 +1,5 @@
 //! Workloads of object creations and deletions that the classic aggregation tests run through
-//! hdf5-pure and through the reference C library.
+//! hdf5-pure and through libhdf5.
 
 use std::path::Path;
 

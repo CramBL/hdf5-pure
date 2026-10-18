@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn matches_c_library_none_bytes() {
-        // Exact bytes the reference C library (HDF5 1.14.6) wrote for strategy
+        // Exact bytes libhdf5 (HDF5 1.14.6) wrote for strategy
         // NONE, captured via tmp/probe_fsinfo.py.
         let expected = [
             0x01u8, 0x03, 0x00, // version=1, strategy=NONE(3), persist=0

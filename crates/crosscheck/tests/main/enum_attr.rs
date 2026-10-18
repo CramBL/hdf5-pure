@@ -1,5 +1,5 @@
 #![cfg(feature = "hdf5")]
-//! An enumeration *attribute* written by the reference C library must reach the
+//! An enumeration *attribute* written by libhdf5 must reach the
 //! caller, decoded through the enum's integer base type (#248).
 //!
 //! This is the read direction of `crates/crosscheck/tests/main/enum_base.rs`, and it matters because

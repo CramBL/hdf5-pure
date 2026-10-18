@@ -4,7 +4,7 @@
 //! address, which for a userblock file is where the userblock ends. The attribute
 //! walk used to take the Attribute Info message's fractal-heap address as an
 //! absolute file offset, so on such a file it looked one userblock too early and
-//! returned `InvalidFractalHeapSignature` — for a file the reference C library
+//! returned `InvalidFractalHeapSignature` - for a file libhdf5
 //! reads correctly, and that this crate had just written.
 //!
 //! Nothing paired the two before: dense storage needed more than eight

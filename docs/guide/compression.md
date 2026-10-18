@@ -130,7 +130,7 @@ builder
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
-The filter records the dataset's fill value, and an element equal to it is stored as a reserved code, so a chunk that is mostly fill packs to the width of what is left. The reference C library (and h5py) records one on *every* scale-offset dataset, since an untouched fill value still counts as defined, and this crate does the same: [`with_fill_value`](crate::DatasetBuilder::with_fill_value) is carried into the filter's parameters, and a dataset without one records the library default of zero. Reserving that code costs one bit per element on a chunk whose values span an exact power of two, which is what the reference pays for it too. In the lossy float D-scale mode an element counts as a fill value when it lands within one decimal quantum of it, so a value that close decodes as the fill value.
+The filter records the dataset's fill value, and an element equal to it is stored as a reserved code, so a chunk that is mostly fill packs to the width of what is left. libhdf5 (and h5py) records one on *every* scale-offset dataset, since an untouched fill value still counts as defined, and this crate does the same: [`with_fill_value`](crate::DatasetBuilder::with_fill_value) is carried into the filter's parameters, and a dataset without one records the library default of zero. Reserving that code costs one bit per element on a chunk whose values span an exact power of two, which is what the reference pays for it too. In the lossy float D-scale mode an element counts as a fill value when it lands within one decimal quantum of it, so a value that close decodes as the fill value.
 
 Both forms are read and written, so appending to or repacking a dataset whose filter has no fill value keeps it that way.
 

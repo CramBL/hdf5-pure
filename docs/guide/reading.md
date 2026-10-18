@@ -239,7 +239,7 @@ Combined with a [streaming open](crate::_guide::streaming#reading-a-large-datase
 
 ### Datasets with unwritten storage
 
-HDF5 allocates a dataset's storage lazily, so a dataset can exist with a shape and nothing behind it: created and never written, or written in part, which leaves some chunks of a chunked dataset allocated and others not. A read of those regions returns the dataset's **fill value**, the value [`with_fill_value`](crate::DatasetBuilder::with_fill_value) set, or the type's zero when none was set. The reference C library does the same, so a dataset another tool created and has not filled in yet returns a full-size array of its fill value.
+HDF5 allocates a dataset's storage lazily, so a dataset can exist with a shape and nothing behind it: created and never written, or written in part, which leaves some chunks of a chunked dataset allocated and others not. A read of those regions returns the dataset's **fill value**, the value [`with_fill_value`](crate::DatasetBuilder::with_fill_value) set, or the type's zero when none was set. libhdf5 does the same, so a dataset another tool created and has not filled in yet returns a full-size array of its fill value.
 
 [`Dataset::fill_value::<T>()`](crate::Dataset::fill_value) reports the value itself, returning `None` when the dataset uses the library default.
 

@@ -189,7 +189,7 @@ fn a_reference_inside_a_compound_element_is_repointed() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("compound.h5");
 
-    // A compound of {object reference, i32} is the shape the reference C library
+    // A compound of {object reference, i32} is the shape libhdf5
     // uses for a dimension scale's `REFERENCE_LIST`, and the one that proves the
     // walk addresses a reference *inside* an element rather than only an element
     // that is one.
@@ -281,7 +281,7 @@ fn a_reference_to_a_deleted_object_is_left_dangling() {
 
     // Deleting the target is not a relocation: the object is gone, and HDF5 has
     // no rule that says a reference to it becomes anything else. The address is
-    // left exactly as it was, which is also what the reference C library does.
+    // left exactly as it was, which is also what libhdf5 does.
     let session = File::open_rw(&path).unwrap();
     session.root().delete("g").unwrap();
     session.commit().unwrap();

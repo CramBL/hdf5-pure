@@ -187,7 +187,7 @@ fn c_library_converts_our_large_group_to_dense() {
     }
 }
 
-/// The reference C library writes each string and integer attribute encoding,
+/// libhdf5 writes each string and integer attribute encoding,
 /// and hdf5-pure reports the `AttrValue` variant that matches it.
 ///
 /// Every other attribute crosscheck in this suite goes the other way — we write,

@@ -1,6 +1,6 @@
 //! Filter pipeline fixtures and error messages used by the unit tests.
 //!
-//! The reference C library is a dependency of the crosscheck package alone, so
+//! libhdf5 is a dependency of the crosscheck package alone, so
 //! a unit test that needs a C-written input reads a committed one under
 //! `tests/data/c/`, written by `crates/crosscheck/tests/main/c_test_data.rs`. In the
 //! other direction `src/repack.rs` commits a file it writes through a

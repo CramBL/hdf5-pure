@@ -166,6 +166,6 @@ let datatype = EnumTypeBuilder::with_base(make_u16_type())
 # Ok::<(), hdf5_pure::FormatError>(())
 ```
 
-[`raw_value(name, bytes)`](crate::EnumTypeBuilder::raw_value) takes a member's raw little-endian bytes, for values wider than an `i64` (a `u64` base near its maximum) or to reproduce stored bytes verbatim. [`build()`](crate::EnumTypeBuilder::build) rejects a non-integer base, a value that does not fit the base type, and raw bytes whose length disagrees with it. Each of the three would produce a datatype message the reference C library cannot read.
+[`raw_value(name, bytes)`](crate::EnumTypeBuilder::raw_value) takes a member's raw little-endian bytes, for values wider than an `i64` (a `u64` base near its maximum) or to reproduce stored bytes verbatim. [`build()`](crate::EnumTypeBuilder::build) rejects a non-integer base, a value that does not fit the base type, and raw bytes whose length disagrees with it. Each of the three would produce a datatype message libhdf5 cannot read.
 
 For more on the writing entry points used throughout this page, see [Writing files](crate::_guide::writing).

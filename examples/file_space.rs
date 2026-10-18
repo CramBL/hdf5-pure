@@ -48,7 +48,7 @@ fn main() {
     builder.write(&persisting).expect("write file");
 
     // The strategy is stored in a superblock-extension message and survives a
-    // reopen (the reference C library observes it too).
+    // reopen (libhdf5 observes it too).
     let strategy = File::open(&persisting).unwrap().file_space_strategy();
     assert_eq!(strategy, Some(FileSpaceStrategy::FsmAggr));
     println!("recorded strategy: {strategy:?}\n");

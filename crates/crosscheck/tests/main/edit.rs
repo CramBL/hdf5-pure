@@ -1,5 +1,5 @@
 #![cfg(feature = "__hdf5-1.10")]
-//! Cross-validation for in-place editing against the reference C library
+//! Cross-validation for in-place editing against libhdf5
 //! (issue #32): files the C library *writes* are edited in place by
 //! `File::open_rw`, and the result is read back by both `hdf5-pure` and the C
 //! library. This proves the editor works on files it did not itself produce, in
@@ -252,7 +252,7 @@ fn c_v0_symboltable_file_edited_then_read_by_c_library() {
     );
     assert!(f.dataset("doomed").is_err());
 
-    // The reference C library reads the edited version-0 file and agrees.
+    // libhdf5 reads the edited version-0 file and agrees.
     let c = hdf5::File::open(&path).unwrap();
     assert_eq!(
         c.dataset("alpha").unwrap().read_raw::<f64>().unwrap(),
@@ -379,7 +379,7 @@ fn c_library_reads_group_attributes_edited_in_place() {
 fn free_space_reuse_and_truncation_stay_c_readable() {
     // Free-space management (issue #21): within one session, add a large dataset
     // then delete it. The freed blocks and superseded headers are reclaimed and
-    // the file is truncated. The reference C library must still read the survivor
+    // the file is truncated. libhdf5 must still read the survivor
     // correctly from the shrunken file, and its end-of-file must be consistent.
     let dir = tempdir().unwrap();
     let path = dir.path().join("c_freespace.h5");
@@ -419,7 +419,7 @@ fn free_space_reuse_and_truncation_stay_c_readable() {
     assert_eq!(f.file_size(), std::fs::metadata(&path).unwrap().len());
     assert!(f.dataset("bulk").is_err());
 
-    // The reference C library reads the shrunken file and the survivors intact.
+    // libhdf5 reads the shrunken file and the survivors intact.
     let c = hdf5::File::open(&path).unwrap();
     absence::assert_libhdf5_absent(&c.dataset("bulk").unwrap_err(), "bulk");
     assert_eq!(
@@ -609,7 +609,7 @@ fn chunked_and_filtered_datasets_added_in_place_are_c_readable() {
         );
     }
 
-    // The reference C library reads the filtered/chunked/extensible additions and
+    // libhdf5 reads the filtered/chunked/extensible additions and
     // sees them as chunked storage.
     let c = hdf5::File::open(&path).unwrap();
     assert_eq!(
@@ -731,7 +731,7 @@ fn deleting_chunked_datasets_in_place_stays_c_readable() {
         );
     }
 
-    // The reference C library reads the reclaimed file too.
+    // libhdf5 reads the reclaimed file too.
     let c = hdf5::File::open(&path).unwrap();
     absence::assert_libhdf5_absent(&c.dataset("c_chunked").unwrap_err(), "c_chunked");
     assert_eq!(
@@ -753,7 +753,7 @@ fn deleting_chunked_datasets_in_place_stays_c_readable() {
 #[cfg(target_endian = "little")]
 fn overwriting_chunked_datasets_in_place_stays_c_readable() {
     // Issue #101: overwriting a chunked dataset's values in place must leave a
-    // file the reference C library still reads. Two paths are exercised:
+    // file libhdf5 still reads. Two paths are exercised:
     //  - a C-written HDF5-1.8 dataset uses a *B-tree v1* chunk index (the foreign
     //    layout the editor never emits); an unfiltered same-shape overwrite reuses
     //    its chunk slots without rewriting the index, so it stays B-tree v1; and
@@ -835,7 +835,7 @@ fn overwriting_chunked_datasets_in_place_stays_c_readable() {
             deflate_new
         );
     }
-    // The reference C library reads both and still sees them as chunked.
+    // libhdf5 reads both and still sees them as chunked.
     let c = hdf5::File::open(&path).unwrap();
     assert_eq!(
         c.dataset("c_chunked").unwrap().read_raw::<i32>().unwrap(),
@@ -919,7 +919,7 @@ fn fits_with_slack_filtered_overwrite_stays_c_readable() {
             .unwrap(),
         updated
     );
-    // The reference C library reads the in-place-rebuilt index + new values, and
+    // libhdf5 reads the in-place-rebuilt index + new values, and
     // still sees the dataset as chunked.
     let c = hdf5::File::open(&path).unwrap();
     assert_eq!(c.dataset("d").unwrap().read_raw::<i32>().unwrap(), updated);
@@ -932,7 +932,7 @@ fn fits_with_slack_filtered_overwrite_stays_c_readable() {
 #[test]
 fn copying_chunked_datasets_in_place_stays_c_readable() {
     // Issue #101: copying a chunked/filtered dataset in place must leave a file
-    // the reference C library still reads, with the copy chunked + compressed. A
+    // libhdf5 still reads, with the copy chunked + compressed. A
     // C-written B-tree-v1 source is reproduced with a v4 index (the writer emits
     // only single/fixed/extensible), which the C library reads as chunked too.
     let dir = tempdir().unwrap();
@@ -989,7 +989,7 @@ fn copying_chunked_datasets_in_place_stays_c_readable() {
             deflate
         );
     }
-    // The reference C library reads the copies and sees them as chunked.
+    // libhdf5 reads the copies and sees them as chunked.
     let c = hdf5::File::open(&path).unwrap();
     assert_eq!(
         c.dataset("c_chunked_copy")
@@ -1205,7 +1205,7 @@ fn deleting_all_hard_links_to_an_object_in_one_commit_is_safe() {
 
 #[test]
 fn cross_file_copy_from_read_by_c_library() {
-    // A cross-file `copy_from` must produce a destination the reference C library
+    // A cross-file `copy_from` must produce a destination libhdf5
     // can read: the copied object's verbatim headers, data, and attributes have to
     // be valid in the new file, not just resolvable by this crate's own reader.
     let dir = tempdir().unwrap();

@@ -85,7 +85,7 @@ use crate::libver::LibVer;
 ///
 /// | Status | Meaning |
 /// |---|---|
-/// | **Genuine** | The property changes the on-disk result exactly as HDF5 specifies, verified against the reference C library. |
+/// | **Genuine** | The property changes the on-disk result exactly as HDF5 specifies, verified against libhdf5. |
 /// | **Recorded** | The value is written to the file and round-trips through the C library, and the layout stays as it was, which is correct for a fresh file, since it has no free space to manage yet. |
 /// | **Read-only** | Honored when a file is read, with no write-side effect. |
 /// | **Behavioral** | Changes how the crate operates on the file, its memory and its durability, without changing a byte of the result. There is nothing on disk to verify against the C library. |
