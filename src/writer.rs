@@ -510,6 +510,146 @@ mod streaming_tests {
 
     type Calls = Arc<Mutex<Vec<usize>>>;
 
+    #[rstest::rstest]
+    #[case::default(None)]
+    #[case::fsm_session(Some((FileSpaceStrategy::FsmAggr, false)))]
+    #[case::fsm_persistent(Some((FileSpaceStrategy::FsmAggr, true)))]
+    #[case::aggr(Some((FileSpaceStrategy::Aggr, false)))]
+    #[case::none(Some((FileSpaceStrategy::None, false)))]
+    #[case::page(Some((FileSpaceStrategy::Page, true)))]
+    fn mixed_reservations_stream_identically(
+        #[case] strategy: Option<(FileSpaceStrategy, bool)>,
+        #[values(0, 4_096)] userblock: u64,
+    ) {
+        let build = |produced_calls: &Calls, chunk_calls: &Calls| {
+            let mut builder = FileBuilder::new();
+            if let Some((strategy, persist)) = strategy {
+                builder.with_file_space_strategy(strategy, persist, 1);
+            }
+            builder.with_userblock(userblock);
+            if userblock != 0 {
+                builder.with_userblock_content(b"writer prefix");
+            }
+            builder.commit_datatype("integer_type", crate::type_builders::make_i32_type());
+            builder.set_attr("root_label", AttrValue::VarLenString("root value".into()));
+            for index in 0..9 {
+                builder.set_attr(&format!("root_{index}"), AttrValue::I64(index));
+            }
+            let mut group = builder.create_group("group");
+            group.set_attr("group_label", AttrValue::VarLenString("group value".into()));
+            for index in 0..9 {
+                group.set_attr(&format!("group_{index}"), AttrValue::I64(index));
+            }
+            let dataset = group.create_dataset("values");
+            dataset
+                .with_i32_data(&[1, 2, 3])
+                .with_committed_datatype("integer_type");
+            dataset.set_attr(
+                "dataset_label",
+                AttrValue::VarLenString("dataset value".into()),
+            );
+            for index in 0..9 {
+                dataset.set_attr(&format!("dataset_{index}"), AttrValue::I64(index));
+            }
+            builder.add_group(group.finish());
+            builder.create_dataset("empty").with_u8_data(&[]);
+            builder
+                .create_dataset("references")
+                .with_path_references(&["group/values"]);
+            builder
+                .create_dataset("strings")
+                .with_vlen_strings(&["first", "second"]);
+            builder
+                .create_dataset("chunked_strings")
+                .with_vlen_strings(&["early", "heap", "references"])
+                .with_chunks(&[1])
+                .with_deflate(6);
+            builder
+                .create_dataset("filtered")
+                .with_f64_data(&[1.0, 2.0, 3.0, 4.0, 5.0])
+                .with_chunks(&[2])
+                .with_deflate(6);
+            builder.create_dataset("produced").with_produced_data(
+                crate::type_builders::make_u8_type(),
+                &[67],
+                67,
+                16,
+                Box::new(BlockProvider {
+                    total: 67,
+                    block: 16,
+                    calls: Arc::clone(produced_calls),
+                    short_block: None,
+                }),
+            );
+            stage_lazy(
+                &mut builder,
+                "verbatim",
+                vec![f64_chunk(&[1.0, 2.0]), f64_chunk(&[3.0, 4.0])],
+                &[4],
+                &[2],
+                Some(&[MaxExtent::Unlimited]),
+                Arc::clone(chunk_calls),
+                None,
+            );
+            builder
+        };
+        let produced_calls = Calls::default();
+        let chunk_calls = Calls::default();
+        let buffered = build(&produced_calls, &chunk_calls).finish().unwrap();
+        assert_eq!(*produced_calls.lock().unwrap(), [0, 1, 2, 3, 4]);
+        assert_eq!(*chunk_calls.lock().unwrap(), [0, 1]);
+        produced_calls.lock().unwrap().clear();
+        chunk_calls.lock().unwrap().clear();
+        let mut sink = NonseekableSink::default();
+        build(&produced_calls, &chunk_calls)
+            .finish_to(&mut sink)
+            .unwrap();
+        assert_eq!(sink.bytes, buffered);
+        assert_eq!(*produced_calls.lock().unwrap(), [0, 1, 2, 3, 4]);
+        assert_eq!(*chunk_calls.lock().unwrap(), [0, 1]);
+        let file = crate::reader::File::from_bytes(buffered).unwrap();
+        assert_eq!(
+            file.dataset("group/values").unwrap().read_i32().unwrap(),
+            [1, 2, 3]
+        );
+        assert_eq!(
+            file.dataset("chunked_strings")
+                .unwrap()
+                .read_vlen_strings(crate::vl_data::VlenStringReadOptions::default())
+                .unwrap(),
+            ["early", "heap", "references"]
+        );
+        assert_eq!(
+            file.dataset("strings")
+                .unwrap()
+                .read_vlen_strings(crate::vl_data::VlenStringReadOptions::default())
+                .unwrap(),
+            ["first", "second"]
+        );
+        assert_eq!(
+            file.dataset("produced").unwrap().read_raw().unwrap(),
+            BlockProvider::expected(67)
+        );
+        assert_eq!(read_back_f64(&sink.bytes, "verbatim"), [1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[derive(Default)]
+    struct NonseekableSink {
+        bytes: Vec<u8>,
+    }
+
+    impl Write for NonseekableSink {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let count = bytes.len().min(17);
+            self.bytes.extend_from_slice(&bytes[..count]);
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     /// A test [`ChunkProvider`] serving fixed in-memory chunk bytes, recording
     /// the order of `chunk_bytes` calls so a test can assert the streaming
     /// writer pulls each chunk exactly once, in ascending slot order. With

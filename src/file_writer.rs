@@ -59,6 +59,8 @@ use crate::data_layout::DataLayout;
 use crate::dataspace::{Dataspace, DataspaceType, Extent, MaxExtent};
 use crate::error::{FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::file_create_properties::FileCreateProperties;
+use crate::file_emission::Emission;
+use crate::file_emission::Reservation;
 use crate::file_space_info;
 use crate::file_space_info::DEFAULT_THRESHOLD;
 use crate::file_space_info::FileSpaceInfo;
@@ -1745,19 +1747,6 @@ impl FileWriter {
                 sink.put(&block)?;
                 written += expected;
                 index += 1;
-            }
-            Ok(())
-        }
-
-        /// Emit one variable-length dataset's or attribute's global heap
-        /// collections back to back, in the order `place_collections` assigned
-        /// their addresses.
-        fn emit_collections<Sk: ByteSink>(
-            sink: &mut Sk,
-            collections: &[Vec<u8>],
-        ) -> Result<(), FormatError> {
-            for collection in collections {
-                sink.put(collection)?;
             }
             Ok(())
         }
@@ -3614,16 +3603,16 @@ impl FileWriter {
             }
         }
 
-        // Patch VL references (attribute and dataset-element) with the GCOL
-        // addresses, which sit after all dataset data. Attribute collections are
-        // emitted first (root, groups, datasets), then dataset-element
-        // collections, and the cursor walk below assigns addresses in that same
-        // order so it matches the emission order at the end of the buffer.
+        // Place the remaining global heap collections after dataset data and patch their
+        // references. The writer places attribute collections in root, group, and dataset order,
+        // followed by dataset-element collections, and derives their emission addresses in the
+        // same order.
         let has_vl = !vl_root.is_empty()
             || grp_vl.iter().any(|v| !v.is_empty())
             || ds_vl.iter().any(|v| !v.is_empty())
             || all_ds.iter().any(|d| d.vl_string_staging.is_some());
 
+        let gcol_start = cursor2;
         let mut gcol_total_size = 0u64;
         if has_vl {
             let mut gcol_cursor = cursor2;
@@ -3643,12 +3632,9 @@ impl FileWriter {
                     patch_vl_refs(&mut all_ds[di].attrs[patch.attr_index].raw_data, &addrs);
                 }
             }
-            // Dataset-element VL references. The references live in the
-            // contiguous/compact element bytes (`ds_layouts[i].data`, cloned
-            // from `d.raw`). A chunked dataset's references are *not* here: they
-            // sit inside chunks that were encoded earlier, so the loop below must
-            // skip it. Dropping that skip would patch heap addresses into the
-            // encoded (possibly compressed) chunk blob and silently corrupt it.
+            // Patch dataset-element references in the contiguous element bytes moved into
+            // `ds_layouts[i].data`. The writer patches chunked references before encoding and
+            // places their collections after the superblock.
             for (i, d) in all_ds.iter().enumerate() {
                 // A chunked VL dataset was placed and patched before its chunks
                 // were encoded; its references are already final.
@@ -3734,24 +3720,64 @@ impl FileWriter {
         .build();
         sink.put(&hdf5_pure_format::__private::serialize_superblock(&sb)?)?;
 
-        // Early-placed VL collections, at the addresses patched into the chunked
-        // datasets' references before their chunks were encoded. This must walk
-        // `early_gcol` in the order the placement loop built it, or the patched
-        // addresses name the wrong collections.
-        for &i in &early_gcol {
-            let staging = all_ds[i]
-                .vl_string_staging
-                .as_ref()
-                .expect("early_gcol only holds datasets with VL staging");
-            emit_collections(sink, &staging.collections)?;
+        /// Identifies borrowed bytes or a deferred dataset or group serialization.
+        enum FileData<'a> {
+            Bytes(&'a [u8]),
+            Dataset(usize),
+            Group(usize),
         }
-        debug_assert_eq!(
-            sink.position(),
-            ub as u64 + root_group_addr.get(),
-            "early VL collections must occupy exactly the space reserved for them"
-        );
 
-        // Root group OH
+        // Derive collection addresses in the placement order used to patch their references.
+        let base = BaseAddress::new(ub as u64);
+        let mut early_collections = early_gcol
+            .iter()
+            .flat_map(|&i| {
+                all_ds[i]
+                    .vl_string_staging
+                    .as_ref()
+                    .expect("early_gcol only holds datasets with VL staging")
+                    .collections
+                    .iter()
+            })
+            .scan(SUPERBLOCK_SIZE as u64, |cursor, collection| {
+                Some(
+                    advance(cursor, collection.len() as u64).and_then(|address| {
+                        Reservation::new(
+                            base,
+                            address,
+                            collection.len() as u64,
+                            FileData::Bytes(collection),
+                        )
+                    }),
+                )
+            });
+        let attribute_collections = vl_root
+            .iter()
+            .chain(grp_vl.iter().flatten())
+            .chain(ds_vl.iter().flatten())
+            .flat_map(|patch| &patch.collections);
+        let late_collections = all_ds
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !early_gcol.contains(i))
+            .filter_map(|(_, d)| d.vl_string_staging.as_ref())
+            .flat_map(|staging| &staging.collections);
+        let mut late_collections =
+            attribute_collections
+                .chain(late_collections)
+                .scan(gcol_start, |cursor, collection| {
+                    Some(
+                        advance(cursor, collection.len() as u64).and_then(|address| {
+                            Reservation::new(
+                                base,
+                                address,
+                                collection.len() as u64,
+                                FileData::Bytes(collection),
+                            )
+                        }),
+                    )
+                });
+
         let tables = LinkTables {
             all_ds: &all_ds,
             committed: &committed,
@@ -3773,77 +3799,64 @@ impl FileWriter {
                 .map(|b| b.attr_info_message.as_slice()),
         )?;
         debug_assert_eq!(root_oh.len(), root_oh_size);
-        sink.put(&root_oh)?;
-        if let Some(ref blob) = root_dense_blob {
-            sink.put(&blob.blob)?;
-        }
-
-        // Group OHs + dense blobs
-        for (gi, g) in groups.iter().enumerate() {
-            let links = tables.links(&g.ds_indices, &g.committed_indices, &g.sub_group_indices);
-            let oh = build_group_oh(
-                &links,
-                &g.attrs,
-                group_dense_blobs[gi]
-                    .as_ref()
-                    .map(|b| b.attr_info_message.as_slice()),
-            )?;
-            debug_assert_eq!(oh.len(), group_oh_sizes[gi]);
-            sink.put(&oh)?;
-            if let Some(ref blob) = group_dense_blobs[gi] {
-                sink.put(&blob.blob)?;
-            }
-        }
-
-        // Committed datatype OHs, at the addresses their references name.
-        for oh in &committed_oh {
-            sink.put(oh)?;
-        }
-
-        // Dataset OHs + dense blobs
-        for (i, oh) in ds_oh_bytes2.iter().enumerate() {
-            sink.put(oh)?;
-            if let Some(ref dense) = ds_dense_blobs[i] {
-                sink.put(&dense.blob)?;
-            }
-        }
-
-        // Data. Contiguous/compact and eager chunked datasets emit their
-        // in-memory bytes; a streamed (lazy) chunked dataset pulls each chunk
-        // from its provider one at a time, so its bytes never all reside here.
-        for (i, layout) in ds_layouts.iter().enumerate() {
-            emit_ds_data(
-                sink,
-                &layout.data,
-                all_ds[i].raw_chunks.as_ref(),
-                all_ds[i].produced.as_ref(),
-            )?;
-        }
-
-        // Global heap collections
-        for patch in &vl_root {
-            emit_collections(sink, &patch.collections)?;
-        }
-        for patches in &grp_vl {
-            for patch in patches {
-                emit_collections(sink, &patch.collections)?;
-            }
-        }
-        for patches in &ds_vl {
-            for patch in patches {
-                emit_collections(sink, &patch.collections)?;
-            }
-        }
-        // Dataset-element VL string collections, in the same order their
-        // addresses were assigned above.
-        for (i, d) in all_ds.iter().enumerate() {
-            if early_gcol.contains(&i) {
-                continue; // emitted right after the superblock
-            }
-            if let Some(staging) = &d.vl_string_staging {
-                emit_collections(sink, &staging.collections)?;
-            }
-        }
+        let mut root_header = core::iter::once(Reservation::new(
+            base,
+            root_group_addr,
+            root_oh.len() as u64,
+            FileData::Bytes(&root_oh),
+        ));
+        let mut group_headers = group_addrs2.iter().enumerate().map(|(gi, &address)| {
+            Reservation::new(
+                base,
+                address,
+                group_oh_sizes[gi] as u64,
+                FileData::Group(gi),
+            )
+        });
+        let mut committed_headers =
+            committed_addrs
+                .iter()
+                .zip(&committed_oh)
+                .map(|(&address, oh)| {
+                    Reservation::new(base, address, oh.len() as u64, FileData::Bytes(oh))
+                });
+        let mut dataset_headers = ds_oh_addrs2
+            .iter()
+            .zip(&ds_oh_bytes2)
+            .map(|(&address, oh)| {
+                Reservation::new(base, address, oh.len() as u64, FileData::Bytes(oh))
+            });
+        let mut dense_blobs = dense_spans
+            .root
+            .iter()
+            .chain(dense_spans.groups.iter().flatten())
+            .chain(dense_spans.datasets.iter().flatten())
+            .zip(
+                root_dense_blob
+                    .iter()
+                    .chain(group_dense_blobs.iter().flatten())
+                    .chain(ds_dense_blobs.iter().flatten()),
+            )
+            .map(|(span, blob)| {
+                Reservation::new(
+                    base,
+                    span.0,
+                    blob.blob.len() as u64,
+                    FileData::Bytes(&blob.blob),
+                )
+            });
+        let mut dataset_regions = ds_layouts
+            .iter()
+            .enumerate()
+            .filter(|(_, layout)| layout.data.len() != 0)
+            .map(|(i, layout)| {
+                Reservation::new(
+                    base,
+                    layout.data_addr,
+                    layout.data.len(),
+                    FileData::Dataset(i),
+                )
+            });
 
         // Superblock extension (File Space Info), at the address recorded above.
         // For a persisting non-paged file, rebuild the message with a real
@@ -3875,14 +3888,54 @@ impl FileWriter {
             ext_len,
             "rebuilt extension header length must match the reserved length"
         );
-        if let Some(bytes) = &real_ext_oh {
-            debug_assert_eq!(
-                sink.position(),
-                ub as u64 + ext_addr.unwrap(),
-                "extension header must land at its recorded base-relative address"
-            );
-            sink.put(bytes)?;
+        let mut extension = match (real_ext_oh.as_ref(), ext_addr) {
+            (Some(bytes), Some(address)) => Some(Reservation::new(
+                base,
+                StoredAddress::new(address),
+                bytes.len() as u64,
+                FileData::Bytes(bytes),
+            )),
+            (None, None) => None,
+            _ => {
+                return Err(FormatError::Internal(
+                    "a superblock extension has no output reservation".into(),
+                ));
+            }
         }
+        .into_iter();
+        // Each source is ordered by physical address independently of the other sources.
+        Emission::new([
+            &mut early_collections,
+            &mut root_header,
+            &mut group_headers,
+            &mut committed_headers,
+            &mut dataset_headers,
+            &mut dense_blobs,
+            &mut dataset_regions,
+            &mut late_collections,
+            &mut extension,
+        ])
+        .emit(sink, eof_addr2, |sink, emission| match emission {
+            FileData::Bytes(bytes) => sink.put(bytes),
+            FileData::Group(gi) => {
+                let g = &groups[gi];
+                let links = tables.links(&g.ds_indices, &g.committed_indices, &g.sub_group_indices);
+                let oh = build_group_oh(
+                    &links,
+                    &g.attrs,
+                    group_dense_blobs[gi]
+                        .as_ref()
+                        .map(|b| b.attr_info_message.as_slice()),
+                )?;
+                sink.put(&oh)
+            }
+            FileData::Dataset(i) => emit_ds_data(
+                sink,
+                &ds_layouts[i].data,
+                all_ds[i].raw_chunks.as_ref(),
+                all_ds[i].produced.as_ref(),
+            ),
+        })?;
 
         Ok(())
     }
