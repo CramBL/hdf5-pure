@@ -3,6 +3,139 @@
 //! HDF5 uses Bob Jenkins' lookup3 hash (not CRC32C) for all metadata
 //! checksums in superblocks, object headers, B-tree nodes, etc.
 
+use crate::error;
+
+/// Computes a Jenkins lookup3 checksum from successive byte slices.
+///
+/// The caller declares the total input length at construction and supplies that many bytes
+/// through [`update`](Self::update) before calling [`finish`](Self::finish). The checksum
+/// equals [`jenkins_lookup3`] applied to the concatenated input.
+///
+/// # Examples
+///
+/// ```
+/// use hdf5_pure_format::__private as format;
+/// use format::JenkinsLookup3;
+///
+/// let first = b"first ";
+/// let second = b"second";
+/// let total_len = (first.len() + second.len()) as u64;
+/// let mut checksum = JenkinsLookup3::new(total_len);
+/// checksum.update(first)?;
+/// checksum.update(second)?;
+/// assert_eq!(checksum.finish()?, format::jenkins_lookup3(b"first second"));
+/// # Ok::<(), hdf5_pure_format::FormatError>(())
+/// ```
+pub struct JenkinsLookup3 {
+    a: u32,
+    b: u32,
+    c: u32,
+    remaining: u64,
+    pending: [u8; LOOKUP3_BLOCK_LEN],
+    pending_len: usize,
+}
+
+impl JenkinsLookup3 {
+    /// Initializes the checksum for an input of `total_len` bytes.
+    ///
+    /// The total length includes only the bytes to hash.
+    /// For a trailing checksum, it excludes the checksum field.
+    // With an initial value of zero, `H5_checksum_lookup3` in H5checksum.c,
+    // HDF5 2.2.0, seeds all three words with 0xdeadbeef plus the input length
+    // modulo 2^32 and mixes 12-byte blocks except for the final block.
+    pub fn new(total_len: u64) -> Self {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "lookup3 seeds each state word with the input length modulo 2^32"
+        )]
+        let seed = LOOKUP3_SEED.wrapping_add(total_len as u32);
+        Self {
+            a: seed,
+            b: seed,
+            c: seed,
+            remaining: total_len,
+            pending: [0; LOOKUP3_BLOCK_LEN],
+            pending_len: 0,
+        }
+    }
+
+    /// Hashes the next input bytes, retaining at most one 12-byte block.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`](error::FormatError::Internal) if the cumulative
+    /// input length would exceed the declared total. On error, the checksum state is unchanged.
+    pub fn update(&mut self, mut data: &[u8]) -> Result<(), error::FormatError> {
+        let Self {
+            a,
+            b,
+            c,
+            remaining,
+            pending,
+            pending_len,
+        } = self;
+        if data.len() as u64 > *remaining {
+            return Err(error::FormatError::Internal(
+                "checksum input exceeds its declared length".into(),
+            ));
+        }
+        while !data.is_empty() {
+            let len = (LOOKUP3_BLOCK_LEN - *pending_len).min(data.len());
+            pending[*pending_len..*pending_len + len].copy_from_slice(&data[..len]);
+            *pending_len += len;
+            *remaining -= len as u64;
+            data = &data[len..];
+            if *pending_len == LOOKUP3_BLOCK_LEN && *remaining != 0 {
+                *a = a.wrapping_add(read_u32_le::<false>(pending, 0, 0));
+                *b = b.wrapping_add(read_u32_le::<false>(pending, 4, 0));
+                *c = c.wrapping_add(read_u32_le::<false>(pending, 8, 0));
+                mix(a, b, c);
+                *pending_len = 0;
+            }
+        }
+        Ok(())
+    }
+
+    /// Computes the checksum after hashing the declared number of bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`](error::FormatError::Internal) if the caller has
+    /// supplied fewer bytes than the declared total.
+    pub fn finish(self) -> Result<u32, error::FormatError> {
+        let Self {
+            mut a,
+            mut b,
+            mut c,
+            remaining,
+            pending,
+            pending_len,
+        } = self;
+        if remaining != 0 {
+            return Err(error::FormatError::Internal(
+                "checksum input is shorter than its declared length".into(),
+            ));
+        }
+        if pending_len == 0 {
+            return Ok(c);
+        }
+        let mut words = [0u32; 3];
+        for (word, bytes) in words.iter_mut().zip(pending[..pending_len].chunks(4)) {
+            for (i, byte) in bytes.iter().enumerate() {
+                *word |= u32::from(*byte) << (8 * i);
+            }
+        }
+        a = a.wrapping_add(words[0]);
+        b = b.wrapping_add(words[1]);
+        c = c.wrapping_add(words[2]);
+        final_mix(&mut a, &mut b, &mut c);
+        Ok(c)
+    }
+}
+
+const LOOKUP3_BLOCK_LEN: usize = 12;
+const LOOKUP3_SEED: u32 = 0xdead_beef;
+
 /// Compute the Jenkins lookup3 checksum of a byte slice.
 ///
 /// This is the `hashlittle` function from Bob Jenkins' lookup3.c,
@@ -258,10 +391,115 @@ mod tests {
     fn each_input_length_through_one_block_and_its_tail_hashes_to_a_fixed_value(
         #[case] len: usize,
         #[case] expected: u32,
+        #[values(1, 7, 8, 11, 12, 13, 64)] window_len: usize,
     ) {
         const PROBE: [u8; 14] = [1, 8, 15, 22, 29, 36, 43, 50, 57, 64, 71, 78, 85, 92];
 
         assert_eq!(jenkins_lookup3(&PROBE[..len]), expected);
+        let mut checksum = JenkinsLookup3::new(len as u64);
+        checksum.update(&[]).unwrap();
+        for window in PROBE[..len].chunks(window_len) {
+            checksum.update(window).unwrap();
+        }
+        checksum.update(&[]).unwrap();
+        assert_eq!(checksum.finish().unwrap(), expected);
+    }
+
+    #[rstest]
+    #[case(0, 0xdead_beef)]
+    #[case(4_294_967_296, 0xdead_beef)]
+    #[case(4_294_967_310, 0xdead_befd)]
+    #[case(u64::MAX, 0xdead_beee)]
+    fn incremental_seed_adds_the_low_32_bits_of_the_total_length(
+        #[case] len: u64,
+        #[case] seed: u32,
+    ) {
+        let checksum = JenkinsLookup3::new(len);
+        assert_eq!((checksum.a, checksum.b, checksum.c), (seed, seed, seed));
+        assert_eq!(checksum.remaining, len);
+    }
+
+    #[test]
+    fn incremental_updates_preserve_a_remaining_length_of_four_gib() {
+        let mut checksum = JenkinsLookup3::new(4_294_967_310);
+        checksum.update(&[0; 14]).unwrap();
+        assert_eq!(checksum.remaining, 4_294_967_296);
+        assert_eq!(checksum.pending_len, 2);
+    }
+
+    #[rstest]
+    #[case(24)]
+    #[case(25)]
+    #[case(36)]
+    #[case(37)]
+    #[case(64)]
+    #[case(65)]
+    fn incremental_windows_match_one_shot_across_multiple_blocks(
+        #[case] len: usize,
+        #[values(1, 8, 12, 13, 16, 65)] window_len: usize,
+    ) {
+        let data = core::array::from_fn::<_, 65, _>(|i| u8::try_from(i * 3).unwrap());
+        let mut checksum = JenkinsLookup3::new(len as u64);
+        for window in data[..len].chunks(window_len) {
+            checksum.update(window).unwrap();
+        }
+        assert_eq!(checksum.finish().unwrap(), jenkins_lookup3(&data[..len]));
+    }
+
+    #[rstest]
+    fn incremental_splits_match_the_published_vector(
+        #[values(0, 1, 4, 11, 12, 13, 24, 28, 29)] split_at: usize,
+    ) {
+        let data = b"Four score and seven years ago";
+        let mut checksum = JenkinsLookup3::new(data.len() as u64);
+        checksum.update(&data[..split_at]).unwrap();
+        checksum.update(&data[split_at..]).unwrap();
+        assert_eq!(checksum.finish().unwrap(), 0x1777_0551);
+    }
+
+    #[rstest]
+    #[case(0, b"".as_slice())]
+    #[case(3, b"ab".as_slice())]
+    fn incremental_update_rejects_excess_input_without_changing_state(
+        #[case] total_len: u64,
+        #[case] prefix: &[u8],
+    ) {
+        let mut checksum = JenkinsLookup3::new(total_len);
+        checksum.update(prefix).unwrap();
+        let state = (checksum.a, checksum.b, checksum.c, checksum.remaining);
+        let pending = checksum.pending;
+        let pending_len = checksum.pending_len;
+        assert_eq!(
+            checksum.update(b"xx").unwrap_err(),
+            error::FormatError::Internal("checksum input exceeds its declared length".into())
+        );
+        assert_eq!(
+            (checksum.a, checksum.b, checksum.c, checksum.remaining),
+            state
+        );
+        assert_eq!(checksum.pending, pending);
+        assert_eq!(checksum.pending_len, pending_len);
+        checksum
+            .update(&b"abc"[prefix.len()..usize::try_from(total_len).unwrap()])
+            .unwrap();
+        assert_eq!(
+            checksum.finish().unwrap(),
+            jenkins_lookup3(&b"abc"[..usize::try_from(total_len).unwrap()])
+        );
+    }
+
+    #[rstest]
+    #[case(1, b"".as_slice())]
+    #[case(14, b"twelve bytes".as_slice())]
+    fn incremental_finish_rejects_incomplete_input(#[case] total_len: u64, #[case] data: &[u8]) {
+        let mut checksum = JenkinsLookup3::new(total_len);
+        checksum.update(data).unwrap();
+        assert_eq!(
+            checksum.finish().unwrap_err(),
+            error::FormatError::Internal(
+                "checksum input is shorter than its declared length".into()
+            )
+        );
     }
 
     #[rstest]

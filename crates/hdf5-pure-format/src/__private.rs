@@ -34,6 +34,7 @@ pub use crate::btree_v2_write::BTreeV2Image;
 pub use crate::btree_v2_write::BTreeV2Plan;
 pub use crate::bytes::ensure_len;
 pub use crate::bytes::read_offset_width;
+pub use crate::checksum::JenkinsLookup3;
 pub use crate::checksum::jenkins_lookup3;
 pub use crate::checksum::verify_trailing;
 pub use crate::chunk_record::ChunkElementEncoding;
