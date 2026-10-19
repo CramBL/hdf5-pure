@@ -91,7 +91,7 @@ jobs:
         shell: bash
         run: |
           {
-            echo 'CARGO_PROFILE_TEST_OPT_LEVEL=2'
+            echo 'CARGO_PROFILE_TEST_OPT_LEVEL=1'
             echo 'CARGO_PROFILE_TEST_DEBUG_ASSERTIONS=true'
             echo 'CARGO_PROFILE_TEST_OVERFLOW_CHECKS=true'
           } >> "$GITHUB_ENV"
@@ -120,7 +120,7 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: ${{ matrix.os == 'ubuntu-latest' && matrix.config.name == 'default' && format('ci-test-opt2-{0}', steps.mold.outputs.identity) || 'ci' }}
+          shared-key: ${{ matrix.os == 'ubuntu-latest' && matrix.config.name == 'default' && format('ci-test-opt1-{0}', steps.mold.outputs.identity) || 'ci' }}
           save-if: ${{ github.ref == 'refs/heads/main' && (matrix.config.name == 'full' || matrix.os == 'ubuntu-latest') }}
           cache-on-failure: true
 
