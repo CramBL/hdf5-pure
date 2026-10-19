@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::num::{NonZeroU64, NonZeroUsize};
-#[cfg(feature = "__page-publication-crosscheck")]
+#[cfg(any(test, feature = "__page-publication-crosscheck"))]
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
@@ -48,7 +48,7 @@ use crate::libver::LibVer;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
 use crate::object_path::{LinkName, LinkNameBuf, ObjectPath, ObjectPathBuf};
-#[cfg(feature = "__page-publication-crosscheck")]
+#[cfg(any(test, feature = "__page-publication-crosscheck"))]
 use crate::page_publication_failure::PagePublicationFailure;
 use crate::read_spec::{RawReadSpec, RawReadStorage};
 use crate::shared_message::{self, BufferedResolver, SharedResolver, SourceResolver};
@@ -1305,29 +1305,18 @@ impl FileInner {
         }
     }
 
-    /// Lock this file's write session for an operation that may change the
-    /// file, and record afterwards that it had the chance to.
+    /// Runs an operation against the editing session and updates handle revisions.
     ///
-    /// Every path that can change the file's bytes — [`File::commit`] and the
-    /// copies, every staged and immediate edit a [`Dataset`] or [`Group`] handle
-    /// makes, and the session teardown — goes through here, so a new entry point
-    /// cannot change the file without classifying what it did. Two write the
-    /// file without passing here, both because no handle can be alive to see it:
-    /// [`FileInner::drop`], which runs when the last `Arc` goes, and
-    /// [`File::refresh`], which takes `&mut self` through `Arc::get_mut` and
-    /// advances the counters itself.
+    /// The caller passes the expected effect as `change`. If the engine adopts a different root,
+    /// the editor records [`Change::Relocating`] even when the caller passed [`Change::Nothing`].
+    /// Handles opened by path then resolve their objects again, and address-only handles become
+    /// stale. A relocating or in-place change advances revisions even if `f` returns an error
+    /// or only records a staged edit.
     ///
-    /// The appender's claim bookkeeping ([`Dataset::claim_for_appender`] and its
-    /// pair) locks the engine directly and rightly notes nothing: it records who
-    /// is appending, not what the file holds — and it must keep working from a
-    /// `Drop` on a sealed file, which this gate refuses.
+    /// # Errors
     ///
-    /// The counters advance whether `f` succeeded or not, and for a staged edit
-    /// that changes no bytes at all. Both are deliberate: a refused commit can
-    /// still have written and rolled back (issues #316 and #344), and the cost
-    /// of a revision that did not need advancing is one re-read on the next use
-    /// of a handle, where the cost of one that needed advancing and did not is a
-    /// wrong answer.
+    /// Returns [`Error::ReadOnly`] if the file has no editing session, or the mutation-gate error
+    /// if it cannot be edited. Returns the error from `f` if the operation fails.
     fn with_engine_mut<R>(
         &self,
         change: Change,
@@ -1337,9 +1326,16 @@ impl FileInner {
             return Err(Error::ReadOnly);
         };
         self.check_mutable(matches!(change, Change::Relocating))?;
-        let out = {
+        let (out, change) = {
             let mut engine = m.lock().unwrap_or_else(PoisonError::into_inner);
-            f(&mut engine)
+            let root = engine.superblock().root_group_address;
+            let out = f(&mut engine);
+            let change = if root == engine.superblock().root_group_address {
+                change
+            } else {
+                Change::Relocating
+            };
+            (out, change)
         };
         self.note(change);
         out
@@ -3067,7 +3063,7 @@ impl File {
     ///
     /// Returns [`Error::EditUnsupported`] unless the file uses non-persistent PAGE allocation.
     /// Returns the opening or configuration error if the session cannot be created.
-    #[cfg(feature = "__page-publication-crosscheck")]
+    #[cfg(any(test, feature = "__page-publication-crosscheck"))]
     pub(crate) fn open_page_publication_failure(
         path: &Path,
         failure: PagePublicationFailure,
@@ -3087,7 +3083,7 @@ impl File {
     /// # Errors
     ///
     /// Returns [`Error::ReadOnly`] if the file has no editing session, or the snapshot read error.
-    #[cfg(feature = "__page-publication-crosscheck")]
+    #[cfg(any(test, feature = "__page-publication-crosscheck"))]
     pub(crate) fn page_publication_snapshot(&self) -> Result<Vec<u8>, Error> {
         self.with_mirror_session(Change::Nothing, |session| {
             session.page_publication_snapshot()
@@ -3264,10 +3260,9 @@ impl File {
     /// would; its write methods still address the file by path, so they stage
     /// and the commit refuses them. And a handle reached by object reference
     /// ([`Dataset::dereference`]) has no path to look up, so it returns
-    /// [`Error::StaleHandle`], and not only after a commit but after anything
-    /// staged, synced or torn down, since only an immediate [`Dataset::append`]
-    /// is known to leave every header where it stands. Dereference again from a
-    /// fresh read.
+    /// [`Error::StaleHandle`] after staging, a commit, or teardown. Recovery that changes the
+    /// root has the same effect. An ordinary [`sync`](Self::sync) preserves these handles when
+    /// the root stays unchanged. Dereference again from a fresh read after relocation.
     ///
     /// A handle onto an object this commit *publishes* — one
     /// [`Group::create_group`], [`Group::create_group_with`] or
@@ -3298,7 +3293,13 @@ impl File {
     /// the file before editing again.
     /// A subsequent commit first completes the publication barrier under the selected
     /// synchronization policy and verifies the superblock before consuming staged edits.
-    /// The editor can report a publication error after writing the complete batch.
+    /// The editor can report an I/O error after publishing the complete batch. Session reads
+    /// while recovery is pending are insufficient to determine the publication outcome.
+    /// Successful recovery during [`sync`](Self::sync) or a subsequent commit verifies and
+    /// adopts the issued state. Reopening a valid file also establishes its stored state.
+    /// An interrupted file can fail to reopen. Recovery failures leave later staged edits
+    /// pending, and recovery that changes the root refreshes handles as described by
+    /// [`sync`](Self::sync).
     ///
     /// Two failures do not carry that promise, and both call for **re-reading**
     /// the datasets the batch named rather than for a retry:
@@ -3442,31 +3443,36 @@ impl File {
         }
     }
 
-    /// Force everything written to this file so far to durable storage — the
-    /// `fsync` the application issues at its own cadence under
-    /// [`SyncPolicy::OnClose`], and a redundant one under the default
-    /// [`SyncPolicy::Always`]. A SWMR-writer file syncs the same way.
+    /// Issues pending writes and synchronizes file content and metadata to durable storage.
     ///
-    /// This is a durability barrier, not a flush: it writes nothing itself.
-    /// Staged edits are not applied ([`commit`](Self::commit) does that, and a
-    /// `sync` before one makes only the *previous* state durable), and elements
-    /// held by a live [`BufferedAppender`] have not
-    /// reached the file at all — flush it first.
+    /// Synchronization is durable under every [`SyncPolicy`], including [`SyncPolicy::OnClose`].
+    /// Writes retained after a failed operation are issued before synchronization. New staged
+    /// edits remain pending for [`commit`](Self::commit). Elements held by a [`BufferedAppender`]
+    /// require its [`flush`](BufferedAppender::flush) first.
     ///
-    /// There is no need to call it before [`close`](Self::close): `close` — and
-    /// dropping the last handle — issues its own barrier under every policy,
-    /// because both write and both destroy the handle that would have ordered
-    /// those writes. This is the mid-session checkpoint, not the closing one.
+    /// In a non-persistent PAGE session, synchronization also verifies and adopts any pending
+    /// publication. The complete earlier batch may become visible even though its commit
+    /// reported an I/O error. Session reads while recovery is pending are insufficient to
+    /// determine the publication outcome. Successful recovery or reopening a valid file
+    /// establishes the committed state. An interrupted file can fail to reopen.
     ///
-    /// Requires a read-write file ([`File::open_rw`]); a read-only file returns
-    /// [`Error::ReadOnly`], and a sealed one [`Error::FileClosed`]. A closed
-    /// file has already been synced.
+    /// If recovery changes the root, existing [`Dataset`] and [`Group`] handles opened by path
+    /// resolve their objects again on their next read. Address-only handles return
+    /// [`Error::StaleHandle`]. Synchronization preserves handle revisions when the root stays
+    /// unchanged, including an ordinary sync with no pending recovery.
+    ///
+    /// [`close`](Self::close) and dropping the last handle perform their own synchronization.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ReadOnly`] if the file has no editing session, or [`Error::FileClosed`] if
+    /// it has been sealed. Returns [`Error::Io`] if writing or synchronization fails.
+    /// Returns [`Error::EditUnsupported`] if pending PAGE publication bytes differ from the
+    /// accepted image or expected framing. Close and reopen the file before editing again.
+    /// Returns [`Error::Format`] if recovery cannot read, parse, or represent the superblock.
+    /// A failed recovery leaves later staged edits pending.
     #[doc(alias = "fsync")]
     pub fn sync(&self) -> Result<(), Error> {
-        // A barrier over writes the operations that made them already accounted
-        // for, so it invalidates no handle. Classing it as a change would end
-        // every by-reference handle in the session because the caller asked for
-        // an `fsync`.
         self.with_mirror_session(Change::Nothing, |session| session.force_sync())
     }
 
@@ -7287,6 +7293,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use rstest::rstest;
+    use test_util::disk_log::{self, DiskOp};
     use test_util::file_space_info;
     use test_util::object_header;
     use test_util::widths::Widths;
@@ -7298,6 +7305,367 @@ mod tests {
     use crate::datatype::layout::FixedPointLayout;
     use crate::message_flags::MessageFlags;
     use crate::{DatatypeByteOrder, FileBuilder};
+
+    #[rstest]
+    #[case::plain(0)]
+    #[case::userblock(4_096)]
+    fn sync_completes_pending_page_publication_and_refreshes_handles(
+        #[case] userblock: u64,
+        #[values(SyncPolicy::Always, SyncPolicy::OnClose)] sync: SyncPolicy,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sync_page.h5");
+        let mut builder = FileBuilder::new();
+        builder
+            .with_file_space_strategy(FileSpaceStrategy::Page, false, 1)
+            .with_userblock(userblock);
+        if userblock > 0 {
+            builder.with_userblock_content(b"preserve this userblock through explicit sync");
+        }
+        builder.create_dataset("keep").with_u8_data(&[7; 64]);
+        builder.create_dataset("replace").with_u8_data(&[3; 64]);
+        builder.create_dataset("remove").with_u8_data(&[5; 64]);
+        let mut group = builder.create_group("group");
+        group.create_dataset("old").with_u8_data(&[19; 64]);
+        builder.add_group(group.finish());
+        builder.write(&path).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let control_path = dir.path().join("control.h5");
+        std::fs::write(&control_path, &original).unwrap();
+        let control = File::open_rw_with_options(
+            &control_path,
+            FileAccessProperties::new().with_sync_policy(sync),
+        )
+        .unwrap();
+        stage_sync_page_edits(&control);
+        disk_log::start();
+        control.commit().unwrap();
+        let operations = disk_log::take();
+        let publication_write = operations
+            .iter()
+            .filter_map(|operation| match operation {
+                DiskOp::Write { offset, .. } => Some(*offset),
+                DiskOp::SetLen(_) => None,
+            })
+            .position(|offset| offset == userblock)
+            .unwrap();
+        drop(control);
+
+        let file =
+            File::open_rw_with_options(&path, FileAccessProperties::new().with_sync_policy(sync))
+                .unwrap();
+        let retained_dataset = file.dataset("replace").unwrap();
+        let retained_group = file.group("group").unwrap();
+        stage_sync_page_edits(&file);
+        disk_log::start();
+        disk_log::fail_write_after(publication_write, 17);
+        let error = file.commit().unwrap_err();
+        let Error::Io(error) = error else {
+            panic!("expected partial publication write failure, got {error:?}");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert_eq!(error.to_string(), "injected disk write failure");
+        let mut issued = original.clone();
+        for operation in disk_log::take() {
+            operation.apply(&mut issued);
+        }
+        assert_eq!(issued, file.page_publication_snapshot().unwrap());
+        assert_eq!(retained_dataset.read_u8().unwrap(), [3; 64]);
+        assert_eq!(retained_group.datasets().unwrap(), ["old"]);
+        file.root()
+            .create_dataset("second", |dataset| {
+                dataset.with_u8_data(&[11; 64]);
+            })
+            .unwrap();
+        assert_eq!(retained_dataset.read_u8().unwrap(), [3; 64]);
+        assert_eq!(retained_group.datasets().unwrap(), ["old"]);
+        let by_address_dataset = FileInner::object_at_relative(
+            &file.inner,
+            file.inner.revisions(),
+            file.addresses()
+                .relative(retained_dataset.header_address().unwrap())
+                .unwrap()
+                .get(),
+        )
+        .unwrap();
+        let Object::Dataset(by_address_dataset) = by_address_dataset else {
+            panic!("expected dataset handle");
+        };
+        let by_address_group = FileInner::object_at_relative(
+            &file.inner,
+            file.inner.revisions(),
+            file.addresses()
+                .relative(retained_group.header_address().unwrap())
+                .unwrap()
+                .get(),
+        )
+        .unwrap();
+        let Object::Group(by_address_group) = by_address_group else {
+            panic!("expected group handle");
+        };
+        assert_eq!(by_address_dataset.read_u8().unwrap(), [3; 64]);
+        assert_eq!(by_address_group.datasets().unwrap(), ["old"]);
+        assert_pending_recovery_write_failure(
+            &file,
+            &retained_dataset,
+            &retained_group,
+            userblock,
+            0,
+        );
+        assert_pending_recovery_write_failure(
+            &file,
+            &retained_dataset,
+            &retained_group,
+            userblock,
+            17,
+        );
+        file.sync().unwrap();
+        assert!(file.has_staged_edits());
+        let published = file.page_publication_snapshot().unwrap();
+        assert_sync_page_state(&File::from_bytes(published.clone()).unwrap(), false);
+        assert_eq!(file.dataset("keep").unwrap().read_u8().unwrap(), [7; 64]);
+        assert_eq!(
+            file.dataset("replace").unwrap().read_u8().unwrap(),
+            [17; 64]
+        );
+        assert_eq!(file.dataset("added").unwrap().read_u8().unwrap(), [9; 64]);
+        let error = file.dataset("remove").unwrap_err();
+        assert!(
+            matches!(error, Error::Format(FormatError::PathNotFound(ref path)) if path == "remove"),
+            "{error:?}"
+        );
+        let mut names = file.root().datasets().unwrap();
+        names.sort_unstable();
+        assert_eq!(names, ["added", "keep", "replace", "second"]);
+        assert_eq!(retained_dataset.read_u8().unwrap(), [17; 64]);
+        assert_eq!(retained_group.datasets().unwrap(), ["old", "child"]);
+        assert_eq!(
+            retained_group.dataset("child").unwrap().read_u8().unwrap(),
+            [31; 64]
+        );
+        let error = by_address_dataset.read_u8().unwrap_err();
+        assert!(matches!(error, Error::StaleHandle), "{error:?}");
+        let error = by_address_group.datasets().unwrap_err();
+        assert!(matches!(error, Error::StaleHandle), "{error:?}");
+        let address_revision = file.inner.address_revision();
+        let content_revision = file.inner.content_revision();
+        file.sync().unwrap();
+        assert_eq!(file.inner.address_revision(), address_revision);
+        assert_eq!(file.inner.content_revision(), content_revision);
+        assert_eq!(file.page_publication_snapshot().unwrap(), published);
+        file.commit().unwrap();
+        assert!(!file.has_staged_edits());
+        assert_sync_page_state(&file, true);
+        test_util::publication::assert_preserved_bytes(
+            &original,
+            &file.page_publication_snapshot().unwrap(),
+            usize::try_from(userblock).unwrap(),
+            hdf5_pure_format::__private::serialize_superblock(file.superblock())
+                .unwrap()
+                .len(),
+        );
+        file.close().unwrap();
+    }
+
+    fn assert_pending_recovery_write_failure(
+        file: &File,
+        dataset: &Dataset,
+        group: &Group,
+        publication_offset: u64,
+        prefix: usize,
+    ) {
+        let address_revision = file.inner.address_revision();
+        let content_revision = file.inner.content_revision();
+        disk_log::start();
+        disk_log::fail_write_after(0, prefix);
+        let error = file.sync().unwrap_err();
+        let Error::Io(error) = error else {
+            panic!("expected recovery write failure, got {error:?}");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert_eq!(error.to_string(), "injected disk write failure");
+        let operations = disk_log::take();
+        assert_eq!(operations.len(), usize::from(prefix > 0));
+        for operation in operations {
+            let DiskOp::Write { offset, bytes } = operation else {
+                panic!("expected pending publication write");
+            };
+            assert_eq!(offset, publication_offset);
+            assert_eq!(bytes.len(), prefix);
+        }
+        assert_eq!(file.inner.address_revision(), address_revision);
+        assert_eq!(file.inner.content_revision(), content_revision);
+        assert!(file.has_staged_edits());
+        assert_eq!(dataset.read_u8().unwrap(), [3; 64]);
+        assert_eq!(group.datasets().unwrap(), ["old"]);
+    }
+
+    fn stage_sync_page_edits(file: &File) {
+        file.root()
+            .create_dataset("added", |dataset| {
+                dataset.with_u8_data(&[9; 64]);
+            })
+            .unwrap();
+        file.dataset("replace")
+            .unwrap()
+            .write_staged(|dataset| {
+                dataset.with_u8_data(&[17; 64]);
+            })
+            .unwrap();
+        file.root().delete("remove").unwrap();
+        file.group("group")
+            .unwrap()
+            .create_dataset("child", |dataset| {
+                dataset.with_u8_data(&[31; 64]);
+            })
+            .unwrap();
+    }
+
+    fn assert_sync_page_state(file: &File, second: bool) {
+        let mut expected = vec![("keep", 7), ("replace", 17), ("added", 9)];
+        if second {
+            expected.push(("second", 11));
+        }
+        let mut names = file.root().datasets().unwrap();
+        names.sort_unstable();
+        let mut expected_names = expected.iter().map(|(path, _)| *path).collect::<Vec<_>>();
+        expected_names.sort_unstable();
+        assert_eq!(names, expected_names);
+        for (path, value) in expected {
+            assert_eq!(file.dataset(path).unwrap().read_u8().unwrap(), [value; 64]);
+        }
+        assert_eq!(file.root().groups().unwrap(), ["group"]);
+        assert_eq!(
+            file.group("group").unwrap().datasets().unwrap(),
+            ["old", "child"]
+        );
+        assert_eq!(
+            file.dataset("group/old").unwrap().read_u8().unwrap(),
+            [19; 64]
+        );
+        assert_eq!(
+            file.dataset("group/child").unwrap().read_u8().unwrap(),
+            [31; 64]
+        );
+        assert!(!file.file_space_info().unwrap().persist);
+        assert!(file.file_space_info().unwrap().manager_addrs.is_empty());
+        assert!(file.persisted_free_space().unwrap().is_empty());
+    }
+
+    #[rstest]
+    #[case::barrier(PagePublicationFailure::RepeatedPublishedSync)]
+    #[case::read(PagePublicationFailure::PublishedRead)]
+    fn failed_page_recovery_sync_preserves_handle_revisions_and_staged_edits(
+        #[case] failure: PagePublicationFailure,
+        #[values(SyncPolicy::Always, SyncPolicy::OnClose)] sync: SyncPolicy,
+        #[values(false, true)] gathered: bool,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("failed_sync.h5");
+        let mut builder = FileBuilder::new();
+        builder.with_file_space_strategy(FileSpaceStrategy::Page, false, 1);
+        builder.create_dataset("keep").with_u8_data(&[7; 64]);
+        builder.write(&path).unwrap();
+        let file = File::open_page_publication_failure(&path, failure, sync, gathered).unwrap();
+        file.root()
+            .create_dataset("added", |dataset| {
+                dataset.with_u8_data(&[9; 64]);
+            })
+            .unwrap();
+        let error = file.commit().unwrap_err();
+        let Error::Io(error) = error else {
+            panic!("expected publication barrier failure, got {error:?}");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert_eq!(error.to_string(), "injected PAGE publication failure");
+        file.root()
+            .create_dataset("second", |dataset| {
+                dataset.with_u8_data(&[11; 64]);
+            })
+            .unwrap();
+        let retained = file.dataset("keep").unwrap();
+        assert_eq!(retained.read_u8().unwrap(), [7; 64]);
+        assert_failed_page_recovery_sync(&file, &retained, failure);
+        assert_failed_page_recovery_sync(&file, &retained, failure);
+    }
+
+    fn assert_failed_page_recovery_sync(
+        file: &File,
+        retained: &Dataset,
+        failure: PagePublicationFailure,
+    ) {
+        let address_revision = file.inner.address_revision();
+        let content_revision = file.inner.content_revision();
+        disk_log::start();
+        let error = file.sync().unwrap_err();
+        match (failure, error) {
+            (PagePublicationFailure::RepeatedPublishedSync, Error::Io(error)) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::Other);
+                assert_eq!(error.to_string(), "injected PAGE publication failure");
+            }
+            (PagePublicationFailure::PublishedRead, Error::Format(FormatError::Source(reason))) => {
+                assert_eq!(reason, "injected PAGE publication read failure");
+            }
+            (_, error) => panic!("expected PAGE recovery failure, got {error:?}"),
+        }
+        assert!(disk_log::take().is_empty());
+        assert_eq!(file.inner.address_revision(), address_revision);
+        assert_eq!(file.inner.content_revision(), content_revision);
+        assert!(file.has_staged_edits());
+        assert_eq!(retained.read_u8().unwrap(), [7; 64]);
+        assert_eq!(file.dataset("second").unwrap().shape().unwrap(), [64]);
+    }
+
+    #[rstest]
+    fn ordinary_sync_preserves_reference_handles_and_staged_edits(
+        #[values(SyncPolicy::Always, SyncPolicy::OnClose)] sync: SyncPolicy,
+        #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] memory: MemoryStrategy,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ordinary_sync.h5");
+        let mut builder = FileBuilder::new();
+        builder.create_dataset("keep").with_u8_data(&[7; 64]);
+        builder
+            .create_dataset("refs")
+            .with_path_references(&["keep"]);
+        builder.write(&path).unwrap();
+        let file = File::open_rw_with_options(
+            &path,
+            FileAccessProperties::new()
+                .with_sync_policy(sync)
+                .with_memory_strategy(memory),
+        )
+        .unwrap();
+        let reference = file
+            .dataset("refs")
+            .unwrap()
+            .dereference()
+            .unwrap()
+            .remove(0);
+        let Object::Dataset(reference) = reference else {
+            panic!("expected dataset reference");
+        };
+        assert_eq!(reference.read_u8().unwrap(), [7; 64]);
+        let address_revision = file.inner.address_revision();
+        let content_revision = file.inner.content_revision();
+        disk_log::start();
+        file.sync().unwrap();
+        assert!(disk_log::take().is_empty());
+        assert_eq!(file.inner.address_revision(), address_revision);
+        assert_eq!(file.inner.content_revision(), content_revision);
+        assert_eq!(reference.read_u8().unwrap(), [7; 64]);
+        file.root()
+            .create_dataset("later", |dataset| {
+                dataset.with_u8_data(&[29; 64]);
+            })
+            .unwrap();
+        file.sync().unwrap();
+        assert!(file.has_staged_edits());
+        let issued = File::from_bytes(file.page_publication_snapshot().unwrap()).unwrap();
+        assert_eq!(issued.root().datasets().unwrap(), ["keep", "refs"]);
+        assert_eq!(issued.dataset("keep").unwrap().read_u8().unwrap(), [7; 64]);
+        file.close().unwrap();
+    }
 
     #[rstest]
     #[case::plain(0, 0)]
