@@ -1,0 +1,20 @@
+[cmake]
+version = "4.4.4"
+url = "https://github.com/Kitware/CMake/releases/download/v4.4.4/cmake-4.4.4-linux-x86_64.tar.gz"
+sha256 = "e5bb807f7728cb60cd8b27ebc97a2edb469b68655f21e844a600c3575b76f5bb"
+
+[images.i686]
+target = "i686-unknown-linux-gnu"
+
+[images.i686.build]
+platform = "linux/amd64"
+parent = "ghcr.io/cross-rs/i686-unknown-linux-gnu@sha256:ffd906743f91aa05afcda004d23c9b8be0410d8da51ab6ed5aef203ae883385d"
+inputs = ["scripts/ci/install-mold.sh"]
+
+[images.s390x]
+target = "s390x-unknown-linux-gnu"
+
+[images.s390x.build]
+platform = "linux/amd64"
+parent = "ghcr.io/cross-rs/s390x-unknown-linux-gnu@sha256:c19e71febe5381884583fb26ad797c51fd80daa8d731a73b3d2cccbe35b61ec7"
+inputs = ["scripts/ci/install-mold.sh"]
