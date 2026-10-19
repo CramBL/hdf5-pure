@@ -167,6 +167,16 @@ impl WriteBuffering {
 /// choose the order in which they update them; see [`MirrorImage`] for why the
 /// mirror writes to disk first.
 pub(crate) trait FileImage: Source + Send + Sync {
+    /// Reads file bytes directly through the disk handle.
+    ///
+    /// Pending writes remain buffered.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Source`] if seeking or reading fails, or a bounds error if the
+    /// range exceeds the recorded physical length or cannot be represented.
+    fn read_disk_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError>;
+
     /// Append `bytes` at end-of-file, returning the absolute address they were
     /// written at — which is the pre-call [`Source::len`]. Extends `len` by
     /// exactly `bytes.len()`; see the module docs for why callers rely on that.
@@ -885,6 +895,15 @@ impl Source for MirrorImage {
 }
 
 impl FileImage for MirrorImage {
+    fn read_disk_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
+        read_at_handle(
+            self.writes.handle(),
+            self.writes.on_disk_len(),
+            offset,
+            bytes,
+        )
+    }
+
     fn append(&mut self, bytes: &[u8]) -> Result<u64, Error> {
         let addr = self.data.len() as u64;
         self.writes.write_at(addr, bytes)?;
@@ -1132,6 +1151,15 @@ impl Source for HandleImage {
 }
 
 impl FileImage for HandleImage {
+    fn read_disk_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
+        read_at_handle(
+            self.writes.handle(),
+            self.writes.on_disk_len(),
+            offset,
+            bytes,
+        )
+    }
+
     fn append(&mut self, bytes: &[u8]) -> Result<u64, Error> {
         let addr = self.len;
         // The trait requires this. It is belt-and-braces for *this* image, whose
@@ -1257,6 +1285,10 @@ impl Source for CountingImage {
 
 #[cfg(test)]
 impl FileImage for CountingImage {
+    fn read_disk_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
+        self.inner.read_disk_at(offset, bytes)
+    }
+
     fn append(&mut self, bytes: &[u8]) -> Result<u64, Error> {
         self.inner.append(bytes)
     }
@@ -1350,6 +1382,10 @@ impl Source for TornWriteImage {
 
 #[cfg(test)]
 impl FileImage for TornWriteImage {
+    fn read_disk_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
+        self.inner.read_disk_at(offset, bytes)
+    }
+
     fn append(&mut self, bytes: &[u8]) -> Result<u64, Error> {
         self.inner.append(bytes)
     }
@@ -1427,6 +1463,10 @@ impl Source for SourceOnlyImage {
 
 #[cfg(test)]
 impl FileImage for SourceOnlyImage {
+    fn read_disk_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
+        self.0.read_disk_at(offset, bytes)
+    }
+
     fn append(&mut self, bytes: &[u8]) -> Result<u64, Error> {
         self.0.append(bytes)
     }

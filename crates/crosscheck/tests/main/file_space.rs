@@ -12,6 +12,8 @@ use hdf5::dataset::Layout as CLayout;
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::plist::file_create::Sizeof;
 use hdf5::plist::file_create::SizeofInfo;
+use hdf5_pure::__private as publication;
+use hdf5_pure::__private::PagePublicationFailure;
 use hdf5_pure::AttrValue;
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::Error;
@@ -82,6 +84,196 @@ fn nonpersistent_page_staged_edits_alternate_with_c_edits(
         &path, page_size, userblock, &original, &before, old_eoa, &old_raw,
     );
     assert_c_page_edit(&path, page_size);
+}
+
+#[rstest]
+#[case::published(PagePublicationFailure::AfterPublish)]
+#[case::publication_sync(PagePublicationFailure::PublishedSync)]
+#[case::completed_publication(PagePublicationFailure::AfterDrain)]
+fn nonpersistent_page_publication_errors_preserve_c_created_objects(
+    #[case] failure: PagePublicationFailure,
+    #[values(SyncPolicy::Always, SyncPolicy::OnClose)] sync: SyncPolicy,
+    #[values(false, true)] gathered: bool,
+    #[values(false, true)] reopen: bool,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("recovery.h5");
+    write_nonpersistent_page_origin(&path, 4096, 0, true);
+    let original = std::fs::read(&path).unwrap();
+    let mut file =
+        publication::open_page_publication_failure(&path, failure, sync, gathered).unwrap();
+    stage_page_recovery_edits(&file);
+    let error = file.commit().unwrap_err();
+    let Error::Io(error) = error else {
+        panic!("expected injected publication failure, got {error:?}");
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::Other);
+    assert_eq!(error.to_string(), "injected PAGE publication failure");
+    let published = publication::page_publication_snapshot(&file).unwrap();
+    assert_page_recovery_state(&File::from_bytes(published.clone()).unwrap(), &[]);
+    assert_page_recovery_state(&file, &[]);
+    assert_preserved_page_bytes(&original, &published);
+    if reopen {
+        file = reopen_page_recovery(file, &path, &published, sync);
+    }
+    file.root()
+        .create_dataset("second", |dataset| {
+            dataset.with_u8_data(&[11; 64]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    assert_page_recovery_state(&file, &[("second", 11)]);
+    file.close().unwrap();
+    assert_preserved_page_bytes(&published, &std::fs::read(&path).unwrap());
+    paged::assert_pages_homogeneous(&path, 4096, &["added", "replace", "second"]);
+    assert_recovered_page_with_c(&path);
+}
+
+#[rstest]
+#[case::persistent_page(FileSpaceStrategy::Page, true)]
+#[case::fsm_aggr(FileSpaceStrategy::FsmAggr, false)]
+#[case::aggr(FileSpaceStrategy::Aggr, false)]
+#[case::none(FileSpaceStrategy::None, false)]
+fn publication_failure_hook_rejects_other_strategies(
+    #[case] strategy: FileSpaceStrategy,
+    #[case] persist: bool,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("unsupported.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_strategy(strategy, persist, 1);
+    builder.create_dataset("keep").with_u8_data(&[7; 64]);
+    builder.write(&path).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let Err(error) = publication::open_page_publication_failure(
+        &path,
+        PagePublicationFailure::AfterPublish,
+        SyncPolicy::Always,
+        true,
+    ) else {
+        panic!("expected rejection of unsupported publication failure input");
+    };
+    assert!(
+        matches!(error, Error::EditUnsupported(reason)
+            if reason == "publication failure crosschecks require non-persistent PAGE allocation"),
+        "{error:?}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+fn stage_page_recovery_edits(file: &File) {
+    file.root()
+        .create_dataset("added", |dataset| {
+            dataset.with_u8_data(&[9; 64]);
+        })
+        .unwrap();
+    file.dataset("replace")
+        .unwrap()
+        .write_staged(|dataset| {
+            dataset.with_u8_data(&[17; 64]);
+        })
+        .unwrap();
+    file.root().delete("remove").unwrap();
+}
+
+/// Edits an interrupted snapshot before reopening the original session's file.
+fn reopen_page_recovery(file: File, path: &Path, published: &[u8], sync: SyncPolicy) -> File {
+    let interrupted = path.with_file_name("interrupted.h5");
+    std::fs::write(&interrupted, published).unwrap();
+    let snapshot = File::open_rw_with_options(
+        &interrupted,
+        FileAccessProperties::new().with_sync_policy(sync),
+    )
+    .unwrap();
+    snapshot
+        .root()
+        .create_dataset("reopened", |dataset| {
+            dataset.with_u8_data(&[23; 64]);
+        })
+        .unwrap();
+    snapshot.commit().unwrap();
+    assert_page_recovery_state(&snapshot, &[("reopened", 23)]);
+    snapshot.close().unwrap();
+    assert_preserved_page_bytes(published, &std::fs::read(&interrupted).unwrap());
+    drop(file);
+    assert_eq!(std::fs::read(path).unwrap(), published);
+    File::open_rw_with_options(path, FileAccessProperties::new().with_sync_policy(sync)).unwrap()
+}
+
+/// Checks published datasets, the surviving group attribute, and non-persistence.
+fn assert_page_recovery_state(file: &File, additional: &[(&str, u8)]) {
+    let mut expected = vec![("keep", 7), ("replace", 17), ("added", 9)];
+    expected.extend_from_slice(additional);
+    let mut paths = expected.iter().map(|(path, _)| *path).collect::<Vec<_>>();
+    paths.sort_unstable();
+    let mut actual = file.root().datasets().unwrap();
+    actual.sort_unstable();
+    assert_eq!(actual, paths);
+    for (path, value) in expected {
+        assert_eq!(file.dataset(path).unwrap().read_u8().unwrap(), [value; 64]);
+    }
+    assert_eq!(file.root().groups().unwrap(), ["group"]);
+    assert_eq!(
+        file.group("group")
+            .unwrap()
+            .attrs()
+            .unwrap()
+            .get("attribute"),
+        Some(&AttrValue::I32(9))
+    );
+    let info = file.file_space_info().unwrap();
+    assert_eq!(info.strategy, FileSpaceStrategy::Page);
+    assert_eq!(info.page_size.get(), 4096);
+    assert!(!info.persist);
+    assert!(info.manager_addrs.is_empty());
+    assert_eq!(file.persisted_free_space().unwrap(), []);
+    if file.edit_backing().is_some() {
+        assert_eq!(file.space_accounting().unwrap().reusable_free_space, []);
+    }
+}
+
+/// Checks that the original bytes following the superblock are preserved.
+fn assert_preserved_page_bytes(before: &[u8], after: &[u8]) {
+    let file = File::from_bytes(before.to_vec()).unwrap();
+    let superblock_len = hdf5_pure_format::__private::serialize_superblock(file.superblock())
+        .unwrap()
+        .len();
+    assert_eq!(
+        &after[superblock_len..before.len()],
+        &before[superblock_len..]
+    );
+}
+
+/// Checks values through the C library, mutates a dataset, and verifies the result.
+fn assert_recovered_page_with_c(path: &Path) {
+    let file = hdf5::File::open_rw(path).unwrap();
+    let mut paths = file.member_names().unwrap();
+    paths.sort_unstable();
+    assert_eq!(paths, ["added", "group", "keep", "replace", "second"]);
+    for (path, value) in [("keep", 7), ("replace", 17), ("added", 9), ("second", 11)] {
+        assert_eq!(
+            file.dataset(path).unwrap().read_raw::<u8>().unwrap(),
+            [value; 64]
+        );
+    }
+    assert_eq!(
+        file.fcpl().unwrap().get_file_space_strategy().unwrap(),
+        CStrategy::FreeSpaceManager {
+            paged: true,
+            persist: false,
+            threshold: 1
+        }
+    );
+    assert_eq!(
+        file.fcpl().unwrap().get_file_space_page_size().unwrap(),
+        4096
+    );
+    file.dataset("second")
+        .unwrap()
+        .write_raw(&[29_u8; 64])
+        .unwrap();
+    file.close().unwrap();
+    assert_page_recovery_state(&File::open(path).unwrap(), &[("second", 29)]);
 }
 
 /// Writes matching datasets and a group attribute through either writer.

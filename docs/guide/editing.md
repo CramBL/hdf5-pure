@@ -40,13 +40,15 @@ With PAGE persistence disabled, [`File::open_rw`](crate::File::open_rw) selects 
 
 The editor appends allocations in typed pages at or beyond the first page boundary covering both the original EOA and physical extent, computed in stored addresses. All existing pages, holes, and tails remain unavailable for allocation. Deletion and replacement retain old bytes, including across repeated commits and reopen. The editor preserves the File Space Info message with `persist = false`, keeps the manager address list empty, and leaves the userblock unchanged. It writes new content before publishing the root and EOA through the superblock, using the selected synchronization policy. This mode can grow the file on each commit.
 
+After a publication error, a subsequent commit first drains pending writes under the selected synchronization policy and verifies the published superblock against the session image. The editor preserves the published additions, replacements, and deletions when committing further edits. If publication bytes differ from the session image, it returns [`Error::EditUnsupported`](crate::Error::EditUnsupported) and requires closing and reopening the file. The editor can report a publication error after writing the complete batch.
+
 A paged commit keeps each page homogeneous, so raw data and file metadata never share a page, apart from a chunked dataset's index, which travels with its chunk data. It also page-aligns the end of allocation, so libhdf5 reopens the result as a paged file. With persistence enabled, a free hole belongs to the page type of the page it sits in, and an allocation draws only on holes of its own type. A page holding nothing at all belongs to neither, so either type may open one. The page types are set out in the [file-space strategy](crate::_guide::file_space) guide.
 
 For a brand-new file, use [`FileBuilder`](crate::FileBuilder), which [Writing files](crate::_guide::writing) walks. To append while readers are live, use the [SWMR writer](crate::_guide::swmr). To compact a file or drop objects across a reopen, use [`repack`](crate::repack()). The [file-creation](crate::FileCreateProperties#supported-properties) and [file-access](crate::FileAccessProperties#supported-properties) property tables list what each path supports.
 
 ## Staging and committing edits
 
-An edit session is transactional: you stage operations on an open file, then apply them all at once with [`commit()`](crate::File::commit). Nothing on disk changes until [`commit()`](crate::File::commit) succeeds.
+An edit session is transactional: you stage operations on an open file, then apply them all at once with [`commit()`](crate::File::commit). The editor records staged operations in memory.
 
 ```rust
 # let dir = tempfile::tempdir()?;
@@ -466,7 +468,7 @@ The metadata cache is **off** by default, which is why a bounded session's resid
 
 The appended data is `fsync`ed before the root is repointed, so the "repoint last" guarantee is real: if the process or machine fails during a commit, the original file is still intact and readable, because the superblock still points at the old root. (Under [`SyncPolicy::OnClose`](crate::SyncPolicy::OnClose) the repoint is still last, and during the session only a *process* failure is ordered against. See [Choosing the fsync cadence](#choosing-the-fsync-cadence).) The cost of a commit scales with the size of the edit, not the size of the file.
 
-**Every check runs before the first byte is written.** On any [`Error::EditUnsupported`](crate::Error::EditUnsupported), the file on disk is left untouched, so an unsupported edit is safe to attempt: it fails cleanly and leaves the file whole.
+**Edit validation runs before the first content write.** A validation error leaves the file on disk untouched. In a non-persistent PAGE session recovering from a publication error, the editor first drains pending writes from the preceding attempt.
 
 A rejection costs the session nothing it had staged, so nothing is lost by attempting a commit. A rejected [`commit()`](crate::File::commit) puts the staged set back whole: [`has_staged_edits()`](crate::File::has_staged_edits) still returns `true`, and committing again returns the same error, having applied no part of the batch. A staging call that returns an error stages nothing, a [`create_group_with`](crate::Group::create_group_with) whose closure had already recorded several edits included.
 

@@ -390,6 +390,8 @@ num-complex = ["dep:num-complex", "serde"]
 __heap-baseline = []
 # Exposes crate-private fractal-heap ownership results to crosscheck tests.
 __fractal-heap-storage-crosscheck = []
+# Enables publication-failure injection for PAGE crosschecks.
+__page-publication-crosscheck = ["std"]
 
 [dependencies]
 hdf5-pure-core.workspace = true
