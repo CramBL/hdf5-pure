@@ -738,3 +738,47 @@ fn c_reads_pure_written_chunk_padding_under_fill_time_never() {
 
     assert_eq!(c_extend_and_read(&path, 8), vec![1, 2, 3, 4, 5, 0, 0, 0]);
 }
+
+#[cfg(target_pointer_width = "64")]
+#[rstest]
+#[case(false, false, 4_294_967_360, 7.0)]
+#[case(false, true, 4_294_967_360, 7.0)]
+#[case(true, false, 2, 13.0)]
+#[case(true, true, 2, 13.0)]
+fn row_windows_read_large_chunked_extents_written_by_the_c_library(
+    #[case] allocated: bool,
+    #[case] streaming: bool,
+    #[case] start: u64,
+    #[case] expected: f64,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("large.h5");
+    {
+        let file = file::libhdf5_create_v110(&path);
+        let dataset = file
+            .new_dataset::<f64>()
+            .shape((4_294_967_424usize, 1))
+            .chunk((4, 1))
+            .fill_value(7.0)
+            .create("values")
+            .unwrap();
+        if allocated {
+            let values = ndarray::arr2(&[[11.0], [12.0], [13.0], [14.0]]);
+            dataset.write_slice(&values, (0..4, ..)).unwrap();
+        }
+        file.close().unwrap();
+    }
+    let file = if streaming {
+        File::open_streaming(&path)
+    } else {
+        File::open(&path)
+    }
+    .unwrap();
+    assert_eq!(
+        file.dataset("values")
+            .unwrap()
+            .read_f64_rows(start, 1)
+            .unwrap(),
+        vec![expected],
+    );
+}
