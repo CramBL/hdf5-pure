@@ -8,7 +8,30 @@
 //! streaming backend, and across edge windows (empty, past-the-end, straddling
 //! chunk boundaries).
 
-use hdf5_pure::{CharacterSet, Datatype, File, FileBuilder, StringPadding};
+use std::io::Cursor;
+use std::sync::Arc;
+use std::sync::Mutex;
+
+use hdf5_pure::CharacterSet;
+use hdf5_pure::Datatype;
+use hdf5_pure::File;
+use hdf5_pure::FileBuilder;
+use hdf5_pure::FormatError;
+use hdf5_pure::ReadSeekSource;
+use hdf5_pure::Source;
+use hdf5_pure::StringPadding;
+use rstest::rstest;
+use test_util::btree_v1;
+use test_util::data_layout;
+use test_util::dataspace;
+use test_util::datatype;
+use test_util::image::Image;
+use test_util::link_message::HardLink;
+use test_util::object_header::Message;
+use test_util::object_header::MessageType;
+use test_util::object_header::v2::Header;
+use test_util::superblock::v2::Superblock;
+use test_util::widths::Widths;
 
 /// Open the bytes produced by `build` on both backends: buffered (in-memory) and
 /// streaming (from a temp file). The windowed read dispatches per backend, so
@@ -422,3 +445,201 @@ fn userblock_windows_go_through_base_framing() {
     check_f64(&buffered, "contig", 1, &[(10, 20)]);
     check_f64(&streaming, "contig", 1, &[(10, 20)]);
 }
+
+#[rstest]
+#[case::full_rows(1, 1)]
+#[case::inner_split(6, 2)]
+fn high_row_windows_read_allocated_chunks_on_both_backends(
+    #[case] columns: u32,
+    #[case] chunk_columns: u32,
+    #[values(false, true)] streaming: bool,
+) {
+    let bytes = sparse_high_row_file(columns, chunk_columns);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("high_rows.h5");
+    std::fs::write(&path, &bytes).unwrap();
+    let file = if streaming {
+        File::open_streaming(&path)
+    } else {
+        File::open(&path)
+    }
+    .unwrap();
+    let dataset = file.dataset("d").unwrap();
+    assert_eq!(
+        dataset.shape().unwrap(),
+        vec![4_294_967_424, u64::from(columns)]
+    );
+    assert_eq!(
+        dataset.read_f64_rows(HIGH_ROW, 1).unwrap(),
+        high_row_values(columns, 0, 1)
+    );
+    assert_eq!(
+        dataset.read_f64_rows(HIGH_ROW + 1, 2).unwrap(),
+        high_row_values(columns, 1, 2)
+    );
+    assert_eq!(
+        dataset.read_f64_rows(HIGH_ROW + 3, 3).unwrap(),
+        high_row_values(columns, 3, 3)
+    );
+    assert_eq!(
+        dataset.read_f64_rows(HIGH_ROW + 3, 3).unwrap(),
+        high_row_values(columns, 3, 3)
+    );
+    assert_eq!(
+        dataset.read_f64_rows(1, 2).unwrap(),
+        (columns + 1..3 * columns + 1)
+            .map(f64::from)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[rstest]
+#[case::full_rows(1, 1)]
+#[case::inner_split(6, 2)]
+fn high_row_index_selection_reads_only_selected_payloads(
+    #[case] columns: u32,
+    #[case] chunk_columns: u32,
+    #[values(false, true)] warm_index: bool,
+) {
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let source = RecordingRowSource {
+        inner: ReadSeekSource::new(Cursor::new(sparse_high_row_file(columns, chunk_columns)))
+            .unwrap(),
+        reads: Arc::clone(&reads),
+    };
+    let file = File::from_source(source).unwrap();
+    let dataset = file.dataset("d").unwrap();
+    if warm_index {
+        assert_eq!(
+            dataset.read_f64_rows(HIGH_ROW, 1).unwrap(),
+            high_row_values(columns, 0, 1)
+        );
+    }
+    reads.lock().unwrap().clear();
+    assert_eq!(
+        dataset.read_f64_rows(0, 1).unwrap(),
+        (1..=columns).map(f64::from).collect::<Vec<_>>()
+    );
+    let payload_reads: Vec<_> = reads
+        .lock()
+        .unwrap()
+        .iter()
+        .copied()
+        .filter(|&(offset, _)| {
+            (PAYLOAD_START..PAYLOAD_START + u64::from(3 * 4 * columns * 8)).contains(&offset)
+        })
+        .collect();
+    assert_eq!(
+        payload_reads,
+        vec![(PAYLOAD_START, usize::try_from(4 * columns * 8).unwrap())]
+    );
+    assert_eq!(
+        dataset.read_f64_rows(HIGH_ROW, 1).unwrap(),
+        high_row_values(columns, 0, 1)
+    );
+    reads.lock().unwrap().clear();
+    assert_eq!(
+        dataset.read_f64_rows(HIGH_ROW, 1).unwrap(),
+        high_row_values(columns, 0, 1)
+    );
+    assert!(reads.lock().unwrap().is_empty());
+}
+
+fn high_row_values(columns: u32, skip: u32, rows: u32) -> Vec<f64> {
+    (101 + skip * columns..101 + (skip + rows) * columns)
+        .map(f64::from)
+        .collect()
+}
+
+fn sparse_high_row_file(columns: u32, chunk_columns: u32) -> Vec<u8> {
+    let mut image = Image::new();
+    let mut keys = Vec::new();
+    let mut addresses = Vec::new();
+    for row in [0, HIGH_ROW, HIGH_ROW + 4] {
+        for column in (0..columns).step_by(usize::try_from(chunk_columns).unwrap()) {
+            let values: Vec<_> = (0..4)
+                .flat_map(|local_row| {
+                    (column..column + chunk_columns).flat_map(move |column| {
+                        let base = if row == 0 {
+                            1
+                        } else {
+                            101 + u32::try_from(row - HIGH_ROW).unwrap() * columns
+                        };
+                        f64::from(base + local_row * columns + column).to_le_bytes()
+                    })
+                })
+                .collect();
+            let address = PAYLOAD_START + addresses.len() as u64 * u64::from(4 * chunk_columns * 8);
+            image.place(usize::try_from(address).unwrap(), &values);
+            keys.push(btree_v1::chunk_key(
+                4 * chunk_columns * 8,
+                0,
+                &[row, u64::from(column), 0],
+            ));
+            addresses.push(address);
+        }
+    }
+    keys.push(btree_v1::chunk_key(0, 0, &[u64::MAX; 3]));
+    let index = image.append(&btree_v1::node(
+        btree_v1::NodeType::CHUNK,
+        0,
+        &keys,
+        &addresses,
+        Widths::EIGHT,
+    ));
+    let shape = dataspace::v2(
+        2,
+        dataspace::Flags::NONE,
+        dataspace::Kind::SIMPLE,
+        &[4_294_967_424, u64::from(columns)],
+        None,
+    );
+    let dataset = image.append(
+        &Header::new()
+            .messages([
+                Message::new(MessageType::DATASPACE, &shape),
+                Message::new(MessageType::DATATYPE, &datatype::f64_le()),
+                Message::new(
+                    MessageType::DATA_LAYOUT,
+                    &data_layout::chunked(index as u64, &[4, chunk_columns], 8),
+                ),
+            ])
+            .build(),
+    );
+    let root = image.append(
+        &Header::new()
+            .message(Message::new(
+                MessageType::LINK,
+                &HardLink::new("d", dataset as u64).build(Widths::EIGHT),
+            ))
+            .build(),
+    );
+    image.place(
+        0,
+        &Superblock::new(Widths::EIGHT)
+            .root_header_address(root as u64)
+            .eof_address(image.as_bytes().len() as u64)
+            .build(),
+    );
+    image.build()
+}
+
+struct RecordingRowSource {
+    inner: ReadSeekSource<Cursor<Vec<u8>>>,
+    reads: Arc<Mutex<Vec<(u64, usize)>>>,
+}
+
+impl Source for RecordingRowSource {
+    fn len(&self) -> u64 {
+        self.inner.len()
+    }
+
+    fn read_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
+        let Self { inner, reads } = self;
+        reads.lock().unwrap().push((offset, bytes.len()));
+        inner.read_at(offset, bytes)
+    }
+}
+
+const HIGH_ROW: u64 = 4_294_967_360;
+const PAYLOAD_START: u64 = 4096;

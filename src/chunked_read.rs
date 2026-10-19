@@ -738,6 +738,9 @@ fn plan_chunk_spans(
 /// empty buffer before converting output dimensions to host-sized indexes. For a scalar layout,
 /// the reader returns `Ok(None)` for the caller to read the whole dataset.
 ///
+/// The reader intersects global row and chunk coordinates as [`u64`] values, then converts
+/// offsets within the decoded chunk and output buffer to [`usize`].
+///
 /// The cache holds the parsed index and decoded chunks for reuse across windows. The caller uses
 /// [`CachePass::LRU`] for a single window, or a shared pass for a sweep.
 ///
@@ -747,7 +750,7 @@ fn plan_chunk_spans(
 /// from the dataspace rank, [`FormatError::InvalidChunkGeometry`] if a decoded chunk exceeds
 /// the reader's allocation limit, and [`FormatError::OffsetOverflow`] if output byte counts
 /// or strides overflow. Returns [`FormatError::ValueTooLargeForPlatform`] if a required buffer
-/// size, dimension, or row or chunk coordinate exceeds [`usize::MAX`], and errors from reading
+/// size, dimension, or buffer index exceeds [`usize::MAX`], and errors from reading
 /// the datatype, fill value, chunk index, or chunk payloads.
 pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
     source: &S,
@@ -836,24 +839,17 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
         return Ok(Some(output));
     }
 
-    let row_lo = row_start.to_usize()?;
-    let row_hi = row_lo.saturating_add(out_rows); // exclusive; caller clamped to the dataset
-    let cd0 = chunk_dims[0];
-
-    // A chunk contributes to the window when its rows meet `[row_lo, row_hi)`.
-    // Every list this function builds and every walk over one applies this test,
-    // so it is written once.
-    let overlaps = |c0: usize| c0 < row_hi && c0.saturating_add(cd0) > row_lo;
-    let chunk_overlaps = |chunk: &ChunkInfo| {
-        match chunk.offsets.first().copied().unwrap_or(0).to_usize() {
-            Ok(c0) => overlaps(c0),
-            // A leading offset too large for `usize` — a 32-bit target reading a
-            // crafted file. Kept rather than dropped: the walk below converts it
-            // again and reports the failure, and a filter that swallowed it here
-            // would turn that error into silence.
-            Err(_) => true,
-        }
-    };
+    let row_lo = row_start;
+    let row_hi = row_start
+        .checked_add(num_rows)
+        .ok_or(FormatError::OffsetOverflow {
+            offset: row_start,
+            length: num_rows,
+        })?;
+    let cd0 = chunk_dims_u64[0];
+    let chunk_end = |c0: u64| c0.saturating_add(cd0).min(ds_dims[0]);
+    let overlaps = |c0: u64| c0 < row_hi && chunk_end(c0) > row_lo;
+    let chunk_overlaps = |chunk: &ChunkInfo| overlaps(chunk.offsets.first().copied().unwrap_or(0));
 
     // Walk the index once, then reuse it for later windows on this handle —
     // keeping only this window's chunks, since each `ChunkInfo` taken out of the
@@ -888,52 +884,35 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
     let mut scratch = FilterScratch::new();
 
     for chunk in &chunks {
-        let c0 = chunk.offsets.first().copied().unwrap_or(0).to_usize()?;
-        // This chunk's exclusive leading-dim end. The saturating add/mul here and
-        // below keep a crafted huge chunk offset or dimension from overflowing
-        // `usize` on 32-bit (a panic in debug, a silently wrong window in
-        // release): a saturated span still compares and clamps correctly, and
-        // `row_band_copy` bounds the copy to the bytes actually present. `dst` and
-        // `band` need no guard — both are bounded by the already-checked
-        // `total_bytes` allocation.
-        let c_end = c0.saturating_add(cd0);
+        let c0 = chunk.offsets.first().copied().unwrap_or(0);
         if !overlaps(c0) {
-            continue; // no overlap with the window
+            continue;
         }
-
-        // Rows of this chunk that fall in the window.
         let lo = c0.max(row_lo);
-        let hi = c_end.min(row_hi);
+        let hi = chunk_end(c0).min(row_hi);
+        let skip = (lo - c0).to_usize()?;
+        let dst_row = (lo - row_lo).to_usize()?;
+        let rows = (hi - lo).to_usize()?;
 
-        // Inner-split scatter parameters. `place_chunk` takes non-negative
-        // offsets, so a chunk straddling the window start is instead entered
-        // `skip` leading slabs in (dim 0 is outermost, so one slab is
-        // `chunk_strides[0]` elements), and its leading dim becomes exactly
-        // the `hi - lo` slabs the window keeps, which also clips a chunk
-        // straddling the window end. A saturated `advance` (crafted dims) makes
-        // `bytes.get(advance..)` come up empty and the chunk copies nothing —
-        // the kernel's clamping discipline for short chunks.
         let scatter: Option<(Vec<usize>, Vec<usize>, usize)> = if full_inner {
             None
         } else {
             let mut offsets = Vec::with_capacity(rank);
-            for &o in chunk.offsets.iter().take(rank) {
-                offsets.push(o.to_usize()?);
+            offsets.push(dst_row);
+            for &offset in chunk.offsets.iter().take(rank).skip(1) {
+                offsets.push(offset.to_usize()?);
             }
-            let skip = lo - c0;
-            offsets[0] = lo - row_lo;
             let mut dims = chunk_dims.clone();
-            dims[0] = hi - lo;
+            dims[0] = rows;
             let advance = skip
                 .saturating_mul(chunk_strides[0])
                 .saturating_mul(elem_size.get());
             Some((offsets, dims, advance))
         };
 
-        // Byte offsets of the contiguous row band (full-inner path).
-        let src = (lo - c0).saturating_mul(row_bytes);
-        let dst = (lo - row_lo) * row_bytes;
-        let band = (hi - lo) * row_bytes;
+        let src = skip.saturating_mul(row_bytes);
+        let dst = dst_row * row_bytes;
+        let band = rows * row_bytes;
 
         let copy = |output: &mut [u8], bytes: &[u8]| match &scatter {
             None => row_band_copy(output, dst, bytes, src, band, elem_size),
@@ -4445,6 +4424,56 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(result, 13.0f64.to_le_bytes());
+    }
+
+    #[rstest]
+    #[case::above_u32_max(4_294_967_424, 4_294_967_360)]
+    #[case::overflowing_chunk_end(u64::MAX, u64::MAX - 3)]
+    fn windowed_rows_clip_high_chunk_coordinates(#[case] extent: u64, #[case] chunk_start: u64) {
+        let chunk = ChunkInfo {
+            chunk_size: StoredChunkSize::BTreeV1(4),
+            filter_mask: 0,
+            offsets: vec![chunk_start, 0, 0],
+            address: StoredAddress::new(512),
+        };
+        let mut bytes = build_chunk_btree_leaf(&[chunk], 3, WIDTHS);
+        bytes.resize(512, 0);
+        bytes.extend_from_slice(&[11, 12, 13, 14]);
+        let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::NONE,
+            chunk_dimensions: vec![4, 1, 1],
+            index: ChunkIndexLayout::BTreeV1 {
+                address: Some(StoredAddress::new(0)),
+            },
+        };
+        let dataspace = Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: 2,
+            dimensions: vec![extent, 1],
+            max_dimensions: None,
+        };
+        let datatype = Datatype::FixedPoint {
+            size: 1,
+            byte_order: byte_order::DatatypeByteOrder::LittleEndian,
+            layout: FixedPointLayout {
+                signed: false,
+                bit_offset: 0,
+                bit_precision: 8,
+            },
+        };
+        let cache = ChunkCache::new();
+        let output = read_chunked_rows_from_source(
+            &BytesSource::new(&bytes),
+            RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::ZERO).unwrap(),
+            FORMAT_WIDTHS,
+            &cache,
+            CachePass::LRU,
+            chunk_start + 1,
+            2,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(output, [12, 13]);
     }
 
     #[rstest]
