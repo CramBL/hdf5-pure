@@ -8,6 +8,7 @@ set working-directory := ".."
 FULL_PUBLIC_WITHOUT_ZLIB_NG := "--features checksum,ndarray,num-complex,provenance,serde,zfp"
 # The features the 32-bit and big-endian tests build the portable crates with, in place of their defaults.
 PORTABILITY_FEATURES := "checksum,fast-deflate,ndarray,num-complex,provenance,serde,zfp"
+CROSS_VERBOSE := if env("CI_CROSS_CANDIDATE", "false") == "true" { "-vv" } else { "" }
 # The package whose tests run the in-memory API on wasm32.
 WASM_TEST := "hdf5-pure-wasm-test"
 
@@ -47,7 +48,7 @@ cast-gate:
     cargo clippy --locked {{ PORTABLE }} --target i686-unknown-linux-gnu --lib {{ FULL_PUBLIC_WITHOUT_ZLIB_NG }} -- -D clippy::cast_possible_truncation -D clippy::cast_possible_wrap -D unfulfilled_lint_expectations
 
 test-32bit FEATURES=PORTABILITY_FEATURES:
-    cross test \
+    cross test {{ CROSS_VERBOSE }} \
         --config 'build.rustc-wrapper=""' \
         --config 'target."i686-unknown-linux-gnu".linker="i686-linux-gnu-gcc"' \
         --config 'target."x86_64-unknown-linux-gnu".linker="cc"' \
@@ -58,7 +59,7 @@ test-32bit FEATURES=PORTABILITY_FEATURES:
         --features "{{ FEATURES }}"
 
 test-big-endian:
-    cross test \
+    cross test {{ CROSS_VERBOSE }} \
         --config 'build.rustc-wrapper=""' \
         --config 'target."s390x-unknown-linux-gnu".linker="s390x-linux-gnu-gcc"' \
         --config 'target."x86_64-unknown-linux-gnu".linker="cc"' \
@@ -68,11 +69,9 @@ test-big-endian:
         --no-default-features \
         --features "{{ PORTABILITY_FEATURES }}"
 
-# The crosschecks against the C library, cross-compiled and linked for the
-# same 32-bit target `test-32bit` checks. `Cross.toml` installs the newer
-# cmake the bundled build needs.
+# The crosschecks against the C library, cross-compiled for the same 32-bit target `test-32bit` checks.
 test-32bit-hdf5 FEATURES="serde,ndarray":
-    cross test \
+    cross test {{ CROSS_VERBOSE }} \
         --config 'build.rustc-wrapper=""' \
         --config 'target."i686-unknown-linux-gnu".linker="i686-linux-gnu-gcc"' \
         --config 'target."x86_64-unknown-linux-gnu".linker="cc"' \
@@ -85,7 +84,7 @@ test-32bit-hdf5 FEATURES="serde,ndarray":
 # The crosschecks against the C library, cross-compiled and linked for the
 # same big-endian target `test-big-endian` checks.
 test-big-endian-hdf5 FEATURES="serde,ndarray":
-    cross test \
+    cross test {{ CROSS_VERBOSE }} \
         --config 'build.rustc-wrapper=""' \
         --config 'target."s390x-unknown-linux-gnu".linker="s390x-linux-gnu-gcc"' \
         --config 'target."x86_64-unknown-linux-gnu".linker="cc"' \
