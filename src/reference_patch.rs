@@ -273,10 +273,43 @@ pub(crate) fn plan<S: Source + ?Sized>(
     relocations: &BTreeMap<u64, u64>,
     budget: u32,
 ) -> Result<Plan, Error> {
-    let mut plan = Plan::default();
     if relocations.is_empty() {
-        return Ok(plan);
+        return Ok(Plan::default());
     }
+    walk(src, superblock, widths, addresses, relocations, budget)
+}
+
+/// Returns whether every reachable object was inspected and has no object references.
+///
+/// Returns `false` if traversal exceeds `budget`, encounters unsupported storage, or cannot
+/// inspect every object.
+///
+/// # Errors
+///
+/// Returns [`Error::EditUnsupported`] for a truncated object-header record and [`Error::Format`]
+/// for other record errors or a root-address overflow.
+pub(crate) fn prove_free_of_references(
+    src: &(impl Source + ?Sized),
+    superblock: &Superblock,
+    widths: FormatWidths,
+    addresses: AddressContext,
+    budget: u32,
+) -> Result<bool, Error> {
+    Ok(
+        walk(src, superblock, widths, addresses, &BTreeMap::new(), budget)?
+            .proved_free_of_references(),
+    )
+}
+
+fn walk(
+    src: &(impl Source + ?Sized),
+    superblock: &Superblock,
+    widths: FormatWidths,
+    addresses: AddressContext,
+    relocations: &BTreeMap<u64, u64>,
+    budget: u32,
+) -> Result<Plan, Error> {
+    let mut plan = Plan::default();
     WALKS.with(|count| count.set(count.get() + 1));
     let base = addresses;
 

@@ -46,8 +46,7 @@ fn userblock_file(path: &std::path::Path) {
     b.write(path).unwrap();
 }
 
-/// Paged, but *not* persisting its free-space managers: neither engine can edit
-/// it, so no strategy makes it editable.
+/// Writes a non-persistent PAGE file that requires mirrored staged editing.
 fn paged_nonpersist_file(path: &std::path::Path) {
     let mut b = FileBuilder::new();
     b.with_file_space_strategy(FileSpaceStrategy::Page, false, 0);
@@ -176,47 +175,24 @@ fn an_explicit_strategy_overrides_either_entry_point() {
     assert_eq!(file.edit_backing(), Some(EditBacking::Mirrored));
 }
 
-/// A file neither engine can edit is refused whatever is preferred — falling back
-/// would only trade a clear error at open for the same error at commit, with work
-/// already staged. `Mirrored` still opens it, because that is a request for a
-/// backing rather than a preference, and reading such a file is legitimate.
 #[test]
-fn a_paged_file_without_persisted_free_space_is_refused_unless_the_mirror_is_demanded() {
+fn nonpersistent_page_uses_the_mirror_unless_bounded_is_required() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("paged.h5");
     paged_nonpersist_file(&path);
-
-    for properties in [
-        FileAccessProperties::new(),
-        with_strategy(MemoryStrategy::Bounded),
-        with_strategy(MemoryStrategy::Auto),
-    ] {
-        let err = File::open_rw_with_options(&path, properties).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("persisted free space"),
-            "{:?} should refuse naming the persisted free space, got: {msg}",
-            properties.memory_strategy()
-        );
-    }
-
-    let file = File::open_rw_with_options(&path, with_strategy(MemoryStrategy::Mirrored))
-        .expect("Mirrored is a request for a backing, and the mirror can read this file");
-    assert_eq!(
-        file.dataset("d").unwrap().read_i32().unwrap(),
-        vec![1, 2, 3]
+    let error =
+        File::open_rw_with_options(&path, with_strategy(MemoryStrategy::Bounded)).unwrap_err();
+    assert!(
+        matches!(error, Error::EditUnsupported(reason) if reason.contains("MemoryStrategy::Mirrored")),
+        "{error:?}"
     );
+    let file = File::open_rw(&path).unwrap();
+    assert_eq!(file.edit_backing(), Some(EditBacking::Mirrored));
+    assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), [1, 2, 3]);
 }
 
-/// The shared refusals must be checked *before* the bounded-only ones, or falling
-/// back for a userblock skips them and hands back a session that cannot commit.
-///
-/// A paged file that does not persist its free space and has a userblock makes the ordering
-/// observable: both backings reject the paged file, and the bounded backing also rejects the
-/// userblock. If the fallback ran first, it would mirror the file, accept staged edits, and reject
-/// them only at `commit`.
 #[test]
-fn a_shared_refusal_beats_a_fallback_the_same_file_qualifies_for() {
+fn nonpersistent_page_with_userblock_uses_the_mirror() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ub_paged.h5");
     let mut b = FileBuilder::new();
@@ -227,12 +203,14 @@ fn a_shared_refusal_beats_a_fallback_the_same_file_qualifies_for() {
         .with_shape(&[3]);
     b.write(&path).unwrap();
 
-    let err = File::open_rw(&path).expect_err("neither backing can edit this file");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("persisted free space"),
-        "the shared paged refusal must win over the userblock fallback, got: {msg}"
-    );
+    let file = File::open_rw(&path).unwrap();
+    assert_eq!(file.edit_backing(), Some(EditBacking::Mirrored));
+    file.root()
+        .create_dataset("added", |builder| {
+            builder.with_i32_data(&[4]);
+        })
+        .unwrap();
+    file.commit().unwrap();
 }
 
 #[test]
@@ -334,19 +312,21 @@ fn the_swmr_writer_refuses_a_bounded_guarantee_it_cannot_meet() {
 fn create_refuses_a_pair_it_could_not_reopen_before_writing_anything() {
     let dir = tempfile::tempdir().unwrap();
 
-    // Refused by every backing: a paged file with no persisted free space cannot
-    // be grown in place at all.
+    // Non-persistent PAGE editing requires the mirror.
     let paged = dir.path().join("paged.h5");
     let err = File::create_with_options(
         &paged,
         FileCreateProperties::new().with_file_space_strategy(FileSpaceStrategy::Page, false, 1),
-        FileAccessProperties::new(),
+        with_strategy(MemoryStrategy::Bounded),
     )
-    .expect_err("a paged non-persisting file cannot be reopened read-write");
-    assert!(
-        err.to_string().contains("persist = true"),
-        "the refusal must name the property to change, not tell the caller to \
-         recreate the file it is creating: {err}"
+    .expect_err("bounded editing requires persisted PAGE managers");
+    let Error::EditUnsupported(reason) = err else {
+        panic!("expected EditUnsupported, got {err:?}");
+    };
+    assert_eq!(
+        reason,
+        "bounded editing of PAGE files without persisted free space is unsupported; \
+        use MemoryStrategy::Auto or MemoryStrategy::Mirrored for staged edits"
     );
     assert!(
         !paged.exists(),
@@ -702,7 +682,7 @@ fn auto_matches_bounded_on_every_pair_bounded_accepts() {
     }
 
     assert_eq!(
-        mirrored, 2,
+        mirrored, 3,
         "the userblock is the only creatable property here the bounded engine \
          rejects; another row reaching the mirror is a fallback set that grew"
     );

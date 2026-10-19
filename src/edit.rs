@@ -62,6 +62,14 @@
 //!
 //! # Scope
 //!
+//! Non-persistent PAGE sessions require mirrored staged editing. They append in fresh typed pages
+//! and relocate value replacements. Staged commits require supported attribute storage and a
+//! complete tree proved free of object references. These sessions retain all old bytes except
+//! for superblock publication, leave freed extents unavailable for reuse or truncation, and
+//! preserve the File Space Info message. New content is written before publication through the
+//! superblock. Immediate append, SWMR writing, and page buffering are unsupported. The in-place
+//! writes and space reuse described here apply to other sessions.
+//!
 //! It is deliberately strict: rather than silently produce a degraded file, it
 //! refuses with [`Error::EditUnsupported`] any case it cannot reproduce
 //! faithfully. Requirements:
@@ -142,6 +150,8 @@
 //!
 //! # Free-space reuse (issue #21)
 //!
+//! The reuse described below applies to persistent PAGE and other reusable-space sessions.
+//!
 //! Each commit vacates space: the object headers it rewrites are superseded, and
 //! a deletion abandons its target's blocks. Under a strategy with free-space
 //! managers, `H5F_FSPACE_STRATEGY_FSM_AGGR` or `H5F_FSPACE_STRATEGY_PAGE`, the
@@ -160,8 +170,9 @@
 //! the commits after it ([`release_trailing_run`]), and one that appends its
 //! managers keeps the whole run and writes the managers past it.
 //! Under `H5F_FSPACE_STRATEGY_AGGR` and `H5F_FSPACE_STRATEGY_NONE`, which have no
-//! free-space managers, and in a file whose strategy the session cannot read, the
-//! session drops the regions it vacates. Under `H5F_FSPACE_STRATEGY_AGGR`, staged edits
+//! free-space managers, the session discards the regions it vacates.
+//! Opening a file with malformed File Space Info returns the parse error.
+//! Under `H5F_FSPACE_STRATEGY_AGGR`, staged edits
 //! and immediate appends allocate from separate metadata and raw aggregates with
 //! 2048-byte refill blocks. A clean close or drop releases unused
 //! aggregate space at EOA after publishing the shorter EOA with the same root. An uncertain
@@ -1206,6 +1217,11 @@ pub(crate) struct WriteEngine {
     /// [`commit`](Self::commit) rewrites the on-disk free-space managers so the
     /// free list survives close/reopen.
     persist: Option<PersistState>,
+    /// The first stored page boundary available to a non-persistent PAGE session.
+    ///
+    /// Set at open at or beyond both the recorded EOA and the physical extent. Such a session
+    /// appends every allocation, retains freed extents, and publishes only through the superblock.
+    fresh_page_boundary: Option<StoredAddress>,
     /// Per-dataset geometry cache for the immediate O(1) in-place append
     /// ([`append_inplace_gathered`](Self::append_inplace_gathered)), keyed by the dataset's resolved
     /// **object-header address** (not its path, so two hard links to one dataset
@@ -1435,18 +1451,16 @@ struct FreeSnapshot {
 
 /// How much memory a read-write open may use to hold the file being edited.
 ///
-/// The two read-write backends differ in memory, not in what they can express: a
-/// *bounded* session reads through a handle and holds only what a commit is
-/// building, while a *mirrored* session materializes the whole file in memory.
-/// Bounded is the better default when it applies, but it cannot yet edit every
-/// file — a pre-v2 (non-latest-format) superblock or a userblock still needs the
-/// mirror.
+/// A bounded session reads through a handle and holds what a commit is building.
+/// A mirrored session holds the whole file in memory. Editing a file with a pre-v2
+/// superblock, a userblock, or non-persistent [`FileSpaceStrategy::Page`] allocation
+/// requires the mirror.
 ///
 /// This is what a caller says about that trade-off, on
 /// [`FileAccessProperties::with_memory_strategy`](crate::FileAccessProperties::with_memory_strategy).
 /// Leaving it unset lets the entry point decide: [`File::open_rw`](crate::File::open_rw)
 /// prefers the bounded engine and falls back to the mirror ([`Auto`](Self::Auto)).
-/// Stating [`Bounded`](Self::Bounded) refuses instead of falling back.
+/// Selecting [`Bounded`](Self::Bounded) rejects a file that requires the mirror.
 ///
 /// This is a *request*, so it is deliberately not the type a file answers with:
 /// [`File::edit_backing`](crate::File::edit_backing) returns an [`EditBacking`],
@@ -1467,15 +1481,10 @@ pub enum MemoryStrategy {
     /// file, which is the cost of the file opening at all. What
     /// [`File::open_rw`](crate::File::open_rw) uses when nothing is asked for.
     ///
-    /// Two files reach that fallback, and no others: one with a pre-v2
-    /// (non-latest-format) superblock, and one with a userblock (a non-zero base
-    /// address). Every other file a read-write open accepts is edited bounded,
-    /// whatever its [`FileSpaceStrategy`], whether or
-    /// not it persists its free space, and however large it is. A paged file with
-    /// no persisted free space is refused by *both* backings rather than
-    /// mirrored, so it is not a third case. The list being exhaustive is what
-    /// makes "prefer bounded" a guarantee to budget against: wherever
-    /// [`Bounded`](Self::Bounded) opens a file, `Auto` gives the same backing.
+    /// Falls back for a pre-v2 superblock, a userblock, or [`FileSpaceStrategy::Page`]
+    /// with persistence disabled. Every other file accepted for editing uses the bounded
+    /// backing, regardless of size. Wherever [`Bounded`](Self::Bounded) opens a file,
+    /// `Auto` selects the same backing.
     Auto,
     /// Always build the whole-file mirror, whatever the file looks like. What
     /// [`File::open_rw`](crate::File::open_rw) did before it learned to dispatch.
@@ -1597,14 +1606,15 @@ pub enum SyncPolicy {
     OnClose,
 }
 
-/// Why the bounded engine cannot edit a file, when the whole-file mirror can.
-///
-/// Kept separate from the refusals that apply to *both* engines: a fallback is
-/// only ever worth taking for a limitation the mirror does not share. A paged
-/// file with no persisted free-space managers, for instance, is refused by the
-/// staged commit as well, so mirroring it would trade a clear error at open for
-/// the same error later with work already staged.
+/// Returns the reason editing a file requires the whole-file mirror, if any.
 fn bounded_only_limitation(session: &WriteEngine) -> Option<&'static str> {
+    if session.fresh_page_boundary.is_some() {
+        return Some(
+            "bounded editing of PAGE files without persisted free space is unsupported; \
+             use MemoryStrategy::Auto or MemoryStrategy::Mirrored for staged edits",
+        );
+    }
+
     if session.superblock.version < 2 {
         return Some(
             "bounded read-write access requires a latest-format file (v2/v3 superblock); \
@@ -1631,23 +1641,18 @@ fn bounded_only_limitation(session: &WriteEngine) -> Option<&'static str> {
 /// the call leaves a file on disk and returns `Err`, which reads like a failed
 /// create but is not one.
 ///
-/// The open-time rejections this function restates are [`bounded_only_limitation`] for the
-/// userblock, the shared paged check in
-/// [`open_rw_with_strategy`](WriteEngine::open_rw_with_strategy) for a paged file with no persisted
-/// free space, and the page-buffer checks in
-/// [`set_page_buffer_size`](WriteEngine::set_page_buffer_size). Keep this function in step with
-/// them. Each is phrased here in terms of the
-/// properties that cause it, since the file does not exist yet.
+/// Checks the creation properties against [`bounded_only_limitation`] and the page-buffer
+/// requirements in [`set_page_buffer_size`](WriteEngine::set_page_buffer_size).
 pub(crate) fn create_would_refuse_reopen(
     create: &FileCreateProperties,
     access: &FileAccessProperties,
 ) -> Option<&'static str> {
-    if let Some((FileSpaceStrategy::Page, false, _)) = create.file_space_strategy() {
+    if let Some((FileSpaceStrategy::Page, false, _)) = create.file_space_strategy()
+        && access.memory_strategy() == Some(MemoryStrategy::Bounded)
+    {
         return Some(
-            "a paged file (FileSpaceStrategy::Page) with persist = false cannot be reopened \
-             read-write, so creating one this way would write the file and then fail to open \
-             it; pass persist = true to with_file_space_strategy, or build the file with \
-             FileBuilder if it is only ever going to be read",
+            "bounded editing of PAGE files without persisted free space is unsupported; \
+             use MemoryStrategy::Auto or MemoryStrategy::Mirrored for staged edits",
         );
     }
     if create.userblock() != 0 && access.memory_strategy() == Some(MemoryStrategy::Bounded) {
@@ -2186,11 +2191,9 @@ impl WriteEngine {
     /// cannot edit is refused up front; [`MemoryStrategy::Auto`] opts in to
     /// falling back to the mirror instead (issue #198, steps 3 and 4).
     ///
-    /// Only a *bounded-only* limitation is worth falling back for — see
-    /// [`bounded_only_limitation`]. [`open_imaged`](Self::open_imaged) rejects non-8-byte offsets
-    /// or lengths and an unsupported superblock version for both engines, and this function
-    /// rejects a paged file without persisted free space under [`MemoryStrategy::Bounded`] and
-    /// [`MemoryStrategy::Auto`] alike, before `Auto` falls back to the mirror.
+    /// Falls back only for [`bounded_only_limitation`]. [`open_imaged`](Self::open_imaged)
+    /// rejects unsupported address widths and file layouts for both backings. A non-persistent
+    /// PAGE file requires the mirror for staged edits in fresh pages.
     pub(crate) fn open_rw_with_strategy(
         path: &Path,
         cache: MetadataCacheConfig,
@@ -2205,20 +2208,6 @@ impl WriteEngine {
         })?;
         session.batched_appends = true;
         session.bounded = true;
-        // Refusals that apply to *both* backings come first, or falling back for a
-        // bounded-only limitation would skip them and hand back a session that
-        // cannot commit. A paged file with no persisted managers has no on-disk
-        // record of which pages hold metadata and which hold raw data, so nothing
-        // can keep the pages segregated; the staged commit refuses it too, so
-        // deferring would only trade this error for the same one later, with work
-        // already staged.
-        if session.space.is_paged() && session.persist.is_none() {
-            return Err(Error::EditUnsupported(
-                "read-write access to a paged file (H5F_FSPACE_STRATEGY_PAGE) requires \
-                 persisted free space; recreate the file with \
-                 with_file_space_strategy(FileSpaceStrategy::Page, true, ..) to grow it in place",
-            ));
-        }
         if let Some(reason) = bounded_only_limitation(&session) {
             if strategy == MemoryStrategy::Bounded {
                 return Err(Error::EditUnsupported(reason));
@@ -2261,6 +2250,12 @@ impl WriteEngine {
         // other: a caller who asked for no `fsync` gets none, and the flag still
         // reaches every other process, which reads it from the operating system.
         session.set_sync_policy(sync_policy);
+        if session.fresh_page_boundary.is_some() {
+            return Err(Error::SwmrAppendUnsupported(
+                "SWMR writing of PAGE files without persisted free space is unsupported; \
+                 use File::open_rw with staged edits and File::commit",
+            ));
+        }
         if session.superblock.version < 3
             || !session.superblock.base_address.is_zero()
             || session.persist.is_some()
@@ -2459,9 +2454,44 @@ impl WriteEngine {
 
         // `H5Fopen` rejects a page size outside 512 bytes to 1 GiB as well (`H5Ofsinfo.c` and
         // `H5Fsuper.c`, HDF5 2.2.0).
-        let file_space_info = match Self::extension_fsinfo(&probe, &superblock, widths, addresses) {
-            Err(err @ FormatError::InvalidFileSpacePageSize(_)) => return Err(err.into()),
-            other => other,
+        let file_space_info = Self::extension_fsinfo(&probe, &superblock, widths, addresses)?;
+        let fresh_page_boundary = if let Some((_, info)) = &file_space_info
+            && info.strategy == FileSpaceStrategy::Page
+            && !info.persist
+        {
+            let stored_eoa = addresses.relative(superblock.eof_address)?;
+            let superblock_len =
+                hdf5_pure_format::__private::serialize_superblock(&superblock)?.len() as u64;
+            let superblock_end =
+                sb_sig_off
+                    .checked_add(superblock_len)
+                    .ok_or(FormatError::OffsetOverflow {
+                        offset: sb_sig_off,
+                        length: superblock_len,
+                    })?;
+            if superblock.eof_address < superblock_end {
+                return Err(Error::InvalidSpaceOwnershipExtent {
+                    address: sb_sig_off,
+                    length: superblock_len,
+                    previous_end: sb_sig_off,
+                    logical_size: superblock.eof_address,
+                });
+            }
+            if superblock.eof_address > len {
+                return Err(FormatError::TruncatedFile {
+                    expected_eof: superblock.eof_address,
+                    actual_len: len,
+                }
+                .into());
+            }
+            Some(Self::fresh_page_boundary(
+                addresses,
+                stored_eoa,
+                len,
+                info.page_size,
+            )?)
+        } else {
+            None
         };
 
         let image = build(handle, len)?;
@@ -2485,6 +2515,7 @@ impl WriteEngine {
             reserved: FreeList::new(),
             proved_free_of_references: false,
             persist: None,
+            fresh_page_boundary,
             located: HashMap::new(),
             vl_overwrite_heaps: HashMap::new(),
             superseded_heaps: Vec::new(),
@@ -2505,6 +2536,9 @@ impl WriteEngine {
         // If the file persists its free space, seed the free list from the
         // on-disk managers and arm persistence for future commits.
         session.load_persisted_free_space(file_space_info);
+        if session.fresh_page_boundary.is_some() {
+            session.space_ownership()?;
+        }
         // Gather this session's writes, now that the page size the file was laid
         // out on is known. Only an exclusively locked session: `lock = None` is
         // the SWMR writer, whose concurrent readers observe the order its ordered
@@ -2619,9 +2653,7 @@ impl WriteEngine {
                  with_sync_policy(SyncPolicy::OnClose), or drop it",
             ));
         }
-        // A paged file whose free space is not persisted can neither commit nor
-        // append — both are refused — so a page buffer would have nothing to
-        // hold, while its mark blocked every reader for the session's life.
+        // Non-persistent PAGE commits require ordered publication without page buffering.
         //
         // Scoped to a paged file: an *unpaged* one commits and appends whether it
         // persists its free space or not, so there is nothing here to refuse. The
@@ -2630,9 +2662,9 @@ impl WriteEngine {
         // is tested for a userblock file directly rather than through a caller.
         if self.space.is_paged() && self.persist.is_none() {
             return Err(Error::EditUnsupported(
-                "a page buffer on a paged file needs its free space persisted: without it \
-                 this session can neither commit nor append, so the buffer would hold nothing \
-                 while marking the file against every reader; recreate the file with \
+                "a page buffer on a paged file needs its free space persisted: staged commits \
+                 without persisted free space require ordered publication without page \
+                 buffering; recreate the file with \
                  with_file_space_strategy(FileSpaceStrategy::Page, true, ..), or drop the \
                  page buffer",
             ));
@@ -2673,29 +2705,15 @@ impl WriteEngine {
     /// A file without a File Space Info message keeps the default `FSM_AGGR` strategy installed by
     /// [`open_imaged`](Self::open_imaged), with separate metadata and raw aggregates. Explicit
     /// [`FileSpaceStrategy::Aggr`] and [`FileSpaceStrategy::FsmAggr`] also use these aggregates.
-    /// A message that fails safe parsing disables reusable space for the session. Persisted manager sections are read only for a file whose strategy
-    /// has free-space managers and whose message requests persistence. The session adds each
-    /// section to the free lists at the stored address its manager records.
-    fn load_persisted_free_space(
-        &mut self,
-        file_space_info: Result<Option<(u64, FileSpaceInfo)>, FormatError>,
-    ) {
-        let (ext_addr, info) = match file_space_info {
-            Ok(Some(found)) => found,
-            Ok(None) => {
-                if let Ok(eoa) = self.end_of_allocation() {
-                    self.aggregation = Some(AggregateSpace::new(eoa.get()));
-                }
-                return;
+    /// Reads persisted manager sections only when the recorded strategy has free-space managers
+    /// and persistence is enabled. Adds eligible sections to the free lists at their stored
+    /// addresses. A non-persistent PAGE session starts with empty free lists.
+    fn load_persisted_free_space(&mut self, file_space_info: Option<(u64, FileSpaceInfo)>) {
+        let Some((ext_addr, info)) = file_space_info else {
+            if let Ok(eoa) = self.end_of_allocation() {
+                self.aggregation = Some(AggregateSpace::new(eoa.get()));
             }
-            Err(_) => {
-                self.space = SessionSpace::from_strategy(
-                    None,
-                    DEFAULT_THRESHOLD,
-                    FileSpacePageSize::DEFAULT,
-                );
-                return;
-            }
+            return;
         };
         self.space =
             SessionSpace::from_strategy(Some(info.strategy), info.threshold, info.page_size);
@@ -2840,6 +2858,34 @@ impl WriteEngine {
     /// [`u64::MAX`].
     fn stored_extent(&self, at: u64, len: u64) -> Option<FreeExtent> {
         FreeExtent::new(self.addresses.relative(at).ok()?.get(), len)
+    }
+
+    /// Returns the first stored page boundary at or beyond both extents.
+    ///
+    /// Physical positions are converted relative to the effective base before alignment.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressBelowBase`] if `physical_len` is below the effective base.
+    /// Returns [`FormatError::OffsetOverflow`] if alignment or physical resolution exceeds
+    /// [`u64::MAX`].
+    fn fresh_page_boundary(
+        addresses: AddressContext,
+        eoa: StoredAddress,
+        physical_len: u64,
+        page_size: FileSpacePageSize,
+    ) -> Result<StoredAddress, FormatError> {
+        let start = addresses.relative(physical_len)?.get().max(eoa.get());
+        let boundary =
+            start
+                .checked_next_multiple_of(page_size.get())
+                .ok_or(FormatError::OffsetOverflow {
+                    offset: start,
+                    length: page_size.get(),
+                })?;
+        let boundary = StoredAddress::new(boundary);
+        addresses.resolve(boundary)?;
+        Ok(boundary)
     }
 
     /// Returns the end of the image as a stored address.
@@ -4180,13 +4226,8 @@ impl WriteEngine {
                  Dataset::append_staged",
             ));
         }
-        // A paged file (`H5F_FSPACE_STRATEGY_PAGE`) that does not persist its free
-        // space has no on-disk record of which pages hold metadata and which hold
-        // raw data, so neither this immediate append nor the staged commit can keep
-        // the two segregated; refuse it outright. A paged *persisting* file appends
-        // through the page-aware `EditStore`, which pads a tail page whenever the
-        // page type changes, and has its managers rewritten at the next commit or
-        // at close (issue #198).
+        // Non-persistent PAGE editing supports only staged allocation in fresh typed pages.
+        // Persistent PAGE appends use `EditStore` and rewrite managers at commit or close.
         if self.space.is_paged() && self.persist.is_none() {
             return Err(Error::AppendInPlaceUnsupported(
                 "in-place append is not supported on a paged file \
@@ -5351,20 +5392,6 @@ impl WriteEngine {
         // before any of them is read below.
         self.invalidate_heap_provenance(staged);
 
-        // A paged file (`H5F_FSPACE_STRATEGY_PAGE`) that does not persist its free
-        // space has no on-disk record of which pages hold metadata and which hold
-        // raw data, so this commit could not keep the two segregated and would
-        // silently degrade the paging. Refuse up front, before any writes, exactly
-        // as the bounded backend does. A paged *persisting* file is committed
-        // through the page-aware tail below (issue #198).
-        if self.space.is_paged() && self.persist.is_none() {
-            return Err(Error::EditUnsupported(
-                "committing an edit to a paged file (H5F_FSPACE_STRATEGY_PAGE) requires \
-                 persisted free space; recreate the file with \
-                 with_file_space_strategy(FileSpaceStrategy::Page, true, ..) to edit it in place",
-            ));
-        }
-
         // Invalidate the in-place-append geometry cache before doing any work. A
         // commit that reaches here rewrites and relocates object headers, frees
         // vacated regions into `self.space`, and may truncate the file, any of
@@ -5430,7 +5457,7 @@ impl WriteEngine {
                 self.addresses,
                 &full.as_path(),
             )?;
-            match Self::prepare_write(&self.image(), addr, fd, base, self.widths, full)? {
+            match self.prepare_write(addr, fd, full)? {
                 WritePlan::InPlace { data_addr, bytes } => {
                     inplace_writes.push((data_addr, bytes));
                 }
@@ -6235,6 +6262,10 @@ impl WriteEngine {
             self.addresses,
         )?;
 
+        if self.fresh_page_boundary.is_some() {
+            self.preflight_fresh_pages(staged, &nodes)?;
+        }
+
         // --- The point of no return. Every refusal is behind us, so the staged
         // set is taken here rather than at the top of this function: a refusal
         // above restores *every* edit the caller staged, and a failure below —
@@ -6665,6 +6696,11 @@ impl WriteEngine {
             return self.repoint_stored_references(&relocations);
         }
 
+        if self.fresh_page_boundary.is_some() {
+            self.pad_to_page()?;
+            return self.publish_nonpersisting(new_root, None);
+        }
+
         let mut trunc_to = self.release_freed(to_free)?;
         if let Some(aggregation) = self.aggregation {
             let end = self
@@ -6678,6 +6714,76 @@ impl WriteEngine {
         self.repoint_stored_references(&relocations)
     }
 
+    /// Proves that a non-persistent PAGE commit can publish without patching stored references.
+    ///
+    /// Checks the existing tree and prospective attribute storage before consuming staged edits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] for object references, unsupported attribute storage,
+    /// or an incomplete reference inspection. Returns address-resolution and object-header record
+    /// errors from [`prove_free_of_references`](crate::reference_patch::prove_free_of_references).
+    fn preflight_fresh_pages(
+        &self,
+        staged: &StagedEdits,
+        nodes: &BTreeMap<ObjectPathBuf, Node>,
+    ) -> Result<(), Error> {
+        let unsupported_dataset =
+            staged
+                .datasets
+                .iter()
+                .chain(&staged.writes)
+                .any(|(_, dataset)| {
+                    dataset.attrs_are_dense
+                        || datatype::datatype_holds_object_address(&dataset.dt)
+                        || dataset
+                            .attrs
+                            .iter()
+                            .any(|attr| datatype::datatype_holds_object_address(&attr.datatype))
+                });
+        // Same-file copies come from the tree checked below. Cross-file copies reject file
+        // addresses when staged, so their datatypes cannot add object references.
+        if unsupported_dataset
+            || staged
+                .cross_copies
+                .iter()
+                .any(|(_, tree)| tree.has_dense_attributes())
+            || nodes.values().any(|node| {
+                matches!(node.attrs, EditedAttrs::Dense(_))
+                    || node.writes.iter().any(|(_, _, write)| {
+                        matches!(
+                            write,
+                            MovingWrite::AttrEdit {
+                                attrs: EditedAttrs::Dense(_),
+                                ..
+                            }
+                        )
+                    })
+            })
+            || !crate::reference_patch::prove_free_of_references(
+                &self.image(),
+                &self.superblock,
+                self.widths,
+                self.addresses,
+                MAX_LINK_GRAPH_NODES,
+            )?
+        {
+            return Err(Error::EditUnsupported(
+                "staged edits of PAGE files without persisted free space require a complete \
+                 object-reference-free tree; repack the file to edit reference-bearing or \
+                 unsupported attribute storage",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Publishes the root and EOA after the content barrier, then applies any requested truncation.
+    ///
+    /// A non-persistent PAGE commit retains its File Space Info message and passes no truncation.
+    ///
+    /// # Errors
+    ///
+    /// Returns the address-conversion, serialization, write, synchronization, or truncation error.
     fn publish_nonpersisting(
         &mut self,
         new_root: u64,
@@ -6699,12 +6805,7 @@ impl WriteEngine {
             // the C library (issue #73). serialize() recomputes the v2/v3
             // checksum.
             //
-            // Provably zero here: the only session that holds flags across a
-            // commit is a page-buffered one, which requires a paged file, and a
-            // paged file takes the tail below instead. Written as the field
-            // rather than as `0` because "publish what this session holds" is the
-            // rule, and a site that states it as a literal is one refactor away
-            // from being wrong silently (issue #308).
+            // Non-persistent PAGE sessions reject page buffering and use zero status flags.
             new_sb.consistency_flags = self.held_status_flags;
             let sb_bytes = hdf5_pure_format::__private::serialize_superblock(&new_sb)?;
             self.publish_attempted = true;
@@ -6735,8 +6836,8 @@ impl WriteEngine {
     /// strategy, and returns the file position to truncate the file to when the flat free run
     /// reaches the end of allocation.
     ///
-    /// Disabled strategies drop the regions. A non-persisting PAGE commit is rejected before this
-    /// point because recovering page typing across sessions requires persisted state.
+    /// Disabled strategies discard the regions. A non-persistent PAGE commit skips this step
+    /// and retains every freed extent without making it reusable.
     ///
     /// # Errors
     ///
@@ -8114,6 +8215,8 @@ impl WriteEngine {
     /// Contiguous, compact, and chunked (including filtered) datasets are all
     /// supported. The chunk geometry, filter pipeline, and chunk index are read
     /// from the on-disk header.
+    /// A non-persistent PAGE session relocates contiguous and chunked replacements regardless
+    /// of whether they fit the existing allocation.
     ///
     /// Every refusal `fd` can decide on its own has been made by then, where the
     /// write is staged.
@@ -8122,14 +8225,15 @@ impl WriteEngine {
     ///
     /// Returns [`Error::EditUnsupported`] if the dataset cannot be overwritten,
     /// the datatype is incompatible, or the shape differs.
-    fn prepare_write<S: Source + ?Sized>(
-        src: &S,
+    fn prepare_write(
+        &self,
         addr: u64,
         fd: &FlatDataset,
-        base: AddressContext,
-        widths: FormatWidths,
         path: &ObjectPathBuf,
     ) -> Result<WritePlan, Error> {
+        let src = &self.image();
+        let base = self.addresses;
+        let widths = self.widths;
         // Enforced by construction: `staged.writes` has one producer, and it
         // refuses there. Asserted rather than re-refused because a second caller
         // that skipped it would not fail here — a chunked builder would fall
@@ -8255,7 +8359,8 @@ impl WriteEngine {
                 // reachable from nothing until the superblock repoint, so a
                 // failed attempt leaves the region genuinely dead and re-offering
                 // it is sound — which is the invariant `restore_free` states.
-                if fd.vl_string_staging.is_none()
+                if self.fresh_page_boundary.is_none()
+                    && fd.vl_string_staging.is_none()
                     && !data_addr.is_undefined(OFFSET_WIDTH)
                     && data_size == fd.raw.len() as u64
                 {
@@ -8385,17 +8490,19 @@ impl WriteEngine {
                 // the file (so the layout's stored addresses index correctly), and
                 // the returned write offsets are shifted back to absolute file
                 // offsets by adding `base` (a no-op on a base-0 file).
-                if let Some(writes) = try_inplace_chunk_writes(
-                    &BaseOffsetSource {
-                        inner: src,
-                        base: base.effective_base(),
-                    },
-                    &dl,
-                    &disk_ds,
-                    &spatial,
-                    raw_size,
-                    &new_chunk_bytes,
-                ) {
+                if self.fresh_page_boundary.is_none()
+                    && let Some(writes) = try_inplace_chunk_writes(
+                        &BaseOffsetSource {
+                            inner: src,
+                            base: base.effective_base(),
+                        },
+                        &dl,
+                        &disk_ds,
+                        &spatial,
+                        raw_size,
+                        &new_chunk_bytes,
+                    )
+                {
                     let writes = writes
                         .into_iter()
                         .map(|(off, b)| Ok((base.absolute(StoredAddress::new(off))?, b)))
@@ -9878,10 +9985,12 @@ impl WriteEngine {
     /// unreachable from the on-disk root, so a mid-commit crash cannot corrupt the
     /// live tree: the superblock still points at the prior, intact root.
     ///
-    /// A paged file reuses within the matching page type, or out of a page holding
+    /// A persistent paged file reuses within the matching page type, or out of a page holding
     /// nothing at all, which belongs to no type ([`SessionSpace::allocate`]). Every
     /// page stays homogeneous either way. It never opens a page for a reused region
     /// — the tail page is untouched by a write into the middle of the file.
+    /// A non-persistent PAGE session appends at or beyond
+    /// [`fresh_page_boundary`](Self::fresh_page_boundary) without drawing from free lists.
     ///
     /// # Errors
     ///
@@ -9905,7 +10014,9 @@ impl WriteEngine {
         class: AllocationClass,
         page_type: PageType,
     ) -> Result<Placement, Error> {
-        if let Some(extent) = self.space.allocate_with_page_type(len, class, page_type) {
+        if self.fresh_page_boundary.is_none()
+            && let Some(extent) = self.space.allocate_with_page_type(len, class, page_type)
+        {
             return Ok(Placement::Reused {
                 addr: self
                     .addresses
@@ -9918,6 +10029,14 @@ impl WriteEngine {
             return Ok(placement);
         }
         self.begin_page(page_type)?;
+        if let Some(boundary) = self.fresh_page_boundary
+            && self.end_of_allocation()? < boundary
+        {
+            return Err(FormatError::Internal(
+                "PAGE allocation precedes its fresh-page boundary".into(),
+            )
+            .into());
+        }
         Ok(Placement::Appended {
             addr: self.image.len(),
             len,
@@ -9925,7 +10044,7 @@ impl WriteEngine {
     }
 
     /// Reserves `len` reusable bytes for `class` and returns their stored address,
-    /// or `None` when no single region is large enough.
+    /// or `None` when no single region is large enough or PAGE persistence is disabled.
     ///
     /// A non-paged file keeps one list for the whole file. A paged file keeps one
     /// per page type and uses the list matching `class`: handing a
@@ -9934,6 +10053,9 @@ impl WriteEngine {
     /// holding nothing at all is the exception, and [`SessionSpace::allocate`] is where it is
     /// spent. [`SessionSpace::Disabled`] draws nothing.
     fn alloc_free(&mut self, len: u64, class: AllocationClass) -> Option<StoredAddress> {
+        if self.fresh_page_boundary.is_some() {
+            return None;
+        }
         self.space
             .allocate(len, class)
             .map(|extent| StoredAddress::new(extent.start()))
@@ -10584,6 +10706,26 @@ enum CopyTree {
         children: Vec<(String, Option<u64>, CopyTree)>,
         dense_attrs: DenseAttrSet,
     },
+}
+
+impl CopyTree {
+    fn has_dense_attributes(&self) -> bool {
+        match self {
+            Self::DatasetVerbatim { dense_attrs, .. }
+            | Self::DatasetContiguous { dense_attrs, .. }
+            | Self::DatasetChunked { dense_attrs, .. } => !dense_attrs.is_empty(),
+            Self::Group {
+                children,
+                dense_attrs,
+                ..
+            } => {
+                !dense_attrs.is_empty()
+                    || children
+                        .iter()
+                        .any(|(_, _, child)| child.has_dense_attributes())
+            }
+        }
+    }
 }
 
 /// The addresses this commit invalidates, against which a reference it writes is

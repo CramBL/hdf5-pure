@@ -2,10 +2,12 @@
 
 use std::path::Path;
 
+use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceStrategy;
+use hdf5_pure::FormatError;
 use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_core::__private::FileSpaceInfoFields;
 use hdf5_pure_format::__private::FormatWidths;
@@ -169,11 +171,13 @@ fn persisted_free_space_is_not_reused_under_a_strategy_without_a_free_space_mana
     );
 }
 
-#[test]
-fn a_file_whose_strategy_cannot_be_read_reuses_no_deleted_extent() {
+#[rstest]
+#[case::flat(FileSpaceStrategy::FsmAggr)]
+#[case::paged(FileSpaceStrategy::Page)]
+fn unreadable_file_space_strategy_is_rejected_before_mutation(#[case] strategy: FileSpaceStrategy) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("strategy.h5");
-    file_space::write_strategy_triplet(&path, FileSpaceStrategy::FsmAggr, false, 1);
+    file_space::write_strategy_triplet(&path, strategy, false, 1);
     let extension = {
         let file = File::open(&path).unwrap();
         let superblock = file.superblock();
@@ -183,23 +187,13 @@ fn a_file_whose_strategy_cannot_be_read_reuses_no_deleted_extent() {
             .unwrap()
     };
     file_space_info::replace_message(&path, extension, &[UNKNOWN_VERSION]);
-
-    let file = File::open_rw(&path).unwrap();
-    let deleted = file_space::contiguous_extent(&file, "b");
-    file.root().delete("b").unwrap();
-    file.commit().unwrap();
-    file.root()
-        .create_dataset("d", |b| {
-            b.with_i32_data(&[4; 300]);
-        })
-        .unwrap();
-    file.commit().unwrap();
-    let placed = file_space::contiguous_extent(&file, "d");
-
-    assert!(
-        !range::overlaps(&deleted, &placed),
-        "{deleted:?}, {placed:?}"
-    );
+    let original = std::fs::read(&path).unwrap();
+    let error = File::open_rw(&path).unwrap_err();
+    let Error::Format(FormatError::UnsupportedFileSpaceInfoVersion(version)) = error else {
+        panic!("expected UnsupportedFileSpaceInfoVersion, got {error:?}");
+    };
+    assert_eq!(version, UNKNOWN_VERSION);
+    assert_eq!(std::fs::read(&path).unwrap(), original);
 }
 
 #[test]

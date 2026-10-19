@@ -143,59 +143,40 @@ fn paged_persist_drop_finalizes() {
     );
 }
 
-/// A paged file without persisted free space cannot be mutated at all, so a paged
-/// file must persist its free space to be grown. `File::open_rw` says so at open;
-/// the refusals further in still exist and still leave the file untouched, and are
-/// reached here through `MemoryStrategy::Mirrored`.
 #[test]
-fn paged_non_persist_mirror_is_refused() {
+fn paged_non_persist_mirror_supports_staged_append() {
     let path = temp::repo_temp_path("pure_paged_nonpersist_mirror.h5");
     paged::write_unlimited_i32(&path, PAGE, false, 100, 32);
-
-    // `File::open_rw` refuses this file outright: neither backing can edit it, so
-    // there is nothing to gain by letting an edit be staged against it first.
-    assert!(
-        matches!(File::open_rw(&path), Err(Error::EditUnsupported(_))),
-        "open_rw must refuse a paged non-persisting file up front"
-    );
-
-    // Demanding the mirror still opens it — that asks for a backing rather than
-    // expressing a preference, and reading such a file is legitimate — which is
-    // the path that still reaches the commit-time refusal below.
     {
         let file = File::open_rw_with_options(
             &path,
             FileAccessProperties::new().with_memory_strategy(MemoryStrategy::Mirrored),
         )
         .unwrap();
-        let mut ds = file.dataset("d").unwrap();
-        // Immediate in-place append is refused (would break page alignment).
-        assert!(
-            matches!(
-                ds.append(&[100i32, 101]),
-                Err(Error::AppendInPlaceUnsupported(_))
-            ),
-            "in-place append on a paged file must be refused"
+        let mut dataset = file.dataset("d").unwrap();
+        let error = dataset.append(&[100i32, 101]).unwrap_err();
+        let Error::AppendInPlaceUnsupported(reason) = error else {
+            panic!("expected AppendInPlaceUnsupported, got {error:?}");
+        };
+        assert_eq!(
+            reason,
+            "in-place append is not supported on a paged file \
+            (H5F_FSPACE_STRATEGY_PAGE) without persisted free space; recreate the \
+            file with with_file_space_strategy(FileSpaceStrategy::Page, true, ..)"
         );
-        // Staged append + commit is refused too, before any writes.
-        ds.append_staged(|bb| {
-            bb.append_i32(&[100, 101, 102]);
-        })
-        .unwrap();
-        assert!(
-            matches!(file.commit(), Err(Error::EditUnsupported(_))),
-            "commit on a paged file must be refused"
-        );
-        // Drop `file` and its `ds` clone (holding the OS lock) before reading back.
+        dataset
+            .append_staged(|builder| {
+                builder.append_i32(&[100, 101, 102]);
+            })
+            .unwrap();
+        file.commit().unwrap();
     }
-
-    // The file is untouched: still reads the original and stays page-aligned.
-    let f = File::open(&path).unwrap();
+    let file = File::open(&path).unwrap();
     assert_eq!(
-        f.dataset("d").unwrap().read_i32().unwrap(),
-        (0..100).collect::<Vec<i32>>()
+        file.dataset("d").unwrap().read_i32().unwrap(),
+        (0..103).collect::<Vec<i32>>()
     );
-    assert_eq!(std::fs::read(&path).unwrap().len() as u64 % PAGE, 0);
+    assert_eq!(file.superblock().eof_address % PAGE, 0);
 }
 
 /// A bounded session that appends nothing must not grow or re-page the file.
