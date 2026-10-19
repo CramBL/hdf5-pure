@@ -32,6 +32,7 @@ jobs:
       pull-requests: read
     outputs:
       run: ${{ github.event_name != 'pull_request' || steps.filter.outputs.run == 'true' }}
+      images: ${{ steps.filter.outputs.images == 'true' }}
     steps:
       - name: Filter the changed paths
         id: filter
@@ -60,6 +61,15 @@ jobs:
               - scripts/constants.just
               - scripts/portability.just
               - .github/workflows/portability.yml
+              - ci/images.toml
+              - docker/ci/cross/**
+              - scripts/ci/**
+              - .github/workflows/ci-images.yml
+            images:
+              - ci/images.toml
+              - docker/ci/cross/**
+              - scripts/ci/install-mold.sh
+              - scripts/ci/cross-image.sh
 
   # The builds this job checks without running them (WASM, bare metal, a std
   # host with no default features), Clippy over the wasm32 tests, then two
@@ -119,10 +129,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {name: i686, recipe: portability::test-32bit}
-          - {name: s390x, recipe: portability::test-big-endian}
-          - {name: i686-hdf5, recipe: portability::test-32bit-hdf5}
-          - {name: s390x-hdf5, recipe: portability::test-big-endian-hdf5}
+          - {name: i686, family: i686, recipe: portability::test-32bit}
+          - {name: s390x, family: s390x, recipe: portability::test-big-endian}
+          - {name: i686-hdf5, family: i686, recipe: portability::test-32bit-hdf5}
+          - {name: s390x-hdf5, family: s390x, recipe: portability::test-big-endian-hdf5}
 
     steps:
       - name: Checkout
@@ -133,10 +143,18 @@ jobs:
       - name: Install Rust
         run: rustup toolchain install
 
+      - name: Select the cross image
+        id: image
+        env:
+          FAMILY: ${{ matrix.family }}
+          CONSTRUCTION_CHANGED: ${{ needs.changes.outputs.images }}
+        run: bash scripts/ci/select-cross-image.sh "$FAMILY" "$CONSTRUCTION_CHANGED"
+
       - name: Cache Cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: portability-${{ matrix.name }}
+          shared-key: portability-${{ matrix.name }}-${{ steps.image.outputs.identity }}
+          cache-targets: ${{ steps.image.outputs.candidate != 'true' }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install tools
@@ -145,7 +163,22 @@ jobs:
           tool: cross@0.2.5,just@1.59.0
 
       - name: Tests
-        run: just ${{ matrix.recipe }}
+        env:
+          RECIPE: ${{ matrix.recipe }}
+          CI_CROSS_CANDIDATE: ${{ steps.image.outputs.candidate }}
+        run: |
+          unset HDF5_DIR
+          just "$RECIPE"
+
+      - name: Verify candidate test binaries
+        if: steps.image.outputs.candidate == 'true'
+        env:
+          TARGET: ${{ matrix.family }}-unknown-linux-gnu
+          IMAGE: ${{ steps.image.outputs.image }}
+          BUNDLED: ${{ contains(matrix.name, 'hdf5') && 'bundled' || '' }}
+        run: |
+          unset HDF5_DIR
+          bash scripts/ci/verify-cross-tests.sh "$TARGET" "$IMAGE" "$BUNDLED"
 
   # The wasm32 tests under Node, with the `wasm-bindgen-test-runner` of the
   # wasm-bindgen release `Cargo.lock` pins.

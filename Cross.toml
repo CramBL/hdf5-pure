@@ -3,6 +3,8 @@ passthrough = [
     "CARGO_PROFILE_TEST_OPT_LEVEL",
     "CARGO_PROFILE_TEST_DEBUG_ASSERTIONS",
     "CARGO_PROFILE_TEST_OVERFLOW_CHECKS",
+    "CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_RUSTFLAGS",
+    "CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_RUSTFLAGS",
 ]
 
 # The `:main` images carry the prefixed cross linker (`i686-linux-gnu-gcc`,
