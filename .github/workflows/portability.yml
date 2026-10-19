@@ -110,6 +110,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.run == 'true'
 
+    env:
+      CARGO_PROFILE_TEST_OPT_LEVEL: "2"
+      CARGO_PROFILE_TEST_DEBUG_ASSERTIONS: "true"
+      CARGO_PROFILE_TEST_OVERFLOW_CHECKS: "true"
+
     strategy:
       fail-fast: false
       matrix:
