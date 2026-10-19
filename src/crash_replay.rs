@@ -121,6 +121,8 @@
 
 use std::path::Path;
 
+use test_util::disk_log::{self, DiskOp};
+
 use crate::chunk_index_inplace::alloc_probe;
 use crate::dataspace::MaxExtent;
 use crate::edit::{AppendBuilder, AppendTarget, MemoryStrategy, SyncPolicy, WriteEngine};
@@ -128,7 +130,6 @@ use crate::error::{Error, FormatError};
 use crate::file_lock::FileLocking;
 use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::FileSpaceStrategy;
-use crate::image::disk_log::{self, DiskOp};
 use crate::object_path::ObjectPathBuf;
 use crate::source::MetadataCacheConfig;
 use crate::type_builders::DatasetBuilder;
@@ -281,23 +282,6 @@ impl Recording {
         );
     }
 
-    /// Apply one operation to an in-memory image of the file, exactly as the
-    /// filesystem would: a positioned write past end-of-file extends it, leaving
-    /// the gap reading as zeros, and `set_len` both truncates and extends.
-    fn apply(image: &mut Vec<u8>, op: &DiskOp) {
-        match op {
-            DiskOp::Write { offset, bytes } => {
-                let start = *offset as usize;
-                let end = start + bytes.len();
-                if image.len() < end {
-                    image.resize(end, 0);
-                }
-                image[start..end].copy_from_slice(bytes);
-            }
-            DiskOp::SetLen(len) => image.resize(*len as usize, 0),
-        }
-    }
-
     /// Materialize every prefix in turn and hand each to `check`, then hold it to
     /// `expect`.
     ///
@@ -324,7 +308,7 @@ impl Recording {
 
         for k in 0..=self.ops.len() {
             if k > 0 {
-                Self::apply(&mut image, &self.ops[k - 1]);
+                self.ops[k - 1].apply(&mut image);
             }
             std::fs::write(&path, &image).unwrap();
             if k == self.ops.len() {

@@ -364,6 +364,8 @@ use self::aggregation::AggregateSpace;
 
 mod aggregation;
 mod global_heap_liveness;
+#[cfg(test)]
+mod page_feasibility;
 mod reclaim;
 
 pub use global_heap_liveness::GlobalHeapLiveness;
