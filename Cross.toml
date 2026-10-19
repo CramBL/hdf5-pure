@@ -1,3 +1,10 @@
+[build.env]
+passthrough = [
+    "CARGO_PROFILE_TEST_OPT_LEVEL",
+    "CARGO_PROFILE_TEST_DEBUG_ASSERTIONS",
+    "CARGO_PROFILE_TEST_OVERFLOW_CHECKS",
+]
+
 # The `:main` images carry the prefixed cross linker (`i686-linux-gnu-gcc`,
 # `s390x-linux-gnu-gcc`) that the `portability::test-*` recipes set. The
 # `:0.2.5` release images predate it. Pinned to the current `:main` digests.

@@ -82,12 +82,22 @@ jobs:
       - name: Install Rust
         run: rustup toolchain install
 
-      # Writer for the `ci` group: the widest dependency set in this workflow.
+      - name: Enable optimized tests with debug checks
+        if: matrix.os == 'ubuntu-latest' && matrix.config.name == 'default'
+        shell: bash
+        run: |
+          {
+            echo 'CARGO_PROFILE_TEST_OPT_LEVEL=2'
+            echo 'CARGO_PROFILE_TEST_DEBUG_ASSERTIONS=true'
+            echo 'CARGO_PROFILE_TEST_OVERFLOW_CHECKS=true'
+          } >> "$GITHUB_ENV"
+
+      # Main writes each cache group from a compatible test configuration.
       - name: Cache Cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: ci
-          save-if: ${{ github.ref == 'refs/heads/main' && matrix.config.name == 'full' }}
+          shared-key: ${{ matrix.os == 'ubuntu-latest' && matrix.config.name == 'default' && 'ci-test-opt2' || 'ci' }}
+          save-if: ${{ github.ref == 'refs/heads/main' && (matrix.config.name == 'full' || matrix.os == 'ubuntu-latest') }}
           cache-on-failure: true
 
       - name: Install tools
