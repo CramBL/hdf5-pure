@@ -58,6 +58,9 @@ impl Fixture {
 #[rstest]
 #[case::unpaged(Fixture { len: 64, chunk: 4, deflate: false, sparse: None })]
 #[case::unpaged_filtered(Fixture { len: 64, chunk: 4, deflate: true, sparse: None })]
+#[case::unpaged_windows(Fixture { len: 769, chunk: 1, deflate: false, sparse: None })]
+#[case::unpaged_filtered_windows(Fixture { len: 769, chunk: 1, deflate: true, sparse: None })]
+#[case::unpaged_sparse_windows(Fixture { len: 769, chunk: 1, deflate: true, sparse: Some(&[1..10, 350..360, 760..769]) })]
 #[case::paged(Fixture { len: 3_000, chunk: 1, deflate: false, sparse: None })]
 #[case::paged_filtered(Fixture { len: 3_000, chunk: 1, deflate: true, sparse: None })]
 #[case::sparse_pages(Fixture {

@@ -8,7 +8,8 @@
 //! A caller reads the bytes of each range the parser returns and passes them back to it.
 //! [`FixedArrayHeaderLocator`] returns the range of the header, [`FixedArrayDataBlockRef`] the
 //! range of an unpaged data block or of a paged one's prefix and page-init bitmap, and
-//! [`FixedArrayPageRef`] the range of one page.
+//! [`FixedArrayPageRef`] the range of one page. [`FixedArrayUnpaged`] describes entry windows
+//! and checksum ranges for an unpaged block.
 //!
 //! The index is defined in "The Fixed Array Index" of the [format specification, version
 //! 4.0][spec].
@@ -17,6 +18,7 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
+use core::num::NonZeroUsize;
 
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
@@ -162,7 +164,9 @@ impl FixedArrayHeader {
 ///
 /// A caller reads the bytes of [`parse_range`](Self::parse_range) and passes them to
 /// [`parse`](Self::parse). The range is the whole data block if it is unpaged, and its prefix
-/// and page-init bitmap if it is paged.
+/// and page-init bitmap if it is paged. For bounded reads of an unpaged block, the caller reads
+/// [`unpaged_prefix_range`](Self::unpaged_prefix_range) and passes the bytes to
+/// [`parse_unpaged_prefix`](Self::parse_unpaged_prefix).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FixedArrayDataBlockRef {
     base: BaseAddress,
@@ -203,41 +207,13 @@ impl FixedArrayDataBlockRef {
         &self,
         region: FileRegion<'a>,
     ) -> Result<FixedArrayDataBlock<'a>, FormatError> {
-        let Self {
-            base,
-            header,
-            range: _,
-            geometry,
-        } = *self;
+        let geometry = self.geometry;
         let bytes = region.subregion(self.parse_range()?)?.bytes();
-        let mut fields = bytes::Fields::new(bytes, 0);
-        if fields.array::<{ DATA_BLOCK_SIGNATURE.len() }>()? != DATA_BLOCK_SIGNATURE {
-            return Err(FormatError::InvalidFixedArraySignature);
-        }
-        let version = fields.u8()?;
-        if version != VERSION {
-            return Err(FormatError::InvalidFixedArrayVersion(version));
-        }
-        let client_id = fields.u8()?;
-        let expected_client = geometry.encoding.client().id();
-        if client_id != expected_client {
-            return Err(FormatError::InvalidFixedArrayBlockClient {
-                expected: expected_client,
-                actual: client_id,
-            });
-        }
-        let owner =
-            PhysicalAddress::new(base.absolute(fields.address(geometry.encoding.offsets())?)?);
-        if owner != header {
-            return Err(FormatError::InvalidFixedArrayBlockOwner {
-                expected: header.get(),
-                actual: owner.get(),
-            });
-        }
+        self.parse_prefix(region)?;
         checksum::verify_trailing(bytes)?;
 
         let body = without_checksum(bytes)?
-            .get(fields.pos()..)
+            .get(data_block_prefix_len(geometry.encoding.offsets()).to_usize()?..)
             .ok_or_else(|| {
                 FormatError::Internal("a Fixed Array data block ends inside its prefix".into())
             })?;
@@ -280,6 +256,87 @@ impl FixedArrayDataBlockRef {
         self.range
     }
 
+    /// Returns the prefix range for an unpaged block, or `None` for a paged block.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the prefix ends past [`u64::MAX`]. The prefix
+    /// is contained in the block's validated range.
+    pub fn unpaged_prefix_range(&self) -> Result<Option<FileRange>, FormatError> {
+        self.geometry
+            .paging
+            .is_none()
+            .then(|| self.prefix_range())
+            .transpose()
+    }
+
+    /// Parses the signature, version, client ID, and owner of an unpaged data block.
+    ///
+    /// The caller verifies the checksum separately, using the ranges returned by
+    /// [`FixedArrayUnpaged::checksummed_range`] and [`FixedArrayUnpaged::checksum_range`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidFixedArrayGeometry`] if the block is paged,
+    /// [`FormatError::InsufficientRegion`] if `region` does not contain the prefix,
+    /// [`FormatError::InvalidFixedArraySignature`] if the signature is not `FADB`,
+    /// [`FormatError::InvalidFixedArrayVersion`] if the version is not 0,
+    /// [`FormatError::InvalidFixedArrayBlockClient`] if the client ID differs from the header's,
+    /// and [`FormatError::InvalidFixedArrayBlockOwner`] if the owner differs from the header's
+    /// physical address. Returns [`FormatError::OffsetOverflow`] if the base address plus the
+    /// owner address is past [`u64::MAX`].
+    pub fn parse_unpaged_prefix(
+        &self,
+        region: FileRegion<'_>,
+    ) -> Result<FixedArrayUnpaged, FormatError> {
+        if self.geometry.paging.is_some() {
+            return Err(FormatError::InvalidFixedArrayGeometry);
+        }
+        self.parse_prefix(region)?;
+        Ok(FixedArrayUnpaged { block: *self })
+    }
+
+    fn prefix_range(&self) -> Result<FileRange, FormatError> {
+        FileRange::new(
+            self.range.start(),
+            data_block_prefix_len(self.geometry.encoding.offsets()),
+        )
+    }
+
+    fn parse_prefix(&self, region: FileRegion<'_>) -> Result<(), FormatError> {
+        let Self {
+            base,
+            header,
+            geometry,
+            ..
+        } = *self;
+        let mut fields = bytes::Fields::new(region.subregion(self.prefix_range()?)?.bytes(), 0);
+        if fields.array::<{ DATA_BLOCK_SIGNATURE.len() }>()? != DATA_BLOCK_SIGNATURE {
+            return Err(FormatError::InvalidFixedArraySignature);
+        }
+        let version = fields.u8()?;
+        if version != VERSION {
+            return Err(FormatError::InvalidFixedArrayVersion(version));
+        }
+        let client_id = fields.u8()?;
+        let expected_client = geometry.encoding.client().id();
+        if client_id != expected_client {
+            return Err(FormatError::InvalidFixedArrayBlockClient {
+                expected: expected_client,
+                actual: client_id,
+            });
+        }
+        let owner =
+            PhysicalAddress::new(base.absolute(fields.address(geometry.encoding.offsets())?)?);
+        if owner != header {
+            return Err(FormatError::InvalidFixedArrayBlockOwner {
+                expected: header.get(),
+                actual: owner.get(),
+            });
+        }
+        Ok(())
+    }
+
     fn page(&self, paging: Paging, index: u64) -> Result<FixedArrayPageRef, FormatError> {
         let Self {
             range, geometry, ..
@@ -302,6 +359,112 @@ impl FixedArrayDataBlockRef {
             first_slot,
             encoding: geometry.encoding,
         })
+    }
+}
+
+/// An unpaged Fixed Array data block whose prefix has been parsed.
+///
+/// The caller can read entry windows independently of the whole block's size. Parsing the
+/// prefix and the windows does not verify the checksum.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FixedArrayUnpaged {
+    block: FixedArrayDataBlockRef,
+}
+
+impl FixedArrayUnpaged {
+    /// Returns a window of at most `max_entries` entries beginning at `first_slot`.
+    ///
+    /// Returns `None` if `first_slot` is at or beyond the array's entry count. The last window
+    /// may contain fewer entries. Slots are indexed from the start of the whole array.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidFixedArrayGeometry`] if a byte length overflows, or
+    /// [`FormatError::OffsetOverflow`] if a physical position is past [`u64::MAX`]. Every window
+    /// is contained in the block's validated range.
+    pub fn window(
+        &self,
+        first_slot: u64,
+        max_entries: NonZeroUsize,
+    ) -> Result<Option<FixedArrayEntryWindow>, FormatError> {
+        let FixedArrayDataBlockRef {
+            range, geometry, ..
+        } = self.block;
+        if first_slot >= geometry.entries {
+            return Ok(None);
+        }
+        let entries = (geometry.entries - first_slot).min(max_entries.get() as u64);
+        let offset = sum([
+            data_block_prefix_len(geometry.encoding.offsets()),
+            product(first_slot, u64::from(geometry.encoding.stride().get()))?,
+        ])?;
+        Ok(Some(FixedArrayEntryWindow {
+            range: FileRange::new(
+                range.start().checked_add(offset)?,
+                product(entries, u64::from(geometry.encoding.stride().get()))?,
+            )?,
+            first_slot,
+            entries,
+            encoding: geometry.encoding,
+        }))
+    }
+
+    /// Returns the range of the prefix and entries covered by the block's checksum.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the range ends past [`u64::MAX`]. The range
+    /// is contained in the block's validated range.
+    pub fn checksummed_range(&self) -> Result<FileRange, FormatError> {
+        let range = self.block.range;
+        FileRange::new(range.start(), range.length() - CHECKSUM_LEN)
+    }
+
+    /// Returns the range of the block's trailing checksum.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the range ends past [`u64::MAX`]. The range
+    /// is contained in the block's validated range.
+    pub fn checksum_range(&self) -> Result<FileRange, FormatError> {
+        FileRange::new(self.checksummed_range()?.end(), CHECKSUM_LEN)
+    }
+}
+
+/// The physical range and logical slots of entries within an unpaged Fixed Array data block.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FixedArrayEntryWindow {
+    range: FileRange,
+    first_slot: u64,
+    entries: u64,
+    encoding: ElementEncoding,
+}
+
+impl FixedArrayEntryWindow {
+    /// Borrows the window's entry bytes from `region`.
+    ///
+    /// The caller verifies the whole block's checksum separately before reading records with
+    /// [`FixedArrayElements::records`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InsufficientRegion`] if `region` does not contain the window.
+    pub fn parse<'a>(&self, region: FileRegion<'a>) -> Result<FixedArrayElements<'a>, FormatError> {
+        Ok(FixedArrayElements {
+            bytes: region.subregion(self.range)?.bytes(),
+            first_slot: self.first_slot,
+            encoding: self.encoding,
+        })
+    }
+
+    /// Returns the range the caller reads for [`parse`](Self::parse).
+    pub const fn parse_range(&self) -> FileRange {
+        self.range
+    }
+
+    /// Returns the exclusive end slot, indexed from the start of the whole array.
+    pub const fn end_slot(&self) -> u64 {
+        self.first_slot + self.entries
     }
 }
 
@@ -382,7 +545,7 @@ impl FixedArrayPageRef {
     }
 }
 
-/// The elements of an unpaged Fixed Array data block or of one page.
+/// The elements of an unpaged Fixed Array data block, an entry window, or one page.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FixedArrayElements<'a> {
     bytes: &'a [u8],
@@ -866,6 +1029,96 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[rstest]
+    #[case::first(0, 14, 8_192, 1_024)]
+    #[case::last_full((1 << 29) - 1_024, 4_294_959_118, 8_192, 1 << 29)]
+    #[case::last_entry((1 << 29) - 1, 4_294_967_302, 8, 1 << 29)]
+    fn unpaged_windows_keep_full_width_geometry(
+        #[case] first_slot: u64,
+        #[case] offset: u64,
+        #[case] length: u64,
+        #[case] end_slot: u64,
+    ) {
+        let mut fixture = Fixture::new(5, false);
+        let at = fixture.header_at();
+        fixture.bytes[at + 7] = 29;
+        fixture.bytes[at + 8..at + 16].copy_from_slice(&(1u64 << 29).to_le_bytes());
+        fixture.restamp_header();
+        let block = fixture.data_block();
+        assert_eq!(block.range().length(), 4_294_967_314);
+        let prefix = block.unpaged_prefix_range().unwrap().unwrap();
+        let unpaged = block
+            .parse_unpaged_prefix(fixture.image().subregion(prefix).unwrap())
+            .unwrap();
+        let window = unpaged
+            .window(first_slot, NonZeroUsize::new(1_024).unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            window.parse_range().start().get(),
+            block.range().start().get() + offset
+        );
+        assert_eq!(window.parse_range().length(), length);
+        assert_eq!(window.end_slot(), end_slot);
+        assert_eq!(unpaged.checksummed_range().unwrap().length(), 4_294_967_310);
+        assert_eq!(
+            unpaged.checksum_range().unwrap().start().get(),
+            block.range().start().get() + 4_294_967_310
+        );
+        assert_eq!(unpaged.window(1 << 29, NonZeroUsize::MIN).unwrap(), None);
+    }
+
+    #[test]
+    fn unpaged_window_parsing_preserves_large_slots() {
+        let geometry = Geometry::new(
+            ElementEncoding::new(
+                OffsetWidth::Eight,
+                chunk_record::ArrayClient::Chunks.id(),
+                8,
+            )
+            .unwrap(),
+            (1 << 32) + 4,
+            33,
+        )
+        .unwrap();
+        let block = FixedArrayDataBlockRef::new(
+            BaseAddress::ZERO,
+            PhysicalAddress::new(0),
+            PhysicalAddress::new(28),
+            geometry,
+        )
+        .unwrap();
+        let mut prefix = Vec::from(DATA_BLOCK_SIGNATURE);
+        prefix.extend_from_slice(&[VERSION, chunk_record::ArrayClient::Chunks.id()]);
+        prefix.extend_from_slice(&0u64.to_le_bytes());
+        let range = block.unpaged_prefix_range().unwrap().unwrap();
+        let unpaged = block
+            .parse_unpaged_prefix(FileRegion::new(range, &prefix).unwrap())
+            .unwrap();
+        let window = unpaged
+            .window(1 << 32, NonZeroUsize::new(2).unwrap())
+            .unwrap()
+            .unwrap();
+        let mut bytes = Vec::from(123u64.to_le_bytes());
+        bytes.extend_from_slice(&u64::MAX.to_le_bytes());
+        assert_eq!(
+            window
+                .parse(FileRegion::new(window.parse_range(), &bytes).unwrap())
+                .unwrap()
+                .records(8)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            vec![(
+                1 << 32,
+                ChunkRecord {
+                    address: StoredAddress::new(123),
+                    stored_size: 8,
+                    filter_mask: 0
+                }
+            )]
+        );
     }
 
     #[rstest]
