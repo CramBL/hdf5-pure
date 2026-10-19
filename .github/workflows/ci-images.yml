@@ -9,13 +9,17 @@ on:
       - scripts/ci/install-mold.sh
       - scripts/ci/cross-image.sh
       - .github/workflows/ci-images.yml
+      - ci/matio.env
+      - rust-toolchain.toml
+      - docker/ci/matio/**
+      - scripts/ci/matio-image.sh
   workflow_dispatch:
     inputs:
       family:
-        description: Cross image family
+        description: Image family
         type: choice
-        default: both
-        options: [both, i686, s390x]
+        default: all
+        options: [all, both, i686, s390x, matio]
 
 permissions:
   contents: read
@@ -39,6 +43,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Log in to GHCR
         env:
@@ -48,14 +53,32 @@ jobs:
 
       - name: Build, validate and publish
         env:
-          FAMILY: ${{ inputs.family || 'both' }}
+          FAMILY: ${{ inputs.family || 'changed' }}
+          BEFORE: ${{ github.event.before }}
         run: |
-          for family in i686 s390x; do
-            if [[ "$FAMILY" != both && "$FAMILY" != "$family" ]]; then
+          if [[ "$FAMILY" == changed ]]; then
+            git diff --name-only "$BEFORE" "$GITHUB_SHA" > "$RUNNER_TEMP/image-changes"
+          fi
+          for family in i686 s390x matio; do
+            if [[ "$FAMILY" == changed ]]; then
+              if [[ "$family" == matio ]]; then
+                pattern='^(ci/matio.env|rust-toolchain.toml|docker/ci/matio/|scripts/ci/(matio-image|install-mold).sh|.github/workflows/ci-images.yml)'
+              else
+                pattern='^(ci/images.toml|docker/ci/cross/|scripts/ci/(cross-image|install-mold).sh|.github/workflows/ci-images.yml)'
+              fi
+              if ! grep -Eq "$pattern" "$RUNNER_TEMP/image-changes"; then
+                continue
+              fi
+            elif [[ "$FAMILY" != all && "$FAMILY" != "$family" && ! ( "$FAMILY" == both && "$family" != matio ) ]]; then
               continue
             fi
-            image="ghcr.io/crambl/hdf5-pure-cross-$family:$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-            bash scripts/ci/cross-image.sh publish "$family" "$image"
+            if [[ "$family" == matio ]]; then
+              image="ghcr.io/crambl/hdf5-pure-matio:$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+              bash scripts/ci/matio-image.sh publish "$image"
+            else
+              image="ghcr.io/crambl/hdf5-pure-cross-$family:$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+              bash scripts/ci/cross-image.sh publish "$family" "$image"
+            fi
           done
 
       - name: Log out of GHCR
