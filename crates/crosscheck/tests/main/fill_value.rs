@@ -10,7 +10,12 @@
 //!   message) - and the pure reader must recover it.
 
 use hdf5::file::LibraryVersion;
-use hdf5_pure::{File, FileBuilder, FillTime, MaxExtent, ScaleOffset};
+use hdf5_pure::ChunkIndex;
+use hdf5_pure::File;
+use hdf5_pure::FileBuilder;
+use hdf5_pure::FillTime;
+use hdf5_pure::MaxExtent;
+use hdf5_pure::ScaleOffset;
 use rstest::rstest;
 
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
@@ -754,7 +759,7 @@ fn row_windows_read_large_chunked_extents_written_by_the_c_library(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("large.h5");
     {
-        let file = file::libhdf5_create_v110(&path);
+        let file = file::libhdf5_create_v18(&path);
         let dataset = file
             .new_dataset::<f64>()
             .shape((4_294_967_424usize, 1))
@@ -766,8 +771,11 @@ fn row_windows_read_large_chunked_extents_written_by_the_c_library(
             let values = ndarray::arr2(&[[11.0], [12.0], [13.0], [14.0]]);
             dataset.write_slice(&values, (0..4, ..)).unwrap();
         }
+        drop(dataset);
         file.close().unwrap();
     }
+    let file_bytes = std::fs::metadata(&path).unwrap().len();
+    assert!(file_bytes < 1_048_576, "fixture has {file_bytes} bytes");
     let file = if streaming {
         File::open_streaming(&path)
     } else {
@@ -780,5 +788,67 @@ fn row_windows_read_large_chunked_extents_written_by_the_c_library(
             .read_f64_rows(start, 1)
             .unwrap(),
         vec![expected],
+    );
+}
+
+#[cfg(target_pointer_width = "64")]
+#[rstest]
+#[case::full_rows(1, 1)]
+#[case::inner_split(6, 2)]
+fn high_row_windows_read_chunks_written_by_the_c_library(
+    #[case] columns: usize,
+    #[case] chunk_columns: usize,
+    #[values(false, true)] streaming: bool,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("high_rows.h5");
+    let start = 4_294_967_360usize;
+    let values = ndarray::Array2::from_shape_vec(
+        (8, columns),
+        (101..101 + 8 * columns)
+            .map(|value| f64::from(u32::try_from(value).unwrap()))
+            .collect(),
+    )
+    .unwrap();
+    {
+        let file = file::libhdf5_create_v18(&path);
+        let dataset = file
+            .new_dataset::<f64>()
+            .shape((4_294_967_424usize, columns))
+            .chunk((4, chunk_columns))
+            .create("d")
+            .unwrap();
+        dataset
+            .write_slice(&values, (start..start + 8, ..))
+            .unwrap();
+        drop(dataset);
+        file.close().unwrap();
+    }
+    let file_bytes = std::fs::metadata(&path).unwrap().len();
+    assert!(file_bytes < 1_048_576, "fixture has {file_bytes} bytes");
+    let file = if streaming {
+        File::open_streaming(&path)
+    } else {
+        File::open(&path)
+    }
+    .unwrap();
+    let dataset = file.dataset("d").unwrap();
+    assert_eq!(dataset.chunk_index().unwrap(), Some(ChunkIndex::BTreeV1));
+    let expected = values
+        .slice(ndarray::s![3..6, ..])
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        dataset.read_f64_rows(start as u64 + 3, 3).unwrap(),
+        expected
+    );
+    assert_eq!(
+        dataset.read_f64_rows(start as u64 + 3, 3).unwrap(),
+        expected
+    );
+    assert_eq!(
+        dataset.read_f64_rows(start as u64 + 1, 1).unwrap(),
+        values.row(1).to_vec()
     );
 }
