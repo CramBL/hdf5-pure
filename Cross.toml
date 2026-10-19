@@ -7,20 +7,8 @@ passthrough = [
     "CARGO_TARGET_S390X_UNKNOWN_LINUX_GNU_RUSTFLAGS",
 ]
 
-# The `:main` images carry the prefixed cross linker (`i686-linux-gnu-gcc`,
-# `s390x-linux-gnu-gcc`) that the `portability::test-*` recipes set. The
-# `:0.2.5` release images predate it. Pinned to the current `:main` digests.
-# Bump both together when cross releases again.
-#
-# `pre-build` installs a newer cmake: the pinned image ships 3.23, and the
-# vendored libhdf5 that `test-*-hdf5` builds (`hdf5-metno-src`, the
-# `__hdf5-bundled` feature) requires 3.26.
 [target.i686-unknown-linux-gnu]
-image = "ghcr.io/cross-rs/i686-unknown-linux-gnu@sha256:ffd906743f91aa05afcda004d23c9b8be0410d8da51ab6ed5aef203ae883385d"
-# `/usr/local/bin/cmake`, earlier on PATH, is the image's own 3.23 build. The
-# `ln -sf` puts the apt one ahead of it.
-pre-build = ["apt-get update && apt-get install --assume-yes cmake && ln -sf /usr/bin/cmake /usr/local/bin/cmake"]
+image = "ghcr.io/crambl/hdf5-pure-cross-i686@sha256:f639a5286f89c45b43b02f86149c7f9c6a09cdca6759fcb7ae7330845b199041"
 
 [target.s390x-unknown-linux-gnu]
-image = "ghcr.io/cross-rs/s390x-unknown-linux-gnu@sha256:c19e71febe5381884583fb26ad797c51fd80daa8d731a73b3d2cccbe35b61ec7"
-pre-build = ["apt-get update && apt-get install --assume-yes cmake && ln -sf /usr/bin/cmake /usr/local/bin/cmake"]
+image = "ghcr.io/crambl/hdf5-pure-cross-s390x@sha256:eb8046ae8021fda900eb7b8a9274121fd6800737a3ad5a3c24e3e2465a3b6101"
