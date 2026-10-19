@@ -55,6 +55,7 @@ jobs:
               - justfile
               - scripts/nightly.txt
               - scripts/constants.just
+              - scripts/ci/**
               - .github/workflows/ci.yml
 
   # The crate's own suite. The crosschecks against libhdf5
@@ -92,11 +93,31 @@ jobs:
             echo 'CARGO_PROFILE_TEST_OVERFLOW_CHECKS=true'
           } >> "$GITHUB_ENV"
 
+      - name: Install and select mold
+        id: mold
+        if: matrix.os == 'ubuntu-latest' && matrix.config.name == 'default'
+        shell: bash
+        run: |
+          for variable in RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTDOCFLAGS; do
+            if [[ -v "$variable" ]]; then
+              echo "::error::$variable overrides the target flags."
+              exit 1
+            fi
+          done
+          bash scripts/ci/install-mold.sh "$RUNNER_TEMP/mold"
+          echo "$RUNNER_TEMP/mold/bin" >> "$GITHUB_PATH"
+          echo "identity=$(bash scripts/ci/install-mold.sh --identity)" >> "$GITHUB_OUTPUT"
+          {
+            echo 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=cc'
+            echo 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C force-frame-pointers=yes -C link-arg=-fuse-ld=mold'
+            echo 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTDOCFLAGS=-C link-arg=-fuse-ld=mold'
+          } >> "$GITHUB_ENV"
+
       # Main writes each cache group from a compatible test configuration.
       - name: Cache Cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: ${{ matrix.os == 'ubuntu-latest' && matrix.config.name == 'default' && 'ci-test-opt2' || 'ci' }}
+          shared-key: ${{ matrix.os == 'ubuntu-latest' && matrix.config.name == 'default' && format('ci-test-opt2-{0}', steps.mold.outputs.identity) || 'ci' }}
           save-if: ${{ github.ref == 'refs/heads/main' && (matrix.config.name == 'full' || matrix.os == 'ubuntu-latest') }}
           cache-on-failure: true
 
@@ -107,6 +128,17 @@ jobs:
 
       - name: Tests
         run: just ${{ matrix.config.name == 'full' && 'test-full' || 'test' }}
+
+      - name: Verify the test linker
+        if: matrix.os == 'ubuntu-latest' && matrix.config.name == 'default'
+        shell: bash
+        run: |
+          cargo nextest list --locked --workspace --exclude hdf5-pure-crosscheck --list-type binaries-only --message-format json > "$RUNNER_TEMP/test-binaries.json"
+          binary=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["rust-binaries"]["hdf5-pure"]["binary-path"])' "$RUNNER_TEMP/test-binaries.json")
+          readelf -h "$binary"
+          readelf -h "$binary" | grep -F 'Advanced Micro Devices X86-64'
+          readelf -p .comment "$binary"
+          readelf -p .comment "$binary" | grep -F "$(mold --version)"
 
       # rustdoc compiles doctests, so nextest cannot run them.
       - name: Doctests
