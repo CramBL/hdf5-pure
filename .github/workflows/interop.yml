@@ -37,6 +37,7 @@ jobs:
       pull-requests: read
     outputs:
       run: ${{ github.event_name != 'pull_request' || steps.filter.outputs.run == 'true' }}
+      matio-image: ${{ steps.filter.outputs.matio-image == 'true' }}
     steps:
       - name: Filter the changed paths
         id: filter
@@ -63,6 +64,18 @@ jobs:
               - scripts/constants.just
               - scripts/hdf5-releases.toml
               - .github/workflows/interop.yml
+              - ci/matio.env
+              - docker/ci/matio/**
+              - scripts/ci/matio-image.sh
+              - scripts/ci/run-matio.sh
+              - scripts/ci/install-mold.sh
+              - .github/workflows/ci-images.yml
+            matio-image:
+              - ci/matio.env
+              - rust-toolchain.toml
+              - docker/ci/matio/**
+              - scripts/ci/matio-image.sh
+              - scripts/ci/install-mold.sh
 
   # The releases scripts/hdf5-releases.toml lists, for the matrix below, and the newest of them.
   releases:
@@ -212,20 +225,60 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
+        if: matrix.os != 'ubuntu-latest' || needs.changes.outputs.matio-image != 'true'
         run: rustup toolchain install
 
+      - name: Build the matio candidate
+        if: matrix.os == 'ubuntu-latest' && needs.changes.outputs.matio-image == 'true'
+        id: image
+        run: |
+          identity=$(bash scripts/ci/matio-image.sh fingerprint)
+          image="hdf5-pure-matio:$identity"
+          bash scripts/ci/matio-image.sh build "$image"
+          identity=$(docker image inspect --format '{{.Id}}' "$image" | cut -d: -f2)
+          {
+            echo "MATIO_IMAGE=$image"
+            echo "CARGO_HOME=$GITHUB_WORKSPACE/../matio-cargo"
+            echo "CARGO_TARGET_DIR=$GITHUB_WORKSPACE/target/matio-$identity"
+            echo 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=cc'
+            echo 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-C force-frame-pointers=yes -C link-arg=-fuse-ld=mold -C link-arg=-Wl,-rpath,/opt/matio/lib'
+          } >> "$GITHUB_ENV"
+          echo "identity=$identity" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the candidate Cargo environment
+        if: steps.image.outcome == 'success'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: matio-${{ steps.image.outputs.identity }}-${{ hashFiles('scripts/ci/run-matio.sh') }}
+          cmd-format: bash scripts/ci/run-matio.sh {0}
+          cache-bin: false
+          cache-targets: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Crosscheck in the candidate
+        if: steps.image.outcome == 'success'
+        run: |
+          bash scripts/ci/run-matio.sh just interop::test-matio
+          bash scripts/ci/run-matio.sh cargo nextest list --locked -p hdf5-pure-crosscheck --features serde,__matio --list-type binaries-only --message-format json > "$RUNNER_TEMP/matio-binaries.json"
+          binary=$(jq -r '[."rust-binaries"[] | select(."binary-name" == "main")][0]."binary-path"' "$RUNNER_TEMP/matio-binaries.json")
+          test -f "$binary"
+          bash scripts/ci/run-matio.sh bash -euo pipefail -c 'readelf -h "$1"; readelf -h "$1" | grep -F "Advanced Micro Devices X86-64"; readelf -p .comment "$1" | grep -F "$(mold --version)"' bash "$binary"
+
       - name: Cache Cargo
+        if: steps.image.outcome != 'success'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: interop
           save-if: false
 
       - name: Install tools
+        if: steps.image.outcome != 'success'
         uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-nextest@0.9.148,just@1.59.0
 
       - name: Install conda
+        if: steps.image.outcome != 'success'
         uses: conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5 # v4.0.1
         with:
           auto-update-conda: false
@@ -235,9 +288,11 @@ jobs:
           conda-remove-defaults: "true"
 
       - name: Install libmatio
+        if: steps.image.outcome != 'success'
         run: conda install -y -c conda-forge libmatio
 
       - name: Crosscheck against the reference library
+        if: steps.image.outcome != 'success'
         run: |
           export LIBRARY_PATH="$CONDA_PREFIX/lib:${LIBRARY_PATH:-}"
           export RUSTFLAGS="-C link-args=-Wl,-rpath,$CONDA_PREFIX/lib"
