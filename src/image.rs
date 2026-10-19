@@ -61,6 +61,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 
+#[cfg(test)]
+use test_util::disk_log;
+
 use crate::convert::Narrow;
 use crate::error::{Error, FormatError};
 use crate::source::{
@@ -155,89 +158,6 @@ impl WriteBuffering {
                 max_bytes,
             } => Some((page_size, max_bytes)),
         }
-    }
-}
-
-/// A recording of everything that reached the operating system, so a test can
-/// replay a prefix of it and see what a crash at that instant would have left.
-///
-/// The log is per thread and off by default, which is what lets it live under
-/// every write in the crate: an inactive thread pays one thread-local read per
-/// issued write, and the lib tests that are not recording are unaffected by the
-/// ones that are, however the harness schedules them.
-///
-/// It records only operations that *succeeded*. A write that returned an error
-/// may have put any prefix of its bytes on the disk, and this cannot know which,
-/// so a failed write is not a point this can replay. That is the boundary
-/// between this and a fault injector: this models the machine stopping between
-/// two completed operations, which is the case the crate's ordering barriers are
-/// written against.
-#[cfg(test)]
-pub(crate) mod disk_log {
-    use std::cell::RefCell;
-
-    /// One completed operation against the file, in the order it was issued.
-    pub(crate) enum DiskOp {
-        /// `bytes` landed at `offset`. Positioned, so replaying it is exact
-        /// wherever the file's length happens to be.
-        Write { offset: u64, bytes: Vec<u8> },
-        /// The file was resized to this length, discarding anything past it.
-        SetLen(u64),
-    }
-
-    impl DiskOp {
-        /// A short label for a failure message: what it touched, not its bytes.
-        pub(crate) fn describe(&self) -> String {
-            match self {
-                DiskOp::Write { offset, bytes } => {
-                    std::format!("write {offset}..{}", offset + bytes.len() as u64)
-                }
-                DiskOp::SetLen(len) => std::format!("set_len {len}"),
-            }
-        }
-    }
-
-    thread_local! {
-        /// `None` when this thread is not recording, which is every thread that
-        /// has not asked to be.
-        static LOG: RefCell<Option<Vec<DiskOp>>> = const { RefCell::new(None) };
-    }
-
-    /// Begin recording on this thread, discarding any previous log.
-    pub(crate) fn start() {
-        LOG.with(|l| *l.borrow_mut() = Some(Vec::new()));
-    }
-
-    /// Stop recording and return what was recorded.
-    pub(crate) fn take() -> Vec<DiskOp> {
-        LOG.with(|l| l.borrow_mut().take()).unwrap_or_default()
-    }
-
-    /// Note one completed write, if this thread is recording.
-    ///
-    /// Takes the bytes by reference and copies them *inside* the recording
-    /// check, which is the difference between the claim above and a lie: built
-    /// as a `DiskOp` at the call site, every write in the whole `cfg(test)`
-    /// build would pay a heap allocation and a copy to hand it to a thread that
-    /// is not recording and will drop it.
-    pub(crate) fn record_write(offset: u64, bytes: &[u8]) {
-        LOG.with(|l| {
-            if let Some(log) = l.borrow_mut().as_mut() {
-                log.push(DiskOp::Write {
-                    offset,
-                    bytes: bytes.to_vec(),
-                });
-            }
-        });
-    }
-
-    /// Note one completed resize, if this thread is recording.
-    pub(crate) fn record_set_len(len: u64) {
-        LOG.with(|l| {
-            if let Some(log) = l.borrow_mut().as_mut() {
-                log.push(DiskOp::SetLen(len));
-            }
-        });
     }
 }
 

@@ -24,6 +24,7 @@ use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
 use hdf5_pure::Layout;
 use hdf5_pure::MaxExtent;
+use hdf5_pure::MemoryStrategy;
 use hdf5_pure::MessageType;
 use hdf5_pure::SyncPolicy;
 use hdf5_pure_core::__private::BaseAddressExt;
@@ -52,6 +53,90 @@ use test_util_hdf5::dataset::Unlimited;
 use test_util_hdf5::file_space;
 use test_util_hdf5::paged;
 use test_util_hdf5::session;
+
+#[rstest]
+#[case::plain(4096, 0)]
+#[case::userblock(4096, 4096)]
+#[case::larger_pages(8192, 8192)]
+fn nonpersistent_page_framing_and_edit_rejections_preserve_c_files(
+    #[case] page_size: u64,
+    #[case] userblock: u64,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nonpersistent_page.h5");
+    let c_file = hdf5::FileBuilder::new()
+        .with_fapl(|fapl| fapl.libver_v110())
+        .with_fcpl(|fcpl| {
+            fcpl.userblock(userblock)
+                .file_space_strategy(CStrategy::FreeSpaceManager {
+                    paged: true,
+                    persist: false,
+                    threshold: 1,
+                })
+                .file_space_page_size(page_size)
+        })
+        .create(&path)
+        .unwrap();
+    c_file
+        .new_dataset::<u8>()
+        .shape(64)
+        .create("keep")
+        .unwrap()
+        .write_raw(&[7; 64])
+        .unwrap();
+    c_file.close().unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let file = File::open(&path).unwrap();
+    assert_eq!(file.superblock().base_address.get(), userblock);
+    assert_eq!(file.superblock().eof_address, before.len() as u64);
+    assert_eq!((file.superblock().eof_address - userblock) % page_size, 0);
+    let info = file.file_space_info().unwrap();
+    assert_eq!(info.strategy, FileSpaceStrategy::Page);
+    assert_eq!(info.page_size.get(), page_size);
+    assert!(!info.persist);
+    assert!(info.manager_addrs.is_empty());
+    assert_eq!(file.dataset("keep").unwrap().read_u8().unwrap(), [7; 64]);
+    drop(file);
+
+    let error = File::open_rw(&path).unwrap_err();
+    let Error::EditUnsupported(reason) = &error else {
+        panic!("expected EditUnsupported, got {error:?}");
+    };
+    assert_eq!(
+        *reason,
+        "read-write access to a paged file (H5F_FSPACE_STRATEGY_PAGE) requires \
+         persisted free space; recreate the file with \
+         with_file_space_strategy(FileSpaceStrategy::Page, true, ..) to grow it in place"
+    );
+    let file = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new().with_memory_strategy(MemoryStrategy::Mirrored),
+    )
+    .unwrap();
+    file.root()
+        .create_dataset("added", |dataset| {
+            dataset.with_u8_data(&[9; 64]);
+        })
+        .unwrap();
+    let error = file.commit().unwrap_err();
+    let Error::EditUnsupported(reason) = &error else {
+        panic!("expected EditUnsupported, got {error:?}");
+    };
+    assert_eq!(
+        *reason,
+        "committing an edit to a paged file (H5F_FSPACE_STRATEGY_PAGE) requires \
+         persisted free space; recreate the file with \
+         with_file_space_strategy(FileSpaceStrategy::Page, true, ..) to edit it in place"
+    );
+    drop(file);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let c_file = hdf5::File::open(&path).unwrap();
+    assert_eq!(c_file.member_names().unwrap(), ["keep"]);
+    assert_eq!(
+        c_file.dataset("keep").unwrap().read_raw::<u8>().unwrap(),
+        [7; 64]
+    );
+}
 
 #[test]
 fn c_library_reads_our_strategy() {
