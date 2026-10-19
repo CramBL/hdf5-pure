@@ -193,33 +193,19 @@ fn hdf5_pure_places_a_workload_under_page_as_recorded(
     let path = dir.path().join("workload.h5");
 
     let file = aggregation::create_file(&path, FileSpaceStrategy::Page, true);
-    let mut report = String::new();
-    for step in workload.steps {
+    let mut report = format!(
+        "PAGE allocation workload: {}\n\n\
+         All sizes and offsets are in bytes. End offsets are exclusive.\n",
+        workload.name
+    );
+    for (index, &step) in workload.steps.iter().enumerate() {
         step.apply(&file);
-        let SpaceOwnership {
-            physical_size,
-            logical_size,
-            userblock_space,
-            live_raw_space,
-            live_metadata_space,
-            free_space_manager_space,
-            reusable_free_space,
-            unclassified_space,
-            analysis_complete,
-            trailing_slack_space,
-        } = file.__space_ownership().unwrap();
-        writeln!(
-            report,
-            "{step:?}: physical size {physical_size}, logical size {logical_size}, \
-             userblock {userblock_space:?}, metadata {:?}, raw {:?}, managers {:?}, free {:?}, \
-             unclassified {:?}, trailing slack {trailing_slack_space:?}, complete {analysis_complete}",
-            sorted(live_metadata_space),
-            sorted(live_raw_space),
-            sorted(free_space_manager_space),
-            sorted(reusable_free_space),
-            sorted(unclassified_space),
-        )
-        .unwrap();
+        write_page_step(
+            &mut report,
+            index + 1,
+            step,
+            file.__space_ownership().unwrap(),
+        );
     }
 
     insta::assert_snapshot!(format!("page_{}", workload.name), report);
@@ -313,7 +299,76 @@ fn live_extents(ownership: &SpaceOwnership) -> BTreeSet<(u64, u64)> {
         .collect()
 }
 
-fn sorted(mut extents: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
-    extents.sort_unstable();
-    extents
+/// Writes the operation and an extent table sorted by offset within each category.
+///
+/// # Panics
+///
+/// Panics if an extent's end offset exceeds [`u64::MAX`].
+fn write_page_step(report: &mut String, number: usize, step: Step, ownership: SpaceOwnership) {
+    write!(report, "\nStep {number}: ").unwrap();
+    match step {
+        Step::Create(Object::Dataset(name, len)) => {
+            writeln!(report, "Create dataset {name:?} with {len} i32 elements").unwrap();
+        }
+        Step::Create(Object::Group(name)) => writeln!(report, "Create group {name:?}").unwrap(),
+        Step::Create(Object::Strings(name)) => {
+            writeln!(report, "Create variable-length string dataset {name:?}").unwrap();
+        }
+        Step::Delete(name) => writeln!(report, "Delete link {name:?}").unwrap(),
+    }
+    let SpaceOwnership {
+        physical_size,
+        logical_size,
+        userblock_space,
+        live_raw_space,
+        live_metadata_space,
+        free_space_manager_space,
+        reusable_free_space,
+        unclassified_space,
+        analysis_complete,
+        trailing_slack_space,
+    } = ownership;
+    writeln!(
+        report,
+        "  Physical size: {physical_size}, logical size: {logical_size}, analysis: {}",
+        if analysis_complete {
+            "complete"
+        } else {
+            "incomplete"
+        }
+    )
+    .unwrap();
+    writeln!(
+        report,
+        "  {:<19} {:>10} {:>10} {:>10}",
+        "Category", "Start", "End", "Length"
+    )
+    .unwrap();
+    let mut empty = Vec::new();
+    for (category, mut extents) in [
+        ("Userblock", userblock_space),
+        ("Live metadata", live_metadata_space),
+        ("Live raw data", live_raw_space),
+        ("Free-space managers", free_space_manager_space),
+        ("Reusable free space", reusable_free_space),
+        ("Unclassified", unclassified_space),
+        ("Trailing slack", trailing_slack_space),
+    ] {
+        if extents.is_empty() {
+            empty.push(category);
+            continue;
+        }
+        extents.sort_unstable();
+        for (start, length) in extents {
+            writeln!(
+                report,
+                "  {category:<19} {start:>10} {:>10} {length:>10}",
+                start.checked_add(length).unwrap()
+            )
+            .unwrap();
+        }
+    }
+    if !empty.is_empty() {
+        writeln!(report, "  No extents: {}", empty.join(", ")).unwrap();
+    }
 }
