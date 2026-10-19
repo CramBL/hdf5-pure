@@ -358,7 +358,7 @@ use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
-#[cfg(feature = "__page-publication-crosscheck")]
+#[cfg(any(test, feature = "__page-publication-crosscheck"))]
 use crate::page_publication_failure::{PagePublicationFailure, PublicationFailureImage};
 use crate::reader::FileAccessProperties;
 use crate::shared_message::DatatypeLocation;
@@ -1357,26 +1357,17 @@ pub(crate) struct WriteEngine {
     /// and checks unspent append reserves and aggregate state before rewriting the managers.
     /// This field is used when [`persist`](Self::persist) is `Some`.
     fsm_len: u64,
-    /// Whether the commit currently running has *asked* the disk to repoint the
-    /// superblock at its new root. Set by whichever tail performs that write,
-    /// immediately **before** issuing it, and read only by
-    /// [`commit`](Self::commit) to decide whether a failure may roll anything
-    /// back — the free lists (see [`FreeSnapshot`]), the staged set, and the
-    /// values in [`inplace_undo`](Self::inplace_undo).
+    /// Whether a publisher attempted the superblock write that prevents commit rollback.
     ///
-    /// Set before rather than after for the reason the whole rollback exists: a
-    /// write that alters the file and then reports failure is a real device
-    /// behaviour, so a write call returning an error does not mean its bytes
-    /// are not on the disk. Once the publish has been issued, whether this
-    /// commit is live is unknowable from here, and every rollback is unsound —
-    /// undoing the values would tear a commit that did land, and re-offering
-    /// the regions would hand out space that commit is using. Doing nothing is
-    /// the only answer that is never actively wrong, and the error the caller
-    /// gets is the write failure that says so (issue #344).
+    /// The publisher sets this before writing because an I/O error can follow a partial or
+    /// complete write. Once publication is attempted, restoring values or returning allocations
+    /// to free lists could overwrite live data.
     ///
-    /// It is a property of one publish, not of the session, so every publisher —
-    /// `commit`, and the manager rewrite an append's draw makes — clears it on
-    /// entry rather than trusting the previous run to have left it false.
+    /// Non-persistent PAGE sessions retain this state after a failed publication. Before taking
+    /// another staged batch, the editor drains pending writes and verifies the issued superblock.
+    /// Explicit synchronization performs the same verification after its durable barrier.
+    /// Successful verification clears this state, including when the verified root is unchanged.
+    /// Other publishers clear it on entry to their publication attempt.
     publish_attempted: bool,
     /// Whether a [`stage_atomically`](Self::stage_atomically) batch is open, so
     /// [`refuse_mid_batch`](Self::refuse_mid_batch) can keep
@@ -2098,7 +2089,7 @@ impl WriteEngine {
     ///
     /// Returns [`Error::EditUnsupported`] unless the file uses non-persistent PAGE allocation.
     /// Returns the opening or buffering error if the mirror cannot be configured.
-    #[cfg(feature = "__page-publication-crosscheck")]
+    #[cfg(any(test, feature = "__page-publication-crosscheck"))]
     pub(crate) fn open_page_publication_failure(
         path: &Path,
         failure: PagePublicationFailure,
@@ -3525,7 +3516,7 @@ impl WriteEngine {
     /// # Errors
     ///
     /// Returns the read or conversion error if the image cannot be read through the disk handle.
-    #[cfg(feature = "__page-publication-crosscheck")]
+    #[cfg(any(test, feature = "__page-publication-crosscheck"))]
     pub(crate) fn page_publication_snapshot(&self) -> Result<Vec<u8>, Error> {
         let mut bytes = vec![0; self.image.len().to_usize()?];
         self.image.read_disk_at(0, &mut bytes)?;
@@ -4203,16 +4194,18 @@ impl WriteEngine {
         barrier_data(self.image.as_mut(), self.sync_policy)
     }
 
-    /// Force this session's writes to durable storage *whatever* the policy
-    /// says. The counterpart to [`barrier`](Self::barrier), which the policy may
-    /// skip.
+    /// Issues pending writes, synchronizes the file, and completes pending PAGE publication.
     ///
-    /// Two callers: [`File::sync`](crate::File::sync), the application naming
-    /// its own cadence, and the teardown path — `File::close` and
-    /// `FileInner::drop` — whose own writes no caller can order, because both
-    /// destroy the handle that would have done it.
+    /// The synchronization barrier is durable under every [`SyncPolicy`]. Publication recovery
+    /// verifies issued bytes before adopting the superblock and leaves later staged edits pending.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if writing or synchronization fails. Returns the publication recovery
+    /// error if the issued superblock cannot be read or verified.
     pub(crate) fn force_sync(&mut self) -> Result<(), Error> {
-        self.image.sync_all()
+        self.image.sync_all()?;
+        self.complete_page_publication()
     }
 
     /// Finalizes free-space metadata or classic aggregate tails at session teardown.
@@ -5276,7 +5269,7 @@ impl WriteEngine {
     pub fn commit(&mut self) -> Result<(), Error> {
         if self.fresh_page_boundary.is_some() && self.publish_attempted {
             self.barrier()?;
-            self.recover_page_publication()?;
+            self.complete_page_publication()?;
         }
         self.synchronize_aggregates()?;
         let snapshot = self.snapshot_free();
@@ -5343,6 +5336,22 @@ impl WriteEngine {
             }
         }
         result
+    }
+
+    /// Verifies pending PAGE publication and clears its recovery state on success.
+    ///
+    /// The caller completes its ordering or synchronization barrier first. Later staged edits
+    /// remain pending if verification fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error from [`recover_page_publication`](Self::recover_page_publication).
+    fn complete_page_publication(&mut self) -> Result<(), Error> {
+        if self.fresh_page_boundary.is_some() && self.publish_attempted {
+            self.recover_page_publication()?;
+            self.publish_attempted = false;
+        }
+        Ok(())
     }
 
     /// Adopts the published PAGE root and EOA after verifying the accepted superblock bytes.

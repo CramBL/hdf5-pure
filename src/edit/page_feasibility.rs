@@ -11,6 +11,8 @@ use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::FreeClass;
 use hdf5_pure_space::__private::PageType;
 use rstest::rstest;
+#[cfg(feature = "checksum")]
+use test_util::checksum::CHECKSUM;
 use test_util::disk_log::{self, DiskOp};
 use test_util::publication;
 
@@ -621,6 +623,12 @@ fn failed_staged_commits_keep_old_pages_unavailable(
 #[case::buffered_completed(true, usize::MAX)]
 #[case::buffered_partial(true, 17)]
 #[case::unbuffered_zero(false, 0)]
+#[case::buffered_zero(true, 0)]
+#[case::unbuffered_unchanged(false, 17)]
+#[case::unbuffered_eoa(false, SUPERBLOCK_EOF_END)]
+#[case::buffered_eoa(true, SUPERBLOCK_EOF_END)]
+#[case::unbuffered_root(false, SUPERBLOCK_ROOT_END)]
+#[case::buffered_root(true, SUPERBLOCK_ROOT_END)]
 fn publication_write_errors_require_verified_session_bytes(
     #[case] gathered: bool,
     #[case] prefix: usize,
@@ -629,6 +637,13 @@ fn publication_write_errors_require_verified_session_bytes(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("publication_write.h5");
     let original = write_page_failure_fixture(&path, 0);
+    let control_path = dir.path().join("control.h5");
+    fs::write(&control_path, &original).unwrap();
+    let mut control = WriteEngine::open_with_locking(&control_path, FileLocking::Enabled).unwrap();
+    control.stage_page_edits();
+    control.commit().unwrap();
+    let expected = hdf5_pure_format::__private::serialize_superblock(&control.superblock).unwrap();
+    drop(control);
     let barriers = Arc::new(Mutex::new(Vec::new()));
     let mut engine = WriteEngine::open_with_page_failure(
         &path,
@@ -649,31 +664,91 @@ fn publication_write_errors_require_verified_session_bytes(
     for operation in disk_log::take() {
         operation.apply(&mut replay);
     }
-    let boundary = if !gathered && prefix > 0 {
+    publication::assert_preserved_bytes(&original, &replay, 0, expected.len());
+    let mut issued = vec![0; expected.len()];
+    engine.image.read_disk_at(0, &mut issued).unwrap();
+    assert_eq!(issued, replay[..expected.len()]);
+    let original_superblock = &original[..expected.len()];
+    let mixed = &replay[..expected.len()];
+    let changes_addresses = prefix >= SUPERBLOCK_EOF_END;
+    if matches!(prefix, SUPERBLOCK_EOF_END | SUPERBLOCK_ROOT_END) {
+        assert_ne!(mixed, original_superblock);
+        assert_ne!(mixed, expected);
+        assert_ne!(
+            &mixed[SUPERBLOCK_EOF_START..SUPERBLOCK_EOF_END],
+            &original_superblock[SUPERBLOCK_EOF_START..SUPERBLOCK_EOF_END]
+        );
+        assert_eq!(
+            &mixed[SUPERBLOCK_EOF_START..SUPERBLOCK_EOF_END],
+            &expected[SUPERBLOCK_EOF_START..SUPERBLOCK_EOF_END]
+        );
+        assert_ne!(
+            &expected[SUPERBLOCK_ROOT_START..SUPERBLOCK_ROOT_END],
+            &original_superblock[SUPERBLOCK_ROOT_START..SUPERBLOCK_ROOT_END]
+        );
+        assert_eq!(
+            &mixed[SUPERBLOCK_ROOT_START..SUPERBLOCK_ROOT_END],
+            if prefix == SUPERBLOCK_EOF_END {
+                &original_superblock[SUPERBLOCK_ROOT_START..SUPERBLOCK_ROOT_END]
+            } else {
+                &expected[SUPERBLOCK_ROOT_START..SUPERBLOCK_ROOT_END]
+            },
+        );
+    }
+    if !gathered && changes_addresses {
         engine.assert_page_publication_rejected();
         drop(engine);
         assert_eq!(fs::read(&path).unwrap(), replay);
+        if matches!(prefix, SUPERBLOCK_EOF_END | SUPERBLOCK_ROOT_END) {
+            #[cfg(feature = "checksum")]
+            {
+                let error = File::open(&path).unwrap_err();
+                let Error::Format(FormatError::ChecksumMismatch {
+                    expected: stored,
+                    computed,
+                }) = error
+                else {
+                    panic!("expected mixed-superblock checksum error, got {error:?}");
+                };
+                let end = expected.len() - CHECKSUM;
+                assert_eq!(stored, u32::from_le_bytes(mixed[end..].try_into().unwrap()));
+                assert_eq!(computed, crate::checksum::jenkins_lookup3(&mixed[..end]));
+                assert_ne!(stored, computed);
+            }
+            return;
+        }
         let file = File::open(&path).unwrap();
         Failure::AfterPublish.assert_page_datasets(&file, None);
         drop(file);
         engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
         engine.set_sync_policy(sync);
-        replay.len() as u64
-    } else {
-        original.len() as u64
-    };
+        let boundary = replay.len() as u64;
+        engine.assert_page_retry(&path, &original, replay, boundary, Failure::AfterPublish);
+        return;
+    }
     engine.assert_page_retry(
         &path,
         &original,
         replay,
-        boundary,
-        if gathered || prefix > 0 {
+        original.len() as u64,
+        if gathered {
             Failure::AfterPublish
         } else {
             Failure::BeforePublish
         },
     );
 }
+
+/// The start of the end-of-file address in a version 2 or 3 superblock with eight-byte addresses.
+///
+/// The EOF and root fields follow the base and extension addresses, as defined in
+/// "Format Signature and Superblock" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_boot_super
+const SUPERBLOCK_EOF_START: usize = 28;
+const SUPERBLOCK_EOF_END: usize = 36;
+const SUPERBLOCK_ROOT_START: usize = SUPERBLOCK_EOF_END;
+const SUPERBLOCK_ROOT_END: usize = 44;
 
 #[rstest]
 #[case::barrier(Failure::RepeatedPublishedSync)]
@@ -682,6 +757,7 @@ fn failed_publication_recovery_preserves_staged_edits(
     #[case] failure: Failure,
     #[values(false, true)] gathered: bool,
     #[values(SyncPolicy::Always, SyncPolicy::OnClose)] sync: SyncPolicy,
+    #[values(false, true)] explicit_sync: bool,
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("recovery_barrier.h5");
@@ -700,9 +776,67 @@ fn failed_publication_recovery_preserves_staged_edits(
         );
     }
     stage_byte_dataset(&mut engine, "second", 11);
+    assert_recovery_preserves_staging(&mut engine, failure, explicit_sync);
+    assert_recovery_preserves_staging(&mut engine, failure, explicit_sync);
+    assert_eq!(
+        barriers.lock().unwrap().last().unwrap().durable,
+        explicit_sync || matches!(sync, SyncPolicy::Always),
+    );
+    drop(engine);
+    assert_eq!(fs::read(&path).unwrap(), published);
+    let file = File::open(&path).unwrap();
+    Failure::AfterPublish.assert_page_datasets(&file, None);
+}
+
+#[rstest]
+fn explicit_sync_clears_pending_page_publication_and_preserves_staged_edits(
+    #[values(SyncPolicy::Always, SyncPolicy::OnClose)] sync: SyncPolicy,
+    #[values(false, true)] gathered: bool,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("explicit_sync.h5");
+    let original = write_page_failure_fixture(&path, 0);
+    let barriers = Arc::new(Mutex::new(Vec::new()));
+    let mut engine =
+        WriteEngine::open_with_page_failure(&path, Failure::AfterDrain, sync, gathered, &barriers);
+    engine.stage_page_edits();
+    let published = engine.assert_page_commit_failure(&original, Failure::AfterDrain);
+    stage_byte_dataset(&mut engine, "second", 11);
+    let mark = engine.staged.mark();
+    assert!(engine.publish_attempted);
+    disk_log::start();
+    engine.force_sync().unwrap();
+    assert!(!engine.publish_attempted);
+    assert!(engine.staged.mark() == mark);
+    assert!(disk_log::take().is_empty());
+    let records = barriers.lock().unwrap();
+    assert_eq!(
+        records.last(),
+        Some(&BarrierRecord {
+            durable: true,
+            published: true,
+            completed: true,
+        })
+    );
+    drop(records);
+    drop(engine);
+    assert_eq!(fs::read(&path).unwrap(), published);
+    Failure::AfterDrain.assert_page_datasets(&File::open(&path).unwrap(), None);
+}
+
+fn assert_recovery_preserves_staging(
+    engine: &mut WriteEngine,
+    failure: Failure,
+    explicit_sync: bool,
+) {
     let mark = engine.staged.mark();
     disk_log::start();
-    let error = engine.commit().unwrap_err();
+    let error = if explicit_sync {
+        engine.force_sync()
+    } else {
+        engine.commit()
+    }
+    .unwrap_err();
     match (failure, error) {
         (Failure::RepeatedPublishedSync, Error::Io(error)) => {
             assert_eq!(error.kind(), ErrorKind::Other);
@@ -713,13 +847,10 @@ fn failed_publication_recovery_preserves_staged_edits(
         }
         (_, error) => panic!("expected injected PAGE recovery failure, got {error:?}"),
     }
+    assert!(engine.publish_attempted);
     assert!(engine.staged.mark() == mark);
     assert!(engine.space.reusable_sections().next().is_none());
     assert!(disk_log::take().is_empty());
-    drop(engine);
-    assert_eq!(fs::read(&path).unwrap(), published);
-    let file = File::open(&path).unwrap();
-    Failure::AfterPublish.assert_page_datasets(&file, None);
 }
 
 /// Creates datasets for preservation, replacement, and deletion, and returns the file bytes.
@@ -814,9 +945,19 @@ impl WriteEngine {
     /// Checks that a publication mismatch preserves staged edits and issues no writes.
     fn assert_page_publication_rejected(&mut self) {
         stage_byte_dataset(self, "second", 11);
+        self.assert_page_recovery_rejected(false);
+        self.assert_page_recovery_rejected(true);
+    }
+
+    fn assert_page_recovery_rejected(&mut self, explicit_sync: bool) {
         let mark = self.staged.mark();
         disk_log::start();
-        let error = self.commit().unwrap_err();
+        let error = if explicit_sync {
+            self.force_sync()
+        } else {
+            self.commit()
+        }
+        .unwrap_err();
         assert!(
             matches!(error, Error::EditUnsupported(reason)
                 if reason == "PAGE publication bytes differ from the session image after a failed write; close and reopen the file before editing again"),
@@ -836,19 +977,33 @@ impl WriteEngine {
         write_boundary: u64,
         failure: Failure,
     ) {
+        let sb_len = hdf5_pure_format::__private::serialize_superblock(&self.superblock)
+            .unwrap()
+            .len();
+        let accepted = self.image.read_exact_at(self.sb_sig_off, sb_len).unwrap();
+        let mut issued = vec![0; sb_len];
+        self.image
+            .read_disk_at(self.sb_sig_off, &mut issued)
+            .unwrap();
+        let pending = self.publish_attempted && issued != accepted;
         stage_byte_dataset(&mut self, "second", 11);
         disk_log::start();
         self.commit().unwrap();
-        for operation in disk_log::take() {
+        let operations = disk_log::take();
+        if pending {
+            let Some(DiskOp::Write { offset, bytes }) = operations.first() else {
+                panic!("expected pending superblock write before later content");
+            };
+            assert_eq!(*offset, self.sb_sig_off);
+            assert_eq!(*bytes, accepted);
+        }
+        for operation in operations {
             if let DiskOp::Write { offset, .. } = &operation {
                 assert!(*offset == self.sb_sig_off || *offset >= write_boundary);
             }
             operation.apply(&mut replay);
         }
         assert!(self.space.reusable_sections().next().is_none());
-        let sb_len = hdf5_pure_format::__private::serialize_superblock(&self.superblock)
-            .unwrap()
-            .len();
         let sb_start = usize::try_from(self.sb_sig_off).unwrap();
         drop(self);
         let bytes = fs::read(path).unwrap();
