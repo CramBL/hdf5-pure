@@ -170,8 +170,8 @@ jobs:
           unset HDF5_DIR
           just "$RECIPE"
 
-      - name: Verify candidate test binaries
-        if: steps.image.outputs.candidate == 'true'
+      - name: Verify cross test binaries
+        if: steps.image.outputs.prepared == 'true'
         env:
           TARGET: ${{ matrix.family }}-unknown-linux-gnu
           IMAGE: ${{ steps.image.outputs.image }}
