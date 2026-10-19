@@ -1,0 +1,63 @@
+name: CI images
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ci/images.toml
+      - docker/ci/cross/**
+      - scripts/ci/install-mold.sh
+      - scripts/ci/cross-image.sh
+      - .github/workflows/ci-images.yml
+  workflow_dispatch:
+    inputs:
+      family:
+        description: Cross image family
+        type: choice
+        default: both
+        options: [both, i686, s390x]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-images
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      github.repository == 'CramBL/hdf5-pure' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Log in to GHCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_ACTOR: ${{ github.actor }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GH_ACTOR" --password-stdin
+
+      - name: Build, validate and publish
+        env:
+          FAMILY: ${{ inputs.family || 'both' }}
+        run: |
+          for family in i686 s390x; do
+            if [[ "$FAMILY" != both && "$FAMILY" != "$family" ]]; then
+              continue
+            fi
+            image="ghcr.io/crambl/hdf5-pure-cross-$family:$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            bash scripts/ci/cross-image.sh publish "$family" "$image"
+          done
+
+      - name: Log out of GHCR
+        if: always()
+        run: docker logout ghcr.io
