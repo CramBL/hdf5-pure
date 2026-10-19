@@ -44,6 +44,7 @@ use hdf5_pure_format::__private::SECTION_CLASS_SIMPLE;
 use rstest::rstest;
 
 use test_util::file_space_info;
+use test_util::free_space;
 use test_util::range;
 use test_util::userblock::Userblock;
 use test_util::widths::Widths;
@@ -54,50 +55,92 @@ use test_util_hdf5::paged;
 use test_util_hdf5::session;
 
 #[rstest]
-#[case::plain(4096, 0)]
-#[case::userblock(4096, 4096)]
-#[case::larger_pages(8192, 8192)]
-fn nonpersistent_page_staged_edits_preserve_c_files(
+#[case::plain(4_096, 0)]
+#[case::userblock(4_096, 4_096)]
+#[case::larger_pages(8_192, 8_192)]
+fn nonpersistent_page_staged_edits_alternate_with_c_edits(
     #[case] page_size: u64,
     #[case] userblock: u64,
+    #[values(false, true)] c_origin: bool,
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nonpersistent_page.h5");
-    let c_file = hdf5::FileBuilder::new()
-        .with_fapl(|fapl| fapl.libver_v110())
-        .with_fcpl(|fcpl| {
-            fcpl.userblock(userblock)
-                .file_space_strategy(CStrategy::FreeSpaceManager {
-                    paged: true,
-                    persist: false,
-                    threshold: 1,
-                })
-                .file_space_page_size(page_size)
-        })
-        .create(&path)
-        .unwrap();
-    c_file
-        .new_dataset::<u8>()
-        .shape(64)
-        .create("keep")
-        .unwrap()
-        .write_raw(&[7; 64])
-        .unwrap();
-    c_file.close().unwrap();
+    write_nonpersistent_page_origin(&path, page_size, userblock, c_origin);
+    let original = std::fs::read(&path).unwrap();
+    add_pure_page_dataset(&path);
+    edit_page_with_libhdf5(&path);
+
     let before = std::fs::read(&path).unwrap();
     let file = File::open(&path).unwrap();
-    assert_eq!(file.superblock().base_address.get(), userblock);
-    assert_eq!(file.superblock().eof_address, before.len() as u64);
-    assert_eq!((file.superblock().eof_address - userblock) % page_size, 0);
-    let info = file.file_space_info().unwrap();
-    assert_eq!(info.strategy, FileSpaceStrategy::Page);
-    assert_eq!(info.page_size.get(), page_size);
-    assert!(!info.persist);
-    assert!(info.manager_addrs.is_empty());
-    assert_eq!(file.dataset("keep").unwrap().read_u8().unwrap(), [7; 64]);
+    let old_eoa = file.superblock().eof_address;
+    let old_raw = file_space::raw_extents(&file, "keep");
+    assert_eq!(file.dataset("from_c").unwrap().read_u8().unwrap(), [13; 64]);
+    assert_eq!(file.dataset("alias").unwrap().read_u8().unwrap(), [7; 64]);
     drop(file);
+    replace_and_delete_page_datasets(&path);
+    assert_pure_page_edit(
+        &path, page_size, userblock, &original, &before, old_eoa, &old_raw,
+    );
+    assert_c_page_edit(&path, page_size);
+}
 
-    let file = File::open_rw(&path).unwrap();
+/// Writes matching datasets and a group attribute through either writer.
+fn write_nonpersistent_page_origin(path: &Path, page_size: u64, userblock: u64, c_origin: bool) {
+    if c_origin {
+        let file = hdf5::FileBuilder::new()
+            .with_fapl(|fapl| fapl.libver_v110())
+            .with_fcpl(|fcpl| {
+                fcpl.userblock(userblock)
+                    .file_space_strategy(CStrategy::FreeSpaceManager {
+                        paged: true,
+                        persist: false,
+                        threshold: 1,
+                    })
+                    .file_space_page_size(page_size)
+            })
+            .create(path)
+            .unwrap();
+        for (name, value) in [("keep", 7), ("replace", 3), ("remove", 5)] {
+            file.new_dataset::<u8>()
+                .shape(64)
+                .create(name)
+                .unwrap()
+                .write_raw(&[value; 64])
+                .unwrap();
+        }
+        let group = file.create_group("group").unwrap();
+        group
+            .new_attr::<i32>()
+            .create("attribute")
+            .unwrap()
+            .write_scalar(&9)
+            .unwrap();
+        drop(group);
+        file.close().unwrap();
+    } else {
+        let mut builder = FileBuilder::new();
+        builder
+            .with_file_space_strategy(FileSpaceStrategy::Page, false, 1)
+            .with_file_space_page_size(page_size)
+            .with_userblock(userblock);
+        for (name, value) in [("keep", 7), ("replace", 3), ("remove", 5)] {
+            builder.create_dataset(name).with_u8_data(&[value; 64]);
+        }
+        let mut group = builder.create_group("group");
+        group.set_attr("attribute", AttrValue::I32(9));
+        builder.add_group(group.finish());
+        builder.write(path).unwrap();
+    }
+    if userblock != 0 {
+        let mut bytes = std::fs::read(path).unwrap();
+        bytes[..userblock as usize].fill(0xA5);
+        std::fs::write(path, bytes).unwrap();
+    }
+}
+
+/// Commits `added` with hdf5-pure for the libhdf5 editing session to read.
+fn add_pure_page_dataset(path: &Path) {
+    let file = File::open_rw(path).unwrap();
     file.root()
         .create_dataset("added", |dataset| {
             dataset.with_u8_data(&[9; 64]);
@@ -105,18 +148,11 @@ fn nonpersistent_page_staged_edits_preserve_c_files(
         .unwrap();
     file.commit().unwrap();
     drop(file);
-    let after = std::fs::read(&path).unwrap();
-    assert_eq!(&after[..userblock as usize], &before[..userblock as usize]);
-    let file = File::open(&path).unwrap();
-    assert_eq!(
-        file.superblock().eof_address % page_size,
-        userblock % page_size
-    );
-    assert!(!file.file_space_info().unwrap().persist);
-    assert_eq!(file.persisted_free_space().unwrap(), []);
-    drop(file);
-    let c_file = hdf5::File::open(&path).unwrap();
-    assert_eq!(c_file.member_names().unwrap(), ["keep", "added"]);
+}
+
+/// Replaces `added` with `from_c` and creates hard and soft links through libhdf5.
+fn edit_page_with_libhdf5(path: &Path) {
+    let c_file = hdf5::File::open_rw(path).unwrap();
     assert_eq!(
         c_file.dataset("added").unwrap().read_raw::<u8>().unwrap(),
         [9; 64]
@@ -124,6 +160,154 @@ fn nonpersistent_page_staged_edits_preserve_c_files(
     assert_eq!(
         c_file.dataset("keep").unwrap().read_raw::<u8>().unwrap(),
         [7; 64]
+    );
+    c_file.unlink("added").unwrap();
+    c_file
+        .new_dataset::<u8>()
+        .shape(64)
+        .create("from_c")
+        .unwrap()
+        .write_raw(&[13; 64])
+        .unwrap();
+    c_file.link_hard("keep", "alias").unwrap();
+    c_file.link_soft("/keep", "soft").unwrap();
+    c_file.close().unwrap();
+}
+
+/// Commits dataset replacement, deletion, and creation with hdf5-pure.
+fn replace_and_delete_page_datasets(path: &Path) {
+    let file = File::open_rw(path).unwrap();
+    file.root().delete("remove").unwrap();
+    file.dataset("replace")
+        .unwrap()
+        .write_staged(|dataset| {
+            dataset.with_u8_data(&[17; 64]);
+        })
+        .unwrap();
+    file.root()
+        .create_dataset("second", |dataset| {
+            dataset.with_u8_data(&[19; 64]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    drop(file);
+}
+
+/// Checks appended placement, preserved bytes, and file-space settings after a staged commit.
+fn assert_pure_page_edit(
+    path: &Path,
+    page_size: u64,
+    userblock: u64,
+    original: &[u8],
+    before: &[u8],
+    old_eoa: u64,
+    old_raw: &[Range<u64>],
+) {
+    let after = std::fs::read(path).unwrap();
+    let file = File::open(path).unwrap();
+    assert_eq!(file.superblock().base_address.get(), userblock);
+    assert_eq!((file.superblock().eof_address - userblock) % page_size, 0);
+    let info = file.file_space_info().unwrap();
+    assert_eq!(info.strategy, FileSpaceStrategy::Page);
+    assert_eq!(info.page_size.get(), page_size);
+    assert!(!info.persist);
+    assert!(info.manager_addrs.is_empty());
+    assert_eq!(file.persisted_free_space().unwrap(), []);
+    assert_eq!(file.dataset("keep").unwrap().read_u8().unwrap(), [7; 64]);
+    assert_eq!(file.dataset("alias").unwrap().read_u8().unwrap(), [7; 64]);
+    assert_eq!(file.dataset("from_c").unwrap().read_u8().unwrap(), [13; 64]);
+    assert_eq!(
+        file.dataset("replace").unwrap().read_u8().unwrap(),
+        [17; 64]
+    );
+    assert_eq!(file.dataset("second").unwrap().read_u8().unwrap(), [19; 64]);
+    assert_eq!(
+        file.group("group")
+            .unwrap()
+            .attrs()
+            .unwrap()
+            .get("attribute"),
+        Some(&AttrValue::I32(9))
+    );
+    assert_eq!(file_space::raw_extents(&file, "keep"), old_raw);
+    let boundary = (old_eoa - userblock).next_multiple_of(page_size) + userblock;
+    assert!(
+        file_space::raw_extents(&file, "replace")
+            .iter()
+            .chain(&file_space::raw_extents(&file, "second"))
+            .all(|extent| extent.start >= boundary)
+    );
+    let sb_len = hdf5_pure_format::__private::serialize_superblock(file.superblock())
+        .unwrap()
+        .len();
+    drop(file);
+    assert_eq!(
+        &after[..userblock as usize],
+        &original[..userblock as usize]
+    );
+    assert_eq!(
+        &after[userblock as usize + sb_len..before.len()],
+        &before[userblock as usize + sb_len..]
+    );
+    assert!(
+        !after
+            .windows(4)
+            .any(|window| window == free_space::SIGNATURE
+                || window == free_space::SECTIONS_SIGNATURE)
+    );
+    paged::assert_pages_homogeneous(path, page_size, &["replace", "second"]);
+}
+
+/// Checks datasets, links, attributes, and file-space settings through libhdf5.
+fn assert_c_page_edit(path: &Path, page_size: u64) {
+    let c_file = hdf5::File::open(path).unwrap();
+    assert!(!c_file.link_exists("remove"));
+    assert!(!c_file.link_exists("added"));
+    assert_eq!(
+        c_file.dataset("keep").unwrap().read_raw::<u8>().unwrap(),
+        [7; 64]
+    );
+    assert_eq!(
+        c_file.dataset("alias").unwrap().read_raw::<u8>().unwrap(),
+        [7; 64]
+    );
+    assert_eq!(
+        c_file.dataset("soft").unwrap().read_raw::<u8>().unwrap(),
+        [7; 64]
+    );
+    assert_eq!(
+        c_file.dataset("from_c").unwrap().read_raw::<u8>().unwrap(),
+        [13; 64]
+    );
+    assert_eq!(
+        c_file.dataset("replace").unwrap().read_raw::<u8>().unwrap(),
+        [17; 64]
+    );
+    assert_eq!(
+        c_file.dataset("second").unwrap().read_raw::<u8>().unwrap(),
+        [19; 64]
+    );
+    assert_eq!(
+        c_file
+            .group("group")
+            .unwrap()
+            .attr("attribute")
+            .unwrap()
+            .read_scalar::<i32>()
+            .unwrap(),
+        9
+    );
+    assert_eq!(
+        c_file.fcpl().unwrap().get_file_space_strategy().unwrap(),
+        CStrategy::FreeSpaceManager {
+            paged: true,
+            persist: false,
+            threshold: 1
+        }
+    );
+    assert_eq!(
+        c_file.fcpl().unwrap().get_file_space_page_size().unwrap(),
+        page_size
     );
 }
 

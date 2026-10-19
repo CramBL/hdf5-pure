@@ -746,11 +746,12 @@ impl BufferedWrites {
         self.handle
             .seek(SeekFrom::Start(offset))
             .map_err(Error::Io)?;
+        #[cfg(not(test))]
         self.handle.write_all(bytes).map_err(Error::Io)?;
         #[cfg(test)]
-        self.issued_order.push((offset, bytes.len() as u64));
+        disk_log::write_all(&mut self.handle, offset, bytes).map_err(Error::Io)?;
         #[cfg(test)]
-        disk_log::record_write(offset, bytes);
+        self.issued_order.push((offset, bytes.len() as u64));
         self.on_disk_len = self.on_disk_len.max(offset + bytes.len() as u64);
         Ok(())
     }

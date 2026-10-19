@@ -4,6 +4,9 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::Error as IoError;
 use std::io::ErrorKind;
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::FreeClass;
@@ -551,89 +554,341 @@ fn stage_byte_dataset(engine: &mut WriteEngine, path: &str, value: u8) {
 
 #[rstest]
 #[case::allocation(Failure::Append)]
+#[case::first_disk_write(Failure::DiskWrite(0, 0))]
+#[case::partial_disk_write(Failure::DiskWrite(0, 17))]
+#[case::completed_content_write(Failure::DiskWrite(0, usize::MAX))]
 #[case::publication(Failure::BeforePublish)]
 #[case::published(Failure::AfterPublish)]
-#[case::content_sync(Failure::FirstSync)]
+#[case::before_content_drain(Failure::BeforeDrain)]
+#[case::content_sync(Failure::ContentSync)]
 #[case::publication_sync(Failure::PublishedSync)]
-fn failed_staged_commits_keep_old_pages_unavailable(#[case] failure: Failure) {
+#[case::completed_publication(Failure::AfterDrain)]
+fn failed_staged_commits_keep_old_pages_unavailable(
+    #[case] failure: Failure,
+    #[values(SyncPolicy::Always, SyncPolicy::OnClose)] sync: SyncPolicy,
+    #[values(false, true)] gathered: bool,
+    #[values(false, true)] reopen: bool,
+) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("failed.h5");
+    let original = write_page_failure_fixture(&path);
+    let barriers = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = WriteEngine::open_with_page_failure(&path, failure, sync, gathered, &barriers);
+    engine.stage_page_edits();
+    let mut replay = engine.assert_page_commit_failure(&original, failure);
+    failure.assert_barriers(sync, &barriers.lock().unwrap());
+    assert!(engine.space.reusable_sections().next().is_none());
+    if reopen {
+        let interrupted = dir.path().join("interrupted.h5");
+        fs::write(&interrupted, &replay).unwrap();
+        assert_interrupted_reopen(&interrupted, &replay, sync);
+        disk_log::start();
+        drop(engine);
+        for operation in disk_log::take() {
+            operation.apply(&mut replay);
+        }
+        assert_eq!(fs::read(&path).unwrap(), replay);
+        engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+        engine.set_sync_policy(sync);
+        assert!(engine.space.reusable_sections().next().is_none());
+    }
+    let write_boundary = if reopen {
+        replay.len() as u64
+    } else {
+        original.len() as u64
+    };
+    engine.assert_page_retry(&path, &original, replay, write_boundary);
+}
+
+/// Writes datasets for preservation, replacement, and deletion, and returns the file bytes.
+fn write_page_failure_fixture(path: &Path) -> Vec<u8> {
     let mut builder = FileBuilder::new();
     builder.with_file_space_strategy(FileSpaceStrategy::Page, false, 1);
     builder.create_dataset("keep").with_u8_data(&[7; 64]);
-    builder.write(&path).unwrap();
-    let original = fs::read(&path).unwrap();
-    let mut engine = WriteEngine::open_imaged(&path, Some(FileLocking::Enabled), |handle, _| {
-        Ok(Box::new(FailingImage {
-            inner: WriteEngine::read_mirror(handle)?,
-            failure,
-            failed: false,
-            published: false,
-        }))
-    })
-    .unwrap();
-    stage_byte_dataset(&mut engine, "added", 9);
-    disk_log::start();
-    let error = engine.commit().unwrap_err();
-    let Error::Io(error) = error else {
-        panic!("expected injected I/O failure, got {error:?}");
-    };
-    assert_eq!(error.kind(), ErrorKind::Other);
-    assert_eq!(error.to_string(), "injected PAGE commit failure");
-    let mut replay = original.clone();
-    for operation in disk_log::take() {
-        operation.apply(&mut replay);
-    }
-    let file = File::from_bytes(replay.clone()).unwrap();
-    assert_eq!(file.dataset("keep").unwrap().read_u8().unwrap(), [7; 64]);
-    assert_eq!(
-        file.root().datasets().unwrap(),
-        if matches!(failure, Failure::AfterPublish | Failure::PublishedSync) {
-            vec!["keep", "added"]
-        } else {
-            vec!["keep"]
+    builder.create_dataset("replace").with_u8_data(&[3; 64]);
+    builder.create_dataset("remove").with_u8_data(&[5; 64]);
+    builder.write(path).unwrap();
+    fs::read(path).unwrap()
+}
+
+impl WriteEngine {
+    /// Opens a mirror with one injected failure and records its synchronization attempts.
+    fn open_with_page_failure(
+        path: &Path,
+        failure: Failure,
+        sync: SyncPolicy,
+        gathered: bool,
+        barriers: &Arc<Mutex<Vec<BarrierRecord>>>,
+    ) -> Self {
+        let mut engine = Self::open_imaged(path, Some(FileLocking::Enabled), |handle, _| {
+            Ok(Box::new(FailingImage {
+                inner: WriteEngine::read_mirror(handle)?,
+                failure,
+                failed: false,
+                published: false,
+                barriers: Arc::clone(barriers),
+            }))
+        })
+        .unwrap();
+        engine.set_sync_policy(sync);
+        if !gathered {
+            engine
+                .set_write_buffering(WriteBuffering::Unbuffered)
+                .unwrap();
         }
-    );
-    stage_byte_dataset(&mut engine, "second", 11);
+        engine
+    }
+
+    /// Stages creation, replacement, and deletion against the failure fixture.
+    fn stage_page_edits(&mut self) {
+        stage_byte_dataset(self, "added", 9);
+        let mut replacement = DatasetBuilder::new("replace");
+        replacement.with_u8_data(&[17; 64]);
+        self.stage_dataset_write(&ObjectPathBuf::parse("replace"), replacement)
+            .unwrap();
+        self.delete(&ObjectPathBuf::parse("remove")).unwrap();
+    }
+
+    /// Checks the injected error and replays recorded writes to read the published state.
+    fn assert_page_commit_failure(&mut self, original: &[u8], failure: Failure) -> Vec<u8> {
+        disk_log::start();
+        if let Failure::DiskWrite(completed, prefix) = failure {
+            disk_log::fail_write_after(completed, prefix);
+        }
+        let error = self.commit().unwrap_err();
+        let Error::Io(error) = error else {
+            panic!("expected injected I/O failure, got {error:?}");
+        };
+        assert_eq!(error.kind(), ErrorKind::Other);
+        assert_eq!(
+            error.to_string(),
+            if matches!(failure, Failure::DiskWrite(..)) {
+                "injected disk write failure"
+            } else {
+                "injected PAGE commit failure"
+            }
+        );
+        let mut replay = original.to_vec();
+        let mut published = false;
+        for operation in disk_log::take() {
+            if let DiskOp::Write { offset, .. } = &operation {
+                published |= *offset == 0;
+            }
+            operation.apply(&mut replay);
+        }
+        assert_eq!(
+            published,
+            matches!(
+                failure,
+                Failure::AfterPublish | Failure::PublishedSync | Failure::AfterDrain
+            )
+        );
+        let file = File::from_bytes(replay.clone()).unwrap();
+        assert_eq!(file.dataset("keep").unwrap().read_u8().unwrap(), [7; 64]);
+        assert_eq!(
+            file.dataset("replace").unwrap().read_u8().unwrap(),
+            [if published { 17 } else { 3 }; 64]
+        );
+        assert_eq!(
+            file.root().datasets().unwrap(),
+            if published {
+                vec!["keep", "replace", "added"]
+            } else {
+                vec!["keep", "replace", "remove"]
+            }
+        );
+        drop(file);
+        replay
+    }
+
+    /// Commits another dataset and checks that old bytes outside the superblock are preserved.
+    fn assert_page_retry(
+        mut self,
+        path: &Path,
+        original: &[u8],
+        mut replay: Vec<u8>,
+        write_boundary: u64,
+    ) {
+        stage_byte_dataset(&mut self, "second", 11);
+        disk_log::start();
+        self.commit().unwrap();
+        for operation in disk_log::take() {
+            if let DiskOp::Write { offset, .. } = &operation {
+                assert!(*offset == 0 || *offset >= write_boundary);
+            }
+            operation.apply(&mut replay);
+        }
+        assert!(self.space.reusable_sections().next().is_none());
+        let sb_len = hdf5_pure_format::__private::serialize_superblock(&self.superblock)
+            .unwrap()
+            .len();
+        drop(self);
+        let bytes = fs::read(path).unwrap();
+        assert_eq!(bytes, replay);
+        assert_eq!(&bytes[sb_len..original.len()], &original[sb_len..]);
+        let file = File::open(path).unwrap();
+        assert_eq!(file.dataset("keep").unwrap().read_u8().unwrap(), [7; 64]);
+        assert_eq!(file.dataset("second").unwrap().read_u8().unwrap(), [11; 64]);
+        assert!(!file.file_space_info().unwrap().persist);
+        assert!(file.file_space_info().unwrap().manager_addrs.is_empty());
+        assert_eq!(file.persisted_free_space().unwrap(), []);
+    }
+}
+
+/// Opens the interrupted file and checks that another commit preserves its existing allocations.
+fn assert_interrupted_reopen(path: &Path, interrupted: &[u8], sync: SyncPolicy) {
+    let mut engine = WriteEngine::open_with_locking(path, FileLocking::Enabled).unwrap();
+    engine.set_sync_policy(sync);
+    assert!(engine.space.reusable_sections().next().is_none());
+    let boundary = engine
+        .end_of_allocation()
+        .unwrap()
+        .get()
+        .max(interrupted.len() as u64)
+        .next_multiple_of(4_096);
+    stage_byte_dataset(&mut engine, "reopened", 23);
     disk_log::start();
     engine.commit().unwrap();
-    for operation in disk_log::take() {
-        operation.apply(&mut replay);
-    }
-    assert!(engine.space.reusable_sections().next().is_none());
     let sb_len = hdf5_pure_format::__private::serialize_superblock(&engine.superblock)
         .unwrap()
         .len();
+    for operation in disk_log::take() {
+        match operation {
+            DiskOp::Write { offset, .. } => {
+                assert!(offset == 0 || offset >= interrupted.len() as u64)
+            }
+            DiskOp::SetLen(len) => assert!(len >= interrupted.len() as u64),
+        }
+    }
+    assert!(engine.space.reusable_sections().next().is_none());
     drop(engine);
-    let bytes = fs::read(&path).unwrap();
-    assert_eq!(bytes, replay);
-    assert_eq!(&bytes[sb_len..original.len()], &original[sb_len..]);
-    let file = File::open(&path).unwrap();
+    let after = fs::read(path).unwrap();
+    assert_eq!(&after[sb_len..interrupted.len()], &interrupted[sb_len..]);
+    let file = File::open(path).unwrap();
     assert_eq!(file.dataset("keep").unwrap().read_u8().unwrap(), [7; 64]);
-    assert_eq!(file.dataset("second").unwrap().read_u8().unwrap(), [11; 64]);
+    assert_eq!(
+        file.dataset("reopened").unwrap().read_u8().unwrap(),
+        [23; 64]
+    );
+    let Layout::Contiguous {
+        address: Some(raw), ..
+    } = file.dataset("reopened").unwrap().layout().unwrap()
+    else {
+        panic!("expected contiguous storage")
+    };
+    assert!(raw >= boundary);
+    assert!(!file.file_space_info().unwrap().persist);
+    assert!(file.file_space_info().unwrap().manager_addrs.is_empty());
     assert_eq!(file.persisted_free_space().unwrap(), []);
 }
 
 #[derive(Clone, Copy)]
 enum Failure {
+    /// Reports an error after draining the published superblock and completing its barrier.
+    AfterDrain,
+    /// Reports an error after draining the superblock write, before recording its barrier.
     AfterPublish,
+    /// Appends half the buffer to the image before reporting an error.
     Append,
+    /// Reports an error before draining the content writes.
+    BeforeDrain,
+    /// Reports an error before accepting the superblock write.
     BeforePublish,
-    FirstSync,
+    /// Reports an error during the content barrier after draining its writes.
+    ContentSync,
+    /// The number of disk writes to skip and the prefix length to write before reporting an error.
+    DiskWrite(usize, usize),
+    /// Reports an error during the publication barrier after draining the superblock write.
     PublishedSync,
 }
 
+impl Failure {
+    /// Checks barrier durability and publication order, including completion at the failure phase.
+    fn assert_barriers(self, sync: SyncPolicy, records: &[BarrierRecord]) {
+        assert!(
+            records
+                .iter()
+                .all(|record| record.durable == matches!(sync, SyncPolicy::Always))
+        );
+        if matches!(
+            self,
+            Failure::BeforeDrain
+                | Failure::ContentSync
+                | Failure::PublishedSync
+                | Failure::AfterDrain
+        ) {
+            assert!(!records.is_empty());
+        }
+        if matches!(self, Failure::PublishedSync | Failure::AfterDrain) {
+            assert_eq!(
+                records.first(),
+                Some(&BarrierRecord {
+                    durable: matches!(sync, SyncPolicy::Always),
+                    published: false,
+                    completed: true
+                })
+            );
+            assert_eq!(
+                records.last(),
+                Some(&BarrierRecord {
+                    durable: matches!(sync, SyncPolicy::Always),
+                    published: true,
+                    completed: matches!(self, Failure::AfterDrain)
+                })
+            );
+        }
+    }
+}
+
+/// A mirror that injects one error and records barriers around superblock publication.
 struct FailingImage {
     inner: MirrorImage,
     failure: Failure,
     failed: bool,
     published: bool,
+    barriers: Arc<Mutex<Vec<BarrierRecord>>>,
 }
 
 impl FailingImage {
     fn fail(&mut self) -> Result<(), Error> {
         self.failed = true;
         Err(IoError::other("injected PAGE commit failure").into())
+    }
+
+    /// Records a barrier attempt, drains writes, and synchronizes them when `durable` is true.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] at the selected failure phase, or an error from the inner image.
+    fn barrier(&mut self, durable: bool) -> Result<(), Error> {
+        let index = {
+            let mut barriers = self.barriers.lock().unwrap();
+            let index = barriers.len();
+            barriers.push(BarrierRecord {
+                durable,
+                published: self.published,
+                completed: false,
+            });
+            index
+        };
+        if !self.failed && !self.published && matches!(self.failure, Failure::BeforeDrain) {
+            self.fail()?;
+        }
+        self.inner.ordering_barrier()?;
+        if !self.failed
+            && ((!self.published && matches!(self.failure, Failure::ContentSync))
+                || (self.published && matches!(self.failure, Failure::PublishedSync)))
+        {
+            self.fail()?;
+        }
+        if durable {
+            self.inner.sync_all()?;
+        }
+        self.barriers.lock().unwrap()[index].completed = true;
+        if !self.failed && self.published && matches!(self.failure, Failure::AfterDrain) {
+            self.fail()?;
+        }
+        Ok(())
     }
 }
 
@@ -653,6 +908,7 @@ impl FileImage for FailingImage {
         if offset == 0 {
             self.published = true;
             if !self.failed && matches!(self.failure, Failure::AfterPublish) {
+                self.inner.ordering_barrier()?;
                 self.fail()?;
             }
         }
@@ -662,22 +918,16 @@ impl FileImage for FailingImage {
         Err(IoError::other("unexpected PAGE truncation").into())
     }
     fn sync_data(&mut self) -> Result<(), Error> {
-        self.inner.sync_data()
+        Err(IoError::other("unexpected data-only PAGE synchronization").into())
     }
     fn sync_all(&mut self) -> Result<(), Error> {
-        if !self.failed
-            && (matches!(self.failure, Failure::FirstSync)
-                || (self.published && matches!(self.failure, Failure::PublishedSync)))
-        {
-            self.fail()?;
-        }
-        self.inner.sync_all()
+        self.barrier(true)
     }
     fn ordering_barrier(&mut self) -> Result<(), Error> {
-        self.inner.ordering_barrier()
+        self.barrier(false)
     }
-    fn set_write_buffering(&mut self, _mode: WriteBuffering) -> Result<(), Error> {
-        self.inner.set_write_buffering(WriteBuffering::Unbuffered)
+    fn set_write_buffering(&mut self, mode: WriteBuffering) -> Result<(), Error> {
+        self.inner.set_write_buffering(mode)
     }
     fn issued_write_order(&self) -> Vec<(u64, u64)> {
         self.inner.issued_write_order()
@@ -691,6 +941,16 @@ impl Source for FailingImage {
     fn read_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
         self.inner.read_at(offset, bytes)
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct BarrierRecord {
+    /// Whether the caller requested durable synchronization.
+    durable: bool,
+    /// Whether the image accepted the superblock write before this barrier.
+    published: bool,
+    /// Whether the inner barrier completed, including synchronization when requested.
+    completed: bool,
 }
 
 #[rstest]
