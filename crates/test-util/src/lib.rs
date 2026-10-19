@@ -24,6 +24,7 @@ pub mod link_message;
 pub mod local_heap;
 pub mod mcos;
 pub mod object_header;
+pub mod publication;
 pub mod range;
 pub mod sohm;
 pub mod superblock;
