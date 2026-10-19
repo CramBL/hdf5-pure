@@ -16,6 +16,78 @@ use test_util_hdf5::aggregation::Workload;
 use test_util_hdf5::file_space;
 
 #[rstest]
+#[case::mirror(MemoryStrategy::Mirrored, 0)]
+#[case::bounded(MemoryStrategy::Bounded, 0)]
+#[case::userblock(MemoryStrategy::Mirrored, 512)]
+fn persistent_creation_recovers_settled_spare_and_reuses_it_after_reopen(
+    #[case] backing: MemoryStrategy,
+    #[case] userblock: u64,
+    #[values(1, 4_096, u64::MAX)] threshold: u64,
+) {
+    let has_manager = threshold == 1;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("persistent.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, threshold);
+    builder.with_userblock(userblock);
+    builder.create_dataset("values").with_i32_data(&[17; 16]);
+    builder.write(&path).unwrap();
+    let file = File::open(&path).unwrap();
+    let free = file.persisted_free_space().unwrap();
+    assert_eq!(!free.is_empty(), has_manager);
+    drop(file);
+    let file = File::open_rw(&path).unwrap();
+    let before = file.__space_ownership().unwrap();
+    assert!(before.analysis_complete);
+    assert_eq!(before.physical_size, before.logical_size);
+    assert_eq!(before.trailing_slack_space, []);
+    assert_eq!(!before.free_space_manager_space.is_empty(), has_manager);
+    if has_manager {
+        assert_eq!(before.unclassified_space, []);
+    }
+    file.close().unwrap();
+    let properties = FileAccessProperties::new().with_memory_strategy(backing);
+    let file = File::open_rw_with_options(&path, properties).unwrap();
+    let reusable = file.space_accounting().unwrap().reusable_free_space;
+    assert_eq!(!reusable.is_empty(), has_manager);
+    file.root()
+        .create_dataset("added", |builder| {
+            builder.with_i32_data(&[23; 16]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    let extent = file_space::contiguous_extent(&file, "added");
+    if has_manager {
+        assert!(
+            reusable
+                .iter()
+                .any(|&(start, length)| start <= extent.start && extent.end <= start + length)
+        );
+    }
+    assert!(file.__space_ownership().unwrap().analysis_complete);
+    file.close().unwrap();
+    let file = File::open_rw_with_options(&path, properties).unwrap();
+    file.root()
+        .create_dataset("third", |builder| {
+            builder.with_i32_data(&[29; 16]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    file.close().unwrap();
+    let file = File::open_rw(&path).unwrap();
+    assert_eq!(
+        file.dataset("values").unwrap().read_i32().unwrap(),
+        [17; 16]
+    );
+    assert_eq!(file.dataset("added").unwrap().read_i32().unwrap(), [23; 16]);
+    assert_eq!(file.dataset("third").unwrap().read_i32().unwrap(), [29; 16]);
+    let after = file.__space_ownership().unwrap();
+    assert!(after.analysis_complete);
+    assert_eq!(after.physical_size, after.logical_size);
+    assert_eq!(after.trailing_slack_space, []);
+}
+
+#[rstest]
 fn hdf5_pure_writes_no_free_space_manager_under_aggr_or_none(
     #[values(FileSpaceStrategy::Aggr, FileSpaceStrategy::None)] strategy: FileSpaceStrategy,
     #[values(

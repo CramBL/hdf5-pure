@@ -550,7 +550,7 @@ fn c_library_reads_managers_we_placed_mid_file() {
 
 #[test]
 fn libhdf5_reads_and_edits_a_reused_manager_with_spare_allocation() {
-    const FILLER: usize = 18;
+    const FILLER: usize = 7;
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("reused_manager_spare_allocation.h5");
@@ -2176,23 +2176,18 @@ fn version_0_mapped(
     .build()
 }
 
-#[test]
-fn c_library_reads_our_fresh_persisting_file() {
-    // Regression for issue #178: a fresh `persist = true` non-paged file must record
-    // a defined `eoa_fsm_fsalloc` in its File Space Info message. hdf5-pure once
-    // wrote the UNDEF sentinel, which an assertion-enabled libhdf5 rejects on open
-    // (H5Fsuper.c: `fs_persist => eoa_fsm_fsalloc != UNDEF`). No dataset is deleted,
-    // so the file genuinely tracks no free space — the corner the strategy
-    // crosschecks (persist = false, or persist = true only after a delete) missed.
+#[rstest]
+#[case::settled_spare(1, true)]
+#[case::no_sections(4_096, false)]
+fn c_library_reads_our_fresh_persisting_file(#[case] threshold: u64, #[case] has_sections: bool) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ours_fresh_persist.h5");
 
     let mut b = FileBuilder::new();
     b.create_dataset("d").with_i32_data(&[1, 2, 3]);
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, threshold);
     b.write(&path).unwrap();
 
-    // Nothing is freed, so our own tracked free space is zero.
     let total_ours: u64 = File::open(&path)
         .unwrap()
         .persisted_free_space()
@@ -2200,18 +2195,15 @@ fn c_library_reads_our_fresh_persisting_file() {
         .iter()
         .map(|(_, l)| l)
         .sum();
-    assert_eq!(total_ours, 0);
+    assert_eq!(total_ours != 0, has_sections);
 
-    // The C library opens the persisting file (which would abort before the fix),
-    // recovers the persist flag, reads the data, and reports a matching (zero)
-    // free-space total.
     let f = hdf5::File::open(&path).unwrap();
     assert_eq!(
         f.create_plist().unwrap().get_file_space_strategy().unwrap(),
         CStrategy::FreeSpaceManager {
             paged: false,
             persist: true,
-            threshold: 1,
+            threshold,
         }
     );
     assert_eq!(

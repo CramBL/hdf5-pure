@@ -1588,7 +1588,7 @@ fn a_paged_tail_conserves_free_space_across_layouts() {
 
 #[test]
 fn a_reused_flat_manager_tail_preserves_its_spare_allocation_across_reopen() {
-    const FILLER: usize = 18;
+    const FILLER: usize = 7;
 
     let path = temp::temp_path("hdf5_pure_fs_flat_tail_allocated_suffix.h5");
     let mut builder = FileBuilder::new();
@@ -1614,7 +1614,6 @@ fn a_reused_flat_manager_tail_preserves_its_spare_allocation_across_reopen() {
         .unwrap()
     };
 
-    // With filler 18, the writer reserves spare section-list capacity during attribute edits.
     for index in 0..3 {
         let file = open();
         file.root().delete(&format!("scratch{index}")).unwrap();
@@ -1643,7 +1642,7 @@ fn a_reused_flat_manager_tail_preserves_its_spare_allocation_across_reopen() {
         }
     }
     let (_, size_with_spare_tail) = spare_tail
-        .expect("filler 18 must produce a reused flat tail with serialized section-list padding");
+        .expect("filler 7 must produce a reused flat tail with serialized section-list padding");
 
     assert_eq!(
         std::fs::metadata(&path).unwrap().len(),
@@ -3121,23 +3120,10 @@ fn paged_staged_append_churn_does_not_leak_the_old_index() {
     assert_no_persisted_free_space_holds_live_chunks(&path, &["d"]);
 }
 
-/// A staged append that adds several chunks fills the chunk-sized holes an
-/// earlier commit left, rather than appending the lot at end-of-file.
-///
-/// The appended chunks and the rebuilt index are laid down as one blob where a
-/// single freed region holds them, since that contiguity is what lets the *next*
-/// commit place the index it supersedes on a paged file. It must not be bought
-/// with reuse: a run of chunks placed one at a time fills several small holes
-/// that no single-hole reservation can reach, and requiring one region for the
-/// whole blob sent every such append past the end of the file instead.
-///
-/// The fixture leaves four holes just wider than one chunk, kept apart by live
-/// spacers so they cannot coalesce into a region the blob would fit, and appends
-/// four chunks into them.
 #[test]
 fn a_multi_chunk_staged_append_fills_chunk_sized_holes() {
     const CHUNK: usize = 64; // elements, so 256 bytes of i32 per chunk
-    const APPENDED: usize = 4;
+    const APPENDED: usize = 16;
     let payload = (APPENDED * CHUNK * 4) as u64;
 
     for (strategy, page, name) in [
@@ -3159,8 +3145,6 @@ fn a_multi_chunk_staged_append_fills_chunk_sized_holes() {
             b.with_file_space_page_size(page);
         }
         Unlimited::new("d", &(0..CHUNK as i32).collect::<Vec<i32>>(), CHUNK as u64).add_to(&mut b);
-        // Scratch and spacer alternate, so deleting the scratch datasets leaves
-        // four separated holes rather than one run.
         for i in 0..APPENDED {
             for role in ["scratch", "spacer"] {
                 b.create_dataset(&format!("{role}{i}"))
@@ -3174,6 +3158,7 @@ fn a_multi_chunk_staged_append_fills_chunk_sized_holes() {
             f.root().delete(&format!("scratch{i}")).unwrap();
         }
         f.commit().unwrap();
+        let reusable = f.space_accounting().unwrap().reusable_free_space;
         let (size_before, free_before) = (
             f.file_size(),
             f.space_accounting().unwrap().reusable_free_bytes,
@@ -3190,6 +3175,16 @@ fn a_multi_chunk_staged_append_fills_chunk_sized_holes() {
             })
             .unwrap();
         f.commit().unwrap();
+        let chunks = f.dataset("d").unwrap().chunks().unwrap();
+        assert_eq!(chunks.len(), APPENDED + 1);
+        for chunk in chunks.into_iter().filter(|chunk| chunk.offset != [0]) {
+            assert!(
+                reusable.iter().any(|&(start, length)| {
+                    start <= chunk.address && chunk.address + chunk.storage_size <= start + length
+                }),
+                "{name}: {chunk:?} lies outside {reusable:?}"
+            );
+        }
         let (size_after, free_after) = (
             f.file_size(),
             f.space_accounting().unwrap().reusable_free_bytes,

@@ -1272,27 +1272,21 @@ impl FileWriter {
         sink.put_zeros(ub - content.len())
     }
 
-    /// Set the file-space management strategy, mirroring
-    /// `H5Pset_file_space_strategy`. The choice is recorded in the file's
-    /// superblock extension so other tools (and a later reopen) see it.
+    /// Sets the file-space management strategy, as `H5Pset_file_space_strategy` does.
     ///
-    /// `persist` requests that freed space be tracked on disk across closes. A
-    /// freshly built file has no free space to track, so this records the persist
-    /// intent (matching what the C library writes for a brand-new persisted
-    /// file); a later [`File::open_rw`](crate::File::open_rw) that frees space writes
-    /// the on-disk free-space-manager blocks. `threshold` is the smallest
-    /// free-space section size the managers track.
+    /// The writer records the choice in the superblock extension. `persist` requests on-disk
+    /// free-space managers. The writer applies `threshold` to freed sections, retaining shorter
+    /// regions that merge with tracked free space. It tracks page tails independently of
+    /// `threshold`.
+    /// [`FileSpaceStrategy::Aggr`] and [`FileSpaceStrategy::None`] have no managers, so the
+    /// writer records a clear persist flag and the default threshold of 1 for them.
     ///
-    /// [`FileSpaceStrategy::Aggr`] and [`FileSpaceStrategy::None`] have no free-space managers,
-    /// so for them the writer ignores `persist` and `threshold` and records a clear persist flag
-    /// and the default threshold of 1. `H5Pset_file_space_strategy` ignores both for those
-    /// strategies too.
-    ///
-    /// Under [`FileSpaceStrategy::Aggr`] or [`FileSpaceStrategy::FsmAggr`] with `persist = false`,
-    /// the writer uses separate metadata and raw aggregates and releases unused tails at EOA
-    /// before emission. This also applies when the strategy is unset. Under `FsmAggr`, the
-    /// writer reuses abandoned aggregate spare subject to `threshold` before reserving more
-    /// aggregate space. Unused interior space remains allocated without persisted free sections.
+    /// Under [`FileSpaceStrategy::Aggr`] or [`FileSpaceStrategy::FsmAggr`], the writer uses
+    /// separate metadata and raw aggregates and releases unused tails at EOA before output.
+    /// This also applies when the strategy is unset. Under `FsmAggr`, the writer reuses abandoned
+    /// aggregate spare subject to `threshold` before reserving more aggregate space. With
+    /// `persist = true`, it records remaining reusable spare in on-disk managers for later
+    /// sessions. Otherwise, unused interior reservations remain allocated after output.
     pub fn with_file_space_strategy(
         &mut self,
         strategy: FileSpaceStrategy,
@@ -1473,9 +1467,7 @@ impl FileWriter {
         let file_space = self.file_space_config()?;
         let reuse_threshold = match file_space {
             None => Some(DEFAULT_THRESHOLD),
-            Some(config) if config.strategy == FileSpaceStrategy::FsmAggr && !config.persist => {
-                Some(config.threshold)
-            }
+            Some(config) if config.strategy == FileSpaceStrategy::FsmAggr => Some(config.threshold),
             Some(_) => None,
         };
         let aggregated = reuse_threshold.is_some()
@@ -1549,14 +1541,8 @@ impl FileWriter {
         let ext_oh = file_space
             .map(|config| file_space_extension_oh(&config.info()))
             .transpose()?;
-        // A persisting *non-paged* file's placeholder File Space Info message (built
-        // just above) records `eoa_pre_fsm` = UNDEF, because a fresh file has no
-        // free-space-manager blocks. libhdf5 requires `fs_persist => eoa_fsm_fsalloc
-        // != UNDEF`, and an assertion-enabled build aborts on the sentinel
-        // (H5Fsuper.c), so the non-paged tail below rewrites the message with a real
-        // end-of-allocation once the layout is known (issue #178). Capture the
-        // parameters here, while `self` is intact. (The paged path has its own
-        // manager-aware rewrite; a `Page` file never reaches the non-paged tail.)
+        // Persistent File Space Info requires final manager addresses and the EOA before
+        // manager allocation. Retain the settings for the rewrite after placement.
         let nonpaged_persist: Option<(FileSpaceStrategy, u64, FileSpacePageSize)> = file_space
             .filter(|config| config.strategy != FileSpaceStrategy::Page)
             .and_then(|config| {
@@ -3749,7 +3735,11 @@ impl FileWriter {
             .transpose()?;
         let ext_addr = ext_addr.map(StoredAddress::get);
 
-        let cursor2 = allocation.finish()?;
+        let (cursor2, manager) = if nonpaged_persist.is_some() {
+            allocation.finish_persisted(WIDTHS)?
+        } else {
+            (allocation.finish()?, None)
+        };
 
         // eof_address is absolute file size (includes userblock + GCOLs + ext)
         let eof_addr2 = (ub as u64)
@@ -3956,21 +3946,27 @@ impl FileWriter {
                 )
             });
 
-        // Superblock extension (File Space Info), at the address recorded above.
-        // For a persisting non-paged file, rebuild the message with a real
-        // end-of-allocation — the end of all content, since no FSM blocks follow —
-        // in place of the UNDEF placeholder (see the capture above; issue #178). The
-        // message length is unchanged (only the `eoa_pre_fsm` field differs), so the
-        // reserved layout still holds.
+        // Replace the placeholder with the manager address and pre-manager EOA, or the final
+        // EOA if no manager is needed. The message has the same length in either case.
         let real_ext_oh = match (&ext_oh, nonpaged_persist) {
             (Some(_), Some((strategy, threshold, np_page_size))) => {
-                let info = file_space_info::persistent_empty(
-                    OFFSET_WIDTH,
-                    strategy,
-                    threshold,
-                    np_page_size,
-                    eof_addr2 - ub as u64,
-                );
+                let info = match &manager {
+                    Some(manager) => file_space_info::persistent_single_manager(
+                        OFFSET_WIDTH,
+                        strategy,
+                        threshold,
+                        np_page_size,
+                        manager.header_address.get(),
+                        manager.header_address.get(),
+                    ),
+                    None => file_space_info::persistent_empty(
+                        OFFSET_WIDTH,
+                        strategy,
+                        threshold,
+                        np_page_size,
+                        cursor2,
+                    ),
+                };
                 let mut oh = ObjectHeaderWriter::new();
                 oh.add_message_with_flags(
                     MessageType::FILE_SPACE_INFO,
@@ -4004,7 +4000,22 @@ impl FileWriter {
         // Under direct placement, supply each source in ascending physical order. With aggregation
         // enabled, a small reservation can precede a large one already placed outside its window,
         // so sort the reservations before emission.
-        let sources: [&mut dyn Iterator<Item = Result<Reservation<FileData<'_>>, FormatError>>; 9] = [
+        let mut manager_blocks = manager
+            .iter()
+            .flat_map(|manager| {
+                [
+                    (manager.header_address, manager.header.as_slice()),
+                    (
+                        manager.section_list_address,
+                        manager.section_list.as_slice(),
+                    ),
+                ]
+            })
+            .map(|(address, bytes)| {
+                Reservation::new(base, address, bytes.len() as u64, FileData::Bytes(bytes))
+            });
+        let sources: [&mut dyn Iterator<Item = Result<Reservation<FileData<'_>>, FormatError>>;
+            10] = [
             &mut early_collections,
             &mut root_header,
             &mut group_headers,
@@ -4014,6 +4025,7 @@ impl FileWriter {
             &mut dataset_regions,
             &mut late_collections,
             &mut extension,
+            &mut manager_blocks,
         ];
         let emit = |sink: &mut S, emission| match emission {
             FileData::Bytes(bytes) => sink.put(bytes),
@@ -4049,7 +4061,8 @@ impl FileWriter {
                     .iter()
                     .filter(|layout| layout.data.len() != 0)
                     .count()
-                + usize::from(real_ext_oh.is_some());
+                + usize::from(real_ext_oh.is_some())
+                + 2 * usize::from(manager.is_some());
             let mut reservations = Vec::with_capacity(count);
             for reservation in sources.into_iter().flatten() {
                 reservations.push(reservation?);
@@ -4074,14 +4087,11 @@ struct FileSpaceConfig {
 }
 
 impl FileSpaceConfig {
-    /// Returns the File Space Info message to write.
+    /// Returns the File Space Info message used to size the superblock extension.
     ///
-    /// A freshly built file has no free space, so under a strategy with free-space managers and
-    /// `persist = true` the writer writes the persisting form with no managers: the persist flag
-    /// set, every manager address undefined, and no manager blocks. A later
-    /// [`File::open_rw`](crate::File::open_rw) that frees space writes the managers. Under every
-    /// other setting the writer writes the non-persistent form, with the default threshold for a
-    /// strategy without free-space managers.
+    /// Persistent messages have undefined manager addresses and an undefined pre-manager EOA
+    /// until placement is complete. For strategies without managers, the writer uses the
+    /// nonpersistent form and the default threshold.
     fn info(&self) -> FileSpaceInfo {
         let Self {
             strategy,
