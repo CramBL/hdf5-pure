@@ -93,9 +93,9 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install tools
-        uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
-          tool: just
+          tool: just@1.59.0
 
       - name: Build targets and i686 lints
         run: just portability
@@ -140,9 +140,9 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install tools
-        uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
-          tool: cross,just
+          tool: cross@0.2.5,just@1.59.0
 
       - name: Tests
         run: just ${{ matrix.recipe }}
@@ -173,16 +173,16 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install just
-        uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
-          tool: just
+          tool: just@1.59.0
 
       - name: Read the pinned wasm-bindgen release
         id: wasm-bindgen
         run: echo "version=$(just portability::wasm-bindgen-version)" >> "$GITHUB_OUTPUT"
 
       - name: Install the wasm-bindgen test runner
-        uses: taiki-e/install-action@920ab1831fbf4fb3ef75c8ead83556c918bb7290 # v2.79.8
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: wasm-bindgen@${{ steps.wasm-bindgen.outputs.version }}
 
