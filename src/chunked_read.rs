@@ -484,34 +484,25 @@ fn generate_implicit_chunks(
         .collect()
 }
 
-/// The per-dimension geometry the chunked readers share: the data rank (the chunk
-/// layout's dimensions minus the trailing element-size dim), the chunk dimensions,
-/// and the dataset dimensions, all as `usize`. `chunk_dimensions` and the
-/// dataspace dims narrow with checked conversions.
+/// Returns the data rank and borrows the chunk and dataset dimensions.
+///
+/// Both dimension slices hold file-width extents. The chunk dimensions exclude the layout's
+/// trailing element-size dimension.
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::ChunkedReadError`] if the layout carries no dimensions
-/// or its rank disagrees with the dataspace. Returns
-/// [`FormatError::ValueTooLargeForPlatform`] if a dimension does not fit in
-/// `usize`.
-fn chunked_dims(
-    chunk_dimensions: &[u64],
-    dataspace: &Dataspace,
-) -> Result<(usize, Vec<usize>, Vec<usize>), FormatError> {
+/// Returns [`FormatError::ChunkedReadError`] if the layout has no dimensions or its rank
+/// differs from the dataspace rank.
+fn chunked_dims<'a>(
+    chunk_dimensions: &'a [u64],
+    dataspace: &'a Dataspace,
+) -> Result<(usize, &'a [u64], &'a [u64]), FormatError> {
     let rank = chunk_dimensions
         .len()
         .checked_sub(1)
         .ok_or_else(|| FormatError::ChunkedReadError("chunked layout has no dimensions".into()))?;
-    let chunk_dims: Vec<usize> = chunk_dimensions[..rank]
-        .iter()
-        .map(|&d| d.to_usize())
-        .collect::<Result<_, _>>()?;
-    let ds_dims: Vec<usize> = dataspace
-        .dimensions
-        .iter()
-        .map(|&d| d.to_usize())
-        .collect::<Result<_, _>>()?;
+    let chunk_dims = &chunk_dimensions[..rank];
+    let ds_dims = dataspace.dimensions.as_slice();
     if ds_dims.len() != rank {
         return Err(FormatError::ChunkedReadError(format!(
             "rank mismatch: dataspace has {} dims, layout has {} chunk dims (rank={})",
@@ -535,11 +526,11 @@ const MAX_CHUNK_ALLOCATION_BYTES: u64 = u32::MAX as u64;
 /// # Errors
 ///
 /// Returns [`FormatError::InvalidChunkGeometry`] if the size exceeds
-/// [`MAX_CHUNK_ALLOCATION_BYTES`].
-fn bounded_chunk_len(chunk_dims: &[usize], elem_size: NonZeroUsize) -> Result<usize, FormatError> {
+/// [`MAX_CHUNK_ALLOCATION_BYTES`] or its calculation overflows [`u64`].
+fn bounded_chunk_len(chunk_dims: &[u64], elem_size: NonZeroUsize) -> Result<usize, FormatError> {
     let logical = chunk_dims
         .iter()
-        .try_fold(elem_size.get() as u64, |acc, &d| acc.checked_mul(d as u64));
+        .try_fold(elem_size.get() as u64, |acc, &d| acc.checked_mul(d));
     match logical {
         Some(bytes) if bytes <= MAX_CHUNK_ALLOCATION_BYTES => bytes.to_usize(),
         _ => Err(FormatError::InvalidChunkGeometry(
@@ -548,12 +539,16 @@ fn bounded_chunk_len(chunk_dims: &[usize], elem_size: NonZeroUsize) -> Result<us
     }
 }
 
-/// Read a chunked dataset from a [`Source`], reading the chunk index and
-/// each chunk's bytes on demand via `read_at`.
+/// Reads a whole chunked dataset from a [`Source`], decoding chunks sequentially.
 ///
-/// Streaming counterpart of [`read_chunked_data_cached`], with the same
-/// chunk-index coverage: the B-tree v1 (v3) index and all five v4 chunk indexes, including the
-/// version 2 B-tree. The decoding is sequential.
+/// The output byte length must fit [`usize`] before the reader reads the chunk index.
+/// Dataset dimensions are converted to host-sized indexes only for a nonempty output.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ValueTooLargeForPlatform`] if the output byte length or a required
+/// buffer index exceeds [`usize::MAX`], and errors from reading the datatype, fill value,
+/// chunk geometry, index, or payloads.
 pub fn read_chunked_data_from_source<S: Source + ?Sized>(
     source: &S,
     spec: RawReadSpec<'_>,
@@ -565,6 +560,7 @@ pub fn read_chunked_data_from_source<S: Source + ?Sized>(
         spec.pipeline(),
         spec.fill(),
     );
+    let total_bytes = spec.byte_len()?;
     let Some(ChunkedPlan {
         flags,
         rank,
@@ -579,24 +575,20 @@ pub fn read_chunked_data_from_source<S: Source + ?Sized>(
     else {
         return spec.unallocated_buffer();
     };
-    let ctx = ChunkContext::from_datatype(&chunk_dims_u64, datatype)?;
+    if total_bytes == 0 {
+        return fill.buffer(0);
+    }
+    let ds_dims = materialized_dims(ds_dims)?;
+    let ctx = ChunkContext::from_datatype(chunk_dims_u64, datatype)?;
     let decoded_chunks = decode_all_chunks_from_source(
         source,
         flags,
-        &chunk_dims_u64,
+        chunk_dims_u64,
         &dataspace.dimensions,
         pipeline,
         ctx,
         &chunks,
     )?;
-    let num_elements = dataspace.num_elements();
-    let total_bytes = num_elements
-        .to_usize()?
-        .checked_mul(elem_size.get())
-        .ok_or(FormatError::OffsetOverflow {
-            offset: num_elements,
-            length: elem_size.get() as u64,
-        })?;
     assemble_chunks(
         &chunks,
         &decoded_chunks,
@@ -610,13 +602,15 @@ pub fn read_chunked_data_from_source<S: Source + ?Sized>(
 }
 
 /// The geometry of a chunked dataset and the allocated chunks its chunk index lists.
-struct ChunkedPlan {
+struct ChunkedPlan<'a> {
     flags: ChunkedLayoutFlags,
     rank: usize,
     /// The size of a chunk in elements along each dimension of the dataset.
     chunk_dims: Vec<usize>,
-    ds_dims: Vec<usize>,
-    chunk_dims_u64: Vec<u64>,
+    /// The complete dataset dimensions at file width.
+    ds_dims: &'a [u64],
+    /// The chunk dimensions at file width, excluding the trailing element-size dimension.
+    chunk_dims_u64: &'a [u64],
     elem_size: NonZeroUsize,
     /// The size in bytes of a decoded chunk.
     #[cfg(feature = "std")]
@@ -624,20 +618,20 @@ struct ChunkedPlan {
     chunks: Vec<ChunkInfo>,
 }
 
-impl ChunkedPlan {
+impl<'a> ChunkedPlan<'a> {
     /// Reads the chunk index of the chunked dataset `spec` describes, or returns `None` if the
     /// index address is undefined, as it is before the dataset's storage is allocated.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::ChunkedReadError`] if `spec` describes another layout or its chunk
-    /// dimensions do not match the dataspace, [`FormatError::ZeroSizedDatatype`] if the size of
+    /// rank differs from the dataspace rank, [`FormatError::ZeroSizedDatatype`] if the size of
     /// the datatype is 0, [`FormatError::ValueTooLargeForPlatform`] if the size of the datatype or
-    /// a dimension exceeds [`usize::MAX`], [`FormatError::InvalidChunkGeometry`] if a chunk exceeds
-    /// the reader's single-chunk allocation limit, and the errors of a malformed chunk index.
+    /// a chunk dimension exceeds [`usize::MAX`], [`FormatError::InvalidChunkGeometry`] if a chunk
+    /// exceeds the reader's single-chunk allocation limit, and the errors of a malformed chunk index.
     fn new(
         source: &(impl Source + ?Sized),
-        spec: RawReadSpec<'_>,
+        spec: RawReadSpec<'a>,
         widths: FormatWidths,
     ) -> Result<Option<Self>, FormatError> {
         let RawReadStorage::Chunked {
@@ -662,7 +656,7 @@ impl ChunkedPlan {
                 reason = "only the std-only chunk visitor reads the chunk length"
             )
         )]
-        let chunk_len = bounded_chunk_len(&chunk_dims, elem_size)?;
+        let chunk_len = bounded_chunk_len(chunk_dims, elem_size)?;
         let chunks = collect_chunks_for_layout_from_source(
             source,
             index,
@@ -671,7 +665,8 @@ impl ChunkedPlan {
             elem_size.get() as u64,
             widths,
         )?;
-        let chunk_dims_u64 = chunk_dims.iter().map(|&d| d as u64).collect();
+        let chunk_dims_u64 = chunk_dims;
+        let chunk_dims = materialized_dims(chunk_dims_u64)?;
         Ok(Some(Self {
             flags,
             rank,
@@ -736,31 +731,24 @@ fn plan_chunk_spans(
     )
 }
 
-/// Read the raw element bytes of the row window `[row_start, row_start + num_rows)`
-/// — a range along the leading dimension — decoding only the chunks it overlaps.
+/// Reads a leading-dimension row window, decoding only overlapping chunks.
 ///
-/// The windowed counterpart of [`read_chunked_data_from_source`]: peak memory is
-/// one window plus one chunk, not the whole dataset. `cache` holds the parsed index
-/// and decompressed chunks, so successive windows on the same handle walk the index
-/// once and reuse boundary chunks.
+/// The caller clamps `row_start` and `num_rows` to the dataset. The output holds the selected
+/// rows and the dataset's full inner dimensions. For an empty selection, the reader returns an
+/// empty buffer before converting output dimensions to host-sized indexes. For a scalar layout,
+/// the reader returns `Ok(None)` for the caller to read the whole dataset.
 ///
-/// A chunk that spans the dataset's full inner extent (`chunk_dims[i] == ds_dims[i]`
-/// for `i >= 1` — every 1-D and frame-per-chunk layout) holds each row contiguously,
-/// so its contribution is a plain row band copied in one move. A chunk of an
-/// inner-split grid scatters into the window through the same N-D kernel the whole
-/// read uses ([`place_chunk`]), aimed at a window-shaped output. Either way only the
-/// chunks overlapping the window are decoded, and `num_rows * row_elems` elements
-/// are returned. Returns `Ok(None)` only for a rank-0 (scalar) chunked layout — a
-/// crafted-file corner with no leading dimension to window — so the caller falls
-/// back to a whole read. The caller clamps the window to the dataset.
+/// The cache holds the parsed index and decoded chunks for reuse across windows. The caller uses
+/// [`CachePass::LRU`] for a single window, or a shared pass for a sweep.
 ///
-/// `pass` decides which chunks the cache keeps, and the answer differs by caller.
-/// A lone window wants [`CachePass::LRU`], so that what it retains is the chunks
-/// it *finished* on: its successor is the adjacent window, and the chunk they
-/// share is that last one. A window that is one step of a sweep across the whole
-/// dataset wants a real pass, shared by every step — the sweep never asks for a
-/// chunk twice, so offering each one to a cache already full is a copy and an
-/// eviction with no reader on the other side. See [`CachePass`].
+/// # Errors
+///
+/// Returns [`FormatError::ChunkedReadError`] if the layout is not chunked or its rank differs
+/// from the dataspace rank, [`FormatError::InvalidChunkGeometry`] if a decoded chunk exceeds
+/// the reader's allocation limit, and [`FormatError::OffsetOverflow`] if output byte counts
+/// or strides overflow. Returns [`FormatError::ValueTooLargeForPlatform`] if a required buffer
+/// size, dimension, or row or chunk coordinate exceeds [`usize::MAX`], and errors from reading
+/// the datatype, fill value, chunk index, or chunk payloads.
 pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
     source: &S,
     spec: RawReadSpec<'_>,
@@ -789,7 +777,7 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
 
     let elem_size = crate::datatype::element_size_usize(datatype)?;
     let (rank, chunk_dims, ds_dims) = chunked_dims(chunk_dimensions, dataspace)?;
-    bounded_chunk_len(&chunk_dims, elem_size)?;
+    bounded_chunk_len(chunk_dims, elem_size)?;
 
     // A rank-0 (scalar) chunked layout has no leading dimension to window; fall
     // back to the whole-dataset reader, which handles rank 0. Only a crafted
@@ -799,47 +787,42 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
         return Ok(None);
     }
 
-    // When every chunk spans the dataset's full inner extent, each row is
-    // contiguous in its chunk and a window is one row band per chunk; an
-    // inner-split chunk grid instead scatters each chunk through the N-D kernel.
-    let full_inner = (1..rank).all(|i| chunk_dims[i] == ds_dims[i]);
-
-    // Elements per row (product of the inner dims; 1 when 1-D). Checked so a
-    // crafted dataspace whose inner dims overflow `usize` errors instead of
-    // panicking (debug) or wrapping (release).
-    let row_elems: usize = ds_dims.iter().skip(1).try_fold(1usize, |acc, &d| {
-        acc.checked_mul(d).ok_or(FormatError::OffsetOverflow {
-            offset: acc as u64,
-            length: d as u64,
-        })
-    })?;
-    let row_bytes = row_elems
-        .checked_mul(elem_size.get())
-        .ok_or(FormatError::OffsetOverflow {
-            offset: row_elems as u64,
-            length: elem_size.get() as u64,
-        })?;
-
-    let out_rows = num_rows.to_usize()?;
-    let total_bytes = out_rows
-        .checked_mul(row_bytes)
-        .ok_or(FormatError::OffsetOverflow {
-            offset: out_rows as u64,
-            length: row_bytes as u64,
-        })?;
-    // Uncovered bytes are unallocated storage; see `assemble_chunks`.
+    let total_bytes = if num_rows == 0 || ds_dims[1..].contains(&0) {
+        0
+    } else {
+        let row_bytes =
+            ds_dims
+                .iter()
+                .skip(1)
+                .try_fold(elem_size.get() as u64, |bytes, &dim| {
+                    bytes.checked_mul(dim).ok_or(FormatError::OffsetOverflow {
+                        offset: bytes,
+                        length: dim,
+                    })
+                })?;
+        num_rows
+            .checked_mul(row_bytes)
+            .ok_or(FormatError::OffsetOverflow {
+                offset: num_rows,
+                length: row_bytes,
+            })?
+            .to_usize()?
+    };
     let mut output = fill.buffer(total_bytes)?;
     if total_bytes == 0 {
         return Ok(Some(output));
     }
 
-    // Scatter geometry for the inner-split path: the output is a dataset whose
-    // leading dimension is the window (`[out_rows, inner dims…]`), row-major.
-    // Checked before any I/O: crafted chunk dimensions (u32 each) can overflow
-    // the stride product where a real chunk's byte size cannot. For a full-inner
-    // chunk the product equals `row_elems`, already checked above.
-    let mut win_dims = ds_dims.clone();
-    win_dims[0] = out_rows;
+    let full_inner = (1..rank).all(|i| chunk_dims[i] == ds_dims[i]);
+    let out_rows = num_rows.to_usize()?;
+    let row_bytes = total_bytes / out_rows;
+    let mut win_dims = Vec::with_capacity(rank);
+    win_dims.push(out_rows);
+    for &dim in &ds_dims[1..] {
+        win_dims.push(dim.to_usize()?);
+    }
+    let chunk_dims_u64 = chunk_dims;
+    let chunk_dims = materialized_dims(chunk_dims_u64)?;
     let win_strides = row_major_strides(&win_dims)?;
     let chunk_strides = row_major_strides(&chunk_dims)?;
 
@@ -893,8 +876,7 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
     };
     sort_chunks_by_address(&mut chunks);
 
-    let chunk_dims_u64: Vec<u64> = chunk_dims.iter().map(|&d| d as u64).collect();
-    let ctx = ChunkContext::from_datatype(&chunk_dims_u64, datatype)?;
+    let ctx = ChunkContext::from_datatype(chunk_dims_u64, datatype)?;
 
     // Coalesce over the window's own chunks. A plan built over the dataset's
     // whole chunk list would put the rows on either side of the window inside a
@@ -980,7 +962,7 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
             None => Cow::Owned(source.read_exact_at(chunk.address.get(), len)?),
         };
         let filtering =
-            ChunkFiltering::for_chunk(flags, &chunk_dims_u64, &dataspace.dimensions, chunk);
+            ChunkFiltering::for_chunk(flags, chunk_dims_u64, &dataspace.dimensions, chunk);
         let dec = decode_chunk(&mut scratch, stored, pipeline, ctx, filtering)?;
         copy(&mut output, &dec);
         match dec {
@@ -1029,10 +1011,15 @@ fn row_major_strides(dims: &[usize]) -> Result<Vec<usize>, FormatError> {
     Ok(strides)
 }
 
-/// Read a chunked dataset from a [`Source`] with parsed-index and
-/// decompressed-chunk caching.
+/// Reads a whole chunked dataset from a [`Source`] with index and decoded-chunk caching.
 ///
-/// This is the streaming counterpart of [`read_chunked_data_cached`].
+/// Dataset dimensions are converted to host-sized indexes only for a nonempty output.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ValueTooLargeForPlatform`] if the output byte length or a required
+/// buffer index exceeds [`usize::MAX`], and errors from reading the datatype, fill value,
+/// chunk geometry, index, or payloads.
 pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
     source: &S,
     spec: RawReadSpec<'_>,
@@ -1062,7 +1049,14 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
 
     let elem_size = crate::datatype::element_size_usize(datatype)?;
     let (rank, chunk_dims, ds_dims) = chunked_dims(chunk_dimensions, dataspace)?;
-    bounded_chunk_len(&chunk_dims, elem_size)?;
+    bounded_chunk_len(chunk_dims, elem_size)?;
+    let total_bytes = spec.byte_len()?;
+    if total_bytes == 0 {
+        return fill.buffer(0);
+    }
+    let ds_dims = materialized_dims(ds_dims)?;
+    let chunk_dims_u64 = chunk_dims;
+    let chunk_dims = materialized_dims(chunk_dims_u64)?;
 
     let mut chunks = if let Some(chunks) = cache.all_indexed_chunks() {
         chunks
@@ -1080,14 +1074,6 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
     };
     sort_chunks_by_address(&mut chunks);
 
-    let total_elements = dataspace.num_elements().to_usize()?;
-    let total_bytes =
-        total_elements
-            .checked_mul(elem_size.get())
-            .ok_or(FormatError::OffsetOverflow {
-                offset: total_elements as u64,
-                length: elem_size.get() as u64,
-            })?;
     // Uncovered bytes are unallocated storage; see `assemble_chunks`.
     let mut output = fill.buffer(total_bytes)?;
 
@@ -1101,8 +1087,7 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
         chunk_strides[i] = chunk_strides[i + 1] * chunk_dims[i + 1];
     }
 
-    let chunk_dims_u64: Vec<u64> = chunk_dims.iter().map(|&d| d as u64).collect();
-    let ctx = ChunkContext::from_datatype(&chunk_dims_u64, datatype)?;
+    let ctx = ChunkContext::from_datatype(chunk_dims_u64, datatype)?;
 
     // Every chunk of the dataset is wanted here; what the plan leaves out is
     // whatever the chunk cache already holds from an earlier read.
@@ -1152,7 +1137,7 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
         // own it moves into the cache, and borrowed from a coalesced span it is
         // copied out of the span only if the cache admits it.
         let filtering =
-            ChunkFiltering::for_chunk(flags, &chunk_dims_u64, &dataspace.dimensions, chunk_info);
+            ChunkFiltering::for_chunk(flags, chunk_dims_u64, &dataspace.dimensions, chunk_info);
         let dec = decode_chunk(&mut scratch, stored, pipeline, ctx, filtering)?;
         place_chunk(
             &dec,
@@ -1471,14 +1456,14 @@ pub(crate) fn visit_decoded_chunks_from_source(
         return Ok(());
     };
     sort_chunks_by_address(&mut chunks);
-    let ctx = ChunkContext::from_datatype(&chunk_dims_u64, spec.datatype())?;
+    let ctx = ChunkContext::from_datatype(chunk_dims_u64, spec.datatype())?;
     let mut scratch = FilterScratch::new();
     for chunk in &chunks {
         let decoded = read_decoded_chunk(
             source,
             &mut scratch,
             flags,
-            &chunk_dims_u64,
+            chunk_dims_u64,
             &spec.dataspace().dimensions,
             spec.pipeline(),
             ctx,
@@ -1797,11 +1782,15 @@ fn assemble_chunks(
     Ok(output)
 }
 
-/// Read a chunked dataset with caching support.
+/// Reads a whole chunked dataset from a file buffer with index and decoded-chunk caching.
 ///
-/// On the first call, scans the chunk index (B-tree / fixed array / etc.) once
-/// and populates the cache's hash index.  Subsequent calls skip the index scan
-/// entirely.  Decompressed chunk data is also cached with LRU eviction.
+/// Dataset dimensions are converted to host-sized indexes only for a nonempty output.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ValueTooLargeForPlatform`] if the output byte length or a required
+/// buffer index exceeds [`usize::MAX`], and errors from reading the datatype, fill value,
+/// chunk geometry, index, or payloads.
 pub fn read_chunked_data_cached(
     file_data: &[u8],
     spec: RawReadSpec<'_>,
@@ -1833,7 +1822,14 @@ pub fn read_chunked_data_cached(
     let elem_width = datatype.element_size()?;
     let elem_size = elem_width.narrow::<NonZeroUsize>()?;
     let (rank, chunk_dims, ds_dims) = chunked_dims(chunk_dimensions, dataspace)?;
-    bounded_chunk_len(&chunk_dims, elem_size)?;
+    bounded_chunk_len(chunk_dims, elem_size)?;
+    let total_bytes = spec.byte_len()?;
+    if total_bytes == 0 {
+        return fill.buffer(0);
+    }
+    let ds_dims = materialized_dims(ds_dims)?;
+    let chunk_dims_u64 = chunk_dims;
+    let chunk_dims = materialized_dims(chunk_dims_u64)?;
     let ndims = rank + 1; // rank + the trailing element-size dimension
 
     let mut chunks = if let Some(chunks) = cache.all_indexed_chunks() {
@@ -1923,8 +1919,6 @@ pub fn read_chunked_data_cached(
     sort_chunks_by_address(&mut chunks);
 
     // Assemble output
-    let total_elements = dataspace.num_elements().to_usize()?;
-    let total_bytes = total_elements * elem_size.get();
     // Uncovered bytes are unallocated storage; see `assemble_chunks`.
     let mut output = fill.buffer(total_bytes)?;
 
@@ -1938,8 +1932,7 @@ pub fn read_chunked_data_cached(
         chunk_strides[i] = chunk_strides[i + 1] * chunk_dims[i + 1];
     }
 
-    let chunk_dims_u64: Vec<u64> = chunk_dims.iter().map(|&d| d as u64).collect();
-    let ctx = ChunkContext::from_datatype(&chunk_dims_u64, datatype)?;
+    let ctx = ChunkContext::from_datatype(chunk_dims_u64, datatype)?;
 
     let pass = cache.begin_pass();
     // One decoder for every chunk of the dataset; see `FilterScratch`.
@@ -1986,7 +1979,7 @@ pub fn read_chunked_data_cached(
         }
         let raw_chunk = &file_data[r];
         let filtering =
-            ChunkFiltering::for_chunk(flags, &chunk_dims_u64, &dataspace.dimensions, chunk_info);
+            ChunkFiltering::for_chunk(flags, chunk_dims_u64, &dataspace.dimensions, chunk_info);
         // A chunk that skipped the pipeline scatters straight from the file
         // buffer, and is copied into the cache only if it would be retained.
         let dec = decode_chunk(
@@ -2014,6 +2007,10 @@ pub fn read_chunked_data_cached(
     }
 
     Ok(output)
+}
+
+fn materialized_dims(dims: &[u64]) -> Result<Vec<usize>, FormatError> {
+    dims.iter().map(|&dim| dim.to_usize()).collect()
 }
 
 /// Places one decoded chunk into the dense output buffer, handling the
@@ -2170,7 +2167,7 @@ mod tests {
         );
         // A single chunk right at the 4 GiB limit is still representable.
         assert_eq!(
-            bounded_chunk_len(&[u32::MAX as usize], convert::nz(1)).unwrap(),
+            bounded_chunk_len(&[u64::from(u32::MAX)], convert::nz(1)).unwrap(),
             u32::MAX as usize
         );
     }
@@ -2182,8 +2179,12 @@ mod tests {
         let err = bounded_chunk_len(&[10], convert::nz(0xAAAA_AAAA)).unwrap_err();
         assert!(matches!(err, FormatError::InvalidChunkGeometry(_)));
 
-        // A geometry whose product overflows u64 is refused, not wrapped.
-        assert!(bounded_chunk_len(&[usize::MAX, usize::MAX], convert::nz(usize::MAX)).is_err());
+        assert_eq!(
+            bounded_chunk_len(&[u64::MAX, u64::MAX], convert::nz(usize::MAX)).unwrap_err(),
+            FormatError::InvalidChunkGeometry(
+                "chunk logical byte size exceeds the reader's single-chunk allocation limit",
+            ),
+        );
     }
 
     /// A chunk grid with a *hole* — some chunks allocated, others never — reads
@@ -4224,11 +4225,6 @@ mod tests {
         );
     }
 
-    /// Inner *dataspace* dimensions whose product overflows `usize` must error
-    /// rather than panic (debug) or wrap (release). The chunk edges stay small so
-    /// the per-chunk geometry guard passes and the `row_elems` check is what
-    /// catches the overflow. `(2^22)^3` overflows 64-bit `usize`; `(2^22)^2`
-    /// already overflows 32-bit, so this holds on both.
     #[test]
     fn windowed_rows_inner_dim_product_overflow_errors() {
         let big: u64 = 1 << 22;
@@ -4256,9 +4252,12 @@ mod tests {
             1,
         )
         .expect_err("overflowing inner-dim product must error");
-        assert!(
-            matches!(err, FormatError::OffsetOverflow { .. }),
-            "expected OffsetOverflow, got {err:?}"
+        assert_eq!(
+            err,
+            FormatError::OffsetOverflow {
+                offset: 140_737_488_355_328,
+                length: 4_194_304,
+            },
         );
     }
 
@@ -4365,6 +4364,164 @@ mod tests {
             .expect("empty window must still be Ok");
             assert_eq!(empty, Some(Vec::new()));
         }
+    }
+
+    #[rstest]
+    #[case(4_294_967_424, 1, 0, 1, 8)]
+    #[case(4_294_967_424, 1, 4_294_967_360, 1, 8)]
+    #[case(4_294_967_297, 0, 1, 1, 0)]
+    fn windowed_rows_materialize_only_the_selected_geometry(
+        #[case] rows: u64,
+        #[case] columns: u64,
+        #[case] start: u64,
+        #[case] count: u64,
+        #[case] expected_bytes: usize,
+    ) {
+        let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::NONE,
+            chunk_dimensions: vec![4, 1, 8],
+            index: ChunkIndexLayout::BTreeV1 { address: None },
+        };
+        let dataspace = Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: 2,
+            dimensions: vec![rows, columns],
+            max_dimensions: None,
+        };
+        let seven = 7.0f64.to_le_bytes();
+        let datatype = make_f64_type();
+        let fill = FillPattern::new(FillTime::IfSet, Some(&seven), convert::nz(8));
+        let spec = RawReadSpec::parse(&layout, &dataspace, &datatype, None, fill).unwrap();
+        let output = read_chunked_rows_from_source(
+            &BytesSource::new(b""),
+            spec,
+            FORMAT_WIDTHS,
+            &ChunkCache::new(),
+            CachePass::LRU,
+            start,
+            count,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(output, seven.repeat(expected_bytes / 8));
+    }
+
+    #[test]
+    fn windowed_rows_read_an_early_chunk_in_a_large_dataspace() {
+        let chunk = ChunkInfo {
+            chunk_size: StoredChunkSize::BTreeV1(32),
+            filter_mask: 0,
+            offsets: vec![0, 0, 0],
+            address: StoredAddress::new(512),
+        };
+        let mut bytes = build_chunk_btree_leaf(&[chunk], 3, WIDTHS);
+        bytes.resize(512, 0);
+        for value in [11.0f64, 12.0, 13.0, 14.0] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::NONE,
+            chunk_dimensions: vec![4, 1, 8],
+            index: ChunkIndexLayout::BTreeV1 {
+                address: Some(StoredAddress::new(0)),
+            },
+        };
+        let dataspace = Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: 2,
+            dimensions: vec![4_294_967_424, 1],
+            max_dimensions: None,
+        };
+        let datatype = make_f64_type();
+        let result = read_chunked_rows_from_source(
+            &BytesSource::new(&bytes),
+            RawReadSpec::plain(&layout, &dataspace, &datatype),
+            FORMAT_WIDTHS,
+            &ChunkCache::new(),
+            CachePass::LRU,
+            2,
+            1,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(result, 13.0f64.to_le_bytes());
+    }
+
+    #[rstest]
+    #[case(false)]
+    #[case(true)]
+    fn whole_chunked_reads_return_an_empty_output_for_large_zero_element_geometry(
+        #[case] allocated: bool,
+    ) {
+        let bytes = build_chunk_btree_leaf(&[], 3, WIDTHS);
+        let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::NONE,
+            chunk_dimensions: vec![4, 1, 8],
+            index: ChunkIndexLayout::BTreeV1 {
+                address: allocated.then_some(StoredAddress::new(0)),
+            },
+        };
+        let dataspace = Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: 2,
+            dimensions: vec![4_294_967_297, 0],
+            max_dimensions: None,
+        };
+        let datatype = make_f64_type();
+        let spec = RawReadSpec::plain(&layout, &dataspace, &datatype);
+        let source = BytesSource::new(&bytes);
+        assert_eq!(
+            read_chunked_data_from_source(&source, spec, FORMAT_WIDTHS).unwrap(),
+            Vec::<u8>::new()
+        );
+        assert_eq!(
+            read_chunked_data_cached_from_source(&source, spec, FORMAT_WIDTHS, &ChunkCache::new())
+                .unwrap(),
+            Vec::<u8>::new()
+        );
+        assert_eq!(
+            read_chunked_data_cached(&bytes, spec, FORMAT_WIDTHS, &ChunkCache::new()).unwrap(),
+            Vec::<u8>::new()
+        );
+    }
+
+    #[cfg(target_pointer_width = "32")]
+    #[test]
+    fn whole_chunked_reads_reject_an_output_above_the_host_limit_before_reading() {
+        assert_eq!(usize::BITS, 32);
+        let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::NONE,
+            chunk_dimensions: vec![4, 1, 8],
+            index: ChunkIndexLayout::BTreeV1 {
+                address: Some(StoredAddress::new(0)),
+            },
+        };
+        let dataspace = Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: 2,
+            dimensions: vec![4_294_967_424, 1],
+            max_dimensions: None,
+        };
+        let datatype = make_f64_type();
+        let spec = RawReadSpec::plain(&layout, &dataspace, &datatype);
+        let source = BytesSource::new(b"");
+        let expected = FormatError::ValueTooLargeForPlatform {
+            value: 34_359_739_392,
+            target: "usize",
+        };
+        assert_eq!(
+            read_chunked_data_from_source(&source, spec, FORMAT_WIDTHS).unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            read_chunked_data_cached_from_source(&source, spec, FORMAT_WIDTHS, &ChunkCache::new())
+                .unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            read_chunked_data_cached(b"", spec, FORMAT_WIDTHS, &ChunkCache::new()).unwrap_err(),
+            expected
+        );
     }
 
     const WIDTHS: Widths = Widths::EIGHT;
