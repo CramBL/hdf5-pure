@@ -1,19 +1,26 @@
 //! The Fixed Array reads over a byte slice or a [`Source`](crate::source::Source).
 //!
-//! [`read_chunks`] reads the header, then the whole data block if it is unpaged, or its prefix
-//! and page-init bitmap and then each initialized page if it is paged.
+//! [`read_chunks`] reads unpaged entry windows or initialized pages. With the `checksum` feature,
+//! the reader verifies the entire unpaged block in bounded reads before visiting any records.
 
 #[cfg(feature = "std")]
 use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use core::iter;
 
+use core::num::NonZeroUsize;
+
+#[cfg(feature = "checksum")]
+use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::FixedArrayDataBlock;
 use hdf5_pure_format::__private::FixedArrayElements;
 use hdf5_pure_format::__private::FixedArrayHeader;
 use hdf5_pure_format::__private::FixedArrayHeaderLocator;
+use hdf5_pure_format::__private::FixedArrayUnpaged;
+#[cfg(feature = "checksum")]
+use hdf5_pure_format::__private::JenkinsLookup3;
 
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
@@ -27,7 +34,8 @@ use crate::width::FormatWidths;
 ///
 /// A record of an unfiltered chunk has `chunk_byte_size` as its stored size. An array whose header
 /// stores the undefined data block address has no chunks, and this function reads only its
-/// header.
+/// header. With the `checksum` feature, the reader verifies the entire unpaged block before
+/// calling `visit`, then reads its entries in bounded windows.
 ///
 /// # Errors
 ///
@@ -35,8 +43,11 @@ use crate::width::FormatWidths;
 /// a page, and the error of a failed read of a [`Source`](crate::source::Source). Returns the
 /// errors [`FixedArrayHeaderLocator::parse`],
 /// [`FixedArrayDataBlockRef::parse`](hdf5_pure_format::__private::FixedArrayDataBlockRef::parse),
+/// [`FixedArrayDataBlockRef::parse_unpaged_prefix`][unpaged],
 /// and [`FixedArrayPageRef::parse`](hdf5_pure_format::__private::FixedArrayPageRef::parse)
 /// return, and the error `visit` returns.
+///
+/// [unpaged]: hdf5_pure_format::__private::FixedArrayDataBlockRef::parse_unpaged_prefix
 pub(crate) fn read_chunks(
     file: &(impl RangeReader + ?Sized),
     widths: FormatWidths,
@@ -53,6 +64,19 @@ pub(crate) fn read_chunks(
             visit(slot, record)
         })
     };
+    if let Some(range) = block.unpaged_prefix_range()? {
+        let bytes = file.read_range(range)?;
+        let unpaged = block.parse_unpaged_prefix(FileRegion::new(range, &bytes)?)?;
+        verify_unpaged(file, unpaged)?;
+        let mut first_slot = 0;
+        while let Some(window) = unpaged.window(first_slot, ENTRY_WINDOW_ENTRIES)? {
+            let range = window.parse_range();
+            let bytes = file.read_range(range)?;
+            visit_elements(window.parse(FileRegion::new(range, &bytes)?)?)?;
+            first_slot = window.end_slot();
+        }
+        return Ok(());
+    }
     let range = block.parse_range()?;
     let bytes = file.read_range(range)?;
     match block.parse(FileRegion::new(range, &bytes)?)? {
@@ -90,6 +114,48 @@ pub(crate) fn index_spans(
         .map(|range| (range.start().get(), range.length()))
         .collect())
 }
+
+/// Reads the trailing checksum and, with the `checksum` feature, verifies the prefix and entries.
+///
+/// # Errors
+///
+/// Returns [`FormatError::UnexpectedEof`] if the file ends inside the block, and, with the
+/// `checksum` feature, [`FormatError::ChecksumMismatch`] if the checksum differs. Propagates
+/// source read errors.
+fn verify_unpaged(
+    file: &(impl RangeReader + ?Sized),
+    unpaged: FixedArrayUnpaged,
+) -> Result<(), FormatError> {
+    let range = unpaged.checksum_range()?;
+    let bytes = file.read_range(range)?;
+    #[cfg(feature = "checksum")]
+    {
+        let expected = u32::from_le_bytes(bytes.as_ref().try_into().map_err(|_error| {
+            FormatError::Internal("a Fixed Array checksum does not have four bytes".into())
+        })?);
+        let range = unpaged.checksummed_range()?;
+        let mut checksum = JenkinsLookup3::new(range.length());
+        let mut start = range.start();
+        while start < range.end() {
+            let length = (range.end().get() - start.get()).min(CHECKSUM_WINDOW_BYTES);
+            let window = FileRange::new(start, length)?;
+            checksum.update(&file.read_range(window)?)?;
+            start = window.end();
+        }
+        let computed = checksum.finish()?;
+        if computed != expected {
+            return Err(FormatError::ChecksumMismatch { expected, computed });
+        }
+    }
+    #[cfg(not(feature = "checksum"))]
+    drop(bytes);
+    Ok(())
+}
+
+// The entry count is a nonzero constant.
+const ENTRY_WINDOW_ENTRIES: NonZeroUsize = NonZeroUsize::new(256).unwrap();
+#[cfg(feature = "checksum")]
+const CHECKSUM_WINDOW_BYTES: u64 = 4_096;
 
 fn read_header(
     file: &(impl RangeReader + ?Sized),
@@ -156,7 +222,18 @@ mod tests {
         let prefix = 4 + 2 + 8;
         let mut reads = vec![(header, HEADER_LEN)];
         if n <= 1_024 {
-            reads.push((block, prefix + n * stride + 4));
+            reads.push((block, prefix));
+            reads.push((block + prefix + n * stride, 4));
+            #[cfg(feature = "checksum")]
+            for offset in (0..prefix + n * stride).step_by(4_096) {
+                reads.push((block + offset, (prefix + n * stride - offset).min(4_096)));
+            }
+            for first in (0..n).step_by(ENTRY_WINDOW_ENTRIES.get()) {
+                reads.push((
+                    block + prefix + first * stride,
+                    (n - first).min(ENTRY_WINDOW_ENTRIES.get() as u64) * stride,
+                ));
+            }
         } else {
             let bitmap = n.div_ceil(1_024).div_ceil(8);
             let pages_at = block + prefix + bitmap + 4;
@@ -202,6 +279,149 @@ mod tests {
         Ok(records)
     }
 
+    fn unpaged_image(n: u64, has_filters: bool) -> Vec<u8> {
+        let mut bytes = image(5, has_filters);
+        let header = usize::try_from(ARRAY_AT).unwrap();
+        bytes[header + 7] = 16;
+        bytes[header + 8..header + 16].copy_from_slice(&n.to_le_bytes());
+        checksum::restamp(&mut bytes, header, usize::try_from(HEADER_LEN).unwrap());
+        let prefix_end = usize::try_from(ARRAY_AT + HEADER_LEN + 14).unwrap();
+        bytes.truncate(prefix_end);
+        for (slot, record) in array_test::chunks(n, has_filters).iter().enumerate() {
+            let address = if slot % 17 == 0 {
+                u64::MAX
+            } else {
+                record.address.get()
+            };
+            bytes.extend_from_slice(&address.to_le_bytes());
+            if has_filters {
+                bytes.extend_from_slice(&u16::try_from(record.stored_size).unwrap().to_le_bytes());
+                bytes.extend_from_slice(&u32::try_from(slot % 4).unwrap().to_le_bytes());
+            }
+        }
+        bytes.extend_from_slice(&[0; 4]);
+        let block = usize::try_from(ARRAY_AT + HEADER_LEN).unwrap();
+        let len = bytes.len() - block;
+        checksum::restamp(&mut bytes, block, len);
+        bytes
+    }
+
+    fn unpaged_expected(n: u64, has_filters: bool) -> Vec<(u64, ChunkRecord)> {
+        array_test::slotted(array_test::chunks(n, has_filters))
+            .into_iter()
+            .filter(|(slot, _)| slot % 17 != 0)
+            .map(|(slot, mut record)| {
+                if has_filters {
+                    record.filter_mask = u32::try_from(slot % 4).unwrap();
+                }
+                (slot, record)
+            })
+            .collect()
+    }
+
+    #[rstest]
+    #[case::empty(0)]
+    #[case::one(1)]
+    #[case::full_window(256)]
+    #[case::partial_window(4_099)]
+    fn unpaged_reads_use_bounded_windows(
+        #[case] n: u64,
+        #[values(false, true)] has_filters: bool,
+        #[values(0, 1 << 40)] base: u64,
+    ) {
+        let bytes = unpaged_image(n, has_filters);
+        let block = read_header(bytes.as_slice(), WIDTHS, StoredAddress::new(ARRAY_AT))
+            .unwrap()
+            .data_block()
+            .unwrap();
+        let range = block.parse_range().unwrap();
+        let region = FileRegion::new(
+            range,
+            &bytes[usize::try_from(range.start().get()).unwrap()..],
+        )
+        .unwrap();
+        let FixedArrayDataBlock::Elements(elements) = block.parse(region).unwrap() else {
+            panic!("expected unpaged elements");
+        };
+        let expected = unpaged_expected(n, has_filters);
+        assert_eq!(
+            elements.records(8).collect::<Result<Vec<_>, _>>().unwrap(),
+            expected
+        );
+        assert_eq!(buffered_records(&bytes, 0).unwrap(), expected);
+        let source = PlacedSource::new(base, bytes);
+        assert_eq!(records(&source).unwrap(), expected);
+        let reads = source.reads.take();
+        assert!(
+            reads.iter().all(|(_, length)| *length <= 4_096),
+            "{reads:?}"
+        );
+        if n > ENTRY_WINDOW_ENTRIES.get() as u64 {
+            let last = reads.last().unwrap();
+            assert_eq!(
+                last.1,
+                usize::try_from((n % ENTRY_WINDOW_ENTRIES.get() as u64) * stride(has_filters))
+                    .unwrap()
+            );
+            assert_eq!(
+                last.0,
+                base + ARRAY_AT
+                    + HEADER_LEN
+                    + 14
+                    + (n - n % ENTRY_WINDOW_ENTRIES.get() as u64) * stride(has_filters)
+            );
+        }
+    }
+
+    #[rstest]
+    #[case::early(14 + 8)]
+    #[case::late(14 + 4_098 * 8)]
+    fn unpaged_checksum_covers_every_window_before_visiting(#[case] field: usize) {
+        let mut bytes = unpaged_image(4_099, false);
+        let block = usize::try_from(ARRAY_AT + HEADER_LEN).unwrap();
+        bytes[block + field] ^= 1;
+        let expected = u32::from_le_bytes(bytes[bytes.len() - 4..].try_into().unwrap());
+        let computed = hdf5_pure_format::__private::jenkins_lookup3(&bytes[block..bytes.len() - 4]);
+        let source = PlacedSource::new(0, bytes);
+        let mut visits = 0;
+        let result = read_chunks(
+            &source.framed(),
+            WIDTHS,
+            StoredAddress::new(ARRAY_AT),
+            8,
+            |_, _| {
+                visits += 1;
+                Ok(())
+            },
+        );
+        if cfg!(feature = "checksum") {
+            assert_eq!(
+                result.unwrap_err(),
+                FormatError::ChecksumMismatch { expected, computed }
+            );
+            assert_eq!(visits, 0);
+        } else {
+            result.unwrap();
+            assert_eq!(visits, unpaged_expected(4_099, false).len());
+        }
+    }
+
+    #[rstest]
+    #[case::signature(0, b'X', FormatError::InvalidFixedArraySignature)]
+    #[case::version(4, 1, FormatError::InvalidFixedArrayVersion(1))]
+    #[case::client(5, 1, FormatError::InvalidFixedArrayBlockClient { expected: 0, actual: 1 })]
+    #[case::owner(6, 0x81, FormatError::InvalidFixedArrayBlockOwner { expected: ARRAY_AT, actual: 0x81 })]
+    fn unpaged_reads_reject_invalid_prefixes(
+        #[case] field: usize,
+        #[case] value: u8,
+        #[case] expected: FormatError,
+    ) {
+        let mut bytes = unpaged_image(4_099, false);
+        bytes[usize::try_from(ARRAY_AT + HEADER_LEN).unwrap() + field] = value;
+        assert_eq!(buffered_records(&bytes, 0).unwrap_err(), expected);
+        assert_eq!(records(&PlacedSource::new(0, bytes)).unwrap_err(), expected);
+    }
+
     #[rstest]
     fn a_buffered_read_reports_every_chunk(
         #[values(0, 512)] base: u64,
@@ -217,7 +437,7 @@ mod tests {
     }
 
     #[rstest]
-    fn a_streamed_read_reads_the_header_the_data_block_and_each_page(
+    fn a_streamed_read_requests_each_metadata_range(
         #[values(0, 512, 1 << 40)] base: u64,
         #[values(0, 5, 3_000)] n: u64,
         #[values(false, true)] has_filters: bool,
@@ -257,7 +477,9 @@ mod tests {
     // Block lengths: 58 unpaged, and 19 for the prefix, 8_196 for a full page, 7_620 for the last.
     #[rstest]
     #[case::header(5, ARRAY_AT + HEADER_LEN - 1, ARRAY_AT + HEADER_LEN)]
-    #[case::unpaged_data_block(5, ARRAY_AT + HEADER_LEN + 57, ARRAY_AT + HEADER_LEN + 58)]
+    #[case::unpaged_prefix(5, ARRAY_AT + HEADER_LEN + 13, ARRAY_AT + HEADER_LEN + 14)]
+    #[case::unpaged_entries(5, ARRAY_AT + HEADER_LEN + 20, ARRAY_AT + HEADER_LEN + 58)]
+    #[case::unpaged_checksum(5, ARRAY_AT + HEADER_LEN + 57, ARRAY_AT + HEADER_LEN + 58)]
     #[case::prefix(3_000, ARRAY_AT + HEADER_LEN + 18, ARRAY_AT + HEADER_LEN + 19)]
     #[case::last_page(
         3_000,
