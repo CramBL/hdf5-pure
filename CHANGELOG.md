@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `File::open_rw` supports mirrored staged edits of non-persistent PAGE files in fresh typed pages. Commits require supported attribute storage and a tree proved free of object references, while old space remains unavailable for reuse ([#793](https://github.com/CramBL/hdf5-pure/pull/793)).
 - `FileBuilder::with_file_space_strategy` uses metadata and raw aggregates for new persistent `FsmAggr` files. Remaining reusable spare is persisted for later sessions, subject to the free-section threshold ([#789](https://github.com/CramBL/hdf5-pure/pull/789)).
 - `FileBuilder` uses separate metadata and raw aggregates for new files under `FsmAggr` with persistence disabled, including when the strategy is unset. Abandoned spare is reused during construction subject to the free-section threshold, while unused interior space remains allocated after output ([#787](https://github.com/CramBL/hdf5-pure/pull/787)).
 - `repack_into` repacks an open `File` into any `Write` sink, such as an in-memory buffer, and `repack_to_path` repacks it into a new file at a path. Both run the fidelity checks of `repack` ([#772](https://github.com/CramBL/hdf5-pure/pull/772)).

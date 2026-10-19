@@ -564,7 +564,7 @@ fn paged_global_heap_references_survive_creation_edit_and_reopen(
             "dataset-value"
         );
     }
-    if persist {
+    {
         let editable = File::open_rw(&path).unwrap();
         editable
             .dataset("contiguous")
@@ -582,23 +582,8 @@ fn paged_global_heap_references_survive_creation_edit_and_reopen(
             })
             .unwrap();
         editable.commit().unwrap();
-    } else {
-        let err = File::open_rw(&path).unwrap_err();
-        assert!(
-            matches!(
-                err,
-                hdf5_pure::Error::EditUnsupported(
-                    "read-write access to a paged file (H5F_FSPACE_STRATEGY_PAGE) requires persisted free space; recreate the file with with_file_space_strategy(FileSpaceStrategy::Page, true, ..) to grow it in place"
-                )
-            ),
-            "{err:?}"
-        );
     }
-    let expected = if persist {
-        ["final-first", "final-second"]
-    } else {
-        ["first", "second"]
-    };
+    let expected = ["final-first", "final-second"];
     assert_eq!(read_c(&path, "contiguous"), expected);
     assert_eq!(read_pure(&path, "contiguous"), expected);
     assert_eq!(

@@ -263,9 +263,9 @@ impl Source for SourceView<'_> {
 /// | positioned / on-demand reads | [`File::open_streaming`](crate::File::open_streaming) | **Genuine (read-only, bounded)** | Fetches metadata and chunks on demand, with peak memory near one chunk. |
 /// | user-supplied read driver (cf. `H5Pset_driver`) | [`File::from_source`](crate::File::from_source) / [`from_source_with_options`](crate::File::from_source_with_options), over the [`Source`] trait | **Genuine (read-only, bounded)** | The same on-demand reads over bytes that are not a path: an object store addressed by range request, or a sandboxed guest handed byte ranges by its host. A read that comes back short is rejected. |
 /// | `H5Pset_fapl_core` / `H5Pset_file_image` | [`File::from_bytes`](crate::File::from_bytes) / [`FileBuilder::finish`](crate::FileBuilder::finish) | **Genuine** | Read an in-memory file image, or build one into a `Vec<u8>`. |
-/// | `H5Fopen(RDWR)` | [`File::open_rw`](crate::File::open_rw) / [`open_rw_with_options`](crate::File::open_rw_with_options) | **Genuine (read-write)** | Reads, appends, and staged edits with [`commit`](crate::File::commit). Holds a latest-format file with no userblock in bounded memory and any other file in a whole-file mirror, picked from the file. Commits to a paged file through a page-aware tail, and rejects a paged file without persisted free space at open. |
+/// | `H5Fopen(RDWR)` | [`File::open_rw`](crate::File::open_rw) / [`open_rw_with_options`](crate::File::open_rw_with_options) | **Genuine (read-write)** | Reads, appends, and staged edits with [`commit`](crate::File::commit). Uses bounded memory for eligible latest-format files. Files with a pre-v2 superblock, a userblock, or non-persistent PAGE allocation require the whole-file mirror. Non-persistent PAGE commits append in fresh typed pages and require a tree proved free of object references. |
 /// | `H5Fopen(RDWR)`, bounded memory | [`File::open_rw_with_options`](crate::File::open_rw_with_options) + [`MemoryStrategy::Bounded`] | **Genuine (read-write, bounded)** | [`File::open_rw`](crate::File::open_rw) picks the bounded backing itself. Stating `Bounded` makes it strict: a file the bounded engine cannot edit is rejected, and never mirrored. |
-/// | no C counterpart | [`with_memory_strategy`](Self::with_memory_strategy), [`MemoryStrategy`] | **Behavioral** | How much memory a read-write open may spend holding the file, overriding the dispatch above. `Bounded` rejects a file the bounded engine cannot edit, a pre-v2 superblock or a userblock. `Auto`, which is what [`File::open_rw`](crate::File::open_rw) uses unset, falls back to the mirror, and `Mirrored` always mirrors. A paged file without persisted free space is rejected under both preferences, because the mirror cannot commit it either. [`File::edit_backing`](crate::File::edit_backing) reports which backend an open resolved to, as an [`EditBacking`] (`Bounded` or `Mirrored`), a separate type because `Auto` is a preference between the two and never an outcome. The C library has no analogue: `H5Fopen` picks its own caching with no caller-visible memory contract. |
+/// | no C counterpart | [`with_memory_strategy`](Self::with_memory_strategy), [`MemoryStrategy`] | **Behavioral** | How much memory a read-write open may spend holding the file, overriding the dispatch above. `Bounded` rejects a file with a pre-v2 superblock, a userblock, or non-persistent PAGE allocation. `Auto`, which is what [`File::open_rw`](crate::File::open_rw) uses unset, falls back to the mirror, and `Mirrored` always mirrors. Non-persistent PAGE files support mirrored staged edits with the restrictions documented by [`File::open_rw`](crate::File::open_rw). [`File::edit_backing`](crate::File::edit_backing) reports which backend an open resolved to, as an [`EditBacking`] (`Bounded` or `Mirrored`), a separate type because `Auto` is a preference between the two and never an outcome. The C library has no analogue: `H5Fopen` picks its own caching with no caller-visible memory contract. |
 /// | `H5F_ACC_SWMR_READ` / `H5F_ACC_SWMR_WRITE` | [`File::open_swmr`](crate::File::open_swmr) / [`open_swmr_writer`](crate::File::open_swmr_writer) (`*_with_options`) | **Genuine** | No OS lock. The writer raises the superblock SWMR-write flag (a v3 superblock is required, as in the C library) and appends alone. It always mirrors, so it accepts `MemoryStrategy::Auto` and `Mirrored` and rejects an explicit `Bounded`. |
 /// | superblock status flags (`h5clear -s`) | checked by [`File::open`](crate::File::open), [`open_streaming`](crate::File::open_streaming), [`from_source`](crate::File::from_source), [`open_rw`](crate::File::open_rw), [`open_swmr`](crate::File::open_swmr) and [`open_swmr_writer`](crate::File::open_swmr_writer), and cleared by [`File::clear_swmr_flag`](crate::File::clear_swmr_flag) | **Genuine** | A file the byte marks as held by a writer is rejected with [`Error::FileMarkedInUse`], as `H5Fopen` rejects it. [`File::open_swmr`](crate::File::open_swmr) follows such a file, and rejects a half-set mark alone. Version-3 superblocks only, which is where the C library checks. [`File::from_bytes`](crate::File::from_bytes) does not consult the byte, and neither, therefore, does [`mat::from_file`](crate::mat::from_file), so a caller holding the bytes can still read a flagged file, at the cost of a copy of it. |
 /// | no C counterpart | [`with_write_mark_policy`](Self::with_write_mark_policy), [`WriteMarkPolicy`] | **Behavioral** | Whether a read-only open proceeds past a file marked open for write by a non-SWMR writer, bit 0 alone, which is what a page-buffered session raises and what no SWMR reader can follow, so such a file is otherwise readable only by copying it through [`File::from_bytes`](crate::File::from_bytes). `AllowSnapshot` reads it as it stands, on the caller's assertion that the writer has flushed ([`File::sync`](crate::File::sync), or a clean close), which the byte cannot record and this crate therefore cannot check. It admits nothing else: a SWMR pair belongs to [`File::open_swmr`](crate::File::open_swmr), and [`File::open_rw`](crate::File::open_rw) and [`File::open_swmr_writer`](crate::File::open_swmr_writer) are rejected whatever it says. The default `Refuse` is what `H5Fopen` does, and `H5Fopen` offers no override at all: `h5clear` is its one way through, and it edits the file. |
@@ -545,9 +545,8 @@ impl FileAccessProperties {
     ///   [`FileSpaceStrategy::Page`], and the
     ///   format's 4 KiB default otherwise. A buffer that cannot hold one page
     ///   drains on every page it touches;
-    /// - a **paged** file whose free space is not persisted, which can be neither
-    ///   committed to nor appended to, so the buffer would hold nothing while its
-    ///   mark blocked every reader;
+    /// - a paged file with persistence disabled, whose staged commits require ordered
+    ///   publication without page buffering
     /// - a superblock older than version 3, whose status-flags byte no library
     ///   reads back, so the mark above would announce nothing;
     /// - [`SyncPolicy::Always`], the default, where
@@ -2973,7 +2972,7 @@ impl File {
         })
     }
 
-    /// Open an existing HDF5 file for reading **and** in-place editing.
+    /// Opens an existing HDF5 file for reading and editing.
     ///
     /// Unlike [`open`](Self::open) (read-only, buffered), this takes an exclusive
     /// OS file lock held for the file's life and lets owned handles modify the
@@ -2990,6 +2989,13 @@ impl File {
     /// Extensible-Array-indexed dataset; [`Dataset::append_staged`] covers the
     /// general case.
     ///
+    /// A [`FileSpaceStrategy::Page`] file with persistence disabled supports staged edits
+    /// through the whole-file mirror. Allocations use fresh typed pages after the original
+    /// allocated region and physical extent, aligned relative to the effective base.
+    /// Freed space remains unavailable, and persistence stays
+    /// disabled. Commits require supported attribute storage and a tree proved free of object
+    /// references. Immediate append, SWMR writing, and page buffering are unsupported in this mode.
+    ///
     /// Two things can turn this open away because another writer holds the file:
     /// the exclusive OS lock, reported as
     /// [`Error::FileLocked`], and the superblock's
@@ -3002,11 +3008,12 @@ impl File {
     /// # Memory
     ///
     /// This picks its backing from the file rather than making the caller pick a
-    /// function (issue #198): a latest-format file with no userblock is edited
+    /// function (issue #198): a latest-format file with no userblock, except a
+    /// non-persistent [`FileSpaceStrategy::Page`] file, is edited
     /// **bounded**, holding only the metadata being parsed plus the configured
     /// caches plus what an edit is building, so resident memory does not scale
     /// with the file; anything else falls back to a whole-file in-memory mirror,
-    /// which is what makes a pre-v2 or userblock file editable at all. The two
+    /// which supports pre-v2 superblocks, userblocks, and non-persistent PAGE editing. The two
     /// backings are the same engine over different storage and offer the same
     /// edit surface, differing in one trade: the bounded one applies a large
     /// immediate append in whole-chunk batches, each crash-atomic on its own, so
@@ -3016,6 +3023,15 @@ impl File {
     /// [`FileAccessProperties::with_memory_strategy`] —
     /// [`MemoryStrategy::Mirrored`] restores the unconditional mirror this
     /// entry point used before it learned to dispatch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] for unsupported address widths or file layouts.
+    /// Returns [`Error::Format`] for malformed File Space Info or invalid address arithmetic,
+    /// and [`Error::InvalidSpaceOwnershipExtent`] for invalid allocation extents.
+    /// Returns [`Error::FileLocked`] if the file is locked by another process,
+    /// [`Error::FileMarkedInUse`] if its status flags indicate a writer, and [`Error::Io`]
+    /// if opening or reading fails.
     #[doc(alias = "H5Fopen")]
     pub fn open_rw<P: AsRef<std::path::Path>>(path: P) -> Result<Self, Error> {
         Self::open_rw_with_options(path, FileAccessProperties::new())
@@ -3079,8 +3095,9 @@ impl File {
     /// [`Error::FileMarkedInUse`], which is what keeps a second writer off a
     /// file SWMR gives only one (no OS lock is held to do it).
     ///
-    /// Requires a latest-format (version-3 superblock) file with no userblock
-    /// and no persisted free-space; other files are refused with
+    /// Requires a latest-format (version-3 superblock) file with no userblock,
+    /// no persisted free space, and a strategy other than [`FileSpaceStrategy::Page`].
+    /// Other files are rejected with
     /// [`Error::SwmrAppendUnsupported`]. The version-3 requirement is the C
     /// library's: neither library reads the SWMR-write flag back on an older
     /// superblock, so raising one there would announce the writer to nobody.
@@ -3164,9 +3181,15 @@ impl File {
     ///
     /// A creation property is validated as the file is written, so an invalid
     /// userblock or page size surfaces here rather than when the properties were
-    /// built. A file created with [`FileSpaceStrategy::Page`] can be grown
-    /// through either editor, by an immediate [`Dataset::append`] or a staged
-    /// commit, provided it also persists its free space (issue #198).
+    /// built. A file created with [`FileSpaceStrategy::Page`] and persistence enabled supports
+    /// immediate [`Dataset::append`] and staged commits. With persistence disabled, staged
+    /// edits require the mirror and the restrictions documented by [`File::open_rw`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if the creation and access properties cannot be used
+    /// together. Returns the build, write, or [`File::open_rw_with_options`] error if file
+    /// creation or read-write opening fails.
     pub fn create_with_options<P: AsRef<std::path::Path>>(
         path: P,
         create: FileCreateProperties,
@@ -3228,6 +3251,8 @@ impl File {
     /// dataset's existing block, and the refusal writes those bytes back on its
     /// way out. A refusal raised before the first write keeps the staged batch
     /// too, so it can be corrected and committed again (issue #316).
+    /// Non-persistent PAGE sessions relocate value replacements and retain the original
+    /// allocations, using only the superblock for publication.
     ///
     /// # Errors
     ///
@@ -5431,7 +5456,7 @@ impl Dataset {
     /// Where the new chunks land otherwise depends on how the file records its
     /// free space. A default-strategy file spends a hole an earlier commit in
     /// this session left; a file that **persists** its free-space managers
-    /// (including every paged file) spends only space the session has first taken
+    /// spends only space the session has first taken
     /// *out* of them, in a rewrite of its own, so no byte an append writes is one
     /// a durable manager advertises — a crash can strand the unspent remainder of
     /// such a batch, but nothing can be handed out twice. A batch gathers every
@@ -9839,7 +9864,7 @@ mod tests {
     ///
     /// Each refusal has a different reason and none stands in for the others: a
     /// budget under one page is a buffer that drains on every page it touches, a
-    /// *paged* file that persists no free space can neither commit nor append, a
+    /// paged file without persistence requires ordered publication without page buffering, a
     /// pre-version-3 superblock carries a status-flags byte no library reads back
     /// so the crash mark would announce nothing, and the SWMR writer's readers
     /// observe the order its writes become visible in. The first is where the C
@@ -9988,14 +10013,14 @@ mod tests {
             matches!(
                 &refused,
                 Err(Error::EditUnsupported(
-                    "a page buffer on a paged file needs its free space persisted: without it \
-                     this session can neither commit nor append, so the buffer would hold \
-                     nothing while marking the file against every reader; recreate the file \
-                     with with_file_space_strategy(FileSpaceStrategy::Page, true, ..), or drop \
+                    "a page buffer on a paged file needs its free space persisted: staged \
+                     commits without persisted free space require ordered publication without \
+                     page buffering; recreate the file with \
+                     with_file_space_strategy(FileSpaceStrategy::Page, true, ..), or drop \
                      the page buffer"
                 ))
             ),
-            "a page buffer on a session that cannot write must be refused, got {refused:?}"
+            "a page buffer on a PAGE file without persisted free space must be rejected, got {refused:?}"
         );
         untouched("paged, not persisting", &no_persist, &before);
 

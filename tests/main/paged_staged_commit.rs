@@ -1,14 +1,7 @@
-//! Staged edits on genuine paged files through `File::open_rw` (issue #198,
-//! step 1). The whole-file editor used to refuse every paged file and send the
-//! caller to the bounded engine; it now commits a persisting paged file
-//! through a page-aware tail that keeps the per-page-type managers intact.
-//! A paged file *without* persisted managers is still refused, because nothing
-//! on disk records which pages hold metadata and which hold raw data.
+//! Tests staged PAGE commits with persistence enabled or disabled.
 
-use hdf5_pure::Error;
+use hdf5_pure::EditBacking;
 use hdf5_pure::File;
-use hdf5_pure::FileAccessProperties;
-use hdf5_pure::MemoryStrategy;
 use test_util::temp;
 use test_util_hdf5::paged;
 
@@ -77,38 +70,23 @@ fn paged_staged_commit_keeps_pages_homogeneous() {
     paged::assert_pages_homogeneous(&path, PAGE, &["d", "added"]);
 }
 
-/// A paged file that does not persist its free space is still refused: without
-/// on-disk managers there is no record of which pages are metadata and which are
-/// raw, so a commit could not keep the two segregated.
-///
-/// `File::open_rw` now says so at open, since neither backing can edit such a
-/// file. The commit-time refusal behind it still exists and is reached here by
-/// demanding the mirror, which opens the file because reading it is legitimate.
 #[test]
-fn paged_without_persist_is_refused() {
+fn paged_without_persist_uses_mirrored_staged_edits() {
     let path = temp::repo_temp_path("pure_paged_staged_nopersist.h5");
     paged::write_contiguous_i32(&path, PAGE, false, 64);
-
-    let err = File::open_rw(&path).unwrap_err();
-    assert!(
-        matches!(&err, Error::EditUnsupported(m) if m.contains("persisted free space")),
-        "expected a persisted-free-space refusal at open, got {err:?}"
-    );
-
-    let s = File::open_rw_with_options(
-        &path,
-        FileAccessProperties::new().with_memory_strategy(MemoryStrategy::Mirrored),
-    )
-    .unwrap();
-    s.root()
+    let file = File::open_rw(&path).unwrap();
+    assert_eq!(file.edit_backing(), Some(EditBacking::Mirrored));
+    file.root()
         .create_dataset("added", |b| {
-            b.with_i32_data(&[1i32, 2, 3]);
+            b.with_i32_data(&[1, 2, 3]);
         })
         .unwrap();
-    let err = s.commit().unwrap_err();
-    assert!(
-        matches!(&err, Error::EditUnsupported(m) if m.contains("persisted free space")),
-        "expected a persisted-free-space refusal, got {err:?}"
+    file.commit().unwrap();
+    drop(file);
+    let file = File::open(&path).unwrap();
+    assert_eq!(
+        file.dataset("added").unwrap().read_i32().unwrap(),
+        [1, 2, 3]
     );
 }
 
