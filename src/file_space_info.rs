@@ -90,8 +90,9 @@ pub(crate) fn persistent_placeholder(
 ///
 /// The persist flag is set and every manager address is undefined, all ones at `offsets`.
 /// [`FileBuilder`](crate::FileBuilder) writes this form for a new
-/// [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr) file with `persist = true`, and a persisting
-/// commit with no free space to record writes it with the end of allocation it publishes. libhdf5
+/// [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr) file with no reusable free sections. The editor
+/// writes it for a persisting commit with no free space to record, using the EOA it publishes.
+/// libhdf5
 /// reads `eoa_pre_fsm` into `eoa_fsm_fsalloc`, and an assertion-enabled build aborts in
 /// `H5F__super_read` (`H5Fsuper.c`, HDF5 1.14.6) on a persisting file whose `eoa_pre_fsm` is
 /// undefined (issue #178).

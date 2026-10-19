@@ -1,6 +1,5 @@
 ---
 source: tests/main/edit_free_space_churn.rs
-assertion_line: 50
 expression: report.render()
 ---
 free-space churn
@@ -29,10 +28,10 @@ lifecycle
   reopens        : 1
 
 high water
-  physical file : 30597076
-  logical file  : 30597076
-  pressure      : 30485327
-  reusable free : 5700744
+  physical file : 30748829
+  logical file  : 30748829
+  pressure      : 30485336
+  reusable free : 5852515
 
 reuse
   epoch writes growing physical file   : 28
@@ -41,33 +40,33 @@ reuse
 
 deletion waves
   wave  after-epoch  live-before  deleted  live-after  physical  logical  reusable live-raw  live-meta  unclassified  pressure
-     1           26           27        5          22  30314638  30314638   5558758  24570890     184099         0  24755880
-     2           31           27        5          22  30597076  30597076   5700077  24715841     180276         0  24896999
-     3           35           26        4          22  30597076  30597076   5699069  24716786     180276         0  24898007
-     4           39           26        4          22  30597076  30597076   5699053  24716802     180276         0  24898023
-     5           43           26        4          22  30597076  30597076   5700143  24715712     180276         0  24896933
-     6           47           26        4          22  30597076  30597076   5700744  24715039     180276         0  24896332
-     7           51           26        4          22  30597076  30597076   5700212  24715481     180276         0  24896864
-     8           55           26        4          22  30319291  30319291   5421304  24716604     180276         0  24897987
-     9           59           26        4          22  30319291  30319291   5419101  24718762     180276         0  24900190
-    10           63           26        4          22  30319291  30319291   5417463  24720301     180276         0  24901828
-    11           67           26        4          22  30319291  30319291   5416042  24721866     180276         0  24903249
-    12           71           26        4          22  30319291  30319291   5414960  24722867     180276         0  24904331
-    13           75           26        4          22  30319291  30319291   5413801  24723918     180276         0  24905490
-    14           79           26        4          22  30319291  30319291   5413333  24724404     180276         0  24905958
-    15           83           26        4          22  30319291  30319291   5413326  24724384     180276         0  24905965
-    16           87           26        4          22  30319291  30319291   5413212  24724516     180276         0  24906079
+     1           26           27        5          22  30314905  30314905   5558989  24570890     184099         0  24755916
+     2           31           27        5          22  30748829  30748829   5851767  24715841     180276         0  24897062
+     3           35           26        4          22  30748829  30748829   5850786  24716786     180276         0  24898043
+     4           39           26        4          22  30748829  30748829   5850779  24716802     180276         0  24898050
+     5           43           26        4          22  30748829  30748829   5851752  24715712     180276         0  24897077
+     6           47           26        4          22  30748829  30748829   5852515  24715039     180276         0  24896314
+     7           51           26        4          22  30748829  30748829   5851965  24715481     180276         0  24896864
+     8           55           26        4          22  30319639  30319639   5421661  24716604     180276         0  24897978
+     9           59           26        4          22  30319639  30319639   5419458  24718762     180276         0  24900181
+    10           63           26        4          22  30319639  30319639   5417955  24720301     180276         0  24901684
+    11           67           26        4          22  30319639  30319639   5416345  24721866     180276         0  24903294
+    12           71           26        4          22  30319639  30319639   5415398  24722867     180276         0  24904241
+    13           75           26        4          22  30319639  30319639   5414257  24723918     180276         0  24905382
+    14           79           26        4          22  30319639  30319639   5413744  24724404     180276         0  24905895
+    15           83           26        4          22  30319639  30319639   5413728  24724384     180276         0  24905911
+    16           87           26        4          22  30319639  30319639   5413479  24724516     180276         0  24906160
 
 reopen checkpoints
   #  reason          after-epoch  physical  persisted-free  recovered-free  unclassified
-  1  final-check              90  30319291         2131597         2131597         0
+  1  final-check              90  30319639         2131909         2131909         0
 
 final
-  physical file size         : 30319291
-  logical size               : 30319291
-  reusable free              : 2131597
-  reusable free regions      : 76
-  pressure                   : 28187694
+  physical file size         : 30319639
+  logical size               : 30319639
+  reusable free              : 2131909
+  reusable free regions      : 78
+  pressure                   : 28187730
   live epochs                : 25
 
 coverage
@@ -98,35 +97,35 @@ coverage
     incompressible                   : 25
 
 ownership while writer open
-  physical file size       : 30319291
-  logical EOF              : 30319291
+  physical file size       : 30319639
+  logical EOF              : 30319639
   live raw bytes           : 27980619
   live metadata bytes      : 205815
-  free-space-manager bytes : 1260
-  reusable free bytes      : 2131597
+  free-space-manager bytes : 1296
+  reusable free bytes      : 2131909
   unclassified bytes       : 0
   trailing slack bytes     : 0
   live raw extents         : 8461
   live metadata extents    : 569
   manager metadata extents : 2
-  reusable free extents    : 76
+  reusable free extents    : 78
   unclassified extents     : 0
   trailing slack extents   : 0
   exact partition          : yes
 
 ownership after writer close
-  physical file size       : 30319291
-  logical EOF              : 30319291
+  physical file size       : 30319639
+  logical EOF              : 30319639
   live raw bytes           : 27980619
   live metadata bytes      : 205815
-  free-space-manager bytes : 1260
-  reusable free bytes      : 2131597
+  free-space-manager bytes : 1296
+  reusable free bytes      : 2131909
   unclassified bytes       : 0
   trailing slack bytes     : 0
   live raw extents         : 8461
   live metadata extents    : 569
   manager metadata extents : 2
-  reusable free extents    : 76
+  reusable free extents    : 78
   unclassified extents     : 0
   trailing slack extents   : 0
   exact partition          : yes

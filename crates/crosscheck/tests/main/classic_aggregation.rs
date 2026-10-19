@@ -25,8 +25,71 @@ use test_util_hdf5::aggregation::Workload;
 use test_util_hdf5::file_space;
 
 #[rstest]
+#[case::tracked(1, true)]
+#[case::above_aggregate(4_096, false)]
+fn libhdf5_recovers_and_reuses_new_file_aggregate_spare(
+    #[case] threshold: u64,
+    #[case] has_sections: bool,
+    #[values(0, 512)] userblock: u64,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("persisted.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, threshold);
+    builder.with_userblock(userblock);
+    builder.create_dataset("values").with_i32_data(&[17; 16]);
+    builder.write(&path).unwrap();
+    let file = File::open(&path).unwrap();
+    let sections = file.persisted_free_space().unwrap();
+    assert_eq!(!sections.is_empty(), has_sections);
+    drop(file);
+    {
+        let file = hdf5::File::open_rw(&path).unwrap();
+        assert_eq!(file_space::libhdf5_free_sections(&file), sections);
+        let added = file.new_dataset::<i32>().shape(16).create("added").unwrap();
+        added.write_raw(&[23; 16]).unwrap();
+        if has_sections {
+            let remaining: u64 = file_space::libhdf5_free_sections(&file)
+                .iter()
+                .map(|&(_, size)| size)
+                .sum();
+            assert!(remaining < sections.iter().map(|&(_, size)| size).sum());
+        }
+    }
+    let file = File::open_rw(&path).unwrap();
+    if has_sections {
+        file_space::assert_exact_space_ownership(&file);
+    } else {
+        assert!(file.__space_ownership().unwrap().analysis_complete);
+    }
+    assert_eq!(
+        file.dataset("values").unwrap().read_i32().unwrap(),
+        [17; 16]
+    );
+    assert_eq!(file.dataset("added").unwrap().read_i32().unwrap(), [23; 16]);
+    file.root()
+        .create_dataset("third", |builder| {
+            builder.with_i32_data(&[29; 16]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    if has_sections {
+        file_space::assert_exact_space_ownership(&file);
+    } else {
+        assert!(file.__space_ownership().unwrap().analysis_complete);
+    }
+    file.close().unwrap();
+    let file = hdf5::File::open(&path).unwrap();
+    assert_eq!(
+        file.dataset("third").unwrap().read_raw::<i32>().unwrap(),
+        [29; 16]
+    );
+}
+
+#[rstest]
 fn libhdf5_reads_and_edits_an_aggregated_creation(
     #[values(0, 512)] userblock: u64,
+    #[values(false, true)] persist: bool,
     #[values(None, Some(FileSpaceStrategy::Aggr), Some(FileSpaceStrategy::FsmAggr))]
     strategy: Option<FileSpaceStrategy>,
 ) {
@@ -34,7 +97,7 @@ fn libhdf5_reads_and_edits_an_aggregated_creation(
     let path = directory.path().join("created.h5");
     let mut builder = FileBuilder::new();
     if let Some(strategy) = strategy {
-        builder.with_file_space_strategy(strategy, strategy == FileSpaceStrategy::Aggr, 9);
+        builder.with_file_space_strategy(strategy, persist, 9);
     }
     builder.with_userblock(userblock);
     builder.set_attr("huge", AttrValue::AsciiString("h".repeat(70_000)));
@@ -75,12 +138,14 @@ fn libhdf5_reads_and_edits_an_aggregated_creation(
             } else {
                 CStrategy::FreeSpaceManager {
                     paged: false,
-                    persist: false,
+                    persist: persist && strategy == Some(FileSpaceStrategy::FsmAggr),
                     threshold: if strategy.is_some() { 9 } else { 1 },
                 }
             }
         );
-        assert_eq!(file.free_space(), 0);
+        if !(persist && strategy == Some(FileSpaceStrategy::FsmAggr)) {
+            assert_eq!(file.free_space(), 0);
+        }
         assert_eq!(
             file.dataset("small").unwrap().read_raw::<i32>().unwrap(),
             [11; 17]
@@ -154,7 +219,9 @@ fn libhdf5_reads_and_edits_an_aggregated_creation(
         file.dataset("added").unwrap().read_raw().unwrap(),
         [29, 31, 37]
     );
-    assert_eq!(file.persisted_free_space().unwrap(), []);
+    if !(persist && strategy == Some(FileSpaceStrategy::FsmAggr)) {
+        assert_eq!(file.persisted_free_space().unwrap(), []);
+    }
     assert_eq!(
         file.superblock().eof_address,
         std::fs::metadata(path).unwrap().len()

@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use rstest::rstest;
 
+use crate::AttrValue;
 use crate::Error;
 use crate::File;
 use crate::FileBuilder;
@@ -100,7 +101,10 @@ fn active_spare_is_excluded_until_persistent_settlement(
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("settlement.h5");
-    write_file(&path, userblock);
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    builder.with_userblock(userblock);
+    builder.write(&path).unwrap();
     let mut engine = open_engine(&path, backing);
     stage_dataset(&mut engine, "first", 37);
     engine.commit().unwrap();
@@ -116,6 +120,13 @@ fn active_spare_is_excluded_until_persistent_settlement(
     engine.place(placement, &[43; 32]).unwrap();
     assert_eq!(engine.image.len(), engine.fsm_len);
     assert_ne!(engine.aggregation, Some(before));
+    let mut anchor = DatasetBuilder::new("");
+    anchor.with_u8_data(&[]);
+    anchor.set_attr("padding", AttrValue::AsciiString("p".repeat(4_096)));
+    engine
+        .stage_created_dataset(&ObjectPathBuf::parse("anchor"), anchor)
+        .unwrap();
+    engine.commit().unwrap();
     let interior = engine
         .aggregation
         .unwrap()
@@ -398,7 +409,12 @@ fn releasing_spare_for_a_deletion_preserves_ownership_on_failure(
     engine
         .set_write_buffering(WriteBuffering::Unbuffered)
         .unwrap();
-    stage_dataset(&mut engine, "first", 37);
+    let mut first = DatasetBuilder::new("");
+    first.with_u8_data(&[37; 2_000]);
+    first.set_attr("padding", AttrValue::AsciiString("p".repeat(1_750)));
+    engine
+        .stage_created_dataset(&ObjectPathBuf::parse("first"), first)
+        .unwrap();
     engine.commit().unwrap();
     let before = engine.aggregation;
     assert_eq!(before.unwrap().unused().count(), 2);
@@ -435,7 +451,10 @@ fn releasing_spare_for_a_deletion_preserves_ownership_on_failure(
         [7; 4096]
     );
     if !deleted {
-        assert_eq!(file.dataset("first").unwrap().read_u8().unwrap(), [37; 64]);
+        assert_eq!(
+            file.dataset("first").unwrap().read_u8().unwrap(),
+            [37; 2_000]
+        );
     }
     file.persisted_free_space().unwrap();
 }

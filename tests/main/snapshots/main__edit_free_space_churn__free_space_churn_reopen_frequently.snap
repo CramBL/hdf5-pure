@@ -1,6 +1,5 @@
 ---
 source: tests/main/edit_free_space_churn.rs
-assertion_line: 59
 expression: report.render()
 ---
 free-space churn
@@ -29,63 +28,63 @@ lifecycle
   reopens        : 19
 
 high water
-  physical file : 30597013
-  logical file  : 30597013
-  pressure      : 30485417
-  reusable free : 5700753
+  physical file : 30748307
+  logical file  : 30748307
+  pressure      : 30485363
+  reusable free : 5851894
 
 reuse
-  epoch writes growing physical file   : 28
-  epoch writes without physical growth : 63
-  post-churn writes without growth      : 63
+  epoch writes growing physical file   : 29
+  epoch writes without physical growth : 62
+  post-churn writes without growth      : 62
 
 deletion waves
   wave  after-epoch  live-before  deleted  live-after  physical  logical  reusable live-raw  live-meta  unclassified  pressure
-     1           26           27        5          22  30314575  30314575   5558650  24570890     184099         0  24755925
-     2           31           27        5          22  30597013  30597013   5699888  24715841     180276         0  24897125
-     3           35           26        4          22  30597013  30597013   5698925  24716786     180276         0  24898088
-     4           39           26        4          22  30597013  30597013   5698909  24716802     180276         0  24898104
-     5           43           26        4          22  30597013  30597013   5700053  24715712     180276         0  24896960
-     6           47           26        4          22  30597013  30597013   5700753  24715039     180276         0  24896260
-     7           51           26        4          22  30597013  30597013   5700230  24715481     180276         0  24896783
-     8           55           26        4          22  30225989  30225989   5328011  24716604     180276         0  24897978
-     9           59           26        4          22  30225989  30225989   5325871  24718762     180276         0  24900118
-    10           63           26        4          22  30225989  30225989   5324278  24720301     180276         0  24901711
-    11           67           26        4          22  30225989  30225989   5322668  24721866     180276         0  24903321
-    12           71           26        4          22  30225989  30225989   5321640  24722867     180276         0  24904349
-    13           75           26        4          22  30225989  30225989   5320580  24723918     180276         0  24905409
-    14           79           26        4          22  30225989  30225989   5320130  24724404     180276         0  24905859
-    15           83           26        4          22  30225989  30225989   5320105  24724384     180276         0  24905884
-    16           87           26        4          22  30225989  30225989   5319919  24724516     180276         0  24906070
+     1           26           27        5          22  30314383  30314383   5558440  24570890     184099         0  24755943
+     2           31           27        5          22  30748307  30748307   5851218  24715841     180276         0  24897089
+     3           35           26        4          22  30748307  30748307   5850219  24716786     180276         0  24898088
+     4           39           26        4          22  30748307  30748307   5850068  24716802     180276         0  24898239
+     5           43           26        4          22  30748307  30748307   5851176  24715712     180276         0  24897131
+     6           47           26        4          22  30748307  30748307   5851894  24715039     180276         0  24896413
+     7           51           26        4          22  30748307  30748307   5851416  24715481     180276         0  24896891
+     8           55           26        4          22  30319296  30319296   5421327  24716604     180276         0  24897969
+     9           59           26        4          22  30319296  30319296   5419115  24718762     180276         0  24900181
+    10           63           26        4          22  30319296  30319296   5417513  24720301     180276         0  24901783
+    11           67           26        4          22  30319296  30319296   5415903  24721866     180276         0  24903393
+    12           71           26        4          22  30319296  30319296   5414875  24722867     180276         0  24904421
+    13           75           26        4          22  30319296  30319296   5413797  24723918     180276         0  24905499
+    14           79           26        4          22  30319296  30319296   5413410  24724404     180276         0  24905886
+    15           83           26        4          22  29624504  29624504   4718602  24724384     180276         0  24905902
+    16           87           26        4          22  30060534  30060534   5154509  24724516     180276         0  24906025
 
 reopen checkpoints
   #  reason          after-epoch  physical  persisted-free  recovered-free  unclassified
-  1  initial-fill              7   9006659            3237            3237         0
-  2  initial-fill             15  18019568            5062            5062         0
-  3  initial-fill             23  27032417            5095            5095         0
-  4  deletion-wave            26  30314575         5558632         5558632         0
-  5  deletion-wave            31  30597013         5699888         5699888         0
-  6  deletion-wave            35  30597013         5698925         5698925         0
-  7  deletion-wave            39  30597013         5698909         5698909         0
-  8  deletion-wave            43  30597013         5700053         5700053         0
-  9  deletion-wave            47  30597013         5700753         5700753         0
-  10  deletion-wave            51  30597013         5700230         5700230         0
-  11  deletion-wave            55  30225989         5328011         5328011         0
-  12  deletion-wave            59  30225989         5325871         5325871         0
-  13  deletion-wave            63  30225989         5324278         5324278         0
-  14  deletion-wave            67  30225989         5322668         5322668         0
-  15  deletion-wave            71  30225989         5321640         5321640         0
-  16  deletion-wave            75  30225989         5320580         5320580         0
-  17  deletion-wave            79  30225989         5320130         5320130         0
-  18  deletion-wave            83  30225989         5320105         5320105         0
-  19  deletion-wave            87  30225989         5319919         5319919         0
+  1  initial-fill              7   9006584            3162            3162         0
+  2  initial-fill             15  18019421            4933            4933         0
+  3  initial-fill             23  27032261            4939            4939         0
+  4  deletion-wave            26  30314383         5558440         5558440         0
+  5  deletion-wave            31  30748307         5851218         5851218         0
+  6  deletion-wave            35  30748307         5850219         5850219         0
+  7  deletion-wave            39  30748307         5850068         5850068         0
+  8  deletion-wave            43  30748307         5851176         5851176         0
+  9  deletion-wave            47  30748307         5851894         5851894         0
+  10  deletion-wave            51  30748307         5851416         5851416         0
+  11  deletion-wave            55  30319296         5421327         5421327         0
+  12  deletion-wave            59  30319296         5419115         5419115         0
+  13  deletion-wave            63  30319296         5417513         5417513         0
+  14  deletion-wave            67  30319296         5415903         5415903         0
+  15  deletion-wave            71  30319296         5414875         5414875         0
+  16  deletion-wave            75  30319296         5413797         5413797         0
+  17  deletion-wave            79  30319296         5413410         5413410         0
+  18  deletion-wave            83  29624504         4718602         4718602         0
+  19  deletion-wave            87  30060534         5154509         5154509         0
 
 final
-  physical file size         : 30225989
-  logical size               : 30225989
-  reusable free              : 2038349
-  reusable free regions      : 73
-  pressure                   : 28187640
+  physical file size         : 30060534
+  logical size               : 30060534
+  reusable free              : 1872957
+  reusable free regions      : 71
+  pressure                   : 28187577
   live epochs                : 25
 
 coverage
@@ -116,35 +115,35 @@ coverage
     incompressible                   : 25
 
 ownership while writer open
-  physical file size       : 30225989
-  logical EOF              : 30225989
+  physical file size       : 30060534
+  logical EOF              : 30060534
   live raw bytes           : 27980619
   live metadata bytes      : 205815
-  free-space-manager bytes : 1206
-  reusable free bytes      : 2038349
+  free-space-manager bytes : 1143
+  reusable free bytes      : 1872957
   unclassified bytes       : 0
   trailing slack bytes     : 0
   live raw extents         : 8461
   live metadata extents    : 569
   manager metadata extents : 2
-  reusable free extents    : 73
+  reusable free extents    : 71
   unclassified extents     : 0
   trailing slack extents   : 0
   exact partition          : yes
 
 ownership after writer close
-  physical file size       : 30225989
-  logical EOF              : 30225989
+  physical file size       : 30060534
+  logical EOF              : 30060534
   live raw bytes           : 27980619
   live metadata bytes      : 205815
-  free-space-manager bytes : 1206
-  reusable free bytes      : 2038349
+  free-space-manager bytes : 1143
+  reusable free bytes      : 1872957
   unclassified bytes       : 0
   trailing slack bytes     : 0
   live raw extents         : 8461
   live metadata extents    : 569
   manager metadata extents : 2
-  reusable free extents    : 73
+  reusable free extents    : 71
   unclassified extents     : 0
   trailing slack extents   : 0
   exact partition          : yes

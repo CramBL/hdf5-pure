@@ -248,27 +248,24 @@ impl FileBuilder {
         self
     }
 
-    /// Set the file-space management strategy, mirroring HDF5's
-    /// `H5Pset_file_space_strategy`. The strategy, persist flag, and free-space
-    /// section `threshold` are recorded in the file's superblock extension, so
-    /// libhdf5 and a later reopen observe the choice.
+    /// Sets the file-space management strategy, as `H5Pset_file_space_strategy` does.
     ///
-    /// `persist = true` records that freed space should be tracked on disk across
-    /// closes. A brand-new file has nothing to track, so this only records the
-    /// intent; freeing space in a later [`File::open_rw`](crate::File::open_rw) then
-    /// writes the on-disk free-space-manager blocks that survive a reopen.
+    /// The writer records the strategy, persist flag, and free-section `threshold` in the
+    /// superblock extension. With `persist = true`, it records reusable free space in
+    /// on-disk free-space managers for later sessions.
     ///
     /// [`FileSpaceStrategy::Aggr`] and [`FileSpaceStrategy::None`] have no free-space managers,
     /// so for either the writer records a clear persist flag and the default threshold of 1,
     /// whatever the caller passes for `persist` and `threshold`. `H5Pset_file_space_strategy`
     /// ignores both for those strategies too.
     ///
-    /// Under [`FileSpaceStrategy::Aggr`] or [`FileSpaceStrategy::FsmAggr`] with `persist = false`,
-    /// the writer uses separate metadata and raw aggregates with 2048-byte refill blocks. This
-    /// also applies when the strategy is unset. Under `FsmAggr`, the writer reuses abandoned
-    /// aggregate spare subject to `threshold` before reserving more aggregate space. Unused
-    /// tails at the end of allocation are released before output, while unused interior space
-    /// remains allocated without persisted free sections.
+    /// Under [`FileSpaceStrategy::Aggr`] or [`FileSpaceStrategy::FsmAggr`], the writer uses
+    /// separate metadata and raw aggregates with 2048-byte refill blocks. This also applies
+    /// when the strategy is unset. Under `FsmAggr`, the writer reuses abandoned aggregate spare
+    /// subject to `threshold` before reserving more aggregate space. Unused tails at the end of
+    /// allocation are released before output. With persistence enabled, the writer records the
+    /// remaining reusable spare, including settled aggregate reservations, in free-space managers.
+    /// Otherwise, unused interior reservations remain allocated after output.
     pub fn with_file_space_strategy(
         &mut self,
         strategy: FileSpaceStrategy,
@@ -601,9 +598,8 @@ mod streaming_tests {
                 Arc::clone(chunk_calls),
                 None,
             );
-            if strategy.is_none_or(|(strategy, persist)| {
-                strategy == FileSpaceStrategy::Aggr
-                    || (strategy == FileSpaceStrategy::FsmAggr && !persist)
+            if strategy.is_none_or(|(strategy, _)| {
+                strategy == FileSpaceStrategy::Aggr || strategy == FileSpaceStrategy::FsmAggr
             }) {
                 builder.set_attr("huge", AttrValue::AsciiString("h".repeat(70_000)));
             }
@@ -657,6 +653,7 @@ mod streaming_tests {
     #[case::empty(4)]
     fn aggregated_creation_streams_final_addresses(
         #[case] workload: usize,
+        #[values(false, true)] persist: bool,
         #[values(0, 512)] userblock: u64,
         #[values(None, Some(FileSpaceStrategy::Aggr), Some(FileSpaceStrategy::FsmAggr))]
         strategy: Option<FileSpaceStrategy>,
@@ -664,7 +661,7 @@ mod streaming_tests {
         let build = || {
             let mut builder = FileBuilder::new();
             if let Some(strategy) = strategy {
-                builder.with_file_space_strategy(strategy, strategy == FileSpaceStrategy::Aggr, 9);
+                builder.with_file_space_strategy(strategy, persist, 9);
             }
             builder.with_userblock(userblock);
             match workload {
@@ -697,6 +694,7 @@ mod streaming_tests {
             }
             builder
         };
+        let persistent = persist && strategy == Some(FileSpaceStrategy::FsmAggr);
         let bytes = build().finish().unwrap();
         let mut sink = NonseekableSink::default();
         build().finish_to(&mut sink).unwrap();
@@ -707,12 +705,21 @@ mod streaming_tests {
         assert_eq!(file.file_space_strategy(), strategy);
         if let Some(strategy) = strategy {
             let info = file.file_space_info().unwrap();
-            assert_eq!(
-                (info.strategy, info.persist, info.manager_addrs.as_slice()),
-                (strategy, false, [].as_slice())
-            );
+            assert_eq!((info.strategy, info.persist), (strategy, persistent));
+            if !persistent {
+                assert_eq!(info.manager_addrs, []);
+            }
         }
-        assert_eq!(file.persisted_free_space().unwrap(), []);
+        let sections = file.persisted_free_space().unwrap();
+        if persistent {
+            assert!(
+                sections
+                    .iter()
+                    .all(|&(address, size)| size >= 9 && address + size <= length - userblock)
+            );
+        } else {
+            assert_eq!(sections, []);
+        }
         match workload {
             0 => assert_eq!(file.root().groups().unwrap().len(), 40),
             1 => {
@@ -764,7 +771,11 @@ mod streaming_tests {
                         size: 19
                     }
                 );
-                assert_eq!(length, first + 4_133);
+                if persistent {
+                    assert!(length > first + 4_133);
+                } else {
+                    assert_eq!(length, first + 4_133);
+                }
                 assert!(file.dataset("last").unwrap().header_address().unwrap() < first);
                 assert_eq!(file.dataset("first").unwrap().read_raw().unwrap(), [11; 17]);
                 assert_eq!(
@@ -785,13 +796,14 @@ mod streaming_tests {
     #[case::later(2)]
     fn aggregated_creation_reports_provider_errors(
         #[case] short: usize,
+        #[values(false, true)] persist: bool,
         #[values(false, true)] streamed: bool,
         #[values(None, Some(FileSpaceStrategy::Aggr), Some(FileSpaceStrategy::FsmAggr))]
         strategy: Option<FileSpaceStrategy>,
     ) {
         let mut builder = FileBuilder::new();
         if let Some(strategy) = strategy {
-            builder.with_file_space_strategy(strategy, false, 1);
+            builder.with_file_space_strategy(strategy, persist, 1);
         }
         let calls = Calls::default();
         builder.create_dataset("data").with_produced_data(
@@ -823,6 +835,7 @@ mod streaming_tests {
 
     #[rstest::rstest]
     fn aggregated_creation_reports_sink_errors(
+        #[values(false, true)] persist: bool,
         #[values(None, Some(FileSpaceStrategy::Aggr), Some(FileSpaceStrategy::FsmAggr))]
         strategy: Option<FileSpaceStrategy>,
     ) {
@@ -837,7 +850,7 @@ mod streaming_tests {
         }
         let mut builder = FileBuilder::new();
         if let Some(strategy) = strategy {
-            builder.with_file_space_strategy(strategy, false, 1);
+            builder.with_file_space_strategy(strategy, persist, 1);
         }
         builder.create_dataset("data").with_u8_data(&[17; 19]);
         let error = builder.finish_to(BrokenOutput).unwrap_err();

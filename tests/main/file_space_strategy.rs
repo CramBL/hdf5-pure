@@ -200,10 +200,7 @@ fn survives_in_place_edit() {
 }
 
 #[test]
-fn persist_true_records_intent_on_a_fresh_file() {
-    // A brand-new file has no free space, so persist = true records the persist
-    // flag with no on-disk managers (matching the C library's brand-new persisted
-    // file). A later File::open_rw that frees space fills the managers in.
+fn persist_true_records_reusable_spare_on_a_fresh_file() {
     let path = temp::temp_path("hdf5_pure_fss_persist.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("d").with_i32_data(&[1, 2, 3]);
@@ -214,12 +211,11 @@ fn persist_true_records_intent_on_a_fresh_file() {
     let info = f.file_space_info().expect("file records a strategy");
     assert_eq!(info.strategy, FileSpaceStrategy::FsmAggr);
     assert!(info.persist, "persist flag is recorded");
-    // No free space yet: every manager slot is undefined and nothing is persisted.
     assert!(
         info.manager_addrs
             .iter()
-            .all(|&a| a == hdf5_pure::DecodedStoredAddress::Undefined)
+            .any(|&a| matches!(a, hdf5_pure::DecodedStoredAddress::Defined(_)))
     );
-    assert!(f.persisted_free_space().unwrap().is_empty());
+    assert!(!f.persisted_free_space().unwrap().is_empty());
     assert_eq!(f.dataset("d").unwrap().read_i32().unwrap(), vec![1, 2, 3]);
 }

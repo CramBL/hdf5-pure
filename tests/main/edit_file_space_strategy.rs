@@ -61,7 +61,7 @@ fn a_replacement_reuses_a_deleted_extent_only_where_a_free_space_manager_tracks_
     file.commit().unwrap();
     file.root()
         .create_dataset("d", |b| {
-            b.with_i32_data(&[4; 300]);
+            b.with_i32_data(&[4; 400]);
         })
         .unwrap();
     file.commit().unwrap();
