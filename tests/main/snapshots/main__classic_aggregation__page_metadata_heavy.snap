@@ -2,9 +2,110 @@
 source: tests/main/classic_aggregation.rs
 expression: report
 ---
-Create(Group("g0")): physical size 4096, logical size 4096, userblock [], metadata [(0, 48), (344, 39), (383, 56), (439, 140)], raw [], managers [(579, 82), (661, 53)], free [(48, 296), (714, 3382)], unclassified [], trailing slack [], complete true
-Create(Group("g1")): physical size 4096, logical size 4096, userblock [], metadata [(0, 48), (48, 39), (87, 73), (344, 39), (714, 140)], raw [], managers [(854, 82), (936, 71)], free [(160, 184), (383, 331), (1007, 3089)], unclassified [], trailing slack [], complete true
-Create(Group("g2")): physical size 4096, logical size 4096, userblock [], metadata [(0, 48), (48, 39), (160, 39), (199, 90), (344, 39), (383, 140)], raw [], managers [(523, 82), (605, 71)], free [(87, 73), (289, 55), (676, 3420)], unclassified [], trailing slack [], complete true
-Create(Group("g3")): physical size 4096, logical size 4096, userblock [], metadata [(0, 48), (48, 39), (160, 39), (289, 39), (344, 39), (676, 107), (783, 140)], raw [], managers [(923, 82), (1005, 107)], free [(87, 73), (199, 90), (328, 16), (383, 293), (1112, 2984)], unclassified [], trailing slack [], complete true
-Create(Group("g4")): physical size 4096, logical size 4096, userblock [], metadata [(0, 48), (48, 39), (87, 39), (160, 39), (289, 39), (344, 39), (383, 124), (1112, 140)], raw [], managers [(1252, 82), (1334, 107)], free [(126, 34), (199, 90), (328, 16), (507, 605), (1441, 2655)], unclassified [], trailing slack [], complete true
-Create(Group("g5")): physical size 4096, logical size 4096, userblock [], metadata [(0, 48), (48, 39), (87, 39), (160, 39), (199, 39), (289, 39), (344, 39), (507, 141), (648, 140)], raw [], managers [(788, 82), (870, 107)], free [(126, 34), (238, 51), (328, 16), (383, 124), (977, 3119)], unclassified [], trailing slack [], complete true
+PAGE allocation workload: metadata_heavy
+
+All sizes and offsets are in bytes. End offsets are exclusive.
+
+Step 1: Create group "g0"
+  Physical size: 4096, logical size: 4096, analysis: complete
+  Category                 Start        End     Length
+  Live metadata                0         48         48
+  Live metadata              344        383         39
+  Live metadata              383        439         56
+  Live metadata              439        579        140
+  Free-space managers        579        661         82
+  Free-space managers        661        714         53
+  Reusable free space         48        344        296
+  Reusable free space        714       4096       3382
+  No extents: Userblock, Live raw data, Unclassified, Trailing slack
+
+Step 2: Create group "g1"
+  Physical size: 4096, logical size: 4096, analysis: complete
+  Category                 Start        End     Length
+  Live metadata                0         48         48
+  Live metadata               48         87         39
+  Live metadata               87        160         73
+  Live metadata              344        383         39
+  Live metadata              714        854        140
+  Free-space managers        854        936         82
+  Free-space managers        936       1007         71
+  Reusable free space        160        344        184
+  Reusable free space        383        714        331
+  Reusable free space       1007       4096       3089
+  No extents: Userblock, Live raw data, Unclassified, Trailing slack
+
+Step 3: Create group "g2"
+  Physical size: 4096, logical size: 4096, analysis: complete
+  Category                 Start        End     Length
+  Live metadata                0         48         48
+  Live metadata               48         87         39
+  Live metadata              160        199         39
+  Live metadata              199        289         90
+  Live metadata              344        383         39
+  Live metadata              383        523        140
+  Free-space managers        523        605         82
+  Free-space managers        605        676         71
+  Reusable free space         87        160         73
+  Reusable free space        289        344         55
+  Reusable free space        676       4096       3420
+  No extents: Userblock, Live raw data, Unclassified, Trailing slack
+
+Step 4: Create group "g3"
+  Physical size: 4096, logical size: 4096, analysis: complete
+  Category                 Start        End     Length
+  Live metadata                0         48         48
+  Live metadata               48         87         39
+  Live metadata              160        199         39
+  Live metadata              289        328         39
+  Live metadata              344        383         39
+  Live metadata              676        783        107
+  Live metadata              783        923        140
+  Free-space managers        923       1005         82
+  Free-space managers       1005       1112        107
+  Reusable free space         87        160         73
+  Reusable free space        199        289         90
+  Reusable free space        328        344         16
+  Reusable free space        383        676        293
+  Reusable free space       1112       4096       2984
+  No extents: Userblock, Live raw data, Unclassified, Trailing slack
+
+Step 5: Create group "g4"
+  Physical size: 4096, logical size: 4096, analysis: complete
+  Category                 Start        End     Length
+  Live metadata                0         48         48
+  Live metadata               48         87         39
+  Live metadata               87        126         39
+  Live metadata              160        199         39
+  Live metadata              289        328         39
+  Live metadata              344        383         39
+  Live metadata              383        507        124
+  Live metadata             1112       1252        140
+  Free-space managers       1252       1334         82
+  Free-space managers       1334       1441        107
+  Reusable free space        126        160         34
+  Reusable free space        199        289         90
+  Reusable free space        328        344         16
+  Reusable free space        507       1112        605
+  Reusable free space       1441       4096       2655
+  No extents: Userblock, Live raw data, Unclassified, Trailing slack
+
+Step 6: Create group "g5"
+  Physical size: 4096, logical size: 4096, analysis: complete
+  Category                 Start        End     Length
+  Live metadata                0         48         48
+  Live metadata               48         87         39
+  Live metadata               87        126         39
+  Live metadata              160        199         39
+  Live metadata              199        238         39
+  Live metadata              289        328         39
+  Live metadata              344        383         39
+  Live metadata              507        648        141
+  Live metadata              648        788        140
+  Free-space managers        788        870         82
+  Free-space managers        870        977        107
+  Reusable free space        126        160         34
+  Reusable free space        238        289         51
+  Reusable free space        328        344         16
+  Reusable free space        383        507        124
+  Reusable free space        977       4096       3119
+  No extents: Userblock, Live raw data, Unclassified, Trailing slack

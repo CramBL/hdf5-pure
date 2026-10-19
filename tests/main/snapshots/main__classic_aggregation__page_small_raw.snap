@@ -2,9 +2,146 @@
 source: tests/main/classic_aggregation.rs
 expression: report
 ---
-Create(Dataset("d0", 16)): physical size 8192, logical size 8192, userblock [], metadata [(0, 48), (344, 71), (415, 56), (471, 140)], raw [(4096, 64)], managers [(611, 82), (693, 53), (746, 82), (828, 35)], free [(48, 296), (863, 3233), (4160, 4032)], unclassified [], trailing slack [], complete true
-Create(Dataset("d1", 16)): physical size 8192, logical size 8192, userblock [], metadata [(0, 48), (48, 71), (119, 73), (344, 71), (863, 140)], raw [(4096, 64), (4160, 64)], managers [(1003, 82), (1085, 71), (1156, 82), (1238, 35)], free [(192, 152), (415, 448), (1273, 2823), (4224, 3968)], unclassified [], trailing slack [], complete true
-Create(Dataset("d2", 16)): physical size 8192, logical size 8192, userblock [], metadata [(0, 48), (48, 71), (192, 71), (344, 71), (415, 90), (1273, 140)], raw [(4096, 64), (4160, 64), (4224, 64)], managers [(1413, 82), (1495, 89), (1584, 82), (1666, 35)], free [(119, 73), (263, 81), (505, 768), (1701, 2395), (4288, 3904)], unclassified [], trailing slack [], complete true
-Create(Dataset("d3", 16)): physical size 8192, logical size 8192, userblock [], metadata [(0, 48), (48, 71), (119, 71), (192, 71), (344, 71), (505, 107), (612, 140)], raw [(4096, 64), (4160, 64), (4224, 64), (4288, 64)], managers [(752, 82), (834, 89), (923, 82), (1005, 35)], free [(190, 2), (263, 81), (415, 90), (1040, 3056), (4352, 3840)], unclassified [], trailing slack [], complete true
-Create(Dataset("d4", 16)): physical size 8192, logical size 8192, userblock [], metadata [(0, 48), (48, 71), (119, 71), (192, 71), (263, 71), (344, 71), (1040, 124), (1164, 140)], raw [(4096, 64), (4160, 64), (4224, 64), (4288, 64), (4352, 64)], managers [(1304, 82), (1386, 89), (1475, 82), (1557, 35)], free [(190, 2), (334, 10), (415, 625), (1592, 2504), (4416, 3776)], unclassified [], trailing slack [], complete true
-Create(Dataset("d5", 16)): physical size 8192, logical size 8192, userblock [], metadata [(0, 48), (48, 71), (119, 71), (192, 71), (263, 71), (344, 71), (415, 71), (486, 141), (627, 140)], raw [(4096, 64), (4160, 64), (4224, 64), (4288, 64), (4352, 64), (4416, 64)], managers [(767, 82), (849, 71), (920, 82), (1002, 35)], free [(190, 2), (334, 10), (1037, 3059), (4480, 3712)], unclassified [], trailing slack [], complete true
+PAGE allocation workload: small_raw
+
+All sizes and offsets are in bytes. End offsets are exclusive.
+
+Step 1: Create dataset "d0" with 16 i32 elements
+  Physical size: 8192, logical size: 8192, analysis: complete
+  Category                 Start        End     Length
+  Live metadata                0         48         48
+  Live metadata              344        415         71
+  Live metadata              415        471         56
+  Live metadata              471        611        140
+  Live raw data             4096       4160         64
+  Free-space managers        611        693         82
+  Free-space managers        693        746         53
+  Free-space managers        746        828         82
+  Free-space managers        828        863         35
+  Reusable free space         48        344        296
+  Reusable free space        863       4096       3233
+  Reusable free space       4160       8192       4032
+  No extents: Userblock, Unclassified, Trailing slack
+
+Step 2: Create dataset "d1" with 16 i32 elements
+  Physical size: 8192, logical size: 8192, analysis: complete
+  Category                 Start        End     Length
+  Live metadata                0         48         48
+  Live metadata               48        119         71
+  Live metadata              119        192         73
+  Live metadata              344        415         71
+  Live metadata              863       1003        140
+  Live raw data             4096       4160         64
+  Live raw data             4160       4224         64
+  Free-space managers       1003       1085         82
+  Free-space managers       1085       1156         71
+  Free-space managers       1156       1238         82
+  Free-space managers       1238       1273         35
+  Reusable free space        192        344        152
+  Reusable free space        415        863        448
+  Reusable free space       1273       4096       2823
+  Reusable free space       4224       8192       3968
+  No extents: Userblock, Unclassified, Trailing slack
+
+Step 3: Create dataset "d2" with 16 i32 elements
+  Physical size: 8192, logical size: 8192, analysis: complete
+  Category                 Start        End     Length
+  Live metadata                0         48         48
+  Live metadata               48        119         71
+  Live metadata              192        263         71
+  Live metadata              344        415         71
+  Live metadata              415        505         90
+  Live metadata             1273       1413        140
+  Live raw data             4096       4160         64
+  Live raw data             4160       4224         64
+  Live raw data             4224       4288         64
+  Free-space managers       1413       1495         82
+  Free-space managers       1495       1584         89
+  Free-space managers       1584       1666         82
+  Free-space managers       1666       1701         35
+  Reusable free space        119        192         73
+  Reusable free space        263        344         81
+  Reusable free space        505       1273        768
+  Reusable free space       1701       4096       2395
+  Reusable free space       4288       8192       3904
+  No extents: Userblock, Unclassified, Trailing slack
+
+Step 4: Create dataset "d3" with 16 i32 elements
+  Physical size: 8192, logical size: 8192, analysis: complete
+  Category                 Start        End     Length
+  Live metadata                0         48         48
+  Live metadata               48        119         71
+  Live metadata              119        190         71
+  Live metadata              192        263         71
+  Live metadata              344        415         71
+  Live metadata              505        612        107
+  Live metadata              612        752        140
+  Live raw data             4096       4160         64
+  Live raw data             4160       4224         64
+  Live raw data             4224       4288         64
+  Live raw data             4288       4352         64
+  Free-space managers        752        834         82
+  Free-space managers        834        923         89
+  Free-space managers        923       1005         82
+  Free-space managers       1005       1040         35
+  Reusable free space        190        192          2
+  Reusable free space        263        344         81
+  Reusable free space        415        505         90
+  Reusable free space       1040       4096       3056
+  Reusable free space       4352       8192       3840
+  No extents: Userblock, Unclassified, Trailing slack
+
+Step 5: Create dataset "d4" with 16 i32 elements
+  Physical size: 8192, logical size: 8192, analysis: complete
+  Category                 Start        End     Length
+  Live metadata                0         48         48
+  Live metadata               48        119         71
+  Live metadata              119        190         71
+  Live metadata              192        263         71
+  Live metadata              263        334         71
+  Live metadata              344        415         71
+  Live metadata             1040       1164        124
+  Live metadata             1164       1304        140
+  Live raw data             4096       4160         64
+  Live raw data             4160       4224         64
+  Live raw data             4224       4288         64
+  Live raw data             4288       4352         64
+  Live raw data             4352       4416         64
+  Free-space managers       1304       1386         82
+  Free-space managers       1386       1475         89
+  Free-space managers       1475       1557         82
+  Free-space managers       1557       1592         35
+  Reusable free space        190        192          2
+  Reusable free space        334        344         10
+  Reusable free space        415       1040        625
+  Reusable free space       1592       4096       2504
+  Reusable free space       4416       8192       3776
+  No extents: Userblock, Unclassified, Trailing slack
+
+Step 6: Create dataset "d5" with 16 i32 elements
+  Physical size: 8192, logical size: 8192, analysis: complete
+  Category                 Start        End     Length
+  Live metadata                0         48         48
+  Live metadata               48        119         71
+  Live metadata              119        190         71
+  Live metadata              192        263         71
+  Live metadata              263        334         71
+  Live metadata              344        415         71
+  Live metadata              415        486         71
+  Live metadata              486        627        141
+  Live metadata              627        767        140
+  Live raw data             4096       4160         64
+  Live raw data             4160       4224         64
+  Live raw data             4224       4288         64
+  Live raw data             4288       4352         64
+  Live raw data             4352       4416         64
+  Live raw data             4416       4480         64
+  Free-space managers        767        849         82
+  Free-space managers        849        920         71
+  Free-space managers        920       1002         82
+  Free-space managers       1002       1037         35
+  Reusable free space        190        192          2
+  Reusable free space        334        344         10
+  Reusable free space       1037       4096       3059
+  Reusable free space       4480       8192       3712
+  No extents: Userblock, Unclassified, Trailing slack
