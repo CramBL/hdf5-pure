@@ -511,7 +511,7 @@ pub(crate) mod edit;
 pub(crate) mod file_lock;
 #[cfg(feature = "std")]
 pub(crate) mod image;
-#[cfg(feature = "__page-publication-crosscheck")]
+#[cfg(all(feature = "std", any(test, feature = "__page-publication-crosscheck")))]
 pub(crate) mod page_publication_failure;
 #[cfg(feature = "std")]
 pub(crate) mod reader;

@@ -47,6 +47,7 @@ use rstest::rstest;
 
 use test_util::file_space_info;
 use test_util::free_space;
+use test_util::publication as publication_bytes;
 use test_util::range;
 use test_util::userblock::Userblock;
 use test_util::widths::Widths;
@@ -238,10 +239,7 @@ fn assert_preserved_page_bytes(before: &[u8], after: &[u8]) {
     let superblock_len = hdf5_pure_format::__private::serialize_superblock(file.superblock())
         .unwrap()
         .len();
-    assert_eq!(
-        &after[superblock_len..before.len()],
-        &before[superblock_len..]
-    );
+    publication_bytes::assert_preserved_bytes(before, after, 0, superblock_len);
 }
 
 /// Checks values through the C library, mutates a dataset, and verifies the result.
