@@ -4,6 +4,8 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::num::{NonZeroU64, NonZeroUsize};
+#[cfg(feature = "__page-publication-crosscheck")]
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
@@ -46,6 +48,8 @@ use crate::libver::LibVer;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
 use crate::object_path::{LinkName, LinkNameBuf, ObjectPath, ObjectPathBuf};
+#[cfg(feature = "__page-publication-crosscheck")]
+use crate::page_publication_failure::PagePublicationFailure;
 use crate::read_spec::{RawReadSpec, RawReadStorage};
 use crate::shared_message::{self, BufferedResolver, SharedResolver, SourceResolver};
 use crate::source::SourceMetadata;
@@ -3057,6 +3061,39 @@ impl File {
         })
     }
 
+    /// Opens a mirrored PAGE crosscheck session with one injected publication error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] unless the file uses non-persistent PAGE allocation.
+    /// Returns the opening or configuration error if the session cannot be created.
+    #[cfg(feature = "__page-publication-crosscheck")]
+    pub(crate) fn open_page_publication_failure(
+        path: &Path,
+        failure: PagePublicationFailure,
+        sync: SyncPolicy,
+        gathered: bool,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            inner: Arc::new(FileInner::from_rw_session(
+                WriteEngine::open_page_publication_failure(path, failure, gathered)?,
+                FileAccessProperties::new().with_sync_policy(sync),
+            )?),
+        })
+    }
+
+    /// Reads issued file bytes through the editing session's disk handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ReadOnly`] if the file has no editing session, or the snapshot read error.
+    #[cfg(feature = "__page-publication-crosscheck")]
+    pub(crate) fn page_publication_snapshot(&self) -> Result<Vec<u8>, Error> {
+        self.with_mirror_session(Change::Nothing, |session| {
+            session.page_publication_snapshot()
+        })
+    }
+
     /// Open exactly as [`open_rw`](Self::open_rw) does, but behind an image that
     /// withholds its whole-file slice, so every read takes the `Source` path
     /// rather than the slice fast path.
@@ -3255,6 +3292,13 @@ impl File {
     /// allocations, using only the superblock for publication.
     ///
     /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] in a non-persistent PAGE session if publication bytes
+    /// differ from the session image or expected framing after a failed write. Close and reopen
+    /// the file before editing again.
+    /// A subsequent commit first completes the publication barrier under the selected
+    /// synchronization policy and verifies the superblock before consuming staged edits.
+    /// The editor can report a publication error after writing the complete batch.
     ///
     /// Two failures do not carry that promise, and both call for **re-reading**
     /// the datasets the batch named rather than for a retry:

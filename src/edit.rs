@@ -358,6 +358,8 @@ use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
+#[cfg(feature = "__page-publication-crosscheck")]
+use crate::page_publication_failure::{PagePublicationFailure, PublicationFailureImage};
 use crate::reader::FileAccessProperties;
 use crate::shared_message::DatatypeLocation;
 use crate::source::SourceMetadata;
@@ -2090,6 +2092,40 @@ impl WriteEngine {
         Self::open_inner(path.as_ref(), Some(locking))
     }
 
+    /// Opens a PAGE mirror configured to inject one publication error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] unless the file uses non-persistent PAGE allocation.
+    /// Returns the opening or buffering error if the mirror cannot be configured.
+    #[cfg(feature = "__page-publication-crosscheck")]
+    pub(crate) fn open_page_publication_failure(
+        path: &Path,
+        failure: PagePublicationFailure,
+        gathered: bool,
+    ) -> Result<Self, Error> {
+        let mut session = Self::open_imaged(path, Some(FileLocking::Enabled), |handle, _| {
+            let inner = Self::read_mirror(handle)?;
+            let publication_offset = superblock::read(&inner)?.address.get();
+            Ok(Box::new(PublicationFailureImage::new(
+                inner,
+                publication_offset,
+                failure,
+            )))
+        })?;
+        if session.fresh_page_boundary.is_none() {
+            return Err(Error::EditUnsupported(
+                "publication failure crosschecks require non-persistent PAGE allocation",
+            ));
+        }
+        if !gathered {
+            session
+                .image
+                .set_write_buffering(WriteBuffering::Unbuffered)?;
+        }
+        Ok(session)
+    }
+
     /// Open exactly as [`open_with_locking`](Self::open_with_locking) does, but
     /// behind an image that withholds its whole-file slice, so every read takes
     /// the [`Source`] path rather than the slice fast path.
@@ -3482,6 +3518,18 @@ impl WriteEngine {
     /// not — without the parsers knowing which (issue #198).
     pub(crate) fn image(&self) -> &dyn Source {
         self.image.as_ref()
+    }
+
+    /// Reads issued bytes for the complete image length, leaving pending writes buffered.
+    ///
+    /// # Errors
+    ///
+    /// Returns the read or conversion error if the image cannot be read through the disk handle.
+    #[cfg(feature = "__page-publication-crosscheck")]
+    pub(crate) fn page_publication_snapshot(&self) -> Result<Vec<u8>, Error> {
+        let mut bytes = vec![0; self.image.len().to_usize()?];
+        self.image.read_disk_at(0, &mut bytes)?;
+        Ok(bytes)
     }
 
     /// Returns this session's committed superblock with addresses in their encoded coordinates.
@@ -5226,6 +5274,10 @@ impl WriteEngine {
     /// refusal after which a dataset the batch named may hold either value.
     /// Every other refusal leaves them all as they were.
     pub fn commit(&mut self) -> Result<(), Error> {
+        if self.fresh_page_boundary.is_some() && self.publish_attempted {
+            self.barrier()?;
+            self.recover_page_publication()?;
+        }
         self.synchronize_aggregates()?;
         let snapshot = self.snapshot_free();
         self.publish_attempted = false;
@@ -5281,7 +5333,50 @@ impl WriteEngine {
         // publish already issued, where undoing anything is unsound. A rollback
         // drained the journal on its way through, so it owes nothing here.
         self.inplace_undo.clear();
+        if self.fresh_page_boundary.is_some() && self.publish_attempted {
+            if result.is_ok() {
+                self.publish_attempted = false;
+            } else {
+                // A failed barrier can leave the new root on disk. Pending writes and uncertain
+                // bytes remain owned until a later commit completes the barrier and recovery.
+                self.recover_page_publication().ok();
+            }
+        }
         result
+    }
+
+    /// Adopts the published PAGE root and EOA after verifying the accepted superblock bytes.
+    ///
+    /// Other superblock fields must match the session's framing. Before consuming staged edits
+    /// in another commit, the caller drains pending writes through a barrier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if the file bytes differ from the accepted image or
+    /// superblock framing. Returns the read, serialization, or parsing error if recovery fails.
+    fn recover_page_publication(&mut self) -> Result<(), Error> {
+        let len = hdf5_pure_format::__private::serialize_superblock(&self.superblock)?.len();
+        let accepted = self.image.read_exact_at(self.sb_sig_off, len)?;
+        let mut published = vec![0; len];
+        self.image.read_disk_at(self.sb_sig_off, &mut published)?;
+        if published != accepted {
+            return Err(Error::EditUnsupported(
+                "PAGE publication bytes differ from the session image after a failed write; \
+                 close and reopen the file before editing again",
+            ));
+        }
+        let recovered = superblock::read(published.as_slice())?.superblock;
+        let mut expected = self.superblock.clone();
+        expected.root_group_address = recovered.root_group_address;
+        expected.eof_address = recovered.eof_address;
+        if hdf5_pure_format::__private::serialize_superblock(&expected)? != published {
+            return Err(Error::EditUnsupported(
+                "PAGE superblock framing changed after a failed publication; \
+                 close and reopen the file before editing again",
+            ));
+        }
+        self.superblock = recovered;
+        Ok(())
     }
 
     /// Captures allocator state and heap allocation records for rollback before publication.

@@ -490,6 +490,10 @@ impl FailingImage {
 }
 
 impl FileImage for FailingImage {
+    fn read_disk_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
+        self.inner.read_disk_at(offset, bytes)
+    }
+
     fn append(&mut self, bytes: &[u8]) -> Result<u64, Error> {
         if self.enabled()
             && (matches!(self.failure, Failure::TailWrite)

@@ -429,6 +429,10 @@ use crate::address::{BaseAddressExt, StoredAddressExt};
 #[cfg(doc)]
 pub mod _guide;
 
+#[cfg(feature = "__page-publication-crosscheck")]
+#[doc(hidden)]
+pub mod __private;
+
 pub(crate) mod access_mode;
 pub(crate) mod address;
 pub(crate) mod attribute;
@@ -507,6 +511,8 @@ pub(crate) mod edit;
 pub(crate) mod file_lock;
 #[cfg(feature = "std")]
 pub(crate) mod image;
+#[cfg(feature = "__page-publication-crosscheck")]
+pub(crate) mod page_publication_failure;
 #[cfg(feature = "std")]
 pub(crate) mod reader;
 #[cfg(feature = "std")]

@@ -787,6 +787,10 @@ mod tests {
     }
 
     impl FileImage for TransientPublicationImage {
+        fn read_disk_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
+            self.inner.read_disk_at(offset, bytes)
+        }
+
         fn append(&mut self, bytes: &[u8]) -> Result<u64, Error> {
             self.inner.append(bytes)
         }

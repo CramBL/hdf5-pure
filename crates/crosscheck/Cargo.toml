@@ -23,7 +23,11 @@ hdf5 = ["dep:hdf5", "dep:hdf5-sys", "test-util-hdf5/hdf5"]
 # has what it needs. The interop recipes derive it from the version they link,
 # and `tests/hdf5_release_feature.rs` checks the one passed against the library
 # actually linked.
-"__hdf5-1.10" = ["hdf5", "test-util-hdf5/__hdf5-1.10"]
+"__hdf5-1.10" = [
+    "hdf5",
+    "test-util-hdf5/__hdf5-1.10",
+    "hdf5-pure/__page-publication-crosscheck",
+]
 "__hdf5-1.12" = ["__hdf5-1.10", "hdf5-sys/deprecated", "test-util-hdf5/__hdf5-1.12"]
 "__hdf5-1.14" = ["__hdf5-1.12", "test-util-hdf5/__hdf5-1.14"]
 "__hdf5-2" = ["__hdf5-1.14", "test-util-hdf5/__hdf5-2"]
