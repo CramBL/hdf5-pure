@@ -51,6 +51,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed loss of source positions above `usize::MAX` in `FormatError` end-of-file diagnostics, while slice-local diagnostics retain host-sized byte counts ([#813](github.com/CramBL/hdf5-pure/pull/813)).
 - Fixed platform-limit classification in `FormatError` diagnostics for fixed-width integer overflow, while host-sized conversions retain their platform-limit classification ([#810](https://github.com/CramBL/hdf5-pure/pull/810)).
 - Fixed `File::open` and related opens accepting a superblock whose group leaf node K is 0 ([#811](https://github.com/CramBL/hdf5-pure/pull/811/)).
 - Fixed `Group::groups` and related reads accepting a version 1 group whose symbol table node holds more links than the superblock's group leaf node K allows, or whose local heap has an undefined data segment address. The link count is checked in files with a version 0 or 1 superblock only ([#811](https://github.com/CramBL/hdf5-pure/pull/811/)).

@@ -578,6 +578,13 @@ pub enum FormatError {
         /// The physical address of the first byte past the collection.
         collection_end: u64,
     },
+    /// A managed fractal-heap object has no allocated block at its heap offset.
+    MissingFractalHeapBlock {
+        /// The object's byte offset in the heap's managed address space.
+        heap_offset: u64,
+        /// The object's length in bytes.
+        object_length: u64,
+    },
     /// Maximum nesting/continuation depth exceeded (malformed data protection).
     NestingDepthExceeded,
     /// A numeric element in a file is wider than the 64-bit word the typed
@@ -669,11 +676,11 @@ pub enum FormatError {
     /// A local heap header stores the undefined address, all bits set, as the address of its data
     /// segment.
     UndefinedLocalHeapDataSegment,
-    /// Unexpected end of data.
+    /// A byte buffer is shorter than required.
     UnexpectedEof {
-        /// Number of bytes expected.
+        /// The required length or end position within the buffer, in bytes.
         expected: usize,
-        /// Number of bytes actually available.
+        /// The available buffer length in bytes.
         available: usize,
     },
     /// A fractal heap's huge-objects v2 B-tree is not the indirectly accessed,
@@ -688,6 +695,16 @@ pub enum FormatError {
         record_size: usize,
         /// The bytes a type-1 record needs: address + length + object ID.
         required: usize,
+    },
+    /// A read or write requires bytes past the source's extent.
+    ///
+    /// Both positions are measured from the same source origin and retain their full
+    /// [`u64`] range on every platform.
+    UnexpectedSourceEof {
+        /// The exclusive end position required by the request, in bytes.
+        expected: u64,
+        /// The source's extent in bytes.
+        available: u64,
     },
     /// A dataset or attribute refers to a committed datatype at a path where the file
     /// being written places no such object.
@@ -847,6 +864,20 @@ impl fmt::Display for FormatError {
             } => write!(
                 f,
                 "truncated file: recorded EOF is {expected_eof}, physical length is {actual_len}"
+            ),
+            Self::MissingFractalHeapBlock {
+                heap_offset,
+                object_length,
+            } => write!(
+                f,
+                "no allocated fractal heap block contains object at heap offset {heap_offset} with length {object_length}"
+            ),
+            Self::UnexpectedSourceEof {
+                expected,
+                available,
+            } => write!(
+                f,
+                "unexpected source EOF: need end position {expected}, source extent is {available}"
             ),
             Self::UnexpectedEof {
                 expected,

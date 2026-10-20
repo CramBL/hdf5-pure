@@ -505,9 +505,9 @@ mod tests {
         assert_eq!(usize::try_from(at).unwrap() + len, group.bytes.len());
         let end = usize::try_from(at).unwrap() + len;
         group.bytes.truncate(end - 1);
-        let expected = Err(FormatError::UnexpectedEof {
-            expected: end,
-            available: end - 1,
+        let expected = Err(FormatError::UnexpectedSourceEof {
+            expected: end.to_u64(),
+            available: (end - 1).to_u64(),
         });
         assert_eq!(
             read_both(&group, Widths::EIGHT, 0, k(2)),

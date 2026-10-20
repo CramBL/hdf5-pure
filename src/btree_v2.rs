@@ -233,9 +233,9 @@ fn extent_in_source<S: Source + ?Sized>(
         length,
     })?;
     if extent.end() > source.len() {
-        return Err(FormatError::UnexpectedEof {
-            expected: extent.end().to_usize().unwrap_or(usize::MAX),
-            available: source.len().to_usize().unwrap_or(usize::MAX),
+        return Err(FormatError::UnexpectedSourceEof {
+            expected: extent.end(),
+            available: source.len(),
         });
     }
     Ok(extent)
@@ -754,6 +754,25 @@ mod tests {
     }
 
     #[test]
+    fn storage_walk_reports_a_header_extent_above_four_gibibytes() {
+        let source = BytesSource::new([]);
+        let address = 4_294_967_536;
+        assert_eq!(
+            collect_btree_v2_storage_extents(&source, StoredAddress::new(address), FORMAT_WIDTHS)
+                .unwrap_err(),
+            FormatError::UnexpectedSourceEof {
+                expected: address
+                    + hdf5_pure_format::__private::btree_v2_header_size(
+                        FORMAT_WIDTHS.offsets,
+                        FORMAT_WIDTHS.lengths
+                    )
+                    .to_u64(),
+                available: 0,
+            }
+        );
+    }
+
+    #[test]
     fn storage_walk_rejects_a_truncated_header() {
         let mut header = btree_v2::Header::new(5, 11, 0, 0).build(WIDTHS);
         header.pop();
@@ -762,9 +781,9 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err,
-            FormatError::UnexpectedEof {
-                expected: header.len() + 1,
-                available: header.len(),
+            FormatError::UnexpectedSourceEof {
+                expected: (header.len() + 1).to_u64(),
+                available: header.len().to_u64(),
             }
         );
     }
@@ -778,9 +797,9 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err,
-            FormatError::UnexpectedEof {
-                expected: (root + u64::from(BTREE_V2_NODE_SIZE)).to_usize().unwrap(),
-                available: file.len(),
+            FormatError::UnexpectedSourceEof {
+                expected: root + u64::from(BTREE_V2_NODE_SIZE),
+                available: file.len().to_u64(),
             }
         );
     }
@@ -929,11 +948,9 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err,
-            FormatError::UnexpectedEof {
-                expected: (bad_address + u64::from(BTREE_V2_NODE_SIZE))
-                    .to_usize()
-                    .unwrap(),
-                available: file.len(),
+            FormatError::UnexpectedSourceEof {
+                expected: bad_address + u64::from(BTREE_V2_NODE_SIZE),
+                available: file.len().to_u64(),
             }
         );
     }

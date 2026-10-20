@@ -5,9 +5,11 @@ use alloc::{string::String, vec::Vec};
 
 use core::num::NonZeroUsize;
 
+use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::PhysicalAddress;
+
 use crate::chunk_cache::ChunkCache;
 use crate::chunked_read;
-use crate::convert;
 #[cfg(test)]
 use crate::data_layout::DataLayout;
 use crate::data_read::primitive::{
@@ -23,6 +25,7 @@ use crate::error::FormatError;
 #[cfg(test)]
 use crate::fill_value::FillPattern;
 use crate::read_spec::{RawReadSpec, RawReadStorage};
+use crate::source;
 use crate::source::Source;
 use crate::width::FormatWidths;
 
@@ -69,16 +72,11 @@ pub fn read_raw_data_full(
 
     match spec.storage() {
         RawReadStorage::Compact { data } => Ok(data.to_vec()),
-        RawReadStorage::Contiguous { address } => {
-            let r = convert::slice_range(address.get(), spec.byte_len_u64())?;
-            if r.end > file_data.len() {
-                return Err(FormatError::UnexpectedEof {
-                    expected: r.end,
-                    available: file_data.len(),
-                });
-            }
-            Ok(file_data[r].to_vec())
-        }
+        RawReadStorage::Contiguous { address } => Ok(source::bytes_in(
+            file_data,
+            FileRange::new(PhysicalAddress::new(address.get()), spec.byte_len_u64())?,
+        )?
+        .to_vec()),
         RawReadStorage::ContiguousUnallocated => fill.buffer(expected_size),
         RawReadStorage::Chunked { .. } => {
             chunked_read::read_chunked_data_cached(file_data, spec, widths, &ChunkCache::new())

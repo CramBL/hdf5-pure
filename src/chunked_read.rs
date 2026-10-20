@@ -10,6 +10,9 @@ use std::borrow::Cow;
 
 use core::num::{NonZeroU64, NonZeroUsize};
 
+use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::PhysicalAddress;
+
 use hdf5_pure_format::__private::BTreeV1ChunkNode;
 use hdf5_pure_format::__private::BTreeV1ChunkNodeBytes;
 use hdf5_pure_format::__private::BTreeV2ChunkRecordContext;
@@ -24,7 +27,7 @@ use crate::address::StoredAddressExt;
 use crate::chunk_cache::{CachePass, ChunkCache};
 use crate::chunk_grid::{self, ChunkGrid, GridOrder};
 use crate::chunk_span::ChunkSpanReader;
-use crate::convert::{self, Narrow};
+use crate::convert::Narrow;
 #[cfg(any(feature = "std", test))]
 use crate::data_layout::DataLayout;
 use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags};
@@ -36,6 +39,7 @@ use crate::filter_pipeline::FilterPipeline;
 use crate::filters::{self, ChunkContext, FilterScratch};
 use crate::fixed_array;
 use crate::read_spec::{RawReadSpec, RawReadStorage};
+use crate::source;
 use crate::source::Source;
 use crate::source::SourceMetadata;
 use crate::width::{FormatWidths, OffsetWidth};
@@ -1937,14 +1941,13 @@ pub fn read_chunked_data_cached(
         }
 
         // Cache miss: read the chunk's bytes from the file.
-        let r = convert::slice_range(chunk_info.address.get(), chunk_info.chunk_size.get())?;
-        if r.end > file_data.len() {
-            return Err(FormatError::UnexpectedEof {
-                expected: r.end,
-                available: file_data.len(),
-            });
-        }
-        let raw_chunk = &file_data[r];
+        let raw_chunk = source::bytes_in(
+            file_data,
+            FileRange::new(
+                PhysicalAddress::new(chunk_info.address.get()),
+                chunk_info.chunk_size.get(),
+            )?,
+        )?;
         let filtering =
             ChunkFiltering::for_chunk(flags, chunk_dims_u64, &dataspace.dimensions, chunk_info);
         // A chunk that skipped the pipeline scatters straight from the file
@@ -2594,9 +2597,9 @@ mod tests {
         };
         assert_eq!(
             err,
-            FormatError::UnexpectedEof {
-                expected: root_at + 512,
-                available: file.len(),
+            FormatError::UnexpectedSourceEof {
+                expected: root_at.to_u64() + 512,
+                available: file.len().to_u64(),
             }
         );
     }

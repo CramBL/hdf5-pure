@@ -39,7 +39,7 @@ use crate::width::FormatWidths;
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::UnexpectedEof`] if the file ends inside a block or a page,
+/// Returns [`FormatError::UnexpectedSourceEof`] if the file ends inside a block or a page,
 /// [`FormatError::ValueTooLargeForPlatform`] if a block does not fit a `usize`, and the error of a
 /// failed read of a [`Source`](crate::source::Source). Returns the errors
 /// [`ExtensibleArrayHeaderLocator::parse`],
@@ -102,7 +102,7 @@ pub(crate) fn read_chunks(
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::UnexpectedEof`] if the file ends inside the header, the index block, or
+/// Returns [`FormatError::UnexpectedSourceEof`] if the file ends inside the header, the index block, or
 /// a super block, [`FormatError::ValueTooLargeForPlatform`] if the index block or a super block
 /// does not fit a `usize`, and the error of a failed read of a
 /// [`Source`](crate::source::Source). Returns the errors [`ExtensibleArrayHeaderLocator::parse`],
@@ -148,7 +148,7 @@ pub(crate) fn index_spans(
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::UnexpectedEof`] if the file ends inside the header, the error of a
+/// Returns [`FormatError::UnexpectedSourceEof`] if the file ends inside the header, the error of a
 /// failed read of a [`Source`](crate::source::Source), and the errors
 /// [`ExtensibleArrayHeaderLocator::parse`] returns.
 pub(crate) fn read_header(
@@ -516,9 +516,9 @@ mod tests {
         cut: Truncated,
     ) {
         let (bytes, end) = truncated(cut);
-        let expected = FormatError::UnexpectedEof {
-            expected: usize::try_from(end).unwrap(),
-            available: bytes.len(),
+        let expected = FormatError::UnexpectedSourceEof {
+            expected: end,
+            available: bytes.len().to_u64(),
         };
         assert_eq!(buffered_records(&bytes, 0).unwrap_err(), expected);
         assert_eq!(records(&PlacedSource::new(0, bytes)).unwrap_err(), expected);

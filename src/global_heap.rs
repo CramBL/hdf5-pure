@@ -143,7 +143,7 @@ impl Directory {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if the collection runs past the end of `source`, the
+    /// Returns [`FormatError::UnexpectedSourceEof`] if the collection runs past the end of `source`, the
     /// errors [`GlobalHeapCollectionLocator::parse`] and
     /// [`GlobalHeapWalk::parse`](hdf5_pure_format::__private::GlobalHeapWalk::parse) return, and
     /// the errors [`read`] returns.
@@ -174,7 +174,7 @@ impl Directory {
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::UnexpectedEof`] if the collection runs past the end of `source`, the
+/// Returns [`FormatError::UnexpectedSourceEof`] if the collection runs past the end of `source`, the
 /// errors [`GlobalHeapCollectionLocator::parse`] and
 /// [`GlobalHeapWalk::parse`](hdf5_pure_format::__private::GlobalHeapWalk::parse) return, and the
 /// errors [`read`] returns.
@@ -190,9 +190,9 @@ pub(crate) fn walk_collection(
     let collection = locator.parse(FileRegion::new(header_range, &header)?)?;
     let end = collection.range().end().get();
     if end > source.len() {
-        return Err(FormatError::UnexpectedEof {
-            expected: end.to_usize().unwrap_or(usize::MAX),
-            available: source.len().to_usize().unwrap_or(usize::MAX),
+        return Err(FormatError::UnexpectedSourceEof {
+            expected: end,
+            available: source.len(),
         });
     }
 

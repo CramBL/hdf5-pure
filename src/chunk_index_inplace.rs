@@ -1941,9 +1941,9 @@ mod tests {
         let available = header.len();
         (
             header,
-            FormatError::UnexpectedEof {
+            FormatError::UnexpectedSourceEof {
                 expected: 14 + (1 << 31),
-                available,
+                available: available.to_u64(),
             },
         )
     }

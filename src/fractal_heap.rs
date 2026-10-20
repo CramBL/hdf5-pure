@@ -8,7 +8,7 @@ use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use core::num::NonZeroU32;
 
-use hdf5_pure_core::__private::{FileRange, FileRegion};
+use hdf5_pure_core::__private::{FileRange, FileRegion, PhysicalAddress};
 use hdf5_pure_format::__private::BTREE_V2_HUGE_OBJECT;
 use hdf5_pure_format::__private::FractalHeapBlock;
 use hdf5_pure_format::__private::FractalHeapBlockFilters;
@@ -30,6 +30,7 @@ use crate::error::FormatError;
 use crate::filter_pipeline::FILTER_SHUFFLE;
 use crate::filters;
 use crate::filters::ChunkContext;
+use crate::source;
 use crate::source::Source;
 use crate::source::SourceMetadata;
 use crate::width::FormatWidths;
@@ -40,7 +41,7 @@ use crate::width::{LengthWidth, OffsetWidth};
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::UnexpectedEof`] if the image is truncated, and the address and header
+/// Returns [`FormatError::InsufficientRegion`] if the image is truncated, and the address and header
 /// parsing errors of [`read_header_from_source`].
 pub(crate) fn parse_header(
     bytes: &[u8],
@@ -57,27 +58,9 @@ pub(crate) fn parse_header(
     )?;
     let locator =
         FractalHeapHeaderLocator::new(addresses.resolve(address)?, widths.offsets, widths.lengths);
-    let prefix = buffered_region(image, locator.parse_range()?)?;
+    let prefix = image.subregion(locator.parse_range()?)?;
     let reference = locator.parse(prefix)?;
-    reference.parse(buffered_region(image, reference.parse_range())?)
-}
-
-fn buffered_region<'a>(
-    image: FileRegion<'a>,
-    range: FileRange,
-) -> Result<FileRegion<'a>, FormatError> {
-    if !image.range().contains(range) {
-        return Err(FormatError::UnexpectedEof {
-            expected: range
-                .end()
-                .get()
-                .saturating_sub(image.range().start().get())
-                .to_usize()
-                .unwrap_or(usize::MAX),
-            available: image.bytes().len(),
-        });
-    }
-    image.subregion(range)
+    reference.parse(image.subregion(reference.parse_range())?)
 }
 
 /// Reads a fractal heap header from a source using validated file widths.
@@ -192,18 +175,11 @@ pub(crate) fn decode_direct_block(
 
 /// Copy `len` bytes at `addr` out of an in-memory file image, bounds-checked.
 fn slice_object(file_data: &[u8], addr: u64, len: usize) -> Result<Vec<u8>, FormatError> {
-    let start = addr.to_usize()?;
-    let end = start.checked_add(len).ok_or(FormatError::OffsetOverflow {
-        offset: addr,
-        length: len as u64,
-    })?;
-    if end > file_data.len() {
-        return Err(FormatError::UnexpectedEof {
-            expected: end,
-            available: file_data.len(),
-        });
-    }
-    Ok(file_data[start..end].to_vec())
+    source::bytes_in(
+        file_data,
+        FileRange::new(PhysicalAddress::new(addr), len.to_u64())?,
+    )
+    .map(<[u8]>::to_vec)
 }
 
 /// Read `len` bytes at `addr` from a streaming source.
@@ -392,8 +368,10 @@ impl<'h> HeapObjectReader<'h> {
     /// # Errors
     ///
     /// Returns [`FormatError::HugeObjectNotFound`] if an indexed huge object is absent, and
-    /// [`FormatError::UnexpectedEof`] if a managed object has no allocated block or a required
-    /// file region is truncated. Returns the errors of decoding a filtered direct block, such as
+    /// [`FormatError::MissingFractalHeapBlock`] if a managed object has no allocated block.
+    /// Returns [`FormatError::InsufficientRegion`] if a managed object's required region extends
+    /// past the image, and [`FormatError::UnexpectedSourceEof`] if a huge object's data extends
+    /// past the image. Returns the errors of decoding a filtered direct block, such as
     /// [`FormatError::UnsupportedFilter`] if its pipeline has a filter without a decoder.
     /// Returns [`FormatError::ChunkedReadError`] if indirect-block traversal exceeds 64 levels,
     /// [`FormatError::ValueTooLargeForPlatform`] if a value does not fit the platform's address
@@ -545,8 +523,11 @@ impl<'h> HeapObjectReader<'h> {
             file_data,
         )?;
         self.read_managed_object_with(
-            |range| buffered_region(image, range).map(|region| Cow::Borrowed(region.bytes())),
-            file_data.len() as u64,
+            |range| {
+                image
+                    .subregion(range)
+                    .map(|region| Cow::Borrowed(region.bytes()))
+            },
             Backend::Buffered,
             heap_offset,
             object_length,
@@ -562,7 +543,6 @@ impl<'h> HeapObjectReader<'h> {
         let addresses = self.addresses;
         self.read_managed_object_with(
             |range| read_header_range(source, addresses, range).map(Cow::Owned),
-            source.len(),
             Backend::Streaming,
             heap_offset,
             object_length,
@@ -572,7 +552,6 @@ impl<'h> HeapObjectReader<'h> {
     fn read_managed_object_with<'bytes>(
         &mut self,
         read: impl Fn(FileRange) -> Result<Cow<'bytes, [u8]>, FormatError>,
-        source_len: u64,
         backend: Backend,
         heap_offset: u64,
         object_length: u64,
@@ -586,9 +565,9 @@ impl<'h> HeapObjectReader<'h> {
             "validated direct blocks belong to the backend that supplied their bytes"
         );
         let blocks = self.layout.as_ref().map_err(Clone::clone)?;
-        let mut block = blocks.root()?.ok_or(FormatError::UnexpectedEof {
-            expected: 1,
-            available: 0,
+        let mut block = blocks.root()?.ok_or(FormatError::MissingFractalHeapBlock {
+            heap_offset,
+            object_length,
         })?;
         for _depth in 0..64 {
             match block {
@@ -658,11 +637,9 @@ impl<'h> HeapObjectReader<'h> {
                             break;
                         }
                     }
-                    block = selected.ok_or(FormatError::UnexpectedEof {
-                        expected: heap_offset
-                            .to_usize()?
-                            .saturating_add(object_length.to_usize()?),
-                        available: source_len.to_usize().unwrap_or(usize::MAX),
+                    block = selected.ok_or(FormatError::MissingFractalHeapBlock {
+                        heap_offset,
+                        object_length,
                     })?;
                 }
             }
@@ -779,9 +756,9 @@ mod tests {
                 FORMAT_WIDTHS,
             )
             .unwrap_err(),
-            FormatError::UnexpectedEof {
-                expected,
-                available
+            FormatError::UnexpectedSourceEof {
+                expected: expected.to_u64(),
+                available: available.to_u64()
             }
         );
     }
@@ -903,9 +880,9 @@ mod tests {
             )
             .read_from_source(&source, parse_id(&header, &id))
             .unwrap_err(),
-            FormatError::UnexpectedEof {
-                expected: range.end().get() as usize,
-                available: supplied.end().get() as usize
+            FormatError::UnexpectedSourceEof {
+                expected: range.end().get(),
+                available: supplied.end().get()
             }
         );
     }
@@ -992,6 +969,45 @@ mod tests {
         .read(&file_data, parse_id(&hdr, &id))
         .unwrap();
         assert_eq!(&obj, b"Hello, World!");
+    }
+
+    #[rstest]
+    #[case::missing_root(false)]
+    #[case::missing_child(true)]
+    fn a_managed_object_without_a_block_reports_its_heap_coordinates(
+        #[case] indirect: bool,
+        #[values(false, true)] streaming: bool,
+    ) {
+        let mut heap = FilteredHeap::new(
+            true,
+            FilterPipeline {
+                version: PIPELINE_VERSION_TWO,
+                filters: Vec::new(),
+            },
+            |_block| {},
+        );
+        if !indirect {
+            heap.header.root_block_address = StoredAddress::undefined(OffsetWidth::Eight);
+            heap.header.current_rows_in_root_indirect_block = 0;
+        }
+        let mut reader = heap.reader(AccessMode::ReadOnly);
+        let error = if streaming {
+            reader.read_managed_object_from_source(&BytesSource::new(&heap.image), 15, 3)
+        } else {
+            reader.read_managed_object(&heap.image, 15, 3)
+        }
+        .unwrap_err();
+        assert_eq!(
+            error,
+            FormatError::MissingFractalHeapBlock {
+                heap_offset: 15,
+                object_length: 3
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "no allocated fractal heap block contains object at heap offset 15 with length 3"
+        );
     }
 
     #[cfg(feature = "std")]

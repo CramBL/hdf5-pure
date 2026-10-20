@@ -36,7 +36,7 @@ pub(crate) struct LocatedSuperblock {
 /// # Errors
 ///
 /// Returns [`FormatError::SignatureNotFound`] if the signature is absent from every candidate
-/// address, and [`FormatError::UnexpectedEof`] if `file` ends inside the
+/// address, and [`FormatError::UnexpectedSourceEof`] if `file` ends inside the
 /// [`SuperblockLocator::CANDIDATE_LEN`] bytes at the signature or inside the superblock. Its
 /// `expected` field is the position in `file` the read needs to reach, and `available` the length
 /// of `file`. Returns [`FormatError::UnsupportedVersion`] if the version is above 3,
@@ -96,7 +96,7 @@ pub(crate) trait SuperblockSource: RangeReader {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if the file ends before `offset + buf.len()`, and
+    /// Returns [`FormatError::UnexpectedSourceEof`] if the file ends before `offset + buf.len()`, and
     /// the error of a failed read of a [`Source`].
     fn read_candidate(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError>;
 }
@@ -263,9 +263,9 @@ mod tests {
         image.truncate(len);
         assert_eq!(
             reader.read(&image).err(),
-            Some(FormatError::UnexpectedEof {
-                expected,
-                available: len,
+            Some(FormatError::UnexpectedSourceEof {
+                expected: expected.to_u64(),
+                available: len.to_u64(),
             })
         );
         assert_eq!(

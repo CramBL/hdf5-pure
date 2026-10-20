@@ -914,7 +914,7 @@ mod tests {
             &references(&[(1, 5)]),
             8,
             BaseAddress::ZERO,
-            Err(FormatError::UnexpectedEof {
+            Err(FormatError::UnexpectedSourceEof {
                 expected: 4608,
                 available: 4600,
             }),
