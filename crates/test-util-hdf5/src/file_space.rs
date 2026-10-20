@@ -23,7 +23,7 @@ use crate::dataset::Unlimited;
 
 /// Returns the total zero-padding length of the persisted free-space section lists.
 ///
-/// Requires a file without a userblock and equal used and allocated lengths for each list.
+/// Requires equal used and allocated lengths for each list.
 /// Compares the section records with their shortest serialization and checks the padding bytes.
 ///
 /// # Panics
@@ -33,32 +33,34 @@ pub fn serialized_manager_padding(path: &Path) -> u64 {
     let bytes = std::fs::read(path).unwrap();
     let file = File::open(path).unwrap();
     let superblock = file.superblock();
-    assert!(superblock.base_address.is_zero());
+    let base = superblock.base_address;
+    let info = file.file_space_info().unwrap();
     let widths = FormatWidths::from_sizes(superblock.offset_size, superblock.length_size).unwrap();
-    file.file_space_info()
-        .unwrap()
-        .manager_addrs
+    info.manager_addrs
         .iter()
-        .filter_map(|&addr| match addr {
-            hdf5_pure::DecodedStoredAddress::Defined(stored) => Some(stored),
+        .enumerate()
+        .filter_map(|(slot, &addr)| match addr {
+            hdf5_pure::DecodedStoredAddress::Defined(stored) => Some((slot, stored)),
             hdf5_pure::DecodedStoredAddress::Undefined => None,
         })
-        .map(|stored| {
-            let at = usize::try_from(stored.get()).unwrap();
+        .map(|(slot, stored)| {
+            let at = usize::try_from(base.absolute(stored).unwrap()).unwrap();
             let header = FreeSpaceManagerHeader::parse(widths, &bytes[at..]).unwrap();
             let list_addr = header.section_list_addr();
-            let start = usize::try_from(list_addr.get()).unwrap();
+            let start = usize::try_from(base.absolute(list_addr).unwrap()).unwrap();
             let used = usize::try_from(header.section_list_used()).unwrap();
             let list = &bytes[start..start + used];
             let sections = format::parse_section_info(widths, list, stored, &header).unwrap();
-            let (_, minimal) = format::serialize_free_space_manager(
-                widths,
-                &sections,
-                stored,
-                list_addr,
-                format::SECTION_CLASS_SIMPLE,
-            )
-            .unwrap();
+            let class = match (info.strategy, slot) {
+                (FileSpaceStrategy::Page, PAGE_SMALL_METADATA_SLOT | PAGE_SMALL_RAW_SLOT) => {
+                    format::SECTION_CLASS_SMALL
+                }
+                (FileSpaceStrategy::Page, PAGE_GENERIC_LARGE_SLOT) => format::SECTION_CLASS_LARGE,
+                _ => format::SECTION_CLASS_SIMPLE,
+            };
+            let (_, minimal) =
+                format::serialize_free_space_manager(widths, &sections, stored, list_addr, class)
+                    .unwrap();
             assert_eq!(header.section_list_used(), header.section_list_allocated());
             let records_end = minimal.len() - SECTION_LIST_CHECKSUM_LEN;
             assert_eq!(&list[..records_end], &minimal[..records_end]);
@@ -71,6 +73,13 @@ pub fn serialized_manager_padding(path: &Path) -> u64 {
         })
         .sum()
 }
+
+// `H5O__fsinfo_encode` in `H5Ofsinfo.c`, HDF5 2.2.0, writes the `H5F_MEM_PAGE_META` address first.
+const PAGE_SMALL_METADATA_SLOT: usize = 0;
+// `H5O__fsinfo_encode` in `H5Ofsinfo.c`, HDF5 2.2.0, writes the `H5F_MEM_PAGE_DRAW` address third.
+const PAGE_SMALL_RAW_SLOT: usize = 2;
+// `H5O__fsinfo_encode` in `H5Ofsinfo.c`, HDF5 2.2.0, writes the `H5F_MEM_PAGE_GENERIC` address seventh.
+const PAGE_GENERIC_LARGE_SLOT: usize = 6;
 
 /// The checksum length of a version 0 section list, defined in "Free-space Index" of the
 /// [format specification, version 4.0][spec].

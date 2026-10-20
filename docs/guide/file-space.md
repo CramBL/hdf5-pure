@@ -122,7 +122,7 @@ b.write(&path)?;
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
-With persistence enabled, [`File::open_rw`](crate::File::open_rw) supports staged commits and immediate appends on eligible PAGE files. Commits and clean close rewrite the per-page-type managers. Both write paths keep metadata and raw pages separate and page-align the end of allocation.
+With persistence enabled, [`File::open_rw`](crate::File::open_rw) supports staged commits and immediate appends on eligible PAGE files. Commits and clean close rewrite the per-page-type managers, including the known free remainder of newly allocated manager pages. Reopening recovers the final persisted sections. Held append reserves remain excluded until released. Both write paths keep metadata and raw pages separate and page-align the end of allocation.
 
 With persistence disabled, staged edits require the whole-file mirror. [`MemoryStrategy::Auto`](crate::MemoryStrategy::Auto) selects it, and explicit bounded editing is rejected. New allocations begin at or beyond the first page boundary covering both the original stored EOA and the physical extent converted relative to the effective base. The editor leaves old allocations, apparent holes, and page tails unavailable. Freed extents are discarded without reuse or truncation. Reopening repeats this policy with an empty reusable-space state. The editor preserves `PAGE, persist = false` in the File Space Info message and keeps the manager address list empty.
 

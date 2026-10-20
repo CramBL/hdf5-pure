@@ -14,9 +14,9 @@ Step 1: Create group "g0"
   Live metadata              383        439         56
   Live metadata              439        579        140
   Free-space managers        579        661         82
-  Free-space managers        661        714         53
+  Free-space managers        661       1020        359
   Reusable free space         48        344        296
-  Reusable free space        714       4096       3382
+  Reusable free space       1020       4096       3076
   No extents: Userblock, Live raw data, Unclassified, Trailing slack
 
 Step 2: Create group "g1"
@@ -26,12 +26,12 @@ Step 2: Create group "g1"
   Live metadata               48         87         39
   Live metadata               87        160         73
   Live metadata              344        383         39
-  Live metadata              714        854        140
-  Free-space managers        854        936         82
-  Free-space managers        936       1007         71
+  Live metadata             1020       1160        140
+  Free-space managers       1160       1242         82
+  Free-space managers       1242       1583        341
   Reusable free space        160        344        184
-  Reusable free space        383        714        331
-  Reusable free space       1007       4096       3089
+  Reusable free space        383       1020        637
+  Reusable free space       1583       4096       2513
   No extents: Userblock, Live raw data, Unclassified, Trailing slack
 
 Step 3: Create group "g2"
@@ -44,10 +44,10 @@ Step 3: Create group "g2"
   Live metadata              344        383         39
   Live metadata              383        523        140
   Free-space managers        523        605         82
-  Free-space managers        605        676         71
+  Free-space managers        605        964        359
   Reusable free space         87        160         73
   Reusable free space        289        344         55
-  Reusable free space        676       4096       3420
+  Reusable free space        964       4096       3132
   No extents: Userblock, Live raw data, Unclassified, Trailing slack
 
 Step 4: Create group "g3"
@@ -58,15 +58,15 @@ Step 4: Create group "g3"
   Live metadata              160        199         39
   Live metadata              289        328         39
   Live metadata              344        383         39
-  Live metadata              676        783        107
-  Live metadata              783        923        140
-  Free-space managers        923       1005         82
-  Free-space managers       1005       1112        107
+  Live metadata              964       1071        107
+  Live metadata             1071       1211        140
+  Free-space managers       1211       1293         82
+  Free-space managers       1293       1652        359
   Reusable free space         87        160         73
   Reusable free space        199        289         90
   Reusable free space        328        344         16
-  Reusable free space        383        676        293
-  Reusable free space       1112       4096       2984
+  Reusable free space        383        964        581
+  Reusable free space       1652       4096       2444
   No extents: Userblock, Live raw data, Unclassified, Trailing slack
 
 Step 5: Create group "g4"
@@ -79,14 +79,14 @@ Step 5: Create group "g4"
   Live metadata              289        328         39
   Live metadata              344        383         39
   Live metadata              383        507        124
-  Live metadata             1112       1252        140
-  Free-space managers       1252       1334         82
-  Free-space managers       1334       1441        107
+  Live metadata             1652       1792        140
+  Free-space managers       1792       1874         82
+  Free-space managers       1874       2269        395
   Reusable free space        126        160         34
   Reusable free space        199        289         90
   Reusable free space        328        344         16
-  Reusable free space        507       1112        605
-  Reusable free space       1441       4096       2655
+  Reusable free space        507       1652       1145
+  Reusable free space       2269       4096       1827
   No extents: Userblock, Live raw data, Unclassified, Trailing slack
 
 Step 6: Create group "g5"
@@ -102,10 +102,10 @@ Step 6: Create group "g5"
   Live metadata              507        648        141
   Live metadata              648        788        140
   Free-space managers        788        870         82
-  Free-space managers        870        977        107
+  Free-space managers        870       1265        395
   Reusable free space        126        160         34
   Reusable free space        238        289         51
   Reusable free space        328        344         16
   Reusable free space        383        507        124
-  Reusable free space        977       4096       3119
+  Reusable free space       1265       4096       2831
   No extents: Userblock, Live raw data, Unclassified, Trailing slack

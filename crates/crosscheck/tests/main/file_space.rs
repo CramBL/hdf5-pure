@@ -59,6 +59,149 @@ use test_util_hdf5::paged;
 use test_util_hdf5::session;
 use test_util_hdf5::userblock;
 
+#[rstest]
+#[case::rust_small(false, 512, 0, 1)]
+#[case::c_small(true, 512, 0, 1)]
+#[case::rust_default(false, 4_096, 0, 1)]
+#[case::c_threshold(true, 4_096, 0, 8_193)]
+#[case::rust_userblock(false, 8_192, 8_192, 1)]
+#[case::c_userblock(true, 8_192, 8_192, 1)]
+fn paged_manager_capacity_survives_reference_library_mutation(
+    #[case] c_created: bool,
+    #[case] page: u64,
+    #[case] base: u64,
+    #[case] threshold: u64,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("manager_capacity.h5");
+    let raw = vec![3u8; usize::try_from(2 * page).unwrap()];
+    if c_created {
+        let file = hdf5::FileBuilder::new()
+            .with_fapl(|fapl| fapl.libver_v110())
+            .with_fcpl(|fcpl| {
+                fcpl.file_space_strategy(CStrategy::FreeSpaceManager {
+                    paged: true,
+                    persist: true,
+                    threshold,
+                })
+                .file_space_page_size(page)
+                .userblock(base)
+            })
+            .create(&path)
+            .unwrap();
+        file.new_dataset::<u8>()
+            .shape([100])
+            .create("keep")
+            .unwrap()
+            .write_raw(&[7u8; 100])
+            .unwrap();
+        file.new_dataset::<u8>()
+            .shape([raw.len()])
+            .create("victim")
+            .unwrap()
+            .write_raw(&raw)
+            .unwrap();
+        file.new_dataset::<u8>()
+            .shape([100])
+            .create("ceiling")
+            .unwrap()
+            .write_raw(&[5u8; 100])
+            .unwrap();
+        file.close().unwrap();
+    } else {
+        let mut builder = FileBuilder::new();
+        builder
+            .with_file_space_strategy(FileSpaceStrategy::Page, true, threshold)
+            .with_file_space_page_size(page)
+            .with_userblock(base);
+        builder.create_dataset("keep").with_u8_data(&[7; 100]);
+        builder.create_dataset("victim").with_u8_data(&raw);
+        builder.create_dataset("ceiling").with_u8_data(&[5; 100]);
+        builder.write(&path).unwrap();
+    }
+    let userblock = Userblock::read(&path, usize::try_from(base).unwrap());
+    let file = File::open_rw(&path).unwrap();
+    file.root().delete("victim").unwrap();
+    file.root()
+        .create_dataset("added", |builder| {
+            builder.with_u8_data(&[9; 100]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    for generation in 0..3 {
+        file.root()
+            .set_attr("generation", AttrValue::I64(generation))
+            .unwrap();
+        file.commit().unwrap();
+        let ownership = file.__space_ownership().unwrap();
+        assert!(ownership.analysis_complete);
+        for &(at, len) in ownership
+            .free_space_manager_space
+            .iter()
+            .chain(&ownership.live_metadata_space)
+        {
+            assert!(
+                ownership
+                    .reusable_free_space
+                    .iter()
+                    .all(|&(free, size)| at + len <= free || free + size <= at)
+            );
+        }
+    }
+    let reusable = file.space_accounting().unwrap().reusable_free_space;
+    file.close().unwrap();
+    assert!(file_space::serialized_manager_padding(&path) > 0);
+    let total: u64 = reusable.iter().map(|&(_, len)| len).sum();
+    let file = hdf5::File::open_rw(&path).unwrap();
+    assert_eq!(file.free_space(), total);
+    assert_eq!(
+        file.dataset("keep").unwrap().read_raw::<u8>().unwrap(),
+        [7; 100]
+    );
+    assert_eq!(
+        file.dataset("added").unwrap().read_raw::<u8>().unwrap(),
+        [9; 100]
+    );
+    assert_eq!(
+        file.dataset("ceiling").unwrap().read_raw::<u8>().unwrap(),
+        [5; 100]
+    );
+    absence::assert_libhdf5_absent(&file.dataset("victim").unwrap_err(), "victim");
+    file.dataset("keep")
+        .unwrap()
+        .write_raw(&[11u8; 100])
+        .unwrap();
+    let added = file
+        .new_dataset::<u8>()
+        .shape([100])
+        .create("c_added")
+        .unwrap();
+    added.write_raw(&[13u8; 100]).unwrap();
+    let allocation = file_space::libhdf5_contiguous_extent(&added);
+    assert_eq!(range::covered_len(&reusable, &allocation), 100);
+    drop(added);
+    file.close().unwrap();
+    userblock.assert_unchanged(&path);
+    let file = File::open_rw(&path).unwrap();
+    assert_eq!(file.dataset("keep").unwrap().read_u8().unwrap(), [11; 100]);
+    assert_eq!(file.dataset("added").unwrap().read_u8().unwrap(), [9; 100]);
+    assert_eq!(
+        file.dataset("ceiling").unwrap().read_u8().unwrap(),
+        [5; 100]
+    );
+    assert_eq!(
+        file.dataset("c_added").unwrap().read_u8().unwrap(),
+        [13; 100]
+    );
+    assert!(file.__space_ownership().unwrap().analysis_complete);
+    assert_eq!(
+        file.file_space_info().unwrap().strategy,
+        FileSpaceStrategy::Page
+    );
+    assert!(file.file_space_info().unwrap().persist);
+    file.close().unwrap();
+}
+
 #[derive(Clone, Copy, Debug)]
 enum HeaderReclamation {
     DeleteDataset,

@@ -194,13 +194,6 @@ pub(crate) struct ManagerPlan {
     pub(crate) end_of_managers: StoredAddress,
 }
 
-impl ManagerPlan {
-    /// Returns `true` when there is no free space to record.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.blocks.is_empty()
-    }
-}
-
 /// Places `managers` contiguously from `start` using their HDF5 wire slots and section classes.
 ///
 /// The semantic manager set decides which extents belong together. This adapter alone translates

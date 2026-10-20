@@ -1470,13 +1470,26 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
     // Three commits that change nothing but one attribute and the tail the commit
     // has to rewrite regardless.
     for i in 0..3 {
-        let before: Vec<(u64, u64)> = File::open(&path).unwrap().persisted_free_space().unwrap();
+        let (before, before_capacity) = {
+            let file = File::open_rw(&path).unwrap();
+            let capacity: u64 = file
+                .__space_ownership()
+                .unwrap()
+                .free_space_manager_space
+                .iter()
+                .map(|&(_, len)| len)
+                .sum();
+            (
+                file.space_accounting().unwrap().reusable_free_space,
+                capacity,
+            )
+        };
         let f = File::open_rw(&path).unwrap();
         f.root().set_attr("n", AttrValue::I64(i)).unwrap();
         f.commit().unwrap();
         drop(f);
 
-        let f = File::open(&path).unwrap();
+        let f = File::open_rw(&path).unwrap();
         let managers: Vec<u64> = f
             .file_space_info()
             .expect("a persisting file records its managers")
@@ -1504,21 +1517,25 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
             start_len,
             "commit {i}: rewriting the tail must not grow the file"
         );
-        // Once the tail is reusing rather than appending, a commit that rewrites
-        // only the tail neither gains nor loses free space: the new tail takes
-        // exactly what the old one gives back. A commit that took more room than
-        // it filled would show up here as free space quietly draining away, which
-        // is the same leak in miniature.
+        // Free bytes plus complete manager capacity stay constant when the file does not grow.
         if i > 0 {
             let before_total: u64 = before.iter().map(|(_, len)| len).sum();
             let after_total: u64 = f
-                .persisted_free_space()
+                .space_accounting()
                 .unwrap()
+                .reusable_free_space
                 .iter()
                 .map(|(_, len)| len)
                 .sum();
             assert_eq!(
-                after_total, before_total,
+                after_total
+                    + f.__space_ownership()
+                        .unwrap()
+                        .free_space_manager_space
+                        .iter()
+                        .map(|&(_, len)| len)
+                        .sum::<u64>(),
+                before_total + before_capacity,
                 "commit {i}: rewriting the tail must conserve free space"
             );
         }

@@ -308,7 +308,7 @@ use hdf5_pure_space::__private as free_space;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::{
     Extent as FreeExtent, FreeClass, FreeList, ManagerKind, ManagerSections, PageTransition,
-    PageType, PagedPostFree, SessionSpace, SessionSpaceSnapshot, TrackedSpace,
+    PageType, SessionSpace, SessionSpaceSnapshot,
 };
 
 use crate::DatatypeByteOrder;
@@ -345,8 +345,8 @@ use crate::file_writer::{
 use crate::fill_value::FillPattern;
 use crate::filter_pipeline::FilterPipeline;
 use crate::filters::{self, ChunkContext, FilterScratch};
+use crate::free_space_manager;
 use crate::free_space_manager::PersistedSections;
-use crate::free_space_manager::{self, ManagerPlan};
 use crate::group_v1;
 use crate::group_v2;
 use crate::image::{FileImage, HandleImage, MirrorImage, WriteBuffering};
@@ -380,6 +380,9 @@ mod global_heap_liveness;
 mod page_feasibility;
 #[cfg(test)]
 mod page_header_reclamation;
+#[cfg(test)]
+mod page_manager_tail;
+mod paged_persistence;
 mod reclaim;
 
 pub use global_heap_liveness::GlobalHeapLiveness;
@@ -7331,7 +7334,7 @@ impl WriteEngine {
     /// Those regions and blocks are dead once the superblock is repointed.
     ///
     /// Returned as a temporary rather than folded into the session, for the reason
-    /// [`paged_post_free`](Self::paged_post_free) does the same: every region
+    /// [`SessionSpace::paged_post_free`] does the same: every region
     /// gathered here is still *live* until that repoint, and everything in between
     /// can fail, so a session that believed them free after a failed commit would
     /// hand them out over the objects still occupying them.
@@ -7363,26 +7366,9 @@ impl WriteEngine {
     /// less the dropped regions that reach it and what [`release_trailing_run`] releases of the
     /// free space below them, and that of an appended tail is `current_eoa`.
     ///
-    /// The reservation and the length define each other, exactly as they do for the
-    /// paged tail ([`tail_layout`](Self::tail_layout)): drawing bytes out of the
-    /// free list changes the very sections the manager blocks record, and a
-    /// different section set is a different length. This proposes a length, sizes
-    /// the blocks against the list as it stands once that length is taken, and
-    /// accepts any plan that *fits*. A longer plan is refused — it would write past
-    /// the reservation into live bytes — and the proposal becomes the length that
-    /// plan asked for, which is the natural next candidate.
-    ///
-    /// A plan **shorter** than its reservation is accepted, and the reservation
-    /// rather than the plan is what the tail extent covers, so those spare bytes
-    /// are freed with the rest of the tail when the next commit supersedes it.
-    /// Rejecting them instead is what the paged tail does, and it can afford to:
-    /// its fallback is a fresh page, recorded in full. Here the fallback is
-    /// end-of-file, and the two lengths genuinely need not meet — best fit picks a
-    /// different hole as the proposal crosses a hole's size, and the pair can
-    /// oscillate by one section record indefinitely. Measured on the workload
-    /// `persisting_churn_reaches_a_steady_size` runs, insisting on an exact fit sent
-    /// about one commit in eight to end-of-file, which is the growth this exists to
-    /// stop.
+    /// Reserves a proposed length before measuring the managers for the remaining free sections.
+    /// Accepts a plan that fits within the reservation and retries with a larger length otherwise.
+    /// Spare capacity belongs to the manager allocation and is reclaimed when it is superseded.
     ///
     /// The writer records spare reservation bytes in the section list's allocated length and
     /// fills them with zeros. On reopen, the reader recovers the complete allocation for
@@ -7412,7 +7398,7 @@ impl WriteEngine {
     /// from [`space`](Self::space) has once the repoint lands. Session space is tried first, so an
     /// ordinary hole is spent before the append's own space. Best fit within
     /// the reserve then takes its smallest run, leaving the largest for the
-    /// append that drew it. The paged tail ([`tail_layout`](Self::tail_layout))
+    /// append that drew it. The paged tail
     /// has no such fallback: it opens a page when nothing fits, and
     /// `paged_group_churn_with_populated_datasets_reaches_a_steady_size` holds it
     /// to not doing so once per draw.
@@ -7510,29 +7496,22 @@ impl WriteEngine {
         Some(allocation)
     }
 
-    /// Commit tail for a genuine paged file (`H5F_FSPACE_STRATEGY_PAGE`, issue
-    /// #198). The paged counterpart of [`commit_persisting`](Self::commit_persisting).
+    /// Publishes the root, extension, and final per-class free sections of a persistent PAGE edit.
     ///
-    /// Two things differ from the flat tail. Free space is recorded in *per-page-type*
-    /// managers — SUPER (slot 0) for metadata, DRAW (slot 2) for small raw, and the
-    /// generic-large manager (slot 6) for whole free pages and large-raw fragments —
-    /// rather than one generic manager, so a paged file reopened by the reference
-    /// library still finds its free space segregated. And the file is padded to a
-    /// page before the tail is laid down, so the end-of-allocation stays a whole
-    /// number of pages, matching the paged file the from-scratch writer produces.
+    /// Plans the complete metadata reservation before writing. The serialized managers and the
+    /// adopted session state include the same page tails and exclude the complete reservation,
+    /// including owned section-list padding. Placement uses appended pages or space already free
+    /// before this publication. Pending object frees and superseded managers cannot fund it.
     ///
-    /// The tail itself is placed like any other run of metadata, in free space
-    /// where some fits ([`tail_layout`](Self::tail_layout)), and only opens a page
-    /// at end-of-file when none does. It used to always append into a page of its
-    /// own and pad the remainder out untracked, which cost a page per commit and
-    /// recorded none of it — a paged file under delete-and-recreate churn grew
-    /// without bound while reporting a fraction of that as reusable (issue #286).
-    /// The reference library does not page-align these blocks either: its manager
-    /// headers sit at whatever offset within a metadata page they are allocated at.
+    /// Writes the planned blocks before publishing their addresses in the superblock. Publishes
+    /// a smaller EOA before truncating the file, and adopts the planned state after publication
+    /// and any truncation succeed.
     ///
-    /// Crash atomicity is identical to the flat path: the tail is either past the
-    /// live file or inside space an earlier commit freed, and is unreferenced
-    /// either way until the superblock repoint, which is the linearization point.
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if the persistent extension cannot be updated,
+    /// a format error if planning or serialization fails, or an I/O error if writing,
+    /// synchronization, or truncation fails.
     fn commit_persisting_paged(
         &mut self,
         new_root: u64,
@@ -7586,108 +7565,65 @@ impl WriteEngine {
             build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &placeholder)?)?
                 .len() as u64;
 
-        // Place the tail — the rewritten extension and the manager blocks — as an
-        // ordinary run of metadata, in a hole an *earlier* commit freed where one
-        // fits. That is what stops a file under delete-and-recreate churn from
-        // growing: every commit frees its predecessor's tail exactly, so in the
-        // steady state a tail lands in a hole an earlier one vacated — the one two
-        // commits back, since a tail is freed into `pg`'s lists only at the repoint
-        // that follows its successor — and the file never has to open a page for it
-        // (issue #286). A superseded tail shorter than the threshold is recorded only
-        // where it merges into free space, so under a threshold longer than the tail a
-        // commit may open a page for its own tail. `pg`'s lists hold only
-        // durable free space — this commit's own frees stay in `to_free` until the
-        // repoint — so the bytes overwritten are already unreachable from the
-        // on-disk root, the guarantee [`reserve`](Self::reserve) relies on.
-        //
-        // The tail is sized from the very lists it draws on, so its length and its
-        // placement define each other: reserving space removes sections, and fewer
-        // sections need fewer bytes to record. `tail_layout` settles that by
-        // proposing a length, planning against it, and accepting the proposal only
-        // when the plan comes out exactly that long — no shorter, which would leave
-        // untracked bytes inside the reservation, and no longer, which would run
-        // past it into whatever lives next. A few rounds settle it; a proposal that
-        // will not converge falls through to the append below, which has no length
-        // to satisfy.
         let current_eoa = self.end_of_allocation()?.get();
-        let placed = self.tail_layout(
+        let freed: Vec<_> = to_free
+            .iter()
+            .filter_map(|&(addr, len, class)| {
+                FreeExtent::new(addr.get(), len).map(|extent| (extent, class))
+            })
+            .collect();
+        let Some(plan) = paged_persistence::PagedPersistencePlan::new(
+            &self.space,
             current_eoa,
-            &to_free,
+            &freed,
             &old_blocks,
             ext_len,
-            page_size,
             widths,
-        );
-        if placed.is_none() && placement == TailPlacement::ReuseOnly {
-            // As on the flat path: the shrink pass opens no page of its own.
+            placement == TailPlacement::ReuseOnly,
+        )?
+        else {
             return Ok(());
-        }
-        let reused = placed.is_some();
-        let (post, plan, ext_addr, blocks_len, eoa) = match placed {
-            Some(layout) => layout,
-            None => {
-                // Nothing fits: open a metadata page at end-of-file. `pad_to_page`
-                // above already left the file page-aligned, so this only records the
-                // tail page's type. No trailing run is released here — whatever
-                // free space reaches end-of-file was too small for the tail, and
-                // stays recorded below it.
-                self.begin_page(PageType::Meta)?;
-                let at = self.end_of_allocation()?.get();
-                let (mut post, eoa) = self.paged_post_free(at, &to_free, &old_blocks);
-                // The tail lands above the dropped whole pages that end the file, so they stay
-                // in it and are tracked as free pages.
-                if let Some(extent) = FreeExtent::new(eoa, at - eoa) {
-                    post.track(extent, PageType::Raw.into());
-                }
-                let sections = post.sections();
-                let managers = ManagerSections::paged(&sections, page_size);
-                let plan = free_space_manager::plan_managers(
-                    &managers,
-                    StoredAddress::new(at).offset(ext_len),
-                    widths,
-                );
-                let blocks_len = plan.end_of_managers.get().max(at + ext_len) - at;
-                (post, plan, at, blocks_len, at)
+        };
+        let paged_persistence::PagedPersistencePlan {
+            tail,
+            slots,
+            blocks,
+        } = plan;
+        let ext_addr = tail.allocation.start();
+        let blocks_len = tail.allocation.len();
+        let final_eoa = tail.final_eoa;
+        let reused = !tail.appended;
+        if reused {
+            let reserved = self.space.allocate(blocks_len, AllocationClass::Metadata);
+            if reserved != Some(tail.allocation) {
+                return Err(FormatError::Internal(
+                    "a PAGE tail reservation differs from its pure plan".into(),
+                )
+                .into());
             }
-        };
-        let final_eoa = if reused {
-            // The tail landed inside the file; the end-of-allocation is where this
-            // commit's appends left it — page-aligned by `pad_to_page`, less the
-            // whole pages of free space reaching it, which `post` no longer
-            // records and the truncation below gives back (issue #418).
-            eoa
         } else {
-            free_space_manager::align_up(ext_addr + blocks_len, page_size)
-        };
-        debug_assert!(
-            ext_addr + blocks_len <= final_eoa,
-            "the tail must end at or below the end-of-allocation it was placed under"
-        );
+            self.begin_page(PageType::Meta)?;
+        }
         let final_eof = self.addresses.resolve(StoredAddress::new(final_eoa))?;
 
-        let ext_oh = if plan.is_empty() {
-            // No free space to track: an empty persist message, recording the final end of
-            // allocation as libhdf5 does when it allocates no managers.
-            let info = file_space_info::persistent_empty(
+        let info = if blocks.is_empty() {
+            file_space_info::persistent_empty(
                 offset_width,
                 strategy,
                 threshold,
                 page_size,
                 final_eoa,
-            );
-            build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &info)?)?
+            )
         } else {
-            // Paged convention (matching the from-scratch writer): the managers are
-            // ordinary metadata below a page-aligned end-of-allocation.
-            let info = file_space_info::persistent_managers(
+            file_space_info::persistent_managers(
                 strategy,
                 threshold,
                 page_size,
-                plan.slots.map(StoredAddress::get),
+                slots.map(StoredAddress::get),
                 final_eoa,
-            );
-            build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &info)?)?
+            )
         };
+        let ext_oh = build_v2_object_header(&self.rewrite_extension_region(old_ext_addr, &info)?)?;
         debug_assert_eq!(
             ext_oh.len() as u64,
             ext_len,
@@ -7710,16 +7646,9 @@ impl WriteEngine {
         // repoint below.
         let region = (ext_addr, blocks_len);
         self.write_tail_block(region, StoredAddress::new(ext_addr), &ext_oh)?;
-        for b in &plan.blocks {
-            let (fshd, fsse) = hdf5_pure_format::__private::serialize_free_space_manager(
-                widths,
-                &b.sections,
-                b.fshd_addr,
-                b.fsse_addr,
-                b.class,
-            )?;
-            self.write_tail_block(region, b.fshd_addr, &fshd)?;
-            self.write_tail_block(region, b.fsse_addr, &fsse)?;
+        for block in &blocks {
+            self.write_tail_block(region, block.header_address, &block.header)?;
+            self.write_tail_block(region, block.section_list_address, &block.section_list)?;
         }
         // An appended tail ends mid-page; pad it out, so the end-of-allocation stays
         // a whole number of pages. A reused tail is already inside the file, and
@@ -7760,25 +7689,7 @@ impl WriteEngine {
         // genuinely free, so adopt the lists built above and drop the padding tails
         // they already account for. The blocks just written become the ones the next
         // commit supersedes.
-        let appended_tail = if reused {
-            None
-        } else {
-            let tail_end = ext_addr.checked_add(blocks_len).ok_or(Error::Format(
-                FormatError::OffsetOverflow {
-                    offset: ext_addr,
-                    length: blocks_len,
-                },
-            ))?;
-            let tail_len =
-                final_eoa
-                    .checked_sub(tail_end)
-                    .ok_or(Error::Format(FormatError::Internal(
-                        "free-space manager tail ends beyond the end of allocation".into(),
-                    )))?;
-            FreeExtent::new(tail_end, tail_len)
-        };
-        self.space
-            .adopt_paged_post_free(post, !reused, appended_tail);
+        self.space.adopt_paged_post_free(tail.post, !reused, None);
         self.persist = Some(PersistState {
             strategy,
             threshold,
@@ -7802,129 +7713,6 @@ impl WriteEngine {
             self.space.record_page_padding(transition);
         }
         Ok(())
-    }
-
-    /// Returns the free lists a paged commit is about to persist, and `eof` less the
-    /// dropped pages that end it.
-    ///
-    /// The lists are the session's durable lists plus the page-padding tails this
-    /// commit's appends left behind, whatever their length, and each of the regions
-    /// this commit vacated and of the superseded extension and manager blocks that
-    /// [`SessionSpace::paged_post_free`] admits using the session threshold. The blocks are
-    /// metadata, and they and the regions are dead once the superblock is repointed.
-    ///
-    /// Every page the result leaves wholly empty is promoted to a free page before
-    /// it is returned (whole-page promotion), so the managers
-    /// this commit writes already describe it. Deferring the promotion to the
-    /// repoint would leave the session holding free space its own on-disk record
-    /// does not name.
-    ///
-    /// Returned as temporaries rather than folded into the session, exactly as the
-    /// flat path builds `post`: every region gathered here is still *live* until
-    /// that repoint, so the session's own lists must not learn about it until the
-    /// repoint succeeds. Everything in between can fail (the extension rewrite,
-    /// each write, each barrier), and a session that survived a failed commit
-    /// while believing live extents were free would hand them out on the next
-    /// commit — silently destroying the objects still occupying them.
-    ///
-    /// Called once to *size* the tail and again for each round the tail's
-    /// placement takes to settle, since what remains depends on the space the tail
-    /// has drawn for itself ([`tail_layout`](Self::tail_layout)). Each call clones
-    /// both lists; they hold one region per hole, not per byte, so the copies are
-    /// small.
-    fn paged_post_free(
-        &self,
-        eof: u64,
-        to_free: &[(StoredAddress, u64, FreeClass)],
-        old_blocks: &[FreeExtent],
-    ) -> (PagedPostFree, u64) {
-        let freed = to_free.iter().filter_map(|&(addr, len, class)| {
-            FreeExtent::new(addr.get(), len).map(|extent| (extent, class))
-        });
-        self.space
-            .paged_post_free(eof, freed, old_blocks.iter().copied())
-            .expect("the PAGE commit tail requires a paged session strategy")
-    }
-
-    /// Reserves free metadata space for a paged commit's tail and plans the manager blocks for its
-    /// address, or returns `None` when nothing reusable fits, and the caller then appends.
-    ///
-    /// `current_eoa` and every address in the result are stored addresses.
-    ///
-    /// The reservation and the plan are mutually dependent: drawing `len` bytes out
-    /// of the free lists changes the sections those very blocks record, and a
-    /// different section set is a different length. This proposes a length, plans
-    /// against the lists as they stand once that length is taken, and accepts only
-    /// an exact agreement. Anything else hands the reservation back and proposes
-    /// the length the plan just came out at, which is the natural next candidate.
-    ///
-    /// Both kinds of disagreement have to be rejected, not just the obvious one. A
-    /// plan **longer** than its reservation would write past it into whatever lives
-    /// after. A plan **shorter** would leave bytes inside the reservation that no
-    /// manager records and the next commit does not free — the leak this whole
-    /// change exists to remove, reintroduced a few bytes at a time.
-    ///
-    /// Iteration is capped rather than trusted to converge: the length is a
-    /// step function of the section set, so a proposal can in principle oscillate
-    /// between two values that each imply the other. Appending is always available
-    /// and always correct, so giving up costs a page rather than a guarantee.
-    fn tail_layout(
-        &mut self,
-        current_eoa: u64,
-        to_free: &[(StoredAddress, u64, FreeClass)],
-        old_blocks: &[FreeExtent],
-        ext_len: u64,
-        page_size: FileSpacePageSize,
-        widths: FormatWidths,
-    ) -> Option<(PagedPostFree, ManagerPlan, u64, u64, u64)> {
-        /// Enough rounds for the section set to settle after a reservation shrinks
-        /// it, without letting an oscillating proposal spin.
-        const ROUNDS: usize = 4;
-
-        // The first proposal: what the blocks would measure with nothing reserved.
-        // A manager block's length depends only on the sections it records, never
-        // on its address, so a start of 0 measures the blocks alone.
-        let (probe, _) = self.paged_post_free(current_eoa, to_free, old_blocks);
-        let probe_sections = probe.sections();
-        let managers = ManagerSections::paged(&probe_sections, page_size);
-        let mut proposed = ext_len + free_space_manager::manager_blocks_len(&managers, widths);
-
-        for _ in 0..ROUNDS {
-            let reserved = self.space.allocate(proposed, AllocationClass::Metadata)?;
-            let at = reserved.start();
-            let (mut post, eoa) = self.paged_post_free(current_eoa, to_free, old_blocks);
-            // Whole free pages at the end of the file are released rather than
-            // recorded, so the sections these blocks are sized from must already
-            // leave them out (issue #418). The reservation was taken before this
-            // list was built, so the run can only begin at or above the tail's own
-            // end.
-            let eoa = post.release_trailing(eoa, proposed);
-            // Class the free space into its managers and place their blocks after
-            // the extension. Shared with the bounded backend so both lay out
-            // identically.
-            let sections = post.sections();
-            let managers = ManagerSections::paged(&sections, page_size);
-            let plan = free_space_manager::plan_managers(
-                &managers,
-                StoredAddress::new(at).offset(ext_len),
-                widths,
-            );
-            // An empty plan writes no blocks at all, leaving the tail the extension
-            // alone; `end_of_managers` is then its own start.
-            let blocks_len = plan.end_of_managers.get().max(at + ext_len) - at;
-            if blocks_len == proposed {
-                debug_assert!(
-                    at + blocks_len <= eoa,
-                    "a reused tail at {at} of {blocks_len} bytes runs past the end-of-allocation \
-                     {eoa} it was placed under"
-                );
-                return Some((post, plan, at, blocks_len, eoa));
-            }
-            self.space
-                .return_allocation(reserved, AllocationClass::Metadata);
-            proposed = blocks_len;
-        }
-        None
     }
 
     /// Writes one block of a persisting commit's tail, paged or flat, at the stored address `addr`
@@ -17174,90 +16962,6 @@ mod tests {
             sections.metadata(),
             [FreeExtent::new(2 * PAGE + 1024, PAGE - 1024).unwrap()],
             "the rest of the claimed page is free space of the claiming type"
-        );
-    }
-
-    /// Every byte a paged session could still hand out, across both page types.
-    fn free_total(s: &WriteEngine) -> u64 {
-        s.space.reusable_sections().map(|extent| extent.len()).sum()
-    }
-
-    /// A paged commit's tail removes from the free lists exactly the bytes it goes
-    /// on to write — no more, and nothing at all when it declines to place itself.
-    ///
-    /// This is the invariant the whole change rests on, and the one an integration
-    /// test cannot reach: the tail's length and the hole it lands in determine each
-    /// other, so which settlement the arithmetic reaches depends on the shape of
-    /// the free list, and a file the writer builds only ever produces some of them.
-    /// In particular, best fit prefers the *smallest* region that fits, so a hole
-    /// whose length is exactly the length the tail proposed is the one it will
-    /// choose — and consuming a region outright drops a section from the managers,
-    /// making the plan come out *shorter* than the space just reserved for it. A
-    /// tail that accepted that would retire the difference from the free list with
-    /// nothing recording it, which is issue #286 again, a few bytes at a time.
-    ///
-    /// Hence a contiguous sweep of hole sizes rather than a chosen one: the length
-    /// the tail proposes is a property of the file and its free list, not something
-    /// this test should have to know, and the sweep is certain to cross it.
-    #[test]
-    fn a_paged_tail_takes_exactly_the_space_it_fills() {
-        use crate::writer::FileBuilder;
-
-        const PAGE: u64 = FileSpacePageSize::DEFAULT.get();
-        /// Any plausible extension length exercises the same arithmetic, and the
-        /// invariant holds for every one of them; the tail's real length is settled
-        /// by the commit, which is not what is under test here.
-        const EXT_LEN: u64 = 100;
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("tail_exact.h5");
-        let mut b = FileBuilder::new();
-        b.create_dataset("d")
-            .with_i32_data(&(0..4000).collect::<Vec<i32>>())
-            .with_shape(&[4000]);
-        b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-            .with_file_space_page_size(PAGE);
-        b.write(&path).unwrap();
-        let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
-        let widths =
-            FormatWidths::from_sizes(s.superblock.offset_size, s.superblock.length_size).unwrap();
-
-        let mut placed = 0usize;
-        for hole in 120..420u64 {
-            s.space = SessionSpace::from_strategy(
-                Some(FileSpaceStrategy::Page),
-                0,
-                FileSpacePageSize::DEFAULT,
-            );
-            s.space.seed_persisted(
-                Some(ManagerKind::PagedSmallMetadata),
-                FreeExtent::new(PAGE, hole).unwrap(),
-            );
-            let free_before = free_total(&s);
-            let eoa = s.end_of_allocation().unwrap().get();
-            let layout = s.tail_layout(eoa, &[], &[], EXT_LEN, FileSpacePageSize::DEFAULT, widths);
-            let free_after = free_total(&s);
-            match layout {
-                Some((_, _, at, blocks_len, _)) => {
-                    placed += 1;
-                    assert_eq!(
-                        free_before - free_after,
-                        blocks_len,
-                        "hole {hole}: the tail took {} bytes at {at} to write {blocks_len}",
-                        free_before - free_after
-                    );
-                }
-                None => assert_eq!(
-                    free_after, free_before,
-                    "hole {hole}: a tail that declines to place itself must hand back \
-                     everything it tried"
-                ),
-            }
-        }
-        assert!(
-            placed > 0,
-            "the sweep must reach holes the tail can actually use, or it asserts \
-             nothing about placement"
         );
     }
 
