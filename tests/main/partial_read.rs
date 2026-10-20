@@ -624,6 +624,132 @@ fn sparse_high_row_file(columns: u32, chunk_columns: u32) -> Vec<u8> {
     image.build()
 }
 
+#[rstest]
+#[case::huge_then_zero(&[2, 4_294_967_296, 0], 1, 1)]
+#[case::zero_then_huge(&[2, 0, 4_294_967_296], 1, 1)]
+#[case::zero_rows_huge_then_zero(&[2, 4_294_967_296, 0], 1, 0)]
+#[case::zero_rows_zero_then_huge(&[2, 0, 4_294_967_296], 1, 0)]
+#[case::high_row(&[4_294_967_424, 0], 4_294_967_360, 1)]
+#[case::many_rows(&[4_294_967_424, 0], 1, 4_294_967_296)]
+fn empty_row_windows_accept_large_extents(
+    #[case] shape: &[u64],
+    #[case] start: u64,
+    #[case] count: u64,
+    #[values("compact", "contiguous", "unallocated", "chunked")] layout: &str,
+    #[values(false, true)] streaming: bool,
+) {
+    let bytes = empty_row_file(shape, layout);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("empty_rows.h5");
+    std::fs::write(&path, bytes).unwrap();
+    let file = if streaming {
+        File::open_streaming(&path)
+    } else {
+        File::open(&path)
+    }
+    .unwrap();
+    let dataset = file.dataset("d").unwrap();
+    assert_eq!(dataset.shape().unwrap(), shape);
+    assert_eq!(
+        dataset.read_raw_rows(start, count).unwrap(),
+        Vec::<u8>::new()
+    );
+    if shape.contains(&0) {
+        assert_eq!(dataset.read_raw().unwrap(), Vec::<u8>::new());
+    }
+}
+
+#[rstest]
+fn zero_row_windows_return_empty_vectors_for_large_rows(#[values(false, true)] streaming: bool) {
+    let shape = [2, 4_294_967_296];
+    let bytes = empty_row_file(&shape, "unallocated");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("zero_rows.h5");
+    std::fs::write(&path, bytes).unwrap();
+    let file = if streaming {
+        File::open_streaming(&path)
+    } else {
+        File::open(&path)
+    }
+    .unwrap();
+    assert_eq!(
+        file.dataset("d").unwrap().read_raw_rows(1, 0).unwrap(),
+        Vec::<u8>::new(),
+    );
+}
+
+#[cfg(target_pointer_width = "32")]
+#[rstest]
+fn nonempty_row_windows_report_the_materialized_byte_length(
+    #[values(false, true)] streaming: bool,
+) {
+    assert_eq!(usize::BITS, 32);
+    let bytes = empty_row_file(&[2, 4_294_967_296], "unallocated");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("large_rows.h5");
+    std::fs::write(&path, bytes).unwrap();
+    let file = if streaming {
+        File::open_streaming(&path)
+    } else {
+        File::open(&path)
+    }
+    .unwrap();
+    let err = file.dataset("d").unwrap().read_raw_rows(1, 1).unwrap_err();
+    let hdf5_pure::Error::Format(err) = err else {
+        panic!("expected format error, got {err:?}");
+    };
+    assert_eq!(
+        err,
+        FormatError::ValueTooLargeForPlatform {
+            value: 34_359_738_368,
+            target: "usize",
+        }
+    );
+}
+
+fn empty_row_file(shape: &[u64], layout: &str) -> Vec<u8> {
+    let mut image = Image::starting_with(&[0; 64]);
+    let layout = match layout {
+        "compact" => data_layout::compact(&[]),
+        "contiguous" => data_layout::contiguous(64, 0),
+        "unallocated" => data_layout::contiguous(u64::MAX, 0),
+        "chunked" => data_layout::chunked(u64::MAX, &vec![1; shape.len()], 8),
+        _ => panic!("unknown test layout {layout:?}"),
+    };
+    let shape = dataspace::v2(
+        u8::try_from(shape.len()).unwrap(),
+        dataspace::Flags::NONE,
+        dataspace::Kind::SIMPLE,
+        shape,
+        None,
+    );
+    let dataset = image.append(
+        &Header::new()
+            .messages([
+                Message::new(MessageType::DATASPACE, &shape),
+                Message::new(MessageType::DATATYPE, &datatype::f64_le()),
+                Message::new(MessageType::DATA_LAYOUT, &layout),
+            ])
+            .build(),
+    );
+    let root = image.append(
+        &Header::new()
+            .message(Message::new(
+                MessageType::LINK,
+                &HardLink::new("d", dataset as u64).build(Widths::EIGHT),
+            ))
+            .build(),
+    );
+    image.place(
+        0,
+        &Superblock::new(Widths::EIGHT)
+            .root_header_address(root as u64)
+            .eof_address(image.as_bytes().len() as u64)
+            .build(),
+    );
+    image.build()
+}
+
 struct RecordingRowSource {
     inner: ReadSeekSource<Cursor<Vec<u8>>>,
     reads: Arc<Mutex<Vec<(u64, usize)>>>,

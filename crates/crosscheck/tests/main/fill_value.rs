@@ -10,6 +10,8 @@
 //!   message) - and the pure reader must recover it.
 
 use hdf5::file::LibraryVersion;
+#[cfg(target_pointer_width = "64")]
+use hdf5::plist::dataset_create::Layout;
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
@@ -850,5 +852,48 @@ fn high_row_windows_read_chunks_written_by_the_c_library(
     assert_eq!(
         dataset.read_f64_rows(start as u64 + 1, 1).unwrap(),
         values.row(1).to_vec()
+    );
+}
+
+#[cfg(target_pointer_width = "64")]
+#[rstest]
+#[case::huge_then_zero(&[2, 4_294_967_296, 0], 1, 1)]
+#[case::zero_then_huge(&[2, 0, 4_294_967_296], 1, 1)]
+#[case::zero_rows_huge_then_zero(&[2, 4_294_967_296, 0], 1, 0)]
+#[case::zero_rows_zero_then_huge(&[2, 0, 4_294_967_296], 1, 0)]
+#[case::high_row(&[4_294_967_424, 0], 4_294_967_360, 1)]
+#[case::many_rows(&[4_294_967_424, 0], 1, 4_294_967_296)]
+fn empty_row_windows_read_large_extents_written_by_the_c_library(
+    #[case] shape: &[usize],
+    #[case] start: u64,
+    #[case] count: u64,
+    #[values(Layout::Compact, Layout::Contiguous)] layout: Layout,
+    #[values(false, true)] streaming: bool,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("empty_rows.h5");
+    {
+        let file = file::libhdf5_create_v18(&path);
+        let dataset = file
+            .new_dataset::<f64>()
+            .shape(shape)
+            .layout(layout)
+            .create("values")
+            .unwrap();
+        assert_eq!(dataset.read_raw::<f64>().unwrap(), Vec::<f64>::new());
+        drop(dataset);
+        file.close().unwrap();
+    }
+    let file = if streaming {
+        File::open_streaming(&path)
+    } else {
+        File::open(&path)
+    }
+    .unwrap();
+    let dataset = file.dataset("values").unwrap();
+    assert_eq!(dataset.read_f64().unwrap(), Vec::<f64>::new());
+    assert_eq!(
+        dataset.read_f64_rows(start, count).unwrap(),
+        Vec::<f64>::new()
     );
 }
