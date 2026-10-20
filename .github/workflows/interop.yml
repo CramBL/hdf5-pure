@@ -154,9 +154,52 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
 
+      # vcpkg selects binary archives by the port, triplet, compiler, and configuration ABI.
+      - name: Configure the zlib binary cache
+        if: runner.os == 'Windows'
+        id: zlib
+        shell: pwsh
+        run: |
+          $root = $env:VCPKG_INSTALLATION_ROOT
+          $revision = git -C $root rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $executable = (Get-FileHash "$root/vcpkg.exe" -Algorithm SHA256).Hash
+          $cache = "$env:RUNNER_TEMP/vcpkg-binary-cache"
+          New-Item -ItemType Directory -Force -Path $cache | Out-Null
+          "VCPKG_BINARY_SOURCES=clear;files,$cache,readwrite" >> $env:GITHUB_ENV
+          "identity=$revision-$executable-$env:ImageVersion" >> $env:GITHUB_OUTPUT
+          "path=$cache" >> $env:GITHUB_OUTPUT
+          Write-Output "vcpkg revision: $revision; runner image: $env:ImageVersion"
+          & "$root/vcpkg.exe" version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Restore the zlib binary cache
+        if: runner.os == 'Windows'
+        id: zlib-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.zlib.outputs.path }}
+          key: vcpkg-zlib-x64-windows-${{ runner.arch }}-${{ steps.zlib.outputs.identity }}-${{ hashFiles('.github/workflows/interop.yml') }}
+
       - name: Install zlib
         if: runner.os == 'Windows'
-        run: vcpkg install zlib:x64-windows
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install zlib:x64-windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-Content "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/share/zlib/vcpkg_abi_info.txt"
+
+      - name: Save the zlib binary cache
+        if: >-
+          runner.os == 'Windows' &&
+          github.repository == 'CramBL/hdf5-pure' &&
+          github.ref == 'refs/heads/main' &&
+          matrix.version == needs.releases.outputs.latest &&
+          steps.zlib-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.zlib.outputs.path }}
+          key: ${{ steps.zlib-cache.outputs.cache-primary-key }}
 
       - name: Cache the HDF5 build
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
