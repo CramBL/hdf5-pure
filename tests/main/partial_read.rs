@@ -858,3 +858,27 @@ fn string_regions_read_selected_columns(
         ["one", "two", "four", "five"]
     );
 }
+
+#[rstest]
+#[case::partial(2)]
+#[case::whole(3)]
+fn oversized_region_buffers_return_a_platform_error(#[case] rows: u64) {
+    let limit = isize::MAX as u64 + 1;
+    let columns = limit / 16;
+    let file = File::from_bytes(empty_row_file(&[3, columns], "unallocated")).unwrap();
+    let error = file
+        .dataset("d")
+        .unwrap()
+        .read_raw_region(&[0, 0], &[rows, columns])
+        .unwrap_err();
+    let hdf5_pure::Error::Format(error) = error else {
+        panic!("expected format error, got {error:?}")
+    };
+    assert_eq!(
+        error,
+        FormatError::ValueTooLargeForPlatform {
+            value: rows * columns * 8,
+            target: "isize"
+        }
+    );
+}

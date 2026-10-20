@@ -38,7 +38,7 @@ use crate::fill_value::FillPattern;
 use crate::filter_pipeline::FilterPipeline;
 use crate::filters::{self, ChunkContext, FilterScratch};
 use crate::fixed_array;
-use crate::read_region::ReadRegion;
+use crate::read_region::{ReadRegion, RowRegion};
 use crate::read_spec::{RawReadSpec, RawReadStorage};
 use crate::source;
 use crate::source::Source;
@@ -774,6 +774,18 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
     read_chunked_region_from_source(source, &region, widths, cache, pass).map(Some)
 }
 
+/// Reads intersecting chunks into the region's packed row-major result.
+///
+/// Coordinates are intersected at file width before conversion to buffer indices. Parsed indexes
+/// and decoded chunks are retained according to the cache configuration.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ChunkedReadError`] if the storage is not chunked or the chunk rank
+/// differs from the dataspace rank, and [`FormatError::InvalidChunkGeometry`] if a decoded chunk
+/// exceeds the allocation limit. Returns [`FormatError::ValueTooLargeForPlatform`] if a buffer
+/// index exceeds [`usize::MAX`], and [`FormatError::OffsetOverflow`] if byte arithmetic overflows.
+/// Returns errors from reading the fill value, chunk index, filters, or payloads.
 pub(crate) fn read_chunked_region_from_source(
     source: &(impl Source + ?Sized),
     region: &ReadRegion<'_>,
@@ -803,25 +815,26 @@ pub(crate) fn read_chunked_region_from_source(
     let (rank, chunk_dims, _) = chunked_dims(chunk_dimensions, dataspace)?;
     bounded_chunk_len(chunk_dims, elem_size)?;
 
-    let total_bytes = region.byte_len()?;
+    let total_bytes = region.byte_len();
     let mut output = fill.buffer(total_bytes)?;
     if region.is_empty() || index.address().is_none() {
         return Ok(output);
     }
     let chunk_dims_u64 = chunk_dims;
-    let chunk_dims = materialized_dims(chunk_dims_u64)?;
-    let chunk_strides = row_major_strides(&chunk_dims)?;
-    let elem_size_u64 = elem_size.get() as u64;
-    let win_dims = region
-        .axes()
-        .iter()
-        .map(|axis| axis.count().to_usize())
-        .collect::<Result<Vec<_>, _>>()?;
-    let win_strides = region
-        .axes()
-        .iter()
-        .map(|axis| axis.output_stride().map(|stride| stride / elem_size.get()))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut placement = match region.row_band() {
+        Some(rows)
+            if chunk_dims_u64
+                .iter()
+                .skip(1)
+                .eq(dataspace.dimensions.iter().skip(1)) =>
+        {
+            RegionCopy::Band {
+                rows,
+                edge: chunk_dims_u64.first().copied().unwrap_or(1),
+            }
+        }
+        _ => RegionCopy::Scatter(RegionScatter::new(region, chunk_dims_u64, elem_size)?),
+    };
     let chunk_overlaps = |chunk: &ChunkInfo| region.overlaps(&chunk.offsets, chunk_dims_u64);
 
     // Walk the index once, then reuse it for later windows on this handle —
@@ -856,66 +869,9 @@ pub(crate) fn read_chunked_region_from_source(
     // One decoder for the whole window; see `FilterScratch`.
     let mut scratch = FilterScratch::new();
 
-    let mut offsets = Vec::with_capacity(rank);
-    let mut dimensions = Vec::with_capacity(rank);
     for chunk in &chunks {
-        offsets.clear();
-        dimensions.clear();
-        let mut advance = 0u64;
-        for (((axis, &offset), &dimension), &stride) in region
-            .axes()
-            .iter()
-            .zip(&chunk.offsets)
-            .zip(chunk_dims_u64)
-            .zip(&chunk_strides)
-        {
-            let lo = axis.start().max(offset);
-            let hi = axis.end().min(offset.saturating_add(dimension));
-            offsets.push((lo - axis.start()).to_usize()?);
-            dimensions.push((hi - lo).to_usize()?);
-            let skip = (lo - offset)
-                .checked_mul(stride as u64)
-                .and_then(|skip| skip.checked_mul(elem_size_u64))
-                .ok_or(FormatError::OffsetOverflow {
-                    offset: lo - offset,
-                    length: stride as u64,
-                })?;
-            advance = advance
-                .checked_add(skip)
-                .ok_or(FormatError::OffsetOverflow {
-                    offset: advance,
-                    length: skip,
-                })?;
-        }
-        let advance = advance.to_usize()?;
-        let band = match (offsets.first(), dimensions.first(), win_strides.first()) {
-            (Some(&offset), Some(&count), Some(&stride))
-                if dimensions.iter().skip(1).eq(chunk_dims.iter().skip(1))
-                    && win_dims.iter().skip(1).eq(chunk_dims.iter().skip(1)) =>
-            {
-                Some((
-                    offset * stride * elem_size.get(),
-                    count * stride * elem_size.get(),
-                ))
-            }
-            _ => None,
-        };
-        let copy = |output: &mut [u8], bytes: &[u8]| match band {
-            Some((destination, length)) => {
-                row_band_copy(output, destination, bytes, advance, length, elem_size)
-            }
-            None => place_chunk(
-                bytes.get(advance..).unwrap_or(&[]),
-                output,
-                &offsets,
-                &dimensions,
-                &win_dims,
-                &win_strides,
-                &chunk_strides,
-                elem_size,
-                rank,
-            ),
-        };
+        let selected = placement.for_chunk(region, chunk, elem_size)?;
+        let copy = |output: &mut [u8], bytes: &[u8]| selected.copy_to(output, bytes, elem_size);
 
         let coord = spatial_coord(chunk, rank);
         let hit = cache.with_decompressed(pass, coord, |bytes| copy(&mut output, bytes));
@@ -939,6 +895,191 @@ pub(crate) fn read_chunked_region_from_source(
     }
 
     Ok(output)
+}
+
+/// Placement geometry shared across the selected chunks.
+enum RegionCopy<'a> {
+    Band { rows: &'a RowRegion, edge: u64 },
+    Scatter(RegionScatter),
+}
+
+impl RegionCopy<'_> {
+    fn for_chunk(
+        &mut self,
+        region: &ReadRegion<'_>,
+        chunk: &ChunkInfo,
+        element_size: NonZeroUsize,
+    ) -> Result<RegionChunk<'_>, FormatError> {
+        match self {
+            Self::Band { rows, edge } => {
+                let offset = region
+                    .spec()
+                    .dataspace()
+                    .dimensions
+                    .first()
+                    .and_then(|_| chunk.offsets.first())
+                    .copied()
+                    .unwrap_or(0);
+                let start = rows.start().max(offset);
+                let end = rows.end().min(offset.saturating_add(*edge));
+                Ok(RegionChunk::Band {
+                    destination: (start - rows.start()).to_usize()? * rows.row_bytes(),
+                    source: (start - offset).to_usize()? * rows.row_bytes(),
+                    length: (end - start).to_usize()? * rows.row_bytes(),
+                })
+            }
+            Self::Scatter(geometry) => geometry.for_chunk(region, chunk, element_size),
+        }
+    }
+}
+
+/// Element strides and reusable intersection buffers for multidimensional placement.
+struct RegionScatter {
+    chunk_dimensions: Vec<usize>,
+    chunk_strides: Vec<usize>,
+    output_dimensions: Vec<usize>,
+    output_strides: Vec<usize>,
+    offsets: Vec<usize>,
+    dimensions: Vec<usize>,
+}
+
+impl RegionScatter {
+    fn new(
+        region: &ReadRegion<'_>,
+        chunk_dimensions: &[u64],
+        element_size: NonZeroUsize,
+    ) -> Result<Self, FormatError> {
+        let chunk_dimensions = materialized_dims(chunk_dimensions)?;
+        let rank = chunk_dimensions.len();
+        let chunk_strides = row_major_strides(&chunk_dimensions)?;
+        Ok(Self {
+            chunk_dimensions,
+            chunk_strides,
+            output_dimensions: region
+                .axes()
+                .map(|axis| axis.count().to_usize())
+                .collect::<Result<Vec<_>, _>>()?,
+            output_strides: region
+                .axes()
+                .map(|axis| {
+                    axis.output_stride()
+                        .map(|stride| stride / element_size.get())
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            offsets: Vec::with_capacity(rank),
+            dimensions: Vec::with_capacity(rank),
+        })
+    }
+
+    fn for_chunk(
+        &mut self,
+        region: &ReadRegion<'_>,
+        chunk: &ChunkInfo,
+        element_size: NonZeroUsize,
+    ) -> Result<RegionChunk<'_>, FormatError> {
+        self.offsets.clear();
+        self.dimensions.clear();
+        let mut advance = 0u64;
+        for (((axis, &offset), &dimension), &stride) in region
+            .axes()
+            .zip(&chunk.offsets)
+            .zip(&self.chunk_dimensions)
+            .zip(&self.chunk_strides)
+        {
+            let start = axis.start().max(offset);
+            let end = axis.end().min(offset.saturating_add(dimension as u64));
+            self.offsets.push((start - axis.start()).to_usize()?);
+            self.dimensions.push((end - start).to_usize()?);
+            let skip = (start - offset)
+                .checked_mul(stride as u64)
+                .and_then(|skip| skip.checked_mul(element_size.get() as u64))
+                .ok_or(FormatError::OffsetOverflow {
+                    offset: start - offset,
+                    length: stride as u64,
+                })?;
+            advance = advance
+                .checked_add(skip)
+                .ok_or(FormatError::OffsetOverflow {
+                    offset: advance,
+                    length: skip,
+                })?;
+        }
+        let source = advance.to_usize()?;
+        match (
+            self.offsets.first(),
+            self.dimensions.first(),
+            self.output_strides.first(),
+        ) {
+            (Some(&offset), Some(&count), Some(&stride))
+                if self
+                    .dimensions
+                    .iter()
+                    .skip(1)
+                    .eq(self.chunk_dimensions.iter().skip(1))
+                    && self
+                        .output_dimensions
+                        .iter()
+                        .skip(1)
+                        .eq(self.chunk_dimensions.iter().skip(1)) =>
+            {
+                Ok(RegionChunk::Band {
+                    source,
+                    destination: offset * stride * element_size.get(),
+                    length: count * stride * element_size.get(),
+                })
+            }
+            _ => Ok(RegionChunk::Scatter {
+                source,
+                geometry: self,
+            }),
+        }
+    }
+}
+
+/// The intersection of a decoded chunk with the output region.
+enum RegionChunk<'a> {
+    Band {
+        destination: usize,
+        source: usize,
+        length: usize,
+    },
+    Scatter {
+        source: usize,
+        geometry: &'a RegionScatter,
+    },
+}
+
+impl RegionChunk<'_> {
+    fn copy_to(&self, output: &mut [u8], bytes: &[u8], element_size: NonZeroUsize) {
+        match self {
+            Self::Band {
+                destination,
+                source,
+                length,
+            } => row_band_copy(output, *destination, bytes, *source, *length, element_size),
+            Self::Scatter { source, geometry } => {
+                let RegionScatter {
+                    chunk_dimensions,
+                    chunk_strides,
+                    output_dimensions,
+                    output_strides,
+                    offsets,
+                    dimensions,
+                } = geometry;
+                place_chunk(
+                    bytes.get(*source..).unwrap_or(&[]),
+                    output,
+                    offsets,
+                    dimensions,
+                    output_dimensions,
+                    output_strides,
+                    chunk_strides,
+                    element_size,
+                    chunk_dimensions.len(),
+                );
+            }
+        }
+    }
 }
 
 /// Copy one chunk's overlapping row band into the window buffer at `dst`, clamped

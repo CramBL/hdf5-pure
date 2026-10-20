@@ -27,16 +27,167 @@
 
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::{
-    EditBacking, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MaxExtent,
-    MemoryStrategy, SyncPolicy,
+    ChunkCacheStats, EditBacking, File, FileAccessProperties, FileBuilder, FileSpaceStrategy,
+    MaxExtent, MemoryStrategy, SyncPolicy,
 };
+
+use rstest::rstest;
+use test_util::allocation;
+use test_util::data_layout;
+use test_util::dataspace;
+use test_util::datatype;
+use test_util::image::Image;
+use test_util::link_message::HardLink;
+use test_util::object_header::Message;
+use test_util::object_header::MessageType;
+use test_util::object_header::v2::Header;
+use test_util::superblock::v2::Superblock;
+use test_util::widths::Widths;
+
+use allocation::measure;
 
 #[global_allocator]
 static ALLOC: heapscope::Alloc = heapscope::Alloc::system();
 
-use test_util::allocation;
+#[rstest]
+#[case::compact_whole(true, 0, u64::MAX, "compact_whole_baseline", "compact_whole_rows")]
+#[case::compact_partial(true, 2, 2, "compact_partial_baseline", "compact_partial_rows")]
+#[case::contiguous_whole(
+    false,
+    0,
+    u64::MAX,
+    "contiguous_whole_baseline",
+    "contiguous_whole_rows"
+)]
+#[case::contiguous_partial(false, 2, 2, "contiguous_partial_baseline", "contiguous_partial_rows")]
+fn row_windows_preserve_the_whole_reads_allocation_count(
+    #[case] compact: bool,
+    #[case] start: u64,
+    #[case] count: u64,
+    #[case] baseline_region: &'static str,
+    #[case] rows_region: &'static str,
+) {
+    let values: Vec<_> = (0..16).map(f64::from).collect();
+    let bytes: Vec<_> = values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect();
+    let mut image = Image::starting_with(&[0; 64]);
+    let layout = if compact {
+        data_layout::compact(&bytes)
+    } else {
+        let address = image.append(&bytes);
+        data_layout::contiguous(address as u64, bytes.len() as u64)
+    };
+    let dataset = image.append(
+        &Header::new()
+            .messages([
+                Message::new(
+                    MessageType::DATASPACE,
+                    &dataspace::v2(
+                        2,
+                        dataspace::Flags::NONE,
+                        dataspace::Kind::SIMPLE,
+                        &[8, 2],
+                        None,
+                    ),
+                ),
+                Message::new(MessageType::DATATYPE, &datatype::f64_le()),
+                Message::new(MessageType::DATA_LAYOUT, &layout),
+            ])
+            .build(),
+    );
+    let root = image.append(
+        &Header::new()
+            .message(Message::new(
+                MessageType::LINK,
+                &HardLink::new("data", dataset as u64).build(Widths::EIGHT),
+            ))
+            .build(),
+    );
+    image.place(
+        0,
+        &Superblock::new(Widths::EIGHT)
+            .root_header_address(root as u64)
+            .eof_address(image.as_bytes().len() as u64)
+            .build(),
+    );
+    let file = File::from_bytes(image.build()).unwrap();
+    let dataset = file.dataset("data").unwrap();
+    assert_eq!(dataset.read_raw().unwrap(), bytes);
+    let (whole, baseline) = allocation::measure(baseline_region, || dataset.read_raw().unwrap());
+    let (window, measured) =
+        allocation::measure(rows_region, || dataset.read_raw_rows(start, count).unwrap());
+    let start = usize::try_from(start).unwrap() * 2 * 8;
+    let end = if count == u64::MAX {
+        whole.len()
+    } else {
+        start + usize::try_from(count).unwrap() * 2 * 8
+    };
+    assert_eq!(window, whole[start..end]);
+    assert!(measured.live_bytes >= window.len() as u64, "{measured}");
+    assert!(
+        measured.blocks <= baseline.blocks,
+        "rows: {measured}; whole: {baseline}"
+    );
+}
 
-use allocation::measure;
+#[test]
+fn full_inner_chunk_bands_preserve_the_whole_reads_allocation_count() {
+    let values: Vec<_> = (0..2048).map(f64::from).collect();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("bands.h5");
+    let mut builder = FileBuilder::new();
+    builder
+        .create_dataset("data")
+        .with_f64_data(&values)
+        .with_shape(&[128, 16])
+        .with_chunks(&[64, 16]);
+    builder.write(&path).unwrap();
+    let file = File::open_streaming(&path).unwrap();
+    let dataset = file.dataset("data").unwrap();
+    assert_eq!(dataset.read_f64().unwrap(), values);
+    let (whole, baseline) =
+        allocation::measure("chunk_bands_whole", || dataset.read_raw().unwrap());
+    let (rows, measured) = allocation::measure("chunk_bands_rows", || {
+        dataset.read_raw_rows(1, 126).unwrap()
+    });
+    assert_eq!(rows, whole[128..whole.len() - 128]);
+    assert!(measured.live_bytes >= rows.len() as u64, "{measured}");
+    assert!(
+        measured.blocks <= baseline.blocks,
+        "rows: {measured}; whole: {baseline}"
+    );
+}
+
+#[test]
+fn typed_contiguous_sweeps_allocate_the_output_and_windows() {
+    const WINDOWS: u64 = 8;
+    let values: Vec<_> = (0..1024 * 1024).map(f64::from).collect();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sweep.h5");
+    let mut builder = FileBuilder::new();
+    builder
+        .create_dataset("data")
+        .with_f64_data(&values)
+        .with_shape(&[1024, 1024]);
+    builder.write(&path).unwrap();
+    let file = File::open_streaming(&path).unwrap();
+    let dataset = file.dataset("data").unwrap();
+    assert_eq!(dataset.read_f64_rows(0, 1).unwrap(), values[..1024]);
+    assert_eq!(dataset.chunk_cache_stats(), ChunkCacheStats::default());
+    let (whole, baseline) =
+        allocation::measure("contiguous_sweep_whole", || dataset.read_raw().unwrap());
+    let (typed, measured) =
+        allocation::measure("contiguous_sweep_typed", || dataset.read_f64().unwrap());
+    assert_eq!(typed, values);
+    assert_eq!(whole.len(), typed.len() * 8);
+    assert!(measured.live_bytes >= whole.len() as u64, "{measured}");
+    assert!(
+        measured.blocks <= baseline.blocks + WINDOWS,
+        "typed: {measured}; whole: {baseline}"
+    );
+}
 
 #[test]
 fn windowed_row_read_allocates_on_the_order_of_the_window() {
