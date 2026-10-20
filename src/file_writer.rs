@@ -1936,8 +1936,9 @@ impl FileWriter {
             // Taking the size as a `NonZeroU32` here is what holds that for the
             // rest of the write: every later stage receives the proof rather
             // than the bare number, so none of them re-checks it.
-            let elem_size = crate::datatype::element_size_usize(&dt)?;
-            let elem_bytes = elem_size.get() as u64;
+            let element_size = dt.element_size()?;
+            let elem_size = element_size.narrow::<NonZeroUsize>()?;
+            let elem_bytes = u64::from(element_size.get());
             // The bytes this dataset's elements occupy end to end — the same
             // `num_elements * element_size` invariant the reader enforces (see
             // `data_read::read_raw_data_full`), which is what both readings of it
@@ -1994,14 +1995,10 @@ impl FileWriter {
             // stages no bytes to disagree with its shape — the whole point is
             // that the two do not have to match.
             if !unallocated && raw_chunks.is_none() && region_len != extent {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "byte counts reported in a shape-mismatch error; display-only"
-                )]
-                return Err(FormatError::ShapeDataMismatch {
-                    expected: extent as usize,
-                    actual: region_len as usize,
-                    element_size: elem_size,
+                return Err(FormatError::LogicalShapeDataMismatch {
+                    expected: extent,
+                    actual: region_len,
+                    element_size: element_size.into(),
                 });
             }
             // Validate the chunk geometry up front for a chunked / filtered /

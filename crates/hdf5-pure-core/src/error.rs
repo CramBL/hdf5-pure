@@ -1,6 +1,7 @@
 use alloc::collections::TryReserveError;
 use alloc::string::String;
 use core::fmt;
+use core::num::NonZeroU64;
 use core::num::NonZeroUsize;
 use core::str::Utf8Error;
 
@@ -568,6 +569,26 @@ pub enum FormatError {
         /// The library-version label of the format the bounds resolved to.
         writing: &'static str,
     },
+    /// A dataset's storage extent differs from its logical byte length.
+    ///
+    /// The byte counts are independent of the host pointer width.
+    LogicalDataSizeMismatch {
+        /// The byte length implied by the dataspace and datatype.
+        expected: u64,
+        /// The declared storage extent or compact payload length, in bytes.
+        actual: u64,
+    },
+    /// A dataset's shape requires a different byte count from the supplied data.
+    ///
+    /// The byte counts are independent of the host pointer width.
+    LogicalShapeDataMismatch {
+        /// The required byte count, saturated at [`u64::MAX`].
+        expected: u64,
+        /// The supplied data length, in bytes.
+        actual: u64,
+        /// The datatype's element size in bytes, used to report element counts.
+        element_size: NonZeroU64,
+    },
     /// The free space object of a global heap collection does not span the rest of the
     /// collection.
     MisplacedGlobalHeapFreeSpace {
@@ -1102,6 +1123,25 @@ impl fmt::Display for FormatError {
                 write!(
                     f,
                     "data size mismatch: expected {expected} bytes, got {actual} bytes"
+                )
+            }
+            Self::LogicalDataSizeMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "data size mismatch: expected {expected} bytes, got {actual} bytes"
+                )
+            }
+            Self::LogicalShapeDataMismatch {
+                expected,
+                actual,
+                element_size,
+            } => {
+                write!(
+                    f,
+                    "shape/data mismatch: shape requires {} elements ({expected} bytes), \
+                     but {} elements ({actual} bytes) were supplied",
+                    expected / element_size.get(),
+                    actual / element_size.get(),
                 )
             }
             Self::InvalidLocalHeapSignature => {

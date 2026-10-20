@@ -56,12 +56,19 @@ pub(crate) struct RawReadSpec<'a> {
 }
 
 impl<'a> RawReadSpec<'a> {
-    /// Parse dataset properties into the representation used by raw readers.
+    /// Parses dataset properties and checks allocated storage extents.
     ///
     /// For allocated compact and contiguous storage, construction compares the
     /// storage extent with the byte length implied by the dataspace and datatype.
     /// [`RawReadStorage`] has no field for a contiguous extent, so downstream
     /// readers cannot use an unchecked extent after construction succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if multiplying the element count by
+    /// the datatype size overflows, or [`FormatError::LogicalDataSizeMismatch`] if
+    /// a nonempty dataset's compact or allocated contiguous storage differs from
+    /// its logical byte length.
     pub(crate) fn parse(
         layout: &'a DataLayout,
         dataspace: &'a Dataspace,
@@ -269,9 +276,9 @@ impl DatasetByteLen {
         if actual == self.0 {
             return Ok(());
         }
-        Err(FormatError::DataSizeMismatch {
-            expected: self.to_usize()?,
-            actual: actual.to_usize()?,
+        Err(FormatError::LogicalDataSizeMismatch {
+            expected: self.0,
+            actual,
         })
     }
 
@@ -307,8 +314,8 @@ mod tests {
         ) else {
             panic!("mismatched compact storage extent was accepted");
         };
-        let FormatError::DataSizeMismatch { expected, actual } = err else {
-            panic!("expected DataSizeMismatch, got {err:?}");
+        let FormatError::LogicalDataSizeMismatch { expected, actual } = err else {
+            panic!("expected LogicalDataSizeMismatch, got {err:?}");
         };
         assert_eq!(expected, 16);
         assert_eq!(actual, 8);
@@ -329,10 +336,54 @@ mod tests {
         ) else {
             panic!("mismatched contiguous storage extent was accepted");
         };
-        let FormatError::DataSizeMismatch { expected, actual } = err else {
-            panic!("expected DataSizeMismatch, got {err:?}");
+        let FormatError::LogicalDataSizeMismatch { expected, actual } = err else {
+            panic!("expected LogicalDataSizeMismatch, got {err:?}");
         };
         assert_eq!(expected, 16);
         assert_eq!(actual, 32);
+    }
+
+    #[rstest::rstest]
+    #[case::larger_storage(4_294_967_312, 4_294_967_328)]
+    #[case::smaller_storage(4_294_967_328, 4_294_967_312)]
+    #[case::equal_storage(4_294_967_312, 4_294_967_312)]
+    fn logical_storage_extents_preserve_full_width_counts(
+        #[case] expected: u64,
+        #[case] actual: u64,
+    ) {
+        let dataspace = Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: 1,
+            dimensions: vec![expected],
+            max_dimensions: None,
+        };
+        let datatype = type_builders::make_u8_type();
+        let layout = DataLayout::Contiguous {
+            address: Some(StoredAddress::new(128)),
+            size: actual,
+        };
+        let result = RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::ZERO);
+        if actual != expected {
+            let Err(err) = result else {
+                panic!("mismatched contiguous storage extent was accepted");
+            };
+            assert_eq!(
+                err,
+                FormatError::LogicalDataSizeMismatch { expected, actual }
+            );
+            return;
+        }
+        let spec = result.unwrap();
+        assert_eq!(spec.byte_len_u64(), expected);
+        #[cfg(target_pointer_width = "32")]
+        assert_eq!(
+            spec.byte_len(),
+            Err(FormatError::ValueTooLargeForPlatform {
+                value: expected,
+                target: "usize"
+            }),
+        );
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(spec.byte_len().unwrap() as u64, expected);
     }
 }

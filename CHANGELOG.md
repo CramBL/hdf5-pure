@@ -51,6 +51,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed lost byte counts and incorrect platform-limit errors in `FormatError` dataset size-mismatch diagnostics when logical lengths exceed the host pointer width. Buffer allocations remain subject to host limits ([#824](https://github.com/CramBL/hdf5-pure/pull/824)).
 - Fixed `Dataset::read_raw_rows` rejecting empty selections when row coordinates or inner extents exceed the host pointer width. Nonempty output buffers are subject to host limits ([#822](https://github.com/CramBL/hdf5-pure/pull/822)).
 - Fixed `FileBuilder::write` leaving metadata page tails untracked in persistent PAGE files when manager storage exactly fills a page ([#820](https://github.com/CramBL/hdf5-pure/pull/820)).
 - Fixed `File::persisted_free_space` rejecting section lists with nonzero unused bytes before their checksum. Checksum verification includes those bytes when enabled.

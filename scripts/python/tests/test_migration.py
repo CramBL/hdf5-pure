@@ -256,6 +256,8 @@ def test_migration_shape_ignores_only_the_allowed_variant_changes(variant, expec
         ("ValueTooLargeForRepresentation", []),
         ("UnexpectedSourceEof", []),
         ("MissingFractalHeapBlock", []),
+        ("LogicalDataSizeMismatch", []),
+        ("LogicalShapeDataMismatch", []),
         ("DuplicateGlobalHeapObjectIndex", []),
         ("GlobalHeapCollectionTooSmall", []),
         ("GlobalHeapObjectOutsideCollection", []),

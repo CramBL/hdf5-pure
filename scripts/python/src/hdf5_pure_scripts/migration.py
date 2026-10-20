@@ -232,6 +232,8 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
             "InvalidSpaceAllocationTime",
             "InvalidSymbolTableNodeSymbolCount",
             "LengthTooLarge",
+            "LogicalDataSizeMismatch",
+            "LogicalShapeDataMismatch",
             "MisplacedGlobalHeapFreeSpace",
             "MissingFractalHeapBlock",
             "TruncatedFile",
