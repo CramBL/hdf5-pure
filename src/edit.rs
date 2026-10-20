@@ -18027,15 +18027,7 @@ mod tests {
         let f64_with = |byte_order| Datatype::FloatingPoint {
             size: 8,
             byte_order,
-            layout: FloatingPointLayout {
-                bit_offset: 0,
-                bit_precision: 64,
-                exponent_location: 52,
-                exponent_size: 11,
-                mantissa_location: 0,
-                mantissa_size: 52,
-                exponent_bias: 1023,
-            },
+            layout: FloatingPointLayout::IEEE754_BINARY64,
         };
         let le_f64 = f64_with(DatatypeByteOrder::LittleEndian);
         let be_f64 = f64_with(DatatypeByteOrder::BigEndian);

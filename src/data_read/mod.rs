@@ -747,15 +747,7 @@ mod tests {
         Datatype::FloatingPoint {
             size: 8,
             byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FloatingPointLayout {
-                bit_offset: 0,
-                bit_precision: 64,
-                exponent_location: 52,
-                exponent_size: 11,
-                mantissa_location: 0,
-                mantissa_size: 52,
-                exponent_bias: 1023,
-            },
+            layout: FloatingPointLayout::IEEE754_BINARY64,
         }
     }
 
@@ -763,15 +755,7 @@ mod tests {
         Datatype::FloatingPoint {
             size: 4,
             byte_order: DatatypeByteOrder::BigEndian,
-            layout: FloatingPointLayout {
-                bit_offset: 0,
-                bit_precision: 32,
-                exponent_location: 23,
-                exponent_size: 8,
-                mantissa_location: 0,
-                mantissa_size: 23,
-                exponent_bias: 127,
-            },
+            layout: FloatingPointLayout::IEEE754_BINARY32,
         }
     }
 
@@ -1284,15 +1268,7 @@ mod tests {
         let f8le = Datatype::FloatingPoint {
             size: 8,
             byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FloatingPointLayout {
-                bit_offset: 0,
-                bit_precision: 64,
-                exponent_location: 52,
-                exponent_size: 11,
-                mantissa_location: 0,
-                mantissa_size: 52,
-                exponent_bias: 1023,
-            },
+            layout: FloatingPointLayout::IEEE754_BINARY64,
         };
         assert_eq!(
             read_as_f32(&2.25f64.to_le_bytes(), &f8le).unwrap(),
@@ -1316,6 +1292,7 @@ mod tests {
 /// Rejecting a numeric element wider than the 64-bit word the readers model one as.
 #[cfg(test)]
 mod wide_element_tests {
+    use crate::MantissaNormalization;
     use crate::datatype::layout::FloatingPointLayout;
 
     use super::*;
@@ -1339,6 +1316,8 @@ mod wide_element_tests {
             size: 16,
             byte_order: DatatypeByteOrder::LittleEndian,
             layout: FloatingPointLayout {
+                mantissa_normalization: MantissaNormalization::LeadingOne,
+                sign_location: 79,
                 bit_offset: 0,
                 bit_precision: 80,
                 exponent_location: 64,

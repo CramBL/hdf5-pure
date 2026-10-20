@@ -357,6 +357,7 @@ def test_migration_builds_core_with_the_profile_core_features():
     [
         ("FileSpacePageSize", []),
         ("LengthWidth", []),
+        ("MantissaNormalization", []),
         ("OffsetWidth", []),
         ("StoredAddress", []),
         ("Unlisted", ["Unlisted: new core root item"]),
@@ -370,15 +371,18 @@ def test_migration_shape_admits_only_the_allowed_new_root_items(name, expected):
 
 
 @pytest.mark.parametrize(
-    ("field", "expected"),
+    ("type_name", "field", "expected"),
     [
-        ("page_size", []),
-        ("threshold", ["FileSpaceInfo: fields changed"]),
+        ("FileSpaceInfo", "page_size", []),
+        ("FileSpaceInfo", "threshold", ["FileSpaceInfo: fields changed"]),
+        ("FloatingPointLayout", "mantissa_normalization", []),
+        ("FloatingPointLayout", "sign_location", []),
+        ("FloatingPointLayout", "exponent_bias", ["FloatingPointLayout: fields changed"]),
     ],
 )
-def test_migration_shape_ignores_only_the_allowed_field_changes(field, expected):
+def test_migration_shape_ignores_only_the_allowed_field_changes(type_name, field, expected):
     baseline = core_shape_fixture()
-    baseline["index"]["1"]["name"] = "FileSpaceInfo"
+    baseline["index"]["1"]["name"] = type_name
     baseline["index"]["2"]["name"] = field
     core = deepcopy(baseline)
     core["index"]["2"]["inner"]["struct_field"] = {"primitive": "u64"}

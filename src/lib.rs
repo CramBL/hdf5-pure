@@ -670,6 +670,7 @@ pub use hdf5_pure_core::FillTime;
 pub use hdf5_pure_core::FixedPointLayout;
 #[doc(inline)]
 pub use hdf5_pure_core::FloatingPointLayout;
+pub use hdf5_pure_core::MantissaNormalization;
 #[doc(inline)]
 pub use hdf5_pure_core::MaxExtent;
 #[doc(inline)]

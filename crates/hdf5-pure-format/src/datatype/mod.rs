@@ -15,6 +15,7 @@ pub(crate) use hdf5_pure_core::Datatype;
 use hdf5_pure_core::DatatypeByteOrder;
 use hdf5_pure_core::FixedPointLayout;
 use hdf5_pure_core::FloatingPointLayout;
+use hdf5_pure_core::MantissaNormalization;
 pub(crate) use hdf5_pure_core::ReferenceType;
 pub(crate) use hdf5_pure_core::StringPadding;
 
@@ -100,6 +101,15 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
             // Floating-Point
             bytes::ensure_len(data, pos, 12)?;
             let byte_order = parse_float_byte_order(bf0);
+            let mantissa_normalization = match (bf0 >> FLOAT_NORMALIZATION_SHIFT)
+                & FLOAT_NORMALIZATION_MASK
+            {
+                FLOAT_NORMALIZATION_UNNORMALIZED => MantissaNormalization::Unnormalized,
+                FLOAT_NORMALIZATION_LEADING_ONE => MantissaNormalization::LeadingOne,
+                FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE => MantissaNormalization::ImpliedLeadingOne,
+                _ => MantissaNormalization::Reserved,
+            };
+            let sign_location = bf1;
             let bit_offset = LittleEndian::read_u16(&data[pos..pos + 2]);
             let bit_precision = LittleEndian::read_u16(&data[pos + 2..pos + 4]);
             let exponent_location = data[pos + 4];
@@ -113,6 +123,8 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
                     size,
                     byte_order,
                     layout: FloatingPointLayout {
+                        mantissa_normalization,
+                        sign_location,
                         bit_offset,
                         bit_precision,
                         exponent_location,
@@ -427,6 +439,8 @@ pub fn serialize_datatype(datatype: &Datatype) -> Vec<u8> {
             byte_order,
             layout:
                 FloatingPointLayout {
+                    mantissa_normalization,
+                    sign_location,
                     bit_offset,
                     bit_precision,
                     exponent_location,
@@ -436,26 +450,28 @@ pub fn serialize_datatype(datatype: &Datatype) -> Vec<u8> {
                     exponent_bias,
                 },
         } => {
-            let mut bf0 = 0x20u8; // bit 5: sign location bit (standard IEEE 754)
-            match byte_order {
+            let normalization = match mantissa_normalization {
+                MantissaNormalization::Unnormalized => FLOAT_NORMALIZATION_UNNORMALIZED,
+                MantissaNormalization::LeadingOne => FLOAT_NORMALIZATION_LEADING_ONE,
+                MantissaNormalization::ImpliedLeadingOne => FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE,
+                MantissaNormalization::Reserved => FLOAT_NORMALIZATION_RESERVED,
+            };
+            let mut bf0 = normalization << FLOAT_NORMALIZATION_SHIFT;
+            let version = match byte_order {
+                DatatypeByteOrder::LittleEndian => DATATYPE_VERSION_ONE,
                 DatatypeByteOrder::BigEndian => {
-                    bf0 |= 0x01;
+                    bf0 |= FLOAT_BYTE_ORDER_LOW_BIT;
+                    DATATYPE_VERSION_ONE
                 }
                 DatatypeByteOrder::Vax => {
-                    bf0 |= 0x40;
+                    bf0 |= FLOAT_BYTE_ORDER_LOW_BIT | FLOAT_BYTE_ORDER_HIGH_BIT;
+                    DATATYPE_VERSION_THREE
                 }
-                _ => {}
-            }
-            // bf[1] = sign bit location (bit position of sign in the value)
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "size is an element byte size; *8-1 is a bit index that fits in a u8 (at most 63 for an 8-byte element)"
-            )]
-            let bf1 = (*size * 8 - 1) as u8;
+            };
             let mut buf = build_header(
                 FLOATING_POINT_CLASS,
-                DATATYPE_VERSION_ONE,
-                [bf0, bf1, 0],
+                version,
+                [bf0, *sign_location, 0],
                 *size,
             );
             buf.extend_from_slice(&bit_offset.to_le_bytes());
@@ -677,8 +693,7 @@ fn parse_string_padding(val: u8) -> Result<StringPadding, FormatError> {
 /// Returns the byte order a floating-point datatype's class bit field encodes.
 ///
 /// Bit 6 and bit 0 select it together: neither set is little-endian, bit 0 alone big-endian, and
-/// both VAX. Bit 6 alone is the reserved pattern, which parses as VAX, the encoding this crate
-/// writes for a VAX type.
+/// both VAX. The reserved pattern with bit 6 alone also parses as VAX.
 ///
 /// The bit field is defined in "The Datatype Message" of the [format specification, version
 /// 4.0][spec].
@@ -700,6 +715,49 @@ const FLOAT_BYTE_ORDER_LOW_BIT: u8 = 0x01;
 
 /// Bit 6 of a floating-point class bit field, the high bit of its byte order.
 const FLOAT_BYTE_ORDER_HIGH_BIT: u8 = 0x40;
+
+/// The bit position of mantissa normalization in the floating-point class bit field.
+///
+/// The field and its values are defined in "The Datatype Message" of the [format
+/// specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const FLOAT_NORMALIZATION_SHIFT: u8 = 4;
+/// The mask for the two mantissa normalization bits after shifting.
+///
+/// Mantissa normalization is defined in "The Datatype Message" of the [format specification,
+/// version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const FLOAT_NORMALIZATION_MASK: u8 = 0x03;
+/// The encoded value for a mantissa stored without normalization.
+///
+/// Mantissa normalization is defined in "The Datatype Message" of the [format specification,
+/// version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const FLOAT_NORMALIZATION_UNNORMALIZED: u8 = 0;
+/// The encoded value for a stored leading mantissa bit that is set, except for zero.
+///
+/// Mantissa normalization is defined in "The Datatype Message" of the [format specification,
+/// version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const FLOAT_NORMALIZATION_LEADING_ONE: u8 = 1;
+/// The encoded value for an implied leading mantissa bit.
+///
+/// Mantissa normalization is defined in "The Datatype Message" of the [format specification,
+/// version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE: u8 = 2;
+/// The reserved mantissa normalization value.
+///
+/// Mantissa normalization is defined in "The Datatype Message" of the [format specification,
+/// version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const FLOAT_NORMALIZATION_RESERVED: u8 = 3;
 
 fn parse_charset(val: u8) -> Result<CharacterSet, FormatError> {
     match val {
@@ -1172,11 +1230,9 @@ mod tests {
         mant_size: u8,
         exp_bias: u32,
     ) -> Vec<u8> {
-        // LE byte order: bo_low=0, bo_high=0
-        let bf0 = 0x00u8;
-        let bf1 = 0x00u8;
-        // mantissa norm = 2 (MSB not stored) in bits 24-31... wait, that's bf2
-        let bf2 = 0x02u8; // norm = 2
+        let bf0 = FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE << FLOAT_NORMALIZATION_SHIFT;
+        let bf1 = u8::try_from(size * 8 - 1).unwrap();
+        let bf2 = 0;
         let mut buf = build_dt_header(1, DATATYPE_VERSION_ONE, [bf0, bf1, bf2], size);
         let mut props = [0u8; 12];
         LittleEndian::write_u16(&mut props[0..2], 0); // `bit_offset`
@@ -1264,6 +1320,43 @@ mod tests {
         );
     }
 
+    #[rstest]
+    #[case(MantissaNormalization::Unnormalized, FLOAT_NORMALIZATION_UNNORMALIZED)]
+    #[case(MantissaNormalization::LeadingOne, FLOAT_NORMALIZATION_LEADING_ONE)]
+    #[case(
+        MantissaNormalization::ImpliedLeadingOne,
+        FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE
+    )]
+    #[case(MantissaNormalization::Reserved, FLOAT_NORMALIZATION_RESERVED)]
+    fn preserves_floating_point_class_fields(
+        #[case] normalization: MantissaNormalization,
+        #[case] normalization_bits: u8,
+        #[values(0, 30, 31, u8::MAX)] sign_location: u8,
+        #[values(
+            DatatypeByteOrder::LittleEndian,
+            DatatypeByteOrder::BigEndian,
+            DatatypeByteOrder::Vax
+        )]
+        byte_order: DatatypeByteOrder,
+    ) {
+        let datatype = Datatype::FloatingPoint {
+            size: 4,
+            byte_order,
+            layout: FloatingPointLayout {
+                mantissa_normalization: normalization,
+                sign_location,
+                ..FloatingPointLayout::IEEE754_BINARY32
+            },
+        };
+        let bytes = serialize_datatype(&datatype);
+        assert_eq!(
+            (bytes[1] >> FLOAT_NORMALIZATION_SHIFT) & FLOAT_NORMALIZATION_MASK,
+            normalization_bits
+        );
+        assert_eq!(bytes[2], sign_location);
+        assert_eq!(parse_datatype(&bytes).unwrap(), (datatype, bytes.len()));
+    }
+
     #[test]
     fn test_float_f32_le() {
         // IEEE 754 f32: exp=8 bits at bit 23, mant=23 bits at bit 0, bias=127
@@ -1289,15 +1382,7 @@ mod tests {
             Datatype::FloatingPoint {
                 size: 8,
                 byte_order: DatatypeByteOrder::LittleEndian,
-                layout: FloatingPointLayout {
-                    bit_offset: 0,
-                    bit_precision: 64,
-                    exponent_location: 52,
-                    exponent_size: 11,
-                    mantissa_location: 0,
-                    mantissa_size: 52,
-                    exponent_bias: 1023,
-                }
+                layout: FloatingPointLayout::IEEE754_BINARY64
             }
         );
     }
@@ -1978,15 +2063,7 @@ mod tests {
                     Datatype::FloatingPoint {
                         size: 8,
                         byte_order: DatatypeByteOrder::LittleEndian,
-                        layout: FloatingPointLayout {
-                            bit_offset: 0,
-                            bit_precision: 64,
-                            exponent_location: 52,
-                            exponent_size: 11,
-                            mantissa_location: 0,
-                            mantissa_size: 52,
-                            exponent_bias: 1023,
-                        },
+                        layout: FloatingPointLayout::IEEE754_BINARY64,
                     },
                 ),
                 __private::compound_member(
@@ -1995,15 +2072,7 @@ mod tests {
                     Datatype::FloatingPoint {
                         size: 8,
                         byte_order: DatatypeByteOrder::LittleEndian,
-                        layout: FloatingPointLayout {
-                            bit_offset: 0,
-                            bit_precision: 64,
-                            exponent_location: 52,
-                            exponent_size: 11,
-                            mantissa_location: 0,
-                            mantissa_size: 52,
-                            exponent_bias: 1023,
-                        },
+                        layout: FloatingPointLayout::IEEE754_BINARY64,
                     },
                 ),
                 __private::compound_member(
@@ -2157,15 +2226,7 @@ mod tests {
             base_type: Box::new(Datatype::FloatingPoint {
                 size: 8,
                 byte_order: DatatypeByteOrder::LittleEndian,
-                layout: FloatingPointLayout {
-                    bit_offset: 0,
-                    bit_precision: 64,
-                    exponent_location: 52,
-                    exponent_size: 11,
-                    mantissa_location: 0,
-                    mantissa_size: 52,
-                    exponent_bias: 1023,
-                },
+                layout: FloatingPointLayout::IEEE754_BINARY64,
             }),
             dimensions: vec![3],
         };
@@ -2291,15 +2352,7 @@ mod display_tests {
         let float = Datatype::FloatingPoint {
             size: 8,
             byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FloatingPointLayout {
-                bit_offset: 0,
-                bit_precision: 64,
-                exponent_location: 52,
-                exponent_size: 11,
-                mantissa_location: 0,
-                mantissa_size: 52,
-                exponent_bias: 1023,
-            },
+            layout: FloatingPointLayout::IEEE754_BINARY64,
         };
         assert_eq!(float.to_string(), "f64");
     }
@@ -2331,6 +2384,8 @@ mod display_tests {
                     size: u32::MAX,
                     byte_order: DatatypeByteOrder::LittleEndian,
                     layout: FloatingPointLayout {
+                        mantissa_normalization: MantissaNormalization::ImpliedLeadingOne,
+                        sign_location: 0,
                         bit_offset: 0,
                         bit_precision: 0,
                         exponent_location: 0,
@@ -2423,15 +2478,7 @@ mod display_tests {
                     Datatype::FloatingPoint {
                         size: 4,
                         byte_order: DatatypeByteOrder::LittleEndian,
-                        layout: FloatingPointLayout {
-                            bit_offset: 0,
-                            bit_precision: 32,
-                            exponent_location: 23,
-                            exponent_size: 8,
-                            mantissa_location: 0,
-                            mantissa_size: 23,
-                            exponent_bias: 127,
-                        },
+                        layout: FloatingPointLayout::IEEE754_BINARY32,
                     },
                 ),
                 __private::compound_member(
