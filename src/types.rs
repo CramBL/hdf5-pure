@@ -544,12 +544,16 @@ fn is_ascii_char_vlen_base(base: &crate::datatype::Datatype) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
     use crate::address::BaseAddress;
     use crate::address::BaseAddressExt;
+    use crate::data_read;
+    use crate::datatype::Datatype;
+    use crate::datatype::layout::FloatingPointLayout;
     use crate::{
-        CharacterSet, DatatypeByteOrder, MantissaNormalization, StringPadding,
-        datatype::{Datatype, layout::FloatingPointLayout},
+        CharacterSet, DatatypeByteOrder, FormatError, MantissaNormalization, StringPadding,
     };
 
     /// A width the curated set has no name for reaches the caller as the type
@@ -1095,16 +1099,13 @@ mod tests {
         );
     }
 
-    /// A value outside the range its own width holds keeps the 64-bit variant
-    /// rather than being wrapped into the narrow one.
-    ///
-    /// It takes a datatype whose *precision* exceeds its size to get there: one
-    /// stored byte holding `0xFF`, sign-extended from bit 16 rather than bit 8,
-    /// decodes to 255 — which no `i8` holds. No writer produces such a type, but
-    /// a file is not this crate's to trust, and `-1` in place of `255` would be
-    /// a silent lie about what the file says.
-    #[test]
-    fn a_value_outside_its_declared_width_is_not_wrapped() {
+    #[rstest]
+    #[case(vec![0xFF], vec![])]
+    #[case(vec![0x01, 0xFF], vec![2])]
+    fn rejects_an_attribute_with_an_invalid_bit_range(
+        #[case] raw: Vec<u8>,
+        #[case] dimensions: Vec<u64>,
+    ) {
         let overwide = Datatype::FixedPoint {
             size: 1,
             byte_order: DatatypeByteOrder::LittleEndian,
@@ -1114,16 +1115,14 @@ mod tests {
                 bit_precision: 16,
             },
         };
+        assert_eq!(decode_raw(overwide.clone(), raw.clone(), dimensions), None);
         assert_eq!(
-            decode_raw(overwide.clone(), vec![0xFF], vec![]),
-            Some(AttrValue::I64(255)),
-            "a scalar past `i8` must widen, not wrap"
-        );
-        assert_eq!(
-            decode_raw(overwide, vec![0x01, 0xFF], vec![2]),
-            Some(AttrValue::I64Array(vec![1, 255])),
-            "one element past `i8` widens the whole array, since a mixed answer \
-             would carry two different meanings for one attribute"
+            data_read::read_as_i64(&raw, &overwide).unwrap_err(),
+            FormatError::InvalidFixedPointRange {
+                size: 1,
+                bit_offset: 0,
+                bit_precision: 16,
+            }
         );
     }
 

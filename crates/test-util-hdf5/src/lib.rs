@@ -22,6 +22,8 @@ pub mod global_heap_fixture;
 pub mod group_filter;
 pub mod lock;
 pub mod mat_file;
+#[cfg(feature = "hdf5")]
+pub mod numeric;
 pub mod paged;
 pub mod reader;
 pub mod session;

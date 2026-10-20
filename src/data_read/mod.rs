@@ -12,15 +12,15 @@ use crate::chunk_cache::ChunkCache;
 use crate::chunked_read;
 #[cfg(test)]
 use crate::data_layout::DataLayout;
-use crate::data_read::primitive::{
-    H5Conversion, HardConversion, NoOpConversion, NumericReadTarget,
-};
+use crate::data_read::primitive::{H5Conversion, NumericReadTarget};
 #[cfg(test)]
 use crate::dataspace::Dataspace;
 use crate::datatype::Datatype;
+#[cfg(test)]
 use crate::datatype::byte_order::DatatypeByteOrder;
+#[cfg(test)]
 use crate::datatype::layout::FixedPointLayout;
-use crate::datatype::numeric::NumericDatatype;
+use crate::datatype::numeric::{NumericDecodePlan, NumericEncoding};
 use crate::error::FormatError;
 #[cfg(test)]
 use crate::fill_value::FillPattern;
@@ -29,6 +29,8 @@ use crate::source;
 use crate::source::Source;
 use crate::width::FormatWidths;
 
+#[cfg(test)]
+mod numeric_tests;
 mod primitive;
 
 #[cfg(test)]
@@ -146,95 +148,6 @@ pub fn read_raw_data_cached_from_source<S: Source + ?Sized>(
     }
 }
 
-fn read_integer_into<T: NumericReadTarget>(
-    src: &[u8],
-    datatype: &Datatype,
-    dst: &mut Vec<T>,
-) -> Result<(), FormatError> {
-    let num_dt: NumericDatatype = datatype.try_into()?;
-    let elem_size = num_dt.element_size().get();
-
-    if !src.len().is_multiple_of(elem_size) {
-        return Err(FormatError::DataSizeMismatch {
-            expected: 0,
-            actual: src.len(),
-        });
-    }
-
-    dst.reserve(src.len() / elem_size);
-
-    if let Some(standard) = num_dt.standard_layout() {
-        return match num_dt {
-            NumericDatatype::FixedPoint { layout, .. } => {
-                primitive::decode_standard_fixed_point_into(src, layout.signed, standard, dst)
-            }
-
-            NumericDatatype::FloatingPoint { .. } => {
-                primitive::decode_standard_floating_point_into(src, standard, dst)
-            }
-        };
-    }
-
-    match num_dt {
-        NumericDatatype::FixedPoint { layout, .. } => {
-            let order = num_dt.byte_order();
-            let bit_offset = num_dt.bit_offset();
-            let bit_precision = num_dt.bit_precision();
-
-            if layout.signed {
-                let conversion = T::I64Conversion::default();
-
-                for chunk in src.chunks_exact(elem_size) {
-                    let value =
-                        read_signed_int(chunk, elem_size, &order, bit_offset, bit_precision);
-                    dst.push(conversion.convert(value));
-                }
-            } else {
-                let conversion = T::U64Conversion::default();
-
-                for chunk in src.chunks_exact(elem_size) {
-                    let value =
-                        read_unsigned_int(chunk, elem_size, &order, bit_offset, bit_precision);
-                    dst.push(conversion.convert(value));
-                }
-            }
-        }
-
-        NumericDatatype::FloatingPoint { .. } => {
-            let order = num_dt.byte_order();
-
-            match elem_size {
-                4 => {
-                    let conversion = T::F32Conversion::default();
-
-                    let (chunks, _remainder) = src.as_chunks::<4>();
-                    debug_assert!(_remainder.is_empty(), "should be checked before this point");
-                    for chunk in chunks {
-                        dst.push(conversion.convert(read_f32_bytes(chunk, &order)));
-                    }
-                }
-                8 => {
-                    let conversion = T::F64Conversion::default();
-
-                    let (chunks, _remainder) = src.as_chunks::<8>();
-                    debug_assert!(_remainder.is_empty(), "should be checked before this point");
-                    for chunk in chunks {
-                        dst.push(conversion.convert(read_f64_bytes(chunk, &order)));
-                    }
-                }
-                _ => {
-                    return Err(FormatError::DataSizeMismatch {
-                        expected: 8,
-                        actual: elem_size,
-                    });
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
 /// Returns the datatype that governs numeric decoding of `dt`.
 ///
 /// An HDF5 enumeration is stored as values of its integer base type, so
@@ -267,101 +180,7 @@ pub fn read_as_f64_into(
     datatype: &Datatype,
     dst: &mut Vec<f64>,
 ) -> Result<(), FormatError> {
-    let num_dt: NumericDatatype = datatype.try_into()?;
-    let elem_size = num_dt.element_size();
-    if !src.len().is_multiple_of(elem_size.get()) {
-        return Err(FormatError::DataSizeMismatch {
-            expected: 0,
-            actual: src.len(),
-        });
-    }
-    let count = src.len() / elem_size.get();
-    dst.reserve(count);
-
-    // Fast path: standard full-width layout, bulk-decoded with `from_*_bytes`.
-    if let Some(standard) = num_dt.standard_layout() {
-        match num_dt {
-            NumericDatatype::FixedPoint { layout, .. } => {
-                primitive::decode_standard_fixed_point_into::<f64>(
-                    src,
-                    layout.signed,
-                    standard,
-                    dst,
-                )?;
-            }
-            NumericDatatype::FloatingPoint {
-                element_size,
-                byte_order,
-                ..
-            } => match element_size.get() {
-                4 => primitive::decode_fixed_width_into::<4, f32, f64, _>(
-                    src,
-                    standard.order,
-                    HardConversion,
-                    dst,
-                )?,
-
-                8 => primitive::decode_fixed_width_into::<8, f64, f64, _>(
-                    src,
-                    standard.order,
-                    NoOpConversion,
-                    dst,
-                )?,
-                _ => {
-                    for i in 0..count {
-                        let chunk = &src[i * elem_size.get()..(i + 1) * elem_size.get()];
-                        let val = convert_to_f64(chunk, datatype, &byte_order)?;
-                        dst.push(val);
-                    }
-                }
-            },
-        }
-    }
-
-    Ok(())
-}
-
-fn convert_to_f64(
-    bytes: &[u8],
-    dt: &Datatype,
-    order: &DatatypeByteOrder,
-) -> Result<f64, FormatError> {
-    match dt {
-        Datatype::FloatingPoint { size, .. } => match size {
-            4 => {
-                let v = read_f32_bytes(bytes, order);
-                Ok(v as f64)
-            }
-            8 => Ok(read_f64_bytes(bytes, order)),
-            _ => Err(FormatError::DataSizeMismatch {
-                expected: 8,
-                actual: *size as usize,
-            }),
-        },
-        Datatype::FixedPoint {
-            size,
-            byte_order: _,
-            layout:
-                FixedPointLayout {
-                    signed,
-                    bit_offset,
-                    bit_precision,
-                },
-        } => {
-            if *signed {
-                let v = read_signed_int(bytes, *size as usize, order, *bit_offset, *bit_precision);
-                Ok(v as f64)
-            } else {
-                let v =
-                    read_unsigned_int(bytes, *size as usize, order, *bit_offset, *bit_precision);
-                Ok(v as f64)
-            }
-        }
-        _ => Err(FormatError::TypeMismatch {
-            expected: "numeric",
-            actual: crate::datatype::datatype_class_name(dt),
-        }),
-    }
+    read_numeric_into(src, datatype, dst)
 }
 
 /// Convert raw bytes to `u64` values.
@@ -388,15 +207,15 @@ pub fn read_as_u16(src: &[u8], datatype: &Datatype) -> Result<Vec<u16>, FormatEr
 }
 
 pub fn read_as_u64_into(src: &[u8], dt: &Datatype, dst: &mut Vec<u64>) -> Result<(), FormatError> {
-    read_integer_into(src, dt, dst)
+    read_numeric_into(src, dt, dst)
 }
 
 pub fn read_as_u32_into(src: &[u8], dt: &Datatype, dst: &mut Vec<u32>) -> Result<(), FormatError> {
-    read_integer_into(src, dt, dst)
+    read_numeric_into(src, dt, dst)
 }
 
 pub fn read_as_u16_into(src: &[u8], dt: &Datatype, dst: &mut Vec<u16>) -> Result<(), FormatError> {
-    read_integer_into(src, dt, dst)
+    read_numeric_into(src, dt, dst)
 }
 
 pub fn read_as_u8(src: &[u8], datatype: &Datatype) -> Result<Vec<u8>, FormatError> {
@@ -406,7 +225,7 @@ pub fn read_as_u8(src: &[u8], datatype: &Datatype) -> Result<Vec<u8>, FormatErro
 }
 
 pub fn read_as_u8_into(src: &[u8], dt: &Datatype, dst: &mut Vec<u8>) -> Result<(), FormatError> {
-    read_integer_into(src, dt, dst)
+    read_numeric_into(src, dt, dst)
 }
 
 /// Convert raw bytes to `f32` values.
@@ -426,109 +245,7 @@ pub fn read_as_f32_into(
     datatype: &Datatype,
     dst: &mut Vec<f32>,
 ) -> Result<(), FormatError> {
-    let num_dt: NumericDatatype = datatype.try_into()?;
-    let num_elem_sz = num_dt.element_size();
-    if !src.len().is_multiple_of(num_elem_sz.get()) {
-        return Err(FormatError::DataSizeMismatch {
-            expected: 0,
-            actual: src.len(),
-        });
-    }
-    let count = src.len() / num_elem_sz.get();
-    let order = num_dt.byte_order();
-    dst.reserve(count);
-
-    if let Some(result) = try_read_as_f32_standard(src, &num_dt, dst) {
-        return result;
-    }
-
-    let elem_sz = num_elem_sz.get();
-    for i in 0..count {
-        let chunk = &src[i * elem_sz..(i + 1) * elem_sz];
-        match datatype {
-            Datatype::FloatingPoint { size: 4, .. } => {
-                dst.push(read_f32_bytes(chunk, &order));
-            }
-            Datatype::FloatingPoint { size: 8, .. } => {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "read_as_f32 narrows stored f64 values to the requested f32"
-                )]
-                dst.push(read_f64_bytes(chunk, &order) as f32);
-            }
-            Datatype::FixedPoint {
-                size,
-                byte_order: _,
-                layout:
-                    FixedPointLayout {
-                        signed: true,
-                        bit_offset,
-                        bit_precision,
-                    },
-            } => {
-                dst.push(
-                    read_signed_int(chunk, *size as usize, &order, *bit_offset, *bit_precision)
-                        as f32,
-                );
-            }
-            Datatype::FixedPoint {
-                size,
-                byte_order: _,
-                layout:
-                    FixedPointLayout {
-                        signed: false,
-                        bit_offset,
-                        bit_precision,
-                    },
-            } => {
-                dst.push(read_unsigned_int(
-                    chunk,
-                    *size as usize,
-                    &order,
-                    *bit_offset,
-                    *bit_precision,
-                ) as f32);
-            }
-            _ => {
-                return Err(FormatError::TypeMismatch {
-                    expected: "numeric",
-                    actual: crate::datatype::datatype_class_name(datatype),
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-fn try_read_as_f32_standard(
-    src: &[u8],
-    num_dt: &NumericDatatype,
-    dst: &mut Vec<f32>,
-) -> Option<Result<(), FormatError>> {
-    let standard = num_dt.standard_layout()?;
-
-    let result = match num_dt {
-        NumericDatatype::FloatingPoint { element_size, .. } => match element_size.get() {
-            4 => primitive::decode_fixed_width_into::<4, f32, f32, _>(
-                src,
-                standard.order,
-                NoOpConversion,
-                dst,
-            ),
-            8 => primitive::decode_fixed_width_into::<8, f64, f32, _>(
-                src,
-                standard.order,
-                HardConversion,
-                dst,
-            ),
-            _ => return None,
-        },
-        NumericDatatype::FixedPoint { layout, .. } => {
-            primitive::decode_standard_fixed_point_into::<f32>(src, layout.signed, standard, dst)
-        }
-    };
-
-    Some(result)
+    read_numeric_into(src, datatype, dst)
 }
 
 /// Convert raw bytes to `i64` values.
@@ -560,7 +277,7 @@ pub fn read_as_i8(src: &[u8], datatype: &Datatype) -> Result<Vec<i8>, FormatErro
 }
 
 pub fn read_as_i64_into(src: &[u8], dt: &Datatype, dst: &mut Vec<i64>) -> Result<(), FormatError> {
-    read_integer_into(src, dt, dst)
+    read_numeric_into(src, dt, dst)
 }
 
 /// Decode `src` and **append** the values to `dst`, the appending form of
@@ -569,7 +286,7 @@ pub fn read_as_i64_into(src: &[u8], dt: &Datatype, dst: &mut Vec<i64>) -> Result
 /// On error `dst` holds an unspecified prefix of this call's values: every
 /// caller abandons the buffer
 pub fn read_as_i32_into(src: &[u8], dt: &Datatype, dst: &mut Vec<i32>) -> Result<(), FormatError> {
-    read_integer_into(src, dt, dst)
+    read_numeric_into(src, dt, dst)
 }
 
 /// Decode `src` and **append** the values to `dst`, the appending form of
@@ -578,11 +295,11 @@ pub fn read_as_i32_into(src: &[u8], dt: &Datatype, dst: &mut Vec<i32>) -> Result
 /// On error `dst` holds an unspecified prefix of this call's values: every
 /// caller abandons the buffer
 pub fn read_as_i16_into(src: &[u8], dt: &Datatype, dst: &mut Vec<i16>) -> Result<(), FormatError> {
-    read_integer_into(src, dt, dst)
+    read_numeric_into(src, dt, dst)
 }
 
 pub fn read_as_i8_into(src: &[u8], dt: &Datatype, dst: &mut Vec<i8>) -> Result<(), FormatError> {
-    read_integer_into(src, dt, dst)
+    read_numeric_into(src, dt, dst)
 }
 
 /// Read fixed-length strings from raw bytes.
@@ -627,104 +344,65 @@ pub fn read_as_strings(src: &[u8], datatype: &Datatype) -> Result<Vec<String>, F
     }
 }
 
-/// An element's bytes as a little-endian 64-bit word.
-fn reorder_bytes(bytes: &[u8], order: &DatatypeByteOrder) -> [u8; 8] {
-    let mut buf = [0u8; 8];
-    let len = bytes.len().min(8);
-    match order {
-        DatatypeByteOrder::LittleEndian | DatatypeByteOrder::Vax => {
-            buf[..len].copy_from_slice(&bytes[..len]);
-        }
-        DatatypeByteOrder::BigEndian => {
-            // Reverse bytes into LE order
-            for i in 0..len {
-                buf[i] = bytes[len - 1 - i];
+/// Appends one converted value per input element after parsing a supported numeric layout.
+///
+/// # Errors
+///
+/// Returns [`FormatError::TypeMismatch`] if the datatype or its enumeration base is not numeric.
+/// Returns [`FormatError::EnumBaseSizeMismatch`] if an enumeration's size differs from its base.
+/// Returns [`FormatError::ZeroSizedDatatype`] or [`FormatError::NumericElementTooWide`] if the
+/// element size is outside one to eight bytes.
+/// Returns [`FormatError::InvalidFixedPointRange`] if the bit range is empty or exceeds the width.
+/// Returns [`FormatError::UnsupportedFloatingPointLayout`] if the floating-point encoding is
+/// not IEEE 754 binary32 or binary64 with the matching element size.
+/// Returns [`FormatError::UnsupportedVaxByteOrder`] if the byte order is VAX.
+/// Returns [`FormatError::DataSizeMismatch`] if the input ends within an element.
+fn read_numeric_into<T: NumericReadTarget>(
+    src: &[u8],
+    datatype: &Datatype,
+    dst: &mut Vec<T>,
+) -> Result<(), FormatError> {
+    let plan = NumericDecodePlan::try_from(datatype)?;
+    let element_size = plan.element_size();
+    if !src.len().is_multiple_of(element_size) {
+        return Err(FormatError::DataSizeMismatch {
+            expected: src.len() - src.len() % element_size,
+            actual: src.len(),
+        });
+    }
+    match plan.encoding() {
+        NumericEncoding::FixedPoint(layout) => {
+            dst.reserve(src.len() / element_size);
+            if layout.signed() {
+                let conversion = T::I64Conversion::default();
+                dst.extend(
+                    src.chunks_exact(element_size)
+                        .map(|bytes| conversion.convert(layout.read_signed(bytes))),
+                );
+            } else {
+                let conversion = T::U64Conversion::default();
+                dst.extend(
+                    src.chunks_exact(element_size)
+                        .map(|bytes| conversion.convert(layout.read_unsigned(bytes))),
+                );
             }
+            Ok(())
         }
-    }
-    buf
-}
-
-fn read_f64_bytes(bytes: &[u8], order: &DatatypeByteOrder) -> f64 {
-    let buf = reorder_bytes(bytes, order);
-    f64::from_le_bytes(buf)
-}
-
-fn read_f32_bytes(bytes: &[u8], order: &DatatypeByteOrder) -> f32 {
-    let mut buf = [0u8; 4];
-    let len = bytes.len().min(4);
-    match order {
-        DatatypeByteOrder::LittleEndian | DatatypeByteOrder::Vax => {
-            buf[..len].copy_from_slice(&bytes[..len]);
+        NumericEncoding::Float32(order) => primitive::decode_fixed_width_into::<4, f32, T, _>(
+            src,
+            order,
+            T::F32Conversion::default(),
+            dst,
+        ),
+        NumericEncoding::Float64(order) => primitive::decode_fixed_width_into::<8, f64, T, _>(
+            src,
+            order,
+            T::F64Conversion::default(),
+            dst,
+        ),
+        NumericEncoding::StandardFixedPoint { signed, layout } => {
+            primitive::decode_standard_fixed_point_into(src, signed, layout, dst)
         }
-        DatatypeByteOrder::BigEndian => {
-            for i in 0..len {
-                buf[i] = bytes[len - 1 - i];
-            }
-        }
-    }
-    f32::from_le_bytes(buf)
-}
-
-/// Read the raw stored integer word (zero-extended to `u64`).
-fn read_raw_word(bytes: &[u8], size: usize, order: &DatatypeByteOrder) -> u64 {
-    let buf = reorder_bytes(bytes, order);
-    let mut val = 0u64;
-    for (i, &byte) in buf.iter().enumerate().take(size.min(8)) {
-        val |= (byte as u64) << (i * 8);
-    }
-    val
-}
-
-/// Extract the significant bits of a fixed-point value per the HDF5 layout:
-/// drop the `bit_offset` low padding bits and mask to `bit_precision`
-/// significant bits, right-justified. Returns the unsigned magnitude. For the
-/// standard full-width case (`bit_offset == 0`, `bit_precision == size*8`) this
-/// is the identity, so normal integers decode exactly as before.
-fn extract_unsigned_bits(src: u64, bit_offset: u16, bit_precision: u16) -> u64 {
-    let off = u32::from(bit_offset);
-    let prec = u32::from(bit_precision);
-    let shifted = if off >= 64 { 0 } else { src >> off };
-    if prec == 0 {
-        0
-    } else if prec >= 64 {
-        shifted
-    } else {
-        shifted & ((1u64 << prec) - 1)
-    }
-}
-
-fn read_unsigned_int(
-    bytes: &[u8],
-    size: usize,
-    order: &DatatypeByteOrder,
-    bit_offset: u16,
-    bit_precision: u16,
-) -> u64 {
-    let raw = read_raw_word(bytes, size, order);
-    extract_unsigned_bits(raw, bit_offset, bit_precision)
-}
-
-#[expect(
-    clippy::cast_possible_wrap,
-    reason = "reinterprets raw bits as a signed integer; sign reinterpretation and \
-              sign-extension are the intended operations"
-)]
-fn read_signed_int(
-    bytes: &[u8],
-    size: usize,
-    order: &DatatypeByteOrder,
-    bit_offset: u16,
-    bit_precision: u16,
-) -> i64 {
-    let magnitude = read_unsigned_int(bytes, size, order, bit_offset, bit_precision);
-    let precision = u32::from(bit_precision);
-    if precision == 0 || precision >= 64 {
-        magnitude as i64
-    } else {
-        // Sign-extend from the precision boundary: replicate bit (precision - 1).
-        let shift = 64 - precision;
-        ((magnitude << shift) as i64) >> shift
     }
 }
 

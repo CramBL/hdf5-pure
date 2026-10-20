@@ -5,7 +5,7 @@ use core::num::NonZeroU64;
 use core::num::NonZeroUsize;
 use core::str::Utf8Error;
 
-use crate::FileSpacePageSize;
+use crate::{FileSpacePageSize, FloatingPointLayout};
 
 /// Reports format, filter, and runtime failures through the `hdf5-pure` API.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,6 +141,13 @@ pub enum FormatError {
     /// An enumeration datatype was built over a base type that is not an
     /// integer. HDF5 enumerations must have a fixed-point base.
     EnumBaseNotInteger,
+    /// An enumeration's element size differs from its base type's element size.
+    EnumBaseSizeMismatch {
+        /// The enumeration's element size in bytes.
+        size: u32,
+        /// The base type's element size in bytes.
+        base_size: u32,
+    },
     /// An enumeration member's integer value does not fit in the base type:
     /// `(member name, value, base size in bytes)`.
     EnumMemberValueRange(String, i64, u32),
@@ -393,6 +400,15 @@ pub enum FormatError {
     /// A Fixed Array header or data block version other than 0, the only version the format
     /// defines.
     InvalidFixedArrayVersion(u8),
+    /// A fixed-point bit range is empty or extends past the element width.
+    InvalidFixedPointRange {
+        /// The element size in bytes.
+        size: usize,
+        /// The first significant bit within the element.
+        bit_offset: u16,
+        /// The number of significant bits.
+        bit_precision: u16,
+    },
     /// A fractal-heap block's stored offset differs from its position in the doubling table.
     InvalidFractalHeapBlockOffset {
         /// The block's expected offset in the heap's managed address space, in bytes.
@@ -756,6 +772,13 @@ pub enum FormatError {
     /// A filtered fractal heap holds an object or structure that this crate does not decode or
     /// encode, such as a huge object.
     UnsupportedFilteredHeapObject,
+    /// Numeric decoding requires IEEE 754 binary32 or binary64, with matching element size.
+    UnsupportedFloatingPointLayout {
+        /// The element size in bytes.
+        size: usize,
+        /// The stored floating-point bit fields.
+        layout: FloatingPointLayout,
+    },
     /// Unknown message type that is marked as must-understand.
     UnsupportedMessage(u16),
     /// A serialized free-space section class is unsupported for its manager client.
@@ -777,6 +800,8 @@ pub enum FormatError {
     /// message body without its file. A committed (`H5Tcommit`) datatype
     /// references another object header and is resolved separately.
     UnsupportedSohmReference,
+    /// Numeric decoding does not support VAX byte order.
+    UnsupportedVaxByteOrder,
     /// The superblock version is not supported.
     UnsupportedVersion(u8),
     /// A dataset uses the Virtual (VDS) data layout, which maps its elements to
@@ -1052,6 +1077,10 @@ impl fmt::Display for FormatError {
                     "an enumeration's base type must be an integer (fixed-point) type"
                 )
             }
+            Self::EnumBaseSizeMismatch { size, base_size } => write!(
+                f,
+                "enumeration element size {size} differs from its {base_size}-byte base type"
+            ),
             Self::EnumMemberValueSize(name, expected, actual) => {
                 write!(
                     f,
@@ -1684,6 +1713,21 @@ impl fmt::Display for FormatError {
                     "a {size}-byte numeric element is wider than the 64-bit values these readers \
                      decode into"
                 )
+            }
+            Self::InvalidFixedPointRange {
+                size,
+                bit_offset,
+                bit_precision,
+            } => write!(
+                f,
+                "fixed-point bit offset {bit_offset} and precision {bit_precision} do not describe a nonempty range within a {size}-byte element"
+            ),
+            Self::UnsupportedFloatingPointLayout { size, layout } => write!(
+                f,
+                "unsupported {size}-byte floating-point layout: {layout:?}"
+            ),
+            Self::UnsupportedVaxByteOrder => {
+                write!(f, "numeric decoding does not support VAX byte order")
             }
             Self::Internal(detail) => write!(f, "internal error in hdf5-pure: {detail}"),
         }

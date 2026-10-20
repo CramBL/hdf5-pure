@@ -243,6 +243,7 @@ def test_migration_shape_ignores_only_the_allowed_variant_changes(variant, expec
     ("variant", "expected"),
     [
         ("EofRelocationUnderflow", []),
+        ("EnumBaseSizeMismatch", []),
         ("FileRegionLengthMismatch", []),
         ("InsufficientRegion", []),
         ("TruncatedFile", []),
@@ -251,6 +252,9 @@ def test_migration_shape_ignores_only_the_allowed_variant_changes(variant, expec
         ("InvalidFractalHeapGeometry", []),
         ("InvalidFractalHeapIdLength", []),
         ("InvalidFilterName", []),
+        ("InvalidFixedPointRange", []),
+        ("UnsupportedFloatingPointLayout", []),
+        ("UnsupportedVaxByteOrder", []),
         ("InvalidFilterPipelineField", []),
         ("UnsupportedSerializedSectionClass", []),
         ("ValueTooLargeForRepresentation", []),
