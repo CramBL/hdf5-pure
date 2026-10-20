@@ -19,6 +19,8 @@ RUN test -n "$CMAKE_VERSION" && test -n "$CMAKE_SHA256" \
     && printf '%s  /tmp/cmake.tar.gz\n' "$CMAKE_SHA256" | sha256sum --check \
     && mkdir -p /opt/cmake \
     && tar --extract --gzip --file /tmp/cmake.tar.gz --strip-components=1 --directory /opt/cmake \
+    && rm -rf /opt/cmake/bin/cmake-gui /opt/cmake/bin/ccmake \
+        /opt/cmake/doc/cmake/html /opt/cmake/doc/cmake/CMake.qch /opt/cmake/man \
     && rm /tmp/cmake.tar.gz \
     && ln -sf /opt/cmake/bin/cmake /usr/local/bin/cmake \
     && ln -sf /opt/cmake/bin/ctest /usr/local/bin/ctest \
