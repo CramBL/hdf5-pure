@@ -43,12 +43,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Breaking:** `FormatError::InvalidFreeSpaceManager` holds a message that describes the invalid free-space manager, and a write returns it for a free section too large to persist at the file's length width.
 - **Breaking:** `File::persisted_free_space` reports a malformed free-space manager as an error, which changes its return type ([#698](https://github.com/CramBL/hdf5-pure/pull/698)).
 - **Breaking:** `FileSpaceInfo::page_size` changes type from `u64` to `FileSpacePageSize`, which holds a page size from 512 bytes to 1 GiB ([#702](https://github.com/CramBL/hdf5-pure/pull/702)).
+- `FormatError` reports a corrupt Extensible Array chunk index with variants of its own. `Dataset::append` reports a corrupt header with the generic chunked-read and chunk-geometry errors ([#806](https://github.com/CramBL/hdf5-pure/pull/806)).
 - `File::open_rw` validates complete checksummed fractal-heap direct blocks before editing or proving storage ownership. Read-only object lookups validate block prefixes and object bounds without reading the complete block ([#750](https://github.com/CramBL/hdf5-pure/pull/750)).
 - `FormatError::UnexpectedEof` reports a superblock that the file ends inside with positions counted from the start of the file. Opening a file that ends within 15 bytes of the start of its signature returns it whatever the version byte ([#780](https://github.com/CramBL/hdf5-pure/pull/780)).
-- `FormatError` reports a corrupt Fixed Array chunk index with variants of its own. An Extensible Array chunk index with an invalid signature or version reports a generic chunked-read error ([#782](https://github.com/CramBL/hdf5-pure/pull/782)).
+- `FormatError` reports a corrupt Fixed Array chunk index with variants of its own ([#782](https://github.com/CramBL/hdf5-pure/pull/782)).
 
 ### Fixed
 
+- Fixed `Dataset::chunks` and related reads accepting an Extensible Array chunk index with an invalid header, or with blocks that do not match it ([#806](https://github.com/CramBL/hdf5-pure/pull/806)).
+- Fixed `Dataset::chunks` and related reads misreading an Extensible Array chunk index whose super blocks each hold 8 or more data block addresses ([#806](https://github.com/CramBL/hdf5-pure/pull/806)).
 - Fixed `Dataset::read_raw_rows` rejecting chunked windows above row `usize::MAX` on 32-bit targets. Output buffers and decoded chunks remain subject to host limits ([#799](https://github.com/CramBL/hdf5-pure/pull/799)).
 - Fixed `Dataset::read_raw_rows` rejecting small chunked row windows because the full dataset extent exceeds the host pointer width. Output buffers remain subject to host limits ([#797](https://github.com/CramBL/hdf5-pure/pull/797)).
 - Fixed `File::commit` losing published additions, replacements, and deletions when retrying after a non-persistent PAGE publication error ([#800](https://github.com/CramBL/hdf5-pure/pull/800)).

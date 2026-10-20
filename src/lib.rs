@@ -435,6 +435,8 @@ pub mod __private;
 
 pub(crate) mod access_mode;
 pub(crate) mod address;
+#[cfg(test)]
+pub(crate) mod array_test;
 pub(crate) mod attribute;
 pub(crate) mod attribute_info;
 pub(crate) mod btree_v1;
@@ -455,6 +457,7 @@ pub(crate) mod datatype;
 pub(crate) mod dense_storage;
 pub(crate) mod display;
 pub(crate) mod error;
+pub(crate) mod extensible_array;
 pub(crate) mod file_allocation;
 pub(crate) mod file_create_properties;
 pub(crate) mod file_emission;

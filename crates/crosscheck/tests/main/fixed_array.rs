@@ -1,6 +1,5 @@
 #![cfg(feature = "__hdf5-1.10")]
 
-use std::iter;
 use std::ops::Range;
 use std::path::Path;
 
@@ -9,13 +8,15 @@ use hdf5::plist::file_create::Sizeof;
 use hdf5::plist::file_create::SizeofInfo;
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::Error;
-use hdf5_pure::File;
 use hdf5_pure::FormatError;
 use rstest::rstest;
 
 use test_util::bytes;
 use test_util::checksum;
 use test_util_hdf5::reader::ReadBackend;
+
+use crate::array_index;
+use crate::array_index::Writes;
 
 #[derive(Clone, Copy, Debug)]
 struct Fixture {
@@ -42,89 +43,16 @@ impl Fixture {
         if deflate {
             builder = builder.deflate(4);
         }
-        let dataset = builder.create("d").unwrap();
-        for range in self.written() {
-            dataset
-                .write_slice(&self.values()[range.clone()], range.clone())
-                .unwrap();
-        }
+        self.writes().write(&builder.create("d").unwrap());
         file.close().unwrap();
     }
 
-    fn expected(self) -> Vec<i32> {
-        let mut expected = vec![0; self.len];
-        for range in self.written() {
-            expected[range.clone()].copy_from_slice(&self.values()[range.clone()]);
+    fn writes(self) -> Writes {
+        Writes {
+            len: self.len,
+            sparse: self.sparse,
         }
-        expected
     }
-
-    fn written(self) -> Vec<Range<usize>> {
-        self.sparse.map_or_else(
-            || iter::once(0..self.len).collect(),
-            <[Range<usize>]>::to_vec,
-        )
-    }
-
-    fn values(self) -> Vec<i32> {
-        (0..self.len)
-            .map(|i| i32::try_from(i).unwrap() % 7 + 1)
-            .collect()
-    }
-}
-
-#[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct Chunk {
-    offset: Vec<u64>,
-    address: u64,
-    size: u64,
-    filter_mask: u32,
-}
-
-fn libhdf5_chunks(path: &Path, userblock: u64) -> Vec<Chunk> {
-    let file = hdf5::File::open(path).unwrap();
-    let dataset = file.dataset("d").unwrap();
-    let mut chunks: Vec<Chunk> = (0..dataset.num_chunks().unwrap())
-        .map(|index| {
-            let info = dataset.chunk_info(index).unwrap();
-            Chunk {
-                offset: info.offset,
-                address: absolute(info.addr, userblock),
-                size: info.size,
-                filter_mask: info.filter_mask,
-            }
-        })
-        .collect();
-    chunks.sort();
-    chunks
-}
-
-// `H5D__get_chunk_info` in `H5Dchunk.c` reports a base-relative chunk address in HDF5 1.10.11 and
-// 1.12.3, and adds the base address in 1.14.6 and 2.2.0.
-fn absolute(address: u64, userblock: u64) -> u64 {
-    if cfg!(feature = "__hdf5-1.14") {
-        address
-    } else {
-        address + userblock
-    }
-}
-
-fn pure_chunks(file: &File) -> Vec<Chunk> {
-    let mut chunks: Vec<Chunk> = file
-        .dataset("d")
-        .unwrap()
-        .chunks()
-        .unwrap()
-        .into_iter()
-        .map(|chunk| Chunk {
-            offset: chunk.offset,
-            address: chunk.address,
-            size: chunk.storage_size,
-            filter_mask: chunk.filter_mask,
-        })
-        .collect();
-    chunks.sort();
-    chunks
 }
 
 #[rstest]
@@ -166,8 +94,11 @@ fn pure_reads_the_fixed_array_libhdf5_writes(
     let file = backend.open(&path).unwrap();
     let dataset = file.dataset("d").unwrap();
     assert_eq!(dataset.chunk_index().unwrap(), Some(ChunkIndex::FixedArray));
-    assert_eq!(dataset.read_i32().unwrap(), fixture.expected());
-    assert_eq!(pure_chunks(&file), libhdf5_chunks(&path, userblock));
+    assert_eq!(dataset.read_i32().unwrap(), fixture.writes().expected());
+    assert_eq!(
+        array_index::pure_chunks(&file),
+        array_index::libhdf5_chunks(&path, userblock)
+    );
 }
 
 #[derive(Clone, Copy, Debug)]

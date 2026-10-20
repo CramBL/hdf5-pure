@@ -105,7 +105,6 @@ fn read_header(
 mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
-    use core::cell::RefCell;
 
     use hdf5_pure_format::__private::IndexSlots;
 
@@ -114,10 +113,9 @@ mod tests {
 
     use super::*;
     use crate::address::StoredAddressExt;
+    use crate::array_test;
+    use crate::array_test::PlacedSource;
     use crate::source;
-    use crate::source::BaseOffsetSource;
-    use crate::source::BytesSource;
-    use crate::source::Source;
     use crate::width::LengthWidth;
     use crate::width::OffsetWidth;
 
@@ -130,23 +128,9 @@ mod tests {
 
     const HEADER_LEN: u64 = 28;
 
-    fn chunks(n: u64, has_filters: bool) -> Vec<ChunkRecord> {
-        (0..n)
-            .map(|i| ChunkRecord {
-                address: StoredAddress::new(0x100 + i * 8),
-                stored_size: if has_filters { 8 + (i % 7) } else { 8 },
-                filter_mask: 0,
-            })
-            .collect()
-    }
-
-    fn slotted(chunks: Vec<ChunkRecord>) -> Vec<(u64, ChunkRecord)> {
-        (0..).zip(chunks).collect()
-    }
-
     fn image(n: u64, has_filters: bool) -> Vec<u8> {
         let array = hdf5_pure_format::__private::build_fixed_array_at(
-            &IndexSlots::dense(&chunks(n, has_filters)),
+            &IndexSlots::dense(&array_test::chunks(n, has_filters)),
             8,
             WIDTHS.offsets,
             WIDTHS.lengths,
@@ -188,58 +172,19 @@ mod tests {
             .collect()
     }
 
-    /// A source whose bytes start at address `start` and that records each metadata read.
-    struct PlacedSource {
-        start: u64,
-        bytes: Vec<u8>,
-        reads: RefCell<Vec<(u64, usize)>>,
-    }
-
-    impl PlacedSource {
-        fn new(start: u64, bytes: Vec<u8>) -> Self {
-            Self {
-                start,
-                bytes,
-                reads: RefCell::new(Vec::new()),
-            }
-        }
-
-        fn framed(&self) -> BaseOffsetSource<'_, Self> {
-            BaseOffsetSource {
-                inner: self,
-                base: BaseAddress::new(self.start),
-            }
-        }
-
-        fn records(&self) -> Result<Vec<(u64, ChunkRecord)>, FormatError> {
-            let mut records = Vec::new();
-            read_chunks(
-                &self.framed(),
-                WIDTHS,
-                StoredAddress::new(ARRAY_AT),
-                8,
-                |slot, record| {
-                    records.push((slot, record));
-                    Ok(())
-                },
-            )?;
-            Ok(records)
-        }
-    }
-
-    impl Source for PlacedSource {
-        fn len(&self) -> u64 {
-            self.start + self.bytes.len() as u64
-        }
-
-        fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError> {
-            BytesSource::new(&self.bytes).read_at(offset - self.start, buf)
-        }
-
-        fn read_metadata_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, FormatError> {
-            self.reads.borrow_mut().push((offset, len));
-            self.read_exact_at(offset, len)
-        }
+    fn records(source: &PlacedSource) -> Result<Vec<(u64, ChunkRecord)>, FormatError> {
+        let mut records = Vec::new();
+        read_chunks(
+            &source.framed(),
+            WIDTHS,
+            StoredAddress::new(ARRAY_AT),
+            8,
+            |slot, record| {
+                records.push((slot, record));
+                Ok(())
+            },
+        )?;
+        Ok(records)
     }
 
     fn buffered_records(image: &[u8], base: u64) -> Result<Vec<(u64, ChunkRecord)>, FormatError> {
@@ -267,7 +212,7 @@ mod tests {
         file.extend_from_slice(&image(n, has_filters));
         assert_eq!(
             buffered_records(&file, base).unwrap(),
-            slotted(chunks(n, has_filters))
+            array_test::slotted(array_test::chunks(n, has_filters))
         );
     }
 
@@ -278,7 +223,10 @@ mod tests {
         #[values(false, true)] has_filters: bool,
     ) {
         let source = PlacedSource::new(base, image(n, has_filters));
-        assert_eq!(source.records().unwrap(), slotted(chunks(n, has_filters)));
+        assert_eq!(
+            records(&source).unwrap(),
+            array_test::slotted(array_test::chunks(n, has_filters))
+        );
         assert_eq!(
             source.reads.into_inner(),
             expected_reads(base, n, has_filters, &[0, 1, 2])
@@ -294,11 +242,12 @@ mod tests {
         bytes[block + 4 + 2 + 8] = bitmap;
         checksum::restamp(&mut bytes, block, 4 + 2 + 8 + 1 + 4);
         let source = PlacedSource::new(512, bytes);
-        let expected: Vec<(u64, ChunkRecord)> = slotted(chunks(4_000, false))
-            .into_iter()
-            .filter(|(slot, _)| pages.contains(&(slot / 1_024)))
-            .collect();
-        assert_eq!(source.records().unwrap(), expected);
+        let expected: Vec<(u64, ChunkRecord)> =
+            array_test::slotted(array_test::chunks(4_000, false))
+                .into_iter()
+                .filter(|(slot, _)| pages.contains(&(slot / 1_024)))
+                .collect();
+        assert_eq!(records(&source).unwrap(), expected);
         assert_eq!(
             source.reads.into_inner(),
             expected_reads(512, 4_000, false, pages)
@@ -327,7 +276,7 @@ mod tests {
             available: usize::try_from(len).unwrap(),
         };
         assert_eq!(buffered_records(&bytes, 0).unwrap_err(), expected);
-        assert_eq!(PlacedSource::new(0, bytes).records().unwrap_err(), expected);
+        assert_eq!(records(&PlacedSource::new(0, bytes)).unwrap_err(), expected);
     }
 
     #[test]
@@ -337,7 +286,7 @@ mod tests {
         bytes[header + 16..header + 24].copy_from_slice(&u64::MAX.to_le_bytes());
         checksum::restamp(&mut bytes, header, usize::try_from(HEADER_LEN).unwrap());
         let source = PlacedSource::new(0, bytes);
-        assert_eq!(source.records().unwrap(), Vec::new());
+        assert_eq!(records(&source).unwrap(), Vec::new());
         assert_eq!(
             source.reads.take(),
             vec![(ARRAY_AT, usize::try_from(HEADER_LEN).unwrap())]
