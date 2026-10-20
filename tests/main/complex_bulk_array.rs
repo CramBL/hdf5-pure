@@ -11,6 +11,7 @@
 //! not what it produces. The one deliberate exception is the empty slice, and
 //! it has its own test below.
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::mat::options::OneDimensionalMode;
 use hdf5_pure::mat::{
     self, Complex32, Complex64, ComplexElement, ComplexI8, ComplexI16, ComplexI32, ComplexI64,
@@ -132,7 +133,7 @@ fn options_reach_a_bulk_array_the_same_way() {
     let mut options = Options::default();
     options.libver = LibVer::V110;
     options.compression = Compression::Deflate {
-        level: 6,
+        level: DeflateLevel::Six,
         shuffle: false,
     };
     options.one_dimensional_mode = OneDimensionalMode::RowVector;

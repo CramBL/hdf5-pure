@@ -16,6 +16,7 @@
 //! before and after a change rather than reading absolute numbers.
 
 use criterion::{Criterion, criterion_group, criterion_main};
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{File, FileBuilder, MaxExtent};
 
 /// Build a file image from a configuring closure.
@@ -91,7 +92,7 @@ fn bench_chunked_assembly(c: &mut Criterion) {
             .with_shape(&[rows, cols])
             .with_chunks(&[128, 128])
             .with_shuffle()
-            .with_deflate(6);
+            .with_deflate(DeflateLevel::Six);
     });
 
     let plain_file = File::from_bytes(plain).unwrap();
@@ -135,7 +136,7 @@ fn bench_write(c: &mut Criterion) {
                     .with_shape(&[rows, cols])
                     .with_chunks(&[128, 128])
                     .with_shuffle()
-                    .with_deflate(6);
+                    .with_deflate(DeflateLevel::Six);
             }))
         })
     });

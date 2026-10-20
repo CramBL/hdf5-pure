@@ -14,6 +14,7 @@
 
 use hdf5::Extent;
 use hdf5::file::LibraryVersion;
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{File, FileBuilder, FillTime, MaxExtent};
 
 use test_util_hdf5::dataset::{Filter, Unlimited};
@@ -188,7 +189,7 @@ fn an_empty_filtered_dataset_declares_the_width_its_first_chunk_needs() {
     let seeded = dir.path().join("seeded.h5");
     let write = |path: &std::path::Path, values: &[i32]| {
         Unlimited::new("col", values, chunk_elems as u64)
-            .filters(&[Filter::Deflate(6)])
+            .filters(&[Filter::Deflate(DeflateLevel::Six)])
             .pure_create(path);
     };
     write(&empty, &[]);
@@ -234,7 +235,7 @@ fn an_empty_filtered_dataset_accepts_an_append_that_fills_its_chunk() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("append.h5");
     Unlimited::<i32>::new("col", &[], chunk_elems as u64)
-        .filters(&[Filter::Deflate(6)])
+        .filters(&[Filter::Deflate(DeflateLevel::Six)])
         .pure_create(&path);
 
     {

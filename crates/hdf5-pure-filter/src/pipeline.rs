@@ -4,6 +4,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::num::NonZeroU32;
 
+use hdf5_pure_core::DeflateLevel;
+
 use crate::error::Error;
 use crate::lzf;
 use crate::scaleoffset;
@@ -243,7 +245,7 @@ impl<'a> ChunkContext<'a> {
 #[derive(Default)]
 pub struct FilterScratch {
     #[cfg(feature = "deflate")]
-    encoder: Option<(u32, flate2::write::ZlibEncoder<Vec<u8>>)>,
+    encoder: Option<(DeflateLevel, flate2::write::ZlibEncoder<Vec<u8>>)>,
     #[cfg(feature = "deflate")]
     decoder: Option<flate2::Decompress>,
 }
@@ -255,12 +257,15 @@ impl FilterScratch {
     }
 
     #[cfg(feature = "deflate")]
-    fn zlib_encoder(&mut self, level: u32) -> &mut flate2::write::ZlibEncoder<Vec<u8>> {
+    fn zlib_encoder(&mut self, level: DeflateLevel) -> &mut flate2::write::ZlibEncoder<Vec<u8>> {
         let stale = self.encoder.as_ref().is_none_or(|(have, _)| *have != level);
         if stale {
             self.encoder = Some((
                 level,
-                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(level)),
+                flate2::write::ZlibEncoder::new(
+                    Vec::new(),
+                    flate2::Compression::new(u32::from(level.get())),
+                ),
             ));
         }
         &mut self.encoder.as_mut().expect("built directly above").1
@@ -456,6 +461,7 @@ fn compress_chunk(
 ///
 /// # Errors
 ///
+/// Returns [`Error::InvalidDeflateLevel`] if a Deflate parameter exceeds `9`.
 /// Returns [`Error::UnsupportedFilter`] if a filter has no encoder.
 /// An encoder may return another [`Error`] for invalid parameters or input.
 pub fn compress_chunk_with(
@@ -470,7 +476,11 @@ pub fn compress_chunk_with(
         let next = match filters.id(i) {
             FILTER_SHUFFLE => shuffle_compress(input, ctx.element_size.get() as usize),
             FILTER_DEFLATE => {
-                let level = filters.client_data(i).first().copied().unwrap_or(6);
+                let level = match filters.client_data(i).first() {
+                    Some(&level) => DeflateLevel::try_from(level)
+                        .map_err(|_error| Error::InvalidDeflateLevel { level })?,
+                    None => DeflateLevel::Six,
+                };
                 deflate_compress(scratch, input, level)?
             }
             FILTER_LZF => lzf::compress(input),
@@ -573,7 +583,7 @@ fn deflate_decompress(
 fn deflate_compress(
     scratch: &mut FilterScratch,
     data: &[u8],
-    level: u32,
+    level: DeflateLevel,
 ) -> Result<Vec<u8>, Error> {
     use std::io::Write;
     let encoder = scratch.zlib_encoder(level);
@@ -598,7 +608,7 @@ fn deflate_compress(
 fn deflate_compress(
     _scratch: &mut FilterScratch,
     _data: &[u8],
-    _level: u32,
+    _level: DeflateLevel,
 ) -> Result<Vec<u8>, Error> {
     Err(Error::UnsupportedFilter(FILTER_DEFLATE))
 }
@@ -767,6 +777,28 @@ mod tests {
     use crate::scaleoffset::ScaleOffsetByteOrder;
     use crate::scaleoffset::ScaleOffsetFill;
 
+    #[rstest]
+    #[case(10)]
+    #[case(255)]
+    #[case(256)]
+    #[case(262)]
+    #[case(u32::MAX)]
+    fn rejects_invalid_deflate_metadata_before_encoding(#[case] level: u32) {
+        let filters = vec![FilterDescription {
+            filter_id: FILTER_DEFLATE,
+            flags: 0,
+            client_data: vec![level],
+        }];
+        let error = compress_chunk_with(
+            &mut FilterScratch::new(),
+            &[1, 2, 3, 4],
+            &filters,
+            ChunkContext::basic(&[1], 4),
+        )
+        .unwrap_err();
+        assert_eq!(error, Error::InvalidDeflateLevel { level });
+    }
+
     struct FilterDescription {
         filter_id: u16,
         flags: u16,
@@ -794,7 +826,8 @@ mod tests {
     #[case((0..256).map(|i| (i % 256) as u8).collect())]
     #[case((0..10).collect())]
     fn deflate_compress_decompress_roundtrip(#[case] data: Vec<u8>) {
-        let compressed = deflate_compress(&mut FilterScratch::new(), &data, 6).unwrap();
+        let compressed =
+            deflate_compress(&mut FilterScratch::new(), &data, DeflateLevel::Six).unwrap();
         assert!(!compressed.is_empty());
         let decompressed =
             deflate_decompress(&mut FilterScratch::new(), &compressed, None).unwrap();
@@ -1150,7 +1183,7 @@ mod tests {
         let dims = [(data.len() / 8) as u64];
         let ctx = ChunkContext::basic(&dims, 8);
 
-        let stored = deflate_compress(&mut FilterScratch::new(), &data, 6).unwrap();
+        let stored = deflate_compress(&mut FilterScratch::new(), &data, DeflateLevel::Six).unwrap();
         let mask = 1u32 << 0; // bit 0 => shuffle (index 0) skipped
         let decoded = decompress_chunk(&stored, &pipeline.filters, ctx, mask).unwrap();
         assert_eq!(decoded, data);
@@ -1160,7 +1193,8 @@ mod tests {
     #[cfg(feature = "deflate")]
     fn deflate_decompress_rejects_bomb() {
         let huge = vec![0u8; 100_000];
-        let compressed = deflate_compress(&mut FilterScratch::new(), &huge, 9).unwrap();
+        let compressed =
+            deflate_compress(&mut FilterScratch::new(), &huge, DeflateLevel::Nine).unwrap();
         assert!(compressed.len() < 1024);
         let err =
             deflate_decompress(&mut FilterScratch::new(), &compressed, Some(1024)).unwrap_err();
@@ -1182,7 +1216,8 @@ mod tests {
     #[cfg(feature = "deflate")]
     fn deflate_decompress_within_cap_ok() {
         let data = vec![7u8; 500];
-        let compressed = deflate_compress(&mut FilterScratch::new(), &data, 6).unwrap();
+        let compressed =
+            deflate_compress(&mut FilterScratch::new(), &data, DeflateLevel::Six).unwrap();
         assert_eq!(
             deflate_decompress(&mut FilterScratch::new(), &compressed, Some(500)).unwrap(),
             data
@@ -1191,10 +1226,10 @@ mod tests {
 
     #[rstest::rstest]
     #[cfg(feature = "deflate")]
-    #[case(1)]
-    #[case(6)]
-    #[case(9)]
-    fn a_reused_encoder_writes_the_same_bytes_as_a_fresh_one(#[case] level: u32) {
+    #[case(DeflateLevel::One)]
+    #[case(DeflateLevel::Six)]
+    #[case(DeflateLevel::Nine)]
+    fn a_reused_encoder_writes_the_same_bytes_as_a_fresh_one(#[case] level: DeflateLevel) {
         let chunks: Vec<Vec<u8>> = vec![
             vec![7u8; 4096],
             (0..4096u32)
@@ -1219,7 +1254,7 @@ mod tests {
 
         assert_eq!(
             reused, fresh,
-            "a reused encoder at level {level} wrote different bytes from a fresh one"
+            "a reused encoder at level {level:?} wrote different bytes from a fresh one"
         );
 
         assert_eq!(
@@ -1238,7 +1273,12 @@ mod tests {
     #[test]
     #[cfg(feature = "deflate")]
     fn a_reused_decoder_recovers_from_a_stream_it_refused() {
-        let good = deflate_compress(&mut FilterScratch::new(), &vec![9u8; 2048], 6).unwrap();
+        let good = deflate_compress(
+            &mut FilterScratch::new(),
+            &vec![9u8; 2048],
+            DeflateLevel::Six,
+        )
+        .unwrap();
         let mut scratch = FilterScratch::new();
 
         assert_eq!(
@@ -1276,7 +1316,8 @@ mod tests {
         use std::io::Read;
 
         let data = vec![7u8; 500];
-        let complete = deflate_compress(&mut FilterScratch::new(), &data, 6).unwrap();
+        let complete =
+            deflate_compress(&mut FilterScratch::new(), &data, DeflateLevel::Six).unwrap();
         let unterminated = &complete[..complete.len() - 4];
 
         let mut accepted = Vec::new();
@@ -1304,12 +1345,12 @@ mod tests {
         let data: Vec<u8> = (0..8192).map(|i| (i % 97) as u8).collect();
         let mut scratch = FilterScratch::new();
 
-        let at_nine = deflate_compress(&mut scratch, &data, 9).unwrap();
-        let at_one = deflate_compress(&mut scratch, &data, 1).unwrap();
+        let at_nine = deflate_compress(&mut scratch, &data, DeflateLevel::Nine).unwrap();
+        let at_one = deflate_compress(&mut scratch, &data, DeflateLevel::One).unwrap();
 
         assert_eq!(
             at_one,
-            deflate_compress(&mut FilterScratch::new(), &data, 1).unwrap(),
+            deflate_compress(&mut FilterScratch::new(), &data, DeflateLevel::One).unwrap(),
             "after a level change the encoder did not write what level 1 writes"
         );
         assert_ne!(
@@ -1461,7 +1502,7 @@ mod tests {
     #[test]
     #[cfg(feature = "deflate")]
     fn deflate_reserves_against_the_stream_not_the_declared_chunk_size() {
-        let stored = deflate_compress(&mut FilterScratch::new(), &[], 6).unwrap();
+        let stored = deflate_compress(&mut FilterScratch::new(), &[], DeflateLevel::Six).unwrap();
         let out = deflate_decompress(&mut FilterScratch::new(), &stored, Some(u32::MAX as usize))
             .unwrap();
         assert!(out.is_empty());

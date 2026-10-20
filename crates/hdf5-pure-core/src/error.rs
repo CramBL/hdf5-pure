@@ -294,6 +294,11 @@ pub enum FormatError {
         /// The version found.
         version: u8,
     },
+    /// A Deflate compression level is outside `0..=9`.
+    InvalidDeflateLevel {
+        /// The compression level that exceeds `9`.
+        level: u32,
+    },
     /// An Extensible Array index block, super block, or data block whose client ID differs from
     /// its header's.
     InvalidExtensibleArrayBlockClient {
@@ -1546,6 +1551,9 @@ impl fmt::Display for FormatError {
             }
             Self::InvalidChunkGeometry(reason) => {
                 write!(f, "invalid chunk geometry: {reason}")
+            }
+            Self::InvalidDeflateLevel { level } => {
+                write!(f, "deflate level {level} is outside 0..=9")
             }
             Self::InvalidFilterName { filter_id, reason } => {
                 write!(f, "invalid name for filter {filter_id}: {reason:?}")

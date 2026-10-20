@@ -8,6 +8,7 @@
 //! `Compact` and legacy `BTreeV1` variants are exercised against
 //! reference-C-library files in `crates/crosscheck/tests/main/layout_introspection.rs`.
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{ChunkIndex, Dataset, File, FileBuilder, Layout, MaxExtent};
 
 fn open(f: &File, name: &str) -> Dataset {
@@ -218,7 +219,7 @@ fn deflate_pipeline_details() {
             .with_i32_data(&(0..8).collect::<Vec<_>>())
             .with_shape(&[8])
             .with_chunks(&[4])
-            .with_deflate(6);
+            .with_deflate(DeflateLevel::Six);
         b.write(&p).unwrap();
     }
 
@@ -250,7 +251,7 @@ fn shuffle_then_deflate_pipeline_order() {
             .with_shape(&[64])
             .with_chunks(&[16])
             .with_shuffle()
-            .with_deflate(6);
+            .with_deflate(DeflateLevel::Six);
         b.write(&p).unwrap();
     }
 

@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use hdf5_pure::AttrValue;
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpaceStrategy;
@@ -125,7 +126,7 @@ pub fn write_chunked_f64(path: &Path, page_size: u64) {
         .with_shape(&[8000])
         .with_chunks(&[1000])
         .with_shuffle()
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     configure(&mut builder, page_size, true);
     builder.write(path).unwrap();
 }

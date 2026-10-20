@@ -5,6 +5,7 @@
 //! boundaries so the in-place index growth is exercised.
 
 use hdf5::file::LibraryVersion;
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{Error, File, FileBuilder};
 
 use test_util::bytes;
@@ -384,7 +385,7 @@ fn rejects_filtered_pure_dataset() {
     let path = dir.path().join("filtered.h5");
     {
         Unlimited::new("d", &(0..100).collect::<Vec<i32>>(), 10)
-            .filters(&[Filter::Deflate(4)])
+            .filters(&[Filter::Deflate(DeflateLevel::Four)])
             .pure_create(&path);
     }
 
@@ -432,7 +433,7 @@ fn rejects_filtered_pure_dataset_with_a_partial_trailing_chunk() {
     {
         // 105 % 10 != 0: a partial trailing chunk
         Unlimited::new("d", &(0..105).collect::<Vec<i32>>(), 10)
-            .filters(&[Filter::Deflate(4)])
+            .filters(&[Filter::Deflate(DeflateLevel::Four)])
             .pure_create(&path);
     }
 

@@ -13,6 +13,7 @@
 //! multiplier, so three of the four obvious fixtures pass over the bug.
 
 use hdf5::dataset::AllocTime;
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{ChunkIndex, File, FileBuilder, MaxExtent};
 
 use test_util::extensible_array;
@@ -604,7 +605,7 @@ fn repack_preserves_a_resizable_multidimensional_dataset() {
         .with_shape(&[8, 8])
         .with_maxshape(&[MaxExtent::Fixed(8), MaxExtent::Fixed(16)])
         .with_chunks(&[4, 4])
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     b.write(&src).unwrap();
 
     hdf5_pure::repack(&src, &dst, &hdf5_pure::RepackOptions::new()).unwrap();
@@ -639,7 +640,7 @@ fn a_shrinking_inplace_overwrite_keeps_each_chunk_in_its_slot() {
         .with_shape(&[8, 8])
         .with_maxshape(&[MaxExtent::Fixed(8), MaxExtent::Fixed(16)])
         .with_chunks(&[4, 4])
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     b.write(&path).unwrap();
     let size_before = std::fs::metadata(&path).unwrap().len();
 
@@ -757,7 +758,7 @@ fn a_shrinking_inplace_overwrite_keeps_ea_chunks_in_their_slots() {
         .with_shape(&[8, 8])
         .with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Fixed(16)])
         .with_chunks(&[4, 4])
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     b.write(&path).unwrap();
     assert_eq!(
         hdf5_pure::File::open(&path)

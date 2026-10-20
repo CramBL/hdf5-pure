@@ -4,6 +4,7 @@
 //! These tests verify that files produced by hdf5-pure are valid HDF5 files
 //! readable by the reference C implementation.
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{
     AttrValue, CompoundTypeBuilder, Datatype, File, FileBuilder, VlenStringReadOptions,
 };
@@ -551,7 +552,7 @@ fn crosscheck_paged_fixed_array_deflate() {
         .with_f64_data(&data)
         .with_shape(&[n as u64])
         .with_chunks(&[1])
-        .with_deflate(4);
+        .with_deflate(DeflateLevel::Four);
     builder.write(&path).unwrap();
 
     let file = hdf5::File::open(&path).unwrap();
@@ -647,7 +648,7 @@ fn crosscheck_deflate_compressed() {
         .create_dataset("data")
         .with_f64_data(&data)
         .with_chunks(&[50])
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     builder.write(&path).unwrap();
 
     let file = hdf5::File::open(&path).unwrap();
@@ -671,7 +672,7 @@ fn crosscheck_shuffle_deflate() {
         .with_f64_data(&data)
         .with_chunks(&[25])
         .with_shuffle()
-        .with_deflate(4);
+        .with_deflate(DeflateLevel::Four);
     builder.write(&path).unwrap();
 
     let file = hdf5::File::open(&path).unwrap();
@@ -1704,7 +1705,7 @@ fn crosscheck_scale_offset_then_deflate() {
         .with_shape(&[n as u64])
         .with_chunks(&[64])
         .with_scale_offset(hdf5_pure::ScaleOffset::Integer(0))
-        .with_deflate(5);
+        .with_deflate(DeflateLevel::Five);
     builder.write(&path).unwrap();
 
     let file = hdf5::File::open(&path).unwrap();

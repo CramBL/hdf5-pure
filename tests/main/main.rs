@@ -44,6 +44,7 @@ mod file_properties;
 mod file_space_page_size;
 mod file_space_strategy;
 mod fill_value;
+mod filter_options;
 mod fixed_strings;
 mod fuzz_regressions;
 mod generic_element;

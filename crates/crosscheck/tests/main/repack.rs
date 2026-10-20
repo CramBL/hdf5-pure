@@ -4,6 +4,7 @@
 //! and the result is read back by both readers. Also proves the fail-loud
 //! contract on a real variable-length string dataset the C library produces.
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{
     Error, File, FillTime, FormatError, MaxExtent, RepackOptions, VlenStringReadOptions,
 };
@@ -490,7 +491,7 @@ fn repack_roundtrips_filtered_and_resizable_vlen_string_datasets() {
         b.create_dataset("compressed")
             .with_vlen_strings(&refs)
             .with_chunks(&[8])
-            .with_deflate(6);
+            .with_deflate(DeflateLevel::Six);
         b.create_dataset("growable")
             .with_vlen_strings(&refs)
             .with_shape(&[words.len() as u64])

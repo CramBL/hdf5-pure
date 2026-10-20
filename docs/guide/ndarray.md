@@ -105,6 +105,7 @@ For both methods, `T` is the type you want the elements *delivered as*, not an a
 [`with_ndarray`](crate::DatasetBuilder::with_ndarray) returns the builder, so chunking and compression chain just like they do for the flat write methods. This is the natural way to write a large array compressed:
 
 ```rust
+# use hdf5_pure::DeflateLevel;
 # #[cfg(feature = "ndarray")] {
 use hdf5_pure::FileBuilder;
 use ndarray::Array2;
@@ -115,7 +116,7 @@ let mut fb = FileBuilder::new();
 fb.create_dataset("big")
     .with_ndarray(&a)
     .with_chunks(&[64, 64])
-    .with_deflate(6);
+    .with_deflate(DeflateLevel::Six);
 let bytes = fb.finish()?;
 # assert!(bytes.len() < 1024 * 1024 * 8);
 # }

@@ -36,6 +36,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** The level type of `DatasetBuilder::with_deflate` and related compression settings changes from integers to an enum restricted to zero through nine ([#833](https://github.com/CramBL/hdf5-pure/pull/833)).
 - **Breaking:** `FloatingPointLayout` gains required fields for mantissa normalization and sign position. Metadata inspection preserves these fields even for unsupported numeric encodings.
 - **Breaking:** The address fields of `FileSpaceInfo` change type from integers to decoded stored addresses.
 - **Breaking:** `StoredAddress::is_undefined` no longer accepts a raw integer width.

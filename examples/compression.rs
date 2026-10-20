@@ -12,6 +12,7 @@
 //! cargo run --example compression
 //! ```
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{File, FileBuilder, ScaleOffset};
 
 fn main() {
@@ -32,7 +33,7 @@ fn main() {
         b.create_dataset("signal")
             .with_f64_data(&signal)
             .with_chunks(chunk)
-            .with_deflate(6);
+            .with_deflate(DeflateLevel::Six);
     });
 
     // Shuffle reorders bytes so like-significance bytes sit together, which
@@ -42,7 +43,7 @@ fn main() {
             .with_f64_data(&signal)
             .with_chunks(chunk)
             .with_shuffle()
-            .with_deflate(6);
+            .with_deflate(DeflateLevel::Six);
     });
 
     // LZF trades compression ratio for speed; like deflate it benefits from a
@@ -104,7 +105,7 @@ fn main() {
             .with_f64_data(&signal)
             .with_chunks(chunk)
             .with_scale_offset(ScaleOffset::FloatDScale(2)) // keep 2 decimal digits
-            .with_deflate(6);
+            .with_deflate(DeflateLevel::Six);
     });
     report("\nf64 D-scale(2)+deflate (lossy)", dscale.len());
     let lossy = File::from_bytes(dscale)

@@ -6,6 +6,7 @@
 //! several element types, and an uncompressed vs shuffle+deflate path are all
 //! covered, comparing the read-back against the known row-major input.
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{File, FileBuilder};
 
 /// Write a flat row-major `f64` dataset with the given shape and chunk shape,
@@ -22,7 +23,7 @@ fn roundtrip_f64(shape: &[u64], chunks: &[u64], shuffle_deflate: bool) {
             .with_shape(shape)
             .with_chunks(chunks);
         if shuffle_deflate {
-            ds.with_shuffle().with_deflate(6);
+            ds.with_shuffle().with_deflate(DeflateLevel::Six);
         }
     }
     let bytes = b.finish().unwrap();
@@ -83,7 +84,7 @@ fn edge_chunks_integer_types() {
         .with_shape(&shape)
         .with_chunks(&[2, 3])
         .with_shuffle()
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     let file = File::from_bytes(b.finish().unwrap()).unwrap();
     assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), i32_data);
 

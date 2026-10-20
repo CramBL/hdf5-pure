@@ -10,8 +10,13 @@
 //! `string_class: StringClass::String`, `invalid_name_policy: Sanitize`, etc.
 
 #[cfg(feature = "serde")]
+use serde::Deserializer;
+#[cfg(feature = "serde")]
+use serde::Serializer;
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
+use crate::DeflateLevel;
 use crate::libver::LibVer;
 
 /// MATLAB class to use when emitting Rust `String` (or BEVE string) values.
@@ -173,10 +178,20 @@ pub enum UnsupportedPolicy {
 pub enum Compression {
     /// No compression (no chunking).
     None,
-    /// HDF5 deflate compression.
+    /// Deflate compression with an optional shuffle filter.
+    ///
+    /// With `serde`, the level is serialized as a number. Deserialization rejects values
+    /// outside `0..=9`.
     Deflate {
-        /// zlib level (0-9).
-        level: u8,
+        /// The level passed to the compressor.
+        #[cfg_attr(
+            feature = "serde",
+            serde(
+                serialize_with = "serialize_deflate_level",
+                deserialize_with = "deserialize_deflate_level"
+            )
+        )]
+        level: DeflateLevel,
         /// Apply HDF5 byte-shuffle filter before deflate.
         shuffle: bool,
     },
@@ -306,9 +321,62 @@ impl Options {
     }
 }
 
+#[cfg(feature = "serde")]
+fn serialize_deflate_level<S: Serializer>(
+    level: &DeflateLevel,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_u8(level.get())
+}
+
+#[cfg(feature = "serde")]
+fn deserialize_deflate_level<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<DeflateLevel, D::Error> {
+    DeflateLevel::try_from(u8::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+}
+
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "serde")]
+    use rstest::rstest;
+
     use super::*;
+
+    #[rstest]
+    #[cfg(feature = "serde")]
+    #[case(DeflateLevel::Zero)]
+    #[case(DeflateLevel::Six)]
+    #[case(DeflateLevel::Nine)]
+    fn serializes_typed_deflate_as_a_number(#[case] level: DeflateLevel) {
+        let compression = Compression::Deflate {
+            level,
+            shuffle: true,
+        };
+        let value = serde_json::json!({"Deflate": {"level": level.get(), "shuffle": true}});
+        assert_eq!(serde_json::to_value(compression).unwrap(), value);
+        assert_eq!(
+            serde_json::from_value::<Compression>(value).unwrap(),
+            compression
+        );
+    }
+
+    #[rstest]
+    #[cfg(feature = "serde")]
+    #[case(10)]
+    #[case(u8::MAX)]
+    fn rejects_invalid_deflate_during_deserialization(#[case] level: u8) {
+        let value = serde_json::json!({"Deflate": {"level": level, "shuffle": true}});
+        let error = serde_json::from_value::<Compression>(value).unwrap_err();
+        assert_eq!(error.classify(), serde_json::error::Category::Data);
+        assert_eq!(
+            error.to_string(),
+            crate::FormatError::InvalidDeflateLevel {
+                level: u32::from(level),
+            }
+            .to_string()
+        );
+    }
 
     /// The encoding defaults that have not moved since the serde writer was the
     /// only consumer. `null_policy` and `empty_marker_encoding` have (see the

@@ -3,6 +3,7 @@
 //! returned wrong values for every dataset after the first because the
 //! file-level chunk-cache index was keyed by chunk coordinate only.
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{File, FileBuilder};
 
 #[test]
@@ -52,15 +53,15 @@ fn csr_triple_compressed_chunked_read() {
     grp.create_dataset("data")
         .with_f32_data(&data)
         .with_chunks(&[64])
-        .with_deflate(4);
+        .with_deflate(DeflateLevel::Four);
     grp.create_dataset("indices")
         .with_i32_data(&indices)
         .with_chunks(&[64])
-        .with_deflate(4);
+        .with_deflate(DeflateLevel::Four);
     grp.create_dataset("indptr")
         .with_i32_data(&indptr)
         .with_chunks(&[16])
-        .with_deflate(4);
+        .with_deflate(DeflateLevel::Four);
     builder.add_group(grp.finish());
 
     let bytes = builder.finish().unwrap();

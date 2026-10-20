@@ -281,11 +281,12 @@ Dataset filters include deflate, shuffle, Fletcher32, LZF, scale-offset, and opt
 Filters operate on chunked storage. Reads decode the configured pipeline automatically.
 
 ```rust
+# use hdf5_pure::DeflateLevel;
 builder.create_dataset("compressed")
     .with_f64_data(&data)
     .with_chunks(&[100])
     .with_shuffle()
-    .with_deflate(6);
+    .with_deflate(DeflateLevel::Six);
 ```
 
 See the [compression guide](https://docs.rs/hdf5-pure/latest/hdf5_pure/_guide/compression/index.html)

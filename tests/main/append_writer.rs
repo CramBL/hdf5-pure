@@ -4,6 +4,7 @@
 //! unfiltered, chunk-aligned and not, across one or many calls and sessions —
 //! read back with this crate. C-library interop lives in
 //! `crates/crosscheck/tests/main/append_writer.rs`.
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{Error, File, FileAccessProperties, FileBuilder, ScaleOffset, SyncPolicy};
 
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
@@ -71,7 +72,7 @@ fn deflate_shuffle_chunk_aligned() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
-        .filters(&[Filter::Shuffle, Filter::Deflate(6)])
+        .filters(&[Filter::Shuffle, Filter::Deflate(DeflateLevel::Six)])
         .pure_create(&path);
     with_writer(&path, |w| {
         w.dataset("d")
@@ -92,7 +93,7 @@ fn fletcher32_chunk_aligned() {
     // Filtered appends must be chunk-aligned: start at 8 (2 full chunks of 4),
     // append 8 more (two whole chunks).
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
-        .filters(&[Filter::Deflate(6), Filter::Fletcher32])
+        .filters(&[Filter::Deflate(DeflateLevel::Six), Filter::Fletcher32])
         .pure_create(&path);
     with_writer(&path, |w| {
         w.dataset("d")
@@ -141,7 +142,7 @@ fn filtered_onto_a_partial_trailing_chunk() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("b.h5");
     Unlimited::new("d", &(0..6).collect::<Vec<i32>>(), 4)
-        .filters(&[Filter::Shuffle, Filter::Deflate(6)])
+        .filters(&[Filter::Shuffle, Filter::Deflate(DeflateLevel::Six)])
         .pure_create(&p); // 6 of a chunk of 4
     with_writer(&p, |w| {
         w.dataset("d").unwrap().append(&[6, 7, 8, 9]).unwrap();
@@ -169,7 +170,7 @@ fn filtered_unaligned_length_onto_an_aligned_dataset() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("a.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
-        .filters(&[Filter::Shuffle, Filter::Deflate(6)])
+        .filters(&[Filter::Shuffle, Filter::Deflate(DeflateLevel::Six)])
         .pure_create(&p);
     with_writer(&p, |w| {
         w.dataset("d").unwrap().append(&[8, 9, 10, 11, 12]).unwrap();
@@ -198,7 +199,7 @@ fn many_small_appends_one_session() {
     // the fast insert-only path. Cross the inline -> direct -> super-block
     // boundary in one long session.
     Unlimited::new("d", &(0..50).collect::<Vec<i32>>(), 1)
-        .filters(&[Filter::Shuffle, Filter::Deflate(6)])
+        .filters(&[Filter::Shuffle, Filter::Deflate(DeflateLevel::Six)])
         .pure_create(&path);
     with_writer(&path, |w| {
         // One handle for the whole session, as the owned API intends — resolving
@@ -274,7 +275,7 @@ fn multiple_datasets_one_writer() {
     // "a" is filtered and appended chunk-aligned (start 4, chunk 2, whole-chunk
     // appends); "b" is unfiltered and appended any-length.
     Unlimited::new("a", &[0, 1, 2, 3], 2)
-        .filters(&[Filter::Deflate(6)])
+        .filters(&[Filter::Deflate(DeflateLevel::Six)])
         .add_to(&mut b);
     Unlimited::new("b", &[100, 101], 4).add_to(&mut b);
     b.write(&path).unwrap();
@@ -421,7 +422,7 @@ fn append_to_pure_empty_dataset() {
     // dataset can be grown in place from the first append. Filtered => the append
     // is chunk-aligned (two whole chunks of 4).
     Unlimited::<i32>::new("d", &[], 4)
-        .filters(&[Filter::Shuffle, Filter::Deflate(6)])
+        .filters(&[Filter::Shuffle, Filter::Deflate(DeflateLevel::Six)])
         .pure_create(&path);
     with_writer(&path, |w| {
         w.dataset("d")

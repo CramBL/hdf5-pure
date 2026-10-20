@@ -1,5 +1,6 @@
 //! Direct tests for the public `mat::MatBuilder` API.
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::mat::{Compression, MatBuilder, MatClass, MatError, Options, StringClass};
 use hdf5_pure::{AttrValue, File, LibVer};
 
@@ -283,7 +284,7 @@ fn the_default_mat_file_is_in_the_1_8_format() {
 fn compression_under_the_1_8_default_is_refused_by_name() {
     let mut options = Options::default();
     options.compression = Compression::Deflate {
-        level: 4,
+        level: DeflateLevel::Four,
         shuffle: false,
     };
     let mut mb = MatBuilder::new(options);
@@ -296,7 +297,7 @@ fn compression_under_the_1_8_default_is_refused_by_name() {
     // Raising the format is the documented way through, and it works.
     let mut options = Options::default();
     options.compression = Compression::Deflate {
-        level: 4,
+        level: DeflateLevel::Four,
         shuffle: false,
     };
     options.libver = LibVer::V110;

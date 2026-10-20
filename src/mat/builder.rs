@@ -1244,7 +1244,7 @@ fn apply_deflate(ds: &mut DatasetBuilder, compression: Compression) {
         if shuffle {
             ds.with_shuffle();
         }
-        ds.with_deflate(level as u32);
+        ds.with_deflate(level);
     }
 }
 

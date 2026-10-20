@@ -12,6 +12,7 @@ use core::num::{NonZeroU32, NonZeroUsize};
 use hdf5_pure_core::FillTime;
 use hdf5_pure_format::__private::GLOBAL_HEAP_MAX_OBJECTS;
 
+use crate::DeflateLevel;
 use crate::address::StoredAddress;
 use crate::attribute::AttributeMessage;
 use crate::chunked_write::{ChunkMeta, ChunkOptions, ChunkProvider, FilterKind, StorageAllocation};
@@ -3438,14 +3439,17 @@ impl DatasetBuilder {
         self
     }
 
-    /// Enable deflate compression (implies chunked if not already set).
+    /// Enables Deflate compression and chunked storage.
+    ///
+    /// [`DeflateLevel`] represents levels zero through nine. Numeric inputs can be converted
+    /// through [`TryFrom`].
     ///
     /// Mutually exclusive with [`with_lzf`](Self::with_lzf), which fills the
     /// same byte-compressor slot, and with [`with_zfp`](Self::with_zfp), which
     /// replaces it: requesting either combination makes the write fail with a
     /// filter error. May follow [`with_shuffle`](Self::with_shuffle) or
     /// [`with_scale_offset`](Self::with_scale_offset).
-    pub fn with_deflate(&mut self, level: u32) -> &mut Self {
+    pub fn with_deflate(&mut self, level: DeflateLevel) -> &mut Self {
         self.chunk_options.set_filter(FilterKind::Deflate(level));
         self
     }

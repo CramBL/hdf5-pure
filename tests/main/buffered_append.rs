@@ -4,13 +4,14 @@
 //! issue #393 every write it makes is the immediate in-place one, filtered or
 //! not, so the type buys write *frequency* and nothing else.
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileLocking;
 use hdf5_pure::{AttrValue, Error, File, FileBuilder, ScaleOffset};
 
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
 
-const SHUFFLE_DEFLATE: &[Filter] = &[Filter::Shuffle, Filter::Deflate(4)];
+const SHUFFLE_DEFLATE: &[Filter] = &[Filter::Shuffle, Filter::Deflate(DeflateLevel::Four)];
 
 // ---- what the buffer buys ----------------------------------------------------
 

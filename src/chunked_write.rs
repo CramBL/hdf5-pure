@@ -18,6 +18,7 @@ use hdf5_pure_format::__private::FilteredSingleChunk;
 use hdf5_pure_format::__private::IndexSlots;
 use hdf5_pure_format::__private::SlotOccupancy;
 
+use crate::DeflateLevel;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::chunk_grid::{ChunkGrid, GridOrder};
@@ -73,8 +74,8 @@ pub enum FilterKind {
     Shuffle,
     /// The h5py LZF filter (id 32000).
     Lzf,
-    /// Deflate, at the given level (0-9).
-    Deflate(u32),
+    /// Deflate compression at the specified [`DeflateLevel`].
+    Deflate(DeflateLevel),
     /// Fletcher32 checksum.
     Fletcher32,
 }
@@ -157,14 +158,9 @@ impl ChunkOptions {
         self.chunk_dims.is_some() || !self.filters.is_empty()
     }
 
-    /// Add `kind` at the position this crate's own writer gives it, replacing
-    /// any filter with the same id already present.
+    /// Inserts `kind` in canonical filter order, replacing an existing filter with the same ID.
     ///
-    /// This is what the `DatasetBuilder` switches (`with_shuffle`,
-    /// `with_deflate`, ...) call. Canonical filter order keeps
-    /// `with_deflate(6).with_shuffle()` and
-    /// `with_shuffle().with_deflate(6)` writing the same bytes: those setters
-    /// name a filter to apply, not a position to apply it at.
+    /// A replacement keeps its original position in the pipeline.
     pub fn set_filter(&mut self, kind: FilterKind) {
         let spec = FilterSpec {
             optional: kind.default_optional(),
@@ -253,34 +249,19 @@ impl ChunkOptions {
         clash(first, second)
     }
 
-    /// Build a FilterPipeline from the options.
+    /// Builds filter descriptions in [`Self::filters`] order.
     ///
-    /// The filters come out in [`filters`](Self::filters) order, carrying their
-    /// optional flags: that is the order they are applied in and the order the
-    /// message stores, and it is not always this crate's canonical one — see
-    /// the field for why.
+    /// The writer derives scalar and chunk parameters from `ctx`. Scale-offset records `fill`
+    /// when its fill policy requires a value.
     ///
-    /// The context's chunk dimensions and element type are only consulted when
-    /// the ZFP filter is active — they're embedded into the ZFP cd_values so the
-    /// resulting file is readable by the reference H5Z-ZFP plugin.
+    /// # Errors
     ///
-    /// `fill` is the dataset's fill value. Scale-offset records it in its
-    /// parameters, so it is part of the pipeline rather than of the data: the
-    /// same dataset written with and without a fill value carries two different
-    /// filters, and the encoder diverts elements equal to that value to a
-    /// reserved sentinel. It is consulted only by the filter that records it,
-    /// so a pattern that could not be read
-    /// ([`FormatError::UnreadableFillValue`]) refuses a scale-offset pipeline
-    /// and leaves every other one buildable.
-    ///
-    /// Returns [`FormatError::UnsupportedZfp`] when ZFP was requested but the
-    /// context's element type is `None` (e.g. the dataset's datatype isn't one
-    /// of f32/f64/i32/i64), or the chunk rank is outside 1..=4, and
-    /// [`FormatError::FilterError`] for a combination of filters where one
-    /// would displace another — see [`refuse_conflicting_filters`] — or for a
-    /// fill value whose length is not one element.
-    ///
-    /// [`refuse_conflicting_filters`]: Self::refuse_conflicting_filters
+    /// Returns [`FormatError::FilterError`] if filters conflict or their parameters are invalid.
+    /// Returns [`FormatError::UnreadableFillValue`] if scale-offset requires an unreadable fill
+    /// value.
+    /// Returns [`FormatError::UnsupportedZfp`] if ZFP cannot encode the element type or chunk
+    /// dimensions.
+    /// A filter parameter encoder may return another [`FormatError`].
     pub fn build_pipeline(
         &self,
         ctx: &ChunkContext<'_>,
@@ -378,7 +359,7 @@ impl ChunkOptions {
                     filter_id: FILTER_DEFLATE,
                     name: None,
                     flags,
-                    client_data: vec![level],
+                    client_data: vec![u32::from(level.get())],
                 },
                 FilterKind::Fletcher32 => FilterDescription {
                     filter_id: FILTER_FLETCHER32,
@@ -1780,6 +1761,8 @@ pub(crate) fn emit_chunked_data_verbatim<S: ByteSink>(
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
     use crate::chunk_cache::ChunkCache;
 
@@ -2402,7 +2385,7 @@ mod tests {
     #[test]
     fn roundtrip_1d_single_chunk_deflate() {
         let values: Vec<f64> = (0..100).map(|i| i as f64).collect();
-        let options = chunked(&[100], &[FilterKind::Deflate(6)]);
+        let options = chunked(&[100], &[FilterKind::Deflate(DeflateLevel::Six)]);
         let result = roundtrip_chunked(&values, &[100], &[100], &options);
         assert_eq!(result, values);
     }
@@ -2422,7 +2405,7 @@ mod tests {
     #[test]
     fn roundtrip_1d_multi_chunk_deflate() {
         let values: Vec<f64> = (0..100).map(|i| i as f64).collect();
-        let options = chunked(&[20], &[FilterKind::Deflate(6)]);
+        let options = chunked(&[20], &[FilterKind::Deflate(DeflateLevel::Six)]);
         let result = roundtrip_chunked(&values, &[100], &[20], &options);
         assert_eq!(result, values);
     }
@@ -2431,7 +2414,10 @@ mod tests {
     #[test]
     fn roundtrip_1d_shuffle_deflate() {
         let values: Vec<f64> = (0..100).map(|i| i as f64).collect();
-        let options = chunked(&[50], &[FilterKind::Shuffle, FilterKind::Deflate(6)]);
+        let options = chunked(
+            &[50],
+            &[FilterKind::Shuffle, FilterKind::Deflate(DeflateLevel::Six)],
+        );
         let result = roundtrip_chunked(&values, &[100], &[50], &options);
         assert_eq!(result, values);
     }
@@ -2650,7 +2636,7 @@ mod tests {
 
     #[test]
     fn chunk_options_auto_dims() {
-        let options = filtered(&[FilterKind::Deflate(6)]);
+        let options = filtered(&[FilterKind::Deflate(DeflateLevel::Six)]);
         let dims = options.resolve_chunk_dims(&[100, 50]);
         assert_eq!(dims, vec![100, 50]);
     }
@@ -2744,26 +2730,31 @@ mod tests {
         );
         // Every other pipeline is buildable from the same pattern: only the
         // filter that records the fill value needs to read it.
-        let plain = filtered(&[FilterKind::Deflate(6)]);
+        let plain = filtered(&[FilterKind::Deflate(DeflateLevel::Six)]);
         assert!(plain.build_pipeline(&ctx, FillPattern::UNKNOWN).is_ok());
     }
 
-    #[test]
-    fn chunk_options_pipeline_deflate() {
-        let options = filtered(&[FilterKind::Deflate(6)]);
+    #[rstest]
+    #[case(DeflateLevel::Zero)]
+    #[case(DeflateLevel::Six)]
+    #[case(DeflateLevel::Nine)]
+    fn pipeline_preserves_deflate_level_parameters(#[case] level: DeflateLevel) {
+        let options = filtered(&[FilterKind::Deflate(level)]);
+        assert_eq!(options.filters[0].kind, FilterKind::Deflate(level));
         let pl = options
             .build_pipeline(&ChunkContext::basic(&[], 8), FillPattern::ZERO)
             .unwrap()
             .unwrap();
         assert_eq!(pl.filters.len(), 1);
         assert_eq!(pl.filters[0].filter_id, FILTER_DEFLATE);
+        assert_eq!(pl.filters[0].client_data, [u32::from(level.get())]);
     }
 
     #[test]
     fn chunk_options_pipeline_shuffle_deflate_fletcher32() {
         let options = filtered(&[
             FilterKind::Shuffle,
-            FilterKind::Deflate(6),
+            FilterKind::Deflate(DeflateLevel::Six),
             FilterKind::Fletcher32,
         ]);
         let pl = options
@@ -2776,14 +2767,7 @@ mod tests {
         assert_eq!(pl.filters[2].filter_id, FILTER_FLETCHER32);
     }
 
-    /// `set_filter` places a filter at this crate's canonical rank whatever
-    /// order the caller names them in, and replaces rather than repeats.
-    ///
-    /// This is what the `DatasetBuilder` switches promise: they name a filter to
-    /// apply, not a position to apply it at, so `with_deflate(6).with_shuffle()`
-    /// has to write the same bytes as `with_shuffle().with_deflate(6)`. The
-    /// pipeline being an ordered list now (issue #333) is exactly what would let
-    /// that drift.
+    // Repeated setters replace the earlier level at its original position.
     #[test]
     fn setting_filters_places_them_in_canonical_order_whatever_order_they_arrive_in() {
         let ids = |o: &ChunkOptions| -> Vec<u16> {
@@ -2794,7 +2778,7 @@ mod tests {
         assert_eq!(
             ids(&filtered(&[
                 FilterKind::Shuffle,
-                FilterKind::Deflate(6),
+                FilterKind::Deflate(DeflateLevel::Six),
                 FilterKind::Fletcher32,
             ])),
             canonical
@@ -2802,7 +2786,7 @@ mod tests {
         assert_eq!(
             ids(&filtered(&[
                 FilterKind::Fletcher32,
-                FilterKind::Deflate(6),
+                FilterKind::Deflate(DeflateLevel::Six),
                 FilterKind::Shuffle,
             ])),
             canonical
@@ -2810,12 +2794,15 @@ mod tests {
 
         // Naming one twice sets its parameter, rather than applying it twice.
         let twice = filtered(&[
-            FilterKind::Deflate(1),
+            FilterKind::Deflate(DeflateLevel::One),
             FilterKind::Shuffle,
-            FilterKind::Deflate(9),
+            FilterKind::Deflate(DeflateLevel::Nine),
         ]);
         assert_eq!(ids(&twice), [FILTER_SHUFFLE, FILTER_DEFLATE]);
-        assert_eq!(twice.filters[1].kind, FilterKind::Deflate(9));
+        assert_eq!(
+            twice.filters[1].kind,
+            FilterKind::Deflate(DeflateLevel::Nine)
+        );
     }
 
     /// A pushed pipeline reaches the file in the order and with the optional
@@ -2832,7 +2819,7 @@ mod tests {
         for (kind, optional) in [
             (FilterKind::Shuffle, true),
             (FilterKind::Fletcher32, false),
-            (FilterKind::Deflate(4), true),
+            (FilterKind::Deflate(DeflateLevel::Four), true),
         ] {
             options.push_filter(FilterSpec { kind, optional });
         }
@@ -2869,7 +2856,7 @@ mod tests {
             (
                 "lzf",
                 "deflate",
-                filtered(&[FilterKind::Lzf, FilterKind::Deflate(6)]),
+                filtered(&[FilterKind::Lzf, FilterKind::Deflate(DeflateLevel::Six)]),
             ),
             (
                 "shuffle",
@@ -2898,7 +2885,10 @@ mod tests {
             (
                 "deflate",
                 "ZFP",
-                filtered(&[FilterKind::Deflate(6), FilterKind::Zfp(16.0)]),
+                filtered(&[
+                    FilterKind::Deflate(DeflateLevel::Six),
+                    FilterKind::Zfp(16.0),
+                ]),
             ),
         ];
 
@@ -2952,7 +2942,7 @@ mod tests {
         let so = FilterKind::ScaleOffset(ScaleOffset::FloatDScale(2), FillAvailability::Defined);
         let cases: &[(ChunkOptions, &[u16])] = &[
             (
-                filtered(&[FilterKind::Shuffle, FilterKind::Deflate(6)]),
+                filtered(&[FilterKind::Shuffle, FilterKind::Deflate(DeflateLevel::Six)]),
                 &[FILTER_SHUFFLE, FILTER_DEFLATE],
             ),
             (
@@ -2960,7 +2950,7 @@ mod tests {
                 &[FILTER_SHUFFLE, FILTER_LZF],
             ),
             (
-                filtered(&[so, FilterKind::Deflate(6)]),
+                filtered(&[so, FilterKind::Deflate(DeflateLevel::Six)]),
                 &[FILTER_SCALEOFFSET, FILTER_DEFLATE],
             ),
             (
@@ -3108,7 +3098,7 @@ mod tests {
                     let raw = f64_to_bytes(&values);
                     let mut options = chunked(&[chunk], &[]);
                     if deflate {
-                        options.set_filter(FilterKind::Deflate(6));
+                        options.set_filter(FilterKind::Deflate(DeflateLevel::Six));
                     }
                     let dims = [chunk];
                     let maxshape = unlimited.then_some([MaxExtent::Unlimited]);

@@ -13,6 +13,7 @@
 use hdf5::Extent;
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::types::FixedAscii;
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{AttrValue, Error, File};
 use rstest::rstest;
 
@@ -134,7 +135,7 @@ fn append_inplace_grows_a_filtered_partial_tail_both_read() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("filtered_tail.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
-        .filters(&[Filter::Shuffle, Filter::Deflate(4)])
+        .filters(&[Filter::Shuffle, Filter::Deflate(DeflateLevel::Four)])
         .libhdf5_create(&path);
 
     {
@@ -160,7 +161,7 @@ fn append_inplace_grows_a_c_written_filtered_partial_tail() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_filtered_tail.h5");
     Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 4)
-        .filters(&[Filter::Shuffle, Filter::Deflate(4)])
+        .filters(&[Filter::Shuffle, Filter::Deflate(DeflateLevel::Four)])
         .libhdf5_create(&path); // 10 % 4 != 0
 
     {
@@ -448,7 +449,7 @@ fn a_filtered_partial_tail_with_two_hard_links_appends_in_place() {
     {
         let mut b = hdf5_pure::FileBuilder::new();
         Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 8)
-            .filters(&[Filter::Deflate(1)])
+            .filters(&[Filter::Deflate(DeflateLevel::One)])
             .add_to(&mut b);
         b.write(&path).unwrap();
     }

@@ -46,6 +46,8 @@ use hdf5_pure_format::__private::SuperBlockGeometry;
 use hdf5_pure_space::__private::AllocationClass;
 
 #[cfg(test)]
+use crate::DeflateLevel;
+#[cfg(test)]
 use crate::address::AddressContext;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
@@ -2423,7 +2425,7 @@ mod tests {
             .with_shape(&[4096])
             .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[4])
-            .with_deflate(1);
+            .with_deflate(DeflateLevel::One);
         b.write(&path).unwrap();
 
         // Widen the array header's element_size (byte 6 of `EAHD`) past the three

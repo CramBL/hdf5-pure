@@ -10,6 +10,7 @@
 //! the file self-describing, and the shapes and edge values the float complex
 //! path already handles.
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::mat::options::{Compression, OneDimensionalMode};
 use hdf5_pure::mat::{
     self, Complex32, Complex64, ComplexI8, ComplexI16, ComplexI32, ComplexI64, ComplexU8,
@@ -489,7 +490,7 @@ fn compression_round_trips_and_leaves_the_empty_array_alone() {
     let plain = mat::to_bytes_with_options(&v, &plain_opts).unwrap();
     let mut opts = plain_opts.clone();
     opts.compression = Compression::Deflate {
-        level: 6,
+        level: DeflateLevel::Six,
         shuffle: false,
     };
     let deflated = mat::to_bytes_with_options(&v, &opts).unwrap();

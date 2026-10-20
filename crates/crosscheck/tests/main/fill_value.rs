@@ -13,6 +13,7 @@ use hdf5::file::LibraryVersion;
 #[cfg(target_pointer_width = "64")]
 use hdf5::plist::dataset_create::Layout;
 use hdf5_pure::ChunkIndex;
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FillTime;
@@ -401,7 +402,7 @@ fn a_filtered_partial_chunk_is_padded_before_compression() {
     let p_path = dir.path().join("deflate.h5");
     Unlimited::new("col", &data, 4)
         .fill_value(fill)
-        .filters(&[Filter::Deflate(6)])
+        .filters(&[Filter::Deflate(DeflateLevel::Six)])
         .pure_create(&p_path);
 
     assert_eq!(

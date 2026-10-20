@@ -4,6 +4,7 @@
 //! writer, filter pipeline, edit engine, and repack all thread LZF through
 //! correctly. LZF is lossless, so every comparison is exact equality.
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{Error, File, FileBuilder, FormatError, RepackOptions};
 
 use test_util::temp;
@@ -113,7 +114,7 @@ fn lzf_plus_deflate_refused() {
         .with_i32_data(&[1, 2, 3, 4])
         .with_chunks(&[4])
         .with_lzf()
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     let err = builder
         .finish()
         .expect_err("lzf + deflate should error, not succeed");

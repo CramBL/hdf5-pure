@@ -243,6 +243,7 @@ def test_migration_shape_ignores_only_the_allowed_variant_changes(variant, expec
     ("variant", "expected"),
     [
         ("EofRelocationUnderflow", []),
+        ("InvalidDeflateLevel", []),
         ("EnumBaseSizeMismatch", []),
         ("FileRegionLengthMismatch", []),
         ("InsufficientRegion", []),
@@ -359,6 +360,7 @@ def test_migration_builds_core_with_the_profile_core_features():
 @pytest.mark.parametrize(
     ("name", "expected"),
     [
+        ("DeflateLevel", []),
         ("FileSpacePageSize", []),
         ("LengthWidth", []),
         ("MantissaNormalization", []),

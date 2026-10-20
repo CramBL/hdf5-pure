@@ -19,6 +19,7 @@ use core::str::FromStr;
 
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::types::VarLenUnicode;
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{AttrValue, File, FileBuilder, FileSpaceStrategy, MaxExtent};
 use rstest::rstest;
 
@@ -92,7 +93,7 @@ fn c_library_reads_filtered_chunked_vlen_strings() {
     b.create_dataset("labels")
         .with_vlen_strings(&data.iter().map(String::as_str).collect::<Vec<_>>())
         .with_chunks(&[8])
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     b.write(&path).unwrap();
 
     assert_both_read(&path, "labels", &data);
@@ -250,7 +251,7 @@ fn c_library_reads_two_distinct_chunked_vlen_string_datasets() {
     b.create_dataset("b")
         .with_vlen_strings(&second.iter().map(String::as_str).collect::<Vec<_>>())
         .with_chunks(&[7])
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     b.write(&path).unwrap();
 
     assert_both_read(&path, "a", &first);
@@ -352,7 +353,7 @@ fn c_library_reads_an_overwritten_filtered_chunked_vlen_string_dataset() {
     b.create_dataset("labels")
         .with_vlen_strings(&before.iter().map(String::as_str).collect::<Vec<_>>())
         .with_chunks(&[8])
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     b.write(&path).unwrap();
 
     let after: Vec<String> = (0..64).map(|i| format!("overwritten-value-{i}")).collect();
@@ -523,7 +524,7 @@ fn paged_global_heap_references_survive_creation_edit_and_reopen(
         .create_dataset("filtered")
         .with_vlen_strings(&["compressed-first", "compressed-second"])
         .with_chunks(&[1])
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     builder.write(&path).unwrap();
     assert_eq!(read_c(&path, "contiguous"), ["first", "second"]);
     assert_eq!(

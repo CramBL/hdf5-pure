@@ -1,5 +1,6 @@
 #![cfg(target_arch = "wasm32")]
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::Layout;
@@ -35,7 +36,7 @@ fn reads_back_a_deflate_compressed_dataset() {
         .create_dataset("x")
         .with_i32_data(&values)
         .with_chunks(&[1024])
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
 
     let file = File::from_bytes(builder.finish().unwrap()).unwrap();
     let dataset = file.dataset("x").unwrap();

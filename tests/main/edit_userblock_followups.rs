@@ -11,6 +11,7 @@
 //! create the never-written-contiguous and compact-layout fixtures those paths
 //! need.)
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{AttrValue, File, FileBuilder};
 
 use test_util::temp;
@@ -88,7 +89,7 @@ fn userblock_delete_chunked_dataset_roundtrip() {
         .with_f64_data(&chunked)
         .with_shape(&[800])
         .with_chunks(&[50])
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     let userblock = userblock::write(&path, b, UB, MARKER);
 
     {
@@ -260,7 +261,7 @@ fn userblock_copy_chunked_dataset_roundtrip() {
         .with_f64_data(&data)
         .with_shape(&[600])
         .with_chunks(&[40])
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     let userblock = userblock::write(&path, b, UB, MARKER);
 
     {

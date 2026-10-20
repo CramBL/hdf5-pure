@@ -18,6 +18,7 @@
 //! cargo run --example mat_streaming
 //! ```
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
 use hdf5_pure::mat::{Block, Blocking, DataProducer, MatBuilder, MatError, Options};
 use std::sync::{Arc, Mutex};
@@ -169,7 +170,7 @@ fn main() {
     // compressed one is not knowable without compressing it.
     let mut options = Options::default();
     options.compression = hdf5_pure::mat::Compression::Deflate {
-        level: 6,
+        level: DeflateLevel::Six,
         shuffle: false,
     };
     let mut mb = MatBuilder::new(options);

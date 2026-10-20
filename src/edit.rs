@@ -312,6 +312,8 @@ use hdf5_pure_space::__private::{
 };
 
 use crate::DatatypeByteOrder;
+#[cfg(test)]
+use crate::DeflateLevel;
 use crate::FillTime;
 use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
@@ -14610,7 +14612,7 @@ mod tests {
         }
         dataset.with_dtype(datatype.clone());
         if chunked {
-            dataset.with_chunks(&[1]).with_deflate(6);
+            dataset.with_chunks(&[1]).with_deflate(DeflateLevel::Six);
         }
         builder.write(&path).unwrap();
         {
@@ -16120,7 +16122,7 @@ mod tests {
                 .with_maxshape(&[MaxExtent::Unlimited])
                 .with_chunks(&[chunk]);
             if deflate {
-                d.with_deflate(6);
+                d.with_deflate(DeflateLevel::Six);
             }
             b.write(path).unwrap();
         };
@@ -16376,7 +16378,7 @@ mod tests {
                 .with_maxshape(&[MaxExtent::Unlimited])
                 .with_chunks(&[chunk])
                 .with_shuffle()
-                .with_deflate(4);
+                .with_deflate(DeflateLevel::Four);
             b.write(path).unwrap();
         };
 
@@ -21203,7 +21205,7 @@ mod tests {
             .with_i32_data(&original)
             .with_shape(&[4096])
             .with_chunks(&[512])
-            .with_deflate(6);
+            .with_deflate(DeflateLevel::Six);
         b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 0);
         b.write(&path).unwrap();
 
@@ -21498,7 +21500,7 @@ mod staged_query_tests {
         col.with_i32_data(&[1, 2, 3, 4])
             .with_maxshape(&[MaxExtent::Unlimited])
             .with_chunks(&[2])
-            .with_deflate(4);
+            .with_deflate(DeflateLevel::Four);
         e.stage_created_dataset(&ObjectPathBuf::parse("col"), col)
             .unwrap();
         e.stage_created_dataset(&ObjectPathBuf::parse("plain"), i32_dataset(&[5]))

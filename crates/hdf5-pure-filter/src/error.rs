@@ -21,6 +21,11 @@ pub enum Error {
         /// Checksum calculated from the payload.
         computed: u32,
     },
+    /// Reports a Deflate compression parameter outside `0..=9`.
+    InvalidDeflateLevel {
+        /// The encoded compression level.
+        level: u32,
+    },
     /// Reports malformed LZF input or output beyond the caller's size limit.
     InvalidLzfStream(&'static str),
     /// Reports invalid scale-offset parameters or input bytes.
@@ -80,6 +85,9 @@ impl fmt::Display for Error {
                 f,
                 "fletcher32 checksum mismatch: expected {expected}, computed {computed}"
             ),
+            Self::InvalidDeflateLevel { level } => {
+                write!(f, "deflate level {level} is outside 0..=9")
+            }
             Self::InvalidLzfStream(reason) => write!(f, "lzf: {reason}"),
             Self::ScaleOffset(reason) => write!(f, "filter error: {reason}"),
             Self::ScaleOffsetValueTooLargeForPlatform { value, target } => write!(
@@ -119,6 +127,7 @@ impl std::error::Error for Error {}
 impl From<Error> for hdf5_pure_core::FormatError {
     fn from(error: Error) -> Self {
         match error {
+            Error::InvalidDeflateLevel { level } => Self::InvalidDeflateLevel { level },
             Error::InvalidLzfStream(reason) => Self::FilterError(format!("lzf: {reason}")),
             Error::ScaleOffset(reason) => Self::FilterError(reason),
             Error::FilterError(reason) => Self::FilterError(reason),
