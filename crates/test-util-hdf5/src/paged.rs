@@ -2,7 +2,11 @@
 
 use std::path::Path;
 
-use hdf5_pure::{File, FileBuilder, FileSpaceStrategy, StoredAddress};
+use hdf5_pure::AttrValue;
+use hdf5_pure::File;
+use hdf5_pure::FileBuilder;
+use hdf5_pure::FileSpaceStrategy;
+use hdf5_pure::StoredAddress;
 use hdf5_pure_core::__private::StoredAddressExt;
 use test_util::{
     btree_v2, bytes, fractal_heap, free_space, global_heap, local_heap, object_header, symbol_table,
@@ -53,6 +57,51 @@ pub fn write_small_large_i32(path: &Path, page_size: u64) {
     builder.create_dataset("b").with_i32_data(&small_b);
     builder.create_dataset("big").with_i32_data(&big);
     configure(&mut builder, page_size, true);
+    builder.write(path).unwrap();
+}
+
+/// Writes a persistent PAGE fixture with adjustable metadata and raw-data lengths.
+///
+/// The root attribute `fill` contains `attribute_len` zero bytes, and dataset `d` contains
+/// `raw_len` bytes of value 7. Uses `page`, `userblock`, and `threshold` as file-creation settings.
+/// Writes the fixture marker at the start of a nonzero userblock.
+///
+/// # Examples
+///
+/// ```
+/// use hdf5_pure::File;
+/// use test_util_hdf5::paged;
+///
+/// # let dir = tempfile::tempdir()?;
+/// # let path = dir.path().join("metadata_tail.h5");
+/// paged::write_metadata_tail(&path, 512, 0, 1, 18, 512);
+/// let file = File::open(&path)?;
+/// assert_eq!(file.dataset("d")?.read_u8()?, vec![7; 512]);
+/// assert_eq!(file.persisted_free_space()?, vec![(513, 511)]);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
+/// # Panics
+///
+/// Panics if creating the fixture fails.
+pub fn write_metadata_tail(
+    path: &Path,
+    page: u64,
+    userblock: u64,
+    threshold: u64,
+    attribute_len: usize,
+    raw_len: usize,
+) {
+    let mut builder = FileBuilder::new();
+    builder
+        .with_file_space_strategy(FileSpaceStrategy::Page, true, threshold)
+        .with_file_space_page_size(page)
+        .with_userblock(userblock);
+    if userblock != 0 {
+        builder.with_userblock_content(b"PAGE metadata tail");
+    }
+    builder.set_attr("fill", AttrValue::U8Array(vec![0; attribute_len]));
+    builder.create_dataset("d").with_u8_data(&vec![7; raw_len]);
     builder.write(path).unwrap();
 }
 
