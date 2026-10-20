@@ -39,6 +39,15 @@ case "$command" in
         context=$(mktemp -d)
         trap 'rm -rf "$context"' EXIT
         cp --parents "${inputs[@]}" "$context"
+        docker pull --platform "$platform" "$parent"
+        docker image inspect --format '{{json .Config}}' "$parent" | jq --raw-output '
+            (.Env[] | capture("^(?<key>[^=]+)=(?<value>.*)$") |
+                "ENV \(.key)=\(.value | tojson)"),
+            (.Labels | to_entries[] | "LABEL \(.key | tojson)=\(.value | tojson)"),
+            "CMD \(.Cmd | tojson)"
+        ' > "$context/parent-config"
+        sed "/^FROM scratch$/r $context/parent-config" docker/ci/cross/Dockerfile \
+            > "$context/docker/ci/cross/Dockerfile"
         docker build --platform "$platform" --file "$context/docker/ci/cross/Dockerfile" \
             --build-arg "BASE_IMAGE=$parent" --build-arg "CMAKE_VERSION=$version" \
             --build-arg "CMAKE_URL=$url" --build-arg "CMAKE_SHA256=$sha256" \
