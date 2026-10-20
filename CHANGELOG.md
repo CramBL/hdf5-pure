@@ -50,6 +50,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed platform-limit classification in `FormatError` diagnostics for fixed-width integer overflow, while host-sized conversions retain their platform-limit classification ([#810](https://github.com/CramBL/hdf5-pure/pull/810)).
 - Fixed `Dataset::chunks` and related reads accepting an Extensible Array chunk index with an invalid header, or with blocks that do not match it ([#806](https://github.com/CramBL/hdf5-pure/pull/806)).
 - Fixed `Dataset::chunks` and related reads misreading an Extensible Array chunk index whose super blocks each hold 8 or more data block addresses ([#806](https://github.com/CramBL/hdf5-pure/pull/806)).
 - Fixed `Dataset::chunks` and related reads requesting an entire unpaged Fixed Array chunk index in one buffer. Encoded metadata is read in bounded windows, while memory for collected chunk records grows with the number of defined entries ([#805](https://github.com/CramBL/hdf5-pure/pull/805)).

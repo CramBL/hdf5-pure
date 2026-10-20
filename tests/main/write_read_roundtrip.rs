@@ -1,3 +1,5 @@
+use hdf5_pure::CompoundField;
+use hdf5_pure::CompoundType;
 use hdf5_pure::{
     AttrValue, CompoundTypeBuilder, DType, Datatype, Error, File, FileBuilder, FormatError,
     MaxExtent,
@@ -399,6 +401,46 @@ fn packed_compound_builder_rejects_a_type_with_no_bytes() {
             .unwrap_err(),
         FormatError::InvalidCompoundSize
     ));
+}
+
+#[test]
+fn tuple_compound_size_overflow_reports_the_fixed_representation() {
+    struct MaxWidthField;
+
+    impl CompoundField for MaxWidthField {
+        fn datatype() -> Result<Datatype, FormatError> {
+            Ok(Datatype::Opaque {
+                size: u32::MAX,
+                tag: Vec::new(),
+            })
+        }
+
+        fn encode_field(&self, _output: &mut Vec<u8>) {
+            panic!("only datatype construction is used");
+        }
+
+        fn decode_field(_datatype: &Datatype, _bytes: &[u8]) -> Result<Self, FormatError> {
+            Err(FormatError::Internal(
+                "only datatype construction is used".to_string(),
+            ))
+        }
+    }
+
+    assert_eq!(
+        <(MaxWidthField,) as CompoundType>::datatype()
+            .unwrap()
+            .type_size(),
+        u32::MAX
+    );
+    let err = <(MaxWidthField, u8) as CompoundType>::datatype().unwrap_err();
+    assert_eq!(
+        err,
+        FormatError::ValueTooLargeForRepresentation {
+            value: 4_294_967_296,
+            target: "u32",
+        }
+    );
+    assert_eq!(err.to_string(), "value 4294967296 does not fit in \"u32\"");
 }
 
 /// Nothing occupies zero bytes per element, and the writers divide by the

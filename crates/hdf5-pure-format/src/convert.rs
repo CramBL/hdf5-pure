@@ -1,29 +1,9 @@
-//! Checked narrowing of file-derived integers to in-memory widths.
+//! Checked integer conversions with host-width and fixed-width overflow diagnostics.
 //!
-//! HDF5 stores an offset, a length, a size or an element count as a 64-bit value, and the reader
-//! indexes an in-memory buffer with `usize`. On a 64-bit host the conversion between the two is
-//! infallible. On a 32-bit host `usize` is 32 bits, where `value as usize` truncates anything
-//! above 4 GiB, so the read lands on the wrong bytes or the allocation comes out short.
-//!
-//! [`Narrow`] replaces such a cast with a conversion that reports [`FormatError`], which composes
-//! with `?` in the format layer and, through `From<FormatError>`, in the high-level layer.
-//! [`Narrow::to_usize`] and [`Narrow::narrow`] report [`FormatError::ValueTooLargeForPlatform`]
-//! for a value that overruns one of the targets [`NarrowTarget`] lists. A caller with an error of
-//! its own passes it to [`Narrow::narrow_or_else`], which reports that error in place of the
-//! platform one.
-//!
-//! Use them for any value that is file-derived and not structurally bounded: the result of
-//! `read_offset` or `read_length`, a data layout address or size, a chunk offset or size, a heap
-//! or collection size, an element count, and any arithmetic on those that becomes a slice index or
-//! an allocation size. [`slice_range`] takes both bounds of an `(offset, length)` pair at once.
-//!
-//! Write a narrowing `as` cast only where the source is bounded on every supported target: a
-//! "size of offsets" byte that is 2, 4, or 8, a version or flags byte, a `u16` message size, a
-//! match arm keyed on the on-disk field width it casts to, or a small loop counter. A widening,
-//! such as a `u8` to `usize`, needs no guard. Annotate a cast you keep with
-//! `#[expect(clippy::cast_possible_truncation /* or cast_possible_wrap */, reason = "…")]`, whose
-//! reason states the bound. The 32-bit cast gate (`just portability::cast-gate`) denies both lints
-//! and `unfulfilled_lint_expectations`, so a stale `#[expect]` fails it as an unguarded cast does.
+//! [`Narrow::narrow`] reports host-width limits for [`usize`] and [`NonZeroUsize`], and
+//! representation limits for [`u32`]. Callers pass field-specific errors to
+//! [`Narrow::narrow_or_else`]. [`slice_range`] checks the addition and conversion of a byte range's
+//! bounds before indexing a buffer.
 
 use core::num::NonZeroU32;
 use core::num::NonZeroUsize;
@@ -58,17 +38,16 @@ pub trait Narrow: Copy {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::ValueTooLargeForPlatform`] if `self` does not fit `T`, carrying
-    /// `self` as a `u64` and naming `T` through [`NarrowTarget::NAME`].
+    /// Returns [`FormatError::ValueTooLargeForPlatform`] if `self` exceeds the range of [`usize`]
+    /// or [`NonZeroUsize`], or [`FormatError::ValueTooLargeForRepresentation`] if `self` exceeds
+    /// the range of [`u32`]. Both errors include the original value and the target's
+    /// [`name`](NarrowTarget::NAME).
     #[inline]
     fn narrow<T>(self) -> Result<T, FormatError>
     where
         T: NarrowTarget + TryFrom<Self, Error = TryFromIntError>,
     {
-        self.narrow_or_else(|| FormatError::ValueTooLargeForPlatform {
-            value: self.to_u64(),
-            target: T::NAME,
-        })
+        self.narrow_or_else(|| T::overflow(self.to_u64()))
     }
 
     /// Narrows `self` to `T`, reporting the error `error` builds.
@@ -95,7 +74,7 @@ pub trait Narrow: Copy {
         T::try_from(self).map_err(|_| error())
     }
 
-    /// Converts `self` to `u64`, the width the platform error reports a value at.
+    /// Converts `self` to [`u64`] for overflow diagnostics.
     fn to_u64(self) -> u64;
 }
 
@@ -133,21 +112,48 @@ impl Narrow for NonZeroU32 {
 /// diagnostic beyond the value and the target's name. Any other target, such as the `u16` size of
 /// an object header message, goes through [`Narrow::narrow_or_else`] with the caller's error.
 pub trait NarrowTarget {
-    /// The name of the target in [`FormatError::ValueTooLargeForPlatform`], `"usize"` for both
-    /// `usize` and [`NonZeroUsize`].
+    /// The target's name in overflow diagnostics, `"usize"` for both [`usize`] and
+    /// [`NonZeroUsize`].
     const NAME: &'static str;
+
+    /// Returns the error for a value above the target's range.
+    ///
+    /// Uses [`FormatError::ValueTooLargeForPlatform`] for [`usize`] and [`NonZeroUsize`], and
+    /// [`FormatError::ValueTooLargeForRepresentation`] for [`u32`].
+    fn overflow(value: u64) -> FormatError;
 }
 
 impl NarrowTarget for usize {
     const NAME: &'static str = "usize";
+
+    fn overflow(value: u64) -> FormatError {
+        FormatError::ValueTooLargeForPlatform {
+            value,
+            target: Self::NAME,
+        }
+    }
 }
 
 impl NarrowTarget for u32 {
     const NAME: &'static str = "u32";
+
+    fn overflow(value: u64) -> FormatError {
+        FormatError::ValueTooLargeForRepresentation {
+            value,
+            target: Self::NAME,
+        }
+    }
 }
 
 impl NarrowTarget for NonZeroUsize {
     const NAME: &'static str = "usize";
+
+    fn overflow(value: u64) -> FormatError {
+        FormatError::ValueTooLargeForPlatform {
+            value,
+            target: Self::NAME,
+        }
+    }
 }
 
 /// Compute `offset .. offset + len` as a `usize` range, checking both the
@@ -176,6 +182,8 @@ pub fn slice_range(offset: u64, len: u64) -> Result<Range<usize>, FormatError> {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     #[test]
@@ -183,16 +191,25 @@ mod tests {
         assert_eq!(0u64.to_usize().unwrap(), 0);
         assert_eq!(1234u64.to_usize().unwrap(), 1234);
         assert_eq!(42u32.to_usize().unwrap(), 42);
-        assert_eq!(1000u64.narrow::<u32>().unwrap(), 1000);
     }
 
-    #[test]
-    fn a_value_past_the_target_width_is_reported_with_the_value() {
-        let err = 0x1_0000_0000u64.narrow::<u32>().unwrap_err();
-        let FormatError::ValueTooLargeForPlatform { value, target } = err else {
-            panic!("expected ValueTooLargeForPlatform, got {err:?}");
+    #[rstest]
+    #[case(0)]
+    #[case(1000)]
+    #[case(u64::from(u32::MAX))]
+    fn a_value_within_the_target_width_converts(#[case] value: u64) {
+        assert_eq!(u64::from(value.narrow::<u32>().unwrap()), value);
+    }
+
+    #[rstest]
+    #[case(u64::from(u32::MAX) + 1)]
+    #[case(u64::MAX)]
+    fn a_value_past_the_target_width_is_reported_with_the_value(#[case] original: u64) {
+        let err = original.narrow::<u32>().unwrap_err();
+        let FormatError::ValueTooLargeForRepresentation { value, target } = err else {
+            panic!("expected ValueTooLargeForRepresentation, got {err:?}");
         };
-        assert_eq!(value, 0x1_0000_0000);
+        assert_eq!(value, original);
         assert_eq!(target, "u32");
     }
 
@@ -209,6 +226,12 @@ mod tests {
                 .narrow_or_else::<u16, _>(|| "index does not fit u16")
                 .unwrap_err(),
             "index does not fit u16"
+        );
+        assert_eq!(
+            (u64::from(u32::MAX) + 1)
+                .narrow_or_else::<u32, _>(|| "count does not fit u32")
+                .unwrap_err(),
+            "count does not fit u32"
         );
     }
 
@@ -245,11 +268,16 @@ mod tests {
     #[test]
     fn large_u64_behaviour_matches_platform_width() {
         let big: u64 = u64::from(u32::MAX) + 1; // 2^32
-        match big.to_usize() {
-            // 64-bit (and wider) hosts: fits.
-            Ok(v) => assert_eq!(v as u64, big),
-            // 32-bit hosts: must be reported, never truncated.
-            Err(e) => assert!(matches!(e, FormatError::ValueTooLargeForPlatform { .. })),
+        if usize::BITS >= 64 {
+            assert_eq!(big.to_usize().unwrap() as u64, big);
+        } else {
+            assert_eq!(
+                big.to_usize().unwrap_err(),
+                FormatError::ValueTooLargeForPlatform {
+                    value: big,
+                    target: "usize",
+                }
+            );
         }
     }
 }
