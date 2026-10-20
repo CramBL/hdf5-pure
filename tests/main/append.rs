@@ -3,6 +3,7 @@
 //! filtered and unfiltered, chunk-aligned and not — and read the result back
 //! with this crate. C-library interop lives in `crates/crosscheck/tests/main/append.rs`.
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{
     AppendBuilder, AttrValue, Error, File, FileBuilder, FormatError, MaxExtent, ScaleOffset,
 };
@@ -15,7 +16,7 @@ fn append_deflate_shuffle_chunk_aligned() {
     let path = dir.path().join("d.h5");
     // 8 elements, chunk 4 => 2 full chunks. Append 8 more (2 chunks): aligned.
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
-        .filters(&[Filter::Shuffle, Filter::Deflate(6)])
+        .filters(&[Filter::Shuffle, Filter::Deflate(DeflateLevel::Six)])
         .pure_create(&path);
     dataset::pure_append_staged(&path, "d", &(8..16).collect::<Vec<_>>());
     assert_eq!(
@@ -31,7 +32,7 @@ fn append_unaligned_crosses_chunk_boundary() {
     // 6 elements, chunk 4 => 1 full chunk + a partial (2 of 4). Append 5 => 11:
     // the partial chunk is rewritten and the tail grows to 3 chunks.
     Unlimited::new("d", &(0..6).collect::<Vec<i32>>(), 4)
-        .filters(&[Filter::Shuffle, Filter::Deflate(6)])
+        .filters(&[Filter::Shuffle, Filter::Deflate(DeflateLevel::Six)])
         .pure_create(&path);
     dataset::pure_append_staged(&path, "d", &(6..11).collect::<Vec<_>>());
     assert_eq!(
@@ -45,7 +46,7 @@ fn append_repeated_partial_then_partial() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     Unlimited::new("d", &(0..3).collect::<Vec<i32>>(), 4)
-        .filters(&[Filter::Deflate(6)])
+        .filters(&[Filter::Deflate(DeflateLevel::Six)])
         .pure_create(&path); // 1 partial chunk (3 of 4)
     dataset::pure_append_staged(&path, "d", &[3, 4]); // -> 5 (crosses into chunk 1, partial)
     dataset::pure_append_staged(&path, "d", &[5, 6, 7]); // -> 8 (fills chunk 1)
@@ -73,7 +74,7 @@ fn append_fletcher32() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     Unlimited::new("d", &(0..5).collect::<Vec<i32>>(), 4)
-        .filters(&[Filter::Deflate(6), Filter::Fletcher32])
+        .filters(&[Filter::Deflate(DeflateLevel::Six), Filter::Fletcher32])
         .pure_create(&path);
     dataset::pure_append_staged(&path, "d", &(5..12).collect::<Vec<_>>());
     assert_eq!(
@@ -279,7 +280,7 @@ fn append_to_userblock_file() {
     let mut b = FileBuilder::new();
     b.with_userblock(512);
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
-        .filters(&[Filter::Shuffle, Filter::Deflate(6)])
+        .filters(&[Filter::Shuffle, Filter::Deflate(DeflateLevel::Six)])
         .add_to(&mut b);
     b.write(&path).unwrap();
     dataset::pure_append_staged(&path, "d", &(8..17).collect::<Vec<_>>()); // unaligned 8 -> 17
@@ -294,7 +295,7 @@ fn zero_length_append_is_noop() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     Unlimited::new("d", &(0..5).collect::<Vec<i32>>(), 4)
-        .filters(&[Filter::Deflate(6)])
+        .filters(&[Filter::Deflate(DeflateLevel::Six)])
         .pure_create(&path);
     {
         let s = File::open_rw(&path).unwrap();
@@ -330,7 +331,7 @@ fn many_appends_do_not_rewrite_existing_data() {
     let base: Vec<i32> = (0..base_n).map(|_| rng()).collect();
     {
         Unlimited::new("d", &base, 200)
-            .filters(&[Filter::Deflate(6)])
+            .filters(&[Filter::Deflate(DeflateLevel::Six)])
             .pure_create(&path);
     }
     let size_after_create = std::fs::metadata(&path).unwrap().len();
@@ -367,7 +368,7 @@ fn introspection_reports_eligibility() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
-        .filters(&[Filter::Shuffle, Filter::Deflate(6)])
+        .filters(&[Filter::Shuffle, Filter::Deflate(DeflateLevel::Six)])
         .pure_create(&path);
     let f = File::open(&path).unwrap();
     let ds = f.dataset("d").unwrap();

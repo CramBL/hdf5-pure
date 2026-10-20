@@ -12,6 +12,7 @@
 //! cargo run --example edit_in_place
 //! ```
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{AttrValue, File, FileBuilder};
 
 fn main() {
@@ -61,7 +62,7 @@ fn main() {
             b.with_f64_data(&waveform)
                 .with_chunks(&[512])
                 .with_shuffle()
-                .with_deflate(6);
+                .with_deflate(DeflateLevel::Six);
         })
         .unwrap();
     // Overwrite an existing dataset's values in place (H5Dwrite). Same datatype

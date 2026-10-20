@@ -13,6 +13,7 @@
 //!     the old chunk storage reclaimed), including reuse of that reclaimed space
 //!     by a later commit in the same session.
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{File, FileBuilder, MaxExtent};
 
 use test_util::temp;
@@ -41,7 +42,7 @@ fn userblock_chunked_add_roundtrip() {
                 b.with_f64_data(&added)
                     .with_shape(&[1000])
                     .with_chunks(&[64])
-                    .with_deflate(6);
+                    .with_deflate(DeflateLevel::Six);
             })
             .unwrap();
         s.commit().unwrap();
@@ -118,7 +119,7 @@ fn userblock_chunked_shrinking_inplace_overwrite() {
         .with_f64_data(&original)
         .with_shape(&[400])
         .with_chunks(&[40])
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     let userblock = userblock::write(&path, b, UB, MARKER);
     let len_before = std::fs::metadata(&path).unwrap().len();
 
@@ -177,7 +178,7 @@ fn real_mat_add_chunked_dataset_preserves_userblock() {
                 b.with_f64_data(&added)
                     .with_shape(&[600])
                     .with_chunks(&[64])
-                    .with_deflate(6);
+                    .with_deflate(DeflateLevel::Six);
             })
             .unwrap();
         s.commit().unwrap();
@@ -223,7 +224,7 @@ fn userblock_extensible_array_add_and_overwrite_roundtrip() {
                     .with_shape(&[500])
                     .with_chunks(&[40])
                     .with_maxshape(&[MaxExtent::Unlimited])
-                    .with_deflate(6);
+                    .with_deflate(DeflateLevel::Six);
             })
             .unwrap();
         s.commit().unwrap();
@@ -279,7 +280,7 @@ fn userblock_single_chunk_index_add_and_overwrite() {
                 b.with_f64_data(&added)
                     .with_shape(&[50])
                     .with_chunks(&[50])
-                    .with_deflate(6);
+                    .with_deflate(DeflateLevel::Six);
             })
             .unwrap();
         s.commit().unwrap();
@@ -326,7 +327,7 @@ fn userblock_chunked_relocating_overwrite_roundtrip() {
         .with_f64_data(&original)
         .with_shape(&[500])
         .with_chunks(&[50])
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     let userblock = userblock::write(&path, b, UB, MARKER);
 
     let updated: Vec<f64> = (0..500).map(|i| (i as f64).sin()).collect();
@@ -431,7 +432,7 @@ fn userblock_chunked_overwrite_reuses_reclaimed_space() {
         .with_f64_data(&original)
         .with_shape(&[1200])
         .with_chunks(&[60])
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     let userblock = userblock::write(&path, b, UB, MARKER);
 
     let updated: Vec<f64> = (0..1200).map(|i| (i as f64).sin() * 1e9).collect();

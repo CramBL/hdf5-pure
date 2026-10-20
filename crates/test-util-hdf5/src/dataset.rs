@@ -5,12 +5,13 @@ use std::path::Path;
 
 #[cfg(feature = "__hdf5-1.10")]
 use hdf5::Extent;
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{DatasetBuilder, File, FileBuilder, H5Element, MaxExtent, ScaleOffset};
 
 /// One stage of a filter pipeline. A dataset applies its stages in the order it lists them.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Filter {
-    Deflate(u8),
+    Deflate(DeflateLevel),
     Shuffle,
     Fletcher32,
     ScaleOffset(ScaleOffset),
@@ -18,13 +19,13 @@ pub enum Filter {
 }
 
 /// Shuffle followed by deflate at level 6, the common append interoperability pipeline.
-pub const SHUFFLE_DEFLATE_6: &[Filter] = &[Filter::Shuffle, Filter::Deflate(6)];
+pub const SHUFFLE_DEFLATE_6: &[Filter] = &[Filter::Shuffle, Filter::Deflate(DeflateLevel::Six)];
 
 /// Applies `filters` to a dataset builder in the order they are listed.
 pub fn apply_filters(builder: &mut DatasetBuilder, filters: &[Filter]) {
     for filter in filters {
         match *filter {
-            Filter::Deflate(level) => builder.with_deflate(u32::from(level)),
+            Filter::Deflate(level) => builder.with_deflate(level),
             Filter::Shuffle => builder.with_shuffle(),
             Filter::Fletcher32 => builder.with_fletcher32(),
             Filter::ScaleOffset(mode) => builder.with_scale_offset(mode),
@@ -177,7 +178,7 @@ impl AppendRefusalFixture {
             }
             Self::UnlimitedI32 => {
                 Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4)
-                    .filters(&[Filter::Deflate(6)])
+                    .filters(&[Filter::Deflate(DeflateLevel::Six)])
                     .add_to(&mut builder);
             }
         }
@@ -369,7 +370,7 @@ impl<T: hdf5::H5Type + Copy> Unlimited<'_, T> {
             .shape((Extent::resizable(data.len()),));
         for filter in filters {
             builder = match *filter {
-                Filter::Deflate(level) => builder.deflate(level),
+                Filter::Deflate(level) => builder.deflate(level.get()),
                 Filter::Shuffle => builder.shuffle(),
                 Filter::Fletcher32 => builder.fletcher32(),
                 Filter::ScaleOffset(mode) => builder.scale_offset(libhdf5_scale_offset(mode)),
@@ -472,6 +473,7 @@ fn libhdf5_scale_offset(mode: ScaleOffset) -> hdf5::filters::ScaleOffset {
 
 #[cfg(test)]
 mod tests {
+    use hdf5_pure::DeflateLevel;
     use hdf5_pure::{ChunkIndex, File, Layout, MaxExtent};
 
     use crate::dataset::{self, Filter, Unlimited};
@@ -481,7 +483,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("d.h5");
         Unlimited::new("d", &[1i32, 2, 3], 2)
-            .filters(&[Filter::Shuffle, Filter::Deflate(6)])
+            .filters(&[Filter::Shuffle, Filter::Deflate(DeflateLevel::Six)])
             .fill_value(9)
             .pure_create(&path);
         dataset::pure_append(&path, "d", &[4i32]);

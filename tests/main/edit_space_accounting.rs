@@ -8,6 +8,7 @@
 //! its reusable free from disk on open, and the total always equals the summed
 //! region lengths.
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{File, FileBuilder};
 use test_util::range;
 use test_util_hdf5::{
@@ -214,7 +215,7 @@ fn a_relocating_overwrite_reclaims_the_old_header_with_its_storage() {
     // Zeros compress to almost nothing, so the replacement below cannot fit back
     // into the chunk slots and the dataset is rebuilt elsewhere.
     Unlimited::new("d", &[0i32; 64], 16)
-        .filters(&[Filter::Deflate(6)])
+        .filters(&[Filter::Deflate(DeflateLevel::Six)])
         .pure_create(&path);
     let original_end = std::fs::metadata(&path).unwrap().len();
 

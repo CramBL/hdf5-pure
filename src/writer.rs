@@ -2,6 +2,8 @@
 
 use std::io::Write;
 
+#[cfg(test)]
+use crate::DeflateLevel;
 use crate::chunked_write::ByteSink;
 use crate::file_writer::FileWriter as FormatWriter;
 use crate::type_builders::{
@@ -580,12 +582,12 @@ mod streaming_tests {
                 .create_dataset("chunked_strings")
                 .with_vlen_strings(&["early", "heap", "references"])
                 .with_chunks(&[1])
-                .with_deflate(6);
+                .with_deflate(DeflateLevel::Six);
             builder
                 .create_dataset("filtered")
                 .with_f64_data(&[1.0, 2.0, 3.0, 4.0, 5.0])
                 .with_chunks(&[2])
-                .with_deflate(6);
+                .with_deflate(DeflateLevel::Six);
             builder.create_dataset("produced").with_produced_data(
                 crate::type_builders::make_u8_type(),
                 &[67],

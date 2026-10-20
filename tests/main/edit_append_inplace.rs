@@ -10,6 +10,7 @@ use std::fs;
 use std::panic;
 use std::panic::AssertUnwindSafe;
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{
     AttrValue, Error, File, FileAccessProperties, FileBuilder, FormatError, MaxExtent, ScaleOffset,
     SyncPolicy,
@@ -65,7 +66,7 @@ fn filtered_whole_chunk() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
-        .filters(&[Filter::Deflate(6)])
+        .filters(&[Filter::Deflate(DeflateLevel::Six)])
         .pure_create(&p); // 2 full chunks, deflate
 
     {
@@ -89,7 +90,7 @@ fn filtered_onto_a_partial_trailing_chunk_grows() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
-        .filters(&[Filter::Deflate(6)])
+        .filters(&[Filter::Deflate(DeflateLevel::Six)])
         .pure_create(&p);
 
     {
@@ -114,8 +115,8 @@ fn filtered_onto_a_partial_trailing_chunk_grows() {
 /// third has to grow that tail — under every filter stack this crate can
 /// re-encode.
 #[rstest]
-#[case::deflate(&[Filter::Deflate(6)])]
-#[case::shuffle_deflate(&[Filter::Shuffle, Filter::Deflate(6)])]
+#[case::deflate(&[Filter::Deflate(DeflateLevel::Six)])]
+#[case::shuffle_deflate(&[Filter::Shuffle, Filter::Deflate(DeflateLevel::Six)])]
 #[case::scale_offset(&[Filter::ScaleOffset(ScaleOffset::Integer(0))])]
 #[case::lzf(&[Filter::Lzf])]
 fn a_filtered_timer_flush_pattern_appends_by_any_length(#[case] filters: &[Filter]) {
@@ -145,8 +146,8 @@ fn a_filtered_timer_flush_pattern_appends_by_any_length(#[case] filters: &[Filte
 /// one left. The values are what catch a chunk that was decoded, extended and
 /// re-encoded against the wrong live prefix.
 #[rstest]
-#[case::deflate(&[Filter::Deflate(6)])]
-#[case::shuffle_deflate(&[Filter::Shuffle, Filter::Deflate(6)])]
+#[case::deflate(&[Filter::Deflate(DeflateLevel::Six)])]
+#[case::shuffle_deflate(&[Filter::Shuffle, Filter::Deflate(DeflateLevel::Six)])]
 #[case::scale_offset(&[Filter::ScaleOffset(ScaleOffset::Integer(0))])]
 #[case::lzf(&[Filter::Lzf])]
 fn repeated_short_filtered_appends_keep_every_element(#[case] filters: &[Filter]) {
@@ -184,7 +185,7 @@ fn filtered_raw_append_onto_a_partial_trailing_chunk() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("d.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
-        .filters(&[Filter::Deflate(6)])
+        .filters(&[Filter::Deflate(DeflateLevel::Six)])
         .pure_create(&p);
 
     {

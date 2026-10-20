@@ -25,6 +25,7 @@
 // startup.
 #![cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{
     EditBacking, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MaxExtent,
     MemoryStrategy, SyncPolicy,
@@ -55,7 +56,7 @@ fn windowed_row_read_allocates_on_the_order_of_the_window() {
         .with_f64_data(&data)
         .with_shape(&[N0 as u64, 32, 8])
         .with_chunks(&[64, 16, 4])
-        .with_deflate(3);
+        .with_deflate(DeflateLevel::Three);
     builder.write(&path).unwrap();
     drop(data);
 
@@ -455,7 +456,7 @@ fn filtered_write_does_not_build_a_compressor_per_chunk() {
             .with_f64_data(&data)
             .with_shape(&[N0 as u64])
             .with_chunks(&[CHUNK_ELEMS])
-            .with_deflate(3);
+            .with_deflate(DeflateLevel::Three);
         builder.write(&path).unwrap();
     });
 
@@ -500,7 +501,7 @@ fn filtered_read_does_not_build_a_decompressor_per_chunk() {
         .with_f64_data(&data)
         .with_shape(&[N0 as u64])
         .with_chunks(&[512])
-        .with_deflate(3);
+        .with_deflate(DeflateLevel::Three);
     builder.write(&path).unwrap();
     drop(data);
 

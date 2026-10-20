@@ -1,5 +1,6 @@
 #![cfg(feature = "ndarray")]
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{Error, File, FileBuilder};
 use ndarray::{Array1, Array2, Array3, ArrayD, ShapeBuilder, array};
 use test_util_hdf5::file_builder;
@@ -193,7 +194,7 @@ fn crosscheck_chunked_compressed_ndarray() {
     fb.create_dataset("m")
         .with_ndarray(&a)
         .with_chunks(&[4, 4])
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     fb.write(&path).unwrap();
 
     let file = hdf5::File::open(&path).unwrap();

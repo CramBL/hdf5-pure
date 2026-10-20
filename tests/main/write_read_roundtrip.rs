@@ -1,5 +1,6 @@
 use hdf5_pure::CompoundField;
 use hdf5_pure::CompoundType;
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{
     AttrValue, CompoundTypeBuilder, DType, Datatype, Error, File, FileBuilder, FormatError,
     MaxExtent,
@@ -946,7 +947,7 @@ fn roundtrip_paged_fixed_array_deflate() {
         .with_f64_data(&data)
         .with_shape(&[n as u64])
         .with_chunks(&[1])
-        .with_deflate(4);
+        .with_deflate(DeflateLevel::Four);
     let bytes = builder.finish().unwrap();
 
     let file = File::from_bytes(bytes).unwrap();
@@ -1053,7 +1054,7 @@ fn roundtrip_scale_offset_integer_then_deflate() {
         .with_shape(&[data.len() as u64])
         .with_chunks(&[64])
         .with_scale_offset(hdf5_pure::ScaleOffset::Integer(0))
-        .with_deflate(5);
+        .with_deflate(DeflateLevel::Five);
     let bytes = builder.finish().unwrap();
 
     let file = File::from_bytes(bytes).unwrap();
@@ -1085,7 +1086,7 @@ fn roundtrip_scale_offset_incompressible_then_deflate() {
         .with_shape(&[n as u64])
         .with_chunks(&[64])
         .with_scale_offset(hdf5_pure::ScaleOffset::Integer(0))
-        .with_deflate(5);
+        .with_deflate(DeflateLevel::Five);
     let bytes = builder.finish().unwrap();
 
     let file = File::from_bytes(bytes).unwrap();
@@ -1342,7 +1343,7 @@ fn userblock_chunked_deflate_read() {
         b.create_dataset("d")
             .with_f64_data(&data)
             .with_shape(&[1000])
-            .with_deflate(6);
+            .with_deflate(DeflateLevel::Six);
     });
     assert_eq!(file.dataset("d").unwrap().read_f64().unwrap(), expect);
 }
@@ -1377,7 +1378,7 @@ fn userblock_chunked_deflate_streaming_read() {
         .with_f64_data(&data)
         .with_shape(&[1000])
         .with_chunks(&[64])
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     std::fs::write(&path, b.finish().unwrap()).unwrap();
 
     let buffered = File::open(&path)

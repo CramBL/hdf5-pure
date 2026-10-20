@@ -1,6 +1,7 @@
 #![cfg(feature = "serde")]
 //! Tests for the new `to_bytes_with_options` / `to_file_with_options` API.
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::mat::{
     self, Compression, EmptyMarkerEncoding, EmptySequencePolicy, InvalidNamePolicy,
     OneDimensionalMode, Options, StringClass,
@@ -100,7 +101,7 @@ fn deflate_compression_shrinks_repetitive_data() {
     let plain = mat::to_bytes_with_options(&doc, &plain_opts).unwrap();
     let mut opts = plain_opts.clone();
     opts.compression = Compression::Deflate {
-        level: 6,
+        level: DeflateLevel::Six,
         shuffle: true,
     };
     let compressed = mat::to_bytes_with_options(&doc, &opts).unwrap();

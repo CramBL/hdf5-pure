@@ -4,6 +4,7 @@
 //! (`hdf5-metno`) reads the grown dataset back exactly — for unfiltered and
 //! filtered datasets this crate wrote, and for a dataset the C library created.
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
 
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
@@ -30,7 +31,7 @@ fn owned_append_filtered_reads_back_in_c() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
-        .filters(&[Filter::Shuffle, Filter::Deflate(6)])
+        .filters(&[Filter::Shuffle, Filter::Deflate(DeflateLevel::Six)])
         .pure_create(&path);
     {
         let file = File::open_rw(&path).unwrap();

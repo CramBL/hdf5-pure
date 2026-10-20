@@ -21,6 +21,7 @@
 //! chunk it declares, so only libhdf5 can produce that file
 //! (issue #293), and a test of it has to link the library.
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{File, FileBuilder};
 
 /// Comfortably more than the read's own window budget, and not a round number of
@@ -78,7 +79,7 @@ fn a_swept_read_of_a_filtered_dataset_matches_a_whole_one() {
         .with_f64_data(&data)
         .with_shape(&[N as u64])
         .with_chunks(&[3000])
-        .with_deflate(4);
+        .with_deflate(DeflateLevel::Four);
     b.write(&path).unwrap();
 
     let file = File::open_streaming(&path).unwrap();

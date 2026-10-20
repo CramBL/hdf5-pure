@@ -19,6 +19,7 @@
 //! files are deterministic seeds, not build artifacts: commit them so the
 //! reproducer travels with the fix.
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{DType, File, FileBuilder, Group};
 use proptest::prelude::*;
 
@@ -162,7 +163,7 @@ proptest! {
             .with_i32_data(&data)
             .with_shape(&shape)
             .with_chunks(&chunk)
-            .with_deflate(6);
+            .with_deflate(DeflateLevel::Six);
         let bytes = b.finish().expect("write");
         let file = File::from_bytes(bytes).expect("parse");
         let ds = file.dataset("d").expect("dataset");
@@ -216,7 +217,7 @@ fn valid_sample_file() -> Vec<u8> {
         .with_i32_data(&[1, 2, 3, 4, 5, 6])
         .with_shape(&[6])
         .with_chunks(&[3])
-        .with_deflate(4);
+        .with_deflate(DeflateLevel::Four);
     let finished = grp.finish();
     b.add_group(finished);
     b.finish().expect("sample file must build")

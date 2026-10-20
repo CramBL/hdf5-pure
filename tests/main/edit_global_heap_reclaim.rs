@@ -3,6 +3,7 @@ use std::path::Path;
 
 use hdf5_pure::AttrValue;
 use hdf5_pure::Datatype;
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpaceStrategy;
@@ -303,7 +304,7 @@ fn an_unreadable_chunk_of_the_deleted_dataset_keeps_every_collection() {
         .create_dataset("x")
         .with_vlen_strings(&STRINGS)
         .with_chunks(&[2])
-        .with_deflate(6)
+        .with_deflate(DeflateLevel::Six)
         .set_attr(
             "labels",
             AttrValue::VarLenStringArray(vec!["alpha".into(), "beta".into()]),
@@ -423,7 +424,7 @@ impl Written {
                 dataset
                     .with_vlen_strings(&STRINGS)
                     .with_chunks(&[2])
-                    .with_deflate(6)
+                    .with_deflate(DeflateLevel::Six)
                     .with_maxshape(&[MaxExtent::Unlimited]);
             }
         }

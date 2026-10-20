@@ -1,6 +1,7 @@
 //! Whole-file repack (issue #21): compaction, object dropping, fidelity of
 //! survivors, and fail-loud refusal of features that cannot be reproduced.
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::{
@@ -302,7 +303,7 @@ fn preserves_chunked_and_compressed_dataset() {
         .with_f64_data(&data)
         .with_chunks(&[256])
         .with_shuffle()
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     b.write(&src).unwrap();
 
     // Drop nothing; just compact. The chunked+filtered dataset must survive with
@@ -612,7 +613,7 @@ fn verbatim_chunk_copy_preserves_compressed_bytes() {
         .with_i32_data(&data)
         .with_chunks(&[512])
         .with_shuffle()
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     b.write(&src).unwrap();
 
     hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
@@ -648,7 +649,7 @@ fn repacks_multichunk_2d_fixed_array() {
         .with_f64_data(&data)
         .with_shape(&[4, 4])
         .with_chunks(&[2, 2])
-        .with_deflate(4);
+        .with_deflate(DeflateLevel::Four);
     b.write(&src).unwrap();
 
     hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
@@ -668,7 +669,7 @@ fn repacks_resizable_extensible_array() {
     let dst = temp::temp_path("hdf5_pure_repack_ea_dst.h5");
     let data: Vec<i64> = (0..1000).collect();
     Unlimited::new("series", &data, 128)
-        .filters(&[Filter::Deflate(3)])
+        .filters(&[Filter::Deflate(DeflateLevel::Three)])
         .pure_create(&src);
 
     hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
@@ -731,7 +732,7 @@ fn repacks_single_chunk_filtered_verbatim() {
     b.create_dataset("vals")
         .with_i32_data(&data)
         .with_chunks(&[256]) // one chunk covers all 256 elements
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     b.write(&src).unwrap();
 
     hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
@@ -756,7 +757,7 @@ fn repacks_chunked_dataset_from_a_userblock_file() {
     b.create_dataset("chk")
         .with_f64_data(&data)
         .with_shape(&[1000])
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     b.create_dataset("plain").with_f64_data(&[1.0, 2.0, 3.0]);
     std::fs::write(&src, b.finish().unwrap()).unwrap();
 
@@ -870,7 +871,7 @@ fn an_explicit_bound_refuses_content_it_cannot_express() {
     b.create_dataset("chk")
         .with_f64_data(&data)
         .with_shape(&[1000])
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     b.write(&src).unwrap();
 
     // Re-target down to 1.8: the chunked dataset cannot be written there.

@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use hdf5_pure::AttrValue;
 use hdf5_pure::Datatype;
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::GlobalHeapLiveness;
@@ -450,7 +451,7 @@ impl Written {
                     .with_vlen_strings(&["alpha", "", "beta"])
                     .with_chunks(&[2]);
                 if filtered {
-                    dataset.with_deflate(6);
+                    dataset.with_deflate(DeflateLevel::Six);
                 }
                 if extendable {
                     dataset.with_maxshape(&[MaxExtent::Unlimited]);

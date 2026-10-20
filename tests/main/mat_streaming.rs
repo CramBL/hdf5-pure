@@ -11,6 +11,7 @@
 //!   per block, into a buffer it shares with every other call. A refactor that
 //!   reintroduced buffering would leave every correctness test green.
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
 use hdf5_pure::mat::{Block, Blocking, Compression, DataProducer, MatBuilder, MatError, Options};
 use std::sync::{Arc, Mutex};
@@ -533,7 +534,7 @@ fn a_producers_error_keeps_its_own_type() {
 fn compression_is_refused_rather_than_ignored() {
     let mut options = Options::default();
     options.compression = Compression::Deflate {
-        level: 6,
+        level: DeflateLevel::Six,
         shuffle: false,
     };
     let (producer, _) = Ramp::new();

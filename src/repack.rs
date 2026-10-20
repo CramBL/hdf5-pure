@@ -115,6 +115,7 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::DeflateLevel;
 use crate::access_mode::AccessMode;
 use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
@@ -1955,7 +1956,12 @@ fn check_pipeline(
                 FILTER_SHUFFLE => FilterKind::Shuffle,
                 FILTER_FLETCHER32 => FilterKind::Fletcher32,
                 // Client-data[0] is the deflate level; default to 6 if absent.
-                FILTER_DEFLATE => FilterKind::Deflate(f.client_data.first().copied().unwrap_or(6)),
+                FILTER_DEFLATE => FilterKind::Deflate(
+                    match f.client_data.first() {
+                        Some(&level) => DeflateLevel::try_from(level)?,
+                        None => DeflateLevel::Six,
+                    }
+                ),
                 FILTER_LZF => FilterKind::Lzf,
                 // Only the lossless integer mode qualifies, re-applied with the
                 // source's minbits parameter. Its fill availability comes along
@@ -1999,6 +2005,44 @@ mod tests {
     use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags};
     use crate::filter_pipeline::FilterDescription;
     use crate::scaleoffset::{FillAvailability, ScaleOffsetFill};
+
+    #[rstest]
+    #[case(None, DeflateLevel::Six)]
+    #[case(Some(0), DeflateLevel::Zero)]
+    #[case(Some(6), DeflateLevel::Six)]
+    #[case(Some(9), DeflateLevel::Nine)]
+    fn reconstructs_typed_deflate_level(#[case] raw: Option<u32>, #[case] level: DeflateLevel) {
+        let pipeline = deflate_pipeline(raw);
+        let filters = check_pipeline(Some(&pipeline), &ObjectPathBuf::parse("data")).unwrap();
+        assert_eq!(filters[0].kind, FilterKind::Deflate(level));
+    }
+
+    #[rstest]
+    #[case(10)]
+    #[case(255)]
+    #[case(256)]
+    #[case(262)]
+    #[case(u32::MAX)]
+    fn rejects_invalid_deflate_metadata_without_truncation(#[case] level: u32) {
+        let pipeline = deflate_pipeline(Some(level));
+        let error = check_pipeline(Some(&pipeline), &ObjectPathBuf::parse("data")).unwrap_err();
+        let Error::Format(error) = error else {
+            panic!("expected a format error, got {error:?}");
+        };
+        assert_eq!(error, FormatError::InvalidDeflateLevel { level });
+    }
+
+    fn deflate_pipeline(level: Option<u32>) -> FilterPipeline {
+        FilterPipeline {
+            version: FILTER_PIPELINE_VERSION_TWO,
+            filters: vec![FilterDescription {
+                filter_id: FILTER_DEFLATE,
+                name: None,
+                flags: 0,
+                client_data: level.into_iter().collect(),
+            }],
+        }
+    }
 
     /// A source's scale-offset fill availability is carried onto the rebuilt
     /// dataset, in both directions.
@@ -2174,6 +2218,8 @@ mod tests {
             .collect();
         assert_eq!(is_dropped(&ObjectPathBuf::parse(path), &drop), dropped);
     }
+
+    const FILTER_PIPELINE_VERSION_TWO: u8 = 2;
 }
 
 /// Repack must carry an attribute across *as it is encoded*, not as

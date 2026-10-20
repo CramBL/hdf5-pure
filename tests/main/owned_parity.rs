@@ -6,6 +6,7 @@
 //! per-open file-locking policy — now work through owned `File` / `Dataset` /
 //! `Group` handles. Plus the post-`close` seal (`Error::FileClosed`).
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{AttrValue, Error, File, FileAccessProperties, FileBuilder, FileLocking};
 
 use test_util_hdf5::{
@@ -23,7 +24,7 @@ fn append_staged_grows_filtered_any_length() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("f.h5");
     Unlimited::new("d", &(0..3).collect::<Vec<i32>>(), 4)
-        .filters(&[Filter::Deflate(6)])
+        .filters(&[Filter::Deflate(DeflateLevel::Six)])
         .pure_create(&path); // length 3, chunk 4 -> partial tail
 
     let file = File::open_rw(&path).unwrap();

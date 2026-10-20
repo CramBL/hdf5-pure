@@ -13,6 +13,7 @@
 //! repointed, and the result is read back correctly by the C library.
 
 use hdf5::file::LibraryVersion;
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{AttrValue, File, FileBuilder, MaxExtent, ScaleOffset};
 
 use test_util_hdf5::{absence, file, fixtures};
@@ -481,7 +482,7 @@ fn a_chunked_dataset_written_into_a_freed_hole_stays_c_readable() {
             .create_dataset("replacement", |b| {
                 b.with_f64_data(&filtered)
                     .with_chunks(&[512])
-                    .with_deflate(4);
+                    .with_deflate(DeflateLevel::Four);
             })
             .unwrap();
         session.commit().unwrap();
@@ -539,7 +540,7 @@ fn chunked_and_filtered_datasets_added_in_place_are_c_readable() {
             .create_dataset("deflated", |b| {
                 b.with_f64_data(&f64_data)
                     .with_chunks(&[100])
-                    .with_deflate(6);
+                    .with_deflate(DeflateLevel::Six);
             })
             .unwrap();
         session
@@ -548,7 +549,7 @@ fn chunked_and_filtered_datasets_added_in_place_are_c_readable() {
                 b.with_f64_data(&f64_data)
                     .with_chunks(&[64])
                     .with_shuffle()
-                    .with_deflate(4);
+                    .with_deflate(DeflateLevel::Four);
             })
             .unwrap();
         session
@@ -785,7 +786,7 @@ fn overwriting_chunked_datasets_in_place_stays_c_readable() {
                 b.with_i32_data(&vec![0i32; 2048])
                     .with_shape(&[2048])
                     .with_chunks(&[256])
-                    .with_deflate(6);
+                    .with_deflate(DeflateLevel::Six);
             })
             .unwrap();
         session.commit().unwrap();
@@ -882,7 +883,7 @@ fn fits_with_slack_filtered_overwrite_stays_c_readable() {
                 b.with_i32_data(&orig)
                     .with_shape(&[2048])
                     .with_chunks(&[512])
-                    .with_deflate(6);
+                    .with_deflate(DeflateLevel::Six);
             })
             .unwrap();
         session.commit().unwrap();
@@ -962,7 +963,7 @@ fn copying_chunked_datasets_in_place_stays_c_readable() {
                     .with_shape(&[4096])
                     .with_chunks(&[512])
                     .with_shuffle()
-                    .with_deflate(6);
+                    .with_deflate(DeflateLevel::Six);
             })
             .unwrap();
         session.commit().unwrap();
@@ -1037,7 +1038,7 @@ fn overwriting_multiply_linked_chunked_that_relocates_is_refused() {
                 b.with_i32_data(&vec![0i32; 1024])
                     .with_shape(&[1024])
                     .with_chunks(&[256])
-                    .with_deflate(6);
+                    .with_deflate(DeflateLevel::Six);
             })
             .unwrap();
         session.commit().unwrap();

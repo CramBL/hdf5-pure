@@ -42,6 +42,8 @@ use hdf5_pure_format::__private::SECTION_CLASS_LARGE;
 use hdf5_pure_format::__private::SECTION_CLASS_SMALL;
 use hdf5_pure_space::__private::AllocationClass;
 
+#[cfg(test)]
+use crate::DeflateLevel;
 use crate::FillTime;
 #[cfg(test)]
 use crate::address::AddressContext;
@@ -4326,7 +4328,7 @@ mod tests {
             .create_dataset("chunked")
             .with_vlen_strings(&["third", "fourth"])
             .with_chunks(&[1])
-            .with_deflate(6);
+            .with_deflate(DeflateLevel::Six);
         let bytes = writer.finish().unwrap();
         let heap_addresses: Vec<u64> = bytes
             .windows(GLOBAL_HEAP_COLLECTION_SIGNATURE.len())
@@ -5782,7 +5784,7 @@ mod tests {
         fw.create_dataset("filtered")
             .with_vlen_strings(&["alpha", "beta", "gamma", "delta"])
             .with_chunks(&[2])
-            .with_deflate(6);
+            .with_deflate(DeflateLevel::Six);
         let bytes = fw.finish().unwrap();
         let f = crate::reader::File::from_bytes(bytes).unwrap();
         let ds = f.dataset("filtered").unwrap();

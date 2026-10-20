@@ -204,6 +204,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
             "GlobalHeapObjectOutsideCollection",
             "InsufficientRegion",
             "Internal",
+            "InvalidDeflateLevel",
             "InvalidExtensibleArrayBlockClient",
             "InvalidExtensibleArrayBlockOffset",
             "InvalidExtensibleArrayBlockOwner",
@@ -255,6 +256,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
     allowed_changed_variants = {"FormatError": {"InvalidFreeSpaceManager"}}
     # The core root items that 0.47.0 does not define.
     allowed_new_items = {
+        "DeflateLevel",
         "DecodedStoredAddress",
         "FileSpacePageSize",
         "FillTime",

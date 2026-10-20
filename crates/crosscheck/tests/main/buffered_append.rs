@@ -14,12 +14,13 @@
 //!    in-place one — including, since issue #393, the first write onto a
 //!    filtered dataset that starts on a partial trailing chunk.
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
 
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
 use test_util_hdf5::lock;
 
-const SHUFFLE_DEFLATE: &[Filter] = &[Filter::Shuffle, Filter::Deflate(4)];
+const SHUFFLE_DEFLATE: &[Filter] = &[Filter::Shuffle, Filter::Deflate(DeflateLevel::Four)];
 
 #[test]
 fn c_library_reads_a_filtered_partial_last_chunk_written_in_place() {

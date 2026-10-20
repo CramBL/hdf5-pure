@@ -5,6 +5,7 @@
 //! and cleared on `close`, only immediate `Dataset::append` permitted (over the
 //! unfiltered, chunk-aligned SWMR subset), and the staged edit surface refused.
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{AttrValue, Error, File};
 
 use test_util::superblock;
@@ -114,7 +115,7 @@ fn swmr_refuses_filtered_and_unaligned_appends() {
     // Filtered: opening is fine (the filter is per dataset), the append is refused.
     let fpath = dir.path().join("f.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4)
-        .filters(&[Filter::Deflate(6)])
+        .filters(&[Filter::Deflate(DeflateLevel::Six)])
         .pure_create(&fpath);
     let file = File::open_swmr_writer(&fpath).unwrap();
     let mut ds = file.dataset("d").unwrap();

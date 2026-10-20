@@ -1,6 +1,7 @@
 //! Tests for in-place editing via `File::open_rw` (issue #32, Group C):
 //! add, delete, and copy datasets and groups at any path.
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{
     AttrValue, CharacterSet, CompoundTypeBuilder, DType, Datatype, Error, File, FileBuilder,
     FormatError, MaxExtent, Object, ReferenceType, ScaleOffset, StringPadding,
@@ -1341,7 +1342,7 @@ fn copy_filtered_chunked_dataset_preserves_pipeline_and_attrs() {
             .with_shape(&[4096])
             .with_chunks(&[512])
             .with_shuffle()
-            .with_deflate(6);
+            .with_deflate(DeflateLevel::Six);
         ds.set_attr("units", AttrValue::String("counts".into()));
         b.write(&path).unwrap();
     }
@@ -1865,7 +1866,9 @@ fn add_filtered_datasets() {
         session
             .root()
             .create_dataset("deflated", |b| {
-                b.with_f64_data(&data).with_chunks(&[50]).with_deflate(6);
+                b.with_f64_data(&data)
+                    .with_chunks(&[50])
+                    .with_deflate(DeflateLevel::Six);
             })
             .unwrap();
         session
@@ -1874,7 +1877,7 @@ fn add_filtered_datasets() {
                 b.with_f64_data(&data)
                     .with_chunks(&[50])
                     .with_shuffle()
-                    .with_deflate(4);
+                    .with_deflate(DeflateLevel::Four);
             })
             .unwrap();
         session
@@ -2001,7 +2004,7 @@ fn add_mixed_contiguous_and_chunked_in_group() {
                 b.with_f64_data(&wave)
                     .with_chunks(&[128])
                     .with_shuffle()
-                    .with_deflate(6);
+                    .with_deflate(DeflateLevel::Six);
             })
             .unwrap();
         session.commit().unwrap();
@@ -2033,7 +2036,7 @@ fn added_chunked_dataset_reports_dtype() {
             .create_dataset("c", |b| {
                 b.with_f64_data(&(0..50).map(f64::from).collect::<Vec<_>>())
                     .with_chunks(&[10])
-                    .with_deflate(3);
+                    .with_deflate(DeflateLevel::Three);
             })
             .unwrap();
         session.commit().unwrap();
@@ -2468,7 +2471,7 @@ fn write_dataset_overwrites_deflate_chunked_equal_size_in_place() {
             .with_f64_data(&data)
             .with_shape(&[200])
             .with_chunks(&[50])
-            .with_deflate(6);
+            .with_deflate(DeflateLevel::Six);
         b.write(&path).unwrap();
     }
     let size_before = std::fs::metadata(&path).unwrap().len();
@@ -2506,7 +2509,7 @@ fn write_dataset_overwrites_deflate_chunked_relocates_on_size_change() {
             .with_i32_data(&orig)
             .with_shape(&[4096])
             .with_chunks(&[512])
-            .with_deflate(6);
+            .with_deflate(DeflateLevel::Six);
         b.write(&path).unwrap();
     }
     let updated: Vec<i32> = (0..4096i32)
@@ -2547,7 +2550,7 @@ fn write_dataset_chunked_relocate_then_reuse_stays_valid() {
             .with_i32_data(&vec![0i32; 4096])
             .with_shape(&[4096])
             .with_chunks(&[512])
-            .with_deflate(6);
+            .with_deflate(DeflateLevel::Six);
         b.write(&path).unwrap();
     }
     // Incompressible new values grow the chunks past their tiny slots, forcing a
@@ -2600,7 +2603,7 @@ fn write_dataset_overwrites_filtered_chunked_fits_with_slack_in_place() {
             .with_i32_data(&orig)
             .with_shape(&[2048])
             .with_chunks(&[512])
-            .with_deflate(6);
+            .with_deflate(DeflateLevel::Six);
         b.write(&path).unwrap();
     }
     let size_before = std::fs::metadata(&path).unwrap().len();
@@ -2649,7 +2652,7 @@ fn write_dataset_overwrites_filtered_extensible_fits_with_slack() {
                     .with_shape(&[2048])
                     .with_chunks(&[512])
                     .with_maxshape(&[MaxExtent::Unlimited]) // unlimited => Extensible Array index
-                    .with_deflate(6);
+                    .with_deflate(DeflateLevel::Six);
             })
             .unwrap();
         session.commit().unwrap();
@@ -2998,7 +3001,7 @@ fn add_provenance_chunked_dataset_via_edit_session() {
                 b.with_f64_data(&[1.0, 2.0, 3.0, 4.0])
                     .with_shape(&[4])
                     .with_chunks(&[2])
-                    .with_deflate(6)
+                    .with_deflate(DeflateLevel::Six)
                     .with_provenance("test-suite", "2026-02-19T12:00:00Z", None);
             })
             .unwrap();
@@ -4422,7 +4425,7 @@ fn a_reference_address_to_a_dataset_a_write_relocates_is_refused() {
         // Zeros so every chunk compresses to almost nothing, leaving slots the
         // replacement below cannot fit back into.
         Unlimited::new("d", &[0i32; 64], 16)
-            .filters(&[Filter::Deflate(6)])
+            .filters(&[Filter::Deflate(DeflateLevel::Six)])
             .add_to(&mut b);
         b.create_dataset("refs").with_path_references(&["d"]);
         b.write(&path).unwrap();
@@ -5158,7 +5161,7 @@ fn add_empty_chunked_datasets_of_every_flavor() {
                 .with_shape(&[0])
                 .with_maxshape(&[MaxExtent::Unlimited])
                 .with_chunks(&[16])
-                .with_deflate(6)
+                .with_deflate(DeflateLevel::Six)
                 .with_shuffle();
         })
         .unwrap();

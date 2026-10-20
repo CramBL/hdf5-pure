@@ -2,6 +2,7 @@
 //! internal batching, cache coherence, and the typed refusals for everything
 //! mirror-only.
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{
     AttrValue, Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MemoryStrategy,
     MetadataCacheConfig, SyncPolicy,
@@ -74,7 +75,7 @@ fn filtered_appends_start_and_end_at_any_length() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("filtered.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
-        .filters(&[Filter::Deflate(6)])
+        .filters(&[Filter::Deflate(DeflateLevel::Six)])
         .pure_create(&p);
     {
         let file = session::open_bounded_on_close(&p).unwrap();
@@ -486,7 +487,7 @@ fn unaligned_filtered_multi_batch_append_lands_every_element() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("atomic.h5");
     Unlimited::new("d", &(0..257).collect::<Vec<i32>>(), 256)
-        .filters(&[Filter::Deflate(6)])
+        .filters(&[Filter::Deflate(DeflateLevel::Six)])
         .pure_create(&p); // one element past a chunk boundary
     const ADDED: i32 = 524_288; // ~2 MiB of i32, several batches
     {

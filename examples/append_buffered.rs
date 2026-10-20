@@ -16,6 +16,7 @@
 //! cargo run --example append_buffered
 //! ```
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{File, FileBuilder, MaxExtent};
 
 const CHUNK: u64 = 64;
@@ -35,7 +36,7 @@ fn main() {
         .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[CHUNK])
         .with_shuffle()
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     builder.write(&path).expect("write initial file");
 
     // ---- Append ten at a time into a chunk of sixty-four -------------------

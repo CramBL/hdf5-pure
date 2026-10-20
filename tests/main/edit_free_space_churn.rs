@@ -10,6 +10,7 @@ use std::path::Path;
 
 use hdf5_pure::AttrValue;
 use hdf5_pure::ChunkIndex;
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
@@ -858,7 +859,7 @@ fn write_epoch(file: &File, spec: EpochSpec) {
         &spec.dataset_path(DEFLATE),
         &spec.compressible_data(),
         Some(CHUNK),
-        &[Filter::Deflate(6)],
+        &[Filter::Deflate(DeflateLevel::Six)],
         false,
     );
     create_i32_dataset(
@@ -866,7 +867,7 @@ fn write_epoch(file: &File, spec: EpochSpec) {
         &spec.dataset_path(SHUFFLE_DEFLATE),
         &spec.data(3),
         Some(CHUNK),
-        &[Filter::Shuffle, Filter::Deflate(6)],
+        &[Filter::Shuffle, Filter::Deflate(DeflateLevel::Six)],
         false,
     );
     create_i32_dataset(

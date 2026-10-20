@@ -16,6 +16,7 @@
 //! cargo run --example append_dataset
 //! ```
 
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{File, FileBuilder, MaxExtent};
 
 fn main() {
@@ -35,7 +36,7 @@ fn main() {
         .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[4])
         .with_shuffle()
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     builder.write(&path).expect("write initial file");
 
     // ---- Check eligibility up front (optional) --------------------------

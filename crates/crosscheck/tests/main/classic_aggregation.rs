@@ -5,6 +5,7 @@ use std::path::Path;
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::types::VarLenUnicode;
 use hdf5_pure::AttrValue;
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
@@ -113,7 +114,7 @@ fn libhdf5_reads_and_edits_an_aggregated_creation(
         .create_dataset("chunked_strings")
         .with_vlen_strings(&["early", "collection"])
         .with_chunks(&[1])
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     builder
         .create_dataset("fixed")
         .with_i32_data(&[1, 2, 3, 4, 5])

@@ -5,6 +5,7 @@ use std::path::Path;
 
 use rstest::rstest;
 
+use crate::DeflateLevel;
 use crate::File;
 use crate::FileBuilder;
 use crate::FileLocking;
@@ -335,7 +336,7 @@ fn write_appendable(
         .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[chunk]);
     if filtered {
-        dataset.with_deflate(6);
+        dataset.with_deflate(DeflateLevel::Six);
     }
     builder.write(path).unwrap();
 }

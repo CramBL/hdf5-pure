@@ -7,6 +7,7 @@
 
 use hdf5::dataset::Layout;
 use hdf5::file::LibraryVersion;
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::{File, FileBuilder, MaxExtent};
 
 use test_util_hdf5::absence;
@@ -164,7 +165,7 @@ fn userblock_chunked_add_and_overwrite_read_by_c_library() {
         .with_f64_data(&seed)
         .with_shape(&[300])
         .with_chunks(&[30])
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     std::fs::write(&path, b.finish().unwrap()).unwrap();
 
     let added: Vec<f64> = (0..400).map(|i| (i % 11) as f64 * 0.5).collect();
@@ -177,7 +178,7 @@ fn userblock_chunked_add_and_overwrite_read_by_c_library() {
                 b.with_f64_data(&added)
                     .with_shape(&[400])
                     .with_chunks(&[50])
-                    .with_deflate(6);
+                    .with_deflate(DeflateLevel::Six);
             })
             .unwrap();
         s.dataset("c")
@@ -224,7 +225,7 @@ fn userblock_chunked_reclaimed_space_reused_read_by_c_library() {
         .with_f64_data(&seed)
         .with_shape(&[600])
         .with_chunks(&[40])
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     std::fs::write(&path, b.finish().unwrap()).unwrap();
 
     let updated: Vec<f64> = (0..600).map(|i| (i as f64) * 0.01).collect();
@@ -523,7 +524,7 @@ fn userblock_extensible_array_add_read_by_c_library() {
                     .with_shape(&[500])
                     .with_chunks(&[40])
                     .with_maxshape(&[MaxExtent::Unlimited])
-                    .with_deflate(6);
+                    .with_deflate(DeflateLevel::Six);
             })
             .unwrap();
         s.commit().unwrap();

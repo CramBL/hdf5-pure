@@ -477,11 +477,12 @@
 //! requested and raising the format produces a file MATLAB cannot load:
 //!
 //! ```rust
+//! # use hdf5_pure::DeflateLevel;
 //! use hdf5_pure::mat::{Compression, Options};
 //! use hdf5_pure::LibVer;
 //!
 //! let mut options = Options::default();
-//! options.compression = Compression::Deflate { level: 6, shuffle: true };
+//! options.compression = Compression::Deflate { level: DeflateLevel::Six, shuffle: true };
 //! options.libver = LibVer::V110; // required for compression; MATLAB `load` cannot read it
 //! # assert_eq!(options.libver, LibVer::V110);
 //! ```

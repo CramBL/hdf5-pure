@@ -14,6 +14,7 @@ use std::sync::Mutex;
 
 use hdf5_pure::CharacterSet;
 use hdf5_pure::Datatype;
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FormatError;
@@ -141,7 +142,7 @@ fn chunked_1d_deflate_multi_chunk() {
             .with_f64_data(&data)
             .with_shape(&[1000])
             .with_chunks(&[64])
-            .with_deflate(4);
+            .with_deflate(DeflateLevel::Four);
     });
     // Windows that start/end inside a chunk, cross exactly one boundary, and span
     // several chunks.
@@ -159,7 +160,7 @@ fn chunked_frame_per_chunk_4d_u8() {
             .with_u8_data(&data)
             .with_shape(&[10, 2, 2, 3])
             .with_chunks(&[1, 2, 2, 3])
-            .with_deflate(4);
+            .with_deflate(DeflateLevel::Four);
     });
     let extra = &[(3, 4), (0, 1), (9, 1)];
     check_u8(&buffered, "frames", 2 * 2 * 3, extra);
@@ -176,7 +177,7 @@ fn chunked_multi_row_chunk_partial_edges() {
             .with_f64_data(&data)
             .with_shape(&[50, 4])
             .with_chunks(&[8, 4])
-            .with_deflate(2);
+            .with_deflate(DeflateLevel::Two);
     });
     let extra = &[(3, 2), (6, 5), (7, 1), (8, 8), (0, 9), (49, 1)];
     check_f64(&buffered, "d", 4, extra);
@@ -212,7 +213,7 @@ fn inner_chunked_edge_overhang_deflate() {
             .with_f64_data(&data)
             .with_shape(&[23, 10])
             .with_chunks(&[4, 3])
-            .with_deflate(4);
+            .with_deflate(DeflateLevel::Four);
     });
     let extra = &[(3, 2), (4, 4), (7, 9), (19, 4), (22, 1), (0, 23)];
     check_f64(&buffered, "e", 10, extra);
@@ -230,7 +231,7 @@ fn inner_chunked_4d_image_grid() {
             .with_u8_data(&data)
             .with_shape(&[13, 5, 7, 3])
             .with_chunks(&[4, 2, 3, 2])
-            .with_deflate(2);
+            .with_deflate(DeflateLevel::Two);
     });
     let extra = &[(3, 2), (4, 4), (11, 2), (12, 1), (0, 13)];
     check_u8(&buffered, "img", 5 * 7 * 3, extra);
@@ -378,7 +379,7 @@ fn read_raw_rows_matches_read_raw() {
             .with_f64_data(&data)
             .with_shape(&[500])
             .with_chunks(&[100])
-            .with_deflate(6);
+            .with_deflate(DeflateLevel::Six);
     });
     for file in [&buffered, &streaming] {
         let ds = file.dataset("r").unwrap();
@@ -435,7 +436,7 @@ fn userblock_windows_go_through_base_framing() {
             .with_f64_data(&chunked)
             .with_shape(&[300])
             .with_chunks(&[64])
-            .with_deflate(3);
+            .with_deflate(DeflateLevel::Three);
         b.create_dataset("contig")
             .with_f64_data(&contig)
             .with_shape(&[40]);

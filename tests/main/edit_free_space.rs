@@ -7,6 +7,7 @@
 //! survivors stay byte-exact and the file stays valid.
 
 use hdf5_pure::AttrValue;
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::EditBacking;
 use hdf5_pure::Error;
 use hdf5_pure::File;
@@ -290,7 +291,7 @@ fn deleting_filtered_chunked_dataset_reclaims_storage() {
             .create_dataset("comp", |b| {
                 b.with_f64_data(&vec![3.0; 4096])
                     .with_chunks(&[512])
-                    .with_deflate(6);
+                    .with_deflate(DeflateLevel::Six);
             })
             .unwrap();
         s.commit().unwrap();
@@ -516,7 +517,7 @@ fn chunked_churn_within_session_stays_bounded() {
                 .create_dataset("scratch", |b| {
                     b.with_f64_data(&vec![i as f64; 2048])
                         .with_chunks(&[256])
-                        .with_deflate(4);
+                        .with_deflate(DeflateLevel::Four);
                 })
                 .unwrap();
             s.commit().unwrap();
@@ -562,7 +563,7 @@ fn deleting_subtree_with_chunked_members_reclaims() {
             .create_dataset("grp/b", |b| {
                 b.with_f64_data(&vec![2.0; 2048])
                     .with_chunks(&[256])
-                    .with_deflate(6);
+                    .with_deflate(DeflateLevel::Six);
             })
             .unwrap();
         s.commit().unwrap();
@@ -594,7 +595,7 @@ fn persisted_chunked_reclaim_is_disjoint_and_reusable() {
     b.create_dataset("comp")
         .with_f64_data(&vec![3.0; 4096])
         .with_chunks(&[512])
-        .with_deflate(6);
+        .with_deflate(DeflateLevel::Six);
     b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
     b.write(&path).unwrap();
 
@@ -923,7 +924,7 @@ fn filtered_chunked_dataset_reuses_freed_space() {
     b.create_dataset("big")
         .with_f64_data(&(0..ELEMS).map(|i| i as f64).collect::<Vec<f64>>())
         .with_chunks(&[4096])
-        .with_deflate(4);
+        .with_deflate(DeflateLevel::Four);
     b.create_dataset("tail").with_i32_data(&[9; 16]);
     b.write(&path).unwrap();
     let start = std::fs::metadata(&path).unwrap().len();
@@ -938,7 +939,7 @@ fn filtered_chunked_dataset_reuses_freed_space() {
             .create_dataset("big2", |b| {
                 b.with_f64_data(&(0..ELEMS).map(|i| i as f64).collect::<Vec<f64>>())
                     .with_chunks(&[4096])
-                    .with_deflate(4);
+                    .with_deflate(DeflateLevel::Four);
             })
             .unwrap();
         s.commit().unwrap();
@@ -1202,7 +1203,7 @@ fn churn_of_groups_attributes_and_datasets_stays_bounded() {
                 .create_dataset(&format!("{name}/filtered"), |b| {
                     b.with_f64_data(&(0..ELEMS).map(|i| (i + round) as f64).collect::<Vec<f64>>())
                         .with_chunks(&[1024])
-                        .with_deflate(4);
+                        .with_deflate(DeflateLevel::Four);
                 })
                 .unwrap();
         }

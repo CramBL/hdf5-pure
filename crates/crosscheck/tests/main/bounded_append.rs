@@ -7,6 +7,7 @@
 use hdf5::Extent;
 use hdf5::file::LibraryVersion;
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
+use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
 
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
@@ -36,7 +37,7 @@ fn bounded_filtered_append_reads_back_in_c() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("filtered.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
-        .filters(&[Filter::Deflate(6)])
+        .filters(&[Filter::Deflate(DeflateLevel::Six)])
         .pure_create(&path);
 
     {

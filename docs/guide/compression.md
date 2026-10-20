@@ -13,6 +13,7 @@ It writes the same signal with several filter combinations, reports the resultin
 Filters apply per chunk, so a dataset must use chunked storage before it can be compressed. Enable chunking with [`with_chunks`](crate::DatasetBuilder::with_chunks) and pass the chunk dimensions. Each compression method ([`with_deflate`](crate::DatasetBuilder::with_deflate), [`with_lzf`](crate::DatasetBuilder::with_lzf), [`with_scale_offset`](crate::DatasetBuilder::with_scale_offset), [`with_zfp`](crate::DatasetBuilder::with_zfp)) implies chunked storage if you have not already set it, but choosing the chunk shape explicitly is recommended since it determines the unit of compression and of partial reads.
 
 ```rust
+# use hdf5_pure::DeflateLevel;
 use hdf5_pure::FileBuilder;
 
 let data: Vec<f64> = (0..10_000).map(|i| (f64::from(i) / 50.0).sin() * 1000.0).collect();
@@ -22,7 +23,7 @@ builder
     .create_dataset("signal")
     .with_f64_data(&data)
     .with_chunks(&[1000])
-    .with_deflate(6);
+    .with_deflate(DeflateLevel::Six);
 let bytes = builder.finish()?;
 # assert!(bytes.len() < data.len() * 8);
 # Ok::<(), hdf5_pure::Error>(())
@@ -32,9 +33,10 @@ See [Writing files](crate::_guide::writing) for the full dataset builder API.
 
 ## Deflate
 
-[`with_deflate(level)`](crate::DatasetBuilder::with_deflate) enables zlib (DEFLATE) compression, where `level` is the standard 0–9 zlib effort setting (higher compresses harder for more CPU). This is the most broadly useful filter and the one applied by most HDF5 producers.
+[`with_deflate`](crate::DatasetBuilder::with_deflate) enables zlib (Deflate) compression with a [`DeflateLevel`](crate::DeflateLevel). The variants represent levels zero through nine. Numeric conversions from [`u8`] or [`u32`] return [`FormatError::InvalidDeflateLevel`](crate::FormatError::InvalidDeflateLevel) for values above nine.
 
 ```rust
+# use hdf5_pure::DeflateLevel;
 # use hdf5_pure::FileBuilder;
 # let data: Vec<f64> = (0..1_000).map(f64::from).collect();
 # let mut builder = FileBuilder::new();
@@ -42,7 +44,7 @@ builder
     .create_dataset("compressed")
     .with_f64_data(&data)
     .with_chunks(&[100])
-    .with_deflate(6);
+    .with_deflate(DeflateLevel::Six);
 # builder.finish()?;
 # Ok::<(), hdf5_pure::Error>(())
 ```
@@ -54,6 +56,7 @@ By default the `deflate` feature is on (it is part of the crate's default featur
 [`with_shuffle()`](crate::DatasetBuilder::with_shuffle) enables the shuffle filter, which reorders the bytes within each chunk so that bytes of like significance sit together. Shuffle does not compress on its own. It rearranges data so a following deflate pass usually compresses better. Chain it before [`with_deflate`](crate::DatasetBuilder::with_deflate):
 
 ```rust
+# use hdf5_pure::DeflateLevel;
 # use hdf5_pure::FileBuilder;
 # let data: Vec<f64> = (0..1_000).map(f64::from).collect();
 # let mut builder = FileBuilder::new();
@@ -62,7 +65,7 @@ builder
     .with_f64_data(&data)
     .with_chunks(&[100])
     .with_shuffle()
-    .with_deflate(6);
+    .with_deflate(DeflateLevel::Six);
 # builder.finish()?;
 # Ok::<(), hdf5_pure::Error>(())
 ```
@@ -116,6 +119,7 @@ builder
 [`ScaleOffset::FloatDScale(decimals)`](crate::ScaleOffset::FloatDScale) is lossy for float datasets: values are multiplied by `10^decimals`, rounded to integers, and then packed like integer mode, so the read-back is close but not exact within the retained digits. It may be followed by [`with_deflate`](crate::DatasetBuilder::with_deflate) for additional savings:
 
 ```rust
+# use hdf5_pure::DeflateLevel;
 # use hdf5_pure::{FileBuilder, ScaleOffset};
 # let readings: Vec<f64> = (0..10_000).map(|i| f64::from(i) / 8.0).collect();
 # let mut builder = FileBuilder::new();
@@ -125,7 +129,7 @@ builder
     .with_f64_data(&readings)
     .with_chunks(&[1000])
     .with_scale_offset(ScaleOffset::FloatDScale(3)) // keep 3 decimal digits
-    .with_deflate(6);                               // may be followed by deflate
+    .with_deflate(DeflateLevel::Six);                               // may be followed by deflate
 # builder.finish()?;
 # Ok::<(), hdf5_pure::Error>(())
 ```
@@ -141,6 +145,7 @@ Both forms are read and written, so appending to or repacking a dataset whose fi
 Filters compose. Shuffle is meant to be chained before deflate, and scale-offset may be followed by deflate. The builder methods return `&mut Self`, so chain them in order:
 
 ```rust
+# use hdf5_pure::DeflateLevel;
 # use hdf5_pure::{FileBuilder, ScaleOffset};
 # let data: Vec<f64> = (0..10_000).map(|i| f64::from(i) / 8.0).collect();
 # let mut builder = FileBuilder::new();
@@ -150,7 +155,7 @@ builder
     .with_f64_data(&data)
     .with_chunks(&[1000])
     .with_shuffle()
-    .with_deflate(6);
+    .with_deflate(DeflateLevel::Six);
 
 // scale-offset then deflate
 builder
@@ -158,7 +163,7 @@ builder
     .with_f64_data(&data)
     .with_chunks(&[1000])
     .with_scale_offset(ScaleOffset::FloatDScale(2))
-    .with_deflate(6);
+    .with_deflate(DeflateLevel::Six);
 # builder.finish()?;
 # Ok::<(), hdf5_pure::Error>(())
 ```
@@ -197,6 +202,7 @@ assert_eq!(reason, "shuffle and scale-offset cannot be combined on one dataset")
 Decompression is automatic. Whatever filters a dataset was written with, the same `read_*` call returns the decoded values. There is nothing to configure on the read side, and lossless paths reproduce the input exactly.
 
 ```rust
+# use hdf5_pure::DeflateLevel;
 # use hdf5_pure::FileBuilder;
 # let data: Vec<f64> = (0..10_000).map(|i| (f64::from(i) / 50.0).sin() * 1000.0).collect();
 # let mut builder = FileBuilder::new();
@@ -204,7 +210,7 @@ Decompression is automatic. Whatever filters a dataset was written with, the sam
 #     .create_dataset("signal")
 #     .with_f64_data(&data)
 #     .with_chunks(&[1000])
-#     .with_deflate(6);
+#     .with_deflate(DeflateLevel::Six);
 # let bytes = builder.finish()?;
 use hdf5_pure::File;
 
