@@ -51,6 +51,7 @@ use crate::object_header::ObjectHeader;
 use crate::object_path::{LinkName, LinkNameBuf, ObjectPath, ObjectPathBuf};
 #[cfg(any(test, feature = "__page-publication-crosscheck"))]
 use crate::page_publication_failure::PagePublicationFailure;
+use crate::read_region::ReadRegion;
 use crate::read_spec::{RawReadSpec, RawReadStorage};
 use crate::shared_message::{self, BufferedResolver, SharedResolver, SourceResolver};
 use crate::source::SourceMetadata;
@@ -2495,17 +2496,13 @@ impl FileInner {
         }
     }
 
-    /// Reads a clamped row window through the dataset's backend.
-    ///
-    /// The caller clamps the window to the dataset. Returns an empty vector for zero rows or a
-    /// zero inner dimension after validating the datatype and excluding virtual storage.
+    /// Reads complete rows after clamping the request to the leading dimension.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::ZeroSizedDatatype`] if the datatype occupies zero bytes per element,
-    /// [`FormatError::UnsupportedVirtualLayout`] for virtual storage, and
-    /// [`FormatError::OffsetOverflow`] if the row's byte length exceeds [`u64::MAX`]. Other errors
-    /// are returned by the storage reader.
+    /// Returns [`FormatError::OffsetOverflow`] if byte strides overflow, and
+    /// [`FormatError::ValueTooLargeForPlatform`] if the result exceeds the platform's buffer limit.
+    /// Returns errors from reading the datatype, layout, or storage.
     fn read_dataset_raw_rows(
         &self,
         spec: RawReadSpec<'_>,
@@ -2514,87 +2511,59 @@ impl FileInner {
         start_row: u64,
         num_rows: u64,
     ) -> Result<Vec<u8>, FormatError> {
-        let widths = self.widths;
-        let (ds, dt) = (spec.dataspace(), spec.datatype());
-        let elem_size = crate::datatype::element_size_usize(dt)?;
-        if matches!(spec.storage(), RawReadStorage::Virtual) {
-            return Err(FormatError::UnsupportedVirtualLayout);
-        }
-        if num_rows == 0 || ds.dimensions.iter().skip(1).any(|&dim| dim == 0) {
-            return Ok(Vec::new());
-        }
-        let row_elems = ds.dimensions.iter().skip(1).try_fold(1u64, |acc, &dim| {
-            acc.checked_mul(dim).ok_or(FormatError::OffsetOverflow {
-                offset: acc,
-                length: dim,
-            })
-        })?;
-        let row_bytes =
-            row_elems
-                .checked_mul(elem_size.get() as u64)
-                .ok_or(FormatError::OffsetOverflow {
-                    offset: row_elems,
-                    length: elem_size.get() as u64,
-                })?;
+        let region = ReadRegion::rows(spec, start_row, num_rows)?;
+        self.read_dataset_region(&region, cache, pass)
+    }
 
-        // Compact data is inline in the layout message — no I/O, no framing.
-        if let RawReadStorage::Compact { data } = spec.storage() {
-            return compact_rows(data, start_row, num_rows, row_bytes);
+    fn read_dataset_region(
+        &self,
+        region: &ReadRegion<'_>,
+        cache: &ChunkCache,
+        pass: CachePass,
+    ) -> Result<Vec<u8>, FormatError> {
+        if region.is_whole() {
+            return self.read_dataset_raw(region.spec(), cache);
         }
-
         let base = self.addresses().effective_base();
         match &self.backend {
-            Backend::InMemory(v) => {
-                let framed = source::frame(v, base)?;
-                read_rows_framed(
-                    &BytesSource::new(framed),
-                    spec,
-                    widths,
-                    cache,
-                    pass,
-                    start_row,
-                    num_rows,
-                    row_bytes,
-                )
-            }
-            Backend::Streaming(s) if base.is_zero() => read_rows_framed(
-                s.as_ref(),
-                spec,
-                widths,
+            Backend::InMemory(bytes) => read_region_framed(
+                &BytesSource::new(source::frame(bytes, base)?),
+                region,
+                self.widths,
                 cache,
                 pass,
-                start_row,
-                num_rows,
-                row_bytes,
             ),
-            Backend::Streaming(s) => {
-                let framed = BaseOffsetSource {
-                    inner: s.as_ref(),
+            Backend::Streaming(source) => read_region_framed(
+                &BaseOffsetSource {
+                    inner: source.as_ref(),
                     base,
-                };
-                read_rows_framed(
-                    &framed, spec, widths, cache, pass, start_row, num_rows, row_bytes,
-                )
-            }
-            Backend::Edit(m) => Self::with_engine(
-                m,
-                |data| {
-                    let framed = source::frame(data, base)?;
-                    read_rows_framed(
-                        &BytesSource::new(framed),
-                        spec,
-                        widths,
+                },
+                region,
+                self.widths,
+                cache,
+                pass,
+            ),
+            Backend::Edit(engine) => Self::with_engine(
+                engine,
+                |bytes| {
+                    read_region_framed(
+                        &BytesSource::new(source::frame(bytes, base)?),
+                        region,
+                        self.widths,
                         cache,
                         pass,
-                        start_row,
-                        num_rows,
-                        row_bytes,
                     )
                 },
-                |s| {
-                    let framed = BaseOffsetSource { inner: s, base };
-                    read_rows_framed(
-                        &framed, spec, widths, cache, pass, start_row, num_rows, row_bytes,
+                |source| {
+                    read_region_framed(
+                        &BaseOffsetSource {
+                            inner: source,
+                            base,
+                        },
+                        region,
+                        self.widths,
+                        cache,
+                        pass,
                     )
                 },
             ),
@@ -2602,123 +2571,101 @@ impl FileInner {
     }
 }
 
-/// Reads a row window through a base-relative [`Source`].
+/// Reads a checked region from a source framed at the file's effective base address.
 ///
-/// Returns an empty vector for zero rows or a zero row byte length in supported layouts.
-/// Reads compact storage from inline bytes, contiguous storage from a bounded source read or
-/// fill values, and chunked storage through the windowed chunk reader. For rank-0 chunked
-/// storage, reads the whole dataset and copies the selected bytes.
+/// The caller must frame `source` so offset zero corresponds to the effective base address.
+/// Stored dataset addresses are used directly as source offsets.
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::UnsupportedVirtualLayout`] for a virtual layout,
-/// [`FormatError::OffsetOverflow`] if a byte range or source offset exceeds [`u64::MAX`], and
-/// [`FormatError::ValueTooLargeForPlatform`] if a required buffer length or byte offset exceeds
-/// [`usize::MAX`]. Propagates errors from the selected storage reader.
-fn read_rows_framed<S: Source + ?Sized>(
-    source: &S,
-    spec: RawReadSpec<'_>,
+/// Returns [`FormatError::UnsupportedVirtualLayout`] for virtual storage, and
+/// [`FormatError::UnexpectedSourceEof`] if a contiguous selection extends past the source's end.
+/// Returns errors from reading or placing the selected bytes, applying filters, or reading fill
+/// values for unallocated storage.
+fn read_region_framed(
+    source: &(impl Source + ?Sized),
+    region: &ReadRegion<'_>,
     widths: FormatWidths,
     cache: &ChunkCache,
     pass: CachePass,
-    start_row: u64,
-    num_rows: u64,
-    row_bytes: u64,
 ) -> Result<Vec<u8>, FormatError> {
-    let fill = spec.fill();
-    if (num_rows == 0 || row_bytes == 0) && !matches!(spec.storage(), RawReadStorage::Virtual) {
+    let spec = region.spec();
+    if matches!(spec.storage(), RawReadStorage::Virtual) {
+        return Err(FormatError::UnsupportedVirtualLayout);
+    }
+    if region.is_empty() {
         return Ok(Vec::new());
     }
-    match spec.storage() {
-        RawReadStorage::Compact { data } => compact_rows(data, start_row, num_rows, row_bytes),
-        RawReadStorage::Contiguous { address } => {
-            let start = start_row
-                .checked_mul(row_bytes)
-                .ok_or(FormatError::OffsetOverflow {
-                    offset: start_row,
-                    length: row_bytes,
-                })?;
-            let len = num_rows
-                .checked_mul(row_bytes)
-                .ok_or(FormatError::OffsetOverflow {
-                    offset: num_rows,
-                    length: row_bytes,
-                })?;
-            let off = address
-                .get()
-                .checked_add(start)
-                .ok_or(FormatError::OffsetOverflow {
-                    offset: address.get(),
-                    length: start,
-                })?;
-            source.read_exact_at(off, len.to_usize()?)
+    if let RawReadStorage::Chunked { .. } = spec.storage() {
+        return crate::chunked_read::read_chunked_region_from_source(
+            source, region, widths, cache, pass,
+        );
+    }
+    if matches!(spec.storage(), RawReadStorage::ContiguousUnallocated) {
+        return spec.fill().buffer(region.byte_len()?);
+    }
+    if let RawReadStorage::Contiguous { address } = spec.storage() {
+        let end = region.end_offset()?;
+        let end = address
+            .get()
+            .checked_add(end)
+            .ok_or(FormatError::OffsetOverflow {
+                offset: address.get(),
+                length: end,
+            })?;
+        if end > source.len() {
+            return Err(FormatError::UnexpectedSourceEof {
+                expected: end,
+                available: source.len(),
+            });
         }
-        RawReadStorage::ContiguousUnallocated => {
-            let len = num_rows
-                .checked_mul(row_bytes)
-                .ok_or(FormatError::OffsetOverflow {
-                    offset: num_rows,
-                    length: row_bytes,
-                })?;
-            fill.buffer(len.to_usize()?)
-        }
-        RawReadStorage::Chunked { .. } => {
-            match crate::chunked_read::read_chunked_rows_from_source(
-                source, spec, widths, cache, pass, start_row, num_rows,
-            )? {
-                Some(bytes) => Ok(bytes),
-                // Rank-0 chunked (a crafted-file corner): fall back to a whole
-                // read, then slice.
-                None => {
-                    let full =
-                        data_read::read_raw_data_cached_from_source(source, spec, widths, cache)?;
-                    compact_rows(&full, start_row, num_rows, row_bytes)
+    }
+    let total = region.byte_len()?;
+    let mut output = Vec::new();
+    region.visit_runs(|offset, length| {
+        match spec.storage() {
+            RawReadStorage::Compact { data } => {
+                let end = offset
+                    .checked_add(length as u64)
+                    .ok_or(FormatError::OffsetOverflow {
+                        offset,
+                        length: length as u64,
+                    })?
+                    .to_usize()?;
+                let bytes =
+                    data.get(offset.to_usize()?..end)
+                        .ok_or(FormatError::DataSizeMismatch {
+                            expected: end,
+                            actual: data.len(),
+                        })?;
+                if output.is_empty() {
+                    output.reserve_exact(total);
+                }
+                output.extend_from_slice(bytes);
+            }
+            RawReadStorage::Contiguous { address } => {
+                let offset =
+                    address
+                        .get()
+                        .checked_add(offset)
+                        .ok_or(FormatError::OffsetOverflow {
+                            offset: address.get(),
+                            length: offset,
+                        })?;
+                if output.is_empty() {
+                    output = source.read_exact_at(offset, length)?;
+                    output.reserve_exact(total - length);
+                } else {
+                    let start = output.len();
+                    output.resize(start + length, 0);
+                    source.read_at(offset, &mut output[start..])?;
                 }
             }
+            _ => return Err(FormatError::Internal("region storage dispatch".into())),
         }
-        RawReadStorage::Virtual => Err(FormatError::UnsupportedVirtualLayout),
-    }
-}
-
-/// Copies a row window from decoded element bytes.
-///
-/// Computes byte offsets before converting them to slice indexes.
-///
-/// # Errors
-///
-/// Returns [`FormatError::OffsetOverflow`] if the window's byte range exceeds [`u64::MAX`],
-/// [`FormatError::ValueTooLargeForPlatform`] if a byte offset exceeds [`usize::MAX`], and
-/// [`FormatError::DataSizeMismatch`] if the window ends past `data`.
-fn compact_rows(
-    data: &[u8],
-    start_row: u64,
-    num_rows: u64,
-    row_bytes: u64,
-) -> Result<Vec<u8>, FormatError> {
-    let start = start_row
-        .checked_mul(row_bytes)
-        .ok_or(FormatError::OffsetOverflow {
-            offset: start_row,
-            length: row_bytes,
-        })?;
-    let len = num_rows
-        .checked_mul(row_bytes)
-        .ok_or(FormatError::OffsetOverflow {
-            offset: num_rows,
-            length: row_bytes,
-        })?;
-    let end = start.checked_add(len).ok_or(FormatError::OffsetOverflow {
-        offset: start,
-        length: len,
+        Ok(())
     })?;
-    let start = start.to_usize()?;
-    let end = end.to_usize()?;
-    data.get(start..end)
-        .map(<[u8]>::to_vec)
-        .ok_or(FormatError::DataSizeMismatch {
-            expected: end,
-            actual: data.len(),
-        })
+    Ok(output)
 }
 
 impl std::fmt::Debug for FileInner {
@@ -6976,27 +6923,22 @@ the same commit to replace it",
         Ok(self.file.read_dataset_raw(spec, &self.chunk_cache)?)
     }
 
-    /// Read the raw element bytes of the row window `[start_row, start_row + num_rows)`
-    /// — a range along the first dimension.
+    /// Reads the unfiltered element bytes of complete leading-dimension rows.
     ///
-    /// The windowed companion to [`read_raw`](Self::read_raw): only the storage the
-    /// window overlaps is read — a bounded sub-read for compact and contiguous
-    /// layouts, just the overlapping chunks for chunked layouts — so peak memory
-    /// scales with the window, not the dataset. Use it to stream a large dataset a
-    /// fixed number of rows at a time.
+    /// Clamps `start_row` and `num_rows` to the current leading dimension. Each row includes
+    /// every element of the inner dimensions, and a scalar counts as one row. A request with
+    /// zero rows or a zero inner dimension returns an empty vector.
     ///
-    /// Each row keeps its full inner shape, and the bytes match what
-    /// [`read_raw`](Self::read_raw) produces for those rows, so the typed
-    /// `read_*_rows` helpers decode a window like their whole-dataset forms. The
-    /// window is clamped to the first dimension: a read past the end returns only
-    /// the rows that exist, and a 0-D scalar is one row. A window covering every
-    /// row delegates to [`read_raw`](Self::read_raw), so a full-range window never
-    /// costs more than a whole read. Variable-length string
-    /// bytes are heap references, not text — use
-    /// [`read_string_rows`](Self::read_string_rows).
+    /// Reads a contiguous byte range for compact or contiguous storage and decodes intersecting
+    /// chunks for chunked storage. For a selection covering the whole dataset, reads through
+    /// [`read_raw`](Self::read_raw). Variable-length string elements contain heap references.
+    /// Use [`read_string_rows`](Self::read_string_rows) to read their text.
     ///
-    /// For supported layouts, a selection with zero rows or a zero inner dimension returns an
-    /// empty vector, even when a row coordinate or dataspace extent exceeds [`usize::MAX`].
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the selection exceeds the platform's buffer limit, byte
+    /// arithmetic overflows, or dataset metadata or storage cannot be read. Dataset layout
+    /// consistency checks apply to empty selections.
     pub fn read_raw_rows(&self, start_row: u64, num_rows: u64) -> Result<Vec<u8>, Error> {
         let dt = self.datatype()?;
         let ds = self.dataspace()?;
@@ -9142,161 +9084,70 @@ mod tests {
     /// in the error; what it still pins is that a window of no rows is an *empty*
     /// buffer and not a zero-length fill, which is what a caller iterating past
     /// the end of a dataset sees.
-    #[test]
-    fn read_rows_framed_zero_row_window_is_ok_even_when_unallocated() {
-        let dl = DataLayout::Contiguous {
-            address: None,
-            size: 0,
-        };
-        let ds = Dataspace {
-            space_type: crate::dataspace::DataspaceType::Simple,
+    #[rstest::rstest]
+    #[case(DataLayout::Contiguous { address: None, size: 0 }, None)]
+    #[case(DataLayout::Virtual, Some(FormatError::UnsupportedVirtualLayout))]
+    fn empty_region_reads_preserve_layout_errors(
+        #[case] layout: DataLayout,
+        #[case] expected: Option<FormatError>,
+    ) {
+        let dataspace = Dataspace {
+            space_type: DataspaceType::Simple,
             rank: 1,
             dimensions: vec![0],
             max_dimensions: None,
         };
-        let dt = Datatype::FixedPoint {
-            size: 8,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: false,
-                bit_offset: 0,
-                bit_precision: 64,
-            },
-        };
-        let cache = ChunkCache::new();
-        let out = read_rows_framed(
-            &BytesSource::new(b""),
-            RawReadSpec::plain(&dl, &ds, &dt),
-            FormatWidths::from_sizes(8, 8).unwrap(),
-            &cache,
-            CachePass::LRU,
-            0,
-            0,
-            8,
-        )
-        .expect("a zero-row window must be Ok(empty)");
-        assert!(out.is_empty());
-
-        // A Virtual layout is unsupported and must still error for a zero-row
-        // window, matching `read_raw`, rather than being swallowed by the early
-        // return.
-        let virtual_dl = DataLayout::Virtual;
-        let err = read_rows_framed(
-            &BytesSource::new(b""),
-            RawReadSpec::plain(&virtual_dl, &ds, &dt),
-            FormatWidths::from_sizes(8, 8).unwrap(),
-            &cache,
-            CachePass::LRU,
-            0,
-            0,
-            8,
-        )
-        .expect_err("a virtual layout must error even for a zero-row window");
-        assert!(
-            matches!(err, FormatError::UnsupportedVirtualLayout),
-            "expected UnsupportedVirtualLayout, got {err:?}"
-        );
-    }
-
-    #[rstest::rstest]
-    #[case::allocated(DataLayout::Contiguous { address: Some(StoredAddress::new(1)), size: 0 })]
-    #[case::unallocated(DataLayout::Contiguous { address: None, size: 0 })]
-    #[case::compact(DataLayout::Compact { data: Vec::new() })]
-    fn row_byte_lengths_report_arithmetic_overflow(#[case] layout: DataLayout) {
-        let dataspace = Dataspace {
-            space_type: DataspaceType::Simple,
-            rank: 1,
-            dimensions: vec![2],
-            max_dimensions: None,
-        };
         let datatype = crate::make_u8_type();
-        let err = read_rows_framed(
-            &BytesSource::new(&[]),
+        let region = ReadRegion::parse(
             RawReadSpec::plain(&layout, &dataspace, &datatype),
+            &[0],
+            &[0],
+        )
+        .unwrap();
+        let result = read_region_framed(
+            &BytesSource::new(&[]),
+            &region,
             FormatWidths::from_sizes(8, 8).unwrap(),
             &ChunkCache::new(),
             CachePass::LRU,
-            0,
-            2,
-            u64::MAX,
-        )
-        .unwrap_err();
-        assert_eq!(
-            err,
-            FormatError::OffsetOverflow {
-                offset: 2,
-                length: u64::MAX
-            }
         );
+        match expected {
+            Some(error) => assert_eq!(result.unwrap_err(), error),
+            None => assert_eq!(result.unwrap(), Vec::<u8>::new()),
+        }
     }
 
     #[test]
-    fn empty_compact_rows_accept_large_row_coordinates() {
-        assert_eq!(
-            compact_rows(&[], 4_294_967_360, 4_294_967_296, 0).unwrap(),
-            Vec::<u8>::new()
-        );
-    }
-
-    #[test]
-    fn read_rows_framed_reads_a_compact_row_window() {
-        let dl = DataLayout::Compact {
-            data: (0..16u8).collect(),
+    fn compact_regions_read_selected_columns() {
+        let layout = DataLayout::Compact {
+            data: (0..16).collect(),
         };
-        let ds = Dataspace {
+        let dataspace = Dataspace {
             space_type: DataspaceType::Simple,
             rank: 2,
             dimensions: vec![4, 4],
             max_dimensions: None,
         };
-        let dt = Datatype::FixedPoint {
-            size: 1,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: false,
-                bit_offset: 0,
-                bit_precision: 8,
-            },
-        };
-        let cache = ChunkCache::new();
-        let rows = |start_row, num_rows| {
-            read_rows_framed(
-                &BytesSource::new(b""),
-                RawReadSpec::plain(&dl, &ds, &dt),
+        let datatype = crate::make_u8_type();
+        let region = ReadRegion::parse(
+            RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::ZERO).unwrap(),
+            &[1, 2],
+            &[2, 2],
+        )
+        .unwrap();
+        assert_eq!(
+            read_region_framed(
+                &BytesSource::new(&[]),
+                &region,
                 FormatWidths::from_sizes(8, 8).unwrap(),
-                &cache,
+                &ChunkCache::new(),
                 CachePass::LRU,
-                start_row,
-                num_rows,
-                4,
             )
-        };
-
-        let out = rows(2, 1).expect("the third row of a compact dataset");
-        assert_eq!(out, vec![8, 9, 10, 11]);
-
-        let err = rows(4, 1).expect_err("a window past the inline bytes");
-        assert!(
-            matches!(
-                err,
-                FormatError::DataSizeMismatch {
-                    expected: 20,
-                    actual: 16
-                }
-            ),
-            "expected DataSizeMismatch, got {err:?}"
+            .unwrap(),
+            [6, 7, 10, 11]
         );
     }
 
-    /// The window a typed whole-dataset read sweeps in is a budget in *stored
-    /// bytes* resolved against the dataset's own geometry, and a chunked dataset
-    /// adds a second rule on top: whole chunk bands.
-    ///
-    /// A window that ended mid-band would make the next window decode the band
-    /// again — the cost windowing exists to avoid — so the budget is rounded down
-    /// to a multiple of the band, and *up* to one whole band when even one band
-    /// is over budget. The three ways a window can come out are one rule with
-    /// different inputs, which is why they are asserted together.
     #[test]
     fn a_typed_read_windows_in_whole_chunk_bands() {
         const BUDGET: u64 = TYPED_READ_WINDOW_BYTES;
