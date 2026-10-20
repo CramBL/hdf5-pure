@@ -760,9 +760,6 @@ impl Source for RecordingRowSource {
     }
 }
 
-const HIGH_ROW: u64 = 4_294_967_360;
-const PAYLOAD_START: u64 = 4096;
-
 #[rstest]
 fn numeric_region_methods_read_selected_columns(
     #[values(false, true)] chunked: bool,
@@ -837,6 +834,7 @@ fn numeric_region_methods_read_selected_columns(
 fn string_regions_read_selected_columns(
     #[case] variable: bool,
     #[values(false, true)] streaming: bool,
+    #[values(false, true)] chunked: bool,
 ) {
     let (buffered, streamed, _directory) = on_both_backends(|builder| {
         let dataset = builder.create_dataset("labels");
@@ -848,6 +846,11 @@ fn string_regions_read_selected_columns(
                 .unwrap();
         }
         dataset.with_shape(&[2, 3]);
+        if chunked {
+            dataset
+                .with_chunks(&[1, 2])
+                .with_deflate(DeflateLevel::Four);
+        }
     });
     let file = if streaming { streamed } else { buffered };
     assert_eq!(
@@ -856,6 +859,201 @@ fn string_regions_read_selected_columns(
             .read_string_region(&[0, 1], &[2, 2])
             .unwrap(),
         ["one", "two", "four", "five"]
+    );
+}
+
+#[rstest]
+#[case::start_rank(&[0], &[1, 1], FormatError::RegionRankMismatch { rank: 2, start: 1, count: 2 })]
+#[case::count_rank(&[0, 0], &[1], FormatError::RegionRankMismatch { rank: 2, start: 2, count: 1 })]
+#[case::start_bound(&[6, 0], &[0, 0], FormatError::RegionOutOfBounds { dimension: 0, start: 6, count: 0, extent: 5 })]
+#[case::count_bound(&[1, 4], &[1, 3], FormatError::RegionOutOfBounds { dimension: 1, start: 4, count: 3, extent: 6 })]
+#[case::count_overflow(&[1, 1], &[1, u64::MAX], FormatError::RegionOutOfBounds { dimension: 1, start: 1, count: u64::MAX, extent: 6 })]
+fn region_requests_return_exact_rank_and_bounds_errors(
+    #[case] start: &[u64],
+    #[case] count: &[u64],
+    #[case] expected: FormatError,
+) {
+    let mut builder = FileBuilder::new();
+    builder
+        .create_dataset("matrix")
+        .with_u8_data(&[0; 30])
+        .with_shape(&[5, 6]);
+    let dataset = File::from_bytes(builder.finish().unwrap())
+        .unwrap()
+        .dataset("matrix")
+        .unwrap();
+    let error = dataset.read_raw_region(start, count).unwrap_err();
+    let hdf5_pure::Error::Format(error) = error else {
+        panic!("expected format error, got {error:?}")
+    };
+    assert_eq!(error, expected);
+}
+
+#[rstest]
+#[case::empty_rows(&[1, 1], &[0, 2])]
+#[case::empty_columns(&[1, 1], &[2, 0])]
+#[case::empty_at_end(&[5, 6], &[0, 0])]
+fn empty_regions_read_no_payload(
+    #[case] start: &[u64],
+    #[case] count: &[u64],
+    #[values(false, true)] chunked: bool,
+) {
+    let mut builder = FileBuilder::new();
+    let dataset = builder.create_dataset("matrix");
+    dataset.with_u8_data(&[7; 30]).with_shape(&[5, 6]);
+    if chunked {
+        dataset.with_chunks(&[2, 3]);
+    }
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let file = File::from_source(RecordingRowSource {
+        inner: ReadSeekSource::new(Cursor::new(builder.finish().unwrap())).unwrap(),
+        reads: Arc::clone(&reads),
+    })
+    .unwrap();
+    let dataset = file.dataset("matrix").unwrap();
+    reads.lock().unwrap().clear();
+    assert_eq!(
+        dataset.read_raw_region(start, count).unwrap(),
+        Vec::<u8>::new()
+    );
+    assert!(reads.lock().unwrap().is_empty());
+}
+
+#[rstest]
+#[case::contiguous(false)]
+#[case::filtered_chunks(true)]
+fn region_reads_fetch_only_intersecting_payload(#[case] chunked: bool) {
+    let values: Vec<u32> = (0..64 * 128).collect();
+    let mut builder = FileBuilder::new();
+    let dataset = builder.create_dataset("matrix");
+    dataset.with_u32_data(&values).with_shape(&[64, 128]);
+    if chunked {
+        dataset
+            .with_chunks(&[4, 8])
+            .with_deflate(DeflateLevel::Four);
+    }
+    let bytes = builder.finish().unwrap();
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let file = File::from_source(RecordingRowSource {
+        inner: ReadSeekSource::new(Cursor::new(bytes)).unwrap(),
+        reads: Arc::clone(&reads),
+    })
+    .unwrap();
+    let dataset = file.dataset("matrix").unwrap();
+    let (expected_reads, payload) = if chunked {
+        let chunks = dataset.chunks().unwrap();
+        let selected = chunks
+            .iter()
+            .find(|chunk| chunk.offset == [16, 40])
+            .unwrap();
+        (
+            vec![(
+                selected.address,
+                usize::try_from(selected.storage_size).unwrap(),
+            )],
+            chunks
+                .into_iter()
+                .map(|chunk| chunk.address..chunk.address + chunk.storage_size)
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        let hdf5_pure::Layout::Contiguous {
+            address: Some(address),
+            size,
+        } = dataset.layout().unwrap()
+        else {
+            panic!("expected allocated contiguous layout")
+        };
+        (
+            vec![(address + 2218 * 4, 12), (address + 2346 * 4, 12)],
+            std::iter::once(address..address + size).collect(),
+        )
+    };
+    reads.lock().unwrap().clear();
+    assert_eq!(
+        dataset.read_u32_region(&[17, 42], &[2, 3]).unwrap(),
+        [2218, 2219, 2220, 2346, 2347, 2348]
+    );
+    let payload_reads: Vec<_> = reads
+        .lock()
+        .unwrap()
+        .iter()
+        .copied()
+        .filter(|&(offset, length)| {
+            payload
+                .iter()
+                .any(|range| offset < range.end && offset + length as u64 > range.start)
+        })
+        .collect();
+    assert_eq!(payload_reads, expected_reads);
+}
+
+#[rstest]
+#[case::scalar(&[], &[42.0])]
+#[case::empty(&[0], &[])]
+fn region_reads_preserve_scalar_and_empty_dataspaces(
+    #[case] shape: &[u64],
+    #[case] expected: &[f64],
+) {
+    let mut builder = FileBuilder::new();
+    builder
+        .create_dataset("data")
+        .with_f64_data(expected)
+        .with_shape(shape);
+    let dataset = File::from_bytes(builder.finish().unwrap())
+        .unwrap()
+        .dataset("data")
+        .unwrap();
+    let start = vec![0; shape.len()];
+    assert_eq!(dataset.read_f64_region(&start, shape).unwrap(), expected);
+    assert_eq!(
+        dataset.read_f64_rows(u64::MAX, u64::MAX).unwrap(),
+        Vec::<f64>::new()
+    );
+}
+
+#[rstest]
+#[case(&[4_294_967_424, 0], &[4_294_967_360, 0], &[1, 0])]
+#[case(&[2, 0, 4_294_967_296], &[1, 0, 4_294_967_295], &[1, 0, 1])]
+fn empty_regions_preserve_file_width_coordinates(
+    #[case] shape: &[u64],
+    #[case] start: &[u64],
+    #[case] count: &[u64],
+    #[values("compact", "contiguous", "unallocated", "chunked")] layout: &str,
+) {
+    let file = File::from_bytes(empty_row_file(shape, layout)).unwrap();
+    assert_eq!(
+        file.dataset("d")
+            .unwrap()
+            .read_raw_region(start, count)
+            .unwrap(),
+        Vec::<u8>::new()
+    );
+}
+
+#[rstest]
+#[case::full_columns(4, 4)]
+#[case::split_columns(4, 2)]
+fn regions_read_high_chunk_coordinates(#[case] columns: u32, #[case] chunk_columns: u32) {
+    let file = File::from_bytes(sparse_high_row_file(columns, chunk_columns)).unwrap();
+    assert_eq!(
+        file.dataset("d")
+            .unwrap()
+            .read_f64_region(&[HIGH_ROW + 1, 1], &[2, 2])
+            .unwrap(),
+        [106.0, 107.0, 110.0, 111.0]
+    );
+}
+
+#[test]
+fn zero_count_regions_preserve_large_nonempty_extents() {
+    let file = File::from_bytes(empty_row_file(&[2, 4_294_967_296], "unallocated")).unwrap();
+    assert_eq!(
+        file.dataset("d")
+            .unwrap()
+            .read_raw_region(&[1, 4_294_967_295], &[0, 1])
+            .unwrap(),
+        Vec::<u8>::new()
     );
 }
 
@@ -882,3 +1080,6 @@ fn oversized_region_buffers_return_a_platform_error(#[case] rows: u64) {
         }
     );
 }
+
+const HIGH_ROW: u64 = 4_294_967_360;
+const PAYLOAD_START: u64 = 4096;

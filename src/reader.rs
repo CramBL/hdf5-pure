@@ -9295,6 +9295,14 @@ mod tests {
                 ("read_raw", ds.read_raw().unwrap_err()),
                 ("read_raw_rows", ds.read_raw_rows(0, 1).unwrap_err()),
                 (
+                    "read_raw_region",
+                    ds.read_raw_region(&[0], &[1]).unwrap_err(),
+                ),
+                (
+                    "empty read_raw_region",
+                    ds.read_raw_region(&[n as u64], &[0]).unwrap_err(),
+                ),
+                (
                     "empty read_raw_rows",
                     ds.read_raw_rows(n as u64, 0).unwrap_err(),
                 ),
