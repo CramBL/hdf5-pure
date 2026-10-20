@@ -81,6 +81,7 @@ mod tests {
     use test_util::widths::Widths;
 
     use super::*;
+    use crate::convert::Narrow;
     use crate::source::BytesSource;
 
     const WIDTHS: Widths = Widths::EIGHT;
@@ -226,9 +227,9 @@ mod tests {
 
         assert_eq!(
             err,
-            FormatError::UnexpectedEof {
-                expected: root_at + usize::try_from(NODE_SIZE).unwrap(),
-                available,
+            FormatError::UnexpectedSourceEof {
+                expected: root_at.to_u64() + NODE_SIZE,
+                available: available.to_u64(),
             }
         );
     }

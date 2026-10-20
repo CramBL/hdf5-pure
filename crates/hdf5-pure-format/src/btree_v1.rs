@@ -832,7 +832,10 @@ mod tests {
         );
         assert_eq!(
             BTreeV1ChunkNodeBytes::read_from_source(node.as_slice(), 0, 8, 2).unwrap_err(),
-            expected
+            FormatError::UnexpectedSourceEof {
+                expected: full.to_u64(),
+                available: (full - 1).to_u64(),
+            }
         );
     }
 }

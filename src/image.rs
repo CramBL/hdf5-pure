@@ -985,9 +985,9 @@ pub(crate) fn read_at_handle(
             length: buf.len() as u64,
         })?;
     if end > len {
-        return Err(FormatError::UnexpectedEof {
-            expected: end.to_usize().unwrap_or(usize::MAX),
-            available: len.to_usize().unwrap_or(usize::MAX),
+        return Err(FormatError::UnexpectedSourceEof {
+            expected: end,
+            available: len,
         });
     }
     let mut h = handle;
@@ -1101,9 +1101,9 @@ impl Source for HandleImage {
                 length: buf.len() as u64,
             })?;
         if end > self.len {
-            return Err(FormatError::UnexpectedEof {
-                expected: end.to_usize().unwrap_or(usize::MAX),
-                available: self.len.to_usize().unwrap_or(usize::MAX),
+            return Err(FormatError::UnexpectedSourceEof {
+                expected: end,
+                available: self.len,
             });
         }
         let on_disk = self.writes.on_disk_len();
@@ -1182,11 +1182,17 @@ impl FileImage for HandleImage {
         // other is exactly what the two being interchangeable has to rule out.
         let end = offset
             .checked_add(bytes.len() as u64)
-            .filter(|&e| e <= self.len)
-            .ok_or(Error::Format(FormatError::UnexpectedEof {
-                expected: offset.to_usize().unwrap_or(usize::MAX),
-                available: self.len.to_usize().unwrap_or(usize::MAX),
-            }))?;
+            .ok_or(FormatError::OffsetOverflow {
+                offset,
+                length: bytes.len() as u64,
+            })?;
+        if end > self.len {
+            return Err(FormatError::UnexpectedSourceEof {
+                expected: end,
+                available: self.len,
+            }
+            .into());
+        }
         debug_assert!(end <= self.len);
         self.invalidate(offset, bytes.len() as u64);
         self.writes.write_at(offset, bytes)
@@ -1610,6 +1616,29 @@ mod tests {
             );
             assert_in_sync(&path, img.as_ref(), backing);
         }
+    }
+
+    #[rstest::rstest]
+    #[case::past_extent(5, b"zz", FormatError::UnexpectedSourceEof { expected: 7, available: 6 })]
+    #[case::large_offset(4_294_967_536, b"zz", FormatError::UnexpectedSourceEof { expected: 4_294_967_538, available: 6 })]
+    #[case::overflow(u64::MAX, b"z", FormatError::OffsetOverflow { offset: u64::MAX, length: 1 })]
+    fn rejected_handle_writes_preserve_the_image(
+        #[case] offset: u64,
+        #[case] data: &[u8],
+        #[case] expected: FormatError,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, mut img) = image(dir.path(), b"abcdef", Backing::Handle);
+        let error = img.write_at(offset, data).unwrap_err();
+        let Error::Format(actual) = error else {
+            panic!("expected a format error, got {error:?}");
+        };
+        assert_eq!(actual, expected);
+        assert_eq!(img.len(), 6);
+        assert_eq!(bytes(img.as_ref()), b"abcdef");
+        drop(img);
+        assert_eq!(fs::metadata(&path).unwrap().len(), 6);
+        assert_eq!(fs::read(path).unwrap(), b"abcdef");
     }
 
     #[test]

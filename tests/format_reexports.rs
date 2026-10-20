@@ -180,6 +180,22 @@ fn existing_error_signatures_and_shapes_compile() {
     ));
 }
 
+#[rstest::rstest]
+#[case::source_eof(
+    FormatError::UnexpectedSourceEof { expected: 4_294_967_600, available: 4_294_967_552 },
+    "unexpected source EOF: need end position 4294967600, source extent is 4294967552"
+)]
+#[case::missing_heap_block(
+    FormatError::MissingFractalHeapBlock { heap_offset: 4_294_967_536, object_length: 64 },
+    "no allocated fractal heap block contains object at heap offset 4294967536 with length 64"
+)]
+fn source_and_heap_diagnostics_preserve_full_width_positions(
+    #[case] error: FormatError,
+    #[case] expected: &str,
+) {
+    assert_eq!(error.to_string(), expected);
+}
+
 #[test]
 fn public_member_fields_remain_nameable() {
     fn compound(member: &CompoundMember) -> (&str, u64, &Datatype) {

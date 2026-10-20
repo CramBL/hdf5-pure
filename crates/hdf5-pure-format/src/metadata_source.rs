@@ -25,8 +25,9 @@ pub trait MetadataSource {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if the file ends before `offset + buf.len()`. An
-    /// implementation returns an error of its own if a read fails for another reason.
+    /// Returns [`FormatError::UnexpectedSourceEof`] if the file ends before `offset + buf.len()`. An
+    /// implementation returns [`FormatError::OffsetOverflow`] if `offset + buf.len()` exceeds
+    /// [`u64::MAX`], and an error of its own if a read fails for another reason.
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError>;
 
     /// Reads `len` bytes starting at `offset` into a new vector.
@@ -35,8 +36,9 @@ pub trait MetadataSource {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if the file ends before `offset + len`. An
-    /// implementation returns an error of its own if a read fails for another reason.
+    /// Returns [`FormatError::UnexpectedSourceEof`] if the file ends before `offset + len`. An
+    /// implementation returns [`FormatError::OffsetOverflow`] if `offset + len` exceeds
+    /// [`u64::MAX`], and an error of its own if a read fails for another reason.
     fn read_metadata_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, FormatError>;
 }
 
@@ -56,13 +58,23 @@ impl MetadataSource for [u8] {
 }
 
 pub(crate) fn region(bytes: &[u8], offset: u64, len: usize) -> Result<&[u8], FormatError> {
-    let start = offset.to_usize()?;
-    start
-        .checked_add(len)
-        .and_then(|end| bytes.get(start..end))
-        .ok_or(FormatError::UnexpectedEof {
-            expected: start.saturating_add(len),
-            available: bytes.len(),
+    let end = offset
+        .checked_add(len.to_u64())
+        .ok_or(FormatError::OffsetOverflow {
+            offset,
+            length: len.to_u64(),
+        })?;
+    if end > bytes.len().to_u64() {
+        return Err(FormatError::UnexpectedSourceEof {
+            expected: end,
+            available: bytes.len().to_u64(),
+        });
+    }
+    bytes
+        .get(offset.to_usize()?..end.to_usize()?)
+        .ok_or(FormatError::UnexpectedSourceEof {
+            expected: end,
+            available: bytes.len().to_u64(),
         })
 }
 
@@ -85,19 +97,29 @@ mod tests {
 
     #[rstest]
     #[case::past_the_end(4, 2, 6)]
-    #[case::overflowing(u64::from(u32::MAX), usize::MAX, usize::MAX)]
+    #[case::large_offset(4_294_967_536, 64, 4_294_967_600)]
     fn a_read_past_the_bytes_returns_unexpected_eof(
         #[case] offset: u64,
         #[case] len: usize,
-        #[case] expected: usize,
+        #[case] expected: u64,
     ) {
         let bytes = [0u8; 5];
 
         assert_eq!(
             bytes.read_metadata_at(offset, len).unwrap_err(),
-            FormatError::UnexpectedEof {
+            FormatError::UnexpectedSourceEof {
                 expected,
                 available: 5,
+            }
+        );
+    }
+    #[test]
+    fn a_wrapping_source_range_reports_arithmetic_overflow() {
+        assert_eq!(
+            [0u8; 5].read_metadata_at(u64::MAX, 1).unwrap_err(),
+            FormatError::OffsetOverflow {
+                offset: u64::MAX,
+                length: 1
             }
         );
     }

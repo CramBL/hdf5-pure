@@ -15260,15 +15260,12 @@ mod tests {
                     .unwrap();
                 bytes[heap_at..heap_at + encoded.len()].copy_from_slice(&encoded);
                 vec![FractalHeapStorageError::Format(
-                    FormatError::UnexpectedEof {
-                        expected: bytes.len()
-                            + usize::try_from(
-                                hdf5_pure_format::__private::free_space_manager_header_len(
-                                    FormatWidths::from_sizes(OFFSET_SIZE, LENGTH_SIZE).unwrap(),
-                                ),
-                            )
-                            .unwrap(),
-                        available: bytes.len(),
+                    FormatError::UnexpectedSourceEof {
+                        expected: bytes.len().to_u64()
+                            + hdf5_pure_format::__private::free_space_manager_header_len(
+                                FormatWidths::from_sizes(OFFSET_SIZE, LENGTH_SIZE).unwrap(),
+                            ),
+                        available: bytes.len().to_u64(),
                     },
                 )]
             }
@@ -15927,7 +15924,7 @@ mod tests {
         assert_eq!(*message, MessageType::DATATYPE);
         assert_eq!(
             *source,
-            FormatError::UnexpectedEof {
+            FormatError::UnexpectedSourceEof {
                 expected: 252,
                 available: 0
             }

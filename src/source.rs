@@ -265,29 +265,25 @@ pub trait Source {
     /// really serve before it is reported here.
     fn len(&self) -> u64;
 
-    /// Read exactly `buf.len()` bytes starting at absolute offset `offset`,
-    /// filling `buf`.
+    /// Reads exactly `buf.len()` bytes at `offset` into `buf`.
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if fewer than `buf.len()` bytes are
-    /// available at `offset`, [`FormatError::OffsetOverflow`] if
-    /// `offset + buf.len()` overflows, [`FormatError::ValueTooLargeForPlatform`]
-    /// if `offset` does not fit this platform's `usize` (for in-memory
-    /// backends), or [`FormatError::Source`] for a backend I/O failure.
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedSourceEof`] if the request ends past
+    /// [`len`](Self::len), [`FormatError::OffsetOverflow`] if `offset + buf.len()`
+    /// exceeds [`u64::MAX`], and [`FormatError::Source`] if a backend read fails.
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError>;
 
-    /// Read `len` bytes starting at `offset` into a freshly allocated `Vec`.
+    /// Reads `len` bytes at `offset` into a new vector.
     ///
-    /// Convenience wrapper over [`read_at`](Source::read_at) for callers that
-    /// want an owned buffer; the lazy backends keep no more than this resident.
+    /// Checks `offset + len` against [`len`](Self::len) before allocating the
+    /// buffer or calling [`read_at`](Self::read_at).
     ///
-    /// The request is bounds-checked against [`len`](Source::len) *before* the
-    /// buffer is allocated. The metadata parsers feed `len` values straight from
-    /// the file (a chunk-0 body size, a continuation-block length, a heap object
-    /// size), so a malformed file could otherwise name a multi-gigabyte length
-    /// and make this reserve `vec![0u8; len]` up front only for the read to fail
-    /// EOF anyway — a cheap denial of service. Rejecting an out-of-range request
-    /// before allocating avoids that; the error returned is identical to the one
-    /// the underlying [`read_at`](Source::read_at) would have produced.
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if `offset + len` exceeds
+    /// [`u64::MAX`], and [`FormatError::UnexpectedSourceEof`] if `offset + len`
+    /// exceeds the source extent. Propagates errors from [`read_at`](Self::read_at).
     fn read_exact_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, FormatError> {
         let end = offset
             .checked_add(len as u64)
@@ -296,9 +292,9 @@ pub trait Source {
                 length: len as u64,
             })?;
         if end > self.len() {
-            return Err(FormatError::UnexpectedEof {
-                expected: end.to_usize().unwrap_or(usize::MAX),
-                available: self.len().to_usize().unwrap_or(usize::MAX),
+            return Err(FormatError::UnexpectedSourceEof {
+                expected: end,
+                available: self.len(),
             });
         }
         let mut buf = vec![0u8; len];
@@ -306,12 +302,15 @@ pub trait Source {
         Ok(buf)
     }
 
-    /// Read metadata bytes, allowing source implementations to apply a bounded
-    /// metadata cache.
+    /// Reads metadata bytes through the source's metadata cache, where enabled.
     ///
     /// The default implementation performs an uncached exact read. Raw dataset
     /// payload readers intentionally call [`read_exact_at`](Self::read_exact_at)
     /// instead, so a metadata cache does not retain user data chunks.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`read_exact_at`](Self::read_exact_at).
     fn read_metadata_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, FormatError> {
         self.read_exact_at(offset, len)
     }
@@ -489,15 +488,26 @@ pub(crate) struct BaseOffsetSource<'a, S: Source + ?Sized> {
 /// (the userblock) cut off, so every address stored relative to the base address
 /// indexes it directly. The in-memory counterpart of [`BaseOffsetSource`], and the
 /// identity for a plain file.
+///
+/// # Errors
+///
+/// Returns [`FormatError::UnexpectedSourceEof`] if `base` exceeds the length of `bytes`.
 pub(crate) fn frame(bytes: &[u8], base: BaseAddress) -> Result<&[u8], FormatError> {
     if base.is_zero() {
         return Ok(bytes);
     }
-    let start = base.get().to_usize()?;
-    bytes.get(start..).ok_or(FormatError::UnexpectedEof {
-        expected: start,
-        available: bytes.len(),
-    })
+    if base.get() > bytes.len().to_u64() {
+        return Err(FormatError::UnexpectedSourceEof {
+            expected: base.get(),
+            available: bytes.len().to_u64(),
+        });
+    }
+    bytes
+        .get(base.get().to_usize()?..)
+        .ok_or(FormatError::UnexpectedSourceEof {
+            expected: base.get(),
+            available: bytes.len().to_u64(),
+        })
 }
 
 impl<S: Source + ?Sized> Source for BaseOffsetSource<'_, S> {
@@ -555,8 +565,8 @@ pub(crate) trait RangeReader {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if the file ends inside `range`,
-    /// [`FormatError::ValueTooLargeForPlatform`] if the range does not fit a `usize`, and the
+    /// Returns [`FormatError::UnexpectedSourceEof`] if the file ends inside `range`,
+    /// [`FormatError::ValueTooLargeForPlatform`] if the range length exceeds [`usize::MAX`], and the
     /// error of a failed read of a [`Source`].
     fn read_range(&self, range: FileRange) -> Result<Cow<'_, [u8]>, FormatError>;
 }
@@ -578,21 +588,23 @@ impl<S: Source + ?Sized> RangeReader for S {
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::UnexpectedEof`] if `bytes` ends inside `range`, and
-/// [`FormatError::ValueTooLargeForPlatform`] if the range ends past [`usize::MAX`].
+/// Returns [`FormatError::UnexpectedSourceEof`] if `range` extends past `bytes`.
 pub(crate) fn bytes_in(bytes: &[u8], range: FileRange) -> Result<&[u8], FormatError> {
+    if range.end().get() > bytes.len().to_u64() {
+        return Err(unexpected_eof(range, bytes.len().to_u64()));
+    }
     bytes
         .get(convert::slice_range(range.start().get(), range.length())?)
         .ok_or_else(|| unexpected_eof(range, bytes.len().to_u64()))
 }
 
-/// Returns the [`FormatError::UnexpectedEof`] of a read of `range` from a file of `extent` bytes.
+/// Reports a request past a source's extent with its original positions.
 ///
-/// A position past [`usize::MAX`] is reported as [`usize::MAX`].
+/// `range` and `extent` are measured from the same source origin.
 pub(crate) fn unexpected_eof(range: FileRange, extent: u64) -> FormatError {
-    FormatError::UnexpectedEof {
-        expected: range.end().get().to_usize().unwrap_or(usize::MAX),
-        available: extent.to_usize().unwrap_or(usize::MAX),
+    FormatError::UnexpectedSourceEof {
+        expected: range.end().get(),
+        available: extent,
     }
 }
 
@@ -622,20 +634,25 @@ impl<T: AsRef<[u8]>> Source for BytesSource<T> {
 
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError> {
         let bytes = self.0.as_ref();
-        let start = offset.to_usize()?;
-        let end = start
-            .checked_add(buf.len())
+        let end = offset
+            .checked_add(buf.len().to_u64())
             .ok_or(FormatError::OffsetOverflow {
                 offset,
                 length: buf.len() as u64,
             })?;
-        if end > bytes.len() {
-            return Err(FormatError::UnexpectedEof {
+        if end > bytes.len().to_u64() {
+            return Err(FormatError::UnexpectedSourceEof {
                 expected: end,
-                available: bytes.len(),
+                available: bytes.len().to_u64(),
             });
         }
-        buf.copy_from_slice(&bytes[start..end]);
+        let region = bytes.get(offset.to_usize()?..end.to_usize()?).ok_or(
+            FormatError::UnexpectedSourceEof {
+                expected: end,
+                available: bytes.len().to_u64(),
+            },
+        )?;
+        buf.copy_from_slice(region);
         Ok(())
     }
 }
@@ -993,11 +1010,9 @@ impl<R: std::io::Read + std::io::Seek> Source for ReadSeekSource<R> {
                 length: buf.len() as u64,
             })?;
         if end > self.len {
-            return Err(FormatError::UnexpectedEof {
-                // `expected`/`available` are byte counts; report them as the
-                // best `usize` we can without truncating on a 32-bit host.
-                expected: end.to_usize().unwrap_or(usize::MAX),
-                available: self.len.to_usize().unwrap_or(usize::MAX),
+            return Err(FormatError::UnexpectedSourceEof {
+                expected: end,
+                available: self.len,
             });
         }
         let mut guard = self
@@ -1023,10 +1038,19 @@ fn format_io(e: &std::io::Error) -> std::string::String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
+    #[cfg(not(feature = "std"))]
+    use alloc::string::ToString;
     #[cfg(not(feature = "std"))]
     use alloc::vec;
+    use core::cell::Cell;
+    #[cfg(feature = "std")]
+    use std::io;
+    #[cfg(feature = "std")]
+    use std::io::{Read, Seek, SeekFrom};
+
+    use hdf5_pure_core::__private::PhysicalAddress;
+
+    use super::*;
 
     #[test]
     fn bytes_source_reads_and_reports_len() {
@@ -1047,7 +1071,13 @@ mod tests {
         let src = BytesSource::new(vec![1u8, 2, 3]);
         let mut buf = [0u8; 4];
         let err = src.read_at(0, &mut buf).unwrap_err();
-        assert!(matches!(err, FormatError::UnexpectedEof { .. }));
+        assert_eq!(
+            err,
+            FormatError::UnexpectedSourceEof {
+                expected: 4,
+                available: 3
+            }
+        );
         // Reading exactly to the end is fine.
         let mut ok = [0u8; 3];
         src.read_at(0, &mut ok).unwrap();
@@ -1058,26 +1088,155 @@ mod tests {
     fn bytes_source_offset_past_end_is_eof() {
         let src = BytesSource::new(vec![0u8; 8]);
         let mut buf = [0u8; 1];
-        assert!(matches!(
+        assert_eq!(
             src.read_at(8, &mut buf).unwrap_err(),
-            FormatError::UnexpectedEof { .. }
-        ));
+            FormatError::UnexpectedSourceEof {
+                expected: 9,
+                available: 8
+            }
+        );
         // Zero-length read at EOF succeeds.
         src.read_at(8, &mut []).unwrap();
     }
 
     #[test]
     fn read_exact_at_rejects_oversized_len_without_allocating() {
-        // A length far larger than the source must error cleanly rather than
-        // attempt to reserve the buffer first. Before the pre-allocation bounds
-        // check, this called `vec![0u8; usize::MAX]` and aborted the process.
         let src = BytesSource::new(vec![1u8, 2, 3, 4]);
-        assert!(matches!(
+        assert_eq!(
             src.read_exact_at(0, usize::MAX).unwrap_err(),
-            FormatError::UnexpectedEof { .. }
-        ));
-        // A read that fits is unaffected.
+            FormatError::UnexpectedSourceEof {
+                expected: usize::MAX.to_u64(),
+                available: 4
+            }
+        );
         assert_eq!(src.read_exact_at(1, 3).unwrap(), vec![2, 3, 4]);
+    }
+
+    #[rstest::rstest]
+    #[case::small(2, 3, 4, 5)]
+    #[case::large(0x1_0000_00f0, 64, 0x1_0000_0100, 4_294_967_600)]
+    fn source_preflight_preserves_positions_without_backend_reads(
+        #[case] offset: u64,
+        #[case] len: usize,
+        #[case] available: u64,
+        #[case] expected: u64,
+    ) {
+        let source = ReadCountingSource {
+            extent: available,
+            reads: Cell::new(0),
+        };
+        let error = FormatError::UnexpectedSourceEof {
+            expected,
+            available,
+        };
+        assert_eq!(source.read_exact_at(offset, len).unwrap_err(), error);
+        assert_eq!(source.reads.get(), 0);
+        let range = FileRange::new(PhysicalAddress::new(offset), len.to_u64()).unwrap();
+        assert_eq!(unexpected_eof(range, available), error);
+        assert_eq!(
+            error.to_string(),
+            alloc::format!(
+                "unexpected source EOF: need end position {expected}, source extent is {available}"
+            )
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::small(4, 2, FormatError::UnexpectedSourceEof { expected: 6, available: 5 })]
+    #[case::large(0x1_0000_00f0, 64, FormatError::UnexpectedSourceEof { expected: 4_294_967_600, available: 5 })]
+    #[case::overflow(u64::MAX, 1, FormatError::OffsetOverflow { offset: u64::MAX, length: 1 })]
+    fn buffered_source_bounds_preserve_the_requested_position(
+        #[case] offset: u64,
+        #[case] length: usize,
+        #[case] expected: FormatError,
+    ) {
+        let bytes = [0u8; 5];
+        assert_eq!(
+            BytesSource::new(bytes)
+                .read_at(offset, &mut vec![0; length])
+                .unwrap_err(),
+            expected
+        );
+        let error = FileRange::new(PhysicalAddress::new(offset), length.to_u64())
+            .and_then(|range| bytes_in(&bytes, range));
+        assert_eq!(error.unwrap_err(), expected);
+    }
+
+    #[test]
+    fn source_preflight_reports_address_overflow_without_backend_reads() {
+        assert_eq!(
+            ReadCountingSource {
+                extent: u64::MAX,
+                reads: Cell::new(0)
+            }
+            .read_exact_at(u64::MAX, 1)
+            .unwrap_err(),
+            FormatError::OffsetOverflow {
+                offset: u64::MAX,
+                length: 1
+            }
+        );
+    }
+
+    struct ReadCountingSource {
+        extent: u64,
+        reads: Cell<u32>,
+    }
+
+    impl Source for ReadCountingSource {
+        fn len(&self) -> u64 {
+            self.extent
+        }
+        fn read_at(&self, _offset: u64, _buf: &mut [u8]) -> Result<(), FormatError> {
+            self.reads.set(self.reads.get() + 1);
+            Err(FormatError::Internal("unexpected backend read".into()))
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[rstest::rstest]
+    #[case::past_extent(0x1_0000_00f0, 64, FormatError::UnexpectedSourceEof { expected: 4_294_967_600, available: 4_294_967_552 })]
+    #[case::overflow(u64::MAX, 1, FormatError::OffsetOverflow { offset: u64::MAX, length: 1 })]
+    fn seek_source_preflight_preserves_positions_without_backend_access(
+        #[case] offset: u64,
+        #[case] len: usize,
+        #[case] expected: FormatError,
+    ) {
+        let source = ReadSeekSource::new(ReadSeekRecordingBackend {
+            reads: 0,
+            seeks: Vec::new(),
+        })
+        .unwrap();
+        assert_eq!(source.len(), 4_294_967_552);
+        assert_eq!(
+            source.read_at(offset, &mut vec![0; len]).unwrap_err(),
+            expected
+        );
+        let backing = source.inner.lock().unwrap();
+        assert_eq!(backing.reads, 0);
+        assert_eq!(backing.seeks, vec![SeekFrom::End(0)]);
+    }
+
+    #[cfg(feature = "std")]
+    struct ReadSeekRecordingBackend {
+        reads: u32,
+        seeks: Vec<SeekFrom>,
+    }
+
+    #[cfg(feature = "std")]
+    impl Read for ReadSeekRecordingBackend {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            self.reads += 1;
+            Err(io::Error::other("unexpected backend read"))
+        }
+    }
+
+    #[cfg(feature = "std")]
+    impl Seek for ReadSeekRecordingBackend {
+        fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+            self.seeks.push(position);
+            Ok(4_294_967_552)
+        }
     }
 
     #[test]
@@ -1196,10 +1355,13 @@ mod tests {
         use std::io::Cursor;
         let seek = ReadSeekSource::new(Cursor::new(vec![1u8, 2, 3, 4])).unwrap();
         let mut buf = [0u8; 3];
-        assert!(matches!(
+        assert_eq!(
             seek.read_at(2, &mut buf).unwrap_err(),
-            FormatError::UnexpectedEof { .. }
-        ));
+            FormatError::UnexpectedSourceEof {
+                expected: 5,
+                available: 4
+            }
+        );
     }
 
     #[cfg(feature = "std")]

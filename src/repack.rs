@@ -1323,9 +1323,9 @@ impl ChunkProvider for DatasetChunkProvider {
                 length: len as u64,
             })?;
         if end > source.len() {
-            return Err(FormatError::UnexpectedEof {
-                expected: end.to_usize().unwrap_or(usize::MAX),
-                available: source.len().to_usize().unwrap_or(usize::MAX),
+            return Err(FormatError::UnexpectedSourceEof {
+                expected: end,
+                available: source.len(),
             });
         }
         let start = out.len();

@@ -36,6 +36,7 @@ use crate::address::StoredAddressExt;
 #[cfg(test)]
 use crate::address::{BaseAddress, BaseAddressExt};
 use crate::btree_v2::BTreeV2Header;
+#[cfg(test)]
 use crate::convert::Narrow;
 use crate::error::FormatError;
 #[cfg(test)]
@@ -526,9 +527,9 @@ fn extent_in_source<S: Source + ?Sized>(
         length,
     })?;
     if extent.end() > source.len() {
-        return Err(FormatError::UnexpectedEof {
-            expected: extent.end().to_usize().unwrap_or(usize::MAX),
-            available: source.len().to_usize().unwrap_or(usize::MAX),
+        return Err(FormatError::UnexpectedSourceEof {
+            expected: extent.end(),
+            available: source.len(),
         }
         .into());
     }
@@ -1163,7 +1164,7 @@ mod tests {
         assert_eq!(
             collect_storage(&file),
             Err(FractalHeapStorageError::Format(
-                FormatError::UnexpectedEof {
+                FormatError::UnexpectedSourceEof {
                     expected: 0x800,
                     available: 0x7c0,
                 }
@@ -1187,8 +1188,8 @@ mod tests {
         assert_eq!(
             collect_storage(&file),
             Err(FractalHeapStorageError::Format(
-                FormatError::UnexpectedEof {
-                    expected: usize::try_from(0x780 + block_len).unwrap(),
+                FormatError::UnexpectedSourceEof {
+                    expected: 0x780 + block_len,
                     available: 0x7a0,
                 }
             ))
@@ -1532,9 +1533,9 @@ mod tests {
                 FractalHeapStorageError::Format(FormatError::InvalidFractalHeapGeometry)
             }
             FilteredDamage::PastTheEndOfTheFile => {
-                FractalHeapStorageError::Format(FormatError::UnexpectedEof {
-                    expected: file.len() + 1,
-                    available: file.len(),
+                FractalHeapStorageError::Format(FormatError::UnexpectedSourceEof {
+                    expected: (file.len() + 1).to_u64(),
+                    available: file.len().to_u64(),
                 })
             }
             FilteredDamage::OverlappingSibling | FilteredDamage::OverlappingHeader => {
@@ -1780,9 +1781,9 @@ mod tests {
         assert_eq!(
             collect_storage(&file),
             Err(FractalHeapStorageError::Format(
-                FormatError::UnexpectedEof {
-                    expected: usize::try_from(MANAGED_FSSE_AT + used + 64).unwrap(),
-                    available: file.len(),
+                FormatError::UnexpectedSourceEof {
+                    expected: MANAGED_FSSE_AT + used + 64,
+                    available: file.len().to_u64(),
                 }
             ))
         );
