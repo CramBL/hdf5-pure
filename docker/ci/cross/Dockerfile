@@ -1,20 +1,20 @@
 ARG BASE_IMAGE
-FROM ${BASE_IMAGE}
+FROM ${BASE_IMAGE} AS prepared
 
 ARG CMAKE_VERSION
 ARG CMAKE_URL
 ARG CMAKE_SHA256
-ARG SOURCE_REVISION
-ARG INPUT_FINGERPRINT
-
-LABEL org.opencontainers.image.source="https://github.com/CramBL/hdf5-pure" \
-      org.opencontainers.image.revision="${SOURCE_REVISION}" \
-      io.hdf5-pure.inputs="${INPUT_FINGERPRINT}"
-
 COPY docker/ci/cross/verify-cmake.sh /usr/local/libexec/
 COPY scripts/ci/install-mold.sh /usr/local/libexec/install-mold.sh
 
-RUN test -n "$CMAKE_VERSION" && test -n "$CMAKE_SHA256" \
+RUN apt-get purge --assume-yes libclang-dev libclang-18-dev \
+        gfortran gfortran-13 gfortran-x86-64-linux-gnu gfortran-13-x86-64-linux-gnu \
+        "gfortran-${CROSS_TOOLCHAIN_PREFIX%-}" "gfortran-13-${CROSS_TOOLCHAIN_PREFIX%-}" \
+    && rm -rf /usr/local/bin/cmake /usr/local/bin/cmake-gui /usr/local/bin/ccmake \
+        /usr/local/bin/ctest /usr/local/bin/cpack /usr/local/share/cmake-3.23 \
+        /usr/local/doc/cmake /usr/local/man/man1/cmake* /usr/local/man/man1/ccmake* \
+        /usr/local/man/man1/ctest* /usr/local/man/man1/cpack* /usr/local/man/man7/cmake* \
+    && test -n "$CMAKE_VERSION" && test -n "$CMAKE_SHA256" \
     && curl --fail --silent --show-error --location "$CMAKE_URL" --output /tmp/cmake.tar.gz \
     && printf '%s  /tmp/cmake.tar.gz\n' "$CMAKE_SHA256" | sha256sum --check \
     && mkdir -p /opt/cmake \
@@ -29,5 +29,15 @@ RUN test -n "$CMAKE_VERSION" && test -n "$CMAKE_SHA256" \
     && bash /usr/local/libexec/install-mold.sh /opt/mold \
     && ln -s /opt/mold/bin/mold "/usr/local/bin/${CROSS_TOOLCHAIN_PREFIX}ld.mold" \
     && dpkg-query --show > /usr/local/libexec/packages.txt
+
+FROM scratch
+COPY --from=prepared / /
+
+ARG SOURCE_REVISION
+ARG INPUT_FINGERPRINT
+
+LABEL org.opencontainers.image.source="https://github.com/CramBL/hdf5-pure" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      io.hdf5-pure.inputs="${INPUT_FINGERPRINT}"
 
 ENV PATH="/opt/mold/bin:${PATH}"
