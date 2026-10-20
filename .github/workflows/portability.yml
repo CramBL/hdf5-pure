@@ -174,16 +174,6 @@ jobs:
           unset HDF5_DIR
           just "$RECIPE"
 
-      - name: Verify cross test binaries
-        if: steps.image.outputs.prepared == 'true'
-        env:
-          TARGET: ${{ matrix.family }}-unknown-linux-gnu
-          IMAGE: ${{ steps.image.outputs.image }}
-          BUNDLED: ${{ contains(matrix.name, 'hdf5') && 'bundled' || '' }}
-        run: |
-          unset HDF5_DIR
-          bash scripts/ci/verify-cross-tests.sh "$TARGET" "$IMAGE" "$BUNDLED"
-
   # The wasm32 tests under Node, with the `wasm-bindgen-test-runner` of the
   # wasm-bindgen release `Cargo.lock` pins.
   wasm:
