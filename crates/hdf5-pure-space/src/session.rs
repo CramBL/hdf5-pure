@@ -141,6 +141,52 @@ impl SessionSpace {
         }
     }
 
+    /// Classifies one complete object-header chunk for reclamation.
+    ///
+    /// `address` is a stored, base-relative address, and `length` includes the chunk's framing.
+    /// For PAGE, returns [`FreeClass::Dead`] if the chunk starts on a page boundary and occupies
+    /// at least one page. Whole pages remain recoverable, while a partial tail stays outside the
+    /// small metadata and raw-data free lists. Other chunks are classified as metadata.
+    ///
+    /// `H5MF__alloc_to_fs_type` in `H5MF.c`, HDF5 2.2.0, assigns PAGE allocations of at least one
+    /// page to the generic-large manager for contiguous drivers.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::{FileSpacePageSize, FileSpaceStrategy};
+    /// use hdf5_pure_space::__private::{FreeClass, PageType, SessionSpace};
+    ///
+    /// let page_size = FileSpacePageSize::DEFAULT;
+    /// let space = SessionSpace::from_strategy(
+    ///     Some(FileSpaceStrategy::Page), 1, page_size,
+    /// );
+    /// let stored_address = page_size.get();
+    /// let complete_length = page_size.get() + 1;
+    /// assert_eq!(
+    ///     space.object_header_free_class(stored_address, complete_length),
+    ///     FreeClass::Dead,
+    /// );
+    /// assert_eq!(
+    ///     space.object_header_free_class(stored_address, page_size.get() - 1),
+    ///     FreeClass::Page(PageType::Meta),
+    /// );
+    /// assert_eq!(
+    ///     space.object_header_free_class(stored_address + 1, complete_length),
+    ///     FreeClass::Page(PageType::Meta),
+    /// );
+    /// ```
+    pub fn object_header_free_class(&self, address: u64, length: u64) -> FreeClass {
+        if self
+            .page_size()
+            .is_some_and(|page| address.is_multiple_of(page.get()) && length >= page.get())
+        {
+            FreeClass::Dead
+        } else {
+            FreeClass::Page(PageType::Meta)
+        }
+    }
+
     /// Seeds one persisted free-space section under the active strategy.
     ///
     /// `kind` carries PAGE manager semantics. A flat strategy ignores it because all manager
@@ -452,6 +498,48 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+
+    #[rstest]
+    #[case::small_aligned(0, -1, FreeClass::Page(PageType::Meta))]
+    #[case::exact_page(0, 0, FreeClass::Dead)]
+    #[case::large_aligned(0, 1, FreeClass::Dead)]
+    #[case::large_unaligned(1, 1, FreeClass::Page(PageType::Meta))]
+    fn object_header_chunks_retain_their_allocation_class(
+        #[values(512, 4_096, 8_192)] page_size: u64,
+        #[case] offset: u64,
+        #[case] length_delta: i64,
+        #[case] expected: FreeClass,
+    ) {
+        let space = SessionSpace::from_strategy(
+            Some(FileSpaceStrategy::Page),
+            1,
+            FileSpacePageSize::try_from(page_size).unwrap(),
+        );
+        assert_eq!(
+            space.object_header_free_class(
+                2 * page_size + offset,
+                page_size.checked_add_signed(length_delta).unwrap()
+            ),
+            expected,
+        );
+    }
+
+    #[rstest]
+    fn unpaged_object_header_chunks_remain_metadata(
+        #[values(
+            None,
+            Some(FileSpaceStrategy::FsmAggr),
+            Some(FileSpaceStrategy::Aggr),
+            Some(FileSpaceStrategy::None)
+        )]
+        strategy: Option<FileSpaceStrategy>,
+    ) {
+        let space = SessionSpace::from_strategy(strategy, 1, FileSpacePageSize::DEFAULT);
+        assert_eq!(
+            space.object_header_free_class(4_096, 8_193),
+            FreeClass::Page(PageType::Meta)
+        );
+    }
 
     #[rstest]
     #[case::metadata(AllocationClass::Metadata, ManagerKind::PagedSmallMetadata, 4_112)]

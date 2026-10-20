@@ -546,14 +546,14 @@ impl WriteEngine {
         }
         match Self::read_object(&self.image(), AccessMode::ReadWrite, addr, self.addresses) {
             Ok(ObjModel::DatasetVerbatim { .. }) => {
-                append_object_metadata_spans(out, &spans, attribute_storage.as_deref());
+                self.append_object_metadata_spans(out, &spans, attribute_storage.as_deref());
             }
             Ok(ObjModel::DatasetContiguous {
                 data_addr,
                 data_size,
                 ..
             }) => {
-                append_object_metadata_spans(out, &spans, attribute_storage.as_deref());
+                self.append_object_metadata_spans(out, &spans, attribute_storage.as_deref());
                 // A defined, in-bounds contiguous data block is owned outright.
                 // An empty dataset stores the undefined address and owns none. Its
                 // absolute file offset is what this bounds-checks and records.
@@ -585,7 +585,7 @@ impl WriteEngine {
             // region that might still be in use.
             Ok(ObjModel::DatasetChunked { .. }) => {
                 if let Some(storage) = self.chunked_storage_spans(addr) {
-                    append_object_metadata_spans(out, &spans, attribute_storage.as_deref());
+                    self.append_object_metadata_spans(out, &spans, attribute_storage.as_deref());
                     // Already page-typed: chunk data is raw, and the index class follows its
                     // format allocation type or proven physical placement.
                     out.extend(storage);
@@ -621,7 +621,7 @@ impl WriteEngine {
         children: impl IntoIterator<Item = StoredAddress>,
         out: &mut Vec<(u64, u64, FreeClass)>,
     ) {
-        append_object_metadata_spans(out, header_spans, attribute_storage);
+        self.append_object_metadata_spans(out, header_spans, attribute_storage);
         out.extend(link_storage.into_iter().flatten().copied());
         // The recursion works in absolute offsets, matching `incoming`'s
         // keys and `oh_chunk_spans`.
@@ -631,6 +631,48 @@ impl WriteEngine {
                 self.collect_free_spans(c, depth + 1, incoming, out);
             }
         }
+    }
+
+    /// Appends classified header chunks and independently enumerated attribute storage to `out`.
+    ///
+    /// Skips the headers if any chunk address lies below the effective base. Attribute spans
+    /// retain their supplied free classes.
+    fn append_object_metadata_spans(
+        &self,
+        out: &mut Vec<(u64, u64, FreeClass)>,
+        header_spans: &[(u64, u64)],
+        attribute_storage: Option<&[(u64, u64, FreeClass)]>,
+    ) {
+        if let Ok(headers) = self.object_header_free_spans(header_spans) {
+            out.extend(headers);
+        }
+        out.extend(attribute_storage.into_iter().flatten().copied());
+    }
+
+    /// Returns independently classified object-header chunks at their physical offsets.
+    ///
+    /// The caller passes complete chunks from [`Self::oh_chunk_spans`]. Classification uses
+    /// stored addresses, while the returned spans retain their original physical offsets for
+    /// the reclamation walk.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressBelowBase`] if a chunk starts below the effective base.
+    pub(super) fn object_header_free_spans(
+        &self,
+        spans: &[(u64, u64)],
+    ) -> Result<Vec<(u64, u64, FreeClass)>, FormatError> {
+        spans
+            .iter()
+            .map(|&(address, length)| {
+                let stored = self.addresses.relative(address)?;
+                Ok((
+                    address,
+                    length,
+                    self.space.object_header_free_class(stored.get(), length),
+                ))
+            })
+            .collect()
     }
 
     /// Returns the Link Info message in `region` and the object header address of each hard link
@@ -1495,21 +1537,6 @@ fn huge_object_free_class(
     }
 }
 
-/// Appends `header_spans` to `out` as metadata, followed by the dense attribute storage in
-/// `attribute_storage`, each span with its own free class.
-fn append_object_metadata_spans(
-    out: &mut Vec<(u64, u64, FreeClass)>,
-    header_spans: &[(u64, u64)],
-    attribute_storage: Option<&[(u64, u64, FreeClass)]>,
-) {
-    out.extend(
-        header_spans
-            .iter()
-            .map(|&(addr, len)| (addr, len, FreeClass::Page(PageType::Meta)))
-            .chain(attribute_storage.into_iter().flatten().copied()),
-    );
-}
-
 /// Returns the gaps in `0..limit` left by sorted, disjoint `claimed` spans.
 fn complement_spans(limit: u64, claimed: &[(u64, u64)]) -> Vec<(u64, u64)> {
     let mut out = Vec::new();
@@ -1526,10 +1553,7 @@ fn complement_spans(limit: u64, claimed: &[(u64, u64)]) -> Vec<(u64, u64)> {
     out
 }
 
-/// Tags object-header chunk spans as file metadata.
-///
-/// Every span [`WriteEngine::oh_chunk_spans`] returns is part of an object header, so the page type
-/// is the same for all of them.
+/// Tags each span as metadata for reclamation.
 pub(super) fn meta_spans(spans: Vec<(u64, u64)>) -> impl Iterator<Item = (u64, u64, FreeClass)> {
     spans
         .into_iter()

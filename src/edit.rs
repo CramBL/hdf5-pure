@@ -378,6 +378,8 @@ mod aggregation;
 mod global_heap_liveness;
 #[cfg(test)]
 mod page_feasibility;
+#[cfg(test)]
+mod page_header_reclamation;
 mod reclaim;
 
 pub use global_heap_liveness::GlobalHeapLiveness;
@@ -6421,7 +6423,7 @@ impl WriteEngine {
                 {
                     to_free.extend(storage);
                 }
-                to_free.extend(reclaim::meta_spans(spans));
+                to_free.extend(self.object_header_free_spans(&spans)?);
             }
         }
 
@@ -6508,7 +6510,7 @@ impl WriteEngine {
                     {
                         to_free.extend(storage);
                     }
-                    to_free.extend(reclaim::meta_spans(spans));
+                    to_free.extend(self.object_header_free_spans(&spans)?);
                 }
             }
         }
