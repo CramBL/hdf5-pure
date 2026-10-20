@@ -3200,22 +3200,14 @@ impl FileWriter {
                     && free_space_manager::align_up(small_raw_total, page_size) != small_raw_total);
             let large_active = !large_frag_sizes.is_empty();
             let mut slots = [u64::MAX; NUM_FILE_FSM_MANAGERS];
-            let mut super_fsm: Option<(StoredAddress, StoredAddress)> = None;
+            let mut super_fsm: Option<(StoredAddress, StoredAddress, u64)> = None;
             let mut draw_fsm: Option<(StoredAddress, StoredAddress)> = None;
             let mut large_fsm: Option<(StoredAddress, StoredAddress)> = None;
-            let mut super_sizes: Vec<_> = collection_meta_sections
-                .iter()
-                .map(|section| section.size)
-                .collect();
-            super_sizes.push(0);
             let mut draw_sizes: Vec<_> = collection_raw_sections
                 .iter()
                 .map(|section| section.size)
                 .collect();
             draw_sizes.push(0);
-            let super_block_len =
-                hdf5_pure_format::__private::free_space_manager_header_len(WIDTHS)
-                    + hdf5_pure_format::__private::section_info_len(WIDTHS, &super_sizes);
             let draw_block_len = if draw_active {
                 hdf5_pure_format::__private::free_space_manager_header_len(WIDTHS)
                     + hdf5_pure_format::__private::section_info_len(WIDTHS, &draw_sizes)
@@ -3228,25 +3220,24 @@ impl FileWriter {
             } else {
                 0
             };
-            // SUPER tracks the metadata page tail. Placing its own block shifts
-            // that tail, so only keep SUPER when a tail actually remains; in the
-            // (astronomically rare) exact-fill case, drop it and leave the tiny
-            // tail untracked. This decision is O(1), not a fixpoint.
-            let super_active = if persist_paged {
-                let with = meta_content_end + super_block_len + draw_block_len + large_block_len;
-                !collection_meta_sections.is_empty()
-                    || free_space_manager::align_up(with, page_size) > with
+            let super_allocation = if persist_paged {
+                paged_metadata_section_allocation(
+                    page_size,
+                    meta_content_end,
+                    [draw_block_len, large_block_len],
+                    &collection_meta_sections,
+                )?
             } else {
-                false
+                None
             };
             if persist_paged {
-                if super_active {
+                if let Some(allocated) = super_allocation {
                     let fshd_addr = StoredAddress::new(meta);
                     meta += hdf5_pure_format::__private::free_space_manager_header_len(WIDTHS);
                     let fsse_addr = StoredAddress::new(meta);
-                    meta += hdf5_pure_format::__private::section_info_len(WIDTHS, &super_sizes);
+                    meta += allocated;
                     slots[0] = fshd_addr.get();
-                    super_fsm = Some((fshd_addr, fsse_addr));
+                    super_fsm = Some((fshd_addr, fsse_addr, allocated));
                 }
                 if draw_active {
                     let fshd_addr = StoredAddress::new(meta);
@@ -3415,17 +3406,14 @@ impl FileWriter {
 
             // (j) Serialize the free-space-manager blocks.
             let super_blocks = super_fsm
-                .map(|(fshd_addr, fsse_addr)| {
+                .map(|(fshd_addr, fsse_addr, allocated)| {
                     hdf5_pure_format::__private::serialize_free_space_manager_with_allocation(
                         WIDTHS,
                         &collection_meta_sections,
                         fshd_addr,
                         fsse_addr,
                         SECTION_CLASS_SMALL,
-                        Some(hdf5_pure_format::__private::section_info_len(
-                            WIDTHS,
-                            &super_sizes,
-                        )),
+                        Some(allocated),
                     )
                 })
                 .transpose()?;
@@ -4133,6 +4121,61 @@ fn file_space_extension_oh(info: &FileSpaceInfo) -> Result<Vec<u8>, FormatError>
     oh.serialize()
 }
 
+/// Reserves section-list capacity for the final metadata page tail.
+///
+/// `metadata_end` is a stored address before manager placement. Includes the lengths in
+/// `other_managers` when testing page alignment. Returns `None` when the metadata ends on a
+/// page boundary without this manager and `sections` is empty. When adding the manager would
+/// fill a page exactly with no other metadata sections, reserves one extra padding byte so
+/// the manager has a page tail to record.
+///
+/// # Errors
+///
+/// Returns [`FormatError::OffsetOverflow`] if a manager extent or its padding exceeds [`u64::MAX`].
+fn paged_metadata_section_allocation(
+    page: FileSpacePageSize,
+    metadata_end: u64,
+    other_managers: impl IntoIterator<Item = u64>,
+    sections: &[FreeSection],
+) -> Result<Option<u64>, FormatError> {
+    let end = other_managers
+        .into_iter()
+        .try_fold(metadata_end, |offset, length| {
+            offset
+                .checked_add(length)
+                .ok_or(FormatError::OffsetOverflow { offset, length })
+        })?;
+    if sections.is_empty() && end % page.get() == 0 {
+        return Ok(None);
+    }
+    let sizes: Vec<_> = sections
+        .iter()
+        .map(|section| section.size)
+        .chain(core::iter::once(0))
+        .collect();
+    let allocation = hdf5_pure_format::__private::section_info_len(WIDTHS, &sizes);
+    let end = [
+        hdf5_pure_format::__private::free_space_manager_header_len(WIDTHS),
+        allocation,
+    ]
+    .into_iter()
+    .try_fold(end, |offset, length| {
+        offset
+            .checked_add(length)
+            .ok_or(FormatError::OffsetOverflow { offset, length })
+    })?;
+    Ok(Some(if sections.is_empty() && end % page.get() == 0 {
+        allocation
+            .checked_add(1)
+            .ok_or(FormatError::OffsetOverflow {
+                offset: allocation,
+                length: 1,
+            })?
+    } else {
+        allocation
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4143,6 +4186,61 @@ mod tests {
     use crate::object_path::ObjectPath;
     use crate::superblock::Superblock;
     use crate::type_builders;
+
+    #[rstest::rstest]
+    #[case::before_exact_fill(394, 0, false, Some(35))]
+    #[case::exact_fill(395, 0, false, Some(36))]
+    #[case::after_exact_fill(396, 0, false, Some(35))]
+    #[case::no_tail(512, 0, false, None)]
+    #[case::other_manager_fills_page(395, 117, false, None)]
+    #[case::existing_section(377, 0, true, Some(53))]
+    fn paged_metadata_capacity_keeps_known_sections(
+        #[case] end: u64,
+        #[case] other: u64,
+        #[case] existing: bool,
+        #[case] expected: Option<u64>,
+    ) {
+        let sections = if existing {
+            vec![FreeSection {
+                addr: StoredAddress::new(48),
+                size: 17,
+            }]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(
+            paged_metadata_section_allocation(
+                FileSpacePageSize::try_from(512).unwrap(),
+                end,
+                [other],
+                &sections
+            )
+            .unwrap(),
+            expected
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::other_manager(u64::MAX, 1, u64::MAX, 1)]
+    #[case::header(u64::MAX - 10, 0, u64::MAX - 10, 82)]
+    #[case::section_list(u64::MAX - 90, 0, u64::MAX - 8, 35)]
+    fn paged_metadata_capacity_rejects_overflow(
+        #[case] end: u64,
+        #[case] other: u64,
+        #[case] offset: u64,
+        #[case] length: u64,
+    ) {
+        assert_eq!(
+            paged_metadata_section_allocation(
+                FileSpacePageSize::try_from(512).unwrap(),
+                end,
+                [other],
+                &[]
+            )
+            .unwrap_err(),
+            FormatError::OffsetOverflow { offset, length }
+        );
+    }
 
     #[test]
     fn small_paged_collections_can_place_metadata_above_four_gibibytes() {

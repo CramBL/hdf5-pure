@@ -204,6 +204,22 @@ pub struct SpaceOwnershipSummary {
 /// Panics if the diagnostic returns an error or any accounting requirement is unmet.
 #[track_caller]
 pub fn assert_exact_space_ownership(file: &File) -> SpaceOwnershipSummary {
+    assert_space_ownership(file, &[])
+}
+
+/// Asserts byte accounting with exactly the expected unclassified extents.
+///
+/// Requires complete analysis, disjoint extents, and zero trailing slack. The extents in
+/// `expected_unclassified` use physical offsets and must match the diagnostic's order.
+///
+/// # Panics
+///
+/// Panics if the diagnostic returns an error or any accounting requirement is unmet.
+#[track_caller]
+pub fn assert_space_ownership(
+    file: &File,
+    expected_unclassified: &[(u64, u64)],
+) -> SpaceOwnershipSummary {
     let ownership = file.__space_ownership().unwrap();
     assert_ownership_extents_disjoint(&ownership);
     let SpaceOwnership {
@@ -237,10 +253,7 @@ pub fn assert_exact_space_ownership(file: &File) -> SpaceOwnershipSummary {
         unclassified_extents: unclassified_space.len(),
         trailing_slack_extents: trailing_slack_space.len(),
     };
-    assert_eq!(
-        summary.unclassified_bytes, 0,
-        "all committed bytes below logical EOF must be live storage or reusable free space: {unclassified_space:?}"
-    );
+    assert_eq!(unclassified_space, expected_unclassified);
     assert_eq!(
         summary.trailing_slack_bytes, 0,
         "the controlled churn fixture must not leave bytes past logical EOF: {trailing_slack_space:?}"
