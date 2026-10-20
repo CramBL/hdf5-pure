@@ -700,6 +700,11 @@ fn int_fits(v: i64, width: usize, signed: bool) -> bool {
 /// those addresses point into the *source*. Repack decides that with
 /// `attr_bytes_are_position_independent`.
 pub(crate) enum AttrSpec {
+    /// A decoded value whose attribute refers to the committed datatype at `path`.
+    CommittedValue {
+        value: AttrValue,
+        path: ObjectPathBuf,
+    },
     /// A decoded value the writer encodes with [`build_attr_message`].
     Value(AttrValue),
     /// An already-encoded message, written as given except for its datatype location.
@@ -734,13 +739,23 @@ pub(crate) enum AttrSpec {
 }
 
 impl AttrSpec {
-    /// Returns the message this attribute writes: a [`Value`](AttrSpec::Value) encoded, or a copy
-    /// of an already-encoded message.
+    /// Encodes a decoded value or copies an already-encoded attribute message.
     ///
     /// A copy with a committed datatype path refers to the undefined address, which the writer
     /// replaces once it places the committed datatype at that path.
-    pub(crate) fn to_message(&self, name: &str) -> AttributeMessage {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ValueTooLargeForRepresentation`] if a variable-length string
+    /// exceeds [`u32::MAX`] bytes.
+    pub(crate) fn to_message(&self, name: &str) -> Result<AttributeMessage, FormatError> {
         match self {
+            Self::CommittedValue { value, .. } => {
+                let mut message = build_attr_message(name, value)?;
+                message.datatype_location =
+                    DatatypeLocation::Committed(crate::file_writer::UNDEF_ADDRESS);
+                Ok(message)
+            }
             Self::Value(v) => build_attr_message(name, v),
             Self::Verbatim {
                 message,
@@ -756,7 +771,7 @@ impl AttrSpec {
                     message.datatype_location =
                         DatatypeLocation::Committed(crate::file_writer::UNDEF_ADDRESS);
                 }
-                message
+                Ok(message)
             }
         }
     }
@@ -765,6 +780,7 @@ impl AttrSpec {
     /// the message keeps its own datatype location.
     pub(crate) fn committed_datatype_path(&self) -> Option<&ObjectPathBuf> {
         match self {
+            Self::CommittedValue { path, .. } => Some(path),
             Self::Value(_) => None,
             Self::Verbatim {
                 committed_datatype_path,
@@ -781,7 +797,7 @@ impl AttrSpec {
     /// build and patch, or `None` when the attribute needs no heap.
     pub(crate) fn var_len_strings(&self) -> Option<&[String]> {
         match self {
-            Self::Value(v) => v.var_len_strings(),
+            Self::CommittedValue { value, .. } | Self::Value(value) => value.var_len_strings(),
             Self::VerbatimVarLen { strings, .. } => Some(strings),
             Self::Verbatim { .. } => None,
         }
@@ -856,8 +872,8 @@ fn fixed_string_attr<S: AsRef<str>>(
     }
 }
 
-/// One fixed-width string, under a scalar dataspace.
-fn fixed_string_scalar_attr(
+/// Encodes a fixed-width string with a scalar dataspace.
+pub(crate) fn fixed_string_scalar_attr(
     name: &str,
     value: &str,
     width: Option<NonZeroU32>,
@@ -885,8 +901,17 @@ fn fixed_string_array_attr<S: AsRef<str>>(
     fixed_string_attr(name, values, width, charset, dataspace)
 }
 
-pub(crate) fn build_attr_message(name: &str, value: &AttrValue) -> AttributeMessage {
-    match value {
+/// Encodes an attribute value with its datatype and dataspace.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ValueTooLargeForRepresentation`] if a variable-length string exceeds
+/// [`u32::MAX`] bytes.
+pub(crate) fn build_attr_message(
+    name: &str,
+    value: &AttrValue,
+) -> Result<AttributeMessage, FormatError> {
+    Ok(match value {
         AttrValue::F32(v) => numeric_scalar_attr(name, make_f32_type(), &v.to_le_bytes()),
         AttrValue::F32Array(a) => numeric_array_attr(name, make_f32_type(), a, f32::to_le_bytes),
         AttrValue::F64(v) => numeric_scalar_attr(name, make_f64_type(), &v.to_le_bytes()),
@@ -926,19 +951,19 @@ pub(crate) fn build_attr_message(name: &str, value: &AttrValue) -> AttributeMess
             fixed_string_array_attr(name, values, Some(*width), CharacterSet::Ascii)
         }
         AttrValue::VarLenAsciiCharArray(values) => {
-            vlen_string_array_attr(name, values, make_matlab_vlen_ascii_type())
+            vlen_string_array_attr(name, values, make_matlab_vlen_ascii_type())?
         }
-        AttrValue::VarLenString(value) => vlen_string_scalar_attr(name, value, CharacterSet::Utf8),
+        AttrValue::VarLenString(value) => vlen_string_scalar_attr(name, value, CharacterSet::Utf8)?,
         AttrValue::VarLenAsciiString(value) => {
-            vlen_string_scalar_attr(name, value, CharacterSet::Ascii)
+            vlen_string_scalar_attr(name, value, CharacterSet::Ascii)?
         }
         AttrValue::VarLenStringArray(values) => {
-            vlen_string_array_attr(name, values, make_vlen_string_type(CharacterSet::Utf8))
+            vlen_string_array_attr(name, values, make_vlen_string_type(CharacterSet::Utf8))?
         }
         AttrValue::VarLenAsciiStringArray(values) => {
-            vlen_string_array_attr(name, values, make_vlen_string_type(CharacterSet::Ascii))
+            vlen_string_array_attr(name, values, make_vlen_string_type(CharacterSet::Ascii))?
         }
-    }
+    })
 }
 
 /// MATLAB v7.3 and matio expect `MATLAB_fields` and similar variable-length
@@ -960,32 +985,38 @@ fn make_matlab_vlen_ascii_type() -> Datatype {
     }
 }
 
-/// A variable-length string attribute: one 16-byte global-heap reference per
-/// element, under the `datatype` that says how to read them back.
+/// Encodes variable-length string references with `datatype` and `dataspace`.
 ///
-/// The datatype is a parameter because both variable-length string encodings
-/// this crate writes stand over the same element bytes, and
-/// [`vl_string_reference_bytes`] is the one encoder for those. The heap
-/// addresses in them are placeholders the writer patches once it has placed the
-/// collections.
+/// The writer replaces placeholder heap addresses after placing the collections.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ValueTooLargeForRepresentation`] if a string exceeds [`u32::MAX`] bytes.
 fn vlen_string_attr(
     name: &str,
     strings: &[String],
     datatype: Datatype,
     dataspace: Dataspace,
-) -> AttributeMessage {
-    AttributeMessage {
+) -> Result<AttributeMessage, FormatError> {
+    Ok(AttributeMessage {
         name: name.to_string(),
-        raw_data: vl_string_reference_bytes(strings),
+        raw_data: vl_string_reference_bytes(strings)?,
         datatype,
         dataspace,
         datatype_location: DatatypeLocation::Inline,
-    }
+    })
 }
 
-/// One variable-length string under a scalar dataspace — the standard
-/// `H5T_STRING` with `STRSIZE = H5T_VARIABLE`.
-fn vlen_string_scalar_attr(name: &str, value: &String, charset: CharacterSet) -> AttributeMessage {
+/// Encodes a variable-length string with a scalar dataspace.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ValueTooLargeForRepresentation`] if `value` exceeds [`u32::MAX`] bytes.
+fn vlen_string_scalar_attr(
+    name: &str,
+    value: &String,
+    charset: CharacterSet,
+) -> Result<AttributeMessage, FormatError> {
     vlen_string_attr(
         name,
         core::slice::from_ref(value),
@@ -994,37 +1025,36 @@ fn vlen_string_scalar_attr(name: &str, value: &String, charset: CharacterSet) ->
     )
 }
 
-/// An array of variable-length strings under `datatype`, with a 1-D dataspace of
-/// their own count — taken here rather than passed in, so the dataspace cannot
-/// disagree with the references below it. Both encodings go through this, which
-/// is what keeps that guarantee true of MATLAB's shape as well.
-fn vlen_string_array_attr(name: &str, values: &[String], datatype: Datatype) -> AttributeMessage {
+/// Encodes variable-length strings with a one-dimensional dataspace of their element count.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ValueTooLargeForRepresentation`] if a string exceeds [`u32::MAX`] bytes.
+fn vlen_string_array_attr(
+    name: &str,
+    values: &[String],
+    datatype: Datatype,
+) -> Result<AttributeMessage, FormatError> {
     vlen_string_attr(name, values, datatype, simple_1d(values.len() as u64))
 }
 
-/// The element bytes of a variable-length string value: one 16-byte global-heap
-/// reference per string, with the collection address left as a placeholder for
-/// the writer to patch once it has placed the collections.
+/// Encodes one 16-byte global-heap reference per string with a placeholder collection address.
 ///
-/// Both variable-length string encodings this crate handles share these bytes —
-/// a true `H5T_STRING` with `STRSIZE = VAR`, and the `H5T_VLEN` of 1-byte
-/// strings that MATLAB and matio emit — so only the datatype descriptor around
-/// them differs. That is what lets repack keep a source attribute's own datatype
-/// while rebuilding its payload against the destination's heap.
+/// Each reference stores the string's byte count and its 1-based object index within a collection.
+/// The collection boundaries match [`build_global_heap_collections`]. The writer replaces the
+/// placeholder addresses after placing those collections.
 ///
-/// The object index is 1-based *within each collection*, and the split into
-/// collections must match [`build_global_heap_collections`] exactly: the two
-/// walk the same strings in the same order, and a divergence would point an
-/// element at the wrong heap object. Keeping one encoder for every caller is
-/// what holds that invariant to a single place.
-pub(crate) fn vl_string_reference_bytes(strings: &[String]) -> Vec<u8> {
+/// The C library writes the count in `H5T__vlen_disk_write` (`H5Tvlen.c`, HDF5 1.14.6)
+/// and the heap address and object index in `H5VL__native_blob_put`
+/// (`H5VLnative_blob.c`, HDF5 1.14.6).
+///
+/// # Errors
+///
+/// Returns [`FormatError::ValueTooLargeForRepresentation`] if a string exceeds [`u32::MAX`] bytes.
+pub(crate) fn vl_string_reference_bytes(strings: &[String]) -> Result<Vec<u8>, FormatError> {
     let mut raw = Vec::with_capacity(strings.len() * VL_REF_SIZE);
     for (i, s) in strings.iter().enumerate() {
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "VLEN string length is written into the 4-byte length prefix of the variable-length reference"
-        )]
-        raw.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        raw.extend_from_slice(&vl_element_count(s.len() as u64)?.to_le_bytes());
         raw.extend_from_slice(&0u64.to_le_bytes()); // patched later
         #[expect(
             clippy::cast_possible_truncation,
@@ -1032,7 +1062,7 @@ pub(crate) fn vl_string_reference_bytes(strings: &[String]) -> Vec<u8> {
         )]
         raw.extend_from_slice(&((i % GLOBAL_HEAP_MAX_OBJECTS + 1) as u32).to_le_bytes());
     }
-    raw
+    Ok(raw)
 }
 
 /// Build the global heap collections holding the given strings, splitting them
@@ -1140,18 +1170,20 @@ pub(crate) struct VlStringStaging {
     pub patch_offsets: Vec<usize>,
 }
 
-/// Stage the references and global-heap collections for a variable-length
-/// dataset/attribute from its per-element byte payloads.
+/// Stages references and global-heap collections for variable-length element payloads.
 ///
-/// `element_size` is the byte width of the VL base type. A VL string's base type
-/// is a single byte (`element_size == 1`), so the reference's stored `length`
-/// equals the payload's byte count. A non-string VL sequence stores an element
-/// *count* in that field, so the length written is `bytes.len() / element_size`,
-/// while the heap object still holds the exact bytes.
+/// `element_size` is the byte width of the base type. Each reference stores the payload's byte
+/// length divided by `element_size`, while the heap object stores the complete payload.
+/// For strings, `element_size` is one byte.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ValueTooLargeForRepresentation`] if a base-element count exceeds
+/// [`u32::MAX`].
 pub(crate) fn stage_vl_elements(
     elements: &[VlStringElement],
     element_size: NonZeroUsize,
-) -> (Vec<u8>, VlStringStaging) {
+) -> Result<(Vec<u8>, VlStringStaging), FormatError> {
     stage_vl_payloads(
         elements.iter().map(|e| match e {
             VlStringElement::Null => None,
@@ -1161,18 +1193,20 @@ pub(crate) fn stage_vl_elements(
     )
 }
 
-/// [`stage_vl_elements`] over payloads the caller has not had to own.
+/// Stages references and global-heap collections from borrowed payloads.
 ///
-/// A writer that already holds its strings — `with_vlen_strings` is handed
-/// `&[&str]` — would otherwise copy every one of them into a
-/// [`VlStringElement::Bytes`] first, which is the whole payload again in one
-/// allocation per element: 4 MiB in 32,768 blocks to write 4 MiB of text
-/// (issue #228). The bytes are copied once, into the heap collections, which is
-/// where they have to end up.
+/// Uses the reference layout described by [`vl_string_reference_bytes`] and the base-element
+/// counts described by [`stage_vl_elements`]. The writer copies each payload into its heap
+/// collection without an intermediate owned element.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ValueTooLargeForRepresentation`] if a base-element count exceeds
+/// [`u32::MAX`].
 pub(crate) fn stage_vl_payloads<'a>(
     payloads: impl ExactSizeIterator<Item = Option<&'a [u8]>>,
     element_size: NonZeroUsize,
-) -> (Vec<u8>, VlStringStaging) {
+) -> Result<(Vec<u8>, VlStringStaging), FormatError> {
     // Collect the non-null payloads in order; their positions become the heap
     // object indices, 1-based within each collection.
     let count = payloads.len();
@@ -1192,12 +1226,9 @@ pub(crate) fn stage_vl_payloads<'a>(
             }
             Some(bytes) => {
                 patch_offsets.push(refs.len());
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "VL element length (element count) is written into the 4-byte \
-                              length prefix of the variable-length reference"
-                )]
-                refs.extend_from_slice(&((bytes.len() / element_size) as u32).to_le_bytes());
+                refs.extend_from_slice(
+                    &vl_element_count((bytes.len() / element_size) as u64)?.to_le_bytes(),
+                );
                 refs.extend_from_slice(&0u64.to_le_bytes()); // patched later
                 // 1-based index within this object's own collection.
                 let index = objects.len() % GLOBAL_HEAP_MAX_OBJECTS + 1;
@@ -1214,13 +1245,24 @@ pub(crate) fn stage_vl_payloads<'a>(
     // A dataset of only null elements (or an empty dataset) references no heap
     // object, so it gets no collection at all — there is nothing to patch and a
     // 4096-byte empty GCOL would be dead weight.
-    (
+    Ok((
         refs,
         VlStringStaging {
             collections: build_global_heap_collections_from_bytes(&objects),
             patch_offsets,
         },
-    )
+    ))
+}
+
+/// Converts a variable-length element count to its four-byte representation.
+///
+/// The C library encodes this count in `H5T__vlen_disk_write` (`H5Tvlen.c`, HDF5 1.14.6).
+///
+/// # Errors
+///
+/// Returns [`FormatError::ValueTooLargeForRepresentation`] if `count` exceeds [`u32::MAX`].
+fn vl_element_count(count: u64) -> Result<u32, FormatError> {
+    count.narrow()
 }
 
 /// Stage the global-heap collections for a dataset whose datatype merely
@@ -2324,7 +2366,8 @@ pub struct DatasetBuilder {
     pub(crate) datatype: Option<Datatype>,
     pub(crate) shape: Option<Vec<u64>>,
     pub(crate) maxshape: Option<Vec<MaxExtent>>,
-    pub(crate) data: Option<Vec<u8>>,
+    /// Staged element bytes or an error to report when serializing the dataset.
+    pub(crate) data: Option<Result<Vec<u8>, Box<FormatError>>>,
     pub(crate) attrs: Vec<(String, AttrSpec)>,
     pub(crate) chunk_options: ChunkOptions,
     /// When set, this dataset's chunks are copied verbatim from a source file
@@ -2451,7 +2494,7 @@ impl DatasetBuilder {
     /// committed at `path`.
     pub fn set_attr_committed(&mut self, name: &str, value: AttrValue, path: &str) -> &mut Self {
         self.attrs
-            .push((name.to_string(), committed_attr_spec(name, &value, path)));
+            .push((name.to_string(), committed_attr_spec(value, path)));
         self
     }
 
@@ -2770,7 +2813,7 @@ impl DatasetBuilder {
     /// after their call to this, which is why clearing here does not defeat
     /// them.
     fn set_element_bytes(&mut self, data: Vec<u8>) {
-        self.data = Some(data);
+        self.data = Some(Ok(data));
         self.vl_string_staging = None;
         self.reference_targets = None;
     }
@@ -2960,24 +3003,21 @@ impl DatasetBuilder {
         self
     }
 
-    /// Write a variable-length UTF-8 string dataset.
+    /// Stages variable-length UTF-8 strings in global-heap objects.
     ///
-    /// Each element is stored as a global-heap object holding the string's
-    /// bytes; the datatype is `H5T_VLEN { H5T_STRING { STRSIZE=VAR, ASCII or
-    /// UTF-8 } }`. The shape defaults to `[values.len()]` unless
-    /// [`with_shape`](Self::with_shape) sets it (use that for ND VL strings,
-    /// passing `values` in row-major order).
+    /// The shape defaults to `[values.len()]` unless [`with_shape`](Self::with_shape) sets it.
+    /// For a multidimensional dataset, pass `values` in row-major order. Empty strings use
+    /// zero-length heap objects.
     ///
-    /// Empty strings become zero-length heap objects (reading back as `""`).
-    /// This convenience method cannot distinguish a null element from an empty
-    /// one, nor carry embedded NULs, non-UTF-8 payloads, or a specific
-    /// charset/padding.
+    /// [`FileBuilder::finish`](crate::FileBuilder::finish) and related output methods report
+    /// [`FormatError::ValueTooLargeForRepresentation`] if a string exceeds [`u32::MAX`] bytes.
+    /// Replacing the element data clears a previously recorded error.
     pub fn with_vlen_strings(&mut self, values: &[&str]) -> &mut Self {
         // Staged straight from the caller's strings: owning each one first would
         // copy the whole payload for nothing (see [`stage_vl_payloads`]). A VL
         // string's base type is one byte, so the reference length is the byte
         // count.
-        self.stage_vlen(
+        self.stage_vlen_result(
             make_vlen_string_type(CharacterSet::Utf8),
             values.len() as u64,
             stage_vl_payloads(values.iter().map(|s| Some(s.as_bytes())), NonZeroUsize::MIN),
@@ -3122,17 +3162,15 @@ impl DatasetBuilder {
         Ok(self)
     }
 
-    /// Write a variable-length string dataset from an explicit source datatype
-    /// and per-element byte payloads, preserving the null-vs-empty distinction.
+    /// Stages variable-length string payloads with their source datatype.
     ///
-    /// `datatype` must be a string-shaped variable-length datatype
-    /// (`is_string: true`, or the MATLAB `H5T_VLEN { H5T_STRING { STRSIZE=1 } }`
-    /// shape); its charset, padding, and base type are reproduced verbatim. Each
-    /// [`VlStringElement`] is either a null reference or a heap object holding
-    /// exact bytes. This is the faithful re-emit path used by repack. Returns a
-    /// [`TypeMismatch`](crate::FormatError::TypeMismatch) if `datatype` is not a
-    /// VL-string datatype. The shape defaults to `[elements.len()]` unless
-    /// [`with_shape`](Self::with_shape) sets it.
+    /// Preserves the datatype, payload bytes, and distinction between null and empty elements.
+    /// The shape defaults to `[elements.len()]` unless [`with_shape`](Self::with_shape) sets it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::TypeMismatch`] if `datatype` is not a variable-length string datatype,
+    /// or [`FormatError::ValueTooLargeForRepresentation`] if a payload exceeds [`u32::MAX`] bytes.
     pub(crate) fn with_vlen_string_elements(
         &mut self,
         datatype: Datatype,
@@ -3144,30 +3182,37 @@ impl DatasetBuilder {
                 actual: "non-VariableLength string",
             });
         }
-        self.stage_vlen_strings(datatype, elements);
+        self.stage_vlen_strings(datatype, elements)?;
         Ok(self)
     }
 
-    /// Shared body of the VL-string write entry points: stage the references
-    /// and global heap collection and record them on the builder.
-    fn stage_vlen_strings(&mut self, datatype: Datatype, elements: &[VlStringElement]) {
+    /// Stages string payloads with a one-byte base type.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ValueTooLargeForRepresentation`] if a payload exceeds
+    /// [`u32::MAX`] bytes.
+    fn stage_vlen_strings(
+        &mut self,
+        datatype: Datatype,
+        elements: &[VlStringElement],
+    ) -> Result<(), FormatError> {
         // A VL string's base type is one byte, so the reference length is the
         // byte count (element_size = 1).
-        self.stage_vlen_elements(datatype, elements, NonZeroUsize::MIN);
+        self.stage_vlen_elements(datatype, elements, NonZeroUsize::MIN)
     }
 
-    /// Write a *non-string* variable-length (sequence) dataset from an explicit
-    /// source datatype and per-element byte payloads.
+    /// Stages variable-length sequence payloads with their source datatype.
     ///
-    /// `datatype` must be a non-string VL datatype (e.g. `H5T_VLEN
-    /// { H5T_NATIVE_DOUBLE }`); its base type is reproduced verbatim. Each
-    /// element's exact heap bytes are re-staged through a fresh global heap, and
-    /// the per-element reference stores the base-type element count. This is the
-    /// faithful re-emit path used by repack. Returns a
-    /// [`TypeMismatch`](crate::FormatError::TypeMismatch) if `datatype` is a
-    /// string-shaped VL datatype or not variable-length at all. The shape
-    /// defaults to `[elements.len()]` unless [`with_shape`](Self::with_shape)
-    /// sets it.
+    /// Preserves the base datatype and each payload's bytes. Each reference stores the number of
+    /// base elements in its payload. The shape defaults to `[elements.len()]` unless
+    /// [`with_shape`](Self::with_shape) sets it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::TypeMismatch`] if `datatype` is not a variable-length sequence
+    /// datatype, [`FormatError::VlDataError`] if its base type has zero size, or
+    /// [`FormatError::ValueTooLargeForRepresentation`] if a base-element count exceeds [`u32::MAX`].
     pub(crate) fn with_vlen_sequence_elements(
         &mut self,
         datatype: Datatype,
@@ -3190,7 +3235,7 @@ impl DatasetBuilder {
                 "non-string VL base type has zero size".into(),
             ));
         };
-        self.stage_vlen_elements(datatype, elements, element_size);
+        self.stage_vlen_elements(datatype, elements, element_size)?;
         Ok(self)
     }
 
@@ -3223,16 +3268,43 @@ impl DatasetBuilder {
         self
     }
 
-    /// Shared body of the VL write entry points (string and sequence): stage the
-    /// references and global heap collection and record them on the builder.
+    /// Stages variable-length payloads and records their references and heap collections.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ValueTooLargeForRepresentation`] if a base-element count exceeds
+    /// [`u32::MAX`].
     fn stage_vlen_elements(
         &mut self,
         datatype: Datatype,
         elements: &[VlStringElement],
         element_size: NonZeroUsize,
+    ) -> Result<(), FormatError> {
+        let staged = stage_vl_elements(elements, element_size)?;
+        self.stage_vlen(datatype, elements.len() as u64, staged);
+        Ok(())
+    }
+
+    /// Records staged variable-length data or an error for file serialization.
+    ///
+    /// Replaces previous element data and clears its reference staging in either case.
+    fn stage_vlen_result(
+        &mut self,
+        datatype: Datatype,
+        num_elements: u64,
+        staged: Result<(Vec<u8>, VlStringStaging), FormatError>,
     ) {
-        let n = elements.len() as u64;
-        self.stage_vlen(datatype, n, stage_vl_elements(elements, element_size));
+        match staged {
+            Ok(staged) => self.stage_vlen(datatype, num_elements, staged),
+            Err(error) => {
+                self.datatype = Some(datatype);
+                self.set_element_bytes(Vec::new());
+                self.data = Some(Err(Box::new(error)));
+                if self.shape.is_none() {
+                    self.shape = Some(vec![num_elements]);
+                }
+            }
+        }
     }
 
     /// Record staged variable-length element bytes and their heap collections on
@@ -3337,13 +3409,18 @@ impl DatasetBuilder {
     ///
     /// Where `committed_datatype_path` is set, the written message refers to the committed
     /// datatype at that path. See [`AttrSpec::VerbatimVarLen`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ValueTooLargeForRepresentation`] if a string exceeds
+    /// [`u32::MAX`] bytes.
     pub(crate) fn set_attr_var_len_verbatim(
         &mut self,
         mut message: AttributeMessage,
         strings: Vec<String>,
         committed_datatype_path: Option<ObjectPathBuf>,
-    ) -> &mut Self {
-        message.raw_data = vl_string_reference_bytes(&strings);
+    ) -> Result<&mut Self, FormatError> {
+        message.raw_data = vl_string_reference_bytes(&strings)?;
         self.attrs.push((
             message.name.clone(),
             AttrSpec::VerbatimVarLen {
@@ -3352,7 +3429,7 @@ impl DatasetBuilder {
                 committed_datatype_path,
             },
         ));
-        self
+        Ok(self)
     }
 
     /// Enable chunked storage with given chunk dimensions.
@@ -3581,7 +3658,7 @@ impl GroupBuilder {
     /// See [`DatasetBuilder::set_attr_committed`].
     pub fn set_attr_committed(&mut self, name: &str, value: AttrValue, path: &str) {
         self.attrs
-            .push((name.to_string(), committed_attr_spec(name, &value, path)));
+            .push((name.to_string(), committed_attr_spec(value, path)));
     }
 
     /// Attaches a variable-length string attribute with the datatype and dataspace of
@@ -3589,13 +3666,18 @@ impl GroupBuilder {
     ///
     /// Where `committed_datatype_path` is set, the written message refers to the committed
     /// datatype at that path. See [`AttrSpec::VerbatimVarLen`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ValueTooLargeForRepresentation`] if a string exceeds
+    /// [`u32::MAX`] bytes.
     pub(crate) fn set_attr_var_len_verbatim(
         &mut self,
         mut message: AttributeMessage,
         strings: Vec<String>,
         committed_datatype_path: Option<ObjectPathBuf>,
-    ) {
-        message.raw_data = vl_string_reference_bytes(&strings);
+    ) -> Result<(), FormatError> {
+        message.raw_data = vl_string_reference_bytes(&strings)?;
         self.attrs.push((
             message.name.clone(),
             AttrSpec::VerbatimVarLen {
@@ -3604,6 +3686,7 @@ impl GroupBuilder {
                 committed_datatype_path,
             },
         ));
+        Ok(())
     }
 
     /// Commits `datatype` in this group under `name`, the way `H5Tcommit` does.
@@ -3650,34 +3733,14 @@ pub(crate) struct CommittedDatatype {
     pub(crate) datatype: Datatype,
 }
 
-/// How an attribute named after the committed datatype at `path` is written:
-/// an already-encoded message whose datatype has moved out of it.
+/// Records a decoded attribute value and the path of its committed datatype.
 ///
-/// The value still decides the message's dataspace and raw bytes; only the
-/// datatype moves out. The writer checks the two agree before it lays anything
-/// out.
-///
-/// A value that keeps its data in the global heap takes
-/// [`VerbatimVarLen`](AttrSpec::VerbatimVarLen) rather than
-/// [`Verbatim`](AttrSpec::Verbatim), so the writer stages its collections and
-/// patches the placeholder addresses [`build_attr_message`] wrote. Plain
-/// `Verbatim` is for bytes that are already final, and carrying a
-/// variable-length value through it wrote every element pointing at address 0 —
-/// a file that returned `Ok`, dropped the attribute from `attrs`, and read as
-/// an empty string in the C library.
-pub(crate) fn committed_attr_spec(name: &str, value: &AttrValue, path: &str) -> AttrSpec {
-    let message = build_attr_message(name, value);
-    let committed_datatype_path = Some(ObjectPathBuf::parse(path));
-    match value.var_len_strings() {
-        Some(strings) => AttrSpec::VerbatimVarLen {
-            message,
-            strings: strings.to_vec(),
-            committed_datatype_path,
-        },
-        None => AttrSpec::Verbatim {
-            message,
-            committed_datatype_path,
-        },
+/// The writer encodes the value during file serialization and checks it against the committed
+/// datatype before placing objects. Variable-length strings use newly staged heap collections.
+pub(crate) fn committed_attr_spec(value: AttrValue, path: &str) -> AttrSpec {
+    AttrSpec::CommittedValue {
+        value,
+        path: ObjectPathBuf::parse(path),
     }
 }
 
@@ -4149,7 +4212,7 @@ mod fixed_string_tests {
     fn staged(builder: &DatasetBuilder) -> (Datatype, Vec<u8>) {
         (
             builder.datatype.clone().expect("a datatype"),
-            builder.data.clone().expect("element bytes"),
+            builder.data.clone().expect("element bytes").unwrap(),
         )
     }
 
@@ -4314,7 +4377,7 @@ mod fixed_string_tests {
             }),
         ];
         for (attr, stage) in cases {
-            let message = super::build_attr_message("a", &attr);
+            let message = super::build_attr_message("a", &attr).unwrap();
             let mut b = DatasetBuilder::new("d");
             stage(&mut b).unwrap();
             let (datatype, raw) = staged(&b);
@@ -4373,7 +4436,7 @@ mod fixed_string_tests {
             ),
         ];
         for (value, expected_charset, expected_space, count) in cases {
-            let message = super::build_attr_message("a", &value);
+            let message = super::build_attr_message("a", &value).unwrap();
             let Datatype::String {
                 size,
                 padding,
@@ -4400,10 +4463,11 @@ mod fixed_string_tests {
     /// the sized variants answer.
     #[test]
     fn a_plain_attribute_takes_the_content_width_and_a_sized_one_keeps_its_slot() {
-        let shrunk = super::build_attr_message("a", &AttrValue::AsciiString("x".into()));
+        let shrunk = super::build_attr_message("a", &AttrValue::AsciiString("x".into())).unwrap();
         assert!(matches!(shrunk.datatype, Datatype::String { size: 1, .. }));
 
-        let kept = super::build_attr_message("a", &AttrValue::ascii_string_sized("x", 5).unwrap());
+        let kept = super::build_attr_message("a", &AttrValue::ascii_string_sized("x", 5).unwrap())
+            .unwrap();
         assert!(matches!(kept.datatype, Datatype::String { size: 5, .. }));
     }
 
@@ -4460,5 +4524,204 @@ mod fixed_string_tests {
                 "{outcome:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::num::NonZeroUsize;
+
+    use rstest::rstest;
+
+    use crate::datatype::{CharacterSet, Datatype};
+    use crate::file_writer::FileWriter;
+    use crate::type_builders::{self, AttrValue, DatasetBuilder, VlStringElement};
+    use crate::{Error, File, FileBuilder, FormatError};
+
+    #[rstest]
+    #[case(0, Ok(0))]
+    #[case(u64::from(u32::MAX), Ok(u32::MAX))]
+    #[case(
+        u64::from(u32::MAX) + 1,
+        Err(FormatError::ValueTooLargeForRepresentation {
+            value: 4_294_967_296,
+            target: "u32",
+        })
+    )]
+    fn a_descriptor_count_uses_the_full_u32_range(
+        #[case] count: u64,
+        #[case] expected: Result<u32, FormatError>,
+    ) {
+        assert_eq!(type_builders::vl_element_count(count), expected);
+    }
+
+    #[rstest]
+    #[case(1, 8)]
+    #[case(2, 4)]
+    #[case(4, 2)]
+    fn sequence_counts_are_measured_in_base_elements(#[case] width: usize, #[case] count: u32) {
+        let elements = [
+            VlStringElement::Bytes(vec![1, 2, 3, 4, 5, 6, 7, 8]),
+            VlStringElement::Null,
+            VlStringElement::Bytes(Vec::new()),
+        ];
+        let (refs, staging) =
+            type_builders::stage_vl_elements(&elements, NonZeroUsize::new(width).unwrap()).unwrap();
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&count.to_le_bytes());
+        expected.extend_from_slice(&0u64.to_le_bytes());
+        expected.extend_from_slice(&1u32.to_le_bytes());
+        expected.extend_from_slice(&[0; 16]);
+        expected.extend_from_slice(&0u32.to_le_bytes());
+        expected.extend_from_slice(&0u64.to_le_bytes());
+        expected.extend_from_slice(&2u32.to_le_bytes());
+        assert_eq!(refs, expected);
+        assert_eq!(staging.patch_offsets, vec![0, 32]);
+        assert_eq!(staging.collections.len(), 1);
+    }
+
+    #[test]
+    fn a_sequence_setter_preserves_its_base_element_count() {
+        let mut builder = DatasetBuilder::new("sequence");
+        let mut datatype = type_builders::make_vlen_string_type(CharacterSet::Ascii);
+        let Datatype::VariableLength {
+            is_string,
+            base_type,
+            ..
+        } = &mut datatype
+        else {
+            panic!("expected a count overflow")
+        };
+        *is_string = false;
+        **base_type = type_builders::make_u32_type();
+        builder
+            .with_vlen_sequence_elements(
+                datatype,
+                &[VlStringElement::Bytes(vec![1, 0, 0, 0, 2, 0, 0, 0])],
+            )
+            .unwrap();
+        assert_eq!(
+            builder.data.unwrap().unwrap(),
+            vec![2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn a_staged_count_error_reaches_the_public_file_builder() {
+        let mut builder = FileBuilder::new();
+        builder.create_dataset("text").stage_vlen_result(
+            type_builders::make_vlen_string_type(CharacterSet::Utf8),
+            1,
+            type_builders::vl_element_count(4_294_967_296)
+                .map(|_| panic!("expected a count overflow")),
+        );
+        let error = builder.finish().unwrap_err();
+        let Error::Format(error) = error else {
+            panic!("expected a format error")
+        };
+        assert_eq!(
+            error,
+            FormatError::ValueTooLargeForRepresentation {
+                value: 4_294_967_296,
+                target: "u32",
+            }
+        );
+    }
+
+    #[rstest]
+    #[case(AttrValue::VarLenStringArray(vec!["é".into(), String::new()]))]
+    #[case(AttrValue::VarLenAsciiStringArray(vec!["ab".into(), String::new()]))]
+    #[case(AttrValue::VarLenAsciiCharArray(vec!["ab".into(), String::new()]))]
+    fn attribute_descriptors_count_payload_bytes(#[case] value: AttrValue) {
+        let message = type_builders::build_attr_message("text", &value).unwrap();
+        assert_eq!(
+            message.raw_data,
+            vec![
+                2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                2, 0, 0, 0
+            ],
+        );
+    }
+
+    #[rstest]
+    #[case(false)]
+    #[case(true)]
+    fn a_staged_count_error_reaches_finish_even_for_an_empty_shape(#[case] empty: bool) {
+        let mut writer = FileWriter::new();
+        let dataset = writer.create_dataset("text");
+        dataset.with_vlen_strings(&["previous"]);
+        dataset.stage_vlen_result(
+            type_builders::make_vlen_string_type(CharacterSet::Utf8),
+            1,
+            type_builders::vl_element_count(4_294_967_296)
+                .map(|_| panic!("expected a count overflow")),
+        );
+        if empty {
+            dataset.with_shape(&[0]);
+        }
+        assert!(dataset.vl_string_staging.is_none());
+        assert!(dataset.reference_targets.is_none());
+        assert_eq!(
+            writer.finish().unwrap_err(),
+            FormatError::ValueTooLargeForRepresentation {
+                value: 4_294_967_296,
+                target: "u32",
+            },
+        );
+    }
+
+    #[rstest]
+    #[case(false)]
+    #[case(true)]
+    fn replacing_element_data_clears_a_staged_count_error(#[case] strings: bool) {
+        let mut writer = FileWriter::new();
+        let dataset = writer.create_dataset("text");
+        dataset.stage_vlen_result(
+            type_builders::make_vlen_string_type(CharacterSet::Utf8),
+            1,
+            type_builders::vl_element_count(4_294_967_296)
+                .map(|_| panic!("expected a count overflow")),
+        );
+        if strings {
+            dataset.with_vlen_strings(&["é"]);
+        } else {
+            dataset.with_u8_data(&[7]);
+        }
+        let file = File::from_bytes(writer.finish().unwrap()).unwrap();
+        let dataset = file.dataset("text").unwrap();
+        if strings {
+            assert_eq!(dataset.read_string().unwrap(), vec!["é"]);
+        } else {
+            assert_eq!(dataset.read_raw().unwrap(), vec![7]);
+        }
+    }
+
+    #[test]
+    fn a_string_datatype_mismatch_preserves_previous_staging() {
+        let mut builder = DatasetBuilder::new("text");
+        builder.with_vlen_strings(&["previous"]);
+        let data = builder.data.clone();
+        let offsets = builder
+            .vl_string_staging
+            .as_ref()
+            .unwrap()
+            .patch_offsets
+            .clone();
+        let error = builder.with_vlen_string_elements(type_builders::make_u8_type(), &[]);
+        let Err(error) = error else {
+            panic!("expected TypeMismatch")
+        };
+        assert_eq!(
+            error,
+            FormatError::TypeMismatch {
+                expected: "VariableLength string",
+                actual: "non-VariableLength string",
+            }
+        );
+        assert_eq!(builder.data, data);
+        assert_eq!(
+            builder.vl_string_staging.as_ref().unwrap().patch_offsets,
+            offsets
+        );
     }
 }

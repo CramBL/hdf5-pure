@@ -916,7 +916,7 @@ mod tests {
     /// [`AttrValue`] has no reference variant, so a file carrying such an
     /// attribute was written by libhdf5.
     fn reference_attr(name: &str, address: u64) -> AttributeMessage {
-        let mut attr = type_builders::build_attr_message(name, &AttrValue::U64(address));
+        let mut attr = type_builders::build_attr_message(name, &AttrValue::U64(address)).unwrap();
         attr.datatype = type_builders::make_object_reference_type();
         attr
     }
@@ -1108,7 +1108,7 @@ mod tests {
         // The object still reports that it holds a reference, so no commit is
         // ever licensed to skip the walk on this file — and nothing is written,
         // because the address could not be located to begin with.
-        let mut attr = type_builders::build_attr_message("target", &AttrValue::U64(300));
+        let mut attr = type_builders::build_attr_message("target", &AttrValue::U64(300)).unwrap();
         attr.datatype = Datatype::Reference {
             size: 16,
             ref_type: ReferenceType::Object,

@@ -529,12 +529,18 @@ trait AttrSink {
         message: AttributeMessage,
         committed_datatype_path: Option<ObjectPathBuf>,
     );
+    /// Attaches variable-length strings with the datatype and dataspace of `message`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ValueTooLargeForRepresentation`] if a string exceeds
+    /// [`u32::MAX`] bytes.
     fn sink_set_attr_var_len_verbatim(
         &mut self,
         message: AttributeMessage,
         strings: Vec<String>,
         committed_datatype_path: Option<ObjectPathBuf>,
-    );
+    ) -> Result<(), FormatError>;
 }
 
 impl AttrSink for FileBuilder {
@@ -553,8 +559,9 @@ impl AttrSink for FileBuilder {
         message: AttributeMessage,
         strings: Vec<String>,
         committed_datatype_path: Option<ObjectPathBuf>,
-    ) {
-        self.set_attr_var_len_verbatim(message, strings, committed_datatype_path);
+    ) -> Result<(), FormatError> {
+        self.set_attr_var_len_verbatim(message, strings, committed_datatype_path)?;
+        Ok(())
     }
 }
 
@@ -574,8 +581,9 @@ impl AttrSink for GroupBuilder {
         message: AttributeMessage,
         strings: Vec<String>,
         committed_datatype_path: Option<ObjectPathBuf>,
-    ) {
-        self.set_attr_var_len_verbatim(message, strings, committed_datatype_path);
+    ) -> Result<(), FormatError> {
+        self.set_attr_var_len_verbatim(message, strings, committed_datatype_path)?;
+        Ok(())
     }
 }
 
@@ -595,8 +603,9 @@ impl AttrSink for DatasetBuilder {
         message: AttributeMessage,
         strings: Vec<String>,
         committed_datatype_path: Option<ObjectPathBuf>,
-    ) {
-        self.set_attr_var_len_verbatim(message, strings, committed_datatype_path);
+    ) -> Result<(), FormatError> {
+        self.set_attr_var_len_verbatim(message, strings, committed_datatype_path)?;
+        Ok(())
     }
 }
 
@@ -1495,7 +1504,7 @@ where
             match (&message.datatype, value.as_strings()) {
                 (Datatype::VariableLength { .. }, Some(strings)) => {
                     let strings = strings.to_vec();
-                    sink.sink_set_attr_var_len_verbatim(message, strings, committed_datatype_path);
+                    sink.sink_set_attr_var_len_verbatim(message, strings, committed_datatype_path)?;
                 }
                 _ => sink.sink_set_attr(&message.name, value.clone()),
             }

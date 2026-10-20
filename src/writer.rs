@@ -320,14 +320,19 @@ impl FileBuilder {
     /// Where `committed_datatype_path` is set, the written message refers to the committed
     /// datatype at that path. See
     /// [`AttrSpec::VerbatimVarLen`](crate::type_builders::AttrSpec::VerbatimVarLen).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ValueTooLargeForRepresentation`] if a string exceeds
+    /// [`u32::MAX`] bytes.
     pub(crate) fn set_attr_var_len_verbatim(
         &mut self,
         message: crate::attribute::AttributeMessage,
         strings: Vec<String>,
         committed_datatype_path: Option<ObjectPathBuf>,
-    ) {
+    ) -> Result<(), FormatError> {
         self.writer
-            .set_root_attr_var_len_verbatim(message, strings, committed_datatype_path);
+            .set_root_attr_var_len_verbatim(message, strings, committed_datatype_path)
     }
 
     /// Whether the staged content needs the 1.10 format — see
@@ -336,7 +341,12 @@ impl FileBuilder {
         self.writer.needs_latest_format()
     }
 
-    /// Serialize the file to bytes in memory.
+    /// Serializes the staged file into memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the staged content cannot be serialized, including a
+    /// variable-length element count greater than [`u32::MAX`].
     pub fn finish(self) -> Result<Vec<u8>, Error> {
         Ok(self.writer.finish()?)
     }

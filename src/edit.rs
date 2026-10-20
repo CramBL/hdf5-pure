@@ -11370,9 +11370,14 @@ fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<FlatDataset,
         ));
     }
     let raw = if is_empty {
-        db.data.unwrap_or_default()
+        db.data
+            .transpose()
+            .map_err(|error| *error)?
+            .unwrap_or_default()
     } else {
         db.data
+            .transpose()
+            .map_err(|error| *error)?
             .ok_or(Error::EditUnsupported("dataset has no data"))?
     };
 
@@ -11481,7 +11486,7 @@ fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<FlatDataset,
     };
     let mut attrs: Vec<crate::attribute::AttributeMessage> = Vec::with_capacity(db.attrs.len());
     for (n, v) in &db.attrs {
-        attrs.push(v.to_message(n));
+        attrs.push(v.to_message(n)?);
     }
     // The message above already carries a placeholder (heap address 0) for each
     // element of a variable-length string attribute; stage its self-contained
@@ -12625,7 +12630,7 @@ fn apply_compact_attr_ops(
                     // Nothing yet to remove from `region` if this name has
                     // never been set as a fixed-size attribute.
                     out = remove_attr_from_region(&out, name, false)?;
-                    let msg = type_builders::build_attr_message(name, value);
+                    let msg = type_builders::build_attr_message(name, value)?;
                     if msg
                         .serialize(crate::file_writer::OFFSET_WIDTH, LENGTH_SIZE)?
                         .len()
@@ -12786,7 +12791,7 @@ fn plan_attr_ops<S: Source + ?Sized>(
         let mut oversized = false;
         for op in ops {
             if let AttrOp::Set { name, value } = op {
-                oversized |= type_builders::build_attr_message(name, value)
+                oversized |= type_builders::build_attr_message(name, value)?
                     .serialize(crate::file_writer::OFFSET_WIDTH, LENGTH_SIZE)?
                     .len()
                     > OBJECT_HEADER_MESSAGE_MAX;
@@ -12850,7 +12855,7 @@ fn plan_attr_ops<S: Source + ?Sized>(
     for op in ops {
         match op {
             AttrOp::Set { name, value } => {
-                let msg = type_builders::build_attr_message(name, value);
+                let msg = type_builders::build_attr_message(name, value)?;
                 let collections = value
                     .var_len_strings()
                     .map(type_builders::build_global_heap_collections);
@@ -13431,7 +13436,7 @@ fn encode_attr_body(name: &str, value: &AttrValue) -> Result<Vec<u8>, Error> {
         value.var_len_strings().is_none(),
         "a variable-length attribute must be intercepted by apply_compact_attr_ops before reaching encode_attr_message"
     );
-    let body = type_builders::build_attr_message(name, value)
+    let body = type_builders::build_attr_message(name, value)?
         .serialize(crate::file_writer::OFFSET_WIDTH, LENGTH_SIZE)?;
     if body.len() > OBJECT_HEADER_MESSAGE_MAX {
         return Err(Error::EditUnsupported(
@@ -15508,6 +15513,7 @@ mod tests {
     #[test]
     fn a_shared_attribute_message_is_told_from_a_private_one_by_its_flags() {
         let body = crate::type_builders::build_attr_message("a", &AttrValue::I64(1))
+            .unwrap()
             .serialize(crate::file_writer::OFFSET_WIDTH, LENGTH_SIZE)
             .unwrap();
         let private = message_record(MessageType::ATTRIBUTE, &body);
@@ -15533,7 +15539,8 @@ mod tests {
     /// libhdf5, and the copy path re-emits its bytes verbatim
     /// like any other attribute's.
     fn reference_attr(name: &str, address: u64) -> crate::attribute::AttributeMessage {
-        let mut attr = crate::type_builders::build_attr_message(name, &AttrValue::U64(address));
+        let mut attr =
+            crate::type_builders::build_attr_message(name, &AttrValue::U64(address)).unwrap();
         attr.datatype = Datatype::Reference {
             size: 8,
             ref_type: crate::datatype::ReferenceType::Object,
@@ -18424,6 +18431,7 @@ mod tests {
     /// One compact Attribute message body for `name`.
     fn attr_body(name: &str, value: i64) -> Vec<u8> {
         crate::type_builders::build_attr_message(name, &AttrValue::I64(value))
+            .unwrap()
             .serialize(crate::file_writer::OFFSET_WIDTH, LENGTH_SIZE)
             .unwrap()
     }

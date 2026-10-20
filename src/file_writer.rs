@@ -1400,7 +1400,7 @@ impl FileWriter {
     pub fn set_root_attr_committed(&mut self, name: &str, value: AttrValue, path: &str) {
         self.root_attrs.push((
             name.to_string(),
-            crate::type_builders::committed_attr_spec(name, &value, path),
+            crate::type_builders::committed_attr_spec(value, path),
         ));
     }
 
@@ -1434,13 +1434,18 @@ impl FileWriter {
     ///
     /// Where `committed_datatype_path` is set, the written message refers to the committed
     /// datatype at that path. See [`AttrSpec::VerbatimVarLen`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ValueTooLargeForRepresentation`] if a string exceeds
+    /// [`u32::MAX`] bytes.
     pub(crate) fn set_root_attr_var_len_verbatim(
         &mut self,
         mut message: crate::attribute::AttributeMessage,
         strings: Vec<String>,
         committed_datatype_path: Option<ObjectPathBuf>,
-    ) {
-        message.raw_data = crate::type_builders::vl_string_reference_bytes(&strings);
+    ) -> Result<(), FormatError> {
+        message.raw_data = crate::type_builders::vl_string_reference_bytes(&strings)?;
         self.root_attrs.push((
             message.name.clone(),
             AttrSpec::VerbatimVarLen {
@@ -1449,6 +1454,7 @@ impl FileWriter {
                 committed_datatype_path,
             },
         ));
+        Ok(())
     }
 
     pub fn finish(self) -> Result<Vec<u8>, FormatError> {
@@ -1890,6 +1896,7 @@ impl FileWriter {
             all_ds: &mut Vec<DsFlat>,
             ds_vl: &mut Vec<Vec<VlPatch>>,
         ) -> Result<usize, FormatError> {
+            let data = db.data.transpose().map_err(|error| *error)?;
             let name = link_name(db.name)?;
             let dt = db.datatype.ok_or(FormatError::DatasetMissingData)?;
             let shape = db.shape.ok_or(FormatError::DatasetMissingShape)?;
@@ -1914,16 +1921,16 @@ impl FileWriter {
             // stages nothing — a caller could not construct this, only a change
             // here could, and every test run is a debug build.
             debug_assert!(
-                !(unallocated && (db.data.is_some() || produced.is_some() || raw_chunks.is_some())),
+                !(unallocated && (data.is_some() || produced.is_some() || raw_chunks.is_some())),
                 "dataset {:?} declares unallocated storage and stages data for it",
                 name.as_str(),
             );
             // Allow empty data for zero-element datasets (e.g. shape [0, 0]).
             let is_empty = shape.contains(&0);
             let raw = if is_empty || unallocated || raw_chunks.is_some() || produced.is_some() {
-                db.data.unwrap_or_default()
+                data.unwrap_or_default()
             } else {
-                db.data.ok_or(FormatError::DatasetMissingData)?
+                data.ok_or(FormatError::DatasetMissingData)?
             };
             // A zero-byte element type is refused before it reaches a layout
             // decision: the chunk splitter clamps a row copy to an element
@@ -2035,13 +2042,13 @@ impl FileWriter {
                 dimensions: shape,
                 max_dimensions,
             };
-            let patches = collect_vl_patches(&db.attrs);
             let mut attrs = Vec::new();
             let mut attr_committed_datatype_paths = Vec::new();
             for (n, v) in &db.attrs {
-                attrs.push(v.to_message(n));
+                attrs.push(v.to_message(n)?);
                 attr_committed_datatype_paths.push(v.committed_datatype_path().cloned());
             }
+            let patches = collect_vl_patches(&db.attrs);
             #[cfg(feature = "provenance")]
             if let Some(ref prov) = db.provenance {
                 let p = crate::provenance::Provenance {
@@ -2125,13 +2132,13 @@ impl FileWriter {
             ds_vl: &mut Vec<Vec<VlPatch>>,
         ) -> Result<usize, FormatError> {
             let name = link_name(g.name)?;
-            let patches = collect_vl_patches(&g.attrs);
             let mut gattrs = Vec::new();
             let mut attr_committed_datatype_paths = Vec::new();
             for (n, v) in &g.attrs {
-                gattrs.push(v.to_message(n));
+                gattrs.push(v.to_message(n)?);
                 attr_committed_datatype_paths.push(v.committed_datatype_path().cloned());
             }
+            let patches = collect_vl_patches(&g.attrs);
             let committed_idx = flatten_committed(g.committed, committed)?;
             let mut ds_idx = Vec::new();
             for db in g.datasets {
@@ -2221,14 +2228,14 @@ impl FileWriter {
             patches
         }
 
-        let vl_root = collect_vl_patches(&self.root_attrs);
-
         let mut root_attrs: Vec<AttributeMessage> = Vec::new();
         let mut root_attr_committed_datatype_paths = Vec::new();
         for (n, v) in &self.root_attrs {
-            root_attrs.push(v.to_message(n));
+            root_attrs.push(v.to_message(n)?);
             root_attr_committed_datatype_paths.push(v.committed_datatype_path().cloned());
         }
+
+        let vl_root = collect_vl_patches(&self.root_attrs);
 
         // ---- Committed datatypes: paths, reference counts, and agreement ----
         //
@@ -4922,12 +4929,14 @@ mod tests {
         // so an empty value still carries a padding byte and would be measured
         // as overhead.
         let probe =
-            type_builders::build_attr_message(name, &AttrValue::AsciiString("y".to_string()));
+            type_builders::build_attr_message(name, &AttrValue::AsciiString("y".to_string()))
+                .unwrap();
         let overhead = probe.serialize_v3(OFFSET_WIDTH, LENGTH_SIZE).unwrap().len() - 1;
         let attr = type_builders::build_attr_message(
             name,
             &AttrValue::AsciiString("y".repeat(size - overhead)),
-        );
+        )
+        .unwrap();
         assert_eq!(
             attr.serialize_v3(OFFSET_WIDTH, LENGTH_SIZE).unwrap().len(),
             size
@@ -5133,7 +5142,7 @@ mod tests {
         ];
         let forward: Vec<AttributeMessage> = names
             .iter()
-            .map(|n| type_builders::build_attr_message(n, &AttrValue::I64(1)))
+            .map(|n| type_builders::build_attr_message(n, &AttrValue::I64(1)).unwrap())
             .collect();
         let mut reversed = forward.clone();
         reversed.reverse();
@@ -5178,6 +5187,7 @@ mod tests {
         let attrs: Vec<AttributeMessage> = (0..SCRAMBLE.len())
             .map(|i| {
                 type_builders::build_attr_message(&format!("a{i:02}"), &AttrValue::I64(i as i64))
+                    .unwrap()
             })
             .collect();
         (
@@ -5502,7 +5512,8 @@ mod tests {
     /// from a measured probe rather than hard-coded so it tracks the encoder.
     fn largest_fitting_i64_attr_elements() -> usize {
         let one =
-            type_builders::build_attr_message("boundary", &AttrValue::I64Array(vec![0i64; 1]));
+            type_builders::build_attr_message("boundary", &AttrValue::I64Array(vec![0i64; 1]))
+                .unwrap();
         let overhead = one.serialize(OFFSET_WIDTH, LENGTH_SIZE).unwrap().len() - 8;
         (OBJECT_HEADER_MESSAGE_MAX - overhead) / 8
     }
@@ -5511,7 +5522,8 @@ mod tests {
     fn compact_attr_at_the_message_size_limit_is_written() {
         let n = largest_fitting_i64_attr_elements();
         let attr =
-            type_builders::build_attr_message("boundary", &AttrValue::I64Array(vec![7i64; n]));
+            type_builders::build_attr_message("boundary", &AttrValue::I64Array(vec![7i64; n]))
+                .unwrap();
         // Pin the probe to the boundary itself: one more element must not fit,
         // or this test would still pass while exercising a tiny attribute.
         let size = attr.serialize(OFFSET_WIDTH, LENGTH_SIZE).unwrap().len();
@@ -5538,10 +5550,10 @@ mod tests {
     #[test]
     fn an_attr_past_the_message_size_limit_moves_to_dense_storage() {
         let n = largest_fitting_i64_attr_elements() + 1;
-        let attrs = vec![type_builders::build_attr_message(
-            "boundary",
-            &AttrValue::I64Array(vec![0i64; n]),
-        )];
+        let attrs = vec![
+            type_builders::build_attr_message("boundary", &AttrValue::I64Array(vec![0i64; n]))
+                .unwrap(),
+        ];
         assert!(
             attrs[0].serialize(OFFSET_WIDTH, LENGTH_SIZE).unwrap().len()
                 > OBJECT_HEADER_MESSAGE_MAX
@@ -5570,10 +5582,10 @@ mod tests {
     #[test]
     fn an_attr_at_the_message_size_limit_stays_compact() {
         let n = largest_fitting_i64_attr_elements();
-        let attrs = vec![type_builders::build_attr_message(
-            "boundary",
-            &AttrValue::I64Array(vec![0i64; n]),
-        )];
+        let attrs = vec![
+            type_builders::build_attr_message("boundary", &AttrValue::I64Array(vec![0i64; n]))
+                .unwrap(),
+        ];
         assert!(!needs_dense_attrs(&attrs).unwrap());
     }
 
