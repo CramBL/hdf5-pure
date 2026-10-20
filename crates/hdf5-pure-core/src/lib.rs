@@ -38,6 +38,7 @@ pub use datatype::StringPadding;
 pub use datatype::byte_order::DatatypeByteOrder;
 pub use datatype::layout::FixedPointLayout;
 pub use datatype::layout::FloatingPointLayout;
+pub use datatype::layout::MantissaNormalization;
 pub use error::FormatError;
 pub use error::OBJECT_HEADER_MESSAGE_MAX;
 pub use file_space_info::FileSpaceInfo;

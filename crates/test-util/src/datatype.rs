@@ -13,7 +13,7 @@ pub fn header(class: Class, version: u8, bit_fields: [u8; 3], size: u32) -> Vec<
 /// A little-endian IEEE 754 double, laid out as the reference library writes
 /// one.
 pub fn f64_le() -> Vec<u8> {
-    let mut datatype = header(Class::FLOATING_POINT, 1, [0x00, 0x00, 0x02], 8);
+    let mut datatype = header(Class::FLOATING_POINT, 1, IEEE754_BINARY64_CLASS_FIELDS, 8);
     // Bit offset(2) and bit precision(2), then the exponent's location and
     // size, the mantissa's, and the exponent bias.
     datatype.extend_from_slice(&0u16.to_le_bytes());
@@ -60,3 +60,11 @@ const SHARED_MESSAGE_VERSION: u8 = 2;
 
 /// The shared message type whose location is an object header.
 const COMMITTED: u8 = 2;
+
+/// The class bit fields for little-endian IEEE 754 binary64.
+///
+/// Mantissa normalization and sign location are defined in "The Datatype Message" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const IEEE754_BINARY64_CLASS_FIELDS: [u8; 3] = [0x20, 0x3F, 0];

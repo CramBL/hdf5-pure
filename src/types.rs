@@ -548,7 +548,7 @@ mod tests {
     use crate::address::BaseAddress;
     use crate::address::BaseAddressExt;
     use crate::{
-        CharacterSet, DatatypeByteOrder, StringPadding,
+        CharacterSet, DatatypeByteOrder, MantissaNormalization, StringPadding,
         datatype::{Datatype, layout::FloatingPointLayout},
     };
 
@@ -571,6 +571,8 @@ mod tests {
             size: u32::MAX,
             byte_order: DatatypeByteOrder::LittleEndian,
             layout: FloatingPointLayout {
+                mantissa_normalization: MantissaNormalization::ImpliedLeadingOne,
+                sign_location: 0,
                 bit_offset: 0,
                 bit_precision: 0,
                 exponent_location: 0,
@@ -1178,15 +1180,7 @@ mod display_tests {
         let vax = Datatype::FloatingPoint {
             size: 4,
             byte_order: DatatypeByteOrder::Vax,
-            layout: FloatingPointLayout {
-                bit_offset: 0,
-                bit_precision: 32,
-                exponent_location: 23,
-                exponent_size: 8,
-                mantissa_location: 0,
-                mantissa_size: 23,
-                exponent_bias: 127,
-            },
+            layout: FloatingPointLayout::IEEE754_BINARY32,
         };
         // Classification keys off size alone, so this stays `F32`; the point is
         // the fallback below.
@@ -1270,15 +1264,7 @@ mod display_tests {
             Datatype::FloatingPoint {
                 size: 4,
                 byte_order: DatatypeByteOrder::LittleEndian,
-                layout: FloatingPointLayout {
-                    bit_offset: 0,
-                    bit_precision: 32,
-                    exponent_location: 23,
-                    exponent_size: 8,
-                    mantissa_location: 0,
-                    mantissa_size: 23,
-                    exponent_bias: 127,
-                },
+                layout: FloatingPointLayout::IEEE754_BINARY32,
             },
         ];
         for datatype in identical {

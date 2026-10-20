@@ -1798,15 +1798,7 @@ mod tests {
         Datatype::FloatingPoint {
             size: 8,
             byte_order: byte_order::DatatypeByteOrder::LittleEndian,
-            layout: FloatingPointLayout {
-                bit_offset: 0,
-                bit_precision: 64,
-                exponent_location: 52,
-                exponent_size: 11,
-                mantissa_location: 0,
-                mantissa_size: 52,
-                exponent_bias: 1023,
-            },
+            layout: FloatingPointLayout::IEEE754_BINARY64,
         }
     }
 

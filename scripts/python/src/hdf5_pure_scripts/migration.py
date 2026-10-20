@@ -255,13 +255,14 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
         "FileSpacePageSize",
         "FillTime",
         "LengthWidth",
+        "MantissaNormalization",
         "OffsetWidth",
         "StoredAddress",
     }
-    # The struct fields whose type differs from 0.47.0's, which the comparison removes from both
-    # shapes.
+    # Added struct fields and fields with changed types, removed from both compared shapes.
     allowed_changed_fields = {
         "FileSpaceInfo": {"eoa_pre_fsm", "manager_addrs", "page_size"},
+        "FloatingPointLayout": {"mantissa_normalization", "sign_location"},
         "Superblock": {
             "driver_info_address",
             "free_space_address",

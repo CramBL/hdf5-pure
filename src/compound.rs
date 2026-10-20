@@ -97,16 +97,7 @@ fn float_order(
             Datatype::FloatingPoint {
                 size: 4,
                 byte_order,
-                layout:
-                    FloatingPointLayout {
-                        bit_offset: 0,
-                        bit_precision: 32,
-                        exponent_location: 23,
-                        exponent_size: 8,
-                        mantissa_location: 0,
-                        mantissa_size: 23,
-                        exponent_bias: 127,
-                    },
+                layout: FloatingPointLayout::IEEE754_BINARY32,
             },
             4,
         ) => Some(*byte_order),
@@ -114,16 +105,7 @@ fn float_order(
             Datatype::FloatingPoint {
                 size: 8,
                 byte_order,
-                layout:
-                    FloatingPointLayout {
-                        bit_offset: 0,
-                        bit_precision: 64,
-                        exponent_location: 52,
-                        exponent_size: 11,
-                        mantissa_location: 0,
-                        mantissa_size: 52,
-                        exponent_bias: 1023,
-                    },
+                layout: FloatingPointLayout::IEEE754_BINARY64,
             },
             8,
         ) => Some(*byte_order),
