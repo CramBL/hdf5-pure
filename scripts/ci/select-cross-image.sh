@@ -4,10 +4,16 @@ cd "$(dirname "$0")/../.."
 
 family=${1:?missing image family}
 candidate=${2:?missing construction-change flag}
+adoption=${3:?missing adoption-change flag}
 case "$family" in i686|s390x) ;; *) exit 1 ;; esac
 case "$candidate" in true|false) ;; *) exit 1 ;; esac
+case "$adoption" in true|false) ;; *) exit 1 ;; esac
 target="$family-unknown-linux-gnu"
 if [[ $candidate == true ]]; then
+    if [[ $adoption == true ]]; then
+        echo 'Change cross construction and adoption in separate PRs' >&2
+        exit 1
+    fi
     identity=$(bash scripts/ci/cross-image.sh fingerprint "$family")
     image="hdf5-pure-cross-$family:$identity"
     bash scripts/ci/cross-image.sh build "$family" "$image"
