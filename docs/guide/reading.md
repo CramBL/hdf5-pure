@@ -212,6 +212,14 @@ The [generic I/O](crate::_guide::generic_io) guide has the writing side. [`read_
 
 [`Dataset::read_raw`](crate::Dataset::read_raw) returns the complete unfiltered record bytes, and [`Dataset::read_compound::<T>()`](crate::Dataset::read_compound) decodes compound (struct-like) records. Their encodings are in the [compound types](crate::_guide::compound_types) guide and under [Reading](crate::Dataset#reading).
 
+### Reading a region
+
+[`Dataset::read_raw_region`](crate::Dataset::read_raw_region) reads a unit-stride region along every dimension. Pass one starting coordinate and element count per dimension. For a dataset with shape `[4, 5]`, a start of `[1, 1]` and a count of `[2, 3]` select two rows and three columns. The result is packed in row-major order, with the last dimension varying fastest. The numeric and string region methods decode the selected elements in the same way as their whole-dataset counterparts.
+
+Both slices must match the dataset rank, and every selected range must fit its current extent. A request with any zero count is empty, and every coordinate and count is checked. For a scalar dataspace, pass empty slices to read its single element. A null dataspace has an empty selection. Out-of-bounds region requests return errors.
+
+Contiguous reads fetch the selected byte runs, and chunked reads decode only intersecting chunks. A region covering the whole dataset uses the whole-dataset read path. These methods support both buffered and streaming opens. See [`Dataset::read_raw_region`](crate::Dataset::read_raw_region) for an example and the error conditions.
+
 ### Reading a row window
 
 The `read_*` methods above deliver a whole dataset. A **row window**, the leading-dimension rows `[start, start + count)`, is read without materializing the rest through [`read_raw_rows(start, count)`](crate::Dataset::read_raw_rows) and the typed [`read_f64_rows`](crate::Dataset::read_f64_rows) / [`read_f32_rows`](crate::Dataset::read_f32_rows) / [`read_i8_rows`](crate::Dataset::read_i8_rows) … [`read_u64_rows`](crate::Dataset::read_u64_rows) / [`read_string_rows`](crate::Dataset::read_string_rows) counterparts. Each decodes exactly like its whole-dataset form, so a window is that whole read sliced to that row range.

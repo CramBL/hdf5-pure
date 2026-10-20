@@ -762,3 +762,99 @@ impl Source for RecordingRowSource {
 
 const HIGH_ROW: u64 = 4_294_967_360;
 const PAYLOAD_START: u64 = 4096;
+
+#[rstest]
+fn numeric_region_methods_read_selected_columns(
+    #[values(false, true)] chunked: bool,
+    #[values(false, true)] streaming: bool,
+) {
+    let values: Vec<i32> = (0..30).collect();
+    let (buffered, streamed, _directory) = on_both_backends(|builder| {
+        let dataset = builder.create_dataset("matrix");
+        dataset.with_i32_data(&values).with_shape(&[5, 6]);
+        if chunked {
+            dataset
+                .with_chunks(&[2, 4])
+                .with_deflate(DeflateLevel::Four);
+        }
+    });
+    let file = if streaming { streamed } else { buffered };
+    let dataset = file.dataset("matrix").unwrap();
+    let start = &[1, 1];
+    let count = &[2, 3];
+    assert_eq!(
+        dataset.read_f64_region(start, count).unwrap(),
+        [7.0, 8.0, 9.0, 13.0, 14.0, 15.0]
+    );
+    assert_eq!(
+        dataset.read_f32_region(start, count).unwrap(),
+        [7.0, 8.0, 9.0, 13.0, 14.0, 15.0]
+    );
+    assert_eq!(
+        dataset.read_i8_region(start, count).unwrap(),
+        [7, 8, 9, 13, 14, 15]
+    );
+    assert_eq!(
+        dataset.read_i16_region(start, count).unwrap(),
+        [7, 8, 9, 13, 14, 15]
+    );
+    assert_eq!(
+        dataset.read_i32_region(start, count).unwrap(),
+        [7, 8, 9, 13, 14, 15]
+    );
+    assert_eq!(
+        dataset.read_i64_region(start, count).unwrap(),
+        [7, 8, 9, 13, 14, 15]
+    );
+    assert_eq!(
+        dataset.read_u8_region(start, count).unwrap(),
+        [7, 8, 9, 13, 14, 15]
+    );
+    assert_eq!(
+        dataset.read_u16_region(start, count).unwrap(),
+        [7, 8, 9, 13, 14, 15]
+    );
+    assert_eq!(
+        dataset.read_u32_region(start, count).unwrap(),
+        [7, 8, 9, 13, 14, 15]
+    );
+    assert_eq!(
+        dataset.read_u64_region(start, count).unwrap(),
+        [7, 8, 9, 13, 14, 15]
+    );
+    assert_eq!(
+        dataset.read_raw_region(start, count).unwrap(),
+        [7i32, 8, 9, 13, 14, 15]
+            .into_iter()
+            .flat_map(i32::to_le_bytes)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[rstest]
+#[case::fixed(false)]
+#[case::variable(true)]
+fn string_regions_read_selected_columns(
+    #[case] variable: bool,
+    #[values(false, true)] streaming: bool,
+) {
+    let (buffered, streamed, _directory) = on_both_backends(|builder| {
+        let dataset = builder.create_dataset("labels");
+        if variable {
+            dataset.with_vlen_strings(&["zero", "one", "two", "three", "four", "five"]);
+        } else {
+            dataset
+                .with_strings(&["zero", "one", "two", "three", "four", "five"])
+                .unwrap();
+        }
+        dataset.with_shape(&[2, 3]);
+    });
+    let file = if streaming { streamed } else { buffered };
+    assert_eq!(
+        file.dataset("labels")
+            .unwrap()
+            .read_string_region(&[0, 1], &[2, 2])
+            .unwrap(),
+        ["one", "two", "four", "five"]
+    );
+}
