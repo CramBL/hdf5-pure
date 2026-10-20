@@ -17,8 +17,6 @@ on:
       - scripts/nightly.txt
       - docker/ci/miri/**
       - scripts/ci/miri-image.sh
-      - scripts/ci/run-miri.sh
-      - scripts/soundness.just
   workflow_dispatch:
     inputs:
       family:
@@ -33,6 +31,7 @@ permissions:
 concurrency:
   group: ci-images
   cancel-in-progress: false
+  queue: max
 
 jobs:
   publish:
@@ -57,7 +56,7 @@ jobs:
           GH_ACTOR: ${{ github.actor }}
         run: printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GH_ACTOR" --password-stdin
 
-      - name: Build, validate and publish
+      - name: Build and publish
         env:
           FAMILY: ${{ inputs.family || 'changed' }}
           BEFORE: ${{ github.event.before }}
@@ -70,7 +69,7 @@ jobs:
               if [[ "$family" == matio ]]; then
                 pattern='^(ci/matio.env|rust-toolchain.toml|docker/ci/matio/|scripts/ci/(matio-image|install-mold).sh|.github/workflows/ci-images.yml)'
               elif [[ "$family" == miri ]]; then
-                pattern='^(ci/miri.env|scripts/nightly.txt|docker/ci/miri/|scripts/ci/(miri-image|run-miri).sh|scripts/soundness.just|.github/workflows/ci-images.yml)'
+                pattern='^(ci/miri.env|scripts/nightly.txt|docker/ci/miri/|scripts/ci/miri-image.sh|.github/workflows/ci-images.yml)'
               else
                 pattern='^(ci/images.toml|docker/ci/cross/|scripts/ci/(cross-image|install-mold).sh|.github/workflows/ci-images.yml)'
               fi
@@ -81,13 +80,11 @@ jobs:
               continue
             fi
             if [[ "$family" == miri ]]; then
-              image="ghcr.io/crambl/hdf5-pure-miri:$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-              bash scripts/ci/miri-image.sh publish "$image"
+              bash scripts/ci/miri-image.sh publish
             elif [[ "$family" == matio ]]; then
-              image="ghcr.io/crambl/hdf5-pure-matio:$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-              bash scripts/ci/matio-image.sh publish "$image"
+              bash scripts/ci/matio-image.sh publish
             else
-              image="ghcr.io/crambl/hdf5-pure-cross-$family:$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+              image="ghcr.io/crambl/hdf5-pure-cross-$family:latest"
               bash scripts/ci/cross-image.sh publish "$family" "$image"
             fi
           done

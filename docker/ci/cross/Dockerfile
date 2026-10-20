@@ -34,10 +34,8 @@ FROM scratch
 COPY --from=prepared / /
 
 ARG SOURCE_REVISION
-ARG INPUT_FINGERPRINT
 
 LABEL org.opencontainers.image.source="https://github.com/CramBL/hdf5-pure" \
-      org.opencontainers.image.revision="${SOURCE_REVISION}" \
-      io.hdf5-pure.inputs="${INPUT_FINGERPRINT}"
+      org.opencontainers.image.revision="${SOURCE_REVISION}"
 
 ENV PATH="/opt/mold/bin:${PATH}"

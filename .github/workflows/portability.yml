@@ -33,7 +33,6 @@ jobs:
     outputs:
       run: ${{ github.event_name != 'pull_request' || steps.filter.outputs.run == 'true' }}
       images: ${{ steps.filter.outputs.images == 'true' }}
-      adoption: ${{ steps.filter.outputs.adoption == 'true' }}
     steps:
       - name: Filter the changed paths
         id: filter
@@ -71,8 +70,6 @@ jobs:
               - docker/ci/cross/**
               - scripts/ci/install-mold.sh
               - scripts/ci/cross-image.sh
-            adoption:
-              - Cross.toml
 
   # The builds this job checks without running them (WASM, bare metal, a std
   # host with no default features), Clippy over the wasm32 tests, then two
@@ -151,8 +148,7 @@ jobs:
         env:
           FAMILY: ${{ matrix.family }}
           CONSTRUCTION_CHANGED: ${{ needs.changes.outputs.images }}
-          ADOPTION_CHANGED: ${{ needs.changes.outputs.adoption }}
-        run: bash scripts/ci/select-cross-image.sh "$FAMILY" "$CONSTRUCTION_CHANGED" "$ADOPTION_CHANGED"
+        run: bash scripts/ci/select-cross-image.sh "$FAMILY" "$CONSTRUCTION_CHANGED"
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2

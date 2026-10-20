@@ -8,7 +8,7 @@ passthrough = [
 ]
 
 [target.i686-unknown-linux-gnu]
-image = "ghcr.io/crambl/hdf5-pure-cross-i686@sha256:7a8f2159513c0f24e80e6a5d1a775a5ef3077b217ae4333a020bd8b627f68223"
+image = "ghcr.io/crambl/hdf5-pure-cross-i686:latest"
 
 [target.s390x-unknown-linux-gnu]
-image = "ghcr.io/crambl/hdf5-pure-cross-s390x@sha256:25f54ac8f275eff01f80844b5441559d726dfb2ae76e9f161a4af3e7d74e3ca5"
+image = "ghcr.io/crambl/hdf5-pure-cross-s390x:latest"
