@@ -2495,11 +2495,17 @@ impl FileInner {
         }
     }
 
-    /// Windowed counterpart of [`read_dataset_raw`](Self::read_dataset_raw): read
-    /// the raw element bytes of the row window `[start_row, start_row + num_rows)`,
-    /// touching only the storage it overlaps. Reads through the same base-framed
-    /// `Source`, so on-disk addresses resolve the same way. The caller clamps
-    /// the window to the dataset.
+    /// Reads a clamped row window through the dataset's backend.
+    ///
+    /// The caller clamps the window to the dataset. Returns an empty vector for zero rows or a
+    /// zero inner dimension after validating the datatype and excluding virtual storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ZeroSizedDatatype`] if the datatype occupies zero bytes per element,
+    /// [`FormatError::UnsupportedVirtualLayout`] for virtual storage, and
+    /// [`FormatError::OffsetOverflow`] if the row's byte length exceeds [`u64::MAX`]. Other errors
+    /// are returned by the storage reader.
     fn read_dataset_raw_rows(
         &self,
         spec: RawReadSpec<'_>,
@@ -2511,21 +2517,23 @@ impl FileInner {
         let widths = self.widths;
         let (ds, dt) = (spec.dataspace(), spec.datatype());
         let elem_size = crate::datatype::element_size_usize(dt)?;
-        // Elements per row (product of inner dims; 1 when 0-D or 1-D). Checked so
-        // a crafted dataspace whose inner dims overflow `usize` errors instead of
-        // panicking (debug) or wrapping (release).
-        let row_elems: usize = ds.dimensions.iter().skip(1).try_fold(1usize, |acc, &d| {
-            acc.checked_mul(d.to_usize()?)
-                .ok_or(FormatError::OffsetOverflow {
-                    offset: acc as u64,
-                    length: d,
-                })
+        if matches!(spec.storage(), RawReadStorage::Virtual) {
+            return Err(FormatError::UnsupportedVirtualLayout);
+        }
+        if num_rows == 0 || ds.dimensions.iter().skip(1).any(|&dim| dim == 0) {
+            return Ok(Vec::new());
+        }
+        let row_elems = ds.dimensions.iter().skip(1).try_fold(1u64, |acc, &dim| {
+            acc.checked_mul(dim).ok_or(FormatError::OffsetOverflow {
+                offset: acc,
+                length: dim,
+            })
         })?;
         let row_bytes =
             row_elems
-                .checked_mul(elem_size.get())
+                .checked_mul(elem_size.get() as u64)
                 .ok_or(FormatError::OffsetOverflow {
-                    offset: row_elems as u64,
+                    offset: row_elems,
                     length: elem_size.get() as u64,
                 })?;
 
@@ -2594,19 +2602,19 @@ impl FileInner {
     }
 }
 
-/// Reads a row window through an already base-framed [`Source`].
+/// Reads a row window through a base-relative [`Source`].
 ///
-/// A compact layout reads from the bytes the layout message holds, a contiguous
-/// one from a single bounded sub-read or, where the file allocated no storage,
-/// from the fill value, and a chunked one from the windowed chunk reader. Only
-/// the rank-0 chunked corner a crafted file reaches falls back to a whole read
-/// plus a slice.
+/// Returns an empty vector for zero rows or a zero row byte length in supported layouts.
+/// Reads compact storage from inline bytes, contiguous storage from a bounded source read or
+/// fill values, and chunked storage through the windowed chunk reader. For rank-0 chunked
+/// storage, reads the whole dataset and copies the selected bytes.
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::UnsupportedVirtualLayout`] for a virtual layout, and
-/// the error the layout's own reader reports for a window the dataset's storage
-/// does not hold.
+/// Returns [`FormatError::UnsupportedVirtualLayout`] for a virtual layout,
+/// [`FormatError::OffsetOverflow`] if a byte range or source offset exceeds [`u64::MAX`], and
+/// [`FormatError::ValueTooLargeForPlatform`] if a required buffer length or byte offset exceeds
+/// [`usize::MAX`]. Propagates errors from the selected storage reader.
 fn read_rows_framed<S: Source + ?Sized>(
     source: &S,
     spec: RawReadSpec<'_>,
@@ -2615,33 +2623,27 @@ fn read_rows_framed<S: Source + ?Sized>(
     pass: CachePass,
     start_row: u64,
     num_rows: u64,
-    row_bytes: usize,
+    row_bytes: u64,
 ) -> Result<Vec<u8>, FormatError> {
     let fill = spec.fill();
-    // A zero-row window reads nothing, uniformly across the *supported* layouts.
-    // A `Virtual` layout is unsupported and must still error like `read_raw`
-    // does, so it is excluded here and falls through to the match.
-    if num_rows == 0 && !matches!(spec.storage(), RawReadStorage::Virtual) {
+    if (num_rows == 0 || row_bytes == 0) && !matches!(spec.storage(), RawReadStorage::Virtual) {
         return Ok(Vec::new());
     }
     match spec.storage() {
         RawReadStorage::Compact { data } => compact_rows(data, start_row, num_rows, row_bytes),
         RawReadStorage::Contiguous { address } => {
-            let start =
-                start_row
-                    .checked_mul(row_bytes as u64)
-                    .ok_or(FormatError::OffsetOverflow {
-                        offset: start_row,
-                        length: row_bytes as u64,
-                    })?;
-            let len =
-                num_rows
-                    .to_usize()?
-                    .checked_mul(row_bytes)
-                    .ok_or(FormatError::OffsetOverflow {
-                        offset: num_rows,
-                        length: row_bytes as u64,
-                    })?;
+            let start = start_row
+                .checked_mul(row_bytes)
+                .ok_or(FormatError::OffsetOverflow {
+                    offset: start_row,
+                    length: row_bytes,
+                })?;
+            let len = num_rows
+                .checked_mul(row_bytes)
+                .ok_or(FormatError::OffsetOverflow {
+                    offset: num_rows,
+                    length: row_bytes,
+                })?;
             let off = address
                 .get()
                 .checked_add(start)
@@ -2649,11 +2651,16 @@ fn read_rows_framed<S: Source + ?Sized>(
                     offset: address.get(),
                     length: start,
                 })?;
-            source.read_exact_at(off, len)
+            source.read_exact_at(off, len.to_usize()?)
         }
         RawReadStorage::ContiguousUnallocated => {
-            let len = num_rows.to_usize()?.saturating_mul(row_bytes);
-            fill.buffer(len)
+            let len = num_rows
+                .checked_mul(row_bytes)
+                .ok_or(FormatError::OffsetOverflow {
+                    offset: num_rows,
+                    length: row_bytes,
+                })?;
+            fill.buffer(len.to_usize()?)
         }
         RawReadStorage::Chunked { .. } => {
             match crate::chunked_read::read_chunked_rows_from_source(
@@ -2665,14 +2672,7 @@ fn read_rows_framed<S: Source + ?Sized>(
                 None => {
                     let full =
                         data_read::read_raw_data_cached_from_source(source, spec, widths, cache)?;
-                    let start = start_row.to_usize()? * row_bytes;
-                    let len = num_rows.to_usize()? * row_bytes;
-                    full.get(start..start + len).map(<[u8]>::to_vec).ok_or(
-                        FormatError::DataSizeMismatch {
-                            expected: start + len,
-                            actual: full.len(),
-                        },
-                    )
+                    compact_rows(&full, start_row, num_rows, row_bytes)
                 }
             }
         }
@@ -2680,36 +2680,39 @@ fn read_rows_framed<S: Source + ?Sized>(
     }
 }
 
-/// Reads the rows `[start_row, start_row + num_rows)` of a compact dataset from
-/// the element bytes its layout message holds.
+/// Copies a row window from decoded element bytes.
 ///
-/// Compact data is inline in the object header, so the window is a slice of
-/// `data` and the file is never read.
+/// Computes byte offsets before converting them to slice indexes.
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::ValueTooLargeForPlatform`] if a row index exceeds
-/// `usize`, [`FormatError::OffsetOverflow`] if the window's byte range overflows
-/// it, and [`FormatError::DataSizeMismatch`] if the window ends past the bytes
-/// the message holds.
+/// Returns [`FormatError::OffsetOverflow`] if the window's byte range exceeds [`u64::MAX`],
+/// [`FormatError::ValueTooLargeForPlatform`] if a byte offset exceeds [`usize::MAX`], and
+/// [`FormatError::DataSizeMismatch`] if the window ends past `data`.
 fn compact_rows(
     data: &[u8],
     start_row: u64,
     num_rows: u64,
-    row_bytes: usize,
+    row_bytes: u64,
 ) -> Result<Vec<u8>, FormatError> {
-    let start = start_row.to_usize()?.checked_mul(row_bytes);
-    let len = num_rows.to_usize()?.checked_mul(row_bytes);
-    let (Some(start), Some(len)) = (start, len) else {
-        return Err(FormatError::OffsetOverflow {
+    let start = start_row
+        .checked_mul(row_bytes)
+        .ok_or(FormatError::OffsetOverflow {
             offset: start_row,
-            length: row_bytes as u64,
-        });
-    };
+            length: row_bytes,
+        })?;
+    let len = num_rows
+        .checked_mul(row_bytes)
+        .ok_or(FormatError::OffsetOverflow {
+            offset: num_rows,
+            length: row_bytes,
+        })?;
     let end = start.checked_add(len).ok_or(FormatError::OffsetOverflow {
-        offset: start as u64,
-        length: len as u64,
+        offset: start,
+        length: len,
     })?;
+    let start = start.to_usize()?;
+    let end = end.to_usize()?;
     data.get(start..end)
         .map(<[u8]>::to_vec)
         .ok_or(FormatError::DataSizeMismatch {
@@ -6991,6 +6994,9 @@ the same commit to replace it",
     /// costs more than a whole read. Variable-length string
     /// bytes are heap references, not text — use
     /// [`read_string_rows`](Self::read_string_rows).
+    ///
+    /// For supported layouts, a selection with zero rows or a zero inner dimension returns an
+    /// empty vector, even when a row coordinate or dataspace extent exceeds [`usize::MAX`].
     pub fn read_raw_rows(&self, start_row: u64, num_rows: u64) -> Result<Vec<u8>, Error> {
         let dt = self.datatype()?;
         let ds = self.dataspace()?;
@@ -9178,6 +9184,46 @@ mod tests {
         assert!(
             matches!(err, FormatError::UnsupportedVirtualLayout),
             "expected UnsupportedVirtualLayout, got {err:?}"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::allocated(DataLayout::Contiguous { address: Some(StoredAddress::new(1)), size: 0 })]
+    #[case::unallocated(DataLayout::Contiguous { address: None, size: 0 })]
+    #[case::compact(DataLayout::Compact { data: Vec::new() })]
+    fn row_byte_lengths_report_arithmetic_overflow(#[case] layout: DataLayout) {
+        let dataspace = Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: 1,
+            dimensions: vec![2],
+            max_dimensions: None,
+        };
+        let datatype = crate::make_u8_type();
+        let err = read_rows_framed(
+            &BytesSource::new(&[]),
+            RawReadSpec::plain(&layout, &dataspace, &datatype),
+            FormatWidths::from_sizes(8, 8).unwrap(),
+            &ChunkCache::new(),
+            CachePass::LRU,
+            0,
+            2,
+            u64::MAX,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            FormatError::OffsetOverflow {
+                offset: 2,
+                length: u64::MAX
+            }
+        );
+    }
+
+    #[test]
+    fn empty_compact_rows_accept_large_row_coordinates() {
+        assert_eq!(
+            compact_rows(&[], 4_294_967_360, 4_294_967_296, 0).unwrap(),
+            Vec::<u8>::new()
         );
     }
 
