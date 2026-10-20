@@ -60,6 +60,217 @@ use test_util_hdf5::session;
 use test_util_hdf5::userblock;
 
 #[rstest]
+#[case::before_exact_fill(false, 512, 0, 17, 512)]
+#[case::exact_fill(false, 512, 0, 18, 512)]
+#[case::after_exact_fill(false, 512, 0, 19, 512)]
+#[case::metadata_only(false, 512, 0, 18, 0)]
+#[case::raw_manager(false, 512, 0, 18, 511)]
+#[case::large_manager(false, 512, 0, 18, 513)]
+#[case::raw_and_metadata_managers(false, 512, 0, 412, 511)]
+#[case::large_and_metadata_managers(false, 512, 0, 412, 513)]
+#[case::userblock(false, 512, 4096, 18, 512)]
+#[case::default_page(false, 4096, 4096, 3601, 4096)]
+#[case::larger_page(false, 8192, 8192, 7697, 8192)]
+#[case::c_created(true, 512, 0, 18, 512)]
+fn created_page_tail_survives_reference_library_mutation(
+    #[case] c_created: bool,
+    #[case] page: u64,
+    #[case] base: u64,
+    #[case] attribute_len: usize,
+    #[case] raw_len: usize,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("creation_tail.h5");
+    if c_created {
+        let file = hdf5::FileBuilder::new()
+            .with_fapl(|fapl| fapl.libver_v110())
+            .with_fcpl(|fcpl| {
+                fcpl.file_space_strategy(CStrategy::FreeSpaceManager {
+                    paged: true,
+                    persist: true,
+                    threshold: 1,
+                })
+                .file_space_page_size(page)
+                .userblock(base)
+            })
+            .create(&path)
+            .unwrap();
+        file.new_attr::<u8>()
+            .shape([attribute_len])
+            .create("fill")
+            .unwrap()
+            .write_raw(&vec![0u8; attribute_len])
+            .unwrap();
+        file.new_dataset::<u8>()
+            .shape([raw_len])
+            .create("d")
+            .unwrap()
+            .write_raw(&vec![7u8; raw_len])
+            .unwrap();
+        file.close().unwrap();
+    } else {
+        paged::write_metadata_tail(&path, page, base, 1, attribute_len, raw_len);
+    }
+    let userblock = Userblock::read(&path, usize::try_from(base).unwrap());
+    let file = File::open(&path).unwrap();
+    let free: u64 = file
+        .persisted_free_space()
+        .unwrap()
+        .iter()
+        .map(|&(_, length)| length)
+        .sum();
+    drop(file);
+    let bytes = std::fs::read(&path).unwrap();
+    let file = File::open_rw(&path).unwrap();
+    let unclassified = if raw_len == 513 {
+        vec![(file_space::raw_extents(&file, "d")[0].end, 511)]
+    } else {
+        Vec::new()
+    };
+    let initial_unclassified = if c_created {
+        reference_manager_unclassified(&bytes, page, &file, unclassified.clone())
+    } else {
+        unclassified.clone()
+    };
+    file_space::assert_space_ownership(&file, &initial_unclassified);
+    file.close().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    if !c_created
+        && ((attribute_len == 18 && raw_len == 512)
+            || (attribute_len == 412 && (raw_len == 511 || raw_len == 513)))
+    {
+        assert_eq!(file_space::serialized_manager_padding(&path), 1);
+    }
+    let file = hdf5::File::open_rw(&path).unwrap();
+    assert_eq!(file.free_space(), free);
+    assert_eq!(
+        file.create_plist()
+            .unwrap()
+            .get_file_space_strategy()
+            .unwrap(),
+        CStrategy::FreeSpaceManager {
+            paged: true,
+            persist: true,
+            threshold: 1
+        }
+    );
+    assert_eq!(
+        file.dataset("d").unwrap().read_raw::<u8>().unwrap(),
+        vec![7; raw_len]
+    );
+    assert_eq!(
+        file.attr("fill").unwrap().read_raw::<u8>().unwrap(),
+        vec![0; attribute_len]
+    );
+    file.dataset("d")
+        .unwrap()
+        .write_raw(&vec![11u8; raw_len])
+        .unwrap();
+    file.attr("fill")
+        .unwrap()
+        .write_raw(&vec![13u8; attribute_len])
+        .unwrap();
+    file.new_dataset::<u8>()
+        .shape([32])
+        .create("from_c")
+        .unwrap()
+        .write_raw(&[17u8; 32])
+        .unwrap();
+    file.close().unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let file = File::open_rw(&path).unwrap();
+    assert_eq!(
+        file.dataset("d").unwrap().read_u8().unwrap(),
+        vec![11; raw_len]
+    );
+    assert_eq!(
+        file.dataset("from_c").unwrap().read_u8().unwrap(),
+        vec![17; 32]
+    );
+    assert_eq!(
+        file.root().attrs().unwrap()["fill"],
+        AttrValue::U8Array(vec![13; attribute_len])
+    );
+    let unclassified = reference_manager_unclassified(&bytes, page, &file, unclassified);
+    file_space::assert_space_ownership(&file, &unclassified);
+    file.root()
+        .create_dataset("from_rust", |builder| {
+            builder.with_u8_data(&[19; 32]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    file_space::assert_space_ownership(&file, &unclassified);
+    file.close().unwrap();
+    let file = File::open(&path).unwrap();
+    assert_eq!(
+        file.dataset("d").unwrap().read_u8().unwrap(),
+        vec![11; raw_len]
+    );
+    assert_eq!(
+        file.dataset("from_c").unwrap().read_u8().unwrap(),
+        vec![17; 32]
+    );
+    assert_eq!(
+        file.dataset("from_rust").unwrap().read_u8().unwrap(),
+        vec![19; 32]
+    );
+    userblock.assert_unchanged(&path);
+}
+
+/// Adds diagnostic gaps that match partial-page tails of managers written by libhdf5.
+///
+/// Includes a tail only when ownership analysis reports that exact gap.
+/// `H5FS__cache_hdr_pre_serialize` in `H5FScache.c`, HDF5 1.10.11, places section lists during flush.
+fn reference_manager_unclassified(
+    bytes: &[u8],
+    page: u64,
+    file: &File,
+    mut expected: Vec<(u64, u64)>,
+) -> Vec<(u64, u64)> {
+    let superblock = file.superblock();
+    let widths = FormatWidths::from_sizes(superblock.offset_size, superblock.length_size).unwrap();
+    let base = superblock.base_address;
+    let info = file.file_space_info().unwrap();
+    let ownership = file.__space_ownership().unwrap();
+    for address in info
+        .manager_addrs
+        .iter()
+        .filter_map(|address| match address {
+            hdf5_pure::DecodedStoredAddress::Defined(address) => Some(*address),
+            hdf5_pure::DecodedStoredAddress::Undefined => None,
+        })
+    {
+        let offset = usize::try_from(base.absolute(address).unwrap()).unwrap();
+        let header = FreeSpaceManagerHeader::parse(widths, &bytes[offset..]).unwrap();
+        for (start, length) in [
+            (
+                address.get(),
+                hdf5_pure_format::__private::free_space_manager_header_len(widths),
+            ),
+            (
+                header.section_list_addr().get(),
+                header.section_list_allocated(),
+            ),
+        ] {
+            if start % page != 0 || length % page == 0 {
+                continue;
+            }
+            let end = start + length;
+            let tail = (
+                base.absolute(StoredAddress::new(end)).unwrap(),
+                page - end % page,
+            );
+            if ownership.unclassified_space.contains(&tail) {
+                expected.push(tail);
+            }
+        }
+    }
+    expected.sort_unstable();
+    expected.dedup();
+    expected
+}
+
+#[rstest]
 #[case::rust_small(false, 512, 0, 1)]
 #[case::c_small(true, 512, 0, 1)]
 #[case::rust_default(false, 4_096, 0, 1)]
