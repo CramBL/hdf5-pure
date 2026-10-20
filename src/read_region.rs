@@ -8,6 +8,20 @@ use crate::dataspace::DataspaceType;
 use crate::error::FormatError;
 use crate::read_spec::RawReadSpec;
 
+pub(crate) enum RegionRequest<'a> {
+    Bounds { start: &'a [u64], count: &'a [u64] },
+    Rows { start: u64, count: u64 },
+}
+
+impl RegionRequest<'_> {
+    pub(crate) fn parse<'a>(self, spec: RawReadSpec<'a>) -> Result<ReadRegion<'a>, FormatError> {
+        match self {
+            Self::Bounds { start, count } => ReadRegion::parse(spec, start, count),
+            Self::Rows { start, count } => ReadRegion::rows(spec, start, count),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ReadRegion<'a> {
     spec: RawReadSpec<'a>,

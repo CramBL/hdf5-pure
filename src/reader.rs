@@ -51,7 +51,7 @@ use crate::object_header::ObjectHeader;
 use crate::object_path::{LinkName, LinkNameBuf, ObjectPath, ObjectPathBuf};
 #[cfg(any(test, feature = "__page-publication-crosscheck"))]
 use crate::page_publication_failure::PagePublicationFailure;
-use crate::read_region::ReadRegion;
+use crate::read_region::{ReadRegion, RegionRequest};
 use crate::read_spec::{RawReadSpec, RawReadStorage};
 use crate::shared_message::{self, BufferedResolver, SharedResolver, SourceResolver};
 use crate::source::SourceMetadata;
@@ -6940,42 +6940,236 @@ the same commit to replace it",
     /// arithmetic overflows, or dataset metadata or storage cannot be read. Dataset layout
     /// consistency checks apply to empty selections.
     pub fn read_raw_rows(&self, start_row: u64, num_rows: u64) -> Result<Vec<u8>, Error> {
-        let dt = self.datatype()?;
-        let ds = self.dataspace()?;
-        let dl = self.read_layout()?;
+        self.read_raw_selection(RegionRequest::Rows {
+            start: start_row,
+            count: num_rows,
+        })
+    }
 
-        let n0 = ds.dimensions.first().copied().unwrap_or(1);
-        let start = start_row.min(n0);
-        let count = num_rows.min(n0 - start);
+    /// Reads unfiltered element bytes from a unit-stride region in row-major order.
+    ///
+    /// `start` and `count` contain one coordinate and element count per dataset dimension.
+    /// Every range must fit the current shape. Returns an empty vector for a zero count in any
+    /// dimension after checking every range. For a scalar dataspace, pass empty slices to read
+    /// its single element. A null dataspace has an empty selection.
+    ///
+    /// The result is packed with the last dimension varying fastest. Contiguous reads fetch the
+    /// selected byte runs, and chunked reads decode intersecting chunks. For a region covering the
+    /// whole dataset, reads through [`read_raw`](Self::read_raw).
+    ///
+    /// Variable-length string elements contain heap references. Use
+    /// [`read_string_region`](Self::read_string_region) to read their text.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::RegionRankMismatch`] if either slice length differs from the
+    /// dataset rank, and [`FormatError::RegionOutOfBounds`] if a range exceeds a dimension's
+    /// current extent. Returns [`FormatError::OffsetOverflow`] if byte arithmetic overflows,
+    /// and [`FormatError::ValueTooLargeForPlatform`] if the result exceeds the platform's
+    /// buffer limit. These format errors are returned as [`Error::Format`].
+    ///
+    /// Returns errors from reading dataset metadata, storage, or filters. Dataset layout
+    /// consistency checks apply to empty selections.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # let directory = tempfile::tempdir()?;
+    /// # let path = directory.path().join("pixels.h5");
+    /// # let mut builder = hdf5_pure::FileBuilder::new();
+    /// # builder.create_dataset("pixels")
+    /// #     .with_u16_data(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
+    /// #     .with_shape(&[3, 4]);
+    /// # builder.write(&path)?;
+    /// use hdf5_pure::File;
+    ///
+    /// let file = File::open(&path)?;
+    /// let dataset = file.dataset("pixels")?;
+    /// let bytes = dataset.read_raw_region(&[1, 1], &[2, 2])?;
+    /// assert_eq!(bytes, [5, 0, 6, 0, 9, 0, 10, 0]);
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
+    pub fn read_raw_region(&self, start: &[u64], count: &[u64]) -> Result<Vec<u8>, Error> {
+        self.read_raw_selection(RegionRequest::Bounds { start, count })
+    }
 
-        // A window covering every row is exactly a whole read: delegate, so it
-        // never costs a window-shaped copy on top of one.
-        // See `read_raw`: an unparseable fill value message is carried into the
-        // read rather than failing it up front.
-        let elem_size = crate::datatype::element_size_usize(&dt)?;
-        let fill_msg = self.fill_value_message();
-        let fill = match &fill_msg {
-            Ok(Some(m)) => FillPattern::from_message(m, elem_size),
-            Ok(None) => FillPattern::new(FillTime::IfSet, None, elem_size),
-            Err(_) => FillPattern::UNKNOWN,
-        };
+    /// Reads a unit-stride region as row-major [`f64`] values.
+    ///
+    /// Uses the selection rules of [`read_raw_region`](Self::read_raw_region) and the numeric
+    /// conversions of [`read_f64`](Self::read_f64).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the region cannot be read or the datatype cannot be decoded
+    /// as numeric values. See [`read_raw_region`](Self::read_raw_region) for selection and
+    /// storage errors.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # let directory = tempfile::tempdir()?;
+    /// # let path = directory.path().join("volume.h5");
+    /// # let values: Vec<_> = (0..24).map(f64::from).collect();
+    /// # let mut builder = hdf5_pure::FileBuilder::new();
+    /// # builder.create_dataset("volume")
+    /// #     .with_f64_data(&values)
+    /// #     .with_shape(&[2, 3, 4]);
+    /// # builder.write(&path)?;
+    /// use hdf5_pure::File;
+    ///
+    /// let file = File::open(&path)?;
+    /// let dataset = file.dataset("volume")?;
+    /// let values = dataset.read_f64_region(&[1, 0, 1], &[1, 2, 2])?;
+    /// assert_eq!(values, [13.0, 14.0, 17.0, 18.0]);
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
+    pub fn read_f64_region(&self, start: &[u64], count: &[u64]) -> Result<Vec<f64>, Error> {
+        let raw = self.read_raw_region(start, count)?;
+        Ok(data_read::read_as_f64(&raw, &self.datatype()?)?)
+    }
 
-        let pipeline = self.filter_pipeline_parsed();
-        let spec = RawReadSpec::parse(&dl, &ds, &dt, pipeline.as_ref(), fill)?;
+    /// Reads a unit-stride region as row-major [`f32`] values.
+    ///
+    /// Uses the selection rules of [`read_raw_region`](Self::read_raw_region) and the numeric
+    /// conversions of [`read_f32`](Self::read_f32). See
+    /// [`read_f64_region`](Self::read_f64_region) for an example.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the region cannot be read or the datatype cannot be decoded
+    /// as numeric values. See [`read_raw_region`](Self::read_raw_region) for selection and
+    /// storage errors.
+    pub fn read_f32_region(&self, start: &[u64], count: &[u64]) -> Result<Vec<f32>, Error> {
+        let raw = self.read_raw_region(start, count)?;
+        Ok(data_read::read_as_f32(&raw, &self.datatype()?)?)
+    }
 
-        if start == 0 && count == n0 {
-            return Ok(self.file.read_dataset_raw(spec, &self.chunk_cache)?);
-        }
+    /// Reads a unit-stride region as row-major [`i8`] values.
+    ///
+    /// Uses the selection rules of [`read_raw_region`](Self::read_raw_region) and the numeric
+    /// conversions of [`read_i8`](Self::read_i8). See
+    /// [`read_f64_region`](Self::read_f64_region) for an example.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the region cannot be read or the datatype cannot be decoded
+    /// as numeric values. See [`read_raw_region`](Self::read_raw_region) for selection and
+    /// storage errors.
+    pub fn read_i8_region(&self, start: &[u64], count: &[u64]) -> Result<Vec<i8>, Error> {
+        let raw = self.read_raw_region(start, count)?;
+        Ok(data_read::read_as_i8(&raw, &self.datatype()?)?)
+    }
 
-        // A lone window's successor is the adjacent one, and the chunk they share
-        // is the one this read finishes on; `CachePass::LRU` is what retains it.
-        Ok(self.file.read_dataset_raw_rows(
-            spec,
-            &self.chunk_cache,
-            CachePass::LRU,
-            start,
-            count,
-        )?)
+    /// Reads a unit-stride region as row-major [`i16`] values.
+    ///
+    /// Uses the selection rules of [`read_raw_region`](Self::read_raw_region) and the numeric
+    /// conversions of [`read_i16`](Self::read_i16). See
+    /// [`read_f64_region`](Self::read_f64_region) for an example.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the region cannot be read or the datatype cannot be decoded
+    /// as numeric values. See [`read_raw_region`](Self::read_raw_region) for selection and
+    /// storage errors.
+    pub fn read_i16_region(&self, start: &[u64], count: &[u64]) -> Result<Vec<i16>, Error> {
+        let raw = self.read_raw_region(start, count)?;
+        Ok(data_read::read_as_i16(&raw, &self.datatype()?)?)
+    }
+
+    /// Reads a unit-stride region as row-major [`i32`] values.
+    ///
+    /// Uses the selection rules of [`read_raw_region`](Self::read_raw_region) and the numeric
+    /// conversions of [`read_i32`](Self::read_i32). See
+    /// [`read_f64_region`](Self::read_f64_region) for an example.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the region cannot be read or the datatype cannot be decoded
+    /// as numeric values. See [`read_raw_region`](Self::read_raw_region) for selection and
+    /// storage errors.
+    pub fn read_i32_region(&self, start: &[u64], count: &[u64]) -> Result<Vec<i32>, Error> {
+        let raw = self.read_raw_region(start, count)?;
+        Ok(data_read::read_as_i32(&raw, &self.datatype()?)?)
+    }
+
+    /// Reads a unit-stride region as row-major [`i64`] values.
+    ///
+    /// Uses the selection rules of [`read_raw_region`](Self::read_raw_region) and the numeric
+    /// conversions of [`read_i64`](Self::read_i64). See
+    /// [`read_f64_region`](Self::read_f64_region) for an example.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the region cannot be read or the datatype cannot be decoded
+    /// as numeric values. See [`read_raw_region`](Self::read_raw_region) for selection and
+    /// storage errors.
+    pub fn read_i64_region(&self, start: &[u64], count: &[u64]) -> Result<Vec<i64>, Error> {
+        let raw = self.read_raw_region(start, count)?;
+        Ok(data_read::read_as_i64(&raw, &self.datatype()?)?)
+    }
+
+    /// Reads a unit-stride region as row-major [`u8`] values.
+    ///
+    /// Uses the selection rules of [`read_raw_region`](Self::read_raw_region) and the numeric
+    /// conversions of [`read_u8`](Self::read_u8). See
+    /// [`read_f64_region`](Self::read_f64_region) for an example.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the region cannot be read or the datatype cannot be decoded
+    /// as numeric values. See [`read_raw_region`](Self::read_raw_region) for selection and
+    /// storage errors.
+    pub fn read_u8_region(&self, start: &[u64], count: &[u64]) -> Result<Vec<u8>, Error> {
+        let raw = self.read_raw_region(start, count)?;
+        Ok(data_read::read_as_u8(&raw, &self.datatype()?)?)
+    }
+
+    /// Reads a unit-stride region as row-major [`u16`] values.
+    ///
+    /// Uses the selection rules of [`read_raw_region`](Self::read_raw_region) and the numeric
+    /// conversions of [`read_u16`](Self::read_u16). See
+    /// [`read_f64_region`](Self::read_f64_region) for an example.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the region cannot be read or the datatype cannot be decoded
+    /// as numeric values. See [`read_raw_region`](Self::read_raw_region) for selection and
+    /// storage errors.
+    pub fn read_u16_region(&self, start: &[u64], count: &[u64]) -> Result<Vec<u16>, Error> {
+        let raw = self.read_raw_region(start, count)?;
+        Ok(data_read::read_as_u16(&raw, &self.datatype()?)?)
+    }
+
+    /// Reads a unit-stride region as row-major [`u32`] values.
+    ///
+    /// Uses the selection rules of [`read_raw_region`](Self::read_raw_region) and the numeric
+    /// conversions of [`read_u32`](Self::read_u32). See
+    /// [`read_f64_region`](Self::read_f64_region) for an example.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the region cannot be read or the datatype cannot be decoded
+    /// as numeric values. See [`read_raw_region`](Self::read_raw_region) for selection and
+    /// storage errors.
+    pub fn read_u32_region(&self, start: &[u64], count: &[u64]) -> Result<Vec<u32>, Error> {
+        let raw = self.read_raw_region(start, count)?;
+        Ok(data_read::read_as_u32(&raw, &self.datatype()?)?)
+    }
+
+    /// Reads a unit-stride region as row-major [`u64`] values.
+    ///
+    /// Uses the selection rules of [`read_raw_region`](Self::read_raw_region) and the numeric
+    /// conversions of [`read_u64`](Self::read_u64). See
+    /// [`read_f64_region`](Self::read_f64_region) for an example.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the region cannot be read or the datatype cannot be decoded
+    /// as numeric values. See [`read_raw_region`](Self::read_raw_region) for selection and
+    /// storage errors.
+    pub fn read_u64_region(&self, start: &[u64], count: &[u64]) -> Result<Vec<u64>, Error> {
+        let raw = self.read_raw_region(start, count)?;
+        Ok(data_read::read_as_u64(&raw, &self.datatype()?)?)
     }
 
     /// Windowed [`read_f64`](Self::read_f64) — decodes only the row window.
@@ -7045,32 +7239,42 @@ the same commit to replace it",
     /// bound holds for them too: peak allocation is the window's references,
     /// its text, and the metadata of the heap collections it touches.
     pub fn read_string_rows(&self, start_row: u64, num_rows: u64) -> Result<Vec<String>, Error> {
-        let dt = self.datatype()?;
-        if vl_data::is_vlen_string_datatype(&dt) {
-            // The window's heap references, read memory-bounded like any other
-            // fixed-size element (4-byte length + collection address + 4-byte
-            // object index), one row spanning its inner dimensions. Resolving
-            // only those against the global heap keeps the bound — the same
-            // resolution `read_string` runs over the whole dataset's references.
-            let raw = self.read_raw_rows(start_row, num_rows)?;
-            let ref_size = VlElement::serialized_size(self.file.widths.offsets);
-            let num_elements = (raw.len() / ref_size) as u64;
-            let mut strings = Vec::new();
-            self.file.with_source(|source| -> Result<(), Error> {
-                Ok(vl_data::visit_vl_strings_from_source(
-                    source,
-                    &raw,
-                    num_elements,
-                    self.file.widths,
-                    self.file.addresses(),
-                    VlenStringReadOptions::default(),
-                    |string| strings.push(String::from(string)),
-                )?)
-            })?;
-            return Ok(strings);
-        }
         let raw = self.read_raw_rows(start_row, num_rows)?;
-        Ok(data_read::read_as_strings(&raw, &dt)?)
+        self.read_strings_from_raw(&raw, &self.datatype()?)
+    }
+
+    /// Reads a unit-stride region of fixed-length or variable-length strings in row-major order.
+    ///
+    /// Uses the selection rules of [`read_raw_region`](Self::read_raw_region). For variable-length
+    /// strings, reads the text referenced by the selected elements.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::TypeMismatch`] through [`Error::Format`] if the dataset's datatype
+    /// is not a string type. Returns errors from [`read_raw_region`](Self::read_raw_region),
+    /// decoding strings, or reading global heap objects.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # let directory = tempfile::tempdir()?;
+    /// # let path = directory.path().join("labels.h5");
+    /// # let mut builder = hdf5_pure::FileBuilder::new();
+    /// # builder.create_dataset("labels")
+    /// #     .with_vlen_strings(&["north", "south", "east", "west", "up", "down"])
+    /// #     .with_shape(&[2, 3]);
+    /// # builder.write(&path)?;
+    /// use hdf5_pure::File;
+    ///
+    /// let file = File::open_streaming(&path)?;
+    /// let dataset = file.dataset("labels")?;
+    /// let labels = dataset.read_string_region(&[0, 1], &[2, 2])?;
+    /// assert_eq!(labels, ["south", "east", "up", "down"]);
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
+    pub fn read_string_region(&self, start: &[u64], count: &[u64]) -> Result<Vec<String>, Error> {
+        let raw = self.read_raw_region(start, count)?;
+        self.read_strings_from_raw(&raw, &self.datatype()?)
     }
 
     /// Interpret this dataset as an array of HDF5 object references
@@ -7189,6 +7393,46 @@ the same commit to replace it",
         } else {
             Ok(VerifyResult::Mismatch { stored, computed })
         }
+    }
+
+    fn read_raw_selection(&self, request: RegionRequest<'_>) -> Result<Vec<u8>, Error> {
+        let datatype = self.datatype()?;
+        let dataspace = self.dataspace()?;
+        let layout = self.read_layout()?;
+        let pipeline = self.filter_pipeline_parsed();
+        let element_size = crate::datatype::element_size_usize(&datatype)?;
+        let fill_message = self.fill_value_message();
+        let fill = match &fill_message {
+            Ok(Some(message)) => FillPattern::from_message(message, element_size),
+            Ok(None) => FillPattern::new(FillTime::IfSet, None, element_size),
+            Err(_) => FillPattern::UNKNOWN,
+        };
+        let spec = RawReadSpec::parse(&layout, &dataspace, &datatype, pipeline.as_ref(), fill)?;
+        let region = request.parse(spec)?;
+        Ok(self
+            .file
+            .read_dataset_region(&region, &self.chunk_cache, CachePass::LRU)?)
+    }
+
+    fn read_strings_from_raw(&self, raw: &[u8], datatype: &Datatype) -> Result<Vec<String>, Error> {
+        if !vl_data::is_vlen_string_datatype(datatype) {
+            return Ok(data_read::read_as_strings(raw, datatype)?);
+        }
+        let reference_size = VlElement::serialized_size(self.file.widths.offsets);
+        let elements = (raw.len() / reference_size) as u64;
+        let mut strings = Vec::new();
+        self.file.with_source(|source| -> Result<(), Error> {
+            Ok(vl_data::visit_vl_strings_from_source(
+                source,
+                raw,
+                elements,
+                self.file.widths,
+                self.file.addresses(),
+                VlenStringReadOptions::default(),
+                |string| strings.push(String::from(string)),
+            )?)
+        })?;
+        Ok(strings)
     }
 }
 

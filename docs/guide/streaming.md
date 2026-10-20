@@ -100,6 +100,10 @@ The streaming backend resolves both group forms (v2 and v1 symbol-table) and rea
 
 Streaming opens are read-only. To **append** to a file with the same bounded-memory discipline, open it with [`File::open_rw`](crate::File::open_rw), which edits a latest-format file bounded, the read-write sibling of [`open_streaming`](crate::File::open_streaming), sharing this backend's read capabilities and the [`FileAccessProperties`](crate::FileAccessProperties) cache budgets below. [Bounded-memory appends](crate::_guide::editing#bounded-memory-appends) has the detail.
 
+## Reading a region
+
+[`Dataset::read_raw_region`](crate::Dataset::read_raw_region) and the related typed methods select a unit-stride region along every dataset dimension. Contiguous reads fetch the selected byte runs, and chunked reads decode only intersecting chunks. Pass one start and count per dimension, with each range inside the current shape. See [Reading a region](crate::_guide::reading#reading-a-region) for the selection rules.
+
 ## Reading a large dataset a window at a time
 
 The whole-dataset reads above materialize one dataset in full. When a single dataset is itself too large to hold decompressed, read it in **row windows**: [`read_raw_rows(start, count)`](crate::Dataset::read_raw_rows) and the typed [`read_f64_rows`](crate::Dataset::read_f64_rows) / … / [`read_string_rows`](crate::Dataset::read_string_rows) decode only the leading-dimension rows `[start, start + count)`, touching only the chunks that window overlaps. Peak memory then tracks the window (plus one chunk), not the dataset.
@@ -216,9 +220,9 @@ assert!(stats.cached_chunks() > 0);
 | read | budget signal | stays zero |
 |---|---|---|
 | whole ([`read_f64`](crate::Dataset::read_f64) and friends) | [`rejections()`](crate::ChunkCacheStats::rejections) | [`evictions()`](crate::ChunkCacheStats::evictions) |
-| row window (`read_*_rows`) | [`evictions()`](crate::ChunkCacheStats::evictions) | [`rejections()`](crate::ChunkCacheStats::rejections) |
+| partial selections (`read_*_region` or `read_*_rows`) | [`evictions()`](crate::ChunkCacheStats::evictions) | [`rejections()`](crate::ChunkCacheStats::rejections) |
 
-A whole read visits each of its chunks exactly once, so a full cache rejects the chunks that follow and keeps the ones it has already placed, which no later chunk of that read would have been served from anyway: a dataset eight times the budget reports seven eighths of its chunks rejected and no evictions at all. Reading it again hits the retained chunks and rejects the rest, so a settled cache costs nothing to keep. A row window keeps the plain LRU rule, because the chunk its successor needs is the one it finished on. Either counter climbing while [`hit_rate()`](crate::ChunkCacheStats::hit_rate) stays low is the same finding.
+A whole read visits each of its chunks exactly once, so a full cache rejects the chunks that follow and keeps the ones it has already placed, which no later chunk of that read would have been served from anyway: a dataset eight times the budget reports seven eighths of its chunks rejected and no evictions at all. Reading it again hits the retained chunks and rejects the rest, so a settled cache costs nothing to keep. A partial region or row-window read uses the LRU rule, retaining recently accessed chunks for later reads. Either counter climbing while [`hit_rate()`](crate::ChunkCacheStats::hit_rate) stays low is the same finding.
 
 ```rust
 # let dir = tempfile::tempdir()?;
