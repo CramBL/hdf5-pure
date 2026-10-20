@@ -394,6 +394,45 @@ mod tests {
     }
 
     #[test]
+    fn both_read_paths_accept_checksummed_unused_section_list_bytes() {
+        let header = free_space::oversized_section_list_header();
+        let mut list = free_space::oversized_section_list();
+        list[185] = 0xd0;
+        let len = list.len();
+        test_util::checksum::restamp(&mut list, 0, len);
+        let mut file = vec![0; 645 + list.len()];
+        file[48..48 + header.len()].copy_from_slice(&header);
+        file[645..].copy_from_slice(&list);
+        let managers = [DecodedStoredAddress::Defined(StoredAddress::new(48))];
+        let expected = vec![
+            section(842, 10),
+            section(5375, 10),
+            section(474, 24),
+            section(2444, 27),
+            section(1595, 47),
+            section(130, 74),
+            section(2618, 194),
+            section(3793, 254),
+            section(1122, 326),
+            section(4385, 393),
+        ];
+
+        assert_eq!(
+            read_persisted_sections(&file, widths(8, 8), BaseAddress::ZERO, &managers),
+            Ok(expected.clone()),
+        );
+        assert_eq!(
+            read_persisted_sections_source(
+                &crate::source::BytesSource::new(&file),
+                widths(8, 8),
+                BaseAddress::ZERO,
+                &managers,
+            ),
+            Ok((expected, vec![(48, 82), (645, 197)])),
+        );
+    }
+
+    #[test]
     fn read_persisted_sections_follows_managers() {
         // Place the single-section FSHD@619 + FSSE@701 fixtures in a buffer at
         // their real offsets and read them through the manager-address indirection.
