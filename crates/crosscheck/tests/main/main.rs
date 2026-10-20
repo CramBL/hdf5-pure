@@ -72,6 +72,7 @@ mod partial_edge_chunk_filters;
 mod repack;
 mod scaleoffset_fill;
 mod serde;
+mod shuffle;
 mod sohm;
 mod space_ownership;
 mod superblock_addresses;

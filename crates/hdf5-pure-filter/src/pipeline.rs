@@ -225,7 +225,7 @@ pub struct ChunkContext<'a> {
     pub scale_offset_type: Option<ScaleOffsetType>,
 }
 
-#[cfg(all(test, feature = "deflate"))]
+#[cfg(test)]
 impl<'a> ChunkContext<'a> {
     fn basic(chunk_dims: &'a [u64], element_size: u32) -> Self {
         Self {
@@ -334,7 +334,7 @@ pub fn decompress_chunk_with(
         }
         let input: &[u8] = owned.as_deref().unwrap_or(compressed);
         let next = match filters.id(i) {
-            FILTER_SHUFFLE => shuffle_decompress(input, ctx.element_size.get() as usize)?,
+            FILTER_SHUFFLE => shuffle_decompress(input, ctx.element_size.get() as usize),
             FILTER_DEFLATE => deflate_decompress(
                 scratch,
                 input,
@@ -443,7 +443,7 @@ fn inner_output_cap(
     Ok(Some(size))
 }
 
-#[cfg(all(test, feature = "deflate"))]
+#[cfg(test)]
 fn compress_chunk(
     data: &[u8],
     filters: &(impl FilterSteps + ?Sized),
@@ -468,7 +468,7 @@ pub fn compress_chunk_with(
     for i in 0..filters.len() {
         let input: &[u8] = owned.as_deref().unwrap_or(data);
         let next = match filters.id(i) {
-            FILTER_SHUFFLE => shuffle_compress(input, ctx.element_size.get() as usize)?,
+            FILTER_SHUFFLE => shuffle_compress(input, ctx.element_size.get() as usize),
             FILTER_DEFLATE => {
                 let level = filters.client_data(i).first().copied().unwrap_or(6);
                 deflate_compress(scratch, input, level)?
@@ -621,17 +621,17 @@ fn shuffle_n<const N: usize>(data: &[u8], result: &mut [u8], num_elements: usize
     }
 }
 
-fn shuffle_decompress(data: &[u8], element_size: usize) -> Result<Vec<u8>, Error> {
+/// Preserves trailing bytes while reversing byte shuffling of complete elements.
+///
+/// `H5Z__filter_shuffle` preserves trailing bytes in both directions (`H5Zshuffle.c`, HDF5 2.2.0).
+fn shuffle_decompress(data: &[u8], element_size: usize) -> Vec<u8> {
     if element_size <= 1 {
-        return Ok(data.to_vec());
-    }
-    if !data.len().is_multiple_of(element_size) {
-        return Err(Error::FilterError(
-            "shuffle: data length not a multiple of element size".into(),
-        ));
+        return data.to_vec();
     }
     let num_elements = data.len() / element_size;
     let mut result = vec![0u8; data.len()];
+    let prefix_len = data.len() - data.len() % element_size;
+    result[prefix_len..].copy_from_slice(&data[prefix_len..]);
 
     // Specialize the common scalar widths so the inner loop unrolls and each
     // element is written as one contiguous store. The generic loop handles
@@ -650,20 +650,18 @@ fn shuffle_decompress(data: &[u8], element_size: usize) -> Result<Vec<u8>, Error
         }
     }
 
-    Ok(result)
+    result
 }
 
-fn shuffle_compress(data: &[u8], element_size: usize) -> Result<Vec<u8>, Error> {
+/// Preserves trailing bytes while grouping complete elements by byte position.
+fn shuffle_compress(data: &[u8], element_size: usize) -> Vec<u8> {
     if element_size <= 1 {
-        return Ok(data.to_vec());
-    }
-    if !data.len().is_multiple_of(element_size) {
-        return Err(Error::FilterError(
-            "shuffle: data length not a multiple of element size".into(),
-        ));
+        return data.to_vec();
     }
     let num_elements = data.len() / element_size;
     let mut result = vec![0u8; data.len()];
+    let prefix_len = data.len() - data.len() % element_size;
+    result[prefix_len..].copy_from_slice(&data[prefix_len..]);
 
     match element_size {
         2 => shuffle_n::<2>(data, &mut result, num_elements),
@@ -679,7 +677,7 @@ fn shuffle_compress(data: &[u8], element_size: usize) -> Result<Vec<u8>, Error> 
         }
     }
 
-    Ok(result)
+    result
 }
 
 fn fletcher32_compute(data: &[u8]) -> u32 {
@@ -769,14 +767,12 @@ mod tests {
     use crate::scaleoffset::ScaleOffsetByteOrder;
     use crate::scaleoffset::ScaleOffsetFill;
 
-    #[cfg(feature = "deflate")]
     struct FilterDescription {
         filter_id: u16,
         flags: u16,
         client_data: Vec<u32>,
     }
 
-    #[cfg(feature = "deflate")]
     impl FilterStep for FilterDescription {
         fn id(&self) -> u16 {
             self.filter_id
@@ -789,7 +785,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "deflate")]
     struct FilterPipeline {
         filters: Vec<FilterDescription>,
     }
@@ -818,6 +813,7 @@ mod tests {
     }
 
     #[rstest::rstest]
+    #[case(1)]
     #[case(2)]
     #[case(3)]
     #[case(4)]
@@ -825,11 +821,17 @@ mod tests {
     #[case(7)]
     #[case(8)]
     #[case(16)]
-    fn shuffle_roundtrip(#[case] width: usize) {
-        let data: Vec<u8> = (0..(width * 50)).map(|i| (i * 31 % 256) as u8).collect();
-        let shuffled = shuffle_compress(&data, width).unwrap();
+    fn shuffle_roundtrip(
+        #[case] width: usize,
+        #[values(0, 1, 50)] elements: usize,
+        #[values(0, 1)] remainder: usize,
+    ) {
+        let data: Vec<u8> = (0..(width * elements + remainder))
+            .map(|i| (i * 31 % 256) as u8)
+            .collect();
+        let shuffled = shuffle_compress(&data, width);
         assert_eq!(shuffled.len(), data.len());
-        assert_eq!(shuffle_decompress(&shuffled, width).unwrap(), data);
+        assert_eq!(shuffle_decompress(&shuffled, width), data);
     }
 
     #[rstest::rstest]
@@ -850,7 +852,7 @@ mod tests {
         }
         let data: Vec<u8> = (0..(width * 37)).map(|i| (i * 17 + 3) as u8).collect();
         assert_eq!(
-            shuffle_compress(&data, width).unwrap(),
+            shuffle_compress(&data, width),
             generic_shuffle(&data, width)
         );
     }
@@ -858,11 +860,47 @@ mod tests {
     #[test]
     fn shuffle_known_pattern() {
         let data = vec![0xA0, 0xA1, 0xA2, 0xA3, 0xB0, 0xB1, 0xB2, 0xB3];
-        let shuffled = shuffle_compress(&data, 4).unwrap();
+        let shuffled = shuffle_compress(&data, 4);
         assert_eq!(
             shuffled,
             vec![0xA0, 0xB0, 0xA1, 0xB1, 0xA2, 0xB2, 0xA3, 0xB3]
         );
+    }
+
+    #[rstest]
+    #[case(2, &[1, 2, 3, 4, 91], &[1, 3, 2, 4, 91])]
+    #[case(3, &[1, 2, 3, 4, 5, 6, 91, 92], &[1, 4, 2, 5, 3, 6, 91, 92])]
+    #[case(4, &[1, 2, 3, 4, 5, 6, 7, 8, 91, 92], &[1, 5, 2, 6, 3, 7, 4, 8, 91, 92])]
+    #[case(
+        8,
+        &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 91, 92],
+        &[1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15, 8, 16, 91, 92]
+    )]
+    #[case(
+        16,
+        &[
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+            17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 91, 92
+        ],
+        &[
+            1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23, 8, 24,
+            9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31, 16, 32, 91, 92
+        ]
+    )]
+    #[case(4, &[], &[])]
+    #[case(4, &[91, 92], &[91, 92])]
+    #[case(4, &[1, 2, 3, 4, 91, 92], &[1, 2, 3, 4, 91, 92])]
+    fn shuffle_preserves_remainder(
+        #[case] width: usize,
+        #[case] data: &[u8],
+        #[case] shuffled: &[u8],
+        #[values(false, true)] reverse: bool,
+    ) {
+        if reverse {
+            assert_eq!(shuffle_decompress(shuffled, width), data);
+        } else {
+            assert_eq!(shuffle_compress(data, width), shuffled);
+        }
     }
 
     #[test]
@@ -922,6 +960,33 @@ mod tests {
         assert_eq!(checksum, 0xFFFF_FFFF);
         let verified = fletcher32_verify(&with_checksum).unwrap();
         assert_eq!(verified, data);
+    }
+
+    #[test]
+    fn pipeline_fletcher32_then_shuffle_preserves_remainder() {
+        let pipeline = FilterPipeline {
+            filters: vec![
+                FilterDescription {
+                    filter_id: FILTER_FLETCHER32,
+                    flags: 0,
+                    client_data: vec![],
+                },
+                FilterDescription {
+                    filter_id: FILTER_SHUFFLE,
+                    flags: 0,
+                    client_data: vec![8],
+                },
+            ],
+        };
+        let data: Vec<u8> = (0..512).map(|i| (i % 251) as u8).collect();
+        let ctx = ChunkContext::basic(&[64], 8);
+        let encoded = compress_chunk(&data, &pipeline.filters, ctx).unwrap();
+        assert_eq!(encoded.len(), 516);
+        assert_eq!(&encoded[512..], &fletcher32_append(&data).unwrap()[512..]);
+        assert_eq!(
+            decompress_chunk(&encoded, &pipeline.filters, ctx, 0).unwrap(),
+            data
+        );
     }
 
     #[test]
@@ -1048,7 +1113,7 @@ mod tests {
         let dims = [(data.len() / 8) as u64];
         let ctx = ChunkContext::basic(&dims, 8);
 
-        let stored = shuffle_compress(&data, 8).unwrap();
+        let stored = shuffle_compress(&data, 8);
         let mask = 1u32 << 1;
         let decoded = decompress_chunk(&stored, &pipeline.filters, ctx, mask).unwrap();
         assert_eq!(
