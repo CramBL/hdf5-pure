@@ -38,6 +38,8 @@ mod file_space_info;
 mod fill_value;
 mod filter_pipeline;
 mod fixed_array;
+#[cfg(test)]
+mod fixture;
 mod fractal_heap;
 mod fractal_heap_block;
 mod fractal_heap_free_space;

@@ -457,6 +457,13 @@ pub enum FormatError {
         /// The decode failure.
         source: Utf8Error,
     },
+    /// A link name offset at or past the end of the data segment of a group's local heap.
+    InvalidLocalHeapNameOffset {
+        /// The name's offset within the heap's data segment.
+        offset: u64,
+        /// The size of the data segment the heap header stores, in bytes.
+        data_segment_size: u64,
+    },
     /// Invalid local heap signature.
     InvalidLocalHeapSignature,
     /// Invalid local heap version.
@@ -642,6 +649,9 @@ pub enum FormatError {
     /// An Object Header Continuation message stores the undefined address, all bits set, as the
     /// address of its continuation block.
     UndefinedContinuationAddress,
+    /// A local heap header stores the undefined address, all bits set, as the address of its data
+    /// segment.
+    UndefinedLocalHeapDataSegment,
     /// Unexpected end of data.
     UnexpectedEof {
         /// Number of bytes expected.
@@ -720,6 +730,12 @@ pub enum FormatError {
     UnsupportedVirtualLayout,
     /// ZFP filter configuration is invalid (e.g. missing element type, rank out of range).
     UnsupportedZfp(String),
+    /// A link name in a group's local heap has no NUL terminator before the end of the data
+    /// segment.
+    UnterminatedLocalHeapName {
+        /// The name's offset within the heap's data segment.
+        offset: u64,
+    },
     /// More userblock content was supplied than the userblock region holds. The
     /// overflow would displace the superblock, so the writer rejects the content.
     UserblockContentTooLarge {
@@ -1045,6 +1061,27 @@ impl fmt::Display for FormatError {
             }
             Self::InvalidLocalHeapVersion(v) => {
                 write!(f, "invalid local heap version: {v}")
+            }
+            Self::InvalidLocalHeapNameOffset {
+                offset,
+                data_segment_size,
+            } => {
+                write!(
+                    f,
+                    "local heap name offset {offset} lies outside the {data_segment_size}-byte data segment"
+                )
+            }
+            Self::UnterminatedLocalHeapName { offset } => {
+                write!(
+                    f,
+                    "the local heap name at data segment offset {offset} has no NUL terminator in the data segment"
+                )
+            }
+            Self::UndefinedLocalHeapDataSegment => {
+                write!(
+                    f,
+                    "local heap header stores the undefined address as its data segment address"
+                )
             }
             Self::InvalidLocalHeapName { offset, source } => {
                 write!(

@@ -226,6 +226,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
             "InvalidFractalHeapBlockOwner",
             "InvalidFractalHeapGeometry",
             "InvalidFractalHeapIdLength",
+            "InvalidLocalHeapNameOffset",
             "InvalidObjectHeaderMessageSize",
             "InvalidSpaceAllocationTime",
             "LengthTooLarge",
@@ -233,8 +234,10 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
             "TruncatedFile",
             "UnalignedGlobalHeapCollection",
             "UndefinedContinuationAddress",
+            "UndefinedLocalHeapDataSegment",
             "UnsupportedSerializedSectionClass",
             "ValueTooLargeForRepresentation",
+            "UnterminatedLocalHeapName",
         }
     }
     # The FormatError variants whose fields differ from 0.47.0's, which the comparison removes from

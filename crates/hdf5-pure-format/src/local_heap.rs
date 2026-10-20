@@ -1,413 +1,471 @@
 //! The local heap parser: the heap header and the null-terminated strings of its data segment.
+//!
+//! A group that stores its links in a symbol table keeps their names in a local heap, and each
+//! symbol table entry holds the offset of its name in the data segment. [`LocalHeapLocator`]
+//! parses the header from the region of the file the caller reads, and the [`LocalHeap`] it
+//! returns takes the data segment from a second region, where [`LocalHeapDataSegment::name`]
+//! parses each name.
 
-use alloc::string::String;
+use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::FileRegion;
+use hdf5_pure_core::__private::PhysicalAddress;
 
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
+use crate::address::DecodedStoredAddress;
 use crate::address::StoredAddress;
-use crate::address::StoredAddressExt;
 use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
-use crate::metadata_source::MetadataSource;
 use crate::width::FormatWidths;
 
-/// A local heap header: the size and the address of the heap's data segment.
+/// The address of a local heap header, from the local heap address of a symbol table message.
 ///
-/// A group that stores its links in a symbol table keeps their names in a local heap, and each
-/// symbol table entry holds the offset of its name in the data segment. The specification defines
-/// version 0 of the header, the one version [`parse`](Self::parse) accepts.
+/// A caller reads the bytes of [`parse_range`](Self::parse_range) and passes them to
+/// [`parse`](Self::parse), which returns the [`LocalHeap`] with the range of its data segment.
+/// The header is defined in "Local Heaps" of the [format specification, version 4.0][spec],
+/// which describes version 0, the one version [`parse`](Self::parse) accepts.
 ///
-/// The header is defined in "Local Heaps" of the [format specification, version 4.0][spec].
+/// # Examples
+///
+/// ```
+/// # use hdf5_pure_core::__private::{BaseAddressExt, FileRange, FileRegion, PhysicalAddress};
+/// # use hdf5_pure_core::__private::StoredAddressExt;
+/// # use hdf5_pure_core::{BaseAddress, StoredAddress};
+/// # use hdf5_pure_format::__private::{FormatWidths, LocalHeapLocator};
+/// # use hdf5_pure_format::FormatError;
+/// # use test_util::local_heap::Segment;
+/// # use test_util::widths::Widths;
+/// # let segment = Segment::of_names(32, &["alpha", "beta"]);
+/// # let mut bytes = segment.header(Widths::EIGHT);
+/// # bytes.extend_from_slice(&segment.bytes);
+/// # let range = FileRange::new(PhysicalAddress::new(512), bytes.len() as u64)?;
+/// # let file = FileRegion::new(range, &bytes)?;
+/// let widths = FormatWidths::from_sizes(8, 8)?;
+/// let locator = LocalHeapLocator::new(widths, BaseAddress::new(512), StoredAddress::new(0));
+/// let heap = locator.parse(file.subregion(locator.parse_range()?)?)?;
+///
+/// let names = heap.data_segment(file.subregion(heap.data_segment_range())?)?;
+/// assert_eq!((names.name(0)?, names.name(6)?), ("alpha", "beta"));
+/// # Ok::<(), FormatError>(())
+/// ```
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_localheap
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LocalHeap {
-    /// The size in bytes of the data segment, its free blocks included.
-    pub data_segment_size: u64,
-    /// The offset of the first free block in the data segment, the header's "Offset to Head of
-    /// Free-list" field.
-    pub free_list_head_offset: u64,
-    /// The address of the data segment, relative to the base address.
-    pub data_segment_address: StoredAddress,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LocalHeapLocator {
+    widths: FormatWidths,
+    base: BaseAddress,
+    address: StoredAddress,
 }
 
-impl LocalHeap {
-    /// Parses the local heap header at `offset` in `file_data`.
-    ///
-    /// `offset_size` and `length_size` are the superblock's "Size of Offsets" and "Size of
-    /// Lengths" bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::UnexpectedEof`] if the header runs past the end of `file_data`,
-    /// [`FormatError::InvalidLocalHeapSignature`] if it does not begin with `HEAP`,
-    /// [`FormatError::InvalidLocalHeapVersion`] if its version is not 0, and
-    /// [`FormatError::InvalidLengthSize`] or [`FormatError::InvalidOffsetSize`] if a width is not
-    /// 2, 4, or 8.
-    pub fn parse(
-        file_data: &[u8],
-        offset: usize,
-        offset_size: u8,
-        length_size: u8,
-    ) -> Result<LocalHeap, FormatError> {
-        Self::parse_with_widths(
-            file_data,
-            offset,
-            FormatWidths::from_sizes(offset_size, length_size)?,
-        )
+impl LocalHeapLocator {
+    /// Creates the locator of the header at the base-relative `address`.
+    pub const fn new(widths: FormatWidths, base: BaseAddress, address: StoredAddress) -> Self {
+        Self {
+            widths,
+            base,
+            address,
+        }
     }
 
-    /// Returns the local heap header at `offset` using validated file widths.
+    /// Parses the header in `region`.
+    ///
+    /// The parser ignores the reserved bytes and the offset to the head of the free list.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnexpectedEof`] if the header runs past the end of `file_data`,
-    /// [`FormatError::InvalidLocalHeapSignature`] if it does not begin with `HEAP`, or
-    /// [`FormatError::InvalidLocalHeapVersion`] if its version is not 0.
-    pub fn parse_with_widths(
-        file_data: &[u8],
-        offset: usize,
-        widths: FormatWidths,
-    ) -> Result<LocalHeap, FormatError> {
-        // signature(4) + version(1) + reserved(3) = 8, then two lengths and one address.
-        let ls = usize::from(widths.lengths.get());
-        let os = usize::from(widths.offsets.get());
-        let total = 8 + ls * 2 + os;
-        // `offset` comes from the file, so the sum is checked before the bounds check.
-        let end = offset
-            .checked_add(total)
-            .ok_or(FormatError::UnexpectedEof {
-                expected: usize::MAX,
-                available: file_data.len(),
-            })?;
-        if end > file_data.len() {
-            return Err(FormatError::UnexpectedEof {
-                expected: end,
-                available: file_data.len(),
-            });
-        }
-
-        if &file_data[offset..offset + 4] != b"HEAP" {
+    /// Returns [`FormatError::InsufficientRegion`] if `region` does not contain
+    /// [`parse_range`](Self::parse_range), [`FormatError::InvalidLocalHeapSignature`] if the bytes
+    /// do not start with `HEAP`, [`FormatError::InvalidLocalHeapVersion`] if the version is not 0,
+    /// and [`FormatError::UndefinedLocalHeapDataSegment`] if the header stores the undefined address
+    /// as the address of the data segment. Returns [`FormatError::OffsetOverflow`] if the base
+    /// address plus the header's address or plus the data segment's address, or the end of the
+    /// header or of the data segment, is past [`u64::MAX`].
+    pub fn parse(&self, region: FileRegion<'_>) -> Result<LocalHeap, FormatError> {
+        let Self {
+            widths,
+            base,
+            address: _,
+        } = *self;
+        let mut fields = bytes::Fields::new(region.subregion(self.parse_range()?)?.bytes(), 0);
+        if fields.array::<{ SIGNATURE.len() }>()? != SIGNATURE {
             return Err(FormatError::InvalidLocalHeapSignature);
         }
-
-        let version = file_data[offset + 4];
-        if version != 0 {
+        let version = fields.u8()?;
+        if version != VERSION {
             return Err(FormatError::InvalidLocalHeapVersion(version));
         }
-
-        let mut pos = offset + 8;
-        let data_segment_size = bytes::read_length_width(file_data, pos, widths.lengths)?;
-        pos += ls;
-        let free_list_head_offset = bytes::read_length_width(file_data, pos, widths.lengths)?;
-        pos += ls;
-        let data_segment_address =
-            StoredAddress::new(bytes::read_offset_width(file_data, pos, widths.offsets)?);
-
+        fields.array::<RESERVED_LEN>()?;
+        let data_segment_size = fields.length(widths.lengths)?;
+        fields.length(widths.lengths)?;
+        let DecodedStoredAddress::Defined(data_segment_address) =
+            fields.decoded_address(widths.offsets)?
+        else {
+            return Err(FormatError::UndefinedLocalHeapDataSegment);
+        };
         Ok(LocalHeap {
-            data_segment_size,
-            free_list_head_offset,
-            data_segment_address,
+            data_segment: FileRange::new(
+                PhysicalAddress::new(base.absolute(data_segment_address)?),
+                data_segment_size,
+            )?,
         })
     }
 
-    /// Returns the null-terminated string at `string_offset` in the heap's data segment.
-    ///
-    /// The heap stores the address of its data segment, so the segment sits in `file_data` at that
-    /// address plus `base_address`.
+    /// Returns the range a caller reads for [`parse`](Self::parse), the whole header.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::OffsetOverflow`] if adding `base_address`, `string_offset` or the
-    /// segment size to the segment address overflows, [`FormatError::ValueTooLargeForPlatform`] if
-    /// the segment address, `string_offset` or the segment size does not fit this platform's
-    /// `usize`, [`FormatError::UnexpectedEof`] if the string begins outside the segment or reaches
-    /// its end with no terminator, and [`FormatError::InvalidLocalHeapName`] if the bytes before
-    /// the terminator are not UTF-8.
-    pub fn read_string(
-        &self,
-        file_data: &[u8],
-        base_address: BaseAddress,
-        string_offset: u64,
-    ) -> Result<String, FormatError> {
-        let segment = base_address.absolute(self.data_segment_address)?;
-        let seg_addr = segment.to_usize()?;
-        let str_start =
-            seg_addr
-                .checked_add(string_offset.to_usize()?)
-                .ok_or(FormatError::OffsetOverflow {
-                    offset: segment,
-                    length: string_offset,
-                })?;
-        let seg_end = seg_addr
-            .checked_add(self.data_segment_size.to_usize()?)
-            .ok_or(FormatError::OffsetOverflow {
-                offset: segment,
-                length: self.data_segment_size,
-            })?;
-
-        if str_start >= file_data.len() || str_start >= seg_end {
-            return Err(FormatError::UnexpectedEof {
-                // A file can place `str_start` near `usize::MAX`, so the sum saturates.
-                expected: str_start.saturating_add(1),
-                available: file_data.len(),
-            });
-        }
-
-        // Find null terminator
-        let search_end = seg_end.min(file_data.len());
-        let mut end = str_start;
-        while end < search_end && file_data[end] != 0 {
-            end += 1;
-        }
-
-        if end >= search_end {
-            return Err(FormatError::UnexpectedEof {
-                expected: end + 1,
-                available: search_end,
-            });
-        }
-
-        let s = core::str::from_utf8(&file_data[str_start..end]).map_err(|source| {
-            FormatError::InvalidLocalHeapName {
-                offset: string_offset,
-                source,
-            }
-        })?;
-        Ok(String::from(s))
-    }
-
-    /// Parses the local heap header at `address` in `source`.
-    ///
-    /// Reads the header's `8 + 2 * length_size + offset_size` bytes and parses them as
-    /// [`parse`](Self::parse) does.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors [`parse`](Self::parse) returns, and the error `source` returns if a read
-    /// fails.
-    pub fn parse_from_source(
-        source: &(impl MetadataSource + ?Sized),
-        address: u64,
-        offset_size: u8,
-        length_size: u8,
-    ) -> Result<LocalHeap, FormatError> {
-        Self::parse_from_source_with_widths(
-            source,
+    /// Returns [`FormatError::OffsetOverflow`] if the base address plus the header's address, or
+    /// the end of the header, is past [`u64::MAX`].
+    pub fn parse_range(&self) -> Result<FileRange, FormatError> {
+        let Self {
+            widths,
+            base,
             address,
-            FormatWidths::from_sizes(offset_size, length_size)?,
+        } = *self;
+        FileRange::new(
+            PhysicalAddress::new(base.absolute(address)?),
+            header_len(widths),
         )
-    }
-
-    /// Returns the local heap header at `address` using validated file widths.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors [`parse_with_widths`](Self::parse_with_widths) returns, and the error
-    /// `source` returns if a read fails.
-    pub fn parse_from_source_with_widths(
-        source: &(impl MetadataSource + ?Sized),
-        address: u64,
-        widths: FormatWidths,
-    ) -> Result<LocalHeap, FormatError> {
-        let total = 8 + usize::from(widths.lengths.get()) * 2 + usize::from(widths.offsets.get());
-        let buf = source.read_metadata_at(address, total)?;
-        Self::parse_with_widths(&buf, 0, widths)
-    }
-
-    /// Returns the null-terminated string at `string_offset` in `segment`, the bytes of the heap's
-    /// data segment.
-    ///
-    /// A caller reads the `data_segment_size` bytes at
-    /// [`data_segment_address`](Self::data_segment_address) once and reads every name of a group
-    /// out of them, where [`read_string`](Self::read_string) takes the whole file.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::ValueTooLargeForPlatform`] if `string_offset` or the segment size
-    /// does not fit this platform's `usize`, [`FormatError::UnexpectedEof`] if the string begins
-    /// outside the segment or reaches its end with no terminator, and
-    /// [`FormatError::InvalidLocalHeapName`] if the bytes before the terminator are not UTF-8.
-    pub fn read_string_in_segment(
-        &self,
-        segment: &[u8],
-        string_offset: u64,
-    ) -> Result<String, FormatError> {
-        let start = string_offset.to_usize()?;
-        let seg_len = self.data_segment_size.to_usize()?;
-        let search_end = seg_len.min(segment.len());
-
-        if start >= search_end {
-            return Err(FormatError::UnexpectedEof {
-                // A file can place `start` near `usize::MAX`, so the sum saturates.
-                expected: start.saturating_add(1),
-                available: search_end,
-            });
-        }
-
-        let mut end = start;
-        while end < search_end && segment[end] != 0 {
-            end += 1;
-        }
-
-        if end >= search_end {
-            return Err(FormatError::UnexpectedEof {
-                expected: end + 1,
-                available: search_end,
-            });
-        }
-
-        let s = core::str::from_utf8(&segment[start..end]).map_err(|source| {
-            FormatError::InvalidLocalHeapName {
-                offset: string_offset,
-                source,
-            }
-        })?;
-        Ok(String::from(s))
     }
 }
 
+/// A local heap, parsed from its header by [`LocalHeapLocator::parse`].
+///
+/// A caller reads the bytes of [`data_segment_range`](Self::data_segment_range) and passes them
+/// to [`data_segment`](Self::data_segment), which returns the segment the names are parsed from.
+/// The heap is defined in "Local Heaps" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_localheap
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LocalHeap {
+    data_segment: FileRange,
+}
+
+impl LocalHeap {
+    /// Returns the range of the data segment, from its address over the size the header stores,
+    /// its free blocks included.
+    pub const fn data_segment_range(&self) -> FileRange {
+        self.data_segment
+    }
+
+    /// Returns the data segment in `region`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InsufficientRegion`] if `region` does not contain
+    /// [`data_segment_range`](Self::data_segment_range).
+    pub fn data_segment<'a>(
+        &self,
+        region: FileRegion<'a>,
+    ) -> Result<LocalHeapDataSegment<'a>, FormatError> {
+        Ok(LocalHeapDataSegment {
+            bytes: region.subregion(self.data_segment)?.bytes(),
+        })
+    }
+}
+
+/// The bytes of a local heap's data segment, from [`LocalHeap::data_segment`].
+///
+/// The segment holds the null-terminated names of a group's links, and [`name`](Self::name)
+/// parses the name at the offset a symbol table entry stores.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LocalHeapDataSegment<'a> {
+    bytes: &'a [u8],
+}
+
+impl<'a> LocalHeapDataSegment<'a> {
+    /// Parses the name at `offset` in the data segment, up to the first NUL byte at or after
+    /// `offset`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidLocalHeapNameOffset`] if `offset` is at or past the end of
+    /// the data segment, [`FormatError::UnterminatedLocalHeapName`] if the data segment ends before
+    /// a NUL byte, and [`FormatError::InvalidLocalHeapName`] if the name is not UTF-8.
+    pub fn name(&self, offset: u64) -> Result<&'a str, FormatError> {
+        let rest = offset
+            .to_usize()
+            .ok()
+            .and_then(|start| self.bytes.get(start..))
+            .filter(|rest| !rest.is_empty())
+            .ok_or(FormatError::InvalidLocalHeapNameOffset {
+                offset,
+                data_segment_size: self.bytes.len().to_u64(),
+            })?;
+        let name = rest
+            .iter()
+            .position(|&byte| byte == 0)
+            .and_then(|end| rest.get(..end))
+            .ok_or(FormatError::UnterminatedLocalHeapName { offset })?;
+        core::str::from_utf8(name)
+            .map_err(|source| FormatError::InvalidLocalHeapName { offset, source })
+    }
+}
+
+fn header_len(FormatWidths { offsets, lengths }: FormatWidths) -> u64 {
+    PREFIX_LEN + 2 * u64::from(lengths.get()) + u64::from(offsets.get())
+}
+
+const SIGNATURE: [u8; 4] = *b"HEAP";
+
+const VERSION: u8 = 0;
+
+const RESERVED_LEN: usize = 3;
+
+const PREFIX_LEN: u64 = (SIGNATURE.len() + 1 + RESERVED_LEN) as u64;
+
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use test_util::image::Image;
+    use alloc::vec::Vec;
+
+    use rstest::rstest;
     use test_util::local_heap;
+    use test_util::local_heap::Segment;
     use test_util::widths::Widths;
 
-    /// A file holding a heap header at `heap_offset` whose data segment, at
-    /// `data_seg_offset`, holds `strings` null-terminated.
-    fn build_heap_file(
-        heap_offset: usize,
-        data_seg_offset: usize,
-        strings: &[&str],
+    use super::*;
+    use crate::address::StoredAddressExt;
+    use crate::fixture;
+
+    fn header(widths: Widths, data_segment_address: u64, names: &[&str]) -> Vec<u8> {
+        Segment::of_names(data_segment_address, names).header(widths)
+    }
+
+    fn locator(widths: Widths, base: u64, address: u64) -> LocalHeapLocator {
+        LocalHeapLocator::new(
+            fixture::format_widths(widths),
+            BaseAddress::new(base),
+            StoredAddress::new(address),
+        )
+    }
+
+    fn data_segment(names: &[&str]) -> Vec<u8> {
+        Segment::of_names(0, names).bytes
+    }
+
+    #[rstest]
+    fn the_header_locates_its_data_segment(
+        #[values(
+            Widths::new(2, 2),
+            Widths::new(2, 8),
+            Widths::FOUR,
+            Widths::new(8, 4),
+            Widths::EIGHT
+        )]
         widths: Widths,
-    ) -> Vec<u8> {
-        let segment = local_heap::Segment::of_names(data_seg_offset as u64, strings);
-        let mut image = Image::new();
-        image.place(heap_offset, &segment.header(widths));
-        image.place(data_seg_offset, &segment.bytes);
-        // Room past the segment for the tests that read off its end.
-        image.append(&[0; 64]);
-        image.build()
+        #[values(0, 512, 5 << 32)] base: u64,
+        #[values(true, false)] follows_header: bool,
+    ) {
+        let header_at = 0x60;
+        let header_len = local_heap::header_len(widths) as u64;
+        let data_segment_at = if follows_header {
+            header_at + header_len
+        } else {
+            0x400
+        };
+        let locator = locator(widths, base, header_at);
+        let range = locator.parse_range().unwrap();
+        assert_eq!(
+            (range.start().get(), range.length()),
+            (base + header_at, header_len)
+        );
+        let bytes = header(widths, data_segment_at, &["alpha", "beta"]);
+        let heap = locator
+            .parse(fixture::region(base + header_at, &bytes))
+            .unwrap();
+        let data_segment = heap.data_segment_range();
+        assert_eq!(
+            (data_segment.start().get(), data_segment.length()),
+            (base + data_segment_at, 11)
+        );
     }
 
-    #[test]
-    fn parse_heap_header() {
-        let file = build_heap_file(0, 100, &["hello", "world"], Widths::EIGHT);
-        let heap = LocalHeap::parse(&file, 0, 8, 8).unwrap();
-        assert_eq!(heap.data_segment_address, StoredAddress::new(100));
-        assert_eq!(heap.data_segment_size, 12); // "hello\0world\0"
+    #[rstest]
+    #[case::signature(0, b'X', FormatError::InvalidLocalHeapSignature)]
+    #[case::version(4, 1, FormatError::InvalidLocalHeapVersion(1))]
+    fn a_malformed_header_is_rejected(
+        #[case] at: usize,
+        #[case] byte: u8,
+        #[case] expected: FormatError,
+    ) {
+        let mut bytes = header(Widths::EIGHT, 0x100, &["x"]);
+        bytes[at] = byte;
         assert_eq!(
-            LocalHeap::parse_from_source(file.as_slice(), 0, 8, 8),
-            Ok(heap)
+            locator(Widths::EIGHT, 0, 0)
+                .parse(fixture::region(0, &bytes))
+                .unwrap_err(),
+            expected
+        );
+    }
+
+    #[rstest]
+    #[case::two(Widths::new(2, 2), 0xFFFF)]
+    #[case::four(Widths::FOUR, 0xFFFF_FFFF)]
+    #[case::eight(Widths::EIGHT, u64::MAX)]
+    fn an_undefined_data_segment_address_is_rejected(
+        #[case] widths: Widths,
+        #[case] undefined: u64,
+    ) {
+        let bytes = header(widths, undefined, &["x"]);
+        assert_eq!(
+            locator(widths, 0, 0)
+                .parse(fixture::region(0, &bytes))
+                .unwrap_err(),
+            FormatError::UndefinedLocalHeapDataSegment
         );
     }
 
     #[test]
-    fn read_string_at_offset_0() {
-        let file = build_heap_file(0, 100, &["hello", "world"], Widths::EIGHT);
-        let heap = LocalHeap::parse(&file, 0, 8, 8).unwrap();
-        let s = heap.read_string(&file, BaseAddress::ZERO, 0).unwrap();
-        assert_eq!(s, "hello");
-    }
-
-    #[test]
-    fn read_string_at_offset_6() {
-        let file = build_heap_file(0, 100, &["hello", "world"], Widths::EIGHT);
-        let heap = LocalHeap::parse(&file, 0, 8, 8).unwrap();
-        let s = heap.read_string(&file, BaseAddress::ZERO, 6).unwrap();
-        assert_eq!(s, "world");
+    fn a_region_short_of_the_header_is_rejected() {
+        let bytes = header(Widths::EIGHT, 0x100, &["x"]);
         assert_eq!(
-            heap.read_string_in_segment(&file[100..112], 6),
-            Ok("world".into())
+            locator(Widths::EIGHT, 512, 0)
+                .parse(fixture::region(512, &bytes[..31]))
+                .unwrap_err(),
+            FormatError::InsufficientRegion {
+                required_start: 512,
+                required_length: 32,
+                provided_start: 512,
+                provided_length: 31,
+            }
         );
     }
 
-    #[test]
-    fn read_string_adds_the_base_address_to_the_stored_segment_address() {
-        const BASE: usize = 512;
-        let mut file = vec![0u8; BASE];
-        file.extend_from_slice(&build_heap_file(0, 100, &["hello", "world"], Widths::EIGHT));
-
-        let heap = LocalHeap::parse(&file, BASE, 8, 8).unwrap();
-        assert_eq!(heap.data_segment_address, StoredAddress::new(100));
+    #[rstest]
+    #[case::base(512, u64::MAX - 8, FormatError::OffsetOverflow { offset: u64::MAX - 8, length: 512 })]
+    #[case::end(0, u64::MAX - 8, FormatError::OffsetOverflow { offset: u64::MAX - 8, length: 32 })]
+    fn a_header_past_u64_max_is_rejected(
+        #[case] base: u64,
+        #[case] address: u64,
+        #[case] expected: FormatError,
+    ) {
         assert_eq!(
-            heap.read_string(&file, BaseAddress::new(BASE as u64), 6)
+            locator(Widths::EIGHT, base, address)
+                .parse_range()
+                .unwrap_err(),
+            expected
+        );
+    }
+
+    #[rstest]
+    #[case::base(512, u64::MAX - 0x100, FormatError::OffsetOverflow { offset: u64::MAX - 0x100, length: 512 })]
+    #[case::end(0, u64::MAX - 1, FormatError::OffsetOverflow { offset: u64::MAX - 1, length: 2 })]
+    fn a_data_segment_past_u64_max_is_rejected(
+        #[case] base: u64,
+        #[case] data_segment_address: u64,
+        #[case] expected: FormatError,
+    ) {
+        let bytes = header(Widths::EIGHT, data_segment_address, &["x"]);
+        assert_eq!(
+            locator(Widths::EIGHT, base, 0)
+                .parse(fixture::region(base, &bytes))
+                .unwrap_err(),
+            expected
+        );
+    }
+
+    #[rstest]
+    #[case::first(0, "alpha")]
+    #[case::second(6, "beta")]
+    #[case::inside(2, "pha")]
+    #[case::empty(5, "")]
+    fn a_name_ends_at_the_first_nul_at_or_after_its_offset(
+        #[case] offset: u64,
+        #[case] expected: &str,
+    ) {
+        let bytes = data_segment(&["alpha", "beta"]);
+        let heap = LocalHeap {
+            data_segment: FileRange::new(PhysicalAddress::new(5 << 32), 11).unwrap(),
+        };
+        assert_eq!(
+            heap.data_segment(fixture::region(5 << 32, &bytes))
+                .unwrap()
+                .name(offset)
                 .unwrap(),
-            "world"
+            expected
         );
     }
 
     #[test]
-    fn invalid_signature() {
-        let mut file = build_heap_file(0, 100, &["x"], Widths::EIGHT);
-        file[0] = b'X';
-        let err = LocalHeap::parse(&file, 0, 8, 8).unwrap_err();
-        assert_eq!(err, FormatError::InvalidLocalHeapSignature);
+    fn a_data_segment_is_taken_only_from_a_region_that_contains_it() {
+        let mut bytes = vec![0xAA; 8];
+        bytes.extend_from_slice(&data_segment(&["alpha"]));
+        bytes.extend_from_slice(&[0xBB; 8]);
+        let heap = LocalHeap {
+            data_segment: FileRange::new(PhysicalAddress::new(0x108), 6).unwrap(),
+        };
+        assert_eq!(
+            heap.data_segment(fixture::region(0x100, &bytes))
+                .unwrap()
+                .name(0)
+                .unwrap(),
+            "alpha"
+        );
+        assert_eq!(
+            heap.data_segment(fixture::region(0x109, &bytes[9..]))
+                .unwrap_err(),
+            FormatError::InsufficientRegion {
+                required_start: 0x108,
+                required_length: 6,
+                provided_start: 0x109,
+                provided_length: 13,
+            }
+        );
     }
 
-    // The third byte of "hello" is 0xFF, so the decode is valid up to 2.
-    #[test]
-    fn read_string_rejects_a_name_that_is_not_utf8() {
-        let mut file = build_heap_file(0, 100, &["hello"], Widths::EIGHT);
-        file[102] = 0xFF;
-        let heap = LocalHeap::parse(&file, 0, 8, 8).unwrap();
+    #[rstest]
+    #[case::at_the_end(11)]
+    #[case::past_the_end(12)]
+    #[case::past_usize_max(u64::MAX)]
+    fn a_name_offset_outside_the_data_segment_is_rejected(#[case] offset: u64) {
+        let bytes = data_segment(&["alpha", "beta"]);
+        let heap = LocalHeap {
+            data_segment: FileRange::new(PhysicalAddress::new(0), 11).unwrap(),
+        };
+        assert_eq!(
+            heap.data_segment(fixture::region(0, &bytes))
+                .unwrap()
+                .name(offset)
+                .unwrap_err(),
+            FormatError::InvalidLocalHeapNameOffset {
+                offset,
+                data_segment_size: 11,
+            }
+        );
+    }
 
-        let err = heap.read_string(&file, BaseAddress::ZERO, 0).unwrap_err();
+    #[rstest]
+    #[case::whole(0)]
+    #[case::inside(3)]
+    fn a_name_without_a_terminator_in_the_data_segment_is_rejected(#[case] offset: u64) {
+        let bytes = b"alpha\0beta";
+        let heap = LocalHeap {
+            data_segment: FileRange::new(PhysicalAddress::new(0), 10).unwrap(),
+        };
+        let segment = heap.data_segment(fixture::region(0, bytes)).unwrap();
+        assert_eq!(segment.name(0).unwrap(), "alpha");
+        assert_eq!(
+            segment.name(6 + offset).unwrap_err(),
+            FormatError::UnterminatedLocalHeapName { offset: 6 + offset }
+        );
+    }
+
+    #[test]
+    fn a_name_that_is_not_utf8_is_rejected() {
+        let mut bytes = data_segment(&["hello"]);
+        bytes[2] = 0xFF;
+        let heap = LocalHeap {
+            data_segment: FileRange::new(PhysicalAddress::new(0), 6).unwrap(),
+        };
+        let err = heap
+            .data_segment(fixture::region(0, &bytes))
+            .unwrap()
+            .name(0)
+            .unwrap_err();
         let FormatError::InvalidLocalHeapName { offset, source } = err else {
             panic!("expected InvalidLocalHeapName, got {err:?}");
         };
-        assert_eq!(offset, 0);
-        assert_eq!(source.valid_up_to(), 2);
-
-        let err = heap.read_string_in_segment(&file[100..], 0).unwrap_err();
-        assert!(
-            matches!(err, FormatError::InvalidLocalHeapName { offset: 0, .. }),
-            "{err:?}"
-        );
-    }
-
-    #[test]
-    fn read_string_past_segment() {
-        let file = build_heap_file(0, 100, &["hi"], Widths::EIGHT);
-        let heap = LocalHeap::parse(&file, 0, 8, 8).unwrap();
-        let err = heap.read_string(&file, BaseAddress::ZERO, 100).unwrap_err();
-        assert!(matches!(err, FormatError::UnexpectedEof { .. }));
-    }
-
-    #[test]
-    fn parse_heap_4byte_offsets() {
-        let file = build_heap_file(0, 80, &["test"], Widths::FOUR);
-        let heap = LocalHeap::parse(&file, 0, 4, 4).unwrap();
-        assert_eq!(heap.data_segment_address, StoredAddress::new(80));
-        let s = heap.read_string(&file, BaseAddress::ZERO, 0).unwrap();
-        assert_eq!(s, "test");
-    }
-
-    #[test]
-    fn invalid_version() {
-        let mut file = build_heap_file(0, 100, &["x"], Widths::EIGHT);
-        file[4] = 1; // bad version
-        let err = LocalHeap::parse(&file, 0, 8, 8).unwrap_err();
-        assert_eq!(err, FormatError::InvalidLocalHeapVersion(1));
-    }
-
-    #[test]
-    fn parse_offset_near_usize_max_errors_without_overflow() {
-        let file = build_heap_file(0, 80, &["test"], Widths::EIGHT);
-        let err = LocalHeap::parse(&file, usize::MAX - 3, 8, 8).unwrap_err();
-        assert!(matches!(err, FormatError::UnexpectedEof { .. }));
-    }
-
-    #[test]
-    fn read_string_offset_near_usize_max_errors_without_overflow() {
-        let file = build_heap_file(0, 80, &["test"], Widths::EIGHT);
-        let heap = LocalHeap::parse(&file, 0, 8, 8).unwrap();
-        assert!(
-            heap.read_string(&file, BaseAddress::ZERO, u64::MAX)
-                .is_err()
-        );
-        assert!(heap.read_string_in_segment(&file, u64::MAX).is_err());
+        assert_eq!((offset, source.valid_up_to()), (0, 2));
     }
 }
