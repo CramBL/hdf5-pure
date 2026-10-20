@@ -94,6 +94,7 @@ jobs:
             echo 'CARGO_PROFILE_TEST_OPT_LEVEL=1'
             echo 'CARGO_PROFILE_TEST_DEBUG_ASSERTIONS=true'
             echo 'CARGO_PROFILE_TEST_OVERFLOW_CHECKS=true'
+            echo 'CARGO_PROFILE_TEST_LTO=off'
           } >> "$GITHUB_ENV"
 
       - name: Install and select mold
