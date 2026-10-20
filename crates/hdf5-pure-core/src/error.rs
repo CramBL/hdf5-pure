@@ -249,6 +249,11 @@ pub enum FormatError {
     InvalidAttributeFlags(u8),
     /// Invalid Attribute Info message version.
     InvalidAttributeInfoVersion(u8),
+    /// An attribute name is empty or contains a null byte.
+    InvalidAttributeName {
+        /// The attribute name.
+        name: String,
+    },
     /// Invalid attribute message version.
     InvalidAttributeVersion(u8),
     /// Invalid B-tree node type.
@@ -1522,6 +1527,12 @@ impl fmt::Display for FormatError {
             }
             Self::SerializationError(msg) => {
                 write!(f, "serialization error: {msg}")
+            }
+            Self::InvalidAttributeName { name } => {
+                write!(
+                    f,
+                    "attribute name {name:?} is empty or contains a null byte"
+                )
             }
             Self::InvalidLinkName(name) => {
                 write!(
