@@ -2602,7 +2602,7 @@ fn read_region_framed(
         );
     }
     if matches!(spec.storage(), RawReadStorage::ContiguousUnallocated) {
-        return spec.fill().buffer(region.byte_len()?);
+        return spec.fill().buffer(region.byte_len());
     }
     if let RawReadStorage::Contiguous { address } = spec.storage() {
         let end = region.end_offset()?;
@@ -2620,7 +2620,7 @@ fn read_region_framed(
             });
         }
     }
-    let total = region.byte_len()?;
+    let total = region.byte_len();
     let mut output = Vec::new();
     region.visit_runs(|offset, length| {
         match spec.storage() {

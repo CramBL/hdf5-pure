@@ -1,3 +1,5 @@
+//! Checked unit-stride dataset selections and their byte geometry.
+
 #[cfg(not(feature = "std"))]
 use alloc::vec;
 #[cfg(not(feature = "std"))]
@@ -8,6 +10,7 @@ use crate::dataspace::DataspaceType;
 use crate::error::FormatError;
 use crate::read_spec::RawReadSpec;
 
+/// A caller's region bounds or clamped leading-dimension row request.
 pub(crate) enum RegionRequest<'a> {
     Bounds { start: &'a [u64], count: &'a [u64] },
     Rows { start: u64, count: u64 },
@@ -22,6 +25,10 @@ impl RegionRequest<'_> {
     }
 }
 
+/// A selection within a dataset's current dimensions.
+///
+/// Nonempty selections have checked byte strides and a result length at most [`isize::MAX`].
+/// Coordinates remain file-width integers until a backend converts them to memory indices.
 #[derive(Clone)]
 pub(crate) struct ReadRegion<'a> {
     spec: RawReadSpec<'a>,
@@ -29,6 +36,15 @@ pub(crate) struct ReadRegion<'a> {
 }
 
 impl<'a> ReadRegion<'a> {
+    /// Parses unit-stride bounds against the current dataspace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::RegionRankMismatch`] if either slice has a different length from
+    /// the rank, and [`FormatError::RegionOutOfBounds`] if any dimension exceeds its extent.
+    /// Returns [`FormatError::OffsetOverflow`] if a byte stride overflows, and
+    /// [`FormatError::ValueTooLargeForPlatform`] if the result exceeds the platform's buffer limit.
+    /// Returns errors from reading the datatype's element size.
     pub(crate) fn parse(
         spec: RawReadSpec<'a>,
         start: &[u64],
@@ -62,6 +78,15 @@ impl<'a> ReadRegion<'a> {
                 selection: Selection::Empty,
             });
         }
+        if start.iter().skip(1).all(|&coordinate| coordinate == 0)
+            && count.iter().skip(1).eq(dimensions.iter().skip(1))
+        {
+            return Self::rows(
+                spec,
+                start.first().copied().unwrap_or(0),
+                count.first().copied().unwrap_or(1),
+            );
+        }
         let mut axes = Vec::with_capacity(rank);
         let mut input_stride = element_size.get() as u64;
         let mut output_stride = input_stride;
@@ -77,44 +102,93 @@ impl<'a> ReadRegion<'a> {
             output_stride = product(output_stride, count)?;
         }
         axes.reverse();
+        let byte_len = buffer_len(output_stride)?;
         Ok(Self {
             spec,
-            selection: Selection::Elements {
-                axes,
-                byte_len: output_stride,
-            },
+            selection: Selection::Elements { axes, byte_len },
         })
     }
 
+    /// Selects complete rows after clamping the request to the leading dimension.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if byte strides overflow, and
+    /// [`FormatError::ValueTooLargeForPlatform`] if the result exceeds the platform's buffer limit.
+    /// Returns errors from reading the datatype's element size.
     pub(crate) fn rows(spec: RawReadSpec<'a>, start: u64, count: u64) -> Result<Self, FormatError> {
         let dimensions = &spec.dataspace().dimensions;
         let extent = dimensions.first().copied().unwrap_or(1);
         let start = start.min(extent);
         let count = count.min(extent - start);
-        if dimensions.is_empty() && count == 0 {
-            crate::datatype::element_size_usize(spec.datatype())?;
+        let element_size = crate::datatype::element_size_usize(spec.datatype())?;
+        if count == 0
+            || dimensions.contains(&0)
+            || spec.dataspace().space_type == DataspaceType::Null
+        {
             return Ok(Self {
                 spec,
                 selection: Selection::Empty,
             });
         }
-        let mut starts = vec![0; dimensions.len()];
-        let mut counts = dimensions.clone();
-        if let (Some(first_start), Some(first_count)) = (starts.first_mut(), counts.first_mut()) {
-            *first_start = start;
-            *first_count = count;
-        }
-        Self::parse(spec, &starts, &counts)
+        let row_bytes = dimensions
+            .iter()
+            .skip(1)
+            .rev()
+            .try_fold(element_size.get() as u64, |stride, &dimension| {
+                product(stride, dimension)
+            })?;
+        product(row_bytes, extent)?;
+        let byte_len = buffer_len(product(row_bytes, count)?)?;
+        Ok(Self {
+            spec,
+            selection: Selection::Rows(RowRegion {
+                start,
+                end: start + count,
+                row_bytes: row_bytes.to_usize()?,
+                byte_len,
+            }),
+        })
     }
 
     pub(crate) fn spec(&self) -> RawReadSpec<'a> {
         self.spec
     }
 
-    pub(crate) fn axes(&self) -> &[RegionAxis] {
+    /// Returns the selected coordinates and byte strides in dimension order.
+    pub(crate) fn axes(&self) -> impl Iterator<Item = RegionAxis> + '_ {
+        let mut owned = match &self.selection {
+            Selection::Elements { axes, .. } => axes.iter(),
+            _ => [].iter(),
+        };
+        let mut dimensions = self.spec.dataspace().dimensions.iter().enumerate();
+        let mut stride = self.row_band().map_or(0, |rows| rows.row_bytes as u64);
+        core::iter::from_fn(move || match &self.selection {
+            Selection::Empty => None,
+            Selection::Elements { .. } => owned.next().cloned(),
+            Selection::Rows(rows) => {
+                let (dimension, &extent) = dimensions.next()?;
+                let (start, count) = if dimension == 0 {
+                    (rows.start, rows.end - rows.start)
+                } else {
+                    stride /= extent;
+                    (0, extent)
+                };
+                Some(RegionAxis {
+                    start,
+                    end: start + count,
+                    count,
+                    input_stride: stride,
+                    output_stride: stride,
+                })
+            }
+        })
+    }
+
+    pub(crate) fn row_band(&self) -> Option<&RowRegion> {
         match &self.selection {
-            Selection::Empty => &[],
-            Selection::Elements { axes, .. } => axes,
+            Selection::Rows(rows) => Some(rows),
+            _ => None,
         }
     }
 
@@ -123,51 +197,80 @@ impl<'a> ReadRegion<'a> {
     }
 
     pub(crate) fn is_whole(&self) -> bool {
-        !self.is_empty()
-            && self
-                .axes()
+        match &self.selection {
+            Selection::Empty => false,
+            Selection::Elements { axes, .. } => axes
                 .iter()
                 .zip(&self.spec.dataspace().dimensions)
-                .all(|(axis, &extent)| axis.start == 0 && axis.count == extent)
-    }
-
-    pub(crate) fn byte_len(&self) -> Result<usize, FormatError> {
-        match self.selection {
-            Selection::Empty => Ok(0),
-            Selection::Elements { byte_len, .. } => byte_len.to_usize(),
+                .all(|(axis, &extent)| axis.start == 0 && axis.count == extent),
+            Selection::Rows(rows) => {
+                rows.start == 0
+                    && rows.end
+                        == self
+                            .spec
+                            .dataspace()
+                            .dimensions
+                            .first()
+                            .copied()
+                            .unwrap_or(1)
+            }
         }
     }
 
+    pub(crate) fn byte_len(&self) -> usize {
+        match self.selection {
+            Selection::Empty => 0,
+            Selection::Rows(ref rows) => rows.byte_len,
+            Selection::Elements { byte_len, .. } => byte_len,
+        }
+    }
+
+    /// Returns the exclusive byte offset of the last selected element in contiguous storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the offset exceeds [`u64::MAX`].
     pub(crate) fn end_offset(&self) -> Result<u64, FormatError> {
         if self.is_empty() {
             return Ok(0);
         }
         self.axes()
-            .iter()
             .try_fold(u64::from(self.spec.datatype().type_size()), |end, axis| {
                 sum(end, product(axis.end - 1, axis.input_stride)?)
             })
     }
 
     pub(crate) fn overlaps(&self, offsets: &[u64], dimensions: &[u64]) -> bool {
+        let rank = self.spec.dataspace().dimensions.len();
         !self.is_empty()
-            && offsets.len() >= self.axes().len()
-            && dimensions.len() == self.axes().len()
-            && self.axes().iter().zip(offsets).zip(dimensions).all(
-                |((axis, &offset), &dimension)| {
+            && offsets.len() >= rank
+            && dimensions.len() == rank
+            && self
+                .axes()
+                .zip(offsets)
+                .zip(dimensions)
+                .all(|((axis, &offset), &dimension)| {
                     offset < axis.end && offset.saturating_add(dimension) > axis.start
-                },
-            )
+                })
     }
 
+    /// Visits contiguous byte runs in row-major order, with offsets relative to the payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if an offset exceeds [`u64::MAX`], or an error
+    /// returned by `visit`.
     pub(crate) fn visit_runs(
         &self,
         mut visit: impl FnMut(u64, usize) -> Result<(), FormatError>,
     ) -> Result<(), FormatError> {
-        if self.is_empty() {
-            return Ok(());
-        }
-        let axes = self.axes();
+        let axes = match &self.selection {
+            Selection::Empty => return Ok(()),
+            Selection::Rows(rows) => {
+                return visit(product(rows.start, rows.row_bytes as u64)?, rows.byte_len);
+            }
+            Selection::Elements { axes, .. } => axes,
+        };
         let mut split = axes.len();
         let mut run_len = self.spec.datatype().type_size() as u64;
         while let Some(axis) = split.checked_sub(1).and_then(|i| axes.get(i)) {
@@ -185,7 +288,7 @@ impl<'a> ReadRegion<'a> {
         loop {
             visit(offset, run_len)?;
             let mut advanced = false;
-            for (coordinate, axis) in coordinates.iter_mut().zip(axes).rev() {
+            for (coordinate, axis) in coordinates.iter_mut().zip(axes.iter()).rev() {
                 *coordinate += 1;
                 if *coordinate < axis.count {
                     offset = sum(offset, axis.input_stride)?;
@@ -206,11 +309,34 @@ impl<'a> ReadRegion<'a> {
 enum Selection {
     Elements {
         axes: Vec<RegionAxis>,
-        byte_len: u64,
+        byte_len: usize,
     },
     Empty,
+    Rows(RowRegion),
 }
 
+/// Complete rows represented without allocating per-dimension geometry.
+#[derive(Clone)]
+pub(crate) struct RowRegion {
+    start: u64,
+    end: u64,
+    row_bytes: usize,
+    byte_len: usize,
+}
+
+impl RowRegion {
+    pub(crate) fn start(&self) -> u64 {
+        self.start
+    }
+    pub(crate) fn end(&self) -> u64 {
+        self.end
+    }
+    pub(crate) fn row_bytes(&self) -> usize {
+        self.row_bytes
+    }
+}
+
+/// Checked coordinates and byte strides for one selected dimension.
 #[derive(Clone)]
 pub(crate) struct RegionAxis {
     start: u64,
@@ -236,6 +362,17 @@ impl RegionAxis {
     pub(crate) fn output_stride(&self) -> Result<usize, FormatError> {
         self.output_stride.to_usize()
     }
+}
+
+fn buffer_len(length: u64) -> Result<usize, FormatError> {
+    let size = length.to_usize()?;
+    if size > isize::MAX as usize {
+        return Err(FormatError::ValueTooLargeForPlatform {
+            value: length,
+            target: "isize",
+        });
+    }
+    Ok(size)
 }
 
 fn product(left: u64, right: u64) -> Result<u64, FormatError> {
