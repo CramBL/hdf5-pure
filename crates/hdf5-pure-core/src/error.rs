@@ -428,6 +428,12 @@ pub enum FormatError {
     InvalidGlobalHeapSignature,
     /// Invalid global heap version.
     InvalidGlobalHeapVersion(u8),
+    /// A version 0 or 1 superblock stores 0 in its "Group Leaf Node K" field. The field is
+    /// defined in "Format Signature and Superblock" of the [format specification, version
+    /// 4.0][spec], which requires a value greater than zero.
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_boot_super
+    InvalidGroupLeafNodeK,
     /// Invalid heap ID type.
     InvalidHeapIdType(u8),
     /// Invalid data layout class.
@@ -513,6 +519,17 @@ pub enum FormatError {
     InvalidStringPadding(u8),
     /// Invalid symbol table node signature.
     InvalidSymbolTableNodeSignature,
+    /// A symbol table node stores more symbols than the 2K entries of a node, where K is the
+    /// superblock's "Group Leaf Node K". The node is defined in "Group Symbol Table Nodes" of the
+    /// [format specification, version 4.0][spec].
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_symboltable
+    InvalidSymbolTableNodeSymbolCount {
+        /// The number of symbols the node stores.
+        symbols: u16,
+        /// The number of entries in a node, twice the superblock's "Group Leaf Node K".
+        capacity: u32,
+    },
     /// Invalid symbol table node version.
     InvalidSymbolTableNodeVersion(u8),
     /// A userblock size the format does not define: it must be zero, or a power
@@ -1097,6 +1114,18 @@ impl fmt::Display for FormatError {
             }
             Self::InvalidSymbolTableNodeSignature => {
                 write!(f, "invalid symbol table node signature")
+            }
+            Self::InvalidGroupLeafNodeK => {
+                write!(
+                    f,
+                    "superblock stores a Group Leaf Node K of 0, and the value must be greater than zero"
+                )
+            }
+            Self::InvalidSymbolTableNodeSymbolCount { symbols, capacity } => {
+                write!(
+                    f,
+                    "symbol table node holds {symbols} symbols, more than its capacity of {capacity}"
+                )
             }
             Self::InvalidSymbolTableNodeVersion(v) => {
                 write!(f, "invalid symbol table node version: {v}")

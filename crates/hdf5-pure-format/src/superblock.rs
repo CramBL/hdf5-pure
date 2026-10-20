@@ -282,9 +282,10 @@ impl SuperblockRef {
     /// Returns [`FormatError::InsufficientRegion`] if `region` does not contain
     /// [`parse_range`](Self::parse_range), or if the version and the widths in `region` give a
     /// longer superblock than that range. Returns the errors [`SuperblockSignature::parse`]
-    /// returns for the signature, the version and the widths, and, under the `checksum` feature,
-    /// [`FormatError::ChecksumMismatch`] if the checksum of a version 2 or 3 superblock does not
-    /// match its bytes.
+    /// returns for the signature, the version and the widths,
+    /// [`FormatError::InvalidGroupLeafNodeK`] if a version 0 or 1 superblock stores 0 in its "Group
+    /// Leaf Node K" field, and, under the `checksum` feature, [`FormatError::ChecksumMismatch`] if
+    /// the checksum of a version 2 or 3 superblock does not match its bytes.
     pub fn parse(&self, region: FileRegion<'_>) -> Result<(Superblock, FormatWidths), FormatError> {
         let Self { range } = *self;
         let held = region.subregion(range)?;
@@ -370,6 +371,9 @@ impl SuperblockCandidateFields {
         let FormatWidths { offsets, lengths } = widths;
         fields.u8()?;
         let group_leaf_node_k = fields.u16()?;
+        if group_leaf_node_k == 0 {
+            return Err(FormatError::InvalidGroupLeafNodeK);
+        }
         let group_internal_node_k = fields.u16()?;
         let consistency_flags = fields.u32()?;
         let indexed_storage_internal_node_k = match version {
@@ -863,6 +867,26 @@ mod tests {
             })
         );
         assert_eq!(serialize_superblock(&parsed).unwrap(), data);
+    }
+
+    #[rstest]
+    fn a_group_leaf_node_k_of_zero_is_rejected(#[values(VERSION_0, VERSION_1)] version: u8) {
+        let builder = v0::Superblock::new(Widths::EIGHT).group_leaf_node_k(0);
+        let data = match version {
+            VERSION_1 => builder.version_1(),
+            _ => builder,
+        }
+        .build();
+        let image = region(&data);
+        let superblock = SuperblockSignature {
+            address: PhysicalAddress::new(0),
+        }
+        .parse(image)
+        .unwrap();
+        assert_eq!(
+            superblock.parse(image).unwrap_err(),
+            FormatError::InvalidGroupLeafNodeK
+        );
     }
 
     // HDF5 1.8.23 wrote the file with `H5Pset_sym_k(8, 16)` and `H5Pset_istore_k(64)`.

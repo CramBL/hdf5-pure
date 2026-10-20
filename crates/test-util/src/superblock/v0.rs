@@ -53,6 +53,11 @@ impl Superblock {
         self
     }
 
+    pub fn group_leaf_node_k(mut self, k: u16) -> Self {
+        self.group_leaf_node_k = k;
+        self
+    }
+
     pub fn indexed_storage_internal_node_k(mut self, k: u16) -> Self {
         self.indexed_storage_internal_node_k = k;
         self

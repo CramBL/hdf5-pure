@@ -8107,6 +8107,7 @@ impl WriteEngine {
                 &symbol_table,
                 self.widths,
                 self.addresses,
+                group_v1::group_leaf_node_k(&self.superblock),
             )? {
                 return Err(Error::EditUnsupported(
                     "a version 1 group holding a soft link cannot be converted in place",
@@ -8119,6 +8120,7 @@ impl WriteEngine {
             &oh,
             self.widths,
             self.addresses,
+            group_v1::group_leaf_node_k(&self.superblock),
         )?;
 
         let mut region = fresh_group_region();

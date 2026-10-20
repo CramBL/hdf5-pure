@@ -87,6 +87,7 @@ use crate::data_layout::{COMPACT_DATA_OFFSET, DataLayout};
 use crate::datatype::{self, Datatype};
 use crate::edit;
 use crate::error::Error;
+use crate::group_v1;
 use crate::group_v2;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
@@ -384,6 +385,7 @@ fn walk(
             &header,
             widths,
             addresses,
+            group_v1::group_leaf_node_k(superblock),
         ) else {
             complete = false;
             continue;

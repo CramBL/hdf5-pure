@@ -7,6 +7,7 @@
 use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use core::num::NonZeroU16;
 
 use hdf5_pure_format::__private::FractalHeapIdLayout;
 use hdf5_pure_format::__private::{BTREE_V2_LINK_CREATION_ORDER, BTREE_V2_LINK_NAME};
@@ -172,6 +173,7 @@ pub(crate) fn find_child_address(
     group_address: u64,
     widths: FormatWidths,
     addresses: AddressContext,
+    group_leaf_node_k: Option<NonZeroU16>,
     name: LinkName<'_>,
 ) -> Result<ChildLookup, FormatError> {
     let mut saw_link = false;
@@ -197,10 +199,17 @@ pub(crate) fn find_child_address(
     }
     ChildLookup::of(
         addresses,
-        resolve_group_entries(file_data, access_mode, &header, widths, addresses)?
-            .into_iter()
-            .find(|e| e.name == name.as_str())
-            .map(|e| e.object_header_address),
+        resolve_group_entries(
+            file_data,
+            access_mode,
+            &header,
+            widths,
+            addresses,
+            group_leaf_node_k,
+        )?
+        .into_iter()
+        .find(|e| e.name == name.as_str())
+        .map(|e| e.object_header_address),
     )
 }
 
@@ -216,6 +225,7 @@ pub(crate) fn find_child_address_from_source<S: Source + ?Sized>(
     group_address: u64,
     widths: FormatWidths,
     addresses: AddressContext,
+    group_leaf_node_k: Option<NonZeroU16>,
     name: LinkName<'_>,
 ) -> Result<ChildLookup, FormatError> {
     let mut saw_link = false;
@@ -241,10 +251,17 @@ pub(crate) fn find_child_address_from_source<S: Source + ?Sized>(
     }
     ChildLookup::of(
         addresses,
-        resolve_group_entries_from_source(source, access_mode, &header, widths, addresses)?
-            .into_iter()
-            .find(|e| e.name == name.as_str())
-            .map(|e| e.object_header_address),
+        resolve_group_entries_from_source(
+            source,
+            access_mode,
+            &header,
+            widths,
+            addresses,
+            group_leaf_node_k,
+        )?
+        .into_iter()
+        .find(|e| e.name == name.as_str())
+        .map(|e| e.object_header_address),
     )
 }
 
@@ -471,6 +488,7 @@ pub fn resolve_path_any(
             current_addr,
             widths,
             addresses,
+            group_v1::group_leaf_node_k(superblock),
             name,
         )? {
             ChildLookup::Found(abs_addr) => current_addr = abs_addr,
@@ -501,6 +519,7 @@ pub fn resolve_group_entries(
     object_header: &ObjectHeader,
     widths: FormatWidths,
     addresses: AddressContext,
+    group_leaf_node_k: Option<NonZeroU16>,
 ) -> Result<Vec<GroupEntry>, FormatError> {
     if is_v1_group(object_header) {
         // v1: find SymbolTableMessage and use existing v1 code
@@ -510,7 +529,7 @@ pub fn resolve_group_entries(
             .find(|m| m.msg_type == MessageType::SYMBOL_TABLE)
             .ok_or_else(|| FormatError::PathNotFound(String::from("no symbol table message")))?;
         let stm = SymbolTableMessage::parse_with_offset_width(&sym_msg.data, widths.offsets)?;
-        group_v1::resolve_v1_group_entries(file_data, &stm, widths, addresses)
+        group_v1::resolve_v1_group_entries(file_data, &stm, widths, addresses, group_leaf_node_k)
     } else if is_v2_group(object_header) {
         resolve_v2_group_entries(file_data, access_mode, object_header, widths, addresses)
     } else {
@@ -556,6 +575,7 @@ pub fn resolve_path_any_from_source<S: Source + ?Sized>(
             current_addr,
             widths,
             addresses,
+            group_v1::group_leaf_node_k(superblock),
             name,
         )? {
             ChildLookup::Found(abs_addr) => current_addr = abs_addr,
@@ -583,6 +603,7 @@ pub fn resolve_group_entries_from_source<S: Source + ?Sized>(
     object_header: &ObjectHeader,
     widths: FormatWidths,
     addresses: AddressContext,
+    group_leaf_node_k: Option<NonZeroU16>,
 ) -> Result<Vec<GroupEntry>, FormatError> {
     if is_v1_group(object_header) {
         let sym_msg = object_header
@@ -591,7 +612,13 @@ pub fn resolve_group_entries_from_source<S: Source + ?Sized>(
             .find(|m| m.msg_type == MessageType::SYMBOL_TABLE)
             .ok_or_else(|| FormatError::PathNotFound(String::from("no symbol table message")))?;
         let stm = SymbolTableMessage::parse_with_offset_width(&sym_msg.data, widths.offsets)?;
-        group_v1::resolve_v1_group_entries_from_source(source, &stm, widths, addresses)
+        group_v1::resolve_v1_group_entries_from_source(
+            source,
+            &stm,
+            widths,
+            addresses,
+            group_leaf_node_k,
+        )
     } else if is_v2_group(object_header) {
         resolve_v2_group_entries_from_source(source, access_mode, object_header, widths, addresses)
     } else {

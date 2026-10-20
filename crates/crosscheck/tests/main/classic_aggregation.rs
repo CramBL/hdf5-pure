@@ -1,6 +1,5 @@
 #![cfg(feature = "__hdf5-1.10")]
 
-use std::ffi::CString;
 use std::path::Path;
 
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
@@ -13,9 +12,6 @@ use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::Layout;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::MemoryStrategy;
-use hdf5_sys::h5o::H5O_INFO_BASIC;
-use hdf5_sys::h5o::H5O_info1_t;
-use hdf5_sys::h5p::H5P_DEFAULT;
 use rstest::rstest;
 
 use test_util_hdf5::aggregation;
@@ -23,6 +19,8 @@ use test_util_hdf5::aggregation::Object;
 use test_util_hdf5::aggregation::Step;
 use test_util_hdf5::aggregation::Workload;
 use test_util_hdf5::file_space;
+
+use crate::c_object;
 
 #[rstest]
 #[case::tracked(1, true)]
@@ -696,7 +694,7 @@ impl Placements<Vec<u64>> {
                     let raw = create(&file, object).map(|dataset| dataset.offset().unwrap());
                     placements
                         .headers
-                        .push(header_address(&file, object.link_name()));
+                        .push(c_object::header_address(&file, object.link_name()));
                     placements.raw.extend(raw);
                     if let Object::Strings(_) = object {
                         strings.extend(raw);
@@ -766,30 +764,6 @@ fn create(file: &hdf5::File, object: Object) -> Option<hdf5::Dataset> {
             Some(dataset)
         }
     }
-}
-
-/// Returns the address of the object header of the object at `name`.
-///
-/// `H5Oget_info_by_name2` reports the address, and its successor in 1.12, `H5Oget_info_by_name3`,
-/// reports an object token in its place.
-fn header_address(file: &hdf5::File, name: &str) -> u64 {
-    let name = CString::new(name).unwrap();
-    let mut info = H5O_info1_t::default();
-    let status = hdf5::sync::sync(|| {
-        // SAFETY: The library lock serializes access, `file` keeps the file open, `name` is a
-        // NUL-terminated string that outlives the call, and `info` is a writable `H5O_info1_t`.
-        unsafe {
-            hdf5_sys::h5o::H5Oget_info_by_name2(
-                file.id(),
-                name.as_ptr(),
-                &raw mut info,
-                H5O_INFO_BASIC,
-                H5P_DEFAULT,
-            )
-        }
-    });
-    assert!(status >= 0, "H5Oget_info_by_name2 failed for {name:?}");
-    info.addr
 }
 
 /// Returns the bytes left in the metadata and small-data aggregators of `file`.
