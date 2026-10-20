@@ -38,6 +38,7 @@ jobs:
     outputs:
       run: ${{ github.event_name != 'pull_request' || steps.filter.outputs.run == 'true' }}
       matio-image: ${{ steps.filter.outputs.matio-image == 'true' }}
+      matio-adoption: ${{ steps.filter.outputs.matio-adoption == 'true' }}
     steps:
       - name: Filter the changed paths
         id: filter
@@ -65,6 +66,7 @@ jobs:
               - scripts/hdf5-releases.toml
               - .github/workflows/interop.yml
               - ci/matio.env
+              - ci/matio-image.txt
               - docker/ci/matio/**
               - scripts/ci/matio-image.sh
               - scripts/ci/run-matio.sh
@@ -76,6 +78,8 @@ jobs:
               - docker/ci/matio/**
               - scripts/ci/matio-image.sh
               - scripts/ci/install-mold.sh
+            matio-adoption:
+              - ci/matio-image.txt
 
   # The releases scripts/hdf5-releases.toml lists, for the matrix below, and the newest of them.
   releases:
@@ -225,17 +229,32 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
-        if: matrix.os != 'ubuntu-latest' || needs.changes.outputs.matio-image != 'true'
+        if: matrix.os != 'ubuntu-latest'
         run: rustup toolchain install
 
-      - name: Build the matio candidate
-        if: matrix.os == 'ubuntu-latest' && needs.changes.outputs.matio-image == 'true'
+      - name: Select the matio image
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
         id: image
+        env:
+          CONSTRUCTION_CHANGED: ${{ needs.changes.outputs.matio-image }}
+          ADOPTION_CHANGED: ${{ needs.changes.outputs.matio-adoption }}
         run: |
-          identity=$(bash scripts/ci/matio-image.sh fingerprint)
-          image="hdf5-pure-matio:$identity"
-          bash scripts/ci/matio-image.sh build "$image"
+          if [[ "$CONSTRUCTION_CHANGED" == true ]]; then
+            if [[ "$ADOPTION_CHANGED" == true ]]; then
+              echo 'Change matio construction and adoption in separate PRs' >&2
+              exit 1
+            fi
+            identity=$(bash scripts/ci/matio-image.sh fingerprint)
+            image="hdf5-pure-matio:$identity"
+            bash scripts/ci/matio-image.sh build "$image"
+          else
+            image=$(cat ci/matio-image.txt)
+            [[ "$image" =~ ^ghcr\.io/crambl/hdf5-pure-matio@sha256:[0-9a-f]{64}$ ]]
+            docker pull "$image"
+          fi
           identity=$(docker image inspect --format '{{.Id}}' "$image" | cut -d: -f2)
+          printf 'Matio image: %s\nCache identity: %s\n' "$image" "$identity"
           {
             echo "MATIO_IMAGE=$image"
             echo "CARGO_HOME=$GITHUB_WORKSPACE/../matio-cargo"
@@ -245,18 +264,20 @@ jobs:
           } >> "$GITHUB_ENV"
           echo "identity=$identity" >> "$GITHUB_OUTPUT"
 
-      - name: Cache the candidate Cargo environment
-        if: steps.image.outcome == 'success'
+      - name: Cache the matio Cargo environment
+        if: matrix.os == 'ubuntu-latest'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: matio-${{ steps.image.outputs.identity }}-${{ hashFiles('scripts/ci/run-matio.sh') }}
-          cmd-format: bash scripts/ci/run-matio.sh {0}
+          cmd-format: env -u CARGO_ENCODED_RUSTFLAGS bash scripts/ci/run-matio.sh {0}
           cache-bin: false
-          cache-targets: false
+          workspaces: . -> target/matio-${{ steps.image.outputs.identity }}
+          cache-targets: ${{ needs.changes.outputs.matio-image != 'true' }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Crosscheck in the candidate
-        if: steps.image.outcome == 'success'
+      - name: Crosscheck in the matio image
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
         run: |
           bash scripts/ci/run-matio.sh just interop::test-matio
           bash scripts/ci/run-matio.sh cargo nextest list --locked -p hdf5-pure-crosscheck --features serde,__matio --list-type binaries-only --message-format json > "$RUNNER_TEMP/matio-binaries.json"
@@ -265,20 +286,20 @@ jobs:
           bash scripts/ci/run-matio.sh bash -euo pipefail -c 'readelf -h "$1"; readelf -h "$1" | grep -F "Advanced Micro Devices X86-64"; readelf -p .comment "$1" | grep -F "$(mold --version)"' bash "$binary"
 
       - name: Cache Cargo
-        if: steps.image.outcome != 'success'
+        if: matrix.os != 'ubuntu-latest'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: interop
           save-if: false
 
       - name: Install tools
-        if: steps.image.outcome != 'success'
+        if: matrix.os != 'ubuntu-latest'
         uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-nextest@0.9.148,just@1.59.0
 
       - name: Install conda
-        if: steps.image.outcome != 'success'
+        if: matrix.os != 'ubuntu-latest'
         uses: conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5 # v4.0.1
         with:
           auto-update-conda: false
@@ -288,11 +309,11 @@ jobs:
           conda-remove-defaults: "true"
 
       - name: Install libmatio
-        if: steps.image.outcome != 'success'
+        if: matrix.os != 'ubuntu-latest'
         run: conda install -y -c conda-forge libmatio
 
       - name: Crosscheck against the reference library
-        if: steps.image.outcome != 'success'
+        if: matrix.os != 'ubuntu-latest'
         run: |
           export LIBRARY_PATH="$CONDA_PREFIX/lib:${LIBRARY_PATH:-}"
           export RUSTFLAGS="-C link-args=-Wl,-rpath,$CONDA_PREFIX/lib"
