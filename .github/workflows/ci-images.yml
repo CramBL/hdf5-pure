@@ -13,13 +13,19 @@ on:
       - rust-toolchain.toml
       - docker/ci/matio/**
       - scripts/ci/matio-image.sh
+      - ci/miri.env
+      - scripts/nightly.txt
+      - docker/ci/miri/**
+      - scripts/ci/miri-image.sh
+      - scripts/ci/run-miri.sh
+      - scripts/soundness.just
   workflow_dispatch:
     inputs:
       family:
         description: Image family
         type: choice
         default: all
-        options: [all, both, i686, s390x, matio]
+        options: [all, both, i686, s390x, matio, miri]
 
 permissions:
   contents: read
@@ -59,20 +65,25 @@ jobs:
           if [[ "$FAMILY" == changed ]]; then
             git diff --name-only "$BEFORE" "$GITHUB_SHA" > "$RUNNER_TEMP/image-changes"
           fi
-          for family in i686 s390x matio; do
+          for family in i686 s390x matio miri; do
             if [[ "$FAMILY" == changed ]]; then
               if [[ "$family" == matio ]]; then
                 pattern='^(ci/matio.env|rust-toolchain.toml|docker/ci/matio/|scripts/ci/(matio-image|install-mold).sh|.github/workflows/ci-images.yml)'
+              elif [[ "$family" == miri ]]; then
+                pattern='^(ci/miri.env|scripts/nightly.txt|docker/ci/miri/|scripts/ci/(miri-image|run-miri).sh|scripts/soundness.just|.github/workflows/ci-images.yml)'
               else
                 pattern='^(ci/images.toml|docker/ci/cross/|scripts/ci/(cross-image|install-mold).sh|.github/workflows/ci-images.yml)'
               fi
               if ! grep -Eq "$pattern" "$RUNNER_TEMP/image-changes"; then
                 continue
               fi
-            elif [[ "$FAMILY" != all && "$FAMILY" != "$family" && ! ( "$FAMILY" == both && "$family" != matio ) ]]; then
+            elif [[ "$FAMILY" != all && "$FAMILY" != "$family" && ! ( "$FAMILY" == both && ( "$family" == i686 || "$family" == s390x ) ) ]]; then
               continue
             fi
-            if [[ "$family" == matio ]]; then
+            if [[ "$family" == miri ]]; then
+              image="ghcr.io/crambl/hdf5-pure-miri:$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+              bash scripts/ci/miri-image.sh publish "$image"
+            elif [[ "$family" == matio ]]; then
               image="ghcr.io/crambl/hdf5-pure-matio:$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
               bash scripts/ci/matio-image.sh publish "$image"
             else

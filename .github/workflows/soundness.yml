@@ -32,6 +32,8 @@ jobs:
       pull-requests: read
     outputs:
       run: ${{ github.event_name != 'pull_request' || steps.filter.outputs.run == 'true' }}
+      miri-image: ${{ steps.filter.outputs.miri-image }}
+      miri-adoption: ${{ steps.filter.outputs.miri-adoption }}
     steps:
       - name: Filter the changed paths
         id: filter
@@ -55,6 +57,22 @@ jobs:
               - scripts/nightly.txt
               - scripts/soundness.just
               - .github/workflows/soundness.yml
+              - ci/miri.env
+              - ci/miri-image.txt
+              - docker/ci/miri/**
+              - scripts/ci/miri-image.sh
+              - scripts/ci/run-miri.sh
+              - .github/workflows/ci-images.yml
+            miri-image:
+              - ci/miri.env
+              - scripts/nightly.txt
+              - docker/ci/miri/**
+              - scripts/ci/miri-image.sh
+              - scripts/ci/run-miri.sh
+              - scripts/soundness.just
+              - .github/workflows/ci-images.yml
+            miri-adoption:
+              - ci/miri-image.txt
 
   # Undefined behaviour in the selected unsafe and high-risk paths `just soundness::miri` runs.
   miri:
@@ -72,25 +90,66 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Build the Miri candidate
+        id: image
+        if: needs.changes.outputs.miri-image == 'true'
+        env:
+          ADOPTION_CHANGED: ${{ needs.changes.outputs.miri-adoption }}
+        run: |
+          if [[ "$ADOPTION_CHANGED" == true ]]; then
+            echo 'Change Miri construction and adoption in separate PRs' >&2
+            exit 1
+          fi
+          identity=$(bash scripts/ci/miri-image.sh fingerprint)
+          image="hdf5-pure-miri:$identity"
+          bash scripts/ci/miri-image.sh build "$image"
+          identity=$(docker image inspect --format '{{.Id}}' "$image" | cut -d: -f2)
+          {
+            echo "MIRI_IMAGE=$image"
+            echo "CARGO_HOME=$GITHUB_WORKSPACE/../miri-cargo"
+          } >> "$GITHUB_ENV"
+          echo "identity=$identity" >> "$GITHUB_OUTPUT"
+          echo "pin=$(cat scripts/nightly.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the candidate Cargo environment
+        if: needs.changes.outputs.miri-image == 'true'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: miri-${{ steps.image.outputs.identity }}-${{ hashFiles('scripts/ci/run-miri.sh', 'scripts/soundness.just') }}
+          cmd-format: env -u CARGO_ENCODED_RUSTFLAGS bash scripts/ci/run-miri.sh {0}
+          cache-bin: false
+          cache-targets: false
+          workspaces: . -> target/${{ steps.image.outputs.pin }}
+          save-if: false
+
       - name: Install Rust
+        if: needs.changes.outputs.miri-image != 'true'
         run: rustup toolchain install
 
       - name: Cache Cargo
+        if: needs.changes.outputs.miri-image != 'true'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: miri
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install tools
+        if: needs.changes.outputs.miri-image != 'true'
         uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: just@1.59.0
 
       - name: Install the Miri toolchain
+        if: needs.changes.outputs.miri-image != 'true'
         run: just soundness::miri-toolchain
 
       - name: Miri
-        run: just soundness::miri
+        run: |
+          if [[ -n "${MIRI_IMAGE:-}" ]]; then
+            bash scripts/ci/run-miri.sh just soundness::miri
+          else
+            just soundness::miri
+          fi
 
   # The exact allocation figures under `tests/baselines/`. One host and one
   # feature set, because an exact count is a property of both; the scaling

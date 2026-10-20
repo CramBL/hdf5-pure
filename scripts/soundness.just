@@ -16,7 +16,7 @@ miri $MIRIFLAGS="-Zmiri-strict-provenance": miri-toolchain
 
 # Install the pinned nightly with Miri and the standard library sources it builds.
 miri-toolchain:
-    rustup toolchain install --no-self-update --profile minimal {{ NIGHTLY }} --component miri,rust-src
+    if [ -z "${MIRI_SYSROOT:-}" ]; then rustup toolchain install --no-self-update --profile minimal {{ NIGHTLY }} --component miri,rust-src; fi
 
 heap-baseline:
     cargo nextest run --locked --features __heap-baseline --test allocation_baseline
