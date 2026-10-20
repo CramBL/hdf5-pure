@@ -59,10 +59,31 @@ impl Writes {
 
 /// Returns the chunks libhdf5 reports for dataset `d` of the file at `path`, sorted.
 pub(crate) fn libhdf5_chunks(path: &Path, userblock: u64) -> Vec<Chunk> {
-    let file = hdf5::File::open(path).unwrap();
-    let count = file.dataset("d").unwrap().num_chunks().unwrap();
-    let indices: Vec<usize> = (0..count).collect();
-    let mut chunks = libhdf5_chunks_at(path, userblock, &indices);
+    #[cfg(feature = "__hdf5-1.14")]
+    let mut chunks = {
+        let file = hdf5::File::open(path).unwrap();
+        let dataset = file.dataset("d").unwrap();
+        let mut chunks = Vec::new();
+        dataset
+            .chunks_visit(|info| {
+                chunks.push(Chunk {
+                    offset: info.offset.to_vec(),
+                    address: absolute(info.addr, userblock),
+                    size: info.size,
+                    filter_mask: info.filter_mask,
+                });
+                0
+            })
+            .unwrap();
+        chunks
+    };
+    #[cfg(not(feature = "__hdf5-1.14"))]
+    let mut chunks = {
+        let file = hdf5::File::open(path).unwrap();
+        let count = file.dataset("d").unwrap().num_chunks().unwrap();
+        let indices: Vec<usize> = (0..count).collect();
+        libhdf5_chunks_at(path, userblock, &indices)
+    };
     chunks.sort();
     chunks
 }
