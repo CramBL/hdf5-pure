@@ -2094,7 +2094,7 @@ fn the_free_sections_libhdf5_persists_are_read_at_the_widths_of_its_file(
     assert_eq!(free.iter().map(|&(_, len)| len).sum::<u64>(), free_c);
 }
 
-// libhdf5 writes one 197-byte section list with 9 zero bytes before its checksum.
+// libhdf5 writes one 197-byte section list with 9 unused bytes before its checksum.
 #[cfg(feature = "__hdf5-1.12")]
 #[test]
 fn the_sections_libhdf5_persists_in_an_oversized_section_list_are_read() {

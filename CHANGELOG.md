@@ -52,6 +52,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - Fixed `FileBuilder::write` leaving metadata page tails untracked in persistent PAGE files when manager storage exactly fills a page ([#820](https://github.com/CramBL/hdf5-pure/pull/820)).
+- Fixed `File::persisted_free_space` rejecting section lists with nonzero unused bytes before their checksum. Checksum verification includes those bytes when enabled.
 - Fixed loss of source positions above `usize::MAX` in `FormatError` end-of-file diagnostics, while slice-local diagnostics retain host-sized byte counts ([#813](github.com/CramBL/hdf5-pure/pull/813)).
 - Fixed `File::commit` losing reusable PAGE manager-page tails after reopen, with free-space persistence enabled ([#815](https://github.com/CramBL/hdf5-pure/pull/815)).
 - Fixed platform-limit classification in `FormatError` diagnostics for fixed-width integer overflow, while host-sized conversions retain their platform-limit classification ([#810](https://github.com/CramBL/hdf5-pure/pull/810)).
