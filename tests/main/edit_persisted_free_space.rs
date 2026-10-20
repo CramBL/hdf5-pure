@@ -3,8 +3,10 @@ use std::path::Path;
 
 use hdf5_pure::AttrValue;
 use hdf5_pure::File;
+use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpaceStrategy;
+use hdf5_pure::MemoryStrategy;
 use hdf5_pure::SpaceOwnership;
 use hdf5_pure_core::__private::StoredAddressExt;
 use rstest::rstest;
@@ -13,6 +15,50 @@ use test_util::range;
 use test_util::temp;
 use test_util::userblock::Userblock;
 use test_util_hdf5::file_space;
+
+#[rstest]
+#[case::bounded(MemoryStrategy::Bounded, 0)]
+#[case::mirrored(MemoryStrategy::Mirrored, 0)]
+#[case::userblock(MemoryStrategy::Mirrored, 4_096)]
+fn paged_manager_tail_survives_reopen(#[case] memory: MemoryStrategy, #[case] userblock: u64) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("paged.h5");
+    let mut builder = userblock_builder(userblock);
+    builder.create_dataset("a").with_i32_data(&[1; 100]);
+    builder.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
+    builder.write(&path).unwrap();
+    let file = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new().with_memory_strategy(memory),
+    )
+    .unwrap();
+    for i in 0..60 {
+        file.root()
+            .create_dataset(&format!("b{i}"), |b| {
+                b.with_i32_data(&[2; 100]);
+            })
+            .unwrap();
+        file.commit().unwrap();
+    }
+    let before = file.space_accounting().unwrap().reusable_free_space;
+    file.close().unwrap();
+    let reopened = File::open_rw(&path).unwrap();
+    assert_eq!(
+        reopened.space_accounting().unwrap().reusable_free_space,
+        before,
+    );
+    assert_eq!(reopened.dataset("a").unwrap().read_i32().unwrap(), [1; 100]);
+    for i in 0..60 {
+        assert_eq!(
+            reopened
+                .dataset(&format!("b{i}"))
+                .unwrap()
+                .read_i32()
+                .unwrap(),
+            [2; 100],
+        );
+    }
+}
 
 #[rstest]
 fn a_session_reuses_the_free_space_an_earlier_session_persisted(

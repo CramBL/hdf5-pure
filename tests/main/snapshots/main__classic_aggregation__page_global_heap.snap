@@ -17,9 +17,9 @@ Step 1: Create dataset "r0" with 16 i32 elements
   Free-space managers        611        693         82
   Free-space managers        693        746         53
   Free-space managers        746        828         82
-  Free-space managers        828        863         35
+  Free-space managers        828       1070        242
   Reusable free space         48        344        296
-  Reusable free space        863       4096       3233
+  Reusable free space       1070       4096       3026
   Reusable free space       4160       8192       4032
   No extents: Userblock, Unclassified, Trailing slack
 
@@ -30,17 +30,17 @@ Step 2: Create variable-length string dataset "v"
   Live metadata               48        127         79
   Live metadata              127        199         72
   Live metadata              344        415         71
-  Live metadata              863       1003        140
+  Live metadata             1070       1210        140
   Live raw data             4096       4160         64
   Live raw data             4160       4192         32
   Live raw data             8192      12288       4096
-  Free-space managers       1003       1085         82
-  Free-space managers       1085       1156         71
-  Free-space managers       1156       1238         82
-  Free-space managers       1238       1273         35
+  Free-space managers       1210       1292         82
+  Free-space managers       1292       1363         71
+  Free-space managers       1363       1445         82
+  Free-space managers       1445       1651        206
   Reusable free space        199        344        145
-  Reusable free space        415        863        448
-  Reusable free space       1273       4096       2823
+  Reusable free space        415       1070        655
+  Reusable free space       1651       4096       2445
   Reusable free space       4192       8192       4000
   No extents: Userblock, Unclassified, Trailing slack
 
@@ -52,19 +52,19 @@ Step 3: Create dataset "r1" with 16 i32 elements
   Live metadata              199        270         71
   Live metadata              344        415         71
   Live metadata              415        504         89
-  Live metadata             1273       1413        140
+  Live metadata             1651       1791        140
   Live raw data             4096       4160         64
   Live raw data             4160       4192         32
   Live raw data             4192       4256         64
   Live raw data             8192      12288       4096
-  Free-space managers       1413       1495         82
-  Free-space managers       1495       1584         89
-  Free-space managers       1584       1666         82
-  Free-space managers       1666       1701         35
+  Free-space managers       1791       1873         82
+  Free-space managers       1873       1962         89
+  Free-space managers       1962       2044         82
+  Free-space managers       2044       2250        206
   Reusable free space        127        199         72
   Reusable free space        270        344         74
-  Reusable free space        504       1273        769
-  Reusable free space       1701       4096       2395
+  Reusable free space        504       1651       1147
+  Reusable free space       2250       4096       1846
   Reusable free space       4256       8192       3936
   No extents: Userblock, Unclassified, Trailing slack
 
@@ -85,10 +85,10 @@ Step 4: Create group "g"
   Free-space managers        749        831         82
   Free-space managers        831        920         89
   Free-space managers        920       1002         82
-  Free-space managers       1002       1037         35
+  Free-space managers       1002       1226        224
   Reusable free space        166        199         33
   Reusable free space        270        344         74
   Reusable free space        415        504         89
-  Reusable free space       1037       4096       3059
+  Reusable free space       1226       4096       2870
   Reusable free space       4256       8192       3936
   No extents: Userblock, Unclassified, Trailing slack

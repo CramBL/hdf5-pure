@@ -17,9 +17,9 @@ Step 1: Create dataset "big" with 400 i32 elements
   Free-space managers        612        694         82
   Free-space managers        694        747         53
   Free-space managers        747        829         82
-  Free-space managers        829        864         35
+  Free-space managers        829       1071        242
   Reusable free space         48        344        296
-  Reusable free space        864       4096       3232
+  Reusable free space       1071       4096       3025
   Reusable free space       5696       8192       2496
   No extents: Userblock, Unclassified, Trailing slack
 
@@ -30,16 +30,16 @@ Step 2: Create dataset "next" with 16 i32 elements
   Live metadata               48        119         71
   Live metadata              119        195         76
   Live metadata              344        415         71
-  Live metadata              864       1004        140
+  Live metadata             1071       1211        140
   Live raw data             4096       5696       1600
   Live raw data             5696       5760         64
-  Free-space managers       1004       1086         82
-  Free-space managers       1086       1157         71
-  Free-space managers       1157       1239         82
-  Free-space managers       1239       1274         35
+  Free-space managers       1211       1293         82
+  Free-space managers       1293       1364         71
+  Free-space managers       1364       1446         82
+  Free-space managers       1446       1652        206
   Reusable free space        195        344        149
-  Reusable free space        415        864        449
-  Reusable free space       1274       4096       2822
+  Reusable free space        415       1071        656
+  Reusable free space       1652       4096       2444
   Reusable free space       5760       8192       2432
   No extents: Userblock, Unclassified, Trailing slack
 
@@ -54,10 +54,10 @@ Step 3: Delete link "big"
   Free-space managers        555        637         82
   Free-space managers        637        708         71
   Free-space managers        708        790         82
-  Free-space managers        790        843         53
+  Free-space managers        790       1050        260
   Reusable free space        119        195         76
   Reusable free space        253        415        162
-  Reusable free space        843       4096       3253
+  Reusable free space       1050       4096       3046
   Reusable free space       4096       5696       1600
   Reusable free space       5760       8192       2432
   No extents: Userblock, Unclassified, Trailing slack
@@ -69,16 +69,16 @@ Step 4: Create dataset "reuse" with 16 i32 elements
   Live metadata               48        119         71
   Live metadata              119        190         71
   Live metadata              253        331         78
-  Live metadata              843        983        140
+  Live metadata             1050       1190        140
   Live raw data             4096       4160         64
   Live raw data             5696       5760         64
-  Free-space managers        983       1065         82
-  Free-space managers       1065       1136         71
-  Free-space managers       1136       1218         82
-  Free-space managers       1218       1271         53
+  Free-space managers       1190       1272         82
+  Free-space managers       1272       1343         71
+  Free-space managers       1343       1425         82
+  Free-space managers       1425       1667        242
   Reusable free space        190        253         63
-  Reusable free space        331        843        512
-  Reusable free space       1271       4096       2825
+  Reusable free space        331       1050        719
+  Reusable free space       1667       4096       2429
   Reusable free space       4160       5696       1536
   Reusable free space       5760       8192       2432
   No extents: Userblock, Unclassified, Trailing slack
