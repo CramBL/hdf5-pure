@@ -33,7 +33,6 @@ jobs:
     outputs:
       run: ${{ github.event_name != 'pull_request' || steps.filter.outputs.run == 'true' }}
       miri-image: ${{ steps.filter.outputs.miri-image }}
-      miri-adoption: ${{ steps.filter.outputs.miri-adoption }}
     steps:
       - name: Filter the changed paths
         id: filter
@@ -58,7 +57,6 @@ jobs:
               - scripts/soundness.just
               - .github/workflows/soundness.yml
               - ci/miri.env
-              - ci/miri-image.txt
               - docker/ci/miri/**
               - scripts/ci/miri-image.sh
               - scripts/ci/run-miri.sh
@@ -68,11 +66,7 @@ jobs:
               - scripts/nightly.txt
               - docker/ci/miri/**
               - scripts/ci/miri-image.sh
-              - scripts/ci/run-miri.sh
-              - scripts/soundness.just
               - .github/workflows/ci-images.yml
-            miri-adoption:
-              - ci/miri-image.txt
 
   # Undefined behaviour in the selected unsafe and high-risk paths `just soundness::miri` runs.
   miri:
@@ -94,20 +88,13 @@ jobs:
         id: image
         env:
           CONSTRUCTION_CHANGED: ${{ needs.changes.outputs.miri-image }}
-          ADOPTION_CHANGED: ${{ needs.changes.outputs.miri-adoption }}
         run: |
-          if [[ "$CONSTRUCTION_CHANGED" == true ]]; then
-            if [[ "$ADOPTION_CHANGED" == true ]]; then
-              echo 'Change Miri construction and adoption in separate PRs' >&2
-              exit 1
-            fi
-            identity=$(bash scripts/ci/miri-image.sh fingerprint)
-            image="hdf5-pure-miri:$identity"
+          candidate=false
+          image=$(bash scripts/ci/miri-image.sh reference)
+          if [[ "$CONSTRUCTION_CHANGED" == true ]] || ! docker pull "$image"; then
+            candidate=true
+            image="hdf5-pure-miri:candidate"
             bash scripts/ci/miri-image.sh build "$image"
-          else
-            image=$(cat ci/miri-image.txt)
-            [[ "$image" =~ ^ghcr\.io/crambl/hdf5-pure-miri@sha256:[0-9a-f]{64}$ ]]
-            docker pull "$image"
           fi
           identity=$(docker image inspect --format '{{.Id}}' "$image" | cut -d: -f2)
           printf 'Miri image: %s\nCache identity: %s\n' "$image" "$identity"
@@ -116,6 +103,8 @@ jobs:
             echo "CARGO_HOME=$GITHUB_WORKSPACE/../miri-cargo"
           } >> "$GITHUB_ENV"
           echo "identity=$identity" >> "$GITHUB_OUTPUT"
+          echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
+          echo "Local build: $candidate"
           echo "pin=$(cat scripts/nightly.txt)" >> "$GITHUB_OUTPUT"
 
       - name: Cache the Miri Cargo environment
@@ -124,7 +113,7 @@ jobs:
           shared-key: miri-${{ steps.image.outputs.identity }}-${{ hashFiles('scripts/ci/run-miri.sh', 'scripts/soundness.just') }}
           cmd-format: env -u CARGO_ENCODED_RUSTFLAGS bash scripts/ci/run-miri.sh {0}
           cache-bin: false
-          cache-targets: ${{ needs.changes.outputs.miri-image != 'true' }}
+          cache-targets: ${{ steps.image.outputs.candidate != 'true' }}
           workspaces: . -> target/${{ steps.image.outputs.pin }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 

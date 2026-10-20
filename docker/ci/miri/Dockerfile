@@ -2,10 +2,8 @@ ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
 ARG SOURCE_REVISION
-ARG INPUT_FINGERPRINT
 LABEL org.opencontainers.image.source="https://github.com/CramBL/hdf5-pure" \
-      org.opencontainers.image.revision="${SOURCE_REVISION}" \
-      io.hdf5-pure.inputs="${INPUT_FINGERPRINT}"
+      org.opencontainers.image.revision="${SOURCE_REVISION}"
 
 ENV RUSTUP_HOME="/opt/rustup" \
     CARGO_HOME="/opt/cargo" \
