@@ -112,10 +112,32 @@ dependencies = [
 
 [[package]]
 name = "hdf5-pure"
-version = "0.44.0"
+version = "0.47.0"
+dependencies = [
+ "hdf5-pure-core",
+ "hdf5-pure-filter",
+ "hdf5-pure-format",
+ "hdf5-pure-space",
+]
+
+[[package]]
+name = "hdf5-pure-core"
+version = "0.47.0"
+
+[[package]]
+name = "hdf5-pure-filter"
+version = "0.47.0"
+dependencies = [
+ "flate2",
+ "hdf5-pure-core",
+]
+
+[[package]]
+name = "hdf5-pure-format"
+version = "0.47.0"
 dependencies = [
  "byteorder",
- "flate2",
+ "hdf5-pure-core",
 ]
 
 [[package]]
@@ -126,6 +148,13 @@ dependencies = [
  "hdf5-pure",
  "libfuzzer-sys",
  "tempfile",
+]
+
+[[package]]
+name = "hdf5-pure-space"
+version = "0.47.0"
+dependencies = [
+ "hdf5-pure-core",
 ]
 
 [[package]]
