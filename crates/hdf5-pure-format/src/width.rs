@@ -117,9 +117,14 @@ impl UintWidth {
 
     /// Returns the narrowest width that holds `len`.
     pub fn smallest_for_len(len: usize) -> Self {
-        match u32::try_from(len) {
-            Ok(len) if len <= u32::from(u8::MAX) => Self::One,
-            Ok(len) if len <= u32::from(u16::MAX) => Self::Two,
+        Self::smallest_for_value(len.to_u64())
+    }
+
+    /// Returns the narrowest width that can represent `value`.
+    pub fn smallest_for_value(value: u64) -> Self {
+        match u32::try_from(value) {
+            Ok(value) if value <= u32::from(u8::MAX) => Self::One,
+            Ok(value) if value <= u32::from(u16::MAX) => Self::Two,
             Ok(_) => Self::Four,
             Err(_) => Self::Eight,
         }
@@ -300,27 +305,44 @@ mod tests {
     }
 
     #[rstest]
+    #[case(0)]
+    #[case(255)]
+    #[case(256)]
+    #[case(65_535)]
+    #[case(65_536)]
+    #[case(4_294_967_295)]
+    fn a_length_selects_the_same_width_as_its_value(#[case] len: usize) {
+        assert_eq!(
+            UintWidth::smallest_for_len(len),
+            UintWidth::smallest_for_value(len.to_u64())
+        );
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[rstest]
+    #[case(4_294_967_296)]
+    #[case(usize::MAX)]
+    fn a_length_past_four_bytes_selects_the_same_width_as_its_value(#[case] len: usize) {
+        assert_eq!(
+            UintWidth::smallest_for_len(len),
+            UintWidth::smallest_for_value(len.to_u64())
+        );
+    }
+
+    #[rstest]
     #[case(0, UintWidth::One)]
     #[case(255, UintWidth::One)]
     #[case(256, UintWidth::Two)]
     #[case(65_535, UintWidth::Two)]
     #[case(65_536, UintWidth::Four)]
-    fn a_length_takes_the_smallest_width_that_holds_it(
-        #[case] len: usize,
+    #[case(u32::MAX.into(), UintWidth::Four)]
+    #[case(u64::from(u32::MAX) + 1, UintWidth::Eight)]
+    #[case(u64::MAX, UintWidth::Eight)]
+    fn a_value_selects_the_smallest_width_that_holds_it(
+        #[case] value: u64,
         #[case] expected: UintWidth,
     ) {
-        assert_eq!(UintWidth::smallest_for_len(len), expected);
-    }
-
-    #[cfg(target_pointer_width = "64")]
-    #[rstest]
-    #[case(4_294_967_295, UintWidth::Four)]
-    #[case(4_294_967_296, UintWidth::Eight)]
-    fn a_length_past_a_four_byte_field_takes_the_eight_byte_one(
-        #[case] len: usize,
-        #[case] expected: UintWidth,
-    ) {
-        assert_eq!(UintWidth::smallest_for_len(len), expected);
+        assert_eq!(UintWidth::smallest_for_value(value), expected);
     }
 
     #[rstest]
