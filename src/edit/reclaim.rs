@@ -26,6 +26,7 @@ use crate::fractal_heap_storage;
 use crate::fractal_heap_storage::FractalHeapAllocation;
 use crate::fractal_heap_storage::FractalHeapStorageError;
 use crate::global_heap;
+use crate::group_v1;
 use crate::group_v2;
 use crate::link_info::LinkInfoMessage;
 use crate::link_message::LinkMessage;
@@ -456,6 +457,7 @@ impl WriteEngine {
                 &header,
                 self.widths(),
                 self.addresses,
+                group_v1::group_leaf_node_k(&self.superblock),
             )
             .ok()?;
             for e in entries {

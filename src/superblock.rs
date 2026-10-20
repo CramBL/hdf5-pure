@@ -41,9 +41,10 @@ pub(crate) struct LocatedSuperblock {
 /// `expected` field is the position in `file` the read needs to reach, and `available` the length
 /// of `file`. Returns [`FormatError::UnsupportedVersion`] if the version is above 3,
 /// [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] if a width is not 2, 4,
-/// or 8, and, under the `checksum` feature, [`FormatError::ChecksumMismatch`] if the checksum of a
-/// version 2 or 3 superblock does not match its bytes. Returns the error of a failed read of
-/// `file`.
+/// or 8, [`FormatError::InvalidGroupLeafNodeK`] if a version 0 or 1 superblock stores 0 in its
+/// "Group Leaf Node K" field, and, under the `checksum` feature, [`FormatError::ChecksumMismatch`]
+/// if the checksum of a version 2 or 3 superblock does not match its bytes. Returns the error of a
+/// failed read of `file`.
 pub(crate) fn read(
     file: &(impl SuperblockSource + ?Sized),
 ) -> Result<LocatedSuperblock, FormatError> {

@@ -112,6 +112,7 @@ impl WriteEngine {
                 header,
                 self.widths(),
                 self.addresses,
+                crate::group_v1::group_leaf_node_k(&self.superblock),
             )? {
                 if !entry
                     .object_header_address

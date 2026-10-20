@@ -43,6 +43,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Breaking:** `FormatError::InvalidFreeSpaceManager` holds a message that describes the invalid free-space manager, and a write returns it for a free section too large to persist at the file's length width.
 - **Breaking:** `File::persisted_free_space` reports a malformed free-space manager as an error, which changes its return type ([#698](https://github.com/CramBL/hdf5-pure/pull/698)).
 - **Breaking:** `FileSpaceInfo::page_size` changes type from `u64` to `FileSpacePageSize`, which holds a page size from 512 bytes to 1 GiB ([#702](https://github.com/CramBL/hdf5-pure/pull/702)).
+- `FormatError` reports a corrupt local heap or symbol table node of a version 1 group with variants of its own, a link name that runs past the heap's data segment among them in place of `UnexpectedEof` ([#811](https://github.com/CramBL/hdf5-pure/pull/811/)).
 - `FormatError` reports a corrupt Extensible Array chunk index with variants of its own. `Dataset::append` reports a corrupt header with the generic chunked-read and chunk-geometry errors ([#806](https://github.com/CramBL/hdf5-pure/pull/806)).
 - `File::open_rw` validates complete checksummed fractal-heap direct blocks before editing or proving storage ownership. Read-only object lookups validate block prefixes and object bounds without reading the complete block ([#750](https://github.com/CramBL/hdf5-pure/pull/750)).
 - `FormatError::UnexpectedEof` reports a superblock that the file ends inside with positions counted from the start of the file. Opening a file that ends within 15 bytes of the start of its signature returns it whatever the version byte ([#780](https://github.com/CramBL/hdf5-pure/pull/780)).
@@ -51,6 +52,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - Fixed platform-limit classification in `FormatError` diagnostics for fixed-width integer overflow, while host-sized conversions retain their platform-limit classification ([#810](https://github.com/CramBL/hdf5-pure/pull/810)).
+- Fixed `File::open` and related opens accepting a superblock whose group leaf node K is 0 ([#811](https://github.com/CramBL/hdf5-pure/pull/811/)).
+- Fixed `Group::groups` and related reads accepting a version 1 group whose symbol table node holds more links than the superblock's group leaf node K allows, or whose local heap has an undefined data segment address. The link count is checked in files with a version 0 or 1 superblock only ([#811](https://github.com/CramBL/hdf5-pure/pull/811/)).
+- Fixed `Group::groups` and related reads of a file opened with `File::open` accepting a version 1 group whose local heap data segment ends past the end of the file, or whose soft link has an invalid name ([#811](https://github.com/CramBL/hdf5-pure/pull/811/)).
 - Fixed `Dataset::chunks` and related reads accepting an Extensible Array chunk index with an invalid header, or with blocks that do not match it ([#806](https://github.com/CramBL/hdf5-pure/pull/806)).
 - Fixed `Dataset::chunks` and related reads misreading an Extensible Array chunk index whose super blocks each hold 8 or more data block addresses ([#806](https://github.com/CramBL/hdf5-pure/pull/806)).
 - Fixed `Dataset::chunks` and related reads requesting an entire unpaged Fixed Array chunk index in one buffer. Encoded metadata is read in bounded windows, while memory for collected chunk records grows with the number of defined entries ([#805](https://github.com/CramBL/hdf5-pure/pull/805)).

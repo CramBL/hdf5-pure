@@ -41,6 +41,7 @@ use crate::file_space_info::{FileSpaceInfo, FileSpaceStrategy};
 use crate::fill_value::{FillPattern, FillValueMessage, FillValueView};
 use crate::filter_pipeline::FilterPipeline;
 use crate::free_space_manager;
+use crate::group_v1;
 use crate::group_v1::GroupEntry;
 use crate::group_v2::{self, ChildLookup};
 use crate::layout_info::{Chunk, ChunkIndex, Filter, Layout};
@@ -2164,9 +2165,10 @@ impl FileInner {
     /// no group at all.
     fn group_children(&self, hdr: &ObjectHeader) -> Result<Vec<GroupEntry>, Error> {
         let (widths, base) = (self.widths, self.addresses());
+        let k = group_v1::group_leaf_node_k(&self.superblock);
         match &self.backend {
             Backend::InMemory(v) => {
-                group_v2::resolve_group_entries(v, self.access_mode, hdr, widths, base)
+                group_v2::resolve_group_entries(v, self.access_mode, hdr, widths, base, k)
             }
             Backend::Streaming(s) => group_v2::resolve_group_entries_from_source(
                 s.as_ref(),
@@ -2174,10 +2176,11 @@ impl FileInner {
                 hdr,
                 widths,
                 base,
+                k,
             ),
             Backend::Edit(m) => Self::with_engine(
                 m,
-                |d| group_v2::resolve_group_entries(d, self.access_mode, hdr, widths, base),
+                |d| group_v2::resolve_group_entries(d, self.access_mode, hdr, widths, base, k),
                 |s| {
                     group_v2::resolve_group_entries_from_source(
                         s,
@@ -2185,6 +2188,7 @@ impl FileInner {
                         hdr,
                         widths,
                         base,
+                        k,
                     )
                 },
             ),
@@ -2211,11 +2215,12 @@ impl FileInner {
     /// of the group (issue #228).
     fn group_child(&self, group_address: u64, name: LinkName<'_>) -> Result<ChildLookup, Error> {
         let (widths, base) = (self.widths, self.addresses());
+        let k = group_v1::group_leaf_node_k(&self.superblock);
         let access = self.access_mode();
         let addr = group_address;
         match &self.backend {
             Backend::InMemory(v) => {
-                group_v2::find_child_address(v, access, addr, widths, base, name)
+                group_v2::find_child_address(v, access, addr, widths, base, k, name)
             }
             Backend::Streaming(s) => group_v2::find_child_address_from_source(
                 s.as_ref(),
@@ -2223,12 +2228,15 @@ impl FileInner {
                 addr,
                 widths,
                 base,
+                k,
                 name,
             ),
             Backend::Edit(m) => Self::with_engine(
                 m,
-                |d| group_v2::find_child_address(d, access, addr, widths, base, name),
-                |s| group_v2::find_child_address_from_source(s, access, addr, widths, base, name),
+                |d| group_v2::find_child_address(d, access, addr, widths, base, k, name),
+                |s| {
+                    group_v2::find_child_address_from_source(s, access, addr, widths, base, k, name)
+                },
             ),
         }
         .map_err(Error::Format)
@@ -4447,6 +4455,23 @@ impl Group {
             };
             (name, group)
         }))
+    }
+
+    /// Returns the name of each on-disk child of the group, with the address the file stores for
+    /// its object header, to crosscheck tests.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of locating the group's object header, such as [`Error::StaleHandle`], and
+    /// [`Error::Format`] if the group's structures do not parse.
+    #[cfg(feature = "__group-links-crosscheck")]
+    #[doc(hidden)]
+    pub fn __links(&self) -> Result<Vec<(String, StoredAddress)>, Error> {
+        Ok(self
+            .children()?
+            .into_iter()
+            .map(|entry| (entry.name, entry.object_header_address))
+            .collect())
     }
 
     /// Read all attributes of this group.
