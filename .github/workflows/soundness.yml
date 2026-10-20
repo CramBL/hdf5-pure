@@ -90,20 +90,27 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Build the Miri candidate
+      - name: Select the Miri image
         id: image
-        if: needs.changes.outputs.miri-image == 'true'
         env:
+          CONSTRUCTION_CHANGED: ${{ needs.changes.outputs.miri-image }}
           ADOPTION_CHANGED: ${{ needs.changes.outputs.miri-adoption }}
         run: |
-          if [[ "$ADOPTION_CHANGED" == true ]]; then
-            echo 'Change Miri construction and adoption in separate PRs' >&2
-            exit 1
+          if [[ "$CONSTRUCTION_CHANGED" == true ]]; then
+            if [[ "$ADOPTION_CHANGED" == true ]]; then
+              echo 'Change Miri construction and adoption in separate PRs' >&2
+              exit 1
+            fi
+            identity=$(bash scripts/ci/miri-image.sh fingerprint)
+            image="hdf5-pure-miri:$identity"
+            bash scripts/ci/miri-image.sh build "$image"
+          else
+            image=$(cat ci/miri-image.txt)
+            [[ "$image" =~ ^ghcr\.io/crambl/hdf5-pure-miri@sha256:[0-9a-f]{64}$ ]]
+            docker pull "$image"
           fi
-          identity=$(bash scripts/ci/miri-image.sh fingerprint)
-          image="hdf5-pure-miri:$identity"
-          bash scripts/ci/miri-image.sh build "$image"
           identity=$(docker image inspect --format '{{.Id}}' "$image" | cut -d: -f2)
+          printf 'Miri image: %s\nCache identity: %s\n' "$image" "$identity"
           {
             echo "MIRI_IMAGE=$image"
             echo "CARGO_HOME=$GITHUB_WORKSPACE/../miri-cargo"
@@ -111,45 +118,18 @@ jobs:
           echo "identity=$identity" >> "$GITHUB_OUTPUT"
           echo "pin=$(cat scripts/nightly.txt)" >> "$GITHUB_OUTPUT"
 
-      - name: Cache the candidate Cargo environment
-        if: needs.changes.outputs.miri-image == 'true'
+      - name: Cache the Miri Cargo environment
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: miri-${{ steps.image.outputs.identity }}-${{ hashFiles('scripts/ci/run-miri.sh', 'scripts/soundness.just') }}
           cmd-format: env -u CARGO_ENCODED_RUSTFLAGS bash scripts/ci/run-miri.sh {0}
           cache-bin: false
-          cache-targets: false
+          cache-targets: ${{ needs.changes.outputs.miri-image != 'true' }}
           workspaces: . -> target/${{ steps.image.outputs.pin }}
-          save-if: false
-
-      - name: Install Rust
-        if: needs.changes.outputs.miri-image != 'true'
-        run: rustup toolchain install
-
-      - name: Cache Cargo
-        if: needs.changes.outputs.miri-image != 'true'
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: miri
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Install tools
-        if: needs.changes.outputs.miri-image != 'true'
-        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
-        with:
-          tool: just@1.59.0
-
-      - name: Install the Miri toolchain
-        if: needs.changes.outputs.miri-image != 'true'
-        run: just soundness::miri-toolchain
-
       - name: Miri
-        run: |
-          if [[ -n "${MIRI_IMAGE:-}" ]]; then
-            bash scripts/ci/run-miri.sh just soundness::miri
-          else
-            just soundness::miri
-          fi
+        run: bash scripts/ci/run-miri.sh just soundness::miri
 
   # The exact allocation figures under `tests/baselines/`. One host and one
   # feature set, because an exact count is a property of both; the scaling
