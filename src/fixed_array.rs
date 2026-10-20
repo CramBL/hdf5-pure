@@ -180,7 +180,7 @@ mod tests {
     use super::*;
     use crate::address::StoredAddressExt;
     use crate::array_test;
-    use crate::array_test::PlacedSource;
+    use crate::placed_source::PlacedSource;
     use crate::source;
     use crate::width::LengthWidth;
     use crate::width::OffsetWidth;

@@ -194,6 +194,8 @@ pub use crate::link_message::LinkMessage;
 pub use crate::link_message::LinkTarget;
 pub use crate::link_message::link_is_named;
 pub use crate::local_heap::LocalHeap;
+pub use crate::local_heap::LocalHeapDataSegment;
+pub use crate::local_heap::LocalHeapLocator;
 pub use crate::message_flags::MessageFlags;
 pub use crate::metadata_source::MetadataSource;
 pub use crate::object_header::AttributePhaseChange;
