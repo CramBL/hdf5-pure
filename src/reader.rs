@@ -9116,11 +9116,22 @@ mod tests {
                 ("read_f64_rows", ds.read_f64_rows(0, 1).unwrap_err()),
                 ("read_i32", ds.read_i32().unwrap_err()),
             ] {
-                let Error::Format(FormatError::DataSizeMismatch { expected, actual }) = &err else {
-                    panic!("{what} over {n} elements: expected DataSizeMismatch, got {err:?}");
+                let Error::Format(FormatError::LogicalDataSizeMismatch { expected, actual }) = &err
+                else {
+                    panic!(
+                        "{what} over {n} elements: expected LogicalDataSizeMismatch, got {err:?}"
+                    );
                 };
-                assert_eq!(*expected, n * 8, "{what} reported the wrong expected size");
-                assert_eq!(*actual, n * 16, "{what} reported the wrong stored size");
+                assert_eq!(
+                    *expected,
+                    (n * 8) as u64,
+                    "{what} reported the wrong expected size"
+                );
+                assert_eq!(
+                    *actual,
+                    (n * 16) as u64,
+                    "{what} reported the wrong stored size"
+                );
             }
         }
     }

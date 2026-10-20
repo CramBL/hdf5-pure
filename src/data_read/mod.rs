@@ -963,7 +963,13 @@ mod tests {
         let data = vec![0u8; 16]; // wrong: should be 24
         let layout = DataLayout::Compact { data };
         let err = read_raw_data(&[], &layout, &ds, &dt).unwrap_err();
-        assert!(matches!(err, FormatError::DataSizeMismatch { .. }));
+        assert_eq!(
+            err,
+            FormatError::LogicalDataSizeMismatch {
+                expected: 24,
+                actual: 16
+            },
+        );
     }
 
     #[test]

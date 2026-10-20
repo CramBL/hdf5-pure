@@ -169,7 +169,7 @@ fn enum_i32_data_into_u8_enum_type_is_rejected() {
         .create_dataset("bad")
         .with_enum_i32_data(u8_enum, &[0, 1]);
     match builder.finish() {
-        Err(hdf5_pure::Error::Format(FormatError::ShapeDataMismatch {
+        Err(hdf5_pure::Error::Format(FormatError::LogicalShapeDataMismatch {
             expected,
             actual,
             element_size,
@@ -178,7 +178,7 @@ fn enum_i32_data_into_u8_enum_type_is_rejected() {
             assert_eq!(expected, 2); // 2 elements * 1 byte
             assert_eq!(actual, 8); // 2 values * 4 bytes each
         }
-        other => panic!("expected ShapeDataMismatch, got {other:?}"),
+        other => panic!("expected LogicalShapeDataMismatch, got {other:?}"),
     }
 }
 

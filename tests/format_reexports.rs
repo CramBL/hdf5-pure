@@ -1,4 +1,6 @@
 use core::num::NonZeroU32;
+use core::num::NonZeroU64;
+use core::num::NonZeroUsize;
 
 use hdf5_pure::CompoundMember;
 use hdf5_pure::Datatype;
@@ -276,4 +278,38 @@ fn width_and_undefined_address_apis_are_public() {
         !hdf5_pure::StoredAddress::undefined(hdf5_pure::OffsetWidth::Two)
             .is_undefined(hdf5_pure::OffsetWidth::Four)
     );
+}
+
+#[rstest::rstest]
+#[case::logical_data(
+    FormatError::LogicalDataSizeMismatch { expected: 4_294_967_312, actual: 4_294_967_328 },
+    "data size mismatch: expected 4294967312 bytes, got 4294967328 bytes"
+)]
+#[case::logical_shape(
+    FormatError::LogicalShapeDataMismatch {
+        expected: 8_589_934_592,
+        actual: 4_294_967_296,
+        element_size: NonZeroU64::new(4_294_967_296).unwrap(),
+    },
+    "shape/data mismatch: shape requires 2 elements (8589934592 bytes), but 1 elements \
+     (4294967296 bytes) were supplied"
+)]
+#[case::buffer_data(
+    FormatError::DataSizeMismatch { expected: 16, actual: 8 },
+    "data size mismatch: expected 16 bytes, got 8 bytes"
+)]
+#[case::buffer_shape(
+    FormatError::ShapeDataMismatch {
+        expected: 32,
+        actual: 24,
+        element_size: NonZeroUsize::new(8).unwrap(),
+    },
+    "shape/data mismatch: shape requires 4 elements (32 bytes), but 3 elements (24 bytes) \
+     were supplied"
+)]
+fn size_mismatch_diagnostics_preserve_counts_and_element_widths(
+    #[case] error: FormatError,
+    #[case] expected: &str,
+) {
+    assert_eq!(error.to_string(), expected);
 }

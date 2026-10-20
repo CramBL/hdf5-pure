@@ -1093,29 +1093,55 @@ fn roundtrip_scale_offset_incompressible_then_deflate() {
     assert_eq!(ds.read_i32().unwrap(), data);
 }
 
-#[test]
-fn shape_data_mismatch_is_rejected() {
-    use hdf5_pure::{Error, FormatError};
-
-    // 3 elements supplied but a 2x2 (=4 element) shape requested.
+#[rstest::rstest]
+#[case::f64(
+    |builder: &mut FileBuilder| {
+        builder
+            .create_dataset("bad")
+            .with_f64_data(&[1.0, 2.0, 3.0])
+            .with_shape(&[2, 2]);
+    },
+    32,
+    24,
+    8,
+    "HDF5 format error: shape/data mismatch: shape requires 4 elements (32 bytes), \
+     but 3 elements (24 bytes) were supplied"
+)]
+#[case::large_u8(
+    |builder: &mut FileBuilder| {
+        builder
+            .create_dataset("bad")
+            .with_u8_data(&[1])
+            .with_shape(&[4_294_967_297]);
+    },
+    4_294_967_297,
+    1,
+    1,
+    "HDF5 format error: shape/data mismatch: shape requires 4294967297 elements \
+     (4294967297 bytes), but 1 elements (1 bytes) were supplied"
+)]
+fn shape_data_mismatch_is_rejected(
+    #[case] configure: fn(&mut FileBuilder),
+    #[case] expected_bytes: u64,
+    #[case] actual_bytes: u64,
+    #[case] element_bytes: u64,
+    #[case] display: &str,
+) {
     let mut builder = FileBuilder::new();
-    builder
-        .create_dataset("bad")
-        .with_f64_data(&[1.0, 2.0, 3.0])
-        .with_shape(&[2, 2]);
+    configure(&mut builder);
     let err = builder.finish().unwrap_err();
-    match err {
-        Error::Format(FormatError::ShapeDataMismatch {
-            expected,
-            actual,
-            element_size,
-        }) => {
-            assert_eq!(expected, 4 * 8); // shape needs 4 f64 = 32 bytes
-            assert_eq!(actual, 3 * 8); // only 3 f64 = 24 bytes supplied
-            assert_eq!(element_size.get(), 8); // f64
-        }
-        other => panic!("expected ShapeDataMismatch, got {other:?}"),
-    }
+    assert_eq!(err.to_string(), display);
+    let Error::Format(FormatError::LogicalShapeDataMismatch {
+        expected,
+        actual,
+        element_size,
+    }) = err
+    else {
+        panic!("expected LogicalShapeDataMismatch, got {err:?}");
+    };
+    assert_eq!(expected, expected_bytes);
+    assert_eq!(actual, actual_bytes);
+    assert_eq!(element_size.get(), element_bytes);
 }
 
 /// A zero-element shape is held to the same shape/data agreement every other
@@ -1149,7 +1175,7 @@ fn zero_element_shape_with_data_is_rejected() {
             }
             let case = format!("shape {shape:?}, chunked {chunked}");
             match builder.finish() {
-                Err(Error::Format(FormatError::ShapeDataMismatch {
+                Err(Error::Format(FormatError::LogicalShapeDataMismatch {
                     expected,
                     actual,
                     element_size,
@@ -1158,7 +1184,7 @@ fn zero_element_shape_with_data_is_rejected() {
                     assert_eq!(actual, 3 * 4, "{case}: three i32 were supplied");
                     assert_eq!(element_size.get(), 4, "{case}");
                 }
-                other => panic!("{case}: expected ShapeDataMismatch, got {other:?}"),
+                other => panic!("{case}: expected LogicalShapeDataMismatch, got {other:?}"),
             }
         }
     }

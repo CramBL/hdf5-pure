@@ -223,7 +223,7 @@ builder
 
 [`with_chunks`](crate::DatasetBuilder::with_chunks) is required here: auto-chunking derives the chunk from the shape, and a zero-element shape has nothing to derive from. A dataset staged without it is rejected with [`FormatError::InvalidChunkGeometry`](crate::FormatError::InvalidChunkGeometry).
 
-A zero-element shape and staged element data are rejected together, with [`FormatError::ShapeDataMismatch`](crate::FormatError::ShapeDataMismatch): the shape declares nowhere for the data to go. Pass an empty slice or leave the data out entirely, as both examples above do.
+A zero-element shape requires empty data. The writer returns [`FormatError::LogicalShapeDataMismatch`](crate::FormatError::LogicalShapeDataMismatch) if element data is supplied. Both examples above omit the data.
 
 ## Serializing: `finish()` vs `write(path)`
 
