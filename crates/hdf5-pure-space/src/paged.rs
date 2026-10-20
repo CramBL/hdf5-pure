@@ -80,6 +80,7 @@ pub struct PagedAllocationSnapshot {
 }
 
 /// Tracks reusable-space state for a paged editing session.
+#[derive(Clone)]
 pub(crate) struct PagedEdit {
     page_size: FileSpacePageSize,
     meta: FreeList,
@@ -304,6 +305,114 @@ impl PagedEdit {
         self.raw = snapshot.raw;
     }
 
+    /// Bounds the section count after page splitting and tail reservation.
+    ///
+    /// Includes pending padding, dead extents, and `extents` in the count.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ValueTooLargeForPlatform`] if the count exceeds [`usize::MAX`].
+    pub(crate) fn tail_section_limit(
+        &self,
+        extents: impl IntoIterator<Item = Extent>,
+    ) -> Result<usize, FormatError> {
+        let page = self.page_size.get();
+        self.meta
+            .extents()
+            .iter()
+            .chain(self.raw.extents())
+            .chain(self.dead.extents())
+            .chain(self.unclassified.extents())
+            .chain(&self.meta_pad)
+            .chain(&self.raw_pad)
+            .copied()
+            .chain(extents)
+            .try_fold(3usize, |count, extent| {
+                let pieces = (extent.end() - 1) / page - extent.start() / page + 1;
+                usize::try_from(pieces)
+                    .ok()
+                    .and_then(|pieces| count.checked_add(pieces))
+                    .ok_or(FormatError::ValueTooLargeForPlatform {
+                        value: pieces,
+                        target: "PAGE persistence section count",
+                    })
+            })
+    }
+
+    /// Reserves metadata capacity in a copy of the allocation state.
+    ///
+    /// Applies pending frees only after reserving the allocation. Includes metadata-page padding
+    /// in the final free sections and excludes any whole pages released above the final EOA.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the allocation, page boundary, or trailing
+    /// reserve exceeds [`u64::MAX`].
+    pub(crate) fn plan_tail(
+        &self,
+        threshold: u64,
+        eoa: u64,
+        freed: &[(Extent, FreeClass)],
+        old_blocks: &[Extent],
+        capacity: u64,
+        appended: bool,
+    ) -> Result<Option<PagedTail>, FormatError> {
+        eoa.checked_next_multiple_of(self.page_size.get())
+            .ok_or(FormatError::OffsetOverflow {
+                offset: eoa,
+                length: self.page_size.get(),
+            })?;
+        capacity
+            .checked_mul(TRAILING_RESERVE_TAILS * 2)
+            .and_then(|reserve| reserve.checked_next_multiple_of(self.page_size.get()))
+            .ok_or(FormatError::OffsetOverflow {
+                offset: capacity,
+                length: TRAILING_RESERVE_TAILS * 2,
+            })?;
+        let mut available = self.clone();
+        let allocation = if appended {
+            Extent::new(eoa, capacity).ok_or(FormatError::OffsetOverflow {
+                offset: eoa,
+                length: capacity,
+            })?
+        } else {
+            let Some(allocation) = available.allocate(capacity, PageType::Meta) else {
+                return Ok(None);
+            };
+            allocation
+        };
+        let (mut post, released_eoa) = available.post_free(
+            threshold,
+            eoa,
+            freed.iter().copied(),
+            old_blocks.iter().copied(),
+        );
+        let final_eoa = if appended {
+            if let Some(extent) = Extent::new(released_eoa, eoa - released_eoa) {
+                post.track(extent, PageType::Raw.into());
+            }
+            let end = allocation.end();
+            let aligned = end.checked_next_multiple_of(self.page_size.get()).ok_or(
+                FormatError::OffsetOverflow {
+                    offset: end,
+                    length: self.page_size.get(),
+                },
+            )?;
+            if let Some(tail) = Extent::new(end, aligned - end) {
+                post.track(tail, PageType::Meta.into());
+            }
+            aligned
+        } else {
+            post.release_trailing(released_eoa, capacity)
+        };
+        Ok(Some(PagedTail {
+            allocation,
+            post,
+            final_eoa,
+            appended,
+        }))
+    }
+
     /// Builds the PAGE free-space state that a commit would publish.
     pub(crate) fn post_free(
         &self,
@@ -412,6 +521,21 @@ impl PagedEdit {
             raw.free(whole_pages);
         }
     }
+}
+
+/// Describes a metadata reservation and the PAGE state to publish with it.
+///
+/// All addresses are stored addresses relative to the file base. Planning leaves the session
+/// unchanged, and the caller adopts [`Self::post`] after successful publication.
+pub struct PagedTail {
+    /// The complete metadata allocation, including any owned padding.
+    pub allocation: Extent,
+    /// The final free-space state, excluding the reservation and including its page tail.
+    pub post: PagedPostFree,
+    /// The page-aligned end of allocation to publish.
+    pub final_eoa: u64,
+    /// Whether the reservation begins at the previous end of allocation.
+    pub appended: bool,
 }
 
 /// Holds the free-space state a paged commit is preparing to publish.
@@ -576,6 +700,89 @@ mod tests {
     const SHORT_OF_THRESHOLD: u64 = THRESHOLD_IN_A_PAGE - 1;
     const EXTENT_AT: u64 = PAGE + 1024;
     const THRESHOLD_OF_THREE_PAGES: u64 = 3 * PAGE;
+
+    #[rstest::rstest]
+    #[case::below_threshold(8_192, 200)]
+    #[case::page_tail(1, 512)]
+    #[case::multiple_pages(1, 4_096)]
+    fn appended_tail_is_part_of_the_planned_state(#[case] threshold: u64, #[case] capacity: u64) {
+        let paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
+        let plan = paged
+            .plan_tail(threshold, 8_192, &[], &[], capacity, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(plan.allocation, extent(8_192, capacity));
+        assert_eq!(plan.final_eoa, (8_192 + capacity).next_multiple_of(4_096));
+        let expected = Extent::new(8_192 + capacity, plan.final_eoa - 8_192 - capacity);
+        assert_eq!(plan.post.sections().metadata(), expected.as_slice());
+        assert!(paged.sections().metadata().is_empty());
+    }
+
+    #[rstest::rstest]
+    #[case::pending_object(false)]
+    #[case::old_manager(true)]
+    fn pending_frees_cannot_fund_a_tail_reservation(#[case] old_manager: bool) {
+        let paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
+        let freed = if old_manager {
+            Vec::new()
+        } else {
+            alloc::vec![(extent(4_096, 500), PageType::Meta.into())]
+        };
+        let old_blocks = if old_manager {
+            alloc::vec![extent(4_096, 500)]
+        } else {
+            Vec::new()
+        };
+        assert!(
+            paged
+                .plan_tail(1, 8_192, &freed, &old_blocks, 300, false)
+                .unwrap()
+                .is_none()
+        );
+        let appended = paged
+            .plan_tail(1, 8_192, &freed, &old_blocks, 300, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            appended.post.sections().metadata(),
+            [extent(4_096, 500), extent(8_492, 3_796)]
+        );
+    }
+
+    #[test]
+    fn a_pure_tail_plan_reserves_only_durable_metadata() {
+        let mut paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
+        paged.seed(extent(100, 500), Some(PageType::Meta));
+        paged.seed(extent(4_096, 4_096), Some(PageType::Raw));
+        let plan = paged
+            .plan_tail(1, 8_192, &[], &[], 300, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(plan.allocation, extent(100, 300));
+        assert!(!plan.appended);
+        assert_eq!(plan.post.sections().metadata(), [extent(400, 200)]);
+        assert_eq!(paged.sections().metadata(), [extent(100, 500)]);
+    }
+
+    #[test]
+    fn tail_section_limit_includes_hidden_dead_fragments_and_page_splits() {
+        let mut paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
+        paged.track(extent(4_000, 5_000), FreeClass::Dead);
+        paged.meta_pad.push(extent(100, 50));
+        assert_eq!(paged.tail_section_limit([extent(12_000, 500)]).unwrap(), 9);
+    }
+
+    #[test]
+    fn a_tail_plan_rejects_an_overflowing_page_boundary() {
+        let paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
+        assert!(matches!(
+            paged.plan_tail(1, u64::MAX - 1, &[], &[], 1, true),
+            Err(FormatError::OffsetOverflow {
+                offset: value,
+                length: 4_096
+            }) if value == u64::MAX - 1
+        ));
+    }
 
     #[test]
     fn an_aligned_page_transition_needs_no_padding() {
@@ -955,5 +1162,8 @@ mod tests {
 
     fn paged_sections(post: &PagedPostFree) -> [Vec<(u64, u64)>; 3] {
         [&post.meta, &post.raw, &post.dead].map(FreeList::sections)
+    }
+    fn extent(start: u64, len: u64) -> Extent {
+        Extent::new(start, len).unwrap()
     }
 }

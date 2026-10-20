@@ -19,6 +19,7 @@ pub use crate::paged::PageType;
 pub use crate::paged::PagedAllocationSnapshot;
 pub use crate::paged::PagedPostFree;
 pub use crate::paged::PagedSections;
+pub use crate::paged::PagedTail;
 pub use crate::persistence::ManagerKind;
 pub use crate::persistence::ManagerSections;
 pub use crate::persistence::TRAILING_RESERVE_TAILS;

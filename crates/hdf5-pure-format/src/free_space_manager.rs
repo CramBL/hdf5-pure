@@ -1039,6 +1039,36 @@ pub fn section_info_len(widths: FormatWidths, section_sizes: &[u64]) -> u64 {
     section_list_len(widths, sets, section_sizes.len())
 }
 
+/// Returns a section-list capacity sufficient for at most `max_sections` sections.
+///
+/// Counts each section as a separate size group, so the capacity covers every grouping of
+/// section sizes for `widths`. Includes the prefix and checksum even when the
+/// section count is zero.
+///
+/// # Errors
+///
+/// Returns [`FormatError::OffsetOverflow`] if the capacity exceeds [`u64::MAX`].
+pub fn section_info_capacity(
+    widths: FormatWidths,
+    max_sections: usize,
+) -> Result<u64, FormatError> {
+    let SectionFields {
+        count,
+        size,
+        offset,
+    } = SectionFields::written(widths, max_sections);
+    let per_section = (count + size + offset + SECTION_CLASS_LEN).to_u64();
+    let fixed = (section_list_prefix_len(widths.offsets) + CHECKSUM_LEN).to_u64();
+    max_sections
+        .to_u64()
+        .checked_mul(per_section)
+        .and_then(|payload| payload.checked_add(fixed))
+        .ok_or(FormatError::OffsetOverflow {
+            offset: fixed,
+            length: max_sections.to_u64(),
+        })
+}
+
 /// Parses the section list of the manager `header` describes, at the start of `data`, into its free
 /// sections.
 ///
@@ -1397,6 +1427,24 @@ mod tests {
     use test_util::free_space;
 
     use super::*;
+
+    #[rstest]
+    #[case::two(2, 2, 15)]
+    #[case::mixed(8, 4, 256)]
+    #[case::eight(8, 8, 256)]
+    fn section_capacity_bounds_distinct_sizes_and_count_width_changes(
+        #[case] offsets: u8,
+        #[case] lengths: u8,
+        #[case] count: usize,
+    ) {
+        let widths = widths(offsets, lengths);
+        let sizes: Vec<_> = (1..=count as u64).collect();
+        let capacity = section_info_capacity(widths, count).unwrap();
+        assert_eq!(section_info_len(widths, &sizes), capacity);
+        let fewer: Vec<_> = sizes.into_iter().take(count - 1).collect();
+        assert!(section_info_len(widths, &fewer) <= capacity);
+        assert!(section_info_len(widths, &alloc::vec![1; count]) <= capacity);
+    }
 
     #[rstest]
     #[case::header(true)]
