@@ -1,12 +1,4 @@
-//! Tests for the windowed (leading-dimension row-range) read API:
-//! `Dataset::read_raw_rows` and the typed `read_*_rows` helpers (issue: partial
-//! reads).
-//!
-//! The invariant under test everywhere: a row window must be byte-for-byte the
-//! same as the whole-dataset read sliced to that row range — for every layout
-//! (contiguous, chunked, inner-chunked grids), on both the in-memory and the
-//! streaming backend, and across edge windows (empty, past-the-end, straddling
-//! chunk boundaries).
+//! Dataset region and row-window reads across layouts and reader backends.
 
 use std::io::Cursor;
 use std::sync::Arc;

@@ -484,6 +484,7 @@ pub(crate) mod object_header_writer;
 pub(crate) mod object_path;
 #[cfg(test)]
 pub(crate) mod placed_source;
+pub(crate) mod read_region;
 pub(crate) mod read_spec;
 pub(crate) mod scaleoffset;
 pub(crate) mod shared_message;

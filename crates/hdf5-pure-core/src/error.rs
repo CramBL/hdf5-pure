@@ -664,6 +664,26 @@ pub enum FormatError {
     },
     /// Path not found during group traversal.
     PathNotFound(String),
+    /// A dataset region extends past a dimension's current extent.
+    RegionOutOfBounds {
+        /// Zero-based index of the dimension.
+        dimension: usize,
+        /// Requested starting coordinate in that dimension.
+        start: u64,
+        /// Requested number of elements in that dimension.
+        count: u64,
+        /// Current extent of that dimension.
+        extent: u64,
+    },
+    /// A dataset region has a different number of coordinates from the dataset's rank.
+    RegionRankMismatch {
+        /// Number of dataset dimensions.
+        rank: usize,
+        /// Number of starting coordinates supplied by the caller.
+        start: usize,
+        /// Number of element counts supplied by the caller.
+        count: usize,
+    },
     /// Serialization error.
     SerializationError(String),
     /// The dataset's element count implied by its shape does not match the
@@ -891,6 +911,20 @@ pub const OBJECT_HEADER_MESSAGE_MAX: usize = u16::MAX as usize;
 impl fmt::Display for FormatError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::RegionOutOfBounds {
+                dimension,
+                start,
+                count,
+                extent,
+            } => write!(
+                f,
+                "region dimension {dimension} starts at {start} with count {count}, beyond extent {extent}"
+            ),
+            Self::RegionRankMismatch { rank, start, count } => write!(
+                f,
+                "region rank {rank} requires {rank} starts and counts, got {start} starts and {count} counts"
+            ),
+
             Self::FileRegionLengthMismatch {
                 range_length,
                 bytes_length,

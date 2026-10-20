@@ -38,6 +38,7 @@ use crate::fill_value::FillPattern;
 use crate::filter_pipeline::FilterPipeline;
 use crate::filters::{self, ChunkContext, FilterScratch};
 use crate::fixed_array;
+use crate::read_region::ReadRegion;
 use crate::read_spec::{RawReadSpec, RawReadStorage};
 use crate::source;
 use crate::source::Source;
@@ -756,6 +757,7 @@ fn plan_chunk_spans(
 /// or strides overflow. Returns [`FormatError::ValueTooLargeForPlatform`] if a required buffer
 /// size, dimension, or buffer index exceeds [`usize::MAX`], and errors from reading
 /// the datatype, fill value, chunk index, or chunk payloads.
+#[cfg(test)]
 pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
     source: &S,
     spec: RawReadSpec<'_>,
@@ -765,6 +767,21 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
     row_start: u64,
     num_rows: u64,
 ) -> Result<Option<Vec<u8>>, FormatError> {
+    if spec.dataspace().dimensions.is_empty() {
+        return Ok(None);
+    }
+    let region = ReadRegion::rows(spec, row_start, num_rows)?;
+    read_chunked_region_from_source(source, &region, widths, cache, pass).map(Some)
+}
+
+pub(crate) fn read_chunked_region_from_source(
+    source: &(impl Source + ?Sized),
+    region: &ReadRegion<'_>,
+    widths: FormatWidths,
+    cache: &ChunkCache,
+    pass: CachePass,
+) -> Result<Vec<u8>, FormatError> {
+    let spec = region.spec();
     let (dataspace, datatype, pipeline, fill) = (
         spec.dataspace(),
         spec.datatype(),
@@ -783,77 +800,29 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
     };
 
     let elem_size = crate::datatype::element_size_usize(datatype)?;
-    let (rank, chunk_dims, ds_dims) = chunked_dims(chunk_dimensions, dataspace)?;
+    let (rank, chunk_dims, _) = chunked_dims(chunk_dimensions, dataspace)?;
     bounded_chunk_len(chunk_dims, elem_size)?;
 
-    // A rank-0 (scalar) chunked layout has no leading dimension to window; fall
-    // back to the whole-dataset reader, which handles rank 0. Only a crafted
-    // file reaches this (valid chunked layouts are rank >= 1), but the reader
-    // parses untrusted input.
-    if rank == 0 {
-        return Ok(None);
-    }
-
-    let total_bytes = if num_rows == 0 || ds_dims[1..].contains(&0) {
-        0
-    } else {
-        let row_bytes =
-            ds_dims
-                .iter()
-                .skip(1)
-                .try_fold(elem_size.get() as u64, |bytes, &dim| {
-                    bytes.checked_mul(dim).ok_or(FormatError::OffsetOverflow {
-                        offset: bytes,
-                        length: dim,
-                    })
-                })?;
-        num_rows
-            .checked_mul(row_bytes)
-            .ok_or(FormatError::OffsetOverflow {
-                offset: num_rows,
-                length: row_bytes,
-            })?
-            .to_usize()?
-    };
+    let total_bytes = region.byte_len()?;
     let mut output = fill.buffer(total_bytes)?;
-    if total_bytes == 0 {
-        return Ok(Some(output));
-    }
-
-    let full_inner = (1..rank).all(|i| chunk_dims[i] == ds_dims[i]);
-    let out_rows = num_rows.to_usize()?;
-    let row_bytes = total_bytes / out_rows;
-    let mut win_dims = Vec::with_capacity(rank);
-    win_dims.push(out_rows);
-    for &dim in &ds_dims[1..] {
-        win_dims.push(dim.to_usize()?);
+    if region.is_empty() || index.address().is_none() {
+        return Ok(output);
     }
     let chunk_dims_u64 = chunk_dims;
     let chunk_dims = materialized_dims(chunk_dims_u64)?;
-    let win_strides = row_major_strides(&win_dims)?;
     let chunk_strides = row_major_strides(&chunk_dims)?;
-
-    // Unallocated chunk index: no storage exists, so every element of the window
-    // is fill. `output` already holds exactly that (it was built from the
-    // pattern), so the window is finished before any chunk is looked at — the
-    // same bytes the whole-dataset readers return through
-    // `RawReadSpec::unallocated_buffer`, which is what keeps `read_raw_rows` and
-    // `read_raw` agreeing over a dataset that was created and never written.
-    if index.address().is_none() {
-        return Ok(Some(output));
-    }
-
-    let row_lo = row_start;
-    let row_hi = row_start
-        .checked_add(num_rows)
-        .ok_or(FormatError::OffsetOverflow {
-            offset: row_start,
-            length: num_rows,
-        })?;
-    let cd0 = chunk_dims_u64[0];
-    let chunk_end = |c0: u64| c0.saturating_add(cd0).min(ds_dims[0]);
-    let overlaps = |c0: u64| c0 < row_hi && chunk_end(c0) > row_lo;
-    let chunk_overlaps = |chunk: &ChunkInfo| overlaps(chunk.offsets.first().copied().unwrap_or(0));
+    let elem_size_u64 = elem_size.get() as u64;
+    let win_dims = region
+        .axes()
+        .iter()
+        .map(|axis| axis.count().to_usize())
+        .collect::<Result<Vec<_>, _>>()?;
+    let win_strides = region
+        .axes()
+        .iter()
+        .map(|axis| axis.output_stride().map(|stride| stride / elem_size.get()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let chunk_overlaps = |chunk: &ChunkInfo| region.overlaps(&chunk.offsets, chunk_dims_u64);
 
     // Walk the index once, then reuse it for later windows on this handle —
     // keeping only this window's chunks, since each `ChunkInfo` taken out of the
@@ -887,44 +856,59 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
     // One decoder for the whole window; see `FilterScratch`.
     let mut scratch = FilterScratch::new();
 
+    let mut offsets = Vec::with_capacity(rank);
+    let mut dimensions = Vec::with_capacity(rank);
     for chunk in &chunks {
-        let c0 = chunk.offsets.first().copied().unwrap_or(0);
-        if !overlaps(c0) {
-            continue;
+        offsets.clear();
+        dimensions.clear();
+        let mut advance = 0u64;
+        for (((axis, &offset), &dimension), &stride) in region
+            .axes()
+            .iter()
+            .zip(&chunk.offsets)
+            .zip(chunk_dims_u64)
+            .zip(&chunk_strides)
+        {
+            let lo = axis.start().max(offset);
+            let hi = axis.end().min(offset.saturating_add(dimension));
+            offsets.push((lo - axis.start()).to_usize()?);
+            dimensions.push((hi - lo).to_usize()?);
+            let skip = (lo - offset)
+                .checked_mul(stride as u64)
+                .and_then(|skip| skip.checked_mul(elem_size_u64))
+                .ok_or(FormatError::OffsetOverflow {
+                    offset: lo - offset,
+                    length: stride as u64,
+                })?;
+            advance = advance
+                .checked_add(skip)
+                .ok_or(FormatError::OffsetOverflow {
+                    offset: advance,
+                    length: skip,
+                })?;
         }
-        let lo = c0.max(row_lo);
-        let hi = chunk_end(c0).min(row_hi);
-        let skip = (lo - c0).to_usize()?;
-        let dst_row = (lo - row_lo).to_usize()?;
-        let rows = (hi - lo).to_usize()?;
-
-        let scatter: Option<(Vec<usize>, Vec<usize>, usize)> = if full_inner {
-            None
-        } else {
-            let mut offsets = Vec::with_capacity(rank);
-            offsets.push(dst_row);
-            for &offset in chunk.offsets.iter().take(rank).skip(1) {
-                offsets.push(offset.to_usize()?);
+        let advance = advance.to_usize()?;
+        let band = match (offsets.first(), dimensions.first(), win_strides.first()) {
+            (Some(&offset), Some(&count), Some(&stride))
+                if dimensions.iter().skip(1).eq(chunk_dims.iter().skip(1))
+                    && win_dims.iter().skip(1).eq(chunk_dims.iter().skip(1)) =>
+            {
+                Some((
+                    offset * stride * elem_size.get(),
+                    count * stride * elem_size.get(),
+                ))
             }
-            let mut dims = chunk_dims.clone();
-            dims[0] = rows;
-            let advance = skip
-                .saturating_mul(chunk_strides[0])
-                .saturating_mul(elem_size.get());
-            Some((offsets, dims, advance))
+            _ => None,
         };
-
-        let src = skip.saturating_mul(row_bytes);
-        let dst = dst_row * row_bytes;
-        let band = rows * row_bytes;
-
-        let copy = |output: &mut [u8], bytes: &[u8]| match &scatter {
-            None => row_band_copy(output, dst, bytes, src, band, elem_size),
-            Some((offsets, dims, advance)) => place_chunk(
-                bytes.get(*advance..).unwrap_or(&[]),
+        let copy = |output: &mut [u8], bytes: &[u8]| match band {
+            Some((destination, length)) => {
+                row_band_copy(output, destination, bytes, advance, length, elem_size)
+            }
+            None => place_chunk(
+                bytes.get(advance..).unwrap_or(&[]),
                 output,
-                offsets,
-                dims,
+                &offsets,
+                &dimensions,
                 &win_dims,
                 &win_strides,
                 &chunk_strides,
@@ -954,7 +938,7 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
         }
     }
 
-    Ok(Some(output))
+    Ok(output)
 }
 
 /// Copy one chunk's overlapping row band into the window buffer at `dst`, clamped
