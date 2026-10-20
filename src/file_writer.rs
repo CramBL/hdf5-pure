@@ -82,7 +82,8 @@ use crate::object_header_writer::ObjectHeaderWriter;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::shared_message::DatatypeLocation;
 use crate::type_builders::{
-    self, AttrSpec, CommittedDatatype, DatasetBuilder, FinishedGroup, GroupBuilder, VlStringStaging,
+    self, AttrSpec, AttributeSpecs, CommittedDatatype, DatasetBuilder, FinishedGroup, GroupBuilder,
+    VlStringStaging,
 };
 use crate::width::FormatWidths;
 use crate::width::LengthWidth;
@@ -1136,7 +1137,7 @@ pub(crate) const UNDEF_ADDRESS: StoredAddress = StoredAddress::undefined(OffsetW
 /// The main file creation API.
 pub struct FileWriter {
     root_datasets: Vec<DatasetBuilder>,
-    root_attrs: Vec<(String, AttrSpec)>,
+    root_attrs: AttributeSpecs,
     root_committed: Vec<CommittedDatatype>,
     groups: Vec<FinishedGroup>,
     userblock_size: u64,
@@ -1165,7 +1166,7 @@ impl FileWriter {
     pub fn new() -> Self {
         Self {
             root_datasets: Vec::new(),
-            root_attrs: Vec::new(),
+            root_attrs: AttributeSpecs::default(),
             root_committed: Vec::new(),
             groups: Vec::new(),
             userblock_size: 0,
@@ -1397,22 +1398,30 @@ impl FileWriter {
         });
     }
 
-    /// Attach a root-group attribute whose datatype is the committed one at
-    /// `path`. See [`DatasetBuilder::set_attr_committed`].
+    /// Stages a root-group attribute using the committed datatype at `path`.
+    ///
+    /// The datatype implied by `value` must match the datatype committed at `path`.
+    /// See [`Self::set_root_attr`] for replacement and ordering.
     pub fn set_root_attr_committed(&mut self, name: &str, value: AttrValue, path: &str) {
-        self.root_attrs.push((
+        self.root_attrs.insert(
             name.to_string(),
             crate::type_builders::committed_attr_spec(value, path),
-        ));
+        );
     }
 
+    /// Stages an attribute for the root group.
+    ///
+    /// The writer replaces a staged attribute with the same name and preserves its first insertion
+    /// position. The replacement includes its value and datatype information.
     pub fn set_root_attr(&mut self, name: &str, value: AttrValue) {
         self.root_attrs
-            .push((name.to_string(), AttrSpec::Value(value)));
+            .insert(name.to_string(), AttrSpec::Value(value));
     }
 
     /// Attaches an already-encoded attribute message to the root group, written as given except
     /// for its datatype location.
+    ///
+    /// See [`Self::set_root_attr`] for replacement and ordering.
     ///
     /// Where `committed_datatype_path` is set, the written message refers to the committed
     /// datatype at that path. See [`AttrSpec::Verbatim`] for what this preserves that
@@ -1422,17 +1431,19 @@ impl FileWriter {
         message: crate::attribute::AttributeMessage,
         committed_datatype_path: Option<ObjectPathBuf>,
     ) {
-        self.root_attrs.push((
+        self.root_attrs.insert(
             message.name.clone(),
             AttrSpec::Verbatim {
                 message,
                 committed_datatype_path,
             },
-        ));
+        );
     }
 
     /// Attaches a variable-length string attribute to the root group with the datatype and
     /// dataspace of `message`, staging `strings` into a heap of this file's own.
+    ///
+    /// See [`Self::set_root_attr`] for replacement and ordering.
     ///
     /// Where `committed_datatype_path` is set, the written message refers to the committed
     /// datatype at that path. See [`AttrSpec::VerbatimVarLen`].
@@ -1448,14 +1459,14 @@ impl FileWriter {
         committed_datatype_path: Option<ObjectPathBuf>,
     ) -> Result<(), FormatError> {
         message.raw_data = crate::type_builders::vl_string_reference_bytes(&strings)?;
-        self.root_attrs.push((
+        self.root_attrs.insert(
             message.name.clone(),
             AttrSpec::VerbatimVarLen {
                 message,
                 strings,
                 committed_datatype_path,
             },
-        ));
+        );
         Ok(())
     }
 
@@ -2217,7 +2228,7 @@ impl FileWriter {
             Ok(addresses)
         }
 
-        fn collect_vl_patches(attrs_raw: &[(String, AttrSpec)]) -> Vec<VlPatch> {
+        fn collect_vl_patches(attrs_raw: &AttributeSpecs) -> Vec<VlPatch> {
             let mut patches = Vec::new();
             for (i, (_n, v)) in attrs_raw.iter().enumerate() {
                 if let Some(strings) = v.var_len_strings() {
@@ -4184,7 +4195,10 @@ fn paged_metadata_section_allocation(
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
+    use crate::File;
     use crate::access_mode::AccessMode;
     use crate::group_v2;
     use crate::link_info::LinkInfoMessage;
@@ -4192,6 +4206,206 @@ mod tests {
     use crate::object_path::ObjectPath;
     use crate::superblock::Superblock;
     use crate::type_builders;
+
+    #[test]
+    fn repeated_root_attribute_has_one_serialized_message() {
+        let mut writer = FileWriter::new();
+        writer.set_root_attr("answer", AttrValue::I32(7));
+        writer.set_root_attr("answer", AttrValue::I32(42));
+        let file = File::from_bytes(writer.finish().unwrap()).unwrap();
+        let messages = file.root().attr_messages().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].name, "answer");
+        assert_eq!(messages[0].raw_data, 42_i32.to_le_bytes());
+    }
+
+    #[rstest]
+    fn repeated_attributes_replace_complete_specs(
+        #[values(
+            AttributeForm::Committed,
+            AttributeForm::CommittedVarLen,
+            AttributeForm::CommittedVarLenVerbatim,
+            AttributeForm::CommittedVerbatim,
+            AttributeForm::Value,
+            AttributeForm::VarLenValue,
+            AttributeForm::VarLenVerbatim,
+            AttributeForm::Verbatim
+        )]
+        before: AttributeForm,
+        #[values(
+            AttributeForm::Committed,
+            AttributeForm::CommittedVarLen,
+            AttributeForm::CommittedVarLenVerbatim,
+            AttributeForm::CommittedVerbatim,
+            AttributeForm::Value,
+            AttributeForm::VarLenValue,
+            AttributeForm::VarLenVerbatim,
+            AttributeForm::Verbatim
+        )]
+        after: AttributeForm,
+        #[values(false, true)] dense: bool,
+        #[values(false, true)] paged: bool,
+    ) {
+        let bytes = replacement_writer(Some(before), after, dense, paged)
+            .finish()
+            .unwrap();
+        assert_eq!(test_util::fractal_heap::has_fractal_heap(&bytes), dense);
+        assert_eq!(
+            bytes,
+            replacement_writer(None, after, dense, paged)
+                .finish()
+                .unwrap()
+        );
+        let file = File::from_bytes(bytes).unwrap();
+        let expected = if dense { 13 } else { 3 };
+        assert_eq!(
+            [
+                file.root().attr_messages().unwrap().len(),
+                file.group("group").unwrap().attr_messages().unwrap().len(),
+                file.dataset("data").unwrap().attr_messages().unwrap().len(),
+            ],
+            [expected; 3]
+        );
+    }
+
+    fn replacement_writer(
+        before: Option<AttributeForm>,
+        after: AttributeForm,
+        dense: bool,
+        paged: bool,
+    ) -> FileWriter {
+        let mut writer = FileWriter::new();
+        if paged {
+            writer.with_file_space_strategy(FileSpaceStrategy::Page, false, 1);
+        }
+        writer.commit_datatype("integer_type", type_builders::make_i32_type());
+        writer.commit_datatype(
+            "string_type",
+            type_builders::build_attr_message("type", &AttrValue::VarLenString("type".into()))
+                .unwrap()
+                .datatype,
+        );
+        replacement_attrs(AttributeOwner::Root(&mut writer), before, after, dense);
+        replacement_attrs(
+            AttributeOwner::Dataset(writer.create_dataset("data").with_i32_data(&[1])),
+            before,
+            after,
+            dense,
+        );
+        let mut group = writer.create_group("group");
+        replacement_attrs(AttributeOwner::Group(&mut group), before, after, dense);
+        writer.add_group(group.finish());
+        writer
+    }
+
+    fn replacement_attrs(
+        mut owner: AttributeOwner<'_>,
+        before: Option<AttributeForm>,
+        after: AttributeForm,
+        dense: bool,
+    ) {
+        owner.insert("first", AttributeForm::Value, 1);
+        owner.insert(
+            "replace",
+            before.unwrap_or(after),
+            if before.is_some() { 7 } else { 42 },
+        );
+        owner.insert("last", AttributeForm::Value, 3);
+        if dense {
+            for index in 0..10 {
+                owner.insert(&format!("filler{index}"), AttributeForm::Value, index);
+            }
+        }
+        if before.is_some() {
+            owner.insert("replace", after, 42);
+        }
+    }
+
+    enum AttributeOwner<'a> {
+        Dataset(&'a mut DatasetBuilder),
+        Group(&'a mut GroupBuilder),
+        Root(&'a mut FileWriter),
+    }
+
+    impl AttributeOwner<'_> {
+        fn insert(&mut self, name: &str, form: AttributeForm, value: i32) {
+            let value = match form {
+                AttributeForm::CommittedVarLen
+                | AttributeForm::CommittedVarLenVerbatim
+                | AttributeForm::VarLenValue
+                | AttributeForm::VarLenVerbatim => {
+                    AttrValue::VarLenString(format!("value-{value}"))
+                }
+                _ => AttrValue::I32(value),
+            };
+            match form {
+                AttributeForm::Value | AttributeForm::VarLenValue => match self {
+                    Self::Dataset(owner) => {
+                        owner.set_attr(name, value);
+                    }
+                    Self::Group(owner) => owner.set_attr(name, value),
+                    Self::Root(owner) => owner.set_root_attr(name, value),
+                },
+                AttributeForm::Committed | AttributeForm::CommittedVarLen => {
+                    let path = if matches!(form, AttributeForm::CommittedVarLen) {
+                        "string_type"
+                    } else {
+                        "integer_type"
+                    };
+                    match self {
+                        Self::Dataset(owner) => {
+                            owner.set_attr_committed(name, value, path);
+                        }
+                        Self::Group(owner) => owner.set_attr_committed(name, value, path),
+                        Self::Root(owner) => owner.set_root_attr_committed(name, value, path),
+                    }
+                }
+                AttributeForm::CommittedVerbatim | AttributeForm::Verbatim => {
+                    let message = type_builders::build_attr_message(name, &value).unwrap();
+                    let path = matches!(form, AttributeForm::CommittedVerbatim)
+                        .then(|| ObjectPathBuf::parse("integer_type"));
+                    match self {
+                        Self::Dataset(owner) => {
+                            owner.set_attr_verbatim(message, path);
+                        }
+                        Self::Group(owner) => owner.set_attr_verbatim(message, path),
+                        Self::Root(owner) => owner.set_root_attr_verbatim(message, path),
+                    }
+                }
+                AttributeForm::CommittedVarLenVerbatim | AttributeForm::VarLenVerbatim => {
+                    let message = type_builders::build_attr_message(name, &value).unwrap();
+                    let strings = value.var_len_strings().unwrap().to_vec();
+                    let path = matches!(form, AttributeForm::CommittedVarLenVerbatim)
+                        .then(|| ObjectPathBuf::parse("string_type"));
+                    match self {
+                        Self::Dataset(owner) => {
+                            owner
+                                .set_attr_var_len_verbatim(message, strings, path)
+                                .unwrap();
+                        }
+                        Self::Group(owner) => owner
+                            .set_attr_var_len_verbatim(message, strings, path)
+                            .unwrap(),
+                        Self::Root(owner) => owner
+                            .set_root_attr_var_len_verbatim(message, strings, path)
+                            .unwrap(),
+                    }
+                }
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum AttributeForm {
+        Committed,
+        CommittedVarLen,
+        CommittedVarLenVerbatim,
+        CommittedVerbatim,
+        Value,
+        VarLenValue,
+        VarLenVerbatim,
+        Verbatim,
+    }
 
     #[rstest::rstest]
     #[case::before_exact_fill(394, 0, false, Some(35))]
@@ -4253,20 +4467,9 @@ mod tests {
         let mut writer = FileWriter::new();
         writer.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
         writer.with_file_space_page_size(FileSpacePageSize::MAX.get());
-        writer.root_attrs.extend([
-            (
-                "first".into(),
-                AttrSpec::Value(AttrValue::VarLenString("first-value".into())),
-            ),
-            (
-                "second".into(),
-                AttrSpec::Value(AttrValue::VarLenString("second-value".into())),
-            ),
-            (
-                "third".into(),
-                AttrSpec::Value(AttrValue::VarLenString("third-value".into())),
-            ),
-        ]);
+        writer.set_root_attr("first", AttrValue::VarLenString("first-value".into()));
+        writer.set_root_attr("second", AttrValue::VarLenString("second-value".into()));
+        writer.set_root_attr("third", AttrValue::VarLenString("third-value".into()));
         let mut sink = SparseSink {
             position: 0,
             chunks: Vec::new(),
@@ -4317,10 +4520,7 @@ mod tests {
         writer.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
         writer.with_file_space_page_size(page_size);
         writer.with_userblock(userblock);
-        writer.root_attrs.push((
-            "root_label".into(),
-            AttrSpec::Value(AttrValue::VarLenString("root-value".into())),
-        ));
+        writer.set_root_attr("root_label", AttrValue::VarLenString("root-value".into()));
         writer
             .create_dataset("contiguous")
             .with_vlen_strings(&["first", "second"]);

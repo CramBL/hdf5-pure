@@ -53,6 +53,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `FileBuilder::set_attr` and related attribute setters writing duplicate attributes for repeated names. Later calls replace the staged attribute at its first insertion position.
 - Fixed truncated variable-length descriptor counts in files serialized through `FileBuilder::finish` and related output methods. Elements with more than `u32::MAX` base elements are rejected.
 - Fixed `Dataset::read_raw` and related filter operations rejecting shuffle input with an incomplete trailing element ([#828](https://github.com/CramBL/hdf5-pure/pull/828)).
 - Fixed lost byte counts and incorrect platform-limit errors in `FormatError` dataset size-mismatch diagnostics when logical lengths exceed the host pointer width. Buffer allocations remain subject to host limits ([#824](https://github.com/CramBL/hdf5-pure/pull/824)).

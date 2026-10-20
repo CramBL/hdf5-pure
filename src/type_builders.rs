@@ -2,10 +2,12 @@
 //!
 //! Extracted from `file_writer.rs` to keep modules under the line limit.
 
+use alloc::collections::BTreeMap;
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String, string::ToString, vec, vec::Vec};
 
 use core::fmt;
+use core::slice;
 
 use core::num::{NonZeroU32, NonZeroUsize};
 
@@ -676,6 +678,46 @@ fn int_fits(v: i64, width: usize, signed: bool) -> bool {
     } else {
         let max = (1i64 << bits) - 1;
         (0..=max).contains(&v)
+    }
+}
+
+/// One attribute specification per staged name, in first insertion order.
+#[derive(Default)]
+pub(crate) struct AttributeSpecs {
+    entries: Vec<(String, AttrSpec)>,
+    indices: BTreeMap<String, usize>,
+}
+
+impl AttributeSpecs {
+    /// Replaces a complete specification at its first insertion position or appends a new name.
+    pub(crate) fn insert(&mut self, name: String, spec: AttrSpec) {
+        if let Some(&index) = self.indices.get(&name) {
+            // Each index is the vector length before its entry is appended.
+            // Entries are never removed.
+            self.entries[index].1 = spec;
+        } else {
+            self.indices.insert(name.clone(), self.entries.len());
+            self.entries.push((name, spec));
+        }
+    }
+
+    /// Iterates in first insertion order.
+    pub(crate) fn iter(&self) -> slice::Iter<'_, (String, AttrSpec)> {
+        self.entries.iter()
+    }
+
+    /// Returns the number of distinct staged names.
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+impl<'a> IntoIterator for &'a AttributeSpecs {
+    type Item = &'a (String, AttrSpec);
+    type IntoIter = slice::Iter<'a, (String, AttrSpec)>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
 
@@ -2369,7 +2411,7 @@ pub struct DatasetBuilder {
     pub(crate) maxshape: Option<Vec<MaxExtent>>,
     /// Staged element bytes or an error to report when serializing the dataset.
     pub(crate) data: Option<Result<Vec<u8>, Box<FormatError>>>,
-    pub(crate) attrs: Vec<(String, AttrSpec)>,
+    pub(crate) attrs: AttributeSpecs,
     pub(crate) chunk_options: ChunkOptions,
     /// When set, this dataset's chunks are copied verbatim from a source file
     /// (repack's verbatim path): the already-compressed chunk bytes, the source
@@ -2415,7 +2457,7 @@ impl DatasetBuilder {
             shape: None,
             maxshape: None,
             data: None,
-            attrs: Vec::new(),
+            attrs: AttributeSpecs::default(),
             chunk_options: ChunkOptions::default(),
             raw_chunks: None,
             produced: None,
@@ -2488,14 +2530,13 @@ impl DatasetBuilder {
         self
     }
 
-    /// Attach an attribute whose datatype is the committed one at `path`.
+    /// Stages an attribute using the committed datatype at `path`.
     ///
-    /// The same agreement rule as [`with_committed_datatype`](Self::with_committed_datatype)
-    /// applies: `value` decides the attribute's type, and it must be the type
-    /// committed at `path`.
+    /// The datatype implied by `value` must match the datatype committed at `path`.
+    /// See [`Self::set_attr`] for replacement and ordering.
     pub fn set_attr_committed(&mut self, name: &str, value: AttrValue, path: &str) -> &mut Self {
         self.attrs
-            .push((name.to_string(), committed_attr_spec(value, path)));
+            .insert(name.to_string(), committed_attr_spec(value, path));
         self
     }
 
@@ -3379,13 +3420,19 @@ impl DatasetBuilder {
         self
     }
 
+    /// Stages an attribute for this dataset.
+    ///
+    /// The writer replaces a staged attribute with the same name and preserves its first insertion
+    /// position. The replacement includes its value and datatype information.
     pub fn set_attr(&mut self, name: &str, value: AttrValue) -> &mut Self {
-        self.attrs.push((name.to_string(), AttrSpec::Value(value)));
+        self.attrs.insert(name.to_string(), AttrSpec::Value(value));
         self
     }
 
     /// Attaches an already-encoded attribute message, written as given except for its datatype
     /// location.
+    ///
+    /// See [`Self::set_attr`] for replacement and ordering.
     ///
     /// Where `committed_datatype_path` is set, the written message refers to the committed
     /// datatype at that path. See [`AttrSpec::Verbatim`] for what this preserves that `set_attr`
@@ -3395,18 +3442,20 @@ impl DatasetBuilder {
         message: AttributeMessage,
         committed_datatype_path: Option<ObjectPathBuf>,
     ) -> &mut Self {
-        self.attrs.push((
+        self.attrs.insert(
             message.name.clone(),
             AttrSpec::Verbatim {
                 message,
                 committed_datatype_path,
             },
-        ));
+        );
         self
     }
 
     /// Attaches a variable-length string attribute with the datatype and dataspace of
     /// `message`, staging `strings` into a heap of this file's own.
+    ///
+    /// See [`Self::set_attr`] for replacement and ordering.
     ///
     /// Where `committed_datatype_path` is set, the written message refers to the committed
     /// datatype at that path. See [`AttrSpec::VerbatimVarLen`].
@@ -3422,14 +3471,14 @@ impl DatasetBuilder {
         committed_datatype_path: Option<ObjectPathBuf>,
     ) -> Result<&mut Self, FormatError> {
         message.raw_data = vl_string_reference_bytes(&strings)?;
-        self.attrs.push((
+        self.attrs.insert(
             message.name.clone(),
             AttrSpec::VerbatimVarLen {
                 message,
                 strings,
                 committed_datatype_path,
             },
-        ));
+        );
         Ok(self)
     }
 
@@ -3593,7 +3642,7 @@ pub struct GroupBuilder {
     pub(crate) name: String,
     pub(crate) datasets: Vec<DatasetBuilder>,
     pub(crate) sub_groups: Vec<FinishedGroup>,
-    pub(crate) attrs: Vec<(String, AttrSpec)>,
+    pub(crate) attrs: AttributeSpecs,
     pub(crate) committed: Vec<CommittedDatatype>,
 }
 
@@ -3603,7 +3652,7 @@ impl GroupBuilder {
             name: name.to_string(),
             datasets: Vec::new(),
             sub_groups: Vec::new(),
-            attrs: Vec::new(),
+            attrs: AttributeSpecs::default(),
             committed: Vec::new(),
         }
     }
@@ -3633,12 +3682,18 @@ impl GroupBuilder {
         self.sub_groups.push(group);
     }
 
+    /// Stages an attribute for this group.
+    ///
+    /// The writer replaces a staged attribute with the same name and preserves its first insertion
+    /// position. The replacement includes its value and datatype information.
     pub fn set_attr(&mut self, name: &str, value: AttrValue) {
-        self.attrs.push((name.to_string(), AttrSpec::Value(value)));
+        self.attrs.insert(name.to_string(), AttrSpec::Value(value));
     }
 
     /// Attaches an already-encoded attribute message, written as given except for its datatype
     /// location.
+    ///
+    /// See [`Self::set_attr`] for replacement and ordering.
     ///
     /// Where `committed_datatype_path` is set, the written message refers to the committed
     /// datatype at that path. See [`AttrSpec::Verbatim`] for what this preserves that `set_attr`
@@ -3648,25 +3703,28 @@ impl GroupBuilder {
         message: AttributeMessage,
         committed_datatype_path: Option<ObjectPathBuf>,
     ) {
-        self.attrs.push((
+        self.attrs.insert(
             message.name.clone(),
             AttrSpec::Verbatim {
                 message,
                 committed_datatype_path,
             },
-        ));
+        );
     }
 
-    /// Attach an attribute whose datatype is the committed one at `path`.
+    /// Stages an attribute using the committed datatype at `path`.
     ///
-    /// See [`DatasetBuilder::set_attr_committed`].
+    /// The datatype implied by `value` must match the datatype committed at `path`.
+    /// See [`Self::set_attr`] for replacement and ordering.
     pub fn set_attr_committed(&mut self, name: &str, value: AttrValue, path: &str) {
         self.attrs
-            .push((name.to_string(), committed_attr_spec(value, path)));
+            .insert(name.to_string(), committed_attr_spec(value, path));
     }
 
     /// Attaches a variable-length string attribute with the datatype and dataspace of
     /// `message`, staging `strings` into a heap of this file's own.
+    ///
+    /// See [`Self::set_attr`] for replacement and ordering.
     ///
     /// Where `committed_datatype_path` is set, the written message refers to the committed
     /// datatype at that path. See [`AttrSpec::VerbatimVarLen`].
@@ -3682,14 +3740,14 @@ impl GroupBuilder {
         committed_datatype_path: Option<ObjectPathBuf>,
     ) -> Result<(), FormatError> {
         message.raw_data = vl_string_reference_bytes(&strings)?;
-        self.attrs.push((
+        self.attrs.insert(
             message.name.clone(),
             AttrSpec::VerbatimVarLen {
                 message,
                 strings,
                 committed_datatype_path,
             },
-        ));
+        );
         Ok(())
     }
 
@@ -3725,7 +3783,7 @@ pub struct FinishedGroup {
     pub(crate) name: String,
     pub(crate) datasets: Vec<DatasetBuilder>,
     pub(crate) sub_groups: Vec<FinishedGroup>,
-    pub(crate) attrs: Vec<(String, AttrSpec)>,
+    pub(crate) attrs: AttributeSpecs,
     pub(crate) committed: Vec<CommittedDatatype>,
 }
 

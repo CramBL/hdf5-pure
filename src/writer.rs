@@ -107,9 +107,11 @@ impl FileBuilder {
         self.writer.commit_datatype(name, datatype);
     }
 
-    /// Attach a root-group attribute whose datatype is the committed one at
-    /// `path`. See [`commit_datatype`](Self::commit_datatype) and
-    /// [`DatasetBuilder::set_attr_committed`](crate::DatasetBuilder::set_attr_committed).
+    /// Stages a root-group attribute using the committed datatype at `path`.
+    ///
+    /// The datatype implied by `value` must match the datatype committed at `path`.
+    /// See [`Self::commit_datatype`] for committed types and [`Self::set_attr`] for replacement
+    /// and ordering.
     pub fn set_attr_committed(&mut self, name: &str, value: AttrValue, path: &str) {
         self.writer.set_root_attr_committed(name, value, path);
     }
@@ -294,13 +296,18 @@ impl FileBuilder {
         self
     }
 
-    /// Set an attribute on the root group.
+    /// Stages an attribute for the root group.
+    ///
+    /// The writer replaces a staged attribute with the same name and preserves its first insertion
+    /// position. The replacement includes its value and datatype information.
     pub fn set_attr(&mut self, name: &str, value: AttrValue) {
         self.writer.set_root_attr(name, value);
     }
 
     /// Attaches an already-encoded attribute message to the root group, written as given except
     /// for its datatype location.
+    ///
+    /// See [`Self::set_attr`] for replacement and ordering.
     ///
     /// Where `committed_datatype_path` is set, the written message refers to the committed
     /// datatype at that path. See
@@ -318,6 +325,8 @@ impl FileBuilder {
 
     /// Attaches a variable-length string attribute to the root group with the datatype and
     /// dataspace of `message`, staging `strings` into a heap of this file's own.
+    ///
+    /// See [`Self::set_attr`] for replacement and ordering.
     ///
     /// Where `committed_datatype_path` is set, the written message refers to the committed
     /// datatype at that path. See

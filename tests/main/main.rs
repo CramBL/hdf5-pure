@@ -7,6 +7,7 @@ mod append;
 mod append_by_reference;
 mod append_writer;
 mod attr_message_size_limit;
+mod attribute_replacement;
 mod bounded_append;
 mod buffered_append;
 mod c_1_8_read_compat;
