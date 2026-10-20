@@ -36,6 +36,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** `FloatingPointLayout` gains required fields for mantissa normalization and sign position. Metadata inspection preserves these fields even for unsupported numeric encodings.
 - **Breaking:** The address fields of `FileSpaceInfo` change type from integers to decoded stored addresses.
 - **Breaking:** `StoredAddress::is_undefined` no longer accepts a raw integer width.
 - **Breaking:** The base-relative address fields of `Superblock` change type from integers to stored addresses. Base and end-of-file addresses retain their absolute coordinates ([#733](https://github.com/CramBL/hdf5-pure/pull/733)).
@@ -53,6 +54,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Fixed lost byte counts and incorrect platform-limit errors in `FormatError` dataset size-mismatch diagnostics when logical lengths exceed the host pointer width. Buffer allocations remain subject to host limits ([#824](https://github.com/CramBL/hdf5-pure/pull/824)).
 - Fixed `Dataset::read_raw_rows` rejecting empty selections when row coordinates or inner extents exceed the host pointer width. Nonempty output buffers are subject to host limits ([#822](https://github.com/CramBL/hdf5-pure/pull/822)).
+- Fixed `Dataset::read_f64` and related numeric reads omitting offset fixed-point values or interpreting unsupported floating-point layouts as IEEE values. Numeric reads reject invalid bit ranges and unsupported encodings, while metadata inspection remains available.
 - Fixed `FileBuilder::write` leaving metadata page tails untracked in persistent PAGE files when manager storage exactly fills a page ([#820](https://github.com/CramBL/hdf5-pure/pull/820)).
 - Fixed `File::persisted_free_space` rejecting section lists with nonzero unused bytes before their checksum. Checksum verification includes those bytes when enabled.
 - Fixed loss of source positions above `usize::MAX` in `FormatError` end-of-file diagnostics, while slice-local diagnostics retain host-sized byte counts ([#813](github.com/CramBL/hdf5-pure/pull/813)).

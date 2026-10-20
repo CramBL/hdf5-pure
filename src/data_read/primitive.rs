@@ -121,38 +121,6 @@ where
     }
 }
 
-#[allow(
-    clippy::unreachable,
-    reason = "Hopefully we'll get to 'parse, dont validate'-ifying this at some point"
-)]
-pub(crate) fn decode_standard_floating_point_into<T>(
-    src: &[u8],
-    StandardNumericLayout { width, order }: StandardNumericLayout,
-    dst: &mut Vec<T>,
-) -> Result<(), FormatError>
-where
-    T: NumericReadTarget,
-{
-    match width {
-        StandardWidth::FourBytes => decode_fixed_width_into::<4, f32, T, T::F32Conversion>(
-            src,
-            order,
-            T::F32Conversion::default(),
-            dst,
-        ),
-        StandardWidth::EightBytes => decode_fixed_width_into::<8, f64, T, T::F64Conversion>(
-            src,
-            order,
-            T::F64Conversion::default(),
-            dst,
-        ),
-
-        StandardWidth::OneByte | StandardWidth::TwoBytes => {
-            unreachable!("standard floating-point layouts are 4 or 8 bytes");
-        }
-    }
-}
-
 pub(crate) trait NumericReadTarget: Sized {
     type I8Conversion: H5Conversion<i8, Self> + Default;
     type I16Conversion: H5Conversion<i16, Self> + Default;
