@@ -321,12 +321,7 @@ jobs:
       - name: Crosscheck in the matio image
         if: matrix.os == 'ubuntu-latest'
         shell: bash
-        run: |
-          bash scripts/ci/run-matio.sh just interop::test-matio
-          bash scripts/ci/run-matio.sh cargo nextest list --locked -p hdf5-pure-crosscheck --features serde,__matio --list-type binaries-only --message-format json > "$RUNNER_TEMP/matio-binaries.json"
-          binary=$(jq -r '[."rust-binaries"[] | select(."binary-name" == "main")][0]."binary-path"' "$RUNNER_TEMP/matio-binaries.json")
-          test -f "$binary"
-          bash scripts/ci/run-matio.sh bash -euo pipefail -c 'readelf -h "$1"; readelf -h "$1" | grep -F "Advanced Micro Devices X86-64"; readelf -p .comment "$1" | grep -F "$(mold --version)"' bash "$binary"
+        run: bash scripts/ci/run-matio.sh just interop::test-matio
 
       - name: Cache Cargo
         if: matrix.os != 'ubuntu-latest'

@@ -33,5 +33,9 @@ for tool in just nextest; do
     printf '%s  tool.tar.gz\n' "$checksum" | sha256sum --check
     tar -xzf tool.tar.gz -C /opt/ci-tools/bin "$binary"
 done
+rustc --version --verbose
+cargo --version
+/opt/ci-tools/bin/just --version
+/opt/ci-tools/bin/cargo-nextest --version
 bash install-mold.sh /opt/mold
 dpkg-query --show > /opt/system-packages.txt

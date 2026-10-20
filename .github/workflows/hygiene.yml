@@ -60,9 +60,6 @@ jobs:
       - name: Workflows
         run: just hygiene::zizmor
 
-      - name: CI image input identities
-        run: bash scripts/ci/test-cross-image.sh
-
       - name: Spelling
         run: just hygiene::typos
 

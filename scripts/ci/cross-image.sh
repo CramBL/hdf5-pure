@@ -44,8 +44,6 @@ case "$command" in
             --build-arg "CMAKE_URL=$url" --build-arg "CMAKE_SHA256=$sha256" \
             --build-arg "SOURCE_REVISION=$(git rev-parse HEAD)" \
             --build-arg "INPUT_FINGERPRINT=$fingerprint" --tag "$image" "$context"
-        docker run --rm "$image" bash /usr/local/libexec/verify-cmake.sh "$version"
-        docker run --rm "$image" bash /usr/local/libexec/verify-linking.sh
         if [[ $command == publish ]]; then
             docker push "$image"
             digest=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$image" |

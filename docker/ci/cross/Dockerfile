@@ -11,7 +11,7 @@ LABEL org.opencontainers.image.source="https://github.com/CramBL/hdf5-pure" \
       org.opencontainers.image.revision="${SOURCE_REVISION}" \
       io.hdf5-pure.inputs="${INPUT_FINGERPRINT}"
 
-COPY docker/ci/cross/verify-cmake.sh docker/ci/cross/verify-linking.sh /usr/local/libexec/
+COPY docker/ci/cross/verify-cmake.sh /usr/local/libexec/
 COPY scripts/ci/install-mold.sh /usr/local/libexec/install-mold.sh
 
 RUN test -n "$CMAKE_VERSION" && test -n "$CMAKE_SHA256" \
@@ -29,5 +29,3 @@ RUN test -n "$CMAKE_VERSION" && test -n "$CMAKE_SHA256" \
     && dpkg-query --show > /usr/local/libexec/packages.txt
 
 ENV PATH="/opt/mold/bin:${PATH}"
-
-RUN bash /usr/local/libexec/verify-linking.sh

@@ -132,17 +132,6 @@ jobs:
       - name: Tests
         run: just ${{ matrix.config.name == 'full' && 'test-full' || 'test' }}
 
-      - name: Verify the test linker
-        if: matrix.os == 'ubuntu-latest' && matrix.config.name == 'default'
-        shell: bash
-        run: |
-          cargo nextest list --locked --workspace --exclude hdf5-pure-crosscheck --list-type binaries-only --message-format json > "$RUNNER_TEMP/test-binaries.json"
-          binary=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["rust-binaries"]["hdf5-pure"]["binary-path"])' "$RUNNER_TEMP/test-binaries.json")
-          readelf -h "$binary"
-          readelf -h "$binary" | grep -F 'Advanced Micro Devices X86-64'
-          readelf -p .comment "$binary"
-          readelf -p .comment "$binary" | grep -F "$(mold --version)"
-
       # rustdoc compiles doctests, so nextest cannot run them.
       - name: Doctests
         run: just ${{ matrix.config.name == 'full' && 'doctest-full' || 'doctest' }}

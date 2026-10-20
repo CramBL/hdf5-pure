@@ -37,9 +37,7 @@ else
     test -n "$image"
     docker pull "$image"
 fi
-prepared=false
 if [[ $candidate == true || $image == ghcr.io/crambl/hdf5-pure-cross-"$family"@sha256:* ]]; then
-    prepared=true
     for variable in RUSTFLAGS CARGO_ENCODED_RUSTFLAGS; do
         if [[ -v $variable ]]; then
             echo "$variable overrides the target linker flags" >&2
@@ -52,5 +50,5 @@ if [[ $candidate == true || $image == ghcr.io/crambl/hdf5-pure-cross-"$family"@s
     } >> "$GITHUB_ENV"
 fi
 identity=$({ printf '%s\n' "$image"; sha256sum Cross.toml scripts/ci/select-cross-image.sh; } | sha256sum | cut -d' ' -f1)
-printf 'image=%s\ncandidate=%s\nprepared=%s\nidentity=%s\n' "$image" "$candidate" "$prepared" "$identity" >> "$GITHUB_OUTPUT"
+printf 'image=%s\ncandidate=%s\nidentity=%s\n' "$image" "$candidate" "$identity" >> "$GITHUB_OUTPUT"
 printf 'Cross image: %s\nCache environment: %s\n' "$image" "$identity"
