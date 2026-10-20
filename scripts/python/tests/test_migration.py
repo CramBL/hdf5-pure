@@ -253,6 +253,7 @@ def test_migration_shape_ignores_only_the_allowed_variant_changes(variant, expec
         ("InvalidFilterName", []),
         ("InvalidFilterPipelineField", []),
         ("UnsupportedSerializedSectionClass", []),
+        ("ValueTooLargeForRepresentation", []),
         ("DuplicateGlobalHeapObjectIndex", []),
         ("GlobalHeapCollectionTooSmall", []),
         ("GlobalHeapObjectOutsideCollection", []),

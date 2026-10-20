@@ -733,16 +733,23 @@ pub enum FormatError {
     /// base, so the two boundaries coincide only when the userblock divides by
     /// the page size: `(userblock bytes, page size)`.
     UserblockNotPageAligned(u64, u64),
-    /// A file-derived 64-bit value (an offset, length, size, or element count)
-    /// does not fit in the target integer type on this platform. This is the
-    /// checked conversion for file-derived values. On a 32-bit host, `usize` is
-    /// 32 bits, so an HDF5 offset or length above `usize::MAX` exceeds its range.
-    /// The error retains the original value, and `target` identifies the integer
-    /// type (for example, `"usize"` or `"u32"`).
+    /// An integer exceeds the range of a host-sized target type.
+    ///
+    /// On a 32-bit host, a conversion to [`usize`] reports this error for values above
+    /// [`u32::MAX`].
     ValueTooLargeForPlatform {
-        /// The original 64-bit value read from the file.
+        /// The original value before conversion.
         value: u64,
-        /// The platform integer type the value could not fit into.
+        /// The host-sized target type, such as `"usize"`.
+        target: &'static str,
+    },
+    /// An integer exceeds the range of a fixed-width target type.
+    ///
+    /// The limit is independent of the host pointer width.
+    ValueTooLargeForRepresentation {
+        /// The original value before conversion.
+        value: u64,
+        /// The fixed-width target type, such as `"u32"`.
         target: &'static str,
     },
     /// A variable-length read exceeded its configured payload-byte limit.
@@ -1419,6 +1426,9 @@ impl fmt::Display for FormatError {
             }
             Self::ValueTooLargeForPlatform { value, target } => {
                 write!(f, "value {value} does not fit in {target} on this platform")
+            }
+            Self::ValueTooLargeForRepresentation { value, target } => {
+                write!(f, "value {value} does not fit in {target:?}")
             }
             Self::EofRelocationUnderflow { stored_eof, shift } => {
                 write!(
