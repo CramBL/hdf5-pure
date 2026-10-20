@@ -52,6 +52,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed truncated variable-length descriptor counts in files serialized through `FileBuilder::finish` and related output methods. Elements with more than `u32::MAX` base elements are rejected.
 - Fixed lost byte counts and incorrect platform-limit errors in `FormatError` dataset size-mismatch diagnostics when logical lengths exceed the host pointer width. Buffer allocations remain subject to host limits ([#824](https://github.com/CramBL/hdf5-pure/pull/824)).
 - Fixed `Dataset::read_raw_rows` rejecting empty selections when row coordinates or inner extents exceed the host pointer width. Nonempty output buffers are subject to host limits ([#822](https://github.com/CramBL/hdf5-pure/pull/822)).
 - Fixed `Dataset::read_f64` and related numeric reads omitting offset fixed-point values or interpreting unsupported floating-point layouts as IEEE values. Numeric reads reject invalid bit ranges and unsupported encodings, while metadata inspection remains available.

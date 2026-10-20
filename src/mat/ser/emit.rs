@@ -588,7 +588,7 @@ mod tests {
             let mut ds = DatasetBuilder::new("m");
             apply_matrix(&mut ds, rows, cols, NumVec::F64(Vec::new()));
             assert_eq!(
-                ds.data.as_deref(),
+                ds.data.as_ref().map(|data| data.as_deref().unwrap()),
                 Some(
                     [rows as u64, cols as u64]
                         .iter()
@@ -610,7 +610,7 @@ mod tests {
         let mut ds = DatasetBuilder::new("c");
         apply_cell(&mut ds, Vec::new(), &mut RefsAccumulator::new());
         assert_eq!(
-            ds.data.as_deref(),
+            ds.data.as_ref().map(|data| data.as_deref().unwrap()),
             Some(
                 [0u64, 0]
                     .iter()
