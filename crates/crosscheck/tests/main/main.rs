@@ -8,6 +8,7 @@ mod array_index;
 mod attr_count;
 mod attr_message_size;
 mod attr_width;
+mod attribute_names;
 mod attribute_replacement;
 mod bounded_append;
 mod buffered_append;

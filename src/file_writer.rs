@@ -2058,7 +2058,7 @@ impl FileWriter {
             let mut attrs = Vec::new();
             let mut attr_committed_datatype_paths = Vec::new();
             for (n, v) in &db.attrs {
-                attrs.push(v.to_message(n)?);
+                attrs.push(AttributeName::try_from(n.as_str())?.to_message(v)?);
                 attr_committed_datatype_paths.push(v.committed_datatype_path().cloned());
             }
             let patches = collect_vl_patches(&db.attrs);
@@ -2148,7 +2148,7 @@ impl FileWriter {
             let mut gattrs = Vec::new();
             let mut attr_committed_datatype_paths = Vec::new();
             for (n, v) in &g.attrs {
-                gattrs.push(v.to_message(n)?);
+                gattrs.push(AttributeName::try_from(n.as_str())?.to_message(v)?);
                 attr_committed_datatype_paths.push(v.committed_datatype_path().cloned());
             }
             let patches = collect_vl_patches(&g.attrs);
@@ -2244,7 +2244,7 @@ impl FileWriter {
         let mut root_attrs: Vec<AttributeMessage> = Vec::new();
         let mut root_attr_committed_datatype_paths = Vec::new();
         for (n, v) in &self.root_attrs {
-            root_attrs.push(v.to_message(n)?);
+            root_attrs.push(AttributeName::try_from(n.as_str())?.to_message(v)?);
             root_attr_committed_datatype_paths.push(v.committed_datatype_path().cloned());
         }
 
@@ -4082,6 +4082,55 @@ impl FileWriter {
     }
 }
 
+/// A nonempty attribute name without null bytes.
+///
+/// The name and its null terminator fit in the two-byte "Name Size" field of attribute message
+/// versions 1, 2, and 3, defined in "The Attribute Message" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_attribute
+struct AttributeName<'a>(&'a str);
+
+impl AttributeName<'_> {
+    /// Encodes or copies an attribute through [`AttrSpec::to_message`].
+    ///
+    /// Uses this name for decoded values and preserves the name of a copied message.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ValueTooLargeForRepresentation`] if a variable-length string
+    /// exceeds [`u32::MAX`] bytes.
+    fn to_message(&self, spec: &AttrSpec) -> Result<AttributeMessage, FormatError> {
+        spec.to_message(self.0)
+    }
+}
+
+impl<'a> TryFrom<&'a str> for AttributeName<'a> {
+    type Error = FormatError;
+
+    /// Parses an attribute name for a new file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidAttributeName`] if `name` is empty or contains a null byte.
+    /// Returns [`FormatError::AttributeFieldTooLong`] if `name` and its null terminator exceed
+    /// [`u16::MAX`] bytes.
+    fn try_from(name: &'a str) -> Result<Self, FormatError> {
+        if name.is_empty() || name.as_bytes().contains(&0) {
+            return Err(FormatError::InvalidAttributeName { name: name.into() });
+        }
+        if name.len() >= usize::from(u16::MAX) {
+            return Err(FormatError::AttributeFieldTooLong {
+                name: name.into(),
+                field: "name",
+                size: name.len().saturating_add(1),
+                limit: usize::from(u16::MAX),
+            });
+        }
+        Ok(Self(name))
+    }
+}
+
 /// The file space settings the caller passes to the writer, with the page size checked.
 #[derive(Clone, Copy, Debug)]
 struct FileSpaceConfig {
@@ -4207,6 +4256,73 @@ mod tests {
     use crate::superblock::Superblock;
     use crate::type_builders;
 
+    #[rstest]
+    #[case::empty("", None)]
+    #[case::nul("prefix\0suffix", None)]
+    #[case::too_long(&"x".repeat(usize::from(u16::MAX)), Some(usize::from(u16::MAX) + 1))]
+    fn rejects_attribute_names_before_sink_output(
+        #[case] name: &str,
+        #[case] encoded_size: Option<usize>,
+        #[values(
+            AttributeForm::Committed,
+            AttributeForm::CommittedVarLen,
+            AttributeForm::CommittedVarLenVerbatim,
+            AttributeForm::CommittedVerbatim,
+            AttributeForm::Value,
+            AttributeForm::VarLenValue,
+            AttributeForm::VarLenVerbatim,
+            AttributeForm::Verbatim
+        )]
+        form: AttributeForm,
+        #[values(
+            AttributeTarget::Dataset,
+            AttributeTarget::Group,
+            AttributeTarget::Root
+        )]
+        target: AttributeTarget,
+        #[values(false, true)] dense: bool,
+    ) {
+        let mut writer = attribute_writer(false);
+        let mut group = writer.create_group("group");
+        {
+            let mut owner = match target {
+                AttributeTarget::Dataset => {
+                    AttributeOwner::Dataset(writer.create_dataset("data").with_i32_data(&[1]))
+                }
+                AttributeTarget::Group => AttributeOwner::Group(&mut group),
+                AttributeTarget::Root => AttributeOwner::Root(&mut writer),
+            };
+            owner.insert("preserved", AttributeForm::Value, 1);
+            if dense {
+                for index in 0..10 {
+                    owner.insert(&format!("filler{index}"), AttributeForm::Value, index);
+                }
+            }
+            owner.insert(name, form, 42);
+        }
+        writer.add_group(group.finish());
+        let mut bytes = b"previous bytes".to_vec();
+        let error = writer.finish_to_sink(&mut bytes).unwrap_err();
+        let expected = match encoded_size {
+            Some(size) => FormatError::AttributeFieldTooLong {
+                name: name.into(),
+                field: "name",
+                size,
+                limit: usize::from(u16::MAX),
+            },
+            None => FormatError::InvalidAttributeName { name: name.into() },
+        };
+        assert_eq!(error, expected);
+        assert_eq!(bytes, b"previous bytes");
+    }
+
+    #[derive(Clone, Copy)]
+    enum AttributeTarget {
+        Dataset,
+        Group,
+        Root,
+    }
+
     #[test]
     fn repeated_root_attribute_has_one_serialized_message() {
         let mut writer = FileWriter::new();
@@ -4274,6 +4390,21 @@ mod tests {
         dense: bool,
         paged: bool,
     ) -> FileWriter {
+        let mut writer = attribute_writer(paged);
+        replacement_attrs(AttributeOwner::Root(&mut writer), before, after, dense);
+        replacement_attrs(
+            AttributeOwner::Dataset(writer.create_dataset("data").with_i32_data(&[1])),
+            before,
+            after,
+            dense,
+        );
+        let mut group = writer.create_group("group");
+        replacement_attrs(AttributeOwner::Group(&mut group), before, after, dense);
+        writer.add_group(group.finish());
+        writer
+    }
+
+    fn attribute_writer(paged: bool) -> FileWriter {
         let mut writer = FileWriter::new();
         if paged {
             writer.with_file_space_strategy(FileSpaceStrategy::Page, false, 1);
@@ -4285,16 +4416,6 @@ mod tests {
                 .unwrap()
                 .datatype,
         );
-        replacement_attrs(AttributeOwner::Root(&mut writer), before, after, dense);
-        replacement_attrs(
-            AttributeOwner::Dataset(writer.create_dataset("data").with_i32_data(&[1])),
-            before,
-            after,
-            dense,
-        );
-        let mut group = writer.create_group("group");
-        replacement_attrs(AttributeOwner::Group(&mut group), before, after, dense);
-        writer.add_group(group.finish());
         writer
     }
 

@@ -20,7 +20,13 @@ use crate::object_path::ObjectPathBuf;
 
 /// Builder for creating a new HDF5 file.
 ///
-/// # Example
+/// Staged attribute names are parsed before output by [`Self::finish`], [`Self::finish_to`], and
+/// [`Self::write`]. These methods return [`Error::Format`] with
+/// [`FormatError::InvalidAttributeName`] for empty names or embedded null bytes, and
+/// [`FormatError::AttributeFieldTooLong`] if a name and its null terminator exceed [`u16::MAX`]
+/// bytes. Slashes, dots, and whitespace are permitted.
+///
+/// # Examples
 ///
 /// ```no_run
 /// use hdf5_pure::FileBuilder;

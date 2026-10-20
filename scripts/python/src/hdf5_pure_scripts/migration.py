@@ -204,6 +204,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
             "GlobalHeapObjectOutsideCollection",
             "InsufficientRegion",
             "Internal",
+            "InvalidAttributeName",
             "InvalidDeflateLevel",
             "InvalidExtensibleArrayBlockClient",
             "InvalidExtensibleArrayBlockOffset",
