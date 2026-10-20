@@ -47,6 +47,7 @@ use rstest::rstest;
 
 use test_util::file_space_info;
 use test_util::free_space;
+use test_util::object_header::v2 as header_bytes;
 use test_util::publication as publication_bytes;
 use test_util::range;
 use test_util::userblock::Userblock;
@@ -56,6 +57,443 @@ use test_util_hdf5::dataset::Unlimited;
 use test_util_hdf5::file_space;
 use test_util_hdf5::paged;
 use test_util_hdf5::session;
+use test_util_hdf5::userblock;
+
+#[derive(Clone, Copy, Debug)]
+enum HeaderReclamation {
+    DeleteDataset,
+    DeleteDenseGroup,
+    DeleteGroup,
+    EditDatasetAttribute,
+    RebuildGroup,
+    ReplaceDataset,
+    UnlinkDataset,
+}
+
+#[rstest]
+#[case::delete_512(512, 0, HeaderReclamation::DeleteDataset)]
+#[case::replace_512(512, 0, HeaderReclamation::ReplaceDataset)]
+#[case::attribute_512(512, 0, HeaderReclamation::EditDatasetAttribute)]
+#[case::delete_group_512(512, 0, HeaderReclamation::DeleteGroup)]
+#[case::rebuild_group_512(512, 0, HeaderReclamation::RebuildGroup)]
+#[case::dense_group_512(512, 0, HeaderReclamation::DeleteDenseGroup)]
+#[case::hard_link_512(512, 0, HeaderReclamation::UnlinkDataset)]
+#[case::delete_4096(4_096, 0, HeaderReclamation::DeleteDataset)]
+#[case::replace_4096(4_096, 0, HeaderReclamation::ReplaceDataset)]
+#[case::attribute_userblock(4_096, 512, HeaderReclamation::EditDatasetAttribute)]
+#[case::delete_group_4096(4_096, 0, HeaderReclamation::DeleteGroup)]
+#[case::rebuild_group_userblock(4_096, 512, HeaderReclamation::RebuildGroup)]
+#[case::dense_group_4096(4_096, 0, HeaderReclamation::DeleteDenseGroup)]
+#[case::delete_8192(8_192, 0, HeaderReclamation::DeleteDataset)]
+#[case::replace_8192(8_192, 8_192, HeaderReclamation::ReplaceDataset)]
+fn reclaimed_page_header_continuations_remain_compatible_with_c_mutation(
+    #[case] page: u64,
+    #[case] userblock: u64,
+    #[case] action: HeaderReclamation,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("header_reclamation.h5");
+    write_c_large_header(&path, page, action);
+    if userblock != 0 {
+        userblock::prepend(&path, &vec![0xA5; usize::try_from(userblock).unwrap()]);
+    }
+    let original = std::fs::read(&path).unwrap();
+    let file = File::open_rw(&path).unwrap();
+    let ownership = file.__space_ownership().unwrap();
+    assert!(ownership.analysis_complete);
+    let continuations: Vec<_> = ownership
+        .live_metadata_space
+        .iter()
+        .copied()
+        .filter(|&(address, length)| {
+            let offset = usize::try_from(address).unwrap();
+            length >= page && original[offset..].starts_with(header_bytes::CONTINUATION_SIGNATURE)
+        })
+        .collect();
+    assert_eq!(continuations.len(), 1, "{continuations:?}");
+    let (address, length) = continuations[0];
+    assert_eq!((address - userblock) % page, 0);
+    assert_ne!(length % page, 0);
+    if userblock == 512 && page == 4_096 {
+        assert_ne!(address % page, 0);
+    }
+    let partial = address + length / page * page..address + length;
+    let generic_fragment =
+        partial.end..userblock + (partial.end - userblock).next_multiple_of(page);
+    assert!(
+        File::from_bytes(original.clone())
+            .unwrap()
+            .persisted_free_space()
+            .unwrap()
+            .iter()
+            .any(|&(start, length)| {
+                start + userblock == generic_fragment.start
+                    && start + userblock + length == generic_fragment.end
+            }),
+        "continuations={continuations:?}, fragment={generic_fragment:?}, free={:?}",
+        File::from_bytes(original.clone())
+            .unwrap()
+            .persisted_free_space()
+            .unwrap()
+    );
+    match action {
+        HeaderReclamation::DeleteDataset | HeaderReclamation::UnlinkDataset => {
+            file.root().delete("target").unwrap()
+        }
+        HeaderReclamation::DeleteDenseGroup | HeaderReclamation::DeleteGroup => {
+            file.root().delete("group").unwrap()
+        }
+        HeaderReclamation::EditDatasetAttribute => file
+            .dataset("target")
+            .unwrap()
+            .set_attr("changed", AttrValue::I32(17))
+            .unwrap(),
+        HeaderReclamation::RebuildGroup => file
+            .group("group")
+            .unwrap()
+            .set_attr("changed", AttrValue::I32(17))
+            .unwrap(),
+        HeaderReclamation::ReplaceDataset => file
+            .dataset("target")
+            .unwrap()
+            .write_staged(|builder| {
+                builder.with_u8_data(&[17; HEADER_TARGET_ELEMENTS]);
+            })
+            .unwrap(),
+    }
+    file.commit().unwrap();
+    assert_header_reclamation_state(&file, &partial, &generic_fragment, action);
+    if matches!(action, HeaderReclamation::UnlinkDataset) {
+        let after = file.__space_ownership().unwrap();
+        assert!(after.live_metadata_space.contains(&(address, length)));
+        assert_eq!(
+            range::covered_len(&after.reusable_free_space, &(address..address + length)),
+            0
+        );
+    }
+    file.close().unwrap();
+    let file = File::open_rw(&path).unwrap();
+    assert_header_reclamation_state(&file, &partial, &generic_fragment, action);
+    file.close().unwrap();
+    let persisted_bytes: u64 = File::from_bytes(std::fs::read(&path).unwrap())
+        .unwrap()
+        .persisted_free_space()
+        .unwrap()
+        .iter()
+        .map(|&(_, length)| length)
+        .sum();
+
+    let file = hdf5::File::open_rw(&path).unwrap();
+    assert_eq!(file.free_space(), persisted_bytes);
+    assert_c_header_survivors(&file, action);
+    file.new_dataset_builder()
+        .with_data(&[23i32; 64])
+        .create("from_c")
+        .unwrap();
+    file.dataset("keep")
+        .unwrap()
+        .write_raw(&[11i32; 64])
+        .unwrap();
+    file.close().unwrap();
+    let file = File::open_rw(&path).unwrap();
+    assert_eq!(file.dataset("keep").unwrap().read_i32().unwrap(), [11; 64]);
+    assert_eq!(
+        file.dataset("from_c").unwrap().read_i32().unwrap(),
+        [23; 64]
+    );
+    assert_rust_header_survivors(&file, action, 11);
+    assert!(file.__space_ownership().unwrap().analysis_complete);
+    file.close().unwrap();
+    if userblock != 0 {
+        assert_eq!(
+            &std::fs::read(&path).unwrap()[..usize::try_from(userblock).unwrap()],
+            &original[..usize::try_from(userblock).unwrap()]
+        );
+    }
+}
+
+fn write_c_large_header(path: &Path, page: u64, action: HeaderReclamation) {
+    let file = hdf5::FileBuilder::new()
+        .with_fapl(|fapl| fapl.libver_v110())
+        .with_fcpl(|fcpl| {
+            fcpl.file_space_strategy(CStrategy::FreeSpaceManager {
+                paged: true,
+                persist: true,
+                threshold: 1,
+            })
+            .file_space_page_size(page)
+        })
+        .create(path)
+        .unwrap();
+    let group = matches!(
+        action,
+        HeaderReclamation::DeleteGroup
+            | HeaderReclamation::DeleteDenseGroup
+            | HeaderReclamation::RebuildGroup
+    );
+    let owner: hdf5::Location = if group {
+        file.create_group("group").unwrap().as_location().unwrap()
+    } else {
+        let dataset = file
+            .new_dataset::<u8>()
+            .shape([HEADER_TARGET_ELEMENTS])
+            .layout(if matches!(action, HeaderReclamation::ReplaceDataset) {
+                CLayout::Compact
+            } else {
+                CLayout::Contiguous
+            })
+            .create("target")
+            .unwrap();
+        dataset.write_raw(&[3u8; HEADER_TARGET_ELEMENTS]).unwrap();
+        dataset.as_location().unwrap()
+    };
+    let elements = usize::try_from((page / 4).max(512)).unwrap();
+    owner
+        .new_attr::<i64>()
+        .shape([elements])
+        .create("big_attr")
+        .unwrap()
+        .write_raw(&vec![7i64; elements])
+        .unwrap();
+    if group {
+        let group = file.group("group").unwrap();
+        let count = if matches!(action, HeaderReclamation::DeleteDenseGroup) {
+            12
+        } else {
+            1
+        };
+        for index in 0..count {
+            group
+                .new_dataset_builder()
+                .with_data(&[index; 4])
+                .create(format!("child{index}").as_str())
+                .unwrap();
+        }
+    }
+    if matches!(action, HeaderReclamation::DeleteDenseGroup) {
+        assert_eq!(
+            file.group("group").unwrap().info().unwrap().storage_type,
+            hdf5::GroupStorageType::Dense
+        );
+    }
+    if matches!(action, HeaderReclamation::UnlinkDataset) {
+        file.link_hard("target", "alias").unwrap();
+    }
+    file.new_dataset_builder()
+        .with_data(&[7i32; 64])
+        .create("keep")
+        .unwrap();
+    file.new_dataset_builder()
+        .with_data(&vec![31i32; usize::try_from(page / 4 + 1).unwrap()])
+        .create("anchor")
+        .unwrap();
+    file.link_soft("/keep", "soft").unwrap();
+    let survivor = file.create_group("survivor").unwrap();
+    survivor
+        .new_attr::<i32>()
+        .create("attribute")
+        .unwrap()
+        .write_scalar(&19)
+        .unwrap();
+    survivor
+        .new_dataset_builder()
+        .with_data(&[29i32; 4])
+        .create("nested")
+        .unwrap();
+    drop(survivor);
+    drop(owner);
+    file.close().unwrap();
+}
+
+fn assert_header_reclamation_state(
+    file: &File,
+    partial: &Range<u64>,
+    generic_fragment: &Range<u64>,
+    action: HeaderReclamation,
+) {
+    let ownership = file.__space_ownership().unwrap();
+    assert!(ownership.analysis_complete);
+    assert_rust_header_survivors(file, action, 7);
+    assert!(
+        ownership
+            .reusable_free_space
+            .iter()
+            .all(|&(start, length)| !range::overlaps(&(start..start + length), partial)),
+        "{ownership:?}"
+    );
+    assert_eq!(
+        file.dataset("anchor").unwrap().read_i32().unwrap(),
+        vec![31; usize::try_from(file.file_space_info().unwrap().page_size.get() / 4 + 1).unwrap()]
+    );
+    if !matches!(action, HeaderReclamation::UnlinkDataset) {
+        assert_eq!(
+            range::covered_len(&ownership.unclassified_space, generic_fragment),
+            generic_fragment.end - generic_fragment.start
+        );
+        assert_eq!(
+            range::covered_len(&ownership.unclassified_space, partial),
+            partial.end - partial.start
+        );
+    }
+}
+
+fn assert_rust_header_survivors(file: &File, action: HeaderReclamation, keep: i32) {
+    let page = file.file_space_info().unwrap().page_size.get();
+    assert_eq!(
+        file.dataset("keep").unwrap().read_i32().unwrap(),
+        [keep; 64]
+    );
+    assert_eq!(
+        file.dataset("survivor/nested").unwrap().read_i32().unwrap(),
+        [29; 4]
+    );
+    assert_eq!(
+        file.group("survivor").unwrap().attrs().unwrap()["attribute"],
+        AttrValue::I32(19)
+    );
+    assert_eq!(
+        file.dataset("anchor").unwrap().read_i32().unwrap(),
+        vec![31; usize::try_from(page / 4 + 1).unwrap()]
+    );
+    let attribute = AttrValue::I64Array(vec![7; usize::try_from((page / 4).max(512)).unwrap()]);
+    match action {
+        HeaderReclamation::UnlinkDataset => {
+            let dataset = file.dataset("alias").unwrap();
+            assert_eq!(dataset.read_u8().unwrap(), [3; HEADER_TARGET_ELEMENTS]);
+            assert_eq!(dataset.attrs().unwrap()["big_attr"], attribute);
+        }
+        HeaderReclamation::ReplaceDataset | HeaderReclamation::EditDatasetAttribute => {
+            let dataset = file.dataset("target").unwrap();
+            let value = if matches!(action, HeaderReclamation::ReplaceDataset) {
+                17
+            } else {
+                3
+            };
+            assert_eq!(dataset.read_u8().unwrap(), [value; HEADER_TARGET_ELEMENTS]);
+            assert_eq!(dataset.attrs().unwrap()["big_attr"], attribute);
+            if matches!(action, HeaderReclamation::EditDatasetAttribute) {
+                assert_eq!(dataset.attrs().unwrap()["changed"], AttrValue::I32(17));
+            }
+        }
+        HeaderReclamation::RebuildGroup => {
+            assert_eq!(
+                file.group("group").unwrap().attrs().unwrap()["big_attr"],
+                attribute
+            );
+            assert_eq!(
+                file.group("group").unwrap().attrs().unwrap()["changed"],
+                AttrValue::I32(17)
+            );
+            assert_eq!(
+                file.dataset("group/child0").unwrap().read_i32().unwrap(),
+                [0; 4]
+            );
+        }
+        HeaderReclamation::DeleteDataset
+        | HeaderReclamation::DeleteDenseGroup
+        | HeaderReclamation::DeleteGroup => {}
+    }
+}
+
+fn assert_c_header_survivors(file: &hdf5::File, action: HeaderReclamation) {
+    assert_eq!(
+        file.dataset("keep").unwrap().read_raw::<i32>().unwrap(),
+        [7; 64]
+    );
+    assert_eq!(
+        file.dataset("soft").unwrap().read_raw::<i32>().unwrap(),
+        [7; 64]
+    );
+    assert_eq!(
+        file.dataset("survivor/nested")
+            .unwrap()
+            .read_raw::<i32>()
+            .unwrap(),
+        [29; 4]
+    );
+    assert_eq!(
+        file.group("survivor")
+            .unwrap()
+            .attr("attribute")
+            .unwrap()
+            .read_scalar::<i32>()
+            .unwrap(),
+        19
+    );
+    assert_eq!(
+        file.dataset("anchor").unwrap().read_raw::<i32>().unwrap(),
+        vec![31; usize::try_from(file.fcpl().unwrap().file_space_page_size() / 4 + 1).unwrap()]
+    );
+    let owner = match action {
+        HeaderReclamation::UnlinkDataset => {
+            Some(file.dataset("alias").unwrap().as_location().unwrap())
+        }
+        HeaderReclamation::ReplaceDataset | HeaderReclamation::EditDatasetAttribute => {
+            Some(file.dataset("target").unwrap().as_location().unwrap())
+        }
+        HeaderReclamation::RebuildGroup => {
+            Some(file.group("group").unwrap().as_location().unwrap())
+        }
+        HeaderReclamation::DeleteDataset
+        | HeaderReclamation::DeleteDenseGroup
+        | HeaderReclamation::DeleteGroup => None,
+    };
+    if let Some(owner) = owner {
+        assert_eq!(
+            owner.attr("big_attr").unwrap().read_raw::<i64>().unwrap(),
+            vec![
+                7;
+                usize::try_from((file.fcpl().unwrap().file_space_page_size() / 4).max(512))
+                    .unwrap()
+            ]
+        );
+    }
+    match action {
+        HeaderReclamation::DeleteDataset => {
+            absence::assert_libhdf5_absent(&file.dataset("target").unwrap_err(), "target")
+        }
+        HeaderReclamation::DeleteGroup | HeaderReclamation::DeleteDenseGroup => {
+            absence::assert_libhdf5_absent(&file.group("group").unwrap_err(), "group")
+        }
+        HeaderReclamation::UnlinkDataset => assert_eq!(
+            file.dataset("alias").unwrap().read_raw::<u8>().unwrap(),
+            [3; HEADER_TARGET_ELEMENTS]
+        ),
+        HeaderReclamation::ReplaceDataset => assert_eq!(
+            file.dataset("target").unwrap().read_raw::<u8>().unwrap(),
+            [17; HEADER_TARGET_ELEMENTS]
+        ),
+        HeaderReclamation::EditDatasetAttribute => assert_eq!(
+            file.dataset("target")
+                .unwrap()
+                .attr("changed")
+                .unwrap()
+                .read_scalar::<i32>()
+                .unwrap(),
+            17
+        ),
+        HeaderReclamation::RebuildGroup => {
+            assert_eq!(
+                file.group("group")
+                    .unwrap()
+                    .attr("changed")
+                    .unwrap()
+                    .read_scalar::<i32>()
+                    .unwrap(),
+                17
+            );
+            assert_eq!(
+                file.dataset("group/child0")
+                    .unwrap()
+                    .read_raw::<i32>()
+                    .unwrap(),
+                [0; 4]
+            );
+        }
+    }
+}
+
+const HEADER_TARGET_ELEMENTS: usize = 256;
 
 #[rstest]
 #[case::plain(4_096, 0)]

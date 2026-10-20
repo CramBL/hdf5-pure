@@ -15,6 +15,7 @@ use rstest::rstest;
 use test_util::checksum::CHECKSUM;
 use test_util::disk_log::{self, DiskOp};
 use test_util::publication;
+use test_util_hdf5::userblock;
 
 use crate::access_mode::AccessMode;
 use crate::address::{
@@ -285,15 +286,7 @@ fn staged_commits_preserve_preexisting_bytes_outside_the_superblock(
     builder.add_group(group.finish());
     builder.write(&path).unwrap();
     if userblock != 0 {
-        let original = fs::read(&path).unwrap();
-        let mut sb = superblock::read(original.as_slice()).unwrap().superblock;
-        sb.base_address = BaseAddress::new(userblock);
-        sb.eof_address += userblock;
-        let mut bytes = vec![0xA5; userblock as usize];
-        bytes.extend_from_slice(&original);
-        let encoded = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();
-        bytes[userblock as usize..userblock as usize + encoded.len()].copy_from_slice(&encoded);
-        fs::write(&path, bytes).unwrap();
+        userblock::prepend(&path, &vec![0xA5; usize::try_from(userblock).unwrap()]);
     }
     let original = fs::read(&path).unwrap();
     let mut engine = WriteEngine::open_rw_with_strategy(
