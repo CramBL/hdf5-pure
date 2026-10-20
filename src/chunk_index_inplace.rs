@@ -459,8 +459,9 @@ impl Located {
         // stored width must leave room for a size field of one to eight bytes.
         // Reject a corrupt header outside that range before the width arithmetic
         // (`ea_elem_size - offset_size - 4`) underflows below it, or names above
-        // it a size field wider than the `u64` that fills it. The whole-file read
-        // path refuses both ends in `read_variable_length`.
+        // it a size field wider than the `u64` that fills it. The reader's header
+        // parser rejects an element size below `offset_size + 4` or above
+        // `offset_size + 12`.
         let elem_w = ea_header.element_size as usize;
         if ea_header.client_id == 1 && !(os as usize + 5..=os as usize + 12).contains(&elem_w) {
             return Err(unsupported(

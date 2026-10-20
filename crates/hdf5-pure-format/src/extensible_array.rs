@@ -49,9 +49,11 @@ use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 
-#[path = "extensible_array_traversal.rs"]
-mod traversal;
-
+/// The address of an Extensible Array header, from the chunk index address of a data layout
+/// message.
+///
+/// A caller reads the bytes of [`parse_range`](Self::parse_range) and passes them to
+/// [`parse`](Self::parse), which returns the header and the reference to its index block.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExtensibleArrayHeaderLocator {
     widths: FormatWidths,
@@ -639,7 +641,13 @@ pub struct ExtensibleArrayPages<'a> {
 }
 
 impl<'a> ExtensibleArrayPages<'a> {
-    pub fn pages(&self) -> impl Iterator<Item = Result<ExtensibleArrayPageRef, FormatError>> + 'a {
+    /// Returns the reference to each page the bitmap marks initialized, in page order.
+    ///
+    /// A page the bitmap does not mark is uninitialized and has no reference, and neither has a
+    /// page whose first slot is at or past the header's "Max Index Set".
+    pub fn pages(
+        &self,
+    ) -> impl Iterator<Item = Result<ExtensibleArrayPageRef, FormatError>> + Clone + 'a {
         let Self {
             owner,
             first_page,
@@ -1268,26 +1276,11 @@ impl ExtensibleArrayHeader {
         4 + 8 + 6 * usize::from(widths.lengths.get()) + usize::from(widths.offsets.get()) + 4
     }
 
-    /// Parses the Extensible Array header at `address` in `source`.
+    /// Reads the Extensible Array header at `address` from `source` and parses it with
+    /// [`parse_with_widths`](Self::parse_with_widths).
     ///
-    /// # Errors
-    ///
-    /// Returns the errors [`parse`](Self::parse) returns, and the error `source` returns if a read
-    /// fails.
-    pub fn parse_from_source(
-        source: &(impl MetadataSource + ?Sized),
-        address: StoredAddress,
-        offset_size: u8,
-        length_size: u8,
-    ) -> Result<Self, FormatError> {
-        Self::parse_from_source_with_widths(
-            source,
-            address,
-            FormatWidths::from_sizes(offset_size, length_size)?,
-        )
-    }
-
-    /// Parses the Extensible Array header at `address` using validated format widths.
+    /// This adapter is temporary. The in-place append reads its header through it, and every other
+    /// read of an Extensible Array header goes through [`ExtensibleArrayHeaderLocator`].
     ///
     /// # Errors
     ///
@@ -1491,35 +1484,6 @@ impl BlockOffsetWidth {
     }
 }
 
-/// Reads a little-endian unsigned integer `size` bytes wide from the start of `data`.
-///
-/// # Errors
-///
-/// Returns [`FormatError::ChunkedReadError`] if `size` is more than 8 or `data` is shorter than
-/// `size`.
-fn read_variable_length(data: &[u8], size: usize) -> Result<u64, FormatError> {
-    if size > 8 || data.len() < size {
-        return Err(FormatError::ChunkedReadError(
-            "invalid variable-length size".into(),
-        ));
-    }
-    let mut val = 0u64;
-    for (i, &byte) in data.iter().enumerate().take(size) {
-        val |= (byte as u64) << (i * 8);
-    }
-    Ok(val)
-}
-
-/// Returns the width in bytes of an element: the address alone for an unfiltered index, and the
-/// element size of the header for a filtered one.
-fn ea_elem_stride(header: &ExtensibleArrayHeader, offset_width: OffsetWidth) -> usize {
-    if header.client_id == 0 {
-        usize::from(offset_width.get())
-    } else {
-        header.element_size as usize
-    }
-}
-
 /// The number and the size of the data blocks of each super block of an Extensible Array, from
 /// the creation parameters of its header.
 ///
@@ -1685,265 +1649,6 @@ impl SuperBlockGeometry {
     pub const fn bitmap_size(self) -> u64 {
         self.ndblks * self.blocks.npages().div_ceil(8)
     }
-}
-
-/// Parses the element at `pos` in `data`, and returns its record, or `None` where it stores the
-/// undefined address, with its width in bytes.
-///
-/// # Errors
-///
-/// Returns [`FormatError::ChunkedReadError`] if `element_size` is too small for a filtered element
-/// or leaves more than 8 bytes for its chunk size, and [`FormatError::UnexpectedEof`] if the
-/// element runs past the end of `data`.
-fn read_element(
-    data: &[u8],
-    pos: usize,
-    client_id: u8,
-    element_size: u8,
-    offset_width: OffsetWidth,
-    chunk_byte_size: u64,
-) -> Result<(Option<ChunkRecord>, usize), FormatError> {
-    let os = usize::from(offset_width.get());
-
-    if client_id == 0 {
-        // Non-filtered: just address
-        if os > data.len() || pos > data.len() - os {
-            return Err(FormatError::UnexpectedEof {
-                expected: pos.saturating_add(os),
-                available: data.len(),
-            });
-        }
-        let Some(address) =
-            bytes::read_optional_offset_width(data, pos, offset_width)?.map(StoredAddress::new)
-        else {
-            return Ok((None, os));
-        };
-        Ok((
-            Some(ChunkRecord {
-                address,
-                stored_size: chunk_byte_size,
-                filter_mask: 0,
-            }),
-            os,
-        ))
-    } else {
-        // Filtered: the address, the chunk size, and the filter mask. The width comes from the
-        // header, where a crafted file can store one too small for the address and the mask.
-        let chunk_size_bytes = (element_size as usize).checked_sub(os + 4).ok_or_else(|| {
-            FormatError::ChunkedReadError("Extensible Array element size too small".into())
-        })?;
-        let elem_total = os + chunk_size_bytes + 4;
-        if elem_total > data.len() || pos > data.len() - elem_total {
-            return Err(FormatError::UnexpectedEof {
-                expected: pos.saturating_add(elem_total),
-                available: data.len(),
-            });
-        }
-        let Some(address) =
-            bytes::read_optional_offset_width(data, pos, offset_width)?.map(StoredAddress::new)
-        else {
-            return Ok((None, elem_total));
-        };
-        let chunk_size = read_variable_length(&data[pos + os..], chunk_size_bytes)?;
-        let fm_off = pos + os + chunk_size_bytes;
-        let filter_mask = u32::from_le_bytes([
-            data[fm_off],
-            data[fm_off + 1],
-            data[fm_off + 2],
-            data[fm_off + 3],
-        ]);
-        Ok((
-            Some(ChunkRecord {
-                address,
-                stored_size: chunk_size,
-                filter_mask,
-            }),
-            elem_total,
-        ))
-    }
-}
-
-/// Reads the Extensible Array using a validated address width.
-///
-/// # Errors
-///
-/// Returns [`FormatError::ChunkedReadError`] if a signature or element encoding is invalid,
-/// [`FormatError::UnexpectedEof`] if a block runs past the end of `file_data`,
-/// [`FormatError::ChecksumMismatch`] if a checksum does not match,
-/// [`FormatError::InvalidChunkGeometry`] if the block geometry is invalid,
-/// [`FormatError::OffsetOverflow`] if a byte extent overflows a [`u64`], and
-/// [`FormatError::ValueTooLargeForPlatform`] if a read length or buffer offset does not fit a
-/// [`usize`]. Also returns the error `visit` returns.
-pub fn read_extensible_array_chunks_with_offset_width(
-    file_data: &[u8],
-    header: &ExtensibleArrayHeader,
-    offset_width: OffsetWidth,
-    chunk_byte_size: u64,
-    mut visit: impl FnMut(u64, ChunkRecord) -> Result<(), FormatError>,
-) -> Result<(), FormatError> {
-    traversal::Reader::parse(header, offset_width, chunk_byte_size)?
-        .read(&traversal::Buffer(file_data), &mut visit)
-}
-
-/// Returns the index spans of the Extensible Array at `ea_base` using validated format widths.
-///
-/// # Errors
-///
-/// Returns the errors [`ExtensibleArrayHeader::parse_from_source_with_widths`] returns,
-/// [`FormatError::ChunkedReadError`] if a signature does not match,
-/// [`FormatError::ChecksumMismatch`] if the checksum of an index or super block does not match,
-/// and the error `source` returns if a read fails.
-pub fn extensible_array_index_spans_with_widths(
-    source: &(impl MetadataSource + ?Sized),
-    ea_base: StoredAddress,
-    widths: FormatWidths,
-) -> Result<Vec<(u64, u64)>, FormatError> {
-    let header = ExtensibleArrayHeader::parse_from_source_with_widths(source, ea_base, widths)?;
-    let offset_width = widths.offsets;
-    let os = usize::from(offset_width.get());
-    let elem_size = ea_elem_stride(&header, offset_width);
-    let page_nelmts = header.page_nelmts().get();
-    let blk_off_size = header.block_offset_width();
-
-    // EAHD header block.
-    let header_len = ExtensibleArrayHeader::serialized_size_with_widths(widths) as u64;
-    let mut spans = vec![(ea_base.get(), header_len)];
-
-    if header.index_block_address.is_undefined(offset_width) {
-        return Ok(spans);
-    }
-
-    // EAIB index block, whose length comes from the geometry the writer builds from.
-    let geom = ExtensibleArrayGeometry::from_header(&header);
-    let ndblk_addrs = geom.direct_dblk_nelmts.len();
-    let nsblk_addrs = geom.nsblk_addrs;
-    let inline = header.idx_blk_elmts as usize;
-    // The signature, the version, the client ID, and the header address.
-    let ib_header = 4 + 1 + 1 + os;
-    let index_block_len =
-        index_block_len(offset_width, inline, elem_size, ndblk_addrs, nsblk_addrs);
-    let ib_addr = header.index_block_address;
-    // The read fails for an index block that runs past the end of the file.
-    let ib = source.read_metadata_at(ib_addr.get(), index_block_len)?;
-    if &ib[..4] != b"EAIB" {
-        return Err(FormatError::ChunkedReadError(
-            "invalid Extensible Array index block signature".into(),
-        ));
-    }
-    // The caller frees the spans, so the walk rejects a block whose checksum does not match
-    // before it reads an address from it.
-    crate::checksum::verify_trailing(&ib)?;
-    spans.push((ib_addr.get(), index_block_len as u64));
-
-    // Read the index block's direct data-block addresses, then its super-block
-    // addresses, immediately following the inline element slots.
-    let mut pos = ib_header + inline * elem_size;
-    for &dblk_nelmts in &geom.direct_dblk_nelmts {
-        let addr = StoredAddress::new(bytes::read_offset_width(&ib, pos, offset_width)?);
-        pos += os;
-        if addr.is_undefined(offset_width) {
-            continue;
-        }
-        spans.push((
-            addr.get(),
-            data_block_len(
-                DataBlockGeometry {
-                    dblk_nelmts,
-                    page_nelmts,
-                },
-                elem_size,
-                offset_width,
-                blk_off_size,
-            ),
-        ));
-    }
-    for j in 0..nsblk_addrs {
-        let addr = StoredAddress::new(bytes::read_offset_width(&ib, pos, offset_width)?);
-        pos += os;
-        if addr.is_undefined(offset_width) {
-            continue;
-        }
-        let sb = geom.super_block_at(j, page_nelmts);
-        spans.push((addr.get(), super_block_len(sb, offset_width, blk_off_size)));
-        easb_data_block_spans(
-            source,
-            addr,
-            sb,
-            offset_width,
-            blk_off_size,
-            elem_size,
-            &mut spans,
-        )?;
-    }
-
-    Ok(spans)
-}
-
-/// Appends to `spans` the span of each data block the super block at `sb_addr` addresses, and
-/// reads the addresses as [`traversal::Reader`] does.
-///
-/// # Errors
-///
-/// Returns [`FormatError::ChunkedReadError`] if the signature is not `EASB`,
-/// [`FormatError::ChecksumMismatch`] if the checksum does not match, and the error `source`
-/// returns if a read fails.
-fn easb_data_block_spans(
-    source: &(impl MetadataSource + ?Sized),
-    sb_addr: StoredAddress,
-    sb: SuperBlockGeometry,
-    offset_width: OffsetWidth,
-    blk_off_size: BlockOffsetWidth,
-    elem_size: usize,
-    spans: &mut Vec<(u64, u64)>,
-) -> Result<(), FormatError> {
-    let os = usize::from(offset_width.get());
-    // The signature, the version, the client ID, the header address, and the block offset.
-    let sb_header = 4 + 1 + 1 + os + blk_off_size.bytes();
-    // The caller frees the spans, so the walk verifies the checksum of the whole block before it
-    // reads an address.
-    let sb_len = super_block_len(sb, offset_width, blk_off_size).to_usize()?;
-    let block = source.read_metadata_at(sb_addr.get(), sb_len)?;
-    if &block[..4] != b"EASB" {
-        return Err(FormatError::ChunkedReadError(
-            "invalid Extensible Array super block signature".into(),
-        ));
-    }
-    crate::checksum::verify_trailing(&block)?;
-
-    let mut pos = sb_header + sb.bitmap_size().to_usize()?;
-    for _ in 0..sb.ndblks {
-        let addr = StoredAddress::new(bytes::read_offset_width(&block, pos, offset_width)?);
-        pos += os;
-        if addr.is_undefined(offset_width) {
-            continue;
-        }
-        spans.push((
-            addr.get(),
-            data_block_len(sb.blocks, elem_size, offset_width, blk_off_size),
-        ));
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Streaming traversal (read each block from a `MetadataSource` on demand)
-// ---------------------------------------------------------------------------
-
-/// Reads the Extensible Array from `source` using a validated address width.
-///
-/// # Errors
-///
-/// Returns the errors [`read_extensible_array_chunks_with_offset_width`] returns, and the error
-/// `source` returns if a read fails.
-pub fn read_extensible_array_chunks_from_source_with_offset_width(
-    source: &(impl MetadataSource + ?Sized),
-    header: &ExtensibleArrayHeader,
-    offset_width: OffsetWidth,
-    chunk_byte_size: u64,
-    mut visit: impl FnMut(u64, ChunkRecord) -> Result<(), FormatError>,
-) -> Result<(), FormatError> {
-    traversal::Reader::parse(header, offset_width, chunk_byte_size)?
-        .read(&traversal::Streaming(source), &mut visit)
 }
 
 /// The slots of an Extensible Array that hold a chunk.
@@ -2122,8 +1827,7 @@ pub fn encode_super_block(
 /// Returns the length in bytes of an index block (`EAIB`): the prefix, `inline_elmts` elements,
 /// the data block and super block addresses, and the checksum.
 ///
-/// [`build_extensible_array_at`] and [`extensible_array_index_spans_with_widths`] both size the
-/// index block with it.
+/// [`build_extensible_array_at`] sizes the index block with it.
 pub(crate) fn index_block_len(
     offset_width: OffsetWidth,
     inline_elmts: usize,
@@ -2711,8 +2415,6 @@ const MAX_PAGE_BITS: u8 = 63;
 
 #[cfg(test)]
 mod tests {
-    use core::cell::Cell;
-
     use rstest::rstest;
 
     use super::*;
@@ -2855,7 +2557,11 @@ mod tests {
         test_util::checksum::restamp(&mut header, 0, eahd_len(8, 8));
 
         let err = if source {
-            ExtensibleArrayHeader::parse_from_source(header.as_slice(), StoredAddress::new(0), 8, 8)
+            ExtensibleArrayHeader::parse_from_source_with_widths(
+                header.as_slice(),
+                StoredAddress::new(0),
+                WIDTHS,
+            )
         } else {
             ExtensibleArrayHeader::parse(&header, 0, 8, 8)
         }
@@ -2937,69 +2643,29 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// Returns the chunks the buffered walk reports, with the slot of each.
-    fn records(
-        file_data: &[u8],
-        header: &ExtensibleArrayHeader,
-        chunk_byte_size: u64,
-    ) -> Result<Vec<(u64, ChunkRecord)>, FormatError> {
-        let mut records = Vec::new();
-        read_extensible_array_chunks_with_offset_width(
-            file_data,
-            header,
-            OffsetWidth::Eight,
-            chunk_byte_size,
-            |slot, record| {
-                records.push((slot, record));
-                Ok(())
-            },
-        )?;
-        Ok(records)
-    }
-
-    /// Returns the chunks the streaming walk reports, with the slot of each.
-    fn records_from_source(
-        source: &[u8],
-        header: &ExtensibleArrayHeader,
-        chunk_byte_size: u64,
-    ) -> Result<Vec<(u64, ChunkRecord)>, FormatError> {
-        let mut records = Vec::new();
-        read_extensible_array_chunks_from_source_with_offset_width(
-            source,
-            header,
-            OffsetWidth::Eight,
-            chunk_byte_size,
-            |slot, record| {
-                records.push((slot, record));
-                Ok(())
-            },
-        )?;
-        Ok(records)
-    }
-
-    /// Returns the chunks both walks report for the array whose header is at `header_offset`, and
-    /// asserts that the two agree.
-    fn walk_both(
+    /// Returns the records of the Extensible Array whose header is at `header_offset` in
+    /// `file_data`.
+    fn records_at(
         file_data: &[u8],
         header_offset: usize,
         chunk_byte_size: u64,
     ) -> Vec<(u64, ChunkRecord)> {
-        let header = ExtensibleArrayHeader::parse(file_data, header_offset, 8, 8).unwrap();
-        let buffered = records(file_data, &header, chunk_byte_size).unwrap();
-        let header = ExtensibleArrayHeader::parse_from_source(
+        let image = FileRegion::new(
+            FileRange::new(PhysicalAddress::new(0), file_data.len() as u64).unwrap(),
             file_data,
-            StoredAddress::new(header_offset as u64),
-            8,
-            8,
         )
         .unwrap();
-        let streamed = records_from_source(file_data, &header, chunk_byte_size).unwrap();
-        assert_eq!(buffered, streamed, "the two walks disagree");
-        buffered
+        let widths = FormatWidths::from_sizes(8, 8).unwrap();
+        let locator = ExtensibleArrayHeaderLocator::new(
+            widths,
+            BaseAddress::ZERO,
+            StoredAddress::new(header_offset as u64),
+        );
+        records_in(image, locator, chunk_byte_size).unwrap()
     }
 
-    /// Returns the records of unfiltered chunks of `chunk_byte_size` bytes stored back
-    /// to back from `base_addr`, one per slot of `slots`.
+    /// Returns the records of unfiltered chunks of `chunk_byte_size` bytes stored back to back from
+    /// `base_addr`, one per slot of `slots`.
     fn back_to_back(
         slots: core::ops::Range<u64>,
         base_addr: u64,
@@ -3076,7 +2742,7 @@ mod tests {
         );
 
         assert_eq!(
-            walk_both(&file_data, header_offset, chunk_byte_size),
+            records_at(&file_data, header_offset, chunk_byte_size),
             back_to_back(0..2, base_addr, chunk_byte_size)
         );
     }
@@ -3174,118 +2840,9 @@ mod tests {
         );
 
         assert_eq!(
-            walk_both(&file_data, header_offset, chunk_byte_size),
+            records_at(&file_data, header_offset, chunk_byte_size),
             back_to_back(0..4, base_addr, chunk_byte_size)
         );
-    }
-
-    // The writer builds the arrays, whose counts reach the super blocks and the paged data blocks.
-    #[rstest]
-    #[case::super_blocks(2_000)]
-    #[case::several_super_blocks(50_000)]
-    #[case::paged(140_000)]
-    fn streaming_ea_super_blocks_and_paged_match_buffered(#[case] n: u64) {
-        let expected = back_to_back(0..n, 0x10, 8);
-        let chunks: Vec<ChunkRecord> = expected.iter().map(|&(_, record)| record).collect();
-        let base = 0x1000u64;
-        let ea = build_extensible_array_at(
-            &IndexSlots::dense(&chunks),
-            8,
-            OffsetWidth::Eight,
-            LengthWidth::Eight,
-            false,
-            StoredAddress::new(base),
-        )
-        .unwrap();
-        let mut file = vec![0u8; base as usize + ea.len()];
-        file[base as usize..].copy_from_slice(&ea);
-
-        assert_eq!(
-            walk_both(&file, base as usize, 8),
-            expected,
-            "chunk records at n={n}"
-        );
-        let header = ExtensibleArrayHeader::parse(&file, base.to_usize().unwrap(), 8, 8).unwrap();
-        let source = CountingSource {
-            bytes: &file,
-            reads: Cell::new(0),
-        };
-        let mut records = Vec::new();
-        super::read_extensible_array_chunks_from_source_with_offset_width(
-            &source,
-            &header,
-            OffsetWidth::Eight,
-            8,
-            |index, record| {
-                records.push((index, record));
-                Ok(())
-            },
-        )
-        .unwrap();
-        assert_eq!(records, expected);
-        let stats = super::extensible_array_layout(
-            SlotOccupancy::Dense(n),
-            n,
-            8,
-            OffsetWidth::Eight,
-            LengthWidth::Eight,
-            false,
-        )
-        .stats;
-        assert_eq!(
-            source.reads.get().to_u64(),
-            1 + stats.nsuper_blks + stats.ndata_blks
-        );
-    }
-
-    // Covers what a round trip does not write: 4-byte addresses, a 4-byte block offset, and a
-    // block of no elements.
-    #[test]
-    fn element_extent_matches_the_writer() {
-        for &(client_id, element_size) in &[(0u8, 8u8), (1, 20)] {
-            for &offset_size in &[4u8, 8] {
-                for &max_nelmts_bits in &[10u8, 16, 32] {
-                    let header = ExtensibleArrayHeader {
-                        client_id,
-                        element_size,
-                        bit_geometry: ExtensibleArrayBitGeometry::parse(max_nelmts_bits, 10)
-                            .unwrap(),
-                        idx_blk_elmts: 4,
-                        min_dblk_nelmts: 4,
-                        super_blk_min_data_ptrs: 2,
-                        max_idx_set: 0,
-                        index_block_address: StoredAddress::new(0),
-                    };
-                    let blk_off = header.block_offset_width();
-                    let offset_width = OffsetWidth::try_from(offset_size).unwrap();
-                    let stride = ea_elem_stride(&header, offset_width);
-                    let page_nelmts = header.page_nelmts().get();
-                    // Every count a non-paged block can have, up to the page
-                    // size that would make it paged instead.
-                    for nelmts in [0u64, 1, 2, 4, 16, 64, 255, 256, 1023, page_nelmts] {
-                        assert_eq!(
-                            traversal::element_extent(
-                                nelmts,
-                                stride,
-                                (4 + 1 + 1 + offset_size as usize + blk_off.bytes() + 4) as u64
-                            )
-                            .unwrap(),
-                            data_block_len(
-                                DataBlockGeometry {
-                                    dblk_nelmts: nelmts,
-                                    page_nelmts,
-                                },
-                                stride,
-                                offset_width,
-                                blk_off,
-                            ),
-                            "client={client_id} os={offset_size} bits={max_nelmts_bits} \
-                             nelmts={nelmts}"
-                        );
-                    }
-                }
-            }
-        }
     }
 
     #[test]
@@ -3294,385 +2851,6 @@ mod tests {
         assert_eq!(ExtensibleArrayHeader::serialized_size(8, 8), 72);
         // 12 fixed + 6*4 stats + 4 address + 4 checksum = 44
         assert_eq!(ExtensibleArrayHeader::serialized_size(4, 4), 44);
-    }
-
-    #[test]
-    fn read_element_unallocated() {
-        let data = vec![0xFFu8; 16];
-        let (record, consumed) = read_element(&data, 0, 0, 8, OffsetWidth::Eight, 80).unwrap();
-        assert_eq!(record, None);
-        assert_eq!(consumed, 8);
-    }
-
-    #[test]
-    fn read_element_filtered() {
-        let os: u8 = 8;
-        let chunk_size_bytes = 5usize;
-        let elem_size = os as usize + chunk_size_bytes + 4;
-        let mut data = vec![0u8; elem_size + 16];
-        // Address
-        data[0..8].copy_from_slice(&0x2000u64.to_le_bytes());
-        let stored_size = u64::from(u32::MAX) + 120;
-        data[8..8 + chunk_size_bytes]
-            .copy_from_slice(&stored_size.to_le_bytes()[..chunk_size_bytes]);
-        // Filter mask
-        data[8 + chunk_size_bytes..12 + chunk_size_bytes].copy_from_slice(&0u32.to_le_bytes());
-
-        let (record, consumed) = read_element(
-            &data,
-            0,
-            1,
-            u8::try_from(elem_size).unwrap(),
-            OffsetWidth::try_from(os).unwrap(),
-            80,
-        )
-        .unwrap();
-        assert_eq!(
-            record,
-            Some(ChunkRecord {
-                address: StoredAddress::new(0x2000),
-                stored_size,
-                filter_mask: 0,
-            })
-        );
-        assert_eq!(consumed, elem_size);
-    }
-
-    // The address and the 4-byte mask of a filtered element take `offset_size + 4` bytes.
-    #[test]
-    fn a_filtered_element_smaller_than_its_own_fields_is_an_error() {
-        let os: u8 = 8;
-        let data = vec![0u8; 64];
-
-        // `element_size` must be at least os + 4 = 12 to hold what it claims.
-        for element_size in 0..(os + 4) {
-            let err = read_element(
-                &data,
-                0,
-                1,
-                element_size,
-                OffsetWidth::try_from(os).unwrap(),
-                80,
-            )
-            .expect_err("a filtered element narrower than its own fields must be rejected");
-            assert!(
-                matches!(err, FormatError::ChunkedReadError(_)),
-                "element_size {element_size} gave {err:?}, want a ChunkedReadError"
-            );
-        }
-
-        // The first width that can hold them is accepted.
-        read_element(
-            &data,
-            0,
-            1,
-            os + 4 + 1,
-            OffsetWidth::try_from(os).unwrap(),
-            80,
-        )
-        .expect("a width that fits address + 1-byte size + mask must parse");
-    }
-
-    // The oracle is the end of the index block, which both readers bound before they read a field.
-    #[test]
-    fn truncated_super_block_addresses_fail_to_read_in_both_backends() {
-        let n = 100u64;
-        let chunks: Vec<ChunkRecord> = (0..n)
-            .map(|i| ChunkRecord {
-                address: StoredAddress::new(0x10 + i * 8),
-                stored_size: 8,
-                filter_mask: 0,
-            })
-            .collect();
-        let base = 0x1000u64;
-        let ea = build_extensible_array_at(
-            &IndexSlots::dense(&chunks),
-            8,
-            OffsetWidth::Eight,
-            LengthWidth::Eight,
-            false,
-            StoredAddress::new(base),
-        )
-        .unwrap();
-        let mut file = vec![0u8; base as usize + ea.len()];
-        file[base as usize..].copy_from_slice(&ea);
-
-        let built = ExtensibleArrayHeader::parse(&file, base as usize, 8, 8).unwrap();
-        let geom = ExtensibleArrayGeometry::from_header(&built);
-        assert!(
-            geom.nsblk_addrs > 0,
-            "fixture must reach the super-block address array"
-        );
-
-        // The writer places the index block before the data blocks, so a cut in the index block
-        // would cut the data blocks too. The format allows the index block after them, so the
-        // test copies the index block, whose checksum covers its own bytes alone, to the end of
-        // the file, repoints the header, and recomputes the header's checksum.
-        let old_ib = built.index_block_address.get().to_usize().unwrap();
-        let ib_len = 4 + 1 + 1 + 8                            // signature to header address
-            + built.idx_blk_elmts as usize * 8                // inline elements
-            + geom.direct_dblk_nelmts.len() * 8               // direct-block addresses
-            + geom.nsblk_addrs * 8                            // super-block addresses
-            + 4; // checksum
-        let block = file[old_ib..old_ib + ib_len].to_vec();
-        let new_ib = file.len();
-        file.extend_from_slice(&block);
-        // The header's index-block address sits after the 12-byte prefix and
-        // the six length-sized statistics fields.
-        let addr_field = base as usize + 12 + 6 * 8;
-        file[addr_field..addr_field + 8].copy_from_slice(&(new_ib as u64).to_le_bytes());
-        test_util::checksum::restamp(&mut file, base as usize, eahd_len(8, 8));
-
-        let header = ExtensibleArrayHeader::parse(&file, base as usize, 8, 8).unwrap();
-        assert_eq!(header.index_block_address.get() as usize, new_ib);
-        // The relocated file must still read identically before it is cut.
-        let intact = records(&file, &header, 8).unwrap();
-        assert_eq!(intact.len() as u64, n, "relocation must preserve the read");
-
-        // Where the first super-block address begins: index block prefix,
-        // then the inline elements, then the direct-block addresses.
-        let sblk_start = new_ib
-            + 4
-            + 1
-            + 1
-            + 8
-            + header.idx_blk_elmts as usize * 8
-            + geom.direct_dblk_nelmts.len() * 8;
-
-        // Cuts the first super block address in half, past every data block.
-        file.truncate(sblk_start + 4);
-
-        let buffered = records(&file, &header, 8);
-        match buffered {
-            Err(FormatError::UnexpectedEof {
-                expected,
-                available,
-            }) => {
-                assert_eq!(
-                    expected,
-                    new_ib + ib_len,
-                    "the buffered read must fault on the cut index block, not earlier"
-                );
-                assert_eq!(available, file.len());
-            }
-            other => panic!("buffered read must reject a truncated address array, got {other:?}"),
-        }
-
-        let hm = ExtensibleArrayHeader::parse_from_source(
-            file.as_slice(),
-            StoredAddress::new(base),
-            8,
-            8,
-        )
-        .unwrap();
-        let streamed = records_from_source(&file, &hm, 8);
-        assert!(
-            streamed.is_err(),
-            "streaming read must reject the same file, got {streamed:?}"
-        );
-    }
-
-    // Flips a checksum byte of each structure the span walk reaches, for every reader of the
-    // structure to reject.
-    #[cfg(feature = "checksum")]
-    #[test]
-    fn a_corrupted_extensible_array_structure_fails_its_checksum() {
-        // The same progression as `streaming_ea_super_blocks_and_paged_match_buffered`:
-        // inline and direct blocks, then super blocks, then paged data blocks.
-        for &n in &[2000u64, 50000, 140000] {
-            let chunks: Vec<ChunkRecord> = (0..n)
-                .map(|i| ChunkRecord {
-                    address: StoredAddress::new(0x10 + i * 8),
-                    stored_size: 8,
-                    filter_mask: 0,
-                })
-                .collect();
-            let base = 0x1000u64;
-            let ea = build_extensible_array_at(
-                &IndexSlots::dense(&chunks),
-                8,
-                OffsetWidth::Eight,
-                LengthWidth::Eight,
-                false,
-                StoredAddress::new(base),
-            )
-            .unwrap();
-            let mut file = vec![0u8; base as usize + ea.len()];
-            file[base as usize..].copy_from_slice(&ea);
-
-            let read_both = |file: &[u8]| {
-                let buffered = ExtensibleArrayHeader::parse(file, base as usize, 8, 8)
-                    .and_then(|h| records(file, &h, 8));
-                let streamed =
-                    ExtensibleArrayHeader::parse_from_source(file, StoredAddress::new(base), 8, 8)
-                        .and_then(|h| records_from_source(file, &h, 8));
-                (buffered, streamed.is_err())
-            };
-            assert_eq!(
-                read_both(&file).0.expect("the sound file must read").len() as u64,
-                n,
-                "the fixture must read before it is corrupted, at n={n}"
-            );
-
-            let spans = extensible_array_index_spans_with_widths(
-                file.as_slice(),
-                StoredAddress::new(base),
-                FormatWidths {
-                    offsets: OffsetWidth::Eight,
-                    lengths: LengthWidth::Eight,
-                },
-            )
-            .unwrap();
-            assert!(spans.len() > 1, "the sweep must reach past the header");
-
-            let header = ExtensibleArrayHeader::parse(&file, base as usize, 8, 8).unwrap();
-            let stride = ea_elem_stride(&header, OffsetWidth::Eight);
-            let page_nelmts = header.page_nelmts().get().to_usize().unwrap();
-            // The prefix of a data block, and the length of the largest unpaged one. A paged block
-            // holds at least two pages and is longer.
-            let db_prefix = 4 + 1 + 1 + 8 + header.block_offset_width().bytes();
-            let max_unpaged = db_prefix + page_nelmts * stride + 4;
-
-            // Each site is a byte to flip and whether the span walk reads its structure. The walk
-            // reads the header, the index block, and the super blocks, and sizes the data blocks
-            // from the header.
-            let mut poke_sites: Vec<(u64, bool)> = Vec::new();
-            let mut paged = 0;
-            for &(at, len) in &spans {
-                let start = at.to_usize().unwrap();
-                let kind = &file[start..start + 4];
-                if kind == b"EADB" && len as usize > max_unpaged {
-                    paged += 1;
-                    // A paged block has a checksum over its prefix and one per page. The reader
-                    // steps over a page the bitmap does not mark, so the test flips the first
-                    // page alone.
-                    poke_sites.push((at + db_prefix as u64 + 4 - 1, false));
-                    poke_sites.push((at + (max_unpaged + 4) as u64 - 1, false));
-                } else {
-                    // The last byte of every other structure is the top byte of
-                    // its one trailing checksum.
-                    poke_sites.push((at + len - 1, kind != b"EADB"));
-                }
-            }
-            if n == 140000 {
-                assert!(paged > 0, "n={n} must reach a paged data block");
-            }
-            assert!(
-                poke_sites.iter().any(|&(_, walked)| walked),
-                "n={n}: the sweep must reach a structure the reclaim walk reads"
-            );
-
-            for (site, walked) in poke_sites {
-                let at = site.to_usize().unwrap();
-                let original = file[at];
-                file[at] ^= 0x01;
-                let (buffered, streamed_err) = read_both(&file);
-                assert!(
-                    matches!(buffered, Err(FormatError::ChecksumMismatch { .. })),
-                    "n={n}: a corrupted checksum at {at:#x} must be rejected, got {buffered:?}"
-                );
-                assert!(
-                    streamed_err,
-                    "n={n}: the streaming backend must reject what the buffered one does, at {at:#x}"
-                );
-                if walked {
-                    let walk = extensible_array_index_spans_with_widths(
-                        file.as_slice(),
-                        StoredAddress::new(base),
-                        FormatWidths {
-                            offsets: OffsetWidth::Eight,
-                            lengths: LengthWidth::Eight,
-                        },
-                    );
-                    assert!(
-                        matches!(walk, Err(FormatError::ChecksumMismatch { .. })),
-                        "n={n}: the reclaim walk must reject a corrupt structure at {at:#x} \
-                         rather than release spans read out of it, got {walk:?}"
-                    );
-                }
-                file[at] = original;
-            }
-        }
-    }
-
-    // The oracle is the header, the index block, and the two size statistics the writer stores.
-    #[test]
-    fn index_spans_match_builder_layout() {
-        let os: u8 = 8;
-        let ls: u8 = 8;
-        let base = 0x4000u64;
-        // Counts that reach the index block, the data blocks it addresses, the super blocks, and
-        // the paged data blocks.
-        for &n in &[1u64, 4, 20, 100, 244, 300, 2000, 50000, 140000] {
-            let chunks: Vec<ChunkRecord> = (0..n)
-                .map(|i| ChunkRecord {
-                    address: StoredAddress::new(0x100000 + i * 8),
-                    stored_size: 8,
-                    filter_mask: 0,
-                })
-                .collect();
-            let ea = build_extensible_array_at(
-                &IndexSlots::dense(&chunks),
-                8,
-                OffsetWidth::Eight,
-                LengthWidth::Eight,
-                false,
-                StoredAddress::new(base),
-            )
-            .unwrap();
-            let mut file = vec![0u8; base as usize + ea.len()];
-            file[base as usize..].copy_from_slice(&ea);
-
-            let spans = extensible_array_index_spans_with_widths(
-                file.as_slice(),
-                StoredAddress::new(base),
-                FormatWidths::from_sizes(os, ls).unwrap(),
-            )
-            .unwrap();
-
-            // Expected total = EAHD + EAIB + `super_blk_size` + `data_blk_size`, the
-            // last two read straight from the statistics the builder wrote.
-            let header = ExtensibleArrayHeader::parse(&file, base as usize, os, ls).unwrap();
-            let geom = ExtensibleArrayGeometry::from_header(&header);
-            let header_len = ExtensibleArrayHeader::serialized_size(os, ls) as u64;
-            // Unfiltered EA: element stride equals the offset size.
-            let index_block_len = index_block_len(
-                OffsetWidth::try_from(os).unwrap(),
-                header.idx_blk_elmts as usize,
-                os as usize,
-                geom.direct_dblk_nelmts.len(),
-                geom.nsblk_addrs,
-            ) as u64;
-            let stat = |k: usize| {
-                let off = base as usize + 12 + k * ls as usize;
-                u64::from_le_bytes(file[off..off + 8].try_into().unwrap())
-            };
-            let super_blk_size = stat(1);
-            let data_blk_size = stat(3);
-            let expected_total = header_len + index_block_len + super_blk_size + data_blk_size;
-
-            let total: u64 = spans.iter().map(|&(_, l)| l).sum();
-            assert_eq!(
-                total, expected_total,
-                "EA index span total mismatch at n={n}"
-            );
-
-            // Disjoint and inside the built blob.
-            let mut sorted = spans.clone();
-            sorted.sort_by_key(|&(a, _)| a);
-            for w in sorted.windows(2) {
-                assert!(
-                    w[0].0 + w[0].1 <= w[1].0,
-                    "EA index spans overlap at n={n}: {sorted:?}"
-                );
-            }
-            for &(a, l) in &spans {
-                assert!(
-                    a >= base && a + l <= base + ea.len() as u64,
-                    "EA index span out of the blob at n={n}: ({a}, {l})"
-                );
-            }
-        }
     }
 
     #[test]
@@ -3854,26 +3032,6 @@ mod tests {
         );
     }
 
-    struct CountingSource<'a> {
-        bytes: &'a [u8],
-        reads: Cell<usize>,
-    }
-
-    impl MetadataSource for CountingSource<'_> {
-        fn len(&self) -> u64 {
-            self.bytes.len().to_u64()
-        }
-
-        fn read_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
-            self.bytes.read_at(offset, bytes)
-        }
-
-        fn read_metadata_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, FormatError> {
-            self.reads.set(self.reads.get() + 1);
-            self.bytes.read_metadata_at(offset, len)
-        }
-    }
-
     const WIDTHS: FormatWidths = FormatWidths {
         offsets: OffsetWidth::Eight,
         lengths: LengthWidth::Eight,
@@ -3883,6 +3041,8 @@ mod tests {
 
     const FIRST_PAGED_SLOT: u64 = 131_060;
 
+    /// The Extensible Array the writer builds at `ARRAY_AT`, in an image whose first byte is at
+    /// physical address `base`.
     struct Fixture {
         base: u64,
         widths: FormatWidths,
@@ -4019,49 +3179,69 @@ mod tests {
         }
 
         fn records(&self, chunk_byte_size: u64) -> Result<Vec<(u64, ChunkRecord)>, FormatError> {
-            let Some(index_block) = self.header()?.index_block() else {
-                return Ok(Vec::new());
-            };
-            let index_block = index_block.parse(self.read(index_block.parse_range())?)?;
-            let mut records: Vec<(u64, ChunkRecord)> = index_block
-                .elements()
-                .records(chunk_byte_size)
-                .collect::<Result<_, _>>()?;
-            let mut visit = |block: ExtensibleArrayDataBlockRef<'_>| {
-                match block.parse(self.read(block.parse_range())?)? {
-                    ExtensibleArrayDataBlock::Elements(elements) => {
-                        for record in elements.records(chunk_byte_size) {
+            records_in(self.image(), self.locator(), chunk_byte_size)
+        }
+    }
+
+    /// Returns the records of the index block and of each block and page that holds a slot below
+    /// the header's "Max Index Set", each parsed from the range its reference returns.
+    fn records_in(
+        image: FileRegion<'_>,
+        locator: ExtensibleArrayHeaderLocator,
+        chunk_byte_size: u64,
+    ) -> Result<Vec<(u64, ChunkRecord)>, FormatError> {
+        let read = |range: FileRange| image.subregion(range);
+        let Some(index_block) = locator.parse(read(locator.parse_range()?)?)?.index_block() else {
+            return Ok(Vec::new());
+        };
+        let index_block = index_block.parse(read(index_block.parse_range())?)?;
+        let mut records: Vec<(u64, ChunkRecord)> = index_block
+            .elements()
+            .records(chunk_byte_size)
+            .collect::<Result<_, _>>()?;
+        let mut visit = |block: ExtensibleArrayDataBlockRef<'_>| {
+            match block.parse(read(block.parse_range())?)? {
+                ExtensibleArrayDataBlock::Elements(elements) => {
+                    for record in elements.records(chunk_byte_size) {
+                        records.push(record?);
+                    }
+                }
+                ExtensibleArrayDataBlock::Pages(pages) => {
+                    for page in pages.pages() {
+                        let page = page?;
+                        for record in page
+                            .parse(read(page.parse_range())?)?
+                            .records(chunk_byte_size)
+                        {
                             records.push(record?);
                         }
                     }
-                    ExtensibleArrayDataBlock::Pages(pages) => {
-                        for page in pages.pages() {
-                            let page = page?;
-                            for record in page
-                                .parse(self.read(page.parse_range())?)?
-                                .records(chunk_byte_size)
-                            {
-                                records.push(record?);
-                            }
-                        }
-                    }
-                }
-                Ok::<_, FormatError>(())
-            };
-            for block in index_block.data_blocks() {
-                visit(block?)?;
-            }
-            for super_block in index_block.super_blocks() {
-                let super_block = super_block?;
-                for block in super_block
-                    .parse(self.read(super_block.parse_range())?)?
-                    .data_blocks()
-                {
-                    visit(block?)?;
                 }
             }
-            Ok(records)
+            Ok::<_, FormatError>(())
+        };
+        for block in index_block.data_blocks() {
+            let block = block?;
+            if block.holds_set_slots() {
+                visit(block)?;
+            }
         }
+        for super_block in index_block.super_blocks() {
+            let super_block = super_block?;
+            if !super_block.holds_set_slots() {
+                continue;
+            }
+            for block in super_block
+                .parse(read(super_block.parse_range())?)?
+                .data_blocks()
+            {
+                let block = block?;
+                if block.holds_set_slots() {
+                    visit(block)?;
+                }
+            }
+        }
+        Ok(records)
     }
 
     #[rstest]
@@ -4837,6 +4017,37 @@ mod tests {
                 + 4 * 8
                 + (direct_blocks.len() as u64 + u64::from(29 - first_super_block)) * 8
                 + 4
+        );
+    }
+
+    // An unpaged data block is the prefix, the block offset, the elements, and the checksum, and a
+    // paged one the prefix, the block offset, the checksum, and the pages with a checksum each.
+    #[rstest]
+    #[case::no_elements(OffsetWidth::Four, 0, 4, 10, 0, 4 + 2 + 4 + 2 + 4)]
+    #[case::four_byte_addresses(OffsetWidth::Four, 0, 4, 16, 255, 4 + 2 + 4 + 2 + 255 * 4 + 4)]
+    #[case::filtered_four_byte_addresses(OffsetWidth::Four, 1, 10, 32, 16, 4 + 2 + 4 + 4 + 16 * 10 + 4)]
+    #[case::one_page(OffsetWidth::Eight, 0, 8, 32, 1_024, 4 + 2 + 8 + 4 + 1_024 * 8 + 4)]
+    #[case::two_pages(OffsetWidth::Eight, 1, 14, 32, 2_048, 4 + 2 + 8 + 4 + 4 + 2 * (1_024 * 14 + 4))]
+    #[case::four_pages_four_byte_addresses(OffsetWidth::Four, 0, 4, 16, 4_096, 4 + 2 + 4 + 2 + 4 + 4 * (1_024 * 4 + 4))]
+    fn a_data_block_has_the_length_of_its_fields(
+        #[case] offsets: OffsetWidth,
+        #[case] client_id: u8,
+        #[case] element_size: u8,
+        #[case] max_index_bits: u8,
+        #[case] elements: u64,
+        #[case] expected: u64,
+    ) {
+        let encoding = ElementEncoding::new(offsets, client_id, element_size).unwrap();
+        let layout = Layout::new(encoding, max_index_bits, 4, 4, 2, 10).unwrap();
+        assert_eq!(
+            layout
+                .data_block_len(DataBlock {
+                    offset: 0,
+                    elements,
+                    libhdf5_offset: None,
+                })
+                .unwrap(),
+            expected
         );
     }
 

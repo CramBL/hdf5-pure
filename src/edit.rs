@@ -297,7 +297,6 @@ use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::PhysicalAddress;
 use hdf5_pure_format::__private::ChunkIndexInfo;
 use hdf5_pure_format::__private::ChunkRecord;
-use hdf5_pure_format::__private::ExtensibleArrayHeader;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use hdf5_pure_format::__private::IndexSlots;
 use hdf5_pure_format::__private::LayoutVersion;
@@ -8829,12 +8828,9 @@ impl WriteEngine {
         // or the kept chunks — carried by metadata into the new index — would be
         // re-encoded in the wrong element width.
         if let Some(idx_addr) = *address {
-            let hdr = ExtensibleArrayHeader::parse_from_source_with_widths(
-                &SourceMetadata(&view),
-                idx_addr,
-                crate::file_writer::WIDTHS,
-            )?;
-            if (hdr.client_id == 1) != has_filters {
+            let array =
+                crate::extensible_array::read_header(&view, crate::file_writer::WIDTHS, idx_addr)?;
+            if array.is_filtered() != has_filters {
                 return Err(Error::AppendUnsupported(
                     "dataset filter metadata is inconsistent (chunk-index client id \
                      disagrees with the filter pipeline)",

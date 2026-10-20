@@ -15,7 +15,6 @@ use hdf5_pure_format::__private::BTreeV1ChunkNodeBytes;
 use hdf5_pure_format::__private::BTreeV2ChunkRecordContext;
 use hdf5_pure_format::__private::BTreeV2Header;
 use hdf5_pure_format::__private::ChunkRecord;
-use hdf5_pure_format::__private::ExtensibleArrayHeader;
 use hdf5_pure_format::__private::LayoutVersion;
 #[cfg(feature = "std")]
 use hdf5_pure_space::__private::Extent;
@@ -31,6 +30,7 @@ use crate::data_layout::DataLayout;
 use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags};
 use crate::dataspace::Dataspace;
 use crate::error::FormatError;
+use crate::extensible_array;
 use crate::fill_value::FillPattern;
 use crate::filter_pipeline::FilterPipeline;
 use crate::filters::{self, ChunkContext, FilterScratch};
@@ -1245,15 +1245,12 @@ pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
             Ok(chunks)
         }
         ChunkIndexLayout::ExtensibleArray { .. } => {
-            let source = SourceMetadata(source);
-            let header =
-                ExtensibleArrayHeader::parse_from_source_with_widths(&source, addr, widths)?;
             let grid = index_grid(dataspace, &spatial_dims(), GridOrder::UnlimitedFirst)?;
             let mut chunks = Vec::new();
-            hdf5_pure_format::__private::read_extensible_array_chunks_from_source_with_offset_width(
-                &source,
-                &header,
-                widths.offsets,
+            extensible_array::read_chunks(
+                source,
+                widths,
+                addr,
                 grid.chunk_byte_size(elem_size)?,
                 |slot, record| {
                     chunks.extend(ChunkInfo::in_extent(&grid, slot, record)?);
@@ -1662,11 +1659,7 @@ fn collect_chunk_index_spans<S: Source + ?Sized>(
         ChunkIndexLayout::SingleChunk { .. } | ChunkIndexLayout::Implicit { .. } => Ok(Vec::new()),
         ChunkIndexLayout::FixedArray { .. } => fixed_array::index_spans(source, widths, index_addr),
         ChunkIndexLayout::ExtensibleArray { .. } => {
-            hdf5_pure_format::__private::extensible_array_index_spans_with_widths(
-                &SourceMetadata(source),
-                index_addr,
-                widths,
-            )
+            extensible_array::index_spans(source, widths, index_addr)
         }
         ChunkIndexLayout::BTreeV2 { .. } => crate::btree_v2::collect_btree_v2_storage_extents(
             source, index_addr, widths,
@@ -1862,17 +1855,12 @@ pub fn read_chunked_data_cached(
                 chunks
             }
             ChunkIndexLayout::ExtensibleArray { .. } => {
-                let header = ExtensibleArrayHeader::parse_with_widths(
-                    file_data,
-                    addr.get().to_usize()?,
-                    widths,
-                )?;
                 let grid = index_grid(dataspace, &spatial_dims(), GridOrder::UnlimitedFirst)?;
                 let mut chunks = Vec::new();
-                hdf5_pure_format::__private::read_extensible_array_chunks_with_offset_width(
+                extensible_array::read_chunks(
                     file_data,
-                    &header,
-                    widths.offsets,
+                    widths,
+                    addr,
                     grid.chunk_byte_size(u64::from(elem_width.get()))?,
                     |slot, record| {
                         chunks.extend(ChunkInfo::in_extent(&grid, slot, record)?);
