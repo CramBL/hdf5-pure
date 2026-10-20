@@ -10,7 +10,7 @@ use super::extent::Extent;
 use super::list::{self, FreeList};
 use super::paged::{
     FreeClass, PageTransition, PageType, PagedAllocationSnapshot, PagedEdit, PagedPostFree,
-    PagedSections,
+    PagedSections, PagedTail,
 };
 use super::persistence::ManagerKind;
 
@@ -389,6 +389,97 @@ impl SessionSpace {
                 .paged
                 .post_free(space.threshold, eoa, freed, old_blocks),
         )
+    }
+
+    /// Bounds the PAGE section count after adding `extents` and reserving a metadata tail.
+    ///
+    /// Includes tracked free space, pending page padding, and dead extents that may form whole
+    /// free pages. Counts every page crossed by an extent separately.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the strategy is not PAGE, or
+    /// [`FormatError::ValueTooLargeForPlatform`] if the count exceeds [`usize::MAX`].
+    pub fn paged_tail_section_limit(
+        &self,
+        extents: impl IntoIterator<Item = Extent>,
+    ) -> Result<usize, FormatError> {
+        let Self::Paged(space) = self else {
+            return Err(FormatError::Internal(
+                "PAGE persistence requires PAGE session space".into(),
+            ));
+        };
+        space.paged.tail_section_limit(extents)
+    }
+
+    /// Plans a metadata reservation and its final PAGE free sections without changing the session.
+    ///
+    /// With `appended`, reserves `capacity` bytes at `eoa`. Otherwise, reserves only reusable
+    /// metadata space and returns `None` if no extent fits. Pending `freed` extents and live
+    /// `old_blocks` become free in the planned state but cannot fund the reservation.
+    ///
+    /// All addresses are stored addresses. The caller passes a page-aligned `eoa` and a nonzero
+    /// `capacity`. The result includes page padding, threshold admission, and trailing-page release.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::FileSpacePageSize;
+    /// use hdf5_pure_core::FileSpaceStrategy;
+    /// use hdf5_pure_space::__private::Extent;
+    /// use hdf5_pure_space::__private::FreeClass;
+    /// use hdf5_pure_space::__private::ManagerKind;
+    /// use hdf5_pure_space::__private::PageType;
+    /// use hdf5_pure_space::__private::SessionSpace;
+    ///
+    /// let mut space = SessionSpace::from_strategy(
+    ///     Some(FileSpaceStrategy::Page), 1, FileSpacePageSize::DEFAULT,
+    /// );
+    /// let durable = Extent::new(4_096, 512).unwrap();
+    /// space.seed_persisted(Some(ManagerKind::PagedSmallMetadata), durable);
+    /// let freed = [(Extent::new(8_192, 128).unwrap(), FreeClass::Page(PageType::Meta))];
+    /// let old_blocks = [Extent::new(8_448, 128).unwrap()];
+    /// let limit = space.paged_tail_section_limit(
+    ///     freed.iter().map(|&(extent, _)| extent).chain(old_blocks),
+    /// )?;
+    ///
+    /// let reused = space.plan_paged_tail(12_288, &freed, &old_blocks, 256, false)?.unwrap();
+    /// assert_eq!(reused.allocation, Extent::new(4_096, 256).unwrap());
+    /// assert_eq!(reused.post.sections().metadata(), [
+    ///     Extent::new(4_352, 256).unwrap(), freed[0].0, old_blocks[0],
+    /// ]);
+    /// assert!(reused.post.sections().metadata().len() <= limit);
+    /// assert_eq!(space.paged_sections().unwrap().metadata(), [durable]);
+    ///
+    /// let appended = space.plan_paged_tail(12_288, &freed, &old_blocks, 256, true)?.unwrap();
+    /// assert_eq!(appended.allocation, Extent::new(12_288, 256).unwrap());
+    /// assert_eq!(appended.final_eoa, 16_384);
+    /// assert_eq!(appended.post.sections().metadata().last(),
+    ///     Some(&Extent::new(12_544, 3_840).unwrap()));
+    /// # Ok::<(), hdf5_pure_core::FormatError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the strategy is not PAGE, or
+    /// [`FormatError::OffsetOverflow`] if the allocation, page boundary, or trailing reserve
+    /// exceeds [`u64::MAX`].
+    pub fn plan_paged_tail(
+        &self,
+        eoa: u64,
+        freed: &[(Extent, FreeClass)],
+        old_blocks: &[Extent],
+        capacity: u64,
+        appended: bool,
+    ) -> Result<Option<PagedTail>, FormatError> {
+        let Self::Paged(space) = self else {
+            return Err(FormatError::Internal(
+                "PAGE persistence requires PAGE session space".into(),
+            ));
+        };
+        space
+            .paged
+            .plan_tail(space.threshold, eoa, freed, old_blocks, capacity, appended)
     }
 
     /// Adopts PAGE post-free state after its publication succeeds.

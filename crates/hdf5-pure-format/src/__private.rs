@@ -177,6 +177,7 @@ pub use crate::free_space_manager::SECTION_CLASS_SMALL;
 pub use crate::free_space_manager::free_space_manager_header_len;
 pub use crate::free_space_manager::free_space_manager_len;
 pub use crate::free_space_manager::parse_section_info;
+pub use crate::free_space_manager::section_info_capacity;
 pub use crate::free_space_manager::section_info_len;
 pub use crate::free_space_manager::serialize_free_space_manager;
 pub use crate::free_space_manager::serialize_free_space_manager_with_allocation;
