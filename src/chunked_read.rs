@@ -271,6 +271,51 @@ impl ChunkInfo {
             address,
         }))
     }
+
+    /// Reads this chunk of a rank-1 dataset of length `extent` and returns the decoded bytes of
+    /// its elements below `extent`.
+    ///
+    /// The chunk is decoded as a reader at `extent` decodes it, so under
+    /// [`ChunkedLayoutFlags::partial_edge_chunks_stored_raw`] a chunk that extends past `extent`
+    /// is read as it is stored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the chunk's offsets or the chunk dimensions of `ctx`
+    /// are not of rank 1. Returns the errors of [`read_decoded_chunk`], and of
+    /// [`bounded_chunk_len`] for the elements below `extent`.
+    #[cfg(feature = "std")]
+    pub(crate) fn read_live_elements(
+        &self,
+        source: &(impl Source + ?Sized),
+        scratch: &mut FilterScratch,
+        flags: ChunkedLayoutFlags,
+        pipeline: Option<&FilterPipeline>,
+        ctx: ChunkContext<'_>,
+        extent: u64,
+    ) -> Result<Vec<u8>, FormatError> {
+        let (&[offset], &[chunk_len]) = (self.offsets.as_slice(), ctx.chunk_dims) else {
+            return Err(FormatError::Internal(format!(
+                "a chunk's live elements are read at rank 1, not for {} chunk dimensions and {} \
+                 offsets",
+                ctx.chunk_dims.len(),
+                self.offsets.len()
+            )));
+        };
+        let mut logical = read_decoded_chunk(
+            source,
+            scratch,
+            flags,
+            ctx.chunk_dims,
+            &[extent],
+            pipeline,
+            ctx,
+            self,
+        )?;
+        let live = extent.saturating_sub(offset).min(chunk_len);
+        logical.truncate(bounded_chunk_len(&[live], ctx.element_size.narrow()?)?);
+        Ok(logical)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,5 +1,5 @@
-//! The chunks an in-place append writes, encoded for the extent before the append and the extent
-//! it publishes.
+//! The chunks an append writes, encoded for the extent the append publishes and, in an in-place
+//! append, for the extent before it.
 
 use crate::chunked_read;
 use crate::chunked_read::ChunkDecoding;
@@ -11,7 +11,7 @@ use crate::filters;
 use crate::filters::ChunkContext;
 use crate::filters::FilterScratch;
 
-/// A chunk ready for an in-place append: the bytes the append writes, and whether a reader runs
+/// A chunk ready for an append: the bytes the append writes, and whether a reader runs
 /// them through the filter pipeline, with the mask of a filtered chunk.
 #[derive(Debug)]
 pub(crate) struct PreparedChunk {
@@ -80,7 +80,7 @@ impl PreparedChunk {
     }
 }
 
-/// The form in which an in-place append writes a chunk, and the filter mask it records.
+/// The form in which an append writes a chunk, and the filter mask it records.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ChunkEncoding {
     /// The output of the filter pipeline, with a filter mask of 0.
@@ -101,10 +101,18 @@ impl ChunkEncoding {
     /// every filter skipped, which both read as it is stored.
     pub(crate) fn decodable_by(current: Option<ChunkDecoding>, published: ChunkDecoding) -> Self {
         match (current, published) {
-            (None | Some(ChunkDecoding::Pipeline), ChunkDecoding::Pipeline) => Self::Filtered,
-            (None | Some(ChunkDecoding::Verbatim), ChunkDecoding::Verbatim) => Self::Raw,
             (Some(ChunkDecoding::Verbatim), ChunkDecoding::Pipeline)
             | (Some(ChunkDecoding::Pipeline), ChunkDecoding::Verbatim) => Self::FiltersSkipped,
+            (_, published) => Self::for_decoding(published),
+        }
+    }
+
+    /// Returns the encoding that a reader which decodes the chunk as `decoding` decodes to the
+    /// chunk's data.
+    pub(crate) fn for_decoding(decoding: ChunkDecoding) -> Self {
+        match decoding {
+            ChunkDecoding::Pipeline => Self::Filtered,
+            ChunkDecoding::Verbatim => Self::Raw,
         }
     }
 }
