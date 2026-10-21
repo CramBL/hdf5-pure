@@ -1379,6 +1379,24 @@ impl FileWriter {
         GroupBuilder::new(name)
     }
 
+    /// Configures and attaches a group in the root group after the callback succeeds.
+    ///
+    /// See [`FileBuilder::create_group_with`](crate::FileBuilder::create_group_with) for the
+    /// callback and attachment behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidLinkName`] if `name` is empty, is `.`, or contains `/`,
+    /// before calling `configure`. Returns the callback's error if `configure` fails.
+    pub fn create_group_with(
+        &mut self,
+        name: &str,
+        configure: impl FnOnce(&mut GroupBuilder) -> Result<(), FormatError>,
+    ) -> Result<(), FormatError> {
+        self.groups.push(GroupBuilder::build_with(name, configure)?);
+        Ok(())
+    }
+
     pub fn add_group(&mut self, group: FinishedGroup) {
         self.groups.push(group);
     }
@@ -2144,7 +2162,7 @@ impl FileWriter {
             grp_vl: &mut Vec<Vec<VlPatch>>,
             ds_vl: &mut Vec<Vec<VlPatch>>,
         ) -> Result<usize, FormatError> {
-            let name = link_name(g.name)?;
+            let name = g.name?;
             let mut gattrs = Vec::new();
             let mut attr_committed_datatype_paths = Vec::new();
             for (n, v) in &g.attrs {

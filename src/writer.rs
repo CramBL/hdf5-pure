@@ -70,6 +70,33 @@ impl FileBuilder {
         self.writer.create_group(name)
     }
 
+    /// Configures and attaches a group in the root group under `name`.
+    ///
+    /// Calls `configure` once with a temporary builder, then attaches the finished group when
+    /// `configure` succeeds. The writer attaches the group under `name`, including when the
+    /// callback replaces the builder. If `configure` returns an error or panics, the writer leaves
+    /// this file's staged groups unchanged.
+    /// The writer checks staged datasets and attributes when writing the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] with [`FormatError::InvalidLinkName`] if `name` is empty, is
+    /// `.`, or contains `/`, before calling `configure`. Returns [`Error::Format`] with the
+    /// callback's error if `configure` fails.
+    #[doc = concat!(
+        "\n# Examples\n\n```\n",
+        include_str!("../examples/attaching_groups.rs"),
+        "\n```"
+    )]
+    pub fn create_group_with(
+        &mut self,
+        name: &str,
+        configure: impl FnOnce(&mut FormatGroupBuilder) -> Result<(), FormatError>,
+    ) -> Result<(), Error> {
+        self.writer.create_group_with(name, configure)?;
+        Ok(())
+    }
+
     /// Add a finished group to the file.
     pub fn add_group(&mut self, group: FinishedGroup) {
         self.writer.add_group(group);

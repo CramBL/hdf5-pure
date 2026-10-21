@@ -5,6 +5,7 @@
 mod append;
 mod append_writer;
 mod array_index;
+mod attaching_groups;
 mod attr_count;
 mod attr_message_size;
 mod attr_width;
