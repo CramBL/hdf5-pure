@@ -195,6 +195,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
     allowed_added_variants = {
         "FormatError": {
             "AddressTooLarge",
+            "ConflictingDatasetStorage",
             "DefinedAddressIsUndefined",
             "DuplicateGlobalHeapObjectIndex",
             "EofRelocationUnderflow",

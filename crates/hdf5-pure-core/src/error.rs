@@ -98,6 +98,8 @@ pub enum FormatError {
     },
     /// A compound field has an incompatible datatype.
     CompoundFieldTypeMismatch(String),
+    /// More than one storage source is supplied, or unallocated storage is combined with data.
+    ConflictingDatasetStorage,
     /// Data size mismatch.
     DataSizeMismatch {
         /// Expected size in bytes.
@@ -1574,6 +1576,9 @@ impl fmt::Display for FormatError {
                     "invalid link name {name:?}: a link name is one component of an object \
                      path, so it is not empty, is not \".\" and holds no \"/\""
                 )
+            }
+            Self::ConflictingDatasetStorage => {
+                write!(f, "dataset requests conflicting storage sources")
             }
             Self::DatasetMissingData => {
                 write!(f, "dataset is missing data")
