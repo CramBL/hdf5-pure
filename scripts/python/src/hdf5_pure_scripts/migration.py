@@ -196,6 +196,11 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
         "FormatError": {
             "AddressTooLarge",
             "ConflictingDatasetStorage",
+            "DatasetDimensionUnlimited",
+            "DatasetMissingDatatype",
+            "DatasetProvenanceRequiresData",
+            "DatasetRankUnsupported",
+            "DatasetSizeOverflow",
             "DefinedAddressIsUndefined",
             "DuplicateGlobalHeapObjectIndex",
             "EofRelocationUnderflow",

@@ -243,6 +243,11 @@ def test_migration_shape_ignores_only_the_allowed_variant_changes(variant, expec
     ("variant", "expected"),
     [
         ("ConflictingDatasetStorage", []),
+        ("DatasetDimensionUnlimited", []),
+        ("DatasetMissingDatatype", []),
+        ("DatasetProvenanceRequiresData", []),
+        ("DatasetRankUnsupported", []),
+        ("DatasetSizeOverflow", []),
         ("EofRelocationUnderflow", []),
         ("InvalidAttributeName", []),
         ("InvalidDeflateLevel", []),

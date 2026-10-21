@@ -94,6 +94,7 @@ mod superblock_status_flags;
 mod swmr_concurrent;
 mod sync_policy;
 mod typed_whole_read;
+mod unallocated_datasets;
 mod userblock_dense_attrs;
 mod vlen_strings;
 mod write_read_roundtrip;
