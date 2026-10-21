@@ -97,16 +97,20 @@ fn read_decoded_chunk(
     Ok(decode_chunk(scratch, Cow::Owned(raw_chunk), pipeline, ctx, filtering)?.into_owned())
 }
 
-/// Runs the inverse filter pipeline over a chunk's stored bytes, and passes
-/// them through where `filtering` is [`ChunkFiltering::Raw`] or the dataset has
-/// no pipeline.
+/// Decodes one stored chunk to its full logical byte size.
+///
+/// The required length is the product of the chunk dimensions and element size, including the
+/// portion of an edge chunk outside the dataset extent. Runs the complete inverse pipeline
+/// before comparing the decoded length. For raw chunks and datasets without a pipeline,
+/// preserves the ownership of `stored`.
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::UnsupportedFilter`] where the pipeline lists a filter
-/// this crate does not implement, [`FormatError::DataSizeMismatch`] where a
-/// chunk decodes to a length other than the chunk size, and the error a filter
-/// reports for stored bytes it rejects.
+/// Returns [`FormatError::DataSizeMismatch`] if the decoded length differs from the full chunk
+/// size, [`FormatError::InvalidChunkGeometry`] if that size exceeds
+/// [`MAX_CHUNK_ALLOCATION_BYTES`] or its calculation overflows [`u64`], and
+/// [`FormatError::ValueTooLargeForPlatform`] if the element size or chunk byte count exceeds
+/// [`usize::MAX`]. Returns the errors of [`filters::decompress_chunk_with`] for active filters.
 fn decode_chunk<'a>(
     scratch: &mut FilterScratch,
     stored: Cow<'a, [u8]>,
@@ -114,16 +118,20 @@ fn decode_chunk<'a>(
     ctx: ChunkContext<'_>,
     filtering: ChunkFiltering,
 ) -> Result<Cow<'a, [u8]>, FormatError> {
-    let (Some(pipeline), ChunkFiltering::Filtered { filter_mask }) = (pipeline, filtering) else {
-        return Ok(stored);
+    let expected = bounded_chunk_len(ctx.chunk_dims, ctx.element_size.narrow()?)?;
+    let decoded = match (pipeline, filtering) {
+        (Some(pipeline), ChunkFiltering::Filtered { filter_mask }) => Cow::Owned(
+            filters::decompress_chunk_with(scratch, &stored, pipeline, ctx, filter_mask)?,
+        ),
+        _ => stored,
     };
-    Ok(Cow::Owned(filters::decompress_chunk_with(
-        scratch,
-        &stored,
-        pipeline,
-        ctx,
-        filter_mask,
-    )?))
+    if decoded.len() != expected {
+        return Err(FormatError::DataSizeMismatch {
+            expected,
+            actual: decoded.len(),
+        });
+    }
+    Ok(decoded)
 }
 
 /// How a chunk's bytes are stored, which decides whether a read runs the
@@ -531,7 +539,8 @@ const MAX_CHUNK_ALLOCATION_BYTES: u64 = u32::MAX as u64;
 /// # Errors
 ///
 /// Returns [`FormatError::InvalidChunkGeometry`] if the size exceeds
-/// [`MAX_CHUNK_ALLOCATION_BYTES`] or its calculation overflows [`u64`].
+/// [`MAX_CHUNK_ALLOCATION_BYTES`] or its calculation overflows [`u64`]. Returns
+/// [`FormatError::ValueTooLargeForPlatform`] if the byte count exceeds [`usize::MAX`].
 fn bounded_chunk_len(chunk_dims: &[u64], elem_size: NonZeroUsize) -> Result<usize, FormatError> {
     let logical = chunk_dims
         .iter()
@@ -553,7 +562,8 @@ fn bounded_chunk_len(chunk_dims: &[u64], elem_size: NonZeroUsize) -> Result<usiz
 ///
 /// Returns [`FormatError::ValueTooLargeForPlatform`] if the output byte length or a required
 /// buffer index exceeds [`usize::MAX`], and errors from reading the datatype, fill value,
-/// chunk geometry, index, or payloads.
+/// chunk geometry, index, or payloads. Returns [`FormatError::DataSizeMismatch`] if a present
+/// chunk decodes to a byte length other than its full logical size.
 pub fn read_chunked_data_from_source<S: Source + ?Sized>(
     source: &S,
     spec: RawReadSpec<'_>,
@@ -573,8 +583,6 @@ pub fn read_chunked_data_from_source<S: Source + ?Sized>(
         ds_dims,
         chunk_dims_u64,
         elem_size,
-        #[cfg(feature = "std")]
-            chunk_len: _,
         chunks,
     }) = ChunkedPlan::new(source, spec, widths)?
     else {
@@ -617,9 +625,6 @@ struct ChunkedPlan<'a> {
     /// The chunk dimensions at file width, excluding the trailing element-size dimension.
     chunk_dims_u64: &'a [u64],
     elem_size: NonZeroUsize,
-    /// The size in bytes of a decoded chunk.
-    #[cfg(feature = "std")]
-    chunk_len: usize,
     chunks: Vec<ChunkInfo>,
 }
 
@@ -654,14 +659,7 @@ impl<'a> ChunkedPlan<'a> {
         }
         let elem_size = crate::datatype::element_size_usize(spec.datatype())?;
         let (rank, chunk_dims, ds_dims) = chunked_dims(chunk_dimensions, spec.dataspace())?;
-        #[cfg_attr(
-            not(feature = "std"),
-            expect(
-                unused_variables,
-                reason = "only the std-only chunk visitor reads the chunk length"
-            )
-        )]
-        let chunk_len = bounded_chunk_len(chunk_dims, elem_size)?;
+        bounded_chunk_len(chunk_dims, elem_size)?;
         let chunks = collect_chunks_for_layout_from_source(
             source,
             index,
@@ -679,8 +677,6 @@ impl<'a> ChunkedPlan<'a> {
             ds_dims,
             chunk_dims_u64,
             elem_size,
-            #[cfg(feature = "std")]
-            chunk_len,
             chunks,
         }))
     }
@@ -756,7 +752,9 @@ fn plan_chunk_spans(
 /// the reader's allocation limit, and [`FormatError::OffsetOverflow`] if output byte counts
 /// or strides overflow. Returns [`FormatError::ValueTooLargeForPlatform`] if a required buffer
 /// size, dimension, or buffer index exceeds [`usize::MAX`], and errors from reading
-/// the datatype, fill value, chunk index, or chunk payloads.
+/// the datatype, fill value, chunk index, or chunk payloads. Returns
+/// [`FormatError::DataSizeMismatch`] if a present chunk decodes to a byte length other than its
+/// full logical size.
 #[cfg(test)]
 pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
     source: &S,
@@ -785,7 +783,9 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
 /// differs from the dataspace rank, and [`FormatError::InvalidChunkGeometry`] if a decoded chunk
 /// exceeds the allocation limit. Returns [`FormatError::ValueTooLargeForPlatform`] if a buffer
 /// index exceeds [`usize::MAX`], and [`FormatError::OffsetOverflow`] if byte arithmetic overflows.
-/// Returns errors from reading the fill value, chunk index, filters, or payloads.
+/// Returns [`FormatError::DataSizeMismatch`] if a present chunk decodes to a byte length other
+/// than its full logical size, and errors from reading the fill value, chunk index, filters,
+/// or payloads.
 pub(crate) fn read_chunked_region_from_source(
     source: &(impl Source + ?Sized),
     region: &ReadRegion<'_>,
@@ -1127,7 +1127,8 @@ fn row_major_strides(dims: &[usize]) -> Result<Vec<usize>, FormatError> {
 ///
 /// Returns [`FormatError::ValueTooLargeForPlatform`] if the output byte length or a required
 /// buffer index exceeds [`usize::MAX`], and errors from reading the datatype, fill value,
-/// chunk geometry, index, or payloads.
+/// chunk geometry, index, or payloads. Returns [`FormatError::DataSizeMismatch`] if a present
+/// chunk decodes to a byte length other than its full logical size.
 pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
     source: &S,
     spec: RawReadSpec<'_>,
@@ -1553,7 +1554,6 @@ pub(crate) fn visit_decoded_chunks_from_source(
     let Some(ChunkedPlan {
         flags,
         chunk_dims_u64,
-        chunk_len,
         mut chunks,
         ..
     }) = ChunkedPlan::new(source, spec, widths)?
@@ -1573,17 +1573,7 @@ pub(crate) fn visit_decoded_chunks_from_source(
             spec.pipeline(),
             ctx,
             chunk,
-        )
-        .and_then(|decoded| {
-            if decoded.len() == chunk_len {
-                Ok(decoded)
-            } else {
-                Err(FormatError::DataSizeMismatch {
-                    expected: chunk_len,
-                    actual: decoded.len(),
-                })
-            }
-        });
+        );
         visit(decoded.as_deref())?;
     }
     Ok(())
@@ -1891,7 +1881,8 @@ fn assemble_chunks(
 ///
 /// Returns [`FormatError::ValueTooLargeForPlatform`] if the output byte length or a required
 /// buffer index exceeds [`usize::MAX`], and errors from reading the datatype, fill value,
-/// chunk geometry, index, or payloads.
+/// chunk geometry, index, or payloads. Returns [`FormatError::DataSizeMismatch`] if a present
+/// chunk decodes to a byte length other than its full logical size.
 pub fn read_chunked_data_cached(
     file_data: &[u8],
     spec: RawReadSpec<'_>,
@@ -2234,6 +2225,8 @@ mod tests {
     #[cfg(feature = "std")]
     use std::io::Cursor;
 
+    #[cfg(feature = "std")]
+    use hdf5_pure_format::__private::FilteredSingleChunk;
     use rstest::rstest;
     use test_util::btree_v1;
     use test_util::btree_v2;
@@ -2245,6 +2238,7 @@ mod tests {
     use crate::chunked_write::ChunkArrayKind;
     use crate::convert;
     use crate::dataspace::MaxExtent;
+    use crate::filter_pipeline::FilterDescription;
     #[cfg(feature = "std")]
     use crate::source::ReadSeekSource;
 
@@ -2252,6 +2246,132 @@ mod tests {
         offsets: OffsetWidth::Eight,
         lengths: crate::width::LengthWidth::Eight,
     };
+
+    #[rstest]
+    #[case::identity(false, ChunkFiltering::Filtered { filter_mask: 0 })]
+    #[case::raw_edge(true, ChunkFiltering::Raw)]
+    #[case::skipped(true, ChunkFiltering::Filtered { filter_mask: FIRST_FILTER_MASK })]
+    #[case::filtered(true, ChunkFiltering::Filtered { filter_mask: 0 })]
+    fn short_and_oversized_chunks_return_size_mismatches(
+        #[case] pipeline: bool,
+        #[case] filtering: ChunkFiltering,
+        #[values(4, 12)] stored_len: usize,
+    ) {
+        let pipeline = pipeline.then(shuffle_pipeline);
+        let stored = vec![7; stored_len];
+        assert_eq!(
+            decode_chunk(
+                &mut FilterScratch::new(),
+                Cow::Borrowed(&stored),
+                pipeline.as_ref(),
+                ChunkContext::basic(&[2], 4),
+                filtering,
+            )
+            .unwrap_err(),
+            FormatError::DataSizeMismatch {
+                expected: 8,
+                actual: stored_len
+            }
+        );
+    }
+
+    #[rstest]
+    #[case(false)]
+    #[case(true)]
+    fn complete_identity_chunks_remain_borrowed(#[case] pipeline: bool) {
+        let pipeline = pipeline.then(shuffle_pipeline);
+        let stored = [7; 8];
+        let decoded = decode_chunk(
+            &mut FilterScratch::new(),
+            Cow::Borrowed(&stored),
+            pipeline.as_ref(),
+            ChunkContext::basic(&[2], 4),
+            ChunkFiltering::Raw,
+        )
+        .unwrap();
+        let Cow::Borrowed(bytes) = decoded else {
+            panic!("expected borrowed chunk bytes, got {decoded:?}");
+        };
+        assert_eq!(bytes, stored);
+        assert_eq!(bytes.as_ptr(), stored.as_ptr());
+    }
+
+    #[cfg(feature = "std")]
+    #[rstest]
+    fn malformed_chunks_fail_uncached_reads_and_visitors(
+        #[values(4, 12)] stored_len: usize,
+        #[values(false, true)] raw_edge: bool,
+    ) {
+        let bytes = vec![7; stored_len];
+        let flags = hdf5_pure_format::__private::SINGLE_INDEX_WITH_FILTER
+            | if raw_edge {
+                crate::data_layout::DONT_FILTER_PARTIAL_BOUND_CHUNKS
+            } else {
+                0
+            };
+        let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::new(flags),
+            chunk_dimensions: vec![2, 4],
+            index: ChunkIndexLayout::SingleChunk {
+                filtered: Some(FilteredSingleChunk {
+                    filtered_size: u64::try_from(stored_len).unwrap(),
+                    filter_mask: 0,
+                }),
+                address: Some(StoredAddress::new(0)),
+            },
+        };
+        let dataspace = Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: 1,
+            dimensions: vec![if raw_edge { 1 } else { 2 }],
+            max_dimensions: None,
+        };
+        let datatype = crate::type_builders::make_i32_type();
+        let pipeline = shuffle_pipeline();
+        let spec = RawReadSpec::parse(
+            &layout,
+            &dataspace,
+            &datatype,
+            Some(&pipeline),
+            FillPattern::ZERO,
+        )
+        .unwrap();
+        let source = BytesSource::new(&bytes);
+        let expected = FormatError::DataSizeMismatch {
+            expected: 8,
+            actual: stored_len,
+        };
+        assert_eq!(
+            read_chunked_data_from_source(&source, spec, FORMAT_WIDTHS).unwrap_err(),
+            expected
+        );
+        let cache = ChunkCache::new();
+        assert_eq!(
+            read_chunked_data_cached_from_source(&source, spec, FORMAT_WIDTHS, &cache).unwrap_err(),
+            expected
+        );
+        assert_eq!(cache.stats().cached_chunks(), 0);
+        let mut visits = 0;
+        visit_decoded_chunks_from_source(&source, spec, FORMAT_WIDTHS, |decoded| {
+            assert_eq!(decoded.unwrap_err(), &expected);
+            visits += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(visits, 1);
+    }
+
+    fn shuffle_pipeline() -> FilterPipeline {
+        FilterPipeline {
+            version: FILTER_PIPELINE_VERSION,
+            filters: vec![FilterDescription {
+                filter_id: crate::filter_pipeline::FILTER_SHUFFLE,
+                name: None,
+                flags: 0,
+                client_data: vec![4],
+            }],
+        }
+    }
 
     #[test]
     fn chunk_bytes_within_limit_are_accepted() {
@@ -4653,5 +4773,11 @@ mod tests {
         );
     }
 
+    // "The Data Storage - Filter Pipeline Message" in format specification, version 4.0,
+    // defines pipeline message version 2.
+    const FILTER_PIPELINE_VERSION: u8 = 2;
+    // "Version 1 B-trees" in format specification, version 4.0, defines the filter mask
+    // of a raw data chunk key, with one bit per pipeline entry, starting at bit zero.
+    const FIRST_FILTER_MASK: u32 = 1;
     const WIDTHS: Widths = Widths::EIGHT;
 }
