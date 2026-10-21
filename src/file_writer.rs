@@ -9,6 +9,8 @@ use core::num::NonZeroUsize;
 use alloc::{string::String, string::ToString, vec, vec::Vec};
 
 #[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
+#[cfg(not(feature = "std"))]
 use alloc::format;
 
 #[cfg(not(feature = "std"))]
@@ -81,6 +83,8 @@ use crate::message_type::MessageType;
 use crate::object_header_writer::ObjectHeaderWriter;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::shared_message::DatatypeLocation;
+use crate::type_builders::ProducedPayload;
+use crate::type_builders::RawChunkPayload;
 use crate::type_builders::{
     self, AttrSpec, AttributeSpecs, CommittedDatatype, DatasetBuilder, FinishedGroup, GroupBuilder,
     VlStringStaging,
@@ -1578,19 +1582,16 @@ impl FileWriter {
             /// holds the undefined address until the writer places that datatype.
             committed_datatype_path: Option<ObjectPathBuf>,
             ds: Dataspace,
-            raw: Vec<u8>,
+            storage: PreparedStorage,
             attrs: Vec<AttributeMessage>,
             /// The committed datatype path of each attribute, parallel to `attrs`.
             attr_committed_datatype_paths: Vec<Option<ObjectPathBuf>>,
             chunk_options: ChunkOptions,
             maxshape: Option<Vec<MaxExtent>>,
-            /// Repack's verbatim chunk payload, when this dataset's chunks are
-            /// copied compressed-as-is rather than encoded from `raw`.
-            raw_chunks: Option<crate::type_builders::RawChunkPayload>,
             reference_targets: Option<Vec<crate::type_builders::ObjectRefPatch>>,
-            /// Staged global heap collections + patch mask for a VL-string
-            /// dataset, whose element references in `raw` need their heap
-            /// addresses patched once the post-data cursor is known.
+            /// Global heap collections and patch offsets for variable-length strings whose
+            /// element bytes are held in `storage`. The writer patches their heap addresses
+            /// after placing the collections.
             vl_string_staging: Option<VlStringStaging>,
             /// A user-defined fill value, encoded in the dataset's datatype, or
             /// `None` for the library default. Validated against the datatype
@@ -1598,15 +1599,6 @@ impl FileWriter {
             fill: Option<Vec<u8>>,
             /// The fill time policy for the dataset.
             fill_time: FillTime,
-            /// When set, this contiguous dataset's element bytes are produced at
-            /// write time rather than held in `raw`, which stays empty.
-            produced: Option<crate::type_builders::ProducedPayload>,
-            /// Whether this dataset allocates storage at all. An unallocated one
-            /// declares its shape and stores nothing. `raw_chunks` and `produced`
-            /// also leave `raw` empty over a non-empty dataspace, but each still
-            /// has a data region and fills it during emission; this one has no
-            /// region to fill.
-            allocation: StorageAllocation,
             /// The byte length this dataset's contiguous data-layout message
             /// records — the region it holds, or the extent an unallocated one
             /// would occupy (issue #293). Derived in `flatten_dataset` so the
@@ -1621,9 +1613,9 @@ impl FileWriter {
             /// data has none in hand, but its total is known from the geometry —
             /// which is the whole reason it can be laid out without being read.
             fn contiguous_len(&self) -> u64 {
-                match &self.produced {
+                match self.storage.produced() {
                     Some(p) => p.total_bytes,
-                    None => self.raw.len() as u64,
+                    None => self.storage.raw().len() as u64,
                 }
             }
 
@@ -1632,27 +1624,23 @@ impl FileWriter {
             /// way a verbatim chunked one does: the emitter reaches for it there,
             /// and the region is described twice (sizing, then placement).
             fn take_contiguous(&mut self) -> DsData {
-                match &self.produced {
+                match self.storage.produced() {
                     Some(p) => DsData::Produced {
                         total_bytes: p.total_bytes,
                         block_bytes: p.block_bytes,
                     },
-                    None => DsData::InMemory(core::mem::take(&mut self.raw)),
+                    None => DsData::InMemory(self.storage.take_raw()),
                 }
             }
         }
 
-        /// One dataset's data region for the assembly pass: either materialized
-        /// in memory, or a plan whose chunk bytes are streamed from a provider.
+        /// A dataset's data region, held in memory or read from a provider during emission.
         enum DsData {
             InMemory(Vec<u8>),
-            /// A verbatim chunked dataset streamed one chunk at a time; the
-            /// provider lives in the matching `DsFlat.raw_chunks` (`Lazy`).
+            /// A verbatim chunk plan whose provider is held in the dataset's prepared storage.
             Streamed(VerbatimPlan),
-            /// A contiguous dataset whose element bytes are produced at write
-            /// time, block by block; the producer lives in the matching
-            /// `DsFlat.produced`. The region is a plain run of `total_bytes`, so
-            /// it is laid out exactly as if the bytes had been handed over.
+            /// A contiguous region written block by block from the provider held in the
+            /// dataset's prepared storage.
             Produced {
                 /// Bytes the whole region occupies.
                 total_bytes: u64,
@@ -1667,6 +1655,52 @@ impl FileWriter {
                 match self {
                     DsData::InMemory(bytes) => Some(bytes),
                     DsData::Streamed(_) | DsData::Produced { .. } => None,
+                }
+            }
+
+            /// Writes a dataset's element bytes directly or reads them from its provider
+            /// one chunk or block at a time.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`FormatError::Internal`] if a streamed or produced region is paired
+            /// with prepared storage of another kind. Propagates provider and sink errors.
+            fn emit(
+                &self,
+                sink: &mut impl ByteSink,
+                storage: &PreparedStorage,
+            ) -> Result<(), FormatError> {
+                match self {
+                    DsData::InMemory(bytes) => sink.put(bytes),
+                    DsData::Streamed(plan) => {
+                        let provider = storage
+                            .chunks()
+                            .ok_or_else(|| {
+                                FormatError::Internal(
+                                    "a streamed region requires prepared chunk storage".into(),
+                                )
+                            })?
+                            .provider
+                            .0
+                            .as_ref();
+                        chunked_write::emit_chunked_data_verbatim(sink, plan, provider)
+                    }
+                    DsData::Produced {
+                        total_bytes,
+                        block_bytes,
+                    } => {
+                        let payload = storage.produced().ok_or_else(|| {
+                            FormatError::Internal(
+                                "a produced region requires a prepared producer".into(),
+                            )
+                        })?;
+                        emit_produced_data(
+                            sink,
+                            payload.provider.0.as_ref(),
+                            *total_bytes,
+                            *block_bytes,
+                        )
+                    }
                 }
             }
 
@@ -1693,41 +1727,6 @@ impl FileWriter {
                 "the element bytes of variable-length dataset {link_name:?} are not held in \
                  memory, so its global heap references cannot be patched"
             ))
-        }
-
-        /// Emit one dataset's data region: in-memory bytes directly, or a
-        /// streamed verbatim plan pulled from its raw-chunk provider one chunk at
-        /// a time (so a streamed dataset's bytes never all reside in memory).
-        fn emit_ds_data<Sk: ByteSink>(
-            sink: &mut Sk,
-            data: &DsData,
-            raw_chunks: Option<&crate::type_builders::RawChunkPayload>,
-            produced: Option<&crate::type_builders::ProducedPayload>,
-        ) -> Result<(), FormatError> {
-            match data {
-                DsData::InMemory(bytes) => sink.put(bytes),
-                DsData::Streamed(plan) => {
-                    let provider = raw_chunks
-                        .expect("a streamed data region implies a raw-chunk payload")
-                        .provider
-                        .0
-                        .as_ref();
-                    chunked_write::emit_chunked_data_verbatim(sink, plan, provider)
-                }
-                DsData::Produced {
-                    total_bytes,
-                    block_bytes,
-                } => {
-                    let payload =
-                        produced.expect("a produced data region implies a produced payload");
-                    emit_produced_data(
-                        sink,
-                        payload.provider.0.as_ref(),
-                        *total_bytes,
-                        *block_bytes,
-                    )
-                }
-            }
         }
 
         /// Emit a contiguous produced region: pull each block from `provider` and
@@ -1793,7 +1792,7 @@ impl FileWriter {
             data_address: StoredAddress,
             chunk_set: Option<&CompressedChunkSet>,
         ) -> Result<ChunkedMeasure, FormatError> {
-            if let Some(rc) = &d.raw_chunks {
+            if let Some(rc) = d.storage.chunks() {
                 let VerbatimLayout {
                     plan,
                     layout_message,
@@ -1837,7 +1836,7 @@ impl FileWriter {
             data_address: StoredAddress,
             chunk_set: Option<&CompressedChunkSet>,
         ) -> Result<ChunkedBuilt, FormatError> {
-            if let Some(rc) = &d.raw_chunks {
+            if let Some(rc) = d.storage.chunks() {
                 // Verbatim chunks are always streamed: the layout is planned from
                 // chunk sizes alone, and the bytes are pulled from the provider in
                 // the assembly loop (buffered `finish` and streaming `finish_to`
@@ -1906,42 +1905,31 @@ impl FileWriter {
             all_ds: &mut Vec<DsFlat>,
             ds_vl: &mut Vec<Vec<VlPatch>>,
         ) -> Result<usize, FormatError> {
-            let data = db.data.transpose().map_err(|error| *error)?;
-            let name = link_name(db.name)?;
-            let dt = db.datatype.ok_or(FormatError::DatasetMissingData)?;
-            let shape = db.shape.ok_or(FormatError::DatasetMissingShape)?;
-            // A verbatim-chunk dataset (repack) owns no flat `raw` element bytes;
-            // its storage is the pre-compressed chunks in `raw_chunks`. Skip the
-            // flat-data requirement and the shape/data-length check for it.
-            let raw_chunks = db.raw_chunks;
-            // A produced dataset owns no flat bytes either: its region is a run
-            // of `total_bytes` filled by its provider during emission.
-            let produced = db.produced;
-            // And an unallocated one owns none because it stores nothing at all.
-            // The two above leave `raw` empty as well; the difference is that
-            // each of them still has a data region, filled during emission,
-            // where this one has none (issue #293).
-            let allocation = db.allocation;
-            let unallocated = allocation == StorageAllocation::Unallocated;
-            // Staging bytes for a dataset that stores nothing is a contradiction,
-            // and it is the builder's to prevent rather than this function's to
-            // resolve: whichever half were honored, the other would be dropped
-            // without a word. Asserted rather than refused because
-            // `with_unallocated_storage` is crate-internal and its one caller
-            // stages nothing — a caller could not construct this, only a change
-            // here could, and every test run is a debug build.
-            debug_assert!(
-                !(unallocated && (data.is_some() || produced.is_some() || raw_chunks.is_some())),
-                "dataset {:?} declares unallocated storage and stages data for it",
-                name.as_str(),
-            );
-            // Allow empty data for zero-element datasets (e.g. shape [0, 0]).
-            let is_empty = shape.contains(&0);
-            let raw = if is_empty || unallocated || raw_chunks.is_some() || produced.is_some() {
-                data.unwrap_or_default()
-            } else {
-                data.ok_or(FormatError::DatasetMissingData)?
-            };
+            let DatasetBuilder {
+                name,
+                datatype,
+                shape,
+                maxshape,
+                data,
+                attrs: attribute_specs,
+                chunk_options,
+                raw_chunks,
+                produced,
+                reference_targets,
+                vl_string_staging,
+                fill,
+                fill_time,
+                allocation,
+                committed_datatype_path,
+                #[cfg(feature = "provenance")]
+                provenance,
+            } = db;
+            let name = link_name(name)?;
+            let dt = datatype.ok_or(FormatError::DatasetMissingData)?;
+            let shape = shape.ok_or(FormatError::DatasetMissingShape)?;
+            let storage =
+                PreparedStorage::parse(data, raw_chunks, produced, allocation, shape.contains(&0))?;
+            let unallocated = storage.allocation() == StorageAllocation::Unallocated;
             // A zero-byte element type is refused before it reaches a layout
             // decision: the chunk splitter clamps a row copy to an element
             // boundary with `% element_size` and would divide by zero, and a
@@ -1975,9 +1963,9 @@ impl FileWriter {
             // measured by the same rule as a materialized one — its size is
             // declared rather than counted, and a declaration that disagrees with
             // the shape would produce a file the reader refuses.
-            let region_len = produced
-                .as_ref()
-                .map_or(raw.len() as u64, |p| p.total_bytes);
+            let region_len = storage
+                .produced()
+                .map_or(storage.raw().len() as u64, |p| p.total_bytes);
             // What a contiguous data-layout message records for this dataset: the
             // region it actually holds, or — for a dataset that allocates no
             // storage at all — the extent it *would* occupy beside the undefined
@@ -1989,29 +1977,10 @@ impl FileWriter {
             // the contiguous layout message; a chunked dataset describes its
             // storage in its index instead.
             let declared_contiguous_len = if unallocated { extent } else { region_len };
-            // Guard against a shape that disagrees with the supplied data:
-            // without this, a mismatch (data for 3 elements with shape `[2, 2]`)
-            // would produce a file that fails to read back. A zero-element shape
-            // is held to that rule rather than exempted from it (issue #332): its
-            // extent is 0, so bytes staged beside it disagree with it like any
-            // other mismatch, and exempting them wrote a file the reference
-            // library refuses to open — twelve bytes of elements at a defined
-            // address under a dataspace declaring none, which our own reader
-            // answers `Ok([])` for without ever looking at the region. A chunked
-            // dataset of that shape had the milder version of the same fault: an
-            // empty chunk grid, so the staged bytes went nowhere and the caller
-            // was told `Ok`. The in-place writer refuses both already
-            // (`edit::flatten_dataset`, which shares this function's name and
-            // holds the same invariant with its own error type), and this is the
-            // same refusal on the whole-file path.
-            //
-            // Staging *no* data for a zero-element shape stays legal, which is
-            // what the `is_empty` bypass above is for: `region_len` and `extent`
-            // are both 0 there, so this comparison passes. A verbatim-chunk
-            // dataset has no flat region to compare, and an unallocated one
-            // stages no bytes to disagree with its shape — the whole point is
-            // that the two do not have to match.
-            if !unallocated && raw_chunks.is_none() && region_len != extent {
+            // Compare the shape's byte extent with the supplied or produced bytes, including
+            // zero-element shapes. Verbatim chunks have no flat region to compare, and
+            // unallocated storage has no element payload.
+            if !unallocated && storage.chunks().is_none() && region_len != extent {
                 return Err(FormatError::LogicalShapeDataMismatch {
                     expected: extent,
                     actual: region_len,
@@ -2023,9 +1992,9 @@ impl FileWriter {
             // wrong rank, a zero chunk dimension, a bad maximum shape, or
             // chunking a scalar) is refused here instead of panicking in the
             // chunk splitter or producing an unreadable dataset.
-            if db.chunk_options.is_chunked() || db.maxshape.is_some() {
-                Extent::new(&shape, db.maxshape.as_deref())
-                    .and_then(|geometry| db.chunk_options.validate_geometry(geometry))
+            if chunk_options.is_chunked() || maxshape.is_some() {
+                Extent::new(&shape, maxshape.as_deref())
+                    .and_then(|geometry| chunk_options.validate_geometry(geometry))
                     .map_err(FormatError::InvalidChunkGeometry)?;
             }
             // Variable-length string element references live in the global heap.
@@ -2036,7 +2005,7 @@ impl FileWriter {
             // *ahead* of everything else, at a fixed address known before any
             // chunk is encoded — see the early-placement block in
             // `finish_to_sink` that fills `early_gcol`. Nothing is refused here.
-            let max_dimensions = db.maxshape.clone();
+            let max_dimensions = maxshape.clone();
             let dspace = Dataspace {
                 space_type: if shape.is_empty() {
                     DataspaceType::Scalar
@@ -2054,23 +2023,23 @@ impl FileWriter {
             };
             let mut attrs = Vec::new();
             let mut attr_committed_datatype_paths = Vec::new();
-            for (n, v) in &db.attrs {
+            for (n, v) in &attribute_specs {
                 attrs.push(AttributeName::try_from(n.as_str())?.to_message(v)?);
                 attr_committed_datatype_paths.push(v.committed_datatype_path().cloned());
             }
-            let patches = collect_vl_patches(&db.attrs);
+            let patches = collect_vl_patches(&attribute_specs);
             #[cfg(feature = "provenance")]
-            if let Some(ref prov) = db.provenance {
+            if let Some(ref prov) = provenance {
                 let p = crate::provenance::Provenance {
                     creator: prov.creator.clone(),
                     timestamp: prov.timestamp.clone(),
                     source: prov.source.clone(),
                 };
-                attrs.extend(p.build_attrs(&raw));
+                attrs.extend(p.build_attrs(storage.raw()));
             }
             // A user-defined fill value is one element wide, so its byte length
             // must equal the datatype's element size.
-            if let Some(fill) = &db.fill {
+            if let Some(fill) = &fill {
                 if fill.len() != elem_size.get() {
                     return Err(FormatError::FillValueSizeMismatch {
                         expected: elem_size.get(),
@@ -2082,24 +2051,21 @@ impl FileWriter {
             all_ds.push(DsFlat {
                 name,
                 dt,
-                dt_location: match db.committed_datatype_path {
+                dt_location: match committed_datatype_path {
                     Some(_) => DatatypeLocation::Committed(UNDEF_ADDRESS),
                     None => DatatypeLocation::Inline,
                 },
-                committed_datatype_path: db.committed_datatype_path,
+                committed_datatype_path,
                 ds: dspace,
-                raw,
+                storage,
                 attrs,
                 attr_committed_datatype_paths,
-                chunk_options: db.chunk_options,
-                maxshape: db.maxshape,
-                raw_chunks,
-                produced,
-                reference_targets: db.reference_targets,
-                vl_string_staging: db.vl_string_staging,
-                fill: db.fill,
-                fill_time: db.fill_time.unwrap_or_default(),
-                allocation,
+                chunk_options,
+                maxshape,
+                reference_targets,
+                vl_string_staging,
+                fill,
+                fill_time: fill_time.unwrap_or_default(),
                 declared_contiguous_len,
             });
             ds_vl.push(patches);
@@ -2502,7 +2468,9 @@ impl FileWriter {
 
         let is_chunked: Vec<bool> = all_ds
             .iter()
-            .map(|d| d.chunk_options.is_chunked() || d.maxshape.is_some() || d.raw_chunks.is_some())
+            .map(|d| {
+                d.chunk_options.is_chunked() || d.maxshape.is_some() || d.storage.chunks().is_some()
+            })
             .collect();
 
         // Chunked storage here means a version 4 data-layout message and one of
@@ -2542,7 +2510,7 @@ impl FileWriter {
                     .flatten()
                     .any(|patch| !patch.collections.is_empty())
                 || all_ds.iter().any(|dataset| {
-                    dataset.raw_chunks.is_none()
+                    dataset.storage.chunks().is_none()
                         && dataset
                             .vl_string_staging
                             .as_ref()
@@ -2616,13 +2584,13 @@ impl FileWriter {
                 }
             }
             for (i, dataset) in all_ds.iter_mut().enumerate() {
-                if dataset.raw_chunks.is_some() {
+                if dataset.storage.chunks().is_some() {
                     continue;
                 }
                 if let Some(staging) = &dataset.vl_string_staging {
                     let addrs = place(&staging.collections)?;
                     type_builders::patch_vl_refs_masked(
-                        &mut dataset.raw,
+                        dataset.storage.raw_mut()?,
                         &staging.patch_offsets,
                         &addrs,
                     );
@@ -2632,7 +2600,7 @@ impl FileWriter {
             cursor - SUPERBLOCK_SIZE as u64
         } else {
             for i in 0..all_ds.len() {
-                if !is_chunked[i] || all_ds[i].raw_chunks.is_some() {
+                if !is_chunked[i] || all_ds[i].storage.chunks().is_some() {
                     continue;
                 }
                 let Some(staging) = all_ds[i].vl_string_staging.take() else {
@@ -2645,7 +2613,7 @@ impl FileWriter {
                     aggregated,
                 )?;
                 type_builders::patch_vl_refs_masked(
-                    &mut all_ds[i].raw,
+                    all_ds[i].storage.raw_mut()?,
                     &staging.patch_offsets,
                     &addrs,
                 );
@@ -2667,7 +2635,7 @@ impl FileWriter {
             .iter()
             .enumerate()
             .map(|(i, d)| {
-                if is_chunked[i] && d.raw_chunks.is_none() {
+                if is_chunked[i] && d.storage.chunks().is_none() {
                     let chunk_dims = d.chunk_options.resolve_chunk_dims(&d.ds.dimensions);
                     let ctx = crate::filters::ChunkContext::from_datatype(&chunk_dims, &d.dt)?;
                     // An allocated chunk holds the dataset's fill value
@@ -2676,13 +2644,13 @@ impl FileWriter {
                     let elem = ctx.element_size.narrow::<NonZeroUsize>()?;
                     let fill = FillPattern::new(d.fill_time, d.fill.as_deref(), elem);
                     Ok(Some(chunked_write::compress_chunks(
-                        &d.raw,
+                        d.storage.raw(),
                         &d.ds.dimensions,
                         ctx,
                         &d.chunk_options,
                         d.maxshape.as_deref(),
                         fill,
-                        d.allocation,
+                        d.storage.allocation(),
                     )?))
                 } else {
                     Ok(None)
@@ -3054,7 +3022,11 @@ impl FileWriter {
                         }
                         crate::type_builders::ObjectRefTarget::Raw(addr) => *addr,
                     };
-                    type_builders::write_reference_address(&mut d.raw, patch.byte_offset, addr);
+                    type_builders::write_reference_address(
+                        d.storage.raw_mut()?,
+                        patch.byte_offset,
+                        addr,
+                    );
                 }
             }
         }
@@ -3288,7 +3260,7 @@ impl FileWriter {
             // run and its sub-page remainder becomes a generic-large section.
             let mut layouts: Vec<Option<DsLayout>> = (0..all_ds.len()).map(|_| None).collect();
             for &i in &empty_indices {
-                let raw = core::mem::take(&mut all_ds[i].raw);
+                let raw = all_ds[i].storage.take_raw();
                 layouts[i] = Some(DsLayout {
                     data: DsData::InMemory(raw),
                     data_addr: UNDEF_ADDRESS,
@@ -3571,12 +3543,7 @@ impl FileWriter {
             for &i in &small_indices {
                 let at = base.absolute(ds_layouts[i].data_addr)?;
                 debug_assert_eq!(sink.position(), at);
-                emit_ds_data(
-                    sink,
-                    &ds_layouts[i].data,
-                    all_ds[i].raw_chunks.as_ref(),
-                    all_ds[i].produced.as_ref(),
-                )?;
+                ds_layouts[i].data.emit(sink, &all_ds[i].storage)?;
             }
             if small_raw_total > 0 {
                 sink.put_zeros(
@@ -3587,12 +3554,7 @@ impl FileWriter {
             for &i in &large_indices {
                 let gap = base.absolute(ds_layouts[i].data_addr)? - sink.position();
                 sink.put_zeros(gap.to_usize()?)?;
-                emit_ds_data(
-                    sink,
-                    &ds_layouts[i].data,
-                    all_ds[i].raw_chunks.as_ref(),
-                    all_ds[i].produced.as_ref(),
-                )?;
+                ds_layouts[i].data.emit(sink, &all_ds[i].storage)?;
                 let end_rel = base.relative(sink.position())?.get();
                 sink.put_zeros(
                     (free_space_manager::align_up(end_rel, page_size) - end_rel).to_usize()?,
@@ -3620,9 +3582,8 @@ impl FileWriter {
                     chunked_msgs: Some((built.layout_message, built.pipeline_message)),
                 });
             } else {
-                // `d.raw` is not read again for a contiguous/compact dataset, so
-                // move its element buffer into the layout rather than cloning it.
-                // A produced region leaves its provider behind for the emitter.
+                // Move in-memory element bytes into the layout. Retain a produced region's
+                // provider in prepared storage for emission.
                 let data = d.take_contiguous();
                 let addr = if data.len() == 0 {
                     UNDEF_ADDRESS
@@ -4043,12 +4004,7 @@ impl FileWriter {
                 )?;
                 sink.put(&oh)
             }
-            FileData::Dataset(i) => emit_ds_data(
-                sink,
-                &ds_layouts[i].data,
-                all_ds[i].raw_chunks.as_ref(),
-                all_ds[i].produced.as_ref(),
-            ),
+            FileData::Dataset(i) => ds_layouts[i].data.emit(sink, &all_ds[i].storage),
         };
         if aggregated {
             let count = aggregate_collection_addresses.len()
@@ -4076,6 +4032,107 @@ impl FileWriter {
         }
 
         Ok(())
+    }
+}
+
+/// A dataset's single storage source after parsing its builder request.
+///
+/// An unallocated schema and a payload source are mutually exclusive. An empty dataset
+/// without an explicit storage request is represented by an empty in-memory buffer.
+enum PreparedStorage {
+    /// Encoded element bytes held in memory.
+    Bytes(Vec<u8>),
+    /// Encoded chunks read verbatim from a provider during emission.
+    Chunks(RawChunkPayload),
+    /// Contiguous element bytes read from a provider during emission.
+    Produced(ProducedPayload),
+    /// A schema without element storage.
+    Unallocated,
+}
+
+impl PreparedStorage {
+    /// Parses a single storage source or an unallocated schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ConflictingDatasetStorage`] if more than one source is requested
+    /// or unallocated storage is paired with a payload. Returns
+    /// [`FormatError::DatasetMissingData`] if a nonempty allocated dataset has no source.
+    /// Propagates an error staged in `data`.
+    fn parse(
+        data: Option<Result<Vec<u8>, Box<FormatError>>>,
+        chunks: Option<RawChunkPayload>,
+        produced: Option<ProducedPayload>,
+        allocation: StorageAllocation,
+        empty: bool,
+    ) -> Result<Self, FormatError> {
+        let data = data.transpose().map_err(|error| *error)?;
+        match (allocation, data, chunks, produced) {
+            (StorageAllocation::Unallocated, None, None, None) => Ok(Self::Unallocated),
+            (StorageAllocation::Allocated, Some(bytes), None, None) => Ok(Self::Bytes(bytes)),
+            (StorageAllocation::Allocated, None, Some(chunks), None) => Ok(Self::Chunks(chunks)),
+            (StorageAllocation::Allocated, None, None, Some(produced)) => {
+                Ok(Self::Produced(produced))
+            }
+            (StorageAllocation::Allocated, None, None, None) if empty => {
+                Ok(Self::Bytes(Vec::new()))
+            }
+            (StorageAllocation::Allocated, None, None, None) => {
+                Err(FormatError::DatasetMissingData)
+            }
+            _ => Err(FormatError::ConflictingDatasetStorage),
+        }
+    }
+
+    /// Returns the in-memory element bytes for reference patching.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the dataset's storage is not an in-memory buffer.
+    fn raw_mut(&mut self) -> Result<&mut Vec<u8>, FormatError> {
+        match self {
+            Self::Bytes(bytes) => Ok(bytes),
+            Self::Chunks(_) | Self::Produced(_) | Self::Unallocated => Err(FormatError::Internal(
+                "element patching requires an in-memory dataset".into(),
+            )),
+        }
+    }
+
+    /// Removes the in-memory buffer, or returns an empty buffer for another storage kind.
+    fn take_raw(&mut self) -> Vec<u8> {
+        match self {
+            Self::Bytes(bytes) => core::mem::take(bytes),
+            Self::Chunks(_) | Self::Produced(_) | Self::Unallocated => Vec::new(),
+        }
+    }
+
+    /// Returns the in-memory element bytes, or an empty slice for another storage kind.
+    fn raw(&self) -> &[u8] {
+        match self {
+            Self::Bytes(bytes) => bytes,
+            Self::Chunks(_) | Self::Produced(_) | Self::Unallocated => &[],
+        }
+    }
+
+    fn chunks(&self) -> Option<&RawChunkPayload> {
+        match self {
+            Self::Chunks(chunks) => Some(chunks),
+            Self::Bytes(_) | Self::Produced(_) | Self::Unallocated => None,
+        }
+    }
+
+    fn produced(&self) -> Option<&ProducedPayload> {
+        match self {
+            Self::Produced(produced) => Some(produced),
+            Self::Bytes(_) | Self::Chunks(_) | Self::Unallocated => None,
+        }
+    }
+
+    fn allocation(&self) -> StorageAllocation {
+        match self {
+            Self::Unallocated => StorageAllocation::Unallocated,
+            Self::Bytes(_) | Self::Chunks(_) | Self::Produced(_) => StorageAllocation::Allocated,
+        }
     }
 }
 

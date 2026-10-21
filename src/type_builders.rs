@@ -2415,10 +2415,9 @@ pub struct DatasetBuilder {
     pub(crate) data: Option<Result<Vec<u8>, Box<FormatError>>>,
     pub(crate) attrs: AttributeSpecs,
     pub(crate) chunk_options: ChunkOptions,
-    /// When set, this dataset's chunks are copied verbatim from a source file
-    /// (repack's verbatim path): the already-compressed chunk bytes, the source
-    /// filter-pipeline message, and the geometry needed to lay them out. This
-    /// takes precedence over `data` / `chunk_options` for chunked storage.
+    /// Encoded chunks, their optional filter-pipeline message, and their geometry for verbatim
+    /// copying from a source file. The writer rejects a request that also stages element
+    /// bytes, a producer, or unallocated storage.
     pub(crate) raw_chunks: Option<RawChunkPayload>,
     /// When set, this dataset is contiguous and its element bytes are produced
     /// at write time rather than staged in `data`, which stays `None`.
