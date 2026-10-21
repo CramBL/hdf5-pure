@@ -66,6 +66,13 @@ pub enum FormatError {
         /// The checksum we computed.
         computed: u32,
     },
+    /// A chunked dataset's layout stores an element size other than the size of its datatype.
+    ChunkElementSizeMismatch {
+        /// The size of the datatype in bytes.
+        datatype: usize,
+        /// The element size the layout stores, in bytes.
+        layout: usize,
+    },
     /// Chunked dataset read error.
     ChunkedReadError(String),
     /// A dataset or attribute refers to a committed datatype whose encoding differs
@@ -1692,6 +1699,10 @@ impl fmt::Display for FormatError {
                     "checksum mismatch: expected {expected:#010x}, computed {computed:#010x}"
                 )
             }
+            Self::ChunkElementSizeMismatch { datatype, layout } => write!(
+                f,
+                "chunked layout stores a {layout}-byte element for a {datatype}-byte datatype"
+            ),
             Self::NestingDepthExceeded => {
                 write!(f, "maximum nesting/continuation depth exceeded")
             }
