@@ -18,19 +18,15 @@ use crate::message_type::MessageType;
 pub use hdf5_pure_core::FormatError;
 pub use hdf5_pure_core::OBJECT_HEADER_MESSAGE_MAX;
 
-/// Distinguishes an intermediate non-group object from other path resolution errors.
-///
-/// [`Error`] reports the first case as [`Error::NotAGroup`] and the second as
-/// [`Error::Format`].
+/// Distinguishes missing components and intermediate non-group objects from format errors.
 #[derive(Debug)]
 pub(crate) enum ResolveError {
-    /// A component the walk had to descend through does not name a group. The
-    /// string is that object's own root-relative path — empty for the root
-    /// group, which is how this crate names the root throughout — and not the
-    /// path that was asked for (issue #365).
-    NotAGroup(String),
-    /// Any other resolution failure, including a missing path component.
+    /// A malformed structure, invalid target, or unsupported link.
     Format(FormatError),
+    /// The root-relative path of an intermediate object that is not a group.
+    NotAGroup(String),
+    /// The root-relative path through the first missing component.
+    NotFound(String),
 }
 
 impl From<FormatError> for ResolveError {
@@ -179,8 +175,7 @@ pub enum Error {
     /// The path may be an *intermediate* component of the one that was asked
     /// for: resolving `a/b/c` opens `a` and then `a/b` to look inside them, so
     /// a dataset at `a/b` reports `NotAGroup("a/b")` rather than anything about
-    /// `a/b/c` (issue #365). `Group::group`, which takes a child name rather
-    /// than a path, reports that name.
+    /// `a/b/c`.
     NotAGroup(String),
     /// The child of the given name is not a committed (`H5Tcommit`) datatype. A
     /// name that resolves to nothing at all is [`FormatError::PathNotFound`]
@@ -383,6 +378,7 @@ impl From<ResolveError> for Error {
         match e {
             ResolveError::NotAGroup(path) => Error::NotAGroup(path),
             ResolveError::Format(e) => Error::Format(e),
+            ResolveError::NotFound(path) => Error::Format(FormatError::PathNotFound(path)),
         }
     }
 }

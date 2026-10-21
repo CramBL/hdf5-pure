@@ -9,13 +9,72 @@
 //! [`LinkName`] is one component of a path, the name of a link in one group.
 //!
 //! [`ObjectPathBuf`] owns the components of a path from the root group, and [`LinkNameBuf`] owns
-//! one component.
+//! one component. [`SoftLinkPath`] owns a nonempty target spelling without null bytes and
+//! preserves whether resolution starts at the root group or the containing group.
 
 #[cfg(not(feature = "std"))]
 use alloc::string::String;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use core::fmt;
+
+use crate::error::FormatError;
+
+/// An owned soft link target with an absolute or relative starting point.
+///
+/// The target spelling is nonempty and contains no null bytes. Components follow
+/// [`ObjectPath::parse`], including `.` and repeated separator handling.
+#[derive(Debug)]
+pub(crate) struct SoftLinkPath {
+    components: ObjectPathBuf,
+    absolute: bool,
+}
+
+impl SoftLinkPath {
+    /// Parses a target while preserving where resolution starts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidSoftLinkTarget`] if `target` is empty or contains a null byte.
+    pub(crate) fn parse(target: &str) -> Result<Self, FormatError> {
+        if target.is_empty() || target.contains('\0') {
+            return Err(FormatError::InvalidSoftLinkTarget(String::from(target)));
+        }
+        let path = ObjectPath::parse(target);
+        Ok(Self {
+            components: path.to_path_buf(),
+            absolute: path.is_absolute(),
+        })
+    }
+
+    /// Borrows the target components and their absolute or relative starting point.
+    pub(crate) fn as_path(&self) -> ObjectPath<'_> {
+        let Self {
+            components,
+            absolute,
+        } = self;
+        let mut path = components.as_path();
+        path.absolute = *absolute;
+        path
+    }
+}
+
+impl fmt::Display for SoftLinkPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            components,
+            absolute,
+        } = self;
+        if *absolute {
+            f.write_str("/")?;
+        }
+        if components.is_empty() && !*absolute {
+            f.write_str(".")
+        } else {
+            components.fmt(f)
+        }
+    }
+}
 
 /// An object path: its components, and where the walk starts.
 ///
@@ -321,7 +380,18 @@ const CURRENT_GROUP: &str = ".";
 mod tests {
     use rstest::rstest;
 
-    use super::{LinkName, LinkNameBuf, ObjectPath, ObjectPathBuf};
+    use super::{LinkName, LinkNameBuf, ObjectPath, ObjectPathBuf, SoftLinkPath};
+    use crate::error::FormatError;
+
+    #[rstest::rstest]
+    #[case::empty("")]
+    #[case::nul("a\0b")]
+    fn soft_link_targets_reject_invalid_spellings(#[case] target: &str) {
+        assert_eq!(
+            SoftLinkPath::parse(target).unwrap_err(),
+            FormatError::InvalidSoftLinkTarget(String::from(target))
+        );
+    }
 
     fn path(spelling: &str) -> ObjectPathBuf {
         ObjectPathBuf::parse(spelling)

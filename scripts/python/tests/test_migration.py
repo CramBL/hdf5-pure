@@ -243,6 +243,12 @@ def test_migration_shape_ignores_only_the_allowed_variant_changes(variant, expec
     ("variant", "expected"),
     [
         ("ConflictingDatasetStorage", []),
+        ("DanglingSoftLink", []),
+        ("ExternalLinkUnsupported", []),
+        ("InvalidSoftLinkEncoding", []),
+        ("InvalidSoftLinkTarget", []),
+        ("InvalidSymbolTableCacheType", []),
+        ("SoftLinkTraversalLimit", []),
         ("DatasetDimensionUnlimited", []),
         ("DatasetMissingDatatype", []),
         ("DatasetProvenanceRequiresData", []),

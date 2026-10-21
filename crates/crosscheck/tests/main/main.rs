@@ -79,6 +79,7 @@ mod repack;
 mod scaleoffset_fill;
 mod serde;
 mod shuffle;
+mod soft_link;
 mod sohm;
 mod space_ownership;
 mod superblock_addresses;

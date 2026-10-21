@@ -18,6 +18,8 @@ use crate::address::{AddressContext, StoredAddress};
 use crate::address::{BaseAddress, BaseAddressExt};
 use crate::btree_v1;
 use crate::error::FormatError;
+use crate::link_message::LinkTarget;
+use crate::object_path::LinkName;
 use crate::source::RangeReader;
 use crate::source::Source;
 use crate::superblock::Superblock;
@@ -92,6 +94,54 @@ pub fn resolve_v1_group_entries_from_source<S: Source + ?Sized>(
         group_leaf_node_k,
         is_child,
     )
+}
+
+/// Returns the target of the version 1 group link named `name`.
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidSymbolTableCacheType`] for an unsupported cache type,
+/// and errors from the local heap and symbol table parsers and `file` reads.
+pub(crate) fn find_link(
+    file: &(impl RangeReader + ?Sized),
+    sym_table_msg: &SymbolTableMessage,
+    widths: FormatWidths,
+    addresses: AddressContext,
+    group_leaf_node_k: Option<NonZeroU16>,
+    name: LinkName<'_>,
+    symbol_table_nodes: impl FnOnce() -> Result<Vec<StoredAddress>, FormatError>,
+) -> Result<Option<LinkTarget>, FormatError> {
+    let heap = read_local_heap(file, sym_table_msg, widths, addresses)?;
+    let range = heap.data_segment_range();
+    let bytes = file.read_range(range)?;
+    let names = heap.data_segment(FileRegion::new(range, &bytes)?)?;
+    let mut found = None;
+    for address in symbol_table_nodes()? {
+        let node = read_symbol_table_node(file, widths, addresses, group_leaf_node_k, address)?;
+        for entry in node.entries {
+            let link_name = names.name(entry.link_name_offset)?;
+            if link_name != name.as_str() {
+                continue;
+            }
+            let target = match entry.cache_type {
+                UNCACHED | CACHED_GROUP => LinkTarget::Hard {
+                    object_header_address: entry.object_header_address,
+                },
+                SYMBOLIC_LINK => {
+                    let [a, b, c, d, ..] = entry.scratch_pad;
+                    // The first four scratch-pad bytes store the local-heap offset, as defined in
+                    // "Symbol Table Entry" of the format specification, version 4.0.
+                    let offset = u64::from(u32::from_le_bytes([a, b, c, d]));
+                    LinkTarget::Soft {
+                        target_path: String::from(names.name(offset)?),
+                    }
+                }
+                other => return Err(FormatError::InvalidSymbolTableCacheType(other)),
+            };
+            found = found.or(Some(target));
+        }
+    }
+    Ok(found)
 }
 
 /// Returns whether the version 1 group `sym_table_msg` describes holds a symbolic link
@@ -246,6 +296,20 @@ fn read_symbol_table_node(
     let range = entries.parse_range();
     entries.parse(FileRegion::new(range, &file.read_range(range)?)?)
 }
+
+/// The symbol table entry cache type for an entry without cached metadata.
+///
+/// Defined in "Symbol Table Entry" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_symboltableentry
+const UNCACHED: u32 = 0;
+
+/// The symbol table entry cache type for an entry with cached group metadata.
+///
+/// Defined in "Symbol Table Entry" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_symboltableentry
+const CACHED_GROUP: u32 = 1;
 
 /// The symbol table entry cache type of a symbolic link. Its object header address is the
 /// undefined address and its scratch pad holds the local heap offset of the link's value, so the
@@ -437,6 +501,35 @@ mod tests {
             )
             .map(links),
         ]
+    }
+
+    #[rstest]
+    #[case(3)]
+    #[case(u32::MAX)]
+    fn a_lookup_rejects_an_unknown_symbol_table_cache_type(#[case] cache_type: u32) {
+        let group = group(
+            &[&[("child", 0x100, cache_type)]],
+            Widths::EIGHT,
+            DataSegment::FollowsHeader,
+        );
+        let widths = format_widths(Widths::EIGHT);
+        let error = find_link(
+            group.bytes.as_slice(),
+            &group.message,
+            widths,
+            addresses(0),
+            k(16),
+            LinkName::new("child").unwrap(),
+            || {
+                Ok(group
+                    .nodes
+                    .iter()
+                    .map(|&(address, _)| StoredAddress::new(address))
+                    .collect())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, FormatError::InvalidSymbolTableCacheType(cache_type));
     }
 
     const CHILDREN: &[(&str, u64, u32)] = &[("alpha", 0x1000, 0), ("beta", 0x2000, 1)];

@@ -140,6 +140,57 @@ impl<'a> LinkPrefix<'a> {
         })
     }
 
+    fn target(&self, data: &[u8], offset_width: OffsetWidth) -> Result<LinkTarget, FormatError> {
+        let mut pos = self.target_pos;
+        Ok(match self.link_type_code {
+            HARD_LINK => LinkTarget::Hard {
+                object_header_address: StoredAddress::new(bytes::read_offset_width(
+                    data,
+                    pos,
+                    offset_width,
+                )?),
+            },
+            SOFT_LINK => {
+                bytes::ensure_len(data, pos, 2)?;
+                let soft_len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
+                pos += 2;
+                bytes::ensure_len(data, pos, soft_len)?;
+                let target_path = String::from(
+                    core::str::from_utf8(&data[pos..pos + soft_len])
+                        .map_err(|source| FormatError::InvalidSoftLinkEncoding { source })?,
+                );
+                LinkTarget::Soft { target_path }
+            }
+            EXTERNAL_LINK => {
+                bytes::ensure_len(data, pos, 2)?;
+                let ext_len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
+                pos += 2;
+                bytes::ensure_len(data, pos, ext_len)?;
+                let ext_data = &data[pos..pos + ext_len];
+                // The external link value starts with one byte for version and flags, followed by
+                // null-terminated file and object path strings ("The Link Message", format
+                // specification, version 4.0).
+                let start = if !ext_data.is_empty() { 1 } else { 0 };
+                let rest = &ext_data[start..];
+                let null1 = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
+                let filename = String::from_utf8_lossy(&rest[..null1]).into_owned();
+                let after_null1 = if null1 + 1 < rest.len() {
+                    null1 + 1
+                } else {
+                    rest.len()
+                };
+                let rest2 = &rest[after_null1..];
+                let null2 = rest2.iter().position(|&b| b == 0).unwrap_or(rest2.len());
+                let object_path = String::from_utf8_lossy(&rest2[..null2]).into_owned();
+                LinkTarget::External {
+                    filename,
+                    object_path,
+                }
+            }
+            other => return Err(FormatError::InvalidLinkType(other)),
+        })
+    }
+
     /// Returns the range of the hard link address in `data`, the message this prefix is parsed
     /// from, or `None` for a soft or an external link.
     fn hard_link_address_range(
@@ -242,6 +293,26 @@ impl LinkMessage {
                 )?))
             })
             .transpose()
+    }
+
+    /// Returns the target of the link named `name`, or `None` for another name.
+    ///
+    /// The name is compared in the message bytes before the target is parsed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`parse_with_offset_width`](Self::parse_with_offset_width) for a
+    /// malformed prefix or, when the name matches, a malformed target.
+    pub fn target_if_named(
+        data: &[u8],
+        offset_width: OffsetWidth,
+        name: &str,
+    ) -> Result<Option<LinkTarget>, FormatError> {
+        let prefix = LinkPrefix::parse(data)?;
+        if !name_matches(prefix.name, name) {
+            return Ok(None);
+        }
+        Ok(Some(prefix.target(data, offset_width)?))
     }
 
     /// Returns the byte range of the object header address in the Link message `data`, or `None`
@@ -364,71 +435,24 @@ impl LinkMessage {
     /// Returns [`FormatError::InvalidLinkVersion`] if the version is not 1,
     /// [`FormatError::InvalidCharacterSet`] if the character set is not ASCII or UTF-8,
     /// [`FormatError::InvalidLinkType`] if the link type is not hard, soft, or external,
+    /// [`FormatError::InvalidSoftLinkEncoding`] if a soft link target is not valid UTF-8,
     /// [`FormatError::ValueTooLargeForPlatform`] if the name length does not fit `usize`, and
     /// [`FormatError::UnexpectedEof`] if `data` ends inside a field.
     pub fn parse_with_offset_width(
         data: &[u8],
         offset_width: OffsetWidth,
     ) -> Result<LinkMessage, FormatError> {
+        let prefix = LinkPrefix::parse(data)?;
+        let link_target = prefix.target(data, offset_width)?;
         let LinkPrefix {
             name,
-            link_type_code,
+            link_type_code: _,
             creation_order,
             charset,
-            target_pos: mut pos,
-        } = LinkPrefix::parse(data)?;
-        let name = String::from_utf8_lossy(name).into_owned();
-
-        // Link target data
-        let link_target = match link_type_code {
-            HARD_LINK => {
-                // Hard link
-                LinkTarget::Hard {
-                    object_header_address: StoredAddress::new(bytes::read_offset_width(
-                        data,
-                        pos,
-                        offset_width,
-                    )?),
-                }
-            }
-            SOFT_LINK => {
-                bytes::ensure_len(data, pos, 2)?;
-                let soft_len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
-                pos += 2;
-                bytes::ensure_len(data, pos, soft_len)?;
-                let target_path = String::from_utf8_lossy(&data[pos..pos + soft_len]).into_owned();
-                LinkTarget::Soft { target_path }
-            }
-            EXTERNAL_LINK => {
-                bytes::ensure_len(data, pos, 2)?;
-                let ext_len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
-                pos += 2;
-                bytes::ensure_len(data, pos, ext_len)?;
-                let ext_data = &data[pos..pos + ext_len];
-                // External link value: flags(1) + null-terminated filename + null-terminated obj path
-                // Skip the flags byte
-                let start = if !ext_data.is_empty() { 1 } else { 0 };
-                let rest = &ext_data[start..];
-                let null1 = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
-                let filename = String::from_utf8_lossy(&rest[..null1]).into_owned();
-                let after_null1 = if null1 + 1 < rest.len() {
-                    null1 + 1
-                } else {
-                    rest.len()
-                };
-                let rest2 = &rest[after_null1..];
-                let null2 = rest2.iter().position(|&b| b == 0).unwrap_or(rest2.len());
-                let object_path = String::from_utf8_lossy(&rest2[..null2]).into_owned();
-                LinkTarget::External {
-                    filename,
-                    object_path,
-                }
-            }
-            other => return Err(FormatError::InvalidLinkType(other)),
-        };
-
+            target_pos: _,
+        } = prefix;
         Ok(LinkMessage {
-            name,
+            name: String::from_utf8_lossy(name).into_owned(),
             link_target,
             creation_order,
             charset,
@@ -530,6 +554,30 @@ mod tests {
             LinkTarget::Soft {
                 target_path: target.to_string()
             }
+        );
+    }
+
+    #[test]
+    fn a_soft_link_target_with_invalid_utf8_is_rejected() {
+        let mut data = LinkMessage {
+            name: String::from("link"),
+            link_target: LinkTarget::Soft {
+                target_path: String::from("x"),
+            },
+            creation_order: None,
+            charset: CharacterSet::Ascii,
+        }
+        .serialize(OffsetWidth::Eight);
+        *data.last_mut().unwrap() = 0xff;
+        let error = LinkMessage::target_if_named(&data, OffsetWidth::Eight, "link").unwrap_err();
+        let FormatError::InvalidSoftLinkEncoding { source } = error else {
+            panic!("expected InvalidSoftLinkEncoding, got {error:?}");
+        };
+        assert_eq!(source.valid_up_to(), 0);
+        assert_eq!(source.error_len(), Some(1));
+        assert_eq!(
+            LinkMessage::target_if_named(&data, OffsetWidth::Eight, "other").unwrap(),
+            None
         );
     }
 

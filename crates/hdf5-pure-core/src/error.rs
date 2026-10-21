@@ -107,6 +107,13 @@ pub enum FormatError {
     CompoundFieldTypeMismatch(String),
     /// More than one storage source is supplied, or unallocated storage is combined with data.
     ConflictingDatasetStorage,
+    /// A soft link's target contains a missing path component.
+    DanglingSoftLink {
+        /// The root-relative path of the soft link.
+        path: String,
+        /// The parsed target path, relative to the containing group or absolute.
+        target: String,
+    },
     /// Data size mismatch.
     DataSizeMismatch {
         /// Expected size in bytes.
@@ -192,6 +199,15 @@ pub enum FormatError {
         stored_eof: u64,
         /// The number of bytes by which the HDF5 image moved earlier in the file.
         shift: u64,
+    },
+    /// Path resolution encountered an external link, which cannot be followed.
+    ExternalLinkUnsupported {
+        /// The root-relative path of the external link.
+        path: String,
+        /// The target file name stored in the link.
+        filename: String,
+        /// The target object path stored in the link.
+        object_path: String,
     },
     /// The supplied byte count differs from the declared physical range length.
     FileRegionLengthMismatch {
@@ -552,6 +568,13 @@ pub enum FormatError {
     InvalidReferenceType(u8),
     /// Invalid shared message version.
     InvalidSharedMessageVersion(u8),
+    /// A soft link's target bytes are not valid UTF-8.
+    InvalidSoftLinkEncoding {
+        /// The UTF-8 decoding error.
+        source: Utf8Error,
+    },
+    /// A soft link's target is empty or contains a null byte. Contains the target string.
+    InvalidSoftLinkTarget(String),
     /// A shared-message index refers to a version 2 B-tree with a type other
     /// than shared-message index (type 7). Contains the B-tree type.
     InvalidSohmBTreeType(u8),
@@ -576,6 +599,8 @@ pub enum FormatError {
     InvalidSpaceAllocationTime(u8),
     /// Invalid string padding type.
     InvalidStringPadding(u8),
+    /// A symbol table entry has a cache type other than 0, 1, or 2. Contains the stored type.
+    InvalidSymbolTableCacheType(u32),
     /// Invalid symbol table node signature.
     InvalidSymbolTableNodeSignature,
     /// A symbol table node stores more symbols than the 2K entries of a node, where K is the
@@ -740,6 +765,13 @@ pub enum FormatError {
     },
     /// The HDF5 magic signature was not found at any valid offset.
     SignatureNotFound,
+    /// Path resolution would exceed the maximum number of soft link traversals.
+    SoftLinkTraversalLimit {
+        /// The root-relative path of the link at which resolution stopped.
+        path: String,
+        /// The maximum number of soft links followed during one resolution.
+        limit: u32,
+    },
     /// A message body references the shared-message heap without a matching
     /// index that covers its type and has an allocated heap. Contains the raw
     /// type ID of the referenced message.
@@ -1288,6 +1320,9 @@ impl fmt::Display for FormatError {
             Self::InvalidBTreeNodeType(t) => {
                 write!(f, "invalid B-tree node type: {t}")
             }
+            Self::InvalidSymbolTableCacheType(cache_type) => {
+                write!(f, "invalid symbol table cache type: {cache_type}")
+            }
             Self::InvalidSymbolTableNodeSignature => {
                 write!(f, "invalid symbol table node signature")
             }
@@ -1305,6 +1340,31 @@ impl fmt::Display for FormatError {
             }
             Self::InvalidSymbolTableNodeVersion(v) => {
                 write!(f, "invalid symbol table node version: {v}")
+            }
+            Self::DanglingSoftLink { path, target } => {
+                write!(f, "soft link {path:?} has a missing target {target:?}")
+            }
+            Self::ExternalLinkUnsupported {
+                path,
+                filename,
+                object_path,
+            } => {
+                write!(
+                    f,
+                    "external link {path:?} targets unsupported file {filename:?}, object {object_path:?}"
+                )
+            }
+            Self::InvalidSoftLinkEncoding { source } => {
+                write!(f, "soft link target is not UTF-8: {source}")
+            }
+            Self::InvalidSoftLinkTarget(target) => {
+                write!(f, "invalid soft link target: {target:?}")
+            }
+            Self::SoftLinkTraversalLimit { path, limit } => {
+                write!(
+                    f,
+                    "path {path:?} exceeds the limit of {limit} soft link traversals"
+                )
             }
             Self::PathNotFound(p) => {
                 write!(f, "path not found: {p}")
@@ -1859,6 +1919,7 @@ impl std::error::Error for FormatError {
         match self {
             FormatError::AllocationFailed { source, .. } => Some(source),
             FormatError::InvalidLocalHeapName { source, .. } => Some(source),
+            FormatError::InvalidSoftLinkEncoding { source } => Some(source),
             _ => None,
         }
     }

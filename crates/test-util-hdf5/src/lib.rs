@@ -29,6 +29,8 @@ pub mod reader;
 #[cfg(feature = "hdf5")]
 pub mod region;
 pub mod session;
+#[cfg(feature = "hdf5")]
+pub mod soft_link;
 #[cfg(feature = "__hdf5-1.10")]
 pub mod space_ownership;
 pub mod userblock;
