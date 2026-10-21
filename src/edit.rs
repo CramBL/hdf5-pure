@@ -347,8 +347,10 @@ use crate::file_writer::{
     self, DenseAttrCreationOrder, LENGTH_SIZE, LENGTH_WIDTH, OFFSET_SIZE, OFFSET_WIDTH,
 };
 use crate::fill_value::FillPattern;
+use crate::fill_value::PaddingFill;
 use crate::filter_pipeline::FilterPipeline;
-use crate::filters::{self, ChunkContext, FilterScratch};
+use crate::filters::ChunkContext;
+use crate::filters::FilterScratch;
 use crate::free_space_manager;
 use crate::free_space_manager::PersistedSections;
 use crate::group_v1;
@@ -8316,13 +8318,6 @@ impl WriteEngine {
                     maxshape,
                 } = chunked_geometry(&fd.dt, &disk_ds, &dl)?;
 
-                // Split the new value into full-size chunk buffers in dense
-                // row-major grid order, then re-encode through the on-disk
-                // pipeline when the dataset is filtered.
-                // The overhang past the dataset's edge holds the dataset's own
-                // fill value, not zeros: an allocated chunk is expected to carry
-                // it wherever nothing was written, and those slots are what a
-                // reader returns once the dataset is extended into them (#296).
                 let padding = fill_msg
                     .map_or(crate::fill_value::PaddingFill::Zero, |(mt, b, e)| {
                         crate::fill_value::PaddingFill::from_message(mt, &region[b..e])
@@ -8335,15 +8330,27 @@ impl WriteEngine {
                 // both branches below — including the staged one, which does its
                 // splitting in the apply phase and so has no other chance to make
                 // it.
-                if let Some(pm) = &pipeline_message {
-                    let pipeline = crate::filter_pipeline::parse_filter_pipeline(pm)?;
-                    if !pipeline_reencodable(&pipeline) {
-                        return Err(Error::EditUnsupported(
-                            "a chunked dataset using a filter this engine cannot re-encode \
-                             cannot be overwritten in place yet",
-                        ));
-                    }
+                let pipeline = pipeline_message
+                    .as_deref()
+                    .map(crate::filter_pipeline::parse_filter_pipeline)
+                    .transpose()?;
+                if pipeline
+                    .as_ref()
+                    .is_some_and(|pipeline| !pipeline_reencodable(pipeline))
+                {
+                    return Err(Error::EditUnsupported(
+                        "a chunked dataset using a filter this engine cannot re-encode \
+                         cannot be overwritten in place yet",
+                    ));
                 }
+                let overwrite = ChunkedOverwrite {
+                    shape: disk_ds.dimensions.clone(),
+                    chunk_dims: spatial,
+                    element_size,
+                    pipeline,
+                    padding,
+                    dt: fd.dt.clone(),
+                };
 
                 // Element bytes still carrying unresolved variable-length
                 // references cannot be split here: a filtered chunk's compressed
@@ -8353,29 +8360,17 @@ impl WriteEngine {
                 if fd.vl_string_staging.is_some() {
                     return Ok(WritePlan::Moving(MovingWrite::Chunked {
                         region,
-                        shape: disk_ds.dimensions.clone(),
-                        chunk_dims: spatial,
-                        element_size,
+                        overwrite,
                         maxshape,
                         pipeline_message,
                         payload: ChunkPayload::Deferred {
                             bytes: staged_bytes(fd, path),
-                            padding,
-                            dt: fd.dt.clone(),
                         },
                         old_addr: addr,
                     }));
                 }
 
-                let new_chunk_bytes = split_and_encode_chunks(
-                    &fd.raw,
-                    &disk_ds.dimensions,
-                    &spatial,
-                    element_size,
-                    &padding,
-                    pipeline_message.as_deref(),
-                    &fd.dt,
-                )?;
+                let new_chunks = overwrite.prepare_chunks(&fd.raw)?;
 
                 // Fast path: overwrite each chunk straight in its slot when every
                 // new chunk fits. No header rewrite and no superblock flip — the
@@ -8393,9 +8388,9 @@ impl WriteEngine {
                         },
                         &dl,
                         &disk_ds,
-                        &spatial,
+                        &overwrite.chunk_dims,
                         raw_size,
-                        &new_chunk_bytes,
+                        &new_chunks,
                     )
                 {
                     let writes = writes
@@ -8411,12 +8406,10 @@ impl WriteEngine {
                 // header, and free the old chunk storage after the commit lands.
                 Ok(WritePlan::Moving(MovingWrite::Chunked {
                     region,
-                    shape: disk_ds.dimensions.clone(),
-                    chunk_dims: spatial,
-                    element_size,
+                    overwrite,
                     maxshape,
                     pipeline_message,
-                    payload: ChunkPayload::Encoded(new_chunk_bytes),
+                    payload: ChunkPayload::Encoded(new_chunks),
                     old_addr: addr,
                 }))
             }
@@ -9264,7 +9257,9 @@ impl WriteEngine {
                 maxshape.as_deref(),
                 pipeline_message.as_deref(),
                 meta,
-                chunk_bytes,
+                &SliceChunkProvider {
+                    chunks: chunk_bytes,
+                },
                 dense_attrs.clone(),
             ),
             CopyTree::Group {
@@ -9298,7 +9293,7 @@ impl WriteEngine {
     ///
     /// A fresh chunk-data blob and index are laid out relocatably via
     /// [`chunked_write::plan_chunked_data_verbatim`] / [`chunked_write::emit_chunked_data_verbatim`], pulling
-    /// each chunk's already-compressed bytes from `chunk_bytes` (in dense
+    /// each chunk's already-compressed bytes from `chunks` (in dense
     /// row-major grid order) and carrying `meta`'s sizes and filter masks and the
     /// source `pipeline_message` verbatim — no recompression, no filter-parameter
     /// reconstruction. Like [`build_chunked_dataset`](Self::build_chunked_dataset)
@@ -9322,7 +9317,7 @@ impl WriteEngine {
         maxshape: Option<&[MaxExtent]>,
         pipeline_message: Option<&[u8]>,
         meta: &[ChunkMeta],
-        chunk_bytes: &[Vec<u8>],
+        chunks: &dyn ChunkProvider,
         dense_attrs: DenseAttrSet,
     ) -> Result<u64, Error> {
         // Plan once at a provisional base purely to size the data region: the plan
@@ -9357,13 +9352,7 @@ impl WriteEngine {
                 )?;
                 let mut buf =
                     Vec::with_capacity(usize::try_from(layout.plan.total_len).unwrap_or(0));
-                chunked_write::emit_chunked_data_verbatim(
-                    &mut buf,
-                    &layout.plan,
-                    &SliceChunkProvider {
-                        chunks: chunk_bytes,
-                    },
-                )?;
+                chunked_write::emit_chunked_data_verbatim(&mut buf, &layout.plan, chunks)?;
                 Ok((buf, layout.layout_message))
             })?;
         // Swap the data-layout message for the rebuilt one; keep every other header
@@ -9523,51 +9512,41 @@ impl WriteEngine {
             }
             MovingWrite::Chunked {
                 region,
-                shape,
-                chunk_dims,
-                element_size,
+                overwrite,
                 maxshape,
                 pipeline_message,
                 payload,
                 ..
             } => {
                 let deferred;
-                let chunk_bytes = match payload {
-                    ChunkPayload::Encoded(chunk_bytes) => chunk_bytes,
-                    ChunkPayload::Deferred { bytes, padding, dt } => {
+                let chunks = match payload {
+                    ChunkPayload::Encoded(chunks) => chunks,
+                    ChunkPayload::Deferred { bytes } => {
                         // Resolve before splitting: the heap collections have to
                         // be placed, and their addresses patched into the element
                         // references, before those references are cut into chunks
                         // and — on a filtered dataset — compressed over.
                         let raw = self.resolve_overwrite_bytes(bytes)?;
-                        deferred = split_and_encode_chunks(
-                            &raw,
-                            shape,
-                            chunk_dims,
-                            *element_size,
-                            padding,
-                            pipeline_message.as_deref(),
-                            dt,
-                        )?;
+                        deferred = overwrite.prepare_chunks(&raw)?;
                         &deferred
                     }
                 };
-                let meta: Vec<ChunkMeta> = chunk_bytes
+                let meta: Vec<ChunkMeta> = chunks
                     .iter()
-                    .map(|c| ChunkMeta {
-                        compressed_size: c.len() as u64,
-                        filter_mask: 0,
+                    .map(|chunk| ChunkMeta {
+                        compressed_size: chunk.stored_size(),
+                        filter_mask: chunk.filter_mask(),
                     })
                     .collect();
                 self.write_chunked_relocatable(
                     region,
-                    shape,
-                    chunk_dims,
-                    *element_size,
+                    &overwrite.shape,
+                    &overwrite.chunk_dims,
+                    overwrite.element_size,
                     maxshape.as_deref(),
                     pipeline_message.as_deref(),
                     &meta,
-                    chunk_bytes,
+                    &PreparedChunkProvider { chunks },
                     DenseAttrSet::default(),
                 )
             }
@@ -10802,23 +10781,19 @@ enum MovingWrite {
         region: OhRegion,
         bytes: OverwriteBytes,
     },
-    /// A chunked dataset whose new (re-encoded) chunks do not all fit their
-    /// existing slots, so its whole storage is rebuilt and relocated. A fresh
-    /// chunk-data blob and index are placed — in a freed region that fits, else at
-    /// end-of-file (via the verbatim
-    /// layout path, carrying the chunk bytes and the source filter `pipeline_message`
-    /// unchanged — no recompression and no filter-parameter reconstruction), the
-    /// data-layout message in the verbatim header `region` is swapped for the new
-    /// one (every other header message — datatype, dataspace, fill value, filter
-    /// pipeline, and attributes, including a dense attribute heap referenced by an
-    /// untouched Attribute Info message — is preserved verbatim), and the old
-    /// chunk storage at `old_addr` is freed after the commit lands.
+    /// A relocating overwrite of a chunked dataset, which rebuilds its whole chunk storage.
+    ///
+    /// The commit writes a new chunk data block and index with
+    /// [`write_chunked_relocatable`](WriteEngine::write_chunked_relocatable), in a freed region
+    /// that fits them or at the end of the file. It keeps every message of the verbatim header
+    /// `region` except the data layout message, which it replaces, so a dense attribute heap stays
+    /// where the Attribute Info message addresses it. After the commit lands, it frees the old
+    /// chunk storage of the dataset whose header is at `old_addr`.
     Chunked {
         region: OhRegion,
-        /// See [`CopyTree::DatasetChunked::shape`].
-        shape: Vec<u64>,
-        chunk_dims: Vec<u64>,
-        element_size: NonZeroUsize,
+        /// The chunk geometry and encoding of the dataset, from which the new layout is planned
+        /// and a [`ChunkPayload::Deferred`] is prepared.
+        overwrite: ChunkedOverwrite,
         maxshape: Option<Vec<MaxExtent>>,
         pipeline_message: Option<Vec<u8>>,
         payload: ChunkPayload,
@@ -10882,7 +10857,7 @@ enum MovingWrite {
 enum ChunkPayload {
     /// Split and encoded by the preflight, which had to do that anyway to find
     /// out whether the chunks still fit their slots.
-    Encoded(Vec<Vec<u8>>),
+    Encoded(Vec<PreparedChunk>),
     /// Element bytes that still carry unresolved variable-length references
     /// ([`OverwriteBytes::vlen`]), so the split has to wait for the apply
     /// phase: a filtered chunk's compressed length depends on the heap
@@ -10893,13 +10868,7 @@ enum ChunkPayload {
     /// single-hard-link refusal (the one every [`MovingWrite`] answers to) in
     /// the preflight, where it belongs: whether it could have stayed in its
     /// slots is not knowable until those lengths exist.
-    Deferred {
-        bytes: OverwriteBytes,
-        /// What the edge overhang of a partial chunk must hold (issue #296).
-        padding: crate::fill_value::PaddingFill,
-        /// The dataset's datatype, for the filter pipeline's [`ChunkContext`].
-        dt: crate::datatype::Datatype,
-    },
+    Deferred { bytes: OverwriteBytes },
 }
 
 /// A staged dataset reduced to the pieces the writer needs.
@@ -11925,59 +11894,73 @@ fn staged_bytes(fd: &FlatDataset, path: &ObjectPathBuf) -> OverwriteBytes {
     }
 }
 
-/// Split `raw` into full-size chunk buffers in dense row-major grid order and
-/// re-encode each through `pipeline_message`, the dataset's on-disk filter
-/// pipeline.
-///
-/// The overhang past the dataset's edge holds the dataset's own fill value, not
-/// zeros: an allocated chunk is expected to carry it wherever nothing was
-/// written, and those slots are what a reader returns once the dataset is
-/// extended into them (issue #296).
-///
-/// The caller has already refused a pipeline
-/// [`pipeline_reencodable`] rejects, so the only errors here are a malformed
-/// pipeline message (unreachable for the same reason) and the encoder's own.
-fn split_and_encode_chunks(
-    raw: &[u8],
-    shape: &[u64],
-    chunk_dims: &[u64],
+/// The chunk geometry and encoding of a chunked dataset that a staged overwrite rewrites.
+struct ChunkedOverwrite {
+    /// The extent of the dataset, which the overwrite keeps.
+    shape: Vec<u64>,
+    /// The chunk dimensions, one per dimension of the dataset.
+    chunk_dims: Vec<u64>,
     element_size: NonZeroUsize,
-    padding: &crate::fill_value::PaddingFill,
-    pipeline_message: Option<&[u8]>,
-    dt: &crate::datatype::Datatype,
-) -> Result<Vec<Vec<u8>>, Error> {
-    let split = chunked_write::split_into_chunks(
-        raw,
-        shape,
-        chunk_dims,
-        element_size,
-        padding.pattern(element_size),
-    )
-    .map_err(Error::Format)?;
-    let Some(pm) = pipeline_message else {
-        return Ok(split);
-    };
-    let pipeline = crate::filter_pipeline::parse_filter_pipeline(pm)?;
-    let ctx = ChunkContext::from_datatype(chunk_dims, dt)?;
-    let mut encoded = Vec::with_capacity(split.len());
-    // One encoder across the rewrite; see `FilterScratch`.
-    let mut scratch = FilterScratch::new();
-    for buf in &split {
-        encoded.push(filters::compress_chunk_with(
-            &mut scratch,
-            buf,
-            &pipeline,
-            ctx,
-        )?);
+    pipeline: Option<FilterPipeline>,
+    /// What a partial edge chunk holds past the extent.
+    padding: PaddingFill,
+    /// The dataset's datatype, for the filter pipeline's [`ChunkContext`].
+    dt: Datatype,
+}
+
+impl ChunkedOverwrite {
+    /// Splits `raw`, the dataset's new value, into whole chunks in dense row-major grid order, and
+    /// encodes each through the filter pipeline.
+    ///
+    /// The part of a partial edge chunk past the extent holds `padding`: the dataset's fill value,
+    /// or zeros where the dataset defines none or never writes it. A reader returns it from those
+    /// elements once the dataset is extended over them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] with [`FormatError::UnreadableFillValue`] if a chunk extends past
+    /// the extent and the dataset's Fill Value message is unreadable, and with
+    /// [`FormatError::ZeroSizedDatatype`] if the datatype occupies zero bytes per element. Returns
+    /// the errors of [`PreparedChunk::encode`] for each chunk.
+    fn prepare_chunks(&self, raw: &[u8]) -> Result<Vec<PreparedChunk>, Error> {
+        let Self {
+            shape,
+            chunk_dims,
+            element_size,
+            pipeline,
+            padding,
+            dt,
+        } = self;
+        let split = chunked_write::split_into_chunks(
+            raw,
+            shape,
+            chunk_dims,
+            *element_size,
+            padding.pattern(*element_size),
+        )?;
+        let ctx = ChunkContext::from_datatype(chunk_dims, dt)?;
+        // One encoder across the rewrite. See `FilterScratch`.
+        let mut scratch = FilterScratch::new();
+        Ok(split
+            .into_iter()
+            .map(|logical| {
+                PreparedChunk::encode(
+                    &mut scratch,
+                    pipeline.as_ref(),
+                    ctx,
+                    ChunkEncoding::Filtered,
+                    logical,
+                )
+            })
+            .collect::<Result<_, _>>()?)
     }
-    Ok(encoded)
 }
 
 /// Tries to overwrite a chunked dataset's chunks in place. When the dataset's
-/// on-disk chunks form a dense grid aligned with `new_bytes` (dense row-major
-/// order), every slot is unmasked (`filter_mask == 0`), and every new chunk
-/// **fits** the slot it replaces (`new_len <= slot`), returns the in-place
-/// `(address, bytes)` writes:
+/// on-disk chunks form a dense grid aligned with `new_chunks` (dense row-major
+/// order), the index records for every slot the filter mask of its new chunk,
+/// and every new chunk **fits** the slot it replaces (`new_len <= slot`),
+/// returns the in-place `(address, bytes)` writes:
 ///
 /// - When every new chunk is **exactly** its slot's size, only the chunk data is
 ///   written; the index is untouched (so any enumerable index type works, and a
@@ -11989,35 +11972,34 @@ fn split_and_encode_chunks(
 ///   on-disk region; any other case returns `None` to relocate.
 ///
 /// Returns `None` — so the caller relocates the dataset instead — when the index
-/// cannot be enumerated, the grid is sparse, a slot is masked, a new chunk does
-/// not fit, the index cannot be rebuilt in place, or any write would be out of
-/// bounds or overlap another.
+/// cannot be enumerated, the grid is sparse, a slot's filter mask differs from
+/// its new chunk's, a new chunk does not fit, the index cannot be rebuilt in
+/// place, or any write would be out of bounds or overlap another.
 fn try_inplace_chunk_writes<S: Source + ?Sized>(
     src: &S,
     layout: &DataLayout,
     ds: &Dataspace,
     spatial: &[u64],
     raw_size: u64,
-    new_bytes: &[Vec<u8>],
+    new_chunks: &[PreparedChunk],
 ) -> Option<Vec<(u64, Vec<u8>)>> {
     let infos =
         chunked_read::enumerate_chunks_from_source(src, layout, ds, crate::file_writer::WIDTHS)
             .ok()?;
     let grid = chunked_read::plan_dense_grid(infos, &ds.dimensions, spatial)?;
-    if grid.grid_order.len() != new_bytes.len() {
+    if grid.grid_order.len() != new_chunks.len() {
         return None;
     }
-    let mut writes = Vec::with_capacity(new_bytes.len() + 1);
-    let mut spans: Vec<(u64, u64)> = Vec::with_capacity(new_bytes.len() + 1);
+    let mut writes = Vec::with_capacity(new_chunks.len() + 1);
+    let mut spans: Vec<(u64, u64)> = Vec::with_capacity(new_chunks.len() + 1);
     let mut any_shrunk = false;
-    for (ci, bytes) in grid.grid_order.iter().zip(new_bytes.iter()) {
-        // A nonzero filter mask means the source left some filter unapplied for
-        // this chunk; re-encoding always applies every filter (mask 0), so an
-        // in-place overwrite would desync the index-recorded mask. Relocate.
-        if ci.filter_mask != 0 {
+    for (ci, chunk) in grid.grid_order.iter().zip(new_chunks) {
+        // An index left untouched keeps each slot's recorded mask, so the
+        // overwrite relocates where a slot's mask differs from its new chunk's.
+        if ci.filter_mask != chunk.filter_mask() {
             return None;
         }
-        let new_len = bytes.len() as u64;
+        let new_len = chunk.stored_size();
         let slot = ci.chunk_size.get();
         // A chunk that no longer fits its slot must relocate.
         if new_len > slot {
@@ -12030,7 +12012,7 @@ fn try_inplace_chunk_writes<S: Source + ?Sized>(
             .get()
             .checked_add(new_len)
             .filter(|&e| e <= src.len())?;
-        writes.push((ci.address.get(), bytes.clone()));
+        writes.push((ci.address.get(), chunk.bytes().to_vec()));
         spans.push((ci.address.get(), new_len));
     }
 
@@ -12044,7 +12026,7 @@ fn try_inplace_chunk_writes<S: Source + ?Sized>(
             spatial,
             raw_size,
             &grid.grid_order,
-            new_bytes,
+            new_chunks,
         )?;
         spans.push((index_addr, index_bytes.len() as u64));
         writes.push((index_addr, index_bytes));
@@ -12086,7 +12068,7 @@ fn try_rebuild_index_in_place<S: Source + ?Sized>(
     spatial: &[u64],
     raw_size: u64,
     grid_order: &[crate::chunked_read::ChunkInfo],
-    new_bytes: &[Vec<u8>],
+    new_chunks: &[PreparedChunk],
 ) -> Option<(u64, Vec<u8>)> {
     let DataLayout::Chunked { index, .. } = layout else {
         return None;
@@ -12094,11 +12076,11 @@ fn try_rebuild_index_in_place<S: Source + ?Sized>(
     let index_addr = index.address()?;
     let written: Vec<ChunkRecord> = grid_order
         .iter()
-        .zip(new_bytes)
-        .map(|(ci, b)| ChunkRecord {
+        .zip(new_chunks)
+        .map(|(ci, chunk)| ChunkRecord {
             address: ci.address,
-            stored_size: b.len() as u64,
-            filter_mask: 0,
+            stored_size: chunk.stored_size(),
+            filter_mask: chunk.filter_mask(),
         })
         .collect();
     // `grid_order` is dense row-major over the *current* shape; where each of
@@ -12183,10 +12165,9 @@ fn try_rebuild_index_in_place<S: Source + ?Sized>(
     Some((index_addr.get(), new_index))
 }
 
-/// A [`ChunkProvider`] over chunk bytes already held in memory, in dense
-/// row-major grid order. Used by the editor's chunked copy and relocating
-/// overwrite, which own each chunk's bytes (a [`CopyTree`] or [`MovingWrite`]
-/// captured them) rather than streaming from a source file like repack.
+/// A [`ChunkProvider`] over chunk bytes held in memory, in dense row-major grid
+/// order, for the editor's chunked copy, whose [`CopyTree::DatasetChunked`]
+/// holds the bytes of each chunk.
 struct SliceChunkProvider<'a> {
     chunks: &'a [Vec<u8>],
 }
@@ -12197,6 +12178,25 @@ impl ChunkProvider for SliceChunkProvider<'_> {
             FormatError::ChunkedReadError("chunk index out of range for in-memory provider".into())
         })?;
         out.extend_from_slice(chunk);
+        Ok(())
+    }
+}
+
+/// A [`ChunkProvider`] over the chunks a relocating chunked overwrite prepared, in dense
+/// row-major grid order.
+struct PreparedChunkProvider<'a> {
+    chunks: &'a [PreparedChunk],
+}
+
+impl ChunkProvider for PreparedChunkProvider<'_> {
+    fn chunk_bytes(&self, index: usize, out: &mut Vec<u8>) -> Result<(), FormatError> {
+        let chunk = self.chunks.get(index).ok_or_else(|| {
+            FormatError::Internal(format!(
+                "a verbatim plan asked for chunk {index} of {} prepared chunks",
+                self.chunks.len()
+            ))
+        })?;
+        out.extend_from_slice(chunk.bytes());
         Ok(())
     }
 }
