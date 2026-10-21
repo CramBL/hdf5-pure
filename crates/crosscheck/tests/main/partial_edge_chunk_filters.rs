@@ -7,8 +7,10 @@
 //! of the dataset and stores each chunk that extends past the extent as it
 //! stands. Both libraries read the values back.
 //!
-//! An in-place append through hdf5-pure, to a dataset with the flag or without
-//! it, stores each chunk it writes filtered, raw, or with every filter skipped.
+//! An append through hdf5-pure, to a dataset with the flag or without it,
+//! stores each chunk it writes filtered or raw. An in-place append also stores
+//! a chunk with every filter skipped where a reader at the extent before the
+//! append and a reader at the extent after it decode the chunk differently.
 //! Both libraries read the values and report the same chunk records, before and
 //! after libhdf5 writes past the appended values.
 
@@ -19,17 +21,14 @@ use std::path::Path;
 use hdf5::Extent;
 use hdf5::dataset::ChunkOpts;
 use hdf5::filters::Filter as CFilter;
-#[cfg(target_endian = "little")]
 use hdf5_pure::DeflateLevel;
-#[cfg(target_endian = "little")]
 use hdf5_pure::File;
 use rstest::rstest;
 use test_util_hdf5::dataset;
-#[cfg(target_endian = "little")]
 use test_util_hdf5::dataset::Unlimited;
 use test_util_hdf5::file;
+use test_util_hdf5::numeric::ByteOrder;
 
-#[cfg(target_endian = "little")]
 use crate::array_index;
 
 #[derive(Clone, Copy, Debug)]
@@ -48,7 +47,6 @@ impl Filter {
         }
     }
 
-    #[cfg(target_endian = "little")]
     fn test_util_pipeline(self) -> Vec<dataset::Filter> {
         let deflate = dataset::Filter::Deflate(DeflateLevel::try_from(DEFLATE_LEVEL).unwrap());
         match self {
@@ -67,10 +65,10 @@ impl Filter {
     }
 }
 
-#[cfg(target_endian = "little")]
 #[derive(Clone, Copy, Debug)]
 enum Stored {
     Filtered,
+    #[cfg(target_endian = "little")]
     FiltersSkipped,
     Raw,
 }
@@ -288,8 +286,105 @@ fn an_in_place_append_stores_each_written_chunk_as_both_libraries_read_it(
     );
 }
 
-#[cfg(target_endian = "little")]
+#[rstest]
+#[case::raw_tail_stays_partial(true, &[106], &[Stored::Raw])]
+#[case::raw_tail_becomes_full(true, &[106, 107], &[Stored::Filtered])]
+#[case::raw_tail_becomes_full_before_a_raw_tail(
+    true,
+    &[106, 107, 108],
+    &[Stored::Filtered, Stored::Raw],
+)]
+#[case::filtered_tail_stays_partial(false, &[106], &[Stored::Filtered])]
+#[case::filtered_tail_becomes_full(false, &[106, 107], &[Stored::Filtered])]
+#[case::filtered_tail_becomes_full_before_a_filtered_tail(
+    false,
+    &[106, 107, 108],
+    &[Stored::Filtered, Stored::Filtered],
+)]
+fn a_staged_append_stores_each_written_chunk_as_both_libraries_read_it(
+    #[case] raw_edges: bool,
+    #[case] appended: &[i32],
+    #[case] written: &[Stored],
+    #[values(Filter::Deflate, Filter::Shuffle, Filter::ShuffleDeflate)] filter: Filter,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("partial_edge_staged_append.h5");
+    let initial: Vec<i32> = (100..106).collect();
+    let unlimited = Unlimited::new("d", &initial, APPEND_CHUNK)
+        .filters(&filter.test_util_pipeline())
+        .fill_value(APPEND_FILL)
+        .stored_as(ByteOrder::LittleEndian.i32_datatype());
+    let (unlimited, chunk_opts) = if raw_edges {
+        (
+            unlimited.partial_edge_chunks_unfiltered(),
+            ChunkOpts::DONT_FILTER_PARTIAL_CHUNKS,
+        )
+    } else {
+        (unlimited, ChunkOpts::empty())
+    };
+    unlimited.libhdf5_create(&path);
+    let before = array_index::libhdf5_chunks(&path, 0);
+
+    dataset::pure_append_staged(&path, "d", appended);
+
+    let mut values = [&initial[..], appended].concat();
+    assert_eq!(
+        read_c_creation_properties(&path),
+        (filter.pipeline(), Some(chunk_opts))
+    );
+    assert_eq!(
+        hdf5::File::open(&path)
+            .unwrap()
+            .dataset("d")
+            .unwrap()
+            .shape(),
+        [values.len()]
+    );
+    assert_eq!(dataset::read_libhdf5::<i32>(&path, "d"), values);
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), values);
+    let chunks = array_index::libhdf5_chunks(&path, 0);
+    let written_records: Vec<_> = chunks[1..]
+        .iter()
+        .zip(written)
+        .map(|(chunk, stored)| {
+            let size = matches!(stored, Stored::Raw).then(|| chunk.size());
+            (chunk.offset().to_vec(), size, chunk.filter_mask())
+        })
+        .collect();
+    let expected: Vec<_> = written
+        .iter()
+        .zip(1..)
+        .map(|(stored, index)| {
+            let size = matches!(stored, Stored::Raw).then_some(16);
+            (vec![index * APPEND_CHUNK], size, 0)
+        })
+        .collect();
+    assert_eq!(
+        (&chunks[..1], chunks.len(), written_records),
+        (&before[..1], 1 + written.len(), expected)
+    );
+    assert_eq!(
+        array_index::pure_chunks(&File::open(&path).unwrap()),
+        chunks
+    );
+
+    let file = hdf5::File::open_rw(&path).unwrap();
+    let ds = file.dataset("d").unwrap();
+    ds.resize([12]).unwrap();
+    ds.write_slice(&[111], 11..12).unwrap();
+    drop(ds);
+    file.close().unwrap();
+
+    values.resize(11, APPEND_FILL);
+    values.push(111);
+    assert_eq!(dataset::read_libhdf5::<i32>(&path, "d"), values);
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), values);
+    assert_eq!(
+        array_index::pure_chunks(&File::open(&path).unwrap()),
+        array_index::libhdf5_chunks(&path, 0)
+    );
+}
+
 const APPEND_CHUNK: u64 = 4;
-#[cfg(target_endian = "little")]
 const APPEND_FILL: i32 = 17;
 const DEFLATE_LEVEL: u8 = 6;

@@ -58,6 +58,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - Fixed `Dataset::append` filtering the partial edge chunks of a dataset whose layout exempts them from the filters ([#845](https://github.com/CramBL/hdf5-pure/pull/845)).
+- Fixed `Dataset::append_staged` filtering the partial edge chunks of a dataset whose layout exempts them from the filters, and dropping that exemption.
 - Fixed `Dataset::read_raw` and related dataset reads accepting present chunks shorter or longer than their full logical size. Absent chunks retain fill-value behavior.
 - Fixed `FileBuilder::finish` and related attribute writers declaring non-ASCII names as ASCII or omitting their character-set declaration.
 - Fixed `FileBuilder::finish` and related output methods accepting empty attribute names or embedded null bytes. Invalid or oversized names are rejected before output.

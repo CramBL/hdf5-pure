@@ -16,7 +16,6 @@ pub(crate) struct Chunk {
     filter_mask: u32,
 }
 
-#[cfg(target_endian = "little")]
 impl Chunk {
     pub(crate) fn offset(&self) -> &[u64] {
         &self.offset
