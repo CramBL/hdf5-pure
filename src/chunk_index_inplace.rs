@@ -64,6 +64,8 @@ use crate::filter_pipeline::FilterPipeline;
 use crate::filters::{self, ChunkContext, FilterScratch};
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
+use crate::prepared_chunk::ChunkEncoding;
+use crate::prepared_chunk::PreparedChunk;
 use crate::source::Source;
 use crate::source::SourceMetadata;
 use crate::width::{FormatWidths, OffsetWidth};
@@ -1014,20 +1016,30 @@ impl Located {
     }
 }
 
-/// The mutation-free result of planning one in-place Extensible-Array append: the
-/// per-chunk (possibly compressed) blobs to write plus the
-/// bookkeeping the write phase publishes.
+/// The result of planning one in-place Extensible-Array append, computed without a write: the
+/// chunks to write and the counts the write phases publish.
 pub(crate) struct AppendPlan {
-    /// Per-chunk (possibly compressed) bytes to write, in element order starting
-    /// at `n_full`. The first entry is the rewritten trailing chunk when the
-    /// current length was not chunk-aligned.
-    pub new_chunk_bytes: Vec<Vec<u8>>,
+    /// The chunks to write, each with its stored bytes and its filter mask, in element order from
+    /// `n_full`. The first is the rewritten trailing chunk when the current length is not a
+    /// multiple of the chunk length.
+    chunks: Vec<PreparedChunk>,
     /// Element index the first new chunk occupies.
-    pub n_full: u64,
+    n_full: u64,
     /// New axis-0 dimension after the append (the commit value).
-    pub new_dim: u64,
+    new_dim: u64,
     /// New number of indexed chunks.
-    pub new_num_chunks: u64,
+    new_num_chunks: u64,
+}
+
+impl AppendPlan {
+    /// Returns the stored size of the largest chunk in the plan, or 0 for a plan without chunks.
+    pub(crate) fn largest_stored_size(&self) -> u64 {
+        self.chunks
+            .iter()
+            .map(PreparedChunk::stored_size)
+            .max()
+            .unwrap_or(0)
+    }
 }
 
 /// Compute, without mutating the file, the new chunk blobs to write for an append
@@ -1124,6 +1136,9 @@ pub(crate) fn plan_ea_append<F: Store>(
 
     // Build the raw tail region: the live prefix of any rewritten partial chunk,
     // then the appended bytes.
+    let ctx = ChunkContext::from_datatype(spatial, datatype)?;
+    // One encoder and decoder across the appended tail. See `FilterScratch`.
+    let mut scratch = FilterScratch::new();
     let mut tail_raw: Vec<u8> = Vec::new();
     if has_partial {
         let rec = loc
@@ -1147,8 +1162,8 @@ pub(crate) fn plan_ea_append<F: Store>(
         // One bounded read of the single trailing chunk.
         let stored = file.read_exact_at(rec.addr.get(), stored_len)?;
         let full = if let Some(pl) = pipeline {
-            let ctx = ChunkContext::from_datatype(spatial, datatype)?;
-            filters::decompress_chunk(&stored, pl, ctx, rec.filter_mask).map_err(Error::Format)?
+            filters::decompress_chunk_with(&mut scratch, &stored, pl, ctx, rec.filter_mask)
+                .map_err(Error::Format)?
         } else {
             stored
         };
@@ -1171,33 +1186,24 @@ pub(crate) fn plan_ea_append<F: Store>(
     let split =
         chunked_write::split_into_chunks(&tail_raw, &[tail_len_elems], spatial, element_size, fill)
             .map_err(Error::Format)?;
-    let new_chunk_bytes: Vec<Vec<u8>> = if let Some(pl) = pipeline {
-        let ctx = ChunkContext::from_datatype(spatial, datatype)?;
-        let mut out = Vec::with_capacity(split.len());
-        // One encoder across the appended tail; see `FilterScratch`.
-        let mut scratch = FilterScratch::new();
-        for buf in &split {
-            out.push(
-                filters::compress_chunk_with(&mut scratch, buf, pl, ctx).map_err(Error::Format)?,
-            );
-        }
-        out
-    } else {
-        split
-    };
+    let encoding = pipeline.map_or(ChunkEncoding::Raw, |_| ChunkEncoding::Filtered);
+    let chunks = split
+        .into_iter()
+        .map(|logical| PreparedChunk::encode(&mut scratch, pipeline, ctx, encoding, logical))
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Every blob has to fit the element it will be recorded in. Checked here,
     // while nothing has been written, rather than where the element is laid out
     // in phase 2 — by then phase 1 has already placed the chunk bytes, and the
     // refusal would leave them behind unreferenced.
     let os = file.widths().offsets.get() as usize;
-    for blob in &new_chunk_bytes {
-        loc.check_stored_size(os, blob.len() as u64)?;
+    for chunk in &chunks {
+        loc.check_stored_size(os, chunk.stored_size())?;
     }
 
-    let new_num_chunks = n_full + new_chunk_bytes.len() as u64;
+    let new_num_chunks = n_full + chunks.len() as u64;
     Ok(AppendPlan {
-        new_chunk_bytes,
+        chunks,
         n_full,
         new_dim,
         new_num_chunks,
@@ -1216,7 +1222,12 @@ pub(crate) fn plan_ea_append<F: Store>(
 pub(crate) fn apply_ea_append<F: Store>(
     file: &mut F,
     loc: &mut Located,
-    plan: &AppendPlan,
+    AppendPlan {
+        chunks,
+        n_full,
+        new_dim,
+        new_num_chunks,
+    }: AppendPlan,
     max_phase: u8,
 ) -> Result<(), Error> {
     // Phase 1: new/relocated chunk bytes, then advance the superblock's recorded
@@ -1232,11 +1243,10 @@ pub(crate) fn apply_ea_append<F: Store>(
     // past what it records. The initial value comes from the superblock: an
     // interrupted append can leave reserved storage beyond its recorded EOF.
     let mut recorded_eof = file.recorded_eof();
-    let mut chunk_addrs = Vec::with_capacity(plan.new_chunk_bytes.len());
-    for blob in &plan.new_chunk_bytes {
-        chunk_addrs.push((
-            StoredAddress::new(file.allocate(blob, AllocationClass::Raw)?),
-            blob.len() as u64,
+    let mut chunk_addrs = Vec::with_capacity(chunks.len());
+    for chunk in &chunks {
+        chunk_addrs.push(StoredAddress::new(
+            file.allocate(chunk.bytes(), AllocationClass::Raw)?,
         ));
     }
     file.sync()?;
@@ -1254,12 +1264,11 @@ pub(crate) fn apply_ea_append<F: Store>(
     // whose live prefix reproduces the old view's bytes). This may allocate new EA
     // blocks past EOF, covered by the phase-3 EOF patch (or draw them from freed
     // space, in which case there is nothing for it to cover).
-    for (k, &(addr, stored_size)) in chunk_addrs.iter().enumerate() {
-        let e = plan.n_full + k as u64;
+    for (e, (addr, chunk)) in (n_full..).zip(chunk_addrs.into_iter().zip(&chunks)) {
         let rec = ElemRecord {
             addr,
-            stored_size,
-            filter_mask: 0,
+            stored_size: chunk.stored_size(),
+            filter_mask: chunk.filter_mask(),
         };
         loc.ea_insert(file, e, rec)?;
     }
@@ -1273,18 +1282,18 @@ pub(crate) fn apply_ea_append<F: Store>(
     if file.len() != recorded_eof {
         file.patch_superblock_eof()?;
     }
-    loc.update_ea_header(file, plan.new_num_chunks)?;
+    loc.update_ea_header(file, new_num_chunks)?;
     file.sync()?;
     if max_phase < 4 {
         return Ok(());
     }
 
     // Phase 4: publish the dataspace dimension — the single commit point.
-    loc.patch_dimension(file, plan.new_dim)?;
+    loc.patch_dimension(file, new_dim)?;
     file.sync()?;
 
-    loc.current_dim = plan.new_dim;
-    loc.num_chunks = plan.new_num_chunks;
+    loc.current_dim = new_dim;
+    loc.num_chunks = new_num_chunks;
     Ok(())
 }
 
@@ -1837,7 +1846,7 @@ mod tests {
             FillPattern::ZERO,
         )
         .unwrap();
-        apply_ea_append(store, loc, &plan, 4).unwrap();
+        apply_ea_append(store, loc, plan, 4).unwrap();
     }
 
     /// Returns the bytes of the file from a fresh data block of `dblk_nelmts`
@@ -2049,6 +2058,46 @@ mod tests {
             reason,
             "malformed unfiltered extensible-array element width"
         );
+    }
+
+    #[test]
+    fn a_layout_element_size_other_than_the_datatype_size_is_rejected() {
+        let mut store = WindowProbeStore::open(build_unlimited(6, 4));
+        let oh_addr = crate::File::from_bytes(store.data.clone())
+            .unwrap()
+            .dataset("d")
+            .unwrap()
+            .header_address()
+            .unwrap();
+        let walk = walk_v2_object_header(&store, oh_addr, store.widths).unwrap();
+        let datatype = walk
+            .messages
+            .iter()
+            .find(|m| m.msg_type == MessageType::DATATYPE)
+            .unwrap();
+        let wider =
+            hdf5_pure_format::__private::serialize_datatype(&crate::type_builders::make_i64_type());
+        assert_eq!(wider.len(), datatype.size);
+        store
+            .publish_checksummed(
+                datatype.chunk_start,
+                datatype.chunk_msg_end,
+                datatype.data_off,
+                &wider,
+            )
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("element_size.h5");
+        std::fs::write(&path, &store.data).unwrap();
+
+        let file = crate::File::open_rw(&path).unwrap();
+        let err = file.dataset("d").unwrap().append(&[6_i64]).unwrap_err();
+        let Error::Format(FormatError::ChunkElementSizeMismatch { datatype, layout }) = err else {
+            panic!("expected ChunkElementSizeMismatch, got {err:?}");
+        };
+        assert_eq!((datatype, layout), (8, 4));
+        file.close().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), store.data);
     }
 
     #[test]

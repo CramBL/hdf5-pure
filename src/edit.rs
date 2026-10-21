@@ -4519,13 +4519,7 @@ impl WriteEngine {
             // draw may be empty. The editor then tries aggregate capacity or allocates at EOA.
             // The manager rewrite runs between planning and application, because it publishes
             // a superblock and must precede any partial application of the append.
-            let largest_blob = plan
-                .new_chunk_bytes
-                .iter()
-                .map(|b| b.len() as u64)
-                .max()
-                .unwrap_or(0);
-            self.reserve_for_immediate_append(largest_blob)?;
+            self.reserve_for_immediate_append(plan.largest_stored_size())?;
             self.synchronize_aggregates()?;
             {
                 let reuse = self.immediate_reuse_allowed();
@@ -4575,7 +4569,7 @@ impl WriteEngine {
                     state.publication_confirmed = false;
                 }
                 let result =
-                    chunk_index_inplace::apply_ea_append(&mut store, &mut st.loc, &plan, max_phase);
+                    chunk_index_inplace::apply_ea_append(&mut store, &mut st.loc, plan, max_phase);
                 if result.is_ok() {
                     if let Some(state) = store.aggregation.as_deref_mut() {
                         state.publication_confirmed = confirmed;
@@ -11185,13 +11179,17 @@ pub(crate) fn validate_gathered_append(st: &LocatedState, b: &AppendBuilder) -> 
     Ok((raw.len() / st.element_size) as u64)
 }
 
-/// Locate the dataset at `oh_addr` in `file` and build its [`LocatedState`],
-/// validating in-place append eligibility (rank-1 / unlimited / Extensible-Array
-/// indexed, a nonzero chunk length, and a re-encodable filter pipeline). A
-/// dataset this path cannot append to takes an
-/// [`Error::AppendInPlaceUnsupported`]. A datatype or filter pipeline message
-/// that does not read or parse returns the [`Error::Format`] the read or the
-/// parse produced.
+/// Locates the dataset at `oh_addr` in `file` and builds its [`LocatedState`] for an in-place
+/// append.
+///
+/// An in-place append accepts a dataset of rank 1 with an unlimited dimension, indexed by an
+/// Extensible Array with a nonzero chunk length, whose filter pipeline the engine can encode again.
+///
+/// # Errors
+///
+/// Returns [`Error::AppendInPlaceUnsupported`] if an in-place append does not accept the dataset,
+/// and [`FormatError::ChunkElementSizeMismatch`] if the layout stores an element size other than
+/// the size of the datatype. Returns the error of a read or a parse of the dataset's metadata.
 pub(crate) fn locate_dataset_state<F: Store>(
     file: &F,
     oh_addr: u64,
@@ -11205,6 +11203,13 @@ pub(crate) fn locate_dataset_state<F: Store>(
     let (dt_off, dt_size) = result.spans.datatype;
     let dt_bytes = file.read_metadata_at(dt_off, dt_size)?;
     let (datatype, _) = hdf5_pure_format::__private::parse_datatype(&dt_bytes)?;
+    let element_size: NonZeroUsize = datatype.element_size()?.narrow()?;
+    if element_size != result.located.elem_bytes {
+        return Err(Error::Format(FormatError::ChunkElementSizeMismatch {
+            datatype: element_size.get(),
+            layout: result.located.elem_bytes.get(),
+        }));
+    }
     let pipeline = match result.spans.filter {
         Some((fb, fsize)) => {
             let fp_bytes = file.read_metadata_at(fb, fsize)?;
@@ -11218,7 +11223,6 @@ pub(crate) fn locate_dataset_state<F: Store>(
         }
         None => None,
     };
-    let element_size = result.located.elem_bytes;
     let spatial = vec![result.located.chunk_elems];
     // A fill message that cannot be read leaves `PaddingFill::Unknown`, which
     // fails only where a chunk actually needs padding — an append that lands on

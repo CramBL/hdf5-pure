@@ -519,6 +519,8 @@ pub(crate) mod image;
 #[cfg(all(feature = "std", any(test, feature = "__page-publication-crosscheck")))]
 pub(crate) mod page_publication_failure;
 #[cfg(feature = "std")]
+pub(crate) mod prepared_chunk;
+#[cfg(feature = "std")]
 pub(crate) mod reader;
 #[cfg(feature = "std")]
 pub(crate) mod reference_patch;

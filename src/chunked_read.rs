@@ -134,10 +134,12 @@ fn decode_chunk<'a>(
     Ok(decoded)
 }
 
-/// How a chunk's bytes are stored, which decides whether a read runs the
-/// inverse filter pipeline over them.
+/// Whether a read runs a chunk's bytes through the filter pipeline, with the filter mask of a
+/// filtered chunk.
+///
+/// A writer stores the mask in the chunk's index record.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ChunkFiltering {
+pub(crate) enum ChunkFiltering {
     /// The pipeline produced the stored bytes, and this mask holds the filters
     /// it skipped for this chunk.
     Filtered { filter_mask: u32 },
@@ -541,7 +543,10 @@ const MAX_CHUNK_ALLOCATION_BYTES: u64 = u32::MAX as u64;
 /// Returns [`FormatError::InvalidChunkGeometry`] if the size exceeds
 /// [`MAX_CHUNK_ALLOCATION_BYTES`] or its calculation overflows [`u64`]. Returns
 /// [`FormatError::ValueTooLargeForPlatform`] if the byte count exceeds [`usize::MAX`].
-fn bounded_chunk_len(chunk_dims: &[u64], elem_size: NonZeroUsize) -> Result<usize, FormatError> {
+pub(crate) fn bounded_chunk_len(
+    chunk_dims: &[u64],
+    elem_size: NonZeroUsize,
+) -> Result<usize, FormatError> {
     let logical = chunk_dims
         .iter()
         .try_fold(elem_size.get() as u64, |acc, &d| acc.checked_mul(d));
