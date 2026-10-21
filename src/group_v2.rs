@@ -1,7 +1,4 @@
-//! V2 group traversal: resolve group children and navigate paths.
-//!
-//! Handles both compact storage (Link messages in object header) and
-//! dense storage (fractal heap + B-tree v2).
+//! Group child lookup, hard link listings, and path resolution through hard and soft links.
 
 #[cfg(not(feature = "std"))]
 use alloc::string::{String, ToString};
@@ -9,6 +6,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::num::NonZeroU16;
 
+use hdf5_pure_core::__private::PhysicalAddress;
 use hdf5_pure_format::__private::FractalHeapIdLayout;
 use hdf5_pure_format::__private::{BTREE_V2_LINK_CREATION_ORDER, BTREE_V2_LINK_NAME};
 use hdf5_pure_space::__private::Extent;
@@ -31,12 +29,173 @@ use crate::link_info::LinkInfoMessage;
 use crate::link_message::{self, LinkMessage, LinkTarget};
 use crate::message_type::MessageType;
 use crate::object_header::{MessageFilter, ObjectHeader};
-use crate::object_path::{LinkName, ObjectPath};
+use crate::object_path::{LinkName, ObjectPath, ObjectPathBuf, SoftLinkPath};
 use crate::source::SourceMetadata;
 use crate::source::{self, BaseOffsetSource, Source};
 use crate::superblock::Superblock;
 use crate::symbol_table::SymbolTableMessage;
 use crate::width::{FormatWidths, OffsetWidth};
+
+/// Resolves `path` from the root group, following hard and soft links.
+///
+/// # Errors
+///
+/// Returns the errors of [`resolve_link_path`] and of the group metadata parsers.
+pub(crate) fn resolve_read_path_any(
+    file_data: &[u8],
+    access_mode: AccessMode,
+    superblock: &Superblock,
+    widths: FormatWidths,
+    addresses: AddressContext,
+    path: &ObjectPath<'_>,
+) -> Result<u64, ResolveError> {
+    let root = addresses.absolute(superblock.root_group_address)?;
+    resolve_link_path(root, root, &ObjectPathBuf::root(), path, |address, name| {
+        find_child_target(
+            file_data,
+            access_mode,
+            address,
+            widths,
+            addresses,
+            group_v1::group_leaf_node_k(superblock),
+            name,
+        )
+    })
+}
+
+/// Resolves `path` from the root group through `source`, following hard and soft links.
+///
+/// # Errors
+///
+/// Returns the errors of [`resolve_link_path`], the group metadata parsers, and `source` reads.
+pub(crate) fn resolve_read_path_any_from_source<S: Source + ?Sized>(
+    source: &S,
+    access_mode: AccessMode,
+    superblock: &Superblock,
+    widths: FormatWidths,
+    addresses: AddressContext,
+    path: &ObjectPath<'_>,
+) -> Result<u64, ResolveError> {
+    let root = addresses.absolute(superblock.root_group_address)?;
+    resolve_link_path(root, root, &ObjectPathBuf::root(), path, |address, name| {
+        find_child_target_from_source(
+            source,
+            access_mode,
+            address,
+            widths,
+            addresses,
+            group_v1::group_leaf_node_k(superblock),
+            name,
+        )
+    })
+}
+
+/// Resolves `path` from `start`, or from `root` for an absolute path.
+///
+/// `H5G__traverse_slink` resolves relative targets from their containing group, and
+/// `H5G__traverse_real` resolves absolute targets from the root group (`H5Gtraverse.c`,
+/// HDF5 1.14.6).
+///
+/// `base` is the root-relative path of `start`, used to report errors. At most 64 soft links
+/// are followed.
+///
+/// # Errors
+///
+/// Returns [`ResolveError::NotFound`] for a missing component and [`ResolveError::NotAGroup`]
+/// for an intermediate non-group object. Returns [`FormatError::DanglingSoftLink`] for a
+/// missing target component, [`FormatError::SoftLinkTraversalLimit`] on exceeding the
+/// traversal limit, and [`FormatError::ExternalLinkUnsupported`] for an external link.
+/// Returns errors from `lookup` for malformed group metadata or link targets.
+pub(crate) fn resolve_link_path(
+    root: u64,
+    start: u64,
+    base: &ObjectPathBuf,
+    path: &ObjectPath<'_>,
+    lookup: impl FnMut(u64, LinkName<'_>) -> Result<ChildLookup, FormatError>,
+) -> Result<u64, ResolveError> {
+    LinkResolver {
+        root,
+        traversed: 0,
+        lookup,
+    }
+    .resolve(start, base, path)
+}
+
+/// Resolves nested soft targets with a shared traversal count.
+struct LinkResolver<F> {
+    root: u64,
+    traversed: u32,
+    lookup: F,
+}
+
+impl<F: FnMut(u64, LinkName<'_>) -> Result<ChildLookup, FormatError>> LinkResolver<F> {
+    fn resolve(
+        &mut self,
+        start: u64,
+        base: &ObjectPathBuf,
+        path: &ObjectPath<'_>,
+    ) -> Result<u64, ResolveError> {
+        let root_path = ObjectPathBuf::root();
+        let (mut address, base) = if path.is_absolute() {
+            (self.root, &root_path)
+        } else {
+            (start, base)
+        };
+        for (walked, &name) in path.components().iter().enumerate() {
+            address = match (self.lookup)(address, name)? {
+                ChildLookup::Found(ChildTarget::Hard(address)) => address.get(),
+                ChildLookup::Found(ChildTarget::Soft(target)) => {
+                    if self.traversed == SOFT_LINK_TRAVERSAL_LIMIT {
+                        return Err(FormatError::SoftLinkTraversalLimit {
+                            path: base.join_path(&path.prefix(walked + 1)).to_string(),
+                            limit: SOFT_LINK_TRAVERSAL_LIMIT,
+                        }
+                        .into());
+                    }
+                    self.traversed += 1;
+                    match self.resolve(
+                        address,
+                        &base.join_path(&path.prefix(walked)),
+                        &target.as_path(),
+                    ) {
+                        Err(ResolveError::NotFound(_)) => {
+                            return Err(FormatError::DanglingSoftLink {
+                                path: base.join_path(&path.prefix(walked + 1)).to_string(),
+                                target: target.to_string(),
+                            }
+                            .into());
+                        }
+                        result => result?,
+                    }
+                }
+                ChildLookup::Found(ChildTarget::External {
+                    filename,
+                    object_path,
+                }) => {
+                    return Err(FormatError::ExternalLinkUnsupported {
+                        path: base.join_path(&path.prefix(walked + 1)).to_string(),
+                        filename,
+                        object_path,
+                    }
+                    .into());
+                }
+                ChildLookup::Absent => {
+                    return Err(ResolveError::NotFound(
+                        base.join_path(&path.prefix(walked + 1)).to_string(),
+                    ));
+                }
+                ChildLookup::NotAGroup => {
+                    return Err(ResolveError::NotAGroup(
+                        base.join_path(&path.prefix(walked)).to_string(),
+                    ));
+                }
+            };
+        }
+        Ok(address)
+    }
+}
+
+const SOFT_LINK_TRAVERSAL_LIMIT: u32 = 64;
 
 /// Returns the version 2 B-tree allocations owned by a dense group's link set using validated
 /// file widths.
@@ -117,49 +276,66 @@ fn resolve_compact_entries(
                     cache_type: 0,
                 });
             }
-            // Skip soft and external links for path resolution
+            // Listings include only hard links.
         }
     }
     Ok(entries)
 }
 
-/// What a by-name child lookup found in the object it was pointed at.
+/// The result of looking up one link name in an object.
 ///
-/// Three answers rather than an `Option`, because "this is not a group, so it
-/// has no children to search" is a different fact from "this group has no child
-/// of that name". Both used to leave the lookup as a `FormatError::PathNotFound`
-/// — absence naming the component, a non-group naming nothing at all — so a
-/// caller could not tell them apart, and a path *through* a dataset read as a
-/// path that does not exist (issue #365).
-///
-/// Which object the answer is about is left to the caller. Naming it takes the
-/// path walked to reach it, and only the caller has that; a lookup one component
-/// deep knows an address and nothing else.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The caller supplies the path used to report an absent child or a non-group object.
+#[derive(Debug)]
 pub(crate) enum ChildLookup {
-    /// The physical position of the named child's object header.
-    Found(u64),
     /// The group holds no child of that name.
     Absent,
+    /// The named link's parsed target.
+    Found(ChildTarget),
     /// The object searched is not a group at all, in either form.
     NotAGroup,
 }
 
 impl ChildLookup {
-    /// Returns the lookup result with a stored child address converted to a physical position.
+    /// Parses a soft target or converts a stored hard link address to a physical position.
     ///
-    /// Returns [`ChildLookup::Absent`] if `address` is [`None`].
+    /// Returns [`ChildLookup::Absent`] if `target` is [`None`].
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the sum of the stored address and effective base
-    /// exceeds [`u64::MAX`].
-    fn of(addresses: AddressContext, address: Option<StoredAddress>) -> Result<Self, FormatError> {
-        Ok(match address {
-            Some(address) => ChildLookup::Found(addresses.absolute(address)?),
+    /// exceeds [`u64::MAX`], and [`FormatError::InvalidSoftLinkTarget`] for an invalid soft target.
+    fn of(addresses: AddressContext, target: Option<LinkTarget>) -> Result<Self, FormatError> {
+        Ok(match target {
+            Some(LinkTarget::Hard {
+                object_header_address,
+            }) => ChildLookup::Found(ChildTarget::Hard(addresses.resolve(object_header_address)?)),
+            Some(LinkTarget::Soft { target_path }) => {
+                ChildLookup::Found(ChildTarget::Soft(SoftLinkPath::parse(&target_path)?))
+            }
+            Some(LinkTarget::External {
+                filename,
+                object_path,
+            }) => ChildLookup::Found(ChildTarget::External {
+                filename,
+                object_path,
+            }),
             None => ChildLookup::Absent,
         })
     }
+}
+
+/// A link target with a resolved hard address or a parsed soft path.
+#[derive(Debug)]
+pub(crate) enum ChildTarget {
+    /// A file name and object path in another file.
+    External {
+        filename: String,
+        object_path: String,
+    },
+    /// The physical position of an object header.
+    Hard(PhysicalAddress),
+    /// A path resolved from its containing group or the root group.
+    Soft(SoftLinkPath),
 }
 
 /// Returns the child named `name` using validated file widths.
@@ -167,7 +343,7 @@ impl ChildLookup {
 /// # Errors
 ///
 /// Returns the [`FormatError`] of the first structure needed for the lookup that does not parse.
-pub(crate) fn find_child_address(
+pub(crate) fn find_child_target(
     file_data: &[u8],
     access_mode: AccessMode,
     group_address: u64,
@@ -199,17 +375,15 @@ pub(crate) fn find_child_address(
     }
     ChildLookup::of(
         addresses,
-        resolve_group_entries(
+        find_noncompact_link(
             file_data,
             access_mode,
             &header,
             widths,
             addresses,
             group_leaf_node_k,
-        )?
-        .into_iter()
-        .find(|e| e.name == name.as_str())
-        .map(|e| e.object_header_address),
+            name,
+        )?,
     )
 }
 
@@ -219,7 +393,7 @@ pub(crate) fn find_child_address(
 ///
 /// Returns the [`FormatError`] of the first structure needed for the lookup that does not parse,
 /// or the error `source` reports for a structure it cannot read.
-pub(crate) fn find_child_address_from_source<S: Source + ?Sized>(
+pub(crate) fn find_child_target_from_source<S: Source + ?Sized>(
     source: &S,
     access_mode: AccessMode,
     group_address: u64,
@@ -251,17 +425,15 @@ pub(crate) fn find_child_address_from_source<S: Source + ?Sized>(
     }
     ChildLookup::of(
         addresses,
-        resolve_group_entries_from_source(
+        find_noncompact_link_from_source(
             source,
             access_mode,
             &header,
             widths,
             addresses,
             group_leaf_node_k,
-        )?
-        .into_iter()
-        .find(|e| e.name == name.as_str())
-        .map(|e| e.object_header_address),
+            name,
+        )?,
     )
 }
 
@@ -328,42 +500,157 @@ fn filtered_is_group(header: &ObjectHeader, saw_link: bool) -> bool {
     saw_link || is_group(header)
 }
 
-/// The stored address of the hard link named `name` among this header's compact
-/// Link messages.
+/// Parses the target of the compact link named `name`.
 ///
-/// Soft and external links are skipped, as [`resolve_compact_entries`] skips
-/// them: they name no object header in this file.
+/// Every retained Link message is inspected so that an unreadable prefix is reported
+/// regardless of its position. Only matching targets are parsed.
 ///
-/// # What a lookup still refuses
+/// # Errors
 ///
-/// Every Link message here is read, rather than stopping at the match, and the
-/// reason is that the ones this cannot read at all are refused: a lookup must
-/// not depend on whether the damaged link sits before or after the one asked
-/// for. That costs nothing, because the parse that produced this header was
-/// asked for the wanted link and kept only it and the messages it could not
-/// judge (see [`wanted_link_only`]).
-///
-/// What a lookup no longer refuses is a link whose *target* is malformed and
-/// whose name is not the one asked for — resolving one path used to parse every
-/// link's target, so any such link failed every lookup in the group. Listing the
-/// group ([`resolve_group_entries`]) still reports it. A lookup reads the link it
-/// was asked for.
+/// Returns the errors of [`LinkMessage::target_if_named`].
 fn scan_compact_links(
     object_header: &ObjectHeader,
     offset_width: OffsetWidth,
     name: LinkName<'_>,
-) -> Result<Option<StoredAddress>, FormatError> {
+) -> Result<Option<LinkTarget>, FormatError> {
     let mut found = None;
     for msg in &object_header.messages {
         if msg.msg_type != MessageType::LINK {
             continue;
         }
-        let addr = LinkMessage::hard_link_address_if_named_with_offset_width(
-            &msg.data,
-            offset_width,
+        let target = LinkMessage::target_if_named(&msg.data, offset_width, name.as_str())?;
+        found = found.or(target);
+    }
+    Ok(found)
+}
+
+fn find_noncompact_link(
+    file_data: &[u8],
+    access_mode: AccessMode,
+    header: &ObjectHeader,
+    widths: FormatWidths,
+    addresses: AddressContext,
+    group_leaf_node_k: Option<NonZeroU16>,
+    name: LinkName<'_>,
+) -> Result<Option<LinkTarget>, FormatError> {
+    if let Some(message) = header
+        .messages
+        .iter()
+        .find(|m| m.msg_type == MessageType::SYMBOL_TABLE)
+    {
+        let table = SymbolTableMessage::parse_with_offset_width(&message.data, widths.offsets)?;
+        return group_v1::find_link(
+            file_data,
+            &table,
+            widths,
+            addresses,
+            group_leaf_node_k,
+            name,
+            || {
+                crate::btree_v1::collect_symbol_table_nodes(
+                    file_data,
+                    table.btree_address,
+                    widths,
+                    addresses,
+                )
+            },
+        );
+    }
+    let info = find_link_info(header, widths.offsets)?;
+    let Some(heap_address) = info.fractal_heap_address else {
+        return Ok(None);
+    };
+    let file_data = source::frame(file_data, addresses.effective_base())?;
+    let heap_header =
+        crate::fractal_heap::parse_header(file_data, addresses, heap_address, widths)?;
+    let index = info
+        .btree_name_index_address
+        .ok_or_else(|| FormatError::PathNotFound(String::from("no B-tree v2 name index")))?;
+    let btree = BTreeV2Header::parse_with_widths(file_data, index.get().to_usize()?, widths)?;
+    let records = btree_v2::collect_btree_v2_records(file_data, &btree, widths.offsets)?;
+    let layout = FractalHeapIdLayout::new(&heap_header, widths.offsets, widths.lengths);
+    let mut heap =
+        HeapObjectReader::new(&heap_header, addresses, heap_address, access_mode, widths);
+    let mut found = None;
+    for record in &records {
+        let Some(id) = record.link_heap_id(btree.tree_type, heap_header.heap_id_length) else {
+            continue;
+        };
+        let data = heap.read(file_data, layout.parse(id)?)?;
+        found = found.or(LinkMessage::target_if_named(
+            &data,
+            widths.offsets,
             name.as_str(),
-        )?;
-        found = found.or(addr);
+        )?);
+    }
+    Ok(found)
+}
+
+fn find_noncompact_link_from_source<S: Source + ?Sized>(
+    source: &S,
+    access_mode: AccessMode,
+    header: &ObjectHeader,
+    widths: FormatWidths,
+    addresses: AddressContext,
+    group_leaf_node_k: Option<NonZeroU16>,
+    name: LinkName<'_>,
+) -> Result<Option<LinkTarget>, FormatError> {
+    if let Some(message) = header
+        .messages
+        .iter()
+        .find(|m| m.msg_type == MessageType::SYMBOL_TABLE)
+    {
+        let table = SymbolTableMessage::parse_with_offset_width(&message.data, widths.offsets)?;
+        return group_v1::find_link(
+            source,
+            &table,
+            widths,
+            addresses,
+            group_leaf_node_k,
+            name,
+            || {
+                crate::btree_v1::collect_symbol_table_nodes_from_source(
+                    source,
+                    table.btree_address,
+                    widths,
+                    addresses,
+                )
+            },
+        );
+    }
+    let info = find_link_info(header, widths.offsets)?;
+    let Some(heap_address) = info.fractal_heap_address else {
+        return Ok(None);
+    };
+    let source = BaseOffsetSource {
+        inner: source,
+        base: addresses.effective_base(),
+    };
+    let heap_header =
+        crate::fractal_heap::read_header_from_source(&source, addresses, heap_address, widths)?;
+    let index = info
+        .btree_name_index_address
+        .ok_or_else(|| FormatError::PathNotFound(String::from("no B-tree v2 name index")))?;
+    let btree = BTreeV2Header::parse_from_source_with_widths(
+        &SourceMetadata(&source),
+        index.get(),
+        widths,
+    )?;
+    let records = btree_v2::collect_btree_v2_records_from_source(&source, &btree, widths.offsets)?;
+    let layout = FractalHeapIdLayout::new(&heap_header, widths.offsets, widths.lengths);
+    let mut heap =
+        HeapObjectReader::new(&heap_header, addresses, heap_address, access_mode, widths);
+    let mut found = None;
+    for record in &records {
+        let Some(id) = record.link_heap_id(btree.tree_type, heap_header.heap_id_length) else {
+            continue;
+        };
+        let data = heap.read_from_source(&source, layout.parse(id)?)?;
+        found = found.or(LinkMessage::target_if_named(
+            &data,
+            widths.offsets,
+            name.as_str(),
+        )?);
     }
     Ok(found)
 }
@@ -465,7 +752,9 @@ pub(crate) fn is_group(object_header: &ObjectHeader) -> bool {
     is_v1_group(object_header) || is_v2_group(object_header)
 }
 
-/// Returns the address of the object header `path` identifies using validated file widths.
+/// Returns the address of the object header `path` identifies through hard links.
+///
+/// Soft and external links are reported as missing components.
 ///
 /// # Errors
 ///
@@ -482,7 +771,7 @@ pub fn resolve_path_any(
     let mut current_addr = addresses.absolute(superblock.root_group_address)?;
 
     for (walked, &name) in path.components().iter().enumerate() {
-        match find_child_address(
+        match find_child_target(
             file_data,
             access_mode,
             current_addr,
@@ -491,8 +780,8 @@ pub fn resolve_path_any(
             group_v1::group_leaf_node_k(superblock),
             name,
         )? {
-            ChildLookup::Found(abs_addr) => current_addr = abs_addr,
-            ChildLookup::Absent => {
+            ChildLookup::Found(ChildTarget::Hard(abs_addr)) => current_addr = abs_addr.get(),
+            ChildLookup::Absent | ChildLookup::Found(_) => {
                 return Err(FormatError::PathNotFound(path.prefix(walked + 1).to_string()).into());
             }
             ChildLookup::NotAGroup => {
@@ -535,7 +824,7 @@ pub fn resolve_group_entries(
     } else {
         // Names no object, and cannot: an enumeration is handed a header and
         // nothing else. Where there is a path to give, the walks give it: they
-        // classify through `find_child_address` before they descend and refuse a
+        // classify through `find_child_target` before they descend and reject a
         // non-group by name (issue #365). What is left reaches this holding no
         // path either — `reference_patch` and the incoming-hard-link tally read
         // it as "not a group, skip", and `FileInner::group_children` and
@@ -569,7 +858,7 @@ pub fn resolve_path_any_from_source<S: Source + ?Sized>(
     let mut current_addr = addresses.absolute(superblock.root_group_address)?;
 
     for (walked, &name) in path.components().iter().enumerate() {
-        match find_child_address_from_source(
+        match find_child_target_from_source(
             source,
             access_mode,
             current_addr,
@@ -578,8 +867,8 @@ pub fn resolve_path_any_from_source<S: Source + ?Sized>(
             group_v1::group_leaf_node_k(superblock),
             name,
         )? {
-            ChildLookup::Found(abs_addr) => current_addr = abs_addr,
-            ChildLookup::Absent => {
+            ChildLookup::Found(ChildTarget::Hard(abs_addr)) => current_addr = abs_addr.get(),
+            ChildLookup::Absent | ChildLookup::Found(_) => {
                 return Err(FormatError::PathNotFound(path.prefix(walked + 1).to_string()).into());
             }
             ChildLookup::NotAGroup => {
@@ -731,6 +1020,103 @@ mod tests {
     use crate::source::BytesSource;
     #[cfg(feature = "std")]
     use crate::writer::FileBuilder;
+
+    #[rstest::rstest]
+    #[case::relative("alias/value", 3)]
+    #[case::absolute("absolute/value", 4)]
+    #[case::chain("chain/value", 3)]
+    #[case::group("alias", 2)]
+    #[case::current_group_target("alias/again/value", 3)]
+    fn soft_link_targets_use_relative_or_absolute_starting_groups(
+        #[case] path: &str,
+        #[case] expected: u64,
+    ) {
+        let result = resolve_link_path(
+            0,
+            1,
+            &ObjectPathBuf::parse("g"),
+            &ObjectPath::parse(path),
+            |address, name| {
+                Ok(match (address, name.as_str()) {
+                    (1, "alias") => ChildLookup::Found(ChildTarget::Soft(
+                        SoftLinkPath::parse("target").unwrap(),
+                    )),
+                    (1, "absolute") => ChildLookup::Found(ChildTarget::Soft(
+                        SoftLinkPath::parse("/target").unwrap(),
+                    )),
+                    (1, "chain") => {
+                        ChildLookup::Found(ChildTarget::Soft(SoftLinkPath::parse("alias").unwrap()))
+                    }
+                    (1, "target") => ChildLookup::Found(ChildTarget::Hard(PhysicalAddress::new(2))),
+                    (0, "target") => ChildLookup::Found(ChildTarget::Hard(PhysicalAddress::new(5))),
+                    (2, "value") => ChildLookup::Found(ChildTarget::Hard(PhysicalAddress::new(3))),
+                    (5, "value") => ChildLookup::Found(ChildTarget::Hard(PhysicalAddress::new(4))),
+                    (2, "again") => {
+                        ChildLookup::Found(ChildTarget::Soft(SoftLinkPath::parse(".").unwrap()))
+                    }
+                    _ => ChildLookup::Absent,
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[rstest::rstest]
+    #[case::self_link("loop")]
+    #[case::expanding_target("loop/suffix")]
+    fn soft_link_cycles_stop_after_a_bounded_number_of_lookups(#[case] target: &str) {
+        let mut reads = 0;
+        let err = resolve_link_path(
+            0,
+            0,
+            &ObjectPathBuf::root(),
+            &ObjectPath::parse("loop"),
+            |_, _| {
+                reads += 1;
+                Ok(ChildLookup::Found(ChildTarget::Soft(
+                    SoftLinkPath::parse(target).unwrap(),
+                )))
+            },
+        )
+        .unwrap_err();
+        let ResolveError::Format(error) = err else {
+            panic!("expected a format error, got {err:?}");
+        };
+        assert_eq!(
+            error,
+            FormatError::SoftLinkTraversalLimit {
+                path: String::from("loop"),
+                limit: 64
+            }
+        );
+        assert_eq!(reads, 65);
+    }
+
+    #[test]
+    fn structure_errors_preserve_their_format_variant() {
+        let expected = FormatError::PathNotFound(String::from("no B-tree v2 name index"));
+        let error = resolve_link_path(
+            0,
+            0,
+            &ObjectPathBuf::root(),
+            &ObjectPath::parse("alias"),
+            |_, name| {
+                if name.as_str() == "alias" {
+                    Ok(ChildLookup::Found(ChildTarget::Soft(
+                        SoftLinkPath::parse("target").unwrap(),
+                    )))
+                } else {
+                    Err(expected.clone())
+                }
+            },
+        )
+        .unwrap_err();
+        let ResolveError::Format(error) = error else {
+            panic!("expected format error, got {error:?}");
+        };
+        assert_eq!(error, expected);
+    }
 
     fn test_widths(superblock: &Superblock) -> FormatWidths {
         FormatWidths::from_sizes(superblock.offset_size, superblock.length_size).unwrap()
@@ -1041,10 +1427,8 @@ mod tests {
         );
     }
 
-    /// Only hard links name an object header in this file, and only the link
-    /// asked for answers.
     #[test]
-    fn scanning_compact_links_answers_for_hard_links_alone() {
+    fn scanning_compact_links_distinguishes_hard_soft_and_absent_names() {
         let mut hard = vec![1u8, 0x00, 4];
         hard.extend_from_slice(b"data");
         hard.extend_from_slice(&0x4000u64.to_le_bytes());
@@ -1063,13 +1447,16 @@ mod tests {
         assert_eq!(
             scan_compact_links(&header, OffsetWidth::Eight, LinkName::new("data").unwrap(),)
                 .unwrap(),
-            Some(StoredAddress::new(0x4000))
+            Some(LinkTarget::Hard {
+                object_header_address: StoredAddress::new(0x4000)
+            })
         );
         assert_eq!(
             scan_compact_links(&header, OffsetWidth::Eight, LinkName::new("soft").unwrap(),)
                 .unwrap(),
-            None,
-            "a soft link names a path, not an object header"
+            Some(LinkTarget::Soft {
+                target_path: String::from("/abc")
+            })
         );
         assert_eq!(
             scan_compact_links(
@@ -1325,7 +1712,7 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
 
         // Each backend reaches `ChildLookup::of` through its own lookup
-        // (`find_child_address` and `find_child_address_from_source`), so both
+        // (`find_child_target` and `find_child_target_from_source`), so both
         // are asserted.
         for (backend, file) in [
             ("buffered", crate::reader::File::from_bytes(bytes).unwrap()),

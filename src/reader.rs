@@ -1862,11 +1862,15 @@ impl FileInner {
         Err(last_err.expect("refresh retried at least once before failing"))
     }
 
-    /// Resolve a path to an object-header address, dispatching on the backend.
+    /// Resolves a path to an object-header address, following hard and soft links.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`group_v2::resolve_link_path`] and the backend metadata reads.
     fn resolve_path(&self, path: &ObjectPath<'_>) -> Result<u64, Error> {
         let access = self.access_mode();
         Ok(match &self.backend {
-            Backend::InMemory(v) => group_v2::resolve_path_any(
+            Backend::InMemory(v) => group_v2::resolve_read_path_any(
                 v,
                 access,
                 &self.superblock,
@@ -1874,7 +1878,7 @@ impl FileInner {
                 self.addresses(),
                 path,
             )?,
-            Backend::Streaming(s) => group_v2::resolve_path_any_from_source(
+            Backend::Streaming(s) => group_v2::resolve_read_path_any_from_source(
                 s.as_ref(),
                 access,
                 &self.superblock,
@@ -1889,7 +1893,7 @@ impl FileInner {
                 let core = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let sb = core.superblock().clone();
                 match core.image_slice() {
-                    Some(data) => group_v2::resolve_path_any(
+                    Some(data) => group_v2::resolve_read_path_any(
                         data,
                         access,
                         &sb,
@@ -1897,7 +1901,7 @@ impl FileInner {
                         core.addresses(),
                         path,
                     )?,
-                    None => group_v2::resolve_path_any_from_source(
+                    None => group_v2::resolve_read_path_any_from_source(
                         core.image(),
                         access,
                         &sb,
@@ -2207,23 +2211,27 @@ impl FileInner {
         self.addresses().absolute(entry.object_header_address)
     }
 
-    /// The child named `name`, at the absolute file address
-    /// [`ChildLookup::Found`] carries.
+    /// Returns the parsed target of the child named `name`.
     ///
-    /// The by-name counterpart of [`group_children`](Self::group_children), and
-    /// the one to reach for when a single child is wanted: it stops at the match
-    /// rather than building an entry, and an owned name, for every other child
-    /// of the group (issue #228).
-    fn group_child(&self, group_address: u64, name: LinkName<'_>) -> Result<ChildLookup, Error> {
+    /// Compact group lookups compare borrowed names and parse matching targets.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors from the group metadata and link target parsers.
+    fn group_child(
+        &self,
+        group_address: u64,
+        name: LinkName<'_>,
+    ) -> Result<ChildLookup, FormatError> {
         let (widths, base) = (self.widths, self.addresses());
         let k = group_v1::group_leaf_node_k(&self.superblock);
         let access = self.access_mode();
         let addr = group_address;
         match &self.backend {
             Backend::InMemory(v) => {
-                group_v2::find_child_address(v, access, addr, widths, base, k, name)
+                group_v2::find_child_target(v, access, addr, widths, base, k, name)
             }
-            Backend::Streaming(s) => group_v2::find_child_address_from_source(
+            Backend::Streaming(s) => group_v2::find_child_target_from_source(
                 s.as_ref(),
                 access,
                 addr,
@@ -2234,13 +2242,10 @@ impl FileInner {
             ),
             Backend::Edit(m) => Self::with_engine(
                 m,
-                |d| group_v2::find_child_address(d, access, addr, widths, base, k, name),
-                |s| {
-                    group_v2::find_child_address_from_source(s, access, addr, widths, base, k, name)
-                },
+                |d| group_v2::find_child_target(d, access, addr, widths, base, k, name),
+                |s| group_v2::find_child_target_from_source(s, access, addr, widths, base, k, name),
             ),
         }
-        .map_err(Error::Format)
     }
 
     /// Read all attributes attached to an object header, dispatching on the
@@ -3510,16 +3515,25 @@ impl File {
         }
     }
 
-    /// Resolve a path and return an owned [`Dataset`] handle.
+    /// Resolves a path and returns an owned [`Dataset`] handle.
+    ///
+    /// Hard and soft links are followed. Relative soft targets start at their containing
+    /// group, and absolute targets start at the file root. External links are unsupported.
     ///
     /// The dataset uses the file-wide chunk-cache default (configured with
     /// [`FileAccessProperties::with_chunk_cache`]). To override the cache for this
     /// one dataset, use [`dataset_with_options`](Self::dataset_with_options).
     ///
+    /// # Errors
+    ///
     /// Returns [`Error::NotADataset`] if the path names something that is not a
     /// dataset, and [`Error::NotAGroup`] if a component *along* the path is not
     /// a group: resolving `a/b/c` opens `a` and then `a/b` to look inside them,
     /// so a dataset at `a/b` reports `NotAGroup("a/b")` (issue #365).
+    ///
+    /// Returns [`FormatError::DanglingSoftLink`] if a soft target has a missing component,
+    /// [`FormatError::SoftLinkTraversalLimit`] if resolution would follow more than 64 soft
+    /// links, and [`FormatError::ExternalLinkUnsupported`] for an external target.
     pub fn dataset(&self, path: &str) -> Result<Dataset, Error> {
         self.dataset_with_options(path, DatasetAccessProperties::new())
     }
@@ -3560,7 +3574,12 @@ impl File {
         ))
     }
 
-    /// Resolve a path and return an owned [`Group`] handle.
+    /// Resolves a path and returns an owned [`Group`] handle.
+    ///
+    /// Hard and soft links are followed. Relative soft targets start at their containing
+    /// group, and absolute targets start at the file root. External links are unsupported.
+    ///
+    /// # Errors
     ///
     /// Returns [`Error::NotAGroup`] if the path names an object that is not a
     /// group, the way [`dataset`](Self::dataset) returns
@@ -3570,6 +3589,10 @@ impl File {
     /// The same error reports a component *along* the path that is not a group,
     /// naming that component's own path rather than the one asked for: `a/b/c`
     /// stopped by a dataset at `a/b` reports `NotAGroup("a/b")` (issue #365).
+    ///
+    /// Returns [`FormatError::DanglingSoftLink`] if a soft target has a missing component,
+    /// [`FormatError::SoftLinkTraversalLimit`] if resolution would follow more than 64 soft
+    /// links, and [`FormatError::ExternalLinkUnsupported`] for an external target.
     pub fn group(&self, path: &str) -> Result<Group, Error> {
         let path = ObjectPathBuf::parse(path);
         match self.inner.staged_object(&path).map(|o| o.kind) {
@@ -4506,6 +4529,9 @@ impl Group {
     /// a trailing separator separates nothing, and a `.` component identifies the group reached so
     /// far, so `a/b`, `a//b/` and `./a/b` identify one dataset.
     ///
+    /// Hard and soft links are followed. Relative soft targets start at their containing
+    /// group, and absolute targets start at the file root. External links are unsupported.
+    ///
     /// The dataset uses the file-wide chunk-cache default. To override the cache
     /// for this one dataset, use
     /// [`dataset_with_options`](Self::dataset_with_options).
@@ -4514,10 +4540,13 @@ impl Group {
     ///
     /// Returns [`FormatError::PathNotFound`] if a component of `path` reaches nothing,
     /// [`Error::NotADataset`] if `path` identifies an object that is not a dataset, and
-    /// [`Error::NotAGroup`] if an object along the way is not a group. Each reports the object by
-    /// its path from the root group, so one object has one name whichever handle a caller holds,
-    /// except through a handle an object reference produced, which has no path of its own
-    /// (issue #365).
+    /// [`Error::NotAGroup`] if an object along the way is not a group. Paths in these errors are
+    /// relative to the root group, except through an object-reference handle, which has no path
+    /// of its own.
+    ///
+    /// Returns [`FormatError::DanglingSoftLink`] if a soft target has a missing component,
+    /// [`FormatError::SoftLinkTraversalLimit`] if resolution would follow more than 64 soft
+    /// links, and [`FormatError::ExternalLinkUnsupported`] for an external target.
     pub fn dataset(&self, path: &str) -> Result<Dataset, Error> {
         self.dataset_with_options(path, DatasetAccessProperties::new())
     }
@@ -4579,6 +4608,10 @@ impl Group {
     /// Returns [`Error::NotAGroup`] if `path` identifies an object that is not a group, the way
     /// [`dataset`](Self::dataset) returns [`Error::NotADataset`] for the mirror case, and
     /// [`FormatError::PathNotFound`] if a component of `path` reaches nothing.
+    ///
+    /// Returns [`FormatError::DanglingSoftLink`] if a soft target has a missing component,
+    /// [`FormatError::SoftLinkTraversalLimit`] if resolution would follow more than 64 soft
+    /// links, and [`FormatError::ExternalLinkUnsupported`] for an external target.
     pub fn group(&self, path: &str) -> Result<Group, Error> {
         let relative = ObjectPath::parse(path);
         let child = self.child_path(&relative);
@@ -4618,30 +4651,14 @@ impl Group {
     /// [`Error::NotAGroup`] if an object along the way is not a group. Both report the object
     /// through [`root_relative`](Self::root_relative).
     fn resolve_path(&self, path: &ObjectPath<'_>) -> Result<u64, Error> {
-        // Resolved before the walk whichever way the walk starts, so a handle
-        // that cannot resolve itself reports that.
         let own = self.header_address()?;
-        // An absolute path starts at the root group, as `H5G__traverse_real`
-        // starts one there (`H5Gtraverse.c`, HDF5 1.14.6).
-        let mut address = if path.is_absolute() {
-            self.file.mirror_root_address()?
-        } else {
-            own
-        };
-        for (walked, &name) in path.components().iter().enumerate() {
-            address = match self.file.group_child(address, name)? {
-                ChildLookup::Found(found) => found,
-                ChildLookup::Absent => {
-                    return Err(Error::Format(FormatError::PathNotFound(
-                        self.root_relative(&path.prefix(walked + 1)),
-                    )));
-                }
-                ChildLookup::NotAGroup => {
-                    return Err(Error::NotAGroup(self.root_relative(&path.prefix(walked))));
-                }
-            };
-        }
-        Ok(address)
+        Ok(group_v2::resolve_link_path(
+            self.file.mirror_root_address()?,
+            own,
+            self.path.as_ref().unwrap_or(&ObjectPathBuf::root()),
+            path,
+            |address, name| self.file.group_child(address, name),
+        )?)
     }
 
     /// Returns the root-relative path of the object `path` identifies from this group, or from
@@ -8908,7 +8925,7 @@ mod tests {
         let addresses = AddressContext::from_effective_base(sb.base_address);
         sb.root_group_address = addresses
             .relative(
-                group_v2::resolve_path_any(
+                group_v2::resolve_read_path_any(
                     &bytes,
                     AccessMode::ReadOnly,
                     &sb,
