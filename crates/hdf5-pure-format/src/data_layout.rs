@@ -621,7 +621,7 @@ fn write_dimension(buf: &mut Vec<u8>, dim: u32, width: UintWidth) {
 /// Byte offset of a layout message's class-specific property description, past
 /// the version and layout class bytes the message opens with. From "The Data
 /// Layout Message", version 4.0.
-const LAYOUT_PROPERTIES_OFFSET: usize = 2;
+pub const LAYOUT_PROPERTIES_OFFSET: usize = 2;
 
 /// Byte offset of a compact layout's inline data within the layout message
 /// body: the property description, past its two-byte data size field. Version 3

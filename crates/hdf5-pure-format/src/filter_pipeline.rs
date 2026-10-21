@@ -14,7 +14,13 @@ use crate::error::FormatError;
 
 // Section `subsubsec_fmt4_dataobject_hdr_msg_filter`, version 4.0, defines the pipeline versions and field widths.
 const VERSION_ONE: u8 = 1;
-const VERSION_TWO: u8 = 2;
+/// Version 2 of the Filter Pipeline message, where only a filter with an identifier of 256 or
+/// above stores the Name Length field, and the Name field where that length is not zero. The
+/// message is defined in "The Data Storage - Filter Pipeline Message" of the [format
+/// specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_filter
+pub const VERSION_TWO: u8 = 2;
 const PREDEFINED_FILTER_LIMIT: u16 = 256;
 const VERSION_ONE_HEADER_SIZE: usize = 8;
 const VERSION_TWO_HEADER_SIZE: usize = 2;

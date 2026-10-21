@@ -52,16 +52,23 @@ use crate::address::AddressContext;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::checksum;
+use crate::chunked_read;
+use crate::chunked_read::ChunkDecoding;
+use crate::chunked_read::ChunkInfo;
+use crate::chunked_read::StoredChunkSize;
 use crate::chunked_write;
 use crate::convert::Narrow;
-use crate::data_layout::{ChunkIndexLayout, DataLayout};
+use crate::data_layout::ChunkIndexLayout;
+use crate::data_layout::ChunkedLayoutFlags;
+use crate::data_layout::DataLayout;
 use crate::dataspace::{Dataspace, MaxExtent};
 use crate::datatype::Datatype;
 use crate::edit::{self, LOSSY_TAIL_REFUSAL};
 use crate::error::{Error, FormatError};
 use crate::fill_value::FillPattern;
 use crate::filter_pipeline::FilterPipeline;
-use crate::filters::{self, ChunkContext, FilterScratch};
+use crate::filters::ChunkContext;
+use crate::filters::FilterScratch;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::prepared_chunk::ChunkEncoding;
@@ -285,9 +292,14 @@ pub(crate) struct Located {
     pub ohdr_chunk_start: u64,
     pub ohdr_chunk_msg_end: u64,
 
+    /// The flags the chunked layout sets, such as [`DONT_FILTER_PARTIAL_BOUND_CHUNKS`], under which
+    /// a partial edge chunk is stored without the filter pipeline.
+    ///
+    /// [`DONT_FILTER_PARTIAL_BOUND_CHUNKS`]: hdf5_pure_format::__private::DONT_FILTER_PARTIAL_BOUND_CHUNKS
+    pub flags: ChunkedLayoutFlags,
     /// Elements per chunk along axis 0 (the only varying axis for rank 1).
     pub chunk_elems: u64,
-    /// Bytes per dataset element (datatype size).
+    /// Bytes per dataset element, the element size the chunked layout stores.
     pub elem_bytes: NonZeroUsize,
     /// Bytes per chunk (uncompressed).
     pub chunk_bytes: usize,
@@ -312,18 +324,24 @@ pub(crate) struct Located {
 }
 
 impl Located {
-    /// Locate the dataset whose object-header address is `oh_addr`, deriving its
-    /// dataspace/layout/Extensible-Array geometry. Filter-neutral: it records
-    /// whether the dataset is filtered and returns the datatype/filter message
-    /// spans, leaving the accept/reject policy to the caller. `unsupported`
-    /// builds the caller's "unsupported target" error so each writer reports
-    /// through its own variant. Path resolution is the caller's job: an owned
-    /// handle already carries its address, and the path-addressed writers
-    /// resolve against their own mirrors.
+    /// Locates the dataset whose object header is at `oh_addr`, and reads its dataspace, its
+    /// layout with the layout flags, and the geometry of its Extensible Array.
     ///
-    /// Every read is a bounded [`Source`] window (the object-header chunks, one
-    /// message span, the EA header), so this works over a store with no
-    /// whole-file mirror.
+    /// The result records whether the dataset is filtered and holds the spans of its datatype,
+    /// filter pipeline, and fill value messages, and the caller decides whether it accepts the
+    /// filters. `unsupported` builds the caller's error for a dataset it cannot append to, so
+    /// each writer reports through its own variant. The caller resolves the path: an owned handle
+    /// holds its address, and the path-addressed writers resolve against their own mirrors.
+    ///
+    /// Every read is a bounded [`Source`] window, so this works over a store with no whole-file
+    /// mirror.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error `unsupported` builds if an in-place append does not accept the dataset,
+    /// and [`Error::MissingMessage`] if the object header has no dataspace, layout, or datatype
+    /// message. Returns the error of a read or a parse of the object header, one of its messages,
+    /// or the Extensible Array header.
     pub(crate) fn locate_at<F: Store>(
         file: &F,
         oh_addr: u64,
@@ -400,15 +418,16 @@ impl Located {
         // Parse the layout: must be a v4 chunked Extensible Array (index type 4).
         let layout_bytes = file.read_metadata_at(layout_msg.data_off, layout_msg.size)?;
         let layout = DataLayout::parse_with_widths(&layout_bytes, widths)?;
-        let (ea_addr, chunk_dims) = match layout {
+        let (ea_addr, chunk_dims, flags) = match layout {
             DataLayout::Chunked {
                 chunk_dimensions,
                 index:
                     ChunkIndexLayout::ExtensibleArray {
                         address: Some(addr),
                     },
+                flags,
                 ..
-            } => (addr, chunk_dimensions),
+            } => (addr, chunk_dimensions, flags),
             DataLayout::Chunked {
                 index: ChunkIndexLayout::ExtensibleArray { address: None },
                 ..
@@ -497,6 +516,7 @@ impl Located {
                 current_dim,
                 ohdr_chunk_start: dataspace_msg.chunk_start,
                 ohdr_chunk_msg_end: dataspace_msg.chunk_msg_end,
+                flags,
                 chunk_elems,
                 elem_bytes,
                 chunk_bytes,
@@ -516,6 +536,61 @@ impl Located {
                 fill: fill_msg.map(|m| (m.msg_type, m.data_off, m.size)),
             },
         })
+    }
+
+    /// Reads the trailing partial chunk and returns the bytes of its live elements.
+    ///
+    /// The chunk is decoded as a reader at the current extent decodes it, through the filter
+    /// pipeline unless the layout flags exempt it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AppendUnsupported`] if the index has no record for the chunk, and the
+    /// errors of the read of the record and of [`chunked_read::read_decoded_chunk`].
+    fn read_live_tail<F: Store>(
+        &self,
+        file: &F,
+        scratch: &mut FilterScratch,
+        pipeline: Option<&FilterPipeline>,
+        ctx: ChunkContext<'_>,
+    ) -> Result<Vec<u8>, Error> {
+        let live_elems = self.current_dim % self.chunk_elems;
+        let rec = self
+            .read_element(file, self.current_dim / self.chunk_elems)?
+            .ok_or(Error::AppendUnsupported(
+                "trailing partial chunk is missing from the index",
+            ))?;
+        let stored_size = if self.client_id == EA_CLIENT_ID_UNFILTERED {
+            self.chunk_bytes.to_u64()
+        } else {
+            rec.stored_size
+        };
+        let chunk = ChunkInfo {
+            chunk_size: StoredChunkSize::v4(stored_size),
+            filter_mask: rec.filter_mask,
+            offsets: vec![self.current_dim - live_elems],
+            address: rec.addr,
+        };
+        let mut logical = chunked_read::read_decoded_chunk(
+            file,
+            scratch,
+            self.flags,
+            ctx.chunk_dims,
+            &[self.current_dim],
+            pipeline,
+            ctx,
+            &chunk,
+        )?;
+        logical.truncate(chunked_read::bounded_chunk_len(
+            &[live_elems],
+            self.elem_bytes,
+        )?);
+        Ok(logical)
+    }
+
+    /// Returns how a reader at the extent `extent` decodes the chunk at element `offset`.
+    fn decoding_at(&self, offset: u64, extent: u64) -> ChunkDecoding {
+        ChunkDecoding::at_extent(self.flags, &[self.chunk_elems], &[extent], &[offset])
     }
 
     /// Read the element record stored at byte offset `off`.
@@ -1094,7 +1169,9 @@ pub(crate) fn plan_ea_append<F: Store>(
     // value, so it yields the same element count with the old live prefix
     // byte-identical — which holds because the pipelines this admits are
     // lossless, the condition the next paragraph enforces. Phases 3 and 4 are the
-    // ordinary in-progress states.
+    // ordinary in-progress states. A chunk the layout flags exempt from the filters at either
+    // dimension is stored as its data, so a reader at either dimension decodes it to the same
+    // data. See `ChunkEncoding::decodable_by`.
     //
     // Reusing the old slot when the re-encoded bytes happen to fit is the option
     // this does *not* take: overwriting a chunk in place is not one atomic write,
@@ -1139,57 +1216,28 @@ pub(crate) fn plan_ea_append<F: Store>(
     let ctx = ChunkContext::from_datatype(spatial, datatype)?;
     // One encoder and decoder across the appended tail. See `FilterScratch`.
     let mut scratch = FilterScratch::new();
-    let mut tail_raw: Vec<u8> = Vec::new();
-    if has_partial {
-        let rec = loc
-            .read_element(file, n_full)?
-            .ok_or(Error::AppendUnsupported(
-                "trailing partial chunk is missing from the index",
-            ))?;
-        let stored_len = if pipeline.is_some() {
-            rec.stored_size
-                .narrow_or_else(|| Error::AppendUnsupported("chunk size exceeds this platform"))?
-        } else {
-            chunk_elems.to_usize()? * element_size.get()
-        };
-        rec.addr
-            .get()
-            .checked_add(stored_len as u64)
-            .filter(|&e| e <= file.len())
-            .ok_or(Error::AppendUnsupported(
-                "trailing chunk extends past end-of-file",
-            ))?;
-        // One bounded read of the single trailing chunk.
-        let stored = file.read_exact_at(rec.addr.get(), stored_len)?;
-        let full = if let Some(pl) = pipeline {
-            filters::decompress_chunk_with(&mut scratch, &stored, pl, ctx, rec.filter_mask)
-                .map_err(Error::Format)?
-        } else {
-            stored
-        };
-        let live_elems: usize = (current_dim % chunk_elems)
-            .narrow_or_else(|| Error::AppendUnsupported("chunk length exceeds this platform"))?;
-        let live_bytes = live_elems * element_size.get();
-        if full.len() < live_bytes {
-            return Err(Error::AppendUnsupported(
-                "trailing chunk decoded shorter than its live element count",
-            ));
-        }
-        tail_raw.extend_from_slice(&full[..live_bytes]);
-    }
+    let mut tail_raw = if has_partial {
+        loc.read_live_tail(file, &mut scratch, pipeline, ctx)?
+    } else {
+        Vec::new()
+    };
     tail_raw.extend_from_slice(raw);
 
-    // Split the tail into full chunk buffers and compress each through the
-    // pipeline when filtered. The final chunk's slots past the new dimension
+    // Split the tail into full chunk buffers and encode each for a reader at the current
+    // dimension and one at the new dimension. The final chunk's slots past the new dimension
     // take the dataset's fill value (issue #296).
     let tail_len_elems = new_dim - n_full * chunk_elems;
     let split =
         chunked_write::split_into_chunks(&tail_raw, &[tail_len_elems], spatial, element_size, fill)
             .map_err(Error::Format)?;
-    let encoding = pipeline.map_or(ChunkEncoding::Raw, |_| ChunkEncoding::Filtered);
-    let chunks = split
-        .into_iter()
-        .map(|logical| PreparedChunk::encode(&mut scratch, pipeline, ctx, encoding, logical))
+    let chunks = (n_full..)
+        .zip(split)
+        .map(|(e, logical)| {
+            let offset = e * chunk_elems;
+            let current = (offset < current_dim).then(|| loc.decoding_at(offset, current_dim));
+            let encoding = ChunkEncoding::decodable_by(current, loc.decoding_at(offset, new_dim));
+            PreparedChunk::encode(&mut scratch, pipeline, ctx, encoding, logical)
+        })
         .collect::<Result<Vec<_>, _>>()?;
 
     // Every blob has to fit the element it will be recorded in. Checked here,
@@ -1580,6 +1628,8 @@ mod tests {
     use std::cell::Cell;
     use std::cell::RefCell;
 
+    use hdf5_pure_format::__private::LAYOUT_PROPERTIES_OFFSET;
+    use hdf5_pure_format::__private::LayoutVersion;
     use rstest::rstest;
     use test_util::image::Image;
     use test_util::object_header::Message;
@@ -1589,6 +1639,7 @@ mod tests {
 
     use super::*;
     use crate::access_mode::AccessMode;
+    use crate::filters;
     use crate::group_v2;
     use crate::object_path::ObjectPath;
     use crate::source::BytesSource;
@@ -1788,7 +1839,16 @@ mod tests {
     /// Drive the full located-append path (`locate_at` + `plan_ea_append` +
     /// `apply_ea_append`) through the probe store and return the located state.
     fn locate(store: &WindowProbeStore) -> (Located, crate::datatype::Datatype) {
-        let oh_addr = group_v2::resolve_path_any(
+        let result =
+            Located::locate_at(store, dataset_address(store), Error::AppendUnsupported).unwrap();
+        let (dt_off, dt_size) = result.spans.datatype;
+        let dt_bytes = store.read_metadata_at(dt_off, dt_size).unwrap();
+        let (datatype, _) = hdf5_pure_format::__private::parse_datatype(&dt_bytes).unwrap();
+        (result.located, datatype)
+    }
+
+    fn dataset_address(store: &WindowProbeStore) -> u64 {
+        group_v2::resolve_path_any(
             &store.data,
             AccessMode::ReadOnly,
             &store.superblock,
@@ -1796,12 +1856,7 @@ mod tests {
             AddressContext::from_effective_base(store.superblock.base_address),
             &ObjectPath::parse("d"),
         )
-        .unwrap();
-        let result = Located::locate_at(store, oh_addr, Error::AppendUnsupported).unwrap();
-        let (dt_off, dt_size) = result.spans.datatype;
-        let dt_bytes = store.read_metadata_at(dt_off, dt_size).unwrap();
-        let (datatype, _) = hdf5_pure_format::__private::parse_datatype(&dt_bytes).unwrap();
-        (result.located, datatype)
+        .unwrap()
     }
 
     /// Every element of the located dataset, read back through the engine's own
@@ -2503,4 +2558,246 @@ mod tests {
             "the refusal should name the element width, but said {err:?}"
         );
     }
+
+    #[rstest]
+    #[case::raw_tail_stays_partial(true, &[106], &[(Stored::Raw, [104, 105, 106, EDGE_FILL])])]
+    #[case::raw_tail_becomes_full(true, &[106, 107], &[(Stored::FiltersSkipped, [104, 105, 106, 107])])]
+    #[case::raw_tail_becomes_full_before_a_raw_tail(
+        true,
+        &[106, 107, 108],
+        &[
+            (Stored::FiltersSkipped, [104, 105, 106, 107]),
+            (Stored::Raw, [108, EDGE_FILL, EDGE_FILL, EDGE_FILL]),
+        ],
+    )]
+    #[case::filtered_tail_stays_partial(
+        false,
+        &[106],
+        &[(Stored::Filtered, [104, 105, 106, EDGE_FILL])],
+    )]
+    #[case::filtered_tail_becomes_full(
+        false,
+        &[106, 107],
+        &[(Stored::Filtered, [104, 105, 106, 107])],
+    )]
+    #[case::filtered_tail_becomes_full_before_a_filtered_tail(
+        false,
+        &[106, 107, 108],
+        &[
+            (Stored::Filtered, [104, 105, 106, 107]),
+            (Stored::Filtered, [108, EDGE_FILL, EDGE_FILL, EDGE_FILL]),
+        ],
+    )]
+    fn every_publication_state_of_an_edge_append_reads_under_its_extent(
+        #[case] raw_edges: bool,
+        #[case] appended: &[i32],
+        #[case] written: &[(Stored, [i32; 4])],
+        #[values(EdgeFilter::Deflate, EdgeFilter::Shuffle, EdgeFilter::ShuffleDeflate)]
+        filter: EdgeFilter,
+        #[values(1, 2, 3, 4)] max_phase: u8,
+    ) {
+        let mut store = edge_store(filter, raw_edges);
+        let before = stored_chunks(&store.data);
+        append_to_edge_store(&mut store, appended, max_phase).unwrap();
+
+        let pipeline = filter.pipeline();
+        let written: Vec<_> = (4..)
+            .step_by(4)
+            .zip(written)
+            .map(|(offset, (stored, values))| {
+                let logical = i32_bytes(values);
+                let (filter_mask, bytes) = match stored {
+                    Stored::Filtered => (
+                        0,
+                        filters::compress_chunk(&logical, &pipeline, ChunkContext::basic(&[4], 4))
+                            .unwrap(),
+                    ),
+                    Stored::FiltersSkipped => (filter.every_filter_skipped(), logical),
+                    Stored::Raw => (0, logical),
+                };
+                (vec![offset], filter_mask, bytes)
+            })
+            .collect();
+        let (chunks, values) = match max_phase {
+            1 => (before, EDGE_INITIAL.to_vec()),
+            2 | 3 => (
+                [&before[..1], &written[..1]].concat(),
+                EDGE_INITIAL.to_vec(),
+            ),
+            _ => (
+                [&before[..1], &written].concat(),
+                [&EDGE_INITIAL[..], appended].concat(),
+            ),
+        };
+        assert_eq!(stored_chunks(&store.data), chunks);
+        let file = crate::File::from_bytes(store.data).unwrap();
+        assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), values);
+    }
+
+    #[rstest]
+    #[case::short_raw_tail(true, 12)]
+    #[case::long_raw_tail(true, 20)]
+    #[case::short_filtered_tail(false, 12)]
+    #[case::long_filtered_tail(false, 20)]
+    fn an_old_tail_of_another_decoded_length_is_rejected(
+        #[case] raw_edges: bool,
+        #[case] decoded_len: usize,
+    ) {
+        let mut store = edge_store(EdgeFilter::Shuffle, raw_edges);
+        let logical = vec![0x5a; decoded_len];
+        let stored = if raw_edges {
+            logical
+        } else {
+            filters::compress_chunk(
+                &logical,
+                &EdgeFilter::Shuffle.pipeline(),
+                ChunkContext::basic(&[4], 4),
+            )
+            .unwrap()
+        };
+        replace_edge_record(&mut store, &stored);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("edge.h5");
+        std::fs::write(&path, &store.data).unwrap();
+
+        let file = crate::File::open_rw(&path).unwrap();
+        let err = file.dataset("d").unwrap().append(&[106_i32]).unwrap_err();
+        let Error::Format(FormatError::DataSizeMismatch { expected, actual }) = err else {
+            panic!("expected DataSizeMismatch, got {err:?}");
+        };
+        assert_eq!((expected, actual), (16, decoded_len));
+        file.close().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), store.data);
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum EdgeFilter {
+        Deflate,
+        Shuffle,
+        ShuffleDeflate,
+    }
+
+    impl EdgeFilter {
+        fn pipeline(self) -> FilterPipeline {
+            let store = self.store();
+            edit::locate_dataset_state(&store, dataset_address(&store))
+                .unwrap()
+                .pipeline
+                .unwrap()
+        }
+
+        fn every_filter_skipped(self) -> u32 {
+            match self {
+                Self::Deflate | Self::Shuffle => 0b1,
+                Self::ShuffleDeflate => 0b11,
+            }
+        }
+
+        fn store(self) -> WindowProbeStore {
+            let mut builder = FileBuilder::new();
+            let dataset = builder
+                .create_dataset("d")
+                .with_i32_data(&EDGE_INITIAL)
+                .with_shape(&[6])
+                .with_maxshape(&[MaxExtent::Unlimited])
+                .with_chunks(&[4])
+                .with_fill_value(EDGE_FILL);
+            match self {
+                Self::Deflate => dataset.with_deflate(DeflateLevel::Six),
+                Self::Shuffle => dataset.with_shuffle(),
+                Self::ShuffleDeflate => dataset.with_shuffle().with_deflate(DeflateLevel::Six),
+            };
+            WindowProbeStore::open(builder.finish().unwrap())
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Stored {
+        Filtered,
+        FiltersSkipped,
+        Raw,
+    }
+
+    fn edge_store(filter: EdgeFilter, raw_edges: bool) -> WindowProbeStore {
+        let mut store = filter.store();
+        if raw_edges {
+            let walk =
+                walk_v2_object_header(&store, dataset_address(&store), store.widths).unwrap();
+            let layout = walk
+                .messages
+                .iter()
+                .find(|m| m.msg_type == MessageType::DATA_LAYOUT)
+                .unwrap();
+            assert_eq!(
+                store.data[layout.data_off.to_usize().unwrap()],
+                LayoutVersion::Four.get()
+            );
+            store
+                .publish_checksummed(
+                    layout.chunk_start,
+                    layout.chunk_msg_end,
+                    layout.data_off + LAYOUT_PROPERTIES_OFFSET.to_u64(),
+                    &[crate::data_layout::DONT_FILTER_PARTIAL_BOUND_CHUNKS],
+                )
+                .unwrap();
+            replace_edge_record(&mut store, &i32_bytes(&[104, 105, EDGE_FILL, EDGE_FILL]));
+        }
+        store
+    }
+
+    fn replace_edge_record(store: &mut WindowProbeStore, stored: &[u8]) {
+        let (loc, _) = locate(store);
+        let addr = StoredAddress::new(store.allocate(stored, AllocationClass::Raw).unwrap());
+        store.patch_superblock_eof().unwrap();
+        let rec = ElemRecord {
+            addr,
+            stored_size: stored.len() as u64,
+            filter_mask: 0,
+        };
+        loc.ea_insert(store, 1, rec).unwrap();
+    }
+
+    fn append_to_edge_store(
+        store: &mut WindowProbeStore,
+        values: &[i32],
+        max_phase: u8,
+    ) -> Result<(), Error> {
+        let mut state = edit::locate_dataset_state(&*store, dataset_address(store)).unwrap();
+        let plan = plan_ea_append(
+            store,
+            &state.loc,
+            &state.datatype,
+            &state.spatial,
+            state.element_size,
+            state.pipeline.as_ref(),
+            true,
+            &i32_bytes(values),
+            values.len() as u64,
+            state.fill.pattern(state.element_size),
+        )?;
+        apply_ea_append(store, &mut state.loc, plan, max_phase)
+    }
+
+    fn stored_chunks(data: &[u8]) -> Vec<(Vec<u64>, u32, Vec<u8>)> {
+        crate::File::from_bytes(data.to_vec())
+            .unwrap()
+            .dataset("d")
+            .unwrap()
+            .chunks()
+            .unwrap()
+            .into_iter()
+            .map(|chunk| {
+                let at = chunk.address.to_usize().unwrap();
+                let end = at + chunk.storage_size.to_usize().unwrap();
+                (chunk.offset, chunk.filter_mask, data[at..end].to_vec())
+            })
+            .collect()
+    }
+
+    fn i32_bytes(values: &[i32]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_le_bytes()).collect()
+    }
+
+    const EDGE_INITIAL: [i32; 6] = [100, 101, 102, 103, 104, 105];
+    const EDGE_FILL: i32 = -7;
 }
