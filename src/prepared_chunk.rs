@@ -1,5 +1,5 @@
-//! The chunks an append writes, encoded for the extent the append publishes and, in an in-place
-//! append, for the extent before it.
+//! The chunks an append or a chunked overwrite writes, encoded for the extent the write publishes
+//! and, in an in-place append, for the extent before it.
 
 use crate::chunked_read;
 use crate::chunked_read::ChunkDecoding;
@@ -11,8 +11,8 @@ use crate::filters;
 use crate::filters::ChunkContext;
 use crate::filters::FilterScratch;
 
-/// A chunk ready for an append: the bytes the append writes, and whether a reader runs
-/// them through the filter pipeline, with the mask of a filtered chunk.
+/// A chunk ready to be written: its stored bytes, and whether a reader runs them through the
+/// filter pipeline, with the mask of a filtered chunk.
 #[derive(Debug)]
 pub(crate) struct PreparedChunk {
     bytes: Vec<u8>,
@@ -59,7 +59,7 @@ impl PreparedChunk {
         Ok(Self { bytes, filtering })
     }
 
-    /// Returns the bytes the append writes for the chunk.
+    /// Returns the bytes stored for the chunk.
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes
     }
@@ -80,7 +80,7 @@ impl PreparedChunk {
     }
 }
 
-/// The form in which an append writes a chunk, and the filter mask it records.
+/// The form in which a chunk is written, and the filter mask its index record stores.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ChunkEncoding {
     /// The output of the filter pipeline, with a filter mask of 0.
