@@ -768,13 +768,14 @@ impl ChunkIndexKind {
     }
 
     /// Returns the body of the version 4 data layout message of chunks indexed
-    /// by this kind, with `index_address` as the address of a Fixed Array or an
-    /// Extensible Array.
+    /// by this kind, with `flags` as its layout flags and `index_address` as the
+    /// address of a Fixed Array or an Extensible Array.
     ///
     /// A Single Chunk layout stores the address of the first of `chunks`, and an
     /// unallocated layout a Fixed Array index at the undefined address.
     fn layout_message(
         self,
+        flags: ChunkedLayoutFlags,
         chunk_dims: &[u32],
         element_size: NonZeroUsize,
         chunks: &[ChunkRecord],
@@ -802,7 +803,7 @@ impl ChunkIndexKind {
             )
         })?;
         DataLayout::encode_chunked(
-            ChunkedLayoutFlags::NONE,
+            flags,
             chunk_dims,
             element_size,
             info,
@@ -1239,6 +1240,7 @@ fn chunk_index_layout(
     index_address: StoredAddress,
 ) -> Result<Vec<u8>, FormatError> {
     set.kind.layout_message(
+        ChunkedLayoutFlags::NONE,
         &set.chunk_dims_u32,
         set.element_size,
         written_chunks,
@@ -1535,15 +1537,27 @@ pub(crate) struct VerbatimLayout {
     pub(crate) pipeline_message: Option<Vec<u8>>,
 }
 
-/// Computes the [`VerbatimLayout`] (data-region plan plus the v4 layout and
-/// verbatim pipeline messages) for a dense, grid-ordered set of chunks, from
-/// their sizes and filter masks alone — no chunk bytes. The byte layout is
-/// identical whether the chunks are later buffered or streamed.
+/// Returns the [`VerbatimLayout`] of a dense set of chunks in row-major grid order, planned from
+/// their sizes and filter masks alone.
+///
+/// The layout is the same whether the chunks are later buffered or streamed. The caller passes
+/// each partial edge chunk unfiltered where [`ChunkedLayoutFlags::partial_edge_chunks_stored_raw`]
+/// is `true` for `flags`: the layout message stores `flags` as given, and the plan records each
+/// chunk as `meta` describes it.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ChunkedReadError`] if `meta` is empty, holds a number of chunks other
+/// than the grid over `shape`, or holds a chunk too large for the chunk size field of a filtered
+/// index, and [`FormatError::OffsetOverflow`] if the stored sizes of the chunks sum past
+/// [`u64::MAX`]. Returns the errors of [`plan_index_slots`] and [`IndexSlots::new`] for the
+/// index, and of [`DataLayout::encode_chunked`] for the layout message.
 pub(crate) fn plan_chunked_data_verbatim(
     meta: &[ChunkMeta],
     shape: &[u64],
     chunk_dims: &[u64],
     element_size: NonZeroUsize,
+    flags: ChunkedLayoutFlags,
     pipeline_message: Option<&[u8]>,
     data_address: StoredAddress,
     maxshape: Option<&[MaxExtent]>,
@@ -1638,6 +1652,7 @@ pub(crate) fn plan_chunked_data_verbatim(
     cursor += index.as_ref().map_or(0, |i| i.len);
 
     let layout_message = kind.layout_message(
+        flags,
         &chunk_dims_u32,
         element_size,
         &written_chunks,
@@ -1772,6 +1787,7 @@ mod tests {
     use crate::chunked_read;
     use crate::convert;
     use crate::data_layout::ChunkIndexLayout;
+    use crate::data_layout::DONT_FILTER_PARTIAL_BOUND_CHUNKS;
     use crate::data_layout::DataLayout;
     use crate::dataspace::{Dataspace, DataspaceType};
     use crate::datatype::layout::FloatingPointLayout;
@@ -2495,6 +2511,7 @@ mod tests {
             &[21],
             &[7],
             convert::nz(8),
+            ChunkedLayoutFlags::NONE,
             Some(&[]),
             StoredAddress::new(0x1000),
             None,
@@ -2560,6 +2577,7 @@ mod tests {
                 shape,
                 &[7],
                 convert::nz(8),
+                ChunkedLayoutFlags::NONE,
                 Some(&[]),
                 StoredAddress::new(0x1000),
                 maxshape,
@@ -2599,6 +2617,7 @@ mod tests {
             &[21],
             &[7],
             convert::nz(8),
+            ChunkedLayoutFlags::NONE,
             None,
             StoredAddress::new(0x1000),
             None,
@@ -2620,6 +2639,7 @@ mod tests {
             &[6],
             &[2],
             convert::nz(1),
+            ChunkedLayoutFlags::NONE,
             Some(&[]),
             StoredAddress::new(0x1000),
             None,
@@ -2634,6 +2654,48 @@ mod tests {
             "chunk 1 of a verbatim chunked dataset stores 70000 bytes, more than the chunk index \
              records for a filtered chunk of 2 bytes"
         );
+    }
+
+    #[rstest]
+    #[case::fixed_array(&[21], None, 3)]
+    #[case::extensible_array(&[21], Some(&[MaxExtent::Unlimited][..]), 3)]
+    #[case::single_chunk(&[7], None, 1)]
+    fn a_verbatim_plan_stores_the_partial_edge_chunk_flag_it_is_given(
+        #[case] shape: &[u64],
+        #[case] maxshape: Option<&[MaxExtent]>,
+        #[case] chunks: usize,
+        #[values(false, true)] stored_raw: bool,
+        #[values(None, Some(&[][..]))] pipeline_message: Option<&[u8]>,
+    ) {
+        let flags = if stored_raw {
+            ChunkedLayoutFlags::new(DONT_FILTER_PARTIAL_BOUND_CHUNKS)
+        } else {
+            ChunkedLayoutFlags::NONE
+        };
+        let meta = vec![
+            ChunkMeta {
+                compressed_size: 56,
+                filter_mask: 0,
+            };
+            chunks
+        ];
+        let layout = plan_chunked_data_verbatim(
+            &meta,
+            shape,
+            &[7],
+            convert::nz(8),
+            flags,
+            pipeline_message,
+            StoredAddress::new(0x1000),
+            maxshape,
+        )
+        .unwrap();
+        let DataLayout::Chunked { flags, .. } =
+            DataLayout::parse(&layout.layout_message, 8, 8).unwrap()
+        else {
+            panic!("a verbatim plan stores a chunked layout");
+        };
+        assert_eq!(flags.partial_edge_chunks_stored_raw(), stored_raw);
     }
 
     #[test]

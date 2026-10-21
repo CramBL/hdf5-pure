@@ -20,6 +20,7 @@ use crate::attribute::AttributeMessage;
 use crate::chunked_write::{ChunkMeta, ChunkOptions, ChunkProvider, FilterKind, StorageAllocation};
 use crate::compound::CompoundType;
 use crate::convert::Narrow;
+use crate::data_layout::ChunkedLayoutFlags;
 use crate::dataspace::{Dataspace, DataspaceType, MaxExtent};
 use crate::datatype::CharacterSet;
 use crate::datatype::CompoundMember;
@@ -2250,13 +2251,15 @@ pub struct ProvenanceConfig {
 /// dataset by copying its source chunks verbatim (no decode/re-encode): the
 /// per-chunk sizes/masks (enough to plan the destination layout without reading
 /// any bytes), a provider that yields each chunk's bytes on demand at write time,
-/// the source filter-pipeline message, and the chunk geometry. Built by repack
-/// from a source [`Dataset`](crate::Dataset).
+/// the source filter-pipeline message and layout flags, and the chunk geometry.
+/// Built by repack from a source [`Dataset`](crate::Dataset).
 pub(crate) struct RawChunkPayload {
     /// Logical chunk dimensions (rank entries, not the trailing element size).
     pub(crate) chunk_dims: Vec<u64>,
     /// Datatype element size in bytes, proven non-zero.
     pub(crate) element_size: NonZeroUsize,
+    /// The layout flags of the source, which the destination layout message stores.
+    pub(crate) flags: ChunkedLayoutFlags,
     /// The verbatim source `FilterPipeline` message bytes, if the source had one.
     pub(crate) pipeline_message: Option<Vec<u8>>,
     /// Per-chunk sizes + filter masks in dense row-major grid order, one per slot.
@@ -2919,9 +2922,10 @@ impl DatasetBuilder {
     /// all resident at once. `pipeline_message` is the source's `FilterPipeline`
     /// message bytes, reused as-is so every filter — including ones this crate
     /// cannot itself apply (ZFP, SZIP, unknown) — is reproduced byte-for-byte.
-    /// `dims`/`maxshape`/`chunk_dims`/`element_size` describe the geometry. The
-    /// shape defaults to `dims` and the chunk dimensions to `chunk_dims`. The
-    /// provider owns its source (e.g. an `Arc<File>`), so this carries no
+    /// `dims`/`maxshape`/`chunk_dims`/`element_size` describe the geometry, and
+    /// `flags` are the source's layout flags, which the destination layout
+    /// message stores. The shape defaults to `dims` and the chunk dimensions to
+    /// `chunk_dims`. The provider owns its source (e.g. an `Arc<File>`), so this carries no
     /// borrowed lifetime.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn with_raw_chunks_lazy(
@@ -2931,6 +2935,7 @@ impl DatasetBuilder {
         maxshape: Option<&[MaxExtent]>,
         chunk_dims: &[u64],
         element_size: NonZeroUsize,
+        flags: ChunkedLayoutFlags,
         pipeline_message: Option<Vec<u8>>,
         meta: Vec<ChunkMeta>,
         provider: Box<dyn ChunkProvider>,
@@ -2951,6 +2956,7 @@ impl DatasetBuilder {
         self.raw_chunks = Some(RawChunkPayload {
             chunk_dims: chunk_dims.to_vec(),
             element_size,
+            flags,
             pipeline_message,
             meta,
             provider: core::panic::AssertUnwindSafe(provider),

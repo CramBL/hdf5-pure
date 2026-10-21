@@ -565,6 +565,7 @@ mod streaming_tests {
     use super::*;
     use crate::chunked_write::{ChunkMeta, ChunkProvider};
     use crate::convert;
+    use crate::data_layout::ChunkedLayoutFlags;
     use crate::dataspace::MaxExtent;
     use crate::layout_info::Layout;
     use std::sync::{Arc, Mutex};
@@ -1005,6 +1006,7 @@ mod streaming_tests {
             maxshape,
             chunk_dims,
             convert::nz(8),
+            ChunkedLayoutFlags::NONE,
             None,
             meta,
             Box::new(provider),
@@ -1254,6 +1256,7 @@ mod streaming_tests {
                     None,
                     &[2],
                     convert::nz(8),
+                    ChunkedLayoutFlags::NONE,
                     None,
                     meta,
                     Box::new(provider),
