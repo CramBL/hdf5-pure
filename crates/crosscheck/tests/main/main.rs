@@ -26,6 +26,7 @@ mod committed_datatype;
 mod compound_offset_width;
 mod continuation_order;
 mod conversions;
+mod decoded_chunk_size;
 mod deflate_level;
 mod dense_attr_limits;
 mod dense_huge_objects;
