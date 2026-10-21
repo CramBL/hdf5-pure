@@ -1925,7 +1925,7 @@ impl FileWriter {
                 provenance,
             } = db;
             let name = link_name(name)?;
-            let dt = datatype.ok_or(FormatError::DatasetMissingData)?;
+            let dt = datatype.ok_or(FormatError::DatasetMissingDatatype)?;
             let shape = shape.ok_or(FormatError::DatasetMissingShape)?;
             let storage =
                 PreparedStorage::parse(data, raw_chunks, produced, allocation, shape.contains(&0))?;
@@ -1944,21 +1944,30 @@ impl FileWriter {
             let element_size = dt.element_size()?;
             let elem_size = element_size.narrow::<NonZeroUsize>()?;
             let elem_bytes = u64::from(element_size.get());
-            // The bytes this dataset's elements occupy end to end — the same
-            // `num_elements * element_size` invariant the reader enforces (see
-            // `data_read::read_raw_data_full`), which is what both readings of it
-            // below are for. Multiply with checked arithmetic, saturating on
-            // overflow: an absurd shape whose element count exceeds `u64` must
-            // not panic a debug build in `Iterator::product` (nor silently wrap a
-            // release build into a false match below). A saturated `u64::MAX` can
-            // never equal a real `data.len()`, so it is correctly reported as a
-            // mismatch.
-            let extent = shape
-                .iter()
-                .copied()
-                .try_fold(1u64, |acc, d| acc.checked_mul(d))
-                .unwrap_or(u64::MAX)
-                .saturating_mul(elem_bytes);
+            let rank = match u8::try_from(shape.len()) {
+                Ok(rank) if rank <= MAX_DATASET_RANK => rank,
+                _ => {
+                    return Err(FormatError::DatasetRankUnsupported {
+                        rank: shape.len(),
+                        maximum: MAX_DATASET_RANK,
+                    });
+                }
+            };
+            if let Some(dimension) = shape.iter().position(|&size| size == UNLIMITED_DIMENSION) {
+                return Err(FormatError::DatasetDimensionUnlimited { dimension });
+            }
+            let extent = if shape.contains(&0) {
+                0
+            } else {
+                shape.iter().try_fold(elem_bytes, |size, &dimension| {
+                    size.checked_mul(dimension)
+                        .ok_or(FormatError::DatasetSizeOverflow { size, dimension })
+                })?
+            };
+            #[cfg(feature = "provenance")]
+            if unallocated && extent != 0 && provenance.is_some() {
+                return Err(FormatError::DatasetProvenanceRequiresData);
+            }
             // The bytes this dataset's data region occupies. A produced region is
             // measured by the same rule as a materialized one — its size is
             // declared rather than counted, and a declaration that disagrees with
@@ -2012,12 +2021,7 @@ impl FileWriter {
                 } else {
                     DataspaceType::Simple
                 },
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "dataspace rank fits the 1-byte dimensionality field (HDF5 caps \
-                              rank at 32)"
-                )]
-                rank: shape.len() as u8,
+                rank,
                 dimensions: shape,
                 max_dimensions,
             };
@@ -4295,6 +4299,16 @@ fn paged_metadata_section_allocation(
         allocation
     }))
 }
+
+/// The value reserved for an unlimited maximum dimension.
+///
+/// `H5Screate_simple` rejects this value in current dimensions (`H5S.c`, HDF5 1.14.6).
+const UNLIMITED_DIMENSION: u64 = u64::MAX;
+
+/// The largest dataset rank accepted by the writer.
+///
+/// `H5Screate_simple` uses `H5S_MAX_RANK` for this bound (`H5S.c`, HDF5 1.14.6).
+const MAX_DATASET_RANK: u8 = 32;
 
 #[cfg(test)]
 mod tests {

@@ -107,10 +107,33 @@ pub enum FormatError {
         /// Actual size in bytes.
         actual: usize,
     },
+    /// A dataset's current shape includes [`u64::MAX`].
+    DatasetDimensionUnlimited {
+        /// The zero-based index of the current dimension set to [`u64::MAX`].
+        dimension: usize,
+    },
     /// Dataset is missing data.
     DatasetMissingData,
+    /// A dataset has no declared datatype.
+    DatasetMissingDatatype,
     /// Dataset is missing shape.
     DatasetMissingShape,
+    /// An element checksum is configured for a nonempty unallocated dataset.
+    DatasetProvenanceRequiresData,
+    /// A dataset's rank exceeds the supported maximum.
+    DatasetRankUnsupported {
+        /// The rank supplied by the caller.
+        rank: usize,
+        /// The largest supported rank.
+        maximum: u8,
+    },
+    /// A dataset's logical byte extent exceeds the range of a 64-bit unsigned integer.
+    DatasetSizeOverflow {
+        /// The byte extent accumulated before multiplication by `dimension`.
+        size: u64,
+        /// The dimension whose multiplication would overflow.
+        dimension: u64,
+    },
     /// A defined address equals the undefined sentinel value for an address field of `offset_size` bytes.
     DefinedAddressIsUndefined {
         /// The defined address that matches the sentinel value.
@@ -1579,6 +1602,33 @@ impl fmt::Display for FormatError {
             }
             Self::ConflictingDatasetStorage => {
                 write!(f, "dataset requests conflicting storage sources")
+            }
+            Self::DatasetDimensionUnlimited { dimension } => {
+                write!(
+                    f,
+                    "dataset dimension {dimension} has an unlimited current size"
+                )
+            }
+            Self::DatasetProvenanceRequiresData => {
+                write!(
+                    f,
+                    "dataset provenance requires element data for a nonempty dataspace"
+                )
+            }
+            Self::DatasetRankUnsupported { rank, maximum } => {
+                write!(
+                    f,
+                    "dataset rank {rank} exceeds the supported maximum of {maximum}"
+                )
+            }
+            Self::DatasetSizeOverflow { size, dimension } => {
+                write!(
+                    f,
+                    "dataset byte size {size} times dimension {dimension} exceeds u64"
+                )
+            }
+            Self::DatasetMissingDatatype => {
+                write!(f, "dataset is missing its datatype")
             }
             Self::DatasetMissingData => {
                 write!(f, "dataset is missing data")

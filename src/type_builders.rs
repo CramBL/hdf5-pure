@@ -2406,6 +2406,10 @@ pub(crate) fn write_reference_address(raw: &mut [u8], byte_offset: usize, addres
 /// [`with_raw_data(datatype, raw_data, num_elements)`](Self::with_raw_data), which writes an
 /// explicit datatype and its raw bytes verbatim, and
 /// [`with_compound_data`](Self::with_compound_data) delegates to it.
+///
+/// [`with_unallocated_storage`](Self::with_unallocated_storage) declares a datatype and shape
+/// without supplying element data. Chunk geometry, filters, maximum shape, and fill settings
+/// can be configured separately.
 pub struct DatasetBuilder {
     pub(crate) name: String,
     pub(crate) datatype: Option<Datatype>,
@@ -2861,32 +2865,45 @@ impl DatasetBuilder {
         self.reference_targets = None;
     }
 
-    /// Stage a dataset that declares its shape and element type and allocates no
-    /// storage.
+    /// Declares the datatype and shape without allocating element storage.
     ///
-    /// By default the reference library does not allocate a *contiguous or
-    /// chunked* dataset's storage until something is written to it — compact
-    /// data is inline in the layout message and is always present — so one
-    /// created and never written holds nothing: no index structure under a
-    /// chunked layout, an undefined data address under a contiguous one. Reading it answers the
-    /// fill value for every element (issue #292), which is why a
-    /// rewrite cannot recover this state from the values it reads back — the
-    /// dataset that stores a grid of fill values reads identically. Repack
-    /// carries it across by saying so here instead (issue #293).
+    /// Sets the current shape to `dims`, where an empty slice describes a scalar. Chunk
+    /// geometry, maximum shape, filters, and fill settings can be configured separately.
     ///
-    /// The chunk geometry, maximum shape, filters and fill value are set the
-    /// usual way and are all reproduced; only the data region is absent. Unlike
-    /// every other data entry point this stages no bytes, so the shape/data
-    /// agreement the writer enforces does not apply to it.
-    pub(crate) fn with_unallocated_storage(
-        &mut self,
-        datatype: Datatype,
-        dims: &[u64],
-    ) -> &mut Self {
+    /// Finalizing the file returns [`FormatError::ConflictingDatasetStorage`] if element
+    /// data or a data provider is also supplied. Element checksums require data for a
+    /// nonempty dataset.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure::Error;
+    /// use hdf5_pure::File;
+    /// use hdf5_pure::FileBuilder;
+    /// use hdf5_pure::MaxExtent;
+    ///
+    /// fn main() -> Result<(), Error> {
+    ///     let mut builder = FileBuilder::new();
+    ///     builder
+    ///         .create_dataset("temperature")
+    ///         .with_unallocated_storage(hdf5_pure::make_f64_type(), &[100, 8])
+    ///         .with_chunks(&[10, 8])
+    ///         .with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Fixed(8)])
+    ///         .with_fill_value(-273.15_f64);
+    ///     let file = File::from_bytes(builder.finish()?)?;
+    ///     let dataset = file.dataset("temperature")?;
+    ///     println!("Shape: {:?}", dataset.shape()?);
+    ///     println!("Allocated chunks: {}", dataset.chunks()?.len());
+    ///     println!(
+    ///         "First three values: {:?}",
+    ///         dataset.read_f64_region(&[0, 0], &[1, 3])?
+    ///     );
+    ///     Ok(())
+    /// }
+    /// ```
+    pub fn with_unallocated_storage(&mut self, datatype: Datatype, dims: &[u64]) -> &mut Self {
         self.datatype = Some(datatype);
-        if self.shape.is_none() {
-            self.shape = Some(dims.to_vec());
-        }
+        self.shape = Some(dims.to_vec());
         self.allocation = StorageAllocation::Unallocated;
         self
     }
