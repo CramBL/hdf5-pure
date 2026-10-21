@@ -25,29 +25,19 @@ use rstest::rstest;
 
 use test_util_hdf5::{dataset, file, lock};
 
-/// Read a VL-string dataset with libhdf5.
-fn read_c(path: &std::path::Path, name: &str) -> Vec<String> {
-    dataset::read_libhdf5::<VarLenUnicode>(path, name)
-        .into_iter()
-        .map(|s| s.as_str().to_owned())
-        .collect()
-}
-
-/// Read the same dataset back through this crate.
-fn read_pure(path: &std::path::Path, name: &str) -> Vec<String> {
-    File::open(path)
-        .unwrap()
-        .dataset(name)
-        .unwrap()
-        .read_string()
-        .unwrap()
-}
-
 /// Assert both libraries agree with `expected`, and that the C library also
 /// reports the layout we intended (chunked, not silently contiguous).
 fn assert_both_read(path: &std::path::Path, name: &str, expected: &[String]) {
-    assert_eq!(read_pure(path, name), expected, "pure reader disagreed");
-    assert_eq!(read_c(path, name), expected, "C library disagreed");
+    assert_eq!(
+        dataset::read_pure_strings(path, name),
+        expected,
+        "pure reader disagreed"
+    );
+    assert_eq!(
+        dataset::read_libhdf5_strings(path, name),
+        expected,
+        "C library disagreed"
+    );
 }
 
 fn words(n: usize) -> Vec<String> {
@@ -166,8 +156,8 @@ fn c_library_reads_chunked_vlen_strings_across_heap_collections() {
     b.write(&path).unwrap();
 
     // Spot-check the boundaries rather than comparing 70k strings twice.
-    let pure = read_pure(&path, "labels");
-    let c = read_c(&path, "labels");
+    let pure = dataset::read_pure_strings(&path, "labels");
+    let c = dataset::read_libhdf5_strings(&path, "labels");
     assert_eq!(pure.len(), data.len());
     assert_eq!(c.len(), data.len());
     for i in [0usize, 1, 65_534, 65_535, 65_536, 69_999] {
@@ -526,9 +516,12 @@ fn paged_global_heap_references_survive_creation_edit_and_reopen(
         .with_chunks(&[1])
         .with_deflate(DeflateLevel::Six);
     builder.write(&path).unwrap();
-    assert_eq!(read_c(&path, "contiguous"), ["first", "second"]);
     assert_eq!(
-        read_c(&path, "filtered"),
+        dataset::read_libhdf5_strings(&path, "contiguous"),
+        ["first", "second"]
+    );
+    assert_eq!(
+        dataset::read_libhdf5_strings(&path, "filtered"),
         ["compressed-first", "compressed-second"]
     );
     {
@@ -585,10 +578,10 @@ fn paged_global_heap_references_survive_creation_edit_and_reopen(
         editable.commit().unwrap();
     }
     let expected = ["final-first", "final-second"];
-    assert_eq!(read_c(&path, "contiguous"), expected);
-    assert_eq!(read_pure(&path, "contiguous"), expected);
+    assert_eq!(dataset::read_libhdf5_strings(&path, "contiguous"), expected);
+    assert_eq!(dataset::read_pure_strings(&path, "contiguous"), expected);
     assert_eq!(
-        read_c(&path, "filtered"),
+        dataset::read_libhdf5_strings(&path, "filtered"),
         ["compressed-first", "compressed-second"]
     );
     {
@@ -645,7 +638,7 @@ fn libhdf5_reads_its_paged_vlen_dataset_after_a_raw_collection_replacement(
             .unwrap();
     }
     assert_eq!(
-        read_pure(&path, "labels"),
+        dataset::read_pure_strings(&path, "labels"),
         ["reference-first", "reference-second"]
     );
     {
@@ -659,6 +652,12 @@ fn libhdf5_reads_its_paged_vlen_dataset_after_a_raw_collection_replacement(
             .unwrap();
         editable.commit().unwrap();
     }
-    assert_eq!(read_c(&path, "labels"), ["pure-first", "pure-second"]);
-    assert_eq!(read_pure(&path, "labels"), ["pure-first", "pure-second"]);
+    assert_eq!(
+        dataset::read_libhdf5_strings(&path, "labels"),
+        ["pure-first", "pure-second"]
+    );
+    assert_eq!(
+        dataset::read_pure_strings(&path, "labels"),
+        ["pure-first", "pure-second"]
+    );
 }

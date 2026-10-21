@@ -475,6 +475,36 @@ pub fn read_libhdf5<T: hdf5::H5Type>(path: &Path, name: &str) -> Vec<T> {
     values
 }
 
+/// Returns every string of the dataset at `name`, read by `hdf5-pure`.
+///
+/// # Panics
+///
+/// Panics if the file or the dataset cannot be opened, or the strings cannot be read.
+#[track_caller]
+pub fn read_pure_strings(path: &Path, name: &str) -> Vec<String> {
+    File::open(path)
+        .unwrap_or_else(|e| panic!("open {path:?}: {e}"))
+        .dataset(name)
+        .unwrap_or_else(|e| panic!("open {name:?} in {path:?}: {e}"))
+        .read_string()
+        .unwrap_or_else(|e| panic!("read {name:?} in {path:?}: {e}"))
+}
+
+/// Returns every variable-length UTF-8 string of the dataset at `name`, read by the C library.
+///
+/// # Panics
+///
+/// Panics if the file or the dataset cannot be opened, the strings cannot be read, or the file
+/// cannot be closed.
+#[cfg(feature = "hdf5")]
+#[track_caller]
+pub fn read_libhdf5_strings(path: &Path, name: &str) -> Vec<String> {
+    read_libhdf5::<hdf5::types::VarLenUnicode>(path, name)
+        .into_iter()
+        .map(|string| string.as_str().to_owned())
+        .collect()
+}
+
 /// Appends `values` to the dataset at `name` in place, in one session that closes before this
 /// returns.
 #[track_caller]
