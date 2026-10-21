@@ -47,6 +47,37 @@ pub fn write_stored(path: &Path, datatype: &Datatype, bytes: &[u8], count: usize
     assert_eq!(status, 0);
 }
 
+/// The byte order of a numeric fixture's stored datatype.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ByteOrder {
+    /// The most significant byte is stored first.
+    BigEndian,
+    /// The least significant byte is stored first.
+    LittleEndian,
+}
+
+impl ByteOrder {
+    /// Returns a signed 32-bit integer datatype with this byte order.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the reference library cannot create the datatype or set its byte order.
+    pub fn i32_datatype(self) -> Datatype {
+        let datatype = Datatype::from_type::<i32>().unwrap();
+        let order = match self {
+            Self::BigEndian => H5T_order_t::H5T_ORDER_BE,
+            Self::LittleEndian => H5T_order_t::H5T_ORDER_LE,
+        };
+        let status = hdf5::sync::sync(|| {
+            // SAFETY: The library lock serializes access and `datatype` owns a live transient
+            // integer type. Both orders are valid for its four-byte representation.
+            unsafe { h5t::H5Tset_order(datatype.id(), order) }
+        });
+        assert_eq!(status, 0);
+        datatype
+    }
+}
+
 /// Returns big-endian byte order if `big_endian` is set, and little-endian byte order otherwise.
 pub fn byte_order(big_endian: bool) -> H5T_order_t {
     if big_endian {
