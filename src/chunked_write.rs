@@ -23,6 +23,7 @@ use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::chunk_grid::{ChunkGrid, GridOrder};
 use crate::convert::Narrow;
+use crate::data_layout::ChunkedLayoutFlags;
 use crate::data_layout::DataLayout;
 use crate::dataspace::{Extent, MaxExtent};
 use crate::error::FormatError;
@@ -801,6 +802,7 @@ impl ChunkIndexKind {
             )
         })?;
         DataLayout::encode_chunked(
+            ChunkedLayoutFlags::NONE,
             chunk_dims,
             element_size,
             info,

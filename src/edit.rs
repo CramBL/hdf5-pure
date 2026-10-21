@@ -329,6 +329,7 @@ use crate::chunked_read;
 use crate::chunked_write::{self, ChunkMeta, ChunkOptions, ChunkProvider, StorageAllocation};
 use crate::convert::Narrow;
 use crate::data_layout::COMPACT_DATA_OFFSET;
+use crate::data_layout::ChunkedLayoutFlags;
 use crate::data_layout::{ChunkIndexLayout, DataLayout};
 use crate::dataspace::{Dataspace, DataspaceType, Extent, MaxExtent};
 use crate::datatype::{self, Datatype};
@@ -9781,6 +9782,7 @@ impl WriteEngine {
             reason = "element size is a datatype byte width that fits u32"
         )]
         let layout_body = DataLayout::encode_chunked(
+            ChunkedLayoutFlags::NONE,
             chunk_dims_u32,
             element_size.get() as u32,
             ChunkIndexInfo::ExtensibleArray,
