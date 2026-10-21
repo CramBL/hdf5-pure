@@ -55,6 +55,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `FileBuilder::finish` and related attribute writers declaring non-ASCII names as ASCII or omitting their character-set declaration.
 - Fixed `FileBuilder::finish` and related output methods accepting empty attribute names or embedded null bytes. Invalid or oversized names are rejected before output.
 - Fixed `FileBuilder::set_attr` and related attribute setters writing duplicate attributes for repeated names. Later calls replace the staged attribute at its first insertion position.
 - Fixed truncated variable-length descriptor counts in files serialized through `FileBuilder::finish` and related output methods. Elements with more than `u32::MAX` base elements are rejected.
