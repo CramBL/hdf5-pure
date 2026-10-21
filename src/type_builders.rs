@@ -29,6 +29,8 @@ use crate::datatype::byte_order::DatatypeByteOrder;
 use crate::datatype::layout::{FixedPointLayout, FloatingPointLayout};
 use crate::display;
 use crate::error::FormatError;
+use crate::object_path::LinkName;
+use crate::object_path::LinkNameBuf;
 use crate::object_path::ObjectPathBuf;
 use crate::scaleoffset::{FillAvailability, ScaleOffset};
 use crate::shared_message::DatatypeLocation;
@@ -3638,8 +3640,10 @@ impl DatasetBuilder {
 /// grp.set_attr("MATLAB_fields", AttrValue::VarLenAsciiCharArray(fields));
 /// builder.add_group(grp.finish());
 /// ```
+#[must_use = "finish the builder and add the group to its parent, or use create_group_with"]
 pub struct GroupBuilder {
-    pub(crate) name: String,
+    /// The parsed link name, or the error to return when writing a detached group.
+    name: Result<LinkNameBuf, FormatError>,
     pub(crate) datasets: Vec<DatasetBuilder>,
     pub(crate) sub_groups: Vec<FinishedGroup>,
     pub(crate) attrs: AttributeSpecs,
@@ -3647,9 +3651,39 @@ pub struct GroupBuilder {
 }
 
 impl GroupBuilder {
+    /// Configures a detached group with a parsed name and finishes it after callback success.
+    ///
+    /// The returned group's name is `name`, including when `configure` replaces the builder.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidLinkName`] if `name` is empty, is `.`, or contains `/`,
+    /// before calling `configure`. Returns the callback's error if `configure` fails.
+    pub(crate) fn build_with(
+        name: &str,
+        configure: impl FnOnce(&mut Self) -> Result<(), FormatError>,
+    ) -> Result<FinishedGroup, FormatError> {
+        let name =
+            LinkName::new(name).ok_or_else(|| FormatError::InvalidLinkName(name.to_string()))?;
+        let mut builder = Self::from_name(Ok(LinkNameBuf::from(name)));
+        configure(&mut builder)?;
+        if builder.name.as_ref().ok().map(LinkNameBuf::as_link_name) != Some(name) {
+            builder.name = Ok(LinkNameBuf::from(name));
+        }
+        Ok(builder.finish())
+    }
+
+    /// Creates a detached builder with a parsed name or deferred name error.
     pub(crate) fn new(name: &str) -> Self {
+        Self::from_name(
+            LinkNameBuf::new(name).ok_or_else(|| FormatError::InvalidLinkName(name.to_string())),
+        )
+    }
+
+    /// Initializes an empty detached builder with a parsed name or deferred name error.
+    fn from_name(name: Result<LinkNameBuf, FormatError>) -> Self {
         Self {
-            name: name.to_string(),
+            name,
             datasets: Vec::new(),
             sub_groups: Vec::new(),
             attrs: AttributeSpecs::default(),
@@ -3675,6 +3709,32 @@ impl GroupBuilder {
     /// [`FormatError::InvalidLinkName`] for a name that is not a component of an object path.
     pub fn create_group(&mut self, name: &str) -> GroupBuilder {
         GroupBuilder::new(name)
+    }
+
+    /// Configures and attaches a subgroup under `name`.
+    ///
+    /// Calls `configure` once with a temporary builder, then attaches the finished group when
+    /// `configure` succeeds. The writer attaches the group under `name`, including when the
+    /// callback replaces the builder. If `configure` returns an error or panics, the writer leaves
+    /// this group's staged subgroups unchanged.
+    /// The writer checks staged datasets and attributes when writing the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidLinkName`] if `name` is empty, is `.`, or contains `/`,
+    /// before calling `configure`. Returns the callback's error if `configure` fails.
+    #[doc = concat!(
+        "\n# Examples\n\n```\n",
+        include_str!("../examples/attaching_groups.rs"),
+        "\n```"
+    )]
+    pub fn create_group_with(
+        &mut self,
+        name: &str,
+        configure: impl FnOnce(&mut GroupBuilder) -> Result<(), FormatError>,
+    ) -> Result<(), FormatError> {
+        self.sub_groups.push(Self::build_with(name, configure)?);
+        Ok(())
     }
 
     /// Add a finished sub-group to this group.
@@ -3779,8 +3839,10 @@ impl GroupBuilder {
 }
 
 /// A finished group ready for the file writer.
+#[must_use = "add the finished group to its parent"]
 pub struct FinishedGroup {
-    pub(crate) name: String,
+    /// The parsed link name, or the error to return when writing a detached group.
+    pub(crate) name: Result<LinkNameBuf, FormatError>,
     pub(crate) datasets: Vec<DatasetBuilder>,
     pub(crate) sub_groups: Vec<FinishedGroup>,
     pub(crate) attrs: AttributeSpecs,
