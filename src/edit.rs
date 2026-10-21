@@ -362,6 +362,8 @@ use crate::object_header::ObjectHeader;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 #[cfg(any(test, feature = "__page-publication-crosscheck"))]
 use crate::page_publication_failure::{PagePublicationFailure, PublicationFailureImage};
+use crate::prepared_chunk::ChunkEncoding;
+use crate::prepared_chunk::PreparedChunk;
 use crate::reader::FileAccessProperties;
 use crate::shared_message::DatatypeLocation;
 use crate::source::SourceMetadata;
@@ -8725,21 +8727,18 @@ impl WriteEngine {
             padding.pattern(element_size),
         )
         .map_err(Error::Format)?;
-        let new_chunk_bytes: Vec<Vec<u8>> = if let Some(pl) = &pipeline {
-            let ctx = ChunkContext::from_datatype(&spatial, &disk_dt)?;
-            let mut out = Vec::with_capacity(split.len());
-            // One encoder across the appended tail; see `FilterScratch`.
-            let mut scratch = FilterScratch::new();
-            for buf in &split {
-                out.push(
-                    filters::compress_chunk_with(&mut scratch, buf, pl, ctx)
-                        .map_err(Error::Format)?,
-                );
-            }
-            out
-        } else {
-            split
-        };
+        let ctx = ChunkContext::from_datatype(&spatial, &disk_dt)?;
+        // One encoder across the appended tail; see `FilterScratch`.
+        let mut scratch = FilterScratch::new();
+        let encoding = pipeline
+            .as_ref()
+            .map_or(ChunkEncoding::Raw, |_| ChunkEncoding::Filtered);
+        let new_chunks = split
+            .into_iter()
+            .map(|logical| {
+                PreparedChunk::encode(&mut scratch, pipeline.as_ref(), ctx, encoding, logical)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         // Grow the dataspace along axis 0, preserving the (unlimited) max-dims.
         let mut grown = disk_ds.clone();
@@ -8758,7 +8757,7 @@ impl WriteEngine {
             element_size,
             has_filters,
             kept_chunks,
-            new_chunk_bytes,
+            new_chunks,
             old_addr: addr,
             old_tail_extent,
         })
@@ -9582,7 +9581,7 @@ impl WriteEngine {
                 element_size,
                 has_filters,
                 kept_chunks,
-                new_chunk_bytes,
+                new_chunks,
                 ..
             } => self.write_appended_chunks(
                 region,
@@ -9591,7 +9590,7 @@ impl WriteEngine {
                 *element_size,
                 *has_filters,
                 kept_chunks,
-                new_chunk_bytes,
+                new_chunks,
             ),
             MovingWrite::AttrEdit { region, attrs, .. } => {
                 // `region` already carries what the commit preflight could resolve;
@@ -9633,7 +9632,7 @@ impl WriteEngine {
         element_size: NonZeroUsize,
         has_filters: bool,
         kept_chunks: &[ChunkRecord],
-        new_chunk_bytes: &[Vec<u8>],
+        new_chunks: &[PreparedChunk],
     ) -> Result<u64, Error> {
         let base = self.addresses;
         // Where the appended chunks and the rebuilt index go, and whether they go
@@ -9677,20 +9676,19 @@ impl WriteEngine {
         // else), so every chunk's index slot is its position in the grid and the
         // array is dense from zero.
         //
-        // This engine applies every filter to a new chunk (no per-chunk skipping),
-        // so an appended chunk's mask is always 0. Kept chunks carry their own
-        // (possibly nonzero) mask.
-        let chunk_total: u64 = new_chunk_bytes.iter().map(|cb| cb.len() as u64).sum();
+        // The index records each kept chunk with its own mask, which may be nonzero, and each
+        // appended chunk with the mask it was prepared with.
+        let chunk_total: u64 = new_chunks.iter().map(PreparedChunk::stored_size).sum();
         let placed_chunks = |blob_stored: StoredAddress| -> Vec<ChunkRecord> {
             let mut combined: Vec<ChunkRecord> = kept_chunks.to_vec();
             let mut next = blob_stored;
-            for cb in new_chunk_bytes {
+            for chunk in new_chunks {
                 combined.push(ChunkRecord {
                     address: next,
-                    stored_size: cb.len() as u64,
-                    filter_mask: 0,
+                    stored_size: chunk.stored_size(),
+                    filter_mask: chunk.filter_mask(),
                 });
-                next = next.offset(cb.len() as u64);
+                next = next.offset(chunk.stored_size());
             }
             combined
         };
@@ -9731,8 +9729,8 @@ impl WriteEngine {
                     let combined = placed_chunks(blob_stored);
                     let mut buf =
                         Vec::with_capacity(usize::try_from(chunk_total + ea_len).unwrap_or(0));
-                    for cb in new_chunk_bytes {
-                        buf.extend_from_slice(cb);
+                    for chunk in new_chunks {
+                        buf.extend_from_slice(chunk.bytes());
                     }
                     buf.extend_from_slice(&ea(
                         &IndexSlots::dense(&combined),
@@ -9759,12 +9757,12 @@ impl WriteEngine {
                 // A chunk embeds no addresses of its own, so it can go anywhere and
                 // the index below simply records where it went.
                 let mut combined: Vec<ChunkRecord> = kept_chunks.to_vec();
-                for cb in new_chunk_bytes {
-                    let abs = self.alloc_or_append_typed(cb, AllocationClass::Raw)?;
+                for chunk in new_chunks {
+                    let abs = self.alloc_or_append_typed(chunk.bytes(), AllocationClass::Raw)?;
                     combined.push(ChunkRecord {
                         address: base.relative(abs)?,
-                        stored_size: cb.len() as u64,
-                        filter_mask: 0,
+                        stored_size: chunk.stored_size(),
+                        filter_mask: chunk.filter_mask(),
                     });
                 }
                 let at =
@@ -10829,10 +10827,10 @@ enum MovingWrite {
     /// A relocating **append** to a chunked, unlimited, Extensible-Array-indexed
     /// dataset (`append_dataset`). The dataset's existing chunk *data* stays in
     /// place; only the newly-appended chunks and any rewritten trailing partial
-    /// chunk (`new_chunk_bytes`, already compressed through the on-disk pipeline)
+    /// chunk (`new_chunks`, already compressed through the on-disk pipeline)
     /// are placed (reusing freed raw space where it fits), a fresh Extensible
     /// Array is rebuilt over
-    /// `kept_chunks ++ new_chunk_bytes`, the verbatim header `region`'s dataspace
+    /// `kept_chunks ++ new_chunks`, the verbatim header `region`'s dataspace
     /// message is grown (`new_dataspace_body`) and its data-layout message
     /// repointed at the new index (every other message — datatype, filter
     /// pipeline, fill value, attributes — preserved verbatim), and the header is
@@ -10856,7 +10854,7 @@ enum MovingWrite {
         kept_chunks: Vec<ChunkRecord>,
         /// The appended chunks in index order: the recompressed trailing partial
         /// chunk first (when present), then the remaining new full chunks.
-        new_chunk_bytes: Vec<Vec<u8>>,
+        new_chunks: Vec<PreparedChunk>,
         /// The dataset header address, for old-index and old-header reclaim.
         old_addr: u64,
         /// The absolute `(addr, len)` of the old trailing partial chunk's data
