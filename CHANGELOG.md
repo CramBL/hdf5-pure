@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `DatasetBuilder::with_unallocated_storage` declares datasets before their element data is available, with configurable fill and chunk settings. Combining unallocated storage with element data is rejected.
 - `FileBuilder::create_group_with` and its nested-group counterpart configure and attach groups through a callback. Attachment occurs only after the callback succeeds.
 - `Dataset::read_raw_region` and related typed reads select unit-stride regions along every dataset dimension. Bounds must fit the current shape, while row-window reads retain their clamping behavior ([#836](https://github.com/CramBL/hdf5-pure/pull/836)).
 - `File::open_rw` supports mirrored staged edits of non-persistent PAGE files in fresh typed pages. Commits require supported attribute storage and a tree proved free of object references, while old space remains unavailable for reuse ([#793](https://github.com/CramBL/hdf5-pure/pull/793)).
