@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `FormatError::ChunkElementSizeMismatch` reports a chunked dataset whose layout stores an element size other than the size of its datatype. An append rejects such a dataset before it writes ([#845](https://github.com/CramBL/hdf5-pure/pull/845)).
 - `DatasetBuilder::with_unallocated_storage` declares datasets before their element data is available, with configurable fill and chunk settings. Combining unallocated storage with element data is rejected.
 - `FileBuilder::create_group_with` and its nested-group counterpart configure and attach groups through a callback. Attachment occurs only after the callback succeeds.
 - `Dataset::read_raw_region` and related typed reads select unit-stride regions along every dataset dimension. Bounds must fit the current shape, while row-window reads retain their clamping behavior ([#836](https://github.com/CramBL/hdf5-pure/pull/836)).
@@ -56,6 +57,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `Dataset::append` filtering the partial edge chunks of a dataset whose layout exempts them from the filters ([#845](https://github.com/CramBL/hdf5-pure/pull/845)).
 - Fixed `Dataset::read_raw` and related dataset reads accepting present chunks shorter or longer than their full logical size. Absent chunks retain fill-value behavior.
 - Fixed `FileBuilder::finish` and related attribute writers declaring non-ASCII names as ASCII or omitting their character-set declaration.
 - Fixed `FileBuilder::finish` and related output methods accepting empty attribute names or embedded null bytes. Invalid or oversized names are rejected before output.

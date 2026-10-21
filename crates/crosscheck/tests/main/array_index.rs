@@ -16,6 +16,21 @@ pub(crate) struct Chunk {
     filter_mask: u32,
 }
 
+#[cfg(target_endian = "little")]
+impl Chunk {
+    pub(crate) fn offset(&self) -> &[u64] {
+        &self.offset
+    }
+
+    pub(crate) fn size(&self) -> u64 {
+        self.size
+    }
+
+    pub(crate) fn filter_mask(&self) -> u32 {
+        self.filter_mask
+    }
+}
+
 /// The elements a crosscheck writes into a rank 1 dataset of `len` elements: all of them, or those
 /// of the ranges in `sparse`.
 #[derive(Clone, Copy, Debug)]
