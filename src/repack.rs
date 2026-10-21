@@ -914,7 +914,9 @@ fn emit_dataset(
     // still refuses time/variable-length/reference types, whose reproduction or
     // embedded addresses are unsafe even when copied verbatim.
     if let DataLayout::Chunked {
-        chunk_dimensions, ..
+        chunk_dimensions,
+        flags,
+        ..
     } = &layout
         && n_elements > 0
     {
@@ -939,6 +941,7 @@ fn emit_dataset(
                 maxshape,
                 &chunk_dims,
                 elem_size,
+                *flags,
                 ds.filter_pipeline_message_bytes()?,
                 meta,
                 Box::new(provider),
