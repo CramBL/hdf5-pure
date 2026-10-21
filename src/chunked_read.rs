@@ -82,7 +82,7 @@ fn decode_all_chunks_from_source<S: Source + ?Sized>(
 ///
 /// Returns [`FormatError::ValueTooLargeForPlatform`] if the stored size of `chunk` exceeds
 /// [`usize::MAX`], the error `source` returns for the read, and the errors of [`decode_chunk`].
-fn read_decoded_chunk(
+pub(crate) fn read_decoded_chunk(
     source: &(impl Source + ?Sized),
     scratch: &mut FilterScratch,
     flags: ChunkedLayoutFlags,
@@ -160,14 +160,41 @@ impl ChunkFiltering {
         ds_dims: &[u64],
         chunk: &ChunkInfo,
     ) -> Self {
+        match ChunkDecoding::at_extent(flags, chunk_dims, ds_dims, &chunk.offsets) {
+            ChunkDecoding::Pipeline => Self::Filtered {
+                filter_mask: chunk.filter_mask,
+            },
+            ChunkDecoding::Verbatim => Self::Raw,
+        }
+    }
+}
+
+/// Whether a reader at a given dataset extent runs a chunk's bytes through the filter pipeline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ChunkDecoding {
+    /// A reader runs the chunk's bytes through the filter pipeline under the chunk's filter mask.
+    Pipeline,
+    /// A reader takes the chunk's bytes as its data.
+    Verbatim,
+}
+
+impl ChunkDecoding {
+    /// Returns how a reader at the extent `ds_dims` decodes the chunk at `offsets`.
+    ///
+    /// Under [`ChunkedLayoutFlags::partial_edge_chunks_stored_raw`] a chunk that extends past the
+    /// extent is [`Self::Verbatim`]. Every other chunk is [`Self::Pipeline`].
+    pub(crate) fn at_extent(
+        flags: ChunkedLayoutFlags,
+        chunk_dims: &[u64],
+        ds_dims: &[u64],
+        offsets: &[u64],
+    ) -> Self {
         if flags.partial_edge_chunks_stored_raw()
-            && extends_past_extent(chunk_dims, ds_dims, &chunk.offsets)
+            && extends_past_extent(chunk_dims, ds_dims, offsets)
         {
-            return Self::Raw;
+            return Self::Verbatim;
         }
-        Self::Filtered {
-            filter_mask: chunk.filter_mask,
-        }
+        Self::Pipeline
     }
 }
 
