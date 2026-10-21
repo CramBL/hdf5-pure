@@ -21,6 +21,10 @@ impl Chunk {
         &self.offset
     }
 
+    pub(crate) fn address(&self) -> u64 {
+        self.address
+    }
+
     pub(crate) fn size(&self) -> u64 {
         self.size
     }
