@@ -82,7 +82,9 @@ hdf5-pure-space = { path = "crates/hdf5-pure-space", version = "=0.47.0", defaul
 test-util = { path = "crates/test-util" }
 test-util-hdf5 = { path = "crates/test-util-hdf5" }
 byteorder = { version = "1", default-features = false }
-hdf5 = { package = "hdf5-metno", git = "https://github.com/metno/hdf5-rust", rev = "605a2e28c17f2209bf2a6d0a8be11ef0b6546034", features = ["zlib"] }
+hdf5 = { package = "hdf5-metno", git = "https://github.com/metno/hdf5-rust", rev = "605a2e28c17f2209bf2a6d0a8be11ef0b6546034", features = [
+    "zlib",
+] }
 # The raw libhdf5 bindings `hdf5-metno` builds on, at the same revision.
 hdf5-sys = { package = "hdf5-metno-sys", git = "https://github.com/metno/hdf5-rust", rev = "605a2e28c17f2209bf2a6d0a8be11ef0b6546034" }
 heapscope = "0.1"
@@ -402,7 +404,10 @@ hdf5-pure-format.workspace = true
 hdf5-pure-space.workspace = true
 ndarray = { workspace = true, optional = true }
 num-complex = { version = "0.4", optional = true, default-features = false }
-serde = { version = "1", optional = true, default-features = false, features = ["derive", "alloc"] }
+serde = { version = "1", optional = true, default-features = false, features = [
+    "derive",
+    "alloc",
+] }
 sha2 = { version = "0.11", optional = true, default-features = false }
 
 [dev-dependencies]
@@ -441,3 +446,11 @@ debug = "line-tables-only"
 
 [profile.test]
 codegen-units = 32
+
+# For longer test runs: modest optimization with debug checks.
+[profile.test-optimized]
+inherits = "test"
+opt-level = 1
+lto = "off"
+debug-assertions = true
+overflow-checks = true

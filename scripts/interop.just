@@ -7,7 +7,7 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 uv := "uv run --project scripts/python --locked"
 
 # The whole matrix: every release, built under tmp/hdf5 on first use.
-default: test-hdf5-all test-matio
+default PROFILE="test": (test-hdf5-all "serde,ndarray" PROFILE) (test-matio "--cargo-profile" PROFILE)
 
 # Build libhdf5 VERSION, a series such as 1.14 or its release, and its tools under tmp/hdf5.
 hdf5-build VERSION:
@@ -27,11 +27,13 @@ hdf5-versions *ARGS:
     @{{ uv }} hdf5-build --list {{ ARGS }}
 
 # Test every release scripts/hdf5-releases.toml lists with `FEATURES`.
-test-hdf5-all FEATURES="serde,ndarray":
+test-hdf5-all FEATURES="serde,ndarray" PROFILE="test":
     #!/usr/bin/env bash
     set -euo pipefail
     for version in $({{ uv }} hdf5-build --list); do
-        {{ quote(just_executable()) }} interop::test-hdf5 "$version" "{{ FEATURES }}"
+        {{ quote(just_executable()) }} interop::test-hdf5 \
+            "$version" {{ quote(FEATURES) }} \
+            --cargo-profile {{ quote(PROFILE) }}
     done
 
 # Run cross tests on libhdf5 `VERSION` with `FEATURES` and `ARGS`. Built under tmp/hdf5 on first use.

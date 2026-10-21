@@ -25,10 +25,12 @@ mod prose "scripts/prose.just"
 _default:
     @{{ quote(just_executable()) }} --list
 
-ci-essentials: fmt-check clippy-full doc test-full doctest-full
+CI_TEST_PROFILE := "test-optimized"
+
+ci-essentials: fmt-check clippy-full doc (test-full "--cargo-profile" CI_TEST_PROFILE) (doctest-full "--profile" CI_TEST_PROFILE)
 
 # Broad local validation gate. GitHub Actions additionally runs CI-specific matrix and cross-target checks.
-ci-local: nightly ci-essentials clippy-feature-powerset clippy-no-std-feature-powerset docs-rs check-release examples portability::default hygiene::default python::default prose::default api::default soundness::default interop::default test doctest
+ci-local: nightly ci-essentials clippy-feature-powerset clippy-no-std-feature-powerset docs-rs check-release examples portability::default hygiene::default python::default prose::default api::default soundness::default (interop::default CI_TEST_PROFILE) (test "--cargo-profile" CI_TEST_PROFILE) (doctest "--profile" CI_TEST_PROFILE)
 
 # Nextest over every workspace crate but the crosschecks, with `ARGS`.
 test *ARGS:
@@ -120,3 +122,5 @@ alias t := test
 alias tf := test-full
 alias e := examples
 alias d := doc
+alias cie := ci-essentials
+alias cil := ci-local
