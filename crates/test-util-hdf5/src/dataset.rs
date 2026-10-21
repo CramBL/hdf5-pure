@@ -4,6 +4,8 @@
 use std::path::Path;
 
 #[cfg(feature = "__hdf5-1.10")]
+use hdf5::Datatype;
+#[cfg(feature = "__hdf5-1.10")]
 use hdf5::Extent;
 #[cfg(feature = "__hdf5-1.10")]
 use hdf5::dataset::ChunkOpts;
@@ -296,6 +298,8 @@ pub struct Unlimited<'a, T> {
     filters: Vec<Filter>,
     fill: Option<T>,
     partial_edge_chunks_unfiltered: bool,
+    #[cfg(feature = "__hdf5-1.10")]
+    stored: Option<Datatype>,
 }
 
 impl<'a, T: Copy> Unlimited<'a, T> {
@@ -307,6 +311,8 @@ impl<'a, T: Copy> Unlimited<'a, T> {
             filters: Vec::new(),
             fill: None,
             partial_edge_chunks_unfiltered: false,
+            #[cfg(feature = "__hdf5-1.10")]
+            stored: None,
         }
     }
 
@@ -327,6 +333,15 @@ impl<'a, T: Copy> Unlimited<'a, T> {
         self.partial_edge_chunks_unfiltered = true;
         self
     }
+
+    /// Sets the datatype the file stores the elements in, in place of the datatype of `T`.
+    ///
+    /// Only `libhdf5_create` writes the setting.
+    #[cfg(feature = "__hdf5-1.10")]
+    pub fn stored_as(mut self, datatype: Datatype) -> Self {
+        self.stored = Some(datatype);
+        self
+    }
 }
 
 impl<T: H5Element> Unlimited<'_, T> {
@@ -334,8 +349,8 @@ impl<T: H5Element> Unlimited<'_, T> {
     ///
     /// # Panics
     ///
-    /// Panics if the dataset stores its partial edge chunks without the filter pipeline, or if
-    /// the write fails.
+    /// Panics if the caller set `partial_edge_chunks_unfiltered` or `stored_as`, or if the write
+    /// fails.
     #[track_caller]
     pub fn pure_create(&self, path: &Path) {
         let mut builder = FileBuilder::new();
@@ -349,7 +364,7 @@ impl<T: H5Element> Unlimited<'_, T> {
     ///
     /// # Panics
     ///
-    /// Panics if the dataset stores its partial edge chunks without the filter pipeline.
+    /// Panics if the caller set `partial_edge_chunks_unfiltered` or `stored_as`.
     pub fn add_to(&self, builder: &mut FileBuilder) {
         let Self {
             name,
@@ -358,10 +373,17 @@ impl<T: H5Element> Unlimited<'_, T> {
             ref filters,
             fill,
             partial_edge_chunks_unfiltered,
+            #[cfg(feature = "__hdf5-1.10")]
+            ref stored,
         } = *self;
         assert!(
             !partial_edge_chunks_unfiltered,
             "hdf5-pure writes no partial edge chunk option"
+        );
+        #[cfg(feature = "__hdf5-1.10")]
+        assert!(
+            stored.is_none(),
+            "hdf5-pure stores the datatype of its element type"
         );
         let dataset = builder
             .create_dataset(name)
@@ -388,11 +410,15 @@ impl<T: hdf5::H5Type + Copy> Unlimited<'_, T> {
             ref filters,
             fill,
             partial_edge_chunks_unfiltered,
+            ref stored,
         } = *self;
         let file = crate::file::libhdf5_create_v110(path);
         let chunk = usize::try_from(chunk).expect("a chunk length this host can address");
-        let mut builder = file
-            .new_dataset::<T>()
+        let builder = match stored {
+            Some(datatype) => file.new_dataset_builder().empty_as(datatype),
+            None => file.new_dataset::<T>(),
+        };
+        let mut builder = builder
             .chunk((chunk,))
             .shape((Extent::resizable(data.len()),));
         for filter in filters {
