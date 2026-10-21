@@ -142,6 +142,10 @@ impl DataLayout {
     /// `chunk_dims` elements of `element_size` bytes indexed by `index` at
     /// `address`.
     ///
+    /// The message stores `flags` in its Flags field, with the
+    /// [`SINGLE_INDEX_WITH_FILTER`] bit set where `index` is a Single Chunk
+    /// index of a filtered chunk and clear for every other index.
+    ///
     /// The message stores every chunk dimension and the element size in the
     /// fewest bytes, of 1, 2, or 4, that hold the largest of them. A Fixed Array
     /// and an Extensible Array index store the creation parameters the writer
@@ -154,6 +158,7 @@ impl DataLayout {
     /// than 254 dimensions, which with the element size do not fit the 1-byte
     /// Dimensionality field.
     pub fn encode_chunked(
+        flags: ChunkedLayoutFlags,
         chunk_dims: &[u32],
         element_size: u32,
         index: ChunkIndexInfo,
@@ -166,19 +171,13 @@ impl DataLayout {
                 "a chunked layout message stores at most 254 chunk dimensions",
             )
         })?;
-        let flags = match index {
-            ChunkIndexInfo::SingleChunk {
-                filtered: Some(_), ..
-            } => SINGLE_INDEX_WITH_FILTER,
-            _ => 0,
-        };
         let dimension_width =
             dimension_width(chunk_dims.iter().copied().fold(element_size, u32::max));
 
         let mut buf = Vec::new();
         buf.push(LayoutVersion::Four.get());
         buf.push(LAYOUT_CLASS_CHUNKED);
-        buf.push(flags);
+        buf.push(flags.stored_with(index));
         buf.push(dimensionality);
         buf.push(dimension_width.get());
         for &dim in chunk_dims.iter().chain(core::iter::once(&element_size)) {
@@ -356,6 +355,16 @@ impl ChunkedLayoutFlags {
     /// filtered chunk's size and filter mask, [`SINGLE_INDEX_WITH_FILTER`].
     const fn single_index_with_filter(self) -> bool {
         self.0 & SINGLE_INDEX_WITH_FILTER != 0
+    }
+
+    /// Returns the Flags byte a message stores beside `index`, with the
+    /// [`SINGLE_INDEX_WITH_FILTER`] bit taken from `index`.
+    const fn stored_with(self, index: ChunkIndexInfo) -> u8 {
+        let flags = self.0 & !SINGLE_INDEX_WITH_FILTER;
+        match index {
+            ChunkIndexInfo::SingleChunk { filtered: Some(_) } => flags | SINGLE_INDEX_WITH_FILTER,
+            _ => flags,
+        }
     }
 
     /// Flags with no bit set.
@@ -1102,6 +1111,7 @@ mod tests {
         #[case] index: ChunkIndexLayout,
     ) {
         let message = DataLayout::encode_chunked(
+            ChunkedLayoutFlags::NONE,
             &[20],
             8,
             info,
@@ -1121,6 +1131,49 @@ mod tests {
     }
 
     #[rstest]
+    #[case::extensible_array_with_raw_partial_chunks(
+        ChunkIndexInfo::ExtensibleArray,
+        DONT_FILTER_PARTIAL_BOUND_CHUNKS,
+        DONT_FILTER_PARTIAL_BOUND_CHUNKS
+    )]
+    #[case::extensible_array_with_a_single_index_flag(
+        ChunkIndexInfo::ExtensibleArray,
+        DONT_FILTER_PARTIAL_BOUND_CHUNKS | SINGLE_INDEX_WITH_FILTER,
+        DONT_FILTER_PARTIAL_BOUND_CHUNKS
+    )]
+    #[case::unfiltered_single_chunk_with_a_single_index_flag(
+        ChunkIndexInfo::SingleChunk { filtered: None },
+        SINGLE_INDEX_WITH_FILTER,
+        0
+    )]
+    #[case::filtered_single_chunk_with_raw_partial_chunks(
+        ChunkIndexInfo::SingleChunk { filtered: Some(FILTERED) },
+        DONT_FILTER_PARTIAL_BOUND_CHUNKS,
+        DONT_FILTER_PARTIAL_BOUND_CHUNKS | SINGLE_INDEX_WITH_FILTER
+    )]
+    fn a_chunked_layout_stores_the_given_flags_and_the_single_index_flag_of_its_index(
+        #[case] info: ChunkIndexInfo,
+        #[case] given: u8,
+        #[case] stored: u8,
+    ) {
+        let message = DataLayout::encode_chunked(
+            ChunkedLayoutFlags::new(given),
+            &[20],
+            8,
+            info,
+            StoredAddress::new(0x1000),
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+        )
+        .unwrap();
+        assert_eq!(message[LAYOUT_PROPERTIES_OFFSET], stored);
+        let DataLayout::Chunked { flags, .. } = DataLayout::parse(&message, 8, 8).unwrap() else {
+            panic!("expected a chunked layout");
+        };
+        assert_eq!(flags, ChunkedLayoutFlags::new(stored));
+    }
+
+    #[rstest]
     #[case::fixed_array(ChunkIndexInfo::FixedArray, &[CHUNK_INDEX_FIXED_ARRAY, FIXED_ARRAY_PAGE_BITS])]
     #[case::extensible_array(ChunkIndexInfo::ExtensibleArray, &[CHUNK_INDEX_EXTENSIBLE_ARRAY, 32, 4, 4, 16, 10])]
     fn an_array_layout_stores_the_parameters_the_array_header_does(
@@ -1128,6 +1181,7 @@ mod tests {
         #[case] indexing: &[u8],
     ) {
         let message = DataLayout::encode_chunked(
+            ChunkedLayoutFlags::NONE,
             &[10],
             8,
             info,
@@ -1151,6 +1205,7 @@ mod tests {
         #[case] width: u8,
     ) {
         let message = DataLayout::encode_chunked(
+            ChunkedLayoutFlags::NONE,
             &[1, largest],
             1,
             ChunkIndexInfo::FixedArray,
@@ -1172,6 +1227,7 @@ mod tests {
     #[test]
     fn a_chunked_layout_of_more_dimensions_than_its_field_holds_is_an_error() {
         let err = DataLayout::encode_chunked(
+            ChunkedLayoutFlags::NONE,
             &[1; 255],
             1,
             ChunkIndexInfo::FixedArray,

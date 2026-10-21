@@ -277,6 +277,7 @@ fn a_chunk_that_cannot_be_read_or_decoded_is_incomplete(
         }],
     };
     let layout = format::DataLayout::encode_chunked(
+        format::ChunkedLayoutFlags::NONE,
         &[2],
         global_heap_fixture::REFERENCE_SIZE as u32,
         format::ChunkIndexInfo::SingleChunk {
