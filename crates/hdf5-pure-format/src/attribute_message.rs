@@ -23,9 +23,10 @@ use crate::width::{LengthWidth, OffsetWidth};
 
 /// An Attribute message: the name, datatype, dataspace, and data of one attribute.
 ///
-/// The parsers read message versions 1, 2, and 3. [`serialize`](Self::serialize) writes version 2,
-/// and [`serialize_v3`](Self::serialize_v3) version 3. The message is defined in "The Attribute
-/// Message" of the [format specification, version 4.0][spec].
+/// The parsers read message versions 1, 2, and 3. [`serialize`](Self::serialize) writes version 2
+/// for ASCII names and version 3 for non-ASCII names. [`serialize_v3`](Self::serialize_v3) writes
+/// version 3 for either character set. The message is defined in "The Attribute Message" of the
+/// [format specification, version 4.0][spec].
 ///
 /// Two messages are equal when every field is equal, so a message that refers to a committed
 /// datatype is not equal to one that encodes the same datatype.
@@ -348,7 +349,9 @@ impl AttributeMessage {
         ))
     }
 
-    /// Serializes the message as version 2.
+    /// Serializes the message as version 2 for an ASCII name or version 3 otherwise.
+    ///
+    /// Writes the UTF-8 character-set declaration for a non-ASCII name.
     ///
     /// `offset_width` is the width of the address in a reference to a committed datatype, and
     /// `length_size` the width of a length, both as the superblock of the file the message goes
@@ -369,10 +372,10 @@ impl AttributeMessage {
         self.serialize_version(VERSION_TWO, offset_width, length_size)
     }
 
-    /// Serializes the message as version 3, which adds the character set of the name.
+    /// Serializes the message as version 3 with its name's character set.
     ///
-    /// The character set is written as ASCII. The widths and the fields are the same as for
-    /// [`serialize`](Self::serialize).
+    /// Writes ASCII for an ASCII name and UTF-8 otherwise. The widths and the fields are the same
+    /// as for [`serialize`](Self::serialize).
     ///
     /// # Errors
     ///
@@ -407,6 +410,16 @@ impl AttributeMessage {
         offset_width: OffsetWidth,
         length_size: u8,
     ) -> Result<Vec<u8>, FormatError> {
+        let charset = if self.name.is_ascii() {
+            CharacterSet::Ascii
+        } else {
+            CharacterSet::Utf8
+        };
+        let version = if charset == CharacterSet::Utf8 {
+            VERSION_THREE
+        } else {
+            version
+        };
         let name_bytes = {
             let mut n = self.name.as_bytes().to_vec();
             n.push(0); // null terminator
@@ -433,7 +446,7 @@ impl AttributeMessage {
         buf.extend_from_slice(&datatype_size.to_le_bytes());
         buf.extend_from_slice(&dataspace_size.to_le_bytes());
         if version >= VERSION_THREE {
-            buf.push(name_character_set(CharacterSet::Ascii));
+            buf.push(name_character_set(charset));
         }
         buf.extend_from_slice(&name_bytes);
         buf.extend_from_slice(&dt_bytes);
@@ -611,6 +624,47 @@ mod tests {
     use crate::dataspace::DataspaceType;
     use crate::datatype::byte_order::DatatypeByteOrder;
     use crate::shared_message;
+
+    #[rstest]
+    #[case("scale", false, VERSION_TWO, ASCII_NAME_CHARACTER_SET)]
+    #[case("scale", true, VERSION_THREE, ASCII_NAME_CHARACTER_SET)]
+    #[case("échelle", false, VERSION_THREE, UTF8_NAME_CHARACTER_SET)]
+    #[case("échelle", true, VERSION_THREE, UTF8_NAME_CHARACTER_SET)]
+    fn serialized_name_declares_its_character_set(
+        #[case] name: &str,
+        #[case] version_three: bool,
+        #[case] version: u8,
+        #[case] character_set: u8,
+    ) {
+        let message = AttributeMessage {
+            name: name.into(),
+            datatype: i32_datatype(),
+            dataspace: Dataspace {
+                space_type: DataspaceType::Scalar,
+                rank: 0,
+                dimensions: Vec::new(),
+                max_dimensions: None,
+            },
+            raw_data: 7i32.to_le_bytes().to_vec(),
+            datatype_location: DatatypeLocation::Inline,
+        };
+        let bytes = if version_three {
+            message.serialize_v3(OffsetWidth::Eight, 8).unwrap()
+        } else {
+            message.serialize(OffsetWidth::Eight, 8).unwrap()
+        };
+        let datatype = crate::datatype::serialize_datatype(&i32_datatype());
+        let dataspace = dataspace::scalar();
+        let value = 7i32.to_le_bytes();
+        let expected = attribute::Attribute::new(name, &datatype, &dataspace, &value);
+        let expected = if version == VERSION_THREE {
+            expected.character_set(character_set).build()
+        } else {
+            expected.flags(attribute::Flags::NONE).build()
+        };
+        assert_eq!(bytes, expected);
+        assert_eq!(AttributeMessage::parse(&bytes, 8).unwrap(), message);
+    }
 
     #[rstest]
     #[case::version_1(
@@ -969,4 +1023,9 @@ mod tests {
             },
         }
     }
+
+    // "The Attribute Message" in format specification, version 4.0, defines the
+    // version 3 Name Character Set Encoding values.
+    const ASCII_NAME_CHARACTER_SET: u8 = 0;
+    const UTF8_NAME_CHARACTER_SET: u8 = 1;
 }

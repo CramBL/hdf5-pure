@@ -388,32 +388,11 @@ pub(crate) struct DenseAttrBlob {
 const DENSE_ATTR_MAX_HEAP_SIZE_BITS: u16 = ATTRIBUTE_HEAP_MAX_HEAP_SIZE_BITS;
 const DENSE_ATTR_BLOCK_OFFSET_BYTES: usize = ATTRIBUTE_HEAP_BLOCK_OFFSET_BYTES;
 
-/// Whether `attrs` must go in a fractal heap rather than the object header.
+/// Returns `true` if `attrs` require dense storage.
 ///
-/// Two independent reasons, matching libhdf5's own disjunction in
-/// `H5Oattribute.c` (`nattrs == max_compact || raw_size >= H5O_MESG_MAX_SIZE`):
-/// too many attributes to keep compact, *or* one attribute too large for an
-/// object-header message, whose size field is 2 bytes wide.
-///
-/// The second is what lets a single large attribute be written at all. Selecting
-/// on count alone would send it to the compact path, where the only available
-/// answer is [`FormatError::AttributeMessageTooLarge`] — even though dense
-/// storage can hold it, as a huge object if need be.
-///
-/// The comparison reads `>` against [`OBJECT_HEADER_MESSAGE_MAX`] (65,535) where
-/// the C library reads `>=` against `H5O_MESG_MAX_SIZE` (65,536): the same
-/// predicate, written from the widest value that fits rather than the first that
-/// does not. What each side measures does differ by a byte, since this writer's
-/// compact attribute messages are version 2 and the C library's latest-format
-/// ones are version 3, one character-set byte longer. An attribute landing in
-/// that single-byte window is therefore stored compactly here and densely there.
-/// Both are readable, and both stay within the header's field width.
-///
-/// Variable-length attributes are selected on the same terms as any other. They
-/// were briefly excluded from the size half of the rule, because a heap built
-/// before their global-heap references were patched embedded the placeholders and
-/// this crate's reader then dropped the attribute; the writer now builds each
-/// heap after that patching, so there is nothing to exclude.
+/// Selects dense storage when the attribute count exceeds [`DENSE_ATTR_THRESHOLD`] or a compact
+/// message exceeds [`OBJECT_HEADER_MESSAGE_MAX`] bytes. Measures compact messages through
+/// [`AttributeMessage::serialize`], including the character-set byte for non-ASCII names.
 ///
 /// # Errors
 ///
@@ -4334,6 +4313,137 @@ mod tests {
         assert_eq!(bytes, b"previous bytes");
     }
 
+    #[rstest]
+    #[case("scale")]
+    #[case("échelle")]
+    fn attribute_names_retain_encoding_across_staging_forms(
+        #[case] name: &str,
+        #[values(
+            AttributeForm::Committed,
+            AttributeForm::CommittedVarLen,
+            AttributeForm::CommittedVarLenVerbatim,
+            AttributeForm::CommittedVerbatim,
+            AttributeForm::Value,
+            AttributeForm::VarLenValue,
+            AttributeForm::VarLenVerbatim,
+            AttributeForm::Verbatim
+        )]
+        form: AttributeForm,
+        #[values(false, true)] dense: bool,
+        #[values(false, true)] paged: bool,
+    ) {
+        let mut writer = attribute_writer(paged);
+        stage_encoded_name_attributes(AttributeOwner::Root(&mut writer), name, form, dense);
+        stage_encoded_name_attributes(
+            AttributeOwner::Dataset(writer.create_dataset("data").with_i32_data(&[1])),
+            name,
+            form,
+            dense,
+        );
+        let mut group = writer.create_group("group");
+        stage_encoded_name_attributes(AttributeOwner::Group(&mut group), name, form, dense);
+        writer.add_group(group.finish());
+        let bytes = writer.finish().unwrap();
+        assert_eq!(test_util::fractal_heap::has_fractal_heap(&bytes), dense);
+        let file = File::from_bytes(bytes.clone()).unwrap();
+        for messages in [
+            file.root().attr_messages().unwrap(),
+            file.group("group").unwrap().attr_messages().unwrap(),
+            file.dataset("data").unwrap().attr_messages().unwrap(),
+        ] {
+            assert_eq!(messages.len(), if dense { 11 } else { 1 });
+            let message = messages
+                .iter()
+                .find(|message| message.name == name)
+                .unwrap();
+            let encoded = if dense {
+                message.serialize_v3(OFFSET_WIDTH, LENGTH_SIZE).unwrap()
+            } else {
+                message.serialize(OFFSET_WIDTH, LENGTH_SIZE).unwrap()
+            };
+            assert_eq!(
+                encoded[0],
+                if dense || !name.is_ascii() {
+                    ATTRIBUTE_MESSAGE_VERSION_THREE
+                } else {
+                    ATTRIBUTE_MESSAGE_VERSION_TWO
+                }
+            );
+            if encoded[0] == ATTRIBUTE_MESSAGE_VERSION_THREE {
+                assert_eq!(
+                    encoded[ATTRIBUTE_NAME_CHARACTER_SET_OFFSET],
+                    if name.is_ascii() {
+                        ASCII_NAME_CHARACTER_SET
+                    } else {
+                        UTF8_NAME_CHARACTER_SET
+                    }
+                );
+            }
+            assert!(bytes.windows(encoded.len()).any(|window| window == encoded));
+        }
+        let expected = match form {
+            AttributeForm::CommittedVarLen
+            | AttributeForm::CommittedVarLenVerbatim
+            | AttributeForm::VarLenValue
+            | AttributeForm::VarLenVerbatim => AttrValue::VarLenString("value-42".into()),
+            _ => AttrValue::I32(42),
+        };
+        for attributes in [
+            file.root().attrs().unwrap(),
+            file.group("group").unwrap().attrs().unwrap(),
+            file.dataset("data").unwrap().attrs().unwrap(),
+        ] {
+            assert_eq!(attributes.get(name), Some(&expected));
+            if dense {
+                assert_eq!(attributes.get("filler0"), Some(&AttrValue::I32(0)));
+                assert_eq!(attributes.get("filler9"), Some(&AttrValue::I32(9)));
+            }
+        }
+    }
+
+    fn stage_encoded_name_attributes(
+        mut owner: AttributeOwner<'_>,
+        name: &str,
+        form: AttributeForm,
+        dense: bool,
+    ) {
+        owner.insert(name, AttributeForm::Value, 7);
+        if dense {
+            for index in 0..10 {
+                owner.insert(&format!("filler{index}"), AttributeForm::Value, index);
+            }
+        }
+        owner.insert(name, form, 42);
+    }
+
+    #[rstest]
+    #[case("xx", 0, false)]
+    #[case("é", 1, false)]
+    #[case("é", 0, true)]
+    fn attribute_name_encoding_counts_toward_compact_storage_limit(
+        #[case] name: &str,
+        #[case] trim: usize,
+        #[case] dense: bool,
+        #[values(false, true)] paged: bool,
+    ) {
+        let probe =
+            type_builders::build_attr_message("xx", &AttrValue::AsciiString("y".into())).unwrap();
+        let overhead = probe.serialize(OFFSET_WIDTH, LENGTH_SIZE).unwrap().len() - 1;
+        let value = AttrValue::AsciiString("y".repeat(OBJECT_HEADER_MESSAGE_MAX - overhead - trim));
+        let message = type_builders::build_attr_message(name, &value).unwrap();
+        assert_eq!(
+            message.serialize(OFFSET_WIDTH, LENGTH_SIZE).unwrap().len(),
+            OBJECT_HEADER_MESSAGE_MAX + usize::from(!name.is_ascii()) - trim
+        );
+        assert_eq!(needs_dense_attrs(&[message]).unwrap(), dense);
+        let mut writer = attribute_writer(paged);
+        writer.set_root_attr(name, value.clone());
+        let bytes = writer.finish().unwrap();
+        assert_eq!(test_util::fractal_heap::has_fractal_heap(&bytes), dense);
+        let file = File::from_bytes(bytes).unwrap();
+        assert_eq!(file.root().attrs().unwrap().get(name), Some(&value));
+    }
+
     #[derive(Clone, Copy)]
     enum AttributeTarget {
         Dataset,
@@ -6468,6 +6578,13 @@ mod tests {
             FormatError::LibverTooOldForContent { .. }
         ));
     }
+    // "The Attribute Message" in format specification, version 4.0, defines message
+    // versions 2 and 3 and the version 3 Name Character Set Encoding field.
+    const ATTRIBUTE_MESSAGE_VERSION_TWO: u8 = 2;
+    const ATTRIBUTE_MESSAGE_VERSION_THREE: u8 = 3;
+    const ATTRIBUTE_NAME_CHARACTER_SET_OFFSET: usize = 8;
+    const ASCII_NAME_CHARACTER_SET: u8 = 0;
+    const UTF8_NAME_CHARACTER_SET: u8 = 1;
     const GLOBAL_HEAP_COLLECTION_SIGNATURE: &[u8] = b"GCOL";
     const OBJECT_HEADER_V2_SIGNATURE: &[u8] = b"OHDR";
 }
