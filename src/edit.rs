@@ -326,6 +326,7 @@ use crate::attribute::StoredAttribute;
 use crate::attribute_info::AttributeInfoMessage;
 use crate::chunk_index_inplace::{self, Located, Store};
 use crate::chunked_read;
+use crate::chunked_read::ChunkDecoding;
 use crate::chunked_write::{self, ChunkMeta, ChunkOptions, ChunkProvider, StorageAllocation};
 use crate::convert::Narrow;
 use crate::data_layout::COMPACT_DATA_OFFSET;
@@ -8425,18 +8426,30 @@ impl WriteEngine {
         }
     }
 
-    /// Plan a relocating append to an existing chunked, unlimited,
-    /// Extensible-Array-indexed dataset at `addr`. Validates the target, splits
-    /// the appended elements into new (and one rewritten trailing) chunks —
-    /// compressed through the on-disk pipeline when filtered — and gathers the
-    /// existing complete chunks by metadata alone. Returns the
-    /// [`MovingWrite::AppendedChunks`] plan; the commit machinery appends the new
-    /// chunks and a rebuilt index and repoints the header (see
-    /// [`write_appended_chunks`](Self::write_appended_chunks)).
+    /// Returns the plan of a relocating append of the elements of `ab` to the chunked dataset at
+    /// `addr`, which [`write_appended_chunks`](Self::write_appended_chunks) writes.
     ///
-    /// Reads only; no bytes are written here. `src` is the file image and `base`
-    /// its userblock base; the dataset's stored (base-relative) structures are read
-    /// through a `base`-shifted view.
+    /// It keeps each complete chunk of the dataset by its index record, and splits the live
+    /// elements of a trailing partial chunk and the appended elements into chunks. It encodes each
+    /// of those for a reader at the extent the append publishes: through the filter pipeline,
+    /// except a chunk that extends past that extent under
+    /// [`ChunkedLayoutFlags::partial_edge_chunks_stored_raw`], which is stored as its data.
+    ///
+    /// It reads `src`, the file image, and writes nothing. `base` is the userblock base of `src`,
+    /// and the dataset's base-relative structures are read through a view shifted by `base`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AppendUnsupported`] if the object at `addr` is not a chunked dataset of
+    /// rank 1, unlimited along its first dimension, with a nonzero chunk length and a dense grid
+    /// of chunks indexed by an Extensible Array whose element format matches the filter pipeline,
+    /// if that pipeline is one this crate cannot re-encode, or is lossy and the dataset ends in a
+    /// partial chunk, if the elements of `ab` mix types or do not match the dataset's datatype, if
+    /// `ab` holds raw bytes for a datatype that a raw append cannot write as they are, if the grown
+    /// length overflows a `u64`, or if `base` is past the end of `src`. Returns the errors of the
+    /// reads of the dataset's header and chunk index, of
+    /// [`ChunkInfo::read_live_elements`](chunked_read::ChunkInfo::read_live_elements) for the
+    /// partial chunk, and of [`PreparedChunk::encode`].
     fn prepare_append<S: Source + ?Sized>(
         src: &S,
         addr: u64,
@@ -8507,7 +8520,7 @@ impl WriteEngine {
 
         // Require a chunked dataset indexed by an Extensible Array, which only a
         // version 4 layout message stores.
-        let DataLayout::Chunked { index, .. } = &dl else {
+        let DataLayout::Chunked { index, flags, .. } = &dl else {
             return Err(Error::AppendUnsupported(
                 "append requires a chunked dataset",
             ));
@@ -8677,43 +8690,29 @@ impl WriteEngine {
         // Build the raw byte region for the tail (from the last chunk boundary to
         // the new end): the live prefix of any rewritten partial chunk, then the
         // appended bytes.
-        let mut tail_raw: Vec<u8> = Vec::new();
-        let mut old_tail_extent: Option<(u64, u64)> = None;
-        if has_partial {
+        let ctx = ChunkContext::from_datatype(&spatial, &disk_dt)?;
+        // One encoder and decoder across the appended tail. See `FilterScratch`.
+        let mut scratch = FilterScratch::new();
+        let (mut tail_raw, old_tail_extent) = if has_partial {
             let partial = &grid_order[n_full];
-            let len = partial.chunk_size.to_usize()?;
-            partial
-                .address
-                .get()
-                .checked_add(len as u64)
-                .filter(|&e| e <= view.len())
-                .ok_or(Error::AppendUnsupported(
-                    "trailing chunk extends past end-of-file",
-                ))?;
-            let stored = view.read_exact_at(partial.address.get(), len)?;
-            let full = if let Some(pl) = &pipeline {
-                let ctx = ChunkContext::from_datatype(&spatial, &disk_dt)?;
-                filters::decompress_chunk(&stored, pl, ctx, partial.filter_mask)
-                    .map_err(Error::Format)?
-            } else {
-                stored
-            };
-            let live_elems = (current_dim0 % chunk_elems).to_usize()?;
-            let live_bytes = live_elems * element_size.get();
-            if full.len() < live_bytes {
-                return Err(Error::AppendUnsupported(
-                    "trailing chunk decoded shorter than its live element count",
-                ));
-            }
-            tail_raw.extend_from_slice(&full[..live_bytes]);
+            let live = partial.read_live_elements(
+                &view,
+                &mut scratch,
+                *flags,
+                pipeline.as_ref(),
+                ctx,
+                current_dim0,
+            )?;
             // The old partial chunk's data block is dead once the new index lands.
-            old_tail_extent = Some((base.absolute(partial.address)?, partial.chunk_size.get()));
-        }
+            let extent = (base.absolute(partial.address)?, partial.chunk_size.get());
+            (live, Some(extent))
+        } else {
+            (Vec::new(), None)
+        };
         tail_raw.extend_from_slice(&ab.raw);
 
-        // Split the tail into full chunk buffers and compress each through the
-        // pipeline when filtered. The final chunk's overhang takes the dataset's
-        // fill value, which is what a reader returns from those slots once a
+        // Split the tail into full chunk buffers. The final chunk's overhang takes the
+        // dataset's fill value, which is what a reader returns from those slots once a
         // later append or resize reaches them (#296).
         let tail_len_elems = new_dim0 - (n_full as u64) * chunk_elems;
         let padding = fill_msg.map_or(crate::fill_value::PaddingFill::Zero, |(mt, b, e)| {
@@ -8727,15 +8726,12 @@ impl WriteEngine {
             padding.pattern(element_size),
         )
         .map_err(Error::Format)?;
-        let ctx = ChunkContext::from_datatype(&spatial, &disk_dt)?;
-        // One encoder across the appended tail; see `FilterScratch`.
-        let mut scratch = FilterScratch::new();
-        let encoding = pipeline
-            .as_ref()
-            .map_or(ChunkEncoding::Raw, |_| ChunkEncoding::Filtered);
-        let new_chunks = split
-            .into_iter()
-            .map(|logical| {
+        let new_chunks = (n_full.to_u64()..)
+            .zip(split)
+            .map(|(index, logical)| {
+                let offset = index * chunk_elems;
+                let published = ChunkDecoding::at_extent(*flags, &spatial, &[new_dim0], &[offset]);
+                let encoding = ChunkEncoding::for_decoding(published);
                 PreparedChunk::encode(&mut scratch, pipeline.as_ref(), ctx, encoding, logical)
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -8753,6 +8749,7 @@ impl WriteEngine {
         Ok(MovingWrite::AppendedChunks {
             region,
             new_dataspace_body,
+            flags: *flags,
             chunk_dims_u32,
             element_size,
             has_filters,
@@ -9577,6 +9574,7 @@ impl WriteEngine {
             MovingWrite::AppendedChunks {
                 region,
                 new_dataspace_body,
+                flags,
                 chunk_dims_u32,
                 element_size,
                 has_filters,
@@ -9586,6 +9584,7 @@ impl WriteEngine {
             } => self.write_appended_chunks(
                 region,
                 new_dataspace_body,
+                *flags,
                 chunk_dims_u32,
                 *element_size,
                 *has_filters,
@@ -9621,13 +9620,14 @@ impl WriteEngine {
     /// time otherwise; the body says why.
     #[expect(
         clippy::too_many_arguments,
-        reason = "the append rebuild needs the header region, grown dataspace, chunk \
-        geometry, and both chunk sets; bundling them into a struct would only move the list"
+        reason = "the append rebuild needs the header region, grown dataspace, layout flags, \
+        chunk geometry, and both chunk sets; bundling them into a struct would only move the list"
     )]
     fn write_appended_chunks(
         &mut self,
         region: &OhRegion,
         new_dataspace_body: &[u8],
+        flags: ChunkedLayoutFlags,
         chunk_dims_u32: &[u32],
         element_size: NonZeroUsize,
         has_filters: bool,
@@ -9780,7 +9780,7 @@ impl WriteEngine {
             reason = "element size is a datatype byte width that fits u32"
         )]
         let layout_body = DataLayout::encode_chunked(
-            ChunkedLayoutFlags::NONE,
+            flags,
             chunk_dims_u32,
             element_size.get() as u32,
             ChunkIndexInfo::ExtensibleArray,
@@ -10824,36 +10824,35 @@ enum MovingWrite {
         payload: ChunkPayload,
         old_addr: u64,
     },
-    /// A relocating **append** to a chunked, unlimited, Extensible-Array-indexed
-    /// dataset (`append_dataset`). The dataset's existing chunk *data* stays in
-    /// place; only the newly-appended chunks and any rewritten trailing partial
-    /// chunk (`new_chunks`, already compressed through the on-disk pipeline)
-    /// are placed (reusing freed raw space where it fits), a fresh Extensible
-    /// Array is rebuilt over
-    /// `kept_chunks ++ new_chunks`, the verbatim header `region`'s dataspace
-    /// message is grown (`new_dataspace_body`) and its data-layout message
-    /// repointed at the new index (every other message — datatype, filter
-    /// pipeline, fill value, attributes — preserved verbatim), and the header is
-    /// relocated. After the commit lands, only the old index structure at
-    /// `old_addr`, the old header, and the relocated old trailing chunk
-    /// (`old_tail_extent`) are freed — never the kept chunk data, which both the
-    /// old and new index share during the commit.
+    /// A relocating append to a chunked, unlimited dataset indexed by an Extensible Array
+    /// (`Dataset::append_staged`).
+    ///
+    /// The kept chunks stay in place. The commit places `new_chunks`, in freed raw space where they
+    /// fit, and builds an Extensible Array over `kept_chunks` and `new_chunks`. It grows the
+    /// dataspace message of the verbatim header `region` to `new_dataspace_body`, repoints its
+    /// data layout message at the new index, keeps every other message verbatim, and relocates
+    /// the header. After the commit lands, it frees the old index and the old header of the
+    /// dataset at `old_addr` and the old trailing chunk at `old_tail_extent`, and never the kept
+    /// chunks, which the old and the new index share during the commit.
     AppendedChunks {
         region: OhRegion,
         /// The grown dataspace message body (v2-serialized), current axis-0
         /// dimension increased, maximum dimensions (unlimited) preserved.
         new_dataspace_body: Vec<u8>,
+        /// The layout flags of the dataset, which the rebuilt layout message stores.
+        flags: ChunkedLayoutFlags,
         /// Rank-only spatial chunk dimensions, for the rebuilt v4 layout message.
         chunk_dims_u32: Vec<u32>,
         element_size: NonZeroUsize,
-        /// Full (uncompressed) chunk byte size = product(spatial) * element_size.
+        /// Whether the dataset has a filter pipeline, and so whether the rebuilt index stores the
+        /// filtered chunk element format.
         has_filters: bool,
         /// Existing complete chunks, in index order, carried by metadata alone —
         /// their base-relative addresses, on-disk stored sizes, and filter masks
         /// preserved exactly (a nonzero mask from a C/h5py-skipped filter is kept).
         kept_chunks: Vec<ChunkRecord>,
-        /// The appended chunks in index order: the recompressed trailing partial
-        /// chunk first (when present), then the remaining new full chunks.
+        /// The written chunks in index order, each encoded for a reader at the grown extent: the
+        /// rewritten trailing partial chunk first where the dataset has one, then the new chunks.
         new_chunks: Vec<PreparedChunk>,
         /// The dataset header address, for old-index and old-header reclaim.
         old_addr: u64,

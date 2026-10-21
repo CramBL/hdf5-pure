@@ -52,7 +52,6 @@ use crate::address::AddressContext;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::checksum;
-use crate::chunked_read;
 use crate::chunked_read::ChunkDecoding;
 use crate::chunked_read::ChunkInfo;
 use crate::chunked_read::StoredChunkSize;
@@ -546,7 +545,7 @@ impl Located {
     /// # Errors
     ///
     /// Returns [`Error::AppendUnsupported`] if the index has no record for the chunk, and the
-    /// errors of the read of the record and of [`chunked_read::read_decoded_chunk`].
+    /// errors of the read of the record and of [`ChunkInfo::read_live_elements`].
     fn read_live_tail<F: Store>(
         &self,
         file: &F,
@@ -554,7 +553,6 @@ impl Located {
         pipeline: Option<&FilterPipeline>,
         ctx: ChunkContext<'_>,
     ) -> Result<Vec<u8>, Error> {
-        let live_elems = self.current_dim % self.chunk_elems;
         let rec = self
             .read_element(file, self.current_dim / self.chunk_elems)?
             .ok_or(Error::AppendUnsupported(
@@ -568,24 +566,10 @@ impl Located {
         let chunk = ChunkInfo {
             chunk_size: StoredChunkSize::v4(stored_size),
             filter_mask: rec.filter_mask,
-            offsets: vec![self.current_dim - live_elems],
+            offsets: vec![self.current_dim - self.current_dim % self.chunk_elems],
             address: rec.addr,
         };
-        let mut logical = chunked_read::read_decoded_chunk(
-            file,
-            scratch,
-            self.flags,
-            ctx.chunk_dims,
-            &[self.current_dim],
-            pipeline,
-            ctx,
-            &chunk,
-        )?;
-        logical.truncate(chunked_read::bounded_chunk_len(
-            &[live_elems],
-            self.elem_bytes,
-        )?);
-        Ok(logical)
+        Ok(chunk.read_live_elements(file, scratch, self.flags, pipeline, ctx, self.current_dim)?)
     }
 
     /// Returns how a reader at the extent `extent` decodes the chunk at element `offset`.
@@ -2600,24 +2584,7 @@ mod tests {
         let before = stored_chunks(&store.data);
         append_to_edge_store(&mut store, appended, max_phase).unwrap();
 
-        let pipeline = filter.pipeline();
-        let written: Vec<_> = (4..)
-            .step_by(4)
-            .zip(written)
-            .map(|(offset, (stored, values))| {
-                let logical = i32_bytes(values);
-                let (filter_mask, bytes) = match stored {
-                    Stored::Filtered => (
-                        0,
-                        filters::compress_chunk(&logical, &pipeline, ChunkContext::basic(&[4], 4))
-                            .unwrap(),
-                    ),
-                    Stored::FiltersSkipped => (filter.every_filter_skipped(), logical),
-                    Stored::Raw => (0, logical),
-                };
-                (vec![offset], filter_mask, bytes)
-            })
-            .collect();
+        let written = filter.stored_chunks_after_the_kept_one(written);
         let (chunks, values) = match max_phase {
             1 => (before, EDGE_INITIAL.to_vec()),
             2 | 3 => (
@@ -2643,19 +2610,7 @@ mod tests {
         #[case] raw_edges: bool,
         #[case] decoded_len: usize,
     ) {
-        let mut store = edge_store(EdgeFilter::Shuffle, raw_edges);
-        let logical = vec![0x5a; decoded_len];
-        let stored = if raw_edges {
-            logical
-        } else {
-            filters::compress_chunk(
-                &logical,
-                &EdgeFilter::Shuffle.pipeline(),
-                ChunkContext::basic(&[4], 4),
-            )
-            .unwrap()
-        };
-        replace_edge_record(&mut store, &stored);
+        let store = edge_store_decoding_to(raw_edges, decoded_len);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("edge.h5");
         std::fs::write(&path, &store.data).unwrap();
@@ -2667,6 +2622,114 @@ mod tests {
         };
         assert_eq!((expected, actual), (16, decoded_len));
         file.close().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), store.data);
+    }
+
+    #[rstest]
+    #[case::raw_tail_stays_partial(true, &[106], &[(Stored::Raw, [104, 105, 106, EDGE_FILL])])]
+    #[case::raw_tail_becomes_full(true, &[106, 107], &[(Stored::Filtered, [104, 105, 106, 107])])]
+    #[case::raw_tail_becomes_full_before_a_raw_tail(
+        true,
+        &[106, 107, 108],
+        &[
+            (Stored::Filtered, [104, 105, 106, 107]),
+            (Stored::Raw, [108, EDGE_FILL, EDGE_FILL, EDGE_FILL]),
+        ],
+    )]
+    #[case::filtered_tail_stays_partial(
+        false,
+        &[106],
+        &[(Stored::Filtered, [104, 105, 106, EDGE_FILL])],
+    )]
+    #[case::filtered_tail_becomes_full(
+        false,
+        &[106, 107],
+        &[(Stored::Filtered, [104, 105, 106, 107])],
+    )]
+    #[case::filtered_tail_becomes_full_before_a_filtered_tail(
+        false,
+        &[106, 107, 108],
+        &[
+            (Stored::Filtered, [104, 105, 106, 107]),
+            (Stored::Filtered, [108, EDGE_FILL, EDGE_FILL, EDGE_FILL]),
+        ],
+    )]
+    fn a_staged_edge_append_keeps_the_layout_flags_and_stores_each_written_chunk_for_the_new_extent(
+        #[case] raw_edges: bool,
+        #[case] appended: &[i32],
+        #[case] written: &[(Stored, [i32; 4])],
+        #[values(EdgeFilter::Deflate, EdgeFilter::Shuffle, EdgeFilter::ShuffleDeflate)]
+        filter: EdgeFilter,
+    ) {
+        let store = edge_store(filter, raw_edges);
+        let before = stored_chunks(&store.data);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("edge.h5");
+        std::fs::write(&path, &store.data).unwrap();
+
+        let file = crate::File::open_rw(&path).unwrap();
+        let mut dataset = file.dataset("d").unwrap();
+        dataset
+            .append_staged(|builder| {
+                builder.append(appended);
+            })
+            .unwrap();
+        drop(dataset);
+        file.close().unwrap();
+
+        let data = std::fs::read(&path).unwrap();
+        assert_eq!(
+            stored_chunks(&data),
+            [
+                &before[..1],
+                &filter.stored_chunks_after_the_kept_one(written)
+            ]
+            .concat()
+        );
+        let flags = if raw_edges {
+            crate::data_layout::DONT_FILTER_PARTIAL_BOUND_CHUNKS
+        } else {
+            0
+        };
+        assert_eq!(
+            locate(&WindowProbeStore::open(data.clone())).0.flags,
+            ChunkedLayoutFlags::new(flags)
+        );
+        let file = crate::File::from_bytes(data).unwrap();
+        assert_eq!(
+            file.dataset("d").unwrap().read_i32().unwrap(),
+            [&EDGE_INITIAL[..], appended].concat()
+        );
+    }
+
+    #[rstest]
+    #[case::short_raw_tail(true, 12)]
+    #[case::long_raw_tail(true, 20)]
+    #[case::short_filtered_tail(false, 12)]
+    #[case::long_filtered_tail(false, 20)]
+    fn a_staged_append_onto_an_old_tail_of_another_decoded_length_is_rejected(
+        #[case] raw_edges: bool,
+        #[case] decoded_len: usize,
+    ) {
+        let store = edge_store_decoding_to(raw_edges, decoded_len);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("edge.h5");
+        std::fs::write(&path, &store.data).unwrap();
+
+        let file = crate::File::open_rw(&path).unwrap();
+        let mut dataset = file.dataset("d").unwrap();
+        dataset
+            .append_staged(|builder| {
+                builder.append(&[106_i32]);
+            })
+            .unwrap();
+        let err = file.commit().unwrap_err();
+        let Error::Format(FormatError::DataSizeMismatch { expected, actual }) = err else {
+            panic!("expected DataSizeMismatch, got {err:?}");
+        };
+        assert_eq!((expected, actual), (16, decoded_len));
+        drop(dataset);
+        drop(file);
         assert_eq!(std::fs::read(&path).unwrap(), store.data);
     }
 
@@ -2691,6 +2754,34 @@ mod tests {
                 Self::Deflate | Self::Shuffle => 0b1,
                 Self::ShuffleDeflate => 0b11,
             }
+        }
+
+        fn stored_chunks_after_the_kept_one(
+            self,
+            written: &[(Stored, [i32; 4])],
+        ) -> Vec<(Vec<u64>, u32, Vec<u8>)> {
+            let pipeline = self.pipeline();
+            (4..)
+                .step_by(4)
+                .zip(written)
+                .map(|(offset, (stored, values))| {
+                    let logical = i32_bytes(values);
+                    let (filter_mask, bytes) = match stored {
+                        Stored::Filtered => (
+                            0,
+                            filters::compress_chunk(
+                                &logical,
+                                &pipeline,
+                                ChunkContext::basic(&[4], 4),
+                            )
+                            .unwrap(),
+                        ),
+                        Stored::FiltersSkipped => (self.every_filter_skipped(), logical),
+                        Stored::Raw => (0, logical),
+                    };
+                    (vec![offset], filter_mask, bytes)
+                })
+                .collect()
         }
 
         fn store(self) -> WindowProbeStore {
@@ -2742,6 +2833,23 @@ mod tests {
                 .unwrap();
             replace_edge_record(&mut store, &i32_bytes(&[104, 105, EDGE_FILL, EDGE_FILL]));
         }
+        store
+    }
+
+    fn edge_store_decoding_to(raw_edges: bool, decoded_len: usize) -> WindowProbeStore {
+        let mut store = edge_store(EdgeFilter::Shuffle, raw_edges);
+        let logical = vec![0x5a; decoded_len];
+        let stored = if raw_edges {
+            logical
+        } else {
+            filters::compress_chunk(
+                &logical,
+                &EdgeFilter::Shuffle.pipeline(),
+                ChunkContext::basic(&[4], 4),
+            )
+            .unwrap()
+        };
+        replace_edge_record(&mut store, &stored);
         store
     }
 
