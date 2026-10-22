@@ -280,12 +280,16 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
         "MantissaNormalization",
         "OffsetWidth",
         "StoredAddress",
+        "SuperblockVersion",
     }
     # Added struct fields and fields with changed types, removed from both compared shapes.
     allowed_changed_fields = {
         "FileSpaceInfo": {"eoa_pre_fsm", "manager_addrs", "page_size"},
         "FloatingPointLayout": {"mantissa_normalization", "sign_location"},
         "Superblock": {
+            "version",
+            "offset_size",
+            "length_size",
             "driver_info_address",
             "free_space_address",
             "root_group_address",

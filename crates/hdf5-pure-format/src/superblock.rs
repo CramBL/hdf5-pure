@@ -18,6 +18,7 @@ use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_core::__private::PhysicalAddress;
 use hdf5_pure_core::__private::SuperblockFields;
 pub(crate) use hdf5_pure_core::Superblock;
+use hdf5_pure_core::SuperblockVersion;
 
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
@@ -29,7 +30,6 @@ use crate::error::FormatError;
 use crate::signature::HDF5_SIGNATURE;
 use crate::width;
 use crate::width::FormatWidths;
-use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 
 /// Serializes `superblock` in the version 2 and 3 layout.
@@ -42,25 +42,27 @@ use crate::width::OffsetWidth;
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::UnsupportedVersion`] if the version is not 2 or 3,
-/// [`FormatError::InvalidOffsetSize`] or [`FormatError::InvalidLengthSize`] if a width is not 2, 4,
-/// or 8, and [`FormatError::Internal`] if the consistency flags do not fit their 1-byte field or an
-/// address does not fit the offset width.
+/// Returns [`FormatError::UnsupportedVersion`] if the version is 0 or 1, and
+/// [`FormatError::Internal`] if the consistency flags do not fit their 1-byte field or an address
+/// does not fit the offset width.
 pub fn serialize_superblock(superblock: &Superblock) -> Result<Vec<u8>, FormatError> {
-    if !matches!(superblock.version, 2 | 3) {
-        return Err(FormatError::UnsupportedVersion(superblock.version));
+    match superblock.version {
+        SuperblockVersion::Zero | SuperblockVersion::One => {
+            return Err(FormatError::UnsupportedVersion(superblock.version.get()));
+        }
+        SuperblockVersion::Two | SuperblockVersion::Three => {}
     }
-    let offset_width = OffsetWidth::try_from(superblock.offset_size)?;
-    let length_width = LengthWidth::try_from(superblock.length_size)?;
+    let offset_width = superblock.offset_size;
     let mut buf = Vec::with_capacity(48);
     buf.extend_from_slice(&HDF5_SIGNATURE);
-    buf.push(superblock.version);
+    buf.push(superblock.version.get());
     buf.push(offset_width.get());
-    buf.push(length_width.get());
+    buf.push(superblock.length_size.get());
     buf.push(superblock.consistency_flags.narrow_or_else(|| {
         FormatError::Internal(format!(
             "consistency flags {:#x} do not fit the 1-byte field of a version {} superblock",
-            superblock.consistency_flags, superblock.version
+            superblock.consistency_flags,
+            superblock.version.get()
         ))
     })?);
     write_address(
@@ -289,36 +291,34 @@ impl SuperblockRef {
     pub fn parse(&self, region: FileRegion<'_>) -> Result<(Superblock, FormatWidths), FormatError> {
         let Self { range } = *self;
         let held = region.subregion(range)?;
-        let candidate = SuperblockCandidateFields::parse(held.bytes())?;
+        let mut fields = bytes::Fields::new(held.bytes(), 0);
+        let candidate = SuperblockCandidateFields::read(&mut fields)?;
         let required = FileRange::new(range.start(), candidate.encoded_len().to_u64())?;
-        parse_superblock(held.subregion(required)?.bytes())
+        let bytes = held.subregion(required)?.bytes();
+        let superblock = match candidate.version {
+            SuperblockVersion::Zero | SuperblockVersion::One => {
+                candidate.read_v0_or_v1(&mut fields)?
+            }
+            SuperblockVersion::Two | SuperblockVersion::Three => {
+                checksum::verify_trailing(bytes)?;
+                candidate.read_v2_or_v3(&mut fields)?
+            }
+        };
+        if fields.pos() != bytes.len() {
+            return Err(FormatError::Internal(format!(
+                "the version {} superblock reader consumed {} of its {} bytes",
+                candidate.version.get(),
+                fields.pos(),
+                bytes.len()
+            )));
+        }
+        Ok((superblock, candidate.widths))
     }
 
     /// Returns the range a caller reads for [`parse`](Self::parse), the whole superblock.
     pub const fn parse_range(&self) -> FileRange {
         self.range
     }
-}
-
-fn parse_superblock(bytes: &[u8]) -> Result<(Superblock, FormatWidths), FormatError> {
-    let mut fields = bytes::Fields::new(bytes, 0);
-    let candidate = SuperblockCandidateFields::read(&mut fields)?;
-    let superblock = match candidate.version {
-        SuperblockVersion::Zero | SuperblockVersion::One => candidate.read_v0_or_v1(&mut fields)?,
-        SuperblockVersion::Two | SuperblockVersion::Three => {
-            checksum::verify_trailing(bytes)?;
-            candidate.read_v2_or_v3(&mut fields)?
-        }
-    };
-    if fields.pos() != bytes.len() {
-        return Err(FormatError::Internal(format!(
-            "the version {} superblock reader consumed {} of its {} bytes",
-            candidate.version.get(),
-            fields.pos(),
-            bytes.len()
-        )));
-    }
-    Ok((superblock, candidate.widths))
 }
 
 /// The version and the two widths of a superblock, which a candidate's range contains and which
@@ -338,7 +338,7 @@ impl SuperblockCandidateFields {
         if fields.array::<{ HDF5_SIGNATURE.len() }>()? != HDF5_SIGNATURE {
             return Err(FormatError::SignatureNotFound);
         }
-        let version = SuperblockVersion::parse(fields.u8()?)?;
+        let version = SuperblockVersion::try_from(fields.u8()?)?;
         if matches!(version, SuperblockVersion::Zero | SuperblockVersion::One) {
             fields.array::<V0_V1_VERSION_FIELDS_LEN>()?;
         }
@@ -392,9 +392,9 @@ impl SuperblockCandidateFields {
         let root_group_address = fields.address(offsets)?;
         fields.array::<ROOT_ENTRY_TAIL_LEN>()?;
         Ok(SuperblockFields {
-            version: version.get(),
-            offset_size: offsets.get(),
-            length_size: lengths.get(),
+            version,
+            offset_size: offsets,
+            length_size: lengths,
             base_address,
             eof_address,
             root_group_address,
@@ -420,9 +420,9 @@ impl SuperblockCandidateFields {
         let root_group_address = fields.address(offsets)?;
         let checksum = fields.u32()?;
         Ok(SuperblockFields {
-            version: version.get(),
-            offset_size: offsets.get(),
-            length_size: lengths.get(),
+            version,
+            offset_size: offsets,
+            length_size: lengths,
             base_address,
             eof_address,
             root_group_address,
@@ -436,35 +436,6 @@ impl SuperblockCandidateFields {
             checksum: Some(checksum),
         }
         .build())
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SuperblockVersion {
-    Zero,
-    One,
-    Two,
-    Three,
-}
-
-impl SuperblockVersion {
-    fn parse(version: u8) -> Result<Self, FormatError> {
-        Ok(match version {
-            0 => Self::Zero,
-            1 => Self::One,
-            2 => Self::Two,
-            3 => Self::Three,
-            version => return Err(FormatError::UnsupportedVersion(version)),
-        })
-    }
-
-    const fn get(self) -> u8 {
-        match self {
-            Self::Zero => 0,
-            Self::One => 1,
-            Self::Two => 2,
-            Self::Three => 3,
-        }
     }
 }
 
@@ -521,6 +492,7 @@ mod tests {
 
     use super::*;
     use crate::address::StoredAddressExt;
+    use crate::width::LengthWidth;
 
     #[rstest]
     #[case::at_0(0, &[0])]
@@ -652,6 +624,9 @@ mod tests {
     // The width bytes are at 13 and 14 in versions 0 and 1, and at 9 and 10 in versions 2 and 3.
     #[rstest]
     #[case::version_0_offsets(VERSION_0, 13, 3, FormatError::InvalidOffsetSize(3))]
+    #[case::version_1_offsets(VERSION_1, 13, 16, FormatError::InvalidOffsetSize(16))]
+    #[case::version_1_lengths(VERSION_1, 14, 0, FormatError::InvalidLengthSize(0))]
+    #[case::version_2_lengths(VERSION_2, 10, 3, FormatError::InvalidLengthSize(3))]
     #[case::version_0_lengths(VERSION_0, 14, 16, FormatError::InvalidLengthSize(16))]
     #[case::version_2_offsets(VERSION_2, 9, 0, FormatError::InvalidOffsetSize(0))]
     #[case::version_3_lengths(VERSION_3, 10, 5, FormatError::InvalidLengthSize(5))]
@@ -895,9 +870,9 @@ mod tests {
         let data: &[u8] = include_bytes!("../../../tests/data/c/1.8/v1_superblock.h5");
         let sb = parse(data);
 
-        assert_eq!(sb.version, 1);
-        assert_eq!(sb.offset_size, 8);
-        assert_eq!(sb.length_size, 8);
+        assert_eq!(sb.version, SuperblockVersion::One);
+        assert_eq!(sb.offset_size, OffsetWidth::Eight);
+        assert_eq!(sb.length_size, LengthWidth::Eight);
 
         // `H5Pset_sym_k(fcpl, 8, 16)` is (internal, leaf), the C library's
         // argument order, which is the reverse of the on-disk order. Version 0
@@ -928,33 +903,16 @@ mod tests {
     }
 
     #[rstest]
-    #[case::offset_size(3, 8, FormatError::InvalidOffsetSize(3))]
-    #[case::length_size(8, 16, FormatError::InvalidLengthSize(16))]
-    fn a_superblock_with_an_invalid_width_returns_its_width_error(
-        #[case] offset_size: u8,
-        #[case] length_size: u8,
-        #[case] expected: FormatError,
-    ) {
-        let mut sb = parse(&build(VERSION_2, OffsetWidth::Eight, LengthWidth::Eight));
-        sb.offset_size = offset_size;
-        sb.length_size = length_size;
-
-        assert_eq!(serialize_superblock(&sb), Err(expected));
-    }
-
-    #[rstest]
-    #[case::version_0(0)]
-    #[case::version_1(1)]
-    #[case::version_4(4)]
-    fn a_superblock_of_a_version_other_than_2_or_3_returns_unsupported_version(
-        #[case] version: u8,
+    #[case(SuperblockVersion::Zero)]
+    #[case(SuperblockVersion::One)]
+    fn a_legacy_superblock_version_is_rejected_by_the_serializer(
+        #[case] version: SuperblockVersion,
     ) {
         let mut sb = parse(&build(VERSION_2, OffsetWidth::Eight, LengthWidth::Eight));
         sb.version = version;
-
         assert_eq!(
             serialize_superblock(&sb),
-            Err(FormatError::UnsupportedVersion(version))
+            Err(FormatError::UnsupportedVersion(version.get()))
         );
     }
 
@@ -1008,9 +966,12 @@ mod tests {
         let (parsed, widths) = superblock.parse(region).unwrap();
 
         assert_eq!(widths, FormatWidths { offsets, lengths });
-        assert_eq!(parsed.version, version);
-        assert_eq!(parsed.offset_size, offsets.get());
-        assert_eq!(parsed.length_size, lengths.get());
+        assert_eq!(
+            parsed.version,
+            SuperblockVersion::try_from(version).unwrap()
+        );
+        assert_eq!(parsed.offset_size, offsets);
+        assert_eq!(parsed.length_size, lengths);
         assert_eq!(parsed.base_address, BaseAddress::ZERO);
         assert_eq!(parsed.eof_address, 4096);
         assert_eq!(parsed.root_group_address.get(), 96);

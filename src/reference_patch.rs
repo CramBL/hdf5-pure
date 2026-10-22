@@ -1334,7 +1334,10 @@ mod tests {
         let reached = super::plan(
             &source,
             &superblock,
-            FormatWidths::from_sizes(superblock.offset_size, superblock.length_size).unwrap(),
+            FormatWidths {
+                offsets: superblock.offset_size,
+                lengths: superblock.length_size,
+            },
             AddressContext::from_effective_base(superblock.base_address),
             &moved,
             1 << 20,
@@ -1351,7 +1354,10 @@ mod tests {
         let skipped = super::plan(
             &source,
             &superblock,
-            FormatWidths::from_sizes(superblock.offset_size, superblock.length_size).unwrap(),
+            FormatWidths {
+                offsets: superblock.offset_size,
+                lengths: superblock.length_size,
+            },
             AddressContext::from_effective_base(superblock.base_address),
             &vacated,
             1 << 20,

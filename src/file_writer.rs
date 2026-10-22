@@ -47,6 +47,7 @@ use hdf5_pure_space::__private::AllocationClass;
 #[cfg(test)]
 use crate::DeflateLevel;
 use crate::FillTime;
+use crate::SuperblockVersion;
 #[cfg(test)]
 use crate::address::AddressContext;
 use crate::address::BaseAddressExt;
@@ -163,8 +164,12 @@ pub(crate) fn build_chunked_dataset_oh(
 /// format writes the same fields under the version number a 1.8 library
 /// understands. That byte is why a SWMR writer needs the newer superblock, and
 /// why [`File::open_swmr_writer`](crate::File::open_swmr_writer) requires one.
-pub(crate) fn superblock_version(libver: LibVer) -> u8 {
-    if libver >= LibVer::V110 { 3 } else { 2 }
+pub(crate) fn superblock_version(libver: LibVer) -> SuperblockVersion {
+    if libver >= LibVer::V110 {
+        SuperblockVersion::Three
+    } else {
+        SuperblockVersion::Two
+    }
 }
 
 /// The data-layout message version the given on-disk format emits for a
@@ -3441,8 +3446,8 @@ impl FileWriter {
             Self::put_userblock(sink, ub, &self.userblock_content)?;
             let sb = SuperblockFields {
                 version: superblock_version(libver),
-                offset_size: OFFSET_SIZE,
-                length_size: LENGTH_SIZE,
+                offset_size: OFFSET_WIDTH,
+                length_size: LENGTH_WIDTH,
                 base_address: base,
                 eof_address: eof_addr2,
                 root_group_address: root_group_addr,
@@ -3726,8 +3731,8 @@ impl FileWriter {
 
         let sb = SuperblockFields {
             version: superblock_version(libver),
-            offset_size: OFFSET_SIZE,
-            length_size: LENGTH_SIZE,
+            offset_size: OFFSET_WIDTH,
+            length_size: LENGTH_WIDTH,
             base_address: BaseAddress::new(ub as u64),
             eof_address: eof_addr2,
             root_group_address: root_group_addr,
@@ -4998,8 +5003,8 @@ mod tests {
             bytes,
             AccessMode::ReadOnly,
             addr as usize,
-            sb.offset_size,
-            sb.length_size,
+            sb.offset_size.get(),
+            sb.length_size.get(),
         )
         .unwrap();
         let msg = hdr
@@ -5049,8 +5054,8 @@ mod tests {
             &bytes,
             AccessMode::ReadOnly,
             ds_addr as usize,
-            sb.offset_size,
-            sb.length_size,
+            sb.offset_size.get(),
+            sb.length_size.get(),
         )
         .unwrap();
         let msg = hdr
@@ -5083,8 +5088,8 @@ mod tests {
                 .unwrap()
                 .to_usize()
                 .unwrap(),
-            sb.offset_size,
-            sb.length_size,
+            sb.offset_size.get(),
+            sb.length_size.get(),
         )
         .unwrap();
         (sb, oh)
@@ -5105,8 +5110,8 @@ mod tests {
             bytes,
             AccessMode::ReadOnly,
             addr as usize,
-            sb.offset_size,
-            sb.length_size,
+            sb.offset_size.get(),
+            sb.length_size.get(),
         )
         .unwrap();
         let dt_data = &hdr
@@ -5128,9 +5133,13 @@ mod tests {
             .unwrap()
             .data;
         let (dt, _) = hdf5_pure_format::__private::parse_datatype(dt_data).unwrap();
-        let ds = Dataspace::parse(ds_data, sb.length_size).unwrap();
-        let dl =
-            crate::data_layout::DataLayout::parse(dl_data, sb.offset_size, sb.length_size).unwrap();
+        let ds = Dataspace::parse(ds_data, sb.length_size.get()).unwrap();
+        let dl = crate::data_layout::DataLayout::parse(
+            dl_data,
+            sb.offset_size.get(),
+            sb.length_size.get(),
+        )
+        .unwrap();
         let raw = crate::data_read::read_raw_data(bytes, &dl, &ds, &dt).unwrap();
         crate::data_read::read_as_f64(&raw, &dt).unwrap()
     }
@@ -5140,7 +5149,7 @@ mod tests {
         let fw = FileWriter::new();
         let bytes = fw.finish().unwrap();
         let (sb, oh) = parse_file(&bytes);
-        assert_eq!(sb.version, 3);
+        assert_eq!(sb.version.get(), 3);
         assert_eq!(oh.version, 2);
     }
 
@@ -5176,8 +5185,8 @@ mod tests {
             &bytes,
             AccessMode::ReadOnly,
             addr as usize,
-            sb.offset_size,
-            sb.length_size,
+            sb.offset_size.get(),
+            sb.length_size.get(),
         )
         .unwrap();
         let attrs = crate::attribute::extract_attributes(&hdr, LENGTH_WIDTH).unwrap();
@@ -5235,8 +5244,8 @@ mod tests {
             &bytes,
             AccessMode::ReadOnly,
             addr as usize,
-            sb.offset_size,
-            sb.length_size,
+            sb.offset_size.get(),
+            sb.length_size.get(),
         )
         .unwrap();
         assert_eq!(hdr.flags & 0x20, 0, "times-stored flag must be clear");
@@ -5273,8 +5282,8 @@ mod tests {
             &bytes,
             AccessMode::ReadOnly,
             addr as usize,
-            sb.offset_size,
-            sb.length_size,
+            sb.offset_size.get(),
+            sb.length_size.get(),
         )
         .unwrap();
 
@@ -5283,7 +5292,7 @@ mod tests {
             .iter()
             .find(|m| m.msg_type == MessageType::LINK_INFO)
             .unwrap();
-        let link_info = LinkInfoMessage::parse(&link_info_msg.data, sb.offset_size).unwrap();
+        let link_info = LinkInfoMessage::parse(&link_info_msg.data, sb.offset_size.get()).unwrap();
         assert!(
             link_info.fractal_heap_address.is_none(),
             "no dense link storage is ever used"
@@ -5339,8 +5348,8 @@ mod tests {
             &bytes,
             AccessMode::ReadOnly,
             addr as usize,
-            sb.offset_size,
-            sb.length_size,
+            sb.offset_size.get(),
+            sb.length_size.get(),
         )
         .unwrap();
         let attrs = crate::attribute::extract_attributes_full(
@@ -5383,8 +5392,8 @@ mod tests {
                 .unwrap()
                 .to_usize()
                 .unwrap(),
-            sb.offset_size,
-            sb.length_size,
+            sb.offset_size.get(),
+            sb.length_size.get(),
         )
         .unwrap();
         let attrs = crate::attribute::extract_attributes_full(
@@ -5424,8 +5433,8 @@ mod tests {
             &bytes,
             AccessMode::ReadOnly,
             addr as usize,
-            sb.offset_size,
-            sb.length_size,
+            sb.offset_size.get(),
+            sb.length_size.get(),
         )
         .unwrap();
         // The Attribute Info message is present but names no fractal heap: that
@@ -5436,7 +5445,8 @@ mod tests {
             .iter()
             .find(|m| m.msg_type == MessageType::ATTRIBUTE_INFO)
             .map(|m| {
-                crate::attribute_info::AttributeInfoMessage::parse(&m.data, sb.offset_size).unwrap()
+                crate::attribute_info::AttributeInfoMessage::parse(&m.data, sb.offset_size.get())
+                    .unwrap()
             })
             .expect("a compact attribute set still carries an Attribute Info message");
         assert_eq!(info.fractal_heap_address, None);
@@ -6008,8 +6018,8 @@ mod tests {
             &bytes,
             AccessMode::ReadOnly,
             addr as usize,
-            sb.offset_size,
-            sb.length_size,
+            sb.offset_size.get(),
+            sb.length_size.get(),
         )
         .unwrap();
         let attrs = crate::attribute::extract_attributes_full(
@@ -6485,8 +6495,8 @@ mod tests {
             bytes,
             AccessMode::ReadOnly,
             addr as usize,
-            sb.offset_size,
-            sb.length_size,
+            sb.offset_size.get(),
+            sb.length_size.get(),
         )
         .unwrap();
         oh.messages

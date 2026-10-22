@@ -228,7 +228,10 @@ fn reference_manager_unclassified(
     mut expected: Vec<(u64, u64)>,
 ) -> Vec<(u64, u64)> {
     let superblock = file.superblock();
-    let widths = FormatWidths::from_sizes(superblock.offset_size, superblock.length_size).unwrap();
+    let widths = FormatWidths {
+        offsets: superblock.offset_size,
+        lengths: superblock.length_size,
+    };
     let base = superblock.base_address;
     let info = file.file_space_info().unwrap();
     let ownership = file.__space_ownership().unwrap();
@@ -1956,7 +1959,18 @@ fn the_serializer_writes_the_message_libhdf5_writes_at_the_widths_of_its_file(
 
     let file = File::open(&path).unwrap();
     let superblock = file.superblock();
-    let widths = FormatWidths::from_sizes(superblock.offset_size, superblock.length_size).unwrap();
+    assert_eq!(
+        usize::from(superblock.offset_size.get()),
+        usize::from(sizeof_addr)
+    );
+    assert_eq!(
+        usize::from(superblock.length_size.get()),
+        usize::from(sizeof_size)
+    );
+    let widths = FormatWidths {
+        offsets: superblock.offset_size,
+        lengths: superblock.length_size,
+    };
     let info = file.file_space_info().unwrap();
     assert_eq!(
         (
@@ -1987,7 +2001,8 @@ fn the_serializer_writes_the_message_libhdf5_writes_at_the_widths_of_its_file(
     // of allocation, and twelve manager addresses.
     assert_eq!(
         encoded.len(),
-        5 + 2 * usize::from(superblock.length_size) + 13 * usize::from(superblock.offset_size)
+        5 + 2 * usize::from(superblock.length_size.get())
+            + 13 * usize::from(superblock.offset_size.get())
     );
 
     let written = std::fs::read(&path).unwrap();
@@ -2031,7 +2046,10 @@ fn libhdf5_truncates_the_maximum_section_size_and_writes_section_sizes_as_wide_a
     let (offset_size, length_size) = (file.superblock().offset_size, file.superblock().length_size);
     let manager_addrs = file.file_space_info().unwrap().manager_addrs.clone();
     drop(file);
-    let widths = FormatWidths::from_sizes(offset_size, length_size).unwrap();
+    let widths = FormatWidths {
+        offsets: offset_size,
+        lengths: length_size,
+    };
     let bytes = std::fs::read(&path).unwrap();
     let headers: Vec<FreeSpaceManagerHeader> = manager_addrs
         .into_iter()
@@ -2045,7 +2063,7 @@ fn libhdf5_truncates_the_maximum_section_size_and_writes_section_sizes_as_wide_a
         })
         .collect();
 
-    let truncated = u64::MAX >> (64 - 8 * u32::from(length_size));
+    let truncated = u64::MAX >> (64 - 8 * u32::from(length_size.get()));
     for header in &headers {
         assert_eq!(
             (
@@ -2063,7 +2081,7 @@ fn libhdf5_truncates_the_maximum_section_size_and_writes_section_sizes_as_wide_a
     let fsse_at = usize::try_from(header.section_list_addr().get()).unwrap();
     let fsse = &bytes[fsse_at..fsse_at + usize::try_from(header.section_list_used()).unwrap()];
     assert_eq!(
-        fsse[4 + 1 + usize::from(offset_size)..fsse.len() - 4],
+        fsse[4 + 1 + usize::from(offset_size.get())..fsse.len() - 4],
         [
             &[1][..],
             &1600u64.to_le_bytes()[..width],
@@ -2134,7 +2152,10 @@ fn the_sections_libhdf5_persists_in_an_oversized_section_list_are_read() {
 
     let file = File::open(&path).unwrap();
     let superblock = file.superblock();
-    let widths = FormatWidths::from_sizes(superblock.offset_size, superblock.length_size).unwrap();
+    let widths = FormatWidths {
+        offsets: superblock.offset_size,
+        lengths: superblock.length_size,
+    };
     let bytes = std::fs::read(&path).unwrap();
     let padded: Vec<(u64, u64)> = file
         .file_space_info()
@@ -2192,7 +2213,10 @@ fn libhdf5_loads_the_managers_the_serializer_writes_at_the_widths_of_its_file(
     let freed = write_c_persisted_with_a_hole(&path, Driver::Sec2, sizeof_addr, sizeof_size, 0);
     let file = File::open(&path).unwrap();
     let superblock = file.superblock();
-    let widths = FormatWidths::from_sizes(superblock.offset_size, superblock.length_size).unwrap();
+    let widths = FormatWidths {
+        offsets: superblock.offset_size,
+        lengths: superblock.length_size,
+    };
     let managers: Vec<u64> = file
         .file_space_info()
         .unwrap()
@@ -4976,15 +5000,15 @@ fn header_extent(path: &Path, file: &File, link_name: &str) -> Range<u64> {
                 .unwrap(),
         )
         .unwrap(),
-        superblock.offset_size,
-        superblock.length_size,
+        superblock.offset_size.get(),
+        superblock.length_size.get(),
     )
     .unwrap();
     let address = root
         .messages
         .iter()
         .filter(|message| message.msg_type == MessageType::LINK)
-        .map(|message| LinkMessage::parse(&message.data, superblock.offset_size).unwrap())
+        .map(|message| LinkMessage::parse(&message.data, superblock.offset_size.get()).unwrap())
         .find(|link| link.name == link_name)
         .map(|link| match link.link_target {
             LinkTarget::Hard {

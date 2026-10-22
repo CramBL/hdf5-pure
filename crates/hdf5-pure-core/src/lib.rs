@@ -49,5 +49,6 @@ pub use file_space_info::FileSpaceStrategy;
 pub use fill_time::FillTime;
 pub use message_type::MessageType;
 pub use superblock::Superblock;
+pub use superblock::SuperblockVersion;
 pub use width::LengthWidth;
 pub use width::OffsetWidth;

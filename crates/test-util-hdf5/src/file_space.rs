@@ -35,7 +35,10 @@ pub fn serialized_manager_padding(path: &Path) -> u64 {
     let superblock = file.superblock();
     let base = superblock.base_address;
     let info = file.file_space_info().unwrap();
-    let widths = FormatWidths::from_sizes(superblock.offset_size, superblock.length_size).unwrap();
+    let widths = FormatWidths {
+        offsets: superblock.offset_size,
+        lengths: superblock.length_size,
+    };
     info.manager_addrs
         .iter()
         .enumerate()

@@ -338,6 +338,10 @@ let in_memory: bool = is_hdf5_bytes(&bytes);
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
+[`File::superblock`](crate::File::superblock) returns the decoded metadata. Its version has type
+[`SuperblockVersion`](crate::SuperblockVersion), and its address and length widths have types
+[`OffsetWidth`](crate::OffsetWidth) and [`LengthWidth`](crate::LengthWidth).
+
 An open [`File`](crate::File) reports its size and the format version it requires:
 
 | Method | Returns |

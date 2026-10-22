@@ -17,8 +17,10 @@
 //! with no finding and no changelog line, leaving callers a value they could
 //! compare and print but not use as a number.
 
+use hdf5_pure::LengthWidth;
 use hdf5_pure::OffsetWidth;
 use hdf5_pure::StoredAddress;
+use hdf5_pure::SuperblockVersion;
 use hdf5_pure::{BaseAddress, Error, File, FileBuilder, LibVer, MessageType, Superblock};
 
 use test_util::temp;
@@ -50,9 +52,10 @@ fn field_types(sb: &Superblock) {
     let _: fn(StoredAddress, OffsetWidth) -> bool = StoredAddress::is_undefined;
     let _: fn(hdf5_pure_core::OffsetWidth) -> StoredAddress = StoredAddress::undefined;
     let _: fn(StoredAddress, hdf5_pure_core::OffsetWidth) -> bool = StoredAddress::is_undefined;
-    let _: u8 = sb.version;
-    let _: u8 = sb.offset_size;
-    let _: u8 = sb.length_size;
+    let _: SuperblockVersion = sb.version;
+    let _: hdf5_pure_core::SuperblockVersion = sb.version;
+    let _: OffsetWidth = sb.offset_size;
+    let _: LengthWidth = sb.length_size;
     let _: BaseAddress = sb.base_address;
     let _: u64 = sb.eof_address;
     let _: StoredAddress = sb.root_group_address;
@@ -80,7 +83,8 @@ fn the_superblock_and_its_base_address_can_both_be_named() {
     let base: BaseAddress = image_start(sb);
     assert_eq!(base.get(), 512, "the base is the userblock size");
     assert_eq!(
-        sb.version, 3,
+        sb.version.get(),
+        3,
         "the default writer emits a version 3 superblock"
     );
     assert_eq!(format_of(sb), LibVer::V110);
@@ -133,4 +137,19 @@ fn a_header_message_type_can_be_named_where_an_error_hands_one_over() {
     );
 
     assert_eq!(missing_message_id(&Error::SwmrUnsupported), None);
+}
+
+#[rstest::rstest]
+#[case(SuperblockVersion::Zero, 0, LibVer::Earliest)]
+#[case(SuperblockVersion::One, 1, LibVer::Earliest)]
+#[case(SuperblockVersion::Two, 2, LibVer::V18)]
+#[case(SuperblockVersion::Three, 3, LibVer::V110)]
+fn a_public_superblock_version_has_a_wire_value_and_a_library_bound(
+    #[case] version: SuperblockVersion,
+    #[case] byte: u8,
+    #[case] bound: LibVer,
+) {
+    assert_eq!(SuperblockVersion::try_from(byte).unwrap(), version);
+    assert_eq!(version.get(), byte);
+    assert_eq!(LibVer::from_superblock_version(version), bound);
 }

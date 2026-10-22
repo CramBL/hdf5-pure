@@ -49,6 +49,7 @@
 use std::fs::{File, TryLockError};
 use std::path::Path;
 
+use crate::SuperblockVersion;
 use crate::error::Error;
 use crate::superblock::Superblock;
 
@@ -335,7 +336,7 @@ pub(crate) fn check_status_flags(
     intent: OpenIntent,
     target: OpenTarget<'_>,
 ) -> Result<(), Error> {
-    if superblock.version < 3 {
+    if superblock.version != SuperblockVersion::Three {
         return Ok(());
     }
     let flags = superblock.consistency_flags;
@@ -411,7 +412,7 @@ pub(crate) fn clear_swmr_flag_at(path: &Path) -> Result<(), Error> {
         superblock: mut sb,
         ..
     } = superblock::read(data.as_slice())?;
-    if sb.version < 2 {
+    if matches!(sb.version, SuperblockVersion::Zero | SuperblockVersion::One) {
         // `serialize_superblock` writes only the v2/v3 layout and returns an error for a v0/v1
         // superblock. `check_status_flags`, like `H5Fopen`, reads the status flags from version 3
         // on, so a flag left in a v0/v1 superblock does not block an open.
@@ -470,11 +471,11 @@ mod tests {
 
     /// A minimal superblock carrying `version` and `flags`; every other field is
     /// irrelevant to the status-flag rules.
-    fn flagged(version: u8, flags: u32) -> Superblock {
+    fn flagged(version: SuperblockVersion, flags: u32) -> Superblock {
         SuperblockFields {
             version,
-            offset_size: OffsetWidth::Eight.get(),
-            length_size: LengthWidth::Eight.get(),
+            offset_size: OffsetWidth::Eight,
+            length_size: LengthWidth::Eight,
             base_address: crate::address::BaseAddress::ZERO,
             eof_address: 0,
             root_group_address: StoredAddress::ZERO,
@@ -494,7 +495,7 @@ mod tests {
     /// below is stated against unless it names the opt-in.
     const READ: OpenIntent = OpenIntent::Read(WriteMarkPolicy::Refuse);
 
-    fn allows(version: u8, flags: u32, intent: OpenIntent) -> bool {
+    fn allows(version: SuperblockVersion, flags: u32, intent: OpenIntent) -> bool {
         check_status_flags(
             &flagged(version, flags),
             intent,
@@ -510,17 +511,17 @@ mod tests {
         for flags in [0x00, WRITE_ACCESS, SWMR_WRITE_ACCESS, 0x05] {
             let held = flags != 0;
             assert_eq!(
-                allows(3, flags, OpenIntent::Write),
+                allows(SuperblockVersion::Three, flags, OpenIntent::Write),
                 !held,
                 "a writer may open a file only when no flag claims it (flags {flags:#04x})"
             );
             assert_eq!(
-                allows(3, flags, READ),
+                allows(SuperblockVersion::Three, flags, READ),
                 !held,
                 "a snapshot read is refused whenever a writer holds the file (flags {flags:#04x})"
             );
             assert_eq!(
-                allows(3, flags, OpenIntent::SwmrRead),
+                allows(SuperblockVersion::Three, flags, OpenIntent::SwmrRead),
                 flags == 0x00 || flags == 0x05,
                 "a SWMR reader needs both bits or neither (flags {flags:#04x})"
             );
@@ -532,7 +533,10 @@ mod tests {
     #[test]
     fn the_file_ok_bit_alone_refuses_nothing() {
         for intent in [READ, OpenIntent::SwmrRead, OpenIntent::Write] {
-            assert!(allows(3, 0x02, intent), "{intent:?} refused flags 0x02");
+            assert!(
+                allows(SuperblockVersion::Three, 0x02, intent),
+                "{intent:?} refused flags 0x02"
+            );
         }
     }
 
@@ -541,11 +545,15 @@ mod tests {
     /// `H5Fopen` accepts.
     #[test]
     fn an_older_superblock_is_not_checked() {
-        for version in [0, 1, 2] {
+        for version in [
+            SuperblockVersion::Zero,
+            SuperblockVersion::One,
+            SuperblockVersion::Two,
+        ] {
             for intent in [READ, OpenIntent::SwmrRead, OpenIntent::Write] {
                 assert!(
                     allows(version, 0x05, intent),
-                    "v{version} superblock refused {intent:?} on flags 0x05"
+                    "{version:?} superblock refused {intent:?} on flags 0x05"
                 );
             }
         }
@@ -555,8 +563,12 @@ mod tests {
     /// recovery a user would otherwise have to find in the C library's docs.
     #[test]
     fn the_refusal_names_the_recovery() {
-        let err = check_status_flags(&flagged(3, 0x05), READ, OpenTarget::Path(Path::new("d.h5")))
-            .expect_err("a flagged file is refused for a snapshot read");
+        let err = check_status_flags(
+            &flagged(SuperblockVersion::Three, 0x05),
+            READ,
+            OpenTarget::Path(Path::new("d.h5")),
+        )
+        .expect_err("a flagged file is refused for a snapshot read");
         let msg = err.to_string();
         assert!(matches!(err, Error::FileMarkedInUse(_)), "got {err:?}");
         // `from_bytes` is named because it is the only way through for a flagged
@@ -577,8 +589,12 @@ mod tests {
     /// a `Source` target falling back to it fails here.
     #[test]
     fn a_source_is_told_which_recovery_it_can_reach() {
-        let err = check_status_flags(&flagged(3, 0x05), READ, OpenTarget::Source)
-            .expect_err("a flagged file is refused for a snapshot read");
+        let err = check_status_flags(
+            &flagged(SuperblockVersion::Three, 0x05),
+            READ,
+            OpenTarget::Source,
+        )
+        .expect_err("a flagged file is refused for a snapshot read");
         let msg = err.to_string();
         assert!(
             msg.starts_with("file is marked in use: a byte source:"),
@@ -601,7 +617,7 @@ mod tests {
     #[test]
     fn a_write_only_mark_names_the_snapshot_opt_in() {
         let err = check_status_flags(
-            &flagged(3, WRITE_ACCESS),
+            &flagged(SuperblockVersion::Three, WRITE_ACCESS),
             READ,
             OpenTarget::Path(Path::new("buffered.h5")),
         )
@@ -629,8 +645,12 @@ mod tests {
     /// recovery it cannot take needs one.
     #[test]
     fn a_source_refused_by_a_write_only_mark_is_offered_the_opt_in() {
-        let err = check_status_flags(&flagged(3, WRITE_ACCESS), READ, OpenTarget::Source)
-            .expect_err("a marked file is refused for a snapshot read");
+        let err = check_status_flags(
+            &flagged(SuperblockVersion::Three, WRITE_ACCESS),
+            READ,
+            OpenTarget::Source,
+        )
+        .expect_err("a marked file is refused for a snapshot read");
         let msg = err.to_string();
         assert!(
             msg.contains("with_write_mark_policy(WriteMarkPolicy::AllowSnapshot)"),
@@ -648,7 +668,7 @@ mod tests {
     #[test]
     fn a_swmr_pair_names_its_reader_and_not_the_opt_in() {
         let err = check_status_flags(
-            &flagged(3, WRITE_ACCESS | SWMR_WRITE_ACCESS),
+            &flagged(SuperblockVersion::Three, WRITE_ACCESS | SWMR_WRITE_ACCESS),
             READ,
             OpenTarget::Path(Path::new("swmr.h5")),
         )
@@ -670,7 +690,11 @@ mod tests {
         for flags in [0x00, WRITE_ACCESS, SWMR_WRITE_ACCESS, 0x05] {
             let allowed = flags & SWMR_WRITE_ACCESS == 0;
             assert_eq!(
-                allows(3, flags, OpenIntent::Read(WriteMarkPolicy::AllowSnapshot)),
+                allows(
+                    SuperblockVersion::Three,
+                    flags,
+                    OpenIntent::Read(WriteMarkPolicy::AllowSnapshot)
+                ),
                 allowed,
                 "AllowSnapshot on flags {flags:#04x}"
             );
@@ -679,7 +703,7 @@ mod tests {
 
     /// Write a file at `path` whose superblock carries `version` and `flags`,
     /// re-serializing the superblock so its checksum stays valid.
-    fn write_file_with(path: &Path, version: u8, flags: u32) {
+    fn write_file_with(path: &Path, version: SuperblockVersion, flags: u32) {
         let mut bytes = crate::writer::FileBuilder::new().finish().unwrap();
         let LocatedSuperblock {
             address,
@@ -687,7 +711,11 @@ mod tests {
             ..
         } = crate::superblock::read(bytes.as_slice()).unwrap();
         let off = usize::try_from(address.get()).unwrap();
-        assert_eq!(sb.version, 3, "this writer emits a v3 superblock");
+        assert_eq!(
+            sb.version,
+            SuperblockVersion::Three,
+            "this writer emits a v3 superblock"
+        );
         sb.version = version;
         sb.consistency_flags = flags;
         let patched = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();
@@ -704,7 +732,11 @@ mod tests {
     fn a_flagged_v2_file_still_opens() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("v2.h5");
-        write_file_with(&path, 2, WRITE_ACCESS | SWMR_WRITE_ACCESS);
+        write_file_with(
+            &path,
+            SuperblockVersion::Two,
+            WRITE_ACCESS | SWMR_WRITE_ACCESS,
+        );
 
         let file = crate::File::open(&path).expect("a v2 file's status flags are not checked");
         assert_eq!(file.superblock().consistency_flags, 0x05);
@@ -717,7 +749,7 @@ mod tests {
     fn the_swmr_writer_refuses_a_superblock_the_gate_would_skip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("v2.h5");
-        write_file_with(&path, 2, 0);
+        write_file_with(&path, SuperblockVersion::Two, 0);
 
         let err = crate::File::open_swmr_writer(&path)
             .expect_err("SWMR writing requires a v3 superblock");
@@ -749,7 +781,7 @@ mod tests {
     fn a_swmr_reader_refuses_write_access_without_the_swmr_bit() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("half.h5");
-        write_file_with(&path, 3, WRITE_ACCESS);
+        write_file_with(&path, SuperblockVersion::Three, WRITE_ACCESS);
 
         let err = crate::File::open_swmr(&path)
             .expect_err("a SWMR reader needs a SWMR writer, not a plain one");
@@ -759,7 +791,11 @@ mod tests {
             "a snapshot read is refused too"
         );
 
-        write_file_with(&path, 3, WRITE_ACCESS | SWMR_WRITE_ACCESS);
+        write_file_with(
+            &path,
+            SuperblockVersion::Three,
+            WRITE_ACCESS | SWMR_WRITE_ACCESS,
+        );
         crate::File::open_swmr(&path).expect("the full pair is the writer it follows");
     }
 }

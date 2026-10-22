@@ -263,7 +263,8 @@ fn overlaps_free(sections: &[(u64, u64)], addr: u64, len: u64) -> bool {
 fn dense_link_tree_anchor_spans(path: &Path) -> Vec<(u8, u64, u64)> {
     let bytes = std::fs::read(path).unwrap();
     let superblock = File::open(path).unwrap().superblock().clone();
-    let header_size = 22 + u64::from(superblock.offset_size) + u64::from(superblock.length_size);
+    let header_size =
+        22 + u64::from(superblock.offset_size.get()) + u64::from(superblock.length_size.get());
     let mut spans = Vec::new();
     for at in 0..bytes.len().saturating_sub(5) {
         if bytes.get(at..at + 4) != Some(b"BTHD") || !matches!(bytes[at + 5], 5 | 6) {
@@ -272,8 +273,8 @@ fn dense_link_tree_anchor_spans(path: &Path) -> Vec<(u8, u64, u64)> {
         let header = hdf5_pure_format::__private::BTreeV2Header::parse(
             &bytes,
             at,
-            superblock.offset_size,
-            superblock.length_size,
+            superblock.offset_size.get(),
+            superblock.length_size.get(),
         )
         .unwrap();
         spans.push((header.tree_type, u64::try_from(at).unwrap(), header_size));

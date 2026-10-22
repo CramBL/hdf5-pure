@@ -56,8 +56,8 @@ fn assert_root_refers_to_nested_continuation_blocks(path: &Path, file: &File) {
     let referenced = |region: &[u8], records_start: usize| {
         referenced_blocks(
             layout,
-            superblock.offset_size,
-            superblock.length_size,
+            superblock.offset_size.get(),
+            superblock.length_size.get(),
             region,
             records_start,
         )

@@ -1,5 +1,8 @@
 use crate::address::BaseAddress;
 use crate::address::StoredAddress;
+use crate::error::FormatError;
+use crate::width::LengthWidth;
+use crate::width::OffsetWidth;
 
 /// The values encoded in a file's superblock.
 ///
@@ -20,12 +23,12 @@ use crate::address::StoredAddress;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Superblock {
-    /// Superblock version (0–3).
-    pub version: u8,
-    /// Size of offsets in bytes (2, 4, or 8).
-    pub offset_size: u8,
-    /// Size of lengths in bytes (2, 4, or 8).
-    pub length_size: u8,
+    /// The encoding version of the superblock.
+    pub version: SuperblockVersion,
+    /// The width of file addresses.
+    pub offset_size: OffsetWidth,
+    /// The width of object sizes and other lengths.
+    pub length_size: LengthWidth,
     /// Absolute file address of the first byte of HDF5 data, as encoded in the superblock.
     ///
     /// The reader uses the physical signature position as the effective base when opening a
@@ -56,4 +59,81 @@ pub struct Superblock {
     pub superblock_extension_address: Option<StoredAddress>,
     /// Jenkins lookup3 checksum (v2/v3 only).
     pub checksum: Option<u32>,
+}
+
+/// The encoding version of a [`Superblock`].
+///
+/// The superblock stores this value in its "Version Number of the Superblock" field, defined in
+/// "Format Signature and Superblock" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_boot_super
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SuperblockVersion {
+    /// Version 0, with a root group symbol-table entry.
+    Zero,
+    /// Version 1, with an indexed storage internal node K field.
+    One,
+    /// Version 2, with a checksum and a superblock extension address.
+    Two,
+    /// Version 3, with file locking flags.
+    Three,
+}
+
+impl SuperblockVersion {
+    /// Returns the version byte stored in the superblock.
+    pub const fn get(self) -> u8 {
+        match self {
+            Self::Zero => 0,
+            Self::One => 1,
+            Self::Two => 2,
+            Self::Three => 3,
+        }
+    }
+}
+
+impl TryFrom<u8> for SuperblockVersion {
+    type Error = FormatError;
+
+    /// Parses the superblock's version byte.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnsupportedVersion`] if `version` is not 0, 1, 2, or 3.
+    fn try_from(version: u8) -> Result<Self, FormatError> {
+        Ok(match version {
+            0 => Self::Zero,
+            1 => Self::One,
+            2 => Self::Two,
+            3 => Self::Three,
+            version => return Err(FormatError::UnsupportedVersion(version)),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    #[rstest]
+    #[case(0, SuperblockVersion::Zero)]
+    #[case(1, SuperblockVersion::One)]
+    #[case(2, SuperblockVersion::Two)]
+    #[case(3, SuperblockVersion::Three)]
+    fn a_version_preserves_its_byte(#[case] byte: u8, #[case] version: SuperblockVersion) {
+        assert_eq!(SuperblockVersion::try_from(byte), Ok(version));
+        assert_eq!(version.get(), byte);
+    }
+
+    #[rstest]
+    #[case(4)]
+    #[case(16)]
+    #[case(255)]
+    fn an_unknown_version_is_rejected(#[case] byte: u8) {
+        assert_eq!(
+            SuperblockVersion::try_from(byte),
+            Err(FormatError::UnsupportedVersion(byte))
+        );
+    }
 }

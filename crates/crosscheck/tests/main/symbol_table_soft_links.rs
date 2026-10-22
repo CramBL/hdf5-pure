@@ -34,7 +34,7 @@ fn a_soft_link_does_not_hide_hard_links_in_a_symbol_table_group() {
 
     let f = File::open(&path).unwrap();
     assert!(
-        f.superblock().version <= 1,
+        f.superblock().version.get() <= 1,
         "expected a v0/v1 superblock from the earliest libver bound"
     );
     assert_eq!(f.root().datasets().unwrap(), ["d"]);
