@@ -27,7 +27,6 @@ use crate::datatype::CompoundMember;
 use crate::datatype::Datatype;
 use crate::datatype::StringPadding;
 use crate::datatype::byte_order::DatatypeByteOrder;
-use crate::datatype::layout::{FixedPointLayout, FloatingPointLayout};
 use crate::display;
 use crate::error::FormatError;
 use crate::object_path::LinkName;
@@ -36,118 +35,50 @@ use crate::object_path::ObjectPathBuf;
 use crate::scaleoffset::{FillAvailability, ScaleOffset};
 use crate::shared_message::DatatypeLocation;
 use crate::width::LengthWidth;
+use crate::{FixedPointType, FloatingPointType};
 
 pub fn make_f64_type() -> Datatype {
-    Datatype::FloatingPoint {
-        size: 8,
-        byte_order: DatatypeByteOrder::LittleEndian,
-
-        layout: FloatingPointLayout::IEEE754_BINARY64,
-    }
+    Datatype::FloatingPoint(FloatingPointType::ieee754_binary64(
+        DatatypeByteOrder::LittleEndian,
+    ))
 }
 
 pub fn make_f32_type() -> Datatype {
-    Datatype::FloatingPoint {
-        size: 4,
-        byte_order: DatatypeByteOrder::LittleEndian,
-        layout: FloatingPointLayout::IEEE754_BINARY32,
-    }
+    Datatype::FloatingPoint(FloatingPointType::ieee754_binary32(
+        DatatypeByteOrder::LittleEndian,
+    ))
 }
 
 pub fn make_i32_type() -> Datatype {
-    Datatype::FixedPoint {
-        size: 4,
-        byte_order: DatatypeByteOrder::LittleEndian,
-        layout: FixedPointLayout {
-            signed: true,
-            bit_offset: 0,
-            bit_precision: 32,
-        },
-    }
+    Datatype::FixedPoint(FixedPointType::i32())
 }
 
 pub fn make_i64_type() -> Datatype {
-    Datatype::FixedPoint {
-        size: 8,
-        byte_order: DatatypeByteOrder::LittleEndian,
-        layout: FixedPointLayout {
-            signed: true,
-            bit_offset: 0,
-            bit_precision: 64,
-        },
-    }
+    Datatype::FixedPoint(FixedPointType::i64())
 }
 
 pub fn make_u8_type() -> Datatype {
-    Datatype::FixedPoint {
-        size: 1,
-        byte_order: DatatypeByteOrder::LittleEndian,
-        layout: FixedPointLayout {
-            signed: false,
-            bit_offset: 0,
-            bit_precision: 8,
-        },
-    }
+    Datatype::FixedPoint(FixedPointType::u8())
 }
 
 pub fn make_i8_type() -> Datatype {
-    Datatype::FixedPoint {
-        size: 1,
-        byte_order: DatatypeByteOrder::LittleEndian,
-        layout: FixedPointLayout {
-            signed: true,
-            bit_offset: 0,
-            bit_precision: 8,
-        },
-    }
+    Datatype::FixedPoint(FixedPointType::i8())
 }
 
 pub fn make_i16_type() -> Datatype {
-    Datatype::FixedPoint {
-        size: 2,
-        byte_order: DatatypeByteOrder::LittleEndian,
-        layout: FixedPointLayout {
-            signed: true,
-            bit_offset: 0,
-            bit_precision: 16,
-        },
-    }
+    Datatype::FixedPoint(FixedPointType::i16())
 }
 
 pub fn make_u16_type() -> Datatype {
-    Datatype::FixedPoint {
-        size: 2,
-        byte_order: DatatypeByteOrder::LittleEndian,
-        layout: FixedPointLayout {
-            signed: false,
-            bit_offset: 0,
-            bit_precision: 16,
-        },
-    }
+    Datatype::FixedPoint(FixedPointType::u16())
 }
 
 pub fn make_u32_type() -> Datatype {
-    Datatype::FixedPoint {
-        size: 4,
-        byte_order: DatatypeByteOrder::LittleEndian,
-        layout: FixedPointLayout {
-            signed: false,
-            bit_offset: 0,
-            bit_precision: 32,
-        },
-    }
+    Datatype::FixedPoint(FixedPointType::u32())
 }
 
 pub fn make_u64_type() -> Datatype {
-    Datatype::FixedPoint {
-        size: 8,
-        byte_order: DatatypeByteOrder::LittleEndian,
-        layout: FixedPointLayout {
-            signed: false,
-            bit_offset: 0,
-            bit_precision: 64,
-        },
-    }
+    Datatype::FixedPoint(FixedPointType::u64())
 }
 
 pub fn make_object_reference_type() -> Datatype {
@@ -628,10 +559,7 @@ impl EnumTypeBuilder {
     pub fn build(self) -> Result<Datatype, FormatError> {
         let size = self.base_type.type_size();
         let signed = match &self.base_type {
-            Datatype::FixedPoint {
-                layout: FixedPointLayout { signed, .. },
-                ..
-            } => *signed,
+            Datatype::FixedPoint(numeric) => numeric.layout().signed(),
             _ => return Err(FormatError::EnumBaseNotInteger),
         };
         let width = size.to_usize()?;

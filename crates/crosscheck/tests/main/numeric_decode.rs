@@ -2,10 +2,11 @@
 
 use hdf5::Datatype as CDatatype;
 use hdf5_pure::{
-    Datatype, DatatypeByteOrder, Error, File, FixedPointLayout, FloatingPointLayout, FormatError,
+    Datatype, DatatypeByteOrder, Error, File, FloatingPointLayout, FormatError,
     MantissaNormalization,
 };
 use hdf5_pure::{FileBuilder, LibVer};
+use hdf5_pure::{FixedPointType, FloatingPointType};
 use hdf5_sys::h5t::{self, H5T_norm_t, H5T_order_t};
 use rstest::rstest;
 use test_util_hdf5::numeric;
@@ -78,16 +79,73 @@ fn reads_c_offset_integers(
     };
     assert_eq!(
         *base,
-        Datatype::FixedPoint {
-            size: 1,
-            byte_order: pure_order(big_endian),
-            layout: FixedPointLayout {
-                signed: false,
-                bit_offset: 4,
-                bit_precision: 4
-            }
-        }
+        Datatype::FixedPoint(FixedPointType::new(1, pure_order(big_endian), false, 4, 4).unwrap())
     );
+}
+
+#[rstest]
+#[case(1, 4, 4)]
+#[case(3, 7, 13)]
+#[case(8, 60, 4)]
+fn reads_c_signed_bit_ranges(
+    #[case] size: u32,
+    #[case] offset: u16,
+    #[case] precision: u16,
+    #[values(false, true)] big_endian: bool,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("signed-range.h5");
+    let datatype = CDatatype::from_type::<i64>().unwrap();
+    hdf5::sync::sync(|| {
+        // SAFETY: The lock serializes access and `datatype` owns a live transient integer type.
+        unsafe {
+            assert_eq!(h5t::H5Tset_precision(datatype.id(), precision.into()), 0);
+            assert_eq!(h5t::H5Tset_offset(datatype.id(), offset.into()), 0);
+            assert_eq!(h5t::H5Tset_size(datatype.id(), size as usize), 0);
+            assert_eq!(
+                h5t::H5Tset_order(datatype.id(), numeric::byte_order(big_endian)),
+                0
+            );
+        }
+    });
+    let raw = [-5i64, 7]
+        .into_iter()
+        .flat_map(|value| {
+            let word = (u64::from_ne_bytes(value.to_ne_bytes()) & (u64::MAX >> (64 - precision)))
+                << offset;
+            if big_endian {
+                word.to_be_bytes()[8 - size as usize..].to_vec()
+            } else {
+                word.to_le_bytes()[..size as usize].to_vec()
+            }
+        })
+        .collect::<Vec<_>>();
+    numeric::write_stored(&path, &datatype, &raw, 2);
+    let reference = hdf5::File::open(&path).unwrap().dataset("values").unwrap();
+    assert_eq!(reference.read_raw::<i64>().unwrap(), vec![-5, 7]);
+    drop(reference);
+    let dataset = File::open(&path).unwrap().dataset("values").unwrap();
+    let stored = Datatype::FixedPoint(
+        FixedPointType::new(size, pure_order(big_endian), true, offset, precision).unwrap(),
+    );
+    assert_eq!(dataset.datatype().unwrap(), stored);
+    assert_eq!(dataset.read_raw().unwrap(), raw);
+    assert_eq!(dataset.read_i64().unwrap(), vec![-5, 7]);
+    assert_eq!(dataset.read_f64().unwrap(), vec![-5.0, 7.0]);
+    let pure_path = dir.path().join("pure-signed-range.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_libver_bounds(LibVer::Earliest, LibVer::V18);
+    builder
+        .create_dataset("values")
+        .with_raw_data(stored, raw, 2)
+        .with_shape(&[2]);
+    builder.write(&pure_path).unwrap();
+    let reference = hdf5::File::open(&pure_path)
+        .unwrap()
+        .dataset("values")
+        .unwrap();
+    assert_eq!(reference.dtype().unwrap(), datatype);
+    assert_eq!(reference.read_raw::<i64>().unwrap(), vec![-5, 7]);
 }
 
 #[rstest]
@@ -110,11 +168,16 @@ fn reads_only_supported_c_floats(
         CDatatype::from_type::<f32>()
     }
     .unwrap();
-    let mut layout = if wide {
+    let layout = if wide {
         FloatingPointLayout::IEEE754_BINARY64
     } else {
         FloatingPointLayout::IEEE754_BINARY32
     };
+    let mut exponent_bias = layout.exponent_bias();
+    let mut normalization = layout.mantissa_normalization();
+    let mut sign_location = layout.sign_location();
+    let mut mantissa_location = layout.mantissa_location();
+    let mut mantissa_size = layout.mantissa_size();
     let order = if matches!(encoding, FloatLayout::Vax) {
         H5T_order_t::H5T_ORDER_VAX
     } else {
@@ -127,37 +190,34 @@ fn reads_only_supported_c_floats(
             assert_eq!(h5t::H5Tset_order(datatype.id(), order), 0);
             match encoding {
                 FloatLayout::Bias => {
-                    layout.exponent_bias += 1;
-                    assert_eq!(
-                        h5t::H5Tset_ebias(datatype.id(), layout.exponent_bias as usize),
-                        0
-                    );
+                    exponent_bias += 1;
+                    assert_eq!(h5t::H5Tset_ebias(datatype.id(), exponent_bias as usize), 0);
                 }
                 FloatLayout::LeadingOne => {
-                    layout.mantissa_normalization = MantissaNormalization::LeadingOne;
+                    normalization = MantissaNormalization::LeadingOne;
                     assert_eq!(
                         h5t::H5Tset_norm(datatype.id(), H5T_norm_t::H5T_NORM_MSBSET),
                         0
                     );
                 }
                 FloatLayout::Sign => {
-                    layout.sign_location = 0;
-                    layout.mantissa_location = 1;
-                    layout.mantissa_size -= 1;
+                    sign_location = 0;
+                    mantissa_location = 1;
+                    mantissa_size -= 1;
                     assert_eq!(
                         h5t::H5Tset_fields(
                             datatype.id(),
                             0,
-                            layout.exponent_location.into(),
-                            layout.exponent_size.into(),
+                            layout.exponent_location().into(),
+                            layout.exponent_size().into(),
                             1,
-                            layout.mantissa_size.into()
+                            mantissa_size.into()
                         ),
                         0
                     );
                 }
                 FloatLayout::Unnormalized => {
-                    layout.mantissa_normalization = MantissaNormalization::Unnormalized;
+                    normalization = MantissaNormalization::Unnormalized;
                     assert_eq!(
                         h5t::H5Tset_norm(datatype.id(), H5T_norm_t::H5T_NORM_NONE),
                         0
@@ -198,11 +258,22 @@ fn reads_only_supported_c_floats(
         pure_order(big_endian)
     };
     let size = if wide { 8 } else { 4 };
-    let stored = Datatype::FloatingPoint {
+    let numeric = FloatingPointType::new(
         size,
         byte_order,
-        layout,
-    };
+        normalization,
+        sign_location,
+        layout.bit_offset(),
+        layout.bit_precision(),
+        layout.exponent_location(),
+        layout.exponent_size(),
+        mantissa_location,
+        mantissa_size,
+        exponent_bias,
+    )
+    .unwrap();
+    let layout = numeric.layout();
+    let stored = Datatype::FloatingPoint(numeric);
     assert_eq!(dataset.datatype().unwrap(), stored);
     assert_eq!(dataset.read_raw().unwrap(), raw);
     let pure_path = dir.path().join("pure-float.h5");

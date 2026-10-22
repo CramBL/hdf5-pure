@@ -9,6 +9,8 @@ use alloc::{format, string::String, vec::Vec};
 
 use core::num::NonZeroU16;
 
+#[cfg(test)]
+use crate::FixedPointType;
 use crate::address::AddressContext;
 #[cfg(test)]
 use crate::address::BaseAddress;
@@ -1145,7 +1147,7 @@ mod embedded_slot_tests {
     use super::*;
     use crate::{
         DatatypeByteOrder,
-        datatype::{CompoundMember, StringPadding, layout::FixedPointLayout},
+        datatype::{CompoundMember, StringPadding},
     };
 
     fn vlen_string() -> Datatype {
@@ -1164,30 +1166,18 @@ mod embedded_slot_tests {
     fn vlen_i32_sequence() -> Datatype {
         Datatype::VariableLength {
             is_string: false,
-            base_type: Box::new(Datatype::FixedPoint {
-                size: 4,
-                byte_order: DatatypeByteOrder::LittleEndian,
-                layout: FixedPointLayout {
-                    signed: true,
-                    bit_offset: 0,
-                    bit_precision: 32,
-                },
-            }),
+            base_type: Box::new(Datatype::FixedPoint(
+                FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
+            )),
             padding: None,
             charset: None,
         }
     }
 
     fn i32_type() -> Datatype {
-        Datatype::FixedPoint {
-            size: 4,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: true,
-                bit_offset: 0,
-                bit_precision: 32,
-            },
-        }
+        Datatype::FixedPoint(
+            FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
+        )
     }
 
     fn member(name: &str, byte_offset: u64, datatype: Datatype) -> CompoundMember {

@@ -9,6 +9,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
+#[cfg(test)]
+use crate::FixedPointType;
 use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
 use crate::address::BaseAddress;
@@ -7527,7 +7529,7 @@ mod tests {
     use crate::address::DecodedStoredAddress;
     use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags};
     use crate::dataspace::DataspaceType;
-    use crate::datatype::layout::FixedPointLayout;
+
     use crate::message_flags::MessageFlags;
     use crate::{DatatypeByteOrder, FileBuilder};
 
@@ -9579,15 +9581,9 @@ mod tests {
     fn attr_datatypes_reports_the_byte_order_attrs_normalizes() {
         let be = crate::attribute::AttributeMessage {
             name: "be".into(),
-            datatype: Datatype::FixedPoint {
-                size: 4,
-                byte_order: DatatypeByteOrder::BigEndian,
-                layout: FixedPointLayout {
-                    signed: true,
-                    bit_offset: 0,
-                    bit_precision: 32,
-                },
-            },
+            datatype: Datatype::FixedPoint(
+                FixedPointType::new(4, DatatypeByteOrder::BigEndian, true, 0, 32).unwrap(),
+            ),
             dataspace: Dataspace {
                 space_type: crate::dataspace::DataspaceType::Scalar,
                 rank: 0,
@@ -9605,12 +9601,7 @@ mod tests {
                 "{}: the value channel keeps the width the attribute was written at",
                 c.owner
             );
-            let Some(Datatype::FixedPoint {
-                size,
-                byte_order: _,
-                layout: FixedPointLayout { signed, .. },
-            }) = c.datatypes.get("count")
-            else {
+            let Some(Datatype::FixedPoint(numeric)) = c.datatypes.get("count") else {
                 panic!(
                     "{}: expected a fixed-point datatype, got {:?}",
                     c.owner,
@@ -9618,7 +9609,7 @@ mod tests {
                 );
             };
             assert_eq!(
-                (*size, *signed),
+                (numeric.size().get(), numeric.layout().signed()),
                 (4, true),
                 "{}: the datatype channel must report the width on disk",
                 c.owner
@@ -9630,7 +9621,7 @@ mod tests {
                 "{}: a big-endian attribute decodes to the value it holds",
                 c.owner
             );
-            let Some(Datatype::FixedPoint { byte_order, .. }) = c.datatypes.get("be") else {
+            let Some(Datatype::FixedPoint(numeric)) = c.datatypes.get("be") else {
                 panic!(
                     "{}: expected a fixed-point datatype, got {:?}",
                     c.owner,
@@ -9638,7 +9629,7 @@ mod tests {
                 );
             };
             assert_eq!(
-                *byte_order,
+                numeric.byte_order(),
                 DatatypeByteOrder::BigEndian,
                 "{}: the datatype channel is the only record of the byte order",
                 c.owner
@@ -9699,15 +9690,9 @@ mod tests {
     /// whole-dataset and the windowed route.
     #[test]
     fn a_wide_dataset_is_refused_by_the_typed_readers() {
-        let dt = Datatype::FixedPoint {
-            size: 16,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: false,
-                bit_offset: 0,
-                bit_precision: 128,
-            },
-        };
+        let dt = Datatype::FixedPoint(
+            FixedPointType::new(16, DatatypeByteOrder::LittleEndian, false, 0, 128).unwrap(),
+        );
         let mut b = FileBuilder::new();
         b.create_dataset("wide")
             .with_raw_data(dt.clone(), vec![0xFF; 32], 2);
@@ -9747,15 +9732,9 @@ mod tests {
     /// datatypes — so a caller can see that something was dropped (#361).
     #[test]
     fn an_attribute_too_wide_to_decode_is_omitted_rather_than_truncated() {
-        let wide = Datatype::FixedPoint {
-            size: 9,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: false,
-                bit_offset: 0,
-                bit_precision: 72,
-            },
-        };
+        let wide = Datatype::FixedPoint(
+            FixedPointType::new(9, DatatypeByteOrder::LittleEndian, false, 0, 72).unwrap(),
+        );
         // 2^64 exactly, so every one of the low 64 bits is zero.
         let mut raw_data = vec![0u8; 9];
         raw_data[8] = 1;
@@ -9848,7 +9827,7 @@ mod tests {
                 assert!(
                     matches!(
                         c.datatypes.get(name),
-                        Some(Datatype::FixedPoint { size: 4, .. })
+                        Some(Datatype::FixedPoint(numeric)) if numeric.size().get() == 4
                     ),
                     "{}: {name} must keep its 4-byte width through the heap, got {:?}",
                     c.owner,

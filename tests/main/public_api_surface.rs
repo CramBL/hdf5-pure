@@ -191,3 +191,48 @@ fn filter_metadata_types_are_public() {
     let _: hdf5_pure::FilterParameters =
         hdf5_pure::FilterParameters::Deflate(hdf5_pure::DeflateLevel::Six);
 }
+
+#[test]
+fn numeric_datatype_payloads_and_accessors_are_public() {
+    use core::num::NonZeroU32;
+
+    use hdf5_pure::{
+        BitFieldType, Datatype, DatatypeByteOrder, FixedPointLayout, FixedPointType,
+        FloatingPointLayout, FloatingPointType, TimeType,
+    };
+
+    let integer = FixedPointType::new(2, DatatypeByteOrder::BigEndian, true, 3, 9).unwrap();
+    let _: NonZeroU32 = integer.size();
+    let layout: FixedPointLayout = integer.layout();
+    assert_eq!(
+        (layout.signed(), layout.bit_offset(), layout.bit_precision()),
+        (true, 3, 9)
+    );
+    let Datatype::FixedPoint(integer) = Datatype::FixedPoint(integer) else {
+        panic!("expected FixedPoint");
+    };
+    assert_eq!(integer.byte_order(), DatatypeByteOrder::BigEndian);
+    let float = FloatingPointType::ieee754_binary64(DatatypeByteOrder::LittleEndian);
+    let layout: FloatingPointLayout = float.layout();
+    assert_eq!(
+        (
+            float.size().get(),
+            layout.exponent_size(),
+            layout.mantissa_size()
+        ),
+        (8, 11, 52)
+    );
+    let Datatype::FloatingPoint(float) = Datatype::FloatingPoint(float) else {
+        panic!("expected FloatingPoint");
+    };
+    assert_eq!(float.layout(), FloatingPointLayout::IEEE754_BINARY64);
+    assert_eq!(
+        Datatype::BitField(BitFieldType::new(1, DatatypeByteOrder::LittleEndian, 4, 4).unwrap())
+            .type_size(),
+        1
+    );
+    assert_eq!(
+        Datatype::Time(TimeType::new(8, DatatypeByteOrder::LittleEndian, 64).unwrap()).type_size(),
+        8
+    );
+}

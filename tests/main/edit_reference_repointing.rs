@@ -9,9 +9,10 @@
 //! the file stayed *readable*, resolving to a stale copy of the object, and only
 //! became unreadable once something reused the span.
 
+use hdf5_pure::FixedPointType;
 use hdf5_pure::{
     AttrValue, CompoundTypeBuilder, Datatype, DatatypeByteOrder, File, FileBuilder,
-    FileSpaceStrategy, FixedPointLayout, Group, Object, ReferenceType,
+    FileSpaceStrategy, Group, Object, ReferenceType,
 };
 
 use test_util_hdf5::{dataset::Unlimited, fixtures};
@@ -218,15 +219,9 @@ fn a_reference_inside_a_compound_element_is_repointed() {
         .field(
             "index",
             8,
-            Datatype::FixedPoint {
-                size: 4,
-                byte_order: DatatypeByteOrder::LittleEndian,
-                layout: FixedPointLayout {
-                    signed: true,
-                    bit_offset: 0,
-                    bit_precision: 32,
-                },
-            },
+            Datatype::FixedPoint(
+                FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
+            ),
         )
         .build()
         .unwrap();

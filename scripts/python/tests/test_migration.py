@@ -279,6 +279,12 @@ def test_migration_shape_ignores_only_the_allowed_variant_changes(variant, expec
         ("InvalidScaleOffsetMode", []),
         ("InvalidShuffleElementSize", []),
         ("InvalidFixedPointRange", []),
+        ("InvalidFloatingPointRange", []),
+        ("InvalidFloatingPointField", []),
+        ("OverlappingFloatingPointFields", []),
+        ("InvalidMantissaNormalization", []),
+        ("InvalidNumericByteOrder", []),
+        ("InvalidNumericBitRange", []),
         ("UnsupportedFloatingPointLayout", []),
         ("UnsupportedVaxByteOrder", []),
         ("InvalidFilterPipelineField", []),
@@ -389,6 +395,11 @@ def test_migration_builds_core_with_the_profile_core_features():
         ("FileSpacePageSize", []),
         ("LengthWidth", []),
         ("MantissaNormalization", []),
+        ("BitFieldType", []),
+        ("FixedPointType", []),
+        ("FloatingPointType", []),
+        ("FloatingPointField", []),
+        ("TimeType", []),
         ("OffsetWidth", []),
         ("StoredAddress", []),
         ("SuperblockVersion", []),
@@ -411,7 +422,9 @@ def test_migration_shape_admits_only_the_allowed_new_root_items(name, expected):
         ("FileSpaceInfo", "threshold", ["FileSpaceInfo: fields changed"]),
         ("FloatingPointLayout", "mantissa_normalization", []),
         ("FloatingPointLayout", "sign_location", []),
-        ("FloatingPointLayout", "exponent_bias", ["FloatingPointLayout: fields changed"]),
+        ("FloatingPointLayout", "exponent_bias", []),
+        ("FixedPointLayout", "bit_precision", []),
+        ("FloatingPointLayout", "unlisted", ["FloatingPointLayout: fields changed"]),
     ],
 )
 def test_migration_shape_ignores_only_the_allowed_field_changes(type_name, field, expected):
@@ -444,4 +457,38 @@ def test_migration_shape_admits_only_the_allowed_superblock_field_changes(field,
     baseline["index"]["2"]["name"] = field
     core = deepcopy(baseline)
     core["index"]["2"]["inner"]["struct_field"] = {"primitive": "u64"}
+    assert migration_shapes(baseline, baseline, core) == expected
+
+
+@pytest.mark.parametrize(
+    ("type_name", "member", "expected"),
+    [
+        ("FixedPointLayout", "signed", []),
+        ("FixedPointLayout", "precision", []),
+        ("FloatingPointLayout", "exponent_bias", []),
+        ("FixedPointLayout", "unlisted", ["FixedPointLayout: inherent changed"]),
+        ("FloatingPointLayout", "unlisted", ["FloatingPointLayout: inherent changed"]),
+    ],
+)
+def test_migration_shape_admits_only_the_numeric_layout_getters(type_name, member, expected):
+    baseline = core_shape_fixture()
+    baseline["index"]["1"]["name"] = type_name
+    core = deepcopy(baseline)
+    core["index"]["6"] = deepcopy(core["index"]["4"])
+    core["index"]["6"]["name"] = member
+    core["index"]["3"]["inner"]["impl"]["items"].append(6)
+    assert migration_shapes(baseline, baseline, core) == expected
+
+
+@pytest.mark.parametrize(
+    ("type_name", "expected"),
+    [("DatatypeByteOrder", []), ("Thing", ["Thing: traits changed"])],
+)
+def test_migration_shape_admits_eq_only_for_datatype_byte_order(type_name, expected):
+    baseline = core_shape_fixture()
+    baseline["index"]["1"]["name"] = type_name
+    core = deepcopy(baseline)
+    core["index"]["6"] = deepcopy(core["index"]["5"])
+    core["index"]["6"]["inner"]["impl"]["trait"]["path"] = "Eq"
+    core["index"]["1"]["inner"]["struct"]["impls"].append(6)
     assert migration_shapes(baseline, baseline, core) == expected

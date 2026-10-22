@@ -1,5 +1,5 @@
 /// Byte order of numeric data.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DatatypeByteOrder {
     /// Stores the least significant byte first.
     LittleEndian,

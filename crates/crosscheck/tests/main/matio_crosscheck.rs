@@ -438,7 +438,6 @@ impl Drop for MatVar {
 // Tests
 // =======================================================================
 
-use hdf5_pure::FixedPointLayout;
 use hdf5_pure::mat::{self, ComplexI16, Matrix};
 use serde::{Deserialize, Serialize};
 
@@ -829,13 +828,9 @@ fn hdf5_pure_reads_complex_int16_written_by_matio() {
             assert_eq!(members[1].byte_offset, 2);
             for m in &members {
                 match m.datatype {
-                    hdf5_pure::Datatype::FixedPoint {
-                        size,
-                        layout: FixedPointLayout { signed, .. },
-                        ..
-                    } => {
-                        assert_eq!(size, 2);
-                        assert!(signed);
+                    hdf5_pure::Datatype::FixedPoint(numeric) => {
+                        assert_eq!(numeric.size().get(), 2);
+                        assert!(numeric.layout().signed());
                     }
                     ref other => panic!("expected a fixed-point component, got {other:?}"),
                 }

@@ -5,7 +5,9 @@ use std::fmt;
 
 use crate::address::AddressContext;
 use crate::datatype::Datatype;
-use crate::datatype::layout::FixedPointLayout;
+#[cfg(test)]
+use crate::{FixedPointType, FloatingPointType, TimeType};
+
 use crate::display::{self, DISPLAY_MAX_MEMBERS, Dims, EscapedName};
 use crate::width::FormatWidths;
 
@@ -113,48 +115,19 @@ impl fmt::Display for DType {
 /// Convert a low-level `Datatype` to a simplified `DType`.
 pub(crate) fn classify_datatype(dt: &Datatype) -> DType {
     match dt {
-        Datatype::FloatingPoint { size: 4, .. } => DType::F32,
-        Datatype::FloatingPoint { size: 8, .. } => DType::F64,
-        Datatype::FixedPoint {
-            size: 1,
-            layout: FixedPointLayout { signed: true, .. },
-            ..
-        } => DType::I8,
-        Datatype::FixedPoint {
-            size: 2,
-            layout: FixedPointLayout { signed: true, .. },
-            ..
-        } => DType::I16,
-        Datatype::FixedPoint {
-            size: 4,
-            layout: FixedPointLayout { signed: true, .. },
-            ..
-        } => DType::I32,
-        Datatype::FixedPoint {
-            size: 8,
-            layout: FixedPointLayout { signed: true, .. },
-            ..
-        } => DType::I64,
-        Datatype::FixedPoint {
-            size: 1,
-            layout: FixedPointLayout { signed: false, .. },
-            ..
-        } => DType::U8,
-        Datatype::FixedPoint {
-            size: 2,
-            layout: FixedPointLayout { signed: false, .. },
-            ..
-        } => DType::U16,
-        Datatype::FixedPoint {
-            size: 4,
-            layout: FixedPointLayout { signed: false, .. },
-            ..
-        } => DType::U32,
-        Datatype::FixedPoint {
-            size: 8,
-            layout: FixedPointLayout { signed: false, .. },
-            ..
-        } => DType::U64,
+        Datatype::FloatingPoint(numeric) if numeric.size().get() == 4 => DType::F32,
+        Datatype::FloatingPoint(numeric) if numeric.size().get() == 8 => DType::F64,
+        Datatype::FixedPoint(numeric) => match (numeric.size().get(), numeric.layout().signed()) {
+            (1, true) => DType::I8,
+            (2, true) => DType::I16,
+            (4, true) => DType::I32,
+            (8, true) => DType::I64,
+            (1, false) => DType::U8,
+            (2, false) => DType::U16,
+            (4, false) => DType::U32,
+            (8, false) => DType::U64,
+            _ => DType::Other(Box::new(dt.clone())),
+        },
         Datatype::String { .. } => DType::String,
         Datatype::VariableLength {
             is_string: true, ..
@@ -278,7 +251,7 @@ fn decode_attr_value<S: crate::source::Source + ?Sized>(
     // An enumeration is stored as values of its integer base type, so it decodes
     // through that base — the same view the numeric readers take of an enum dataset.
     match crate::data_read::effective_numeric(&attr.datatype) {
-        Datatype::FloatingPoint { size: 4, .. } => {
+        Datatype::FloatingPoint(numeric) if numeric.size().get() == 4 => {
             let vals = crate::data_read::read_as_f64(&attr.raw_data, &attr.datatype).ok()?;
             if scalar {
                 Some(AttrValue::F32(narrow_f32(*vals.first()?)))
@@ -288,7 +261,7 @@ fn decode_attr_value<S: crate::source::Source + ?Sized>(
                 ))
             }
         }
-        Datatype::FloatingPoint { .. } => {
+        Datatype::FloatingPoint(..) => {
             let vals = crate::data_read::read_as_f64(&attr.raw_data, &attr.datatype).ok()?;
             if scalar {
                 Some(AttrValue::F64(*vals.first()?))
@@ -296,23 +269,15 @@ fn decode_attr_value<S: crate::source::Source + ?Sized>(
                 Some(AttrValue::F64Array(vals))
             }
         }
-        Datatype::FixedPoint {
-            size,
-            layout: FixedPointLayout { signed: true, .. },
-            ..
-        } => signed_attr_value(
+        Datatype::FixedPoint(numeric) if numeric.layout().signed() => signed_attr_value(
             crate::data_read::read_as_i64(&attr.raw_data, &attr.datatype).ok()?,
             scalar,
-            *size,
+            numeric.size().get(),
         ),
-        Datatype::FixedPoint {
-            size,
-            layout: FixedPointLayout { signed: false, .. },
-            ..
-        } => unsigned_attr_value(
+        Datatype::FixedPoint(numeric) => unsigned_attr_value(
             crate::data_read::read_as_u64(&attr.raw_data, &attr.datatype).ok()?,
             scalar,
-            *size,
+            numeric.size().get(),
         ),
         Datatype::String { charset, size, .. } => {
             let strings = crate::data_read::read_as_strings(&attr.raw_data, &attr.datatype).ok()?;
@@ -547,58 +512,26 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::FloatingPointLayout;
     use crate::address::BaseAddress;
     use crate::address::BaseAddressExt;
-    use crate::data_read;
     use crate::datatype::Datatype;
-    use crate::datatype::layout::FloatingPointLayout;
-    use crate::{
-        CharacterSet, DatatypeByteOrder, FormatError, MantissaNormalization, StringPadding,
-    };
+    use crate::{CharacterSet, DatatypeByteOrder, StringPadding};
 
     /// A width the curated set has no name for reaches the caller as the type
     /// itself, and writing it must not overflow the `size * 8` bit-width
     /// computation (issue #140) — `size` is an on-disk `u32`, so a crafted one
     /// near [`u32::MAX`] is what a file can hold.
-    #[test]
-    fn an_unusual_size_arrives_whole_and_writes_its_width() {
-        let int = Datatype::FixedPoint {
-            size: u32::MAX,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: true,
-                bit_offset: 0,
-                bit_precision: 0,
-            },
-        };
-        let float = Datatype::FloatingPoint {
-            size: u32::MAX,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FloatingPointLayout {
-                mantissa_normalization: MantissaNormalization::ImpliedLeadingOne,
-                sign_location: 0,
-                bit_offset: 0,
-                bit_precision: 0,
-                exponent_location: 0,
-                exponent_size: 0,
-                mantissa_location: 0,
-                mantissa_size: 0,
-                exponent_bias: 0,
-            },
-        };
-
-        let bits = u64::from(u32::MAX) * 8;
-        for (dt, prefix) in [(&int, 'i'), (&float, 'f')] {
-            let classified = classify_datatype(dt);
-            assert_eq!(classified, DType::Other(Box::new(dt.clone())));
-
-            // Exact, not a prefix: the right width is a prefix of every wider
-            // wrong one, so `starts_with` would pass a `size * 80`.
-            assert_eq!(
-                classified.to_string(),
-                format!("other({prefix}{bits}(bits 0..0))")
-            );
-        }
+    #[rstest]
+    #[case(Datatype::FixedPoint(FixedPointType::new(u32::MAX, DatatypeByteOrder::LittleEndian, true, 0, 1).unwrap()), "other(i34359738360(bits 0..1))")]
+    #[case(Datatype::FloatingPoint(FloatingPointType::from_layout(u32::MAX, DatatypeByteOrder::LittleEndian, FloatingPointLayout::IEEE754_BINARY64).unwrap()), "other(f34359738360(bits 0..64))")]
+    fn an_unusual_size_arrives_whole_and_writes_its_width(
+        #[case] datatype: Datatype,
+        #[case] expected: &str,
+    ) {
+        let classified = classify_datatype(&datatype);
+        assert_eq!(classified, DType::Other(Box::new(datatype)));
+        assert_eq!(classified.to_string(), expected);
     }
 
     /// Why `Other` carries the type rather than a rendering of it: a type
@@ -960,15 +893,9 @@ mod tests {
             padding: StringPadding::NullTerminate,
             charset: CharacterSet::Ascii,
         };
-        let int_base = Datatype::FixedPoint {
-            size: 1,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: false,
-                bit_offset: 0,
-                bit_precision: 8,
-            },
-        };
+        let int_base = Datatype::FixedPoint(
+            FixedPointType::new(1, DatatypeByteOrder::LittleEndian, false, 0, 8).unwrap(),
+        );
 
         // What MATLAB and matio write, and what this crate writes for
         // `AttrValue::VarLenAsciiCharArray`.
@@ -1080,15 +1007,9 @@ mod tests {
     /// produce, and the value must still arrive.
     #[test]
     fn a_width_with_no_rust_integer_widens() {
-        let three_byte = Datatype::FixedPoint {
-            size: 3,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: false,
-                bit_offset: 0,
-                bit_precision: 24,
-            },
-        };
+        let three_byte = Datatype::FixedPoint(
+            FixedPointType::new(3, DatatypeByteOrder::LittleEndian, false, 0, 24).unwrap(),
+        );
         assert_eq!(
             decode_raw(three_byte.clone(), vec![0xFF, 0xFF, 0xFF], vec![]),
             Some(AttrValue::U64(0x00FF_FFFF))
@@ -1096,33 +1017,6 @@ mod tests {
         assert_eq!(
             decode_raw(three_byte, vec![1, 0, 0, 2, 0, 0], vec![2]),
             Some(AttrValue::U64Array(vec![1, 2]))
-        );
-    }
-
-    #[rstest]
-    #[case(vec![0xFF], vec![])]
-    #[case(vec![0x01, 0xFF], vec![2])]
-    fn rejects_an_attribute_with_an_invalid_bit_range(
-        #[case] raw: Vec<u8>,
-        #[case] dimensions: Vec<u64>,
-    ) {
-        let overwide = Datatype::FixedPoint {
-            size: 1,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: true,
-                bit_offset: 0,
-                bit_precision: 16,
-            },
-        };
-        assert_eq!(decode_raw(overwide.clone(), raw.clone(), dimensions), None);
-        assert_eq!(
-            data_read::read_as_i64(&raw, &overwide).unwrap_err(),
-            FormatError::InvalidFixedPointRange {
-                size: 1,
-                bit_offset: 0,
-                bit_precision: 16,
-            }
         );
     }
 
@@ -1176,20 +1070,19 @@ mod display_tests {
     /// it. The whole `Debug` record is unreadable in the message that quotes it.
     #[test]
     fn an_unclassified_type_carries_the_type_and_writes_a_summary() {
-        let vax = Datatype::FloatingPoint {
-            size: 4,
-            byte_order: DatatypeByteOrder::Vax,
-            layout: FloatingPointLayout::IEEE754_BINARY32,
-        };
+        let vax = Datatype::FloatingPoint(
+            FloatingPointType::from_layout(
+                4,
+                DatatypeByteOrder::Vax,
+                FloatingPointLayout::IEEE754_BINARY32,
+            )
+            .unwrap(),
+        );
         // Classification keys off size alone, so this stays `F32`; the point is
         // the fallback below.
         assert_eq!(classify_datatype(&vax), DType::F32);
 
-        let time = Datatype::Time {
-            size: 4,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            bit_precision: 32,
-        };
+        let time = Datatype::Time(TimeType::new(4, DatatypeByteOrder::LittleEndian, 32).unwrap());
         let classified = classify_datatype(&time);
         assert_eq!(classified, DType::Other(Box::new(time.clone())));
         assert_eq!(classified.to_string(), "other(time32)");
@@ -1251,20 +1144,17 @@ mod display_tests {
     #[test]
     fn dtype_and_datatype_agree_on_the_names_they_share() {
         let identical = [
-            Datatype::FixedPoint {
-                size: 4,
-                byte_order: DatatypeByteOrder::LittleEndian,
-                layout: FixedPointLayout {
-                    signed: true,
-                    bit_offset: 0,
-                    bit_precision: 32,
-                },
-            },
-            Datatype::FloatingPoint {
-                size: 4,
-                byte_order: DatatypeByteOrder::LittleEndian,
-                layout: FloatingPointLayout::IEEE754_BINARY32,
-            },
+            Datatype::FixedPoint(
+                FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
+            ),
+            Datatype::FloatingPoint(
+                FloatingPointType::from_layout(
+                    4,
+                    DatatypeByteOrder::LittleEndian,
+                    FloatingPointLayout::IEEE754_BINARY32,
+                )
+                .unwrap(),
+            ),
         ];
         for datatype in identical {
             assert_eq!(

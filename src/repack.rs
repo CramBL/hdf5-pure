@@ -145,6 +145,8 @@ use crate::type_builders::{
 use crate::vl_data::{self, EmbeddedVlSlot, VlByteObject, VlenStringReadOptions};
 use crate::width::OffsetWidth;
 use crate::writer::FileBuilder;
+#[cfg(test)]
+use crate::{FixedPointType, TimeType};
 
 /// Options controlling a [`repack`].
 ///
@@ -1405,11 +1407,11 @@ fn try_plan_dense_chunks(
 /// a default that silently picks a side.
 fn attr_bytes_are_position_independent(dt: &Datatype) -> bool {
     match dt {
-        Datatype::FixedPoint { .. }
-        | Datatype::FloatingPoint { .. }
-        | Datatype::Time { .. }
+        Datatype::FixedPoint(..)
+        | Datatype::FloatingPoint(..)
+        | Datatype::Time(..)
         | Datatype::String { .. }
-        | Datatype::BitField { .. }
+        | Datatype::BitField(..)
         | Datatype::Opaque { .. } => true,
         Datatype::Compound { members, .. } => members
             .iter()
@@ -1537,11 +1539,11 @@ fn check_datatype(dt: &Datatype, owner: &str) -> Result<(), Error> {
         // Scalar and opaque-bytes datatypes whose on-disk form `Datatype::serialize`
         // reproduces exactly (including the time type's byte order), so reading the
         // raw element bytes and re-emitting them is byte-for-byte faithful.
-        Datatype::FixedPoint { .. }
-        | Datatype::FloatingPoint { .. }
-        | Datatype::Time { .. }
+        Datatype::FixedPoint(..)
+        | Datatype::FloatingPoint(..)
+        | Datatype::Time(..)
         | Datatype::String { .. }
-        | Datatype::BitField { .. }
+        | Datatype::BitField(..)
         | Datatype::Opaque { .. } => Ok(()),
         // String-shaped variable-length datatypes (`is_string: true`, or the
         // MATLAB VLEN-of-1-byte-ASCII-string shape) are reproduced by reading
@@ -1601,11 +1603,11 @@ fn check_vlen_base_type(dt: &Datatype, owner: &str) -> Result<(), Error> {
         )))
     };
     match dt {
-        Datatype::FixedPoint { .. }
-        | Datatype::FloatingPoint { .. }
-        | Datatype::Time { .. }
+        Datatype::FixedPoint(..)
+        | Datatype::FloatingPoint(..)
+        | Datatype::Time(..)
         | Datatype::String { .. }
-        | Datatype::BitField { .. }
+        | Datatype::BitField(..)
         | Datatype::Opaque { .. } => Ok(()),
         Datatype::Reference { .. } => bad("references"),
         Datatype::VariableLength { .. } => bad("variable-length elements"),
@@ -2168,11 +2170,7 @@ mod tests {
         let src = dir.join("hdf5_pure_repack_time_src.h5");
         let dst = dir.join("hdf5_pure_repack_time_dst.h5");
 
-        let dt = Datatype::Time {
-            size: 4,
-            byte_order: DatatypeByteOrder::BigEndian,
-            bit_precision: 32,
-        };
+        let dt = Datatype::Time(TimeType::new(4, DatatypeByteOrder::BigEndian, 32).unwrap());
         let raw: Vec<u8> = vec![
             0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x03,
         ];
@@ -2239,20 +2237,14 @@ mod attribute_fidelity_tests {
     use crate::datatype::CharacterSet;
     use crate::datatype::ReferenceType;
     use crate::datatype::StringPadding;
-    use crate::datatype::layout::FixedPointLayout;
+
     use crate::{DatatypeByteOrder, File, FileBuilder, RepackOptions};
     use std::collections::BTreeMap;
 
     fn i32_type() -> Datatype {
-        Datatype::FixedPoint {
-            size: 4,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: true,
-                bit_offset: 0,
-                bit_precision: 32,
-            },
-        }
+        Datatype::FixedPoint(
+            FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
+        )
     }
 
     /// Attribute messages keyed by name, for an object reached by `path`
@@ -2413,15 +2405,9 @@ mod attribute_fidelity_tests {
             // of the bytes inside it does not.
             AttributeMessage {
                 name: "big_endian".into(),
-                datatype: Datatype::FixedPoint {
-                    size: 4,
-                    byte_order: DatatypeByteOrder::BigEndian,
-                    layout: FixedPointLayout {
-                        signed: true,
-                        bit_offset: 0,
-                        bit_precision: 32,
-                    },
-                },
+                datatype: Datatype::FixedPoint(
+                    FixedPointType::new(4, DatatypeByteOrder::BigEndian, true, 0, 32).unwrap(),
+                ),
                 dataspace: Dataspace {
                     space_type: DataspaceType::Scalar,
                     rank: 0,

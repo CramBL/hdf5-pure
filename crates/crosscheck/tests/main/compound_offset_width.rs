@@ -10,7 +10,8 @@ use hdf5_pure::Datatype;
 use hdf5_pure::DatatypeByteOrder;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
-use hdf5_pure::FixedPointLayout;
+
+use hdf5_pure::FixedPointType;
 use hdf5_pure::LibVer;
 use rstest::rstest;
 
@@ -91,15 +92,7 @@ fn pure_reader_reads_c_compound_offset_widths(#[case] size: u32) {
 }
 
 fn compound_type(size: u32, byte_order: DatatypeByteOrder) -> Datatype {
-    let member = Datatype::FixedPoint {
-        size: 1,
-        byte_order,
-        layout: FixedPointLayout {
-            signed: false,
-            bit_offset: 0,
-            bit_precision: 8,
-        },
-    };
+    let member = Datatype::FixedPoint(FixedPointType::new(1, byte_order, false, 0, 8).unwrap());
     CompoundTypeBuilder::with_size(size)
         .field("first", 0, member.clone())
         .field("last", u64::from(size - 1), member)

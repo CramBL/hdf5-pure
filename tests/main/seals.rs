@@ -30,6 +30,7 @@
 
 #![deny(unreachable_patterns)]
 
+use hdf5_pure::TimeType;
 use hdf5_pure::{
     AttrValue, CompoundMember, DType, Datatype, EditBacking, FileSpaceInfo, LibVer, MemoryStrategy,
     Object, ReferenceType, SyncPolicy, mat::MatClass,
@@ -48,11 +49,11 @@ fn sealed_enums_still_require_a_wildcard_arm() {
 
     fn datatype(d: &Datatype) {
         match d {
-            Datatype::FixedPoint { .. }
-            | Datatype::FloatingPoint { .. }
-            | Datatype::Time { .. }
+            Datatype::FixedPoint(..)
+            | Datatype::FloatingPoint(..)
+            | Datatype::Time(..)
             | Datatype::String { .. }
-            | Datatype::BitField { .. }
+            | Datatype::BitField(..)
             | Datatype::Opaque { .. }
             | Datatype::Compound { .. }
             | Datatype::Reference { .. }
@@ -168,11 +169,9 @@ fn sealed_enums_still_require_a_wildcard_arm() {
     attr_value(&AttrValue::I32(1));
     dtype(&DType::F64);
     mat_class(MatClass::Double);
-    datatype(&Datatype::Time {
-        size: 8,
-        byte_order: hdf5_pure::DatatypeByteOrder::LittleEndian,
-        bit_precision: 64,
-    });
+    datatype(&Datatype::Time(
+        TimeType::new(8, hdf5_pure::DatatypeByteOrder::LittleEndian, 64).unwrap(),
+    ));
     let _: fn(&Object) = object;
 }
 

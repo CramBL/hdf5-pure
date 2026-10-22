@@ -5,7 +5,7 @@ use alloc::{format, string::ToString, vec::Vec};
 
 use crate::convert::Narrow;
 use crate::datatype::byte_order::DatatypeByteOrder;
-use crate::datatype::layout::{FixedPointLayout, FloatingPointLayout};
+use crate::datatype::layout::FloatingPointLayout;
 use crate::datatype::{CompoundMember, Datatype};
 use crate::error::FormatError;
 use crate::type_builders;
@@ -68,20 +68,13 @@ fn integer_order(
     name: &str,
 ) -> Result<DatatypeByteOrder, FormatError> {
     match datatype {
-        Datatype::FixedPoint {
-            size: actual_size,
-            byte_order,
-            layout:
-                FixedPointLayout {
-                    signed: actual_signed,
-                    bit_offset: 0,
-                    bit_precision,
-                },
-        } if *actual_size == size
-            && *actual_signed == signed
-            && u32::from(*bit_precision) == size * 8 =>
+        Datatype::FixedPoint(numeric)
+            if numeric.size().get() == size
+                && numeric.layout().signed() == signed
+                && numeric.layout().bit_offset() == 0
+                && u32::from(numeric.layout().bit_precision()) == size * 8 =>
         {
-            Ok(*byte_order)
+            Ok(numeric.byte_order())
         }
         _ => Err(FormatError::CompoundFieldTypeMismatch(name.to_string())),
     }
@@ -92,26 +85,19 @@ fn float_order(
     size: u32,
     name: &str,
 ) -> Result<DatatypeByteOrder, FormatError> {
-    let standard = match (datatype, size) {
-        (
-            Datatype::FloatingPoint {
-                size: 4,
-                byte_order,
-                layout: FloatingPointLayout::IEEE754_BINARY32,
-            },
-            4,
-        ) => Some(*byte_order),
-        (
-            Datatype::FloatingPoint {
-                size: 8,
-                byte_order,
-                layout: FloatingPointLayout::IEEE754_BINARY64,
-            },
-            8,
-        ) => Some(*byte_order),
-        _ => None,
-    };
-    standard.ok_or_else(|| FormatError::CompoundFieldTypeMismatch(name.to_string()))
+    match datatype {
+        Datatype::FloatingPoint(numeric)
+            if numeric.size().get() == size
+                && matches!(
+                    (size, numeric.layout()),
+                    (4, FloatingPointLayout::IEEE754_BINARY32)
+                        | (8, FloatingPointLayout::IEEE754_BINARY64)
+                ) =>
+        {
+            Ok(numeric.byte_order())
+        }
+        _ => Err(FormatError::CompoundFieldTypeMismatch(name.to_string())),
+    }
 }
 
 fn ordered<const N: usize>(bytes: &[u8], order: DatatypeByteOrder) -> Result<[u8; N], FormatError> {

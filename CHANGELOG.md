@@ -41,11 +41,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** The numeric variants of `Datatype` change from public layout fields to checked, immutable payloads. Parsing rejects invalid bit ranges and overlapping floating-point fields, while value decoding remains limited to supported encodings.
 - **Breaking:** `Dataset::filter_pipeline` and related introspection change to fallible methods with typed identifiers and parameters. Uninterpreted parameters remain available, and staged parameters are marked pending.
 - **Breaking:** The consistency flags field of `Superblock` changes from an integer to a typed flag set. Parsed flags preserve reserved bits and inconsistent access marks.
 - **Breaking:** The version and width fields of `Superblock` change from integers to enums restricted to supported values. The library-version conversion also requires a typed version.
 - **Breaking:** The level type of `DatasetBuilder::with_deflate` and related compression settings changes from integers to an enum restricted to zero through nine ([#833](https://github.com/CramBL/hdf5-pure/pull/833)).
-- **Breaking:** `FloatingPointLayout` gains required fields for mantissa normalization and sign position. Metadata inspection preserves these fields even for unsupported numeric encodings.
 - **Breaking:** The address fields of `FileSpaceInfo` change type from integers to decoded stored addresses.
 - **Breaking:** `StoredAddress::is_undefined` no longer accepts a raw integer width.
 - **Breaking:** The base-relative address fields of `Superblock` change type from integers to stored addresses. Base and end-of-file addresses retain their absolute coordinates ([#733](https://github.com/CramBL/hdf5-pure/pull/733)).

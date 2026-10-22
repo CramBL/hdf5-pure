@@ -24,8 +24,9 @@ use hdf5::types::TypeDescriptor;
 use hdf5::types::VarLenUnicode;
 use hdf5::{ObjectReference1, ReferencedObject};
 use hdf5_pure::CharacterSet;
+use hdf5_pure::FixedPointType;
 use hdf5_pure::StringPadding;
-use hdf5_pure::{AttrValue, Datatype, File, FixedPointLayout, RepackOptions};
+use hdf5_pure::{AttrValue, Datatype, File, RepackOptions};
 use rstest::rstest;
 
 use test_util_hdf5::file;
@@ -39,15 +40,9 @@ const DATASET_VALUES: [i32; 3] = [10, 20, 30];
 /// not change the encoding — only where it is stored — so the answer a resolved
 /// reference must produce is exactly the answer an inline `H5T_STD_I32LE` gives.
 fn committed_i32() -> Datatype {
-    Datatype::FixedPoint {
-        size: 4,
-        byte_order: hdf5_pure::DatatypeByteOrder::LittleEndian,
-        layout: FixedPointLayout {
-            signed: true,
-            bit_offset: 0,
-            bit_precision: 32,
-        },
-    }
+    Datatype::FixedPoint(
+        FixedPointType::new(4, hdf5_pure::DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
+    )
 }
 
 /// Commit `dtype` in `loc` under `name`. Afterwards `dtype` itself is the

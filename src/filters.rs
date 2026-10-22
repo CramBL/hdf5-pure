@@ -12,8 +12,8 @@ pub use hdf5_pure_filter::__private::FilterScratch;
 #[cfg(feature = "zfp")]
 use hdf5_pure_filter::__private::ZfpElementType;
 
-#[cfg(feature = "zfp")]
-use crate::FixedPointLayout;
+#[cfg(test)]
+use crate::FixedPointType;
 use crate::error::FormatError;
 use crate::filter_pipeline;
 use crate::filter_pipeline::FilterPipeline;
@@ -93,18 +93,14 @@ pub fn zfp_element_type_from_datatype(
 ) -> Option<ZfpElementTypeWhenEnabled> {
     use crate::datatype::Datatype;
     match dt {
-        Datatype::FloatingPoint { size: 4, .. } => Some(ZfpElementType::F32),
-        Datatype::FloatingPoint { size: 8, .. } => Some(ZfpElementType::F64),
-        Datatype::FixedPoint {
-            size: 4,
-            layout: FixedPointLayout { signed: true, .. },
-            ..
-        } => Some(ZfpElementType::I32),
-        Datatype::FixedPoint {
-            size: 8,
-            layout: FixedPointLayout { signed: true, .. },
-            ..
-        } => Some(ZfpElementType::I64),
+        Datatype::FloatingPoint(numeric) if numeric.size().get() == 4 => Some(ZfpElementType::F32),
+        Datatype::FloatingPoint(numeric) if numeric.size().get() == 8 => Some(ZfpElementType::F64),
+        Datatype::FixedPoint(numeric) if numeric.size().get() == 4 && numeric.layout().signed() => {
+            Some(ZfpElementType::I32)
+        }
+        Datatype::FixedPoint(numeric) if numeric.size().get() == 8 && numeric.layout().signed() => {
+            Some(ZfpElementType::I64)
+        }
         _ => None,
     }
 }
@@ -219,19 +215,13 @@ mod tests {
     use super::*;
     use crate::Datatype;
     use crate::datatype::byte_order::DatatypeByteOrder;
-    use crate::datatype::layout::FixedPointLayout;
+
     #[test]
     fn a_context_cannot_be_built_from_a_zero_width_datatype() {
         let degenerate = Datatype::Array {
-            base_type: Box::new(Datatype::FixedPoint {
-                size: 4,
-                byte_order: DatatypeByteOrder::LittleEndian,
-                layout: FixedPointLayout {
-                    signed: true,
-                    bit_offset: 0,
-                    bit_precision: 32,
-                },
-            }),
+            base_type: Box::new(Datatype::FixedPoint(
+                FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
+            )),
             dimensions: vec![0],
         };
         assert_eq!(
@@ -239,15 +229,9 @@ mod tests {
             FormatError::ZeroSizedDatatype { class: 10 }
         );
 
-        let ordinary = crate::datatype::Datatype::FixedPoint {
-            size: 4,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: true,
-                bit_offset: 0,
-                bit_precision: 32,
-            },
-        };
+        let ordinary = crate::datatype::Datatype::FixedPoint(
+            FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
+        );
         let ctx = ChunkContext::from_datatype(&[4], &ordinary).unwrap();
         assert_eq!(ctx.element_size.get(), 4);
     }
