@@ -1010,6 +1010,7 @@ mod tests {
     use test_util::widths::Widths;
 
     use super::*;
+    use crate::SuperblockVersion;
     use crate::data_layout::DataLayout;
     use crate::data_read;
     use crate::dataspace::Dataspace;
@@ -1163,21 +1164,19 @@ mod tests {
         }
         .unwrap();
 
-        let header = ObjectHeader::parse_with_base(
+        let header = ObjectHeader::parse_with_base_and_widths(
             &bytes,
             AccessMode::ReadOnly,
             object_at.to_usize().unwrap(),
-            superblock.offset_size.get(),
-            superblock.length_size.get(),
+            FormatWidths {
+                offsets: superblock.offset_size,
+                lengths: superblock.length_size,
+            },
             addresses.effective_base(),
         )
         .unwrap();
-        let (datatype, dataspace, layout) = extract_dataset(
-            &bytes,
-            &header,
-            superblock.offset_size.get(),
-            superblock.length_size.get(),
-        );
+        let (datatype, dataspace, layout) =
+            extract_dataset(&bytes, &header, test_widths(&superblock));
         let raw = data_read::read_raw_data(
             source::frame(&bytes, addresses.effective_base()).unwrap(),
             &layout,
@@ -1259,8 +1258,7 @@ mod tests {
     fn extract_dataset(
         _file_data: &[u8],
         hdr: &ObjectHeader,
-        offset_size: u8,
-        length_size: u8,
+        widths: FormatWidths,
     ) -> (Datatype, Dataspace, DataLayout) {
         let dt_data = &hdr
             .messages
@@ -1281,8 +1279,8 @@ mod tests {
             .unwrap()
             .data;
         let (dt, _) = hdf5_pure_format::__private::parse_datatype(dt_data).unwrap();
-        let ds = Dataspace::parse(ds_data, length_size).unwrap();
-        let dl = DataLayout::parse(dl_data, offset_size, length_size).unwrap();
+        let ds = Dataspace::parse_with_length_width(ds_data, widths.lengths).unwrap();
+        let dl = DataLayout::parse_with_widths(dl_data, widths).unwrap();
         (dt, ds, dl)
     }
 
@@ -1476,7 +1474,10 @@ mod tests {
     fn integration_v2_groups_temperature() {
         let file_data: &[u8] = include_bytes!("../tests/data/unattributed/v2_groups.h5");
         let sb = crate::superblock::read(file_data).unwrap().superblock;
-        assert!(sb.version.get() >= 2); // v2/v3 superblock
+        assert!(matches!(
+            sb.version,
+            SuperblockVersion::Two | SuperblockVersion::Three
+        ));
 
         let addr = resolve_path_any(
             file_data,
@@ -1487,16 +1488,24 @@ mod tests {
             &ObjectPath::parse("sensors/temperature"),
         )
         .unwrap();
-        let hdr = ObjectHeader::parse(
+        let hdr = ObjectHeader::parse_with_widths(
             file_data,
             AccessMode::ReadOnly,
             addr as usize,
-            sb.offset_size.get(),
-            sb.length_size.get(),
+            FormatWidths {
+                offsets: sb.offset_size,
+                lengths: sb.length_size,
+            },
         )
         .unwrap();
-        let (dt, ds, dl) =
-            extract_dataset(file_data, &hdr, sb.offset_size.get(), sb.length_size.get());
+        let (dt, ds, dl) = extract_dataset(
+            file_data,
+            &hdr,
+            FormatWidths {
+                offsets: sb.offset_size,
+                lengths: sb.length_size,
+            },
+        );
         let raw = data_read::read_raw_data(file_data, &dl, &ds, &dt).unwrap();
         let values = data_read::read_as_f64(&raw, &dt).unwrap();
         assert_eq!(values, vec![22.5, 23.1, 21.8]);
@@ -1516,16 +1525,24 @@ mod tests {
             &ObjectPath::parse("sensors/humidity"),
         )
         .unwrap();
-        let hdr = ObjectHeader::parse(
+        let hdr = ObjectHeader::parse_with_widths(
             file_data,
             AccessMode::ReadOnly,
             addr as usize,
-            sb.offset_size.get(),
-            sb.length_size.get(),
+            FormatWidths {
+                offsets: sb.offset_size,
+                lengths: sb.length_size,
+            },
         )
         .unwrap();
-        let (dt, ds, dl) =
-            extract_dataset(file_data, &hdr, sb.offset_size.get(), sb.length_size.get());
+        let (dt, ds, dl) = extract_dataset(
+            file_data,
+            &hdr,
+            FormatWidths {
+                offsets: sb.offset_size,
+                lengths: sb.length_size,
+            },
+        );
         let raw = data_read::read_raw_data(file_data, &dl, &ds, &dt).unwrap();
         let values = data_read::read_as_i32(&raw, &dt).unwrap();
         assert_eq!(values, vec![45, 50, 55]);
@@ -1545,16 +1562,24 @@ mod tests {
             &ObjectPath::parse("dataset_015"),
         )
         .unwrap();
-        let hdr = ObjectHeader::parse(
+        let hdr = ObjectHeader::parse_with_widths(
             file_data,
             AccessMode::ReadOnly,
             addr as usize,
-            sb.offset_size.get(),
-            sb.length_size.get(),
+            FormatWidths {
+                offsets: sb.offset_size,
+                lengths: sb.length_size,
+            },
         )
         .unwrap();
-        let (dt, ds, dl) =
-            extract_dataset(file_data, &hdr, sb.offset_size.get(), sb.length_size.get());
+        let (dt, ds, dl) = extract_dataset(
+            file_data,
+            &hdr,
+            FormatWidths {
+                offsets: sb.offset_size,
+                lengths: sb.length_size,
+            },
+        );
         let raw = data_read::read_raw_data(file_data, &dl, &ds, &dt).unwrap();
         let values = data_read::read_as_f64(&raw, &dt).unwrap();
         assert_eq!(values, vec![15.0]);
@@ -1575,16 +1600,24 @@ mod tests {
             &ObjectPath::parse("group1/values"),
         )
         .unwrap();
-        let hdr = ObjectHeader::parse(
+        let hdr = ObjectHeader::parse_with_widths(
             file_data,
             AccessMode::ReadOnly,
             addr as usize,
-            sb.offset_size.get(),
-            sb.length_size.get(),
+            FormatWidths {
+                offsets: sb.offset_size,
+                lengths: sb.length_size,
+            },
         )
         .unwrap();
-        let (dt, ds, dl) =
-            extract_dataset(file_data, &hdr, sb.offset_size.get(), sb.length_size.get());
+        let (dt, ds, dl) = extract_dataset(
+            file_data,
+            &hdr,
+            FormatWidths {
+                offsets: sb.offset_size,
+                lengths: sb.length_size,
+            },
+        );
         let raw = data_read::read_raw_data(file_data, &dl, &ds, &dt).unwrap();
         let values = data_read::read_as_i32(&raw, &dt).unwrap();
         assert_eq!(values, vec![10, 20, 30]);
@@ -1604,16 +1637,24 @@ mod tests {
             &ObjectPath::parse("sensors/temperature"),
         )
         .unwrap();
-        let hdr = ObjectHeader::parse(
+        let hdr = ObjectHeader::parse_with_widths(
             file_data,
             AccessMode::ReadOnly,
             addr as usize,
-            sb.offset_size.get(),
-            sb.length_size.get(),
+            FormatWidths {
+                offsets: sb.offset_size,
+                lengths: sb.length_size,
+            },
         )
         .unwrap();
-        let (dt, ds, dl) =
-            extract_dataset(file_data, &hdr, sb.offset_size.get(), sb.length_size.get());
+        let (dt, ds, dl) = extract_dataset(
+            file_data,
+            &hdr,
+            FormatWidths {
+                offsets: sb.offset_size,
+                lengths: sb.length_size,
+            },
+        );
         let raw = data_read::read_raw_data(file_data, &dl, &ds, &dt).unwrap();
         let values = data_read::read_as_f64(&raw, &dt).unwrap();
         assert_eq!(values, vec![22.5, 23.1, 21.8]);
@@ -1783,12 +1824,11 @@ mod huge_link_tests {
             &ObjectPath::parse("g"),
         )
         .unwrap();
-        let header = ObjectHeader::parse(
+        let header = ObjectHeader::parse_with_widths(
             bytes,
             AccessMode::ReadOnly,
             group_addr.to_usize().unwrap(),
-            widths.offsets.get(),
-            widths.lengths.get(),
+            widths,
         )
         .unwrap();
         let link_info = find_link_info(&header, widths.offsets).unwrap();

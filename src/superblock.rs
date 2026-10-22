@@ -183,6 +183,7 @@ mod tests {
     use test_util::widths::Widths;
 
     use super::*;
+    use crate::SuperblockVersion;
     use crate::address::BaseAddress;
     use crate::address::BaseAddressExt;
     use crate::source::BytesSource;
@@ -204,7 +205,14 @@ mod tests {
             widths,
         } = reader.read(&image).unwrap();
         assert_eq!(address.get(), signature_at as u64);
-        assert_eq!(superblock.version.get(), if version_0 { 0 } else { 2 });
+        assert_eq!(
+            superblock.version,
+            if version_0 {
+                SuperblockVersion::Zero
+            } else {
+                SuperblockVersion::Two
+            }
+        );
         assert_eq!(
             superblock.base_address,
             BaseAddress::new(signature_at as u64)
@@ -228,7 +236,7 @@ mod tests {
             ..
         } = reader.read(image).unwrap();
         assert_eq!(address.get(), 512);
-        assert_eq!(superblock.version.get(), 0);
+        assert_eq!(superblock.version, SuperblockVersion::Zero);
         assert_eq!(superblock.base_address, BaseAddress::new(512));
         assert_eq!(superblock.eof_address, image.len() as u64);
     }

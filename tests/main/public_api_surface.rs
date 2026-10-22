@@ -88,8 +88,8 @@ fn the_superblock_and_its_base_address_can_both_be_named() {
     let base: BaseAddress = image_start(sb);
     assert_eq!(base.get(), 512, "the base is the userblock size");
     assert_eq!(
-        sb.version.get(),
-        3,
+        sb.version,
+        SuperblockVersion::Three,
         "the default writer emits a version 3 superblock"
     );
     assert_eq!(format_of(sb), LibVer::V110);

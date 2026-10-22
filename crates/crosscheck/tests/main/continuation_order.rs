@@ -8,6 +8,7 @@ use hdf5_pure::File;
 use hdf5_pure::MessageType;
 use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_format::__private;
+use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::MessageRecordLayout;
 use hdf5_pure_format::__private::ObjectHeaderContinuation;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
@@ -55,10 +56,12 @@ fn assert_root_refers_to_nested_continuation_blocks(path: &Path, file: &File) {
     let chunk0_end = root_at + prefix.len + usize::try_from(prefix.chunk0_size).unwrap();
     let referenced = |region: &[u8], records_start: usize| {
         referenced_blocks(
-            layout,
-            superblock.offset_size.get(),
-            superblock.length_size.get(),
             region,
+            layout,
+            FormatWidths {
+                offsets: superblock.offset_size,
+                lengths: superblock.length_size,
+            },
             records_start,
         )
     };
@@ -82,10 +85,9 @@ fn assert_root_refers_to_nested_continuation_blocks(path: &Path, file: &File) {
 }
 
 fn referenced_blocks(
-    layout: MessageRecordLayout,
-    offset_size: u8,
-    length_size: u8,
     region: &[u8],
+    layout: MessageRecordLayout,
+    widths: FormatWidths,
     records_start: usize,
 ) -> Vec<ObjectHeaderContinuation> {
     std::iter::successors(
@@ -93,7 +95,7 @@ fn referenced_blocks(
         |record| layout.next_message(region, record.body_range.end).unwrap(),
     )
     .filter(|record| record.msg_type == MessageType::OBJECT_HEADER_CONTINUATION)
-    .map(|record| ObjectHeaderContinuation::parse(record.body, offset_size, length_size).unwrap())
+    .map(|record| ObjectHeaderContinuation::parse_with_widths(record.body, widths).unwrap())
     .collect()
 }
 

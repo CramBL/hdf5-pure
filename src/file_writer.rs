@@ -5110,12 +5110,14 @@ mod tests {
             &ObjectPath::parse(path),
         )
         .unwrap();
-        let hdr = ObjectHeader::parse(
+        let hdr = ObjectHeader::parse_with_widths(
             bytes,
             AccessMode::ReadOnly,
             addr as usize,
-            sb.offset_size.get(),
-            sb.length_size.get(),
+            FormatWidths {
+                offsets: sb.offset_size,
+                lengths: sb.length_size,
+            },
         )
         .unwrap();
         let msg = hdr
@@ -5161,12 +5163,14 @@ mod tests {
             &ObjectPath::parse("typed"),
         )
         .unwrap();
-        let hdr = ObjectHeader::parse(
+        let hdr = ObjectHeader::parse_with_widths(
             &bytes,
             AccessMode::ReadOnly,
             ds_addr as usize,
-            sb.offset_size.get(),
-            sb.length_size.get(),
+            FormatWidths {
+                offsets: sb.offset_size,
+                lengths: sb.length_size,
+            },
         )
         .unwrap();
         let msg = hdr
@@ -5191,7 +5195,7 @@ mod tests {
 
     fn parse_file(bytes: &[u8]) -> (Superblock, ObjectHeader) {
         let sb = crate::superblock::read(bytes).unwrap().superblock;
-        let oh = ObjectHeader::parse(
+        let oh = ObjectHeader::parse_with_widths(
             bytes,
             AccessMode::ReadOnly,
             AddressContext::from_effective_base(sb.base_address)
@@ -5199,8 +5203,10 @@ mod tests {
                 .unwrap()
                 .to_usize()
                 .unwrap(),
-            sb.offset_size.get(),
-            sb.length_size.get(),
+            FormatWidths {
+                offsets: sb.offset_size,
+                lengths: sb.length_size,
+            },
         )
         .unwrap();
         (sb, oh)
@@ -5217,12 +5223,14 @@ mod tests {
             &ObjectPath::parse(path),
         )
         .unwrap();
-        let hdr = ObjectHeader::parse(
+        let hdr = ObjectHeader::parse_with_widths(
             bytes,
             AccessMode::ReadOnly,
             addr as usize,
-            sb.offset_size.get(),
-            sb.length_size.get(),
+            FormatWidths {
+                offsets: sb.offset_size,
+                lengths: sb.length_size,
+            },
         )
         .unwrap();
         let dt_data = &hdr
@@ -5244,11 +5252,13 @@ mod tests {
             .unwrap()
             .data;
         let (dt, _) = hdf5_pure_format::__private::parse_datatype(dt_data).unwrap();
-        let ds = Dataspace::parse(ds_data, sb.length_size.get()).unwrap();
-        let dl = crate::data_layout::DataLayout::parse(
+        let ds = Dataspace::parse_with_length_width(ds_data, sb.length_size).unwrap();
+        let dl = crate::data_layout::DataLayout::parse_with_widths(
             dl_data,
-            sb.offset_size.get(),
-            sb.length_size.get(),
+            FormatWidths {
+                offsets: sb.offset_size,
+                lengths: sb.length_size,
+            },
         )
         .unwrap();
         let raw = crate::data_read::read_raw_data(bytes, &dl, &ds, &dt).unwrap();
@@ -5260,7 +5270,7 @@ mod tests {
         let fw = FileWriter::new();
         let bytes = fw.finish().unwrap();
         let (sb, oh) = parse_file(&bytes);
-        assert_eq!(sb.version.get(), 3);
+        assert_eq!(sb.version, SuperblockVersion::Three);
         assert_eq!(oh.version, 2);
     }
 
@@ -5292,12 +5302,14 @@ mod tests {
             &ObjectPath::parse("data"),
         )
         .unwrap();
-        let hdr = ObjectHeader::parse(
+        let hdr = ObjectHeader::parse_with_widths(
             &bytes,
             AccessMode::ReadOnly,
             addr as usize,
-            sb.offset_size.get(),
-            sb.length_size.get(),
+            FormatWidths {
+                offsets: sb.offset_size,
+                lengths: sb.length_size,
+            },
         )
         .unwrap();
         let attrs = crate::attribute::extract_attributes(&hdr, LENGTH_WIDTH).unwrap();
@@ -5351,12 +5363,14 @@ mod tests {
             &ObjectPath::parse("grp"),
         )
         .unwrap();
-        let hdr = ObjectHeader::parse(
+        let hdr = ObjectHeader::parse_with_widths(
             &bytes,
             AccessMode::ReadOnly,
             addr as usize,
-            sb.offset_size.get(),
-            sb.length_size.get(),
+            FormatWidths {
+                offsets: sb.offset_size,
+                lengths: sb.length_size,
+            },
         )
         .unwrap();
         assert_eq!(hdr.flags & 0x20, 0, "times-stored flag must be clear");
@@ -5389,12 +5403,14 @@ mod tests {
             &ObjectPath::parse("grp"),
         )
         .unwrap();
-        let hdr = ObjectHeader::parse(
+        let hdr = ObjectHeader::parse_with_widths(
             &bytes,
             AccessMode::ReadOnly,
             addr as usize,
-            sb.offset_size.get(),
-            sb.length_size.get(),
+            FormatWidths {
+                offsets: sb.offset_size,
+                lengths: sb.length_size,
+            },
         )
         .unwrap();
 
@@ -5403,7 +5419,8 @@ mod tests {
             .iter()
             .find(|m| m.msg_type == MessageType::LINK_INFO)
             .unwrap();
-        let link_info = LinkInfoMessage::parse(&link_info_msg.data, sb.offset_size.get()).unwrap();
+        let link_info =
+            LinkInfoMessage::parse_with_offset_width(&link_info_msg.data, sb.offset_size).unwrap();
         assert!(
             link_info.fractal_heap_address.is_none(),
             "no dense link storage is ever used"
@@ -5455,12 +5472,14 @@ mod tests {
             &ObjectPath::parse("data"),
         )
         .unwrap();
-        let hdr = ObjectHeader::parse(
+        let hdr = ObjectHeader::parse_with_widths(
             &bytes,
             AccessMode::ReadOnly,
             addr as usize,
-            sb.offset_size.get(),
-            sb.length_size.get(),
+            FormatWidths {
+                offsets: sb.offset_size,
+                lengths: sb.length_size,
+            },
         )
         .unwrap();
         let attrs = crate::attribute::extract_attributes_full(
@@ -5495,7 +5514,7 @@ mod tests {
         let sb = crate::superblock::read(bytes.as_slice())
             .unwrap()
             .superblock;
-        let oh = ObjectHeader::parse(
+        let oh = ObjectHeader::parse_with_widths(
             &bytes,
             AccessMode::ReadOnly,
             AddressContext::from_effective_base(sb.base_address)
@@ -5503,8 +5522,10 @@ mod tests {
                 .unwrap()
                 .to_usize()
                 .unwrap(),
-            sb.offset_size.get(),
-            sb.length_size.get(),
+            FormatWidths {
+                offsets: sb.offset_size,
+                lengths: sb.length_size,
+            },
         )
         .unwrap();
         let attrs = crate::attribute::extract_attributes_full(
@@ -5540,12 +5561,14 @@ mod tests {
             &ObjectPath::parse("data"),
         )
         .unwrap();
-        let hdr = ObjectHeader::parse(
+        let hdr = ObjectHeader::parse_with_widths(
             &bytes,
             AccessMode::ReadOnly,
             addr as usize,
-            sb.offset_size.get(),
-            sb.length_size.get(),
+            FormatWidths {
+                offsets: sb.offset_size,
+                lengths: sb.length_size,
+            },
         )
         .unwrap();
         // The Attribute Info message is present but names no fractal heap: that
@@ -5556,8 +5579,11 @@ mod tests {
             .iter()
             .find(|m| m.msg_type == MessageType::ATTRIBUTE_INFO)
             .map(|m| {
-                crate::attribute_info::AttributeInfoMessage::parse(&m.data, sb.offset_size.get())
-                    .unwrap()
+                crate::attribute_info::AttributeInfoMessage::parse_with_offset_width(
+                    &m.data,
+                    sb.offset_size,
+                )
+                .unwrap()
             })
             .expect("a compact attribute set still carries an Attribute Info message");
         assert_eq!(info.fractal_heap_address, None);
@@ -6125,12 +6151,14 @@ mod tests {
             &ObjectPath::parse("data"),
         )
         .unwrap();
-        let hdr = ObjectHeader::parse(
+        let hdr = ObjectHeader::parse_with_widths(
             &bytes,
             AccessMode::ReadOnly,
             addr as usize,
-            sb.offset_size.get(),
-            sb.length_size.get(),
+            FormatWidths {
+                offsets: sb.offset_size,
+                lengths: sb.length_size,
+            },
         )
         .unwrap();
         let attrs = crate::attribute::extract_attributes_full(
@@ -6602,12 +6630,14 @@ mod tests {
             &ObjectPath::parse(path),
         )
         .unwrap();
-        let oh = ObjectHeader::parse(
+        let oh = ObjectHeader::parse_with_widths(
             bytes,
             AccessMode::ReadOnly,
             addr as usize,
-            sb.offset_size.get(),
-            sb.length_size.get(),
+            FormatWidths {
+                offsets: sb.offset_size,
+                lengths: sb.length_size,
+            },
         )
         .unwrap();
         oh.messages

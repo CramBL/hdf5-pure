@@ -2361,8 +2361,7 @@ mod tests {
         let bytes = fractal_heap::Header::new(0x100)
             .managed_object_count(3)
             .build(widths);
-        let header =
-            FractalHeapHeader::parse(&bytes, 0, offset_width.get(), length_width.get()).unwrap();
+        let header = FractalHeapHeader::parse_bytes(&bytes, offset_width, length_width).unwrap();
 
         assert_eq!(
             header.serialize(offset_width, length_width),

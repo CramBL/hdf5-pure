@@ -62,6 +62,7 @@ use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FormatError;
+use hdf5_pure::SuperblockVersion;
 use rstest::rstest;
 
 use test_util::superblock;
@@ -244,13 +245,13 @@ fn snapshot_open_requires_effective_eof(
 }
 
 #[rstest]
-#[case::v0(LibraryVersion::Earliest, 32, superblock::VERSION_0)]
-#[case::v1(LibraryVersion::Earliest, 33, superblock::VERSION_1)]
-#[case::v2(LibraryVersion::V18, 32, superblock::VERSION_2)]
+#[case::v0(LibraryVersion::Earliest, 32, SuperblockVersion::Zero)]
+#[case::v1(LibraryVersion::Earliest, 33, SuperblockVersion::One)]
+#[case::v2(LibraryVersion::V18, 32, SuperblockVersion::Two)]
 fn initial_legacy_swmr_open_requires_effective_eof(
     #[case] low: LibraryVersion,
     #[case] indexed_storage_k: u32,
-    #[case] version: u8,
+    #[case] version: SuperblockVersion,
     #[values((0, 0), (512, 512), (0, 512), (512, 0))] placement: (usize, usize),
     #[values(-1, 0, 512)] length_delta: i32,
     #[values(false, true)] explicit_options: bool,
@@ -261,7 +262,10 @@ fn initial_legacy_swmr_open_requires_effective_eof(
     let path = dir.path().join("legacy-swmr.h5");
     completeness_fixture(&original_path, stored_base as u64, low, indexed_storage_k);
     let original = std::fs::read(&original_path).unwrap();
-    assert_eq!(superblock::version_at(&original, stored_base), version);
+    assert_eq!(
+        superblock::version_at(&original, stored_base),
+        version.get()
+    );
     let mut image = vec![0; signature_offset];
     image.extend_from_slice(&original[stored_base..]);
     let effective_eof = image.len() as u64;
@@ -306,7 +310,7 @@ fn initial_legacy_swmr_open_requires_effective_eof(
         );
     }
     let mut file = ours.unwrap();
-    assert_eq!(file.superblock().version.get(), version);
+    assert_eq!(file.superblock().version, version);
     assert_eq!(file.superblock().base_address.get(), stored_base as u64);
     assert_eq!(file.superblock().eof_address, original.len() as u64);
     assert_eq!(file.dataset("early").unwrap().read_i32().unwrap(), [42]);
@@ -353,7 +357,7 @@ fn swmr_open_and_refresh_accept_partially_extended_image(
         );
     }
     let mut file = File::open_swmr(&path).unwrap();
-    assert_eq!(file.superblock().version.get(), superblock::VERSION_3);
+    assert_eq!(file.superblock().version, SuperblockVersion::Three);
     assert_eq!(file.dataset("early").unwrap().read_i32().unwrap(), [42]);
     image.pop().unwrap();
     std::fs::write(&path, image).unwrap();

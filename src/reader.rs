@@ -10586,8 +10586,8 @@ mod tests {
             } = crate::superblock::read(bytes.as_slice()).unwrap();
             let sig = usize::try_from(address.get()).unwrap();
             assert_eq!(
-                sb.version.get(),
-                3,
+                sb.version,
+                SuperblockVersion::Three,
                 "the fixture must start at the newer format"
             );
             sb.version = SuperblockVersion::Two;

@@ -1121,7 +1121,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            DataLayout::parse(&message, offset_width.get(), 4).unwrap(),
+            DataLayout::parse_with_widths(
+                &message,
+                FormatWidths {
+                    offsets: offset_width,
+                    lengths: LengthWidth::Four
+                }
+            )
+            .unwrap(),
             DataLayout::Chunked {
                 flags,
                 chunk_dimensions: vec![20, 8],
@@ -1259,7 +1266,14 @@ mod tests {
         );
         assert_eq!(message[0], version.get());
         assert_eq!(
-            DataLayout::parse(&message, offset_width.get(), length_width.get()).unwrap(),
+            DataLayout::parse_with_widths(
+                &message,
+                FormatWidths {
+                    offsets: offset_width,
+                    lengths: length_width
+                }
+            )
+            .unwrap(),
             DataLayout::Contiguous {
                 address: Some(StoredAddress::new(0x800)),
                 size: 24,
