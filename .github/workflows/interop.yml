@@ -122,7 +122,8 @@ jobs:
         version: ${{ fromJSON(needs.releases.outputs.versions) }}
 
     env:
-      CROSSCHECK_FEATURES: serde,ndarray
+      # Enables the value and content-hash crosschecks.
+      CROSSCHECK_FEATURES: serde,ndarray,provenance
       HDF5_VERSION: ${{ matrix.version }}
       NEXTEST_NO_TESTS: pass
       NEXTEST_PROFILE: ci

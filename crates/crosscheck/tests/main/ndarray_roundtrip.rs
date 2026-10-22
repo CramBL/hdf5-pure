@@ -1,5 +1,6 @@
 #![cfg(feature = "ndarray")]
 
+#[cfg(feature = "__hdf5-1.10")]
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::{Error, File, FileBuilder};
 use ndarray::{Array1, Array2, Array3, ArrayD, ShapeBuilder, array};
