@@ -315,6 +315,7 @@ use crate::DatatypeByteOrder;
 #[cfg(test)]
 use crate::DeflateLevel;
 use crate::FillTime;
+use crate::SuperblockStatusFlags;
 use crate::SuperblockVersion;
 use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
@@ -1417,7 +1418,7 @@ pub(crate) struct WriteEngine {
     /// Maintained only by [`set_consistency_flags`](Self::set_consistency_flags),
     /// which is the one place this crate writes that byte, so the field cannot
     /// drift from what is on the disk.
-    held_status_flags: u32,
+    held_status_flags: SuperblockStatusFlags,
     /// Who owns this session's `fsync` cadence, from the fapl's
     /// [`FileAccessProperties::with_sync_policy`]. Consulted by
     /// [`barrier`](Self::barrier) and [`barrier_data`](Self::barrier_data) —
@@ -1923,7 +1924,7 @@ pub(crate) struct AppendGeometry {
 /// (write access) | bit 2 (SWMR write access). Cleared on a clean close. Matches
 /// libhdf5, h5py, and [`crate::File::open_swmr_writer`]. These
 /// are the bits every open path checks — see [`file_lock::check_status_flags`].
-const SWMR_WRITE_FLAGS: u32 = file_lock::WRITE_ACCESS | file_lock::SWMR_WRITE_ACCESS;
+const SWMR_WRITE_FLAGS: SuperblockStatusFlags = SuperblockStatusFlags::swmr_write_marked();
 
 /// A dataset located once for [`Dataset::append`](crate::Dataset::append) (or the bounded
 /// backend's immediate append), then maintained across appends. Mirrors the
@@ -2325,7 +2326,7 @@ impl WriteEngine {
     ///
     /// Returns [`Error::Format`] if the superblock cannot be serialized, or [`Error::Io`] if
     /// writing or syncing the image fails.
-    fn set_consistency_flags(&mut self, flags: u32) -> Result<(), Error> {
+    fn set_consistency_flags(&mut self, flags: SuperblockStatusFlags) -> Result<(), Error> {
         self.superblock.consistency_flags = flags;
         self.held_status_flags = flags;
         let bytes = hdf5_pure_format::__private::serialize_superblock(&self.superblock)?;
@@ -2360,11 +2361,12 @@ impl WriteEngine {
     /// the same handle that just failed; it is a chance, not a guarantee.
     fn raise_crash_mark(&mut self) -> Result<(), Error> {
         let raised = self
-            .set_consistency_flags(file_lock::WRITE_ACCESS)
+            .set_consistency_flags(SuperblockStatusFlags::write_marked())
             .and_then(|()| self.image.sync_all());
         if raised.is_err() {
-            let _ = self.set_consistency_flags(0);
-            let _ = self.image.sync_all();
+            self.set_consistency_flags(SuperblockStatusFlags::new())
+                .ok();
+            self.image.sync_all().ok();
         }
         raised
     }
@@ -2387,10 +2389,10 @@ impl WriteEngine {
     /// it takes a crash inside the window — so the argument is the reason, not a
     /// test.
     pub(crate) fn release_status_flags(&mut self) -> Result<(), Error> {
-        if self.held_status_flags == 0 {
+        if self.held_status_flags.is_empty() {
             return Ok(());
         }
-        self.set_consistency_flags(0)?;
+        self.set_consistency_flags(SuperblockStatusFlags::new())?;
         self.image.sync_all()
     }
 
@@ -2570,7 +2572,7 @@ impl WriteEngine {
             publish_attempted: false,
             staging_batch: false,
             staged_generation: 0,
-            held_status_flags: 0,
+            held_status_flags: SuperblockStatusFlags::new(),
             sync_policy: SyncPolicy::Always,
         };
         // If the file persists its free space, seed the free list from the
@@ -19055,7 +19057,10 @@ mod tests {
         b.write(&flagged).unwrap();
         let ancient = dir.path().join("ancient.h5");
         std::fs::copy(&flagged, &ancient).unwrap();
-        for (path, version, flags) in [(&flagged, 3, SWMR_WRITE_FLAGS), (&ancient, 9, 0)] {
+        for (path, version, flags) in [
+            (&flagged, 3, SWMR_WRITE_FLAGS),
+            (&ancient, 9, SuperblockStatusFlags::new()),
+        ] {
             let mut data = std::fs::read(path).unwrap();
             let LocatedSuperblock {
                 address,
@@ -19125,7 +19130,7 @@ mod tests {
                 ),
                 "FileBuilder should emit a v2/v3 superblock"
             );
-            sb.consistency_flags = 0x05;
+            sb.consistency_flags = SuperblockStatusFlags::swmr_write_marked();
             let bytes = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();
             data[off..off + bytes.len()].copy_from_slice(&bytes);
             std::fs::write(&path, &data).unwrap();
@@ -19135,7 +19140,7 @@ mod tests {
                     .unwrap()
                     .superblock
                     .consistency_flags,
-                0x05
+                SuperblockStatusFlags::swmr_write_marked()
             );
         }
 
@@ -19161,7 +19166,7 @@ mod tests {
             } = crate::superblock::read(data.as_slice()).unwrap();
             let off = usize::try_from(address.get()).unwrap();
             sb.version = SuperblockVersion::Two;
-            sb.consistency_flags = crate::file_lock::WRITE_ACCESS;
+            sb.consistency_flags = SuperblockStatusFlags::write_marked();
             let bytes = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();
             data[off..off + bytes.len()].copy_from_slice(&bytes);
             std::fs::write(&path, &data).unwrap();
@@ -19184,7 +19189,7 @@ mod tests {
                 .unwrap()
                 .superblock
                 .consistency_flags,
-            0,
+            SuperblockStatusFlags::new(),
             "commit must clear the stale consistency flag"
         );
     }
@@ -19924,8 +19929,10 @@ mod tests {
              whose absolute and relative roots are the same number"
         );
         // Up and back down, which is the sequence a marked session performs.
-        s.set_consistency_flags(file_lock::WRITE_ACCESS).unwrap();
-        s.set_consistency_flags(0).unwrap();
+        s.set_consistency_flags(SuperblockStatusFlags::write_marked())
+            .unwrap();
+        s.set_consistency_flags(SuperblockStatusFlags::new())
+            .unwrap();
         s.force_sync().unwrap();
         drop(s);
 
@@ -20142,7 +20149,7 @@ mod tests {
         // file, which is mandatory on Windows.
         assert_eq!(
             s.held_status_flags,
-            file_lock::WRITE_ACCESS,
+            SuperblockStatusFlags::write_marked(),
             "a page-buffered session must hold the crash mark"
         );
         // A staged commit rather than an in-place append: in-place appending is
@@ -21164,7 +21171,8 @@ mod tests {
             s.commit().unwrap();
             let after_commit = syncs.load(Ordering::Relaxed);
 
-            s.set_consistency_flags(0).unwrap();
+            s.set_consistency_flags(SuperblockStatusFlags::new())
+                .unwrap();
             let after_flags = syncs.load(Ordering::Relaxed);
             // The flag write's barrier orders as well as syncs, like the other
             // two. Its production callers all force a sync straight after, which

@@ -47,6 +47,7 @@ use hdf5_pure_space::__private::AllocationClass;
 #[cfg(test)]
 use crate::DeflateLevel;
 use crate::FillTime;
+use crate::SuperblockStatusFlags;
 use crate::SuperblockVersion;
 #[cfg(test)]
 use crate::address::AddressContext;
@@ -3456,7 +3457,7 @@ impl FileWriter {
                 indexed_storage_internal_node_k: None,
                 free_space_address: None,
                 driver_info_address: None,
-                consistency_flags: 0,
+                consistency_flags: SuperblockStatusFlags::new(),
                 superblock_extension_address: Some(StoredAddress::new(ext_addr)),
                 checksum: None,
             }
@@ -3741,7 +3742,7 @@ impl FileWriter {
             indexed_storage_internal_node_k: None,
             free_space_address: None,
             driver_info_address: None,
-            consistency_flags: 0,
+            consistency_flags: SuperblockStatusFlags::new(),
             superblock_extension_address: Some(
                 ext_addr
                     .map(StoredAddress::new)

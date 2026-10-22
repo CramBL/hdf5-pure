@@ -380,6 +380,8 @@ def test_migration_builds_core_with_the_profile_core_features():
         ("OffsetWidth", []),
         ("StoredAddress", []),
         ("SuperblockVersion", []),
+        ("SuperblockStatusFlag", []),
+        ("SuperblockStatusFlags", []),
         ("Unlisted", ["Unlisted: new core root item"]),
     ],
 )
@@ -417,6 +419,7 @@ def test_migration_shape_ignores_only_the_allowed_field_changes(type_name, field
         ("eof_address", ["Superblock: fields changed"]),
         ("free_space_address", []),
         ("version", []),
+        ("consistency_flags", []),
         ("offset_size", []),
         ("length_size", []),
         ("root_group_address", []),

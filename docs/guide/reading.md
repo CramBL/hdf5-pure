@@ -341,6 +341,9 @@ let in_memory: bool = is_hdf5_bytes(&bytes);
 [`File::superblock`](crate::File::superblock) returns the decoded metadata. Its version has type
 [`SuperblockVersion`](crate::SuperblockVersion), and its address and length widths have types
 [`OffsetWidth`](crate::OffsetWidth) and [`LengthWidth`](crate::LengthWidth).
+The reader preserves every consistency flag bit in
+[`SuperblockStatusFlags`](crate::SuperblockStatusFlags), including reserved bits and an SWMR
+write mark without a write mark.
 
 An open [`File`](crate::File) reports its size and the format version it requires:
 

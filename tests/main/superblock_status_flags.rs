@@ -8,6 +8,7 @@
 
 #![expect(clippy::mem_forget, reason = "the tests model a writer that crashed")]
 
+use hdf5_pure::SuperblockStatusFlags;
 use hdf5_pure::{
     Error, File, FileAccessProperties, FileBuilder, FileLocking, FileSpaceStrategy, MemoryStrategy,
     WriteMarkPolicy,
@@ -166,7 +167,10 @@ fn from_bytes_reads_a_flagged_file() {
     flag_as_if_crashed(&path);
 
     let file = File::from_bytes(std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(file.superblock().consistency_flags, 0x05);
+    assert_eq!(
+        file.superblock().consistency_flags,
+        SuperblockStatusFlags::swmr_write_marked()
+    );
     assert_eq!(
         file.dataset("d").unwrap().read_i32().unwrap(),
         (0..4).collect::<Vec<_>>()
@@ -441,7 +445,10 @@ fn the_opt_in_reads_a_flushed_write_marked_file() {
             expected,
             "{what} read something other than what the writer committed"
         );
-        assert_eq!(file.superblock().consistency_flags, 0x01);
+        assert_eq!(
+            file.superblock().consistency_flags,
+            SuperblockStatusFlags::write_marked()
+        );
     }
 }
 

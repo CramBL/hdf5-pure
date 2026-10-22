@@ -3,7 +3,11 @@
 //! `File::close`, the SWMR-write flag is cleared and libhdf5
 //! reads the streamed appends back exactly.
 
+use hdf5::file::LibraryVersion;
 use hdf5_pure::File;
+use hdf5_pure::SuperblockStatusFlags;
+use hdf5_pure::SuperblockVersion;
+use rstest::rstest;
 
 use test_util_hdf5::dataset::{self, Unlimited};
 
@@ -29,30 +33,22 @@ fn c_library_reads_swmr_appends_after_close() {
     );
 }
 
-/// The status-flags field of a *version-1* superblock is read from the offset
-/// the C library writes it to. The v1 layout puts the flags before the chunk
-/// B-tree K, and this crate had the two swapped, so it reported a file's
-/// `istore_k` as its status flags. Only a file the C library wrote can settle
-/// the order — a hand-built fixture asserting the crate's own layout agrees
-/// with itself whichever way round it is.
-///
-/// The flag check skips a v1 superblock (see `file_lock::check_status_flags`),
-/// so this is about `File::superblock()` reporting the truth, not about the
-/// refusal — but it is the same byte, and a gate that ever widened would have
-/// refused every v1 file whose `istore_k` happens to be odd.
-#[test]
-fn a_v1_superblock_reports_the_flags_the_c_library_wrote() {
-    use hdf5::file::LibraryVersion;
-
+#[rstest]
+#[case(LibraryVersion::Earliest, 32, SuperblockVersion::Zero)]
+#[case(LibraryVersion::Earliest, 33, SuperblockVersion::One)]
+#[case(LibraryVersion::V18, 33, SuperblockVersion::Two)]
+#[case(LibraryVersion::V110, 33, SuperblockVersion::Three)]
+fn a_superblock_reports_the_flags_the_c_library_wrote(
+    #[case] libver: LibraryVersion,
+    #[case] indexed_storage_k: u32,
+    #[case] version: SuperblockVersion,
+) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("legacy.h5");
-    // A non-default, odd chunk B-tree K: it sits beside the flags in the v1
-    // layout, and reading it as the flags would report bit 0 — "open for write".
-    const ISTORE_K: u32 = 33;
     {
         let file = hdf5::File::with_options()
-            .with_fapl(|p| p.libver_bounds(LibraryVersion::Earliest, LibraryVersion::V18))
-            .with_fcpl(|p| p.istore_k(ISTORE_K))
+            .with_fapl(|p| p.libver_bounds(libver, LibraryVersion::V110))
+            .with_fcpl(|p| p.istore_k(indexed_storage_k))
             .create(&path)
             .unwrap();
         file.new_dataset::<i32>()
@@ -62,26 +58,22 @@ fn a_v1_superblock_reports_the_flags_the_c_library_wrote() {
             .unwrap()
             .write(&[0i32, 1, 2, 3])
             .unwrap();
-        assert_eq!(file.create_plist().unwrap().istore_k(), ISTORE_K);
+        assert_eq!(file.create_plist().unwrap().istore_k(), indexed_storage_k);
         file.close().unwrap();
     }
 
     let sb = File::open(&path).unwrap();
     let sb = sb.superblock();
-    assert_eq!(
-        sb.version.get(),
-        1,
-        "the earliest format with istore_k gives v1"
-    );
-    assert_eq!(
-        sb.indexed_storage_internal_node_k,
-        Some(ISTORE_K as u16),
-        "the chunk B-tree K must read back as itself"
-    );
-    assert_eq!(
-        sb.consistency_flags, 0,
-        "a cleanly closed file has no status flags set"
-    );
+    assert_eq!(sb.version, version);
+    if version == SuperblockVersion::One {
+        assert_eq!(
+            sb.indexed_storage_internal_node_k,
+            Some(u16::try_from(indexed_storage_k).unwrap())
+        );
+    } else {
+        assert_eq!(sb.indexed_storage_internal_node_k, None);
+    }
+    assert_eq!(sb.consistency_flags, SuperblockStatusFlags::new());
 }
 
 /// Both libraries read the same superblock status-flags byte the same way
