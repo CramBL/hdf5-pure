@@ -95,6 +95,7 @@ mod symbol_table_soft_links;
 mod unallocated_datasets;
 mod userblock_base_address;
 mod vlen_chunked;
+mod vlen_metadata;
 mod vlen_string_attrs;
 
 mod fail_if_unknown;
