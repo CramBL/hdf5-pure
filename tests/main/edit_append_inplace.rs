@@ -205,16 +205,11 @@ fn filtered_raw_append_onto_a_partial_trailing_chunk() {
 }
 
 #[rstest]
-#[case::page_exponent_64(11, 64, "Extensible Array page element count does not fit u64")]
-#[case::maximum_element_bits_255(
-    7,
-    255,
-    "Extensible Array maximum element bit count must be in 1..=64"
-)]
+#[case::page_exponent_64(11, 64)]
+#[case::maximum_element_bits_255(7, 255)]
 fn append_to_malformed_ea_bit_geometry_returns_a_format_error_and_preserves_the_file(
     #[case] byte: usize,
     #[case] value: u8,
-    #[case] reason: &str,
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
@@ -237,10 +232,13 @@ fn append_to_malformed_ea_bit_geometry_returns_a_format_error_and_preserves_the_
         let err = panic::catch_unwind(AssertUnwindSafe(|| dataset.append(&[4i32, 5, 6, 7])))
             .expect("append must reject malformed geometry without panicking")
             .unwrap_err();
-        let Error::Format(FormatError::InvalidChunkGeometry(actual)) = err else {
-            panic!("expected InvalidChunkGeometry, got {err:?}");
-        };
-        assert_eq!(actual, reason);
+        assert!(
+            matches!(
+                err,
+                Error::Format(FormatError::InvalidExtensibleArrayGeometry)
+            ),
+            "{err:?}"
+        );
     }
     assert_eq!(fs::read(&path).unwrap(), bytes);
 }

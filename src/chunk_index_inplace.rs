@@ -73,7 +73,6 @@ use crate::message_type::MessageType;
 use crate::prepared_chunk::ChunkEncoding;
 use crate::prepared_chunk::PreparedChunk;
 use crate::source::Source;
-use crate::source::SourceMetadata;
 use crate::width::{FormatWidths, OffsetWidth};
 
 /// Counts the two index-block allocations, so a test can say whether its fixture
@@ -465,11 +464,8 @@ impl Located {
         };
         let chunk_bytes = chunk_elems.to_usize()? * elem_bytes.get();
 
-        let ea_header = ExtensibleArrayHeader::parse_from_source_with_widths(
-            &SourceMetadata(file),
-            ea_addr,
-            widths,
-        )?;
+        let array = crate::extensible_array::read_header(file, widths, ea_addr)?;
+        let ea_header = array.header();
         let has_filters = filter_msg.is_some();
         if (ea_header.client_id == 1) != has_filters {
             return Err(unsupported(
@@ -477,13 +473,8 @@ impl Located {
                  disagrees with the filter pipeline)",
             ));
         }
-        // A filtered element is `address + compressed_size + filter_mask`, so its
-        // stored width must leave room for a size field of one to eight bytes.
-        // Reject a corrupt header outside that range before the width arithmetic
-        // (`ea_elem_size - offset_size - 4`) underflows below it, or names above
-        // it a size field wider than the `u64` that fills it. The reader's header
-        // parser rejects an element size below `offset_size + 4` or above
-        // `offset_size + 12`.
+        // Immediate append writes a stored-size field of one to eight bytes.
+        // The header parser accepts an empty size field as well.
         let elem_w = ea_header.element_size as usize;
         if ea_header.client_id == 1 && !(os as usize + 5..=os as usize + 12).contains(&elem_w) {
             return Err(unsupported(
@@ -495,7 +486,7 @@ impl Located {
                 "malformed unfiltered extensible-array element width",
             ));
         }
-        let geom = ExtensibleArrayGeometry::from_header(&ea_header, widths.offsets)?;
+        let geom = array.geometry()?;
         let index_block_addr = ea_header.index_block_address;
         // The dataspace dimension is the single commit point; the EA element
         // count is published one step earlier. If a prior writer crashed between
@@ -2063,18 +2054,33 @@ mod tests {
         image.build()
     }
 
-    #[test]
-    fn an_unfiltered_element_wider_than_an_address_is_unsupported() {
+    #[rstest]
+    #[case(0)]
+    #[case(7)]
+    #[case(9)]
+    #[case(255)]
+    fn an_unfiltered_element_width_other_than_an_address_is_readable_but_append_is_unsupported(
+        #[case] element_size: u8,
+    ) {
         let mut data = build_unlimited(4, 1);
         let header_at = data
             .windows(4)
             .position(|window| window == b"EAHD")
             .unwrap();
-        data[header_at + 6] = 9;
+        data[header_at + 6] = element_size;
         test_util::checksum::restamp(
             &mut data,
             header_at,
             ExtensibleArrayHeader::serialized_size(8, 8),
+        );
+        assert_eq!(
+            crate::File::from_bytes(data.clone())
+                .unwrap()
+                .dataset("d")
+                .unwrap()
+                .read_i32()
+                .unwrap(),
+            [0, 1, 2, 3]
         );
         let store = WindowProbeStore::open(data);
         let oh_addr = group_v2::resolve_path_any(
@@ -2097,6 +2103,70 @@ mod tests {
             reason,
             "malformed unfiltered extensible-array element width"
         );
+    }
+
+    #[rstest]
+    fn locating_an_array_reads_its_complete_header_once(#[values(false, true)] filtered: bool) {
+        let store = if filtered {
+            EdgeFilter::Shuffle.store()
+        } else {
+            WindowProbeStore::open(build_unlimited(4, 1))
+        };
+        let address = dataset_address(&store);
+        store.reset_counters();
+        let located = Located::locate_at(&store, address, Error::AppendUnsupported)
+            .unwrap()
+            .located;
+        assert_eq!(
+            store
+                .reads
+                .borrow()
+                .iter()
+                .filter(|(at, _)| *at == located.ea_addr.get())
+                .copied()
+                .collect::<Vec<_>>(),
+            [(
+                located.ea_addr.get(),
+                ExtensibleArrayHeader::serialized_size_with_widths(store.widths),
+            )]
+        );
+    }
+
+    #[test]
+    fn a_filtered_header_with_an_empty_size_field_parses_and_is_unsupported_for_append() {
+        let mut store = EdgeFilter::Shuffle.store();
+        let address = dataset_address(&store);
+        let header = Located::locate_at(&store, address, Error::AppendUnsupported)
+            .unwrap()
+            .located
+            .ea_addr
+            .get()
+            .to_usize()
+            .unwrap();
+        store.data[header + EA_HEADER_ELEMENT_SIZE] =
+            store.widths.offsets.get() + EA_FILTER_MASK_BYTES;
+        test_util::checksum::restamp(
+            &mut store.data,
+            header,
+            ExtensibleArrayHeader::serialized_size_with_widths(store.widths),
+        );
+        let array = crate::extensible_array::read_header(
+            &store,
+            store.widths,
+            StoredAddress::new(header.to_u64()),
+        )
+        .unwrap();
+        assert_eq!(
+            array.header().element_size,
+            store.widths.offsets.get() + EA_FILTER_MASK_BYTES
+        );
+        let Err(error) = Located::locate_at(&store, address, Error::AppendUnsupported) else {
+            panic!("expected an unsupported element width");
+        };
+        let Error::AppendUnsupported(reason) = error else {
+            panic!("expected AppendUnsupported, got {error:?}");
+        };
+        assert_eq!(reason, "malformed filtered extensible-array element width");
     }
 
     #[test]
@@ -2493,18 +2563,8 @@ mod tests {
         assert_eq!(got, expected);
     }
 
-    /// A filtered element's stored-size field is at most the eight bytes of the
-    /// `u64` that fills it, and a file naming a wider one is refused at `locate`
-    /// rather than panicking when the element is laid out.
-    ///
-    /// The refusal is two-sided for a reason: the low side alone was what this
-    /// guard checked, and the high side reached
-    /// `rec.stored_size.to_le_bytes()[..csz]` with `csz` up to 243. Reproduced
-    /// through the safe public API before the upper bound landed — an
-    /// `element_size` of 30 on an 8-byte-address file panicked with "range end
-    /// index 18 out of range for slice of length 8".
     #[test]
-    fn an_element_width_wider_than_a_u64_is_refused_not_a_panic() {
+    fn a_filtered_element_width_beyond_the_geometry_limit_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wide_elem.h5");
         let mut b = crate::writer::FileBuilder::new();
@@ -2516,9 +2576,7 @@ mod tests {
             .with_deflate(DeflateLevel::One);
         b.write(&path).unwrap();
 
-        // Widen the array header's element_size (byte 6 of `EAHD`) past the three
-        // fields it names. A filtered element is address + stored size + filter
-        // mask, so on an 8-byte-address file the format's own ceiling is 20.
+        // The filtered element limit is an 8-byte address, an 8-byte size, and a 4-byte mask.
         let mut bytes = std::fs::read(&path).unwrap();
         let at = bytes
             .windows(4)
@@ -2526,9 +2584,6 @@ mod tests {
             .expect("a filtered unlimited dataset is indexed by an extensible array");
         assert_eq!(bytes[at + 6], 14, "the writer's own element width moved");
         bytes[at + 6] = 30;
-        // Restamp the header. Its checksum covers this field, so leaving it
-        // stale would have the reader refuse the file for being corrupt before
-        // it ever reached the width guard under test.
         crate::checksum::stamp_trailing(&mut bytes, at, 12 + 6 * 8 + 8 + 4);
         std::fs::write(&path, &bytes).unwrap();
 
@@ -2536,11 +2591,16 @@ mod tests {
         let err = f
             .dataset("d")
             .and_then(|mut d| d.append(&[1i32, 2, 3, 4]))
-            .expect_err("an element width wider than a u64 must be refused");
+            .unwrap_err();
         assert!(
-            std::format!("{err:?}").contains("element width"),
-            "the refusal should name the element width, but said {err:?}"
+            matches!(
+                err,
+                Error::Format(FormatError::InvalidExtensibleArrayGeometry)
+            ),
+            "{err:?}"
         );
+        drop(f);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
 
     #[rstest]
@@ -2908,4 +2968,9 @@ mod tests {
 
     const EDGE_INITIAL: [i32; 6] = [100, 101, 102, 103, 104, 105];
     const EDGE_FILL: i32 = -7;
+
+    // "The Extensible Array Index" in format specification, version 4.0, defines the version 0
+    // header element-size field and the four-byte filter mask for version 4 chunked layouts.
+    const EA_HEADER_ELEMENT_SIZE: usize = 6;
+    const EA_FILTER_MASK_BYTES: u8 = 4;
 }
