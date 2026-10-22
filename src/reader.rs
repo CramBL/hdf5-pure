@@ -25,6 +25,7 @@ use crate::element::H5Element;
 use crate::type_builders::{DatasetBuilder, VL_REF_SIZE};
 
 use crate::FillTime;
+use crate::SuperblockVersion;
 use crate::appender::BufferedAppender;
 use crate::attribute;
 use crate::chunk_cache::{CachePass, ChunkCache, ChunkCacheConfig, ChunkCacheStats};
@@ -1126,7 +1127,7 @@ impl FileInner {
         let mut data = Vec::new();
         handle.read_to_end(&mut data).map_err(Error::Io)?;
         let (superblock, widths, opened) = Self::parse_superblock(data.as_slice())?;
-        if superblock.version < SWMR_SUPERBLOCK_VERSION {
+        if superblock.version != SWMR_SUPERBLOCK_VERSION {
             opened.require_complete(data.len() as u64)?;
         }
         file_lock::check_status_flags(
@@ -7520,7 +7521,7 @@ const NO_LINK_TO_WRITE: &str = "a write needs a link name, and this path holds n
 
 // H5F__super_read in src/H5Fsuper.c, HDF5 1.14.6, exempts initial SWMR reads from the EOF
 // completeness check for superblock version 3 and later.
-const SWMR_SUPERBLOCK_VERSION: u8 = 3;
+const SWMR_SUPERBLOCK_VERSION: SuperblockVersion = SuperblockVersion::Three;
 
 #[cfg(test)]
 mod tests {
@@ -8929,7 +8930,10 @@ mod tests {
                     &bytes,
                     AccessMode::ReadOnly,
                     &sb,
-                    FormatWidths::from_sizes(sb.offset_size, sb.length_size).unwrap(),
+                    FormatWidths {
+                        offsets: sb.offset_size,
+                        lengths: sb.length_size,
+                    },
                     AddressContext::from_effective_base(sb.base_address),
                     &ObjectPath::parse("plain"),
                 )
@@ -10591,8 +10595,12 @@ mod tests {
                 ..
             } = crate::superblock::read(bytes.as_slice()).unwrap();
             let sig = usize::try_from(address.get()).unwrap();
-            assert_eq!(sb.version, 3, "the fixture must start at the newer format");
-            sb.version = 2;
+            assert_eq!(
+                sb.version.get(),
+                3,
+                "the fixture must start at the newer format"
+            );
+            sb.version = SuperblockVersion::Two;
             let rewritten = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();
             bytes[sig..sig + rewritten.len()].copy_from_slice(&rewritten);
             std::fs::write(&old_format, &bytes).unwrap();

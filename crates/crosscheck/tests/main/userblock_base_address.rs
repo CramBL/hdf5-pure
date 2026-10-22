@@ -306,7 +306,7 @@ fn initial_legacy_swmr_open_requires_effective_eof(
         );
     }
     let mut file = ours.unwrap();
-    assert_eq!(file.superblock().version, version);
+    assert_eq!(file.superblock().version.get(), version);
     assert_eq!(file.superblock().base_address.get(), stored_base as u64);
     assert_eq!(file.superblock().eof_address, original.len() as u64);
     assert_eq!(file.dataset("early").unwrap().read_i32().unwrap(), [42]);
@@ -353,7 +353,7 @@ fn swmr_open_and_refresh_accept_partially_extended_image(
         );
     }
     let mut file = File::open_swmr(&path).unwrap();
-    assert_eq!(file.superblock().version, superblock::VERSION_3);
+    assert_eq!(file.superblock().version.get(), superblock::VERSION_3);
     assert_eq!(file.dataset("early").unwrap().read_i32().unwrap(), [42]);
     image.pop().unwrap();
     std::fs::write(&path, image).unwrap();

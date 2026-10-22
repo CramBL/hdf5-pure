@@ -11,6 +11,8 @@
 //!
 //! [`H5F_libver_t`]: https://portal.hdfgroup.org/documentation/hdf5/latest/group___f_a_p_l.html
 
+use crate::SuperblockVersion;
+
 /// A library-version boundary, mirroring HDF5's `H5F_libver_t`.
 ///
 /// Variants are ordered oldest to newest; a later variant understands strictly
@@ -76,16 +78,15 @@ impl LibVer {
     /// refused rather than silently satisfied with something newer.
     pub const WRITER_OLDEST: LibVer = LibVer::V18;
 
-    /// The minimum library version required to read a file with the given
-    /// superblock version — i.e. the *low bound* the on-disk format implies.
+    /// Returns the minimum library version required by a superblock version.
     ///
-    /// Superblock 0/1 → [`Earliest`](LibVer::Earliest); 2 → [`V18`](LibVer::V18);
-    /// 3 and anything newer → [`V110`](LibVer::V110).
-    pub fn from_superblock_version(version: u8) -> LibVer {
+    /// Returns [`Earliest`](Self::Earliest) for versions 0 and 1, [`V18`](Self::V18) for version 2,
+    /// and [`V110`](Self::V110) for version 3.
+    pub fn from_superblock_version(version: SuperblockVersion) -> LibVer {
         match version {
-            0 | 1 => LibVer::Earliest,
-            2 => LibVer::V18,
-            _ => LibVer::V110,
+            SuperblockVersion::Zero | SuperblockVersion::One => LibVer::Earliest,
+            SuperblockVersion::Two => LibVer::V18,
+            SuperblockVersion::Three => LibVer::V110,
         }
     }
 

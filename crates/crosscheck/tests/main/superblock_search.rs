@@ -1,6 +1,9 @@
 #![cfg(feature = "__hdf5-1.10")]
 
 use hdf5::file::LibraryVersion;
+use hdf5_pure::LengthWidth;
+use hdf5_pure::OffsetWidth;
+use hdf5_pure::SuperblockVersion;
 use rstest::rstest;
 
 use test_util::superblock;
@@ -49,7 +52,12 @@ fn every_reader_finds_the_superblock_after_a_userblock_libhdf5_wrote(
     assert!(hdf5_pure::is_hdf5(&path).unwrap());
     assert!(hdf5_pure::is_hdf5_bytes(&bytes));
     let file = backend.open(&path).unwrap();
-    assert_eq!(file.superblock().version, version);
+    assert_eq!(
+        file.superblock().version,
+        SuperblockVersion::try_from(version).unwrap()
+    );
+    assert_eq!(file.superblock().offset_size, OffsetWidth::Eight);
+    assert_eq!(file.superblock().length_size, LengthWidth::Eight);
     assert_eq!(file.superblock().base_address.get(), userblock);
     assert_eq!(file.superblock().eof_address, bytes.len() as u64);
     assert_eq!(

@@ -133,7 +133,7 @@ fn both_readers_list_the_links_and_addresses_libhdf5_lists(
         File::open(&path).unwrap(),
         File::open_streaming(&path).unwrap(),
     ] {
-        assert_eq!(file.superblock().version, creation.superblock_version);
+        assert_eq!(file.superblock().version.get(), creation.superblock_version);
         assert_eq!(file.superblock().base_address.get(), creation.userblock);
         let listed: Vec<Vec<(String, u64)>> = GROUPS
             .iter()

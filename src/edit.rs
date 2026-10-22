@@ -315,6 +315,7 @@ use crate::DatatypeByteOrder;
 #[cfg(test)]
 use crate::DeflateLevel;
 use crate::FillTime;
+use crate::SuperblockVersion;
 use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
 use crate::address::BaseAddress;
@@ -1620,7 +1621,10 @@ fn bounded_only_limitation(session: &WriteEngine) -> Option<&'static str> {
         );
     }
 
-    if session.superblock.version < 2 {
+    if matches!(
+        session.superblock.version,
+        SuperblockVersion::Zero | SuperblockVersion::One
+    ) {
         return Some(
             "bounded read-write access requires a latest-format file (v2/v3 superblock); \
              leave MemoryStrategy unset, or pass MemoryStrategy::Auto, to fall back to \
@@ -2295,7 +2299,7 @@ impl WriteEngine {
                  use File::open_rw with staged edits and File::commit",
             ));
         }
-        if session.superblock.version < 3
+        if session.superblock.version != SuperblockVersion::Three
             || !session.superblock.base_address.is_zero()
             || session.persist.is_some()
         {
@@ -2460,9 +2464,6 @@ impl WriteEngine {
         } = superblock::read(&probe)?;
         let sb_sig_off = address.get();
 
-        if superblock.version > 3 {
-            return Err(Error::EditUnsupported("unsupported superblock version"));
-        }
         // Refuse a file a writer already holds, before anything is mutated. This
         // is the one exclusion the OS lock above cannot make: a SWMR writer
         // takes no lock, so its file is lock-free but flagged (issue #245).
@@ -2714,7 +2715,7 @@ impl WriteEngine {
         // it. A version-2 paged file is reachable — `LibVer::V18` writes a
         // version-2 superblock and nothing about paged file space rules it out —
         // so this is a refusal rather than an assertion (issue #308).
-        if self.superblock.version < 3 {
+        if self.superblock.version != SuperblockVersion::Three {
             return Err(Error::EditUnsupported(
                 "a page buffer marks the file for the life of the session, so that a session \
                  that crashes leaves one every reader refuses rather than one that reads \
@@ -2952,7 +2953,10 @@ impl WriteEngine {
         addresses: AddressContext,
     ) -> Result<Option<(u64, FileSpaceInfo)>, FormatError> {
         let base = addresses;
-        if superblock.version < 2 {
+        if matches!(
+            superblock.version,
+            SuperblockVersion::Zero | SuperblockVersion::One
+        ) {
             return Ok(None); // no superblock extension exists before v2
         }
         let Some(ext_rel) = superblock.superblock_extension_address else {
@@ -4273,7 +4277,10 @@ impl WriteEngine {
                  address); use Dataset::append_staged",
             ));
         }
-        if self.superblock.version < 2 {
+        if matches!(
+            self.superblock.version,
+            SuperblockVersion::Zero | SuperblockVersion::One
+        ) {
             return Err(Error::AppendInPlaceUnsupported(
                 "in-place append requires a latest-format file (v2/v3 superblock); use \
                  Dataset::append_staged",
@@ -5179,7 +5186,7 @@ impl WriteEngine {
             "cross-file copy requires a buffered source file (File::open or File::from_bytes), not a streaming one",
         ))?;
         let src_sb = source.superblock();
-        if src_sb.offset_size != OFFSET_SIZE || src_sb.length_size != LENGTH_SIZE {
+        if src_sb.offset_size != OFFSET_WIDTH || src_sb.length_size != LENGTH_WIDTH {
             return Err(Error::EditUnsupported(
                 "cross-file copy requires the source file to use 8-byte offsets and lengths",
             ));
@@ -6902,7 +6909,10 @@ impl WriteEngine {
         let base = self.addresses;
         let new_eof = trunc_to.map_or(self.image.len(), PhysicalAddress::get);
         self.barrier()?;
-        if self.superblock.version >= 2 {
+        if matches!(
+            self.superblock.version,
+            SuperblockVersion::Two | SuperblockVersion::Three
+        ) {
             // Build the new superblock off a clone and adopt it only once the
             // write succeeds, so a failed write does not desync the in-memory
             // state. The v2/v3 superblock carries its own checksum.
@@ -7804,13 +7814,17 @@ impl WriteEngine {
     /// describe the old symbol-table group, no longer apply). The
     /// object-header-address write is done last so it is the linearization point.
     fn repoint_v0v1_root(&mut self, new_root: StoredAddress, new_eof: u64) -> Result<(), Error> {
-        let os = self.superblock.offset_size;
+        let os = self.superblock.offset_size.get();
         let addr_width = u64::from(os);
         // Field layout after the fixed prefix: base / free-space / EOF / driver
         // addresses, then the root symbol-table entry (link-name offset, object
         // header address, cache type(4), reserved(4), scratch(16)). The prefix is
         // 24 bytes for v0 and 28 for v1 (the latter adds indexed-storage-K).
-        let var_start = if self.superblock.version == 0 { 24 } else { 28 };
+        let var_start = if self.superblock.version == SuperblockVersion::Zero {
+            24
+        } else {
+            28
+        };
         let base = self.sb_sig_off + var_start;
         let eof_off = base + 2 * addr_width;
         let ste = base + 4 * addr_width;
@@ -17207,8 +17221,10 @@ mod tests {
         b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 0);
         b.write(&path).unwrap();
         let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
-        let widths =
-            FormatWidths::from_sizes(s.superblock.offset_size, s.superblock.length_size).unwrap();
+        let widths = FormatWidths {
+            offsets: s.superblock.offset_size,
+            lengths: s.superblock.length_size,
+        };
 
         let free_total = |s: &WriteEngine| -> u64 {
             s.space.reusable_sections().map(|extent| extent.len()).sum()
@@ -19103,7 +19119,10 @@ mod tests {
             } = crate::superblock::read(data.as_slice()).unwrap();
             let off = usize::try_from(address.get()).unwrap();
             assert!(
-                sb.version >= 2,
+                matches!(
+                    sb.version,
+                    SuperblockVersion::Two | SuperblockVersion::Three
+                ),
                 "FileBuilder should emit a v2/v3 superblock"
             );
             sb.consistency_flags = 0x05;
@@ -19141,7 +19160,7 @@ mod tests {
                 ..
             } = crate::superblock::read(data.as_slice()).unwrap();
             let off = usize::try_from(address.get()).unwrap();
-            sb.version = 2;
+            sb.version = SuperblockVersion::Two;
             sb.consistency_flags = crate::file_lock::WRITE_ACCESS;
             let bytes = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();
             data[off..off + bytes.len()].copy_from_slice(&bytes);

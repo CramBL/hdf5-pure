@@ -68,7 +68,11 @@ fn a_v1_superblock_reports_the_flags_the_c_library_wrote() {
 
     let sb = File::open(&path).unwrap();
     let sb = sb.superblock();
-    assert_eq!(sb.version, 1, "the earliest format with istore_k gives v1");
+    assert_eq!(
+        sb.version.get(),
+        1,
+        "the earliest format with istore_k gives v1"
+    );
     assert_eq!(
         sb.indexed_storage_internal_node_k,
         Some(ISTORE_K as u16),

@@ -379,6 +379,7 @@ def test_migration_builds_core_with_the_profile_core_features():
         ("MantissaNormalization", []),
         ("OffsetWidth", []),
         ("StoredAddress", []),
+        ("SuperblockVersion", []),
         ("Unlisted", ["Unlisted: new core root item"]),
     ],
 )
@@ -415,11 +416,14 @@ def test_migration_shape_ignores_only_the_allowed_field_changes(type_name, field
         ("driver_info_address", []),
         ("eof_address", ["Superblock: fields changed"]),
         ("free_space_address", []),
+        ("version", []),
+        ("offset_size", []),
+        ("length_size", []),
         ("root_group_address", []),
         ("superblock_extension_address", []),
     ],
 )
-def test_migration_shape_admits_only_relative_superblock_field_changes(field, expected):
+def test_migration_shape_admits_only_the_allowed_superblock_field_changes(field, expected):
     baseline = core_shape_fixture()
     baseline["index"]["1"]["name"] = "Superblock"
     baseline["index"]["2"]["name"] = field

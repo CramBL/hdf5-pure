@@ -111,7 +111,7 @@ fn c_written_v2_file_edited_in_place() {
     fixtures::libhdf5_edit_repack_starter(&path, LibraryVersion::V18, LibraryVersion::V18, &[7, 8])
         .close()
         .unwrap();
-    assert_eq!(File::open(&path).unwrap().superblock().version, 2);
+    assert_eq!(File::open(&path).unwrap().superblock().version.get(), 2);
 
     {
         let session = File::open_rw(&path).unwrap();
@@ -134,7 +134,7 @@ fn c_written_v3_file_edited_in_place() {
     )
     .close()
     .unwrap();
-    assert_eq!(File::open(&path).unwrap().superblock().version, 3);
+    assert_eq!(File::open(&path).unwrap().superblock().version.get(), 3);
 
     {
         let session = File::open_rw(&path).unwrap();
@@ -207,7 +207,7 @@ fn c_v0_symboltable_file_edited_then_read_by_c_library() {
     .close()
     .unwrap();
     assert!(
-        File::open(&path).unwrap().superblock().version <= 1,
+        File::open(&path).unwrap().superblock().version.get() <= 1,
         "expected a v0/v1 superblock from the earliest libver bound"
     );
 
@@ -233,7 +233,7 @@ fn c_v0_symboltable_file_edited_then_read_by_c_library() {
 
     // The superblock stays version 0; the edited groups were converted to v2.
     let f = File::open(&path).unwrap();
-    assert!(f.superblock().version <= 1);
+    assert!(f.superblock().version.get() <= 1);
     assert_eq!(
         f.dataset("alpha").unwrap().read_f64().unwrap(),
         vec![1.0, 2.0, 3.0]
@@ -299,7 +299,7 @@ fn c_v0_root_attributes_survive_conversion() {
             .unwrap();
         file.close().unwrap();
     }
-    assert!(File::open(&path).unwrap().superblock().version <= 1);
+    assert!(File::open(&path).unwrap().superblock().version.get() <= 1);
 
     {
         let session = File::open_rw(&path).unwrap();
@@ -1679,7 +1679,10 @@ fn a_replaced_object_is_read_by_the_c_library() {
         fixtures::libhdf5_edit_repack_starter(&path, low, high, &[7, 8])
             .close()
             .unwrap();
-        assert_eq!(File::open(&path).unwrap().superblock().version, want_sb);
+        assert_eq!(
+            File::open(&path).unwrap().superblock().version.get(),
+            want_sb
+        );
 
         {
             let session = File::open_rw(&path).unwrap();

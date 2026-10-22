@@ -18,8 +18,11 @@ use crate::EnumMember;
 use crate::FileSpaceInfo;
 use crate::FileSpacePageSize;
 use crate::FileSpaceStrategy;
+use crate::LengthWidth;
+use crate::OffsetWidth;
 use crate::StoredAddress;
 use crate::Superblock;
+use crate::SuperblockVersion;
 
 pub use crate::address::BaseAddressExt;
 pub use crate::address::DecodedStoredAddress;
@@ -88,9 +91,9 @@ pub fn enum_member(name: String, value: Vec<u8>) -> EnumMember {
 ///
 /// Each field holds the value of the [`Superblock`] field of the same name.
 pub struct SuperblockFields {
-    pub version: u8,
-    pub offset_size: u8,
-    pub length_size: u8,
+    pub version: SuperblockVersion,
+    pub offset_size: OffsetWidth,
+    pub length_size: LengthWidth,
     pub base_address: BaseAddress,
     pub eof_address: u64,
     pub root_group_address: StoredAddress,

@@ -563,6 +563,7 @@ pub use hdf5_pure_core::StoredAddress;
 #[cfg(feature = "std")]
 #[doc(inline)]
 pub use hdf5_pure_core::MessageType;
+pub use hdf5_pure_core::SuperblockVersion;
 #[cfg(feature = "std")]
 pub use superblock::Superblock;
 

@@ -804,8 +804,8 @@ mod tests {
                 .unwrap()
                 .to_usize()
                 .unwrap(),
-            sb.offset_size,
-            sb.length_size,
+            sb.offset_size.get(),
+            sb.length_size.get(),
         )
         .unwrap();
         let sym_msg = root_header
@@ -813,7 +813,7 @@ mod tests {
             .iter()
             .find(|m| m.msg_type == MessageType::SYMBOL_TABLE)
             .unwrap();
-        SymbolTableMessage::parse(&sym_msg.data, sb.offset_size).unwrap()
+        SymbolTableMessage::parse(&sym_msg.data, sb.offset_size.get()).unwrap()
     }
 
     // Integration tests with real HDF5 files
@@ -827,7 +827,10 @@ mod tests {
         let entries = resolve_v1_group_entries(
             file_data,
             &root_sym,
-            FormatWidths::from_sizes(sb.offset_size, sb.length_size).unwrap(),
+            FormatWidths {
+                offsets: sb.offset_size,
+                lengths: sb.length_size,
+            },
             AddressContext::from_effective_base(BaseAddress::ZERO),
             group_leaf_node_k(&sb),
         )
@@ -841,11 +844,12 @@ mod tests {
             file_data,
             AccessMode::ReadOnly,
             data_entry.object_header_address.get() as usize,
-            sb.offset_size,
-            sb.length_size,
+            sb.offset_size.get(),
+            sb.length_size.get(),
         )
         .unwrap();
-        let (dt, ds, dl) = extract_dataset(file_data, &hdr, sb.offset_size, sb.length_size);
+        let (dt, ds, dl) =
+            extract_dataset(file_data, &hdr, sb.offset_size.get(), sb.length_size.get());
         let raw = crate::data_read::read_raw_data(file_data, &dl, &ds, &dt).unwrap();
         let values = crate::data_read::read_as_f64(&raw, &dt).unwrap();
         assert_eq!(values, vec![1.0, 2.0, 3.0]);

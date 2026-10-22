@@ -1119,7 +1119,10 @@ mod tests {
     }
 
     fn test_widths(superblock: &Superblock) -> FormatWidths {
-        FormatWidths::from_sizes(superblock.offset_size, superblock.length_size).unwrap()
+        FormatWidths {
+            offsets: superblock.offset_size,
+            lengths: superblock.length_size,
+        }
     }
 
     #[cfg(feature = "std")]
@@ -1164,16 +1167,16 @@ mod tests {
             &bytes,
             AccessMode::ReadOnly,
             object_at.to_usize().unwrap(),
-            superblock.offset_size,
-            superblock.length_size,
+            superblock.offset_size.get(),
+            superblock.length_size.get(),
             addresses.effective_base(),
         )
         .unwrap();
         let (datatype, dataspace, layout) = extract_dataset(
             &bytes,
             &header,
-            superblock.offset_size,
-            superblock.length_size,
+            superblock.offset_size.get(),
+            superblock.length_size.get(),
         );
         let raw = data_read::read_raw_data(
             source::frame(&bytes, addresses.effective_base()).unwrap(),
@@ -1473,7 +1476,7 @@ mod tests {
     fn integration_v2_groups_temperature() {
         let file_data: &[u8] = include_bytes!("../tests/data/unattributed/v2_groups.h5");
         let sb = crate::superblock::read(file_data).unwrap().superblock;
-        assert!(sb.version >= 2); // v2/v3 superblock
+        assert!(sb.version.get() >= 2); // v2/v3 superblock
 
         let addr = resolve_path_any(
             file_data,
@@ -1488,11 +1491,12 @@ mod tests {
             file_data,
             AccessMode::ReadOnly,
             addr as usize,
-            sb.offset_size,
-            sb.length_size,
+            sb.offset_size.get(),
+            sb.length_size.get(),
         )
         .unwrap();
-        let (dt, ds, dl) = extract_dataset(file_data, &hdr, sb.offset_size, sb.length_size);
+        let (dt, ds, dl) =
+            extract_dataset(file_data, &hdr, sb.offset_size.get(), sb.length_size.get());
         let raw = data_read::read_raw_data(file_data, &dl, &ds, &dt).unwrap();
         let values = data_read::read_as_f64(&raw, &dt).unwrap();
         assert_eq!(values, vec![22.5, 23.1, 21.8]);
@@ -1516,11 +1520,12 @@ mod tests {
             file_data,
             AccessMode::ReadOnly,
             addr as usize,
-            sb.offset_size,
-            sb.length_size,
+            sb.offset_size.get(),
+            sb.length_size.get(),
         )
         .unwrap();
-        let (dt, ds, dl) = extract_dataset(file_data, &hdr, sb.offset_size, sb.length_size);
+        let (dt, ds, dl) =
+            extract_dataset(file_data, &hdr, sb.offset_size.get(), sb.length_size.get());
         let raw = data_read::read_raw_data(file_data, &dl, &ds, &dt).unwrap();
         let values = data_read::read_as_i32(&raw, &dt).unwrap();
         assert_eq!(values, vec![45, 50, 55]);
@@ -1544,11 +1549,12 @@ mod tests {
             file_data,
             AccessMode::ReadOnly,
             addr as usize,
-            sb.offset_size,
-            sb.length_size,
+            sb.offset_size.get(),
+            sb.length_size.get(),
         )
         .unwrap();
-        let (dt, ds, dl) = extract_dataset(file_data, &hdr, sb.offset_size, sb.length_size);
+        let (dt, ds, dl) =
+            extract_dataset(file_data, &hdr, sb.offset_size.get(), sb.length_size.get());
         let raw = data_read::read_raw_data(file_data, &dl, &ds, &dt).unwrap();
         let values = data_read::read_as_f64(&raw, &dt).unwrap();
         assert_eq!(values, vec![15.0]);
@@ -1573,11 +1579,12 @@ mod tests {
             file_data,
             AccessMode::ReadOnly,
             addr as usize,
-            sb.offset_size,
-            sb.length_size,
+            sb.offset_size.get(),
+            sb.length_size.get(),
         )
         .unwrap();
-        let (dt, ds, dl) = extract_dataset(file_data, &hdr, sb.offset_size, sb.length_size);
+        let (dt, ds, dl) =
+            extract_dataset(file_data, &hdr, sb.offset_size.get(), sb.length_size.get());
         let raw = data_read::read_raw_data(file_data, &dl, &ds, &dt).unwrap();
         let values = data_read::read_as_i32(&raw, &dt).unwrap();
         assert_eq!(values, vec![10, 20, 30]);
@@ -1601,11 +1608,12 @@ mod tests {
             file_data,
             AccessMode::ReadOnly,
             addr as usize,
-            sb.offset_size,
-            sb.length_size,
+            sb.offset_size.get(),
+            sb.length_size.get(),
         )
         .unwrap();
-        let (dt, ds, dl) = extract_dataset(file_data, &hdr, sb.offset_size, sb.length_size);
+        let (dt, ds, dl) =
+            extract_dataset(file_data, &hdr, sb.offset_size.get(), sb.length_size.get());
         let raw = data_read::read_raw_data(file_data, &dl, &ds, &dt).unwrap();
         let values = data_read::read_as_f64(&raw, &dt).unwrap();
         assert_eq!(values, vec![22.5, 23.1, 21.8]);
@@ -1748,7 +1756,10 @@ mod huge_link_tests {
     use crate::source::BytesSource;
 
     fn test_widths(superblock: &Superblock) -> FormatWidths {
-        FormatWidths::from_sizes(superblock.offset_size, superblock.length_size).unwrap()
+        FormatWidths {
+            offsets: superblock.offset_size,
+            lengths: superblock.length_size,
+        }
     }
 
     /// A file with one group of `count` links, each name long enough that its
@@ -1760,14 +1771,14 @@ mod huge_link_tests {
 
     /// Group `g`'s dense-link storage: its info message, its heap address, and
     /// the file's offset and length sizes.
-    fn dense_link_info(bytes: &[u8]) -> (LinkInfoMessage, StoredAddress, u8, u8) {
+    fn dense_link_info(bytes: &[u8]) -> (LinkInfoMessage, StoredAddress, FormatWidths) {
         let superblock = crate::superblock::read(bytes).unwrap().superblock;
-        let (offset_size, length_size) = (superblock.offset_size, superblock.length_size);
+        let widths = test_widths(&superblock);
         let group_addr = resolve_path_any(
             bytes,
             AccessMode::ReadOnly,
             &superblock,
-            test_widths(&superblock),
+            widths,
             AddressContext::from_effective_base(superblock.base_address),
             &ObjectPath::parse("g"),
         )
@@ -1776,16 +1787,15 @@ mod huge_link_tests {
             bytes,
             AccessMode::ReadOnly,
             group_addr.to_usize().unwrap(),
-            offset_size,
-            length_size,
+            widths.offsets.get(),
+            widths.lengths.get(),
         )
         .unwrap();
-        let link_info =
-            find_link_info(&header, OffsetWidth::try_from(offset_size).unwrap()).unwrap();
+        let link_info = find_link_info(&header, widths.offsets).unwrap();
         let fh_addr = link_info
             .fractal_heap_address
             .expect("this many long-named links are stored densely");
-        (link_info, fh_addr, offset_size, length_size)
+        (link_info, fh_addr, widths)
     }
 
     /// Both dense-link walks resolve every huge object against one parse of the
@@ -1799,7 +1809,7 @@ mod huge_link_tests {
         // Above the C library's max_compact of 8, so the links are stored densely.
         const COUNT: usize = 12;
         let bytes = file_with_huge_links(COUNT);
-        let (link_info, fh_addr, offset_size, length_size) = dense_link_info(&bytes);
+        let (link_info, fh_addr, widths) = dense_link_info(&bytes);
 
         fractal_heap::reset_huge_index_decodes();
         let buffered = resolve_dense_entries(
@@ -1808,7 +1818,7 @@ mod huge_link_tests {
             AddressContext::from_effective_base(BaseAddress::new(0)),
             &link_info,
             fh_addr,
-            FormatWidths::from_sizes(offset_size, length_size).unwrap(),
+            widths,
         )
         .unwrap();
         assert_eq!(buffered.len(), COUNT, "the walk must still read every link");
@@ -1826,7 +1836,7 @@ mod huge_link_tests {
             AddressContext::from_effective_base(BaseAddress::new(0)),
             &link_info,
             fh_addr,
-            FormatWidths::from_sizes(offset_size, length_size).unwrap(),
+            widths,
         )
         .unwrap();
         assert_eq!(streamed.len(), COUNT);
