@@ -9,6 +9,7 @@
 //! reference-C-library files in `crates/crosscheck/tests/main/layout_introspection.rs`.
 
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::FilterId;
 use hdf5_pure::{ChunkIndex, Dataset, File, FileBuilder, Layout, MaxExtent};
 
 fn open(f: &File, name: &str) -> Dataset {
@@ -52,8 +53,8 @@ fn contiguous_fixed_dataset() {
         ds.chunks().is_err(),
         "chunks() errors on a non-chunked dataset"
     );
-    assert!(ds.filter_pipeline().is_empty());
-    assert!(ds.filters().is_empty());
+    assert!(ds.filter_pipeline().unwrap().is_empty());
+    assert!(ds.filters().unwrap().is_empty());
 }
 
 // ---- chunked index kinds ----------------------------------------------------
@@ -226,13 +227,17 @@ fn deflate_pipeline_details() {
     let f = File::open(&p).unwrap();
     let ds = open(&f, "d");
 
-    let pipeline = ds.filter_pipeline();
+    let pipeline = ds.filter_pipeline().unwrap();
     assert_eq!(pipeline.len(), 1);
     let deflate = &pipeline[0];
-    assert_eq!(deflate.id, 1, "deflate filter id");
-    assert_eq!(deflate.client_data, vec![6], "compression level");
+    assert_eq!(deflate.id, FilterId::Deflate, "deflate filter id");
+    assert_eq!(deflate.client_data(), vec![6], "compression level");
     assert!(!deflate.is_optional);
-    assert_eq!(ds.filters(), vec![1], "lightweight id list agrees");
+    assert_eq!(
+        ds.filters().unwrap(),
+        vec![FilterId::Deflate],
+        "lightweight id list agrees"
+    );
 
     for c in ds.chunks().unwrap() {
         assert!(c.storage_size > 0);
@@ -258,14 +263,22 @@ fn shuffle_then_deflate_pipeline_order() {
     let f = File::open(&p).unwrap();
     let ds = open(&f, "d");
 
-    let ids: Vec<u16> = ds.filter_pipeline().iter().map(|flt| flt.id).collect();
+    let ids: Vec<FilterId> = ds
+        .filter_pipeline()
+        .unwrap()
+        .iter()
+        .map(|flt| flt.id)
+        .collect();
     assert_eq!(
         ids,
-        vec![2, 1],
+        vec![FilterId::Shuffle, FilterId::Deflate],
         "shuffle (2) then deflate (1), in write order"
     );
-    assert_eq!(ds.filters(), vec![2, 1]);
-    for flt in ds.filter_pipeline() {
+    assert_eq!(
+        ds.filters().unwrap(),
+        vec![FilterId::Shuffle, FilterId::Deflate]
+    );
+    for flt in ds.filter_pipeline().unwrap() {
         assert!(!flt.is_optional);
     }
 }

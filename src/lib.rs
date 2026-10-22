@@ -576,7 +576,10 @@ pub use reader::{
 };
 
 #[cfg(feature = "std")]
-pub use layout_info::{Chunk, ChunkIndex, Filter, Layout};
+pub use layout_info::{
+    Chunk, ChunkIndex, CustomFilterId, Filter, FilterId, FilterParameters, Layout,
+    ScaleOffsetParameters,
+};
 
 #[cfg(feature = "std")]
 pub use file_lock::{FileLocking, WriteMarkPolicy};

@@ -17,6 +17,7 @@
 //! ```
 
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::FilterId;
 use hdf5_pure::{File, FileBuilder, MaxExtent};
 
 fn main() {
@@ -48,13 +49,16 @@ fn main() {
         assert!(ds.is_chunked());
         assert_eq!(ds.maxshape().unwrap(), Some(vec![MaxExtent::Unlimited])); // axis 0 unlimited
         assert_eq!(ds.chunk_shape().unwrap(), Some(vec![4]));
-        assert_eq!(ds.filters(), vec![2, 1]); // shuffle (2) then deflate (1)
+        assert_eq!(
+            ds.filters().unwrap(),
+            vec![FilterId::Shuffle, FilterId::Deflate]
+        ); // shuffle (2) then deflate (1)
         println!(
             "eligible: chunked={}, maxshape={:?}, chunks={:?}, filters={:?}",
             ds.is_chunked(),
             ds.maxshape().unwrap(),
             ds.chunk_shape().unwrap(),
-            ds.filters(),
+            ds.filters().unwrap(),
         );
     } // the buffered reader holds no lock, but drop it before editing anyway
 

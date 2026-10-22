@@ -4,6 +4,7 @@
 //! with this crate. C-library interop lives in `crates/crosscheck/tests/main/append.rs`.
 
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::FilterId;
 use hdf5_pure::{
     AppendBuilder, AttrValue, Error, File, FileBuilder, FormatError, MaxExtent, ScaleOffset,
 };
@@ -376,7 +377,10 @@ fn introspection_reports_eligibility() {
     assert_eq!(ds.maxshape().unwrap(), Some(vec![MaxExtent::Unlimited]));
     assert_eq!(ds.chunk_shape().unwrap(), Some(vec![4]));
     // shuffle (2) then deflate (1), in pipeline order.
-    assert_eq!(ds.filters(), vec![2, 1]);
+    assert_eq!(
+        ds.filters().unwrap(),
+        vec![FilterId::Shuffle, FilterId::Deflate]
+    );
 }
 
 #[test]
@@ -390,7 +394,7 @@ fn introspection_on_contiguous_dataset() {
     assert!(!ds.is_chunked());
     assert_eq!(ds.maxshape().unwrap(), None);
     assert_eq!(ds.chunk_shape().unwrap(), None);
-    assert!(ds.filters().is_empty());
+    assert!(ds.filters().unwrap().is_empty());
 }
 
 // --- Refusal matrix: every case leaves the file unchanged and returns

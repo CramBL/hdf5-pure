@@ -560,6 +560,7 @@ fn libhdf5_scale_offset(mode: ScaleOffset) -> hdf5::filters::ScaleOffset {
 #[cfg(test)]
 mod tests {
     use hdf5_pure::DeflateLevel;
+    use hdf5_pure::FilterId;
     use hdf5_pure::{ChunkIndex, File, Layout, MaxExtent};
 
     use crate::dataset::{self, Filter, Unlimited};
@@ -589,11 +590,10 @@ mod tests {
                 index: ChunkIndex::ExtensibleArray,
             }
         );
-        assert_eq!(d.filters(), vec![SHUFFLE, DEFLATE]);
+        assert_eq!(
+            d.filters().unwrap(),
+            vec![FilterId::Shuffle, FilterId::Deflate]
+        );
         assert_eq!(d.fill_value::<i32>().unwrap(), Some(9));
     }
-
-    // The filter identifiers of section `subsubsec_fmt4_dataobject_hdr_msg_filter`, version 4.0.
-    const DEFLATE: u16 = 1;
-    const SHUFFLE: u16 = 2;
 }

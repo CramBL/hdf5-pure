@@ -5208,6 +5208,7 @@ fn add_empty_chunked_datasets_of_every_flavor() {
             .dataset("filtered")
             .unwrap()
             .filter_pipeline()
+            .unwrap()
             .is_empty(),
         "the filter pipeline must survive a dataset with no chunks"
     );
@@ -6779,7 +6780,7 @@ fn a_staged_subtree_is_addressable_before_the_commit() {
     assert_eq!(col.maxshape().unwrap(), Some(vec![MaxExtent::Unlimited]));
     assert_eq!(col.dtype().unwrap(), DType::U64);
     assert!(col.is_chunked());
-    assert!(col.filters().is_empty());
+    assert!(col.filters().unwrap().is_empty());
 
     // An append onto a dataset that is not written yet folds into the pending
     // creation, and the shape follows.

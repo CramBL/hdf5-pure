@@ -20,12 +20,19 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use core::fmt;
+use core::num::NonZeroU32;
 
+use hdf5_pure_filter::__private::{
+    FILTER_DEFLATE, FILTER_FLETCHER32, FILTER_LZF, FILTER_NBIT, FILTER_RESERVED,
+    FILTER_SCALEOFFSET, FILTER_SHUFFLE, FILTER_SZIP, FILTER_ZFP,
+};
+
+use crate::DeflateLevel;
+use crate::FormatError;
+use crate::ScaleOffset;
 use crate::data_layout::ChunkIndexLayout;
 use crate::display::{Dims, EscapedName};
-use crate::filter_pipeline::{
-    FILTER_DEFLATE, FILTER_FLETCHER32, FILTER_LZF, FILTER_SCALEOFFSET, FILTER_SHUFFLE,
-};
+use crate::filter_pipeline::FilterDescription;
 
 /// How a dataset's raw data is arranged on disk.
 ///
@@ -159,30 +166,274 @@ pub struct Chunk {
     pub filter_mask: u32,
 }
 
-/// One filter in a dataset's pipeline.
+/// A filter's identifier, interpreted parameters, and encoded metadata.
 ///
-/// The curated per-filter analogue of `H5Pget_filter2`. Obtain the ordered
-/// pipeline with [`Dataset::filter_pipeline`](crate::Dataset::filter_pipeline);
-/// [`Dataset::filters`](crate::Dataset::filters) stays the lighter call when
-/// only the identifiers are needed.
+/// Obtain filters in application order from
+/// [`Dataset::filter_pipeline`](crate::Dataset::filter_pipeline).
+/// The reader preserves the recorded name, flags, and client data alongside the interpreted
+/// parameters. A staged dataset has [`FilterParameters::Pending`] until its parameters are derived
+/// during serialization.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct Filter {
-    /// The registered HDF5 filter identifier, the same numbering returned by
-    /// [`Dataset::filters`](crate::Dataset::filters). `Display` names the ones
-    /// this crate knows, such as 1 = deflate or 32000 = lzf.
-    pub id: u16,
-    /// The filter's recorded name, when the file stores one. Absent for most
-    /// built-in filters, which are identified by [`id`](Self::id) alone.
+    /// The filter identifier encoded in the pipeline message.
+    pub id: FilterId,
+    /// The recorded filter name, if present.
     pub name: Option<String>,
-    /// Whether the filter is optional. When `true`, a reader that cannot apply
-    /// the filter may skip it; a mandatory filter (`false`) must be applied for
-    /// the data to decode correctly.
+    /// Whether the writer may omit this filter if it fails during output.
+    ///
+    /// Each chunk's [`filter_mask`](Chunk::filter_mask) records which filters were omitted.
     pub is_optional: bool,
-    /// The filter's client data (`cd_values`): the auxiliary parameters stored
-    /// with it — for deflate, one value, the compression level. The meaning is
-    /// filter-specific.
-    pub client_data: Vec<u32>,
+    /// The interpreted parameters, or their opaque or pending classification.
+    pub parameters: FilterParameters,
+    flags: u16,
+    client_data: Vec<u32>,
+}
+
+impl Filter {
+    pub(crate) fn pending(id: FilterId, is_optional: bool) -> Self {
+        Self {
+            id,
+            name: None,
+            is_optional,
+            parameters: FilterParameters::Pending,
+            flags: if is_optional {
+                crate::filter_pipeline::H5Z_FLAG_OPTIONAL
+            } else {
+                0
+            },
+            client_data: Vec::new(),
+        }
+    }
+
+    pub(crate) fn from_description(
+        FilterDescription {
+            filter_id,
+            name,
+            flags,
+            client_data,
+        }: FilterDescription,
+    ) -> Result<Self, FormatError> {
+        let id = FilterId::try_from(filter_id)?;
+        let parameters = FilterParameters::parse(id, &client_data)?;
+        Ok(Self {
+            id,
+            name,
+            is_optional: flags & crate::filter_pipeline::H5Z_FLAG_OPTIONAL != 0,
+            parameters,
+            flags,
+            client_data,
+        })
+    }
+
+    /// Returns the filter flags, including reserved bits read from the file.
+    pub fn flags(&self) -> u16 {
+        self.flags
+    }
+
+    /// Returns the encoded filter parameters in their stored order.
+    ///
+    /// Returns an empty slice for [`FilterParameters::Pending`].
+    pub fn client_data(&self) -> &[u32] {
+        &self.client_data
+    }
+}
+
+/// The interpreted parameters or interpretation state of a [`Filter`].
+///
+/// The reader checks the parameter counts and values of the interpreted filters. The complete
+/// encoded parameter vector is available through [`Filter::client_data`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FilterParameters {
+    /// The Deflate compression level.
+    Deflate(DeflateLevel),
+    /// The number of bytes per element for byte shuffling.
+    Shuffle(NonZeroU32),
+    /// A Fletcher32 checksum, which has no client-data values.
+    Fletcher32,
+    /// The integer or decimal floating-point scale-offset mode.
+    ScaleOffset(ScaleOffsetParameters),
+    /// Raw parameters for a filter or mode that this API does not interpret.
+    Opaque,
+    /// Parameters awaiting serialization of a staged dataset.
+    Pending,
+}
+
+impl FilterParameters {
+    fn parse(id: FilterId, values: &[u32]) -> Result<Self, FormatError> {
+        Ok(match id {
+            FilterId::Deflate => {
+                let [level] = values else {
+                    return Err(FormatError::InvalidFilterParameterCount {
+                        filter_id: id.get(),
+                        expected: 1,
+                        actual: values.len(),
+                    });
+                };
+                Self::Deflate(DeflateLevel::try_from(*level)?)
+            }
+            FilterId::Shuffle => {
+                let [size] = values else {
+                    return Err(FormatError::InvalidFilterParameterCount {
+                        filter_id: id.get(),
+                        expected: 1,
+                        actual: values.len(),
+                    });
+                };
+                Self::Shuffle(
+                    NonZeroU32::new(*size)
+                        .ok_or(FormatError::InvalidShuffleElementSize { size: *size })?,
+                )
+            }
+            FilterId::Fletcher32 => {
+                if !values.is_empty() {
+                    return Err(FormatError::InvalidFilterParameterCount {
+                        filter_id: id.get(),
+                        expected: 0,
+                        actual: values.len(),
+                    });
+                }
+                Self::Fletcher32
+            }
+            FilterId::ScaleOffset => {
+                let mode = hdf5_pure_filter::__private::parse_scale_offset_parameters(values)?;
+                match mode {
+                    Some(mode) => Self::ScaleOffset(ScaleOffsetParameters {
+                        mode: ScaleOffset::from_filter_mode(mode),
+                    }),
+                    None => Self::Opaque,
+                }
+            }
+            _ => Self::Opaque,
+        })
+    }
+}
+
+/// The interpreted mode of a stored scale-offset filter.
+///
+/// The complete parameter vector is available through [`Filter::client_data`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScaleOffsetParameters {
+    mode: ScaleOffset,
+}
+
+impl ScaleOffsetParameters {
+    /// Returns the stored integer precision or decimal scaling mode.
+    pub fn mode(&self) -> ScaleOffset {
+        self.mode
+    }
+}
+
+/// A nonzero identifier stored in an HDF5 filter pipeline.
+///
+/// Identifiers are available independently of codec features. Versions 1 and 2 of the filter
+/// pipeline message are defined in "The Data Storage - Filter Pipeline Message" of the [format
+/// specification, version 4.0][spec]. The reader preserves identifiers without a named variant in
+/// [`Custom`](Self::Custom).
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_filter
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum FilterId {
+    /// Deflate compression.
+    Deflate,
+    /// Shuffling of data-element bytes.
+    Shuffle,
+    /// Fletcher32 checksums.
+    Fletcher32,
+    /// SZIP compression.
+    Szip,
+    /// N-bit packing.
+    Nbit,
+    /// Scale-offset compression.
+    ScaleOffset,
+    /// LZF compression.
+    Lzf,
+    /// ZFP compression.
+    Zfp,
+    /// An identifier without a named variant in this enum.
+    Custom(CustomFilterId),
+}
+
+impl FilterId {
+    /// Returns the identifier encoded in the filter pipeline message.
+    pub const fn get(self) -> u16 {
+        match self {
+            Self::Deflate => FILTER_DEFLATE,
+            Self::Shuffle => FILTER_SHUFFLE,
+            Self::Fletcher32 => FILTER_FLETCHER32,
+            Self::Szip => FILTER_SZIP,
+            Self::Nbit => FILTER_NBIT,
+            Self::ScaleOffset => FILTER_SCALEOFFSET,
+            Self::Lzf => FILTER_LZF,
+            Self::Zfp => FILTER_ZFP,
+            Self::Custom(id) => id.get(),
+        }
+    }
+    /// Returns the registered filter name, or [`None`] for [`Custom`](Self::Custom).
+    fn name(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Deflate => "deflate",
+            Self::Shuffle => "shuffle",
+            Self::Fletcher32 => "fletcher32",
+            Self::Szip => "szip",
+            Self::Nbit => "nbit",
+            Self::ScaleOffset => "scaleoffset",
+            Self::Lzf => "lzf",
+            Self::Zfp => "zfp",
+            Self::Custom(_) => return None,
+        })
+    }
+}
+
+impl TryFrom<u16> for FilterId {
+    type Error = FormatError;
+
+    /// Parses an encoded filter identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidFilterId`] if `id` is zero.
+    fn try_from(id: u16) -> Result<Self, FormatError> {
+        Ok(match id {
+            FILTER_RESERVED => return Err(FormatError::InvalidFilterId { id }),
+            FILTER_DEFLATE => Self::Deflate,
+            FILTER_SHUFFLE => Self::Shuffle,
+            FILTER_FLETCHER32 => Self::Fletcher32,
+            FILTER_SZIP => Self::Szip,
+            FILTER_NBIT => Self::Nbit,
+            FILTER_SCALEOFFSET => Self::ScaleOffset,
+            FILTER_LZF => Self::Lzf,
+            FILTER_ZFP => Self::Zfp,
+            id => Self::Custom(CustomFilterId(id)),
+        })
+    }
+}
+
+/// A nonzero filter identifier without a named [`FilterId`] variant.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct CustomFilterId(u16);
+
+impl CustomFilterId {
+    /// Returns the identifier encoded in the filter pipeline message.
+    pub const fn get(self) -> u16 {
+        self.0
+    }
+}
+
+impl TryFrom<u16> for CustomFilterId {
+    type Error = FormatError;
+
+    /// Parses an identifier without a named [`FilterId`] variant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidFilterId`] if `id` is zero, and
+    /// [`FormatError::InvalidCustomFilterId`] if `id` has a named [`FilterId`] variant.
+    fn try_from(id: u16) -> Result<Self, FormatError> {
+        match FilterId::try_from(id)? {
+            FilterId::Custom(id) => Ok(id),
+            _ => Err(FormatError::InvalidCustomFilterId { id }),
+        }
+    }
 }
 
 // ---- Display ----
@@ -229,7 +480,7 @@ impl fmt::Display for Filter {
     /// `custom(id=40000)` — so the parentheses hold the filter's parameters and
     /// nothing else.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let well_known = well_known_filter_name(self.id);
+        let well_known = self.id.name();
         match well_known {
             Some(name) => f.write_str(name)?,
             // Recorded by the file, so escaped for the same reason a compound's
@@ -246,7 +497,7 @@ impl fmt::Display for Filter {
         if write_id || !self.client_data.is_empty() {
             f.write_str("(")?;
             if write_id {
-                write!(f, "id={}", self.id)?;
+                write!(f, "id={}", self.id.get())?;
             }
             for (i, value) in self.client_data.iter().enumerate() {
                 if write_id || i > 0 {
@@ -257,36 +508,14 @@ impl fmt::Display for Filter {
             f.write_str(")")?;
         }
 
+        if self.parameters == FilterParameters::Pending {
+            f.write_str(" [pending]")?;
+        }
         if self.is_optional {
             f.write_str(" [optional]")?;
         }
         Ok(())
     }
-}
-
-/// The name of a filter this crate knows by identifier.
-///
-/// Most built-in filters record no name of their own, which would otherwise
-/// leave a bare number in the output. Naming one is not a claim that this crate
-/// can run it: a message reporting a filter it cannot decode is exactly where
-/// the name earns its keep.
-fn well_known_filter_name(id: u16) -> Option<&'static str> {
-    Some(match id {
-        // The filters this crate implements are matched through their
-        // constants, so the two lists cannot drift apart.
-        FILTER_DEFLATE => "deflate",
-        FILTER_SHUFFLE => "shuffle",
-        FILTER_FLETCHER32 => "fletcher32",
-        FILTER_SCALEOFFSET => "scaleoffset",
-        FILTER_LZF => "lzf",
-        // Registered identifiers with no constant here: szip and nbit have no
-        // implementation, and `FILTER_ZFP` is behind the `zfp` feature while
-        // the name is worth reporting whether or not the decoder is built.
-        4 => "szip",
-        5 => "nbit",
-        32013 => "zfp",
-        _ => return None,
-    })
 }
 
 #[cfg(test)]
@@ -296,6 +525,179 @@ mod tests {
     use super::*;
     use crate::address::StoredAddress;
     use crate::address::StoredAddressExt;
+
+    #[rstest]
+    #[case(1, FilterId::Deflate)]
+    #[case(2, FilterId::Shuffle)]
+    #[case(3, FilterId::Fletcher32)]
+    #[case(4, FilterId::Szip)]
+    #[case(5, FilterId::Nbit)]
+    #[case(6, FilterId::ScaleOffset)]
+    #[case(32000, FilterId::Lzf)]
+    #[case(32013, FilterId::Zfp)]
+    fn parses_named_ids(#[case] raw: u16, #[case] id: FilterId) {
+        assert_eq!(FilterId::try_from(raw).unwrap(), id);
+        assert_eq!(id.get(), raw);
+        assert_eq!(
+            CustomFilterId::try_from(raw).unwrap_err(),
+            FormatError::InvalidCustomFilterId { id: raw }
+        );
+    }
+
+    #[rstest]
+    #[case(7)]
+    #[case(255)]
+    #[case(256)]
+    #[case(32768)]
+    #[case(u16::MAX)]
+    fn preserves_custom_ids(#[case] raw: u16) {
+        let custom = CustomFilterId::try_from(raw).unwrap();
+        assert_eq!(custom.get(), raw);
+        let id = FilterId::try_from(raw).unwrap();
+        assert_eq!(id, FilterId::Custom(custom));
+        assert_eq!(id.get(), raw);
+    }
+
+    #[test]
+    fn rejects_reserved_id() {
+        assert_eq!(
+            FilterId::try_from(0).unwrap_err(),
+            FormatError::InvalidFilterId { id: 0 }
+        );
+        assert_eq!(
+            CustomFilterId::try_from(0).unwrap_err(),
+            FormatError::InvalidFilterId { id: 0 }
+        );
+    }
+
+    #[rstest]
+    #[case(FilterId::Deflate, vec![0], FilterParameters::Deflate(DeflateLevel::Zero))]
+    #[case(FilterId::Deflate, vec![6], FilterParameters::Deflate(DeflateLevel::Six))]
+    #[case(FilterId::Deflate, vec![9], FilterParameters::Deflate(DeflateLevel::Nine))]
+    #[case(FilterId::Shuffle, vec![4], FilterParameters::Shuffle(NonZeroU32::new(4).unwrap()))]
+    #[case(FilterId::Fletcher32, vec![], FilterParameters::Fletcher32)]
+    #[case(FilterId::ScaleOffset, scale_offset_values(), FilterParameters::ScaleOffset(ScaleOffsetParameters { mode: ScaleOffset::Integer(0) }))]
+    #[case(FilterId::Lzf, vec![4, 0x0105, 256], FilterParameters::Opaque)]
+    #[case(FilterId::Zfp, vec![1, 2, 3, 4, 5, 6], FilterParameters::Opaque)]
+    #[case(FilterId::Szip, vec![1, 2, 3, 4], FilterParameters::Opaque)]
+    #[case(FilterId::Nbit, vec![1, 2], FilterParameters::Opaque)]
+    #[case(FilterId::try_from(40000).unwrap(), vec![u32::MAX, 0, 7], FilterParameters::Opaque)]
+    fn interprets_parameters_without_losing_wire_metadata(
+        #[case] id: FilterId,
+        #[case] values: Vec<u32>,
+        #[case] parameters: FilterParameters,
+        #[values(0x8000, 0x8001)] flags: u16,
+    ) {
+        let filter = Filter::from_description(FilterDescription {
+            filter_id: id.get(),
+            name: Some("recorded filter name".into()),
+            flags,
+            client_data: values.clone(),
+        })
+        .unwrap();
+        assert_eq!(filter.id, id);
+        assert_eq!(filter.parameters, parameters);
+        assert_eq!(filter.flags(), flags);
+        assert_eq!(
+            filter.is_optional,
+            flags & crate::filter_pipeline::H5Z_FLAG_OPTIONAL != 0
+        );
+        assert_eq!(filter.name.as_deref(), Some("recorded filter name"));
+        assert_eq!(filter.client_data(), values);
+    }
+
+    #[rstest]
+    #[case(FilterId::Deflate, vec![], FormatError::InvalidFilterParameterCount { filter_id: FILTER_DEFLATE, expected: 1, actual: 0 })]
+    #[case(FilterId::Deflate, vec![6, 7], FormatError::InvalidFilterParameterCount { filter_id: FILTER_DEFLATE, expected: 1, actual: 2 })]
+    #[case(FilterId::Shuffle, vec![], FormatError::InvalidFilterParameterCount { filter_id: FILTER_SHUFFLE, expected: 1, actual: 0 })]
+    #[case(FilterId::Shuffle, vec![4, 8], FormatError::InvalidFilterParameterCount { filter_id: FILTER_SHUFFLE, expected: 1, actual: 2 })]
+    #[case(FilterId::Shuffle, vec![0], FormatError::InvalidShuffleElementSize { size: 0 })]
+    #[case(FilterId::Fletcher32, vec![1], FormatError::InvalidFilterParameterCount { filter_id: FILTER_FLETCHER32, expected: 0, actual: 1 })]
+    #[case(FilterId::ScaleOffset, vec![2, 0], FormatError::InvalidFilterParameterCount { filter_id: FILTER_SCALEOFFSET, expected: 20, actual: 2 })]
+    fn rejects_malformed_known_parameters(
+        #[case] id: FilterId,
+        #[case] values: Vec<u32>,
+        #[case] expected: FormatError,
+    ) {
+        assert_eq!(FilterParameters::parse(id, &values).unwrap_err(), expected);
+    }
+
+    #[rstest]
+    #[case(10)]
+    #[case(256)]
+    #[case(u32::MAX)]
+    fn rejects_invalid_deflate_metadata(#[case] level: u32) {
+        assert_eq!(
+            FilterParameters::parse(FilterId::Deflate, &[level]).unwrap_err(),
+            FormatError::InvalidDeflateLevel { level }
+        );
+    }
+
+    #[rstest]
+    #[case(1, 33, FormatError::InvalidScaleOffsetIntegerPrecision { bits: 33, element_size: 4 })]
+    #[case(2, 0, FormatError::InvalidScaleOffsetElementCount { count: 0 })]
+    #[case(3, 2, FormatError::InvalidScaleOffsetMode { mode: 2, class: 2 })]
+    #[case(4, 0, FormatError::InvalidScaleOffsetElementSize { size: 0 })]
+    #[case(4, 9, FormatError::InvalidScaleOffsetElementSize { size: 9 })]
+    #[case(5, 2, FormatError::InvalidScaleOffsetIntegerSign { sign: 2 })]
+    #[case(6, 2, FormatError::InvalidScaleOffsetByteOrder { order: 2 })]
+    #[case(7, 2, FormatError::InvalidScaleOffsetFillAvailability { value: 2 })]
+    fn rejects_invalid_scale_offset_fields(
+        #[case] index: usize,
+        #[case] value: u32,
+        #[case] expected: FormatError,
+    ) {
+        let mut values = scale_offset_values();
+        values[index] = value;
+        assert_eq!(
+            FilterParameters::parse(FilterId::ScaleOffset, &values).unwrap_err(),
+            expected
+        );
+    }
+
+    #[rstest]
+    #[case(1)]
+    #[case(3)]
+    #[case(5)]
+    fn rejects_invalid_scale_offset_float_size(#[case] size: u32) {
+        let mut values = scale_offset_values();
+        values[0] = 0;
+        values[3] = 1;
+        values[4] = size;
+        assert_eq!(
+            FilterParameters::parse(FilterId::ScaleOffset, &values).unwrap_err(),
+            FormatError::InvalidScaleOffsetFloatSize { size }
+        );
+    }
+
+    #[rstest]
+    #[case(0, Some(ScaleOffset::FloatDScale(-2)))]
+    #[case(1, None)]
+    fn distinguishes_supported_scale_offset_modes(
+        #[case] mode: u32,
+        #[case] expected: Option<ScaleOffset>,
+        #[values(0, u32::MAX)] sign: u32,
+    ) {
+        let mut values = scale_offset_values();
+        values[0] = mode;
+        values[1] = u32::from_ne_bytes((-2_i32).to_ne_bytes());
+        values[3] = 1;
+        values[5] = sign;
+        let parsed = FilterParameters::parse(FilterId::ScaleOffset, &values).unwrap();
+        match (parsed, expected) {
+            (FilterParameters::ScaleOffset(parameters), Some(mode)) => {
+                assert_eq!(parameters.mode(), mode)
+            }
+            (FilterParameters::Opaque, None) => {}
+            (parsed, expected) => panic!("expected {expected:?}, got {parsed:?}"),
+        }
+    }
+
+    fn scale_offset_values() -> Vec<u32> {
+        let mut values = vec![0; 20];
+        values[..8].copy_from_slice(&[2, 0, 4, 0, 4, 1, 0, 1]);
+        values
+    }
 
     #[rstest]
     #[case(ChunkIndexLayout::BTreeV1 { address: None }, ChunkIndex::BTreeV1)]
@@ -375,77 +777,78 @@ mod display_tests {
     /// Most built-in filters record no name, which would leave a bare number.
     #[test]
     fn a_filter_is_named_by_its_identifier_when_the_file_records_none() {
-        let deflate = Filter {
-            id: 1,
+        let deflate = Filter::from_description(FilterDescription {
+            filter_id: 1,
             name: None,
-            is_optional: false,
+            flags: 0,
             client_data: vec![6],
-        };
+        })
+        .unwrap();
         assert_eq!(deflate.to_string(), "deflate(6)");
 
-        let lzf = Filter {
-            id: 32000,
+        let lzf = Filter::from_description(FilterDescription {
+            filter_id: 32000,
             name: None,
-            is_optional: false,
+            flags: 0,
             client_data: vec![],
-        };
+        })
+        .unwrap();
         assert_eq!(lzf.to_string(), "lzf");
     }
 
     #[test]
     fn an_unregistered_filter_falls_back_to_its_recorded_name_then_its_id() {
-        let named = Filter {
-            id: 40000,
+        let named = Filter::from_description(FilterDescription {
+            filter_id: 40000,
             name: Some("custom".into()),
-            is_optional: true,
+            flags: crate::filter_pipeline::H5Z_FLAG_OPTIONAL,
             client_data: vec![],
-        };
+        })
+        .unwrap();
         assert_eq!(named.to_string(), "custom(id=40000) [optional]");
 
-        let anonymous = Filter {
-            id: 40001,
+        let anonymous = Filter::from_description(FilterDescription {
+            filter_id: 40001,
             name: None,
-            is_optional: false,
+            flags: 0,
             client_data: vec![],
-        };
+        })
+        .unwrap();
         assert_eq!(anonymous.to_string(), "filter(id=40001)");
     }
 
     /// The file records this name, so it cannot reach a message unescaped.
     #[test]
     fn a_recorded_filter_name_cannot_carry_a_control_character() {
-        let hostile = Filter {
-            id: 40000,
+        let hostile = Filter::from_description(FilterDescription {
+            filter_id: 40000,
             name: Some("evil\u{1b}[31m\nname".into()),
-            is_optional: false,
+            flags: 0,
             client_data: vec![],
-        };
+        })
+        .unwrap();
         let shown = hostile.to_string();
         assert!(!shown.chars().any(char::is_control), "{shown}");
         assert_eq!(shown, "evil\\u{1b}[31m\\nname(id=40000)");
     }
 
-    /// The `zfp` identifier is written as a literal, its constant being behind
-    /// a feature, so it is pinned to that constant here.
     #[cfg(feature = "zfp")]
     #[test]
     fn the_zfp_name_is_reached_through_its_own_identifier() {
-        assert_eq!(
-            well_known_filter_name(crate::filter_pipeline::FILTER_ZFP),
-            Some("zfp")
-        );
+        assert_eq!(FilterId::Zfp.name(), Some("zfp"));
     }
 
     /// The identifier is labeled, so it cannot read as one of the client-data
     /// values it sits beside.
     #[test]
     fn an_unregistered_filter_keeps_its_id_apart_from_its_client_data() {
-        let named = Filter {
-            id: 40000,
+        let named = Filter::from_description(FilterDescription {
+            filter_id: 40000,
             name: Some("custom".into()),
-            is_optional: false,
+            flags: 0,
             client_data: vec![7, 8],
-        };
+        })
+        .unwrap();
         assert_eq!(named.to_string(), "custom(id=40000, 7, 8)");
     }
 }

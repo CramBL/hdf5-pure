@@ -334,6 +334,11 @@ pub enum FormatError {
     InvalidChunkIndexType(u8),
     /// A compound datatype has a zero total size.
     InvalidCompoundSize,
+    /// A custom filter identifier has a named filter variant.
+    InvalidCustomFilterId {
+        /// The identifier of the named filter.
+        id: u16,
+    },
     /// Invalid dataspace type.
     InvalidDataspaceType(u8),
     /// Invalid dataspace version.
@@ -411,12 +416,27 @@ pub enum FormatError {
     InvalidFillValueFlags(u8),
     /// An object header message type that is not a fill value message type.
     InvalidFillValueMessageType(u16),
+    /// The filter identifier is zero, which is reserved.
+    InvalidFilterId {
+        /// The reserved identifier.
+        id: u16,
+    },
+
     /// A stored filter name violates the pipeline's name encoding.
     InvalidFilterName {
         /// The identifier of the filter with the malformed name.
         filter_id: u16,
         /// The name constraint that failed.
         reason: &'static str,
+    },
+    /// A filter's client data has a different number of values than required.
+    InvalidFilterParameterCount {
+        /// The filter whose parameter count is invalid.
+        filter_id: u16,
+        /// The required number of client-data values.
+        expected: usize,
+        /// The number of client-data values read.
+        actual: usize,
     },
     /// A filter pipeline field exceeds its format limit.
     InvalidFilterPipelineField {
@@ -566,8 +586,57 @@ pub enum FormatError {
     InvalidOffsetSize(u8),
     /// Invalid reference type.
     InvalidReferenceType(u8),
+    /// A scale-offset byte-order code is neither little endian nor big endian.
+    InvalidScaleOffsetByteOrder {
+        /// The encoded byte-order code.
+        order: u32,
+    },
+    /// The element count of a scale-offset filter is zero.
+    InvalidScaleOffsetElementCount {
+        /// The recorded element count.
+        count: u32,
+    },
+    /// A scale-offset element size is outside `1..=8` bytes.
+    InvalidScaleOffsetElementSize {
+        /// The recorded element size in bytes.
+        size: u32,
+    },
+    /// A scale-offset fill-value availability flag is neither 0 nor 1.
+    InvalidScaleOffsetFillAvailability {
+        /// The encoded fill-value availability flag.
+        value: u32,
+    },
+    /// The element size of a floating-point scale-offset filter is neither 4 nor 8 bytes.
+    InvalidScaleOffsetFloatSize {
+        /// The recorded element size in bytes.
+        size: u32,
+    },
+    /// An integer scale-offset precision exceeds the element's bit width.
+    InvalidScaleOffsetIntegerPrecision {
+        /// The recorded minimum number of bits per element.
+        bits: u32,
+        /// The recorded element size in bytes.
+        element_size: u32,
+    },
+    /// An integer scale-offset sign code is neither unsigned nor two's complement.
+    InvalidScaleOffsetIntegerSign {
+        /// The encoded integer sign code.
+        sign: u32,
+    },
+    /// A scale-offset mode is incompatible with the scalar datatype class.
+    InvalidScaleOffsetMode {
+        /// The encoded scaling mode.
+        mode: u32,
+        /// The encoded scalar datatype class.
+        class: u32,
+    },
     /// Invalid shared message version.
     InvalidSharedMessageVersion(u8),
+    /// The element size of a shuffle filter is zero.
+    InvalidShuffleElementSize {
+        /// The recorded element size in bytes.
+        size: u32,
+    },
     /// A soft link's target bytes are not valid UTF-8.
     InvalidSoftLinkEncoding {
         /// The UTF-8 decoding error.
@@ -1726,6 +1795,47 @@ impl fmt::Display for FormatError {
             }
             Self::InvalidDeflateLevel { level } => {
                 write!(f, "deflate level {level} is outside 0..=9")
+            }
+            Self::InvalidFilterId { id } => write!(f, "reserved filter identifier {id}"),
+            Self::InvalidCustomFilterId { id } => {
+                write!(f, "filter identifier {id} has a named variant")
+            }
+            Self::InvalidFilterParameterCount {
+                filter_id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "filter {filter_id} requires {expected} parameters, got {actual}"
+            ),
+            Self::InvalidScaleOffsetByteOrder { order } => {
+                write!(f, "invalid scale-offset byte order {order}")
+            }
+            Self::InvalidScaleOffsetElementCount { count } => {
+                write!(f, "invalid scale-offset element count {count}")
+            }
+            Self::InvalidScaleOffsetElementSize { size } => {
+                write!(f, "invalid scale-offset element size {size}")
+            }
+            Self::InvalidScaleOffsetFillAvailability { value } => {
+                write!(f, "invalid scale-offset fill availability {value}")
+            }
+            Self::InvalidScaleOffsetFloatSize { size } => {
+                write!(f, "invalid scale-offset float size {size}")
+            }
+            Self::InvalidScaleOffsetIntegerPrecision { bits, element_size } => write!(
+                f,
+                "scale-offset integer precision {bits} exceeds the width of a {element_size}-byte element"
+            ),
+            Self::InvalidScaleOffsetIntegerSign { sign } => {
+                write!(f, "invalid scale-offset integer sign {sign}")
+            }
+            Self::InvalidScaleOffsetMode { mode, class } => write!(
+                f,
+                "scale-offset mode {mode} does not match scalar class {class}"
+            ),
+            Self::InvalidShuffleElementSize { size } => {
+                write!(f, "invalid shuffle element size {size}")
             }
             Self::InvalidFilterName { filter_id, reason } => {
                 write!(f, "invalid name for filter {filter_id}: {reason:?}")

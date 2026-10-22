@@ -753,17 +753,37 @@ fn fletcher32_append(data: &[u8]) -> Result<Vec<u8>, Error> {
     Ok(result)
 }
 
+/// The reserved filter identifier.
+///
+/// Defined for versions 1 and 2 of the filter pipeline message in "The Data Storage - Filter
+/// Pipeline Message" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_filter
+pub const FILTER_RESERVED: u16 = 0;
 /// The registered identifier for Deflate compression.
 pub const FILTER_DEFLATE: u16 = 1;
 /// The registered identifier for byte Shuffle.
 pub const FILTER_SHUFFLE: u16 = 2;
 /// The registered identifier for Fletcher32 checksums.
 pub const FILTER_FLETCHER32: u16 = 3;
+/// The registered identifier for SZIP compression.
+///
+/// Defined for versions 1 and 2 of the filter pipeline message in "The Data Storage - Filter
+/// Pipeline Message" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_filter
+pub const FILTER_SZIP: u16 = 4;
+/// The registered identifier for N-bit packing.
+///
+/// Defined for versions 1 and 2 of the filter pipeline message in "The Data Storage - Filter
+/// Pipeline Message" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_filter
+pub const FILTER_NBIT: u16 = 5;
 /// The registered identifier for Scale-Offset compression.
 pub const FILTER_SCALEOFFSET: u16 = 6;
 /// The registered identifier for LZF compression.
 pub const FILTER_LZF: u16 = 32000;
-#[cfg(feature = "zfp")]
 /// The registered identifier for ZFP compression.
 pub const FILTER_ZFP: u16 = 32013;
 /// Permits a filter to be omitted if it fails during output.

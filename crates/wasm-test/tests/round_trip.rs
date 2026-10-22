@@ -48,6 +48,7 @@ fn reads_back_a_deflate_compressed_dataset() {
     assert_eq!(chunk_shape, &vec![1024]);
     let filters: Vec<String> = dataset
         .filter_pipeline()
+        .unwrap()
         .iter()
         .map(ToString::to_string)
         .collect();

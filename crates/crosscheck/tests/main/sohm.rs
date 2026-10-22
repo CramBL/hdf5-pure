@@ -297,7 +297,7 @@ fn shared_filter_pipelines_and_fill_values_read_back() {
     for i in 0..3 {
         let dataset = file.dataset(&format!("c{i}")).unwrap();
         assert_eq!(
-            dataset.filters().len(),
+            dataset.filters().unwrap().len(),
             1,
             "c{i} must report its shared deflate pipeline"
         );

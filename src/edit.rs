@@ -358,6 +358,7 @@ use crate::free_space_manager::PersistedSections;
 use crate::group_v1;
 use crate::group_v2;
 use crate::image::{FileImage, HandleImage, MirrorImage, WriteBuffering};
+use crate::layout_info::FilterId;
 use crate::libver::LibVer;
 use crate::link_info::LinkInfoMessage;
 use crate::link_message::{LinkMessage, LinkTarget};
@@ -830,7 +831,7 @@ pub(crate) struct StagedMeta {
     pub(crate) chunked: bool,
     /// Each staged filter's registered id and its `H5Z_FLAG_OPTIONAL` flag, in
     /// pipeline order.
-    pub(crate) filters: Vec<(u16, bool)>,
+    pub(crate) filters: Vec<(FilterId, bool)>,
 }
 
 /// Where a [`StagedEdits`] stood before a batch of staging calls, so a batch
@@ -21678,7 +21679,7 @@ mod staged_query_tests {
         assert_eq!(meta.maxshape, Some(vec![MaxExtent::Unlimited]));
         assert_eq!(meta.datatype.type_size(), 4);
         assert!(meta.chunked);
-        assert_eq!(meta.filters, vec![(1u16, false)]);
+        assert_eq!(meta.filters, vec![(FilterId::Deflate, false)]);
 
         // A fixed-shape, unfiltered dataset is contiguous and reports no
         // maximum, the way `Dataset::maxshape` reports an on-disk one.

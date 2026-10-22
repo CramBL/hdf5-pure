@@ -176,3 +176,18 @@ fn status_flags_have_named_constructors_and_typed_queries(
     assert!(!flags.is_inconsistent());
     assert_eq!(flags.unknown_bits(), 0);
 }
+
+#[test]
+fn filter_metadata_types_are_public() {
+    let _: fn(&hdf5_pure::Dataset) -> Result<Vec<hdf5_pure::FilterId>, Error> =
+        hdf5_pure::Dataset::filters;
+    let _: fn(&hdf5_pure::Dataset) -> Result<Vec<hdf5_pure::Filter>, Error> =
+        hdf5_pure::Dataset::filter_pipeline;
+    let _: fn(&hdf5_pure::ScaleOffsetParameters) -> hdf5_pure::ScaleOffset =
+        hdf5_pure::ScaleOffsetParameters::mode;
+    let id: hdf5_pure::CustomFilterId = 40000_u16.try_into().unwrap();
+    let id: hdf5_pure::FilterId = hdf5_pure::FilterId::Custom(id);
+    assert_eq!(id.get(), 40000);
+    let _: hdf5_pure::FilterParameters =
+        hdf5_pure::FilterParameters::Deflate(hdf5_pure::DeflateLevel::Six);
+}

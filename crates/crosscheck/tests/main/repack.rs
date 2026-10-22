@@ -5,6 +5,7 @@
 //! contract on a real variable-length string dataset the C library produces.
 
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::FilterId;
 use hdf5_pure::{
     Error, File, FillTime, FormatError, MaxExtent, RepackOptions, VlenStringReadOptions,
 };
@@ -842,10 +843,12 @@ fn c_sparse_chunked_scale_offset_repacks_with_its_fill_value() {
             .dataset("data")
             .unwrap()
             .filter_pipeline()
+            .unwrap()
             .into_iter()
-            .find(|f| f.id == 6)
+            .find(|f| f.id == FilterId::ScaleOffset)
             .expect("a scale-offset filter")
-            .client_data
+            .client_data()
+            .to_vec()
     };
 
     hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
@@ -1758,7 +1761,7 @@ fn repack_preserves_c_written_unallocated_storage_in_every_layout() {
 
         if layout == "filtered" {
             assert_eq!(
-                ds.filter_pipeline().len(),
+                ds.filter_pipeline().unwrap().len(),
                 2,
                 "[{layout}] shuffle + deflate must be carried onto a dataset with \
                  no chunk to apply them to"
@@ -1927,20 +1930,16 @@ fn repack_still_refuses_a_never_written_dataset_with_a_lossy_filter() {
     assert!(!dst.exists(), "dst must not be created when repack refuses");
 }
 
-/// Filter ids, so a pipeline assertion reads as filters rather than as numbers.
-const FILTER_DEFLATE: u16 = 1;
-const FILTER_SHUFFLE: u16 = 2;
-const FILTER_FLETCHER32: u16 = 3;
-
 /// A dataset's pipeline as `(filter id, is_optional)`, in stored order — the
 /// two properties issue #333 is about, and the pair `h5dump` and `H5Pget_filter2`
 /// report.
-fn pipeline_of(path: &std::path::Path, dataset: &str) -> Vec<(u16, bool)> {
+fn pipeline_of(path: &std::path::Path, dataset: &str) -> Vec<(FilterId, bool)> {
     File::open(path)
         .unwrap()
         .dataset(dataset)
         .unwrap()
         .filter_pipeline()
+        .unwrap()
         .iter()
         .map(|f| (f.id, f.is_optional))
         .collect()
@@ -2037,9 +2036,9 @@ fn a_never_written_dataset_keeps_its_pipeline_order_and_optional_flags() {
     assert_eq!(
         source,
         [
-            (FILTER_SHUFFLE, true),
-            (FILTER_FLETCHER32, false),
-            (FILTER_DEFLATE, true)
+            (FilterId::Shuffle, true),
+            (FilterId::Fletcher32, false),
+            (FilterId::Deflate, true)
         ],
         "the C library did not write the pipeline this test is about"
     );
@@ -2094,9 +2093,9 @@ fn a_vlen_string_dataset_keeps_its_pipeline_order_and_optional_flags() {
     assert_eq!(
         source,
         [
-            (FILTER_SHUFFLE, true),
-            (FILTER_FLETCHER32, false),
-            (FILTER_DEFLATE, true)
+            (FilterId::Shuffle, true),
+            (FilterId::Fletcher32, false),
+            (FilterId::Deflate, true)
         ],
         "the C library did not write the pipeline this test is about"
     );
