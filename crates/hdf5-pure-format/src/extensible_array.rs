@@ -974,7 +974,11 @@ impl Layout {
     // A data block of more elements than a page is paged, as `H5EA__dblock_alloc` pages it
     // (`H5EAdblock.c`, HDF5 2.2.0).
     fn pages(self, elements: u64) -> Option<u64> {
-        (elements > self.page_elements()).then(|| elements >> self.page_bits)
+        let block = DataBlockGeometry {
+            dblk_nelmts: elements,
+            page_nelmts: self.page_elements(),
+        };
+        block.is_paged().then(|| block.npages())
     }
 
     const fn page_elements(self) -> u64 {
@@ -1494,8 +1498,10 @@ impl BlockOffsetWidth {
 /// SB0: 1 x 16   SB1: 1 x 32   SB2: 2 x 32   SB3: 2 x 64   SB4: 4 x 64 ...
 /// ```
 ///
-/// The index block holds the data block addresses of the first `super_blk_min_data_ptrs` super
-/// blocks, and the addresses of the super blocks after them.
+/// The index block stores direct data block addresses for the first
+/// `2 * log2(super_blk_min_data_ptrs)` super blocks, followed by addresses of the remaining super
+/// blocks. The direct address count is `2 * (super_blk_min_data_ptrs - 1)`, as
+/// `H5EA__iblock_alloc` computes it (`H5EAiblock.c`, HDF5 2.2.0).
 #[derive(Debug, Clone)]
 pub struct ExtensibleArrayGeometry {
     /// The `(ndblks, dblk_nelmts)` of each super block.
@@ -1504,8 +1510,7 @@ pub struct ExtensibleArrayGeometry {
     pub(crate) direct_dblk_nelmts: Vec<u64>,
     /// The number of super block addresses in the index block.
     pub(crate) nsblk_addrs: usize,
-    /// The index in `sblks` of the super block the first super block address points at,
-    /// `super_blk_min_data_ptrs`.
+    /// The index in [`Self::sblks`] of the first super block addressed by the index block.
     pub(crate) first_indirect_sblk: usize,
 }
 
@@ -1526,51 +1531,62 @@ impl ExtensibleArrayGeometry {
         }
     }
 
-    /// Returns the geometry of the array `h` describes.
-    pub fn from_header(h: &ExtensibleArrayHeader) -> Self {
-        let min_dblk = h.min_dblk_nelmts as u64;
-        let sup_blk_min = h.super_blk_min_data_ptrs as usize;
-        // `nsblks = max_nelmts_bits - log2(min_dblk_nelmts) + 1`
-        let log2_min = if min_dblk <= 1 {
-            0
-        } else {
-            min_dblk.trailing_zeros() as u64
-        };
-        // The parsed maximum-index bit count is at most 64, so the difference is a
-        // small super-block count that always fits `usize`.
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "the parsed maximum-index bit count is at most 64; the super-block count fits usize"
-        )]
-        let nsblks = (u64::from(h.max_index_bits().get())).saturating_sub(log2_min) as usize + 1;
-
-        let mut sblks = Vec::with_capacity(nsblks);
-        let mut ndblks = 1u64;
-        let mut dblk_nelmts = min_dblk;
-        for u in 0..nsblks {
-            sblks.push((ndblks, dblk_nelmts));
-            if u % 2 == 0 {
-                dblk_nelmts = dblk_nelmts.saturating_mul(2);
-            } else {
-                ndblks = ndblks.saturating_mul(2);
-            }
+    /// Derives block geometry from the header's creation parameters.
+    ///
+    /// `offsets` is the file's address width, used to interpret the element encoding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidExtensibleArrayClient`] if the client ID is 2 or more, and
+    /// [`FormatError::InvalidExtensibleArrayGeometry`] if a filtered element width or creation
+    /// parameter is out of range, or the block geometry overflows [`u64`].
+    pub fn from_header(
+        &ExtensibleArrayHeader {
+            client_id,
+            element_size,
+            bit_geometry,
+            idx_blk_elmts,
+            min_dblk_nelmts,
+            super_blk_min_data_ptrs,
+            max_idx_set: _,
+            index_block_address: _,
+        }: &ExtensibleArrayHeader,
+        offsets: OffsetWidth,
+    ) -> Result<Self, FormatError> {
+        let encoding =
+            ElementEncoding::new(offsets, client_id, element_size).map_err(
+                |error| match error {
+                    InvalidElementEncoding::Client(id) => {
+                        FormatError::InvalidExtensibleArrayClient(id)
+                    }
+                    InvalidElementEncoding::EntrySize => {
+                        FormatError::InvalidExtensibleArrayGeometry
+                    }
+                },
+            )?;
+        let layout = Layout::new(
+            encoding,
+            bit_geometry.max_index_bits().get(),
+            idx_blk_elmts,
+            min_dblk_nelmts,
+            super_blk_min_data_ptrs,
+            bit_geometry.page_bits.0,
+        )?;
+        let mut sblks = Vec::with_capacity(layout.super_blocks.to_usize()?);
+        for index in 0..layout.super_blocks {
+            let block = layout.super_block(index)?;
+            sblks.push((block.blocks, block.block_elements));
         }
-
         let mut direct_dblk_nelmts = Vec::new();
-        for sb in sblks.iter().take(sup_blk_min.min(nsblks)) {
-            let (nd, dn) = *sb;
-            for _ in 0..nd {
-                direct_dblk_nelmts.push(dn);
-            }
+        for block in layout.direct_blocks() {
+            direct_dblk_nelmts.push(block?.elements);
         }
-
-        let nsblk_addrs = nsblks.saturating_sub(sup_blk_min);
-        ExtensibleArrayGeometry {
+        Ok(Self {
             sblks,
             direct_dblk_nelmts,
-            nsblk_addrs,
-            first_indirect_sblk: sup_blk_min,
-        }
+            nsblk_addrs: (layout.super_blocks - layout.first_super_block).to_usize()?,
+            first_indirect_sblk: layout.first_super_block.to_usize()?,
+        })
     }
 
     /// Returns the `(ndblks, dblk_nelmts)` of each super block: the number of its data blocks and
@@ -2006,7 +2022,10 @@ pub fn extensible_array_layout(
         max_idx_set: 0,
         index_block_address: StoredAddress::new(0),
     };
-    let geom = ExtensibleArrayGeometry::from_header(&geom_header);
+    // The selected element encoding matches the address width, and the constant
+    // writer parameters satisfy the checked layout's bounds.
+    let geom = ExtensibleArrayGeometry::from_header(&geom_header, offset_size)
+        .expect("the writer's Extensible Array geometry is representable");
     let inline = geom_header.idx_blk_elmts as usize;
 
     let header_len = ExtensibleArrayHeader::serialized_size_with_widths(FormatWidths {
@@ -2356,7 +2375,10 @@ pub fn extensible_array_capacity() -> u64 {
         max_idx_set: 0,
         index_block_address: StoredAddress::new(0),
     };
-    let geom = ExtensibleArrayGeometry::from_header(&geom_header);
+    // Eight-byte unfiltered elements and the constant creation parameters
+    // satisfy the checked layout's bounds.
+    let geom = ExtensibleArrayGeometry::from_header(&geom_header, OffsetWidth::Eight)
+        .expect("the writer's Extensible Array geometry is representable");
     let direct: u64 = geom.direct_dblk_nelmts.iter().sum();
     let indirect: u64 = (0..geom.nsblk_addrs)
         .map(|j| {
@@ -2798,9 +2820,7 @@ mod tests {
             pos += osv;
         }
 
-        // The index block addresses the data blocks of the first `super_blk_min_data_ptrs` super
-        // blocks, which with `min_dblk_nelmts = 2` are 1 block of 2 and 1 block of 4. The first
-        // holds the two elements past the two inline ones.
+        // For minimum two data block pointers, the direct blocks hold 2 and 4 elements.
         let n_direct_dblks = 2;
         file_data[pos..pos + osv].copy_from_slice(&(data_block_offset as u64).to_le_bytes());
         pos += osv;
@@ -2894,7 +2914,7 @@ mod tests {
             max_idx_set: 0,
             index_block_address: StoredAddress::new(0),
         };
-        let geom = ExtensibleArrayGeometry::from_header(&geom_header);
+        let geom = ExtensibleArrayGeometry::from_header(&geom_header, OffsetWidth::Eight).unwrap();
         for &n in &[1u64, 4, 20, 100, 244, 300, 2000, 50000, 131056, 140000] {
             let chunks: Vec<ChunkRecord> = (0..n)
                 .map(|i| ChunkRecord {
@@ -3759,27 +3779,145 @@ mod tests {
         );
     }
 
-    // The writer and the in-place append engine take the geometry of the index block from
-    // `ExtensibleArrayGeometry::from_header`, and the reader from `Layout`.
-    #[test]
-    fn the_writer_and_the_reader_agree_on_the_blocks_of_every_array_the_writer_builds() {
+    #[rstest]
+    #[case(0, 4, 10)]
+    #[case(3, 4, 10)]
+    #[case(16, 0, 10)]
+    #[case(16, 1, 10)]
+    #[case(16, 3, 10)]
+    #[case(16, 4, 4)]
+    fn append_geometry_rejects_invalid_creation_parameters(
+        #[case] min_elements: u8,
+        #[case] minimum_pointers: u8,
+        #[case] page_bits: u8,
+    ) {
+        let header = ExtensibleArrayHeader {
+            client_id: EA_CLIENT_ID_UNFILTERED,
+            element_size: OffsetWidth::Eight.get(),
+            bit_geometry: ExtensibleArrayBitGeometry::parse(EA_MAX_NELMTS_BITS, page_bits).unwrap(),
+            idx_blk_elmts: EA_IDX_BLK_ELMTS,
+            min_dblk_nelmts: min_elements,
+            super_blk_min_data_ptrs: minimum_pointers,
+            max_idx_set: 0,
+            index_block_address: StoredAddress::new(0),
+        };
+        assert_eq!(
+            ExtensibleArrayGeometry::from_header(&header, OffsetWidth::Eight).unwrap_err(),
+            FormatError::InvalidExtensibleArrayGeometry
+        );
+    }
+
+    #[rstest]
+    fn shared_geometry_agrees_on_block_page_and_bitmap_lengths(
+        #[values(2, 4, 8, 16)] minimum_pointers: u8,
+        #[values(OffsetWidth::Four, OffsetWidth::Eight)] offsets: OffsetWidth,
+        #[values(false, true)] filtered: bool,
+    ) {
+        let element_size = offsets.get() + if filtered { 6 } else { 0 };
+        let client_id = if filtered {
+            ArrayClient::FilteredChunks { chunk_size_len: 2 }.id()
+        } else {
+            EA_CLIENT_ID_UNFILTERED
+        };
+        let header = ExtensibleArrayHeader {
+            client_id,
+            element_size,
+            bit_geometry: ExtensibleArrayBitGeometry::for_writer(),
+            idx_blk_elmts: EA_IDX_BLK_ELMTS,
+            min_dblk_nelmts: EA_MIN_DBLK_NELMTS,
+            super_blk_min_data_ptrs: minimum_pointers,
+            max_idx_set: 0,
+            index_block_address: StoredAddress::new(0),
+        };
+        let geometry = ExtensibleArrayGeometry::from_header(&header, offsets).unwrap();
+        let layout = Layout::new(
+            ElementEncoding::new(offsets, client_id, element_size).unwrap(),
+            EA_MAX_NELMTS_BITS,
+            EA_IDX_BLK_ELMTS,
+            EA_MIN_DBLK_NELMTS,
+            minimum_pointers,
+            EA_MAX_DBLK_NELMTS_BITS,
+        )
+        .unwrap();
+        assert_eq!(
+            layout.index_block_len().unwrap(),
+            u64::try_from(index_block_len(
+                offsets,
+                usize::from(EA_IDX_BLK_ELMTS),
+                usize::from(element_size),
+                geometry.direct_dblk_nelmts().len(),
+                geometry.nsblk_addrs(),
+            ))
+            .unwrap()
+        );
+        for ordinal in 0..geometry.nsblk_addrs() {
+            let writer = geometry.super_block_at(ordinal, header.page_nelmts().get());
+            let reader = layout
+                .super_block(u32::try_from(geometry.first_indirect_sblk() + ordinal).unwrap())
+                .unwrap();
+            assert_eq!(layout.bitmap_len(reader).unwrap(), writer.bitmap_size());
+            assert_eq!(
+                layout.super_block_len(reader).unwrap(),
+                super_block_len(writer, offsets, header.block_offset_width())
+            );
+            assert_eq!(
+                layout
+                    .data_block_len(reader.data_block(0).unwrap())
+                    .unwrap(),
+                data_block_len(
+                    writer.blocks,
+                    usize::from(element_size),
+                    offsets,
+                    header.block_offset_width()
+                )
+            );
+            assert_eq!(
+                layout.pages(reader.block_elements).unwrap_or(0),
+                writer.blocks.npages()
+            );
+        }
+    }
+
+    #[rstest]
+    #[case(2, 2, 2, 282)]
+    #[case(4, 6, 4, 298)]
+    #[case(8, 14, 6, 346)]
+    #[case(16, 30, 8, 458)]
+    fn reader_and_writer_geometry_agree_on_pointer_counts(
+        #[case] min_data_pointers: u8,
+        #[case] direct_blocks: usize,
+        #[case] first_secondary: usize,
+        #[case] index_bytes: usize,
+    ) {
         let header = ExtensibleArrayHeader {
             client_id: 0,
             element_size: 8,
             bit_geometry: ExtensibleArrayBitGeometry::for_writer(),
             idx_blk_elmts: EA_IDX_BLK_ELMTS,
             min_dblk_nelmts: EA_MIN_DBLK_NELMTS,
-            super_blk_min_data_ptrs: EA_SUPER_BLK_MIN_DATA_PTRS,
+            super_blk_min_data_ptrs: min_data_pointers,
             max_idx_set: 0,
             index_block_address: StoredAddress::new(0),
         };
-        let geometry = ExtensibleArrayGeometry::from_header(&header);
+        let geometry = ExtensibleArrayGeometry::from_header(&header, OffsetWidth::Eight).unwrap();
+        assert_eq!(geometry.direct_dblk_nelmts().len(), direct_blocks);
+        assert_eq!(geometry.first_indirect_sblk(), first_secondary);
+        assert_eq!(
+            index_block_len(
+                OffsetWidth::Eight,
+                usize::from(EA_IDX_BLK_ELMTS),
+                8,
+                geometry.direct_dblk_nelmts().len(),
+                geometry.nsblk_addrs()
+            ),
+            index_bytes
+        );
         let layout = Layout::new(
             ElementEncoding::new(OffsetWidth::Eight, 0, 8).unwrap(),
             EA_MAX_NELMTS_BITS,
             EA_IDX_BLK_ELMTS,
             EA_MIN_DBLK_NELMTS,
-            EA_SUPER_BLK_MIN_DATA_PTRS,
+            min_data_pointers,
             EA_MAX_DBLK_NELMTS_BITS,
         )
         .unwrap();

@@ -495,7 +495,7 @@ impl Located {
                 "malformed unfiltered extensible-array element width",
             ));
         }
-        let geom = ExtensibleArrayGeometry::from_header(&ea_header);
+        let geom = ExtensibleArrayGeometry::from_header(&ea_header, widths.offsets)?;
         let index_block_addr = ea_header.index_block_address;
         // The dataspace dimension is the single commit point; the EA element
         // count is published one step earlier. If a prior writer crashed between
