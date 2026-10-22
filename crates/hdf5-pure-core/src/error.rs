@@ -733,6 +733,21 @@ pub enum FormatError {
     ///
     /// Contains the rejected byte count.
     InvalidUserblockSize(u64),
+    /// A variable-length datatype's class bit field has reserved bits set.
+    ///
+    /// Contains the set bits in positions 12 through 23 of the class bit field.
+    InvalidVariableLengthReservedBits(u32),
+    /// A variable-length sequence has nonzero string padding or character-set metadata.
+    InvalidVariableLengthSequenceMetadata {
+        /// The encoded padding code.
+        padding: u8,
+        /// The encoded character-set code.
+        charset: u8,
+    },
+    /// A variable-length datatype has a subtype other than sequence (0) or string (1).
+    ///
+    /// Contains the encoded subtype.
+    InvalidVariableLengthSubtype(u8),
     /// The ZFP block budget is below one bit at the chunk's rank.
     InvalidZfpBitBudget {
         /// The rate's representation from [`f64::to_bits`].
@@ -1806,6 +1821,21 @@ impl fmt::Display for FormatError {
             }
             Self::VlDataError(msg) => {
                 write!(f, "variable-length data error: {msg}")
+            }
+            Self::InvalidVariableLengthReservedBits(bits) => {
+                write!(
+                    f,
+                    "variable-length datatype sets reserved bits: {bits:#08x}"
+                )
+            }
+            Self::InvalidVariableLengthSequenceMetadata { padding, charset } => {
+                write!(
+                    f,
+                    "variable-length sequence has string metadata: padding {padding}, character set {charset}"
+                )
+            }
+            Self::InvalidVariableLengthSubtype(subtype) => {
+                write!(f, "unsupported variable-length datatype subtype: {subtype}")
             }
             Self::VariableLengthElementLimitExceeded { limit, actual } => {
                 write!(

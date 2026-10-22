@@ -61,6 +61,12 @@ pub fn element_size_usize(datatype: &Datatype) -> Result<NonZeroUsize, FormatErr
 /// size. Returns [`FormatError::InvalidFloatingPointField`] if a floating-point field is empty or
 /// outside that range, [`FormatError::OverlappingFloatingPointFields`] if fields overlap, or
 /// [`FormatError::InvalidMantissaNormalization`] if the normalization code is reserved.
+///
+/// Returns [`FormatError::InvalidVariableLengthSubtype`] if a variable-length subtype is
+/// neither sequence nor string, [`FormatError::InvalidVariableLengthReservedBits`] if its
+/// class bit field has reserved bits set, or
+/// [`FormatError::InvalidVariableLengthSequenceMetadata`] if a sequence has nonzero string
+/// padding or character-set metadata.
 pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
     // Minimum header: 4 bytes (`class_and_version` + 3 bytes bit field) + 4 bytes size = 8
     bytes::ensure_len(data, 0, 8)?;
@@ -302,21 +308,7 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
             ))
         }
         VARIABLE_LENGTH_CLASS => {
-            // Variable-Length
-            let vl_type = bf0 & 0x0F;
-            let is_string = vl_type == 1;
-            let padding = if is_string {
-                let pad_val = (bf0 >> 4) & 0x0F;
-                Some(parse_string_padding(pad_val)?)
-            } else {
-                None
-            };
-            let charset = if is_string {
-                let cs_val = bf1 & 0x0F;
-                Some(parse_charset(cs_val)?)
-            } else {
-                None
-            };
+            let (is_string, padding, charset) = parse_variable_length_metadata([bf0, bf1, bf2])?;
             let (base_type, consumed) = parse_datatype(&data[pos..])?;
             pos += consumed;
             Ok((
@@ -650,6 +642,71 @@ fn build_header(class: u8, version: u8, bf: [u8; 3], size: u32) -> Vec<u8> {
     buf[4..8].copy_from_slice(&size.to_le_bytes());
     buf
 }
+
+fn parse_variable_length_metadata(
+    flags: [u8; 3],
+) -> Result<(bool, Option<StringPadding>, Option<CharacterSet>), FormatError> {
+    let [bf0, bf1, bf2] = flags;
+    let subtype = bf0 & VARIABLE_LENGTH_FIELD_MASK;
+    let is_string = match subtype {
+        VARIABLE_LENGTH_SEQUENCE => false,
+        VARIABLE_LENGTH_STRING => true,
+        _ => return Err(FormatError::InvalidVariableLengthSubtype(subtype)),
+    };
+    let bits = u32::from_le_bytes([bf0, bf1, bf2, 0]) & VARIABLE_LENGTH_RESERVED_MASK;
+    if bits != 0 {
+        return Err(FormatError::InvalidVariableLengthReservedBits(bits));
+    }
+    let padding = bf0 >> VARIABLE_LENGTH_PADDING_SHIFT;
+    let charset = bf1 & VARIABLE_LENGTH_FIELD_MASK;
+    if is_string {
+        return Ok((
+            true,
+            Some(parse_string_padding(padding)?),
+            Some(parse_charset(charset)?),
+        ));
+    }
+    if padding != 0 || charset != 0 {
+        return Err(FormatError::InvalidVariableLengthSequenceMetadata { padding, charset });
+    }
+    Ok((false, None, None))
+}
+
+/// The mask for a four-bit variable-length subtype or character-set code.
+///
+/// The fields for datatype message versions 1 through 5 are defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const VARIABLE_LENGTH_FIELD_MASK: u8 = 0x0F;
+/// The variable-length sequence subtype code.
+///
+/// The code for datatype message versions 1 through 5 is defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const VARIABLE_LENGTH_SEQUENCE: u8 = 0;
+/// The variable-length string subtype code.
+///
+/// The code for datatype message versions 1 through 5 is defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const VARIABLE_LENGTH_STRING: u8 = 1;
+/// The bit position of string padding in the variable-length class bit field.
+///
+/// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const VARIABLE_LENGTH_PADDING_SHIFT: u8 = 4;
+/// The mask for reserved bits 12 through 23 of the variable-length class bit field.
+///
+/// The bits for datatype message versions 1 through 5 are defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const VARIABLE_LENGTH_RESERVED_MASK: u32 = 0xFF_F000;
 
 fn parse_string_padding(val: u8) -> Result<StringPadding, FormatError> {
     match val {
@@ -1620,6 +1677,180 @@ mod tests {
             }
             _ => panic!("expected Enumeration"),
         }
+    }
+
+    #[rstest]
+    #[case(2)]
+    #[case(3)]
+    #[case(4)]
+    #[case(5)]
+    #[case(6)]
+    #[case(7)]
+    #[case(8)]
+    #[case(9)]
+    #[case(10)]
+    #[case(11)]
+    #[case(12)]
+    #[case(13)]
+    #[case(14)]
+    #[case(15)]
+    fn rejects_reserved_variable_length_subtypes(#[case] subtype: u8) {
+        let mut bytes = build_dt_header(
+            VARIABLE_LENGTH_CLASS,
+            DATATYPE_VERSION_ONE,
+            [subtype, 0, 0],
+            16,
+        );
+        bytes.extend_from_slice(&build_fixed_point(1, false, false, 0, 8));
+        assert_eq!(
+            parse_datatype(&bytes).unwrap_err(),
+            FormatError::InvalidVariableLengthSubtype(subtype)
+        );
+    }
+
+    #[rstest]
+    #[case(0x00_1000)]
+    #[case(0x00_2000)]
+    #[case(0x00_4000)]
+    #[case(0x00_8000)]
+    #[case(0x01_0000)]
+    #[case(0x02_0000)]
+    #[case(0x04_0000)]
+    #[case(0x08_0000)]
+    #[case(0x10_0000)]
+    #[case(0x20_0000)]
+    #[case(0x40_0000)]
+    #[case(0x80_0000)]
+    fn rejects_variable_length_reserved_bits(
+        #[case] bits: u32,
+        #[values(VARIABLE_LENGTH_SEQUENCE, VARIABLE_LENGTH_STRING)] subtype: u8,
+    ) {
+        let [bf0, bf1, bf2, _] = bits.to_le_bytes();
+        let mut bytes = build_dt_header(
+            VARIABLE_LENGTH_CLASS,
+            DATATYPE_VERSION_ONE,
+            [bf0 | subtype, bf1, bf2],
+            16,
+        );
+        bytes.extend_from_slice(&build_fixed_point(1, false, false, 0, 8));
+        assert_eq!(
+            parse_datatype(&bytes).unwrap_err(),
+            FormatError::InvalidVariableLengthReservedBits(bits)
+        );
+    }
+
+    #[rstest]
+    #[case(1, 0)]
+    #[case(2, 0)]
+    #[case(15, 0)]
+    #[case(0, 1)]
+    #[case(0, 15)]
+    #[case(1, 1)]
+    fn rejects_string_metadata_on_variable_length_sequences(
+        #[case] padding: u8,
+        #[case] charset: u8,
+    ) {
+        let mut bytes = build_dt_header(
+            VARIABLE_LENGTH_CLASS,
+            DATATYPE_VERSION_ONE,
+            [padding << VARIABLE_LENGTH_PADDING_SHIFT, charset, 0],
+            16,
+        );
+        bytes.extend_from_slice(&build_fixed_point(1, false, false, 0, 8));
+        assert_eq!(
+            parse_datatype(&bytes).unwrap_err(),
+            FormatError::InvalidVariableLengthSequenceMetadata { padding, charset }
+        );
+    }
+
+    #[rstest]
+    #[case([0x31, 0, 0], FormatError::InvalidStringPadding(3))]
+    #[case([0xF1, 0, 0], FormatError::InvalidStringPadding(15))]
+    #[case([1, 2, 0], FormatError::InvalidCharacterSet(2))]
+    #[case([1, 15, 0], FormatError::InvalidCharacterSet(15))]
+    fn rejects_invalid_variable_length_string_metadata(
+        #[case] flags: [u8; 3],
+        #[case] expected: FormatError,
+    ) {
+        let mut bytes = build_dt_header(VARIABLE_LENGTH_CLASS, DATATYPE_VERSION_ONE, flags, 16);
+        bytes.extend_from_slice(&build_fixed_point(1, false, false, 0, 8));
+        assert_eq!(parse_datatype(&bytes).unwrap_err(), expected);
+    }
+
+    #[rstest]
+    #[case(0, StringPadding::NullTerminate)]
+    #[case(1, StringPadding::NullPad)]
+    #[case(2, StringPadding::SpacePad)]
+    fn variable_length_strings_preserve_metadata_and_base_byte_order(
+        #[case] padding_code: u8,
+        #[case] padding: StringPadding,
+        #[values(false, true)] utf8: bool,
+        #[values(false, true)] big_endian: bool,
+    ) {
+        let mut bytes = build_dt_header(
+            VARIABLE_LENGTH_CLASS,
+            DATATYPE_VERSION_ONE,
+            [
+                VARIABLE_LENGTH_STRING | (padding_code << VARIABLE_LENGTH_PADDING_SHIFT),
+                u8::from(utf8),
+                0,
+            ],
+            16,
+        );
+        bytes.extend_from_slice(&build_fixed_point(1, big_endian, false, 0, 8));
+        let (datatype, consumed) = parse_datatype(&bytes).unwrap();
+        assert_eq!(consumed, bytes.len());
+        assert_eq!(
+            datatype,
+            Datatype::VariableLength {
+                is_string: true,
+                padding: Some(padding),
+                charset: Some(if utf8 {
+                    CharacterSet::Utf8
+                } else {
+                    CharacterSet::Ascii
+                }),
+                base_type: Box::new(Datatype::FixedPoint(FixedPointType::new(1, if big_endian {
+                        DatatypeByteOrder::BigEndian
+                    } else {
+                        DatatypeByteOrder::LittleEndian
+                    }, false, 0, 8).unwrap())),
+            }
+        );
+        assert_eq!(serialize_datatype(&datatype), bytes);
+    }
+
+    #[test]
+    fn nested_variable_length_sequences_roundtrip() {
+        let datatype = Datatype::VariableLength {
+            is_string: false,
+            padding: None,
+            charset: None,
+            base_type: Box::new(Datatype::VariableLength {
+                is_string: false,
+                padding: None,
+                charset: None,
+                base_type: Box::new(Datatype::FixedPoint(FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap())),
+            }),
+        };
+        let mut expected = build_dt_header(
+            VARIABLE_LENGTH_CLASS,
+            DATATYPE_VERSION_ONE,
+            [VARIABLE_LENGTH_SEQUENCE, 0, 0],
+            16,
+        );
+        expected.extend_from_slice(&build_dt_header(
+            VARIABLE_LENGTH_CLASS,
+            DATATYPE_VERSION_ONE,
+            [VARIABLE_LENGTH_SEQUENCE, 0, 0],
+            16,
+        ));
+        expected.extend_from_slice(&build_fixed_point(4, false, true, 0, 32));
+        assert_eq!(serialize_datatype(&datatype), expected);
+        assert_eq!(
+            parse_datatype(&expected).unwrap(),
+            (datatype, expected.len())
+        );
     }
 
     #[test]
