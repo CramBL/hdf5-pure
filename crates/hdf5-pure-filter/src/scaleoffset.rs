@@ -11,7 +11,10 @@ use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use hdf5_pure_core::FormatError;
+
 use crate::error::Error;
+use crate::pipeline::FILTER_SCALEOFFSET;
 
 // `cd_values` indices (H5Z_SCALEOFFSET_PARM_*).
 const PARM_SCALETYPE: usize = 0;
@@ -239,6 +242,77 @@ pub fn scale_offset_mode(cd_values: &[u32]) -> Option<(ScaleOffset, FillAvailabi
         _ => return None,
     };
     Some((mode, fill))
+}
+
+/// Parses the scalar metadata and mode of a stored scale-offset filter.
+///
+/// Returns [`None`] for floating-point E-scale mode. `H5Z__filter_scaleoffset` in
+/// `H5Zscaleoffset.c`, HDF5 2.2.0, requires `H5Z_SCALEOFFSET_TOTAL_NPARMS` values and interprets
+/// their scalar class and mode together.
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidFilterParameterCount`] if `values` does not contain 20 entries.
+/// Returns a scale-offset variant of [`FormatError`] for invalid scalar metadata or a mode that
+/// does not match the scalar class.
+pub fn parse_scale_offset_parameters(values: &[u32]) -> Result<Option<ScaleOffset>, FormatError> {
+    if values.len() != TOTAL_NPARMS {
+        return Err(FormatError::InvalidFilterParameterCount {
+            filter_id: FILTER_SCALEOFFSET,
+            expected: TOTAL_NPARMS,
+            actual: values.len(),
+        });
+    }
+    if values[PARM_NELMTS] == 0 {
+        return Err(FormatError::InvalidScaleOffsetElementCount {
+            count: values[PARM_NELMTS],
+        });
+    }
+    let size = values[PARM_SIZE];
+    if !(1..=8).contains(&size) {
+        return Err(FormatError::InvalidScaleOffsetElementSize { size });
+    }
+    if !matches!(values[PARM_ORDER], ORDER_LE | ORDER_BE) {
+        return Err(FormatError::InvalidScaleOffsetByteOrder {
+            order: values[PARM_ORDER],
+        });
+    }
+    if !matches!(values[PARM_FILAVAIL], FILL_UNDEFINED | FILL_DEFINED) {
+        return Err(FormatError::InvalidScaleOffsetFillAvailability {
+            value: values[PARM_FILAVAIL],
+        });
+    }
+    match (values[PARM_SCALETYPE], values[PARM_CLASS]) {
+        (SO_INT, CLS_INTEGER) => {
+            if !matches!(values[PARM_SIGN], SGN_NONE | SGN_2) {
+                return Err(FormatError::InvalidScaleOffsetIntegerSign {
+                    sign: values[PARM_SIGN],
+                });
+            }
+            if values[PARM_SCALEFACTOR] > size * 8 {
+                return Err(FormatError::InvalidScaleOffsetIntegerPrecision {
+                    bits: values[PARM_SCALEFACTOR],
+                    element_size: size,
+                });
+            }
+            Ok(Some(ScaleOffset::Integer(values[PARM_SCALEFACTOR])))
+        }
+        (SO_FLOAT_DSCALE | SO_FLOAT_ESCALE, CLS_FLOAT) => {
+            if !matches!(size, 4 | 8) {
+                return Err(FormatError::InvalidScaleOffsetFloatSize { size });
+            }
+            if values[PARM_SCALETYPE] == SO_FLOAT_ESCALE {
+                return Ok(None);
+            }
+            Ok(Some(ScaleOffset::FloatDScale(i32::from_ne_bytes(
+                values[PARM_SCALEFACTOR].to_ne_bytes(),
+            ))))
+        }
+        _ => Err(FormatError::InvalidScaleOffsetMode {
+            mode: values[PARM_SCALETYPE],
+            class: values[PARM_CLASS],
+        }),
+    }
 }
 
 /// Decoded scale-offset parameters shared by the compress and decompress paths.

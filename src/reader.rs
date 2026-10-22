@@ -45,7 +45,7 @@ use crate::free_space_manager;
 use crate::group_v1;
 use crate::group_v1::GroupEntry;
 use crate::group_v2::{self, ChildLookup};
-use crate::layout_info::{Chunk, ChunkIndex, Filter, Layout};
+use crate::layout_info::{Chunk, ChunkIndex, Filter, FilterId, Layout};
 use crate::libver::LibVer;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
@@ -6002,19 +6002,24 @@ the same commit to replace it",
         Ok(Some(chunk_dimensions[..rank].to_vec()))
     }
 
-    /// The HDF5 filter IDs applied to this dataset's chunks, in pipeline
-    /// (application) order, or an empty vector when the dataset is unfiltered.
-    /// The IDs are the registered HDF5 filter numbers — e.g. 1 = deflate,
-    /// 2 = shuffle, 3 = fletcher32, 6 = scale-offset — so a caller can inspect
-    /// the pipeline without decoding a chunk. A dataset this session has staged
-    /// and not yet committed reports the pipeline its builder asked for.
-    pub fn filters(&self) -> Vec<u16> {
-        if let Ok(Some(meta)) = self.staged_meta() {
-            return meta.filters.into_iter().map(|(id, _)| id).collect();
+    /// Returns the filter identifiers in application order.
+    ///
+    /// Returns an empty vector for an unfiltered dataset. For a staged dataset, returns the
+    /// identifiers requested by its builder. This reads metadata without decoding chunk data.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the filter message or known filter parameters are invalid.
+    /// Propagates errors from resolving the dataset or reading its metadata.
+    pub fn filters(&self) -> Result<Vec<FilterId>, Error> {
+        if let Some(meta) = self.staged_meta()? {
+            return Ok(meta.filters.into_iter().map(|(id, _)| id).collect());
         }
-        self.filter_pipeline_parsed()
-            .map(|p| p.filters.iter().map(|f| f.filter_id).collect())
-            .unwrap_or_default()
+        self.filter_pipeline_parsed()?
+            .into_iter()
+            .flat_map(|pipeline| pipeline.filters)
+            .map(|description| Ok(Filter::from_description(description)?.id))
+            .collect()
     }
 
     /// How and where this dataset's raw data is stored: compact, contiguous,
@@ -6098,46 +6103,33 @@ the same commit to replace it",
             .collect()
     }
 
-    /// This dataset's filter pipeline as an ordered list of [`Filter`]s — each
-    /// with its identifier, optional name, optional/mandatory flag, and client
-    /// data — or an empty vector when the dataset is unfiltered.
+    /// Returns the filter pipeline in application order.
     ///
-    /// The detailed companion to [`filters`](Self::filters), which returns just
-    /// the identifiers. Filters are listed in application (write) order — the
-    /// on-disk pipeline order, matching [`filters`](Self::filters); a reader
-    /// inverts them in the *reverse* of this order to decode a chunk. The curated
-    /// analogue of `H5Pget_nfilters` + `H5Pget_filter2`.
+    /// Each [`Filter`] includes its identifier, recorded name, flags, interpreted parameters, and
+    /// complete client data. Returns an empty vector for an unfiltered dataset.
     ///
-    /// A dataset this session has staged and not yet committed reports each
-    /// filter's identifier and optional flag, and no name or client data: those
-    /// are derived from the dataset being written (element size, chunk geometry,
-    /// fill value) when [`File::commit`] writes it.
-    pub fn filter_pipeline(&self) -> Vec<Filter> {
-        if let Ok(Some(meta)) = self.staged_meta() {
-            return meta
+    /// A staged dataset reports [`FilterParameters::Pending`](crate::FilterParameters::Pending)
+    /// with the identifier and optional flag requested by its builder. The writer derives the
+    /// encoded client data from the dataset when [`File::commit`] serializes it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the filter message or known filter parameters are invalid.
+    /// Propagates errors from resolving the dataset or reading its metadata.
+    pub fn filter_pipeline(&self) -> Result<Vec<Filter>, Error> {
+        if let Some(meta) = self.staged_meta()? {
+            return Ok(meta
                 .filters
                 .into_iter()
-                .map(|(id, is_optional)| Filter {
-                    id,
-                    is_optional,
-                    name: None,
-                    client_data: Vec::new(),
-                })
-                .collect();
+                .map(|(id, optional)| Filter::pending(id, optional))
+                .collect());
         }
-        self.filter_pipeline_parsed()
-            .map(|p| {
-                p.filters
-                    .into_iter()
-                    .map(|f| Filter {
-                        id: f.filter_id,
-                        is_optional: f.is_optional(),
-                        name: f.name,
-                        client_data: f.client_data,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+        self.filter_pipeline_parsed()?
+            .into_iter()
+            .flat_map(|pipeline| pipeline.filters)
+            .map(Filter::from_description)
+            .collect::<Result<_, _>>()
+            .map_err(Error::from)
     }
 
     /// Returns the absolute file position of `address`, and `None` where a layout message stores
@@ -6299,7 +6291,7 @@ the same commit to replace it",
         let dt = self.datatype()?;
         let ds = self.dataspace()?;
         let dl = self.read_layout()?;
-        let pipeline = self.filter_pipeline_parsed();
+        let pipeline = self.filter_pipeline_parsed()?;
         // See `read_raw`: an unparseable fill value message is carried into the
         // read rather than failing it up front.
         let elem_size = crate::datatype::element_size_usize(&dt)?;
@@ -6775,20 +6767,18 @@ the same commit to replace it",
         Ok(DataLayout::parse_with_widths(&msg.data, self.file.widths)?)
     }
 
-    /// A handle that can no longer be resolved reports no pipeline, the same
-    /// answer an unfiltered dataset gives: this feeds the two infallible
-    /// accessors ([`filters`](Self::filters) and
-    /// [`filter_pipeline`](Self::filter_pipeline)), which have no way to say
-    /// why. Every caller that *can* say uses a `Result` reader instead.
-    pub(crate) fn filter_pipeline_parsed(&self) -> Option<FilterPipeline> {
-        let state = self.resolved().ok()?;
-        let msg = state
+    pub(crate) fn filter_pipeline_parsed(&self) -> Result<Option<FilterPipeline>, Error> {
+        let state = self.resolved()?;
+        let Some(msg) = state
             .header
             .messages
             .iter()
-            .find(|m| m.msg_type == MessageType::FILTER_PIPELINE)?;
-        let body = self.file.message_body(msg).ok()?;
-        crate::filter_pipeline::parse_filter_pipeline(&body).ok()
+            .find(|m| m.msg_type == MessageType::FILTER_PIPELINE)
+        else {
+            return Ok(None);
+        };
+        let body = self.file.message_body(msg)?;
+        Ok(Some(crate::filter_pipeline::parse_filter_pipeline(&body)?))
     }
 
     /// Whether this dataset's element bytes live in files outside this one
@@ -6924,7 +6914,7 @@ the same commit to replace it",
         // `read_dataset_raw` applies the base address centrally (for both
         // contiguous and chunked layouts) by reading from a base-relative view of
         // the file.
-        let pipeline = self.filter_pipeline_parsed();
+        let pipeline = self.filter_pipeline_parsed()?;
         // A fill value message this parser cannot read does not, by itself,
         // make the dataset unreadable: it only decides what *unallocated*
         // storage looks like. Carry the uncertainty into the read and let it
@@ -7417,7 +7407,7 @@ the same commit to replace it",
         let datatype = self.datatype()?;
         let dataspace = self.dataspace()?;
         let layout = self.read_layout()?;
-        let pipeline = self.filter_pipeline_parsed();
+        let pipeline = self.filter_pipeline_parsed()?;
         let element_size = crate::datatype::element_size_usize(&datatype)?;
         let fill_message = self.fill_value_message();
         let fill = match &fill_message {

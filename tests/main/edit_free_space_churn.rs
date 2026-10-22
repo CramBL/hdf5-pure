@@ -16,6 +16,7 @@ use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpaceStrategy;
+use hdf5_pure::FilterId;
 use hdf5_pure::FormatError;
 use hdf5_pure::Layout;
 use hdf5_pure::MaxExtent;
@@ -1389,7 +1390,13 @@ fn validate_dataset(
         }
         (_, _, layout) => panic!("{path}: unexpected layout {layout:?}"),
     }
-    assert_eq!(dataset.filters(), expected_filters);
+    assert_eq!(
+        dataset.filters().unwrap(),
+        expected_filters
+            .iter()
+            .map(|&id| FilterId::try_from(id).unwrap())
+            .collect::<Vec<_>>()
+    );
     match expected_filters {
         [] => coverage.filter_none += 1,
         [FILTER_DEFLATE] => coverage.filter_deflate += 1,

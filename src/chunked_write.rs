@@ -35,6 +35,7 @@ use crate::filter_pipeline::{
     FilterDescription, FilterPipeline, H5Z_FLAG_OPTIONAL,
 };
 use crate::filters::{self, ChunkContext};
+use crate::layout_info::FilterId;
 use crate::scaleoffset::{self, FillAvailability, ScaleOffset};
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
@@ -88,15 +89,15 @@ impl FilterKind {
     /// two `Deflate`s at different levels are one filter appearing twice, not
     /// two filters, which is what makes [`ChunkOptions::set_filter`] replace
     /// rather than accumulate.
-    pub(crate) fn filter_id(self) -> u16 {
+    pub(crate) fn filter_id(self) -> FilterId {
         match self {
             #[cfg(feature = "zfp")]
-            Self::Zfp(_) => FILTER_ZFP,
-            Self::ScaleOffset(..) => FILTER_SCALEOFFSET,
-            Self::Shuffle => FILTER_SHUFFLE,
-            Self::Lzf => FILTER_LZF,
-            Self::Deflate(_) => FILTER_DEFLATE,
-            Self::Fletcher32 => FILTER_FLETCHER32,
+            Self::Zfp(_) => FilterId::Zfp,
+            Self::ScaleOffset(..) => FilterId::ScaleOffset,
+            Self::Shuffle => FilterId::Shuffle,
+            Self::Lzf => FilterId::Lzf,
+            Self::Deflate(_) => FilterId::Deflate,
+            Self::Fletcher32 => FilterId::Fletcher32,
         }
     }
 
@@ -184,8 +185,8 @@ impl ChunkOptions {
             return;
         }
         let at = hdf5_pure_filter::__private::canonical_filter_position(
-            self.filters.iter().map(|f| f.kind.filter_id()),
-            kind.filter_id(),
+            self.filters.iter().map(|f| f.kind.filter_id().get()),
+            kind.filter_id().get(),
         );
         self.filters.insert(at, spec);
     }
@@ -220,7 +221,7 @@ impl ChunkOptions {
         if self
             .filters
             .iter()
-            .any(|f| f.kind.filter_id() == FILTER_DEFLATE)
+            .any(|f| f.kind.filter_id() == FilterId::Deflate)
         {
             return Err("deflate compression requires the `deflate` crate feature");
         }
@@ -243,7 +244,7 @@ impl ChunkOptions {
         };
 
         let Some((first, second)) = hdf5_pure_filter::__private::first_filter_conflict(
-            self.filters.iter().map(|f| f.kind.filter_id()),
+            self.filters.iter().map(|f| f.kind.filter_id().get()),
         ) else {
             return Ok(());
         };
@@ -2834,10 +2835,10 @@ mod tests {
     // Repeated setters replace the earlier level at its original position.
     #[test]
     fn setting_filters_places_them_in_canonical_order_whatever_order_they_arrive_in() {
-        let ids = |o: &ChunkOptions| -> Vec<u16> {
+        let ids = |o: &ChunkOptions| -> Vec<FilterId> {
             o.filters.iter().map(|f| f.kind.filter_id()).collect()
         };
-        let canonical = [FILTER_SHUFFLE, FILTER_DEFLATE, FILTER_FLETCHER32];
+        let canonical = [FilterId::Shuffle, FilterId::Deflate, FilterId::Fletcher32];
 
         assert_eq!(
             ids(&filtered(&[
@@ -2862,7 +2863,7 @@ mod tests {
             FilterKind::Shuffle,
             FilterKind::Deflate(DeflateLevel::Nine),
         ]);
-        assert_eq!(ids(&twice), [FILTER_SHUFFLE, FILTER_DEFLATE]);
+        assert_eq!(ids(&twice), [FilterId::Shuffle, FilterId::Deflate]);
         assert_eq!(
             twice.filters[1].kind,
             FilterKind::Deflate(DeflateLevel::Nine)

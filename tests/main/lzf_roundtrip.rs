@@ -5,6 +5,7 @@
 //! correctly. LZF is lossless, so every comparison is exact equality.
 
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::FilterId;
 use hdf5_pure::{Error, File, FileBuilder, FormatError, RepackOptions};
 
 use test_util::temp;
@@ -22,7 +23,7 @@ fn lzf_i32_roundtrip() {
 
     let file = File::from_bytes(bytes).unwrap();
     let ds = file.dataset("v").unwrap();
-    assert_eq!(ds.filters(), vec![32000]);
+    assert_eq!(ds.filters().unwrap(), vec![FilterId::Lzf]);
     assert_eq!(ds.read_i32().unwrap(), vals);
 }
 
@@ -40,7 +41,10 @@ fn lzf_shuffle_f64_roundtrip() {
 
     let file = File::from_bytes(bytes).unwrap();
     let ds = file.dataset("v").unwrap();
-    assert_eq!(ds.filters(), vec![2, 32000]);
+    assert_eq!(
+        ds.filters().unwrap(),
+        vec![FilterId::Shuffle, FilterId::Lzf]
+    );
     assert_eq!(ds.read_f64().unwrap(), vals);
 }
 
@@ -93,11 +97,11 @@ fn lzf_records_h5py_cd_values() {
     let bytes = builder.finish().unwrap();
 
     let file = File::from_bytes(bytes).unwrap();
-    let pipeline = file.dataset("v").unwrap().filter_pipeline();
+    let pipeline = file.dataset("v").unwrap().filter_pipeline().unwrap();
     assert_eq!(pipeline.len(), 1);
-    assert_eq!(pipeline[0].id, 32000);
+    assert_eq!(pipeline[0].id, FilterId::Lzf);
     assert_eq!(pipeline[0].name.as_deref(), Some("lzf"));
-    assert_eq!(pipeline[0].client_data, vec![4, 0x0105, 64 * 4]);
+    assert_eq!(pipeline[0].client_data(), vec![4, 0x0105, 64 * 4]);
     // Optional, as h5py records it. LZF is the one filter this crate writes
     // whose compressor can decline a chunk; a later writer needs the flag to
     // store that chunk raw instead of failing the write outright.
@@ -281,7 +285,7 @@ fn pure_written_fixture_reads_back() {
 fn reads_h5py_lzf_masked_chunk() {
     let file = File::open(fixture("u8_noise.h5")).unwrap();
     let ds = file.dataset("v").unwrap();
-    assert_eq!(ds.filters(), vec![32000]);
+    assert_eq!(ds.filters().unwrap(), vec![FilterId::Lzf]);
     let expected = std::fs::read(fixture("u8_noise.raw.bin")).unwrap();
     assert_eq!(ds.read_u8().unwrap(), expected);
 }
@@ -291,7 +295,10 @@ fn reads_h5py_lzf_masked_chunk() {
 fn reads_h5py_shuffle_lzf() {
     let file = File::open(fixture("f64_shuffle_lzf.h5")).unwrap();
     let ds = file.dataset("v").unwrap();
-    assert_eq!(ds.filters(), vec![2, 32000]);
+    assert_eq!(
+        ds.filters().unwrap(),
+        vec![FilterId::Shuffle, FilterId::Lzf]
+    );
     let raw = std::fs::read(fixture("f64_shuffle_lzf.raw.bin")).unwrap();
     let expected: Vec<f64> = raw
         .as_chunks::<8>()
@@ -337,6 +344,9 @@ fn repack_roundtrips_lzf() {
 
     let file = File::open(&dst).unwrap();
     let ds = file.dataset("vals").unwrap();
-    assert_eq!(ds.filters(), vec![2, 32000]);
+    assert_eq!(
+        ds.filters().unwrap(),
+        vec![FilterId::Shuffle, FilterId::Lzf]
+    );
     assert_eq!(ds.read_f64().unwrap(), data);
 }

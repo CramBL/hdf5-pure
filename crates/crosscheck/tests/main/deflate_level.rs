@@ -7,6 +7,7 @@ use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
 #[cfg(feature = "__hdf5-1.10")]
 use hdf5_pure::FileBuilder;
+use hdf5_pure::FilterParameters;
 use rstest::rstest;
 
 #[rstest]
@@ -40,7 +41,21 @@ fn reads_c_deflate_values_and_level_metadata(
     let dataset = File::open(&path).unwrap().dataset("data").unwrap();
     assert_eq!(dataset.read_i32().unwrap(), [1, 2, 3, 4]);
     assert_eq!(
-        dataset.filter_pipeline().last().unwrap().client_data,
+        dataset
+            .filter_pipeline()
+            .unwrap()
+            .last()
+            .unwrap()
+            .parameters,
+        FilterParameters::Deflate(level)
+    );
+    assert_eq!(
+        dataset
+            .filter_pipeline()
+            .unwrap()
+            .last()
+            .unwrap()
+            .client_data(),
         [u32::from(level.get())]
     );
 }

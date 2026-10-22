@@ -10,9 +10,11 @@ pub use crate::pipeline::ChunkContext;
 pub use crate::pipeline::FILTER_DEFLATE;
 pub use crate::pipeline::FILTER_FLETCHER32;
 pub use crate::pipeline::FILTER_LZF;
+pub use crate::pipeline::FILTER_NBIT;
+pub use crate::pipeline::FILTER_RESERVED;
 pub use crate::pipeline::FILTER_SCALEOFFSET;
 pub use crate::pipeline::FILTER_SHUFFLE;
-#[cfg(feature = "zfp")]
+pub use crate::pipeline::FILTER_SZIP;
 pub use crate::pipeline::FILTER_ZFP;
 pub use crate::pipeline::FilterScratch;
 pub use crate::pipeline::FilterStep;
@@ -31,6 +33,7 @@ pub use crate::scaleoffset::ScaleOffsetByteOrder;
 pub use crate::scaleoffset::ScaleOffsetFill;
 pub use crate::scaleoffset::ScaleOffsetType;
 pub use crate::scaleoffset::build_cd_values as build_scale_offset_cd_values;
+pub use crate::scaleoffset::parse_scale_offset_parameters;
 pub use crate::scaleoffset::scale_offset_mode;
 #[cfg(feature = "zfp")]
 pub use crate::zfp::ZfpElementType;

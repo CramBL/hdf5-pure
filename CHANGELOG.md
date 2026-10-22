@@ -41,6 +41,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** `Dataset::filter_pipeline` and related introspection change to fallible methods with typed identifiers and parameters. Uninterpreted parameters remain available, and staged parameters are marked pending.
 - **Breaking:** The consistency flags field of `Superblock` changes from an integer to a typed flag set. Parsed flags preserve reserved bits and inconsistent access marks.
 - **Breaking:** The version and width fields of `Superblock` change from integers to enums restricted to supported values. The library-version conversion also requires a typed version.
 - **Breaking:** The level type of `DatasetBuilder::with_deflate` and related compression settings changes from integers to an enum restricted to zero through nine ([#833](https://github.com/CramBL/hdf5-pure/pull/833)).

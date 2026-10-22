@@ -127,7 +127,14 @@ Four accessors describe a dataset's storage layout without reading any data. The
 | [`Dataset::is_chunked()`](crate::Dataset::is_chunked) | `bool`, `true` for chunked storage. A filtered dataset is always chunked |
 | [`Dataset::maxshape()`](crate::Dataset::maxshape) | `Option<Vec<MaxExtent>>`, the maximum dimensions, with a dimension that grows without bound reported as [`MaxExtent::Unlimited`](crate::MaxExtent::Unlimited). `None` for a fixed-shape dataset |
 | [`Dataset::chunk_shape()`](crate::Dataset::chunk_shape) | `Option<Vec<u64>>`, the chunk dimensions, one per rank. `None` for a dataset that is not chunked |
-| [`Dataset::filters()`](crate::Dataset::filters) | `Vec<u16>`, the HDF5 filter IDs in pipeline order (1 = deflate, 2 = shuffle, 3 = fletcher32, 6 = scale-offset, 32000 = LZF). Empty for an unfiltered dataset |
+| [`Dataset::filters()`](crate::Dataset::filters) | `Result<Vec<FilterId>, Error>`, the typed filter identifiers in pipeline order. Empty for an unfiltered dataset |
+
+[`Dataset::filter_pipeline`](crate::Dataset::filter_pipeline) reads the parameters and recorded
+metadata for each filter. Known parameter errors are returned during introspection.
+Raw parameters remain available for [`FilterParameters::Opaque`](crate::FilterParameters::Opaque)
+filters. Staged datasets report [`FilterParameters::Pending`](crate::FilterParameters::Pending)
+until serialization. The recorded flags and client data remain available through
+[`Filter::flags`](crate::Filter::flags) and [`Filter::client_data`](crate::Filter::client_data).
 
 ```rust
 # let dir = tempfile::tempdir()?;

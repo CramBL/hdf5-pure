@@ -11,9 +11,14 @@
 //! writer only emits the v4 array indices), plus unfiltered and filtered v2-B-tree (`BTreeV2`)
 //! datasets whose chunks the pure reader enumerates and reads.
 
+use core::num::NonZeroU32;
+
 use hdf5::Extent;
 use hdf5::dataset::Layout as CLayout;
 use hdf5::file::LibraryVersion;
+use hdf5_pure::DeflateLevel;
+use hdf5_pure::FilterId;
+use hdf5_pure::FilterParameters;
 use hdf5_pure::{Chunk, ChunkIndex, File, Layout};
 
 use test_util_hdf5::dataset;
@@ -243,19 +248,36 @@ fn c_shuffle_then_deflate_pipeline() {
     let f = File::open(&path).unwrap();
     let ds = f.dataset("d").unwrap();
 
-    let pipeline = ds.filter_pipeline();
-    let ids: Vec<u16> = pipeline.iter().map(|flt| flt.id).collect();
+    let pipeline = ds.filter_pipeline().unwrap();
+    let ids: Vec<FilterId> = pipeline.iter().map(|flt| flt.id).collect();
     assert_eq!(
         ids,
-        vec![2, 1],
+        vec![FilterId::Shuffle, FilterId::Deflate],
         "shuffle (2) then deflate (1), in write order"
     );
-    assert_eq!(ds.filters(), vec![2, 1]);
+    assert_eq!(
+        ds.filters().unwrap(),
+        vec![FilterId::Shuffle, FilterId::Deflate]
+    );
 
-    let shuffle = pipeline.iter().find(|flt| flt.id == 2).unwrap();
-    let deflate = pipeline.iter().find(|flt| flt.id == 1).unwrap();
-    assert_eq!(deflate.client_data, vec![6], "deflate level");
-    assert_eq!(shuffle.client_data, vec![4], "shuffle element size (i32)");
+    let shuffle = pipeline
+        .iter()
+        .find(|flt| flt.id == FilterId::Shuffle)
+        .unwrap();
+    let deflate = pipeline
+        .iter()
+        .find(|flt| flt.id == FilterId::Deflate)
+        .unwrap();
+    assert_eq!(
+        deflate.parameters,
+        FilterParameters::Deflate(DeflateLevel::Six)
+    );
+    assert_eq!(
+        shuffle.parameters,
+        FilterParameters::Shuffle(NonZeroU32::new(4).unwrap())
+    );
+    assert_eq!(deflate.client_data(), vec![6], "deflate level");
+    assert_eq!(shuffle.client_data(), vec![4], "shuffle element size (i32)");
     // The reference wrapper records filters as OPTIONAL (filter-flags bit 0),
     // "the same way h5py does it", so a reader may skip one it lacks. Our
     // `is_optional` reflects that faithfully — unlike the pure writer, which

@@ -12,6 +12,8 @@
 //! test are the reference library's own, then checks that what hdf5-pure
 //! encodes is what the C library reads back.
 
+use hdf5_pure::FilterId;
+use hdf5_pure::FilterParameters;
 use hdf5_pure::{H5Element, ScaleOffset};
 
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
@@ -41,12 +43,17 @@ fn the_c_library_records_a_defined_fill_value_even_without_one() {
         let ds = f.dataset("col").unwrap();
         let so = ds
             .filter_pipeline()
+            .unwrap()
             .into_iter()
-            .find(|f| f.id == 6)
+            .find(|f| f.id == FilterId::ScaleOffset)
             .expect("a scale-offset filter");
+        let FilterParameters::ScaleOffset(parameters) = &so.parameters else {
+            panic!("expected scale-offset parameters, got {:?}", so.parameters);
+        };
+        assert_eq!(parameters.mode(), ScaleOffset::Integer(0));
         // cd_values[7] is FILAVAIL (1 = defined); cd_values[8..] carry the fill
         // value, least-significant 4 bytes per entry.
-        (so.client_data[7], so.client_data[8])
+        (so.client_data()[7], so.client_data()[8])
     };
 
     assert_eq!(filavail_and_filval(Some(7), "explicit.h5"), (1, 7));
@@ -64,10 +71,12 @@ fn filter_parms(path: &std::path::Path) -> Vec<u32> {
         .dataset("col")
         .unwrap()
         .filter_pipeline()
+        .unwrap()
         .into_iter()
-        .find(|f| f.id == 6)
+        .find(|f| f.id == FilterId::ScaleOffset)
         .expect("a scale-offset filter")
-        .client_data
+        .client_data()
+        .to_vec()
 }
 
 /// The other half of the premise above (issue #297): this crate writes the same
