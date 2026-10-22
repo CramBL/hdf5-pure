@@ -70,7 +70,7 @@ test-big-endian:
         --features "{{ PORTABILITY_FEATURES }}"
 
 # The crosschecks against the C library, cross-compiled for the same 32-bit target `test-32bit` checks.
-test-32bit-hdf5 FEATURES="serde,ndarray":
+test-32bit-hdf5 FEATURES="serde,ndarray,provenance":
     cross test {{ CROSS_VERBOSE }} \
         --config 'build.rustc-wrapper=""' \
         --config 'target."i686-unknown-linux-gnu".linker="i686-linux-gnu-gcc"' \
@@ -83,7 +83,7 @@ test-32bit-hdf5 FEATURES="serde,ndarray":
 
 # The crosschecks against the C library, cross-compiled and linked for the
 # same big-endian target `test-big-endian` checks.
-test-big-endian-hdf5 FEATURES="serde,ndarray":
+test-big-endian-hdf5 FEATURES="serde,ndarray,provenance":
     cross test {{ CROSS_VERBOSE }} \
         --config 'build.rustc-wrapper=""' \
         --config 'target."s390x-unknown-linux-gnu".linker="s390x-linux-gnu-gcc"' \

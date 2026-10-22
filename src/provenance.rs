@@ -16,7 +16,7 @@ use crate::attribute::AttributeMessage;
 use crate::datatype::CharacterSet;
 use crate::type_builders;
 
-/// SHA-256 hex digest of the raw dataset bytes.
+/// The attribute name for the SHA-256 digest of unfiltered dataset element bytes.
 pub const ATTR_SHA256: &str = "_provenance_sha256";
 /// Creator identifier (tool/user).
 pub const ATTR_CREATOR: &str = "_provenance_creator";
@@ -25,7 +25,7 @@ pub const ATTR_TIMESTAMP: &str = "_provenance_timestamp";
 /// Optional free-form description of the data source.
 pub const ATTR_SOURCE: &str = "_provenance_source";
 
-/// Compute the SHA-256 digest of `data` and return the lowercase hex string.
+/// Returns the SHA-256 digest of `data` as lowercase hexadecimal.
 pub fn sha256_hex(data: &[u8]) -> String {
     let hash = Sha256::digest(data);
     let mut hex = String::with_capacity(64);
@@ -35,27 +35,40 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hex
 }
 
-/// Collects provenance information to be stored as HDF5 attributes.
+/// The creator, timestamp, and source recorded with a dataset's content hash.
 pub struct Provenance {
+    /// The tool or user that produced the dataset.
     pub creator: String,
+    /// The timestamp string supplied by the caller.
     pub timestamp: String,
+    /// The source description, if supplied.
     pub source: Option<String>,
 }
 
 impl Provenance {
-    /// Build provenance attribute messages for the given raw dataset bytes.
+    /// Returns the SHA-256 hash and creator metadata as attribute messages.
     ///
-    /// Returns a `Vec<AttributeMessage>` containing:
-    /// - `_provenance_sha256`   — hex digest of `raw_data`
-    /// - `_provenance_creator`  — the creator string
-    /// - `_provenance_timestamp` — the timestamp string
-    /// - `_provenance_source`   — (optional) source description
+    /// Hashes `raw_data` exactly as supplied. For dataset verification, pass the unfiltered
+    /// element bytes returned by [`Dataset::read_raw`](crate::Dataset::read_raw), including stored
+    /// heap identifiers and object-reference addresses.
+    ///
+    /// The attribute order is [`ATTR_SHA256`], [`ATTR_CREATOR`], [`ATTR_TIMESTAMP`], and
+    /// [`ATTR_SOURCE`] when [`source`](Self::source) is present.
     pub fn build_attrs(&self, raw_data: &[u8]) -> Vec<AttributeMessage> {
-        let hash = sha256_hex(raw_data);
+        self.attrs_with_hash(&sha256_hex(raw_data))
+    }
+
+    /// Returns the attributes of [`Self::build_attrs`] with a fixed-width digest placeholder.
+    pub(crate) fn deferred_attrs(&self) -> Vec<AttributeMessage> {
+        self.attrs_with_hash(DEFERRED_SHA256)
+    }
+
+    /// Builds attribute messages with `hash` in the first position.
+    fn attrs_with_hash(&self, hash: &str) -> Vec<AttributeMessage> {
         let mut attrs = Vec::with_capacity(4);
         attrs.push(type_builders::fixed_string_scalar_attr(
             ATTR_SHA256,
-            &hash,
+            hash,
             None,
             CharacterSet::Utf8,
         ));
@@ -82,6 +95,9 @@ impl Provenance {
         attrs
     }
 }
+
+/// A 64-byte hexadecimal placeholder for a digest deferred during file planning.
+const DEFERRED_SHA256: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 /// Outcome of checking a dataset against its stored provenance hash.
 ///
@@ -143,6 +159,10 @@ mod tests {
         let attrs = prov.build_attrs(b"hello");
         assert_eq!(attrs.len(), 3);
         assert_eq!(attrs[0].name, ATTR_SHA256);
+        assert_eq!(
+            attrs[0].raw_data,
+            b"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
         assert_eq!(attrs[1].name, ATTR_CREATOR);
         assert_eq!(attrs[2].name, ATTR_TIMESTAMP);
     }

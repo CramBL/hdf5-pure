@@ -27,7 +27,7 @@ hdf5-versions *ARGS:
     @{{ uv }} hdf5-build --list {{ ARGS }}
 
 # Test every release scripts/hdf5-releases.toml lists with `FEATURES`.
-test-hdf5-all FEATURES="serde,ndarray" PROFILE="test":
+test-hdf5-all FEATURES="serde,ndarray,provenance" PROFILE="test":
     #!/usr/bin/env bash
     set -euo pipefail
     for version in $({{ uv }} hdf5-build --list); do
@@ -37,19 +37,19 @@ test-hdf5-all FEATURES="serde,ndarray" PROFILE="test":
     done
 
 # Run cross tests on libhdf5 `VERSION` with `FEATURES` and `ARGS`. Built under tmp/hdf5 on first use.
-test-hdf5 VERSION FEATURES="serde,ndarray" *ARGS: (hdf5-build VERSION)
+test-hdf5 VERSION FEATURES="serde,ndarray,provenance" *ARGS: (hdf5-build VERSION)
     release_feature="$({{ quote(just_executable()) }} interop::hdf5-release-feature {{ VERSION }})" && \
     eval "$({{ quote(just_executable()) }} interop::hdf5-env {{ VERSION }})" && \
     cargo nextest run --locked -p {{ CROSSCHECK }} --features "hdf5,{{ FEATURES }}${release_feature:+,$release_feature}" {{ ARGS }}
 
 # Run one configured nextest group against libhdf5 `VERSION`.
-test-hdf5-group VERSION GROUP FEATURES="serde,ndarray": (hdf5-build VERSION)
+test-hdf5-group VERSION GROUP FEATURES="serde,ndarray,provenance": (hdf5-build VERSION)
     release_feature="$({{ quote(just_executable()) }} interop::hdf5-release-feature {{ VERSION }})" && \
     eval "$({{ quote(just_executable()) }} interop::hdf5-env {{ VERSION }})" && \
     cargo nextest run --locked -p {{ CROSSCHECK }} --features "hdf5,{{ FEATURES }}${release_feature:+,$release_feature}" -E 'group({{ GROUP }})'
 
 # Clippy over the crosschecks, linking libhdf5 VERSION.
-lint-hdf5 VERSION FEATURES="serde,ndarray":
+lint-hdf5 VERSION FEATURES="serde,ndarray,provenance":
     release_feature="$({{ quote(just_executable()) }} interop::hdf5-release-feature {{ VERSION }})" && \
     eval "$({{ quote(just_executable()) }} interop::hdf5-env {{ VERSION }})" && \
     cargo clippy --locked -p {{ CROSSCHECK }} --all-targets --features "hdf5,{{ FEATURES }}${release_feature:+,$release_feature}" -- -D warnings

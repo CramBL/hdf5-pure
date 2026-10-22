@@ -1590,6 +1590,9 @@ impl FileWriter {
             ds: Dataspace,
             storage: PreparedStorage,
             attrs: Vec<AttributeMessage>,
+            /// The reserved content hash, completed after resolving element addresses.
+            #[cfg(feature = "provenance")]
+            pending_hash: Option<PendingHash>,
             /// The committed datatype path of each attribute, parallel to `attrs`.
             attr_committed_datatype_paths: Vec<Option<ObjectPathBuf>>,
             chunk_options: ChunkOptions,
@@ -1637,6 +1640,52 @@ impl FileWriter {
                     },
                     None => DsData::InMemory(self.storage.take_raw()),
                 }
+            }
+        }
+
+        /// The position of a reserved hash attribute.
+        #[cfg(feature = "provenance")]
+        struct PendingHash {
+            /// The index in the dataset's flattened attribute list.
+            attribute: usize,
+        }
+
+        #[cfg(feature = "provenance")]
+        impl PendingHash {
+            /// Appends hash metadata with a 64-byte digest placeholder.
+            fn reserve(
+                attrs: &mut Vec<AttributeMessage>,
+                provenance: crate::provenance::Provenance,
+            ) -> Self {
+                let attribute = attrs.len();
+                attrs.extend(provenance.deferred_attrs());
+                Self { attribute }
+            }
+
+            /// Writes the hash of finalized unfiltered element bytes into the reserved attribute.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`FormatError::Internal`] if the reserved attribute is absent or its
+            /// data length differs from the hexadecimal digest length.
+            fn complete(
+                self,
+                attrs: &mut [AttributeMessage],
+                bytes: &[u8],
+            ) -> Result<(), FormatError> {
+                let attribute = attrs.get_mut(self.attribute).ok_or_else(|| {
+                    FormatError::Internal(
+                        "the reserved provenance digest attribute is absent".into(),
+                    )
+                })?;
+                let hash = crate::provenance::sha256_hex(bytes);
+                if attribute.raw_data.len() != hash.len() {
+                    return Err(FormatError::Internal(
+                        "the provenance digest does not occupy its reserved bytes".into(),
+                    ));
+                }
+                attribute.raw_data.copy_from_slice(hash.as_bytes());
+                Ok(())
             }
         }
 
@@ -2041,14 +2090,16 @@ impl FileWriter {
             }
             let patches = collect_vl_patches(&attribute_specs);
             #[cfg(feature = "provenance")]
-            if let Some(ref prov) = provenance {
-                let p = crate::provenance::Provenance {
-                    creator: prov.creator.clone(),
-                    timestamp: prov.timestamp.clone(),
-                    source: prov.source.clone(),
-                };
-                attrs.extend(p.build_attrs(storage.raw()));
-            }
+            let pending_hash = provenance.map(|prov| {
+                PendingHash::reserve(
+                    &mut attrs,
+                    crate::provenance::Provenance {
+                        creator: prov.creator,
+                        timestamp: prov.timestamp,
+                        source: prov.source,
+                    },
+                )
+            });
             // A user-defined fill value is one element wide, so its byte length
             // must equal the datatype's element size.
             if let Some(fill) = &fill {
@@ -2071,6 +2122,8 @@ impl FileWriter {
                 ds: dspace,
                 storage,
                 attrs,
+                #[cfg(feature = "provenance")]
+                pending_hash,
                 attr_committed_datatype_paths,
                 chunk_options,
                 maxshape,
@@ -2635,6 +2688,17 @@ impl FileWriter {
             allocation.end() - SUPERBLOCK_SIZE as u64
         };
 
+        #[cfg(feature = "provenance")]
+        for (i, dataset) in all_ds.iter_mut().enumerate() {
+            if dataset.reference_targets.is_none()
+                && (dataset.vl_string_staging.is_none() || early_gcol.contains(&i))
+            {
+                if let Some(hash) = dataset.pending_hash.take() {
+                    hash.complete(&mut dataset.attrs, dataset.storage.raw())?;
+                }
+            }
+        }
+
         // Compress each encode-path chunked dataset exactly once, up front. The
         // object-header sizing pass and the data-emit pass both need the chunk
         // layout, but only the embedded addresses differ between them — the
@@ -2713,6 +2777,15 @@ impl FileWriter {
                 groups: &[GrpFlat],
                 datasets: &[DsFlat],
             ) -> Result<DenseBlobs, FormatError> {
+                #[cfg(feature = "provenance")]
+                if datasets
+                    .iter()
+                    .any(|dataset| dataset.pending_hash.is_some())
+                {
+                    return Err(FormatError::Internal(
+                        "a provenance digest is incomplete before attribute encoding".into(),
+                    ));
+                }
                 fn one(
                     attrs: &[AttributeMessage],
                     span: Option<(StoredAddress, usize)>,
@@ -3039,6 +3112,10 @@ impl FileWriter {
                         patch.byte_offset,
                         addr,
                     );
+                }
+                #[cfg(feature = "provenance")]
+                if let Some(hash) = d.pending_hash.take() {
+                    hash.complete(&mut d.attrs, d.storage.raw())?;
                 }
             }
         }
@@ -3660,7 +3737,7 @@ impl FileWriter {
             // Patch dataset-element references in the contiguous element bytes moved into
             // `ds_layouts[i].data`. The writer reserves chunked datasets' collections and patches
             // their references before chunk encoding.
-            for (i, d) in all_ds.iter().enumerate() {
+            for (i, d) in all_ds.iter_mut().enumerate() {
                 // A chunked VL dataset was placed and patched before its chunks
                 // were encoded; its references are already final.
                 if early_gcol.contains(&i) {
@@ -3680,6 +3757,10 @@ impl FileWriter {
                         aggregated,
                     )?;
                     type_builders::patch_vl_refs_masked(bytes, &staging.patch_offsets, &addrs);
+                    #[cfg(feature = "provenance")]
+                    if let Some(hash) = d.pending_hash.take() {
+                        hash.complete(&mut d.attrs, bytes)?;
+                    }
                 }
             }
         }

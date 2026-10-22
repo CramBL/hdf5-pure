@@ -14,6 +14,8 @@ build = "build.rs"
 [features]
 serde = ["hdf5-pure/serde"]
 ndarray = ["hdf5-pure/ndarray"]
+# Checks dataset values, content hashes, and creator metadata through the reference library.
+provenance = ["hdf5-pure/provenance"]
 # Links the reference HDF5 C library (the optional `hdf5-metno` dependency,
 # aliased `hdf5` below, and its raw bindings, aliased `hdf5-sys`). Named
 # explicitly, so it stays the one name for this and nothing invents a second.
