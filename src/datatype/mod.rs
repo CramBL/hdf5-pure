@@ -9,11 +9,11 @@ pub(crate) use hdf5_pure_format::__private::element_size_usize;
 
 pub(crate) fn datatype_class_name(datatype: &Datatype) -> &'static str {
     match datatype {
-        Datatype::FixedPoint { .. } => "FixedPoint",
-        Datatype::FloatingPoint { .. } => "FloatingPoint",
+        Datatype::FixedPoint(..) => "FixedPoint",
+        Datatype::FloatingPoint(..) => "FloatingPoint",
         Datatype::String { .. } => "String",
-        Datatype::Time { .. } => "Time",
-        Datatype::BitField { .. } => "BitField",
+        Datatype::Time(..) => "Time",
+        Datatype::BitField(..) => "BitField",
         Datatype::Opaque { .. } => "Opaque",
         Datatype::Compound { .. } => "Compound",
         Datatype::Reference { .. } => "Reference",

@@ -6,9 +6,7 @@
 //! through the typed integer readers (via the base type) while the datatype
 //! itself preserves the member name/value pairs. See issue #129.
 
-use hdf5_pure::{
-    DType, Datatype, EnumTypeBuilder, File, FileBuilder, FixedPointLayout, FormatError,
-};
+use hdf5_pure::{DType, Datatype, EnumTypeBuilder, File, FileBuilder, FormatError};
 use test_util_hdf5::file_builder;
 
 #[test]
@@ -35,11 +33,7 @@ fn i32_enum_dataset_preserves_members_and_values() {
             assert!(
                 matches!(
                     *base_type,
-                    Datatype::FixedPoint {
-                        size: 4,
-                        layout: FixedPointLayout { signed: true, .. },
-                        ..
-                    }
+                    Datatype::FixedPoint(numeric) if numeric.size().get() == 4 && numeric.layout().signed()
                 ),
                 "expected i32 base, got {base_type:?}"
             );
@@ -228,7 +222,9 @@ fn enum_over_u16_base_round_trips() {
             members,
         } => {
             assert_eq!(*size, 2, "element size comes from the base type");
-            assert!(matches!(**base_type, Datatype::FixedPoint { size: 2, .. }));
+            assert!(
+                matches!(**base_type, Datatype::FixedPoint(numeric) if numeric.size().get() == 2)
+            );
             assert_eq!(members[0].value, 1u16.to_le_bytes().to_vec());
             assert_eq!(members[1].value, 40_000u16.to_le_bytes().to_vec());
         }

@@ -124,7 +124,7 @@ fn a_c_written_bool_attribute_keeps_its_enumeration_in_the_datatype_channel() {
     };
     assert_eq!(*size, 1, "the enum's own width");
     assert!(
-        matches!(**base_type, Datatype::FixedPoint { size: 1, .. }),
+        matches!(**base_type, Datatype::FixedPoint(numeric) if numeric.size().get() == 1),
         "the base is the 8-bit integer the codes are stored as, got {base_type:?}"
     );
     let mapping: BTreeMap<&str, &[u8]> = members
@@ -142,7 +142,7 @@ fn a_c_written_bool_attribute_keeps_its_enumeration_in_the_datatype_channel() {
     assert!(
         matches!(
             datatypes.get("count"),
-            Some(Datatype::FixedPoint { size: 1, .. })
+            Some(Datatype::FixedPoint(numeric)) if numeric.size().get() == 1
         ),
         "expected a plain 8-bit integer for the i8, got {:?}",
         datatypes.get("count")

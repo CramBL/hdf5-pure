@@ -17,8 +17,7 @@ use hdf5_pure::mat::{
     ComplexU16, ComplexU32, ComplexU64, Matrix, Options,
 };
 use hdf5_pure::{
-    AttrValue, CompoundTypeBuilder, Datatype, DatatypeByteOrder, File, FileBuilder,
-    FixedPointLayout, LibVer,
+    AttrValue, CompoundTypeBuilder, Datatype, DatatypeByteOrder, File, FileBuilder, LibVer,
 };
 use serde::{Deserialize, Serialize};
 
@@ -169,22 +168,14 @@ fn assert_compound_of(dt: &Datatype, size: u32, signed: bool) {
     assert_eq!(members[1].byte_offset, u64::from(size));
     for m in members {
         match &m.datatype {
-            Datatype::FixedPoint {
-                size: component,
-                byte_order,
-                layout:
-                    FixedPointLayout {
-                        signed: is_signed,
-                        bit_offset,
-                        bit_precision,
-                    },
-            } => {
-                assert_eq!(*component, size);
-                assert_eq!(*byte_order, DatatypeByteOrder::LittleEndian);
-                assert_eq!(*is_signed, signed);
-                assert_eq!(*bit_offset, 0);
-                assert_eq!(u32::from(*bit_precision), size * 8);
+            Datatype::FixedPoint(numeric) => {
+                assert_eq!(numeric.size().get(), size);
+                assert_eq!(numeric.byte_order(), DatatypeByteOrder::LittleEndian);
+                assert_eq!(numeric.layout().signed(), signed);
+                assert_eq!(numeric.layout().bit_offset(), 0);
+                assert_eq!(u32::from(numeric.layout().bit_precision()), size * 8);
             }
+
             other => panic!("expected a fixed-point component, got {other:?}"),
         }
     }

@@ -612,7 +612,7 @@ const V1_FIELD_ALIGNMENT: usize = 8;
 
 #[cfg(test)]
 mod tests {
-    use hdf5_pure_core::FixedPointLayout;
+    use hdf5_pure_core::FixedPointType;
     use rstest::rstest;
     use test_util::attribute;
     use test_util::dataspace;
@@ -794,7 +794,7 @@ mod tests {
         assert_eq!(attr.name, "shared_attr");
         assert!(matches!(
             attr.datatype,
-            Datatype::FloatingPoint { size: 8, .. }
+            Datatype::FloatingPoint(numeric) if numeric.size().get() == 8
         ));
         assert_eq!(
             attr.datatype_location,
@@ -835,7 +835,7 @@ mod tests {
         assert_eq!(attr.name, "inline_attr");
         assert!(matches!(
             attr.datatype,
-            Datatype::FloatingPoint { size: 8, .. }
+            Datatype::FloatingPoint(numeric) if numeric.size().get() == 8
         ));
         assert_eq!(attr.datatype_location, DatatypeLocation::Inline);
     }
@@ -1013,15 +1013,9 @@ mod tests {
     }
 
     fn i32_datatype() -> Datatype {
-        Datatype::FixedPoint {
-            size: 4,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: true,
-                bit_offset: 0,
-                bit_precision: 32,
-            },
-        }
+        Datatype::FixedPoint(
+            FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
+        )
     }
 
     // "The Attribute Message" in format specification, version 4.0, defines the

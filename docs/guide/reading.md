@@ -118,6 +118,45 @@ println!("dtype: {:?}", ds.dtype()?);
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
+### Numeric datatypes
+
+The numeric variants of [`Datatype`](crate::Datatype) use immutable payloads in place of public
+size and layout fields. Construct a payload with its type's constructors, then match the variant
+and read its accessors:
+
+```rust
+use hdf5_pure::{Datatype, DatatypeByteOrder, FixedPointType, FloatingPointType};
+
+let integer = FixedPointType::new(2, DatatypeByteOrder::BigEndian, true, 4, 12)?;
+assert_eq!(integer.size().get(), 2);
+assert_eq!(integer.byte_order(), DatatypeByteOrder::BigEndian);
+assert!(integer.layout().signed());
+assert_eq!(integer.layout().bit_offset(), 4);
+assert_eq!(integer.layout().bit_precision(), 12);
+
+let fixed = Datatype::FixedPoint(integer);
+let signed = Datatype::FixedPoint(FixedPointType::i32());
+let floating = Datatype::FloatingPoint(FloatingPointType::ieee754_binary64(
+    DatatypeByteOrder::LittleEndian,
+));
+
+fn significant_bits(datatype: &Datatype) -> Option<u16> {
+    match datatype {
+        Datatype::FixedPoint(integer) => Some(integer.layout().bit_precision()),
+        Datatype::FloatingPoint(floating) => Some(floating.layout().bit_precision()),
+        _ => None,
+    }
+}
+
+assert_eq!(significant_bits(&fixed), Some(12));
+assert_eq!(significant_bits(&signed), Some(32));
+assert_eq!(significant_bits(&floating), Some(64));
+# Ok::<(), hdf5_pure::FormatError>(())
+```
+
+Metadata inspection supports elements wider than eight bytes and non-IEEE or VAX floating-point
+encodings. Numeric value conversions have separate limits on element size, byte order, and encoding.
+
 ### Chunking, filters, and append eligibility
 
 Four accessors describe a dataset's storage layout without reading any data. They also report whether a dataset can be grown in place with [`Dataset::append_staged`](crate::Dataset::append_staged) or a [streaming append](crate::_guide::editing#streaming-appends) before you attempt the append:

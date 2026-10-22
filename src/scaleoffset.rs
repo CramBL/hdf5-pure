@@ -13,7 +13,9 @@ pub(crate) use hdf5_pure_filter::__private::ScaleOffsetType;
 
 use crate::datatype::Datatype;
 use crate::datatype::byte_order::DatatypeByteOrder;
-use crate::datatype::layout::FixedPointLayout;
+#[cfg(test)]
+use crate::{FixedPointType, FloatingPointType};
+
 use crate::error::FormatError;
 use crate::fill_value::FillPattern;
 
@@ -86,23 +88,21 @@ pub(crate) fn scale_offset_mode(cd_values: &[u32]) -> Option<(ScaleOffset, FillA
 /// Returns [`None`] for byte orders other than little or big endian, integer sizes outside
 /// 1, 2, 4, or 8 bytes, floating-point sizes other than 4 or 8 bytes, and other datatype classes.
 pub fn scale_offset_type_from_datatype(dt: &Datatype) -> Option<ScaleOffsetType> {
-    let order = match dt {
-        Datatype::FixedPoint { byte_order, .. } | Datatype::FloatingPoint { byte_order, .. } => {
-            match byte_order {
-                DatatypeByteOrder::LittleEndian => ScaleOffsetByteOrder::LittleEndian,
-                DatatypeByteOrder::BigEndian => ScaleOffsetByteOrder::BigEndian,
-                DatatypeByteOrder::Vax => return None,
-            }
-        }
+    let byte_order = match dt {
+        Datatype::FixedPoint(numeric) => numeric.byte_order(),
+        Datatype::FloatingPoint(numeric) => numeric.byte_order(),
         _ => return None,
     };
+    let order = match byte_order {
+        DatatypeByteOrder::LittleEndian => ScaleOffsetByteOrder::LittleEndian,
+        DatatypeByteOrder::BigEndian => ScaleOffsetByteOrder::BigEndian,
+        DatatypeByteOrder::Vax => return None,
+    };
     match dt {
-        Datatype::FixedPoint {
-            size,
-            layout: FixedPointLayout { signed, .. },
-            ..
-        } if matches!(*size, 1 | 2 | 4 | 8) => Some(ScaleOffsetType::integer(*signed, order)),
-        Datatype::FloatingPoint { size, .. } if matches!(*size, 4 | 8) => {
+        Datatype::FixedPoint(numeric) if matches!(numeric.size().get(), 1 | 2 | 4 | 8) => {
+            Some(ScaleOffsetType::integer(numeric.layout().signed(), order))
+        }
+        Datatype::FloatingPoint(numeric) if matches!(numeric.size().get(), 4 | 8) => {
             Some(ScaleOffsetType::floating(order))
         }
         _ => None,
@@ -127,26 +127,23 @@ mod tests {
 
     #[test]
     fn scale_offset_type_from_datatype_classes() {
-        let i32_ty = Datatype::FixedPoint {
-            size: 4,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: true,
-                bit_offset: 0,
-                bit_precision: 32,
-            },
-        };
+        let i32_ty = Datatype::FixedPoint(
+            FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
+        );
         let so = scale_offset_type_from_datatype(&i32_ty).unwrap();
         assert_eq!(
             so,
             ScaleOffsetType::integer(true, ScaleOffsetByteOrder::LittleEndian)
         );
 
-        let f64_ty = Datatype::FloatingPoint {
-            size: 8,
-            byte_order: DatatypeByteOrder::BigEndian,
-            layout: FloatingPointLayout::IEEE754_BINARY64,
-        };
+        let f64_ty = Datatype::FloatingPoint(
+            FloatingPointType::from_layout(
+                8,
+                DatatypeByteOrder::BigEndian,
+                FloatingPointLayout::IEEE754_BINARY64,
+            )
+            .unwrap(),
+        );
         let so = scale_offset_type_from_datatype(&f64_ty).unwrap();
         assert_eq!(
             so,

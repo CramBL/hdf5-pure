@@ -382,6 +382,8 @@ use crate::type_builders::{
     self, AttrValue, DatasetBuilder, ObjectRefPatch, ObjectRefTarget, VlStringStaging,
 };
 use crate::width::FormatWidths;
+#[cfg(test)]
+use crate::{FixedPointType, FloatingPointType};
 
 use self::aggregation::AggregateSpace;
 
@@ -11686,18 +11688,11 @@ fn replace_dataspace_message(
 /// Compound members and base types are compared recursively. All other fields must match.
 fn overwrite_datatypes_match(disk: &Datatype, staged: &Datatype) -> bool {
     match (disk, staged) {
-        (
-            Datatype::FixedPoint {
-                size: 1,
-                layout: disk_layout,
-                ..
-            },
-            Datatype::FixedPoint {
-                size: 1,
-                layout: staged_layout,
-                ..
-            },
-        ) => disk_layout == staged_layout,
+        (Datatype::FixedPoint(disk), Datatype::FixedPoint(staged))
+            if disk.size().get() == 1 && staged.size().get() == 1 =>
+        {
+            disk.layout() == staged.layout()
+        }
         (
             Datatype::Compound {
                 size: disk_size,
@@ -11789,11 +11784,12 @@ fn overwrite_datatypes_match(disk: &Datatype, staged: &Datatype) -> bool {
 /// it already refuses every non-little-endian and non-scalar dataset.
 pub(crate) fn datatype_is_raw_appendable(dt: &Datatype) -> bool {
     match dt {
-        Datatype::FixedPoint { size: 1, .. } => true,
-        Datatype::FixedPoint { byte_order, .. }
-        | Datatype::FloatingPoint { byte_order, .. }
-        | Datatype::Time { byte_order, .. }
-        | Datatype::BitField { byte_order, .. } => *byte_order == DatatypeByteOrder::LittleEndian,
+        Datatype::FixedPoint(numeric) => {
+            numeric.size().get() == 1 || numeric.byte_order() == DatatypeByteOrder::LittleEndian
+        }
+        Datatype::FloatingPoint(numeric) => numeric.byte_order() == DatatypeByteOrder::LittleEndian,
+        Datatype::Time(numeric) => numeric.byte_order() == DatatypeByteOrder::LittleEndian,
+        Datatype::BitField(numeric) => numeric.byte_order() == DatatypeByteOrder::LittleEndian,
         Datatype::String { .. } | Datatype::Opaque { .. } => true,
         Datatype::Enumeration { base_type, .. } | Datatype::Array { base_type, .. } => {
             datatype_is_raw_appendable(base_type)
@@ -14447,7 +14443,7 @@ mod tests {
     use super::*;
     use crate::checksum;
     use crate::data_layout::DONT_FILTER_PARTIAL_BOUND_CHUNKS;
-    use crate::datatype::layout::FixedPointLayout;
+
     use crate::datatype::layout::FloatingPointLayout;
     use crate::datatype::{CharacterSet, StringPadding};
     use crate::filter_pipeline::FILTER_DEFLATE;
@@ -14508,24 +14504,26 @@ mod tests {
         #[case] staged_precision: u16,
         #[case] compatible: bool,
     ) {
-        let disk = Datatype::FixedPoint {
-            size,
-            byte_order: DatatypeByteOrder::BigEndian,
-            layout: FixedPointLayout {
-                signed: disk_signed,
-                bit_offset: disk_offset,
-                bit_precision: disk_precision,
-            },
-        };
-        let staged = Datatype::FixedPoint {
-            size,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: staged_signed,
-                bit_offset: staged_offset,
-                bit_precision: staged_precision,
-            },
-        };
+        let disk = Datatype::FixedPoint(
+            FixedPointType::new(
+                size,
+                DatatypeByteOrder::BigEndian,
+                disk_signed,
+                disk_offset,
+                disk_precision,
+            )
+            .unwrap(),
+        );
+        let staged = Datatype::FixedPoint(
+            FixedPointType::new(
+                size,
+                DatatypeByteOrder::LittleEndian,
+                staged_signed,
+                staged_offset,
+                staged_precision,
+            )
+            .unwrap(),
+        );
         assert_ne!(disk, staged);
         assert_eq!(overwrite_datatypes_match(&disk, &staged), compatible);
         assert_eq!(overwrite_datatypes_match(&staged, &disk), compatible);
@@ -14692,15 +14690,9 @@ mod tests {
             padding.pattern(element_size),
         )
         .unwrap();
-        let dt = Datatype::FixedPoint {
-            size: 4,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: true,
-                bit_offset: 0,
-                bit_precision: 32,
-            },
-        };
+        let dt = Datatype::FixedPoint(
+            FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
+        );
         let expected: Vec<(Vec<u8>, u32)> = logical
             .iter()
             .zip(partial)
@@ -14797,15 +14789,9 @@ mod tests {
     }
 
     fn big_endian_u8_type() -> Datatype {
-        Datatype::FixedPoint {
-            size: 1,
-            byte_order: DatatypeByteOrder::BigEndian,
-            layout: FixedPointLayout {
-                signed: false,
-                bit_offset: 0,
-                bit_precision: 8,
-            },
-        }
+        Datatype::FixedPoint(
+            FixedPointType::new(1, DatatypeByteOrder::BigEndian, false, 0, 8).unwrap(),
+        )
     }
 
     fn array_type(base: Datatype, dimensions: Vec<u32>) -> Datatype {
@@ -18192,10 +18178,15 @@ mod tests {
 
     #[test]
     fn raw_appendable_recurses_into_aggregates() {
-        let f64_with = |byte_order| Datatype::FloatingPoint {
-            size: 8,
-            byte_order,
-            layout: FloatingPointLayout::IEEE754_BINARY64,
+        let f64_with = |byte_order| {
+            Datatype::FloatingPoint(
+                FloatingPointType::from_layout(
+                    8,
+                    byte_order,
+                    FloatingPointLayout::IEEE754_BINARY64,
+                )
+                .unwrap(),
+            )
         };
         let le_f64 = f64_with(DatatypeByteOrder::LittleEndian);
         let be_f64 = f64_with(DatatypeByteOrder::BigEndian);

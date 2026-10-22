@@ -5,7 +5,7 @@ use core::num::NonZeroU64;
 use core::num::NonZeroUsize;
 use core::str::Utf8Error;
 
-use crate::{FileSpacePageSize, FloatingPointLayout};
+use crate::{DatatypeByteOrder, FileSpacePageSize, FloatingPointField, FloatingPointLayout};
 
 /// Reports format, filter, and runtime failures through the `hdf5-pure` API.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -481,7 +481,29 @@ pub enum FormatError {
     /// A fixed-point bit range is empty or extends past the element width.
     InvalidFixedPointRange {
         /// The element size in bytes.
-        size: usize,
+        size: u32,
+        /// The first significant bit within the element.
+        bit_offset: u16,
+        /// The number of significant bits.
+        bit_precision: u16,
+    },
+    /// A floating-point field is empty or extends outside the significant bit range.
+    InvalidFloatingPointField {
+        /// The field whose range is invalid.
+        field: FloatingPointField,
+        /// The field's first bit, counting from the least significant bit.
+        location: u8,
+        /// The field's size in bits.
+        size: u8,
+        /// The first significant bit within the element.
+        bit_offset: u16,
+        /// The number of significant bits.
+        bit_precision: u16,
+    },
+    /// A floating-point bit range is empty or extends past the element width.
+    InvalidFloatingPointRange {
+        /// The element size in bytes.
+        size: u32,
         /// The first significant bit within the element.
         bit_offset: u16,
         /// The number of significant bits.
@@ -569,6 +591,28 @@ pub enum FormatError {
     InvalidLocalHeapSignature,
     /// Invalid local heap version.
     InvalidLocalHeapVersion(u8),
+    /// A floating-point mantissa normalization code is reserved.
+    ///
+    /// Contains the reserved two-bit code.
+    InvalidMantissaNormalization(u8),
+    /// A time or bit-field datatype's significant bit range is empty or exceeds its element width.
+    InvalidNumericBitRange {
+        /// The datatype class code.
+        class: u8,
+        /// The element size in bytes.
+        size: u32,
+        /// The first significant bit within the element, or zero for a time datatype.
+        bit_offset: u16,
+        /// The number of significant bits.
+        bit_precision: u16,
+    },
+    /// A fixed-point, time, or bit-field datatype has VAX byte order.
+    InvalidNumericByteOrder {
+        /// The datatype class code.
+        class: u8,
+        /// The byte order supplied for this class.
+        byte_order: DatatypeByteOrder,
+    },
     /// A version 1 object-header message has a data size that is not a multiple of eight.
     ///
     /// Contains the declared message data size.
@@ -787,6 +831,21 @@ pub enum FormatError {
         offset: u64,
         /// Second operand (typically the length/size).
         length: u64,
+    },
+    /// Two floating-point fields occupy at least one common bit.
+    OverlappingFloatingPointFields {
+        /// The first field in the overlapping pair.
+        first: FloatingPointField,
+        /// The first field's starting bit, counting from the least significant bit.
+        first_location: u8,
+        /// The first field's size in bits.
+        first_size: u8,
+        /// The second field in the overlapping pair.
+        second: FloatingPointField,
+        /// The second field's starting bit, counting from the least significant bit.
+        second_location: u8,
+        /// The second field's size in bits.
+        second_size: u8,
     },
     /// Path not found during group traversal.
     PathNotFound(String),
@@ -2015,6 +2074,51 @@ impl fmt::Display for FormatError {
             } => write!(
                 f,
                 "fixed-point bit offset {bit_offset} and precision {bit_precision} do not describe a nonempty range within a {size}-byte element"
+            ),
+            Self::InvalidFloatingPointRange {
+                size,
+                bit_offset,
+                bit_precision,
+            } => write!(
+                f,
+                "floating-point bit offset {bit_offset} and precision {bit_precision} do not describe a nonempty range within a {size}-byte element"
+            ),
+            Self::InvalidFloatingPointField {
+                field,
+                location,
+                size,
+                bit_offset,
+                bit_precision,
+            } => write!(
+                f,
+                "floating-point {field:?} field at bit {location} with size {size} is outside the significant range at offset {bit_offset} with precision {bit_precision}"
+            ),
+            Self::OverlappingFloatingPointFields {
+                first,
+                first_location,
+                first_size,
+                second,
+                second_location,
+                second_size,
+            } => write!(
+                f,
+                "floating-point {first:?} field at bit {first_location} with size {first_size} overlaps {second:?} field at bit {second_location} with size {second_size}"
+            ),
+            Self::InvalidMantissaNormalization(value) => {
+                write!(f, "invalid floating-point mantissa normalization {value}")
+            }
+            Self::InvalidNumericByteOrder { class, byte_order } => write!(
+                f,
+                "datatype class {class} does not support {byte_order} byte order"
+            ),
+            Self::InvalidNumericBitRange {
+                class,
+                size,
+                bit_offset,
+                bit_precision,
+            } => write!(
+                f,
+                "datatype class {class} bit offset {bit_offset} and precision {bit_precision} do not describe a nonempty range within a {size}-byte element"
             ),
             Self::UnsupportedFloatingPointLayout { size, layout } => write!(
                 f,

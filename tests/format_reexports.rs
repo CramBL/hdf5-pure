@@ -5,6 +5,7 @@ use core::num::NonZeroUsize;
 use hdf5_pure::CompoundMember;
 use hdf5_pure::Datatype;
 use hdf5_pure::FillTime;
+use hdf5_pure::FixedPointType;
 use hdf5_pure::FormatError;
 use hdf5_pure::MaxExtent;
 
@@ -56,6 +57,16 @@ fn core_types_keep_their_original_paths() {
     let _: Option<FillTime> = None::<hdf5_pure_core::FillTime>;
     let _: Option<FillTime> = None::<hdf5_pure_format::FillTime>;
     let _: Option<hdf5_pure::EnumMember> = None::<hdf5_pure_core::EnumMember>;
+    let _: Option<hdf5_pure::FixedPointType> = None::<hdf5_pure_core::FixedPointType>;
+    let _: Option<hdf5_pure::FixedPointType> = None::<hdf5_pure_format::FixedPointType>;
+    let _: Option<hdf5_pure::FloatingPointType> = None::<hdf5_pure_core::FloatingPointType>;
+    let _: Option<hdf5_pure::FloatingPointType> = None::<hdf5_pure_format::FloatingPointType>;
+    let _: Option<hdf5_pure::BitFieldType> = None::<hdf5_pure_core::BitFieldType>;
+    let _: Option<hdf5_pure::BitFieldType> = None::<hdf5_pure_format::BitFieldType>;
+    let _: Option<hdf5_pure::TimeType> = None::<hdf5_pure_core::TimeType>;
+    let _: Option<hdf5_pure::TimeType> = None::<hdf5_pure_format::TimeType>;
+    let _: Option<hdf5_pure::FloatingPointField> = None::<hdf5_pure_core::FloatingPointField>;
+    let _: Option<hdf5_pure::FloatingPointField> = None::<hdf5_pure_format::FloatingPointField>;
     let _: Option<hdf5_pure::FixedPointLayout> = None::<hdf5_pure_core::FixedPointLayout>;
     let _: Option<hdf5_pure::FloatingPointLayout> = None::<hdf5_pure_core::FloatingPointLayout>;
     let _: Option<hdf5_pure::DatatypeByteOrder> = None::<hdf5_pure_core::DatatypeByteOrder>;
@@ -132,23 +143,17 @@ fn existing_error_signatures_and_shapes_compile() {
     };
     assert_eq!(element_size(&datatype).unwrap().get(), datatype.type_size());
     assert_eq!(display_and_clone(&datatype), "string[4] utf8 null-pad");
-    let fixed = hdf5_pure::FixedPointLayout {
-        signed: true,
-        bit_offset: 0,
-        bit_precision: 16,
-    };
-    assert_eq!(fixed.bit_precision, 16);
+    let fixed = FixedPointType::i16().layout();
+    assert_eq!(fixed.bit_precision(), 16);
     let float = hdf5_pure::FloatingPointLayout::IEEE754_BINARY32;
-    assert_eq!(float.exponent_location, 23);
-    assert_eq!(float.exponent_size, 8);
-    assert_eq!(float.mantissa_location, 0);
-    assert_eq!(float.mantissa_size, 23);
-    assert_eq!(float.exponent_bias, 127);
-    let integer = Datatype::FixedPoint {
-        size: 2,
-        byte_order: hdf5_pure::DatatypeByteOrder::LittleEndian,
-        layout: fixed,
-    };
+    assert_eq!(float.exponent_location(), 23);
+    assert_eq!(float.exponent_size(), 8);
+    assert_eq!(float.mantissa_location(), 0);
+    assert_eq!(float.mantissa_size(), 23);
+    assert_eq!(float.exponent_bias(), 127);
+    let integer = Datatype::FixedPoint(
+        FixedPointType::from_layout(2, hdf5_pure::DatatypeByteOrder::LittleEndian, fixed).unwrap(),
+    );
     assert_eq!(integer.element_size().unwrap().get(), 2);
     assert_eq!(
         hdf5_pure::DatatypeByteOrder::BigEndian,

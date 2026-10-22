@@ -17,7 +17,8 @@
 
 use hdf5::file::LibraryVersion;
 use hdf5::plist::file_create::{SharedMessageIndex, SharedMessageType};
-use hdf5_pure::{AttrValue, Datatype, DatatypeByteOrder, File, FixedPointLayout};
+use hdf5_pure::FixedPointType;
+use hdf5_pure::{AttrValue, Datatype, DatatypeByteOrder, File};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
@@ -44,15 +45,9 @@ fn dataset_values(seed: i32) -> Vec<i32> {
 /// does not change its encoding, only where it is stored, so a resolved heap
 /// reference must produce exactly what an inline type produces.
 fn i32_type() -> Datatype {
-    Datatype::FixedPoint {
-        size: 4,
-        byte_order: DatatypeByteOrder::LittleEndian,
-        layout: FixedPointLayout {
-            signed: true,
-            bit_offset: 0,
-            bit_precision: 32,
-        },
-    }
+    Datatype::FixedPoint(
+        FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
+    )
 }
 
 /// A fixture file plus the directory that keeps it alive.

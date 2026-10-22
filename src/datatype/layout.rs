@@ -3,7 +3,6 @@ use core::num::NonZeroUsize;
 
 use crate::FormatError;
 
-pub use hdf5_pure_core::FixedPointLayout;
 pub use hdf5_pure_core::FloatingPointLayout;
 pub use hdf5_pure_format::__private::StandardNumericLayout;
 pub use hdf5_pure_format::__private::StandardWidth;

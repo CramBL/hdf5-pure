@@ -8,6 +8,7 @@ use rstest::rstest;
 use super::*;
 use crate::MantissaNormalization;
 use crate::datatype::layout::FloatingPointLayout;
+use crate::{FixedPointType, FloatingPointType};
 
 macro_rules! assert_targets {
     ($assertion:ident, $($args:expr),+) => {
@@ -107,11 +108,8 @@ fn appends_every_ieee_element(
     #[values(DatatypeByteOrder::LittleEndian, DatatypeByteOrder::BigEndian)]
     order: DatatypeByteOrder,
 ) {
-    let datatype = Datatype::FloatingPoint {
-        size,
-        byte_order: order,
-        layout,
-    };
+    let datatype =
+        Datatype::FloatingPoint(FloatingPointType::from_layout(size, order, layout).unwrap());
     let raw = if size == 4 {
         [11.0f32, 3.0]
             .into_iter()
@@ -135,72 +133,32 @@ fn appends_every_ieee_element(
 }
 
 #[rstest]
-#[case(1, 0, 0)]
-#[case(1, 8, 1)]
-#[case(1, 4, 5)]
-#[case(2, 0, 17)]
-#[case(8, 64, 1)]
-#[case(8, u16::MAX, u16::MAX)]
-fn rejects_invalid_fixed_point_ranges_before_decoding(
-    #[case] size: u32,
-    #[case] bit_offset: u16,
-    #[case] bit_precision: u16,
-    #[values(&[][..], &[0][..], &[0; 8][..])] raw: &[u8],
-    #[values(false, true)] enumeration: bool,
-) {
-    let datatype = maybe_enumeration(
-        fixed(
-            size,
-            false,
-            DatatypeByteOrder::LittleEndian,
-            bit_offset,
-            bit_precision,
-        ),
-        enumeration,
-    );
-    let error = FormatError::InvalidFixedPointRange {
-        size: size as usize,
-        bit_offset,
-        bit_precision,
-    };
-    assert_targets!(assert_rejects, raw, &datatype, error);
-}
-
-#[rstest]
-#[case::bias32(4, FloatingPointLayout { exponent_bias: 128, ..FloatingPointLayout::IEEE754_BINARY32 })]
-#[case::bias64(8, FloatingPointLayout { exponent_bias: 1024, ..FloatingPointLayout::IEEE754_BINARY64 })]
-#[case::offset(4, FloatingPointLayout { bit_offset: 1, ..FloatingPointLayout::IEEE754_BINARY32 })]
-#[case::precision(4, FloatingPointLayout { bit_precision: 31, ..FloatingPointLayout::IEEE754_BINARY32 })]
-#[case::exponent_location(4, FloatingPointLayout { exponent_location: 22, ..FloatingPointLayout::IEEE754_BINARY32 })]
-#[case::exponent_size(4, FloatingPointLayout { exponent_size: 7, ..FloatingPointLayout::IEEE754_BINARY32 })]
-#[case::mantissa_location(4, FloatingPointLayout { mantissa_location: 1, ..FloatingPointLayout::IEEE754_BINARY32 })]
-#[case::mantissa_size(4, FloatingPointLayout { mantissa_size: 22, ..FloatingPointLayout::IEEE754_BINARY32 })]
-#[case::sign(4, FloatingPointLayout { sign_location: 30, ..FloatingPointLayout::IEEE754_BINARY32 })]
-#[case::unnormalized(4, FloatingPointLayout { mantissa_normalization: MantissaNormalization::Unnormalized, ..FloatingPointLayout::IEEE754_BINARY32 })]
-#[case::leading_one(4, FloatingPointLayout { mantissa_normalization: MantissaNormalization::LeadingOne, ..FloatingPointLayout::IEEE754_BINARY32 })]
-#[case::reserved(4, FloatingPointLayout { mantissa_normalization: MantissaNormalization::Reserved, ..FloatingPointLayout::IEEE754_BINARY32 })]
-#[case::size(2, FloatingPointLayout::IEEE754_BINARY32)]
+#[case::bias32(FloatingPointType::new(4, DatatypeByteOrder::LittleEndian, MantissaNormalization::ImpliedLeadingOne, 31, 0, 32, 23, 8, 0, 23, 128).unwrap())]
+#[case::bias64(FloatingPointType::new(8, DatatypeByteOrder::LittleEndian, MantissaNormalization::ImpliedLeadingOne, 63, 0, 64, 52, 11, 0, 52, 1024).unwrap())]
+#[case::offset(FloatingPointType::new(5, DatatypeByteOrder::LittleEndian, MantissaNormalization::ImpliedLeadingOne, 32, 1, 32, 24, 8, 1, 23, 127).unwrap())]
+#[case::precision(FloatingPointType::new(4, DatatypeByteOrder::LittleEndian, MantissaNormalization::ImpliedLeadingOne, 30, 0, 31, 22, 8, 0, 22, 127).unwrap())]
+#[case::exponent_location(FloatingPointType::new(4, DatatypeByteOrder::LittleEndian, MantissaNormalization::ImpliedLeadingOne, 31, 0, 32, 22, 8, 0, 22, 127).unwrap())]
+#[case::exponent_size(FloatingPointType::new(4, DatatypeByteOrder::LittleEndian, MantissaNormalization::ImpliedLeadingOne, 31, 0, 32, 23, 7, 0, 23, 127).unwrap())]
+#[case::mantissa_location(FloatingPointType::new(4, DatatypeByteOrder::LittleEndian, MantissaNormalization::ImpliedLeadingOne, 31, 0, 32, 23, 8, 1, 22, 127).unwrap())]
+#[case::mantissa_size(FloatingPointType::new(4, DatatypeByteOrder::LittleEndian, MantissaNormalization::ImpliedLeadingOne, 31, 0, 32, 23, 8, 0, 22, 127).unwrap())]
+#[case::sign(FloatingPointType::new(4, DatatypeByteOrder::LittleEndian, MantissaNormalization::ImpliedLeadingOne, 30, 0, 32, 23, 7, 0, 23, 127).unwrap())]
+#[case::unnormalized(FloatingPointType::new(4, DatatypeByteOrder::LittleEndian, MantissaNormalization::Unnormalized, 31, 0, 32, 23, 8, 0, 23, 127).unwrap())]
+#[case::leading_one(FloatingPointType::new(4, DatatypeByteOrder::LittleEndian, MantissaNormalization::LeadingOne, 31, 0, 32, 23, 8, 0, 23, 127).unwrap())]
+#[case::size(FloatingPointType::from_layout(5, DatatypeByteOrder::LittleEndian, FloatingPointLayout::IEEE754_BINARY32).unwrap())]
 fn rejects_unsupported_float_layouts(
-    #[case] size: u32,
-    #[case] layout: FloatingPointLayout,
+    #[case] numeric: FloatingPointType,
     #[values(&[][..], &[0][..], &[0; 8][..])] raw: &[u8],
 ) {
-    let datatype = Datatype::FloatingPoint {
-        size,
-        byte_order: DatatypeByteOrder::LittleEndian,
-        layout,
-    };
+    let datatype = Datatype::FloatingPoint(numeric);
     let error = FormatError::UnsupportedFloatingPointLayout {
-        size: size as usize,
-        layout,
+        size: numeric.size().get() as usize,
+        layout: numeric.layout(),
     };
     assert_targets!(assert_rejects, raw, &datatype, error);
 }
 
 #[rstest]
-#[case(fixed(1, false, DatatypeByteOrder::Vax, 0, 8))]
-#[case(Datatype::FloatingPoint { size: 4, byte_order: DatatypeByteOrder::Vax,
-    layout: FloatingPointLayout::IEEE754_BINARY32 })]
+#[case(Datatype::FloatingPoint(FloatingPointType::from_layout(4, DatatypeByteOrder::Vax, FloatingPointLayout::IEEE754_BINARY32).unwrap()))]
 fn rejects_unsupported_byte_order(
     #[case] datatype: Datatype,
     #[values(&[][..], &[0][..], &[0; 8][..])] raw: &[u8],
@@ -216,11 +174,14 @@ fn rejects_unsupported_byte_order(
 #[rstest]
 fn rejects_partial_elements(#[values(false, true)] floating: bool) {
     let datatype = if floating {
-        Datatype::FloatingPoint {
-            size: 4,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FloatingPointLayout::IEEE754_BINARY32,
-        }
+        Datatype::FloatingPoint(
+            FloatingPointType::from_layout(
+                4,
+                DatatypeByteOrder::LittleEndian,
+                FloatingPointLayout::IEEE754_BINARY32,
+            )
+            .unwrap(),
+        )
     } else {
         fixed(2, true, DatatypeByteOrder::LittleEndian, 4, 8)
     };
@@ -299,15 +260,9 @@ fn fixed(
     bit_offset: u16,
     bit_precision: u16,
 ) -> Datatype {
-    Datatype::FixedPoint {
-        size,
-        byte_order,
-        layout: FixedPointLayout {
-            signed,
-            bit_offset,
-            bit_precision,
-        },
-    }
+    Datatype::FixedPoint(
+        FixedPointType::new(size, byte_order, signed, bit_offset, bit_precision).unwrap(),
+    )
 }
 
 fn maybe_enumeration(datatype: Datatype, enumeration: bool) -> Datatype {

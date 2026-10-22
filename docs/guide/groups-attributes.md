@@ -197,7 +197,7 @@ let root = file.root();
 let is_bool = matches!(
     root.attr_datatypes()?.get("success"),
     Some(Datatype::Enumeration { base_type, members, .. })
-        if matches!(**base_type, Datatype::FixedPoint { size: 1, .. })
+        if matches!(base_type.as_ref(), Datatype::FixedPoint(numeric) if numeric.size().get() == 1)
             && members.iter().any(|m| m.name == "TRUE")
 );
 let value = root.attrs()?.get("success").and_then(AttrValue::as_i64);

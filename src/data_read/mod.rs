@@ -18,8 +18,6 @@ use crate::dataspace::Dataspace;
 use crate::datatype::Datatype;
 #[cfg(test)]
 use crate::datatype::byte_order::DatatypeByteOrder;
-#[cfg(test)]
-use crate::datatype::layout::FixedPointLayout;
 use crate::datatype::numeric::{NumericDecodePlan, NumericEncoding};
 use crate::error::FormatError;
 #[cfg(test)]
@@ -28,6 +26,8 @@ use crate::read_spec::{RawReadSpec, RawReadStorage};
 use crate::source;
 use crate::source::Source;
 use crate::width::FormatWidths;
+#[cfg(test)]
+use crate::{FixedPointType, FloatingPointType};
 
 #[cfg(test)]
 mod numeric_tests;
@@ -344,15 +344,14 @@ pub fn read_as_strings(src: &[u8], datatype: &Datatype) -> Result<Vec<String>, F
     }
 }
 
-/// Appends one converted value per input element after parsing a supported numeric layout.
+/// Appends one converted value per input element using a supported numeric encoding.
 ///
 /// # Errors
 ///
 /// Returns [`FormatError::TypeMismatch`] if the datatype or its enumeration base is not numeric.
 /// Returns [`FormatError::EnumBaseSizeMismatch`] if an enumeration's size differs from its base.
-/// Returns [`FormatError::ZeroSizedDatatype`] or [`FormatError::NumericElementTooWide`] if the
-/// element size is outside one to eight bytes.
-/// Returns [`FormatError::InvalidFixedPointRange`] if the bit range is empty or exceeds the width.
+/// Returns [`FormatError::NumericElementTooWide`] if the element size exceeds eight bytes, or
+/// [`FormatError::ValueTooLargeForPlatform`] if it exceeds the target's `usize` range.
 /// Returns [`FormatError::UnsupportedFloatingPointLayout`] if the floating-point encoding is
 /// not IEEE 754 binary32 or binary64 with the matching element size.
 /// Returns [`FormatError::UnsupportedVaxByteOrder`] if the byte order is VAX.
@@ -422,55 +421,43 @@ mod tests {
     use crate::fill_value::FillPattern;
 
     fn make_f64_le_type() -> Datatype {
-        Datatype::FloatingPoint {
-            size: 8,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FloatingPointLayout::IEEE754_BINARY64,
-        }
+        Datatype::FloatingPoint(
+            FloatingPointType::from_layout(
+                8,
+                DatatypeByteOrder::LittleEndian,
+                FloatingPointLayout::IEEE754_BINARY64,
+            )
+            .unwrap(),
+        )
     }
 
     fn make_f32_be_type() -> Datatype {
-        Datatype::FloatingPoint {
-            size: 4,
-            byte_order: DatatypeByteOrder::BigEndian,
-            layout: FloatingPointLayout::IEEE754_BINARY32,
-        }
+        Datatype::FloatingPoint(
+            FloatingPointType::from_layout(
+                4,
+                DatatypeByteOrder::BigEndian,
+                FloatingPointLayout::IEEE754_BINARY32,
+            )
+            .unwrap(),
+        )
     }
 
     fn make_i32_le_type() -> Datatype {
-        Datatype::FixedPoint {
-            size: 4,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: true,
-                bit_offset: 0,
-                bit_precision: 32,
-            },
-        }
+        Datatype::FixedPoint(
+            FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
+        )
     }
 
     fn make_i16_le_type() -> Datatype {
-        Datatype::FixedPoint {
-            size: 2,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: true,
-                bit_offset: 0,
-                bit_precision: 16,
-            },
-        }
+        Datatype::FixedPoint(
+            FixedPointType::new(2, DatatypeByteOrder::LittleEndian, true, 0, 16).unwrap(),
+        )
     }
 
     fn make_u8_type() -> Datatype {
-        Datatype::FixedPoint {
-            size: 1,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: false,
-                bit_offset: 0,
-                bit_precision: 8,
-            },
-        }
+        Datatype::FixedPoint(
+            FixedPointType::new(1, DatatypeByteOrder::LittleEndian, false, 0, 8).unwrap(),
+        )
     }
 
     fn make_simple_dataspace(dims: &[u64]) -> Dataspace {
@@ -788,15 +775,9 @@ mod tests {
     fn unsigned_subbyte_precision_masks_padding() {
         // 12 significant bits stored in 2 bytes: the top 4 bits are padding and
         // must be masked off (previously returned as part of the value).
-        let dt = Datatype::FixedPoint {
-            size: 2,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: false,
-                bit_offset: 0,
-                bit_precision: 12,
-            },
-        };
+        let dt = Datatype::FixedPoint(
+            FixedPointType::new(2, DatatypeByteOrder::LittleEndian, false, 0, 12).unwrap(),
+        );
         // Stored word 0xF123: low 12 bits = 0x123 (= 291), high nibble padding.
         let raw = 0xF123u16.to_le_bytes();
         assert_eq!(read_as_u64(&raw, &dt).unwrap(), vec![0x123]);
@@ -806,15 +787,9 @@ mod tests {
     fn unsigned_bit_offset_shifts_value() {
         // 8 significant bits living in bits [4, 12) of a 16-bit word: Both the
         // low 4 (offset) and high 4 bits are padding.
-        let dt = Datatype::FixedPoint {
-            size: 2,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: false,
-                bit_offset: 4,
-                bit_precision: 8,
-            },
-        };
+        let dt = Datatype::FixedPoint(
+            FixedPointType::new(2, DatatypeByteOrder::LittleEndian, false, 4, 8).unwrap(),
+        );
         // 0xCAB7 -> (>>4) = 0xCAB -> &0xFF = 0xAB (= 171).
         let raw = 0xCAB7u16.to_le_bytes();
         assert_eq!(read_as_u64(&raw, &dt).unwrap(), vec![0xAB]);
@@ -824,15 +799,9 @@ mod tests {
     fn signed_subbyte_precision_sign_extends() {
         // 4-bit signed value 0b1111 == -1
         // The high nibble is padding that must not leak in, and the sign bit is at bit 3 (not bit 7).
-        let dt = Datatype::FixedPoint {
-            size: 1,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: true,
-                bit_offset: 0,
-                bit_precision: 4,
-            },
-        };
+        let dt = Datatype::FixedPoint(
+            FixedPointType::new(1, DatatypeByteOrder::LittleEndian, true, 0, 4).unwrap(),
+        );
         assert_eq!(read_as_i64(&[0x3F], &dt).unwrap(), vec![-1]);
         // 0b0111 == +7 (still inside 4-bit range, stays positive).
         assert_eq!(read_as_i64(&[0x07], &dt).unwrap(), vec![7]);
@@ -856,19 +825,20 @@ mod tests {
     }
 
     fn make_int(size: u32, signed: bool, be: bool) -> Datatype {
-        Datatype::FixedPoint {
-            size,
-            byte_order: if be {
-                DatatypeByteOrder::BigEndian
-            } else {
-                DatatypeByteOrder::LittleEndian
-            },
-            layout: FixedPointLayout {
+        Datatype::FixedPoint(
+            FixedPointType::new(
+                size,
+                if be {
+                    DatatypeByteOrder::BigEndian
+                } else {
+                    DatatypeByteOrder::LittleEndian
+                },
                 signed,
-                bit_offset: 0,
-                bit_precision: (size * 8) as u16,
-            },
-        }
+                0,
+                (size * 8) as u16,
+            )
+            .unwrap(),
+        )
     }
 
     #[test]
@@ -943,11 +913,14 @@ mod tests {
         // f32/f64 and every integer width, LE and BE, decode to f32 correctly.
         let f4 = read_as_f32(&1.5f32.to_be_bytes(), &make_f32_be_type()).unwrap();
         assert_eq!(f4, vec![1.5]);
-        let f8le = Datatype::FloatingPoint {
-            size: 8,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FloatingPointLayout::IEEE754_BINARY64,
-        };
+        let f8le = Datatype::FloatingPoint(
+            FloatingPointType::from_layout(
+                8,
+                DatatypeByteOrder::LittleEndian,
+                FloatingPointLayout::IEEE754_BINARY64,
+            )
+            .unwrap(),
+        );
         assert_eq!(
             read_as_f32(&2.25f64.to_le_bytes(), &f8le).unwrap(),
             vec![2.25f32]
@@ -971,40 +944,41 @@ mod tests {
 #[cfg(test)]
 mod wide_element_tests {
     use crate::MantissaNormalization;
-    use crate::datatype::layout::FloatingPointLayout;
 
     use super::*;
 
     /// A fixed-point type `size` bytes wide, every bit of it significant.
     fn wide_int(size: u32, signed: bool, byte_order: DatatypeByteOrder) -> Datatype {
-        Datatype::FixedPoint {
-            size,
-            byte_order,
-            layout: FixedPointLayout {
+        Datatype::FixedPoint(
+            FixedPointType::new(
+                size,
+                byte_order,
                 signed,
-                bit_offset: 0,
-                bit_precision: u16::try_from(size * 8).expect("test widths fit a u16"),
-            },
-        }
+                0,
+                u16::try_from(size * 8).expect("test widths fit a u16"),
+            )
+            .unwrap(),
+        )
     }
 
     /// A 16-byte float, the width an 80-bit `long double` is stored at.
     fn wide_float() -> Datatype {
-        Datatype::FloatingPoint {
-            size: 16,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FloatingPointLayout {
-                mantissa_normalization: MantissaNormalization::LeadingOne,
-                sign_location: 79,
-                bit_offset: 0,
-                bit_precision: 80,
-                exponent_location: 64,
-                exponent_size: 15,
-                mantissa_location: 0,
-                mantissa_size: 64,
-                exponent_bias: 16383,
-            },
-        }
+        Datatype::FloatingPoint(
+            FloatingPointType::new(
+                16,
+                DatatypeByteOrder::LittleEndian,
+                MantissaNormalization::LeadingOne,
+                79,
+                0,
+                80,
+                64,
+                15,
+                0,
+                64,
+                16383,
+            )
+            .unwrap(),
+        )
     }
 
     /// One numeric reader with its output type erased, so every one of them can
@@ -1131,15 +1105,9 @@ mod wide_element_tests {
 
     #[test]
     fn reads_standard_unsigned_u8_as_f32() {
-        let datatype = Datatype::FixedPoint {
-            size: 1,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: false,
-                bit_offset: 0,
-                bit_precision: 8,
-            },
-        };
+        let datatype = Datatype::FixedPoint(
+            FixedPointType::new(1, DatatypeByteOrder::LittleEndian, false, 0, 8).unwrap(),
+        );
 
         let values = read_as_f32(&[0xff], &datatype).unwrap();
 

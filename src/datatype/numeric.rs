@@ -3,9 +3,9 @@ use core::num::NonZeroU16;
 use crate::datatype;
 use crate::datatype::byte_order::FixedWidthByteOrder;
 use crate::datatype::layout::{
-    FixedPointLayout, FloatingPointLayout, NumericElementSize, StandardNumericLayout, StandardWidth,
+    FloatingPointLayout, NumericElementSize, StandardNumericLayout, StandardWidth,
 };
-use crate::{Datatype, FormatError};
+use crate::{Datatype, FixedPointType, FormatError};
 
 /// A supported numeric encoding and its element width.
 ///
@@ -19,6 +19,39 @@ pub(crate) struct NumericDecodePlan {
 }
 
 impl NumericDecodePlan {
+    fn fixed_point(datatype: FixedPointType) -> Result<Self, FormatError> {
+        let element_size = NumericElementSize::new(datatype.size())?;
+        let order = FixedWidthByteOrder::try_from(datatype.byte_order())
+            .map_err(|_order| FormatError::UnsupportedVaxByteOrder)?;
+        let layout = datatype.layout();
+        let signed = layout.signed();
+        let bit_offset = layout.bit_offset();
+        let precision = layout.precision();
+        let width = match (element_size.get(), bit_offset, precision.get()) {
+            (1, 0, 8) => Some(StandardWidth::OneByte),
+            (2, 0, 16) => Some(StandardWidth::TwoBytes),
+            (4, 0, 32) => Some(StandardWidth::FourBytes),
+            (8, 0, 64) => Some(StandardWidth::EightBytes),
+            _ => None,
+        };
+        let encoding = match width {
+            Some(width) => NumericEncoding::StandardFixedPoint {
+                signed,
+                layout: StandardNumericLayout { width, order },
+            },
+            None => NumericEncoding::FixedPoint(FixedPointDecode {
+                order,
+                signed,
+                bit_offset,
+                precision,
+            }),
+        };
+        Ok(Self {
+            element_size,
+            encoding,
+        })
+    }
+
     pub(crate) const fn element_size(self) -> usize {
         self.element_size.get()
     }
@@ -49,34 +82,18 @@ impl TryFrom<&Datatype> for NumericDecodePlan {
         }
 
         match datatype {
-            Datatype::FixedPoint {
-                size: _,
-                byte_order,
-                layout,
-            } => {
-                let element_size = NumericElementSize::new(datatype.element_size()?)?;
-                let order = FixedWidthByteOrder::try_from(*byte_order)
+            Datatype::FixedPoint(numeric) => Self::fixed_point(*numeric),
+            Datatype::FloatingPoint(numeric) => {
+                let element_size = NumericElementSize::new(numeric.size())?;
+                let order = FixedWidthByteOrder::try_from(numeric.byte_order())
                     .map_err(|_order| FormatError::UnsupportedVaxByteOrder)?;
-                Ok(Self {
-                    element_size,
-                    encoding: NumericEncoding::fixed_point(element_size, order, *layout)?,
-                })
-            }
-            Datatype::FloatingPoint {
-                size: _,
-                byte_order,
-                layout,
-            } => {
-                let element_size = NumericElementSize::new(datatype.element_size()?)?;
-                let order = FixedWidthByteOrder::try_from(*byte_order)
-                    .map_err(|_order| FormatError::UnsupportedVaxByteOrder)?;
-                let encoding = match (element_size.get(), *layout) {
+                let encoding = match (element_size.get(), numeric.layout()) {
                     (4, FloatingPointLayout::IEEE754_BINARY32) => NumericEncoding::Float32(order),
                     (8, FloatingPointLayout::IEEE754_BINARY64) => NumericEncoding::Float64(order),
                     _ => {
                         return Err(FormatError::UnsupportedFloatingPointLayout {
                             size: element_size.get(),
-                            layout: *layout,
+                            layout: numeric.layout(),
                         });
                     }
                 };
@@ -103,53 +120,6 @@ pub(crate) enum NumericEncoding {
         signed: bool,
         layout: StandardNumericLayout,
     },
-}
-
-impl NumericEncoding {
-    /// Parses a supported fixed-point encoding within `element_size`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::InvalidFixedPointRange`] if the significant bit range is empty or
-    /// extends past the element width.
-    fn fixed_point(
-        element_size: NumericElementSize,
-        order: FixedWidthByteOrder,
-        layout: FixedPointLayout,
-    ) -> Result<Self, FormatError> {
-        let FixedPointLayout {
-            signed,
-            bit_offset,
-            bit_precision,
-        } = layout;
-        let Some(precision) = NonZeroU16::new(bit_precision).filter(|precision| {
-            usize::from(bit_offset) + usize::from(precision.get()) <= element_size.get() * 8
-        }) else {
-            return Err(FormatError::InvalidFixedPointRange {
-                size: element_size.get(),
-                bit_offset,
-                bit_precision,
-            });
-        };
-        let width = match (element_size.get(), bit_offset, bit_precision) {
-            (1, 0, 8) => StandardWidth::OneByte,
-            (2, 0, 16) => StandardWidth::TwoBytes,
-            (4, 0, 32) => StandardWidth::FourBytes,
-            (8, 0, 64) => StandardWidth::EightBytes,
-            _ => {
-                return Ok(Self::FixedPoint(FixedPointDecode {
-                    order,
-                    signed,
-                    bit_offset,
-                    precision,
-                }));
-            }
-        };
-        Ok(Self::StandardFixedPoint {
-            signed,
-            layout: StandardNumericLayout { width, order },
-        })
-    }
 }
 
 /// A nonempty fixed-point bit range within the decode plan's element width.
@@ -189,33 +159,5 @@ impl FixedPointDecode {
     pub(crate) fn read_signed(self, bytes: &[u8]) -> i64 {
         let shift = 64 - self.precision.get();
         i64::from_ne_bytes((self.read_unsigned(bytes) << shift).to_ne_bytes()) >> shift
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use rstest::rstest;
-
-    use crate::datatype::byte_order::DatatypeByteOrder;
-
-    use super::*;
-
-    #[rstest]
-    #[case(Datatype::FixedPoint {
-        size: 0,
-        byte_order: DatatypeByteOrder::LittleEndian,
-        layout: FixedPointLayout { signed: false, bit_offset: 0, bit_precision: 0 },
-    }, 0)]
-    #[case(Datatype::FloatingPoint {
-        size: 0,
-        byte_order: DatatypeByteOrder::LittleEndian,
-        layout: FloatingPointLayout::IEEE754_BINARY32,
-    }, 1)]
-    fn zero_sized_numeric_datatype_returns_zero_sized_datatype(
-        #[case] datatype: Datatype,
-        #[case] class: u8,
-    ) {
-        let error = NumericDecodePlan::try_from(&datatype).unwrap_err();
-        assert_eq!(error, FormatError::ZeroSizedDatatype { class });
     }
 }

@@ -5,8 +5,7 @@ use core::fmt;
 use core::num::NonZeroU32;
 
 use self::byte_order::DatatypeByteOrder;
-use self::layout::FixedPointLayout;
-use self::layout::FloatingPointLayout;
+use self::layout::{BitFieldType, FixedPointType, FloatingPointType, TimeType};
 use crate::FormatError;
 use crate::display;
 use crate::display::DISPLAY_MAX_MEMBERS;
@@ -80,44 +79,25 @@ pub struct EnumMember {
 
 /// Represents the class-specific fields of an HDF5 Datatype message.
 ///
-/// [`type_size`](Self::type_size) gives the element size in bytes. A
-/// [`FixedPoint`](Self::FixedPoint) or [`FloatingPoint`](Self::FloatingPoint) type wider than eight
-/// bytes parses, although the numeric conversion paths do not decode its values.
+/// [`type_size`](Self::type_size) gives the element size in bytes. The fixed-point,
+/// floating-point, time, and bit-field payloads contain checked sizes and bit ranges.
+/// Metadata for a numeric type wider than eight bytes or with an unsupported floating-point
+/// encoding is available even when numeric value conversions cannot decode its values.
 ///
-/// The [format specification, version 4.0][spec] defines a Complex class (11), which this enum
-/// does not represent.
+/// "The Datatype Message" of the [format specification, version 4.0][spec] defines datatype
+/// message versions 1 through 5, including a Complex class (11), which this enum does not
+/// represent.
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Datatype {
     /// Class 0: Fixed-point (integer) types.
-    FixedPoint {
-        /// Size of one element, in bytes.
-        size: u32,
-        /// Order of the element bytes.
-        byte_order: DatatypeByteOrder,
-        /// Sign and significant bit range.
-        layout: FixedPointLayout,
-    },
+    FixedPoint(FixedPointType),
     /// Class 1: Floating-point types.
-    FloatingPoint {
-        /// Size of one element, in bytes.
-        size: u32,
-        /// Order of the element bytes.
-        byte_order: DatatypeByteOrder,
-        /// Bit fields and exponent bias.
-        layout: FloatingPointLayout,
-    },
+    FloatingPoint(FloatingPointType),
     /// Class 2: Time type (rarely used).
-    Time {
-        /// Size of one element, in bytes.
-        size: u32,
-        /// Order of the element bytes.
-        byte_order: DatatypeByteOrder,
-        /// Number of significant bits in an element.
-        bit_precision: u16,
-    },
+    Time(TimeType),
     /// Class 3: Fixed-length string.
     String {
         /// Width of one string, in bytes.
@@ -128,16 +108,7 @@ pub enum Datatype {
         charset: CharacterSet,
     },
     /// Class 4: Bit field.
-    BitField {
-        /// Size of one element, in bytes.
-        size: u32,
-        /// Order of the element bytes.
-        byte_order: DatatypeByteOrder,
-        /// Position of the first significant bit.
-        bit_offset: u16,
-        /// Number of significant bits in an element.
-        bit_precision: u16,
-    },
+    BitField(BitFieldType),
     /// Class 5: Opaque data.
     Opaque {
         /// Size of one element, in bytes.
@@ -189,14 +160,14 @@ pub enum Datatype {
 }
 
 impl Datatype {
-    /// Return the size in bytes of one element of this type.
+    /// Returns the size in bytes of one element of this type.
     pub fn type_size(&self) -> u32 {
         match self {
-            Datatype::FixedPoint { size, .. } => *size,
-            Datatype::FloatingPoint { size, .. } => *size,
-            Datatype::Time { size, .. } => *size,
+            Datatype::FixedPoint(datatype) => datatype.size().get(),
+            Datatype::FloatingPoint(datatype) => datatype.size().get(),
+            Datatype::Time(datatype) => datatype.size().get(),
             Datatype::String { size, .. } => *size,
-            Datatype::BitField { size, .. } => *size,
+            Datatype::BitField(datatype) => datatype.size().get(),
             Datatype::Opaque { size, .. } => *size,
             Datatype::Compound { size, .. } => *size,
             Datatype::Reference { size, .. } => *size,
@@ -218,11 +189,11 @@ impl Datatype {
     /// The class code this type encodes as, the low nibble of a datatype message's first byte.
     fn class_code(&self) -> u8 {
         match self {
-            Datatype::FixedPoint { .. } => 0,
-            Datatype::FloatingPoint { .. } => 1,
-            Datatype::Time { .. } => 2,
+            Datatype::FixedPoint(..) => 0,
+            Datatype::FloatingPoint(..) => 1,
+            Datatype::Time(..) => 2,
             Datatype::String { .. } => 3,
-            Datatype::BitField { .. } => 4,
+            Datatype::BitField(..) => 4,
             Datatype::Opaque { .. } => 5,
             Datatype::Compound { .. } => 6,
             Datatype::Reference { .. } => 7,
@@ -248,9 +219,15 @@ impl Datatype {
     /// Returns [`FormatError::ZeroSizedDatatype`] if the element type occupies
     /// zero bytes.
     pub fn element_size(&self) -> Result<NonZeroU32, FormatError> {
-        NonZeroU32::new(self.type_size()).ok_or(FormatError::ZeroSizedDatatype {
-            class: self.class_code(),
-        })
+        match self {
+            Self::FixedPoint(datatype) => Ok(datatype.size()),
+            Self::FloatingPoint(datatype) => Ok(datatype.size()),
+            Self::Time(datatype) => Ok(datatype.size()),
+            Self::BitField(datatype) => Ok(datatype.size()),
+            _ => NonZeroU32::new(self.type_size()).ok_or(FormatError::ZeroSizedDatatype {
+                class: self.class_code(),
+            }),
+        }
     }
 }
 
@@ -325,53 +302,42 @@ fn write_byte_order(f: &mut fmt::Formatter<'_>, byte_order: &DatatypeByteOrder) 
 impl fmt::Display for Datatype {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::FixedPoint {
-                size,
-                byte_order,
-                layout:
-                    FixedPointLayout {
-                        signed,
-                        bit_offset,
-                        bit_precision,
-                    },
-            } => {
-                let sign = if *signed { 'i' } else { 'u' };
-                write!(f, "{sign}{}", bit_width(*size))?;
-                write_bit_span(f, *size, *bit_offset, *bit_precision)?;
-                write_byte_order(f, byte_order)
+            Self::FixedPoint(datatype) => {
+                let layout = datatype.layout();
+                let size = datatype.size().get();
+                let sign = if layout.signed() { 'i' } else { 'u' };
+                write!(f, "{sign}{}", bit_width(size))?;
+                write_bit_span(f, size, layout.bit_offset(), layout.bit_precision())?;
+                write_byte_order(f, &datatype.byte_order())
             }
-            Self::FloatingPoint {
-                size,
-                byte_order,
-                layout,
-            } => {
-                write!(f, "f{}", bit_width(*size))?;
-                write_bit_span(f, *size, layout.bit_offset, layout.bit_precision)?;
-                write_byte_order(f, byte_order)
+            Self::FloatingPoint(datatype) => {
+                let layout = datatype.layout();
+                let size = datatype.size().get();
+                write!(f, "f{}", bit_width(size))?;
+                write_bit_span(f, size, layout.bit_offset(), layout.bit_precision())?;
+                write_byte_order(f, &datatype.byte_order())
             }
-            Self::Time {
-                size,
-                byte_order,
-                bit_precision,
-            } => {
-                write!(f, "time{}", bit_width(*size))?;
-                write_bit_span(f, *size, 0, *bit_precision)?;
-                write_byte_order(f, byte_order)
+            Self::Time(datatype) => {
+                let size = datatype.size().get();
+                write!(f, "time{}", bit_width(size))?;
+                write_bit_span(f, size, 0, datatype.bit_precision().get())?;
+                write_byte_order(f, &datatype.byte_order())
             }
             Self::String {
                 size,
                 padding,
                 charset,
             } => write!(f, "string[{size}] {charset} {padding}"),
-            Self::BitField {
-                size,
-                byte_order,
-                bit_offset,
-                bit_precision,
-            } => {
-                write!(f, "bitfield{}", bit_width(*size))?;
-                write_bit_span(f, *size, *bit_offset, *bit_precision)?;
-                write_byte_order(f, byte_order)
+            Self::BitField(datatype) => {
+                let size = datatype.size().get();
+                write!(f, "bitfield{}", bit_width(size))?;
+                write_bit_span(
+                    f,
+                    size,
+                    datatype.bit_offset(),
+                    datatype.bit_precision().get(),
+                )?;
+                write_byte_order(f, &datatype.byte_order())
             }
             Self::Opaque { size, tag } => {
                 write!(f, "opaque[{size}]")?;

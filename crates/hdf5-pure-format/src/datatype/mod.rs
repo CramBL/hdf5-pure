@@ -13,11 +13,13 @@ use hdf5_pure_core::__private;
 pub(crate) use hdf5_pure_core::CharacterSet;
 pub(crate) use hdf5_pure_core::Datatype;
 use hdf5_pure_core::DatatypeByteOrder;
-use hdf5_pure_core::FixedPointLayout;
+
+#[cfg(test)]
 use hdf5_pure_core::FloatingPointLayout;
 use hdf5_pure_core::MantissaNormalization;
 pub(crate) use hdf5_pure_core::ReferenceType;
 pub(crate) use hdf5_pure_core::StringPadding;
+use hdf5_pure_core::{BitFieldType, FixedPointType, FloatingPointType, TimeType};
 
 use crate::bytes;
 use crate::error::FormatError;
@@ -54,6 +56,11 @@ pub fn element_size_usize(datatype: &Datatype) -> Result<NonZeroUsize, FormatErr
 /// [`FormatError::InvalidStringPadding`] for an unknown string padding code, or
 /// [`FormatError::InvalidCharacterSet`] for an unknown character set code. Returns
 /// [`FormatError::ZeroSizedDatatype`] if the parsed type has no element bytes.
+/// Returns [`FormatError::InvalidFixedPointRange`], [`FormatError::InvalidFloatingPointRange`], or
+/// [`FormatError::InvalidNumericBitRange`] if a numeric bit range is empty or exceeds its element
+/// size. Returns [`FormatError::InvalidFloatingPointField`] if a floating-point field is empty or
+/// outside that range, [`FormatError::OverlappingFloatingPointFields`] if fields overlap, or
+/// [`FormatError::InvalidMantissaNormalization`] if the normalization code is reserved.
 pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
     // Minimum header: 4 bytes (`class_and_version` + 3 bytes bit field) + 4 bytes size = 8
     bytes::ensure_len(data, 0, 8)?;
@@ -85,15 +92,13 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
             let bit_precision = LittleEndian::read_u16(&data[pos + 2..pos + 4]);
             pos += 4;
             Ok((
-                Datatype::FixedPoint {
+                Datatype::FixedPoint(FixedPointType::new(
                     size,
                     byte_order,
-                    layout: FixedPointLayout {
-                        signed,
-                        bit_offset,
-                        bit_precision,
-                    },
-                },
+                    signed,
+                    bit_offset,
+                    bit_precision,
+                )?),
                 pos,
             ))
         }
@@ -107,7 +112,7 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
                 FLOAT_NORMALIZATION_UNNORMALIZED => MantissaNormalization::Unnormalized,
                 FLOAT_NORMALIZATION_LEADING_ONE => MantissaNormalization::LeadingOne,
                 FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE => MantissaNormalization::ImpliedLeadingOne,
-                _ => MantissaNormalization::Reserved,
+                value => return Err(FormatError::InvalidMantissaNormalization(value)),
             };
             let sign_location = bf1;
             let bit_offset = LittleEndian::read_u16(&data[pos..pos + 2]);
@@ -119,21 +124,19 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
             let exponent_bias = LittleEndian::read_u32(&data[pos + 8..pos + 12]);
             pos += 12;
             Ok((
-                Datatype::FloatingPoint {
+                Datatype::FloatingPoint(FloatingPointType::new(
                     size,
                     byte_order,
-                    layout: FloatingPointLayout {
-                        mantissa_normalization,
-                        sign_location,
-                        bit_offset,
-                        bit_precision,
-                        exponent_location,
-                        exponent_size,
-                        mantissa_location,
-                        mantissa_size,
-                        exponent_bias,
-                    },
-                },
+                    mantissa_normalization,
+                    sign_location,
+                    bit_offset,
+                    bit_precision,
+                    exponent_location,
+                    exponent_size,
+                    mantissa_location,
+                    mantissa_size,
+                    exponent_bias,
+                )?),
                 pos,
             ))
         }
@@ -148,11 +151,7 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
             let bit_precision = LittleEndian::read_u16(&data[pos..pos + 2]);
             pos += 2;
             Ok((
-                Datatype::Time {
-                    size,
-                    byte_order,
-                    bit_precision,
-                },
+                Datatype::Time(TimeType::new(size, byte_order, bit_precision)?),
                 pos,
             ))
         }
@@ -183,12 +182,12 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
             let bit_precision = LittleEndian::read_u16(&data[pos + 2..pos + 4]);
             pos += 4;
             Ok((
-                Datatype::BitField {
+                Datatype::BitField(BitFieldType::new(
                     size,
                     byte_order,
                     bit_offset,
                     bit_precision,
-                },
+                )?),
                 pos,
             ))
         }
@@ -399,65 +398,44 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
         _ => Err(FormatError::InvalidDatatypeClass(class_id)),
     };
 
-    // The declared size is checked through `type_size` because it differs from the size in the header field:
-    // An array type derives its size from its base type and dimensions, so a zero dimension yields a zero-byte element
-    // from a non-zero header field.
+    // Array types compute their size from their base type and dimensions. A zero dimension
+    // produces an element with zero bytes even when the header size is positive.
     let (datatype, consumed) = parsed?;
-    if datatype.type_size() == 0 {
-        return Err(FormatError::ZeroSizedDatatype { class: class_id });
-    }
+    datatype.element_size()?;
     Ok((datatype, consumed))
 }
 
 /// Serializes a datatype into an HDF5 Datatype message body.
 pub fn serialize_datatype(datatype: &Datatype) -> Vec<u8> {
     match datatype {
-        Datatype::FixedPoint {
-            size,
-            byte_order,
-            layout:
-                FixedPointLayout {
-                    signed,
-                    bit_offset,
-                    bit_precision,
-                },
-        } => {
+        Datatype::FixedPoint(datatype) => {
+            let layout = datatype.layout();
             let mut bf0 = 0u8;
-            if matches!(byte_order, DatatypeByteOrder::BigEndian) {
+            if datatype.byte_order() == DatatypeByteOrder::BigEndian {
                 bf0 |= 0x01;
             }
-            if *signed {
+            if layout.signed() {
                 bf0 |= 0x08;
             }
-            let mut buf = build_header(FIXED_POINT_CLASS, DATATYPE_VERSION_ONE, [bf0, 0, 0], *size);
-            buf.extend_from_slice(&bit_offset.to_le_bytes());
-            buf.extend_from_slice(&bit_precision.to_le_bytes());
+            let mut buf = build_header(
+                FIXED_POINT_CLASS,
+                DATATYPE_VERSION_ONE,
+                [bf0, 0, 0],
+                datatype.size().get(),
+            );
+            buf.extend_from_slice(&layout.bit_offset().to_le_bytes());
+            buf.extend_from_slice(&layout.bit_precision().to_le_bytes());
             buf
         }
-        Datatype::FloatingPoint {
-            size,
-            byte_order,
-            layout:
-                FloatingPointLayout {
-                    mantissa_normalization,
-                    sign_location,
-                    bit_offset,
-                    bit_precision,
-                    exponent_location,
-                    exponent_size,
-                    mantissa_location,
-                    mantissa_size,
-                    exponent_bias,
-                },
-        } => {
-            let normalization = match mantissa_normalization {
+        Datatype::FloatingPoint(datatype) => {
+            let layout = datatype.layout();
+            let normalization = match layout.mantissa_normalization() {
                 MantissaNormalization::Unnormalized => FLOAT_NORMALIZATION_UNNORMALIZED,
                 MantissaNormalization::LeadingOne => FLOAT_NORMALIZATION_LEADING_ONE,
                 MantissaNormalization::ImpliedLeadingOne => FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE,
-                MantissaNormalization::Reserved => FLOAT_NORMALIZATION_RESERVED,
             };
             let mut bf0 = normalization << FLOAT_NORMALIZATION_SHIFT;
-            let version = match byte_order {
+            let version = match datatype.byte_order() {
                 DatatypeByteOrder::LittleEndian => DATATYPE_VERSION_ONE,
                 DatatypeByteOrder::BigEndian => {
                     bf0 |= FLOAT_BYTE_ORDER_LOW_BIT;
@@ -471,16 +449,16 @@ pub fn serialize_datatype(datatype: &Datatype) -> Vec<u8> {
             let mut buf = build_header(
                 FLOATING_POINT_CLASS,
                 version,
-                [bf0, *sign_location, 0],
-                *size,
+                [bf0, layout.sign_location(), 0],
+                datatype.size().get(),
             );
-            buf.extend_from_slice(&bit_offset.to_le_bytes());
-            buf.extend_from_slice(&bit_precision.to_le_bytes());
-            buf.push(*exponent_location);
-            buf.push(*exponent_size);
-            buf.push(*mantissa_location);
-            buf.push(*mantissa_size);
-            buf.extend_from_slice(&exponent_bias.to_le_bytes());
+            buf.extend_from_slice(&layout.bit_offset().to_le_bytes());
+            buf.extend_from_slice(&layout.bit_precision().to_le_bytes());
+            buf.push(layout.exponent_location());
+            buf.push(layout.exponent_size());
+            buf.push(layout.mantissa_location());
+            buf.push(layout.mantissa_size());
+            buf.extend_from_slice(&layout.exponent_bias().to_le_bytes());
             buf
         }
         Datatype::String {
@@ -618,35 +596,27 @@ pub fn serialize_datatype(datatype: &Datatype) -> Vec<u8> {
             };
             build_header(REFERENCE_CLASS, DATATYPE_VERSION_ONE, [bf0, 0, 0], *size)
         }
-        Datatype::Time {
-            size,
-            byte_order,
-            bit_precision,
-        } => {
-            // bf0 bit 0 is the byte order (0 = little-endian, 1 = big-endian).
-            let bf0 = if matches!(byte_order, DatatypeByteOrder::BigEndian) {
-                0x01u8
-            } else {
-                0
-            };
-            let mut buf = build_header(TIME_CLASS, DATATYPE_VERSION_ONE, [bf0, 0, 0], *size);
-            buf.extend_from_slice(&bit_precision.to_le_bytes());
+        Datatype::Time(datatype) => {
+            let bf0 = u8::from(datatype.byte_order() == DatatypeByteOrder::BigEndian);
+            let mut buf = build_header(
+                TIME_CLASS,
+                DATATYPE_VERSION_ONE,
+                [bf0, 0, 0],
+                datatype.size().get(),
+            );
+            buf.extend_from_slice(&datatype.bit_precision().get().to_le_bytes());
             buf
         }
-        Datatype::BitField {
-            size,
-            byte_order,
-            bit_offset,
-            bit_precision,
-        } => {
-            let bf0 = if matches!(byte_order, DatatypeByteOrder::BigEndian) {
-                0x01u8
-            } else {
-                0
-            };
-            let mut buf = build_header(BIT_FIELD_CLASS, DATATYPE_VERSION_ONE, [bf0, 0, 0], *size);
-            buf.extend_from_slice(&bit_offset.to_le_bytes());
-            buf.extend_from_slice(&bit_precision.to_le_bytes());
+        Datatype::BitField(datatype) => {
+            let bf0 = u8::from(datatype.byte_order() == DatatypeByteOrder::BigEndian);
+            let mut buf = build_header(
+                BIT_FIELD_CLASS,
+                DATATYPE_VERSION_ONE,
+                [bf0, 0, 0],
+                datatype.size().get(),
+            );
+            buf.extend_from_slice(&datatype.bit_offset().to_le_bytes());
+            buf.extend_from_slice(&datatype.bit_precision().get().to_le_bytes());
             buf
         }
         Datatype::Opaque { size, tag } => {
@@ -757,6 +727,7 @@ const FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE: u8 = 2;
 /// version 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+#[cfg(test)]
 const FLOAT_NORMALIZATION_RESERVED: u8 = 3;
 
 fn parse_charset(val: u8) -> Result<CharacterSet, FormatError> {
@@ -1077,6 +1048,7 @@ fn build_dt_header(class: u8, version: u8, bf: [u8; 3], size: u32) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use hdf5_pure_core::FloatingPointField;
     use rstest::rstest;
 
     use super::*;
@@ -1096,14 +1068,10 @@ mod tests {
             size: 8,
             ref_type: ReferenceType::Object,
         };
-        let i32_le = || Datatype::FixedPoint {
-            size: 4,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: true,
-                bit_offset: 0,
-                bit_precision: 32,
-            },
+        let i32_le = || {
+            Datatype::FixedPoint(
+                FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
+            )
         };
         let holds_an_address = [
             ("a bare object reference", object_ref()),
@@ -1186,15 +1154,9 @@ mod tests {
             members: vec![__private::compound_member(
                 "a".into(),
                 0,
-                Datatype::FixedPoint {
-                    size: 8,
-                    byte_order: DatatypeByteOrder::LittleEndian,
-                    layout: FixedPointLayout {
-                        signed: true,
-                        bit_offset: 0,
-                        bit_precision: 64,
-                    },
-                },
+                Datatype::FixedPoint(
+                    FixedPointType::new(8, DatatypeByteOrder::LittleEndian, true, 0, 64).unwrap(),
+                ),
             )],
         };
         assert!(!datatype_holds_object_address(&ints));
@@ -1253,15 +1215,9 @@ mod tests {
         assert_eq!(consumed, 12);
         assert_eq!(
             dt,
-            Datatype::FixedPoint {
-                size: 1,
-                byte_order: DatatypeByteOrder::LittleEndian,
-                layout: FixedPointLayout {
-                    signed: false,
-                    bit_offset: 0,
-                    bit_precision: 8,
-                }
-            }
+            Datatype::FixedPoint(
+                FixedPointType::new(1, DatatypeByteOrder::LittleEndian, false, 0, 8).unwrap()
+            )
         );
     }
 
@@ -1271,15 +1227,9 @@ mod tests {
         let (dt, _) = parse_datatype(&data).unwrap();
         assert_eq!(
             dt,
-            Datatype::FixedPoint {
-                size: 2,
-                byte_order: DatatypeByteOrder::LittleEndian,
-                layout: FixedPointLayout {
-                    signed: true,
-                    bit_offset: 0,
-                    bit_precision: 16,
-                }
-            }
+            Datatype::FixedPoint(
+                FixedPointType::new(2, DatatypeByteOrder::LittleEndian, true, 0, 16).unwrap()
+            )
         );
     }
 
@@ -1288,15 +1238,10 @@ mod tests {
         let data = build_fixed_point(4, true, false, 0, 32);
         let (dt, _) = parse_datatype(&data).unwrap();
         match &dt {
-            Datatype::FixedPoint {
-                byte_order,
-
-                size,
-                layout: FixedPointLayout { signed, .. },
-            } => {
-                assert_eq!(*byte_order, DatatypeByteOrder::BigEndian);
-                assert!(!signed);
-                assert_eq!(*size, 4);
+            Datatype::FixedPoint(numeric) => {
+                assert_eq!(numeric.byte_order(), DatatypeByteOrder::BigEndian);
+                assert!(!numeric.layout().signed());
+                assert_eq!(numeric.size().get(), 4);
             }
             _ => panic!("expected FixedPoint"),
         }
@@ -1308,15 +1253,9 @@ mod tests {
         let (dt, _) = parse_datatype(&data).unwrap();
         assert_eq!(
             dt,
-            Datatype::FixedPoint {
-                size: 8,
-                byte_order: DatatypeByteOrder::LittleEndian,
-                layout: FixedPointLayout {
-                    signed: true,
-                    bit_offset: 0,
-                    bit_precision: 64,
-                }
-            }
+            Datatype::FixedPoint(
+                FixedPointType::new(8, DatatypeByteOrder::LittleEndian, true, 0, 64).unwrap()
+            )
         );
     }
 
@@ -1327,7 +1266,6 @@ mod tests {
         MantissaNormalization::ImpliedLeadingOne,
         FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE
     )]
-    #[case(MantissaNormalization::Reserved, FLOAT_NORMALIZATION_RESERVED)]
     fn preserves_floating_point_class_fields(
         #[case] normalization: MantissaNormalization,
         #[case] normalization_bits: u8,
@@ -1339,15 +1277,29 @@ mod tests {
         )]
         byte_order: DatatypeByteOrder,
     ) {
-        let datatype = Datatype::FloatingPoint {
-            size: 4,
-            byte_order,
-            layout: FloatingPointLayout {
-                mantissa_normalization: normalization,
-                sign_location,
-                ..FloatingPointLayout::IEEE754_BINARY32
-            },
+        let (size, precision, exponent_size, mantissa_location, mantissa_size) = match sign_location
+        {
+            0 => (4, 32, 8, 1, 22),
+            30 => (4, 32, 7, 0, 23),
+            31 => (4, 32, 8, 0, 23),
+            _ => (32, 256, 8, 0, 23),
         };
+        let datatype = Datatype::FloatingPoint(
+            FloatingPointType::new(
+                size,
+                byte_order,
+                normalization,
+                sign_location,
+                0,
+                precision,
+                23,
+                exponent_size,
+                mantissa_location,
+                mantissa_size,
+                127,
+            )
+            .unwrap(),
+        );
         let bytes = serialize_datatype(&datatype);
         assert_eq!(
             (bytes[1] >> FLOAT_NORMALIZATION_SHIFT) & FLOAT_NORMALIZATION_MASK,
@@ -1365,11 +1317,14 @@ mod tests {
         assert_eq!(consumed, 20);
         assert_eq!(
             dt,
-            Datatype::FloatingPoint {
-                size: 4,
-                byte_order: DatatypeByteOrder::LittleEndian,
-                layout: FloatingPointLayout::IEEE754_BINARY32
-            }
+            Datatype::FloatingPoint(
+                FloatingPointType::from_layout(
+                    4,
+                    DatatypeByteOrder::LittleEndian,
+                    FloatingPointLayout::IEEE754_BINARY32
+                )
+                .unwrap()
+            )
         );
     }
 
@@ -1379,11 +1334,14 @@ mod tests {
         let (dt, _) = parse_datatype(&data).unwrap();
         assert_eq!(
             dt,
-            Datatype::FloatingPoint {
-                size: 8,
-                byte_order: DatatypeByteOrder::LittleEndian,
-                layout: FloatingPointLayout::IEEE754_BINARY64
-            }
+            Datatype::FloatingPoint(
+                FloatingPointType::from_layout(
+                    8,
+                    DatatypeByteOrder::LittleEndian,
+                    FloatingPointLayout::IEEE754_BINARY64
+                )
+                .unwrap()
+            )
         );
     }
 
@@ -1396,14 +1354,14 @@ mod tests {
         #[case] bit_field: u8,
         #[case] expected: DatatypeByteOrder,
     ) {
-        let mut data = build_dt_header(1, DATATYPE_VERSION_ONE, [bit_field, 0x1F, 0x02], 4);
-        data.extend_from_slice(&[0u8; 12]);
+        let mut data = build_float(4, 23, 8, 0, 23, 127);
+        data[1] = (data[1] & !(FLOAT_BYTE_ORDER_HIGH_BIT | FLOAT_BYTE_ORDER_LOW_BIT)) | bit_field;
 
         let (dt, _) = parse_datatype(&data).unwrap();
-        let Datatype::FloatingPoint { byte_order, .. } = dt else {
+        let Datatype::FloatingPoint(numeric) = dt else {
             panic!("expected a floating-point datatype, got {dt:?}");
         };
-        assert_eq!(byte_order, expected);
+        assert_eq!(numeric.byte_order(), expected);
     }
 
     #[test]
@@ -1540,15 +1498,12 @@ mod tests {
                 assert_eq!(members[1].name, "y");
                 assert_eq!(members[1].byte_offset, 4);
                 match &members[0].datatype {
-                    Datatype::FixedPoint {
-                        size: 4,
-                        layout: FixedPointLayout { signed: false, .. },
-                        ..
-                    } => {}
+                    Datatype::FixedPoint(numeric)
+                        if numeric.size().get() == 4 && !numeric.layout().signed() => {}
                     other => panic!("expected u32, got {other:?}"),
                 }
                 match &members[1].datatype {
-                    Datatype::FloatingPoint { size: 8, .. } => {}
+                    Datatype::FloatingPoint(numeric) if numeric.size().get() == 8 => {}
                     other => panic!("expected f64, got {other:?}"),
                 }
             }
@@ -1591,7 +1546,7 @@ mod tests {
                 assert_eq!(members[1].byte_offset, 8);
                 for m in &members {
                     assert!(
-                        matches!(m.datatype, Datatype::FloatingPoint { size: 8, .. }),
+                        matches!(m.datatype, Datatype::FloatingPoint(numeric) if numeric.size().get() == 8),
                         "expected f64 member, got {:?}",
                         m.datatype
                     );
@@ -1658,11 +1613,8 @@ mod tests {
                 assert_eq!(members[2].name, "BLUE");
                 assert_eq!(members[2].value, 2i32.to_le_bytes().to_vec());
                 match *base_type {
-                    Datatype::FixedPoint {
-                        size: 4,
-                        layout: FixedPointLayout { signed: true, .. },
-                        ..
-                    } => {}
+                    Datatype::FixedPoint(numeric)
+                        if numeric.size().get() == 4 && numeric.layout().signed() => {}
                     other => panic!("expected i32, got {other:?}"),
                 }
             }
@@ -1775,11 +1727,8 @@ mod tests {
             } => {
                 assert_eq!(dimensions, vec![3, 4]);
                 match *base_type {
-                    Datatype::FixedPoint {
-                        size: 4,
-                        layout: FixedPointLayout { signed: true, .. },
-                        ..
-                    } => {}
+                    Datatype::FixedPoint(numeric)
+                        if numeric.size().get() == 4 && numeric.layout().signed() => {}
                     other => panic!("expected i32, got {other:?}"),
                 }
             }
@@ -1843,15 +1792,9 @@ mod tests {
     /// so a caller can divide by it without a separate zero check.
     #[test]
     fn element_size_matches_type_size_for_a_type_that_has_one() {
-        let dt = Datatype::FixedPoint {
-            size: 4,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: true,
-                bit_offset: 0,
-                bit_precision: 32,
-            },
-        };
+        let dt = Datatype::FixedPoint(
+            FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
+        );
         assert_eq!(dt.element_size().unwrap().get(), dt.type_size());
     }
 
@@ -1862,15 +1805,9 @@ mod tests {
     #[test]
     fn element_size_rejects_a_constructed_array_with_a_zero_dimensionq() {
         let dt = Datatype::Array {
-            base_type: Box::new(Datatype::FixedPoint {
-                size: 4,
-                byte_order: DatatypeByteOrder::LittleEndian,
-                layout: FixedPointLayout {
-                    signed: true,
-                    bit_offset: 0,
-                    bit_precision: 32,
-                },
-            }),
+            base_type: Box::new(Datatype::FixedPoint(
+                FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
+            )),
             dimensions: vec![0, 4],
         };
         assert_eq!(dt.type_size(), 0);
@@ -1911,12 +1848,9 @@ mod tests {
         let (dt, _) = parse_datatype(&buf).unwrap();
         assert_eq!(
             dt,
-            Datatype::BitField {
-                size: 2,
-                byte_order: DatatypeByteOrder::LittleEndian,
-                bit_offset: 0,
-                bit_precision: 16,
-            }
+            Datatype::BitField(
+                BitFieldType::new(2, DatatypeByteOrder::LittleEndian, 0, 16).unwrap()
+            )
         );
     }
 
@@ -1931,11 +1865,7 @@ mod tests {
         assert_eq!(consumed, 10);
         assert_eq!(
             dt,
-            Datatype::Time {
-                size: 8,
-                byte_order: DatatypeByteOrder::LittleEndian,
-                bit_precision: 64,
-            }
+            Datatype::Time(TimeType::new(8, DatatypeByteOrder::LittleEndian, 64).unwrap())
         );
     }
 
@@ -1950,14 +1880,7 @@ mod tests {
             let mut buf = build_dt_header(2, DATATYPE_VERSION_ONE, [be, 0, 0], 4);
             buf.extend_from_slice(&32u16.to_le_bytes());
             let (dt, _) = parse_datatype(&buf).unwrap();
-            assert_eq!(
-                dt,
-                Datatype::Time {
-                    size: 4,
-                    byte_order: order,
-                    bit_precision: 32,
-                }
-            );
+            assert_eq!(dt, Datatype::Time(TimeType::new(4, order, 32).unwrap()));
             // serialize -> parse must round-trip the byte order.
             let (reparsed, _) = parse_datatype(&serialize_datatype(&dt)).unwrap();
             assert_eq!(reparsed, dt);
@@ -2060,33 +1983,34 @@ mod tests {
                 __private::compound_member(
                     "x".to_string(),
                     0,
-                    Datatype::FloatingPoint {
-                        size: 8,
-                        byte_order: DatatypeByteOrder::LittleEndian,
-                        layout: FloatingPointLayout::IEEE754_BINARY64,
-                    },
+                    Datatype::FloatingPoint(
+                        FloatingPointType::from_layout(
+                            8,
+                            DatatypeByteOrder::LittleEndian,
+                            FloatingPointLayout::IEEE754_BINARY64,
+                        )
+                        .unwrap(),
+                    ),
                 ),
                 __private::compound_member(
                     "y".to_string(),
                     8,
-                    Datatype::FloatingPoint {
-                        size: 8,
-                        byte_order: DatatypeByteOrder::LittleEndian,
-                        layout: FloatingPointLayout::IEEE754_BINARY64,
-                    },
+                    Datatype::FloatingPoint(
+                        FloatingPointType::from_layout(
+                            8,
+                            DatatypeByteOrder::LittleEndian,
+                            FloatingPointLayout::IEEE754_BINARY64,
+                        )
+                        .unwrap(),
+                    ),
                 ),
                 __private::compound_member(
                     "id".to_string(),
                     16,
-                    Datatype::FixedPoint {
-                        size: 4,
-                        byte_order: DatatypeByteOrder::LittleEndian,
-                        layout: FixedPointLayout {
-                            signed: true,
-                            bit_offset: 0,
-                            bit_precision: 32,
-                        },
-                    },
+                    Datatype::FixedPoint(
+                        FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32)
+                            .unwrap(),
+                    ),
                 ),
             ],
         };
@@ -2099,15 +2023,9 @@ mod tests {
     fn serialize_parse_enum_roundtrip() {
         let dt = Datatype::Enumeration {
             size: 4,
-            base_type: Box::new(Datatype::FixedPoint {
-                size: 4,
-                byte_order: DatatypeByteOrder::LittleEndian,
-                layout: FixedPointLayout {
-                    signed: true,
-                    bit_offset: 0,
-                    bit_precision: 32,
-                },
-            }),
+            base_type: Box::new(Datatype::FixedPoint(
+                FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
+            )),
             members: vec![
                 __private::enum_member("RED".to_string(), 0i32.to_le_bytes().to_vec()),
                 __private::enum_member("GREEN".to_string(), 1i32.to_le_bytes().to_vec()),
@@ -2121,23 +2039,20 @@ mod tests {
 
     /// Fixed-point base type for enum round-trip tests.
     fn enum_base_fp(size: u32, be: bool, signed: bool) -> Datatype {
-        Datatype::FixedPoint {
-            size,
-            byte_order: if be {
-                DatatypeByteOrder::BigEndian
-            } else {
-                DatatypeByteOrder::LittleEndian
-            },
-            layout: FixedPointLayout {
+        Datatype::FixedPoint(
+            FixedPointType::new(
+                size,
+                if be {
+                    DatatypeByteOrder::BigEndian
+                } else {
+                    DatatypeByteOrder::LittleEndian
+                },
                 signed,
-                bit_offset: 0,
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "test builds byte-width base types; size*8 is well within u16"
-                )]
-                bit_precision: (size * 8) as u16,
-            },
-        }
+                0,
+                u16::try_from(size * 8).unwrap(),
+            )
+            .unwrap(),
+        )
     }
 
     /// Build an enum datatype over `base`, storing each member value truncated to
@@ -2223,11 +2138,14 @@ mod tests {
     #[test]
     fn serialize_parse_array_roundtrip() {
         let dt = Datatype::Array {
-            base_type: Box::new(Datatype::FloatingPoint {
-                size: 8,
-                byte_order: DatatypeByteOrder::LittleEndian,
-                layout: FloatingPointLayout::IEEE754_BINARY64,
-            }),
+            base_type: Box::new(Datatype::FloatingPoint(
+                FloatingPointType::from_layout(
+                    8,
+                    DatatypeByteOrder::LittleEndian,
+                    FloatingPointLayout::IEEE754_BINARY64,
+                )
+                .unwrap(),
+            )),
             dimensions: vec![3],
         };
         let bytes = serialize_datatype(&dt);
@@ -2237,11 +2155,7 @@ mod tests {
 
     #[test]
     fn serialize_parse_time_roundtrip() {
-        let dt = Datatype::Time {
-            size: 8,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            bit_precision: 64,
-        };
+        let dt = Datatype::Time(TimeType::new(8, DatatypeByteOrder::LittleEndian, 64).unwrap());
         let bytes = serialize_datatype(&dt);
         let (parsed, consumed) = parse_datatype(&bytes).unwrap();
         assert_eq!(parsed, dt);
@@ -2254,12 +2168,7 @@ mod tests {
             DatatypeByteOrder::LittleEndian,
             DatatypeByteOrder::BigEndian,
         ] {
-            let dt = Datatype::BitField {
-                size: 4,
-                byte_order,
-                bit_offset: 3,
-                bit_precision: 17,
-            };
+            let dt = Datatype::BitField(BitFieldType::new(4, byte_order, 3, 17).unwrap());
             let bytes = serialize_datatype(&dt);
             let (parsed, consumed) = parse_datatype(&bytes).unwrap();
             assert_eq!(parsed, dt);
@@ -2289,71 +2198,221 @@ mod tests {
 
     #[test]
     fn test_type_size() {
-        let dt = Datatype::FixedPoint {
-            size: 4,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: true,
-                bit_offset: 0,
-                bit_precision: 32,
-            },
-        };
+        let dt = Datatype::FixedPoint(
+            FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
+        );
         assert_eq!(dt.type_size(), 4);
 
         let dt = Datatype::Array {
-            base_type: Box::new(Datatype::FixedPoint {
-                size: 4,
-                byte_order: DatatypeByteOrder::LittleEndian,
-                layout: FixedPointLayout {
-                    signed: true,
-                    bit_offset: 0,
-                    bit_precision: 32,
-                },
-            }),
+            base_type: Box::new(Datatype::FixedPoint(
+                FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
+            )),
             dimensions: vec![3, 4],
         };
         assert_eq!(dt.type_size(), 48);
     }
 
     fn byte_member_type() -> Datatype {
-        Datatype::FixedPoint {
-            size: 1,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: false,
-                bit_offset: 0,
-                bit_precision: 8,
-            },
-        }
+        Datatype::FixedPoint(
+            FixedPointType::new(1, DatatypeByteOrder::LittleEndian, false, 0, 8).unwrap(),
+        )
     }
 
     const DATATYPE_VERSION_FOUR: u8 = 4;
+    #[rstest]
+    #[case(0, 0, 8, FormatError::ZeroSizedDatatype { class: FIXED_POINT_CLASS })]
+    #[case(1, 0, 0, FormatError::InvalidFixedPointRange { size: 1, bit_offset: 0, bit_precision: 0 })]
+    #[case(1, 8, 1, FormatError::InvalidFixedPointRange { size: 1, bit_offset: 8, bit_precision: 1 })]
+    #[case(1, 4, 5, FormatError::InvalidFixedPointRange { size: 1, bit_offset: 4, bit_precision: 5 })]
+    #[case(8, u16::MAX, u16::MAX, FormatError::InvalidFixedPointRange { size: 8, bit_offset: u16::MAX, bit_precision: u16::MAX })]
+    fn rejects_invalid_fixed_point_metadata(
+        #[case] size: u32,
+        #[case] offset: u16,
+        #[case] precision: u16,
+        #[case] expected: FormatError,
+    ) {
+        assert_eq!(
+            parse_datatype(&build_fixed_point(size, false, false, offset, precision)).unwrap_err(),
+            expected
+        );
+    }
+
+    #[rstest]
+    #[case(4, 0, FormatError::ZeroSizedDatatype { class: FLOATING_POINT_CLASS })]
+    #[case(8, 1, FormatError::InvalidFloatingPointRange { size: 4, bit_offset: 1, bit_precision: 32 })]
+    #[case(10, 0, FormatError::InvalidFloatingPointRange { size: 4, bit_offset: 0, bit_precision: 0 })]
+    #[case(10, 33, FormatError::InvalidFloatingPointRange { size: 4, bit_offset: 0, bit_precision: 33 })]
+    #[case(2, 32, FormatError::InvalidFloatingPointField { field: FloatingPointField::Sign, location: 32, size: 1, bit_offset: 0, bit_precision: 32 })]
+    #[case(13, 0, FormatError::InvalidFloatingPointField { field: FloatingPointField::Exponent, location: 23, size: 0, bit_offset: 0, bit_precision: 32 })]
+    #[case(13, 10, FormatError::InvalidFloatingPointField { field: FloatingPointField::Exponent, location: 23, size: 10, bit_offset: 0, bit_precision: 32 })]
+    #[case(15, 0, FormatError::InvalidFloatingPointField { field: FloatingPointField::Mantissa, location: 0, size: 0, bit_offset: 0, bit_precision: 32 })]
+    #[case(14, 250, FormatError::InvalidFloatingPointField { field: FloatingPointField::Mantissa, location: 250, size: 23, bit_offset: 0, bit_precision: 32 })]
+    fn rejects_invalid_floating_point_metadata(
+        #[case] index: usize,
+        #[case] value: u8,
+        #[case] expected: FormatError,
+    ) {
+        let mut bytes = build_float(4, 23, 8, 0, 23, 127);
+        bytes[index] = value;
+        assert_eq!(parse_datatype(&bytes).unwrap_err(), expected);
+    }
+
+    #[test]
+    fn rejects_reserved_mantissa_normalization() {
+        let mut bytes = build_float(4, 23, 8, 0, 23, 127);
+        bytes[1] = FLOAT_NORMALIZATION_RESERVED << FLOAT_NORMALIZATION_SHIFT;
+        assert_eq!(
+            parse_datatype(&bytes).unwrap_err(),
+            FormatError::InvalidMantissaNormalization(FLOAT_NORMALIZATION_RESERVED)
+        );
+    }
+
+    #[rstest]
+    #[case(
+        2,
+        23,
+        FloatingPointField::Sign,
+        23,
+        1,
+        FloatingPointField::Exponent,
+        23,
+        8
+    )]
+    #[case(
+        2,
+        0,
+        FloatingPointField::Sign,
+        0,
+        1,
+        FloatingPointField::Mantissa,
+        0,
+        23
+    )]
+    #[case(
+        15,
+        24,
+        FloatingPointField::Exponent,
+        23,
+        8,
+        FloatingPointField::Mantissa,
+        0,
+        24
+    )]
+    fn rejects_overlapping_floating_point_metadata(
+        #[case] index: usize,
+        #[case] value: u8,
+        #[case] first: FloatingPointField,
+        #[case] first_location: u8,
+        #[case] first_size: u8,
+        #[case] second: FloatingPointField,
+        #[case] second_location: u8,
+        #[case] second_size: u8,
+    ) {
+        let mut bytes = build_float(4, 23, 8, 0, 23, 127);
+        bytes[index] = value;
+        assert_eq!(
+            parse_datatype(&bytes).unwrap_err(),
+            FormatError::OverlappingFloatingPointFields {
+                first,
+                first_location,
+                first_size,
+                second,
+                second_location,
+                second_size
+            }
+        );
+    }
+
+    #[rstest]
+    #[case(
+        FloatingPointType::ieee754_binary32(DatatypeByteOrder::LittleEndian),
+        build_float(4, 23, 8, 0, 23, 127)
+    )]
+    #[case(
+        FloatingPointType::ieee754_binary64(DatatypeByteOrder::LittleEndian),
+        build_float(8, 52, 11, 0, 52, 1023)
+    )]
+    fn preserves_ieee_bytes(#[case] numeric: FloatingPointType, #[case] expected: Vec<u8>) {
+        let datatype = Datatype::FloatingPoint(numeric);
+        let encoded = serialize_datatype(&datatype);
+        assert_eq!(encoded, expected);
+        assert_eq!(parse_datatype(&encoded).unwrap(), (datatype, encoded.len()));
+    }
+
+    #[rstest]
+    #[case(16)]
+    #[case(u32::MAX)]
+    fn parses_wide_numeric_metadata(#[case] size: u32) {
+        let fixed = Datatype::FixedPoint(
+            FixedPointType::new(size, DatatypeByteOrder::BigEndian, true, 1, 127).unwrap(),
+        );
+        let encoded = serialize_datatype(&fixed);
+        assert_eq!(parse_datatype(&encoded).unwrap().0, fixed);
+        let floating = Datatype::FloatingPoint(
+            FloatingPointType::from_layout(
+                size,
+                DatatypeByteOrder::Vax,
+                FloatingPointLayout::IEEE754_BINARY64,
+            )
+            .unwrap(),
+        );
+        let encoded = serialize_datatype(&floating);
+        assert_eq!(parse_datatype(&encoded).unwrap().0, floating);
+    }
+    #[rstest]
+    #[case(0, 1, FormatError::ZeroSizedDatatype { class: TIME_CLASS })]
+    #[case(1, 0, FormatError::InvalidNumericBitRange { class: TIME_CLASS, size: 1, bit_offset: 0, bit_precision: 0 })]
+    #[case(1, 9, FormatError::InvalidNumericBitRange { class: TIME_CLASS, size: 1, bit_offset: 0, bit_precision: 9 })]
+    fn rejects_invalid_time_metadata(
+        #[case] size: u32,
+        #[case] precision: u16,
+        #[case] expected: FormatError,
+    ) {
+        let mut bytes = build_dt_header(TIME_CLASS, DATATYPE_VERSION_ONE, [0, 0, 0], size);
+        bytes.extend_from_slice(&precision.to_le_bytes());
+        assert_eq!(parse_datatype(&bytes).unwrap_err(), expected);
+    }
+
+    #[rstest]
+    #[case(0, 0, 1, FormatError::ZeroSizedDatatype { class: BIT_FIELD_CLASS })]
+    #[case(1, 0, 0, FormatError::InvalidNumericBitRange { class: BIT_FIELD_CLASS, size: 1, bit_offset: 0, bit_precision: 0 })]
+    #[case(1, 4, 5, FormatError::InvalidNumericBitRange { class: BIT_FIELD_CLASS, size: 1, bit_offset: 4, bit_precision: 5 })]
+    fn rejects_invalid_bit_field_metadata(
+        #[case] size: u32,
+        #[case] offset: u16,
+        #[case] precision: u16,
+        #[case] expected: FormatError,
+    ) {
+        let mut bytes = build_dt_header(BIT_FIELD_CLASS, DATATYPE_VERSION_ONE, [0, 0, 0], size);
+        bytes.extend_from_slice(&offset.to_le_bytes());
+        bytes.extend_from_slice(&precision.to_le_bytes());
+        assert_eq!(parse_datatype(&bytes).unwrap_err(), expected);
+    }
 }
 
 #[cfg(all(test, feature = "std"))]
 mod display_tests {
+    use rstest::rstest;
+
     use hdf5_pure_core::__private::DISPLAY_MAX_MEMBERS;
 
     use super::*;
 
     #[test]
     fn ordinary_numeric_types_read_as_their_rust_names() {
-        let int = Datatype::FixedPoint {
-            size: 4,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: true,
-                bit_offset: 0,
-                bit_precision: 32,
-            },
-        };
+        let int = Datatype::FixedPoint(
+            FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
+        );
         assert_eq!(int.to_string(), "i32");
 
-        let float = Datatype::FloatingPoint {
-            size: 8,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FloatingPointLayout::IEEE754_BINARY64,
-        };
+        let float = Datatype::FloatingPoint(
+            FloatingPointType::from_layout(
+                8,
+                DatatypeByteOrder::LittleEndian,
+                FloatingPointLayout::IEEE754_BINARY64,
+            )
+            .unwrap(),
+        );
         assert_eq!(float.to_string(), "f64");
     }
 
@@ -2363,62 +2422,16 @@ mod display_tests {
     /// Each width is `size * 8` over an on-disk `u32`. [`bit_width`] widens before
     /// multiplying. The test exercises each class that calls it, including the
     /// classes that `classify_datatype` routes here.
-    #[test]
-    fn a_crafted_size_writes_its_width_instead_of_overflowing() {
-        let bits = u64::from(u32::MAX) * 8;
-        let cases = [
-            (
-                Datatype::FixedPoint {
-                    size: u32::MAX,
-                    byte_order: DatatypeByteOrder::LittleEndian,
-                    layout: FixedPointLayout {
-                        signed: true,
-                        bit_offset: 0,
-                        bit_precision: 0,
-                    },
-                },
-                format!("i{bits}(bits 0..0)"),
-            ),
-            (
-                Datatype::FloatingPoint {
-                    size: u32::MAX,
-                    byte_order: DatatypeByteOrder::LittleEndian,
-                    layout: FloatingPointLayout {
-                        mantissa_normalization: MantissaNormalization::ImpliedLeadingOne,
-                        sign_location: 0,
-                        bit_offset: 0,
-                        bit_precision: 0,
-                        exponent_location: 0,
-                        exponent_size: 0,
-                        mantissa_location: 0,
-                        mantissa_size: 0,
-                        exponent_bias: 0,
-                    },
-                },
-                format!("f{bits}(bits 0..0)"),
-            ),
-            (
-                Datatype::Time {
-                    size: u32::MAX,
-                    byte_order: DatatypeByteOrder::LittleEndian,
-                    bit_precision: 0,
-                },
-                format!("time{bits}(bits 0..0)"),
-            ),
-            (
-                Datatype::BitField {
-                    size: u32::MAX,
-                    byte_order: DatatypeByteOrder::LittleEndian,
-                    bit_offset: 0,
-                    bit_precision: 0,
-                },
-                format!("bitfield{bits}(bits 0..0)"),
-            ),
-        ];
-
-        for (dtype, expected) in cases {
-            assert_eq!(dtype.to_string(), expected);
-        }
+    #[rstest]
+    #[case(Datatype::FixedPoint(FixedPointType::new(u32::MAX, DatatypeByteOrder::LittleEndian, true, 0, 1).unwrap()), "i34359738360(bits 0..1)")]
+    #[case(Datatype::FloatingPoint(FloatingPointType::from_layout(u32::MAX, DatatypeByteOrder::LittleEndian, FloatingPointLayout::IEEE754_BINARY64).unwrap()), "f34359738360(bits 0..64)")]
+    #[case(Datatype::Time(TimeType::new(u32::MAX, DatatypeByteOrder::LittleEndian, 1).unwrap()), "time34359738360(bits 0..1)")]
+    #[case(Datatype::BitField(BitFieldType::new(u32::MAX, DatatypeByteOrder::LittleEndian, 0, 1).unwrap()), "bitfield34359738360(bits 0..1)")]
+    fn a_crafted_size_writes_its_width_instead_of_overflowing(
+        #[case] datatype: Datatype,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(datatype.to_string(), expected);
     }
 
     /// A bit offset and bit precision of `u16::MAX` together produce a bit span
@@ -2428,42 +2441,31 @@ mod display_tests {
     /// type before the add, so the result is 131,070.
     #[test]
     fn a_crafted_bit_span_does_not_wrap() {
-        let dtype = Datatype::FixedPoint {
-            size: 1,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: false,
-                bit_offset: u16::MAX,
-                bit_precision: u16::MAX,
-            },
-        };
-        assert_eq!(dtype.to_string(), "u8(bits 65535..131070)");
+        let dtype = Datatype::FixedPoint(
+            FixedPointType::new(
+                16_384,
+                DatatypeByteOrder::LittleEndian,
+                false,
+                u16::MAX,
+                u16::MAX,
+            )
+            .unwrap(),
+        );
+        assert_eq!(dtype.to_string(), "u131072(bits 65535..131070)");
     }
 
     /// Only what departs from the ordinary is written, since that is what the
     /// reader of the message is looking for.
     #[test]
     fn unusual_fields_are_written_and_ordinary_ones_are_not() {
-        let big_endian = Datatype::FixedPoint {
-            size: 2,
-            byte_order: DatatypeByteOrder::BigEndian,
-            layout: FixedPointLayout {
-                signed: false,
-                bit_offset: 0,
-                bit_precision: 16,
-            },
-        };
+        let big_endian = Datatype::FixedPoint(
+            FixedPointType::new(2, DatatypeByteOrder::BigEndian, false, 0, 16).unwrap(),
+        );
         assert_eq!(big_endian.to_string(), "u16 be");
 
-        let narrow = Datatype::FixedPoint {
-            size: 4,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: true,
-                bit_offset: 0,
-                bit_precision: 24,
-            },
-        };
+        let narrow = Datatype::FixedPoint(
+            FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 24).unwrap(),
+        );
         assert_eq!(narrow.to_string(), "i32(bits 0..24)");
     }
 
@@ -2475,39 +2477,31 @@ mod display_tests {
                 __private::compound_member(
                     "x".into(),
                     0,
-                    Datatype::FloatingPoint {
-                        size: 4,
-                        byte_order: DatatypeByteOrder::LittleEndian,
-                        layout: FloatingPointLayout::IEEE754_BINARY32,
-                    },
+                    Datatype::FloatingPoint(
+                        FloatingPointType::from_layout(
+                            4,
+                            DatatypeByteOrder::LittleEndian,
+                            FloatingPointLayout::IEEE754_BINARY32,
+                        )
+                        .unwrap(),
+                    ),
                 ),
                 __private::compound_member(
                     "n".into(),
                     4,
-                    Datatype::FixedPoint {
-                        size: 8,
-                        byte_order: DatatypeByteOrder::LittleEndian,
-                        layout: FixedPointLayout {
-                            signed: true,
-                            bit_offset: 0,
-                            bit_precision: 64,
-                        },
-                    },
+                    Datatype::FixedPoint(
+                        FixedPointType::new(8, DatatypeByteOrder::LittleEndian, true, 0, 64)
+                            .unwrap(),
+                    ),
                 ),
             ],
         };
         assert_eq!(compound.to_string(), "compound{x: f32, n: i64}");
 
         let array = Datatype::Array {
-            base_type: Box::new(Datatype::FixedPoint {
-                size: 1,
-                byte_order: DatatypeByteOrder::LittleEndian,
-                layout: FixedPointLayout {
-                    signed: false,
-                    bit_offset: 0,
-                    bit_precision: 8,
-                },
-            }),
+            base_type: Box::new(Datatype::FixedPoint(
+                FixedPointType::new(1, DatatypeByteOrder::LittleEndian, false, 0, 8).unwrap(),
+            )),
             dimensions: vec![2, 3],
         };
         assert_eq!(
@@ -2630,14 +2624,8 @@ mod display_tests {
     }
 
     fn u32_datatype() -> Datatype {
-        Datatype::FixedPoint {
-            size: 4,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: false,
-                bit_offset: 0,
-                bit_precision: 32,
-            },
-        }
+        Datatype::FixedPoint(
+            FixedPointType::new(4, DatatypeByteOrder::LittleEndian, false, 0, 32).unwrap(),
+        )
     }
 }

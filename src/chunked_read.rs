@@ -44,6 +44,8 @@ use crate::source;
 use crate::source::Source;
 use crate::source::SourceMetadata;
 use crate::width::{FormatWidths, OffsetWidth};
+#[cfg(test)]
+use crate::{FixedPointType, FloatingPointType};
 
 /// Decodes every chunk, reading each chunk's bytes from a [`Source`].
 ///
@@ -2576,15 +2578,10 @@ mod tests {
             chunk_dimensions: vec![4, 8],
             index: ChunkIndexLayout::FixedArray { address: None },
         };
-        let datatype = Datatype::FixedPoint {
-            size: 8,
-            byte_order: byte_order::DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: true,
-                bit_offset: 0,
-                bit_precision: 64,
-            },
-        };
+        let datatype = Datatype::FixedPoint(
+            FixedPointType::new(8, byte_order::DatatypeByteOrder::LittleEndian, true, 0, 64)
+                .unwrap(),
+        );
         let simple = |dims: Vec<u64>| Dataspace {
             space_type: DataspaceType::Simple,
             rank: dims.len() as u8,
@@ -3385,24 +3382,30 @@ mod tests {
     use crate::data_layout::DONT_FILTER_PARTIAL_BOUND_CHUNKS;
     use crate::dataspace::{Dataspace, DataspaceType};
     use crate::datatype::byte_order;
-    use crate::datatype::layout::{FixedPointLayout, FloatingPointLayout};
+    use crate::datatype::layout::FloatingPointLayout;
     use crate::datatype::{Datatype, byte_order::DatatypeByteOrder};
     use crate::source::BytesSource;
 
     fn make_f64_type() -> Datatype {
-        Datatype::FloatingPoint {
-            size: 8,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FloatingPointLayout::IEEE754_BINARY64,
-        }
+        Datatype::FloatingPoint(
+            FloatingPointType::from_layout(
+                8,
+                DatatypeByteOrder::LittleEndian,
+                FloatingPointLayout::IEEE754_BINARY64,
+            )
+            .unwrap(),
+        )
     }
 
     fn make_f32_type() -> Datatype {
-        Datatype::FloatingPoint {
-            size: 4,
-            byte_order: DatatypeByteOrder::LittleEndian,
-            layout: FloatingPointLayout::IEEE754_BINARY32,
-        }
+        Datatype::FloatingPoint(
+            FloatingPointType::from_layout(
+                4,
+                DatatypeByteOrder::LittleEndian,
+                FloatingPointLayout::IEEE754_BINARY32,
+            )
+            .unwrap(),
+        )
     }
 
     /// Build a synthetic file with a B-tree and chunk data for a 1D uncompressed dataset.
@@ -4749,15 +4752,10 @@ mod tests {
             dimensions: vec![extent, 1],
             max_dimensions: None,
         };
-        let datatype = Datatype::FixedPoint {
-            size: 1,
-            byte_order: byte_order::DatatypeByteOrder::LittleEndian,
-            layout: FixedPointLayout {
-                signed: false,
-                bit_offset: 0,
-                bit_precision: 8,
-            },
-        };
+        let datatype = Datatype::FixedPoint(
+            FixedPointType::new(1, byte_order::DatatypeByteOrder::LittleEndian, false, 0, 8)
+                .unwrap(),
+        );
         let cache = ChunkCache::new();
         let output = read_chunked_rows_from_source(
             &BytesSource::new(&bytes),

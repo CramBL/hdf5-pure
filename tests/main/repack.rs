@@ -1,6 +1,7 @@
 //! Whole-file repack (issue #21): compaction, object dropping, fidelity of
 //! survivors, and fail-loud refusal of features that cannot be reproduced.
 
+use hdf5_pure::BitFieldType;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::Error;
 use hdf5_pure::File;
@@ -435,12 +436,8 @@ fn roundtrips_opaque_and_bitfield_datatypes() {
         tag: b"rgba".to_vec(),
     };
     let opaque_raw: Vec<u8> = vec![0xDE, 0xAD, 0xBE, 0xEF, 1, 2, 3, 4, 9, 8, 7, 6];
-    let bitfield_dt = Datatype::BitField {
-        size: 2,
-        byte_order: DatatypeByteOrder::LittleEndian,
-        bit_offset: 0,
-        bit_precision: 12,
-    };
+    let bitfield_dt =
+        Datatype::BitField(BitFieldType::new(2, DatatypeByteOrder::LittleEndian, 0, 12).unwrap());
     let bitfield_raw: Vec<u8> = vec![0x34, 0x12, 0xFF, 0x0F];
 
     let mut b = FileBuilder::new();

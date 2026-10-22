@@ -666,6 +666,8 @@ pub use hdf5_pure_core::FileSpaceStrategy;
 
 pub use compound::{CompoundField, CompoundType};
 #[doc(inline)]
+pub use hdf5_pure_core::BitFieldType;
+#[doc(inline)]
 pub use hdf5_pure_core::CharacterSet;
 #[doc(inline)]
 pub use hdf5_pure_core::CompoundMember;
@@ -679,8 +681,11 @@ pub use hdf5_pure_core::EnumMember;
 pub use hdf5_pure_core::FillTime;
 #[doc(inline)]
 pub use hdf5_pure_core::FixedPointLayout;
+pub use hdf5_pure_core::FixedPointType;
+pub use hdf5_pure_core::FloatingPointField;
 #[doc(inline)]
 pub use hdf5_pure_core::FloatingPointLayout;
+pub use hdf5_pure_core::FloatingPointType;
 pub use hdf5_pure_core::MantissaNormalization;
 #[doc(inline)]
 pub use hdf5_pure_core::MaxExtent;
@@ -688,6 +693,7 @@ pub use hdf5_pure_core::MaxExtent;
 pub use hdf5_pure_core::ReferenceType;
 #[doc(inline)]
 pub use hdf5_pure_core::StringPadding;
+pub use hdf5_pure_core::TimeType;
 
 pub use type_builders::{
     CompoundTypeBuilder, DatasetBuilder, EnumTypeBuilder, ExplicitCompoundTypeBuilder,

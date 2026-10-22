@@ -248,6 +248,12 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
             "InvalidFixedArraySignature",
             "InvalidFixedArrayVersion",
             "InvalidFixedPointRange",
+            "InvalidFloatingPointRange",
+            "InvalidFloatingPointField",
+            "OverlappingFloatingPointFields",
+            "InvalidMantissaNormalization",
+            "InvalidNumericByteOrder",
+            "InvalidNumericBitRange",
             "InvalidFractalHeapBlockOffset",
             "InvalidFractalHeapBlockOwner",
             "InvalidFractalHeapGeometry",
@@ -282,9 +288,17 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
     }
     # The FormatError variants whose fields differ from 0.47.0's, which the comparison removes from
     # both shapes.
-    allowed_changed_variants = {"FormatError": {"InvalidFreeSpaceManager"}}
+    allowed_changed_variants = {
+        "Datatype": {"FixedPoint", "FloatingPoint", "Time", "BitField"},
+        "FormatError": {"InvalidFreeSpaceManager"},
+    }
     # The core root items that 0.47.0 does not define.
     allowed_new_items = {
+        "BitFieldType",
+        "FixedPointType",
+        "FloatingPointType",
+        "FloatingPointField",
+        "TimeType",
         "DeflateLevel",
         "DecodedStoredAddress",
         "FileSpacePageSize",
@@ -300,7 +314,18 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
     # Added struct fields and fields with changed types, removed from both compared shapes.
     allowed_changed_fields = {
         "FileSpaceInfo": {"eoa_pre_fsm", "manager_addrs", "page_size"},
-        "FloatingPointLayout": {"mantissa_normalization", "sign_location"},
+        "FixedPointLayout": {"signed", "bit_offset", "bit_precision"},
+        "FloatingPointLayout": {
+            "mantissa_normalization",
+            "sign_location",
+            "bit_offset",
+            "bit_precision",
+            "exponent_location",
+            "exponent_size",
+            "mantissa_location",
+            "mantissa_size",
+            "exponent_bias",
+        },
         "Superblock": {
             "version",
             "consistency_flags",
@@ -310,6 +335,20 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
             "free_space_address",
             "root_group_address",
             "superblock_extension_address",
+        },
+    }
+    allowed_added_inherent = {
+        "FixedPointLayout": {"signed", "bit_offset", "bit_precision", "precision"},
+        "FloatingPointLayout": {
+            "mantissa_normalization",
+            "sign_location",
+            "bit_offset",
+            "bit_precision",
+            "exponent_location",
+            "exponent_size",
+            "mantissa_location",
+            "mantissa_size",
+            "exponent_bias",
         },
     }
     for path, kind in sorted(moved):
@@ -339,6 +378,10 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
         for field in allowed_changed_fields.get(name, set()):
             old["fields"].pop(field, None)
             new["fields"].pop(field, None)
+        for member in allowed_added_inherent.get(name, set()):
+            new["inherent"].pop(member, None)
+        if name == "DatatypeByteOrder":
+            new["traits"] = [trait for trait in new["traits"] if trait.get("path") != "Eq"]
         # The comparison uses alphabetical order for the release's FormatError declarations.
         if name == "FormatError":
             old["variant_order"].sort()

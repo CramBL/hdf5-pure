@@ -19,6 +19,8 @@ use hdf5_pure_format::__private::IndexSlots;
 use hdf5_pure_format::__private::SlotOccupancy;
 
 use crate::DeflateLevel;
+#[cfg(test)]
+use crate::FloatingPointType;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::chunk_grid::{ChunkGrid, GridOrder};
@@ -1867,11 +1869,14 @@ mod tests {
     use crate::read_spec::RawReadSpec;
 
     fn make_f64_type() -> Datatype {
-        Datatype::FloatingPoint {
-            size: 8,
-            byte_order: byte_order::DatatypeByteOrder::LittleEndian,
-            layout: FloatingPointLayout::IEEE754_BINARY64,
-        }
+        Datatype::FloatingPoint(
+            FloatingPointType::from_layout(
+                8,
+                byte_order::DatatypeByteOrder::LittleEndian,
+                FloatingPointLayout::IEEE754_BINARY64,
+            )
+            .unwrap(),
+        )
     }
 
     /// Every chunk [`split_into_chunks`] produces is exactly one whole chunk of
