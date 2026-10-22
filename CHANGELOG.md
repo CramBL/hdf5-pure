@@ -58,6 +58,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `Dataset::append` using incorrect Extensible Array block geometry when the secondary block parameters differ from the defaults.
 - Fixed `Dataset::append` filtering the partial edge chunks of a dataset whose layout exempts them from the filters ([#845](https://github.com/CramBL/hdf5-pure/pull/845)).
 - Fixed `Dataset::append_staged` filtering the partial edge chunks of a dataset whose layout exempts them from the filters, and dropping that exemption.
 - Fixed `Dataset::write_staged` filtering the partial edge chunks of a dataset whose layout exempts them from the filters, and copies and repacks of such a dataset dropping that exemption.
