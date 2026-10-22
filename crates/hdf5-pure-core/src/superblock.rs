@@ -53,8 +53,8 @@ pub struct Superblock {
     pub free_space_address: Option<StoredAddress>,
     /// Driver information block address relative to the HDF5 base address, in versions 0 and 1.
     pub driver_info_address: Option<StoredAddress>,
-    /// File consistency flags.
-    pub consistency_flags: u32,
+    /// The file consistency flags, including reserved bits read from the file.
+    pub consistency_flags: SuperblockStatusFlags,
     /// Superblock extension address relative to the HDF5 base address, in versions 2 and 3.
     pub superblock_extension_address: Option<StoredAddress>,
     /// Jenkins lookup3 checksum (v2/v3 only).
@@ -110,6 +110,110 @@ impl TryFrom<u8> for SuperblockVersion {
     }
 }
 
+/// The file consistency flags of a [`Superblock`].
+///
+/// The reader preserves every stored bit, including reserved bits and an SWMR write mark
+/// without a write mark. [`is_inconsistent`](Self::is_inconsistent) identifies that combination.
+///
+/// The superblock stores this field in four bytes in versions 0 and 1, and in one byte in versions
+/// 2 and 3. Version 3 uses the access flags for file locking, as defined in "Format Signature and
+/// Superblock" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_boot_super
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SuperblockStatusFlags {
+    bits: u32,
+}
+
+impl SuperblockStatusFlags {
+    /// Creates empty status flags.
+    pub const fn new() -> Self {
+        Self { bits: 0 }
+    }
+
+    /// Creates status flags with write access marked.
+    pub const fn write_marked() -> Self {
+        Self {
+            bits: SuperblockStatusFlag::WriteAccess.mask(),
+        }
+    }
+
+    /// Creates status flags with both write access and SWMR write access marked.
+    pub const fn swmr_write_marked() -> Self {
+        Self {
+            bits: SuperblockStatusFlag::WriteAccess.mask()
+                | SuperblockStatusFlag::SwmrWriteAccess.mask(),
+        }
+    }
+
+    /// Returns `true` if every status bit is clear.
+    pub const fn is_empty(self) -> bool {
+        self.bits == 0
+    }
+
+    /// Returns `true` if `flag` is set.
+    pub const fn contains(self, flag: SuperblockStatusFlag) -> bool {
+        self.bits & flag.mask() != 0
+    }
+
+    /// Returns `true` if SWMR write access is marked without write access.
+    pub const fn is_inconsistent(self) -> bool {
+        self.contains(SuperblockStatusFlag::SwmrWriteAccess)
+            && !self.contains(SuperblockStatusFlag::WriteAccess)
+    }
+
+    /// Returns every stored bit, including reserved bits.
+    pub const fn bits(self) -> u32 {
+        self.bits
+    }
+
+    /// Returns all bits except [`WriteAccess`](SuperblockStatusFlag::WriteAccess) and
+    /// [`SwmrWriteAccess`](SuperblockStatusFlag::SwmrWriteAccess).
+    pub const fn unknown_bits(self) -> u32 {
+        self.bits
+            & !(SuperblockStatusFlag::WriteAccess.mask()
+                | SuperblockStatusFlag::SwmrWriteAccess.mask())
+    }
+
+    pub(crate) const fn from_bits(bits: u32) -> Self {
+        Self { bits }
+    }
+}
+
+impl TryFrom<SuperblockStatusFlags> for u8 {
+    type Error = FormatError;
+
+    /// Encodes the status flags for a version 2 or 3 superblock.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::SuperblockStatusFlagsTooWide`] if any bit above bit 7 is set.
+    fn try_from(flags: SuperblockStatusFlags) -> Result<Self, Self::Error> {
+        Self::try_from(flags.bits)
+            .map_err(|_error| FormatError::SuperblockStatusFlagsTooWide { bits: flags.bits })
+    }
+}
+
+/// An access flag in a version 3 superblock's [`SuperblockStatusFlags`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SuperblockStatusFlag {
+    /// The file is open for write access.
+    WriteAccess,
+    /// The file is open for single-writer/multiple-reader write access.
+    SwmrWriteAccess,
+}
+
+impl SuperblockStatusFlag {
+    // "Format Signature and Superblock" of the format specification, version 4.0, defines
+    // write access at bit 0 and SWMR write access at bit 2 of the file consistency flags.
+    const fn mask(self) -> u32 {
+        match self {
+            Self::WriteAccess => 0x01,
+            Self::SwmrWriteAccess => 0x04,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -134,6 +238,32 @@ mod tests {
         assert_eq!(
             SuperblockVersion::try_from(byte),
             Err(FormatError::UnsupportedVersion(byte))
+        );
+    }
+
+    #[rstest]
+    #[case(0x00, (true, false, false, false, 0))]
+    #[case(0x01, (false, true, false, false, 0))]
+    #[case(0x04, (false, false, true, true, 0))]
+    #[case(0x05, (false, true, true, false, 0))]
+    #[case(0x02, (false, false, false, false, 0x02))]
+    #[case(0x8000_0004, (false, false, true, true, 0x8000_0000))]
+    #[case(u32::MAX, (false, true, true, false, 0xFFFF_FFFA))]
+    fn observed_status_flags_preserve_unknown_and_inconsistent_bits(
+        #[case] bits: u32,
+        #[case] expected: (bool, bool, bool, bool, u32),
+    ) {
+        let flags = SuperblockStatusFlags::from_bits(bits);
+        assert_eq!(flags.bits(), bits);
+        assert_eq!(
+            (
+                flags.is_empty(),
+                flags.contains(SuperblockStatusFlag::WriteAccess),
+                flags.contains(SuperblockStatusFlag::SwmrWriteAccess),
+                flags.is_inconsistent(),
+                flags.unknown_bits()
+            ),
+            expected,
         );
     }
 }

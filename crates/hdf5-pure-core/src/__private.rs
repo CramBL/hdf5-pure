@@ -22,6 +22,7 @@ use crate::LengthWidth;
 use crate::OffsetWidth;
 use crate::StoredAddress;
 use crate::Superblock;
+use crate::SuperblockStatusFlags;
 use crate::SuperblockVersion;
 
 pub use crate::address::BaseAddressExt;
@@ -102,7 +103,7 @@ pub struct SuperblockFields {
     pub indexed_storage_internal_node_k: Option<u16>,
     pub free_space_address: Option<StoredAddress>,
     pub driver_info_address: Option<StoredAddress>,
-    pub consistency_flags: u32,
+    pub consistency_flags: SuperblockStatusFlags,
     pub superblock_extension_address: Option<StoredAddress>,
     pub checksum: Option<u32>,
 }
@@ -143,4 +144,9 @@ impl SuperblockFields {
             checksum,
         }
     }
+}
+
+/// Creates status flags from an encoded field, preserving every bit.
+pub const fn superblock_status_flags(bits: u32) -> SuperblockStatusFlags {
+    SuperblockStatusFlags::from_bits(bits)
 }

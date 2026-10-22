@@ -20,6 +20,8 @@
 use hdf5_pure::LengthWidth;
 use hdf5_pure::OffsetWidth;
 use hdf5_pure::StoredAddress;
+use hdf5_pure::SuperblockStatusFlag;
+use hdf5_pure::SuperblockStatusFlags;
 use hdf5_pure::SuperblockVersion;
 use hdf5_pure::{BaseAddress, Error, File, FileBuilder, LibVer, MessageType, Superblock};
 
@@ -64,7 +66,10 @@ fn field_types(sb: &Superblock) {
     let _: Option<u16> = sb.indexed_storage_internal_node_k;
     let _: Option<StoredAddress> = sb.free_space_address;
     let _: Option<StoredAddress> = sb.driver_info_address;
-    let _: u32 = sb.consistency_flags;
+    let _: SuperblockStatusFlags = sb.consistency_flags;
+    let _: hdf5_pure_core::SuperblockStatusFlags = sb.consistency_flags;
+    let _: fn(SuperblockStatusFlags, SuperblockStatusFlag) -> bool =
+        SuperblockStatusFlags::contains;
     let _: Option<StoredAddress> = sb.superblock_extension_address;
     let _: Option<u32> = sb.checksum;
 }
@@ -152,4 +157,22 @@ fn a_public_superblock_version_has_a_wire_value_and_a_library_bound(
     assert_eq!(SuperblockVersion::try_from(byte).unwrap(), version);
     assert_eq!(version.get(), byte);
     assert_eq!(LibVer::from_superblock_version(version), bound);
+}
+
+#[rstest::rstest]
+#[case(SuperblockStatusFlags::new(), 0x00, false, false)]
+#[case(SuperblockStatusFlags::write_marked(), 0x01, true, false)]
+#[case(SuperblockStatusFlags::swmr_write_marked(), 0x05, true, true)]
+fn status_flags_have_named_constructors_and_typed_queries(
+    #[case] flags: SuperblockStatusFlags,
+    #[case] bits: u8,
+    #[case] write: bool,
+    #[case] swmr: bool,
+) {
+    assert_eq!(flags.bits(), u32::from(bits));
+    assert_eq!(u8::try_from(flags).unwrap(), bits);
+    assert_eq!(flags.contains(SuperblockStatusFlag::WriteAccess), write);
+    assert_eq!(flags.contains(SuperblockStatusFlag::SwmrWriteAccess), swmr);
+    assert!(!flags.is_inconsistent());
+    assert_eq!(flags.unknown_bits(), 0);
 }

@@ -780,6 +780,11 @@ pub enum FormatError {
     ///
     /// The string describes the backend-specific failure.
     Source(String),
+    /// The status flags exceed the one-byte field of a version 2 or 3 superblock.
+    SuperblockStatusFlagsTooWide {
+        /// The flags that exceed the field width.
+        bits: u32,
+    },
     /// The physical file is shorter than its recorded end-of-file position after relocation.
     TruncatedFile {
         /// The physical end-of-file position derived from the superblock and signature location.
@@ -1908,6 +1913,10 @@ impl fmt::Display for FormatError {
             Self::UnsupportedVaxByteOrder => {
                 write!(f, "numeric decoding does not support VAX byte order")
             }
+            Self::SuperblockStatusFlagsTooWide { bits } => write!(
+                f,
+                "superblock status flags {bits:#x} do not fit their 1-byte field"
+            ),
             Self::Internal(detail) => write!(f, "internal error in hdf5-pure: {detail}"),
         }
     }

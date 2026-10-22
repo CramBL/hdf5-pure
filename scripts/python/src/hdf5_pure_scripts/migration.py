@@ -196,6 +196,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
         "FormatError": {
             "AddressTooLarge",
             "ChunkElementSizeMismatch",
+            "SuperblockStatusFlagsTooWide",
             "ConflictingDatasetStorage",
             "DanglingSoftLink",
             "DatasetDimensionUnlimited",
@@ -281,6 +282,8 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
         "OffsetWidth",
         "StoredAddress",
         "SuperblockVersion",
+        "SuperblockStatusFlag",
+        "SuperblockStatusFlags",
     }
     # Added struct fields and fields with changed types, removed from both compared shapes.
     allowed_changed_fields = {
@@ -288,6 +291,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
         "FloatingPointLayout": {"mantissa_normalization", "sign_location"},
         "Superblock": {
             "version",
+            "consistency_flags",
             "offset_size",
             "length_size",
             "driver_info_address",
