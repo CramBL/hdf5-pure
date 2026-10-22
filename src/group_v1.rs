@@ -761,8 +761,7 @@ mod tests {
     fn extract_dataset(
         _file_data: &[u8],
         hdr: &crate::object_header::ObjectHeader,
-        offset_size: u8,
-        length_size: u8,
+        widths: FormatWidths,
     ) -> (
         crate::datatype::Datatype,
         crate::dataspace::Dataspace,
@@ -787,8 +786,9 @@ mod tests {
             .unwrap()
             .data;
         let (dt, _) = hdf5_pure_format::__private::parse_datatype(dt_data).unwrap();
-        let ds = crate::dataspace::Dataspace::parse(ds_data, length_size).unwrap();
-        let dl = crate::data_layout::DataLayout::parse(dl_data, offset_size, length_size).unwrap();
+        let ds =
+            crate::dataspace::Dataspace::parse_with_length_width(ds_data, widths.lengths).unwrap();
+        let dl = crate::data_layout::DataLayout::parse_with_widths(dl_data, widths).unwrap();
         (dt, ds, dl)
     }
 
@@ -796,7 +796,7 @@ mod tests {
         file_data: &[u8],
         sb: &crate::superblock::Superblock,
     ) -> SymbolTableMessage {
-        let root_header = ObjectHeader::parse(
+        let root_header = ObjectHeader::parse_with_widths(
             file_data,
             AccessMode::ReadOnly,
             AddressContext::from_effective_base(sb.base_address)
@@ -804,8 +804,10 @@ mod tests {
                 .unwrap()
                 .to_usize()
                 .unwrap(),
-            sb.offset_size.get(),
-            sb.length_size.get(),
+            FormatWidths {
+                offsets: sb.offset_size,
+                lengths: sb.length_size,
+            },
         )
         .unwrap();
         let sym_msg = root_header
@@ -813,7 +815,7 @@ mod tests {
             .iter()
             .find(|m| m.msg_type == MessageType::SYMBOL_TABLE)
             .unwrap();
-        SymbolTableMessage::parse(&sym_msg.data, sb.offset_size.get()).unwrap()
+        SymbolTableMessage::parse_with_offset_width(&sym_msg.data, sb.offset_size).unwrap()
     }
 
     // Integration tests with real HDF5 files
@@ -840,16 +842,24 @@ mod tests {
             .find(|e| e.name == "data")
             .expect("should have 'data'");
 
-        let hdr = ObjectHeader::parse(
+        let hdr = ObjectHeader::parse_with_widths(
             file_data,
             AccessMode::ReadOnly,
             data_entry.object_header_address.get() as usize,
-            sb.offset_size.get(),
-            sb.length_size.get(),
+            FormatWidths {
+                offsets: sb.offset_size,
+                lengths: sb.length_size,
+            },
         )
         .unwrap();
-        let (dt, ds, dl) =
-            extract_dataset(file_data, &hdr, sb.offset_size.get(), sb.length_size.get());
+        let (dt, ds, dl) = extract_dataset(
+            file_data,
+            &hdr,
+            FormatWidths {
+                offsets: sb.offset_size,
+                lengths: sb.length_size,
+            },
+        );
         let raw = crate::data_read::read_raw_data(file_data, &dl, &ds, &dt).unwrap();
         let values = crate::data_read::read_as_f64(&raw, &dt).unwrap();
         assert_eq!(values, vec![1.0, 2.0, 3.0]);

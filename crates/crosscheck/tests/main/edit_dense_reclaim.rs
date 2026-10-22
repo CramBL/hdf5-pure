@@ -270,11 +270,13 @@ fn dense_link_tree_anchor_spans(path: &Path) -> Vec<(u8, u64, u64)> {
         if bytes.get(at..at + 4) != Some(b"BTHD") || !matches!(bytes[at + 5], 5 | 6) {
             continue;
         }
-        let header = hdf5_pure_format::__private::BTreeV2Header::parse(
+        let header = hdf5_pure_format::__private::BTreeV2Header::parse_with_widths(
             &bytes,
             at,
-            superblock.offset_size.get(),
-            superblock.length_size.get(),
+            FormatWidths {
+                offsets: superblock.offset_size,
+                lengths: superblock.length_size,
+            },
         )
         .unwrap();
         spans.push((header.tree_type, u64::try_from(at).unwrap(), header_size));

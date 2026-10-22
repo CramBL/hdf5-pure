@@ -7,6 +7,7 @@
 
 use std::path::Path;
 
+use hdf5_pure::SuperblockVersion;
 use hdf5_pure::{Error, File};
 
 /// A version 0 file whose root holds a dataset `d` and a soft link `pointer`
@@ -34,7 +35,10 @@ fn a_soft_link_does_not_hide_hard_links_in_a_symbol_table_group() {
 
     let f = File::open(&path).unwrap();
     assert!(
-        f.superblock().version.get() <= 1,
+        matches!(
+            f.superblock().version,
+            SuperblockVersion::Zero | SuperblockVersion::One
+        ),
         "expected a v0/v1 superblock from the earliest libver bound"
     );
     assert_eq!(f.root().datasets().unwrap(), ["d"]);

@@ -476,10 +476,6 @@ const CHECKSUM_LEN: usize = 4;
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
-    use test_util::superblock::VERSION_0;
-    use test_util::superblock::VERSION_1;
-    use test_util::superblock::VERSION_2;
-    use test_util::superblock::VERSION_3;
     use test_util::superblock::v0;
     use test_util::superblock::v2;
     use test_util::widths::Widths;
@@ -596,18 +592,21 @@ mod tests {
     }
 
     #[rstest]
+    #[case(OffsetWidth::Two, LengthWidth::Two)]
+    #[case(OffsetWidth::Four, LengthWidth::Four)]
+    #[case(OffsetWidth::Eight, LengthWidth::Eight)]
     fn a_version_0_or_1_superblock_of_every_width_parses_at_its_candidate(
-        #[values(VERSION_0, VERSION_1)] version: u8,
-        #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] offsets: OffsetWidth,
+        #[values(SuperblockVersion::Zero, SuperblockVersion::One)] version: SuperblockVersion,
+        #[case] offsets: OffsetWidth,
+        #[case] lengths: LengthWidth,
         #[values(0, 512, 1 << 33)] address: u64,
     ) {
-        let lengths = LengthWidth::try_from(offsets.get()).unwrap();
         assert_parses_at(version, offsets, lengths, address);
     }
 
     #[rstest]
     fn a_version_2_or_3_superblock_of_every_width_parses_at_its_candidate(
-        #[values(VERSION_2, VERSION_3)] version: u8,
+        #[values(SuperblockVersion::Two, SuperblockVersion::Three)] version: SuperblockVersion,
         #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] offsets: OffsetWidth,
         #[values(LengthWidth::Two, LengthWidth::Four, LengthWidth::Eight)] lengths: LengthWidth,
         #[values(0, 512, 1 << 33)] address: u64,
@@ -617,15 +616,15 @@ mod tests {
 
     // The width bytes are at 13 and 14 in versions 0 and 1, and at 9 and 10 in versions 2 and 3.
     #[rstest]
-    #[case::version_0_offsets(VERSION_0, 13, 3, FormatError::InvalidOffsetSize(3))]
-    #[case::version_1_offsets(VERSION_1, 13, 16, FormatError::InvalidOffsetSize(16))]
-    #[case::version_1_lengths(VERSION_1, 14, 0, FormatError::InvalidLengthSize(0))]
-    #[case::version_2_lengths(VERSION_2, 10, 3, FormatError::InvalidLengthSize(3))]
-    #[case::version_0_lengths(VERSION_0, 14, 16, FormatError::InvalidLengthSize(16))]
-    #[case::version_2_offsets(VERSION_2, 9, 0, FormatError::InvalidOffsetSize(0))]
-    #[case::version_3_lengths(VERSION_3, 10, 5, FormatError::InvalidLengthSize(5))]
+    #[case::version_0_offsets(SuperblockVersion::Zero, 13, 3, FormatError::InvalidOffsetSize(3))]
+    #[case::version_1_offsets(SuperblockVersion::One, 13, 16, FormatError::InvalidOffsetSize(16))]
+    #[case::version_1_lengths(SuperblockVersion::One, 14, 0, FormatError::InvalidLengthSize(0))]
+    #[case::version_2_lengths(SuperblockVersion::Two, 10, 3, FormatError::InvalidLengthSize(3))]
+    #[case::version_0_lengths(SuperblockVersion::Zero, 14, 16, FormatError::InvalidLengthSize(16))]
+    #[case::version_2_offsets(SuperblockVersion::Two, 9, 0, FormatError::InvalidOffsetSize(0))]
+    #[case::version_3_lengths(SuperblockVersion::Three, 10, 5, FormatError::InvalidLengthSize(5))]
     fn a_candidate_with_an_invalid_width_returns_its_width_error(
-        #[case] version: u8,
+        #[case] version: SuperblockVersion,
         #[case] at: usize,
         #[case] width: u8,
         #[case] expected: FormatError,
@@ -642,7 +641,11 @@ mod tests {
     #[case::version_4(4)]
     #[case::version_255(255)]
     fn a_candidate_of_an_unknown_version_returns_unsupported_version(#[case] version: u8) {
-        let mut encoded = build(VERSION_2, OffsetWidth::Eight, LengthWidth::Eight);
+        let mut encoded = build(
+            SuperblockVersion::Two,
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+        );
         encoded[HDF5_SIGNATURE.len()] = version;
         assert_eq!(
             locate(&encoded).unwrap().parse(region(&encoded)),
@@ -652,9 +655,11 @@ mod tests {
 
     #[cfg(feature = "checksum")]
     #[rstest]
-    #[case::version_2(VERSION_2)]
-    #[case::version_3(VERSION_3)]
-    fn a_superblock_whose_checksum_differs_returns_checksum_mismatch(#[case] version: u8) {
+    #[case::version_2(SuperblockVersion::Two)]
+    #[case::version_3(SuperblockVersion::Three)]
+    fn a_superblock_whose_checksum_differs_returns_checksum_mismatch(
+        #[case] version: SuperblockVersion,
+    ) {
         let mut encoded = build(version, OffsetWidth::Eight, LengthWidth::Eight);
         let computed = u32::from_le_bytes(*encoded.last_chunk().unwrap());
         *encoded.last_mut().unwrap() ^= 0xFF;
@@ -676,7 +681,11 @@ mod tests {
         #[case] address: u64,
         #[case] len: usize,
     ) {
-        let encoded = build(VERSION_2, OffsetWidth::Eight, LengthWidth::Eight);
+        let encoded = build(
+            SuperblockVersion::Two,
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+        );
         let signature = SuperblockSignature {
             address: PhysicalAddress::new(address),
         };
@@ -693,7 +702,11 @@ mod tests {
 
     #[test]
     fn a_region_short_of_the_superblock_returns_insufficient_region() {
-        let encoded = build(VERSION_2, OffsetWidth::Eight, LengthWidth::Eight);
+        let encoded = build(
+            SuperblockVersion::Two,
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+        );
         let superblock = locate(&encoded).unwrap().parse(region(&encoded)).unwrap();
         let short = &encoded[..encoded.len() - 1];
         assert_eq!(
@@ -709,10 +722,14 @@ mod tests {
 
     #[test]
     fn a_superblock_whose_version_changed_to_a_longer_one_returns_insufficient_region() {
-        let encoded = build(VERSION_0, OffsetWidth::Eight, LengthWidth::Eight);
+        let encoded = build(
+            SuperblockVersion::Zero,
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+        );
         let superblock = locate(&encoded).unwrap().parse(region(&encoded)).unwrap();
         let mut changed = encoded.clone();
-        changed[HDF5_SIGNATURE.len()] = VERSION_1;
+        changed[HDF5_SIGNATURE.len()] = SuperblockVersion::One.get();
         assert_eq!(
             superblock.parse(region(&changed)),
             Err(FormatError::InsufficientRegion {
@@ -725,12 +742,12 @@ mod tests {
     }
 
     #[rstest]
-    #[case(VERSION_0, false)]
-    #[case(VERSION_0, true)]
-    #[case(VERSION_1, false)]
-    #[case(VERSION_1, true)]
+    #[case(SuperblockVersion::Zero, false)]
+    #[case(SuperblockVersion::Zero, true)]
+    #[case(SuperblockVersion::One, false)]
+    #[case(SuperblockVersion::One, true)]
     fn legacy_address_fields_reencode_in_stored_coordinates(
-        #[case] version: u8,
+        #[case] version: SuperblockVersion,
         #[case] defined: bool,
         #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] width: OffsetWidth,
     ) {
@@ -739,7 +756,7 @@ mod tests {
             .base_address(512)
             .eof_address(2048)
             .root_group(0, 96);
-        let mut data = if version == VERSION_1 {
+        let mut data = if version == SuperblockVersion::One {
             builder.version_1()
         } else {
             builder
@@ -795,12 +812,12 @@ mod tests {
     }
 
     #[rstest]
-    #[case(VERSION_2, false)]
-    #[case(VERSION_2, true)]
-    #[case(VERSION_3, false)]
-    #[case(VERSION_3, true)]
+    #[case(SuperblockVersion::Two, false)]
+    #[case(SuperblockVersion::Two, true)]
+    #[case(SuperblockVersion::Three, false)]
+    #[case(SuperblockVersion::Three, true)]
     fn direct_address_fields_roundtrip_in_stored_coordinates(
-        #[case] version: u8,
+        #[case] version: SuperblockVersion,
         #[case] defined: bool,
         #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] width: OffsetWidth,
     ) {
@@ -808,7 +825,7 @@ mod tests {
             usize::from(width.get()),
             usize::from(width.get()),
         ))
-        .version(version)
+        .version(version.get())
         .base_address(512)
         .eof_address(2048)
         .root_header_address(96)
@@ -839,10 +856,12 @@ mod tests {
     }
 
     #[rstest]
-    fn a_group_leaf_node_k_of_zero_is_rejected(#[values(VERSION_0, VERSION_1)] version: u8) {
+    fn a_group_leaf_node_k_of_zero_is_rejected(
+        #[values(SuperblockVersion::Zero, SuperblockVersion::One)] version: SuperblockVersion,
+    ) {
         let builder = v0::Superblock::new(Widths::EIGHT).group_leaf_node_k(0);
         let data = match version {
-            VERSION_1 => builder.version_1(),
+            SuperblockVersion::One => builder.version_1(),
             _ => builder,
         }
         .build();
@@ -892,7 +911,7 @@ mod tests {
 
     #[test]
     fn a_superblock_whose_two_widths_differ_round_trips_to_the_same_bytes() {
-        let data = build(VERSION_2, OffsetWidth::Two, LengthWidth::Four);
+        let data = build(SuperblockVersion::Two, OffsetWidth::Two, LengthWidth::Four);
         assert_eq!(serialize_superblock(&parse(&data)).unwrap(), data);
     }
 
@@ -902,7 +921,11 @@ mod tests {
     fn a_legacy_superblock_version_is_rejected_by_the_serializer(
         #[case] version: SuperblockVersion,
     ) {
-        let mut sb = parse(&build(VERSION_2, OffsetWidth::Eight, LengthWidth::Eight));
+        let mut sb = parse(&build(
+            SuperblockVersion::Two,
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+        ));
         sb.version = version;
         assert_eq!(
             serialize_superblock(&sb),
@@ -919,7 +942,11 @@ mod tests {
         #[case] widen: fn(&mut Superblock),
         #[case] detail: &str,
     ) {
-        let mut sb = parse(&build(VERSION_2, OffsetWidth::Two, LengthWidth::Two));
+        let mut sb = parse(&build(
+            SuperblockVersion::Two,
+            OffsetWidth::Two,
+            LengthWidth::Two,
+        ));
         widen(&mut sb);
         assert_eq!(
             serialize_superblock(&sb),
@@ -933,7 +960,7 @@ mod tests {
     #[case(u32::MAX)]
     fn legacy_status_flags_that_exceed_one_byte_are_rejected_by_the_modern_serializer(
         #[case] bits: u32,
-        #[values(VERSION_2, VERSION_3)] version: u8,
+        #[values(SuperblockVersion::Two, SuperblockVersion::Three)] version: SuperblockVersion,
     ) {
         let legacy = v0::Superblock::new(Widths::EIGHT)
             .consistency_flags(bits)
@@ -956,10 +983,10 @@ mod tests {
     fn legacy_status_flags_preserve_every_observed_bit(
         #[case] bits: u32,
         #[case] unknown: u32,
-        #[values(VERSION_0, VERSION_1)] version: u8,
+        #[values(SuperblockVersion::Zero, SuperblockVersion::One)] version: SuperblockVersion,
     ) {
         let builder = v0::Superblock::new(Widths::EIGHT).consistency_flags(bits);
-        let data = if version == VERSION_1 {
+        let data = if version == SuperblockVersion::One {
             builder.version_1()
         } else {
             builder
@@ -979,10 +1006,10 @@ mod tests {
     fn modern_status_flags_round_trip_every_observed_bit(
         #[case] bits: u8,
         #[case] unknown: u32,
-        #[values(VERSION_2, VERSION_3)] version: u8,
+        #[values(SuperblockVersion::Two, SuperblockVersion::Three)] version: SuperblockVersion,
     ) {
         let data = v2::Superblock::new(Widths::EIGHT)
-            .version(version)
+            .version(version.get())
             .consistency_flags(bits)
             .build();
         let parsed = parse(&data);
@@ -996,7 +1023,12 @@ mod tests {
         assert_eq!(serialize_superblock(&parsed).unwrap(), data);
     }
 
-    fn assert_parses_at(version: u8, offsets: OffsetWidth, lengths: LengthWidth, address: u64) {
+    fn assert_parses_at(
+        version: SuperblockVersion,
+        offsets: OffsetWidth,
+        lengths: LengthWidth,
+        address: u64,
+    ) {
         let encoded = build(version, offsets, lengths);
         let region = FileRegion::new(
             FileRange::new(PhysicalAddress::new(address), encoded.len() as u64).unwrap(),
@@ -1024,22 +1056,19 @@ mod tests {
         let (parsed, widths) = superblock.parse(region).unwrap();
 
         assert_eq!(widths, FormatWidths { offsets, lengths });
-        assert_eq!(
-            parsed.version,
-            SuperblockVersion::try_from(version).unwrap()
-        );
+        assert_eq!(parsed.version, version);
         assert_eq!(parsed.offset_size, offsets);
         assert_eq!(parsed.length_size, lengths);
         assert_eq!(parsed.base_address, BaseAddress::ZERO);
         assert_eq!(parsed.eof_address, 4096);
         assert_eq!(parsed.root_group_address.get(), 96);
         match version {
-            VERSION_0 | VERSION_1 => {
+            SuperblockVersion::Zero | SuperblockVersion::One => {
                 assert_eq!(parsed.group_leaf_node_k, Some(4));
                 assert_eq!(parsed.group_internal_node_k, Some(16));
                 assert_eq!(
                     parsed.indexed_storage_internal_node_k,
-                    (version == VERSION_1).then_some(64)
+                    (version == SuperblockVersion::One).then_some(64)
                 );
                 assert_eq!(parsed.consistency_flags.bits(), 1);
                 assert_eq!(parsed.checksum, None);
@@ -1138,23 +1167,23 @@ mod tests {
         .unwrap()
     }
 
-    fn build(version: u8, offsets: OffsetWidth, lengths: LengthWidth) -> Vec<u8> {
+    fn build(version: SuperblockVersion, offsets: OffsetWidth, lengths: LengthWidth) -> Vec<u8> {
         let widths = Widths::new(usize::from(offsets.get()), usize::from(lengths.get()));
         match version {
-            VERSION_0 | VERSION_1 => {
+            SuperblockVersion::Zero | SuperblockVersion::One => {
                 let builder = v0::Superblock::new(widths)
                     .consistency_flags(1)
                     .indexed_storage_internal_node_k(64)
                     .eof_address(4096)
                     .root_group(0, 96);
                 match version {
-                    VERSION_1 => builder.version_1(),
+                    SuperblockVersion::One => builder.version_1(),
                     _ => builder,
                 }
                 .build()
             }
             _ => v2::Superblock::new(widths)
-                .version(version)
+                .version(version.get())
                 .consistency_flags(1)
                 .eof_address(4096)
                 .root_header_address(96)

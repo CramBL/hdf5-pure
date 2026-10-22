@@ -7,6 +7,7 @@ use hdf5::plist::file_create::SharedMessageType;
 use hdf5::plist::file_create::Sizeof;
 use hdf5::plist::file_create::SizeofInfo;
 use hdf5_pure::File;
+use hdf5_pure::SuperblockVersion;
 use rstest::rstest;
 
 use crate::c_object;
@@ -17,7 +18,7 @@ struct Creation {
     sizes: (Sizeof, Sizeof),
     group_leaf_node_k: u32,
     shared_messages: bool,
-    superblock_version: u8,
+    superblock_version: SuperblockVersion,
 }
 
 const DEFAULT: Creation = Creation {
@@ -25,7 +26,7 @@ const DEFAULT: Creation = Creation {
     sizes: (Sizeof::Bytes8, Sizeof::Bytes8),
     group_leaf_node_k: 0,
     shared_messages: false,
-    superblock_version: 0,
+    superblock_version: SuperblockVersion::Zero,
 };
 
 const GROUPS: [&str; 2] = ["/", "/nested"];
@@ -113,7 +114,7 @@ fn hdf5_pure_links(file: &File, group: &str) -> Vec<(String, u64)> {
 #[case::one_link_per_half_node(Creation { group_leaf_node_k: 1, ..DEFAULT }, 40)]
 #[case::wide_nodes(Creation { group_leaf_node_k: 16, ..DEFAULT }, 100)]
 #[case::superblock_extension_k(
-    Creation { group_leaf_node_k: 16, shared_messages: true, superblock_version: 2, ..DEFAULT },
+    Creation { group_leaf_node_k: 16, shared_messages: true, superblock_version: SuperblockVersion::Two, ..DEFAULT },
     100
 )]
 fn both_readers_list_the_links_and_addresses_libhdf5_lists(
@@ -133,7 +134,7 @@ fn both_readers_list_the_links_and_addresses_libhdf5_lists(
         File::open(&path).unwrap(),
         File::open_streaming(&path).unwrap(),
     ] {
-        assert_eq!(file.superblock().version.get(), creation.superblock_version);
+        assert_eq!(file.superblock().version, creation.superblock_version);
         assert_eq!(file.superblock().base_address.get(), creation.userblock);
         let listed: Vec<Vec<(String, u64)>> = GROUPS
             .iter()

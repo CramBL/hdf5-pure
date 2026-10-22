@@ -4990,7 +4990,7 @@ fn object_extent(file_path: &Path, object_path: &str) -> Range<u64> {
 fn header_extent(path: &Path, file: &File, link_name: &str) -> Range<u64> {
     let bytes = std::fs::read(path).unwrap();
     let superblock = file.superblock();
-    let root = ObjectHeader::parse(
+    let root = ObjectHeader::parse_with_widths(
         &bytes,
         AccessMode::ReadOnly,
         usize::try_from(
@@ -5000,15 +5000,19 @@ fn header_extent(path: &Path, file: &File, link_name: &str) -> Range<u64> {
                 .unwrap(),
         )
         .unwrap(),
-        superblock.offset_size.get(),
-        superblock.length_size.get(),
+        FormatWidths {
+            offsets: superblock.offset_size,
+            lengths: superblock.length_size,
+        },
     )
     .unwrap();
     let address = root
         .messages
         .iter()
         .filter(|message| message.msg_type == MessageType::LINK)
-        .map(|message| LinkMessage::parse(&message.data, superblock.offset_size.get()).unwrap())
+        .map(|message| {
+            LinkMessage::parse_with_offset_width(&message.data, superblock.offset_size).unwrap()
+        })
         .find(|link| link.name == link_name)
         .map(|link| match link.link_target {
             LinkTarget::Hard {
