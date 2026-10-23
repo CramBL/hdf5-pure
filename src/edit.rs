@@ -300,11 +300,11 @@ use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use hdf5_pure_format::__private::IndexSlots;
 use hdf5_pure_format::__private::LayoutVersion;
-use hdf5_pure_format::__private::MessageRecord;
 use hdf5_pure_format::__private::MessageRecordLayout;
 use hdf5_pure_format::__private::OBJECT_HEADER_PREFIX_MAX_LEN;
 use hdf5_pure_format::__private::ObjectHeaderContinuation;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
+use hdf5_pure_format::__private::RecordSplice;
 use hdf5_pure_space::__private as free_space;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::{
@@ -11630,72 +11630,45 @@ pub(crate) const LOSSY_TAIL_REFUSAL: &str = "this dataset's filter pipeline is l
      decode and re-encode values that are already committed, changing them. Append whole \
      chunks from a chunk-aligned length instead";
 
-/// Rebuild a header message `region`, replacing the single Data Layout message's
-/// record with one carrying `new_layout_body` and leaving every other message
-/// (datatype, dataspace, fill value, filter pipeline, attributes, attribute info)
-/// byte-for-byte. The replacement may differ in length from the original — a
-/// chunked rebuild can change the index type and thus the layout message size — so
-/// the record is rebuilt via [`MessageRecordLayout::record`]. The chunked overwrite
-/// and copy paths use this to relocate a dataset's chunk storage while preserving
-/// the rest of its header exactly.
+/// Returns a copy of `region` whose first Data Layout message has `new_layout_body` as its body.
+///
+/// The rewritten record has no flag set and, where the region tracks creation order, a creation
+/// index of 0. Every other record is copied unchanged, a later Data Layout message included.
+///
+/// # Errors
+///
+/// Returns [`Error::EditUnsupported`] if `region` lacks a Data Layout message or if the body of a
+/// record it reads runs past the end of `region`. Returns [`Error::Format`] if `new_layout_body`
+/// is longer than [`OBJECT_HEADER_MESSAGE_MAX`].
 fn replace_layout_message(region: &OhRegion, new_layout_body: &[u8]) -> Result<OhRegion, Error> {
-    let mut out = Vec::with_capacity(region.len());
-    let mut p = 0;
-    let mut replaced = false;
-    while let Some((msg_type, _body, body_end)) = region.next_message(p)? {
-        if msg_type == MessageType::DATA_LAYOUT && !replaced {
-            out.extend_from_slice(
-                &region
-                    .layout()
-                    .record(MessageType::DATA_LAYOUT, new_layout_body),
-            );
-            replaced = true;
-        } else {
-            out.extend_from_slice(&region[p..body_end]);
-        }
-        p = body_end;
-    }
-    if !replaced {
-        return Err(Error::EditUnsupported(
+    let splice = region
+        .splice_first(MessageType::DATA_LAYOUT)?
+        .ok_or(Error::EditUnsupported(
             "chunked dataset header has no data-layout message to relocate",
-        ));
-    }
-    Ok(region.with_bytes(out))
+        ))?;
+    Ok(region.with_bytes(splice.replace_record(MessageFlags::NONE, 0, new_layout_body)?))
 }
 
-/// Rebuild a header message `region`, replacing the single Dataspace message's
-/// record with one carrying `new_dataspace_body` (the grown current dimensions,
-/// v2-serialized, maximum dimensions preserved) and leaving every other message
-/// byte-for-byte. Used by the append path to grow a dataset's axis-0 dimension.
-/// The replacement may differ in length from the original (a v1 on-disk
-/// dataspace is normalized to v2 in the rebuilt header), so the record is rebuilt
-/// via [`MessageRecordLayout::record`].
+/// Returns a copy of `region` whose first Dataspace message has `new_dataspace_body` as its body.
+///
+/// The rewritten record has no flag set and, where the region tracks creation order, a creation
+/// index of 0. Every other record is copied unchanged, a later Dataspace message included.
+///
+/// # Errors
+///
+/// Returns [`Error::AppendUnsupported`] if `region` lacks a Dataspace message,
+/// [`Error::EditUnsupported`] if the body of a record it reads runs past the end of `region`, and
+/// [`Error::Format`] if `new_dataspace_body` is longer than [`OBJECT_HEADER_MESSAGE_MAX`].
 fn replace_dataspace_message(
     region: &OhRegion,
     new_dataspace_body: &[u8],
 ) -> Result<OhRegion, Error> {
-    let mut out = Vec::with_capacity(region.len());
-    let mut p = 0;
-    let mut replaced = false;
-    while let Some((msg_type, _body, body_end)) = region.next_message(p)? {
-        if msg_type == MessageType::DATASPACE && !replaced {
-            out.extend_from_slice(
-                &region
-                    .layout()
-                    .record(MessageType::DATASPACE, new_dataspace_body),
-            );
-            replaced = true;
-        } else {
-            out.extend_from_slice(&region[p..body_end]);
-        }
-        p = body_end;
-    }
-    if !replaced {
-        return Err(Error::AppendUnsupported(
+    let splice = region
+        .splice_first(MessageType::DATASPACE)?
+        .ok_or(Error::AppendUnsupported(
             "dataset header has no dataspace message to grow",
-        ));
-    }
-    Ok(region.with_bytes(out))
+        ))?;
+    Ok(region.with_bytes(splice.replace_record(MessageFlags::NONE, 0, new_dataspace_body)?))
 }
 
 /// Compares datatype structure while ignoring byte order for one-byte fixed-point types.
@@ -12422,36 +12395,18 @@ fn rebuild_compact_layout_region(region: &OhRegion, raw: &[u8]) -> Result<OhRegi
     }
     // libhdf5 reads the first Data Layout message of a header (`H5O_msg_read_oh`
     // in `H5Omessage.c`, HDF5 2.2.0).
-    let (start, record) =
-        region
-            .first_message(MessageType::DATA_LAYOUT)?
-            .ok_or(Error::EditUnsupported(
-                "compact dataset header has no data-layout message",
-            ))?;
-    let &[version, LAYOUT_CLASS_COMPACT, ..] = record.body else {
+    let splice = region
+        .splice_first(MessageType::DATA_LAYOUT)?
+        .ok_or(Error::EditUnsupported(
+            "compact dataset header has no data-layout message",
+        ))?;
+    let &[version, LAYOUT_CLASS_COMPACT, ..] = splice.record().body else {
         return Err(Error::EditUnsupported(
             "compact-layout overwrite found a non-compact data layout",
         ));
     };
     let layout = DataLayout::encode_compact(LayoutVersion::try_from(version)?, raw)?;
-    let (Some(head), Some(tail)) = (region.get(..start), region.get(record.body_range.end..))
-    else {
-        return Err(Error::Format(FormatError::Internal(
-            "a message record read from the region lies outside it".to_owned(),
-        )));
-    };
-    let mut out =
-        Vec::with_capacity(head.len() + region.layout().prefix_len() + layout.len() + tail.len());
-    out.extend_from_slice(head);
-    region.layout().write_record(
-        &mut out,
-        MessageType::DATA_LAYOUT,
-        record.flags,
-        record.creation_index.unwrap_or(0),
-        &layout,
-    );
-    out.extend_from_slice(tail);
-    Ok(region.with_bytes(out))
+    Ok(region.with_bytes(splice.replace_body(&layout)?))
 }
 
 /// The link creation indexes one commit hands out to the links it adds to one
@@ -13854,29 +13809,15 @@ impl OhRegion {
         next_record(self.props.layout, &self.bytes, msg_start)
     }
 
-    /// Returns the first message record of `msg_type` in this region, with the offset at which
-    /// the record begins, or `None` where every record is of another type.
+    /// Returns the [`RecordSplice`] of the first message record of `msg_type` in this region, or
+    /// `None` where every record is of another type.
     ///
     /// # Errors
     ///
     /// Returns [`Error::EditUnsupported`] if the body of a record it reads runs past the end of
     /// the region.
-    fn first_message(
-        &self,
-        msg_type: MessageType,
-    ) -> Result<Option<(usize, MessageRecord<'_>)>, Error> {
-        let mut start = 0;
-        while let Some(record) = self
-            .layout()
-            .next_message(&self.bytes, start)
-            .map_err(record_error)?
-        {
-            if record.msg_type == msg_type {
-                return Ok(Some((start, record)));
-            }
-            start = record.body_range.end;
-        }
-        Ok(None)
+    fn splice_first(&self, msg_type: MessageType) -> Result<Option<RecordSplice<'_>>, Error> {
+        RecordSplice::first(self.layout(), &self.bytes, msg_type).map_err(record_error)
     }
 
     /// The creation index of the record at `msg_start`, or `None` for a header
@@ -19030,6 +18971,12 @@ mod tests {
     ) {
         let region = |inline: &[u8]| {
             [
+                record_layout.record_with_creation_index(
+                    UNKNOWN_MESSAGE_TYPE,
+                    MessageFlags::CONSTANT,
+                    1,
+                    &[0xAB; 3],
+                ),
                 record_layout.record(MessageType::DATASPACE, &[0xAB; 8]),
                 record_layout.record_with_creation_index(
                     MessageType::DATA_LAYOUT,
@@ -19045,7 +18992,11 @@ mod tests {
             ]
             .concat()
         };
-        let props = ObjectHeaderPrefix::with_layout(record_layout);
+        let props = ObjectHeaderPrefix {
+            layout: record_layout,
+            times: Some(FIXTURE_TIMES),
+            attribute_phase_change: Some(FIXTURE_PHASE),
+        };
 
         let out = rebuild_compact_layout_region(
             &OhRegion::new(region(&[1, 2, 3, 4]), props),
@@ -19053,7 +19004,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(out[..], region(&[9, 8, 7, 6, 5])[..]);
+        assert_eq!(
+            (out.props(), &out[..]),
+            (props, &region(&[9, 8, 7, 6, 5])[..])
+        );
     }
 
     #[rstest]
@@ -19096,6 +19050,162 @@ mod tests {
         };
         assert_eq!(reason, expected);
     }
+
+    #[rstest]
+    fn replace_layout_message_replaces_only_the_first_layout_record(
+        #[values(MessageRecordLayout::PLAIN, TRACKED)] record_layout: MessageRecordLayout,
+    ) {
+        let region = rewrite_fixture(
+            record_layout,
+            records_around(
+                record_layout,
+                dataspace_record(record_layout),
+                compact_layout_record(record_layout, &[1, 2, 3, 4]),
+            ),
+        );
+        let body = layout_bytes::contiguous(0x900, 16);
+
+        let out = replace_layout_message(&region, &body).unwrap();
+
+        let expected = records_around(
+            record_layout,
+            dataspace_record(record_layout),
+            record_layout.record(MessageType::DATA_LAYOUT, &body),
+        );
+        assert_eq!((out.props(), &out[..]), (region.props(), &expected[..]));
+    }
+
+    #[rstest]
+    fn replace_dataspace_message_replaces_only_the_first_dataspace_record(
+        #[values(MessageRecordLayout::PLAIN, TRACKED)] record_layout: MessageRecordLayout,
+    ) {
+        let region = rewrite_fixture(
+            record_layout,
+            records_around(
+                record_layout,
+                dataspace_record(record_layout),
+                compact_layout_record(record_layout, &[1, 2, 3, 4]),
+            ),
+        );
+        let body = [0x22; 12];
+
+        let out = replace_dataspace_message(&region, &body).unwrap();
+
+        let expected = records_around(
+            record_layout,
+            record_layout.record(MessageType::DATASPACE, &body),
+            compact_layout_record(record_layout, &[1, 2, 3, 4]),
+        );
+        assert_eq!((out.props(), &out[..]), (region.props(), &expected[..]));
+    }
+
+    #[rstest]
+    #[case::replace_layout_message(replace_layout_message)]
+    #[case::replace_dataspace_message(replace_dataspace_message)]
+    #[case::rebuild_compact_layout_region(rebuild_compact_layout_region)]
+    fn a_region_rewrite_rejects_a_record_past_the_region(
+        #[case] rewrite: fn(&OhRegion, &[u8]) -> Result<OhRegion, Error>,
+    ) {
+        let mut bytes = message_record(MessageType::DATASPACE, &[0; 8]);
+        bytes.pop();
+
+        let err = rewrite(&plain_region(bytes), &[1, 2]).unwrap_err();
+
+        let Error::EditUnsupported(reason) = err else {
+            panic!("expected EditUnsupported, got {err:?}");
+        };
+        assert_eq!(reason, "malformed object header message");
+    }
+
+    #[test]
+    fn replace_layout_message_rejects_a_header_without_a_layout() {
+        let region = plain_region(message_record(MessageType::DATASPACE, &[0; 8]));
+
+        let err = replace_layout_message(&region, &[1, 2]).unwrap_err();
+
+        let Error::EditUnsupported(reason) = err else {
+            panic!("expected EditUnsupported, got {err:?}");
+        };
+        assert_eq!(
+            reason,
+            "chunked dataset header has no data-layout message to relocate"
+        );
+    }
+
+    #[test]
+    fn replace_dataspace_message_rejects_a_header_without_a_dataspace() {
+        let region = plain_region(message_record(
+            MessageType::DATA_LAYOUT,
+            &layout_bytes::compact(&[3, 4]),
+        ));
+
+        let err = replace_dataspace_message(&region, &[1, 2]).unwrap_err();
+
+        let Error::AppendUnsupported(reason) = err else {
+            panic!("expected AppendUnsupported, got {err:?}");
+        };
+        assert_eq!(reason, "dataset header has no dataspace message to grow");
+    }
+
+    fn rewrite_fixture(record_layout: MessageRecordLayout, bytes: Vec<u8>) -> OhRegion {
+        OhRegion::new(
+            bytes,
+            ObjectHeaderPrefix {
+                layout: record_layout,
+                times: Some(FIXTURE_TIMES),
+                attribute_phase_change: Some(FIXTURE_PHASE),
+            },
+        )
+    }
+
+    fn records_around(
+        record_layout: MessageRecordLayout,
+        dataspace: Vec<u8>,
+        data_layout: Vec<u8>,
+    ) -> Vec<u8> {
+        [
+            record_layout.record_with_creation_index(
+                UNKNOWN_MESSAGE_TYPE,
+                MessageFlags::CONSTANT,
+                1,
+                &[0xAB; 3],
+            ),
+            dataspace,
+            data_layout,
+            record_layout.record_with_creation_index(
+                MessageType::ATTRIBUTE,
+                MessageFlags::NONE,
+                2,
+                &[0xCD; 5],
+            ),
+            record_layout.record(MessageType::DATASPACE, &[0xEE; 8]),
+            record_layout.record(
+                MessageType::DATA_LAYOUT,
+                &layout_bytes::contiguous(0x800, 4),
+            ),
+        ]
+        .concat()
+    }
+
+    fn dataspace_record(record_layout: MessageRecordLayout) -> Vec<u8> {
+        record_layout.record_with_creation_index(
+            MessageType::DATASPACE,
+            MessageFlags::CONSTANT,
+            3,
+            &[0x11; 8],
+        )
+    }
+
+    fn compact_layout_record(record_layout: MessageRecordLayout, inline: &[u8]) -> Vec<u8> {
+        record_layout.record_with_creation_index(
+            MessageType::DATA_LAYOUT,
+            MessageFlags::CONSTANT,
+            4,
+            &layout_bytes::compact(inline),
+        )
+    }
+
+    const UNKNOWN_MESSAGE_TYPE: MessageType = MessageType::from_u16(0x00C8);
 
     #[test]
     fn a_refused_open_never_builds_the_image() {
