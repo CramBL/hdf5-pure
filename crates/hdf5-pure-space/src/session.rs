@@ -214,6 +214,20 @@ impl SessionSpace {
         self.allocate_with_page_type(len, class, class.into())
     }
 
+    /// Reserves `len` bytes from the smallest flat free region whose allocation ends at or below
+    /// `limit`.
+    ///
+    /// Allocates from the start of the region and retains any remainder, including one shorter
+    /// than the tracking threshold. Equal-sized regions are selected by lowest address.
+    /// Returns `None` and preserves the session if `len` is zero, no region fits, or the strategy
+    /// is disabled or paged.
+    pub fn allocate_flat_below(&mut self, len: u64, limit: u64) -> Option<Extent> {
+        let Self::Flat(space) = self else {
+            return None;
+        };
+        space.free.alloc_below(len, limit)
+    }
+
     /// Reserves reusable bytes with an explicit PAGE type.
     ///
     /// `page_type` determines PAGE placement independently of the request's `class`. Array chunk
@@ -589,6 +603,50 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+
+    #[test]
+    fn flat_limit_allocation_retains_remainders_below_threshold() {
+        let mut space = SessionSpace::from_strategy(
+            Some(FileSpaceStrategy::FsmAggr),
+            50,
+            FileSpacePageSize::DEFAULT,
+        );
+        space.seed_persisted(None, Extent::new(100, 100).unwrap());
+        space.seed_persisted(None, Extent::new(300, 60).unwrap());
+        assert_eq!(space.allocate_flat_below(40, 340), Extent::new(300, 40));
+        assert_eq!(
+            space.reusable_sections().collect::<Vec<_>>(),
+            [
+                Extent::new(100, 100).unwrap(),
+                Extent::new(340, 20).unwrap()
+            ]
+        );
+        space.return_allocation(Extent::new(300, 40).unwrap(), AllocationClass::Metadata);
+        assert_eq!(
+            space.reusable_sections().collect::<Vec<_>>(),
+            [
+                Extent::new(100, 100).unwrap(),
+                Extent::new(300, 60).unwrap()
+            ]
+        );
+    }
+
+    #[rstest]
+    #[case::disabled(Some(FileSpaceStrategy::None))]
+    #[case::paged(Some(FileSpaceStrategy::Page))]
+    fn flat_limit_allocation_preserves_other_strategies(
+        #[case] strategy: Option<FileSpaceStrategy>,
+    ) {
+        let mut space = SessionSpace::from_strategy(strategy, 1, FileSpacePageSize::DEFAULT);
+        space.seed_persisted(
+            Some(ManagerKind::PagedSmallMetadata),
+            Extent::new(4_112, 128).unwrap(),
+        );
+        space.finish_seed();
+        let before = space.reusable_sections().collect::<Vec<_>>();
+        assert_eq!(space.allocate_flat_below(64, 4_176), None);
+        assert_eq!(space.reusable_sections().collect::<Vec<_>>(), before);
+    }
 
     #[rstest]
     #[case::small_aligned(0, -1, FreeClass::Page(PageType::Meta))]
