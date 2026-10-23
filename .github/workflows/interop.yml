@@ -63,6 +63,7 @@ jobs:
               - scripts/interop.just
               - scripts/constants.just
               - scripts/hdf5-releases.toml
+              - .github/interop-pr-matrix.json
               - .github/workflows/interop.yml
               - ci/matio.env
               - docker/ci/matio/**
@@ -77,14 +78,14 @@ jobs:
               - scripts/ci/matio-image.sh
               - scripts/ci/install-mold.sh
 
-  # The releases scripts/hdf5-releases.toml lists, for the matrix below, and the newest of them.
+  # The HDF5 version and platform combinations for this event, and the newest supported release.
   releases:
     name: releases
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.run == 'true'
     outputs:
-      versions: ${{ steps.list.outputs.versions }}
+      matrix: ${{ steps.list.outputs.matrix }}
       latest: ${{ steps.list.outputs.latest }}
 
     steps:
@@ -104,7 +105,12 @@ jobs:
       - name: List the releases
         id: list
         run: |
-          echo "versions=$(just interop::hdf5-versions --json)" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            matrix=$(jq -c . .github/interop-pr-matrix.json)
+          else
+            matrix=$(just interop::hdf5-versions --json | jq -c '{include: [.[] as $version | ["ubuntu-latest", "macos-latest", "windows-latest"][] | {os: ., version: $version}]}')
+          fi
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
           echo "latest=$(just interop::hdf5-versions | tail -n 1)" >> "$GITHUB_OUTPUT"
 
   # The test suite linking each release of the C library. Each release is
@@ -117,9 +123,7 @@ jobs:
 
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        version: ${{ fromJSON(needs.releases.outputs.versions) }}
+      matrix: ${{ fromJSON(needs.releases.outputs.matrix) }}
 
     env:
       # Enables the value and content-hash crosschecks.
