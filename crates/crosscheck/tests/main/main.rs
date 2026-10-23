@@ -51,6 +51,7 @@ mod extensible_array_chunks;
 mod external_storage;
 mod file_space;
 mod file_space_fuzz;
+mod file_space_oracle;
 mod fill_value;
 mod fixed_array;
 mod fixed_string;

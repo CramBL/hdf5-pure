@@ -56,6 +56,7 @@ use test_util::widths::Widths;
 use test_util_hdf5::absence;
 use test_util_hdf5::dataset::Unlimited;
 use test_util_hdf5::file_space;
+use test_util_hdf5::file_space_oracle::SectionMap;
 use test_util_hdf5::paged;
 use test_util_hdf5::session;
 use test_util_hdf5::storage;
@@ -2046,6 +2047,15 @@ fn the_free_sections_libhdf5_persists_are_read_at_the_widths_of_its_file(
         "the deleted dataset's storage at {freed} is a free section, {free:?}"
     );
     assert_eq!(free.iter().map(|&(_, len)| len).sum::<u64>(), free_c);
+    // `H5FS__cache_sinfo_deserialize` in H5FScache.c, HDF5 2.2.0, asserts on these fixtures
+    // when their length width is smaller than eight bytes.
+    if sizeof_size == Sizeof::Bytes8 {
+        super::file_space_oracle::checkpoint(
+            &path,
+            &format!("widths-{driver:?}-{sizeof_addr:?}-{sizeof_size:?}"),
+            "persisted",
+        );
+    }
 }
 
 // libhdf5 writes one 197-byte section list with 9 unused bytes before its checksum.
@@ -2870,6 +2880,16 @@ fn assert_version_0_free_space_reads_as_libhdf5_reads_it(
     let free = f.persisted_free_space().unwrap();
     assert!(free.contains(&(freed - userblock, 1600)), "{free:?}");
     assert_eq!(free.iter().map(|&(_, len)| len).sum::<u64>(), free_c);
+    // `H5FS__cache_sinfo_deserialize` in H5FScache.c, HDF5 2.2.0, asserts on these fixtures
+    // when their length width is smaller than eight bytes.
+    if sizeof_size == Sizeof::Bytes8 {
+        drop(f);
+        super::file_space_oracle::checkpoint(
+            &path,
+            &format!("version-0-{sizeof_addr:?}-{sizeof_size:?}-base-{userblock}"),
+            "persisted",
+        );
+    }
 }
 
 #[test]
@@ -3044,9 +3064,17 @@ fn libhdf5_reads_its_file_after_an_edit_reuses_the_free_space_it_persisted(
         f.free_space(),
         ours.iter().map(|&(_, len)| len).sum::<u64>()
     );
-    let mut sections = file_space::libhdf5_free_sections(&f);
-    sections.sort_unstable();
-    assert_eq!(sections, ours);
+    SectionMap::new("hdf5-pure", ours, f.size() - userblock)
+        .unwrap()
+        .compare(
+            &SectionMap::new(
+                "libhdf5",
+                file_space::libhdf5_free_sections(&f).unwrap(),
+                f.size() - userblock,
+            )
+            .unwrap(),
+        )
+        .unwrap();
     drop(d);
     f.close().unwrap();
     stamped.assert_unchanged(&path);
@@ -3110,9 +3138,17 @@ fn libhdf5_reads_relocated_persisted_free_space_and_writes_to_the_file(
         f.free_space(),
         ours.iter().map(|&(_, len)| len).sum::<u64>()
     );
-    let mut sections = file_space::libhdf5_free_sections(&f);
-    sections.sort_unstable();
-    assert_eq!(sections, ours);
+    SectionMap::new("hdf5-pure", ours, f.size() - userblock)
+        .unwrap()
+        .compare(
+            &SectionMap::new(
+                "libhdf5",
+                file_space::libhdf5_free_sections(&f).unwrap(),
+                f.size() - userblock,
+            )
+            .unwrap(),
+        )
+        .unwrap();
     f.new_dataset::<i32>()
         .shape((50,))
         .create("e")
@@ -3199,9 +3235,17 @@ fn libhdf5_reads_its_paged_file_after_an_edit_reuses_the_free_space_it_persisted
         f.free_space(),
         ours.iter().map(|&(_, len)| len).sum::<u64>()
     );
-    let mut sections = file_space::libhdf5_free_sections(&f);
-    sections.sort_unstable();
-    assert_eq!(sections, ours);
+    SectionMap::new("hdf5-pure", ours, f.size() - userblock)
+        .unwrap()
+        .compare(
+            &SectionMap::new(
+                "libhdf5",
+                file_space::libhdf5_free_sections(&f).unwrap(),
+                f.size() - userblock,
+            )
+            .unwrap(),
+        )
+        .unwrap();
     drop(d);
     f.close().unwrap();
 
@@ -3281,9 +3325,17 @@ fn libhdf5_reads_and_writes_our_edited_paged_file(#[values(0, PAGE_SIZE)] userbl
         f.free_space(),
         ours.iter().map(|&(_, len)| len).sum::<u64>()
     );
-    let mut sections = file_space::libhdf5_free_sections(&f);
-    sections.sort_unstable();
-    assert_eq!(sections, ours);
+    SectionMap::new("hdf5-pure", ours, f.size() - userblock)
+        .unwrap()
+        .compare(
+            &SectionMap::new(
+                "libhdf5",
+                file_space::libhdf5_free_sections(&f).unwrap(),
+                f.size() - userblock,
+            )
+            .unwrap(),
+        )
+        .unwrap();
     f.new_dataset::<i32>()
         .shape((50,))
         .create("e")
@@ -4175,6 +4227,11 @@ fn c_library_reads_our_file_after_a_release_shortened_it() {
              {peak}, now {len})"
         );
 
+        super::file_space_oracle::checkpoint(
+            &path,
+            &format!("tail-truncation-{label}"),
+            "rust-close",
+        );
         let ours = File::open(&path).unwrap();
         assert_eq!(ours.file_size(), len, "{label}: superblock EOF matches");
         let free_ours: Vec<(u64, u64)> = ours.persisted_free_space().unwrap();
@@ -4307,6 +4364,7 @@ fn c_library_reads_our_file_after_an_append_reused_free_space() {
             );
         }
 
+        super::file_space_oracle::checkpoint(&path, &format!("append-reuse-{label}"), "rust-close");
         let ours = File::open(&path).unwrap();
         assert_eq!(ours.dataset("log2").unwrap().read_i32().unwrap(), payload);
         let total_ours: u64 = ours
@@ -4503,6 +4561,16 @@ fn a_sub_threshold_extent_is_tracked_only_beside_a_tracked_extent_as_libhdf5_tra
             ours_total
         )
     );
+    super::file_space_oracle::checkpoint(
+        &ours,
+        &format!("fsm-subthreshold-{persist}-{}", deletions.join("-")),
+        "rust-close",
+    );
+    super::file_space_oracle::checkpoint(
+        &theirs,
+        &format!("fsm-subthreshold-{persist}-{}", deletions.join("-")),
+        "c-close",
+    );
 }
 
 #[rstest]
@@ -4630,6 +4698,12 @@ fn a_paged_returned_extent_is_tracked_as_libhdf5_tracks_it(
         (ours_session, ours_reopened, theirs_reopened),
         (expected, expected, expected)
     );
+    let case = format!(
+        "page-threshold-{threshold}-{measured}-{}",
+        deletions.join("-")
+    );
+    super::file_space_oracle::checkpoint(&ours, &case, "rust-close");
+    super::file_space_oracle::checkpoint(&theirs, &case, "c-close");
 }
 
 #[test]

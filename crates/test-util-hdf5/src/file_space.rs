@@ -20,6 +20,8 @@ use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 
 use crate::dataset::Unlimited;
+#[cfg(feature = "__hdf5-1.10")]
+use crate::file_space_oracle::OracleError;
 
 /// Returns the total zero-padding length of the persisted free-space section lists.
 ///
@@ -325,7 +327,7 @@ fn extent_bytes(extents: &[(u64, u64)]) -> u64 {
 #[track_caller]
 pub fn assert_eof_matches_physical_size(path: &Path) {
     let file = File::open(path).unwrap();
-    let eof = file.file_size();
+    let eof = file.superblock().eof_address;
     let actual = std::fs::metadata(path).unwrap().len();
     assert_eq!(
         eof, actual,
@@ -379,30 +381,43 @@ pub fn libhdf5_contiguous_extent(dataset: &Hdf5Dataset) -> Range<u64> {
     address..address + dataset.storage_size()
 }
 
-/// Returns the free sections libhdf5 tracks in `file`, as `(address, size)` pairs whose addresses
-/// are relative to the base address.
+/// Enumerates free-space-manager sections through `H5Fget_free_sections`.
+///
+/// Returns `(stored_address, length)` pairs with base-relative addresses. The call uses
+/// `H5FD_MEM_DEFAULT` to query all managers and preserves the C enumeration order. The caller can
+/// construct a [`crate::file_space_oracle::SectionMap`] to sort and validate the records.
+///
+/// # Errors
+///
+/// Returns [`OracleError::C`] if a C call fails, [`OracleError::Allocation`] if the section
+/// buffer cannot be allocated, or [`OracleError::Enumeration`] if the two calls report different
+/// section counts.
 #[cfg(feature = "__hdf5-1.10")]
-pub fn libhdf5_free_sections(file: &Hdf5File) -> Vec<(u64, u64)> {
+pub fn libhdf5_free_sections(file: &Hdf5File) -> Result<Vec<(u64, u64)>, OracleError> {
     hdf5::sync::sync(|| {
         // SAFETY: The library lock serializes access and `file` keeps the file open. With a null
         // buffer and a count of zero the call writes nothing and returns the number of sections.
         let count =
             unsafe { H5Fget_free_sections(file.id(), H5FD_MEM_DEFAULT, 0, std::ptr::null_mut()) };
-        let count = usize::try_from(count).unwrap();
+        let count = crate::file_space_oracle::enumeration_count(count)?;
         if count == 0 {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        let mut sections = vec![SectionInfo { addr: 0, size: 0 }; count];
+        let mut sections = Vec::new();
+        sections
+            .try_reserve_exact(count)
+            .map_err(|_error| OracleError::Allocation { count })?;
+        sections.resize(count, SectionInfo { addr: 0, size: 0 });
         // SAFETY: The library lock serializes access, `file` keeps the file open, and
         // `sections` holds `count` writable records of the layout `H5F_sect_info_t` has.
         let written = unsafe {
             H5Fget_free_sections(file.id(), H5FD_MEM_DEFAULT, count, sections.as_mut_ptr())
         };
-        assert_eq!(usize::try_from(written).unwrap(), count);
-        sections
+        crate::file_space_oracle::enumeration_complete(count, written)?;
+        Ok(sections
             .into_iter()
             .map(|section| (section.addr, section.size))
-            .collect()
+            .collect())
     })
 }
 

@@ -21,6 +21,7 @@ use test_util_hdf5::aggregation::Object;
 use test_util_hdf5::aggregation::Step;
 use test_util_hdf5::aggregation::Workload;
 use test_util_hdf5::file_space;
+use test_util_hdf5::file_space_oracle::SectionMap;
 use test_util_hdf5::storage;
 
 use crate::c_object;
@@ -46,11 +47,22 @@ fn libhdf5_recovers_and_reuses_new_file_aggregate_spare(
     drop(file);
     {
         let file = hdf5::File::open_rw(&path).unwrap();
-        assert_eq!(file_space::libhdf5_free_sections(&file), sections);
+        SectionMap::new("hdf5-pure", sections.clone(), file.size() - userblock)
+            .unwrap()
+            .compare(
+                &SectionMap::new(
+                    "libhdf5",
+                    file_space::libhdf5_free_sections(&file).unwrap(),
+                    file.size() - userblock,
+                )
+                .unwrap(),
+            )
+            .unwrap();
         let added = file.new_dataset::<i32>().shape(16).create("added").unwrap();
         added.write_raw(&[23; 16]).unwrap();
         if has_sections {
             let remaining: u64 = file_space::libhdf5_free_sections(&file)
+                .unwrap()
                 .iter()
                 .map(|&(_, size)| size)
                 .sum();
@@ -283,7 +295,7 @@ fn libhdf5_persists_no_free_space_manager_under_aggr() {
     assert_eq!(file.persisted_free_space().unwrap(), []);
     let reopened = hdf5::File::open(&path).unwrap();
     assert_eq!(reopened.free_space(), 0);
-    assert_eq!(file_space::libhdf5_free_sections(&reopened), []);
+    assert_eq!(file_space::libhdf5_free_sections(&reopened).unwrap(), []);
 }
 
 #[rstest]
@@ -784,6 +796,7 @@ fn create(file: &hdf5::File, object: Object) -> Option<hdf5::Dataset> {
 /// (`H5MF_get_freespace` in `H5MF.c`, HDF5 2.2.0).
 fn aggregator_bytes(file: &hdf5::File) -> u64 {
     let tracked: u64 = file_space::libhdf5_free_sections(file)
+        .unwrap()
         .iter()
         .map(|&(_, size)| size)
         .sum();

@@ -38,6 +38,32 @@ use crate::userblock;
 ///
 /// Panics if a file operation fails or a workload assertion fails.
 pub fn run_churn(lifecycle: Lifecycle, strategy: Strategy, base: Base) -> ChurnReport {
+    run_churn_inner(lifecycle, strategy, base, None::<fn(&Path, &str)>)
+}
+
+/// Runs churn with observations after each intended close and before the next writing session.
+///
+/// The observer receives the closed file's path and a checkpoint label. For
+/// [`Lifecycle::ContinuousOpen`], it runs only after the final close.
+///
+/// # Panics
+///
+/// Panics if a file operation fails, a workload assertion fails, or the observer panics.
+pub fn run_churn_observed(
+    lifecycle: Lifecycle,
+    strategy: Strategy,
+    base: Base,
+    observer: impl FnMut(&Path, &str),
+) -> ChurnReport {
+    run_churn_inner(lifecycle, strategy, base, Some(observer))
+}
+
+fn run_churn_inner(
+    lifecycle: Lifecycle,
+    strategy: Strategy,
+    base: Base,
+    mut observer: Option<impl FnMut(&Path, &str)>,
+) -> ChurnReport {
     let path = temp::temp_path(&format!(
         "hdf5_pure_free_space_churn_{}_{}_{}.h5",
         lifecycle.label(),
@@ -193,6 +219,7 @@ pub fn run_churn(lifecycle: Lifecycle, strategy: Strategy, base: Base) -> ChurnR
                     &mut closes,
                     &mut reopens,
                     &mut stats,
+                    &mut observer,
                 );
             }
         } else if lifecycle == Lifecycle::ReopenFrequently
@@ -212,6 +239,7 @@ pub fn run_churn(lifecycle: Lifecycle, strategy: Strategy, base: Base) -> ChurnR
                 &mut closes,
                 &mut reopens,
                 &mut stats,
+                &mut observer,
             );
         }
     }
@@ -246,6 +274,7 @@ pub fn run_churn(lifecycle: Lifecycle, strategy: Strategy, base: Base) -> ChurnR
             &mut closes,
             &mut reopens,
             &mut stats,
+            &mut observer,
         );
     }
 
@@ -284,6 +313,10 @@ pub fn run_churn(lifecycle: Lifecycle, strategy: Strategy, base: Base) -> ChurnR
     );
     let after_close_coverage = validate_all_epochs(&reader, &live, epochs_written);
     assert_eq!(after_close_coverage, coverage);
+    reader.close().unwrap();
+    if let Some(observer) = &mut observer {
+        observer(&path, "final-close");
+    }
 
     let RunStats {
         peak_physical_size,
@@ -966,6 +999,7 @@ fn reopen_session(
     closes: &mut usize,
     reopens: &mut usize,
     stats: &mut RunStats,
+    observer: &mut Option<impl FnMut(&Path, &str)>,
 ) {
     session
         .take()
@@ -975,6 +1009,12 @@ fn reopen_session(
     *closes += 1;
     let physical_size = base.image_size(path);
     assert!(physical_size <= MAX_FILE_BYTES);
+    if let Some(observer) = observer {
+        observer(
+            path,
+            &format!("{}-after-epoch-{after_epoch}", reason.label()),
+        );
+    }
     let persisted_free = persisted_free_bytes(path);
     let reopened = base.open(path);
     let acct = reopened.space_accounting().unwrap();
