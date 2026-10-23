@@ -36,6 +36,8 @@ pub use crate::scaleoffset::build_cd_values as build_scale_offset_cd_values;
 pub use crate::scaleoffset::parse_scale_offset_parameters;
 pub use crate::scaleoffset::scale_offset_mode;
 #[cfg(feature = "zfp")]
+pub use crate::zfp::ResolvedZfpSettings;
+#[cfg(feature = "zfp")]
 pub use crate::zfp::ZfpElementType;
 #[cfg(feature = "zfp")]
 pub use crate::zfp::compress as compress_zfp;

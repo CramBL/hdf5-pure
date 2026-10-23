@@ -7,6 +7,8 @@ use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::UserblockSize;
+#[cfg(feature = "zfp")]
+use hdf5_pure::ZfpRate;
 use hdf5_pure::{
     AttrValue, Datatype, DatatypeByteOrder, FileBuilder, FileSpaceStrategy, LibVer, MaxExtent,
     RepackOptions, ScaleOffset,
@@ -695,7 +697,7 @@ fn roundtrips_zfp_verbatim() {
     b.create_dataset("vals")
         .with_f64_data(&data)
         .with_chunks(&[256])
-        .with_zfp(32.0);
+        .with_zfp(ZfpRate::try_from(32.0).unwrap());
     b.write(&src).unwrap();
 
     hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();

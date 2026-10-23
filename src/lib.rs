@@ -316,8 +316,13 @@
 //! it are byte-for-byte interoperable with the reference H5Z-ZFP plugin (`h5py` + `hdf5plugin`). It
 //! has no extra crate dependency. See the [compression guide](crate::_guide::compression).
 //!
+//! [`ZfpRate`] accepts finite, positive requests of at most 64 compressed bits per scalar.
+//! The writer checks the scalar-specific maximum and the block budget when resolving chunk
+//! geometry. Low rates may be insufficient for floating-point headers, depending on the data.
+//!
 //! ```rust
 //! # #[cfg(feature = "zfp")] {
+//! use hdf5_pure::ZfpRate;
 //! # let (ny, nx) = (16usize, 16usize);
 //! # let data: Vec<f32> = (0..ny * nx).map(|i| i as f32).collect();
 //! let mut builder = hdf5_pure::FileBuilder::new();
@@ -325,11 +330,12 @@
 //!     .with_f32_data(&data)
 //!     .with_shape(&[ny as u64, nx as u64])
 //!     .with_chunks(&[ny as u64, nx as u64])
-//!     .with_zfp(16.0);  // 16 bits per value
+//!     .with_zfp(ZfpRate::try_from(16.0)?);  // 16 bits per value
 //! # let bytes = builder.finish().unwrap();
 //! # let file = hdf5_pure::File::from_bytes(bytes).unwrap();
 //! # assert_eq!(file.dataset("temperature").unwrap().shape().unwrap(), vec![16, 16]);
 //! # }
+//! # Ok::<(), hdf5_pure::Error>(())
 //! ```
 //!
 //! # Platform support
@@ -664,6 +670,8 @@ pub use hdf5_pure_core::FileSpacePageSize;
 #[doc(inline)]
 pub use hdf5_pure_core::FileSpaceStrategy;
 pub use hdf5_pure_core::UserblockSize;
+#[cfg(feature = "zfp")]
+pub use hdf5_pure_core::ZfpRate;
 
 pub use compound::{CompoundField, CompoundType};
 #[doc(inline)]

@@ -23,6 +23,7 @@ mod region;
 mod superblock;
 mod userblock_size;
 mod width;
+mod zfp_rate;
 
 #[doc(hidden)]
 pub mod __private;
@@ -61,3 +62,4 @@ pub use superblock::SuperblockVersion;
 pub use userblock_size::UserblockSize;
 pub use width::LengthWidth;
 pub use width::OffsetWidth;
+pub use zfp_rate::ZfpRate;

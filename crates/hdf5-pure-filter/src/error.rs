@@ -1,6 +1,8 @@
 use alloc::format;
 use core::fmt;
 
+use hdf5_pure_core::FormatError;
+
 /// Reports an invalid filter stream or codec configuration.
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -58,6 +60,9 @@ pub enum Error {
         /// Platform index type that cannot hold the value.
         target: &'static str,
     },
+    /// Reports an invalid ZFP request or a rate incompatible with the chunk.
+    #[cfg(feature = "zfp")]
+    ZfpConfiguration(FormatError),
     /// Reports invalid ZFP parameters or input bytes.
     #[cfg(feature = "zfp")]
     ZfpFilter(alloc::string::String),
@@ -107,6 +112,8 @@ impl fmt::Display for Error {
                 "ZFP chunk dimension {value} does not fit in {target} on this platform"
             ),
             #[cfg(feature = "zfp")]
+            Self::ZfpConfiguration(error) => error.fmt(f),
+            #[cfg(feature = "zfp")]
             Self::ZfpFilter(reason) => write!(f, "filter error: {reason}"),
             #[cfg(feature = "zfp")]
             Self::ZfpHeaderTooLarge { budget, required } => write!(
@@ -124,7 +131,7 @@ impl fmt::Display for Error {
 #[cfg(feature = "std")]
 impl std::error::Error for Error {}
 
-impl From<Error> for hdf5_pure_core::FormatError {
+impl From<Error> for FormatError {
     fn from(error: Error) -> Self {
         match error {
             Error::InvalidDeflateLevel { level } => Self::InvalidDeflateLevel { level },
@@ -141,6 +148,8 @@ impl From<Error> for hdf5_pure_core::FormatError {
             Error::ScaleOffsetValueTooLargeForPlatform { value, target } => {
                 Self::ValueTooLargeForPlatform { value, target }
             }
+            #[cfg(feature = "zfp")]
+            Error::ZfpConfiguration(error) => error,
             #[cfg(feature = "zfp")]
             Error::ZfpFilter(reason) => Self::FilterError(reason),
             #[cfg(feature = "zfp")]
