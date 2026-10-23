@@ -17,6 +17,10 @@
 //! with no finding and no changelog line, leaving callers a value they could
 //! compare and print but not use as a number.
 
+use hdf5_pure::FilterDisposition;
+use hdf5_pure::FilterId;
+use hdf5_pure::FilterParameters;
+use hdf5_pure::FormatError;
 use hdf5_pure::LengthWidth;
 use hdf5_pure::OffsetWidth;
 use hdf5_pure::StoredAddress;
@@ -158,6 +162,39 @@ fn a_public_superblock_version_has_a_wire_value_and_a_library_bound(
     assert_eq!(SuperblockVersion::try_from(byte).unwrap(), version);
     assert_eq!(version.get(), byte);
     assert_eq!(LibVer::from_superblock_version(version), bound);
+    assert_eq!(
+        match version {
+            SuperblockVersion::Zero => 0,
+            SuperblockVersion::One => 1,
+            SuperblockVersion::Two => 2,
+            SuperblockVersion::Three => 3,
+        },
+        byte
+    );
+    let version = hdf5_pure_core::SuperblockVersion::try_from(byte).unwrap();
+    assert_eq!(
+        match version {
+            hdf5_pure_core::SuperblockVersion::Zero => 0,
+            hdf5_pure_core::SuperblockVersion::One => 1,
+            hdf5_pure_core::SuperblockVersion::Two => 2,
+            hdf5_pure_core::SuperblockVersion::Three => 3,
+        },
+        byte
+    );
+}
+
+#[rstest::rstest]
+#[case(4)]
+#[case(u8::MAX)]
+fn public_superblock_versions_reject_unsupported_bytes(#[case] byte: u8) {
+    assert_eq!(
+        SuperblockVersion::try_from(byte).unwrap_err(),
+        FormatError::UnsupportedVersion(byte)
+    );
+    assert_eq!(
+        hdf5_pure_core::SuperblockVersion::try_from(byte).unwrap_err(),
+        hdf5_pure_core::FormatError::UnsupportedVersion(byte)
+    );
 }
 
 #[rstest::rstest]
@@ -282,4 +319,55 @@ fn chunk_filter_metadata_types_are_public() {
     let _: fn(&hdf5_pure::Chunk) -> hdf5_pure::ChunkFilterView<'_> = hdf5_pure::Chunk::filters;
     let _: hdf5_pure::FilterDisposition = hdf5_pure::FilterDisposition::BypassedRaw;
     assert_eq!(hdf5_pure::FilterMask::NONE.raw_bits(), 0);
+}
+
+#[test]
+#[deny(unreachable_patterns)]
+fn filter_identifier_matches_require_a_consumer_fallback() {
+    let id = FilterId::try_from(40_000).unwrap();
+    match id {
+        FilterId::Deflate
+        | FilterId::Shuffle
+        | FilterId::Fletcher32
+        | FilterId::Szip
+        | FilterId::Nbit
+        | FilterId::ScaleOffset
+        | FilterId::Lzf
+        | FilterId::Zfp
+        | FilterId::Custom(_) => assert_eq!(id.get(), 40_000),
+        _ => panic!("unexpected filter identifier: {id:?}"),
+    }
+}
+
+#[test]
+#[deny(unreachable_patterns)]
+fn filter_parameter_matches_require_a_consumer_fallback() {
+    let parameters = FilterParameters::Opaque;
+    match parameters {
+        FilterParameters::Deflate(_)
+        | FilterParameters::Shuffle(_)
+        | FilterParameters::Fletcher32
+        | FilterParameters::ScaleOffset(_)
+        | FilterParameters::Opaque
+        | FilterParameters::Pending => assert_eq!(parameters, FilterParameters::Opaque),
+        _ => panic!("unexpected filter parameters: {parameters:?}"),
+    }
+}
+
+#[rstest::rstest]
+#[case(FilterDisposition::Applied, (true, true))]
+#[case(FilterDisposition::BypassedRaw, (false, false))]
+#[case(FilterDisposition::Skipped, (true, false))]
+fn filter_dispositions_can_be_matched_exhaustively(
+    #[case] disposition: FilterDisposition,
+    #[case] expected: (bool, bool),
+) {
+    assert_eq!(
+        match disposition {
+            FilterDisposition::Applied => (true, true),
+            FilterDisposition::BypassedRaw => (false, false),
+            FilterDisposition::Skipped => (true, false),
+        },
+        expected
+    );
 }
