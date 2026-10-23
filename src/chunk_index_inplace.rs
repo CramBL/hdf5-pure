@@ -3279,7 +3279,8 @@ mod tests {
             .map(|chunk| {
                 let at = chunk.address.to_usize().unwrap();
                 let end = at + chunk.storage_size.to_usize().unwrap();
-                (chunk.offset, chunk.filter_mask, data[at..end].to_vec())
+                let filter_mask = chunk.filter_mask().raw_bits();
+                (chunk.offset, filter_mask, data[at..end].to_vec())
             })
             .collect()
     }

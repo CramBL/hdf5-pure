@@ -1,6 +1,8 @@
 //! The chunks an append or a chunked overwrite writes, encoded for the extent the write publishes
 //! and, in an in-place append, for the extent before it.
 
+use hdf5_pure_core::__private::PipelineFilterMask;
+
 use crate::chunked_read;
 use crate::chunked_read::ChunkDecoding;
 use crate::chunked_read::ChunkFiltering;
@@ -24,10 +26,11 @@ impl PreparedChunk {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::Internal`] if `logical` is not the size of a whole chunk of `ctx`,
-    /// or if `encoding` is [`ChunkEncoding::FiltersSkipped`] and `pipeline` has more than 32
-    /// filters. Returns the errors of [`chunked_read::bounded_chunk_len`] for the chunk size, and
-    /// of [`filters::compress_chunk_with`] for a filtered chunk.
+    /// Returns [`FormatError::Internal`] if `logical` is not the size of a whole chunk of `ctx`.
+    /// Returns [`FormatError::InvalidFilterPipelineField`] if `encoding` is
+    /// [`ChunkEncoding::FiltersSkipped`] and `pipeline` has more than 32 filters.
+    /// Returns the errors of [`chunked_read::bounded_chunk_len`] for the chunk size, and of
+    /// [`filters::compress_chunk_with`] for a filtered chunk.
     pub(crate) fn encode(
         scratch: &mut FilterScratch,
         pipeline: Option<&FilterPipeline>,
@@ -125,20 +128,12 @@ impl ChunkEncoding {
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::Internal`] if `pipeline` has more than 32 filters.
+/// Returns [`FormatError::InvalidFilterPipelineField`] if `pipeline` has more than 32 filters.
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_extarr
 fn every_filter_skipped(pipeline: Option<&FilterPipeline>) -> Result<u32, FormatError> {
-    let count = pipeline.map_or(0, |pipeline| pipeline.filters.len());
-    u32::try_from(count)
-        .ok()
-        .and_then(|count| 1_u64.checked_shl(count))
-        .and_then(|bit| u32::try_from(bit - 1).ok())
-        .ok_or_else(|| {
-            FormatError::Internal(format!(
-                "a filter mask cannot skip each filter of a {count}-filter pipeline"
-            ))
-        })
+    PipelineFilterMask::all_skipped(pipeline.map_or(0, |pipeline| pipeline.filters.len()))
+        .map(|mask| mask.recorded_mask().raw_bits())
 }
 
 #[cfg(test)]
@@ -174,12 +169,6 @@ mod tests {
     }
 
     #[rstest]
-    #[case::thirty_three_filters_skipped(
-        ChunkEncoding::FiltersSkipped,
-        shuffles(33),
-        16,
-        "a filter mask cannot skip each filter of a 33-filter pipeline"
-    )]
     #[case::short_raw_chunk(
         ChunkEncoding::Raw,
         shuffles(1),
@@ -192,7 +181,7 @@ mod tests {
         20,
         "a chunk prepared for storage holds 20 of its 16 logical bytes"
     )]
-    fn a_chunk_of_another_length_or_a_mask_past_32_filters_is_an_internal_error(
+    fn a_chunk_of_another_length_is_an_internal_error(
         #[case] encoding: ChunkEncoding,
         #[case] pipeline: FilterPipeline,
         #[case] logical_len: usize,
@@ -210,6 +199,26 @@ mod tests {
             panic!("expected Internal, got {err:?}");
         };
         assert_eq!(detail, reason);
+    }
+
+    #[test]
+    fn a_pipeline_larger_than_the_mask_is_rejected_before_storage() {
+        let error = PreparedChunk::encode(
+            &mut FilterScratch::new(),
+            Some(&shuffles(33)),
+            ChunkContext::basic(&[4], 4),
+            ChunkEncoding::FiltersSkipped,
+            vec![7; 16],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            FormatError::InvalidFilterPipelineField {
+                field: "filter count",
+                value: 33,
+                maximum: 32,
+            }
+        );
     }
 
     fn shuffles(count: usize) -> FilterPipeline {

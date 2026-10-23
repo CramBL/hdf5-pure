@@ -30,6 +30,8 @@ pub enum Error {
     },
     /// Reports malformed LZF input or output beyond the caller's size limit.
     InvalidLzfStream(&'static str),
+    /// Reports a pipeline whose filter count exceeds the mask's 32 positions.
+    Pipeline(FormatError),
     /// Reports invalid scale-offset parameters or input bytes.
     ScaleOffset(alloc::string::String),
     /// Reports a scale-offset element count that exceeds the platform's index width.
@@ -94,6 +96,7 @@ impl fmt::Display for Error {
                 write!(f, "deflate level {level} is outside 0..=9")
             }
             Self::InvalidLzfStream(reason) => write!(f, "lzf: {reason}"),
+            Self::Pipeline(error) => error.fmt(f),
             Self::ScaleOffset(reason) => write!(f, "filter error: {reason}"),
             Self::ScaleOffsetValueTooLargeForPlatform { value, target } => write!(
                 f,
@@ -134,6 +137,7 @@ impl std::error::Error for Error {}
 impl From<Error> for FormatError {
     fn from(error: Error) -> Self {
         match error {
+            Error::Pipeline(error) => error,
             Error::InvalidDeflateLevel { level } => Self::InvalidDeflateLevel { level },
             Error::InvalidLzfStream(reason) => Self::FilterError(format!("lzf: {reason}")),
             Error::ScaleOffset(reason) => Self::FilterError(reason),

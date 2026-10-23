@@ -9,6 +9,7 @@
 //! reference-C-library files in `crates/crosscheck/tests/main/layout_introspection.rs`.
 
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::FilterDisposition;
 use hdf5_pure::FilterId;
 use hdf5_pure::UserblockSize;
 use hdf5_pure::{ChunkIndex, Dataset, File, FileBuilder, Layout, MaxExtent};
@@ -90,7 +91,7 @@ fn chunked_single_chunk() {
     assert_eq!(chunks.len(), 1);
     assert_eq!(chunks[0].offset, vec![0]);
     assert_eq!(chunks[0].storage_size, 8 * 4, "unfiltered chunk byte size");
-    assert_eq!(chunks[0].filter_mask, 0);
+    assert_eq!(chunks[0].filter_mask().raw_bits(), 0);
     assert!(chunks[0].address != 0);
 }
 
@@ -124,7 +125,7 @@ fn chunked_fixed_array() {
     assert_eq!(sorted_offsets(&ds), vec![vec![0], vec![4]]);
     for c in &chunks {
         assert_eq!(c.storage_size, 4 * 4);
-        assert_eq!(c.filter_mask, 0);
+        assert_eq!(c.filter_mask().raw_bits(), 0);
         assert!(c.address != 0);
     }
     // Distinct chunk addresses.
@@ -242,7 +243,11 @@ fn deflate_pipeline_details() {
 
     for c in ds.chunks().unwrap() {
         assert!(c.storage_size > 0);
-        assert_eq!(c.filter_mask, 0, "all filters applied to every chunk");
+        assert_eq!(
+            c.filter_mask().raw_bits(),
+            0,
+            "all filters applied to every chunk"
+        );
     }
 }
 
@@ -336,4 +341,53 @@ fn layout_chunk_shape_agrees_with_chunk_shape_accessor() {
     };
     assert_eq!(Some(chunk_shape), ds.chunk_shape().unwrap());
     assert!(ds.is_chunked());
+}
+
+#[test]
+fn chunks_retain_their_own_pipeline_after_the_dataset_is_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pipelines.h5");
+    let mut builder = FileBuilder::new();
+    builder
+        .create_dataset("first")
+        .with_i32_data(&[1, 2, 3, 4])
+        .with_chunks(&[2])
+        .with_shuffle()
+        .with_fletcher32();
+    builder
+        .create_dataset("second")
+        .with_i32_data(&[1, 2, 3, 4])
+        .with_chunks(&[2])
+        .with_deflate(DeflateLevel::Six)
+        .with_fletcher32();
+    builder.write(&path).unwrap();
+    let (first, second) = {
+        let file = File::open(&path).unwrap();
+        (
+            file.dataset("first").unwrap().chunks().unwrap(),
+            file.dataset("second").unwrap().chunks().unwrap(),
+        )
+    };
+    let first_view = first[0].filters();
+    let second_view = second[0].filters();
+    assert_eq!(
+        first_view
+            .dispositions()
+            .map(|(filter, _)| filter.id)
+            .collect::<Vec<_>>(),
+        [FilterId::Shuffle, FilterId::Fletcher32]
+    );
+    assert_eq!(
+        second_view
+            .dispositions()
+            .map(|(filter, _)| filter.id)
+            .collect::<Vec<_>>(),
+        [FilterId::Deflate, FilterId::Fletcher32]
+    );
+    assert!(
+        first_view
+            .dispositions()
+            .all(|(_, state)| state == FilterDisposition::Applied)
+    );
+    assert_eq!(first_view.filter(2), None);
 }

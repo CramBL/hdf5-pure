@@ -4,7 +4,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::num::NonZeroU32;
 
+use hdf5_pure_core::__private::PipelineFilterMask;
 use hdf5_pure_core::DeflateLevel;
+#[cfg(test)]
+use hdf5_pure_core::FormatError;
 #[cfg(all(test, feature = "zfp"))]
 use hdf5_pure_core::ZfpRate;
 
@@ -355,6 +358,7 @@ struct PreparedZfpFilter {
 /// Returns [`Error::UnsupportedFilter`] if an active filter has no decoder.
 /// Returns [`Error::DataSizeMismatch`] if a representable, nonzero full chunk size differs from
 /// the decoded length.
+/// Returns [`Error::Pipeline`] if the pipeline contains more than 32 filters.
 /// A decoder may return another [`Error`] for malformed input or invalid parameters.
 pub fn decompress_chunk(
     compressed: &[u8],
@@ -373,13 +377,15 @@ pub fn decompress_chunk(
 
 /// Reverses the active filters on one stored chunk using reusable scratch state.
 ///
-/// Bit `i` of `filter_mask` skips the filter at index `i` in forward order.
+/// Bit `i` of `filter_mask` skips the filter at index `i` in forward order. Bits outside the
+/// pipeline are ignored.
 ///
 /// # Errors
 ///
 /// Returns [`Error::UnsupportedFilter`] if an active filter has no decoder.
 /// Returns [`Error::DataSizeMismatch`] if a representable, nonzero full chunk size differs from
 /// the decoded length.
+/// Returns [`Error::Pipeline`] if the pipeline contains more than 32 filters.
 /// A decoder may return another [`Error`] for malformed input or invalid parameters.
 pub fn decompress_chunk_with(
     scratch: &mut FilterScratch,
@@ -388,6 +394,7 @@ pub fn decompress_chunk_with(
     ctx: ChunkContext<'_>,
     filter_mask: u32,
 ) -> Result<Vec<u8>, Error> {
+    let pipeline = MaskedFilters::new(filters, filter_mask)?;
     // Even an edge chunk is stored at full chunk size. The size bounds decompression
     // and checks the decoded length when its nonzero byte count fits in usize.
     let expected = expected_chunk_len(&ctx);
@@ -396,26 +403,25 @@ pub fn decompress_chunk_with(
     // Filters are listed in application order. Decoding reverses them.
     // `i` is the filter's forward index and its bit position in `filter_mask`.
     // A set bit means the filter was skipped for this chunk.
-    for i in (0..filters.len()).rev() {
-        if i < 32 && (filter_mask >> i) & 1 == 1 {
+    for (i, skipped) in pipeline.mask.positions().rev() {
+        if skipped {
             continue;
         }
         let input: &[u8] = owned.as_deref().unwrap_or(compressed);
         let next = match filters.id(i) {
             FILTER_SHUFFLE => shuffle_decompress(input, ctx.element_size.get() as usize),
             FILTER_DEFLATE => {
-                let cap = inner_output_cap(scratch, expected, filters, filter_mask, i, ctx)?;
+                let cap = pipeline.inner_output_cap(scratch, expected, i, ctx)?;
                 deflate_decompress(scratch, input, cap)?
             }
-            FILTER_LZF => lzf::decompress(
-                input,
-                inner_output_cap(scratch, expected, filters, filter_mask, i, ctx)?,
-            )?,
+            FILTER_LZF => {
+                lzf::decompress(input, pipeline.inner_output_cap(scratch, expected, i, ctx)?)?
+            }
             FILTER_FLETCHER32 => fletcher32_verify(input)?,
             FILTER_SCALEOFFSET => scaleoffset::decompress(
                 input,
                 filters.client_data(i),
-                inner_output_cap(scratch, expected, filters, filter_mask, i, ctx)?,
+                pipeline.inner_output_cap(scratch, expected, i, ctx)?,
             )?,
             #[cfg(feature = "zfp")]
             FILTER_ZFP => scratch
@@ -451,61 +457,74 @@ fn expected_chunk_len(ctx: &ChunkContext<'_>) -> Option<usize> {
     usize::try_from(bytes).ok().filter(|&n| n != 0)
 }
 
-fn filter_max_forward_output(
-    scratch: &mut FilterScratch,
-    filters: &(impl FilterSteps + ?Sized),
-    index: usize,
-    in_size: usize,
-    ctx: ChunkContext<'_>,
-) -> Result<usize, Error> {
-    #[cfg(not(feature = "zfp"))]
-    let _ = (scratch, ctx);
+struct MaskedFilters<'a, F: FilterSteps + ?Sized> {
+    filters: &'a F,
+    mask: PipelineFilterMask,
+}
 
-    Ok(match filters.id(index) {
-        // Fletcher32 appends a 4-byte checksum.
-        FILTER_FLETCHER32 => in_size.saturating_add(4),
-        // A conforming LZF encoder may emit every byte as its own literal run
-        // (control byte + literal), so a stream is at most twice its decoded
-        // size. Matches are denser. Efficient encoders stay near in_size/32
-        // overhead, but the bound must admit any conforming stream.
-        FILTER_LZF => in_size.saturating_mul(2),
-        // Scale-offset writes a fixed header before the payload and, when the data does not pack
-        // smaller, stores it verbatim after that header.
-        FILTER_SCALEOFFSET => in_size.saturating_add(scaleoffset::HEADER_LEN),
-        // Deflate can slightly expand incompressible input (zlib "stored" blocks
-        // plus framing). The bound exceeds zlib's worst case.
-        FILTER_DEFLATE => in_size.saturating_add(in_size / 16).saturating_add(64),
-        #[cfg(feature = "zfp")]
-        // ZFP encodes full blocks even when the chunk ends with a partial block.
-        FILTER_ZFP => scratch
-            .zfp_settings(ctx, filters.client_data(index), index)?
-            .encoded_bytes(),
-        _ => in_size,
-    })
+impl<'a, F: FilterSteps + ?Sized> MaskedFilters<'a, F> {
+    fn new(filters: &'a F, bits: u32) -> Result<Self, Error> {
+        Ok(Self {
+            filters,
+            mask: PipelineFilterMask::from_raw_bits(bits, filters.len())
+                .map_err(Error::Pipeline)?,
+        })
+    }
+
+    fn inner_output_cap(
+        &self,
+        scratch: &mut FilterScratch,
+        expected: Option<usize>,
+        filter_index: usize,
+        ctx: ChunkContext<'_>,
+    ) -> Result<Option<usize>, Error> {
+        let Some(mut size) = expected else {
+            return Ok(None);
+        };
+        for (index, skipped) in self.mask.positions().take(filter_index) {
+            if !skipped {
+                size = self.max_forward_output(scratch, index, size, ctx)?;
+            }
+        }
+        Ok(Some(size))
+    }
+
+    fn max_forward_output(
+        &self,
+        scratch: &mut FilterScratch,
+        index: usize,
+        in_size: usize,
+        ctx: ChunkContext<'_>,
+    ) -> Result<usize, Error> {
+        #[cfg(not(feature = "zfp"))]
+        let _ = (scratch, ctx);
+
+        Ok(match self.filters.id(index) {
+            // Fletcher32 appends a 4-byte checksum.
+            FILTER_FLETCHER32 => in_size.saturating_add(4),
+            // A conforming LZF encoder may emit every byte as its own literal run
+            // (control byte + literal), so a stream is at most twice its decoded
+            // size. Matches are denser. Efficient encoders stay near in_size/32
+            // overhead, but the bound must admit any conforming stream.
+            FILTER_LZF => in_size.saturating_mul(2),
+            // Scale-offset writes a fixed header before the payload and, when the data does not pack
+            // smaller, stores it verbatim after that header.
+            FILTER_SCALEOFFSET => in_size.saturating_add(scaleoffset::HEADER_LEN),
+            // Deflate can slightly expand incompressible input (zlib "stored" blocks
+            // plus framing). The bound exceeds zlib's worst case.
+            FILTER_DEFLATE => in_size.saturating_add(in_size / 16).saturating_add(64),
+            #[cfg(feature = "zfp")]
+            // ZFP encodes full blocks even when the chunk ends with a partial block.
+            FILTER_ZFP => scratch
+                .zfp_settings(ctx, self.filters.client_data(index), index)?
+                .encoded_bytes(),
+            _ => in_size,
+        })
+    }
 }
 
 #[cfg(feature = "deflate")]
 const MAX_DEFLATE_EXPANSION: usize = 1032;
-
-fn inner_output_cap(
-    scratch: &mut FilterScratch,
-    expected: Option<usize>,
-    filters: &(impl FilterSteps + ?Sized),
-    filter_mask: u32,
-    filter_index: usize,
-    ctx: ChunkContext<'_>,
-) -> Result<Option<usize>, Error> {
-    let Some(mut size) = expected else {
-        return Ok(None);
-    };
-    for j in 0..filter_index {
-        if j < 32 && (filter_mask >> j) & 1 == 1 {
-            continue;
-        }
-        size = filter_max_forward_output(scratch, filters, j, size, ctx)?;
-    }
-    Ok(Some(size))
-}
 
 #[cfg(test)]
 fn compress_chunk(
@@ -522,6 +541,7 @@ fn compress_chunk(
 ///
 /// Returns [`Error::InvalidDeflateLevel`] if a Deflate parameter exceeds `9`.
 /// Returns [`Error::UnsupportedFilter`] if a filter has no encoder.
+/// Returns [`Error::Pipeline`] if the pipeline contains more than 32 filters.
 /// An encoder may return another [`Error`] for invalid parameters or input.
 pub fn compress_chunk_with(
     scratch: &mut FilterScratch,
@@ -529,8 +549,9 @@ pub fn compress_chunk_with(
     filters: &(impl FilterSteps + ?Sized),
     ctx: ChunkContext<'_>,
 ) -> Result<Vec<u8>, Error> {
+    let pipeline = MaskedFilters::new(filters, 0)?;
     let mut owned: Option<Vec<u8>> = None;
-    for i in 0..filters.len() {
+    for (i, _) in pipeline.mask.positions() {
         let input: &[u8] = owned.as_deref().unwrap_or(data);
         let next = match filters.id(i) {
             FILTER_SHUFFLE => shuffle_compress(input, ctx.element_size.get() as usize),
@@ -908,6 +929,50 @@ mod tests {
         let decompressed =
             deflate_decompress(&mut FilterScratch::new(), &compressed, None).unwrap();
         assert_eq!(decompressed, data);
+    }
+
+    #[rstest::rstest]
+    #[case::empty(0, 0)]
+    #[case::one(1, 1)]
+    #[case::two(2, 3)]
+    #[case::full(32, u32::MAX)]
+    fn every_skipped_filter_is_omitted_without_shifting_past_the_mask(
+        #[case] count: usize,
+        #[case] bits: u32,
+    ) {
+        let filters: Vec<_> = (0..count)
+            .map(|_| FilterDescription {
+                filter_id: 40000,
+                flags: H5Z_FLAG_OPTIONAL,
+                client_data: vec![7, 8],
+            })
+            .collect();
+        assert_eq!(
+            decompress_chunk(&[1, 2, 3, 4], &filters, ChunkContext::basic(&[4], 1), bits).unwrap(),
+            [1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn a_pipeline_larger_than_the_mask_is_rejected_by_both_directions() {
+        let filters: Vec<_> = (0..33)
+            .map(|_| FilterDescription {
+                filter_id: FILTER_SHUFFLE,
+                flags: 0,
+                client_data: vec![1],
+            })
+            .collect();
+        let expected = Error::Pipeline(FormatError::InvalidFilterPipelineField {
+            field: "filter count",
+            value: 33,
+            maximum: 32,
+        });
+        let ctx = ChunkContext::basic(&[4], 1);
+        assert_eq!(
+            decompress_chunk(&[1, 2, 3, 4], &filters, ctx, 0),
+            Err(expected.clone())
+        );
+        assert_eq!(compress_chunk(&[1, 2, 3, 4], &filters, ctx), Err(expected));
     }
 
     #[test]

@@ -29,6 +29,6 @@ fn fletcher32_then_shuffle_reads_c_created_chunk_with_remainder() {
     let chunks = dataset.chunks().unwrap();
     assert_eq!(chunks.len(), 1);
     assert_eq!(chunks[0].storage_size, 516);
-    assert_eq!(chunks[0].filter_mask, 0);
+    assert_eq!(chunks[0].filter_mask().raw_bits(), 0);
     assert_eq!(dataset.read_f64().unwrap(), data);
 }

@@ -197,6 +197,41 @@ let appendable = ds.is_chunked()
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
+[`Dataset::chunks`](crate::Dataset::chunks) retains each chunk's originating pipeline.
+Use [`Chunk::filters`](crate::Chunk::filters) to inspect applied, skipped, and raw-bypassed
+filters in application order. Skip bits refer to positions in that order, independently of
+filter identifiers. A partial edge chunk stored raw bypasses every filter even when its
+recorded mask is zero.
+
+```rust
+# let dir = tempfile::tempdir()?;
+# let path = dir.path().join("chunks.h5");
+# let mut builder = hdf5_pure::FileBuilder::new();
+# builder.create_dataset("samples").with_i32_data(&[1, 2, 3, 4])
+#     .with_chunks(&[2]).with_shuffle().with_fletcher32();
+# builder.write(&path)?;
+use hdf5_pure::{File, FilterDisposition};
+
+let dataset = File::open(&path)?.dataset("samples")?;
+for chunk in dataset.chunks()? {
+    for (filter, disposition) in chunk.filters().dispositions() {
+        match disposition {
+            FilterDisposition::Applied => println!("{:?} applied", filter.id),
+            FilterDisposition::Skipped => println!("{:?} skipped", filter.id),
+            FilterDisposition::BypassedRaw => println!("{:?} bypassed", filter.id),
+        }
+    }
+}
+# Ok::<(), hdf5_pure::Error>(())
+```
+
+[`ChunkFilterView::filter`](crate::ChunkFilterView::filter) returns `None` for a position
+outside the pipeline. [`Chunk::filter_mask`](crate::Chunk::filter_mask) and
+[`FilterMask::raw_bits`](crate::FilterMask::raw_bits) expose the recorded mask for low-level
+inspection. Bits outside the pipeline are preserved and ignored during decoding, and are
+available separately through
+[`ChunkFilterView::uninterpreted_bits`](crate::ChunkFilterView::uninterpreted_bits).
+
 ## Reading dataset data
 
 ### Typed reads

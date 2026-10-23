@@ -6,6 +6,8 @@ pub mod absence;
 pub mod aggregation;
 pub mod attr;
 #[cfg(feature = "__hdf5-1.10")]
+pub mod chunk_filter;
+#[cfg(feature = "__hdf5-1.10")]
 pub mod creation_order;
 pub mod dataset;
 pub mod dense_attr;

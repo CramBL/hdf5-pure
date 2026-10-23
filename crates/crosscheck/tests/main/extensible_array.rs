@@ -264,7 +264,7 @@ fn nondefault_geometry_round_trips_through_rust_append_and_c_mutation(
             (
                 indexed[slot].address,
                 indexed[slot].storage_size,
-                indexed[slot].filter_mask
+                indexed[slot].filter_mask().raw_bits()
             ),
             (address, size, mask)
         );

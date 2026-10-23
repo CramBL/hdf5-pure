@@ -5,6 +5,7 @@
 //! correctly. LZF is lossless, so every comparison is exact equality.
 
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::FilterDisposition;
 use hdf5_pure::FilterId;
 use hdf5_pure::{Error, File, FileBuilder, FormatError, RepackOptions};
 
@@ -288,6 +289,13 @@ fn reads_h5py_lzf_masked_chunk() {
     assert_eq!(ds.filters().unwrap(), vec![FilterId::Lzf]);
     let expected = std::fs::read(fixture("u8_noise.raw.bin")).unwrap();
     assert_eq!(ds.read_u8().unwrap(), expected);
+    let chunks = ds.chunks().unwrap();
+    assert_eq!(chunks.len(), 1);
+    let (filter, disposition) = chunks[0].filters().filter(0).unwrap();
+    assert_eq!(filter.id, FilterId::Lzf);
+    assert!(filter.is_optional);
+    assert_eq!(disposition, FilterDisposition::Skipped);
+    assert!(!chunks[0].filters().bypasses_pipeline());
 }
 
 /// A shuffle+lzf chain exactly as h5py writes it.

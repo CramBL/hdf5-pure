@@ -9,6 +9,8 @@ use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
+use hdf5_pure_core::__private::FILTER_COUNT_MAX;
+
 use crate::bytes;
 use crate::error::FormatError;
 
@@ -30,7 +32,6 @@ const VERSION_TWO_FILTER_FIELDS_SIZE: usize = 4;
 const VERSION_ONE_RESERVED_SIZE: usize = 6;
 const NAME_ALIGNMENT: usize = 8;
 const CLIENT_DATA_VALUE_SIZE: usize = 4;
-const FILTER_COUNT_MAX: usize = 32;
 const FIELD_LENGTH_MAX: usize = u16::MAX as usize;
 
 /// Description of a single filter in a pipeline.
