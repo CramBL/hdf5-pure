@@ -34,7 +34,7 @@ fn small_file_churn_plateaus_only_with_persistent_free_space(#[case] strategy: F
         builder.with_file_space_page_size(FileSpacePageSize::try_from(4_096).unwrap());
     }
     builder.write(&path).unwrap();
-    let mut file = session::open_bounded(&path).unwrap();
+    let mut file = session::open_bounded_on_close(&path).unwrap();
     for sequence in 0..LIVE_GROUPS {
         GroupSpec::new(sequence).write(&Context::new(&file, &path, strategy, 0));
     }
@@ -90,7 +90,7 @@ fn small_file_churn_plateaus_only_with_persistent_free_space(#[case] strategy: F
         reader
             .close()
             .unwrap_or_else(|error| panic!("close reader: {error:?}; {before_close}"));
-        file = session::open_bounded(&path)
+        file = session::open_bounded_on_close(&path)
             .unwrap_or_else(|error| panic!("reopen writer: {error:?}; {before_close}"));
         let context = Context::new(&file, &path, strategy, iteration);
         if strategy != FileSpaceStrategy::None {
