@@ -64,6 +64,7 @@ mod global_heap_liveness;
 mod global_heap_reads;
 mod hdf5;
 mod hdf5_release_feature;
+mod heap_allocations;
 mod layout_introspection;
 mod libver_matrix;
 mod libver_output;
