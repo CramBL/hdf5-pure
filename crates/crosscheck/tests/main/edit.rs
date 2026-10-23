@@ -13,10 +13,13 @@
 //! repointed, and the result is read back correctly by the C library.
 
 use hdf5::file::LibraryVersion;
+use hdf5_pure::ChunkIndex;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::SuperblockVersion;
 use hdf5_pure::{AttrValue, File, FileBuilder, MaxExtent, ScaleOffset};
 
+use rstest::rstest;
+use test_util_hdf5::numeric::ByteOrder;
 use test_util_hdf5::{absence, file, fixtures};
 
 /// Stage an add, an add-into-a-group, a delete, and a copy — the full op set.
@@ -2275,4 +2278,87 @@ fn appending_into_a_staged_contiguous_dataset_stays_c_readable() {
         vec![1.0, 2.0, 3.0, 4.0, 5.0],
         "and every element the fold appended"
     );
+}
+
+#[rstest]
+#[case::fixed(Some(8), ChunkIndex::FixedArray)]
+#[case::finite_maximum(Some(16), ChunkIndex::FixedArray)]
+#[case::unlimited(None, ChunkIndex::ExtensibleArray)]
+fn copied_chunked_geometry_preserves_stored_bytes_and_maximum_dimensions(
+    #[case] maximum: Option<usize>,
+    #[case] expected_index: ChunkIndex,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("chunked_geometry.h5");
+    let values: Vec<i32> = (0..64).collect();
+    {
+        let file = file::libhdf5_create_v110(&path);
+        file.new_dataset_builder()
+            .empty_as(ByteOrder::LittleEndian.i32_datatype())
+            .shape([hdf5::Extent::new(8, maximum), hdf5::Extent::fixed(8)])
+            .chunk([2, 4])
+            .shuffle()
+            .deflate(6)
+            .create("d")
+            .unwrap()
+            .write_raw(&values)
+            .unwrap();
+        file.close().unwrap();
+    }
+    {
+        let file = File::open_rw(&path).unwrap();
+        file.copy("d", "copy").unwrap();
+        file.commit().unwrap();
+    }
+    {
+        let file = hdf5::File::open(&path).unwrap();
+        let source = file.dataset("d").unwrap();
+        let copy = file.dataset("copy").unwrap();
+        assert_eq!(copy.shape(), [8, 8]);
+        assert_eq!(copy.chunk(), Some(vec![2, 4]));
+        assert_eq!(copy.space().unwrap().maxdims(), [maximum, Some(8)]);
+        assert_eq!(copy.read_raw::<i32>().unwrap(), values);
+        let image = std::fs::read(&path).unwrap();
+        assert_eq!(source.num_chunks(), Some(8));
+        assert_eq!(copy.num_chunks(), Some(8));
+        for index in 0..8 {
+            let source = source.chunk_info(index).unwrap();
+            let copy = copy.chunk_info(index).unwrap();
+            assert_eq!(copy.offset, source.offset);
+            assert_eq!(copy.size, source.size);
+            assert_eq!(copy.filter_mask, source.filter_mask);
+            let source_start = usize::try_from(source.addr).unwrap();
+            let copy_start = usize::try_from(copy.addr).unwrap();
+            let size = usize::try_from(source.size).unwrap();
+            assert_eq!(
+                image[copy_start..copy_start + size],
+                image[source_start..source_start + size],
+            );
+        }
+    }
+    {
+        let file = File::open(&path).unwrap();
+        assert_eq!(
+            file.dataset("copy").unwrap().chunk_index().unwrap(),
+            Some(expected_index)
+        );
+    }
+    let updated: Vec<i32> = values.iter().map(|value| value * 7919).collect();
+    {
+        let file = File::open_rw(&path).unwrap();
+        file.dataset("d")
+            .unwrap()
+            .write_staged(|dataset| {
+                dataset.with_i32_data(&updated).with_shape(&[8, 8]);
+            })
+            .unwrap();
+        file.commit().unwrap();
+    }
+    let file = hdf5::File::open(&path).unwrap();
+    let source = file.dataset("d").unwrap();
+    let copy = file.dataset("copy").unwrap();
+    assert_eq!(source.read_raw::<i32>().unwrap(), updated);
+    assert_eq!(copy.read_raw::<i32>().unwrap(), values);
+    assert_eq!(source.chunk(), Some(vec![2, 4]));
+    assert_eq!(source.space().unwrap().maxdims(), [maximum, Some(8)]);
 }

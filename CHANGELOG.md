@@ -69,6 +69,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed integer overflow and saturated chunk byte counts in `Dataset::write_staged` and related chunked edits when the uncompressed chunk size exceeds `u64::MAX`.
 - Fixed `Dataset::write_staged` rejecting the overwrite of a dataset whose object header holds more than one layout message, changing the dataset to the later layout, or writing values that a read of the dataset does not return.
 - Fixed `Dataset::datatype` and related metadata reads accepting reserved variable-length subtype codes, nonzero reserved bits, or string metadata on sequences.
 - Fixed `Dataset::append` overstating allocated Extensible Array blocks and element capacity for sparse chunk indexes, including indexes with uninitialized data-block pages.
