@@ -2,216 +2,485 @@
 source: crates/crosscheck/tests/main/file_space_oracle.rs
 expression: report
 ---
-checkpoint: Page/persist=true/page=4096/threshold=128/base=0/c_origin=false/created
-properties: rust=FreeSpaceManager { paged: true, persist: true, threshold: 128 } libhdf5=FreeSpaceManager { paged: true, persist: true, threshold: 128 } c_persist=true c_threshold=128 page=4096 base=0
-file: rust_eof=24576 libhdf5_filesize=24576 physical=24576 base=0
-free sections (base-relative address, length)
-  index  hdf5-pure                         libhdf5                           match
-  0      (0x2d2, 0xd2e)                    (0x2d2, 0xd2e)                    yes
-  1      (0x1320, 0xce0)                   (0x1320, 0xce0)                   yes
-free: rust_sections=2 c_sections=2 rust_bytes=6670 c_bytes=6670
-libhdf5_H5Fget_freespace=6670 difference_from_c_sections=0
-ownership (Rust): analysis_complete=true
-  userblock: sections=0 bytes=0
-  live_raw: sections=3 bytes=17184
-  live_metadata: sections=6 bytes=488
-  managers: sections=4 bytes=234
-  reusable: sections=2 bytes=6670
-  unclassified: sections=0 bytes=0
-  trailing_slack: sections=0 bytes=0
-exact_section_map_equal=true
+case:       Page/persist=true/page=4096/threshold=128/base=0/c_origin=false
+checkpoint: created
 
-checkpoint: Page/persist=true/page=4096/threshold=128/base=0/c_origin=false/rust-deletion
-properties: rust=FreeSpaceManager { paged: true, persist: true, threshold: 128 } libhdf5=FreeSpaceManager { paged: true, persist: true, threshold: 128 } c_persist=true c_threshold=128 page=4096 base=0
-file: rust_eof=12288 libhdf5_filesize=12288 physical=12288 base=0
-free sections (base-relative address, length)
-  index  hdf5-pure                         libhdf5                           match
-  0      (0x15c, 0x176)                    (0x15c, 0x176)                    yes
-  1      (0x5ee, 0xa12)                    (0x5ee, 0xa12)                    yes
-  2      (0x1320, 0xce0)                   (0x1320, 0xce0)                   yes
-  3      (0x2000, 0x1000)                  (0x2000, 0x1000)                  yes
-free: rust_sections=4 c_sections=4 rust_bytes=10344 c_bytes=10344
-libhdf5_H5Fget_freespace=10344 difference_from_c_sections=0
-ownership (Rust): analysis_complete=true
-  userblock: sections=0 bytes=0
-  live_raw: sections=2 bytes=800
-  live_metadata: sections=5 bytes=401
-  managers: sections=6 bytes=585
-  reusable: sections=3 bytes=10344
-  unclassified: sections=2 bytes=158
-  trailing_slack: sections=0 bytes=0
-exact_section_map_equal=true
+file-space properties
+  property                          hdf5-pure        libhdf5
+  strategy                               PAGE           PAGE
+  persistence                            true           true
+  threshold (bytes)                       128            128
+  page size (bytes)                      4096           4096
+  base / userblock (bytes)                  0              0
 
-checkpoint: Page/persist=true/page=4096/threshold=128/base=0/c_origin=false/rust-reuse-0
-properties: rust=FreeSpaceManager { paged: true, persist: true, threshold: 128 } libhdf5=FreeSpaceManager { paged: true, persist: true, threshold: 128 } c_persist=true c_threshold=128 page=4096 base=0
-file: rust_eof=24576 libhdf5_filesize=24576 physical=24576 base=0
-free sections (base-relative address, length)
-  index  hdf5-pure                         libhdf5                           match
-  0      (0x204, 0x3ea)                    (0x204, 0x3ea)                    yes
-  1      (0x8c3, 0x73d)                    (0x8c3, 0x73d)                    yes
-  2      (0x1320, 0xce0)                   (0x1320, 0xce0)                   yes
-  3      (0x2000, 0x1000)                  (0x2000, 0x1000)                  yes
-  4      (0x5ee0, 0x120)                   (0x5ee0, 0x120)                   yes
-free: rust_sections=5 c_sections=5 rust_bytes=10535 c_bytes=10535
-libhdf5_H5Fget_freespace=10535 difference_from_c_sections=0
-ownership (Rust): analysis_complete=true
-  userblock: sections=0 bytes=0
-  live_raw: sections=3 bytes=12800
-  live_metadata: sections=6 bytes=498
-  managers: sections=6 bytes=585
-  reusable: sections=4 bytes=10535
-  unclassified: sections=2 bytes=158
-  trailing_slack: sections=0 bytes=0
-exact_section_map_equal=true
+file sizes (absolute bytes)
+  measurement                           bytes
+  hdf5-pure stored EOF                  24576
+  libhdf5 H5Fget_filesize               24576
+  physical file                         24576
 
-checkpoint: Page/persist=true/page=4096/threshold=128/base=0/c_origin=false/manager-rewrite-0
-properties: rust=FreeSpaceManager { paged: true, persist: true, threshold: 128 } libhdf5=FreeSpaceManager { paged: true, persist: true, threshold: 128 } c_persist=true c_threshold=128 page=4096 base=0
-file: rust_eof=12288 libhdf5_filesize=12288 physical=12288 base=0
-free sections (base-relative address, length)
-  index  hdf5-pure                         libhdf5                           match
-  0      (0x568, 0xa98)                    (0x568, 0xa98)                    yes
-  1      (0x1320, 0xce0)                   (0x1320, 0xce0)                   yes
-  2      (0x2000, 0x1000)                  (0x2000, 0x1000)                  yes
-free: rust_sections=3 c_sections=3 rust_bytes=10104 c_bytes=10104
-libhdf5_H5Fget_freespace=10104 difference_from_c_sections=0
-ownership (Rust): analysis_complete=true
-  userblock: sections=0 bytes=0
-  live_raw: sections=2 bytes=800
-  live_metadata: sections=5 bytes=401
-  managers: sections=6 bytes=657
-  reusable: sections=2 bytes=10104
-  unclassified: sections=3 bytes=326
-  trailing_slack: sections=0 bytes=0
-exact_section_map_equal=true
+free-space sections (stored addresses, byte lengths)
+  index |        hdf5-pure         |         libhdf5          | match
+        |     address      length  |     address      length  |
+  ------+--------------------------+--------------------------+------
+      0 | (0x000002d2, 0x00000d2e) | (0x000002d2, 0x00000d2e) | yes
+      1 | (0x00001320, 0x00000ce0) | (0x00001320, 0x00000ce0) | yes
 
-checkpoint: Page/persist=true/page=4096/threshold=128/base=0/c_origin=false/rust-reuse-1
-properties: rust=FreeSpaceManager { paged: true, persist: true, threshold: 128 } libhdf5=FreeSpaceManager { paged: true, persist: true, threshold: 128 } c_persist=true c_threshold=128 page=4096 base=0
-file: rust_eof=28672 libhdf5_filesize=28672 physical=28672 base=0
-free sections (base-relative address, length)
-  index  hdf5-pure                         libhdf5                           match
-  0      (0x204, 0x364)                    (0x204, 0x364)                    yes
-  1      (0x8d3, 0x72d)                    (0x8d3, 0x72d)                    yes
-  2      (0x1320, 0xce0)                   (0x1320, 0xce0)                   yes
-  3      (0x2000, 0x1000)                  (0x2000, 0x1000)                  yes
-  4      (0x6070, 0xf90)                   (0x6070, 0xf90)                   yes
-free: rust_sections=5 c_sections=5 rust_bytes=14081 c_bytes=14081
-libhdf5_H5Fget_freespace=14081 difference_from_c_sections=0
-ownership (Rust): analysis_complete=true
-  userblock: sections=0 bytes=0
-  live_raw: sections=3 bytes=13200
-  live_metadata: sections=6 bytes=498
-  managers: sections=6 bytes=567
-  reusable: sections=4 bytes=14081
-  unclassified: sections=3 bytes=326
-  trailing_slack: sections=0 bytes=0
-exact_section_map_equal=true
+free-space totals
+  measurement                       hdf5-pure        libhdf5
+  section count                             2              2
+  section bytes                          6670           6670
+  H5Fget_freespace                          -           6670
+  reported - section bytes                  -              0
 
-checkpoint: Page/persist=true/page=4096/threshold=128/base=0/c_origin=false/manager-rewrite-1
-properties: rust=FreeSpaceManager { paged: true, persist: true, threshold: 128 } libhdf5=FreeSpaceManager { paged: true, persist: true, threshold: 128 } c_persist=true c_threshold=128 page=4096 base=0
-file: rust_eof=12288 libhdf5_filesize=12288 physical=12288 base=0
-free sections (base-relative address, length)
-  index  hdf5-pure                         libhdf5                           match
-  0      (0x24b, 0x688)                    (0x24b, 0x688)                    yes
-  1      (0xc02, 0x3fe)                    (0xc02, 0x3fe)                    yes
-  2      (0x1320, 0xce0)                   (0x1320, 0xce0)                   yes
-  3      (0x2000, 0x1000)                  (0x2000, 0x1000)                  yes
-free: rust_sections=4 c_sections=4 rust_bytes=10086 c_bytes=10086
-libhdf5_H5Fget_freespace=10086 difference_from_c_sections=0
-ownership (Rust): analysis_complete=true
-  userblock: sections=0 bytes=0
-  live_raw: sections=2 bytes=800
-  live_metadata: sections=5 bytes=401
-  managers: sections=6 bytes=675
-  reusable: sections=3 bytes=10086
-  unclassified: sections=3 bytes=326
-  trailing_slack: sections=0 bytes=0
-exact_section_map_equal=true
+ownership (Rust)
+  analysis complete: true
 
-checkpoint: Page/persist=true/page=4096/threshold=128/base=0/c_origin=false/rust-reuse-2
-properties: rust=FreeSpaceManager { paged: true, persist: true, threshold: 128 } libhdf5=FreeSpaceManager { paged: true, persist: true, threshold: 128 } c_persist=true c_threshold=128 page=4096 base=0
-file: rust_eof=28672 libhdf5_filesize=28672 physical=28672 base=0
-free sections (base-relative address, length)
-  index  hdf5-pure                         libhdf5                           match
-  0      (0x204, 0x9fe)                    (0x204, 0x9fe)                    yes
-  1      (0xf7f, 0x81)                     (0xf7f, 0x81)                     yes
-  2      (0x1320, 0xce0)                   (0x1320, 0xce0)                   yes
-  3      (0x2000, 0x1000)                  (0x2000, 0x1000)                  yes
-  4      (0x6200, 0xe00)                   (0x6200, 0xe00)                   yes
-free: rust_sections=5 c_sections=5 rust_bytes=13663 c_bytes=13663
-libhdf5_H5Fget_freespace=13663 difference_from_c_sections=0
-ownership (Rust): analysis_complete=true
-  userblock: sections=0 bytes=0
-  live_raw: sections=3 bytes=13600
-  live_metadata: sections=6 bytes=498
-  managers: sections=6 bytes=585
-  reusable: sections=4 bytes=13663
-  unclassified: sections=3 bytes=326
-  trailing_slack: sections=0 bytes=0
-exact_section_map_equal=true
+  category                           sections          bytes
+  userblock                                 0              0
+  live raw data                             3          17184
+  live metadata                             6            488
+  free-space managers                       4            234
+  reusable free space                       2           6670
+  unclassified                              0              0
+  trailing slack                            0              0
 
-checkpoint: Page/persist=true/page=4096/threshold=128/base=0/c_origin=false/manager-rewrite-2
-properties: rust=FreeSpaceManager { paged: true, persist: true, threshold: 128 } libhdf5=FreeSpaceManager { paged: true, persist: true, threshold: 128 } c_persist=true c_threshold=128 page=4096 base=0
-file: rust_eof=12288 libhdf5_filesize=12288 physical=12288 base=0
-free sections (base-relative address, length)
-  index  hdf5-pure                         libhdf5                           match
-  0      (0x533, 0xa4c)                    (0x533, 0xa4c)                    yes
-  1      (0xfc6, 0x3a)                     (0xfc6, 0x3a)                     yes
-  2      (0x1320, 0xce0)                   (0x1320, 0xce0)                   yes
-  3      (0x2000, 0x1000)                  (0x2000, 0x1000)                  yes
-free: rust_sections=4 c_sections=4 rust_bytes=10086 c_bytes=10086
-libhdf5_H5Fget_freespace=10086 difference_from_c_sections=0
-ownership (Rust): analysis_complete=true
-  userblock: sections=0 bytes=0
-  live_raw: sections=2 bytes=800
-  live_metadata: sections=5 bytes=401
-  managers: sections=6 bytes=675
-  reusable: sections=3 bytes=10086
-  unclassified: sections=3 bytes=326
-  trailing_slack: sections=0 bytes=0
-exact_section_map_equal=true
+exact section map equal: true
 
-checkpoint: Page/persist=true/page=4096/threshold=128/base=0/c_origin=false/c-reuse
-properties: rust=FreeSpaceManager { paged: true, persist: true, threshold: 128 } libhdf5=FreeSpaceManager { paged: true, persist: true, threshold: 128 } c_persist=true c_threshold=128 page=4096 base=0
-file: rust_eof=24576 libhdf5_filesize=24576 physical=24576 base=0
-free sections (base-relative address, length)
-  index  hdf5-pure                         libhdf5                           match
-  0      (0x287, 0x9)                      (0x287, 0x9)                      yes
-  1      (0x512, 0x21)                     (0x512, 0x21)                     yes
-  2      (0x674, 0x90b)                    (0x674, 0x90b)                    yes
-  3      (0xffe, 0x2)                      (0xffe, 0x2)                      yes
-  4      (0x1320, 0xce0)                   (0x1320, 0xce0)                   yes
-  5      (0x2000, 0x1000)                  (0x2000, 0x1000)                  yes
-  6      (0x5ee0, 0x120)                   (0x5ee0, 0x120)                   yes
-free: rust_sections=7 c_sections=7 rust_bytes=10039 c_bytes=10039
-libhdf5_H5Fget_freespace=10039 difference_from_c_sections=0
-ownership (Rust): analysis_complete=true
-  userblock: sections=0 bytes=0
-  live_raw: sections=3 bytes=12800
-  live_metadata: sections=7 bytes=736
-  managers: sections=6 bytes=423
-  reusable: sections=5 bytes=9751
-  unclassified: sections=5 bytes=866
-  trailing_slack: sections=0 bytes=0
-exact_section_map_equal=true
 
-checkpoint: Page/persist=true/page=4096/threshold=128/base=0/c_origin=false/c-delete
-properties: rust=FreeSpaceManager { paged: true, persist: true, threshold: 128 } libhdf5=FreeSpaceManager { paged: true, persist: true, threshold: 128 } c_persist=true c_threshold=128 page=4096 base=0
-file: rust_eof=8192 libhdf5_filesize=8192 physical=8192 base=0
-free sections (base-relative address, length)
-  index  hdf5-pure                         libhdf5                           match
-  0      (0x28d, 0x3)                      (0x28d, 0x3)                      yes
-  1      (0x40f, 0x6)                      (0x40f, 0x6)                      yes
-  2      (0x56b, 0xa14)                    (0x56b, 0xa14)                    yes
-  3      (0xffe, 0x2)                      (0xffe, 0x2)                      yes
-  4      (0x1320, 0xce0)                   (0x1320, 0xce0)                   yes
-free: rust_sections=5 c_sections=5 rust_bytes=5887 c_bytes=5887
-libhdf5_H5Fget_freespace=5887 difference_from_c_sections=0
-ownership (Rust): analysis_complete=true
-  userblock: sections=0 bytes=0
-  live_raw: sections=2 bytes=800
-  live_metadata: sections=6 bytes=468
-  managers: sections=4 bytes=288
-  reusable: sections=5 bytes=5887
-  unclassified: sections=5 bytes=749
-  trailing_slack: sections=0 bytes=0
-exact_section_map_equal=true
+case:       Page/persist=true/page=4096/threshold=128/base=0/c_origin=false
+checkpoint: rust-deletion
+
+file-space properties
+  property                          hdf5-pure        libhdf5
+  strategy                               PAGE           PAGE
+  persistence                            true           true
+  threshold (bytes)                       128            128
+  page size (bytes)                      4096           4096
+  base / userblock (bytes)                  0              0
+
+file sizes (absolute bytes)
+  measurement                           bytes
+  hdf5-pure stored EOF                  12288
+  libhdf5 H5Fget_filesize               12288
+  physical file                         12288
+
+free-space sections (stored addresses, byte lengths)
+  index |        hdf5-pure         |         libhdf5          | match
+        |     address      length  |     address      length  |
+  ------+--------------------------+--------------------------+------
+      0 | (0x0000015c, 0x00000176) | (0x0000015c, 0x00000176) | yes
+      1 | (0x000005ee, 0x00000a12) | (0x000005ee, 0x00000a12) | yes
+      2 | (0x00001320, 0x00000ce0) | (0x00001320, 0x00000ce0) | yes
+      3 | (0x00002000, 0x00001000) | (0x00002000, 0x00001000) | yes
+
+free-space totals
+  measurement                       hdf5-pure        libhdf5
+  section count                             4              4
+  section bytes                         10344          10344
+  H5Fget_freespace                          -          10344
+  reported - section bytes                  -              0
+
+ownership (Rust)
+  analysis complete: true
+
+  category                           sections          bytes
+  userblock                                 0              0
+  live raw data                             2            800
+  live metadata                             5            401
+  free-space managers                       6            585
+  reusable free space                       3          10344
+  unclassified                              2            158
+  trailing slack                            0              0
+
+exact section map equal: true
+
+
+case:       Page/persist=true/page=4096/threshold=128/base=0/c_origin=false
+checkpoint: rust-reuse-0
+
+file-space properties
+  property                          hdf5-pure        libhdf5
+  strategy                               PAGE           PAGE
+  persistence                            true           true
+  threshold (bytes)                       128            128
+  page size (bytes)                      4096           4096
+  base / userblock (bytes)                  0              0
+
+file sizes (absolute bytes)
+  measurement                           bytes
+  hdf5-pure stored EOF                  24576
+  libhdf5 H5Fget_filesize               24576
+  physical file                         24576
+
+free-space sections (stored addresses, byte lengths)
+  index |        hdf5-pure         |         libhdf5          | match
+        |     address      length  |     address      length  |
+  ------+--------------------------+--------------------------+------
+      0 | (0x00000204, 0x000003ea) | (0x00000204, 0x000003ea) | yes
+      1 | (0x000008c3, 0x0000073d) | (0x000008c3, 0x0000073d) | yes
+      2 | (0x00001320, 0x00000ce0) | (0x00001320, 0x00000ce0) | yes
+      3 | (0x00002000, 0x00001000) | (0x00002000, 0x00001000) | yes
+      4 | (0x00005ee0, 0x00000120) | (0x00005ee0, 0x00000120) | yes
+
+free-space totals
+  measurement                       hdf5-pure        libhdf5
+  section count                             5              5
+  section bytes                         10535          10535
+  H5Fget_freespace                          -          10535
+  reported - section bytes                  -              0
+
+ownership (Rust)
+  analysis complete: true
+
+  category                           sections          bytes
+  userblock                                 0              0
+  live raw data                             3          12800
+  live metadata                             6            498
+  free-space managers                       6            585
+  reusable free space                       4          10535
+  unclassified                              2            158
+  trailing slack                            0              0
+
+exact section map equal: true
+
+
+case:       Page/persist=true/page=4096/threshold=128/base=0/c_origin=false
+checkpoint: manager-rewrite-0
+
+file-space properties
+  property                          hdf5-pure        libhdf5
+  strategy                               PAGE           PAGE
+  persistence                            true           true
+  threshold (bytes)                       128            128
+  page size (bytes)                      4096           4096
+  base / userblock (bytes)                  0              0
+
+file sizes (absolute bytes)
+  measurement                           bytes
+  hdf5-pure stored EOF                  12288
+  libhdf5 H5Fget_filesize               12288
+  physical file                         12288
+
+free-space sections (stored addresses, byte lengths)
+  index |        hdf5-pure         |         libhdf5          | match
+        |     address      length  |     address      length  |
+  ------+--------------------------+--------------------------+------
+      0 | (0x00000568, 0x00000a98) | (0x00000568, 0x00000a98) | yes
+      1 | (0x00001320, 0x00000ce0) | (0x00001320, 0x00000ce0) | yes
+      2 | (0x00002000, 0x00001000) | (0x00002000, 0x00001000) | yes
+
+free-space totals
+  measurement                       hdf5-pure        libhdf5
+  section count                             3              3
+  section bytes                         10104          10104
+  H5Fget_freespace                          -          10104
+  reported - section bytes                  -              0
+
+ownership (Rust)
+  analysis complete: true
+
+  category                           sections          bytes
+  userblock                                 0              0
+  live raw data                             2            800
+  live metadata                             5            401
+  free-space managers                       6            657
+  reusable free space                       2          10104
+  unclassified                              3            326
+  trailing slack                            0              0
+
+exact section map equal: true
+
+
+case:       Page/persist=true/page=4096/threshold=128/base=0/c_origin=false
+checkpoint: rust-reuse-1
+
+file-space properties
+  property                          hdf5-pure        libhdf5
+  strategy                               PAGE           PAGE
+  persistence                            true           true
+  threshold (bytes)                       128            128
+  page size (bytes)                      4096           4096
+  base / userblock (bytes)                  0              0
+
+file sizes (absolute bytes)
+  measurement                           bytes
+  hdf5-pure stored EOF                  28672
+  libhdf5 H5Fget_filesize               28672
+  physical file                         28672
+
+free-space sections (stored addresses, byte lengths)
+  index |        hdf5-pure         |         libhdf5          | match
+        |     address      length  |     address      length  |
+  ------+--------------------------+--------------------------+------
+      0 | (0x00000204, 0x00000364) | (0x00000204, 0x00000364) | yes
+      1 | (0x000008d3, 0x0000072d) | (0x000008d3, 0x0000072d) | yes
+      2 | (0x00001320, 0x00000ce0) | (0x00001320, 0x00000ce0) | yes
+      3 | (0x00002000, 0x00001000) | (0x00002000, 0x00001000) | yes
+      4 | (0x00006070, 0x00000f90) | (0x00006070, 0x00000f90) | yes
+
+free-space totals
+  measurement                       hdf5-pure        libhdf5
+  section count                             5              5
+  section bytes                         14081          14081
+  H5Fget_freespace                          -          14081
+  reported - section bytes                  -              0
+
+ownership (Rust)
+  analysis complete: true
+
+  category                           sections          bytes
+  userblock                                 0              0
+  live raw data                             3          13200
+  live metadata                             6            498
+  free-space managers                       6            567
+  reusable free space                       4          14081
+  unclassified                              3            326
+  trailing slack                            0              0
+
+exact section map equal: true
+
+
+case:       Page/persist=true/page=4096/threshold=128/base=0/c_origin=false
+checkpoint: manager-rewrite-1
+
+file-space properties
+  property                          hdf5-pure        libhdf5
+  strategy                               PAGE           PAGE
+  persistence                            true           true
+  threshold (bytes)                       128            128
+  page size (bytes)                      4096           4096
+  base / userblock (bytes)                  0              0
+
+file sizes (absolute bytes)
+  measurement                           bytes
+  hdf5-pure stored EOF                  12288
+  libhdf5 H5Fget_filesize               12288
+  physical file                         12288
+
+free-space sections (stored addresses, byte lengths)
+  index |        hdf5-pure         |         libhdf5          | match
+        |     address      length  |     address      length  |
+  ------+--------------------------+--------------------------+------
+      0 | (0x0000024b, 0x00000688) | (0x0000024b, 0x00000688) | yes
+      1 | (0x00000c02, 0x000003fe) | (0x00000c02, 0x000003fe) | yes
+      2 | (0x00001320, 0x00000ce0) | (0x00001320, 0x00000ce0) | yes
+      3 | (0x00002000, 0x00001000) | (0x00002000, 0x00001000) | yes
+
+free-space totals
+  measurement                       hdf5-pure        libhdf5
+  section count                             4              4
+  section bytes                         10086          10086
+  H5Fget_freespace                          -          10086
+  reported - section bytes                  -              0
+
+ownership (Rust)
+  analysis complete: true
+
+  category                           sections          bytes
+  userblock                                 0              0
+  live raw data                             2            800
+  live metadata                             5            401
+  free-space managers                       6            675
+  reusable free space                       3          10086
+  unclassified                              3            326
+  trailing slack                            0              0
+
+exact section map equal: true
+
+
+case:       Page/persist=true/page=4096/threshold=128/base=0/c_origin=false
+checkpoint: rust-reuse-2
+
+file-space properties
+  property                          hdf5-pure        libhdf5
+  strategy                               PAGE           PAGE
+  persistence                            true           true
+  threshold (bytes)                       128            128
+  page size (bytes)                      4096           4096
+  base / userblock (bytes)                  0              0
+
+file sizes (absolute bytes)
+  measurement                           bytes
+  hdf5-pure stored EOF                  28672
+  libhdf5 H5Fget_filesize               28672
+  physical file                         28672
+
+free-space sections (stored addresses, byte lengths)
+  index |        hdf5-pure         |         libhdf5          | match
+        |     address      length  |     address      length  |
+  ------+--------------------------+--------------------------+------
+      0 | (0x00000204, 0x000009fe) | (0x00000204, 0x000009fe) | yes
+      1 | (0x00000f7f, 0x00000081) | (0x00000f7f, 0x00000081) | yes
+      2 | (0x00001320, 0x00000ce0) | (0x00001320, 0x00000ce0) | yes
+      3 | (0x00002000, 0x00001000) | (0x00002000, 0x00001000) | yes
+      4 | (0x00006200, 0x00000e00) | (0x00006200, 0x00000e00) | yes
+
+free-space totals
+  measurement                       hdf5-pure        libhdf5
+  section count                             5              5
+  section bytes                         13663          13663
+  H5Fget_freespace                          -          13663
+  reported - section bytes                  -              0
+
+ownership (Rust)
+  analysis complete: true
+
+  category                           sections          bytes
+  userblock                                 0              0
+  live raw data                             3          13600
+  live metadata                             6            498
+  free-space managers                       6            585
+  reusable free space                       4          13663
+  unclassified                              3            326
+  trailing slack                            0              0
+
+exact section map equal: true
+
+
+case:       Page/persist=true/page=4096/threshold=128/base=0/c_origin=false
+checkpoint: manager-rewrite-2
+
+file-space properties
+  property                          hdf5-pure        libhdf5
+  strategy                               PAGE           PAGE
+  persistence                            true           true
+  threshold (bytes)                       128            128
+  page size (bytes)                      4096           4096
+  base / userblock (bytes)                  0              0
+
+file sizes (absolute bytes)
+  measurement                           bytes
+  hdf5-pure stored EOF                  12288
+  libhdf5 H5Fget_filesize               12288
+  physical file                         12288
+
+free-space sections (stored addresses, byte lengths)
+  index |        hdf5-pure         |         libhdf5          | match
+        |     address      length  |     address      length  |
+  ------+--------------------------+--------------------------+------
+      0 | (0x00000533, 0x00000a4c) | (0x00000533, 0x00000a4c) | yes
+      1 | (0x00000fc6, 0x0000003a) | (0x00000fc6, 0x0000003a) | yes
+      2 | (0x00001320, 0x00000ce0) | (0x00001320, 0x00000ce0) | yes
+      3 | (0x00002000, 0x00001000) | (0x00002000, 0x00001000) | yes
+
+free-space totals
+  measurement                       hdf5-pure        libhdf5
+  section count                             4              4
+  section bytes                         10086          10086
+  H5Fget_freespace                          -          10086
+  reported - section bytes                  -              0
+
+ownership (Rust)
+  analysis complete: true
+
+  category                           sections          bytes
+  userblock                                 0              0
+  live raw data                             2            800
+  live metadata                             5            401
+  free-space managers                       6            675
+  reusable free space                       3          10086
+  unclassified                              3            326
+  trailing slack                            0              0
+
+exact section map equal: true
+
+
+case:       Page/persist=true/page=4096/threshold=128/base=0/c_origin=false
+checkpoint: c-reuse
+
+file-space properties
+  property                          hdf5-pure        libhdf5
+  strategy                               PAGE           PAGE
+  persistence                            true           true
+  threshold (bytes)                       128            128
+  page size (bytes)                      4096           4096
+  base / userblock (bytes)                  0              0
+
+file sizes (absolute bytes)
+  measurement                           bytes
+  hdf5-pure stored EOF                  24576
+  libhdf5 H5Fget_filesize               24576
+  physical file                         24576
+
+free-space sections (stored addresses, byte lengths)
+  index |        hdf5-pure         |         libhdf5          | match
+        |     address      length  |     address      length  |
+  ------+--------------------------+--------------------------+------
+      0 | (0x00000287, 0x00000009) | (0x00000287, 0x00000009) | yes
+      1 | (0x00000512, 0x00000021) | (0x00000512, 0x00000021) | yes
+      2 | (0x00000674, 0x0000090b) | (0x00000674, 0x0000090b) | yes
+      3 | (0x00000ffe, 0x00000002) | (0x00000ffe, 0x00000002) | yes
+      4 | (0x00001320, 0x00000ce0) | (0x00001320, 0x00000ce0) | yes
+      5 | (0x00002000, 0x00001000) | (0x00002000, 0x00001000) | yes
+      6 | (0x00005ee0, 0x00000120) | (0x00005ee0, 0x00000120) | yes
+
+free-space totals
+  measurement                       hdf5-pure        libhdf5
+  section count                             7              7
+  section bytes                         10039          10039
+  H5Fget_freespace                          -          10039
+  reported - section bytes                  -              0
+
+ownership (Rust)
+  analysis complete: true
+
+  category                           sections          bytes
+  userblock                                 0              0
+  live raw data                             3          12800
+  live metadata                             7            736
+  free-space managers                       6            423
+  reusable free space                       5           9751
+  unclassified                              5            866
+  trailing slack                            0              0
+
+exact section map equal: true
+
+
+case:       Page/persist=true/page=4096/threshold=128/base=0/c_origin=false
+checkpoint: c-delete
+
+file-space properties
+  property                          hdf5-pure        libhdf5
+  strategy                               PAGE           PAGE
+  persistence                            true           true
+  threshold (bytes)                       128            128
+  page size (bytes)                      4096           4096
+  base / userblock (bytes)                  0              0
+
+file sizes (absolute bytes)
+  measurement                           bytes
+  hdf5-pure stored EOF                   8192
+  libhdf5 H5Fget_filesize                8192
+  physical file                          8192
+
+free-space sections (stored addresses, byte lengths)
+  index |        hdf5-pure         |         libhdf5          | match
+        |     address      length  |     address      length  |
+  ------+--------------------------+--------------------------+------
+      0 | (0x0000028d, 0x00000003) | (0x0000028d, 0x00000003) | yes
+      1 | (0x0000040f, 0x00000006) | (0x0000040f, 0x00000006) | yes
+      2 | (0x0000056b, 0x00000a14) | (0x0000056b, 0x00000a14) | yes
+      3 | (0x00000ffe, 0x00000002) | (0x00000ffe, 0x00000002) | yes
+      4 | (0x00001320, 0x00000ce0) | (0x00001320, 0x00000ce0) | yes
+
+free-space totals
+  measurement                       hdf5-pure        libhdf5
+  section count                             5              5
+  section bytes                          5887           5887
+  H5Fget_freespace                          -           5887
+  reported - section bytes                  -              0
+
+ownership (Rust)
+  analysis complete: true
+
+  category                           sections          bytes
+  userblock                                 0              0
+  live raw data                             2            800
+  live metadata                             6            468
+  free-space managers                       4            288
+  reusable free space                       5           5887
+  unclassified                              5            749
+  trailing slack                            0              0
+
+exact section map equal: true

@@ -6,6 +6,7 @@
 //! classified only by Rust's [`File::__space_ownership`] diagnostic.
 
 use std::collections::BTreeSet;
+use std::fmt::Display;
 use std::fs;
 use std::path::Path;
 
@@ -171,9 +172,36 @@ impl FreeSpaceOracleCheckpoint {
                 ),
             });
         }
-        let properties = format!(
-            "rust={expected:?} libhdf5={c_strategy:?} c_persist={c_persist} c_threshold={c_threshold} page={page} base={base}"
-        );
+        let mut properties = String::from("file-space properties\n");
+        for row in [
+            paired_row("property", "hdf5-pure", "libhdf5"),
+            paired_row(
+                "strategy",
+                strategy_name(&expected),
+                strategy_name(&c_strategy),
+            ),
+            paired_row(
+                "persistence",
+                info.as_ref().is_some_and(|i| i.persist),
+                c_persist,
+            ),
+            paired_row(
+                "threshold (bytes)",
+                info.as_ref().map_or(DEFAULT_THRESHOLD, |i| i.threshold),
+                c_threshold,
+            ),
+            paired_row(
+                "page size (bytes)",
+                info.as_ref().map_or_else(
+                    || "not stored".to_owned(),
+                    |i| i.page_size.get().to_string(),
+                ),
+                page,
+            ),
+            paired_row("base / userblock (bytes)", base, c_base),
+        ] {
+            properties.push_str(&row);
+        }
         file.close().map_err(|source| OracleError::C {
             operation: "H5Fclose",
             source,
@@ -239,64 +267,141 @@ impl FreeSpaceOracleCheckpoint {
 
     /// Formats every section from both libraries beside file sizes and Rust ownership totals.
     ///
-    /// Missing rows and unequal pairs are marked explicitly. Reports include both section-byte
-    /// sums and the separate `H5Fget_freespace` total.
+    /// Missing rows and unequal pairs are marked explicitly. Section addresses and lengths are
+    /// formatted in aligned hexadecimal columns padded with zeros. Reports include both
+    /// section-byte sums and the separate `H5Fget_freespace` total.
     pub fn render(&self) -> String {
         let mut out = format!(
-            "checkpoint: {}/{}\nproperties: {}\nfile: rust_eof={} libhdf5_filesize={} physical={} base={}\nfree sections (base-relative address, length)\n  index  hdf5-pure                         libhdf5                           match\n",
-            self.case,
-            self.step,
-            self.properties,
-            self.rust_logical_size,
-            self.c_file_size,
-            self.physical_file_size,
-            self.base
+            "case:       {}\ncheckpoint: {}\n\n{}\n",
+            self.case, self.step, self.properties
         );
-        for index in 0..self.rust.sections.len().max(self.c.sections.len()) {
+        self.render_sizes(&mut out);
+        self.render_sections(&mut out);
+        self.render_totals(&mut out);
+        self.render_ownership(&mut out);
+        out.push_str(&format!(
+            "\nexact section map equal: {}\n\n",
+            self.rust.sections == self.c.sections
+        ));
+        out
+    }
+
+    fn render_sizes(&self, out: &mut String) {
+        out.push_str("file sizes (absolute bytes)\n");
+        out.push_str(&format!("  {:<28} {:>14}\n", "measurement", "bytes"));
+        for (label, bytes) in [
+            ("hdf5-pure stored EOF", self.rust_logical_size),
+            ("libhdf5 H5Fget_filesize", self.c_file_size),
+            ("physical file", self.physical_file_size),
+        ] {
+            out.push_str(&format!("  {label:<28} {bytes:>14}\n"));
+        }
+        out.push('\n');
+    }
+
+    fn render_sections(&self, out: &mut String) {
+        let count = self.rust.sections.len().max(self.c.sections.len());
+        let (max_address, max_length) = self
+            .rust
+            .sections
+            .iter()
+            .chain(&self.c.sections)
+            .fold((0, 0), |(address, length), &(at, len)| {
+                (address.max(at), length.max(len))
+            });
+        let index_width = count.to_string().len().max("index".len());
+        let address_width = format!("{max_address:#x}").len().max(10);
+        let length_width = format!("{max_length:#x}").len().max(10);
+        let section_width = address_width + length_width + 4;
+        let columns = format!(
+            " {:>address_width$}  {:>length_width$} ",
+            "address", "length"
+        );
+        out.push_str("free-space sections (stored addresses, byte lengths)\n");
+        out.push_str(&format!(
+            "  {:>index_width$} | {:^section_width$} | {:^section_width$} | match\n",
+            "index", "hdf5-pure", "libhdf5"
+        ));
+        out.push_str(&format!(
+            "  {:>index_width$} | {columns} | {columns} |\n",
+            ""
+        ));
+        out.push_str(&format!(
+            "  {}-+-{}-+-{}-+------\n",
+            "-".repeat(index_width),
+            "-".repeat(section_width),
+            "-".repeat(section_width)
+        ));
+        if count == 0 {
+            out.push_str("  (no sections)\n");
+        }
+        for index in 0..count {
             let rust = self.rust.sections.get(index);
             let c = self.c.sections.get(index);
             let row = |section: Option<&(u64, u64)>| match section {
-                Some((address, length)) => format!("({address:#x}, {length:#x})"),
-                None => "<missing>".to_owned(),
+                Some((address, length)) => {
+                    format!("({address:#0address_width$x}, {length:#0length_width$x})")
+                }
+                None => format!("{:<section_width$}", "<missing>"),
             };
             out.push_str(&format!(
-                "  {index:<6} {:<33} {:<33} {}\n",
+                "  {index:>index_width$} | {} | {} | {}\n",
                 row(rust),
                 row(c),
                 if rust == c { "yes" } else { "NO" }
             ));
         }
-        out.push_str(&format!("free: rust_sections={} c_sections={} rust_bytes={} c_bytes={}\nlibhdf5_H5Fget_freespace={} difference_from_c_sections={}\n",
-            self.rust.sections.len(), self.c.sections.len(), self.rust.bytes, self.c.bytes,
-            self.c_reported_freespace, i128::from(self.c_reported_freespace) - i128::from(self.c.bytes)));
+        out.push('\n');
+    }
+
+    fn render_totals(&self, out: &mut String) {
+        out.push_str("free-space totals\n");
+        for row in [
+            paired_row("measurement", "hdf5-pure", "libhdf5"),
+            paired_row(
+                "section count",
+                self.rust.sections.len(),
+                self.c.sections.len(),
+            ),
+            paired_row("section bytes", self.rust.bytes, self.c.bytes),
+            paired_row("H5Fget_freespace", "-", self.c_reported_freespace),
+            paired_row(
+                "reported - section bytes",
+                "-",
+                i128::from(self.c_reported_freespace) - i128::from(self.c.bytes),
+            ),
+        ] {
+            out.push_str(&row);
+        }
+        out.push('\n');
+    }
+
+    fn render_ownership(&self, out: &mut String) {
+        out.push_str("ownership (Rust)\n");
         if let Some(ownership) = &self.ownership {
             out.push_str(&format!(
-                "ownership (Rust): analysis_complete={}\n",
+                "  analysis complete: {}\n\n",
                 ownership.analysis_complete
             ));
+            out.push_str(&paired_row("category", "sections", "bytes"));
             for (label, sections) in [
                 ("userblock", &ownership.userblock_space),
-                ("live_raw", &ownership.live_raw_space),
-                ("live_metadata", &ownership.live_metadata_space),
-                ("managers", &ownership.free_space_manager_space),
-                ("reusable", &ownership.reusable_free_space),
+                ("live raw data", &ownership.live_raw_space),
+                ("live metadata", &ownership.live_metadata_space),
+                ("free-space managers", &ownership.free_space_manager_space),
+                ("reusable free space", &ownership.reusable_free_space),
                 ("unclassified", &ownership.unclassified_space),
-                ("trailing_slack", &ownership.trailing_slack_space),
+                ("trailing slack", &ownership.trailing_slack_space),
             ] {
-                out.push_str(&format!(
-                    "  {label}: sections={} bytes={}\n",
+                out.push_str(&paired_row(
+                    label,
                     sections.len(),
-                    sections.iter().map(|s| u128::from(s.1)).sum::<u128>()
+                    sections.iter().map(|s| u128::from(s.1)).sum::<u128>(),
                 ));
             }
         } else {
-            out.push_str("ownership (Rust): unavailable: in-place editing requires 8-byte offsets and lengths\n");
+            out.push_str("  unavailable: in-place editing requires 8-byte offsets and lengths\n");
         }
-        out.push_str(&format!(
-            "exact_section_map_equal={}\n",
-            self.rust.sections == self.c.sections
-        ));
-        out
     }
 }
 /// A sorted list of positive, disjoint sections within a base-relative allocation boundary.
@@ -492,6 +597,20 @@ pub fn enumeration_complete(expected: usize, actual: isize) -> Result<(), Oracle
 /// Returns [`OracleError::C`] if `count` is negative or cannot fit in [`usize`].
 pub fn enumeration_count(count: isize) -> Result<usize, OracleError> {
     usize::try_from(count).map_err(|_error| c_error("H5Fget_free_sections"))
+}
+
+/// Formats a label and two values in the report's aligned columns.
+fn paired_row(label: &str, left: impl Display, right: impl Display) -> String {
+    format!("  {label:<28} {left:>14} {right:>14}\n")
+}
+
+fn strategy_name(strategy: &CStrategy) -> &'static str {
+    match strategy {
+        CStrategy::FreeSpaceManager { paged: true, .. } => "PAGE",
+        CStrategy::FreeSpaceManager { paged: false, .. } => "FSM_AGGR",
+        CStrategy::PageAggregation => "AGGR",
+        CStrategy::None => "NONE",
+    }
 }
 
 /// Returns the C free-space total followed by the physical file length, in bytes.
