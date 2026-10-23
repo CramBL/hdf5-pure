@@ -8185,7 +8185,9 @@ impl WriteEngine {
             match msg_type {
                 MessageType::DATATYPE => datatype = Some((body, body_end)),
                 MessageType::DATASPACE => dataspace = Some((body, body_end)),
-                MessageType::DATA_LAYOUT => layout = Some((body, body_end)),
+                // libhdf5 reads the first Data Layout message of a header
+                // (`H5O_msg_read_oh` in `H5Omessage.c`, HDF5 2.2.0).
+                MessageType::DATA_LAYOUT if layout.is_none() => layout = Some((body, body_end)),
                 MessageType::FILTER_PIPELINE => filter = Some((body, body_end)),
                 // Versioned beats legacy, and within a type the first wins —
                 // the same rule `Dataset::fill_value_message` and `Located::from_walk`

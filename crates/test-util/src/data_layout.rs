@@ -42,6 +42,14 @@ pub fn virtual_storage() -> Vec<u8> {
     vec![VERSION_FOUR, VIRTUAL_CLASS]
 }
 
+/// The undefined address at the 8-byte width, with every bit set.
+///
+/// The undefined address is defined in "Appendix A: Definitions" of the [format specification,
+/// version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#sec_fmt4_appendixa
+pub const UNDEFINED_ADDRESS: u64 = u64::MAX;
+
 const VERSION_THREE: u8 = 3;
 const VERSION_FOUR: u8 = 4;
 
