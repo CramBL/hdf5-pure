@@ -9,6 +9,23 @@ use rstest::rstest;
 
 use test_util::fuzz;
 
+#[test]
+fn chunked_path_references_resolve() {
+    let mut builder = FileBuilder::new();
+    builder.create_dataset("target").with_i32_data(&[7]);
+    builder
+        .create_dataset("refs")
+        .with_path_references(&["target"])
+        .with_chunks(&[1]);
+    let file = File::from_bytes(builder.finish().unwrap()).unwrap();
+    let references = file.dataset("refs").unwrap();
+    let objects = references.dereference().unwrap();
+    let Object::Dataset(target) = &objects[0] else {
+        panic!("expected a dataset target, got {:?}", objects[0]);
+    };
+    assert_eq!(target.read_i32().unwrap(), [7]);
+}
+
 /// Returns a file holding `/b`, `/a/b`, `/a/mytype` and `/a/inner`, where `/b` reads 2 and `/a/b`
 /// reads 1, so that a path resolved from the root and the same path resolved from `a` reach
 /// different data.

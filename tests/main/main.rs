@@ -15,6 +15,7 @@ mod buffered_append;
 mod c_1_8_read_compat;
 mod chunk_cache_stats;
 mod chunked_edge_roundtrip;
+mod chunked_references;
 mod classic_aggregation;
 mod closure_reentrancy;
 mod complex_bulk_array;

@@ -20,6 +20,7 @@ mod c_write_compat;
 mod cell_array;
 mod chunk_btree_offset_width;
 mod chunk_index_grid;
+mod chunked_references;
 mod classic_aggregation;
 mod classic_aggregation_policy;
 mod committed_datatype;

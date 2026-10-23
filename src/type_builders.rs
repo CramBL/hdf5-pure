@@ -4679,10 +4679,79 @@ mod tests {
 
     use rstest::rstest;
 
+    use crate::CompoundTypeBuilder;
+    use crate::DeflateLevel;
+    use crate::address::StoredAddress;
+    use crate::address::StoredAddressExt;
     use crate::datatype::{CharacterSet, Datatype};
     use crate::file_writer::FileWriter;
+    use crate::object_path::ObjectPathBuf;
+    use crate::type_builders::ObjectRefPatch;
+    use crate::type_builders::ObjectRefTarget;
     use crate::type_builders::{self, AttrValue, DatasetBuilder, VlStringElement};
     use crate::{Error, File, FileBuilder, FormatError};
+
+    #[rstest]
+    #[case(false)]
+    #[case(true)]
+    fn chunked_reference_patches_preserve_embedded_values(#[case] embedded: bool) {
+        let mut builder = FileBuilder::new();
+        builder
+            .create_dataset("probe")
+            .with_path_references(&["target"]);
+        let targets = vec![
+            ObjectRefTarget::Path(ObjectPathBuf::parse("target")),
+            ObjectRefTarget::Raw(StoredAddress::new(0)),
+            ObjectRefTarget::Raw(StoredAddress::new(u64::MAX)),
+        ];
+        let dataset = builder.create_dataset("refs");
+        if embedded {
+            let datatype = CompoundTypeBuilder::new()
+                .field("marker", type_builders::make_i32_type())
+                .field("reference", type_builders::make_object_reference_type())
+                .build()
+                .unwrap();
+            let raw = [7i32, 11, 13]
+                .into_iter()
+                .flat_map(|value| value.to_le_bytes().into_iter().chain([0; 8]))
+                .collect();
+            let patches = targets
+                .into_iter()
+                .enumerate()
+                .map(|(index, target)| ObjectRefPatch {
+                    byte_offset: index * 12 + 4,
+                    target,
+                })
+                .collect();
+            dataset.with_embedded_object_references(datatype, raw, 3, patches);
+        } else {
+            dataset.with_object_references(targets);
+        }
+        dataset
+            .with_chunks(&[2])
+            .with_shuffle()
+            .with_deflate(DeflateLevel::Six);
+        builder.create_dataset("target").with_i32_data(&[42]);
+        let file = File::from_bytes(builder.finish().unwrap()).unwrap();
+        let address = file.dataset("probe").unwrap().read_raw().unwrap();
+        let expected_addresses = [address.as_slice(), &[0; 8], &u64::MAX.to_le_bytes()].concat();
+        let raw = file.dataset("refs").unwrap().read_raw().unwrap();
+        let expected = if embedded {
+            [7i32, 11, 13]
+                .into_iter()
+                .zip(expected_addresses.as_chunks::<8>().0)
+                .flat_map(|(marker, reference)| {
+                    marker
+                        .to_le_bytes()
+                        .into_iter()
+                        .chain(reference.iter().copied())
+                })
+                .collect::<Vec<_>>()
+        } else {
+            expected_addresses
+        };
+        assert_eq!(raw, expected);
+    }
 
     #[rstest]
     #[case(0, Ok(0))]
