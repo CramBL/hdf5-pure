@@ -1,6 +1,5 @@
 #![cfg(feature = "__hdf5-1.10")]
 
-use std::collections::BTreeSet;
 use std::path::Path;
 
 use hdf5::Extent;
@@ -14,17 +13,17 @@ use hdf5::types::VarLenArray;
 use hdf5::types::VarLenUnicode;
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::File;
-use hdf5_pure::GlobalHeapLiveness;
 use ndarray::ArrayView2;
 use ndarray::s;
 use rstest::rstest;
 use tempfile::TempDir;
 use test_util::global_heap;
-use test_util_hdf5::space_ownership;
-use test_util_hdf5::space_ownership::SharedStorage;
+use test_util::widths::Widths;
+use test_util_hdf5::global_heap_fixture;
+use test_util_hdf5::storage;
 
 #[rstest]
-fn libhdf5_collections_are_each_referenced(
+fn native_collections_survive_deletion_of_another_reference(
     #[values(LibraryVersion::Earliest, LibraryVersion::V18)] low: LibraryVersion,
     #[values(
         Form::CompactAttribute,
@@ -53,14 +52,21 @@ fn libhdf5_collections_are_each_referenced(
         Payload::Compounds => form.write(&group, &records()),
         Payload::ArraysOfStrings => form.write(&group, &[strings(), strings()]),
         Payload::ArraysOfCompounds => {
-            let [first, second, third] = records();
-            form.write(&group, &[[first, second], [third.clone(), third]]);
+            let [first, _, last] = records();
+            form.write(&group, &[[first, last]]);
         }
     }
     drop(group);
     file.close().unwrap();
 
-    assert_collections_are_referenced(&path);
+    let before = {
+        let file = hdf5::File::open(&path).unwrap();
+        payload.read(form, &file.group("g").unwrap())
+    };
+    assert_eq!(before, payload.expected(form));
+    assert_collections_survive_owner_deletion(&path);
+    let file = hdf5::File::open(&path).unwrap();
+    assert_eq!(payload.read(form, &file.group("g").unwrap()), before);
 }
 
 #[rstest]
@@ -75,7 +81,7 @@ fn libhdf5_collections_are_each_referenced(
 #[case::filtered_extensible_array(ChunkIndex::ExtensibleArray, true)]
 #[case::version_2_btree(ChunkIndex::BTreeV2, false)]
 #[case::filtered_version_2_btree(ChunkIndex::BTreeV2, true)]
-fn libhdf5_chunked_collections_are_each_referenced(
+fn native_chunked_collections_survive_deletion_of_another_reference(
     #[case] index: ChunkIndex,
     #[case] filtered: bool,
 ) {
@@ -102,14 +108,33 @@ fn libhdf5_chunked_collections_are_each_referenced(
         assert_eq!(dataset.chunks().unwrap().len(), allocated);
     }
     drop(file);
-    assert_collections_are_referenced(&path);
+    assert_collections_survive_owner_deletion(&path);
+    let file = hdf5::File::open(&path).unwrap();
+    let values = file
+        .dataset("strings")
+        .unwrap()
+        .read_raw::<VarLenUnicode>()
+        .unwrap();
+    assert_eq!(
+        [values[0].clone(), values[1].clone(), values[6].clone()],
+        strings()
+    );
+    let values = file
+        .dataset("records")
+        .unwrap()
+        .read_raw::<Record>()
+        .unwrap();
+    assert_eq!(
+        [values[0].clone(), values[1].clone(), values[6].clone()],
+        records()
+    );
 }
 
 #[rstest]
 #[case::only_through_a_second_hard_link(Linking::SecondHardLinkOnly)]
 #[case::through_two_paths(Linking::TwoHardLinks)]
 #[case::beside_a_soft_link(Linking::SoftLink)]
-fn a_linked_dataset_refers_to_its_collection(#[case] linking: Linking) {
+fn linked_native_datasets_retain_their_collections_during_deletion(#[case] linking: Linking) {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("liveness_links.h5");
     let file = libhdf5_file(&path, LibraryVersion::Earliest);
@@ -127,29 +152,15 @@ fn a_linked_dataset_refers_to_its_collection(#[case] linking: Linking) {
     drop(first);
     file.close().unwrap();
 
-    assert_collections_are_referenced(&path);
-}
-
-#[rstest]
-#[case::shared_chunked_dataspace(SharedStorage::Dataspace, false)]
-#[case::compact_shared_attribute(SharedStorage::Attribute, false)]
-#[case::dense_shared_attribute(SharedStorage::Attribute, true)]
-#[case::compact_shared_attribute_fields(SharedStorage::AttributeFields, false)]
-#[case::dense_shared_attribute_fields(SharedStorage::AttributeFields, true)]
-fn shared_messages_are_incomplete(#[case] storage: SharedStorage, #[case] dense: bool) {
-    let directory = TempDir::new().unwrap();
-    let path = directory.path().join("liveness_shared.h5");
-    space_ownership::libhdf5_write_shared_storage(&path, storage, dense);
-    let file = File::open_rw(&path).unwrap();
-
+    assert_collections_survive_owner_deletion(&path);
+    let file = hdf5::File::open(&path).unwrap();
     assert_eq!(
-        file.__global_heap_liveness().unwrap(),
-        GlobalHeapLiveness {
-            referenced_collections: BTreeSet::new(),
-            analysis_complete: false,
-        }
+        file.dataset("b/d")
+            .unwrap()
+            .read_raw::<VarLenUnicode>()
+            .unwrap(),
+        vec!["alpha".parse::<VarLenUnicode>().unwrap()]
     );
-    file.close().unwrap();
 }
 
 /// Writes the dataset `name` of 1 by 7 elements, compressed with deflate if `filtered` is `true`,
@@ -216,6 +227,30 @@ enum Form {
 }
 
 impl Form {
+    fn expected<T: Clone>(self, values: &[T]) -> Vec<T> {
+        if matches!(self, Self::FillValue) {
+            vec![values[0].clone(); values.len()]
+        } else {
+            values.to_vec()
+        }
+    }
+
+    fn read<T: H5Type>(self, group: &hdf5::Group) -> Vec<T> {
+        match self {
+            Self::CompactAttribute => group.attr("a").unwrap().read_raw::<T>().unwrap(),
+            Self::DenseAttribute => group
+                .group("dense")
+                .unwrap()
+                .attr("a")
+                .unwrap()
+                .read_raw::<T>()
+                .unwrap(),
+            Self::CompactDataset | Self::ContiguousDataset | Self::FillValue => {
+                group.dataset("d").unwrap().read_raw::<T>().unwrap()
+            }
+        }
+    }
+
     fn write<T: H5Type + Clone>(self, group: &hdf5::Group, values: &[T]) {
         match self {
             Self::CompactAttribute => write_attribute(group, values),
@@ -273,8 +308,44 @@ enum Payload {
     Strings,
 }
 
+impl Payload {
+    fn expected(self, form: Form) -> Values {
+        match self {
+            Self::Strings => Values::Strings(form.expected(&strings())),
+            Self::Sequences => Values::Sequences(form.expected(&sequences())),
+            Self::Compounds => Values::Compounds(form.expected(&records())),
+            Self::ArraysOfStrings => {
+                Values::ArraysOfStrings(form.expected(&[strings(), strings()]))
+            }
+            Self::ArraysOfCompounds => {
+                let [first, _, last] = records();
+                Values::ArraysOfCompounds(form.expected(&[[first, last]]))
+            }
+        }
+    }
+
+    fn read(self, form: Form, group: &hdf5::Group) -> Values {
+        match self {
+            Self::Strings => Values::Strings(form.read(group)),
+            Self::Sequences => Values::Sequences(form.read(group)),
+            Self::Compounds => Values::Compounds(form.read(group)),
+            Self::ArraysOfStrings => Values::ArraysOfStrings(form.read(group)),
+            Self::ArraysOfCompounds => Values::ArraysOfCompounds(form.read(group)),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum Values {
+    ArraysOfCompounds(Vec<[Record; 2]>),
+    ArraysOfStrings(Vec<[VarLenUnicode; 3]>),
+    Compounds(Vec<Record>),
+    Sequences(Vec<VarLenArray<i32>>),
+    Strings(Vec<VarLenUnicode>),
+}
+
 #[repr(C)]
-#[derive(Clone, Debug, hdf5::H5Type)]
+#[derive(Clone, Debug, PartialEq, hdf5::H5Type)]
 struct Record {
     n: i32,
     s: VarLenUnicode,
@@ -316,19 +387,74 @@ fn libhdf5_file(path: &Path, low: LibraryVersion) -> hdf5::File {
         .unwrap()
 }
 
-/// Asserts that the analysis of the file at `path` is complete and lists the offset of every
-/// collection signature in the file.
-fn assert_collections_are_referenced(path: &Path) {
-    let expected = global_heap::collection_starts(&std::fs::read(path).unwrap());
-    assert!(!expected.is_empty(), "libhdf5 placed no collection");
-    let file = File::open_rw(path).unwrap();
-
-    assert_eq!(
-        file.__global_heap_liveness().unwrap(),
-        GlobalHeapLiveness {
-            referenced_collections: expected.into_iter().collect(),
-            analysis_complete: true,
+fn assert_collections_survive_owner_deletion(path: &Path) {
+    let before = std::fs::read(path).unwrap();
+    let collections = global_heap::collection_ranges(&before, Widths::EIGHT);
+    assert!(!collections.is_empty());
+    for (index, collection) in collections.iter().enumerate() {
+        let file = File::open_rw(path).unwrap();
+        file.root()
+            .create_dataset("probe", |builder| {
+                builder.with_vlen_strings(&["x"]);
+            })
+            .unwrap();
+        file.commit().unwrap();
+        let reference = test_util_hdf5::file_space::contiguous_extent(&file, "probe");
+        file.close().unwrap();
+        let mut image = std::fs::read(path).unwrap();
+        let first_object = usize::try_from(collection.start).unwrap() + COLLECTION_PREFIX_LEN;
+        let object = u32::from(u16::from_le_bytes(
+            *image[first_object..].first_chunk().unwrap(),
+        ));
+        assert!(object > 0);
+        let at = usize::try_from(reference.start).unwrap();
+        image[at..at + global_heap_fixture::REFERENCE_SIZE].copy_from_slice(
+            &global_heap::reference(1, collection.start, object, Widths::EIGHT),
+        );
+        std::fs::write(path, image).unwrap();
+        let file = File::open_rw(path).unwrap();
+        file.root().delete("probe").unwrap();
+        file.commit().unwrap();
+        let pressure = usize::try_from(collection.end - collection.start).unwrap();
+        file.root()
+            .create_dataset(&format!("pressure{index}"), |builder| {
+                builder.with_u8_data(&vec![0x5a; pressure]);
+            })
+            .unwrap();
+        file.commit().unwrap();
+        storage::assert_unavailable(
+            &file,
+            &collections
+                .iter()
+                .map(|extent| (extent.start, extent.end - extent.start))
+                .collect::<Vec<_>>(),
+        );
+        file.close().unwrap();
+        let after = std::fs::read(path).unwrap();
+        for extent in &collections {
+            let range =
+                usize::try_from(extent.start).unwrap()..usize::try_from(extent.end).unwrap();
+            assert_eq!(
+                &after[range.clone()],
+                &before[range],
+                "a surviving owner must retain its collection"
+            );
         }
-    );
-    file.close().unwrap();
+        let file = hdf5::File::open(path).unwrap();
+        assert!(!file.link_exists("probe"));
+        assert_eq!(
+            file.dataset(&format!("pressure{index}"))
+                .unwrap()
+                .read_raw::<u8>()
+                .unwrap(),
+            vec![0x5a; pressure]
+        );
+    }
 }
+
+/// The version 1 collection header size with eight-byte length fields.
+///
+/// Defined in "Global Heap" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_globalheap
+const COLLECTION_PREFIX_LEN: usize = 16;

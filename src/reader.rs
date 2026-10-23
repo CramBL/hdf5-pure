@@ -7546,6 +7546,10 @@ const NO_LINK_TO_WRITE: &str = "a write needs a link name, and this path holds n
 const SWMR_SUPERBLOCK_VERSION: SuperblockVersion = SuperblockVersion::Three;
 
 #[cfg(test)]
+#[path = "storage_tests/mod.rs"]
+mod storage_tests;
+
+#[cfg(test)]
 mod tests {
     use std::sync::atomic::AtomicUsize;
 

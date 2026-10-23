@@ -17,6 +17,7 @@ use test_util::file_space_info;
 use test_util::range;
 use test_util::widths::Widths;
 use test_util_hdf5::file_space;
+use test_util_hdf5::storage;
 
 #[rstest]
 #[case::fsm_aggr(FileSpaceStrategy::FsmAggr, false, 1, true)]
@@ -369,11 +370,9 @@ fn a_sub_threshold_extent_is_tracked_only_beside_a_tracked_extent(
 fn persisted_or_reused_sections(path: &Path, persist: bool) -> Vec<(u64, u64)> {
     let mut sections = File::open(path).unwrap().persisted_free_space().unwrap();
     if persist {
-        let file = File::open_rw(path).unwrap();
-        let ownership = file.__space_ownership().unwrap();
-        assert!(ownership.analysis_complete);
-        sections.extend(ownership.live_metadata_space);
-        sections.extend(ownership.free_space_manager_space);
+        let bytes = std::fs::read(path).unwrap();
+        let file = File::open(path).unwrap();
+        sections.extend(storage::file_metadata_extents(&file, &bytes));
     }
     sections
 }
@@ -398,12 +397,11 @@ fn sub_threshold_extents_that_end_the_file_are_given_back_in_one_commit() {
         })
         .unwrap();
     file.commit().unwrap();
-    let ownership = file.__space_ownership().unwrap();
-    assert!(ownership.analysis_complete);
-    let (retained_end, _) = ownership
+    let accounting = file.space_accounting().unwrap();
+    let (retained_end, _) = accounting
         .reusable_free_space
         .into_iter()
-        .find(|&(start, len)| start + len == ownership.logical_size)
+        .find(|&(start, len)| start + len == accounting.logical_size)
         .unwrap();
     for path in ["x", "y"] {
         file.root()

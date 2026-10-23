@@ -17,6 +17,7 @@ use test_util::temp;
 use test_util::userblock::Userblock;
 use test_util_hdf5::file_space;
 use test_util_hdf5::paged;
+use test_util_hdf5::storage;
 
 #[rstest]
 #[case::before_exact_fill(512, 0, 1, 17, 512)]
@@ -31,7 +32,7 @@ use test_util_hdf5::paged;
 #[case::threshold(512, 0, 4097, 18, 512)]
 #[case::default_page(4096, 4096, 1, 3601, 4096)]
 #[case::larger_page(8192, 8192, 1, 7697, 8192)]
-fn created_page_metadata_tail_is_owned(
+fn created_page_metadata_tail_survives_reopen_and_reuse(
     #[case] page: u64,
     #[case] base: u64,
     #[case] threshold: u64,
@@ -67,11 +68,6 @@ fn created_page_metadata_tail_is_owned(
     if exact_fill {
         assert_eq!(initial, vec![(base + page + 1, page - 1)]);
     }
-    let unclassified = if raw_len == 513 {
-        vec![(file_space::raw_extents(&file, "d")[0].end, 511)]
-    } else {
-        Vec::new()
-    };
     assert_eq!(
         file.dataset("d").unwrap().read_u8().unwrap(),
         vec![7; raw_len]
@@ -80,7 +76,6 @@ fn created_page_metadata_tail_is_owned(
         file.root().attrs().unwrap()["fill"],
         AttrValue::U8Array(vec![0; attribute_len])
     );
-    file_space::assert_space_ownership(&file, &unclassified);
     file.close().unwrap();
     let file = File::open_rw(&path).unwrap();
     assert_eq!(
@@ -93,25 +88,6 @@ fn created_page_metadata_tail_is_owned(
         })
         .unwrap();
     file.commit().unwrap();
-    if exact_fill && threshold == 1 {
-        assert!(
-            file.__space_ownership()
-                .unwrap()
-                .live_metadata_space
-                .iter()
-                .any(|&(at, len)| {
-                    initial
-                        .iter()
-                        .any(|&(free, size)| free <= at && at + len <= free + size)
-                })
-        );
-    }
-    let unclassified = if threshold > page {
-        vec![(48, 136), (255, 258)]
-    } else {
-        unclassified
-    };
-    file_space::assert_space_ownership(&file, &unclassified);
     let reusable = file.space_accounting().unwrap().reusable_free_space;
     assert_eq!(
         file.dataset("d").unwrap().read_u8().unwrap(),
@@ -122,7 +98,17 @@ fn created_page_metadata_tail_is_owned(
         vec![9; 32]
     );
     file.close().unwrap();
+    let bytes = std::fs::read(&path).unwrap();
     let reopened = File::open_rw(&path).unwrap();
+    let metadata = storage::file_metadata_extents(&reopened, &bytes);
+    storage::assert_unavailable(&reopened, &metadata);
+    if exact_fill && threshold == 1 {
+        assert!(metadata.iter().any(|&(at, len)| {
+            initial
+                .iter()
+                .any(|&(free, size)| free <= at && at + len <= free + size)
+        }));
+    }
     assert_eq!(
         reopened.space_accounting().unwrap().reusable_free_space,
         reusable
@@ -135,7 +121,6 @@ fn created_page_metadata_tail_is_owned(
         reopened.dataset("added").unwrap().read_u8().unwrap(),
         vec![9; 32]
     );
-    file_space::assert_space_ownership(&reopened, &unclassified);
     reopened.close().unwrap();
     paged::assert_consistent(&path, page);
     if raw_len != 0 {

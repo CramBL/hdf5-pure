@@ -1,5 +1,5 @@
 ---
-source: tests/main/classic_aggregation.rs
+source: src/storage_tests/classic_aggregation.rs
 expression: report
 ---
 PAGE allocation workload: block_edges

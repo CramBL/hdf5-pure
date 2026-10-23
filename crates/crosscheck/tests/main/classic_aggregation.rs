@@ -21,6 +21,7 @@ use test_util_hdf5::aggregation::Object;
 use test_util_hdf5::aggregation::Step;
 use test_util_hdf5::aggregation::Workload;
 use test_util_hdf5::file_space;
+use test_util_hdf5::storage;
 
 use crate::c_object;
 
@@ -56,12 +57,17 @@ fn libhdf5_recovers_and_reuses_new_file_aggregate_spare(
             assert!(remaining < sections.iter().map(|&(_, size)| size).sum());
         }
     }
+    let bytes = std::fs::read(&path).unwrap();
     let file = File::open_rw(&path).unwrap();
     if has_sections {
-        file_space::assert_exact_space_ownership(&file);
-    } else {
-        assert!(file.__space_ownership().unwrap().analysis_complete);
+        assert_classic_fixture_partition(&file, &bytes, &["values", "added"]);
     }
+    let raw = ["values", "added"]
+        .iter()
+        .flat_map(|name| file_space::raw_extents(&file, name))
+        .map(|extent| (extent.start, extent.end - extent.start))
+        .collect::<Vec<_>>();
+    storage::assert_unavailable(&file, &raw);
     assert_eq!(
         file.dataset("values").unwrap().read_i32().unwrap(),
         [17; 16]
@@ -73,11 +79,18 @@ fn libhdf5_recovers_and_reuses_new_file_aggregate_spare(
         })
         .unwrap();
     file.commit().unwrap();
+    file.close().unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let file = File::open_rw(&path).unwrap();
     if has_sections {
-        file_space::assert_exact_space_ownership(&file);
-    } else {
-        assert!(file.__space_ownership().unwrap().analysis_complete);
+        assert_classic_fixture_partition(&file, &bytes, &["values", "added", "third"]);
     }
+    let raw = ["values", "added", "third"]
+        .iter()
+        .flat_map(|name| file_space::raw_extents(&file, name))
+        .map(|extent| (extent.start, extent.end - extent.start))
+        .collect::<Vec<_>>();
+    storage::assert_unavailable(&file, &raw);
     file.close().unwrap();
     let file = hdf5::File::open(&path).unwrap();
     assert_eq!(
@@ -367,10 +380,7 @@ fn libhdf5_reads_and_mutates_its_classic_file_after_staged_edits(
     for step in workload.steps {
         step.apply(&file);
         if strategy != PERSISTENT_FSM_AGGR {
-            assert_eq!(
-                file.__space_ownership().unwrap().free_space_manager_space,
-                []
-            );
+            storage::assert_no_managers(&file);
             assert_eq!(file.persisted_free_space().unwrap(), []);
         }
     }
@@ -460,37 +470,43 @@ fn libhdf5_reads_and_extends_its_classic_file_after_immediate_appends(
         })
         .unwrap();
     file.commit().unwrap();
-    let raw_cursor = file
-        .__space_ownership()
-        .unwrap()
-        .live_raw_space
+    let before_raw = ["first", "values"]
         .iter()
-        .map(|&(start, length)| start + length)
-        .max()
-        .unwrap();
+        .flat_map(|name| file_space::raw_extents(&file, name))
+        .collect::<Vec<_>>();
+    let raw_cursor = before_raw.iter().map(|extent| extent.end).max().unwrap();
     let reusable = file.space_accounting().unwrap().reusable_free_space;
     file.dataset("values")
         .unwrap()
         .append_raw(&expected[initial..])
         .unwrap();
-    let ownership = file.__space_ownership().unwrap();
-    assert!(ownership.analysis_complete);
-    assert_eq!(ownership.physical_size, ownership.logical_size);
+    let raw = ["first", "values"]
+        .iter()
+        .flat_map(|name| file_space::raw_extents(&file, name))
+        .collect::<Vec<_>>();
+    storage::assert_unavailable(
+        &file,
+        &raw.iter()
+            .map(|extent| (extent.start, extent.end - extent.start))
+            .collect::<Vec<_>>(),
+    );
     if strategy != PERSISTENT_FSM_AGGR {
-        assert_eq!(ownership.free_space_manager_space, []);
+        storage::assert_no_managers(&file);
     }
+    let placed = raw
+        .iter()
+        .filter(|extent| !before_raw.contains(extent))
+        .collect::<Vec<_>>();
     if strategy == AGGR {
         assert!(
-            ownership
-                .live_raw_space
-                .iter()
-                .any(|&(start, _)| start == raw_cursor)
+            placed.iter().any(|extent| extent.start == raw_cursor),
+            "cursor={raw_cursor}, placed={placed:?}"
         );
     } else {
-        assert!(ownership.live_raw_space.iter().any(|&(start, length)| {
+        assert!(placed.iter().any(|extent| {
             reusable
                 .iter()
-                .any(|&(address, size)| start < address + size && address < start + length)
+                .any(|&(at, len)| at < extent.end && extent.start < at + len)
         }));
     }
     file.root()
@@ -613,21 +629,15 @@ fn libhdf5_fsm_file_reuses_deleted_storage_before_aggregate_spare(
     let chunks = file.dataset("values").unwrap().chunks().unwrap();
     assert!(chunks.iter().any(|chunk| free_start <= chunk.address
         && chunk.address + chunk.storage_size <= free_start + free_size));
-    let ownership = file.__space_ownership().unwrap();
-    assert!(ownership.analysis_complete);
     if strategy != PERSISTENT_FSM_AGGR {
-        assert_eq!(ownership.free_space_manager_space, []);
+        storage::assert_no_managers(&file);
     }
-    assert!(
-        ownership
-            .reusable_free_space
-            .iter()
-            .all(|&(start, length)| ownership
-                .live_raw_space
-                .iter()
-                .chain(&ownership.live_metadata_space)
-                .all(|&(address, size)| start + length <= address || address + size <= start))
-    );
+    let raw = ["replacement", "alias", "values"]
+        .iter()
+        .flat_map(|name| file_space::raw_extents(&file, name))
+        .map(|extent| (extent.start, extent.end - extent.start))
+        .collect::<Vec<_>>();
+    storage::assert_unavailable(&file, &raw);
     file.close().unwrap();
     let file = hdf5::File::open_rw(&path).unwrap();
     assert_eq!(
@@ -778,6 +788,43 @@ fn aggregator_bytes(file: &hdf5::File) -> u64 {
         .map(|&(_, size)| size)
         .sum();
     file.free_space() - tracked
+}
+
+/// Asserts a byte partition from serialized headers, dataset payloads, and reusable space.
+///
+/// # Panics
+///
+/// Panics if a fixture structure cannot be read, the ranges fail to partition the byte image, or
+/// the backing-store length differs from the image length.
+fn assert_classic_fixture_partition(file: &File, bytes: &[u8], datasets: &[&str]) {
+    let mut extents = storage::file_metadata_extents(file, bytes);
+    for name in datasets {
+        let address = storage::root_object_address(file, bytes, name);
+        extents.extend(storage::header_extents(file, bytes, address));
+        extents.extend(
+            file_space::raw_extents(file, name)
+                .iter()
+                .map(|raw| (raw.start, raw.end - raw.start)),
+        );
+    }
+    extents.extend(file.space_accounting().unwrap().reusable_free_space);
+    let userblock = file.superblock().base_address.get();
+    if userblock > 0 {
+        extents.push((0, userblock));
+    }
+    extents.sort_unstable();
+    let mut end = 0;
+    for &(start, len) in &extents {
+        assert!(len > 0, "empty fixture extent at {start}");
+        assert_eq!(
+            start, end,
+            "fixture partition has a gap or overlap: {extents:?}"
+        );
+        end = start.checked_add(len).unwrap();
+    }
+    let physical = u64::try_from(bytes.len()).unwrap();
+    assert_eq!(end, physical, "fixture partition must cover every byte");
+    assert_eq!(file.file_size(), physical);
 }
 
 /// `H5F_FSPACE_STRATEGY_AGGR`, which hdf5-metno names `PageAggregation`.

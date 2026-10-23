@@ -29,6 +29,7 @@ use test_util::temp;
 use test_util::widths::Widths;
 use test_util_hdf5::dataset::Unlimited;
 use test_util_hdf5::file_space;
+use test_util_hdf5::storage;
 
 // Shared with `tests/main/paged_staged_commit.rs`, which holds the staged commit to
 // the same invariant this holds the in-place append's reserve to (issue #387).
@@ -1472,11 +1473,9 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
     // has to rewrite regardless.
     for i in 0..3 {
         let (before, before_capacity) = {
+            let bytes = std::fs::read(&path).unwrap();
             let file = File::open_rw(&path).unwrap();
-            let capacity: u64 = file
-                .__space_ownership()
-                .unwrap()
-                .free_space_manager_space
+            let capacity: u64 = storage::manager_extents(&file, &bytes)
                 .iter()
                 .map(|&(_, len)| len)
                 .sum();
@@ -1490,7 +1489,12 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
         f.commit().unwrap();
         drop(f);
 
+        let bytes = std::fs::read(&path).unwrap();
         let f = File::open_rw(&path).unwrap();
+        let after_capacity: u64 = storage::manager_extents(&f, &bytes)
+            .iter()
+            .map(|&(_, len)| len)
+            .sum();
         let managers: Vec<u64> = f
             .file_space_info()
             .expect("a persisting file records its managers")
@@ -1529,13 +1533,7 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
                 .map(|(_, len)| len)
                 .sum();
             assert_eq!(
-                after_total
-                    + f.__space_ownership()
-                        .unwrap()
-                        .free_space_manager_space
-                        .iter()
-                        .map(|&(_, len)| len)
-                        .sum::<u64>(),
+                after_total + after_capacity,
                 before_total + before_capacity,
                 "commit {i}: rewriting the tail must conserve free space"
             );
@@ -1646,13 +1644,19 @@ fn a_reused_flat_manager_tail_preserves_its_spare_allocation_across_reopen() {
             .set_attr("n", AttrValue::I64(generation))
             .unwrap();
         file.commit().unwrap();
-        let ownership = file_space::assert_exact_space_ownership(&file);
         let physical_size = std::fs::metadata(&path).unwrap().len();
         file.close().unwrap();
         let spare = file_space::serialized_manager_padding(&path);
         if spare > 0 {
+            let bytes = std::fs::read(&path).unwrap();
+            let reader = File::open(&path).unwrap();
+            let manager_bytes: u64 = storage::manager_extents(&reader, &bytes)
+                .iter()
+                .map(|&(_, len)| len)
+                .sum();
+            reader.close().unwrap();
             assert!(
-                ownership.free_space_manager_bytes > spare,
+                manager_bytes > spare,
                 "the padding must be part of a larger manager allocation"
             );
             spare_tail = Some((spare, physical_size));
@@ -1682,16 +1686,12 @@ fn a_reused_flat_manager_tail_preserves_its_spare_allocation_across_reopen() {
         recovered.reusable_free_bytes, persisted_free,
         "reopen must recover the same reusable free-space total"
     );
-    let ownership = file_space::assert_exact_space_ownership(&reopened);
-    assert_eq!(ownership.unclassified_bytes, 0);
 
     reopened
         .root()
         .set_attr("n", AttrValue::I64(10_000))
         .unwrap();
     reopened.commit().unwrap();
-    let ownership = file_space::assert_exact_space_ownership(&reopened);
-    assert_eq!(ownership.unclassified_bytes, 0);
     assert!(
         std::fs::metadata(&path).unwrap().len() <= size_with_spare_tail,
         "rewriting the recovered manager tail should reuse its complete previous allocation"
@@ -2792,16 +2792,25 @@ fn scratch_delete_releases(
         })
         .unwrap();
     f.commit().unwrap();
-    let before = file_space::assert_exact_space_ownership(&f);
+    f.close().unwrap();
+    let (f, before) = occupied_storage(&path);
     f.root().delete("scratch").unwrap();
     f.commit().unwrap();
-    let after = file_space::assert_exact_space_ownership(&f);
-    (
-        f,
-        before.live_raw_bytes + before.live_metadata_bytes
-            - after.live_raw_bytes
-            - after.live_metadata_bytes,
-    )
+    f.close().unwrap();
+    let (f, after) = occupied_storage(&path);
+    (f, before - after)
+}
+
+fn occupied_storage(path: &std::path::Path) -> (File, u64) {
+    let bytes = std::fs::read(path).unwrap();
+    let file = open_rw_on_close(path);
+    let accounting = file.space_accounting().unwrap();
+    let managers: u64 = storage::manager_extents(&file, &bytes)
+        .iter()
+        .map(|&(_, len)| len)
+        .sum();
+    let occupied = accounting.logical_size - accounting.reusable_free_bytes - managers;
+    (file, occupied)
 }
 
 /// How many whole, page-aligned free pages the session is offering back.

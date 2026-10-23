@@ -15018,6 +15018,8 @@ mod tests {
                 "{storage:?}"
             );
 
+            assert_ownership_covers_storage(&session, &storage, false);
+
             let incoming = session.count_incoming_hard_links().unwrap();
             let mut planned = Vec::new();
             session.collect_free_spans(addr, 0, &incoming, &mut planned);
@@ -15363,8 +15365,10 @@ mod tests {
                 "the filtered heap allocation ({addr}, {len}) is in {storage:?}"
             );
         }
+        assert_ownership_covers_storage(&session, &storage, true);
         session.delete(&object).unwrap();
         session.commit().unwrap();
+        assert!(session.space_ownership().unwrap().analysis_complete);
 
         for (addr, len) in header_spans
             .into_iter()
@@ -15508,6 +15512,7 @@ mod tests {
         let link_storage = session
             .dense_group_storage_spans(&header_spans, None, &link_info)
             .expect("the dense link storage is structurally complete");
+        assert_ownership_covers_storage(&session, &link_storage, false);
         let heap = crate::fractal_heap_storage::collect_fractal_heap_storage_from_source(
             &session.image(),
             AddressContext::from_effective_base(BaseAddress::ZERO),
@@ -15560,6 +15565,39 @@ mod tests {
             panic!("expected PathNotFound for g, got {err:?}");
         };
         assert_eq!(missing, "g");
+    }
+
+    /// Asserts complete analysis and coverage of the selected heap allocations.
+    ///
+    /// With `metadata`, every byte must be live metadata. Otherwise, raw and metadata storage
+    /// contribute to the coverage.
+    ///
+    /// # Panics
+    ///
+    /// Panics if analysis fails, is incomplete, or selected allocations are not fully covered by
+    /// the required storage classes.
+    fn assert_ownership_covers_storage(
+        session: &WriteEngine,
+        storage: &[(u64, u64, FreeClass)],
+        metadata: bool,
+    ) {
+        let owned = session.space_ownership().unwrap();
+        assert!(owned.analysis_complete);
+        for &(at, len, _) in storage {
+            let covered =
+                test_util::range::covered_len(&owned.live_metadata_space, &(at..at + len));
+            let raw = if metadata {
+                0
+            } else {
+                test_util::range::covered_len(&owned.live_raw_space, &(at..at + len))
+            };
+            assert_eq!(
+                covered + raw,
+                len,
+                "heap storage {at}..{} must be classified",
+                at + len
+            );
+        }
     }
 
     #[test]
