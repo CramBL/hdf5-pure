@@ -1641,6 +1641,36 @@ impl FileWriter {
                     None => DsData::InMemory(self.storage.take_raw()),
                 }
             }
+
+            /// Encodes the dataset's resolved element bytes into an address-independent chunk set.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`FormatError::ZeroSizedDatatype`] if an element has zero width, or
+            /// [`FormatError::UnsupportedFilter`] if a filter has no encoder.
+            ///
+            /// Returns [`FormatError::ChunkedReadError`] if the chunk-index geometry is
+            /// unsupported or exceeds the writer's index limits, or
+            /// [`FormatError::ValueTooLargeForPlatform`] if an element size or chunk count exceeds
+            /// [`usize::MAX`].
+            ///
+            /// Returns [`FormatError::FilterError`] for invalid filter parameters or input.
+            /// Filter-specific errors from [`ChunkOptions::build_pipeline`] and
+            /// [`crate::filters::compress_chunk_with`] are propagated.
+            fn compress_chunks(&self) -> Result<CompressedChunkSet, FormatError> {
+                let chunk_dims = self.chunk_options.resolve_chunk_dims(&self.ds.dimensions);
+                let ctx = crate::filters::ChunkContext::from_datatype(&chunk_dims, &self.dt)?;
+                let elem = ctx.element_size.narrow::<NonZeroUsize>()?;
+                chunked_write::compress_chunks(
+                    self.storage.raw(),
+                    &self.ds.dimensions,
+                    ctx,
+                    &self.chunk_options,
+                    self.maxshape.as_deref(),
+                    FillPattern::new(self.fill_time, self.fill.as_deref(), elem),
+                    self.storage.allocation(),
+                )
+            }
         }
 
         /// The position of a reserved hash attribute.
@@ -1917,8 +1947,7 @@ impl FileWriter {
                     data: DsData::Streamed(plan),
                 })
             } else {
-                // Encode path: the chunks were compressed once up front; just lay
-                // the cached set out at this address (no recompression).
+                // Each cached chunk set contains the encoded final element bytes.
                 let set = chunk_set
                     .expect("an encode-path chunked dataset must have a precomputed chunk set");
                 let result = chunked_write::assemble_chunked_at(set, data_address)?;
@@ -2699,35 +2728,12 @@ impl FileWriter {
             }
         }
 
-        // Compress each encode-path chunked dataset exactly once, up front. The
-        // object-header sizing pass and the data-emit pass both need the chunk
-        // layout, but only the embedded addresses differ between them — the
-        // (expensive) compression does not. Caching the `CompressedChunkSet` here
-        // lets both passes call the cheap `assemble_chunked_at` instead of
-        // recompressing the whole dataset twice. Verbatim datasets carry their
-        // bytes pre-compressed and are planned (not recompressed), so they get no
-        // entry.
-        let chunk_sets: Vec<Option<CompressedChunkSet>> = all_ds
+        let mut chunk_sets: Vec<Option<CompressedChunkSet>> = all_ds
             .iter()
             .enumerate()
             .map(|(i, d)| {
-                if is_chunked[i] && d.storage.chunks().is_none() {
-                    let chunk_dims = d.chunk_options.resolve_chunk_dims(&d.ds.dimensions);
-                    let ctx = crate::filters::ChunkContext::from_datatype(&chunk_dims, &d.dt)?;
-                    // An allocated chunk holds the dataset's fill value
-                    // wherever nothing was written, so the edge overhang of a
-                    // partial chunk is filled rather than zeroed (issue #296).
-                    let elem = ctx.element_size.narrow::<NonZeroUsize>()?;
-                    let fill = FillPattern::new(d.fill_time, d.fill.as_deref(), elem);
-                    Ok(Some(chunked_write::compress_chunks(
-                        d.storage.raw(),
-                        &d.ds.dimensions,
-                        ctx,
-                        &d.chunk_options,
-                        d.maxshape.as_deref(),
-                        fill,
-                        d.storage.allocation(),
-                    )?))
+                if is_chunked[i] && d.storage.chunks().is_none() && d.reference_targets.is_none() {
+                    d.compress_chunks().map(Some)
                 } else {
                     Ok(None)
                 }
@@ -2897,11 +2903,9 @@ impl FileWriter {
         // function of chunk count/size, not of the (dummy) data address. For a
         // streamed (lazy) dataset this touches no chunk bytes at all.
         let mut actual_ds_oh_sizes: Vec<usize> = Vec::with_capacity(all_ds.len());
-        // Each dataset's data-region byte length, captured here (where chunked
-        // data is already built once for OH sizing) so the paged layout can
-        // classify small vs large allocations and size its free-space managers
-        // without a second build. A chunked data length is base-address
-        // independent, so the dummy-base build gives the true length.
+        // Data-region lengths for allocation and PAGE free-space planning. Reference-bearing
+        // chunks have a zero placeholder until their target addresses are resolved and their
+        // encoded sizes are known.
         let mut ds_data_lens: Vec<u64> = Vec::with_capacity(all_ds.len());
         let mut ds_dense_lens: Vec<Option<usize>> = Vec::with_capacity(all_ds.len());
         let mut dummy_cursor = 0u64;
@@ -2924,16 +2928,35 @@ impl FileWriter {
                     .transpose()?,
             );
             let oh = if is_chunked[i] {
-                let measured =
-                    measure_chunked(d, StoredAddress::new(dummy_cursor), chunk_sets[i].as_ref())?;
-                dummy_cursor += measured.data_len;
-                ds_data_lens.push(measured.data_len);
+                let (layout_message, pipeline_message) = if d.reference_targets.is_some() {
+                    let chunk_dims = d.chunk_options.resolve_chunk_dims(&d.ds.dimensions);
+                    let ctx = crate::filters::ChunkContext::from_datatype(&chunk_dims, &d.dt)?;
+                    let elem = ctx.element_size.narrow::<NonZeroUsize>()?;
+                    let header = d.chunk_options.measure_header(
+                        &d.ds.dimensions,
+                        ctx,
+                        d.maxshape.as_deref(),
+                        FillPattern::new(d.fill_time, d.fill.as_deref(), elem),
+                        d.storage.allocation(),
+                    )?;
+                    ds_data_lens.push(0);
+                    (header.layout_message, header.pipeline_message)
+                } else {
+                    let measured = measure_chunked(
+                        d,
+                        StoredAddress::new(dummy_cursor),
+                        chunk_sets[i].as_ref(),
+                    )?;
+                    dummy_cursor += measured.data_len;
+                    ds_data_lens.push(measured.data_len);
+                    (measured.layout_message, measured.pipeline_message)
+                };
                 build_chunked_dataset_oh(
                     &d.dt,
                     &d.dt_location,
                     &d.ds,
-                    &measured.layout_message,
-                    measured.pipeline_message.as_deref(),
+                    &layout_message,
+                    pipeline_message.as_deref(),
                     &d.attrs,
                     dense_attr_info.as_deref(),
                     d.fill_time,
@@ -3096,8 +3119,8 @@ impl FileWriter {
             // Patch reference datasets: a path target resolves to its object's
             // destination address (an unknown path falls back to the undefined
             // address); a raw target is written verbatim (null / undefined).
-            for d in all_ds.iter_mut() {
-                let Some(ref patches) = d.reference_targets else {
+            for (i, d) in all_ds.iter_mut().enumerate() {
+                let Some(patches) = d.reference_targets.take() else {
                     continue;
                 };
                 for patch in patches {
@@ -3116,6 +3139,12 @@ impl FileWriter {
                 #[cfg(feature = "provenance")]
                 if let Some(hash) = d.pending_hash.take() {
                     hash.complete(&mut d.attrs, d.storage.raw())?;
+                }
+                if is_chunked[i] {
+                    let set = d.compress_chunks()?;
+                    ds_data_lens[i] =
+                        chunked_write::measure_chunked_at(&set, StoredAddress::new(0))?.data_len;
+                    chunk_sets[i] = Some(set);
                 }
             }
         }

@@ -25,6 +25,7 @@ const ATTR_SHA256: &str = "_provenance_sha256";
     case(AddressData::DeflatedStrings)
 )]
 #[case(AddressData::PathReferences)]
+#[case(AddressData::ChunkedPathReferences)]
 #[case(AddressData::ResolvedReferences)]
 #[cfg_attr(
     any(feature = "deflate", feature = "fast-deflate"),
@@ -70,7 +71,9 @@ fn provenance_hashes_final_unfiltered_element_bytes(
     let dataset = file.dataset("data").unwrap();
     if matches!(
         data,
-        AddressData::PathReferences | AddressData::ResolvedReferences
+        AddressData::PathReferences
+            | AddressData::ChunkedPathReferences
+            | AddressData::ResolvedReferences
     ) {
         let values: Vec<_> = dataset
             .dereference()
@@ -140,6 +143,9 @@ fn address_data_builder(
         .with_path_references(&["target"]);
     let dataset = builder.create_dataset("data");
     match data {
+        AddressData::ChunkedPathReferences => dataset
+            .with_path_references(&["target", "target"])
+            .with_chunks(&[1]),
         AddressData::ChunkedStrings => dataset
             .with_vlen_strings(&["alpha", "beta", "gamma"])
             .with_chunks(&[2]),
@@ -172,6 +178,7 @@ fn address_data_builder(
 
 #[derive(Clone, Copy, Debug)]
 enum AddressData {
+    ChunkedPathReferences,
     ChunkedStrings,
     ContiguousStrings,
     #[cfg(any(feature = "deflate", feature = "fast-deflate"))]

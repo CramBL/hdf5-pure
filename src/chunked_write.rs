@@ -392,6 +392,68 @@ impl ChunkOptions {
         }
     }
 
+    /// Builds layout and pipeline messages for object-header sizing from dataset metadata.
+    ///
+    /// The layout is for sizing, with the same encoded length as the final layout. The pipeline
+    /// message contains the final filter parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::FilterError`] if filter parameters are invalid or pipeline fields
+    /// exceed their encoded widths. Other filter-parameter errors from [`Self::build_pipeline`]
+    /// are propagated.
+    ///
+    /// Returns [`FormatError::ChunkedReadError`] if the chunk-index geometry is unsupported or
+    /// exceeds the writer's index limits, or [`FormatError::InvalidChunkGeometry`] if the layout
+    /// has too many dimensions.
+    ///
+    /// Returns [`FormatError::ValueTooLargeForRepresentation`] if a chunk dimension exceeds its
+    /// stored width, or [`FormatError::ValueTooLargeForPlatform`] if an element size or chunk
+    /// count exceeds [`usize::MAX`].
+    pub(crate) fn measure_header(
+        &self,
+        shape: &[u64],
+        ctx: ChunkContext<'_>,
+        maxshape: Option<&[MaxExtent]>,
+        fill: FillPattern<'_>,
+        allocation: StorageAllocation,
+    ) -> Result<ChunkedHeader, FormatError> {
+        let pipeline = self.build_pipeline(&ctx, fill)?;
+        let element_size = ctx.element_size.narrow::<NonZeroUsize>()?;
+        let (kind, _, _) = plan_index_slots(
+            shape,
+            ctx.chunk_dims,
+            maxshape,
+            full_chunk_bytes(ctx.chunk_dims.iter().copied(), element_size),
+            pipeline.is_some(),
+            allocation,
+        )?;
+        let chunk_dims = ctx
+            .chunk_dims
+            .iter()
+            .map(|&dimension| dimension.narrow())
+            .collect::<Result<Vec<u32>, _>>()?;
+        Ok(ChunkedHeader {
+            layout_message: kind.layout_message(
+                ChunkedLayoutFlags::NONE,
+                &chunk_dims,
+                element_size,
+                &[ChunkRecord {
+                    address: StoredAddress::new(0),
+                    stored_size: 0,
+                    filter_mask: 0,
+                }],
+                StoredAddress::new(0),
+                pipeline.is_some(),
+            )?,
+            pipeline_message: pipeline
+                .as_ref()
+                .map(FilterPipeline::serialize)
+                .transpose()
+                .map_err(crate::filter_pipeline::map_filter_pipeline_error)?,
+        })
+    }
+
     /// Checks the chunk geometry of a dataset of `extent`.
     ///
     /// The check is meaningful only for a dataset stored chunked, by
@@ -1345,6 +1407,14 @@ pub(crate) struct ChunkedMeasure {
     pub pipeline_message: Option<Vec<u8>>,
 }
 
+/// The messages needed to size a chunked dataset's object header before encoding its elements.
+pub(crate) struct ChunkedHeader {
+    /// The layout message used for its encoded length during object-header sizing.
+    pub layout_message: Vec<u8>,
+    /// The final filter-pipeline message, if the dataset has one.
+    pub pipeline_message: Option<Vec<u8>>,
+}
+
 /// Lays an already-[`compress`ed](compress_chunks) chunk set out at `data_address`,
 /// producing the on-disk data region (chunk bytes followed by the chunk index)
 /// and the v4 data-layout message. Cheap: this only concatenates and builds the
@@ -2217,6 +2287,74 @@ mod tests {
         data.chunks(8)
             .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
             .collect()
+    }
+
+    #[rstest]
+    #[case(&[64], &[64], None, [16, 28], 17)]
+    #[case(&[128], &[32], None, [17, 17], 17)]
+    #[case(&[128], &[32], Some(&[MaxExtent::Unlimited][..]), [21, 21], 21)]
+    #[case(&[2, 3], &[2, 2], None, [18, 18], 18)]
+    fn header_lengths_and_filter_parameters_match_geometry(
+        #[case] shape: &[u64],
+        #[case] chunk_dims: &[u64],
+        #[case] maxshape: Option<&[MaxExtent]>,
+        #[case] allocated_lengths: [usize; 2],
+        #[case] unallocated_length: usize,
+        #[values(false, true)] filtered: bool,
+        #[values(false, true)] varied: bool,
+        #[values(StorageAllocation::Allocated, StorageAllocation::Unallocated)]
+        allocation: StorageAllocation,
+    ) {
+        let mut options = ChunkOptions::default();
+        if filtered {
+            options.set_filter(FilterKind::Shuffle);
+            options.set_filter(FilterKind::Deflate(DeflateLevel::Six));
+        }
+        let ctx = ChunkContext::basic(chunk_dims, 8);
+        let header = options
+            .measure_header(shape, ctx, maxshape, FillPattern::ZERO, allocation)
+            .unwrap();
+        let count = shape.iter().product::<u64>().to_usize().unwrap() * 8;
+        let raw: Vec<_> = (0..count)
+            .map(|index| {
+                if varied {
+                    u8::try_from(index % 251).unwrap()
+                } else {
+                    0
+                }
+            })
+            .collect();
+        let chunks = compress_chunks(
+            &raw,
+            shape,
+            ctx,
+            &options,
+            maxshape,
+            FillPattern::ZERO,
+            allocation,
+        )
+        .unwrap();
+        let measured = measure_chunked_at(&chunks, StoredAddress::new(0x1234)).unwrap();
+        assert_eq!(
+            header.layout_message.len(),
+            match allocation {
+                StorageAllocation::Allocated => allocated_lengths[usize::from(filtered)],
+                StorageAllocation::Unallocated => unallocated_length,
+            }
+        );
+        assert_eq!(
+            header.pipeline_message.as_ref().map(|message| {
+                FilterPipeline::parse(message)
+                    .unwrap()
+                    .filters
+                    .into_iter()
+                    .map(|filter| (filter.filter_id, filter.client_data))
+                    .collect::<Vec<_>>()
+            }),
+            filtered.then_some(vec![(FILTER_SHUFFLE, vec![8]), (FILTER_DEFLATE, vec![6])])
+        );
+        assert_eq!(header.layout_message.len(), measured.layout_message.len());
+        assert_eq!(header.pipeline_message, measured.pipeline_message);
     }
 
     /// Measuring a chunked region and assembling it must agree on its length and

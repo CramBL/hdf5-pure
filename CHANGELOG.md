@@ -62,6 +62,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `DatasetBuilder::with_path_references` writing unresolved references in chunked datasets, including filtered output.
 - Fixed `FileBuilder::finish` and related output methods hashing unresolved heap identifiers and object-reference addresses with the `provenance` feature.
 - Fixed `Dataset::append` using incorrect Extensible Array block geometry when the secondary block parameters differ from the defaults.
 - Fixed `Dataset::append` filtering the partial edge chunks of a dataset whose layout exempts them from the filters ([#845](https://github.com/CramBL/hdf5-pure/pull/845)).
