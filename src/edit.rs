@@ -297,6 +297,7 @@ use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::PhysicalAddress;
 use hdf5_pure_format::__private::ChunkIndexInfo;
 use hdf5_pure_format::__private::ChunkRecord;
+use hdf5_pure_format::__private::ChunkedGeometry;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use hdf5_pure_format::__private::IndexSlots;
 use hdf5_pure_format::__private::LayoutVersion;
@@ -3258,7 +3259,7 @@ impl WriteEngine {
         if disk_ds.dimensions.len() != 1 {
             return false;
         }
-        let Ok(geometry) = chunked_geometry(&disk_dt, &disk_ds, &dl) else {
+        let Ok(geometry) = ChunkedGeometry::new(&disk_dt, &disk_ds, &dl) else {
             return false;
         };
         match (geometry.spatial.first(), disk_ds.dimensions.first()) {
@@ -8350,7 +8351,9 @@ impl WriteEngine {
                     element_size,
                     raw_size,
                     maxshape,
-                } = chunked_geometry(&fd.dt, &disk_ds, &dl)?;
+                } = ChunkedGeometry::new(&fd.dt, &disk_ds, &dl)?;
+                let spatial = spatial.to_vec();
+                let maxshape = maxshape.map(<[MaxExtent]>::to_vec);
 
                 let padding = fill_msg
                     .map_or(crate::fill_value::PaddingFill::Zero, |(mt, b, e)| {
@@ -8469,13 +8472,13 @@ impl WriteEngine {
     /// # Errors
     ///
     /// Returns [`Error::AppendUnsupported`] if the object at `addr` is not a chunked dataset of
-    /// rank 1, unlimited along its first dimension, with a nonzero chunk length and a dense grid
-    /// of chunks indexed by an Extensible Array whose element format matches the filter pipeline,
+    /// rank 1, unlimited along its first dimension, with a dense grid of chunks indexed by an
+    /// Extensible Array whose element format matches the filter pipeline,
     /// if that pipeline is one this crate cannot re-encode, or is lossy and the dataset ends in a
     /// partial chunk, if the elements of `ab` mix types or do not match the dataset's datatype, if
     /// `ab` holds raw bytes for a datatype that a raw append cannot write as they are, if the grown
     /// length overflows a `u64`, or if `base` is past the end of `src`. Returns the errors of the
-    /// reads of the dataset's header and chunk index, of
+    /// reads of the dataset's header and chunk index, of [`ChunkedGeometry::new`], of
     /// [`ChunkInfo::read_live_elements`](chunked_read::ChunkInfo::read_live_elements) for the
     /// partial chunk, and of [`PreparedChunk::encode`].
     fn prepare_append<S: Source + ?Sized>(
@@ -8578,15 +8581,10 @@ impl WriteEngine {
         let ChunkedGeometry {
             spatial,
             element_size,
+            raw_size,
             ..
-        } = chunked_geometry(&disk_dt, &disk_ds, &dl)?;
+        } = ChunkedGeometry::new(&disk_dt, &disk_ds, &dl)?;
         let chunk_elems = spatial[0];
-        if chunk_elems == 0 {
-            return Err(Error::AppendUnsupported(
-                "append requires a nonzero chunk length",
-            ));
-        }
-
         // Validate the appended bytes against the on-disk element type.
         if ab.raw.len() % element_size != 0 {
             return Err(Error::AppendUnsupported(
@@ -8679,7 +8677,7 @@ impl WriteEngine {
             &disk_ds,
             crate::file_writer::WIDTHS,
         )?;
-        let grid = chunked_read::plan_dense_grid(infos, &disk_ds.dimensions, &spatial).ok_or(
+        let grid = chunked_read::plan_dense_grid(infos, &disk_ds.dimensions, spatial).ok_or(
             Error::AppendUnsupported(
                 "dataset has a sparse or inconsistent chunk grid; cannot append",
             ),
@@ -8718,7 +8716,7 @@ impl WriteEngine {
         // Build the raw byte region for the tail (from the last chunk boundary to
         // the new end): the live prefix of any rewritten partial chunk, then the
         // appended bytes.
-        let ctx = ChunkContext::from_datatype(&spatial, &disk_dt)?;
+        let ctx = ChunkContext::from_datatype(spatial, &disk_dt)?;
         // One encoder and decoder across the appended tail. See `FilterScratch`.
         let mut scratch = FilterScratch::new();
         let (mut tail_raw, old_tail_extent) = if has_partial {
@@ -8749,7 +8747,7 @@ impl WriteEngine {
         let split = chunked_write::split_into_chunks(
             &tail_raw,
             &[tail_len_elems],
-            &spatial,
+            spatial,
             element_size,
             padding.pattern(element_size),
         )
@@ -8758,7 +8756,7 @@ impl WriteEngine {
             .zip(split)
             .map(|(index, logical)| {
                 let offset = index * chunk_elems;
-                let published = ChunkDecoding::at_extent(*flags, &spatial, &[new_dim0], &[offset]);
+                let published = ChunkDecoding::at_extent(*flags, spatial, &[new_dim0], &[offset]);
                 let encoding = ChunkEncoding::for_decoding(published);
                 PreparedChunk::encode(&mut scratch, pipeline.as_ref(), ctx, encoding, logical)
             })
@@ -8780,6 +8778,7 @@ impl WriteEngine {
             flags: *flags,
             chunk_dims_u32,
             element_size,
+            raw_size,
             has_filters,
             kept_chunks,
             new_chunks,
@@ -9128,7 +9127,9 @@ impl WriteEngine {
                     element_size,
                     raw_size: _,
                     maxshape,
-                } = chunked_geometry(&dt, &ds, &layout)?;
+                } = ChunkedGeometry::new(&dt, &ds, &layout)?;
+                let chunk_dims = chunk_dims.to_vec();
+                let maxshape = maxshape.map(<[MaxExtent]>::to_vec);
 
                 // The layout's chunk-index address and every chunk address it leads
                 // to are stored base-relative, so enumerate and read on a
@@ -9604,6 +9605,7 @@ impl WriteEngine {
                 flags,
                 chunk_dims_u32,
                 element_size,
+                raw_size,
                 has_filters,
                 kept_chunks,
                 new_chunks,
@@ -9614,6 +9616,7 @@ impl WriteEngine {
                 *flags,
                 chunk_dims_u32,
                 *element_size,
+                *raw_size,
                 *has_filters,
                 kept_chunks,
                 new_chunks,
@@ -9657,6 +9660,7 @@ impl WriteEngine {
         flags: ChunkedLayoutFlags,
         chunk_dims_u32: &[u32],
         element_size: NonZeroUsize,
+        chunk_bytes: u64,
         has_filters: bool,
         kept_chunks: &[ChunkRecord],
         new_chunks: &[PreparedChunk],
@@ -9695,10 +9699,6 @@ impl WriteEngine {
         // The element width comes from the chunk geometry rather than from the
         // chunk list, so a rebuild declares the same width the original index did —
         // including when the dataset it grows was created empty.
-        let chunk_bytes = chunked_write::full_chunk_bytes(
-            chunk_dims_u32.iter().map(|&d| u64::from(d)),
-            element_size,
-        );
         // Rank 1 and unlimited along axis 0 (`prepare_append` refuses anything
         // else), so every chunk's index slot is its position in the grid and the
         // array is dense from zero.
@@ -10870,6 +10870,8 @@ enum MovingWrite {
         /// Rank-only spatial chunk dimensions, for the rebuilt v4 layout message.
         chunk_dims_u32: Vec<u32>,
         element_size: NonZeroUsize,
+        /// The checked uncompressed chunk byte count used to size index elements.
+        raw_size: u64,
         /// Whether the dataset has a filter pipeline, and so whether the rebuilt index stores the
         /// filtered chunk element format.
         has_filters: bool,
@@ -11835,61 +11837,6 @@ fn parse_chunked_header(
         ds,
         layout: dl,
         pipeline_message,
-    })
-}
-
-/// The chunk geometry a verbatim chunked rebuild needs, derived by
-/// [`chunked_geometry`] from a chunked dataset's datatype, dataspace, and parsed
-/// [`DataLayout::Chunked`].
-struct ChunkedGeometry {
-    /// Rank-only spatial chunk dimensions.
-    spatial: Vec<u64>,
-    /// Element size in bytes, proven non-zero: the chunk splitter divides by
-    /// it, and so does the append path's element-count arithmetic.
-    element_size: NonZeroUsize,
-    /// Full (uncompressed) chunk byte size, `product(spatial) * element_size`.
-    /// This is what the chunk index's element width is derived from, so it has
-    /// to be the geometry's product and not any written chunk's size.
-    raw_size: u64,
-    /// The on-disk maximum dimensions, when they differ from the current shape.
-    /// An unlimited dimension selects the extensible-array index and a finite
-    /// one the fixed-array index. `None` keeps the fixed-array or single-chunk
-    /// index.
-    maxshape: Option<Vec<MaxExtent>>,
-}
-
-/// Derive the [`ChunkedGeometry`] for a chunked dataset from its datatype,
-/// dataspace, and parsed [`DataLayout::Chunked`].
-fn chunked_geometry(
-    dt: &crate::datatype::Datatype,
-    ds: &Dataspace,
-    layout: &DataLayout,
-) -> Result<ChunkedGeometry, Error> {
-    let DataLayout::Chunked {
-        chunk_dimensions, ..
-    } = layout
-    else {
-        return Err(Error::EditUnsupported("dataset is not chunked"));
-    };
-    let rank = ds.dimensions.len();
-    if chunk_dimensions.len() <= rank {
-        return Err(Error::EditUnsupported(
-            "chunked layout has malformed dimensions",
-        ));
-    }
-    let spatial: Vec<u64> = chunk_dimensions[..rank].to_vec();
-    let element_size = crate::datatype::element_size_usize(dt)?;
-    let raw_size = spatial
-        .iter()
-        .copied()
-        .product::<u64>()
-        .saturating_mul(element_size.get() as u64);
-    let maxshape = ds.extensible_max_dimensions().map(<[MaxExtent]>::to_vec);
-    Ok(ChunkedGeometry {
-        spatial,
-        element_size,
-        raw_size,
-        maxshape,
     })
 }
 

@@ -28,6 +28,7 @@ mod btree_v2_write;
 mod bytes;
 mod checksum;
 mod chunk_record;
+mod chunked_geometry;
 mod convert;
 mod data_layout;
 mod dataspace;

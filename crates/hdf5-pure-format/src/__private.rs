@@ -41,6 +41,7 @@ pub use crate::chunk_record::ChunkElementEncoding;
 pub use crate::chunk_record::ChunkRecord;
 pub use crate::chunk_record::IndexSlots;
 pub use crate::chunk_record::chunk_element_encoding;
+pub use crate::chunked_geometry::ChunkedGeometry;
 pub use crate::convert::Narrow;
 pub use crate::convert::NarrowTarget;
 pub use crate::convert::slice_range;
