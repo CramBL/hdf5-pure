@@ -1,0 +1,173 @@
+---
+source: crates/crosscheck/tests/main/file_space_oracle.rs
+expression: report
+---
+checkpoint: None/persist=false/page=4096/threshold=1/base=0/c_origin=false/created
+properties: rust=None libhdf5=None c_persist=false c_threshold=1 page=4096 base=0
+file: rust_eof=17576 libhdf5_filesize=17576 physical=17576 base=0
+free sections (base-relative address, length)
+  index  hdf5-pure                         libhdf5                           match
+free: rust_sections=0 c_sections=0 rust_bytes=0 c_bytes=0
+libhdf5_H5Fget_freespace=0 difference_from_c_sections=0
+ownership (Rust): analysis_complete=true
+  userblock: sections=0 bytes=0
+  live_raw: sections=3 bytes=17184
+  live_metadata: sections=6 bytes=392
+  managers: sections=0 bytes=0
+  reusable: sections=0 bytes=0
+  unclassified: sections=0 bytes=0
+  trailing_slack: sections=0 bytes=0
+exact_section_map_equal=true
+
+checkpoint: None/persist=false/page=4096/threshold=1/base=0/c_origin=false/rust-deletion
+properties: rust=None libhdf5=None c_persist=false c_threshold=1 page=4096 base=0
+file: rust_eof=17647 libhdf5_filesize=17647 physical=17647 base=0
+free sections (base-relative address, length)
+  index  hdf5-pure                         libhdf5                           match
+free: rust_sections=0 c_sections=0 rust_bytes=0 c_bytes=0
+libhdf5_H5Fget_freespace=0 difference_from_c_sections=0
+ownership (Rust): analysis_complete=true
+  userblock: sections=0 bytes=0
+  live_raw: sections=2 bytes=800
+  live_metadata: sections=5 bytes=305
+  managers: sections=0 bytes=0
+  reusable: sections=0 bytes=0
+  unclassified: sections=3 bytes=16542
+  trailing_slack: sections=0 bytes=0
+exact_section_map_equal=true
+
+checkpoint: None/persist=false/page=4096/threshold=1/base=0/c_origin=false/rust-reuse-0
+properties: rust=None libhdf5=None c_persist=false c_threshold=1 page=4096 base=0
+file: rust_eof=29815 libhdf5_filesize=29815 physical=29815 base=0
+free sections (base-relative address, length)
+  index  hdf5-pure                         libhdf5                           match
+free: rust_sections=0 c_sections=0 rust_bytes=0 c_bytes=0
+libhdf5_H5Fget_freespace=0 difference_from_c_sections=0
+ownership (Rust): analysis_complete=true
+  userblock: sections=0 bytes=0
+  live_raw: sections=3 bytes=12800
+  live_metadata: sections=6 bytes=402
+  managers: sections=0 bytes=0
+  reusable: sections=0 bytes=0
+  unclassified: sections=4 bytes=16613
+  trailing_slack: sections=0 bytes=0
+exact_section_map_equal=true
+
+checkpoint: None/persist=false/page=4096/threshold=1/base=0/c_origin=false/manager-rewrite-0
+properties: rust=None libhdf5=None c_persist=false c_threshold=1 page=4096 base=0
+file: rust_eof=29886 libhdf5_filesize=29886 physical=29886 base=0
+free sections (base-relative address, length)
+  index  hdf5-pure                         libhdf5                           match
+free: rust_sections=0 c_sections=0 rust_bytes=0 c_bytes=0
+libhdf5_H5Fget_freespace=0 difference_from_c_sections=0
+ownership (Rust): analysis_complete=true
+  userblock: sections=0 bytes=0
+  live_raw: sections=2 bytes=800
+  live_metadata: sections=5 bytes=305
+  managers: sections=0 bytes=0
+  reusable: sections=0 bytes=0
+  unclassified: sections=4 bytes=28781
+  trailing_slack: sections=0 bytes=0
+exact_section_map_equal=true
+
+checkpoint: None/persist=false/page=4096/threshold=1/base=0/c_origin=false/rust-reuse-1
+properties: rust=None libhdf5=None c_persist=false c_threshold=1 page=4096 base=0
+file: rust_eof=42454 libhdf5_filesize=42454 physical=42454 base=0
+free sections (base-relative address, length)
+  index  hdf5-pure                         libhdf5                           match
+free: rust_sections=0 c_sections=0 rust_bytes=0 c_bytes=0
+libhdf5_H5Fget_freespace=0 difference_from_c_sections=0
+ownership (Rust): analysis_complete=true
+  userblock: sections=0 bytes=0
+  live_raw: sections=3 bytes=13200
+  live_metadata: sections=6 bytes=402
+  managers: sections=0 bytes=0
+  reusable: sections=0 bytes=0
+  unclassified: sections=4 bytes=28852
+  trailing_slack: sections=0 bytes=0
+exact_section_map_equal=true
+
+checkpoint: None/persist=false/page=4096/threshold=1/base=0/c_origin=false/manager-rewrite-1
+properties: rust=None libhdf5=None c_persist=false c_threshold=1 page=4096 base=0
+file: rust_eof=42525 libhdf5_filesize=42525 physical=42525 base=0
+free sections (base-relative address, length)
+  index  hdf5-pure                         libhdf5                           match
+free: rust_sections=0 c_sections=0 rust_bytes=0 c_bytes=0
+libhdf5_H5Fget_freespace=0 difference_from_c_sections=0
+ownership (Rust): analysis_complete=true
+  userblock: sections=0 bytes=0
+  live_raw: sections=2 bytes=800
+  live_metadata: sections=5 bytes=305
+  managers: sections=0 bytes=0
+  reusable: sections=0 bytes=0
+  unclassified: sections=4 bytes=41420
+  trailing_slack: sections=0 bytes=0
+exact_section_map_equal=true
+
+checkpoint: None/persist=false/page=4096/threshold=1/base=0/c_origin=false/rust-reuse-2
+properties: rust=None libhdf5=None c_persist=false c_threshold=1 page=4096 base=0
+file: rust_eof=55493 libhdf5_filesize=55493 physical=55493 base=0
+free sections (base-relative address, length)
+  index  hdf5-pure                         libhdf5                           match
+free: rust_sections=0 c_sections=0 rust_bytes=0 c_bytes=0
+libhdf5_H5Fget_freespace=0 difference_from_c_sections=0
+ownership (Rust): analysis_complete=true
+  userblock: sections=0 bytes=0
+  live_raw: sections=3 bytes=13600
+  live_metadata: sections=6 bytes=402
+  managers: sections=0 bytes=0
+  reusable: sections=0 bytes=0
+  unclassified: sections=4 bytes=41491
+  trailing_slack: sections=0 bytes=0
+exact_section_map_equal=true
+
+checkpoint: None/persist=false/page=4096/threshold=1/base=0/c_origin=false/manager-rewrite-2
+properties: rust=None libhdf5=None c_persist=false c_threshold=1 page=4096 base=0
+file: rust_eof=55564 libhdf5_filesize=55564 physical=55564 base=0
+free sections (base-relative address, length)
+  index  hdf5-pure                         libhdf5                           match
+free: rust_sections=0 c_sections=0 rust_bytes=0 c_bytes=0
+libhdf5_H5Fget_freespace=0 difference_from_c_sections=0
+ownership (Rust): analysis_complete=true
+  userblock: sections=0 bytes=0
+  live_raw: sections=2 bytes=800
+  live_metadata: sections=5 bytes=305
+  managers: sections=0 bytes=0
+  reusable: sections=0 bytes=0
+  unclassified: sections=4 bytes=54459
+  trailing_slack: sections=0 bytes=0
+exact_section_map_equal=true
+
+checkpoint: None/persist=false/page=4096/threshold=1/base=0/c_origin=false/c-reuse
+properties: rust=None libhdf5=None c_persist=false c_threshold=1 page=4096 base=0
+file: rust_eof=67883 libhdf5_filesize=67883 physical=67883 base=0
+free sections (base-relative address, length)
+  index  hdf5-pure                         libhdf5                           match
+free: rust_sections=0 c_sections=0 rust_bytes=0 c_bytes=0
+libhdf5_H5Fget_freespace=0 difference_from_c_sections=0
+ownership (Rust): analysis_complete=true
+  userblock: sections=0 bytes=0
+  live_raw: sections=3 bytes=12800
+  live_metadata: sections=7 bytes=624
+  managers: sections=0 bytes=0
+  reusable: sections=0 bytes=0
+  unclassified: sections=4 bytes=54459
+  trailing_slack: sections=0 bytes=0
+exact_section_map_equal=true
+
+checkpoint: None/persist=false/page=4096/threshold=1/base=0/c_origin=false/c-delete
+properties: rust=None libhdf5=None c_persist=false c_threshold=1 page=4096 base=0
+file: rust_eof=55832 libhdf5_filesize=55832 physical=55832 base=0
+free sections (base-relative address, length)
+  index  hdf5-pure                         libhdf5                           match
+free: rust_sections=0 c_sections=0 rust_bytes=0 c_bytes=0
+libhdf5_H5Fget_freespace=0 difference_from_c_sections=0
+ownership (Rust): analysis_complete=true
+  userblock: sections=0 bytes=0
+  live_raw: sections=2 bytes=800
+  live_metadata: sections=5 bytes=305
+  managers: sections=0 bytes=0
+  reusable: sections=0 bytes=0
+  unclassified: sections=5 bytes=54727
+  trailing_slack: sections=0 bytes=0
+exact_section_map_equal=true

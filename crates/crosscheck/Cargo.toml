@@ -54,6 +54,7 @@ hdf5-sys = { workspace = true, optional = true }
 ignored = ["hdf5", "hdf5-sys"]
 
 [dev-dependencies]
+insta.workspace = true
 hdf5-pure = { workspace = true, features = [
     "__fractal-heap-storage-crosscheck",
     "__group-links-crosscheck",

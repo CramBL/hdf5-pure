@@ -243,6 +243,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: just interop::test-hdf5-group "$HDF5_VERSION" @global "$CROSSCHECK_FEATURES"
 
+      # Checks the paired snapshots against the pinned bundled library.
+      - name: Check free-space oracle snapshots
+        if: matrix.os == 'ubuntu-latest' && matrix.version == needs.releases.outputs.latest
+        env:
+          INSTA_UPDATE: "no"
+        run: just interop::test-bundled --test main file_space
+
       # Clippy needs a libhdf5 to build against, so it runs here, once.
       - name: Lint the crosschecks
         if: matrix.os == 'ubuntu-latest' && matrix.version == needs.releases.outputs.latest

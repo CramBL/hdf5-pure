@@ -1,0 +1,25 @@
+---
+source: crates/crosscheck/tests/main/file_space_oracle.rs
+expression: report
+---
+checkpoint: tail-truncation-paged/rust-close
+properties: rust=FreeSpaceManager { paged: true, persist: true, threshold: 0 } libhdf5=FreeSpaceManager { paged: true, persist: true, threshold: 0 } c_persist=true c_threshold=0 page=16384 base=0
+file: rust_eof=65536 libhdf5_filesize=65536 physical=65536 base=0
+free sections (base-relative address, length)
+  index  hdf5-pure                         libhdf5                           match
+  0      (0xb1, 0x544)                     (0xb1, 0x544)                     yes
+  1      (0x1dc8, 0x2238)                  (0x1dc8, 0x2238)                  yes
+  2      (0x4010, 0x3ff0)                  (0x4010, 0x3ff0)                  yes
+  3      (0x8000, 0x4000)                  (0x8000, 0x4000)                  yes
+  4      (0xc000, 0x4000)                  (0xc000, 0x4000)                  yes
+free: rust_sections=5 c_sections=5 rust_bytes=59244 c_bytes=59244
+libhdf5_H5Fget_freespace=59244 difference_from_c_sections=0
+ownership (Rust): analysis_complete=true
+  userblock: sections=0 bytes=0
+  live_raw: sections=1 bytes=16
+  live_metadata: sections=4 bytes=317
+  managers: sections=6 bytes=5959
+  reusable: sections=3 bytes=59244
+  unclassified: sections=0 bytes=0
+  trailing_slack: sections=0 bytes=0
+exact_section_map_equal=true

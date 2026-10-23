@@ -1,0 +1,22 @@
+---
+source: crates/crosscheck/tests/main/file_space_oracle.rs
+expression: report
+---
+checkpoint: page-threshold-1000-e-e/rust-close
+properties: rust=FreeSpaceManager { paged: true, persist: true, threshold: 1000 } libhdf5=FreeSpaceManager { paged: true, persist: true, threshold: 1000 } c_persist=true c_threshold=1000 page=4096 base=0
+file: rust_eof=8192 libhdf5_filesize=8192 physical=8192 base=0
+free sections (base-relative address, length)
+  index  hdf5-pure                         libhdf5                           match
+  0      (0xa47, 0x5b9)                    (0xa47, 0x5b9)                    yes
+  1      (0x14b0, 0xb50)                   (0x14b0, 0xb50)                   yes
+free: rust_sections=2 c_sections=2 rust_bytes=4361 c_bytes=4361
+libhdf5_H5Fget_freespace=4361 difference_from_c_sections=0
+ownership (Rust): analysis_complete=true
+  userblock: sections=0 bytes=0
+  live_raw: sections=3 bytes=1200
+  live_metadata: sections=6 bytes=1139
+  managers: sections=4 bytes=531
+  reusable: sections=2 bytes=4361
+  unclassified: sections=2 bytes=961
+  trailing_slack: sections=0 bytes=0
+exact_section_map_equal=true

@@ -507,6 +507,7 @@ dependencies = [
  "hdf5-pure-core",
  "hdf5-pure-format",
  "hdf5-pure-space",
+ "insta",
  "ndarray",
  "proptest",
  "rstest",

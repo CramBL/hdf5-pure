@@ -32,6 +32,29 @@ use crate::session;
 ///
 /// Panics if a file operation fails or a workload assertion fails.
 pub fn run_endurance(strategy: FileSpaceStrategy) -> String {
+    run_endurance_inner(strategy, None::<fn(&Path, &str)>)
+}
+
+/// Runs endurance with observations at each closed reopen checkpoint and after the final close.
+///
+/// The observer receives the closed file's path and a checkpoint label. It runs before the next
+/// writing session opens. The returned report describes the final reopened state before its
+/// editing session closes.
+///
+/// # Panics
+///
+/// Panics if a file operation fails, a workload assertion fails, or the observer panics.
+pub fn run_endurance_observed(
+    strategy: FileSpaceStrategy,
+    observer: impl FnMut(&Path, &str),
+) -> String {
+    run_endurance_inner(strategy, Some(observer))
+}
+
+fn run_endurance_inner(
+    strategy: FileSpaceStrategy,
+    mut observer: Option<impl FnMut(&Path, &str)>,
+) -> String {
     let path = temp::temp_path("free_space_endurance.h5");
     let mut builder = FileBuilder::new();
     builder.with_file_space_strategy(strategy, strategy != FileSpaceStrategy::None, 1);
@@ -95,6 +118,9 @@ pub fn run_endurance(strategy: FileSpaceStrategy) -> String {
         reader
             .close()
             .unwrap_or_else(|error| panic!("close reader: {error:?}; {before_close}"));
+        if let Some(observer) = &mut observer {
+            observer(&path, &format!("reopen-{iteration}"));
+        }
         file = session::open_bounded_on_close(&path)
             .unwrap_or_else(|error| panic!("reopen writer: {error:?}; {before_close}"));
         let context = Context::new(&file, &path, strategy, iteration);
@@ -134,6 +160,9 @@ pub fn run_endurance(strategy: FileSpaceStrategy) -> String {
     let final_state = context.to_string();
     file.close()
         .unwrap_or_else(|error| panic!("final close: {error:?}; {final_state}"));
+    if let Some(observer) = &mut observer {
+        observer(&path, "final-close");
+    }
     report
 }
 

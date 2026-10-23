@@ -15,6 +15,8 @@ pub mod dense_attr;
 pub mod file;
 pub mod file_builder;
 pub mod file_space;
+#[cfg(feature = "__hdf5-1.10")]
+pub mod file_space_oracle;
 pub mod fixed_string;
 pub mod fixtures;
 pub mod free_space_churn;

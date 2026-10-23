@@ -1,0 +1,98 @@
+---
+source: crates/crosscheck/tests/main/file_space_oracle.rs
+expression: report
+---
+checkpoint: churn/ContinuousOpen/FsmAggr/Zero/final-close
+properties: rust=FreeSpaceManager { paged: false, persist: true, threshold: 1 } libhdf5=FreeSpaceManager { paged: false, persist: true, threshold: 1 } c_persist=true c_threshold=1 page=4096 base=0
+file: rust_eof=30319639 libhdf5_filesize=30319639 physical=30319639 base=0
+free sections (base-relative address, length)
+  index  hdf5-pure                         libhdf5                           match
+  0      (0x6a, 0x4)                       (0x6a, 0x4)                       yes
+  1      (0x55d, 0x40)                     (0x55d, 0x40)                     yes
+  2      (0x73f, 0x7)                      (0x73f, 0x7)                      yes
+  3      (0x808, 0x28)                     (0x808, 0x28)                     yes
+  4      (0x19f497, 0x739a)                (0x19f497, 0x739a)                yes
+  5      (0x1a68bf, 0x3e)                  (0x1a68bf, 0x3e)                  yes
+  6      (0x1f7b94, 0x6)                   (0x1f7b94, 0x6)                   yes
+  7      (0x1f7c53, 0x2d)                  (0x1f7c53, 0x2d)                  yes
+  8      (0x1f808f, 0x2)                   (0x1f808f, 0x2)                   yes
+  9      (0x1f9023, 0x4)                   (0x1f9023, 0x4)                   yes
+  10     (0x1ff1e8, 0x4b6)                 (0x1ff1e8, 0x4b6)                 yes
+  11     (0x269451, 0x35)                  (0x269451, 0x35)                  yes
+  12     (0x2694cd, 0x21)                  (0x2694cd, 0x21)                  yes
+  13     (0x31f9e3, 0x297)                 (0x31f9e3, 0x297)                 yes
+  14     (0x436db9, 0x1faa)                (0x436db9, 0x1faa)                yes
+  15     (0x539503, 0x13368)               (0x539503, 0x13368)               yes
+  16     (0x54c8ba, 0x4)                   (0x54c8ba, 0x4)                   yes
+  17     (0x5edd98, 0x3df1)                (0x5edd98, 0x3df1)                yes
+  18     (0x5f1bb1, 0x3)                   (0x5f1bb1, 0x3)                   yes
+  19     (0x5f2924, 0x2d6)                 (0x5f2924, 0x2d6)                 yes
+  20     (0x6107f5, 0x1295c1)              (0x6107f5, 0x1295c1)              yes
+  21     (0x880d6f, 0x10c44)               (0x880d6f, 0x10c44)               yes
+  22     (0x89643a, 0x5)                   (0x89643a, 0x5)                   yes
+  23     (0x896592, 0x4)                   (0x896592, 0x4)                   yes
+  24     (0x896858, 0x2a)                  (0x896858, 0x2a)                  yes
+  25     (0x896892, 0x3)                   (0x896892, 0x3)                   yes
+  26     (0x896a5d, 0x3d)                  (0x896a5d, 0x3d)                  yes
+  27     (0x9db250, 0x1d726)               (0x9db250, 0x1d726)               yes
+  28     (0xa80855, 0x542)                 (0xa80855, 0x542)                 yes
+  29     (0xa82408, 0x54e)                 (0xa82408, 0x54e)                 yes
+  30     (0xaa038d, 0x23)                  (0xaa038d, 0x23)                  yes
+  31     (0xaa055a, 0x4f1)                 (0xaa055a, 0x4f1)                 yes
+  32     (0xaa0aa3, 0x2)                   (0xaa0aa3, 0x2)                   yes
+  33     (0xaa0fdc, 0x24)                  (0xaa0fdc, 0x24)                  yes
+  34     (0xce202f, 0x7)                   (0xce202f, 0x7)                   yes
+  35     (0xce207e, 0x424)                 (0xce207e, 0x424)                 yes
+  36     (0xde3a8b, 0x2f)                  (0xde3a8b, 0x2f)                  yes
+  37     (0xde3d54, 0x2f)                  (0xde3d54, 0x2f)                  yes
+  38     (0xde40fa, 0x26)                  (0xde40fa, 0x26)                  yes
+  39     (0xde452e, 0x2)                   (0xde452e, 0x2)                   yes
+  40     (0xde4867, 0x31)                  (0xde4867, 0x31)                  yes
+  41     (0xde4a57, 0x527)                 (0xde4a57, 0x527)                 yes
+  42     (0xde5887, 0x32)                  (0xde5887, 0x32)                  yes
+  43     (0xde7979, 0xb)                   (0xde7979, 0xb)                   yes
+  44     (0xde9220, 0x2c)                  (0xde9220, 0x2c)                  yes
+  45     (0xecd2ec, 0x1c542)               (0xecd2ec, 0x1c542)               yes
+  46     (0xeec796, 0x6)                   (0xeec796, 0x6)                   yes
+  47     (0xeecadc, 0x27)                  (0xeecadc, 0x27)                  yes
+  48     (0xeed3d3, 0x4)                   (0xeed3d3, 0x4)                   yes
+  49     (0x1214404, 0x1b543)              (0x1214404, 0x1b543)              yes
+  50     (0x122fdd4, 0x1)                  (0x122fdd4, 0x1)                  yes
+  51     (0x122fe35, 0x3)                  (0x122fe35, 0x3)                  yes
+  52     (0x1230bd1, 0x4)                  (0x1230bd1, 0x4)                  yes
+  53     (0x1230ce6, 0x1)                  (0x1230ce6, 0x1)                  yes
+  54     (0x1230de7, 0x4013)               (0x1230de7, 0x4013)               yes
+  55     (0x13260b6, 0x13089)              (0x13260b6, 0x13089)              yes
+  56     (0x13392aa, 0x27)                 (0x13392aa, 0x27)                 yes
+  57     (0x156cf35, 0xe344)               (0x156cf35, 0xe344)               yes
+  58     (0x157bc65, 0x35)                 (0x157bc65, 0x35)                 yes
+  59     (0x157bce2, 0x6)                  (0x157bce2, 0x6)                  yes
+  60     (0x157be11, 0x6)                  (0x157be11, 0x6)                  yes
+  61     (0x166ecd4, 0xe2de)               (0x166ecd4, 0xe2de)               yes
+  62     (0x167d115, 0x24)                 (0x167d115, 0x24)                 yes
+  63     (0x167d32b, 0x5)                  (0x167d32b, 0x5)                  yes
+  64     (0x167d378, 0x6)                  (0x167d378, 0x6)                  yes
+  65     (0x167d427, 0x25)                 (0x167d427, 0x25)                 yes
+  66     (0x1681ca1, 0x3)                  (0x1681ca1, 0x3)                  yes
+  67     (0x178538b, 0x1)                  (0x178538b, 0x1)                  yes
+  68     (0x1785909, 0x37)                 (0x1785909, 0x37)                 yes
+  69     (0x17859fe, 0x3)                  (0x17859fe, 0x3)                  yes
+  70     (0x19ba99b, 0xd79c)               (0x19ba99b, 0xd79c)               yes
+  71     (0x1ac9201, 0x508)                (0x1ac9201, 0x508)                yes
+  72     (0x1ac9845, 0x1)                  (0x1ac9845, 0x1)                  yes
+  73     (0x1ace045, 0x2b)                 (0x1ace045, 0x2b)                 yes
+  74     (0x1bd19da, 0x44)                 (0x1bd19da, 0x44)                 yes
+  75     (0x1cd3778, 0x1526d)              (0x1cd3778, 0x1526d)              yes
+  76     (0x1ce8cae, 0x1e7)                (0x1ce8cae, 0x1e7)                yes
+  77     (0x1cea412, 0x5)                  (0x1cea412, 0x5)                  yes
+free: rust_sections=78 c_sections=78 rust_bytes=2131909 c_bytes=2131909
+libhdf5_H5Fget_freespace=2131909 difference_from_c_sections=0
+ownership (Rust): analysis_complete=true
+  userblock: sections=0 bytes=0
+  live_raw: sections=8461 bytes=27980619
+  live_metadata: sections=569 bytes=205815
+  managers: sections=2 bytes=1296
+  reusable: sections=78 bytes=2131909
+  unclassified: sections=0 bytes=0
+  trailing_slack: sections=0 bytes=0
+exact_section_map_equal=true
