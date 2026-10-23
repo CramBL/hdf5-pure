@@ -4,6 +4,8 @@
 //! Each block occupies a fixed number of bits set by the rate. Floating-point values
 //! should be finite when their decoded values matter.
 
+#![cfg(feature = "zfp")]
+
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 

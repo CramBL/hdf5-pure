@@ -12,9 +12,6 @@ use alloc::{format, vec, vec::Vec};
 const HADDR_UNDEF: u64 = u64::MAX;
 use core::num::NonZeroUsize;
 
-#[cfg(feature = "zfp")]
-use hdf5_pure_filter::__private::ResolvedZfpSettings;
-
 use hdf5_pure_format::__private::ChunkIndexInfo;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::FilteredSingleChunk;
@@ -35,8 +32,6 @@ use crate::data_layout::DataLayout;
 use crate::dataspace::{Extent, MaxExtent};
 use crate::error::FormatError;
 use crate::fill_value::FillPattern;
-#[cfg(feature = "zfp")]
-use crate::filter_pipeline::FILTER_ZFP;
 use crate::filter_pipeline::{
     FILTER_DEFLATE, FILTER_FLETCHER32, FILTER_LZF, FILTER_SCALEOFFSET, FILTER_SHUFFLE,
     FilterDescription, FilterPipeline, H5Z_FLAG_OPTIONAL,
@@ -46,6 +41,8 @@ use crate::layout_info::FilterId;
 use crate::scaleoffset::{self, FillAvailability, ScaleOffset};
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
+
+mod zfp;
 
 /// The on-disk address and length widths every chunk index *this module* writes
 /// uses. Named so the path that sizes an index and the path that emits it cannot
@@ -316,27 +313,13 @@ impl ChunkOptions {
             let flags = if spec.optional { H5Z_FLAG_OPTIONAL } else { 0 };
             filters.push(match spec.kind {
                 #[cfg(feature = "zfp")]
-                FilterKind::Zfp(rate) => {
-                    let elem_ty = ctx.element_type.ok_or_else(|| {
-                        FormatError::UnsupportedZfp(
-                            "ZFP compression requires the dataset's datatype to be one \
-                             of f32, f64, i32, or i64"
-                                .into(),
-                        )
-                    })?;
-                    let settings = ResolvedZfpSettings::new(rate, elem_ty, chunk_dims)
-                        .map_err(FormatError::from)?;
-                    let client_data = match scratch.as_deref_mut() {
-                        Some(scratch) => scratch.zfp_client_data(settings, filters.len()),
-                        None => settings.client_data(),
-                    };
-                    FilterDescription {
-                        filter_id: FILTER_ZFP,
-                        name: Some("zfp".into()),
-                        flags,
-                        client_data,
-                    }
-                }
+                FilterKind::Zfp(rate) => zfp::filter_description(
+                    ctx,
+                    scratch.as_deref_mut(),
+                    rate,
+                    filters.len(),
+                    flags,
+                )?,
                 FilterKind::ScaleOffset(mode, fill_avail) => {
                     let ty = scale_offset_type.ok_or_else(|| {
                         FormatError::FilterError(
@@ -1901,6 +1884,8 @@ mod tests {
     use crate::fill_value::FillPattern;
     use crate::read_spec::RawReadSpec;
 
+    mod zfp;
+
     fn make_f64_type() -> Datatype {
         Datatype::FloatingPoint(
             FloatingPointType::from_layout(
@@ -3095,42 +3080,6 @@ mod tests {
                 "scale-offset",
                 filtered(&[FilterKind::Shuffle, FilterKind::ScaleOffset(so, fill)]),
             ),
-            #[cfg(feature = "zfp")]
-            (
-                "scale-offset",
-                "ZFP",
-                filtered(&[
-                    FilterKind::ScaleOffset(so, fill),
-                    FilterKind::Zfp(ZfpRate::try_from(16.0).unwrap()),
-                ]),
-            ),
-            #[cfg(feature = "zfp")]
-            (
-                "shuffle",
-                "ZFP",
-                filtered(&[
-                    FilterKind::Shuffle,
-                    FilterKind::Zfp(ZfpRate::try_from(16.0).unwrap()),
-                ]),
-            ),
-            #[cfg(feature = "zfp")]
-            (
-                "lzf",
-                "ZFP",
-                filtered(&[
-                    FilterKind::Lzf,
-                    FilterKind::Zfp(ZfpRate::try_from(16.0).unwrap()),
-                ]),
-            ),
-            #[cfg(feature = "zfp")]
-            (
-                "deflate",
-                "ZFP",
-                filtered(&[
-                    FilterKind::Deflate(DeflateLevel::Six),
-                    FilterKind::Zfp(ZfpRate::try_from(16.0).unwrap()),
-                ]),
-            ),
         ];
 
         for (a, b, options) in cases {
@@ -3159,20 +3108,9 @@ mod tests {
         ChunkContext {
             chunk_dims,
             element_size: core::num::NonZeroU32::new(8).expect("8 is non-zero"),
-            element_type: zfp_f64_type(),
+            element_type: crate::filters::zfp_element_type_from_datatype(&make_f64_type()),
             scale_offset_type: crate::scaleoffset::scale_offset_type_from_datatype(&make_f64_type()),
         }
-    }
-
-    /// The type a ZFP request needs, when the feature is on.
-    #[cfg(feature = "zfp")]
-    fn zfp_f64_type() -> Option<crate::filters::ZfpElementTypeWhenEnabled> {
-        crate::filters::zfp_element_type_from_datatype(&make_f64_type())
-    }
-
-    #[cfg(not(feature = "zfp"))]
-    fn zfp_f64_type() -> Option<crate::filters::ZfpElementTypeWhenEnabled> {
-        None
     }
 
     /// Chaining a primary transform with a filter it does *not* displace still

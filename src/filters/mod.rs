@@ -9,8 +9,6 @@ use alloc::vec::Vec;
 use core::num::NonZeroU32;
 
 pub use hdf5_pure_filter::__private::FilterScratch;
-#[cfg(feature = "zfp")]
-use hdf5_pure_filter::__private::ZfpElementType;
 
 #[cfg(test)]
 use crate::FixedPointType;
@@ -18,6 +16,11 @@ use crate::error::FormatError;
 use crate::filter_pipeline;
 use crate::filter_pipeline::FilterPipeline;
 use crate::scaleoffset::ScaleOffsetType;
+
+mod zfp;
+
+#[cfg(feature = "zfp")]
+pub use zfp::{ZfpElementTypeWhenEnabled, zfp_element_type_from_datatype};
 
 /// Carries a dataset's chunk shape and datatype facts to filter pipeline calls.
 #[derive(Debug, Clone, Copy)]
@@ -40,11 +43,7 @@ pub struct ChunkContext<'a> {
     pub scale_offset_type: Option<ScaleOffsetType>,
 }
 
-/// The scalar type a chunk context carries when the `zfp` feature is enabled.
-///
-/// Without the feature, the alias is [`core::convert::Infallible`].
-#[cfg(feature = "zfp")]
-pub type ZfpElementTypeWhenEnabled = ZfpElementType;
+/// An uninhabited scalar type used when ZFP support is disabled.
 #[cfg(not(feature = "zfp"))]
 pub type ZfpElementTypeWhenEnabled = core::convert::Infallible;
 
@@ -81,27 +80,6 @@ impl<'a> ChunkContext<'a> {
             element_type: zfp_element_type_from_datatype(dt),
             scale_offset_type: crate::scaleoffset::scale_offset_type_from_datatype(dt),
         })
-    }
-}
-
-/// Returns the ZFP scalar type for a supported fixed-point or floating-point datatype.
-///
-/// Returns `None` for datatypes other than 32-bit and 64-bit floats or signed integers.
-#[cfg(feature = "zfp")]
-pub fn zfp_element_type_from_datatype(
-    dt: &crate::datatype::Datatype,
-) -> Option<ZfpElementTypeWhenEnabled> {
-    use crate::datatype::Datatype;
-    match dt {
-        Datatype::FloatingPoint(numeric) if numeric.size().get() == 4 => Some(ZfpElementType::F32),
-        Datatype::FloatingPoint(numeric) if numeric.size().get() == 8 => Some(ZfpElementType::F64),
-        Datatype::FixedPoint(numeric) if numeric.size().get() == 4 && numeric.layout().signed() => {
-            Some(ZfpElementType::I32)
-        }
-        Datatype::FixedPoint(numeric) if numeric.size().get() == 8 && numeric.layout().signed() => {
-            Some(ZfpElementType::I64)
-        }
-        _ => None,
     }
 }
 

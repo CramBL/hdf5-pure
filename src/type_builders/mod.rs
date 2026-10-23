@@ -15,8 +15,6 @@ use hdf5_pure_core::FillTime;
 use hdf5_pure_format::__private::GLOBAL_HEAP_MAX_OBJECTS;
 
 use crate::DeflateLevel;
-#[cfg(feature = "zfp")]
-use crate::ZfpRate;
 use crate::address::StoredAddress;
 use crate::attribute::AttributeMessage;
 use crate::chunked_write::{ChunkMeta, ChunkOptions, ChunkProvider, FilterKind, StorageAllocation};
@@ -38,6 +36,8 @@ use crate::scaleoffset::{FillAvailability, ScaleOffset};
 use crate::shared_message::DatatypeLocation;
 use crate::width::LengthWidth;
 use crate::{FixedPointType, FloatingPointType};
+
+mod zfp;
 
 pub fn make_f64_type() -> Datatype {
     Datatype::FloatingPoint(FloatingPointType::ieee754_binary64(
@@ -3519,27 +3519,6 @@ impl DatasetBuilder {
             // explicitly undefined, and `with_scale_offset` is where a reader
             // looks for that choice.
             .set_filter(FilterKind::ScaleOffset(mode, FillAvailability::Defined));
-        self
-    }
-
-    /// Enables fixed-rate ZFP compression and chunked storage.
-    ///
-    /// `rate` is measured in compressed bits per scalar. The writer resolves the rate against
-    /// the dataset's datatype and chunk dimensions. The supported scalar types are [`f32`],
-    /// [`f64`], [`i32`], and [`i64`], with one through four chunk dimensions.
-    ///
-    /// Writing returns [`FormatError::InvalidZfpRateForScalar`] if the rate exceeds
-    /// the scalar's width, or [`FormatError::InvalidZfpBitBudget`] if the encoded block budget
-    /// is zero. Writing returns [`FormatError::UnsupportedZfp`] for unsupported scalar types or
-    /// chunk geometry.
-    /// Floating-point block headers can require more bits depending on the data, producing
-    /// [`FormatError::FilterError`] during compression.
-    ///
-    /// Combining ZFP with shuffle, scale-offset, deflate, or LZF returns a filter error when
-    /// writing. The encoded data is compatible with the H5Z-ZFP plugin, filter ID 32013.
-    #[cfg(feature = "zfp")]
-    pub fn with_zfp(&mut self, rate: ZfpRate) -> &mut Self {
-        self.chunk_options.set_filter(FilterKind::Zfp(rate));
         self
     }
 

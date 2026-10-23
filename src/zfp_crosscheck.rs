@@ -7,6 +7,8 @@
 //! Each supported fixture checks encoded bytes exactly and decoded values within a
 //! rate-dependent tolerance. Unsupported modes and scalar types are skipped.
 
+#![cfg(all(test, feature = "zfp", feature = "std"))]
+
 use std::fs;
 use std::path::PathBuf;
 
