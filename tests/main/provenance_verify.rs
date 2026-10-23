@@ -7,6 +7,7 @@ use hdf5_pure::Error;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
 use hdf5_pure::Object;
+use hdf5_pure::UserblockSize;
 use hdf5_pure::VlenStringReadOptions;
 use hdf5_pure::{AttrValue, File, FileBuilder, VerifyResult};
 use rstest::rstest;
@@ -35,7 +36,7 @@ fn provenance_hashes_final_unfiltered_element_bytes(
     #[case] data: AddressData,
     #[values(false, true)] page: bool,
     #[values(false, true)] dense: bool,
-    #[values(0, 4096)] userblock: u64,
+    #[values(UserblockSize::NONE, UserblockSize::try_from(4096).unwrap())] userblock: UserblockSize,
     #[values(Output::Finish, Output::Sink, Output::Write)] output: Output,
 ) {
     let build = |address| address_data_builder(data, page, dense, userblock, address);
@@ -60,7 +61,7 @@ fn provenance_hashes_final_unfiltered_element_bytes(
             std::fs::read(&path).unwrap()
         }
     };
-    if userblock != 0 {
+    if userblock != UserblockSize::NONE {
         assert_eq!(&bytes[..10], b"provenance");
     }
     assert_eq!(test_util::fractal_heap::has_fractal_heap(&bytes), dense);
@@ -126,7 +127,7 @@ fn address_data_builder(
     data: AddressData,
     page: bool,
     dense: bool,
-    userblock: u64,
+    userblock: UserblockSize,
     address: u64,
 ) -> FileBuilder {
     let mut builder = FileBuilder::new();
@@ -134,7 +135,7 @@ fn address_data_builder(
         builder.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
     }
     builder.with_userblock(userblock);
-    if userblock != 0 {
+    if userblock != UserblockSize::NONE {
         builder.with_userblock_content(b"provenance");
     }
     builder.create_dataset("target").with_i32_data(&[7]);

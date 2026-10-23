@@ -10,8 +10,10 @@ use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpaceStrategy;
+use hdf5_pure::FilterMask;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::Object;
+use hdf5_pure::UserblockSize;
 #[cfg(feature = "provenance")]
 use hdf5_pure::VerifyResult;
 use rstest::rstest;
@@ -32,7 +34,7 @@ fn c_resolves_chunked_path_references_and_reads_chunk_records(
         FileSpaceStrategy::Page
     )]
     strategy: FileSpaceStrategy,
-    #[values(0, 4096)] userblock: u64,
+    #[values(UserblockSize::NONE, UserblockSize::try_from(4096).unwrap())] userblock: UserblockSize,
     #[values(false, true)] dense: bool,
 ) {
     let dir = tempfile::tempdir().unwrap();
@@ -116,12 +118,12 @@ fn c_resolves_chunked_path_references_and_reads_chunk_records(
         let address = if cfg!(feature = "__hdf5-1.14") {
             c_chunk.addr
         } else {
-            c_chunk.addr + userblock
+            c_chunk.addr + userblock.get()
         };
         assert_eq!(address, chunk.address);
         assert_eq!(c_chunk.size, chunk.storage_size);
-        assert_eq!(c_chunk.filter_mask, chunk.filter_mask);
-        assert_eq!(chunk.filter_mask, 0);
+        assert_eq!(c_chunk.filter_mask, chunk.filter_mask().raw_bits());
+        assert_eq!(chunk.filter_mask(), FilterMask::NONE);
     }
     c.close().unwrap();
 }
