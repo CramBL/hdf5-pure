@@ -1,5 +1,6 @@
 //! Numeric dataset fixtures written through the reference library.
 
+use std::ffi::CStr;
 use std::ffi::CString;
 use std::path::Path;
 
@@ -8,6 +9,7 @@ use hdf5::globals;
 use hdf5::types::TypeDescriptor;
 use hdf5_sys::h5d;
 use hdf5_sys::h5p::H5P_DEFAULT;
+use hdf5_sys::h5s;
 use hdf5_sys::h5s::H5S_ALL;
 use hdf5_sys::h5t;
 use hdf5_sys::h5t::H5T_class_t;
@@ -200,3 +202,112 @@ pub fn padded_compound(datatype: &Datatype, padding: [bool; 3]) -> Datatype {
         datatype
     })
 }
+
+/// Creates a variable-length string datatype with `base` as its parent.
+///
+/// # Panics
+///
+/// Panics if the reference library cannot create, encode, or decode the datatype.
+///
+/// # Examples
+///
+/// ```
+/// use hdf5::Datatype;
+/// use test_util_hdf5::numeric;
+///
+/// let base = Datatype::from_type::<f32>()?;
+/// let string = numeric::variable_length_string(&base);
+/// assert_eq!(string.size(), core::mem::size_of::<usize>());
+/// # Ok::<(), hdf5::Error>(())
+/// ```
+pub fn variable_length_string(base: &Datatype) -> Datatype {
+    hdf5::sync::sync(|| {
+        // SAFETY: The lock serializes access and `base` owns a live datatype.
+        let id = unsafe { h5t::H5Tvlen_create(base.id()) };
+        assert!(id >= 0);
+        // SAFETY: The returned handle owns the newly created datatype ID.
+        let sequence = unsafe { hdf5::from_id::<Datatype>(id) }.unwrap();
+        let mut size = 0;
+        assert_eq!(
+            // SAFETY: The lock and live handle cover the call. A null buffer requests its encoded size.
+            unsafe { h5t::H5Tencode(sequence.id(), core::ptr::null_mut(), &mut size) },
+            0
+        );
+        let mut encoded = vec![0; size];
+        assert_eq!(
+            // SAFETY: `encoded` has `size` writable bytes. The datatype remains live.
+            unsafe { h5t::H5Tencode(sequence.id(), encoded.as_mut_ptr().cast(), &mut size) },
+            0
+        );
+        encoded[ENCODED_DATATYPE_FLAGS_OFFSET] |= VARIABLE_LENGTH_STRING_BIT;
+        // SAFETY: The buffer is a complete C-encoded VL datatype. Only its defined subtype bit differs.
+        let id = unsafe { h5t::H5Tdecode1(encoded.as_ptr().cast()) };
+        assert!(id >= 0);
+        // SAFETY: The returned handle owns the newly decoded datatype ID.
+        unsafe { hdf5::from_id::<Datatype>(id) }.unwrap()
+    })
+}
+
+/// Writes null-terminated strings using the dataset's variable-length datatype.
+///
+/// # Panics
+///
+/// Panics if the dataset is not a variable-length string dataset, its element count differs
+/// from `values.len()`, or the reference library cannot inspect or write it.
+///
+/// # Examples
+///
+/// ```
+/// # use std::error::Error;
+/// use hdf5::Datatype;
+/// use hdf5::types::TypeDescriptor;
+/// use test_util_hdf5::numeric;
+/// # let dir = tempfile::tempdir()?;
+/// # let file = hdf5::File::create(dir.path().join("strings.h5"))?;
+///
+/// let datatype = Datatype::from_descriptor(&TypeDescriptor::VarLenAscii)?;
+/// let dataset = file.new_dataset_builder().empty_as(&datatype).shape(1).create("strings")?;
+/// numeric::write_variable_length_strings(&dataset, &[c"alpha"]);
+/// # Ok::<(), Box<dyn Error>>(())
+/// ```
+pub fn write_variable_length_strings(dataset: &hdf5::Dataset, values: &[&CStr]) {
+    let datatype = dataset.dtype().unwrap();
+    let space = dataset.space().unwrap();
+    let pointers: Vec<_> = values.iter().map(|value| value.as_ptr()).collect();
+    hdf5::sync::sync(|| {
+        // SAFETY: The lock serializes access and the handles remain live throughout the calls.
+        let count = unsafe {
+            assert_eq!(h5t::H5Tis_variable_str(datatype.id()), 1);
+            assert_eq!(
+                h5t::H5Tget_size(datatype.id()),
+                core::mem::size_of::<*const core::ffi::c_char>()
+            );
+            h5s::H5Sget_simple_extent_npoints(space.id())
+        };
+        assert_eq!(usize::try_from(count).unwrap(), values.len());
+        assert_eq!(
+            // SAFETY: The checked VL-string datatype has a pointer-sized memory representation.
+            // `pointers` contains one live NUL-terminated string per selected dataset element.
+            unsafe {
+                h5d::H5Dwrite(
+                    dataset.id(),
+                    datatype.id(),
+                    H5S_ALL,
+                    H5S_ALL,
+                    H5P_DEFAULT,
+                    pointers.as_ptr().cast(),
+                )
+            },
+            0
+        );
+    });
+}
+
+// H5T_encode in H5T.c, libhdf5 1.14.6, prefixes a datatype message with two bytes.
+// The first class-specific byte follows the class/version byte in section
+// `subsubsec_fmt4_dataobject_hdr_msg_dtmessage`, version 4.0.
+const ENCODED_DATATYPE_FLAGS_OFFSET: usize = 3;
+
+// Section `subsubsec_fmt4_dataobject_hdr_msg_dtmessage`, version 4.0, assigns VL subtype 1 to
+// strings in datatype messages 1 through 5.
+const VARIABLE_LENGTH_STRING_BIT: u8 = 0x01;

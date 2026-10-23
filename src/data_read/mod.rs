@@ -8,6 +8,10 @@ use core::num::NonZeroUsize;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::PhysicalAddress;
 
+#[cfg(test)]
+use crate::VariableLengthStringType;
+#[cfg(test)]
+use crate::VariableLengthType;
 use crate::chunk_cache::ChunkCache;
 use crate::chunked_read;
 #[cfg(test)]
@@ -943,7 +947,9 @@ mod tests {
 /// Rejecting a numeric element wider than the 64-bit word the readers model one as.
 #[cfg(test)]
 mod wide_element_tests {
+    use crate::CharacterSet;
     use crate::MantissaNormalization;
+    use crate::StringPadding;
 
     use super::*;
 
@@ -1073,12 +1079,14 @@ mod wide_element_tests {
     /// would report a wide element for a datatype that is not numeric at all.
     #[test]
     fn a_non_numeric_datatype_is_rejected_for_its_class_not_its_width() {
-        let vlen = Datatype::VariableLength {
-            is_string: true,
-            padding: None,
-            charset: None,
-            base_type: Box::new(wide_int(1, false, DatatypeByteOrder::LittleEndian)),
-        };
+        let vlen = Datatype::VariableLength(VariableLengthType::String(
+            VariableLengthStringType::with_base_type(
+                StringPadding::NullTerminate,
+                CharacterSet::Ascii,
+                wide_int(1, false, DatatypeByteOrder::LittleEndian),
+            )
+            .unwrap(),
+        ));
         assert_eq!(
             vlen.type_size(),
             16,

@@ -51,6 +51,8 @@ use crate::SuperblockStatusFlags;
 use crate::SuperblockVersion;
 use crate::UserblockSize;
 #[cfg(test)]
+use crate::VariableLengthType;
+#[cfg(test)]
 use crate::address::AddressContext;
 use crate::address::BaseAddressExt;
 use crate::address::StoredAddressExt;
@@ -6504,12 +6506,9 @@ mod tests {
         use crate::type_builders::VlStringElement;
         use crate::vl_data::{VlByteObject, VlenStringReadOptions};
 
-        let dt = Datatype::VariableLength {
-            is_string: false,
-            padding: None,
-            charset: None,
-            base_type: Box::new(crate::type_builders::make_i32_type()),
-        };
+        let dt = Datatype::VariableLength(VariableLengthType::sequence(
+            crate::type_builders::make_i32_type(),
+        ));
         let seqs: Vec<Vec<i32>> = vec![vec![1, 2, 3], vec![], vec![-7, 42]];
         let elements: Vec<VlStringElement> = seqs
             .iter()
@@ -6526,10 +6525,7 @@ mod tests {
         assert!(
             matches!(
                 ds.datatype().unwrap(),
-                Datatype::VariableLength {
-                    is_string: false,
-                    ..
-                }
+                Datatype::VariableLength(VariableLengthType::Sequence { .. })
             ),
             "datatype must stay a non-string variable-length sequence"
         );

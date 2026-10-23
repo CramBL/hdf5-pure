@@ -88,3 +88,5 @@ pub use hdf5_pure_core::OffsetWidth;
 pub use hdf5_pure_core::ReferenceType;
 pub use hdf5_pure_core::StringPadding;
 pub use hdf5_pure_core::TimeType;
+pub use hdf5_pure_core::VariableLengthStringType;
+pub use hdf5_pure_core::VariableLengthType;

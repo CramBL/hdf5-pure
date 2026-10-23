@@ -3,7 +3,11 @@
 use std::collections::HashMap;
 use std::fmt;
 
+#[cfg(test)]
+use crate::VariableLengthStringType;
+use crate::VariableLengthType;
 use crate::address::AddressContext;
+use crate::datatype::CharacterSet;
 use crate::datatype::Datatype;
 #[cfg(test)]
 use crate::{FixedPointType, FloatingPointType, TimeType};
@@ -129,9 +133,7 @@ pub(crate) fn classify_datatype(dt: &Datatype) -> DType {
             _ => DType::Other(Box::new(dt.clone())),
         },
         Datatype::String { .. } => DType::String,
-        Datatype::VariableLength {
-            is_string: true, ..
-        } => DType::VariableLengthString,
+        Datatype::VariableLength(VariableLengthType::String(_)) => DType::VariableLengthString,
         Datatype::Compound { members, .. } => {
             let fields = members
                 .iter()
@@ -299,20 +301,9 @@ fn decode_attr_value<S: crate::source::Source + ?Sized>(
                 crate::type_builders::decoded_fixed_string_array(strings, *size, charset)
             })
         }
-        Datatype::VariableLength {
-            is_string,
-            base_type,
-            charset,
-            ..
-        } if *is_string || is_ascii_char_vlen_base(base_type) => {
-            // Two MATLAB-relevant encodings share the same on-disk byte
-            // layout (length + heap ref + object index per element; heap
-            // object holds raw bytes without terminator):
-            //   - is_string: true             — H5T_STRING{STRSIZE=VAR}
-            //   - VLEN of H5T_STRING{SIZE=1}  — what matio / MATLAB emit
-            //
-            // The reader reads each element from the global heap, at the
-            // physical position `addresses` resolves its collection address to.
+        Datatype::VariableLength(kind)
+            if crate::vl_data::is_vlen_string_datatype(&attr.datatype) =>
+        {
             let strings = crate::vl_data::read_vl_strings_from_source(
                 source,
                 &attr.raw_data,
@@ -331,10 +322,7 @@ fn decode_attr_value<S: crate::source::Source + ?Sized>(
             // shape, which has no variant: that shape exists for `MATLAB_fields`
             // and its neighbours, which are always arrays, and giving it one
             // would mean a scalar variant no builder needs.
-            match (
-                vlen_string_shape(*is_string, base_type, charset.as_ref()),
-                scalar,
-            ) {
+            match (vlen_string_shape(kind), scalar) {
                 (VlenStringShape::AsciiCharSequence, true) => {
                     Some(AttrValue::AsciiString(one_or_empty(strings)))
                 }
@@ -443,40 +431,22 @@ enum VlenStringShape {
     /// A true variable-length ASCII string (`H5T_STRING`, `STRSIZE = VAR`),
     /// written by [`AttrValue::VarLenAsciiString`] and its array form.
     Ascii,
-    /// A true variable-length UTF-8 string, or one whose charset is unstated,
+    /// A true variable-length UTF-8 string,
     /// written by [`AttrValue::VarLenString`] and its array form.
     Utf8,
 }
 
-/// Classify a variable-length string datatype.
+/// Returns the attribute string representation for a variable-length kind.
 ///
-/// `is_string` is what separates a true variable-length string from a sequence
-/// of 1-byte strings, and it has to be consulted: libhdf5 writes a VL string's
-/// base type as a 1-byte *integer*, so the base type alone happens to be enough
-/// for the files it produces — but nothing in the format stops a writer from
-/// giving a VL string a 1-byte *string* base, which is byte-identical to the
-/// MATLAB sequence's base. Trusting the base type alone would then report the
-/// MATLAB encoding for a value that is not in it, and rewrite it as a different
-/// datatype class.
-fn vlen_string_shape(
-    is_string: bool,
-    base_type: &crate::datatype::Datatype,
-    charset: Option<&crate::datatype::CharacterSet>,
-) -> VlenStringShape {
-    use crate::datatype::CharacterSet;
-    if !is_string && is_ascii_char_vlen_base(base_type) {
-        return VlenStringShape::AsciiCharSequence;
-    }
-    // A variable-length string states its own charset, and the base type must
-    // not be consulted for it: a writer may give one the same 1-byte string base
-    // the sequence uses, and reading the charset off that base would report
-    // ASCII for a datatype whose own field says UTF-8 — rewriting the value in a
-    // charset it was not stored in. A sequence carries its charset on the base
-    // type instead, which is why the branch above reads it there.
-    if charset == Some(&CharacterSet::Ascii) {
-        VlenStringShape::Ascii
-    } else {
-        VlenStringShape::Utf8
+/// Strings are classified by their character-set metadata. Sequences use the ASCII
+/// character-sequence representation.
+fn vlen_string_shape(kind: &VariableLengthType) -> VlenStringShape {
+    match kind {
+        VariableLengthType::Sequence { .. } => VlenStringShape::AsciiCharSequence,
+        VariableLengthType::String(string) => match string.charset() {
+            CharacterSet::Ascii => VlenStringShape::Ascii,
+            CharacterSet::Utf8 => VlenStringShape::Utf8,
+        },
     }
 }
 
@@ -489,22 +459,6 @@ fn vlen_string_shape(
 /// `attrs_to_map` keeps only what decodes.
 fn one_or_empty(strings: Vec<std::string::String>) -> std::string::String {
     strings.into_iter().next().unwrap_or_default()
-}
-
-/// Recognize the MATLAB-style VLEN encoding where the base type is a 1-byte
-/// ASCII string (`H5T_VLEN { H5T_STRING { STRSIZE 1, ..., CSET ASCII } }`).
-/// Other VLEN sequences of strings may exist but we only auto-decode this
-/// specific shape as a string array.
-fn is_ascii_char_vlen_base(base: &crate::datatype::Datatype) -> bool {
-    use crate::datatype::{CharacterSet, Datatype};
-    matches!(
-        base,
-        Datatype::String {
-            size: 1,
-            charset: CharacterSet::Ascii,
-            ..
-        }
-    )
 }
 
 #[cfg(test)]
@@ -880,12 +834,6 @@ mod tests {
         );
     }
 
-    /// The MATLAB sequence-of-ASCII-chars encoding and a true variable-length
-    /// ASCII string have the same base type once a writer chooses a 1-byte
-    /// string base for the latter; `is_string` is the only thing separating
-    /// them. libhdf5 writes an integer base, so no file it produces reaches the
-    /// ambiguous case — which is exactly why this is asserted here rather than
-    /// left to the C crosscheck, where the branch cannot be reached.
     #[test]
     fn only_a_sequence_of_ascii_chars_claims_the_matlab_shape() {
         let char_base = Datatype::String {
@@ -897,38 +845,52 @@ mod tests {
             FixedPointType::new(1, DatatypeByteOrder::LittleEndian, false, 0, 8).unwrap(),
         );
 
-        // What MATLAB and matio write, and what this crate writes for
-        // `AttrValue::VarLenAsciiCharArray`.
         assert_eq!(
-            vlen_string_shape(false, &char_base, None),
+            vlen_string_shape(&VariableLengthType::sequence(char_base.clone())),
             VlenStringShape::AsciiCharSequence
         );
-        // The same base type, but flagged a string: a true variable-length
-        // string, which must not claim the sequence variant.
         assert_eq!(
-            vlen_string_shape(true, &char_base, Some(&CharacterSet::Ascii)),
-            VlenStringShape::Ascii
-        );
-        // And its charset comes from its own field, not from that base: reading
-        // it off the base reported ASCII here, which rewrote a UTF-8 attribute
-        // as an ASCII one.
-        assert_eq!(
-            vlen_string_shape(true, &char_base, Some(&CharacterSet::Utf8)),
-            VlenStringShape::Utf8
-        );
-        // What libhdf5 actually writes for a variable-length string.
-        assert_eq!(
-            vlen_string_shape(true, &int_base, Some(&CharacterSet::Ascii)),
+            vlen_string_shape(&VariableLengthType::String(
+                VariableLengthStringType::with_base_type(
+                    StringPadding::NullTerminate,
+                    CharacterSet::Ascii,
+                    char_base.clone()
+                )
+                .unwrap()
+            )),
             VlenStringShape::Ascii
         );
         assert_eq!(
-            vlen_string_shape(true, &int_base, Some(&CharacterSet::Utf8)),
+            vlen_string_shape(&VariableLengthType::String(
+                VariableLengthStringType::with_base_type(
+                    StringPadding::NullTerminate,
+                    CharacterSet::Utf8,
+                    char_base
+                )
+                .unwrap()
+            )),
             VlenStringShape::Utf8
         );
-        // An unstated charset reads as UTF-8, which is the lossless assumption:
-        // every ASCII string is valid UTF-8, so nothing is corrupted by it.
         assert_eq!(
-            vlen_string_shape(true, &int_base, None),
+            vlen_string_shape(&VariableLengthType::String(
+                VariableLengthStringType::with_base_type(
+                    StringPadding::NullTerminate,
+                    CharacterSet::Ascii,
+                    int_base.clone()
+                )
+                .unwrap()
+            )),
+            VlenStringShape::Ascii
+        );
+        assert_eq!(
+            vlen_string_shape(&VariableLengthType::String(
+                VariableLengthStringType::with_base_type(
+                    StringPadding::NullTerminate,
+                    CharacterSet::Utf8,
+                    int_base
+                )
+                .unwrap()
+            )),
             VlenStringShape::Utf8
         );
     }

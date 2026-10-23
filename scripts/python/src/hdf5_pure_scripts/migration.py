@@ -316,6 +316,8 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
         "MantissaNormalization",
         "OffsetWidth",
         "StoredAddress",
+        "VariableLengthStringType",
+        "VariableLengthType",
         "SuperblockVersion",
         "SuperblockStatusFlag",
         "SuperblockStatusFlags",
@@ -387,6 +389,19 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
             continue
         old = public_type_shape(baseline, baseline_items[name])
         new = public_type_shape(core, core_items[name])
+        if name == "Datatype" and new["variants"].get("VariableLength") == {
+            "kind": "tuple",
+            "fields": {
+                "0": {
+                    "resolved_path": {
+                        "path": "owner::datatype::VariableLengthType",
+                        "args": None,
+                    }
+                }
+            },
+            "discriminant": None,
+        }:
+            old["variants"]["VariableLength"] = new["variants"]["VariableLength"]
         for variant in allowed_added_variants.get(name, set()):
             new["variants"].pop(variant, None)
             if variant in new["variant_order"]:

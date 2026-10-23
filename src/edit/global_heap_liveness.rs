@@ -517,8 +517,8 @@ struct ReferenceSlots {
 /// a variable-length type whose base type holds a file address.
 fn holds_unlocated_address(datatype: &Datatype) -> bool {
     match datatype {
-        Datatype::VariableLength { base_type, .. } => {
-            crate::datatype::datatype_holds_file_address(base_type)
+        Datatype::VariableLength(kind) => {
+            crate::datatype::datatype_holds_file_address(kind.base_type())
         }
         Datatype::Compound { members, .. } => members
             .iter()

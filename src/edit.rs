@@ -319,6 +319,9 @@ use crate::FillTime;
 use crate::SuperblockStatusFlags;
 use crate::SuperblockVersion;
 use crate::UserblockSize;
+#[cfg(test)]
+use crate::VariableLengthStringType;
+use crate::VariableLengthType;
 use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
 use crate::address::BaseAddress;
@@ -11743,24 +11746,21 @@ fn overwrite_datatypes_match(disk: &Datatype, staged: &Datatype) -> bool {
                 && overwrite_datatypes_match(disk_base, staged_base)
         }
         (
-            Datatype::VariableLength {
-                is_string: disk_string,
-                padding: disk_padding,
-                charset: disk_charset,
-                base_type: disk_base,
-            },
-            Datatype::VariableLength {
-                is_string: staged_string,
-                padding: staged_padding,
-                charset: staged_charset,
-                base_type: staged_base,
-            },
+            Datatype::VariableLength(VariableLengthType::String(disk)),
+            Datatype::VariableLength(VariableLengthType::String(staged)),
         ) => {
-            disk_string == staged_string
-                && disk_padding == staged_padding
-                && disk_charset == staged_charset
-                && overwrite_datatypes_match(disk_base, staged_base)
+            disk.padding() == staged.padding()
+                && disk.charset() == staged.charset()
+                && overwrite_datatypes_match(disk.base_type(), staged.base_type())
         }
+        (
+            Datatype::VariableLength(VariableLengthType::Sequence {
+                element_type: disk_base,
+            }),
+            Datatype::VariableLength(VariableLengthType::Sequence {
+                element_type: staged_base,
+            }),
+        ) => overwrite_datatypes_match(disk_base, staged_base),
         (
             Datatype::Array {
                 base_type: disk_base,
@@ -11809,7 +11809,7 @@ pub(crate) fn datatype_is_raw_appendable(dt: &Datatype) -> bool {
         Datatype::Compound { members, .. } => members
             .iter()
             .all(|m| datatype_is_raw_appendable(&m.datatype)),
-        Datatype::VariableLength { .. } | Datatype::Reference { .. } | _ => false,
+        Datatype::VariableLength(_) | Datatype::Reference { .. } | _ => false,
     }
 }
 
@@ -14609,81 +14609,59 @@ mod tests {
         false
     )]
     #[case::vlen_string(
-        variable_length_type(
+        variable_length_string_type(
             big_endian_u8_type(),
-            true,
             CharacterSet::Utf8,
             StringPadding::NullTerminate
         ),
-        variable_length_type(
+        variable_length_string_type(
             type_builders::make_u8_type(),
-            true,
             CharacterSet::Utf8,
             StringPadding::NullTerminate
         ),
         true
     )]
     #[case::vlen_sequence(
-        variable_length_type(
-            big_endian_u8_type(),
-            false,
-            CharacterSet::Utf8,
-            StringPadding::NullTerminate
-        ),
-        variable_length_type(
-            type_builders::make_u8_type(),
-            false,
-            CharacterSet::Utf8,
-            StringPadding::NullTerminate
-        ),
+        Datatype::VariableLength(VariableLengthType::sequence(big_endian_u8_type())),
+        Datatype::VariableLength(VariableLengthType::sequence(type_builders::make_u8_type())),
         true
     )]
     #[case::vlen_kind(
-        variable_length_type(
-            big_endian_u8_type(),
-            false,
-            CharacterSet::Utf8,
-            StringPadding::NullTerminate
-        ),
-        variable_length_type(
+        Datatype::VariableLength(VariableLengthType::sequence(big_endian_u8_type())),
+        variable_length_string_type(
             type_builders::make_u8_type(),
-            true,
             CharacterSet::Utf8,
             StringPadding::NullTerminate
         ),
         false
     )]
     #[case::vlen_charset(
-        variable_length_type(
+        variable_length_string_type(
             big_endian_u8_type(),
-            true,
             CharacterSet::Ascii,
             StringPadding::NullTerminate
         ),
-        variable_length_type(
+        variable_length_string_type(
             type_builders::make_u8_type(),
-            true,
             CharacterSet::Utf8,
             StringPadding::NullTerminate
         ),
         false
     )]
     #[case::vlen_padding(
-        variable_length_type(
+        variable_length_string_type(
             big_endian_u8_type(),
-            true,
             CharacterSet::Utf8,
             StringPadding::SpacePad
         ),
-        variable_length_type(
+        variable_length_string_type(
             type_builders::make_u8_type(),
-            true,
             CharacterSet::Utf8,
             StringPadding::NullTerminate
         ),
         false
     )]
-    #[case::nested(array_type(single_member_compound_type(variable_length_type(big_endian_u8_type(), true, CharacterSet::Utf8, StringPadding::NullTerminate), 16, "x", 0), vec![2]), array_type(single_member_compound_type(variable_length_type(type_builders::make_u8_type(), true, CharacterSet::Utf8, StringPadding::NullTerminate), 16, "x", 0), vec![2]), true)]
+    #[case::nested(array_type(single_member_compound_type(variable_length_string_type(big_endian_u8_type(), CharacterSet::Utf8, StringPadding::NullTerminate), 16, "x", 0), vec![2]), array_type(single_member_compound_type(variable_length_string_type(type_builders::make_u8_type(), CharacterSet::Utf8, StringPadding::NullTerminate), 16, "x", 0), vec![2]), true)]
     fn overwrite_requires_matching_nested_fields_except_one_byte_order(
         #[case] disk: Datatype,
         #[case] staged: Datatype,
@@ -14789,9 +14767,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("byte_order.h5");
         let datatype = if vlen {
-            variable_length_type(
+            variable_length_string_type(
                 big_endian_u8_type(),
-                true,
                 CharacterSet::Utf8,
                 StringPadding::NullTerminate,
             )
@@ -14865,18 +14842,14 @@ mod tests {
             .unwrap()
     }
 
-    fn variable_length_type(
+    fn variable_length_string_type(
         base: Datatype,
-        is_string: bool,
         charset: CharacterSet,
         padding: StringPadding,
     ) -> Datatype {
-        Datatype::VariableLength {
-            is_string,
-            padding: is_string.then_some(padding),
-            charset: is_string.then_some(charset),
-            base_type: Box::new(base),
-        }
+        Datatype::VariableLength(VariableLengthType::String(
+            VariableLengthStringType::with_base_type(padding, charset, base).unwrap(),
+        ))
     }
 
     #[test]
@@ -15985,15 +15958,11 @@ mod tests {
     #[test]
     fn a_variable_length_of_object_references_is_refused() {
         use crate::datatype::{CharacterSet, ReferenceType};
-        let of_references = Datatype::VariableLength {
-            is_string: false,
-            padding: None,
-            charset: None,
-            base_type: Box::new(Datatype::Reference {
+        let of_references =
+            Datatype::VariableLength(VariableLengthType::sequence(Datatype::Reference {
                 size: 8,
                 ref_type: ReferenceType::Object,
-            }),
-        };
+            }));
         let of_strings = crate::type_builders::make_vlen_string_type(CharacterSet::Utf8);
         let raw = vec![0u8; 32];
         let invalidated = InvalidatedAddresses {
@@ -18276,12 +18245,9 @@ mod tests {
         }));
 
         // Variable-length / reference leaves are never raw-appendable, even LE.
-        assert!(!datatype_is_raw_appendable(&Datatype::VariableLength {
-            is_string: false,
-            padding: None,
-            charset: None,
-            base_type: Box::new(le_f64.clone()),
-        }));
+        assert!(!datatype_is_raw_appendable(&Datatype::VariableLength(
+            VariableLengthType::sequence(le_f64.clone())
+        )));
         assert!(!datatype_is_raw_appendable(&Datatype::Reference {
             size: 8,
             ref_type: crate::datatype::ReferenceType::Object,

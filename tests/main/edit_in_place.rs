@@ -2,6 +2,7 @@
 //! add, delete, and copy datasets and groups at any path.
 
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::VariableLengthType;
 #[cfg(feature = "zfp")]
 use hdf5_pure::ZfpRate;
 use hdf5_pure::{
@@ -4288,12 +4289,7 @@ fn a_datatype_mixing_locatable_and_unlocatable_references_is_refused() {
         ),
         (
             "a variable length of them",
-            Datatype::VariableLength {
-                is_string: false,
-                padding: None,
-                charset: None,
-                base_type: Box::new(object_ref()),
-            },
+            Datatype::VariableLength(VariableLengthType::sequence(object_ref())),
         ),
     ];
 

@@ -15,6 +15,7 @@ use crate::FileSpacePageSize;
 use crate::FixedPointType;
 #[cfg(test)]
 use crate::UserblockSize;
+use crate::VariableLengthType;
 use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
 use crate::address::BaseAddress;
@@ -6571,7 +6572,7 @@ the same commit to replace it",
                 dataspace.num_elements(),
                 self.file.widths,
                 self.file.addresses(),
-                1, // a VL string's base type is a single byte
+                1, // VL string references count bytes
                 options,
             )?)
         })
@@ -6592,7 +6593,10 @@ the same commit to replace it",
         options: VlenStringReadOptions,
     ) -> Result<(Vec<vl_data::VlByteObject>, usize), Error> {
         let datatype = self.datatype()?;
-        let Datatype::VariableLength { base_type, .. } = &datatype else {
+        let Datatype::VariableLength(VariableLengthType::Sequence {
+            element_type: base_type,
+        }) = &datatype
+        else {
             return Err(FormatError::TypeMismatch {
                 expected: "non-string VariableLength",
                 actual: "non-VariableLength",

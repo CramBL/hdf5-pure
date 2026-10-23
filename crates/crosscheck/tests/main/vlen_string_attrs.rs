@@ -13,6 +13,8 @@
 
 use hdf5::types::{TypeDescriptor, VarLenAscii, VarLenUnicode};
 use hdf5_pure::FixedPointType;
+use hdf5_pure::VariableLengthStringType;
+use hdf5_pure::VariableLengthType;
 use hdf5_pure::{AttrValue, File, FileBuilder};
 
 /// The four values under test, one per variant, keyed by the attribute name
@@ -381,24 +383,21 @@ fn a_committed_datatype_attribute_stages_its_heap() {
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("committed.h5");
-    let standard = Datatype::VariableLength {
-        is_string: true,
-        padding: Some(StringPadding::NullTerminate),
-        charset: Some(CharacterSet::Utf8),
-        base_type: Box::new(Datatype::FixedPoint(
-            FixedPointType::new(1, DatatypeByteOrder::LittleEndian, false, 0, 8).unwrap(),
-        )),
-    };
-    let matlab = Datatype::VariableLength {
-        is_string: false,
-        padding: None,
-        charset: None,
-        base_type: Box::new(Datatype::String {
-            size: 1,
-            padding: StringPadding::NullTerminate,
-            charset: CharacterSet::Ascii,
-        }),
-    };
+    let standard = Datatype::VariableLength(VariableLengthType::String(
+        VariableLengthStringType::with_base_type(
+            StringPadding::NullTerminate,
+            CharacterSet::Utf8,
+            Datatype::FixedPoint(
+                FixedPointType::new(1, DatatypeByteOrder::LittleEndian, false, 0, 8).unwrap(),
+            ),
+        )
+        .unwrap(),
+    ));
+    let matlab = Datatype::VariableLength(VariableLengthType::sequence(Datatype::String {
+        size: 1,
+        padding: StringPadding::NullTerminate,
+        charset: CharacterSet::Ascii,
+    }));
 
     // A fixed-width string under a committed datatype is the other side of the
     // same decision: it must keep taking the verbatim path, since staging a heap

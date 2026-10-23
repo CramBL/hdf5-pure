@@ -11,6 +11,7 @@ use core::num::NonZeroU16;
 
 #[cfg(test)]
 use crate::FixedPointType;
+use crate::VariableLengthType;
 use crate::address::AddressContext;
 #[cfg(test)]
 use crate::address::BaseAddress;
@@ -157,8 +158,7 @@ impl VlElement {
         Ok(Some(GlobalHeapId { collection, index }))
     }
 
-    /// Returns the size in bytes of the element's data, `length` base-type elements of
-    /// `element_size` bytes each.
+    /// Returns the size in bytes of the element's data, `length * element_size`.
     ///
     /// # Errors
     ///
@@ -205,15 +205,9 @@ pub fn parse_vl_references(
 /// this module.
 pub(crate) fn is_vlen_string_datatype(datatype: &Datatype) -> bool {
     match datatype {
-        Datatype::VariableLength {
-            is_string: true, ..
-        } => true,
-        Datatype::VariableLength {
-            is_string: false,
-            base_type,
-            ..
-        } => matches!(
-            base_type.as_ref(),
+        Datatype::VariableLength(VariableLengthType::String(_)) => true,
+        Datatype::VariableLength(VariableLengthType::Sequence { element_type }) => matches!(
+            element_type.as_ref(),
             Datatype::String {
                 size: 1,
                 charset: CharacterSet::Ascii,
@@ -232,9 +226,8 @@ pub(crate) fn is_vlen_string_datatype(datatype: &Datatype) -> bool {
 pub(crate) struct EmbeddedVlSlot {
     /// Byte offset of the 16-byte reference within one element of the dataset.
     pub byte_offset: usize,
-    /// Byte width of the variable-length base type. The reference's stored
-    /// `length` counts base-type elements, so the heap object holds
-    /// `length * element_size` bytes.
+    /// The byte multiplier for the reference's stored `length`. This is 1 for strings
+    /// and the base-type element size for sequences.
     pub element_size: usize,
 }
 
@@ -308,9 +301,10 @@ fn collect_vlen_slots(
         return true;
     }
     match datatype {
-        Datatype::VariableLength { base_type, .. } => {
-            // A VL string's reference counts bytes (its base type is one byte
-            // wide); a sequence's counts base-type elements.
+        Datatype::VariableLength(kind) => {
+            let base_type = kind.base_type();
+            // A VL string's reference counts bytes. A sequence's reference counts
+            // base-type elements.
             let element_size = if is_vlen_string_datatype(datatype) {
                 1
             } else {
@@ -513,12 +507,8 @@ pub(crate) enum VlByteObject {
 /// null marker) instead of a `&str`, so a faithful rewrite can reproduce
 /// embedded-NUL and non-UTF-8 payloads exactly.
 ///
-/// `element_size` is the byte width of one base-type element of the sequence.
-/// For VL strings the base type is a single byte, so `element_size == 1` and the
-/// reference's stored `length` (an element count) equals the byte count. For a
-/// non-string VL sequence (e.g. `H5T_VLEN { H5T_NATIVE_DOUBLE }`) the stored
-/// `length` counts base-type elements, so the heap object holds
-/// `length * element_size` bytes — exactly what is read here.
+/// `element_size` is 1 for VL strings and the base-type element size for sequences.
+/// Each heap payload occupies `length * element_size` bytes.
 pub(crate) fn read_vl_byte_objects_from_source<S: Source + ?Sized>(
     source: &S,
     raw_data: &[u8],
@@ -1151,27 +1141,14 @@ mod embedded_slot_tests {
     };
 
     fn vlen_string() -> Datatype {
-        Datatype::VariableLength {
-            is_string: true,
-            base_type: Box::new(Datatype::String {
-                size: 1,
-                charset: CharacterSet::Utf8,
-                padding: StringPadding::NullTerminate,
-            }),
-            padding: Some(StringPadding::NullTerminate),
-            charset: Some(CharacterSet::Utf8),
-        }
+        Datatype::VariableLength(VariableLengthType::string(
+            StringPadding::NullTerminate,
+            CharacterSet::Utf8,
+        ))
     }
 
     fn vlen_i32_sequence() -> Datatype {
-        Datatype::VariableLength {
-            is_string: false,
-            base_type: Box::new(Datatype::FixedPoint(
-                FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
-            )),
-            padding: None,
-            charset: None,
-        }
+        Datatype::VariableLength(VariableLengthType::sequence(i32_type()))
     }
 
     fn i32_type() -> Datatype {
@@ -1200,9 +1177,6 @@ mod embedded_slot_tests {
         );
     }
 
-    /// Each member keeps its own base-type width: a string reference counts
-    /// bytes, a sequence reference counts base-type elements. Collapsing the two
-    /// would read the wrong number of heap bytes back.
     #[test]
     fn compound_members_keep_their_own_element_size() {
         let dt = Datatype::Compound {

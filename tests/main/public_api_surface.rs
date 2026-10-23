@@ -17,6 +17,8 @@
 //! with no finding and no changelog line, leaving callers a value they could
 //! compare and print but not use as a number.
 
+use hdf5_pure::CharacterSet;
+use hdf5_pure::Datatype;
 use hdf5_pure::FilterDisposition;
 use hdf5_pure::FilterId;
 use hdf5_pure::FilterParameters;
@@ -24,10 +26,13 @@ use hdf5_pure::FormatError;
 use hdf5_pure::LengthWidth;
 use hdf5_pure::OffsetWidth;
 use hdf5_pure::StoredAddress;
+use hdf5_pure::StringPadding;
 use hdf5_pure::SuperblockStatusFlag;
 use hdf5_pure::SuperblockStatusFlags;
 use hdf5_pure::SuperblockVersion;
 use hdf5_pure::UserblockSize;
+use hdf5_pure::VariableLengthStringType;
+use hdf5_pure::VariableLengthType;
 use hdf5_pure::{BaseAddress, Error, File, FileBuilder, LibVer, MessageType, Superblock};
 
 use test_util::temp;
@@ -370,4 +375,33 @@ fn filter_dispositions_can_be_matched_exhaustively(
         },
         expected
     );
+}
+
+#[test]
+fn variable_length_kinds_and_string_metadata_are_public() {
+    let sequence: hdf5_pure_core::VariableLengthType =
+        hdf5_pure_format::VariableLengthType::sequence(hdf5_pure::make_u32_type());
+    let Datatype::VariableLength(VariableLengthType::Sequence { element_type }) =
+        Datatype::VariableLength(sequence)
+    else {
+        panic!("expected a variable-length sequence");
+    };
+    assert_eq!(*element_type, hdf5_pure::make_u32_type());
+
+    let string: hdf5_pure_core::VariableLengthStringType =
+        hdf5_pure_format::VariableLengthStringType::new(
+            StringPadding::SpacePad,
+            CharacterSet::Utf8,
+        );
+    let _: &VariableLengthStringType = &string;
+    let datatype = Datatype::VariableLength(VariableLengthType::String(string));
+    let hdf5_pure_format::Datatype::VariableLength(hdf5_pure_format::VariableLengthType::String(
+        string,
+    )) = datatype
+    else {
+        panic!("expected a variable-length string");
+    };
+    assert_eq!(string.padding(), &StringPadding::SpacePad);
+    assert_eq!(string.charset(), &CharacterSet::Utf8);
+    assert_eq!(string.base_type(), &hdf5_pure::make_u8_type());
 }

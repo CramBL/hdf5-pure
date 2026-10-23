@@ -6,6 +6,7 @@
 
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::FilterId;
+use hdf5_pure::VariableLengthType;
 use hdf5_pure::{
     Error, File, FillTime, FormatError, MaxExtent, RepackOptions, VlenStringReadOptions,
 };
@@ -128,7 +129,7 @@ fn repack_roundtrips_c_vlen_string_dataset() {
     assert!(
         matches!(
             labels.datatype().unwrap(),
-            hdf5_pure::Datatype::VariableLength { .. }
+            hdf5_pure::Datatype::VariableLength(_)
         ),
         "repacked datatype must stay variable-length"
     );
@@ -282,10 +283,7 @@ fn repack_roundtrips_c_vlen_sequence_dataset() {
     assert!(
         matches!(
             ds.datatype().unwrap(),
-            hdf5_pure::Datatype::VariableLength {
-                is_string: false,
-                ..
-            }
+            hdf5_pure::Datatype::VariableLength(VariableLengthType::Sequence { .. })
         ),
         "repacked datatype must stay a non-string variable-length sequence"
     );
@@ -984,10 +982,7 @@ fn repack_roundtrips_c_compound_with_vlen_string_member() {
         hdf5_pure::Datatype::Compound { members, .. } => {
             assert_eq!(members.len(), 2);
             assert!(
-                matches!(
-                    members[1].datatype,
-                    hdf5_pure::Datatype::VariableLength { .. }
-                ),
+                matches!(members[1].datatype, hdf5_pure::Datatype::VariableLength(_)),
                 "the label member must stay variable-length"
             );
         }

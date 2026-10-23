@@ -414,6 +414,8 @@ def test_migration_builds_core_with_the_profile_core_features():
         ("SuperblockVersion", []),
         ("SuperblockStatusFlag", []),
         ("SuperblockStatusFlags", []),
+        ("VariableLengthStringType", []),
+        ("VariableLengthType", []),
         ("Unlisted", ["Unlisted: new core root item"]),
     ],
 )
@@ -510,4 +512,55 @@ def test_migration_shape_admits_eq_only_for_datatype_byte_order(type_name, expec
     core["index"]["6"] = deepcopy(core["index"]["5"])
     core["index"]["6"]["inner"]["impl"]["trait"]["path"] = "Eq"
     core["index"]["1"]["inner"]["struct"]["impls"].append(6)
+    assert migration_shapes(baseline, baseline, core) == expected
+
+
+@pytest.mark.parametrize(
+    ("type_name", "variant", "field_type", "kind", "expected"),
+    [
+        ("Datatype", "VariableLength", "VariableLengthType", "tuple", []),
+        ("Datatype", "VariableLength", "Datatype", "tuple", ["Datatype: variants changed"]),
+        (
+            "Datatype",
+            "VariableLength",
+            "VariableLengthType",
+            "struct",
+            ["Datatype: variants changed"],
+        ),
+        ("Datatype", "String", "VariableLengthType", "tuple", ["Datatype: variants changed"]),
+        ("Other", "VariableLength", "VariableLengthType", "tuple", ["Other: variants changed"]),
+    ],
+)
+def test_migration_admits_only_the_typed_variable_length_variant(
+    type_name, variant, field_type, kind, expected
+):
+    baseline = core_shape_fixture()
+    baseline["index"]["1"]["name"] = type_name
+    baseline["index"]["1"]["inner"] = {
+        "enum": {
+            "generics": {"params": [], "where_predicates": []},
+            "variants": [6],
+            "impls": [],
+        }
+    }
+    baseline["index"]["6"] = {
+        "name": variant,
+        "inner": {"variant": {"kind": "unit", "discriminant": None}},
+    }
+    core = deepcopy(baseline)
+    core["index"]["6"]["inner"]["variant"]["kind"] = (
+        {"tuple": [7]} if kind == "tuple" else {"struct": {"fields": [7]}}
+    )
+    core["index"]["7"] = {
+        "name": None,
+        "visibility": "default",
+        "inner": {
+            "struct_field": {
+                "resolved_path": {
+                    "path": f"hdf5_pure_core::datatype::{field_type}",
+                    "args": None,
+                }
+            }
+        },
+    }
     assert migration_shapes(baseline, baseline, core) == expected

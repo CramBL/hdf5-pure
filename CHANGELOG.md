@@ -42,6 +42,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** The public fields of `Datatype::VariableLength` are replaced by a string or sequence payload. String padding and character-set metadata are required.
 - **Breaking:** Exhaustive matches on `FilterId` and related parameter interpretations require a fallback. Numeric identifiers and raw parameters remain available for inspection.
 - **Breaking:** The chunk mask field is replaced by typed inspection through `Chunk::filters` and a separate recorded-mask accessor. Dispositions follow the dataset's pipeline order and distinguish raw bypass, while bits outside the pipeline remain available for inspection.
 - **Breaking:** The rate argument of `DatasetBuilder::with_zfp` changes from a floating-point number to a checked type. Dataset-specific rate and block-budget limits are checked before encoding, while floating-point header limits depend on the data.
