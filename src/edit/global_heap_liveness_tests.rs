@@ -1,15 +1,5 @@
 use std::collections::BTreeSet;
 
-use hdf5_pure::AttrValue;
-use hdf5_pure::Datatype;
-use hdf5_pure::DeflateLevel;
-use hdf5_pure::File;
-use hdf5_pure::FileBuilder;
-use hdf5_pure::GlobalHeapLiveness;
-use hdf5_pure::MaxExtent;
-use hdf5_pure::StoredAddress;
-use hdf5_pure::UserblockSize;
-use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_format::__private as format;
 use rstest::rstest;
 use test_util::attribute;
@@ -27,6 +17,17 @@ use test_util::widths::Widths;
 use test_util_hdf5::global_heap_fixture;
 use test_util_hdf5::global_heap_fixture::Fixture;
 use test_util_hdf5::global_heap_fixture::Form;
+
+use crate::AttrValue;
+use crate::Datatype;
+use crate::DeflateLevel;
+use crate::FileBuilder;
+use crate::MaxExtent;
+use crate::StoredAddress;
+use crate::UserblockSize;
+use crate::address::StoredAddressExt;
+use crate::edit::GlobalHeapLiveness;
+use crate::edit::ownership_tests;
 
 #[rstest]
 #[case::compact_attribute_of_strings(Form::CompactAttribute, global_heap_fixture::vlen_string())]
@@ -53,7 +54,7 @@ fn each_supported_form_refers_to_its_collection(#[case] form: Form, #[case] data
     let messages = form.messages(&mut fixture, &datatype, &elements);
     fixture.object("x", messages);
 
-    assert_eq!(fixture.liveness(), complete([collection]));
+    assert_eq!(liveness(fixture), complete([collection]));
 }
 
 #[test]
@@ -81,7 +82,7 @@ fn objects_that_share_a_collection_refer_to_it_once() {
         fixture.object(name, messages);
     }
 
-    assert_eq!(fixture.liveness(), complete([shared, other]));
+    assert_eq!(liveness(fixture), complete([shared, other]));
 }
 
 #[test]
@@ -101,7 +102,7 @@ fn an_object_behind_two_links_and_a_cycle_refers_to_its_collection() {
     fixture.link("g", group);
     fixture.link("d", dataset);
 
-    assert_eq!(fixture.liveness(), complete([collection]));
+    assert_eq!(liveness(fixture), complete([collection]));
 }
 
 #[rstest]
@@ -128,7 +129,7 @@ fn only_an_element_with_an_object_refers_to_its_collection(
     fixture.object("d", messages);
 
     assert_eq!(
-        fixture.liveness(),
+        liveness(fixture),
         complete(referenced.then_some(collection))
     );
 }
@@ -169,7 +170,7 @@ fn embedded_members_refer_to_their_collections(
     let messages = form.messages(&mut fixture, &datatype, &elements);
     fixture.object("x", messages);
 
-    assert_eq!(fixture.liveness(), complete(collections));
+    assert_eq!(liveness(fixture), complete(collections));
 }
 
 #[rstest]
@@ -192,7 +193,7 @@ fn a_datatype_with_unlocated_addresses_is_incomplete(#[case] datatype: Datatype)
     ));
     fixture.object("d", messages);
 
-    assert_eq!(fixture.liveness(), incomplete());
+    assert_eq!(liveness(fixture), incomplete());
 }
 
 #[rstest]
@@ -210,11 +211,11 @@ fn a_datatype_with_unlocated_addresses_is_incomplete(#[case] datatype: Datatype)
 fn a_message_the_analysis_cannot_read_is_incomplete(#[case] message: Message) {
     let mut fixture = Fixture::new();
     let mut messages =
-        global_heap_fixture::dataset_messages(&hdf5_pure::make_i32_type(), &dataspace::scalar());
+        global_heap_fixture::dataset_messages(&crate::make_i32_type(), &dataspace::scalar());
     messages.push(message);
     fixture.object("d", messages);
 
-    assert_eq!(fixture.liveness(), incomplete());
+    assert_eq!(liveness(fixture), incomplete());
 }
 
 #[rstest]
@@ -235,7 +236,7 @@ fn a_dataset_with_a_shared_message_is_incomplete(#[case] mut messages: Vec<Messa
     ));
     fixture.object("d", messages);
 
-    assert_eq!(fixture.liveness(), incomplete());
+    assert_eq!(liveness(fixture), incomplete());
 }
 
 #[test]
@@ -253,7 +254,7 @@ fn every_batch_of_a_contiguous_dataset_is_read() {
     );
     fixture.object("d", messages);
 
-    assert_eq!(fixture.liveness(), complete([first, last]));
+    assert_eq!(liveness(fixture), complete([first, last]));
 }
 
 #[rstest]
@@ -308,7 +309,7 @@ fn a_chunk_that_cannot_be_read_or_decoded_is_incomplete(
     messages.push(Message::new(MessageType::DATA_LAYOUT, &layout));
     fixture.object("d", messages);
 
-    assert_eq!(fixture.liveness(), incomplete());
+    assert_eq!(liveness(fixture), incomplete());
 }
 
 #[test]
@@ -333,7 +334,7 @@ fn an_unallocated_chunked_dataset_refers_to_no_collection() {
     ));
     fixture.object("d", messages);
 
-    assert_eq!(fixture.liveness(), complete([]));
+    assert_eq!(liveness(fixture), complete([]));
 }
 
 #[test]
@@ -367,7 +368,7 @@ fn an_unfiltered_chunk_of_the_wrong_length_is_incomplete() {
     ));
     fixture.object("d", messages);
 
-    assert_eq!(fixture.liveness(), incomplete());
+    assert_eq!(liveness(fixture), incomplete());
 }
 
 #[rstest]
@@ -389,10 +390,10 @@ fn a_written_file_refers_to_every_collection_it_holds(
     let expected = complete(global_heap::collection_starts(
         &std::fs::read(&path).unwrap(),
     ));
-    let file = File::open_rw(&path).unwrap();
+    let engine = ownership_tests::open_engine(&path);
 
-    assert_eq!(file.__global_heap_liveness().unwrap(), expected);
-    file.close().unwrap();
+    assert_eq!(engine.global_heap_liveness().unwrap(), expected);
+    drop(engine);
 }
 
 /// A variable-length element of length 0.
@@ -470,6 +471,19 @@ impl Written {
         }
         builder
     }
+}
+
+/// Writes the fixture and analyzes its reachable global heap collections.
+///
+/// # Panics
+///
+/// Panics if the fixture cannot be written, opened, or analyzed.
+fn liveness(fixture: Fixture) -> GlobalHeapLiveness {
+    let path = temp::temp_path("liveness_fixture.h5");
+    fixture.write(&path);
+    ownership_tests::open_engine(&path)
+        .global_heap_liveness()
+        .unwrap()
 }
 
 fn complete(collections: impl IntoIterator<Item = u64>) -> GlobalHeapLiveness {
