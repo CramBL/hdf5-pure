@@ -18,7 +18,6 @@ mod error;
 mod lzf;
 mod pipeline;
 mod scaleoffset;
-#[cfg(feature = "zfp")]
 mod zfp;
 
 /// Returns an initial allocation size bounded by the output cap and the input
