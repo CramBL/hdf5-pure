@@ -2072,6 +2072,87 @@ mod tests {
         );
     }
 
+    #[rstest::rstest]
+    #[case::indexed_exact(false, 0)]
+    #[case::indexed_reserved(false, 64)]
+    #[case::direct_exact(true, 0)]
+    #[case::direct_reserved(true, 64)]
+    fn mixed_managed_huge_and_manager_allocations_are_exact(
+        #[case] direct: bool,
+        #[case] spare: u64,
+    ) {
+        const TREE: u64 = 0x800;
+        const LEAF: u64 = 0x900;
+        const PAYLOAD: u64 = 0xa00;
+        const PAYLOAD_LEN: u64 = 37;
+        const NODE_SIZE: usize = 128;
+        let (mut file, used) = managed_fsm_image(spare);
+        let mut header =
+            FractalHeapHeader::parse(&file, usize::try_from(STORAGE_HEAP_AT).unwrap(), 8, 8)
+                .unwrap();
+        header.btree_huge_objects_address = StoredAddress::new(TREE);
+        header.huge_objects_count = 1;
+        header.huge_objects_size = PAYLOAD_LEN;
+        let (tree_type, record_size, record) = if direct {
+            header.heap_id_length = 17;
+            let mut record = PAYLOAD.to_le_bytes().to_vec();
+            record.extend_from_slice(&PAYLOAD_LEN.to_le_bytes());
+            (BTREE_V2_HUGE_OBJECT_DIRECT, 16, record)
+        } else {
+            (
+                BTREE_V2_HUGE_OBJECT,
+                24,
+                encoded_huge_record(PAYLOAD, PAYLOAD_LEN, 1),
+            )
+        };
+        place_storage_header(&mut file, &header);
+        place(
+            &mut file,
+            TREE,
+            &btree_v2::Header::new(tree_type, record_size, LEAF, 1)
+                .node_size(u32::try_from(NODE_SIZE).unwrap())
+                .build(Widths::EIGHT),
+        );
+        place_btree_node(
+            &mut file,
+            LEAF,
+            &btree_v2::leaf(tree_type, &[record]),
+            NODE_SIZE,
+        );
+        let expected = vec![
+            allocation(
+                STORAGE_HEAP_AT,
+                len_u64(FractalHeapHeader::serialized_size(
+                    OffsetWidth::Eight,
+                    LengthWidth::Eight,
+                )),
+                FractalHeapAllocation::Header,
+            ),
+            allocation(STORAGE_ROOT_AT, 128, FractalHeapAllocation::DirectBlock),
+            allocation(MANAGED_FSM_AT, 82, FractalHeapAllocation::ManagedFsmHeader),
+            allocation(
+                MANAGED_FSSE_AT,
+                used + spare,
+                FractalHeapAllocation::ManagedFsmSectionList,
+            ),
+            allocation(
+                TREE,
+                len_u64(__private::btree_v2_header_size(
+                    OffsetWidth::Eight,
+                    LengthWidth::Eight,
+                )),
+                FractalHeapAllocation::HugeObjectIndex,
+            ),
+            allocation(
+                LEAF,
+                len_u64(NODE_SIZE),
+                FractalHeapAllocation::HugeObjectIndex,
+            ),
+            allocation(PAYLOAD, PAYLOAD_LEN, FractalHeapAllocation::HugeObject),
+        ];
+        assert_eq!(collect_storage(&file).unwrap().allocations(), expected);
+    }
+
     #[test]
     fn overlapping_owned_allocations_are_rejected() {
         const TREE: u64 = 0x400;
