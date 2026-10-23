@@ -2,15 +2,39 @@
 source: crates/crosscheck/tests/main/file_space_oracle.rs
 expression: report
 ---
-checkpoint: version-0-Bytes2-Bytes8-base-0/persisted
-properties: rust=FreeSpaceManager { paged: false, persist: true, threshold: 1 } libhdf5=FreeSpaceManager { paged: false, persist: true, threshold: 1 } c_persist=true c_threshold=1 page=4096 base=0
-file: rust_eof=26848 libhdf5_filesize=26848 physical=26848 base=0
-free sections (base-relative address, length)
-  index  hdf5-pure                         libhdf5                           match
-  0      (0x2c5, 0x28)                     (0x2c5, 0x28)                     yes
-  1      (0x505, 0x2fb)                    (0x505, 0x2fb)                    yes
-  2      (0xe40, 0x640)                    (0xe40, 0x640)                    yes
-free: rust_sections=3 c_sections=3 rust_bytes=2403 c_bytes=2403
-libhdf5_H5Fget_freespace=2403 difference_from_c_sections=0
-ownership (Rust): unavailable: in-place editing requires 8-byte offsets and lengths
-exact_section_map_equal=true
+case:       version-0-Bytes2-Bytes8-base-0
+checkpoint: persisted
+
+file-space properties
+  property                          hdf5-pure        libhdf5
+  strategy                           FSM_AGGR       FSM_AGGR
+  persistence                            true           true
+  threshold (bytes)                         1              1
+  page size (bytes)                      4096           4096
+  base / userblock (bytes)                  0              0
+
+file sizes (absolute bytes)
+  measurement                           bytes
+  hdf5-pure stored EOF                  26848
+  libhdf5 H5Fget_filesize               26848
+  physical file                         26848
+
+free-space sections (stored addresses, byte lengths)
+  index |        hdf5-pure         |         libhdf5          | match
+        |     address      length  |     address      length  |
+  ------+--------------------------+--------------------------+------
+      0 | (0x000002c5, 0x00000028) | (0x000002c5, 0x00000028) | yes
+      1 | (0x00000505, 0x000002fb) | (0x00000505, 0x000002fb) | yes
+      2 | (0x00000e40, 0x00000640) | (0x00000e40, 0x00000640) | yes
+
+free-space totals
+  measurement                       hdf5-pure        libhdf5
+  section count                             3              3
+  section bytes                          2403           2403
+  H5Fget_freespace                          -           2403
+  reported - section bytes                  -              0
+
+ownership (Rust)
+  unavailable: in-place editing requires 8-byte offsets and lengths
+
+exact section map equal: true
