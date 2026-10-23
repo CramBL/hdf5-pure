@@ -18,6 +18,7 @@ use hdf5_sys::h5t;
 use hdf5_sys::h5t::H5T_order_t;
 use hdf5_sys::h5t::H5T_str_t;
 use rstest::rstest;
+use test_util_hdf5::numeric;
 
 #[rstest]
 #[case(StringPadding::NullTerminate, H5T_str_t::H5T_STR_NULLTERM)]
@@ -28,6 +29,8 @@ fn reads_c_variable_length_string_metadata(
     #[case] c_padding: H5T_str_t,
     #[values(false, true)] utf8: bool,
     #[values(false, true)] big_endian: bool,
+    #[values(false, true)] low_padding: bool,
+    #[values(false, true)] high_padding: bool,
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("strings.h5");
@@ -48,6 +51,14 @@ fn reads_c_variable_length_string_metadata(
         unsafe {
             assert_eq!(h5t::H5Tset_strpad(datatype.id(), c_padding), 0);
             assert_eq!(h5t::H5Tset_order(datatype.id(), order), 0);
+            assert_eq!(
+                h5t::H5Tset_pad(
+                    datatype.id(),
+                    numeric::bit_padding(low_padding),
+                    numeric::bit_padding(high_padding)
+                ),
+                0
+            );
         }
     });
     {
@@ -87,11 +98,21 @@ fn reads_c_variable_length_string_metadata(
             } else {
                 CharacterSet::Ascii
             }),
-            base_type: Box::new(Datatype::FixedPoint(FixedPointType::new(1, if big_endian {
-                    DatatypeByteOrder::BigEndian
-                } else {
-                    DatatypeByteOrder::LittleEndian
-                }, false, 0, 8).unwrap())),
+            base_type: Box::new(Datatype::FixedPoint(
+                FixedPointType::new(
+                    1,
+                    if big_endian {
+                        DatatypeByteOrder::BigEndian
+                    } else {
+                        DatatypeByteOrder::LittleEndian
+                    },
+                    false,
+                    0,
+                    8
+                )
+                .unwrap()
+                .with_padding(low_padding, high_padding)
+            )),
         }
     );
     assert_eq!(
@@ -176,11 +197,20 @@ fn reads_c_nested_variable_length_sequence_datatype() {
                 is_string: false,
                 padding: None,
                 charset: None,
-                base_type: Box::new(Datatype::FixedPoint(FixedPointType::new(4, if cfg!(target_endian = "big") {
-                        DatatypeByteOrder::BigEndian
-                    } else {
-                        DatatypeByteOrder::LittleEndian
-                    }, false, 0, 32).unwrap())),
+                base_type: Box::new(Datatype::FixedPoint(
+                    FixedPointType::new(
+                        4,
+                        if cfg!(target_endian = "big") {
+                            DatatypeByteOrder::BigEndian
+                        } else {
+                            DatatypeByteOrder::LittleEndian
+                        },
+                        false,
+                        0,
+                        32
+                    )
+                    .unwrap()
+                )),
             }),
         }
     );

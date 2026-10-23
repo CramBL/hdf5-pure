@@ -61,6 +61,8 @@ impl FixedPointType {
             size,
             byte_order,
             layout: FixedPointLayout {
+                low_padding: false,
+                high_padding: false,
                 signed,
                 bit_offset,
                 bit_precision,
@@ -81,11 +83,16 @@ impl FixedPointType {
         layout: FixedPointLayout,
     ) -> Result<Self, FormatError> {
         let FixedPointLayout {
+            low_padding,
+            high_padding,
             signed,
             bit_offset,
             bit_precision,
         } = layout;
-        Self::new(size, byte_order, signed, bit_offset, bit_precision.get())
+        Ok(
+            Self::new(size, byte_order, signed, bit_offset, bit_precision.get())?
+                .with_padding(low_padding, high_padding),
+        )
     }
 
     /// Constructs a signed 8-bit integer datatype in little-endian byte order.
@@ -94,6 +101,8 @@ impl FixedPointType {
             size: NonZeroU32::MIN,
             byte_order: DatatypeByteOrder::LittleEndian,
             layout: FixedPointLayout {
+                low_padding: false,
+                high_padding: false,
                 signed: true,
                 bit_offset: 0,
                 bit_precision: standard_precision(8),
@@ -107,6 +116,8 @@ impl FixedPointType {
             size: standard_size(2),
             byte_order: DatatypeByteOrder::LittleEndian,
             layout: FixedPointLayout {
+                low_padding: false,
+                high_padding: false,
                 signed: true,
                 bit_offset: 0,
                 bit_precision: standard_precision(16),
@@ -120,6 +131,8 @@ impl FixedPointType {
             size: standard_size(4),
             byte_order: DatatypeByteOrder::LittleEndian,
             layout: FixedPointLayout {
+                low_padding: false,
+                high_padding: false,
                 signed: true,
                 bit_offset: 0,
                 bit_precision: standard_precision(32),
@@ -133,6 +146,8 @@ impl FixedPointType {
             size: standard_size(8),
             byte_order: DatatypeByteOrder::LittleEndian,
             layout: FixedPointLayout {
+                low_padding: false,
+                high_padding: false,
                 signed: true,
                 bit_offset: 0,
                 bit_precision: standard_precision(64),
@@ -146,6 +161,8 @@ impl FixedPointType {
             size: NonZeroU32::MIN,
             byte_order: DatatypeByteOrder::LittleEndian,
             layout: FixedPointLayout {
+                low_padding: false,
+                high_padding: false,
                 signed: false,
                 bit_offset: 0,
                 bit_precision: standard_precision(8),
@@ -159,6 +176,8 @@ impl FixedPointType {
             size: standard_size(2),
             byte_order: DatatypeByteOrder::LittleEndian,
             layout: FixedPointLayout {
+                low_padding: false,
+                high_padding: false,
                 signed: false,
                 bit_offset: 0,
                 bit_precision: standard_precision(16),
@@ -172,6 +191,8 @@ impl FixedPointType {
             size: standard_size(4),
             byte_order: DatatypeByteOrder::LittleEndian,
             layout: FixedPointLayout {
+                low_padding: false,
+                high_padding: false,
                 signed: false,
                 bit_offset: 0,
                 bit_precision: standard_precision(32),
@@ -185,11 +206,32 @@ impl FixedPointType {
             size: standard_size(8),
             byte_order: DatatypeByteOrder::LittleEndian,
             layout: FixedPointLayout {
+                low_padding: false,
+                high_padding: false,
                 signed: false,
                 bit_offset: 0,
                 bit_precision: standard_precision(64),
             },
         }
+    }
+
+    /// Sets the padding bits below and above the significant range.
+    ///
+    /// Pass `true` for one or `false` for zero.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::FixedPointType;
+    ///
+    /// let datatype = FixedPointType::u16().with_padding(true, false);
+    /// assert!(datatype.layout().low_padding());
+    /// assert!(!datatype.layout().high_padding());
+    /// ```
+    pub const fn with_padding(mut self, low: bool, high: bool) -> Self {
+        self.layout.low_padding = low;
+        self.layout.high_padding = high;
+        self
     }
 
     /// Returns the number of bytes occupied by one element.
@@ -200,7 +242,7 @@ impl FixedPointType {
     pub const fn byte_order(self) -> DatatypeByteOrder {
         self.byte_order
     }
-    /// Returns the sign and significant bit range of each element.
+    /// Returns the padding, sign, and significant bit range of each element.
     pub const fn layout(self) -> FixedPointLayout {
         self.layout
     }
@@ -350,6 +392,29 @@ impl FloatingPointType {
         }
     }
 
+    /// Sets the low, high, and internal padding bits.
+    ///
+    /// Pass `true` for one or `false` for zero. The internal value is used for unused bits
+    /// between the sign, exponent, and mantissa fields.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::{DatatypeByteOrder, FloatingPointType};
+    ///
+    /// let datatype = FloatingPointType::ieee754_binary32(DatatypeByteOrder::LittleEndian)
+    ///     .with_padding(true, false, true);
+    /// assert!(datatype.layout().low_padding());
+    /// assert!(!datatype.layout().high_padding());
+    /// assert!(datatype.layout().internal_padding());
+    /// ```
+    pub const fn with_padding(mut self, low: bool, high: bool, internal: bool) -> Self {
+        self.layout.low_padding = low;
+        self.layout.high_padding = high;
+        self.layout.internal_padding = internal;
+        self
+    }
+
     /// Returns the number of bytes occupied by one element.
     pub const fn size(self) -> NonZeroU32 {
         self.size
@@ -430,6 +495,10 @@ impl TimeType {
 /// Elements have a positive size and little-endian or big-endian byte order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BitFieldType {
+    /// The value of unused bits below the significant range, with `true` representing one.
+    low_padding: bool,
+    /// The value of unused bits above the significant range, with `true` representing one.
+    high_padding: bool,
     size: NonZeroU32,
     byte_order: DatatypeByteOrder,
     bit_offset: u16,
@@ -472,11 +541,44 @@ impl BitFieldType {
                 bit_precision,
             })?;
         Ok(Self {
+            low_padding: false,
+            high_padding: false,
             size,
             byte_order,
             bit_offset,
             bit_precision,
         })
+    }
+
+    /// Sets the padding bits below and above the significant range.
+    ///
+    /// Pass `true` for one or `false` for zero.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::{BitFieldType, DatatypeByteOrder};
+    ///
+    /// let datatype = BitFieldType::new(2, DatatypeByteOrder::LittleEndian, 3, 9)?
+    ///     .with_padding(false, true);
+    /// assert!(!datatype.low_padding());
+    /// assert!(datatype.high_padding());
+    /// # Ok::<(), hdf5_pure_core::FormatError>(())
+    /// ```
+    pub const fn with_padding(mut self, low: bool, high: bool) -> Self {
+        self.low_padding = low;
+        self.high_padding = high;
+        self
+    }
+
+    /// Returns the padding bit below the significant range, with `true` representing one.
+    pub const fn low_padding(self) -> bool {
+        self.low_padding
+    }
+
+    /// Returns the padding bit above the significant range, with `true` representing one.
+    pub const fn high_padding(self) -> bool {
+        self.high_padding
     }
 
     /// Returns the number of bytes occupied by one element.
@@ -497,9 +599,18 @@ impl BitFieldType {
     }
 }
 
-/// The sign and bit range stored in a fixed-point datatype message.
+/// The padding, sign, and bit range stored in a fixed-point datatype message.
+///
+/// The fields for datatype message versions 1 through 5 are defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FixedPointLayout {
+    /// The value of unused bits below the significant range, with `true` representing one.
+    low_padding: bool,
+    /// The value of unused bits above the significant range, with `true` representing one.
+    high_padding: bool,
     /// Whether the stored integer has a sign bit.
     signed: bool,
     /// The first significant bit within each element.
@@ -509,6 +620,16 @@ pub struct FixedPointLayout {
 }
 
 impl FixedPointLayout {
+    /// Returns the padding bit below the significant range, with `true` representing one.
+    pub const fn low_padding(self) -> bool {
+        self.low_padding
+    }
+
+    /// Returns the padding bit above the significant range, with `true` representing one.
+    pub const fn high_padding(self) -> bool {
+        self.high_padding
+    }
+
     /// Returns the nonzero number of significant bits in each element.
     pub const fn precision(self) -> NonZeroU16 {
         self.bit_precision
@@ -532,8 +653,21 @@ impl FixedPointLayout {
 ///
 /// The fields are constructed through [`FloatingPointType::new`], which also checks that the
 /// significant bit range fits within the element size.
+///
+/// The fields for datatype message versions 1 through 5 are defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FloatingPointLayout {
+    /// The value of unused bits below the significant range, with `true` representing one.
+    low_padding: bool,
+    /// The value of unused bits above the significant range, with `true` representing one.
+    high_padding: bool,
+    /// The value of unused bits between the sign, exponent, and mantissa fields.
+    ///
+    /// `true` represents one and `false` represents zero.
+    internal_padding: bool,
     /// How the most significant mantissa bit is represented.
     mantissa_normalization: MantissaNormalization,
     /// The bit position of the sign, counting from the least significant bit.
@@ -555,6 +689,23 @@ pub struct FloatingPointLayout {
 }
 
 impl FloatingPointLayout {
+    /// Returns the padding bit below the significant range, with `true` representing one.
+    pub const fn low_padding(self) -> bool {
+        self.low_padding
+    }
+
+    /// Returns the padding bit above the significant range, with `true` representing one.
+    pub const fn high_padding(self) -> bool {
+        self.high_padding
+    }
+
+    /// Returns the padding bit between the sign, exponent, and mantissa fields.
+    ///
+    /// `true` represents one and `false` represents zero.
+    pub const fn internal_padding(self) -> bool {
+        self.internal_padding
+    }
+
     fn parse(
         mantissa_normalization: MantissaNormalization,
         sign_location: u8,
@@ -634,6 +785,9 @@ impl FloatingPointLayout {
             }
         }
         Ok(Self {
+            low_padding: false,
+            high_padding: false,
+            internal_padding: false,
             mantissa_normalization,
             sign_location,
             bit_offset,
@@ -685,6 +839,9 @@ impl FloatingPointLayout {
 
     /// The bit fields of an IEEE 754 binary32 element.
     pub const IEEE754_BINARY32: Self = Self {
+        low_padding: false,
+        high_padding: false,
+        internal_padding: false,
         mantissa_normalization: MantissaNormalization::ImpliedLeadingOne,
         sign_location: 31,
         bit_offset: 0,
@@ -697,6 +854,9 @@ impl FloatingPointLayout {
     };
     /// The bit fields of an IEEE 754 binary64 element.
     pub const IEEE754_BINARY64: Self = Self {
+        low_padding: false,
+        high_padding: false,
+        internal_padding: false,
         mantissa_normalization: MantissaNormalization::ImpliedLeadingOne,
         sign_location: 63,
         bit_offset: 0,
@@ -808,6 +968,36 @@ mod tests {
                 numeric.layout().bit_precision()
             ),
             (signed, offset, precision)
+        );
+    }
+
+    #[rstest]
+    fn preserves_fixed_point_layout_padding(
+        #[values(false, true)] low: bool,
+        #[values(false, true)] high: bool,
+    ) {
+        let layout = FixedPointType::u16().with_padding(low, high).layout();
+        assert_eq!(
+            FixedPointType::from_layout(2, DatatypeByteOrder::BigEndian, layout).unwrap(),
+            FixedPointType::new(2, DatatypeByteOrder::BigEndian, false, 0, 16)
+                .unwrap()
+                .with_padding(low, high),
+        );
+    }
+
+    #[rstest]
+    fn preserves_floating_point_layout_padding(
+        #[values(false, true)] low: bool,
+        #[values(false, true)] high: bool,
+        #[values(false, true)] internal: bool,
+    ) {
+        let layout = FloatingPointType::ieee754_binary32(DatatypeByteOrder::LittleEndian)
+            .with_padding(low, high, internal)
+            .layout();
+        assert_eq!(
+            FloatingPointType::from_layout(4, DatatypeByteOrder::BigEndian, layout).unwrap(),
+            FloatingPointType::ieee754_binary32(DatatypeByteOrder::BigEndian)
+                .with_padding(low, high, internal),
         );
     }
 
@@ -1000,6 +1190,9 @@ mod tests {
     impl FloatingFields {
         const fn from_layout(layout: FloatingPointLayout) -> Self {
             let FloatingPointLayout {
+                low_padding: _,
+                high_padding: _,
+                internal_padding: _,
                 mantissa_normalization,
                 sign_location,
                 bit_offset,

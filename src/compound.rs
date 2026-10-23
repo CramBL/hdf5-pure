@@ -89,7 +89,7 @@ fn float_order(
         Datatype::FloatingPoint(numeric)
             if numeric.size().get() == size
                 && matches!(
-                    (size, numeric.layout()),
+                    (size, numeric.with_padding(false, false, false).layout()),
                     (4, FloatingPointLayout::IEEE754_BINARY32)
                         | (8, FloatingPointLayout::IEEE754_BINARY64)
                 ) =>

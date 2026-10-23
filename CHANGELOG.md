@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `FixedPointType::with_padding` and related numeric datatype methods configure padding bits. Metadata reads and writes preserve the bits, including those of variable-length base types.
 - `FormatError::ChunkElementSizeMismatch` reports a chunked dataset whose layout stores an element size other than the size of its datatype. An append rejects such a dataset before it writes ([#845](https://github.com/CramBL/hdf5-pure/pull/845)).
 - `File::dataset` and related group lookups follow relative, absolute, and chained soft links. External links remain unsupported, and soft link traversal is bounded.
 - `DatasetBuilder::with_unallocated_storage` declares datasets before their element data is available, with configurable fill and chunk settings. Combining unallocated storage with element data is rejected.

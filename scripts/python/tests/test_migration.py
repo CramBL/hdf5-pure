@@ -427,6 +427,11 @@ def test_migration_shape_admits_only_the_allowed_new_root_items(name, expected):
 @pytest.mark.parametrize(
     ("type_name", "field", "expected"),
     [
+        ("FixedPointLayout", "low_padding", ["FixedPointLayout: fields changed"]),
+        ("FixedPointLayout", "high_padding", ["FixedPointLayout: fields changed"]),
+        ("FloatingPointLayout", "low_padding", ["FloatingPointLayout: fields changed"]),
+        ("FloatingPointLayout", "high_padding", ["FloatingPointLayout: fields changed"]),
+        ("FloatingPointLayout", "internal_padding", ["FloatingPointLayout: fields changed"]),
         ("FileSpaceInfo", "page_size", []),
         ("FileSpaceInfo", "threshold", ["FileSpaceInfo: fields changed"]),
         ("FloatingPointLayout", "mantissa_normalization", []),
@@ -472,6 +477,11 @@ def test_migration_shape_admits_only_the_allowed_superblock_field_changes(field,
 @pytest.mark.parametrize(
     ("type_name", "member", "expected"),
     [
+        ("FixedPointLayout", "low_padding", []),
+        ("FixedPointLayout", "high_padding", []),
+        ("FloatingPointLayout", "low_padding", []),
+        ("FloatingPointLayout", "high_padding", []),
+        ("FloatingPointLayout", "internal_padding", []),
         ("FixedPointLayout", "signed", []),
         ("FixedPointLayout", "precision", []),
         ("FloatingPointLayout", "exponent_bias", []),

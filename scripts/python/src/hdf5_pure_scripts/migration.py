@@ -347,8 +347,18 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
         },
     }
     allowed_added_inherent = {
-        "FixedPointLayout": {"signed", "bit_offset", "bit_precision", "precision"},
+        "FixedPointLayout": {
+            "signed",
+            "bit_offset",
+            "bit_precision",
+            "precision",
+            "low_padding",
+            "high_padding",
+        },
         "FloatingPointLayout": {
+            "low_padding",
+            "high_padding",
+            "internal_padding",
             "mantissa_normalization",
             "sign_location",
             "bit_offset",
