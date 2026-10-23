@@ -9,6 +9,7 @@ use hdf5_pure::FileBuilder;
 use hdf5_pure::FixedPointType;
 use hdf5_pure::FloatingPointType;
 use hdf5_pure::LibVer;
+use hdf5_pure::VariableLengthType;
 use hdf5_sys::h5p::H5P_DEFAULT;
 use hdf5_sys::h5t;
 use rstest::rstest;
@@ -90,12 +91,7 @@ fn preserves_c_padding_through_nested_types(
             high,
             internal,
         ),
-        |base, _| Datatype::VariableLength {
-            is_string: false,
-            padding: None,
-            charset: None,
-            base_type: Box::new(base),
-        },
+        |base, _| Datatype::VariableLength(VariableLengthType::sequence(base)),
     );
     assert_eq!(actual, expected);
     let mut builder = FileBuilder::new();

@@ -26,7 +26,8 @@
 //!   v4 chunk index (single-chunk / fixed-array / extensible-array) regardless
 //!   of the source index type.
 //! - **Variable-length** datasets (1D and ND, contiguous/compact as well as
-//!   chunked, filtered, or resizable): string-shaped (`is_string: true` and the
+//!   chunked, filtered, or resizable): string-shaped
+//!   ([`VariableLengthType::String`](crate::VariableLengthType::String) and the
 //!   MATLAB VLEN-of-1-byte-ASCII-string shape) and non-string sequences over any
 //!   base type that embeds no addresses. Each element's exact heap bytes are read
 //!   and re-staged through a fresh global heap, preserving charset, padding, the
@@ -116,6 +117,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::DeflateLevel;
+#[cfg(test)]
+use crate::VariableLengthStringType;
+#[cfg(test)]
+use crate::VariableLengthType;
 use crate::access_mode::AccessMode;
 use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
@@ -1419,7 +1424,7 @@ fn attr_bytes_are_position_independent(dt: &Datatype) -> bool {
         Datatype::Enumeration { base_type, .. } | Datatype::Array { base_type, .. } => {
             attr_bytes_are_position_independent(base_type)
         }
-        Datatype::VariableLength { .. } | Datatype::Reference { .. } | _ => false,
+        Datatype::VariableLength(_) | Datatype::Reference { .. } | _ => false,
     }
 }
 
@@ -1508,7 +1513,7 @@ where
             // its payload. Gating on what the decode *produced* rather than
             // re-classifying the datatype here keeps the two from drifting apart.
             match (&message.datatype, value.as_strings()) {
-                (Datatype::VariableLength { .. }, Some(strings)) => {
+                (Datatype::VariableLength(_), Some(strings)) => {
                     let strings = strings.to_vec();
                     sink.sink_set_attr_var_len_verbatim(message, strings, committed_datatype_path)?;
                 }
@@ -1545,15 +1550,15 @@ fn check_datatype(dt: &Datatype, owner: &str) -> Result<(), Error> {
         | Datatype::String { .. }
         | Datatype::BitField(..)
         | Datatype::Opaque { .. } => Ok(()),
-        // String-shaped variable-length datatypes (`is_string: true`, or the
+        // String-shaped variable-length datatypes (`VariableLengthType::String`, or the
         // MATLAB VLEN-of-1-byte-ASCII-string shape) are reproduced by reading
         // each element's exact heap bytes and re-staging them through the
         // writer's VL-string path; the layout/filter checks gate chunked ones.
-        Datatype::VariableLength { .. } if vl_data::is_vlen_string_datatype(dt) => Ok(()),
+        Datatype::VariableLength(_) if vl_data::is_vlen_string_datatype(dt) => Ok(()),
         // Non-string VL (sequences of arbitrary base types) are re-staged the
         // same way, but only when the base type's bytes carry no embedded heap or
         // file addresses that a verbatim copy would leave stale.
-        Datatype::VariableLength { base_type, .. } => check_vlen_base_type(base_type, owner),
+        Datatype::VariableLength(kind) => check_vlen_base_type(kind.base_type(), owner),
         // Object references (8-byte object-header addresses) are repacked by
         // rewriting each address to its target's new location. Region references
         // (which embed a dataspace selection in the global heap) and non-8-byte
@@ -1587,7 +1592,7 @@ fn check_datatype(dt: &Datatype, owner: &str) -> Result<(), Error> {
 /// re-emitted by [`emit_vlen_sequence_dataset`]. Excludes the string-shaped VL
 /// datatypes, which [`emit_vlen_string_dataset`] handles.
 fn is_nonstring_vlen(dt: &Datatype) -> bool {
-    matches!(dt, Datatype::VariableLength { .. }) && !vl_data::is_vlen_string_datatype(dt)
+    matches!(dt, Datatype::VariableLength(_)) && !vl_data::is_vlen_string_datatype(dt)
 }
 
 /// A non-string VL sequence is repacked by re-staging each element's exact heap
@@ -1610,7 +1615,7 @@ fn check_vlen_base_type(dt: &Datatype, owner: &str) -> Result<(), Error> {
         | Datatype::BitField(..)
         | Datatype::Opaque { .. } => Ok(()),
         Datatype::Reference { .. } => bad("references"),
-        Datatype::VariableLength { .. } => bad("variable-length elements"),
+        Datatype::VariableLength(_) => bad("variable-length elements"),
         Datatype::Compound { members, .. } => {
             for m in members {
                 check_vlen_base_type(&m.datatype, owner)?;
@@ -2546,12 +2551,14 @@ mod attribute_fidelity_tests {
     /// being the whole of it, and copying the element copies the address.
     #[test]
     fn a_nested_address_makes_the_whole_datatype_position_dependent() {
-        let vlen = Datatype::VariableLength {
-            is_string: true,
-            padding: None,
-            charset: Some(CharacterSet::Ascii),
-            base_type: Box::new(i32_type()),
-        };
+        let vlen = Datatype::VariableLength(VariableLengthType::String(
+            VariableLengthStringType::with_base_type(
+                StringPadding::NullTerminate,
+                CharacterSet::Ascii,
+                i32_type(),
+            )
+            .unwrap(),
+        ));
         let reference = Datatype::Reference {
             size: 8,
             ref_type: ReferenceType::Object,

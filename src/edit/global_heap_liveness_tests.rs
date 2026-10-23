@@ -25,6 +25,7 @@ use crate::FileBuilder;
 use crate::MaxExtent;
 use crate::StoredAddress;
 use crate::UserblockSize;
+use crate::VariableLengthType;
 use crate::address::StoredAddressExt;
 use crate::edit::GlobalHeapLiveness;
 use crate::edit::ownership_tests;
@@ -174,12 +175,9 @@ fn embedded_members_refer_to_their_collections(
 }
 
 #[rstest]
-#[case::sequence_of_sequences(Datatype::VariableLength {
-    is_string: false,
-    padding: None,
-    charset: None,
-    base_type: Box::new(global_heap_fixture::vlen_sequence()),
-})]
+#[case::sequence_of_sequences(Datatype::VariableLength(VariableLengthType::sequence(
+    global_heap_fixture::vlen_sequence()
+)))]
 #[case::object_reference(global_heap_fixture::object_reference())]
 #[case::compound_with_an_object_reference(global_heap_fixture::with_integer(
     global_heap_fixture::object_reference()

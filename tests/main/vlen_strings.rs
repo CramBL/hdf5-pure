@@ -83,10 +83,7 @@ fn vlen_specific_apis_reject_non_vlen_datasets() {
     let file = File::open(FIXTURE).unwrap();
     let dataset = file.dataset("names").unwrap();
     let datatype = dataset.datatype().unwrap();
-    assert!(matches!(
-        datatype,
-        hdf5_pure::Datatype::VariableLength { .. }
-    ));
+    assert!(matches!(datatype, hdf5_pure::Datatype::VariableLength(_)));
 
     let numeric = File::open("tests/data/unattributed/simple_dataset.h5").unwrap();
     let numeric_dataset = numeric.dataset("data").unwrap();

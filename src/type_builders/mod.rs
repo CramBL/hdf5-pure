@@ -15,6 +15,7 @@ use hdf5_pure_core::FillTime;
 use hdf5_pure_format::__private::GLOBAL_HEAP_MAX_OBJECTS;
 
 use crate::DeflateLevel;
+use crate::VariableLengthType;
 use crate::address::StoredAddress;
 use crate::attribute::AttributeMessage;
 use crate::chunked_write::{ChunkMeta, ChunkOptions, ChunkProvider, FilterKind, StorageAllocation};
@@ -90,23 +91,14 @@ pub fn make_object_reference_type() -> Datatype {
     }
 }
 
-/// A variable-length string datatype with the given character set and
-/// null-terminated padding.
+/// Constructs a null-terminated variable-length string datatype.
 ///
-/// The character set and padding live in the variable-length datatype's own
-/// bitfields; the base element type is an 8-bit unsigned integer
-/// (`H5T_STD_U8LE`), exactly the shape libhdf5 and h5py emit for
-/// a VL string (`H5Tvlen_create(H5T_C_S1)` stores the base as a 1-byte
-/// integer). Matching it byte-for-byte is what lets the C library read these
-/// datasets back into `VarLenUnicode`/`VarLenAscii` without a conversion-path
-/// error.
+/// The parent datatype is an unsigned one-byte integer in little-endian byte order.
 pub fn make_vlen_string_type(charset: CharacterSet) -> Datatype {
-    Datatype::VariableLength {
-        is_string: true,
-        padding: Some(StringPadding::NullTerminate),
-        charset: Some(charset),
-        base_type: Box::new(make_u8_type()),
-    }
+    Datatype::VariableLength(VariableLengthType::string(
+        StringPadding::NullTerminate,
+        charset,
+    ))
 }
 
 // ---- Compound / Enum type builders ----
@@ -949,16 +941,11 @@ pub(crate) fn build_attr_message(
 /// Only the descriptor differs from [`make_vlen_string_type`]: the elements
 /// underneath are [`vl_string_reference_bytes`] either way.
 fn make_matlab_vlen_ascii_type() -> Datatype {
-    Datatype::VariableLength {
-        is_string: false,
-        padding: None,
-        charset: None,
-        base_type: Box::new(Datatype::String {
-            size: 1,
-            padding: StringPadding::NullTerminate,
-            charset: CharacterSet::Ascii,
-        }),
-    }
+    Datatype::VariableLength(VariableLengthType::sequence(Datatype::String {
+        size: 1,
+        padding: StringPadding::NullTerminate,
+        charset: CharacterSet::Ascii,
+    }))
 }
 
 /// Encodes variable-length string references with `datatype` and `dataspace`.
@@ -1148,9 +1135,9 @@ pub(crate) struct VlStringStaging {
 
 /// Stages references and global-heap collections for variable-length element payloads.
 ///
-/// `element_size` is the byte width of the base type. Each reference stores the payload's byte
-/// length divided by `element_size`, while the heap object stores the complete payload.
-/// For strings, `element_size` is one byte.
+/// `element_size` is 1 for strings and the base-type element size for sequences. Each reference
+/// stores the payload's byte length divided by `element_size`, while the heap object stores the
+/// complete payload.
 ///
 /// # Errors
 ///
@@ -1248,8 +1235,7 @@ fn vl_element_count(count: u64) -> Result<u32, FormatError> {
 /// `raw` is the dataset's element bytes as read from the source, and `offsets`
 /// gives the byte offset of every embedded VL reference within `raw`, in the same
 /// order as `elements`. Each reference is rewritten in place: a null element is
-/// zeroed outright, and a heap-backed one keeps the source's `length` field
-/// (which counts base-type elements, whose width varies per member) while
+/// zeroed outright, and a heap-backed one keeps the source's `length` field while
 /// gaining the destination's object index. The addresses stay at zero until
 /// [`patch_vl_refs_masked`] fills them in, exactly as for a top-level VL dataset.
 pub(crate) fn stage_embedded_vl_elements(
@@ -3010,9 +2996,8 @@ impl DatasetBuilder {
     /// Replacing the element data clears a previously recorded error.
     pub fn with_vlen_strings(&mut self, values: &[&str]) -> &mut Self {
         // Staged straight from the caller's strings: owning each one first would
-        // copy the whole payload for nothing (see [`stage_vl_payloads`]). A VL
-        // string's base type is one byte, so the reference length is the byte
-        // count.
+        // copy the whole payload for nothing (see [`stage_vl_payloads`]). Each
+        // string reference stores the byte count.
         self.stage_vlen_result(
             make_vlen_string_type(CharacterSet::Utf8),
             values.len() as u64,
@@ -3182,7 +3167,7 @@ impl DatasetBuilder {
         Ok(self)
     }
 
-    /// Stages string payloads with a one-byte base type.
+    /// Stages variable-length string payloads using byte-count references.
     ///
     /// # Errors
     ///
@@ -3193,8 +3178,7 @@ impl DatasetBuilder {
         datatype: Datatype,
         elements: &[VlStringElement],
     ) -> Result<(), FormatError> {
-        // A VL string's base type is one byte, so the reference length is the
-        // byte count (element_size = 1).
+        // Each string reference stores the byte count.
         self.stage_vlen_elements(datatype, elements, NonZeroUsize::MIN)
     }
 
@@ -3214,7 +3198,10 @@ impl DatasetBuilder {
         datatype: Datatype,
         elements: &[VlStringElement],
     ) -> Result<&mut Self, crate::error::FormatError> {
-        let Datatype::VariableLength { base_type, .. } = &datatype else {
+        let Datatype::VariableLength(VariableLengthType::Sequence {
+            element_type: base_type,
+        }) = &datatype
+        else {
             return Err(crate::error::FormatError::TypeMismatch {
                 expected: "non-string VariableLength",
                 actual: "non-VariableLength",
@@ -4585,6 +4572,7 @@ mod tests {
 
     use crate::CompoundTypeBuilder;
     use crate::DeflateLevel;
+    use crate::VariableLengthType;
     use crate::address::StoredAddress;
     use crate::address::StoredAddressExt;
     use crate::datatype::{CharacterSet, Datatype};
@@ -4702,17 +4690,8 @@ mod tests {
     #[test]
     fn a_sequence_setter_preserves_its_base_element_count() {
         let mut builder = DatasetBuilder::new("sequence");
-        let mut datatype = type_builders::make_vlen_string_type(CharacterSet::Ascii);
-        let Datatype::VariableLength {
-            is_string,
-            base_type,
-            ..
-        } = &mut datatype
-        else {
-            panic!("expected a count overflow")
-        };
-        *is_string = false;
-        **base_type = type_builders::make_u32_type();
+        let datatype =
+            Datatype::VariableLength(VariableLengthType::sequence(type_builders::make_u32_type()));
         builder
             .with_vlen_sequence_elements(
                 datatype,

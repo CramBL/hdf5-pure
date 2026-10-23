@@ -8,6 +8,7 @@ use hdf5_pure::Datatype;
 use hdf5_pure::FillTime;
 use hdf5_pure::ReferenceType;
 use hdf5_pure::StringPadding;
+use hdf5_pure_core::VariableLengthType;
 use hdf5_pure_format::__private as format;
 use test_util::attribute::Attribute;
 use test_util::data_layout;
@@ -201,12 +202,10 @@ pub fn reference(len: u32, collection: u64, index: u32) -> Vec<u8> {
 
 /// Returns a null-terminated ASCII variable-length string datatype.
 pub fn vlen_string() -> Datatype {
-    Datatype::VariableLength {
-        is_string: true,
-        padding: Some(StringPadding::NullTerminate),
-        charset: Some(CharacterSet::Ascii),
-        base_type: Box::new(hdf5_pure::make_u8_type()),
-    }
+    Datatype::VariableLength(VariableLengthType::string(
+        StringPadding::NullTerminate,
+        CharacterSet::Ascii,
+    ))
 }
 
 /// Returns a compound datatype with an `i32` member and a `member` field.
@@ -240,12 +239,7 @@ pub fn object_reference() -> Datatype {
 
 /// Returns a variable-length sequence of 32-bit integers.
 pub fn vlen_sequence() -> Datatype {
-    Datatype::VariableLength {
-        is_string: false,
-        padding: None,
-        charset: None,
-        base_type: Box::new(hdf5_pure::make_i32_type()),
-    }
+    Datatype::VariableLength(VariableLengthType::sequence(hdf5_pure::make_i32_type()))
 }
 
 /// The size in bytes of a global heap reference with eight-byte addresses.

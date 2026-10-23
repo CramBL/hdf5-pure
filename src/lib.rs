@@ -704,6 +704,8 @@ pub use hdf5_pure_core::ReferenceType;
 #[doc(inline)]
 pub use hdf5_pure_core::StringPadding;
 pub use hdf5_pure_core::TimeType;
+pub use hdf5_pure_core::VariableLengthStringType;
+pub use hdf5_pure_core::VariableLengthType;
 
 pub use type_builders::{
     CompoundTypeBuilder, DatasetBuilder, EnumTypeBuilder, ExplicitCompoundTypeBuilder,

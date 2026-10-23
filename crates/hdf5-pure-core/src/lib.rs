@@ -39,6 +39,8 @@ pub use datatype::Datatype;
 pub use datatype::EnumMember;
 pub use datatype::ReferenceType;
 pub use datatype::StringPadding;
+pub use datatype::VariableLengthStringType;
+pub use datatype::VariableLengthType;
 pub use datatype::byte_order::DatatypeByteOrder;
 pub use datatype::layout::BitFieldType;
 pub use datatype::layout::FixedPointLayout;

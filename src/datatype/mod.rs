@@ -18,7 +18,7 @@ pub(crate) fn datatype_class_name(datatype: &Datatype) -> &'static str {
         Datatype::Compound { .. } => "Compound",
         Datatype::Reference { .. } => "Reference",
         Datatype::Enumeration { .. } => "Enumeration",
-        Datatype::VariableLength { .. } => "VariableLength",
+        Datatype::VariableLength(_) => "VariableLength",
         Datatype::Array { .. } => "Array",
         _ => "Unknown",
     }

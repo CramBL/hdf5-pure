@@ -26,6 +26,8 @@ use hdf5::{ObjectReference1, ReferencedObject};
 use hdf5_pure::CharacterSet;
 use hdf5_pure::FixedPointType;
 use hdf5_pure::StringPadding;
+use hdf5_pure::VariableLengthStringType;
+use hdf5_pure::VariableLengthType;
 use hdf5_pure::{AttrValue, Datatype, File, RepackOptions};
 use rstest::rstest;
 
@@ -594,16 +596,11 @@ fn a_committed_char_sequence_attribute_on_a_dataset_stays_committed_across_a_rep
     let dir = tempfile::tempdir().unwrap();
     let (src, dst) = (dir.path().join("src.h5"), dir.path().join("dst.h5"));
     let mut builder = hdf5_pure::FileBuilder::new();
-    let char_sequence = Datatype::VariableLength {
-        is_string: false,
-        padding: None,
-        charset: None,
-        base_type: Box::new(Datatype::String {
-            size: 1,
-            padding: StringPadding::NullTerminate,
-            charset: CharacterSet::Ascii,
-        }),
-    };
+    let char_sequence = Datatype::VariableLength(VariableLengthType::sequence(Datatype::String {
+        size: 1,
+        padding: StringPadding::NullTerminate,
+        charset: CharacterSet::Ascii,
+    }));
     builder.commit_datatype("fields", char_sequence);
     builder
         .create_dataset("data")
@@ -661,12 +658,14 @@ fn write_c_committed_string_fixture(path: &Path) {
 /// this crate.
 fn write_pure_committed_string_fixture(path: &Path) {
     let mut builder = hdf5_pure::FileBuilder::new();
-    let strtype = Datatype::VariableLength {
-        is_string: true,
-        padding: Some(StringPadding::NullTerminate),
-        charset: Some(CharacterSet::Utf8),
-        base_type: Box::new(hdf5_pure::make_u8_type()),
-    };
+    let strtype = Datatype::VariableLength(VariableLengthType::String(
+        VariableLengthStringType::with_base_type(
+            StringPadding::NullTerminate,
+            CharacterSet::Utf8,
+            hdf5_pure::make_u8_type(),
+        )
+        .unwrap(),
+    ));
     builder.commit_datatype("strtype", strtype);
     builder.set_attr_committed("label", AttrValue::VarLenString("m/s".into()), "strtype");
     builder.write(path).unwrap();

@@ -19,6 +19,8 @@ use hdf5_pure_core::FloatingPointLayout;
 use hdf5_pure_core::MantissaNormalization;
 pub(crate) use hdf5_pure_core::ReferenceType;
 pub(crate) use hdf5_pure_core::StringPadding;
+use hdf5_pure_core::VariableLengthStringType;
+use hdf5_pure_core::VariableLengthType;
 use hdf5_pure_core::{BitFieldType, FixedPointType, FloatingPointType, TimeType};
 
 use crate::bytes;
@@ -310,19 +312,18 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
             ))
         }
         VARIABLE_LENGTH_CLASS => {
-            let (is_string, padding, charset) = parse_variable_length_metadata([bf0, bf1, bf2])?;
+            let kind = parse_variable_length_metadata([bf0, bf1, bf2])?;
             let (base_type, consumed) = parse_datatype(&data[pos..])?;
             pos += consumed;
-            Ok((
-                Datatype::VariableLength {
-                    is_string,
-                    padding,
-                    charset,
-                    base_type: Box::new(base_type),
-                },
-                pos,
-            ))
+            let kind = match kind {
+                VariableLengthMetadata::Sequence => VariableLengthType::sequence(base_type),
+                VariableLengthMetadata::String { padding, charset } => VariableLengthType::String(
+                    VariableLengthStringType::with_base_type(padding, charset, base_type)?,
+                ),
+            };
+            Ok((Datatype::VariableLength(kind), pos))
         }
+
         ARRAY_CLASS => {
             // Array
             if version == DATATYPE_VERSION_TWO {
@@ -476,28 +477,24 @@ pub fn serialize_datatype(datatype: &Datatype) -> Vec<u8> {
             let bf0 = pad_val | (cs_val << 4);
             build_header(STRING_CLASS, DATATYPE_VERSION_ONE, [bf0, 0, 0], *size)
         }
-        Datatype::VariableLength {
-            is_string,
-            padding,
-            charset,
-            base_type,
-        } => {
-            let mut bf0 = if *is_string { 0x01u8 } else { 0x00 };
-            if *is_string && let Some(p) = padding {
-                let pv = match p {
-                    StringPadding::NullTerminate => 0,
-                    StringPadding::NullPad => 1,
-                    StringPadding::SpacePad => 2,
-                };
-                bf0 |= pv << 4;
-            }
-            let bf1 = if *is_string {
-                charset.as_ref().map_or(0, |c| match c {
-                    CharacterSet::Ascii => 0,
-                    CharacterSet::Utf8 => 1,
-                })
-            } else {
-                0
+        Datatype::VariableLength(kind) => {
+            let (bf0, bf1) = match kind {
+                VariableLengthType::Sequence { .. } => (VARIABLE_LENGTH_SEQUENCE, 0),
+                VariableLengthType::String(string) => {
+                    let padding = match string.padding() {
+                        StringPadding::NullTerminate => 0,
+                        StringPadding::NullPad => 1,
+                        StringPadding::SpacePad => 2,
+                    };
+                    let charset = match string.charset() {
+                        CharacterSet::Ascii => 0,
+                        CharacterSet::Utf8 => 1,
+                    };
+                    (
+                        VARIABLE_LENGTH_STRING | (padding << VARIABLE_LENGTH_PADDING_SHIFT),
+                        charset,
+                    )
+                }
             };
             let mut buf = build_header(
                 VARIABLE_LENGTH_CLASS,
@@ -505,7 +502,7 @@ pub fn serialize_datatype(datatype: &Datatype) -> Vec<u8> {
                 [bf0, bf1, 0],
                 16,
             );
-            buf.extend_from_slice(&serialize_datatype(base_type));
+            buf.extend_from_slice(&serialize_datatype(kind.base_type()));
             buf
         }
         Datatype::Compound { size, members } => {
@@ -676,33 +673,36 @@ fn build_header(class: u8, version: u8, bf: [u8; 3], size: u32) -> Vec<u8> {
     buf
 }
 
-fn parse_variable_length_metadata(
-    flags: [u8; 3],
-) -> Result<(bool, Option<StringPadding>, Option<CharacterSet>), FormatError> {
+enum VariableLengthMetadata {
+    Sequence,
+    String {
+        padding: StringPadding,
+        charset: CharacterSet,
+    },
+}
+
+fn parse_variable_length_metadata(flags: [u8; 3]) -> Result<VariableLengthMetadata, FormatError> {
     let [bf0, bf1, bf2] = flags;
     let subtype = bf0 & VARIABLE_LENGTH_FIELD_MASK;
-    let is_string = match subtype {
-        VARIABLE_LENGTH_SEQUENCE => false,
-        VARIABLE_LENGTH_STRING => true,
-        _ => return Err(FormatError::InvalidVariableLengthSubtype(subtype)),
-    };
+    if !matches!(subtype, VARIABLE_LENGTH_SEQUENCE | VARIABLE_LENGTH_STRING) {
+        return Err(FormatError::InvalidVariableLengthSubtype(subtype));
+    }
     let bits = u32::from_le_bytes([bf0, bf1, bf2, 0]) & VARIABLE_LENGTH_RESERVED_MASK;
     if bits != 0 {
         return Err(FormatError::InvalidVariableLengthReservedBits(bits));
     }
     let padding = bf0 >> VARIABLE_LENGTH_PADDING_SHIFT;
     let charset = bf1 & VARIABLE_LENGTH_FIELD_MASK;
-    if is_string {
-        return Ok((
-            true,
-            Some(parse_string_padding(padding)?),
-            Some(parse_charset(charset)?),
-        ));
+    if subtype == VARIABLE_LENGTH_STRING {
+        return Ok(VariableLengthMetadata::String {
+            padding: parse_string_padding(padding)?,
+            charset: parse_charset(charset)?,
+        });
     }
     if padding != 0 || charset != 0 {
         return Err(FormatError::InvalidVariableLengthSequenceMetadata { padding, charset });
     }
-    Ok((false, None, None))
+    Ok(VariableLengthMetadata::Sequence)
 }
 
 /// The mask for a four-bit variable-length subtype or character-set code.
@@ -948,9 +948,10 @@ pub fn datatype_holds_object_address(dt: &Datatype) -> bool {
         Datatype::Compound { members, .. } => members
             .iter()
             .any(|m| datatype_holds_object_address(&m.datatype)),
-        Datatype::Array { base_type, .. }
-        | Datatype::Enumeration { base_type, .. }
-        | Datatype::VariableLength { base_type, .. } => datatype_holds_object_address(base_type),
+        Datatype::Array { base_type, .. } | Datatype::Enumeration { base_type, .. } => {
+            datatype_holds_object_address(base_type)
+        }
+        Datatype::VariableLength(kind) => datatype_holds_object_address(kind.base_type()),
         _ => false,
     }
 }
@@ -966,7 +967,7 @@ pub fn datatype_holds_object_address(dt: &Datatype) -> bool {
 /// variable-length string.
 pub fn datatype_holds_file_address(dt: &Datatype) -> bool {
     match dt {
-        Datatype::VariableLength { .. } | Datatype::Reference { .. } => true,
+        Datatype::VariableLength(_) | Datatype::Reference { .. } => true,
         Datatype::Compound { members, .. } => members
             .iter()
             .any(|m| datatype_holds_file_address(&m.datatype)),
@@ -1191,12 +1192,7 @@ mod tests {
             ),
             (
                 "a variable length of them",
-                Datatype::VariableLength {
-                    is_string: false,
-                    padding: None,
-                    charset: None,
-                    base_type: Box::new(object_ref()),
-                },
+                Datatype::VariableLength(VariableLengthType::sequence(object_ref())),
             ),
             (
                 "an enumeration over one",
@@ -1866,6 +1862,23 @@ mod tests {
     }
 
     #[rstest]
+    #[case(STRING_CLASS)]
+    #[case(OPAQUE_CLASS)]
+    fn rejects_zero_sized_variable_length_string_bases(#[case] class: u8) {
+        let mut bytes = build_dt_header(
+            VARIABLE_LENGTH_CLASS,
+            DATATYPE_VERSION_ONE,
+            [VARIABLE_LENGTH_STRING, 0, 0],
+            16,
+        );
+        bytes.extend_from_slice(&build_dt_header(class, DATATYPE_VERSION_ONE, [0, 0, 0], 0));
+        assert_eq!(
+            parse_datatype(&bytes).unwrap_err(),
+            FormatError::ZeroSizedDatatype { class }
+        );
+    }
+
+    #[rstest]
     #[case(0, StringPadding::NullTerminate)]
     #[case(1, StringPadding::NullPad)]
     #[case(2, StringPadding::SpacePad)]
@@ -1890,48 +1903,42 @@ mod tests {
         assert_eq!(consumed, bytes.len());
         assert_eq!(
             datatype,
-            Datatype::VariableLength {
-                is_string: true,
-                padding: Some(padding),
-                charset: Some(if utf8 {
-                    CharacterSet::Utf8
-                } else {
-                    CharacterSet::Ascii
-                }),
-                base_type: Box::new(Datatype::FixedPoint(
-                    FixedPointType::new(
-                        1,
-                        if big_endian {
-                            DatatypeByteOrder::BigEndian
-                        } else {
-                            DatatypeByteOrder::LittleEndian
-                        },
-                        false,
-                        0,
-                        8
+            Datatype::VariableLength(VariableLengthType::String(
+                VariableLengthStringType::with_base_type(
+                    padding,
+                    if utf8 {
+                        CharacterSet::Utf8
+                    } else {
+                        CharacterSet::Ascii
+                    },
+                    Datatype::FixedPoint(
+                        FixedPointType::new(
+                            1,
+                            if big_endian {
+                                DatatypeByteOrder::BigEndian
+                            } else {
+                                DatatypeByteOrder::LittleEndian
+                            },
+                            false,
+                            0,
+                            8
+                        )
+                        .unwrap()
                     )
-                    .unwrap()
-                )),
-            }
+                )
+                .unwrap()
+            ))
         );
         assert_eq!(serialize_datatype(&datatype), bytes);
     }
 
     #[test]
     fn nested_variable_length_sequences_roundtrip() {
-        let datatype = Datatype::VariableLength {
-            is_string: false,
-            padding: None,
-            charset: None,
-            base_type: Box::new(Datatype::VariableLength {
-                is_string: false,
-                padding: None,
-                charset: None,
-                base_type: Box::new(Datatype::FixedPoint(
-                    FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
-                )),
-            }),
-        };
+        let datatype = Datatype::VariableLength(VariableLengthType::sequence(
+            Datatype::VariableLength(VariableLengthType::sequence(Datatype::FixedPoint(
+                FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
+            ))),
+        ));
         let mut expected = build_dt_header(
             VARIABLE_LENGTH_CLASS,
             DATATYPE_VERSION_ONE,
@@ -1963,16 +1970,10 @@ mod tests {
 
         let (dt, _) = parse_datatype(&buf).unwrap();
         match dt {
-            Datatype::VariableLength {
-                is_string,
-                padding,
-                charset,
-                base_type,
-            } => {
-                assert!(is_string);
-                assert_eq!(padding, Some(StringPadding::NullTerminate));
-                assert_eq!(charset, Some(CharacterSet::Utf8));
-                assert_eq!(base_type.type_size(), 1);
+            Datatype::VariableLength(VariableLengthType::String(string)) => {
+                assert_eq!(string.padding(), &StringPadding::NullTerminate);
+                assert_eq!(string.charset(), &CharacterSet::Utf8);
+                assert_eq!(string.base_type().type_size(), 1);
             }
             _ => panic!("expected VariableLength"),
         }
@@ -1988,16 +1989,8 @@ mod tests {
 
         let (dt, _) = parse_datatype(&buf).unwrap();
         match dt {
-            Datatype::VariableLength {
-                is_string,
-                padding,
-                charset,
-                base_type,
-            } => {
-                assert!(!is_string);
-                assert_eq!(padding, None);
-                assert_eq!(charset, None);
-                assert_eq!(base_type.type_size(), 4);
+            Datatype::VariableLength(VariableLengthType::Sequence { element_type }) => {
+                assert_eq!(element_type.type_size(), 4);
             }
             _ => panic!("expected VariableLength"),
         }
