@@ -3,6 +3,7 @@ use core::cmp::Reverse;
 
 use super::admission::TrackedSpace;
 use super::extent::Extent;
+use super::persistence::TRAILING_RESERVE_TAILS;
 
 /// A sorted, coalesced set of free regions in a single file being edited.
 ///
@@ -183,6 +184,51 @@ impl FreeList {
             );
         }
         self.regions.splice(i..=i, replacement);
+        Some(allocation)
+    }
+
+    /// Removes a suffix of the free run reaching `eoa` and returns the new end of allocation.
+    ///
+    /// Retains [`TRAILING_RESERVE_TAILS`] times `tail_len` bytes for future manager tails.
+    /// Releases space only when at least that many bytes can be removed. Returns `eoa` and
+    /// preserves the list if the run is too short or the reserve arithmetic overflows.
+    pub fn release_trailing_run(&mut self, eoa: u64, tail_len: u64) -> u64 {
+        let run_start = trailing_run_start([&*self], eoa);
+        let Some(keep) = TRAILING_RESERVE_TAILS.checked_mul(tail_len) else {
+            return eoa;
+        };
+        let Some(release_min) = keep.checked_mul(2) else {
+            return eoa;
+        };
+        if eoa - run_start < release_min {
+            return eoa;
+        }
+        let Some(cut) = run_start.checked_add(keep) else {
+            return eoa;
+        };
+        let Some(released) = Extent::new(cut, eoa - cut) else {
+            return eoa;
+        };
+        self.take_range(released);
+        cut
+    }
+
+    /// Reserves the first `len` bytes of the smallest free region whose allocation ends at or
+    /// below `limit`.
+    pub(crate) fn alloc_below(&mut self, len: u64, limit: u64) -> Option<Extent> {
+        let extent = self
+            .regions
+            .iter()
+            .filter(|extent| {
+                extent.len() >= len
+                    && extent
+                        .start()
+                        .checked_add(len)
+                        .is_some_and(|end| end <= limit)
+            })
+            .min_by_key(|extent| extent.len())?;
+        let allocation = Extent::new(extent.start(), len)?;
+        self.take_range(allocation);
         Some(allocation)
     }
 
@@ -477,6 +523,70 @@ mod tests {
         let mut fl = FreeList::new();
         fl.free(Extent::new(0, 100).unwrap());
         assert!(fl.alloc(0).is_none());
+    }
+
+    #[rstest]
+    #[case::empty(&[], 10, 100, None, &[])]
+    #[case::zero(&[(100, 100)], 0, 200, None, &[(100, 100)])]
+    #[case::exact(&[(100, 20)], 20, 120, Some((100, 20)), &[])]
+    #[case::smallest(&[(100, 100), (300, 30), (400, 60)], 20, 500,
+        Some((300, 20)), &[(100, 100), (320, 10), (400, 60)])]
+    #[case::equal_lengths(&[(100, 30), (200, 30)], 20, 300,
+        Some((100, 20)), &[(120, 10), (200, 30)])]
+    #[case::allocation_end(&[(100, 100)], 20, 120, Some((100, 20)), &[(120, 80)])]
+    #[case::limit_excludes_smallest(&[(100, 100), (300, 30)], 20, 250,
+        Some((100, 20)), &[(120, 80), (300, 30)])]
+    #[case::past_limit(&[(100, 100)], 20, 119, None, &[(100, 100)])]
+    #[case::too_short(&[(100, 10)], 20, 200, None, &[(100, 10)])]
+    #[case::overflow(&[(u64::MAX - 10, 10)], 20, u64::MAX,
+        None, &[(u64::MAX - 10, 10)])]
+    #[case::maximum_end(&[(u64::MAX - 10, 10)], 5, u64::MAX,
+        Some((u64::MAX - 10, 5)), &[(u64::MAX - 5, 5)])]
+    fn allocation_below_limit_preserves_unallocated_space(
+        #[case] initial: &[(u64, u64)],
+        #[case] len: u64,
+        #[case] limit: u64,
+        #[case] expected: Option<(u64, u64)>,
+        #[case] remaining: &[(u64, u64)],
+    ) {
+        let mut free = FreeList::new();
+        for &(start, len) in initial {
+            free.free(Extent::new(start, len).unwrap());
+        }
+        assert_eq!(
+            free.alloc_below(len, limit),
+            expected.map(|(start, len)| Extent::new(start, len).unwrap())
+        );
+        assert_eq!(free.sections(), remaining);
+    }
+
+    #[rstest]
+    #[case::empty(&[], 1_000, 10, 1_000, &[])]
+    #[case::live_end(&[(100, 100)], 1_000, 10, 1_000, &[(100, 100)])]
+    #[case::below_threshold(&[(100, 79)], 179, 10, 179, &[(100, 79)])]
+    #[case::threshold(&[(100, 80)], 180, 10, 140, &[(100, 40)])]
+    #[case::above_threshold(&[(100, 200)], 300, 10, 140, &[(100, 40)])]
+    #[case::interior_space(&[(10, 20), (100, 200)], 300, 10, 140,
+        &[(10, 20), (100, 40)])]
+    #[case::zero_tail(&[(100, 200)], 300, 0, 100, &[])]
+    #[case::zero_tail_empty(&[], 0, 0, 0, &[])]
+    #[case::reserve_overflow(&[(100, 200)], 300, u64::MAX, 300, &[(100, 200)])]
+    #[case::threshold_overflow(&[(100, 200)], 300, u64::MAX / 4, 300, &[(100, 200)])]
+    #[case::maximum_end(&[(u64::MAX - 80, 80)], u64::MAX, 10,
+        u64::MAX - 40, &[(u64::MAX - 80, 40)])]
+    fn trailing_release_retains_the_tail_reserve(
+        #[case] initial: &[(u64, u64)],
+        #[case] eoa: u64,
+        #[case] tail_len: u64,
+        #[case] expected: u64,
+        #[case] remaining: &[(u64, u64)],
+    ) {
+        let mut free = FreeList::new();
+        for &(start, len) in initial {
+            free.free(Extent::new(start, len).unwrap());
+        }
+        assert_eq!(free.release_trailing_run(eoa, tail_len), expected);
+        assert_eq!(free.sections(), remaining);
     }
 
     #[test]

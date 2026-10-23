@@ -166,9 +166,8 @@
 //! a run reaching end-of-file, the commit truncates the file to where the run
 //! starts, rounded up to a page boundary in a paged file. A paged session counts
 //! a dropped region in that run only where the region spans a page or more. A
-//! persisting commit keeps part of the free space for the managers of
-//! the commits after it ([`release_trailing_run`]), and one that appends its
-//! managers keeps the whole run and writes the managers past it.
+//! persisting commit retains free space for future managers
+//! ([`FreeList::release_trailing_run`]). A commit that appends its managers retains the whole run.
 //! Under `H5F_FSPACE_STRATEGY_AGGR` and `H5F_FSPACE_STRATEGY_NONE`, which have no
 //! free-space managers, the session discards the regions it vacates.
 //! Opening a file with malformed File Space Info returns the parse error.
@@ -268,14 +267,9 @@
 //! (issue #418): the commit lowers the end-of-allocation to where the run starts,
 //! drops those sections from the managers it writes, and truncates the file once
 //! the smaller superblock is durable — page-aligned on a paged file, so the end
-//! of allocation stays a whole number of pages. Two things bound it. A few tails'
-//! worth of the run stays ([`release_trailing_run`]), because the manager blocks
-//! are rewritten by every commit and can never land in their own predecessor's
-//! extent, so a file trimmed closer than that sends its next tail past the end of
-//! the file instead of into the reserve; and a run that would give back less than
-//! it keeps is left alone, since
-//! trimming the top off a hole the next write was about to fill costs a whole
-//! object to return a fraction of one. A commit whose own tail had to be appended
+//! of allocation stays a whole number of pages. The writer retains a reserve for future
+//! manager tails and trims only when it can release at least as much space as it retains
+//! ([`FreeList::release_trailing_run`]). A commit whose own tail had to be appended
 //! *above* the run it freed takes a second, tail-only rewrite to move the blocks
 //! down into it ([`WriteEngine::shrink_to_the_trailing_free_run`]) — the delete
 //! case, where the freed regions only become writable once the repoint that
@@ -1750,42 +1744,6 @@ pub(crate) fn create_would_refuse_reopen(
         }
     }
     None
-}
-
-/// Releases the run of free space reaching `eoa` from a flat file's post-commit
-/// free list, and returns the end-of-allocation the commit should publish
-/// (issue #418).
-///
-/// Not the whole run: [`free_space::TRAILING_RESERVE_TAILS`] tails' worth of it stays in the
-/// file, and stays recorded, so the commits after this one still have somewhere
-/// to write their own manager blocks.
-///
-/// And nothing at all unless the run gives back at least as much as it keeps.
-/// Trimming the top off a hole that is *about* to be reused is the worst of both:
-/// it returns a few hundred bytes and leaves the hole too small for the object
-/// that would have filled it, which then goes past end-of-file instead, so the
-/// file grows by a whole object to give back a fraction of one.
-///
-/// Returns `eoa` unchanged, and leaves the list as it came in, when the allocation
-/// ends in live bytes and when the run is not worth releasing.
-fn release_trailing_run(post: &mut FreeList, eoa: u64, tail_len: u64) -> u64 {
-    let run_start = free_space::trailing_run_start([&*post], eoa);
-    let Some(keep) = free_space::TRAILING_RESERVE_TAILS.checked_mul(tail_len) else {
-        return eoa;
-    };
-    let Some(release_min) = keep.checked_mul(2) else {
-        return eoa;
-    };
-    if eoa - run_start < release_min {
-        return eoa;
-    }
-    let Some(cut) = run_start.checked_add(keep) else {
-        return eoa;
-    };
-    let released = FreeExtent::new(cut, eoa - cut)
-        .expect("the released range ends at the current end of allocation");
-    post.take_range(released);
-    cut
 }
 
 /// Whether a persisting file's tail rewrite may grow the file to place its
@@ -4108,7 +4066,7 @@ impl WriteEngine {
     /// Runs after the root publication makes the preceding commit's freed regions reusable.
     /// The manager tail must end at EOA or, for a flat file, adjoin a tracked free run reaching
     /// EOA. The combined run below and above the tail must meet the retention threshold in
-    /// [`release_trailing_run`].
+    /// [`FreeList::release_trailing_run`].
     ///
     /// [`TailPlacement::ReuseOnly`] requires the replacement to fit below the old manager tail.
     /// The writer publishes the replacement with the current root before truncating.
@@ -4135,11 +4093,8 @@ impl WriteEngine {
         {
             return Ok(());
         }
-        // The free run reaching up to it, plus the tail the rewrite frees, is what
-        // the rewrite would have to release from. Held to the same threshold
-        // `release_trailing_run` applies, since below it that call returns the
-        // file's length unchanged and the pass would cost a rewrite to publish
-        // exactly what the commit before it did.
+        // Apply the retention threshold of `FreeList::release_trailing_run` to the combined
+        // free run and old tail before attempting a rewrite.
         let run_start = self.space.trailing_run_start(tail_start);
         if eoa - run_start < 2 * free_space::TRAILING_RESERVE_TAILS * (tail_end - tail_start) {
             return Ok(());
@@ -7184,11 +7139,9 @@ impl WriteEngine {
             StoredAddress::new(ext_addr).offset(ext_len),
             widths,
         );
-        // A reused tail sits inside the file, which ends it at the end-of-allocation
-        // the layout settled on: the current end-of-file less the dropped regions
-        // that reach it and what `release_trailing_run` releases of the free space
-        // below them. Neither is in `post`, and the truncation below gives both back
-        // to the filesystem (issue #418). An appended tail ends the file itself.
+        // For a reused tail, truncate to the planned EOA after publication. The post-commit
+        // free list excludes dropped trailing regions and the suffix released by
+        // `FreeList::release_trailing_run`. An appended tail ends the file itself.
         let final_eoa = if reused { eoa } else { ext_addr + tail_len };
         debug_assert!(
             ext_addr + tail_len <= final_eoa,
@@ -7394,8 +7347,8 @@ impl WriteEngine {
     /// `current_eoa` and every address in the result are stored addresses. The address is `None`
     /// when nothing reusable fits, and the caller then appends the tail at `current_eoa`. The
     /// length is the tail's in either case. The end-of-allocation of a reused tail is `current_eoa`
-    /// less the dropped regions that reach it and what [`release_trailing_run`] releases of the
-    /// free space below them, and that of an appended tail is `current_eoa`.
+    /// less the dropped regions that reach it and what [`FreeList::release_trailing_run`] releases
+    /// of the free space below them, and that of an appended tail is `current_eoa`.
     ///
     /// Reserves a proposed length before measuring the managers for the remaining free sections.
     /// Accepts a plan that fits within the reservation and retries with a larger length otherwise.
@@ -7460,7 +7413,7 @@ impl WriteEngine {
 
         for _ in 0..ROUNDS {
             let allocation = if let Some(limit) = limit {
-                self.reserve_flat_tail_below(current_eoa, proposed, limit)
+                self.space.allocate_flat_below(proposed, limit)
             } else {
                 self.space.allocate(proposed, AllocationClass::Metadata)
             };
@@ -7474,12 +7427,10 @@ impl WriteEngine {
             };
             let at = reserved.start();
             let (mut post, eoa) = self.flat_post_free(current_eoa, to_free, old_blocks);
-            // Free space that reaches end-of-file is released rather than
-            // recorded: the file is truncated to where the run starts, so the
-            // sections these blocks are sized from must already leave it out
-            // (issue #418). The reservation was taken before this list was built,
-            // so the run can only begin at or above the tail's own end.
-            let eoa = release_trailing_run(&mut post, eoa, proposed);
+            // Exclude the released suffix before sizing the managers. The tail reservation
+            // has already been removed from this list, so the trailing run starts at or
+            // above the reservation's end.
+            let eoa = post.release_trailing_run(eoa, proposed);
             let managers = ManagerSections::flat(post.extents().iter().copied());
             let len = ext_len + free_space_manager::manager_blocks_len(&managers, widths);
             if len <= proposed {
@@ -7503,28 +7454,6 @@ impl WriteEngine {
         // was too small for the tail and stays recorded below it, and a dropped
         // extent that ended the allocation stays below it untracked.
         (probe, None, appended_len, current_eoa)
-    }
-
-    /// Reserves the smallest reusable extent whose first `len` bytes end at or below `limit`.
-    ///
-    /// Returns `None` when the session has no flat free list or no qualifying extent.
-    fn reserve_flat_tail_below(&mut self, eoa: u64, len: u64, limit: u64) -> Option<FreeExtent> {
-        let (mut available, _) = self.space.flat_post_free(eoa, [])?;
-        let extent = available
-            .extents()
-            .iter()
-            .filter(|extent| {
-                extent.len() >= len
-                    && extent
-                        .start()
-                        .checked_add(len)
-                        .is_some_and(|end| end <= limit)
-            })
-            .min_by_key(|extent| extent.len())?;
-        let allocation = FreeExtent::new(extent.start(), len)?;
-        available.take_range(allocation);
-        self.space.adopt_flat_post_free(available);
-        Some(allocation)
     }
 
     /// Publishes the root, extension, and final per-class free sections of a persistent PAGE edit.
