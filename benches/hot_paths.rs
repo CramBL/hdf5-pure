@@ -17,6 +17,7 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::{File, FileBuilder, MaxExtent};
 
 /// Build a file image from a configuring closure.
@@ -255,7 +256,7 @@ fn bench_page_buffer(c: &mut Criterion) {
     let fixture = |path: &std::path::Path| {
         let mut b = FileBuilder::new();
         b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-            .with_file_space_page_size(4096);
+            .with_file_space_page_size(FileSpacePageSize::DEFAULT);
         for name in &names {
             b.create_dataset(name)
                 .with_i32_data(&vec![0i32; CHUNK])

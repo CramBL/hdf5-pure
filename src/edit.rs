@@ -1727,7 +1727,8 @@ pub(crate) fn create_would_refuse_reopen(
         let page_size = match create.file_space_strategy() {
             Some((FileSpaceStrategy::Page, _, _)) => create
                 .file_space_page_size()
-                .unwrap_or(FileSpacePageSize::DEFAULT.get()),
+                .unwrap_or(FileSpacePageSize::DEFAULT)
+                .get(),
             _ => DEFAULT_GATHER_PAGE,
         };
         if (access.page_buffer_size() as u64) < page_size {
@@ -14885,7 +14886,9 @@ mod tests {
             .with_i32_data(&(0..1024).collect::<Vec<_>>());
         builder.with_file_space_strategy(strategy, true, 0);
         if strategy == FileSpaceStrategy::Page {
-            builder.with_file_space_page_size(DENSE_ATTRIBUTE_PAGE_SIZE);
+            builder.with_file_space_page_size(
+                FileSpacePageSize::try_from(DENSE_ATTRIBUTE_PAGE_SIZE).unwrap(),
+            );
         }
         builder.write(path).unwrap();
     }
@@ -15039,7 +15042,9 @@ mod tests {
         builder.add_group(group.finish());
         builder
             .with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-            .with_file_space_page_size(DENSE_ATTRIBUTE_PAGE_SIZE);
+            .with_file_space_page_size(
+                FileSpacePageSize::try_from(DENSE_ATTRIBUTE_PAGE_SIZE).unwrap(),
+            );
         builder.write(&path).unwrap();
         prepend_userblock(&path, userblock);
 
@@ -15643,7 +15648,7 @@ mod tests {
         b.with_userblock(UserblockSize::try_from(userblock).unwrap());
         b.create_dataset("d").with_i32_data(&[1; 100]);
         b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-            .with_file_space_page_size(FileSpacePageSize::MIN.get());
+            .with_file_space_page_size(FileSpacePageSize::MIN);
         b.write(&path).unwrap();
         let s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
 
@@ -16645,7 +16650,7 @@ mod tests {
             .with_i32_data(&(0..1000).collect::<Vec<i32>>())
             .with_shape(&[1000]);
         b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-            .with_file_space_page_size(4096);
+            .with_file_space_page_size(FileSpacePageSize::DEFAULT);
         b.write(&path).unwrap();
 
         // Read the file's recorded free space *before* opening the session: the
@@ -16821,7 +16826,7 @@ mod tests {
                 .with_i32_data(&(0..1000).collect::<Vec<i32>>())
                 .with_shape(&[1000]);
             b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-                .with_file_space_page_size(PAGE);
+                .with_file_space_page_size(FileSpacePageSize::try_from(PAGE).unwrap());
             b.write(path).unwrap();
         };
 
@@ -16987,7 +16992,7 @@ mod tests {
                 .with_i32_data(&(0..4000).collect::<Vec<i32>>())
                 .with_shape(&[4000]);
             b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-                .with_file_space_page_size(PAGE);
+                .with_file_space_page_size(FileSpacePageSize::try_from(PAGE).unwrap());
             b.write(path).unwrap();
             let mut s = WriteEngine::open_with_locking(path, FileLocking::Enabled).unwrap();
             s.space = SessionSpace::from_strategy(
@@ -17309,7 +17314,7 @@ mod tests {
             .with_i32_data(&(0..4000).collect::<Vec<i32>>())
             .with_shape(&[4000]);
         b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-            .with_file_space_page_size(PAGE);
+            .with_file_space_page_size(FileSpacePageSize::try_from(PAGE).unwrap());
         b.write(&path).unwrap();
         let before = std::fs::metadata(&path).unwrap().len();
 
@@ -17376,7 +17381,7 @@ mod tests {
                 .with_chunks(&[50]);
         }
         b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-            .with_file_space_page_size(page);
+            .with_file_space_page_size(FileSpacePageSize::try_from(page).unwrap());
         b.write(&path).unwrap();
 
         {
@@ -17451,7 +17456,7 @@ mod tests {
             .with_i32_data(&(0..200).collect::<Vec<i32>>())
             .with_shape(&[200]);
         b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-            .with_file_space_page_size(4096);
+            .with_file_space_page_size(FileSpacePageSize::DEFAULT);
         b.write(&path).unwrap();
 
         let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
@@ -17519,7 +17524,7 @@ mod tests {
         b.create_dataset("b").with_i32_data(&[2; 400]);
         b.create_dataset("c").with_i32_data(&[3; 100]);
         b.with_file_space_strategy(strategy, true, 1)
-            .with_file_space_page_size(4096);
+            .with_file_space_page_size(FileSpacePageSize::DEFAULT);
         b.write(&path).unwrap();
 
         let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
@@ -19487,7 +19492,7 @@ mod tests {
         let p = dir.path().join("paged_crash.h5");
         let mut b = crate::writer::FileBuilder::new();
         b.with_file_space_strategy(crate::FileSpaceStrategy::Page, true, 0)
-            .with_file_space_page_size(4096);
+            .with_file_space_page_size(FileSpacePageSize::DEFAULT);
         b.create_dataset("d")
             .with_i32_data(&(0..64).collect::<Vec<i32>>())
             .with_shape(&[64])
@@ -19592,7 +19597,7 @@ mod tests {
         let p = dir.path().join("paged_interleave.h5");
         let mut b = crate::writer::FileBuilder::new();
         b.with_file_space_strategy(crate::FileSpaceStrategy::Page, true, 0)
-            .with_file_space_page_size(PAGE);
+            .with_file_space_page_size(FileSpacePageSize::try_from(PAGE).unwrap());
         b.create_dataset("d")
             .with_i32_data(&(0..64).collect::<Vec<i32>>())
             .with_shape(&[64])
@@ -19673,7 +19678,7 @@ mod tests {
         let p = dir.path().join("paged_raw.h5");
         let mut b = crate::writer::FileBuilder::new();
         b.with_file_space_strategy(crate::FileSpaceStrategy::Page, true, 0)
-            .with_file_space_page_size(PAGE);
+            .with_file_space_page_size(FileSpacePageSize::try_from(PAGE).unwrap());
         b.create_dataset("d")
             .with_i32_data(&(0..64).collect::<Vec<i32>>())
             .with_shape(&[64])
@@ -19749,7 +19754,7 @@ mod tests {
             // default page size cannot tell a session that reads the file's page
             // size from one that assumes the default.
             b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-                .with_file_space_page_size(16 * 1024);
+                .with_file_space_page_size(FileSpacePageSize::try_from(16 * 1024).unwrap());
         }
         for t in 0..tables {
             b.create_dataset(&std::format!("t{t}"))
@@ -20025,7 +20030,7 @@ mod tests {
             use crate::writer::FileBuilder;
             let mut b = FileBuilder::new();
             b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-                .with_file_space_page_size(4096);
+                .with_file_space_page_size(FileSpacePageSize::DEFAULT);
             for t in 0..tables {
                 b.create_dataset(&std::format!("t{t}"))
                     .with_i32_data(&(0..256).collect::<Vec<_>>())
@@ -20118,7 +20123,7 @@ mod tests {
         b.with_userblock(UserblockSize::try_from(4096).unwrap());
         if paged {
             b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-                .with_file_space_page_size(4096);
+                .with_file_space_page_size(FileSpacePageSize::DEFAULT);
         }
         b.create_dataset("t0")
             .with_i32_data(&(0..256).collect::<Vec<_>>())
@@ -20267,7 +20272,7 @@ mod tests {
                 path,
                 crate::FileCreateProperties::new()
                     .with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-                    .with_file_space_page_size(16 * 1024),
+                    .with_file_space_page_size(FileSpacePageSize::try_from(16 * 1024).unwrap()),
                 crate::FileAccessProperties::new()
                     .with_sync_policy(SyncPolicy::OnClose)
                     .with_page_buffer_size(budget),

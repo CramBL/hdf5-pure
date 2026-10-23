@@ -4,11 +4,10 @@
 //! `crates/crosscheck/tests/main/file_space.rs`.
 
 use hdf5_pure::AttrValue;
-use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
+use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceStrategy;
-use hdf5_pure::FormatError;
 use hdf5_pure::VlenStringReadOptions;
 use rstest::rstest;
 
@@ -178,7 +177,7 @@ fn paged_non_persist_is_aligned_without_managers() {
     let mut b = FileBuilder::new();
     b.create_dataset("d").with_i32_data(&data);
     b.with_file_space_strategy(FileSpaceStrategy::Page, false, 0)
-        .with_file_space_page_size(PAGE);
+        .with_file_space_page_size(FileSpacePageSize::try_from(PAGE).unwrap());
     b.write(&path).unwrap();
 
     let bytes = std::fs::read(&path).unwrap();
@@ -201,7 +200,7 @@ fn paged_metadata_only() {
     let path = temp::repo_temp_path("pure_paged_b1_meta.h5");
     let mut b = FileBuilder::new();
     b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(PAGE);
+        .with_file_space_page_size(FileSpacePageSize::try_from(PAGE).unwrap());
     b.write(&path).unwrap();
 
     let bytes = std::fs::read(&path).unwrap();
@@ -249,7 +248,7 @@ fn paged_exact_page_multiple_large_block() {
     let mut b = FileBuilder::new();
     b.create_dataset("exact").with_i32_data(&big);
     b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(PAGE);
+        .with_file_space_page_size(FileSpacePageSize::try_from(PAGE).unwrap());
     b.write(&path).unwrap();
 
     let bytes = std::fs::read(&path).unwrap();
@@ -282,7 +281,7 @@ fn paged_groups_attrs_vlen() {
     grp.create_dataset("readings").with_i32_data(&[10, 20, 30]);
     b.add_group(grp.finish());
     b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(PAGE);
+        .with_file_space_page_size(FileSpacePageSize::try_from(PAGE).unwrap());
     b.write(&path).unwrap();
 
     let bytes = std::fs::read(&path).unwrap();
@@ -304,21 +303,4 @@ fn paged_groups_attrs_vlen() {
         .read_vlen_strings(VlenStringReadOptions::default())
         .unwrap();
     assert_eq!(labels, vec!["alpha", "beta", "gamma", "delta"]);
-}
-
-#[rstest]
-#[case::below_the_minimum(64)]
-#[case::above_the_maximum((1 << 30) + 1)]
-#[case::a_power_of_two_above_the_maximum(2 << 30)]
-fn the_writer_rejects_a_paged_page_size_outside_512_bytes_to_1_gib(#[case] page_size: u64) {
-    let mut b = FileBuilder::new();
-    b.create_dataset("d").with_i32_data(&[1, 2, 3]);
-    b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(page_size);
-
-    let err = b.finish().unwrap_err();
-    let Error::Format(FormatError::InvalidFileSpacePageSize(rejected)) = err else {
-        panic!("expected InvalidFileSpacePageSize, got {err:?}");
-    };
-    assert_eq!(rejected, page_size);
 }

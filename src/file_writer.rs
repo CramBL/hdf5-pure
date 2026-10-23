@@ -1142,7 +1142,7 @@ pub struct FileWriter {
     /// `with_file_space_strategy`. `None` leaves the file-space defaults.
     file_space_strategy: Option<(FileSpaceStrategy, bool, u64)>,
     /// File-space page size from `with_file_space_page_size`.
-    file_space_page_size: Option<u64>,
+    file_space_page_size: Option<FileSpacePageSize>,
 }
 
 impl Default for FileWriter {
@@ -1282,15 +1282,10 @@ impl FileWriter {
         self
     }
 
-    /// Sets the file space page size in bytes, which the C library sets with
-    /// `H5Pset_file_space_page_size`.
+    /// Sets the page size recorded in file-space metadata.
     ///
-    /// The writer records the page size under every strategy, and under
-    /// [`FileSpaceStrategy::Page`] aligns every allocation to it.
-    ///
-    /// [`finish`](Self::finish) returns [`FormatError::InvalidFileSpacePageSize`] if `page_size` is
-    /// less than 512 bytes or more than 1 GiB.
-    pub fn with_file_space_page_size(&mut self, page_size: u64) -> &mut Self {
+    /// The writer allocates storage in pages of this size under [`FileSpaceStrategy::Page`].
+    pub fn with_file_space_page_size(&mut self, page_size: FileSpacePageSize) -> &mut Self {
         self.file_space_page_size = Some(page_size);
         self
     }
@@ -1329,32 +1324,25 @@ impl FileWriter {
     /// Returns the file space settings the writer records, or `None` if the caller sets neither a
     /// strategy nor a page size.
     ///
-    /// For a page size set without a strategy the writer records `H5F_FSPACE_STRATEGY_FSM_AGGR`,
-    /// the default.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::InvalidFileSpacePageSize`] if the page size is less than 512 bytes
-    /// or more than 1 GiB, under every strategy.
-    fn file_space_config(&self) -> Result<Option<FileSpaceConfig>, FormatError> {
+    /// When the caller sets only a page size, the writer uses [`FileSpaceStrategy::FsmAggr`].
+    /// When the caller sets only a strategy, the writer uses [`FileSpacePageSize::DEFAULT`].
+    fn file_space_config(&self) -> Option<FileSpaceConfig> {
         if !self.records_file_space() {
-            return Ok(None);
+            return None;
         }
         let (strategy, persist, threshold) = self.file_space_strategy.unwrap_or((
             FileSpaceStrategy::FsmAggr,
             false,
             DEFAULT_THRESHOLD,
         ));
-        Ok(Some(FileSpaceConfig {
+        Some(FileSpaceConfig {
             strategy,
             persist,
             threshold,
             page_size: self
                 .file_space_page_size
-                .map(FileSpacePageSize::try_from)
-                .transpose()?
-                .unwrap_or_default(),
-        }))
+                .unwrap_or(FileSpacePageSize::DEFAULT),
+        })
     }
 
     pub fn create_group(&mut self, name: &str) -> GroupBuilder {
@@ -1483,7 +1471,7 @@ impl FileWriter {
     /// from its provider one chunk at a time here, never all held at once.
     pub(crate) fn finish_to_sink<S: ByteSink>(self, sink: &mut S) -> Result<(), FormatError> {
         let libver = self.resolve_libver()?;
-        let file_space = self.file_space_config()?;
+        let file_space = self.file_space_config();
         let reuse_threshold = match file_space {
             None => Some(DEFAULT_THRESHOLD),
             Some(config) if config.strategy == FileSpaceStrategy::FsmAggr => Some(config.threshold),
@@ -4282,7 +4270,7 @@ impl<'a> TryFrom<&'a str> for AttributeName<'a> {
     }
 }
 
-/// The file space settings the caller passes to the writer, with the page size checked.
+/// The file-space settings resolved for output.
 #[derive(Clone, Copy, Debug)]
 struct FileSpaceConfig {
     strategy: FileSpaceStrategy,
@@ -4879,7 +4867,7 @@ mod tests {
     fn small_paged_collections_can_place_metadata_above_four_gibibytes() {
         let mut writer = FileWriter::new();
         writer.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
-        writer.with_file_space_page_size(FileSpacePageSize::MAX.get());
+        writer.with_file_space_page_size(FileSpacePageSize::MAX);
         writer.set_root_attr("first", AttrValue::VarLenString("first-value".into()));
         writer.set_root_attr("second", AttrValue::VarLenString("second-value".into()));
         writer.set_root_attr("third", AttrValue::VarLenString("third-value".into()));
@@ -4931,7 +4919,7 @@ mod tests {
     ) {
         let mut writer = FileWriter::new();
         writer.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
-        writer.with_file_space_page_size(page_size);
+        writer.with_file_space_page_size(FileSpacePageSize::try_from(page_size).unwrap());
         writer.with_userblock(UserblockSize::try_from(userblock).unwrap());
         writer.set_root_attr("root_label", AttrValue::VarLenString("root-value".into()));
         writer
@@ -6757,7 +6745,7 @@ mod tests {
         // not exist before 1.10.
         let mut fw = FileWriter::new();
         fw.with_libver_bounds(LibVer::Earliest, LibVer::V18);
-        fw.with_file_space_page_size(4096);
+        fw.with_file_space_page_size(FileSpacePageSize::DEFAULT);
         fw.create_dataset("d").with_i32_data(&[1]);
         assert!(matches!(
             fw.finish().unwrap_err(),

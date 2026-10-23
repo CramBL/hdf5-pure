@@ -56,7 +56,7 @@ fn fresh_page_placement_and_root_publication_preserve_old_allocations(
     let mut builder = FileBuilder::new();
     builder
         .with_file_space_strategy(FileSpaceStrategy::Page, false, 1)
-        .with_file_space_page_size(page_size)
+        .with_file_space_page_size(FileSpacePageSize::try_from(page_size).unwrap())
         .with_userblock(UserblockSize::try_from(userblock).unwrap());
     if userblock > 0 {
         builder.with_userblock_content(b"preserve this userblock");
@@ -274,7 +274,7 @@ fn staged_commits_preserve_preexisting_bytes_outside_the_superblock(
     let mut builder = FileBuilder::new();
     builder
         .with_file_space_strategy(FileSpaceStrategy::Page, false, 1)
-        .with_file_space_page_size(page_size);
+        .with_file_space_page_size(FileSpacePageSize::try_from(page_size).unwrap());
     builder.create_dataset("keep").with_u8_data(&[7; 64]);
     builder.create_dataset("replace").with_u8_data(&[3; 64]);
     builder

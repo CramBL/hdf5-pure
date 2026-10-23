@@ -16,6 +16,8 @@ fn a_page_size_from_512_bytes_to_1_gib_parses(#[case] page_size: u64) {
 
 #[rstest]
 #[case::zero(0)]
+#[case::sixty_four_bytes(64)]
+#[case::one_hundred_bytes(100)]
 #[case::below_the_minimum(511)]
 #[case::above_the_maximum((1 << 30) + 1)]
 #[case::two_gib(2 << 30)]

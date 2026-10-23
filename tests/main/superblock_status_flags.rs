@@ -8,6 +8,7 @@
 
 #![expect(clippy::mem_forget, reason = "the tests model a writer that crashed")]
 
+use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::SuperblockStatusFlags;
 use hdf5_pure::{
     Error, File, FileAccessProperties, FileBuilder, FileLocking, FileSpaceStrategy, MemoryStrategy,
@@ -194,7 +195,7 @@ fn from_bytes_reads_a_flagged_file() {
 fn build_paged(path: &std::path::Path) {
     let mut b = FileBuilder::new();
     b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-        .with_file_space_page_size(4096);
+        .with_file_space_page_size(FileSpacePageSize::DEFAULT);
     Unlimited::new("d", &[0i32; 64], 64).add_to(&mut b);
     b.write(path).unwrap();
 }

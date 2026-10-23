@@ -3,6 +3,7 @@
 //! mirror-only.
 
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::UserblockSize;
 use hdf5_pure::{
     AttrValue, Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MemoryStrategy,
@@ -357,7 +358,7 @@ fn paged_non_persist_is_refused_at_open() {
     let p = dir.path().join("paged_plain.h5");
     let mut b = FileBuilder::new();
     b.with_file_space_strategy(FileSpaceStrategy::Page, false, 0)
-        .with_file_space_page_size(4096);
+        .with_file_space_page_size(FileSpacePageSize::DEFAULT);
     Unlimited::new("d", &[1, 2, 3], 2).add_to(&mut b);
     b.write(&p).unwrap();
     let err = session::open_bounded_on_close(&p).unwrap_err();

@@ -1372,7 +1372,7 @@ fn paged_churn_reaches_a_steady_size() {
     let mut b = FileBuilder::new();
     b.create_dataset("seed").with_i32_data(&[0i32; 4]);
     b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-        .with_file_space_page_size(PAGE);
+        .with_file_space_page_size(FileSpacePageSize::try_from(PAGE).unwrap());
     b.write(&path).unwrap();
 
     let rows: Vec<i32> = (0..500).map(|i| i % 97).collect();
@@ -1464,7 +1464,7 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
     let mut b = FileBuilder::new();
     b.create_dataset("seed").with_i32_data(&[0i32; 4]);
     b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-        .with_file_space_page_size(PAGE);
+        .with_file_space_page_size(FileSpacePageSize::try_from(PAGE).unwrap());
     b.write(&path).unwrap();
     let start_len = std::fs::metadata(&path).unwrap().len();
 
@@ -1565,7 +1565,7 @@ fn a_paged_tail_conserves_free_space_across_layouts() {
         b.create_dataset("seed")
             .with_i32_data(&(0..100 + filler as i32).collect::<Vec<i32>>());
         b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-            .with_file_space_page_size(PAGE);
+            .with_file_space_page_size(FileSpacePageSize::try_from(PAGE).unwrap());
         b.write(&path).unwrap();
 
         // The first commit settles the tail into the file's own free space; from
@@ -2120,7 +2120,7 @@ fn deleting_down_to_one_group_releases_a_paged_file_s_trailing_pages() {
     let path = temp::temp_path("hdf5_pure_fs_release_paged.h5");
     let mut b = FileBuilder::new();
     b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(RECLAIM_PAGE);
+        .with_file_space_page_size(FileSpacePageSize::try_from(RECLAIM_PAGE).unwrap());
     b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
     b.write(&path).unwrap();
 
@@ -2250,7 +2250,7 @@ fn a_released_file_holds_its_length_across_many_tail_rewrites() {
         let mut b = FileBuilder::new();
         b.with_file_space_strategy(strategy, true, 0);
         if strategy == FileSpaceStrategy::Page {
-            b.with_file_space_page_size(RECLAIM_PAGE);
+            b.with_file_space_page_size(FileSpacePageSize::try_from(RECLAIM_PAGE).unwrap());
         }
         b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
         b.write(&path).unwrap();
@@ -2531,7 +2531,7 @@ fn append_churn_on_a_persisting_file(
     let mut b = FileBuilder::new();
     b.with_file_space_strategy(strategy, true, 1);
     if strategy == FileSpaceStrategy::Page {
-        b.with_file_space_page_size(RECLAIM_PAGE);
+        b.with_file_space_page_size(FileSpacePageSize::try_from(RECLAIM_PAGE).unwrap());
     }
     b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
     b.write(&path).unwrap();
@@ -2670,7 +2670,7 @@ fn a_paged_append_reserve_keeps_pages_homogeneous() {
     let path = temp::temp_path("hdf5_pure_fs_paged_reserve_homogeneous.h5");
     let mut b = FileBuilder::new();
     b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
-    b.with_file_space_page_size(RECLAIM_PAGE);
+    b.with_file_space_page_size(FileSpacePageSize::try_from(RECLAIM_PAGE).unwrap());
     b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
     // The hole the appends draw from: four megabytes of raw chunk data an earlier
     // commit gives back.
@@ -2759,7 +2759,7 @@ fn churn_fixture(path: &std::path::Path, strategy: FileSpaceStrategy) -> File {
     let mut b = FileBuilder::new();
     b.with_file_space_strategy(strategy, true, 0);
     if strategy == FileSpaceStrategy::Page {
-        b.with_file_space_page_size(RECLAIM_PAGE);
+        b.with_file_space_page_size(FileSpacePageSize::try_from(RECLAIM_PAGE).unwrap());
     }
     // Metadata only: a group carrying an attribute. It keeps the space each cycle
     // vacates interior rather than trailing without putting raw data in the pages
@@ -3095,7 +3095,7 @@ fn paged_staged_append_churn_does_not_leak_the_old_index() {
     let path = temp::temp_path("hdf5_pure_fs_paged_append_churn.h5");
     let mut b = FileBuilder::new();
     b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(RECLAIM_PAGE);
+        .with_file_space_page_size(FileSpacePageSize::try_from(RECLAIM_PAGE).unwrap());
     Unlimited::new("d", &[0i32; ROWS], ROWS as u64).add_to(&mut b);
     b.write(&path).unwrap();
 
@@ -3160,7 +3160,7 @@ fn a_multi_chunk_staged_append_fills_chunk_sized_holes() {
         let mut b = FileBuilder::new();
         b.with_file_space_strategy(strategy, true, 0);
         if page > 0 {
-            b.with_file_space_page_size(page);
+            b.with_file_space_page_size(FileSpacePageSize::try_from(page).unwrap());
         }
         Unlimited::new("d", &(0..CHUNK as i32).collect::<Vec<i32>>(), CHUNK as u64).add_to(&mut b);
         for i in 0..APPENDED {

@@ -6,6 +6,7 @@ use hdf5_pure::Datatype;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
+use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::UserblockSize;
@@ -377,7 +378,7 @@ fn a_collection_reclaimed_in_a_paged_file_is_reused_in_place_by_raw_data() {
     builder.create_dataset("keep").with_i32_data(&[1, 2, 3]);
     builder
         .with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(PAGE_SIZE);
+        .with_file_space_page_size(FileSpacePageSize::try_from(PAGE_SIZE).unwrap());
     builder.write(&path).unwrap();
     let collections = collections(&path);
     let [collection] = &collections[..] else {

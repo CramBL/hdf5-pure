@@ -1,5 +1,6 @@
 //! File-creation properties as one reusable value — the `fcpl` analogue.
 
+use crate::FileSpacePageSize;
 use crate::UserblockSize;
 use crate::file_space_info::FileSpaceStrategy;
 use crate::libver::LibVer;
@@ -28,8 +29,8 @@ use crate::libver::LibVer;
 /// equivalent [`FileBuilder`](crate::FileBuilder) methods set the same fields one
 /// at a time and interoperate freely with this.
 ///
-/// Userblock sizes are checked when [`UserblockSize`] is constructed. Page sizes and
-/// constraints between settings are checked when writing.
+/// Userblock and page sizes are checked when [`UserblockSize`] and [`FileSpacePageSize`] are
+/// constructed. Constraints between settings are checked when writing.
 ///
 /// # Supported properties
 ///
@@ -109,7 +110,7 @@ use crate::libver::LibVer;
 /// | `H5Pset_file_space_strategy(AGGR / NONE, …)` | `…(Aggr / None, …)` | **Recorded** | The strategy is stored in the superblock extension, and the layout stays sequential. A read-write session reuses no freed region and allocates at the end of the file. |
 /// | `persist` flag | 2nd argument of [`with_file_space_strategy`](Self::with_file_space_strategy) | **Genuine** (paged) / **Recorded** (`FsmAggr`) | Paged: per-page-type managers are written from creation. `FsmAggr`: the flag records intent, and managers appear after a later delete. The writer ignores it under `Aggr` and `None`, as the C library does. |
 /// | `threshold` | 3rd argument of [`with_file_space_strategy`](Self::with_file_space_strategy) | **Genuine** | Round-trips through the C library under `FsmAggr` and `Page`. A read-write session tracks a freed region shorter than the threshold only where the region adjoins tracked free space, which under `Page` is free space in its own page for a region shorter than a page. Page tails are tracked whatever its value. The writer ignores it under `Aggr` and `None`, as the C library does. |
-/// | `H5Pset_file_space_page_size` | [`with_file_space_page_size`](Self::with_file_space_page_size) | **Genuine** (paged) / **Recorded** (non-paged) | Under [`Page`](crate::FileSpaceStrategy::Page) it is the alignment quantum, 4096 by default. Under the other strategies it is recorded and inert. Under every strategy a page size outside 512 bytes to 1 GiB, the range the C library takes, is rejected at write time ([`FormatError::InvalidFileSpacePageSize`](crate::FormatError::InvalidFileSpacePageSize)). |
+/// | `H5Pset_file_space_page_size` | [`with_file_space_page_size`](Self::with_file_space_page_size) | **Genuine** (paged) / **Recorded** (non-paged) | The writer records the page size under every strategy and allocates storage in pages of this size under [`Page`](crate::FileSpaceStrategy::Page). [`FileSpacePageSize::DEFAULT`] is 4096 bytes. |
 /// | `H5Pset_userblock` | [`with_userblock`](Self::with_userblock) | **Genuine** | Reserves a zero-filled prefix with a [`UserblockSize`]. Under [`Page`](crate::FileSpaceStrategy::Page), the writer requires a whole number of pages. [`FileBuilder::with_userblock_content`](crate::FileBuilder::with_userblock_content) supplies its contents on every output path. |
 /// | `H5Pset_libver_bounds` (`fapl`) | [`with_libver_bounds`](Self::with_libver_bounds) | **Genuine** (1.8 / 1.10) | A format selector between the two the writer emits: `high` picks the v2 (HDF5 1.8) superblock at `Earliest..=V18` and the v3 (1.10) one at anything reaching 1.10, and a lower bound above 1.10 (`V112`, `V114`, `LATEST`) selects the 1.10 format too. As in the C library, the low bound permits newer encodings and requires none. An upper bound older than 1.8, or below the lower bound, is rejected with [`FormatError::LibverBoundsUnsatisfiable`](crate::FormatError::LibverBoundsUnsatisfiable). HDF5 classes this as a file-access property, and it sits here because this crate resolves the bound at write time. |
 /// | `H5Pset_fill_value` / `H5Pset_fill_time` (`dcpl`) | [`DatasetBuilder::with_fill_value`](crate::DatasetBuilder::with_fill_value), [`with_fill_time`](crate::DatasetBuilder::with_fill_time) | **Genuine** (per dataset) | Encodes the fill value and fill time in a v3 Fill Value message, and [`Dataset::fill_value`](crate::Dataset::fill_value) and [`Dataset::fill_time`](crate::Dataset::fill_time) read them back, from this crate's files and the C library's. |
@@ -142,21 +143,21 @@ use crate::libver::LibVer;
 ///
 /// # Examples
 ///
-/// ```no_run
-/// use hdf5_pure::{FileCreateProperties, FileSpaceStrategy};
+/// ```
+/// # let directory = tempfile::tempdir()?;
+/// # let path = directory.path().join("out.h5");
+/// use hdf5_pure::{FileBuilder, FileCreateProperties, FileSpacePageSize, FileSpaceStrategy};
 ///
-/// // Define the layout once...
-/// fn paged_layout() -> FileCreateProperties {
-///     FileCreateProperties::new()
-///         .with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-///         .with_file_space_page_size(8192)
-/// }
+/// let page_size = FileSpacePageSize::try_from(8192)?;
+/// let properties = FileCreateProperties::new()
+///     .with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
+///     .with_file_space_page_size(page_size);
 ///
-/// // ...and reuse it across every write path.
-/// let mut builder = hdf5_pure::FileBuilder::new();
-/// builder.with_create_properties(paged_layout());
+/// let mut builder = FileBuilder::new();
+/// builder.with_create_properties(properties);
 /// builder.create_dataset("data").with_f64_data(&[1.0, 2.0]);
-/// builder.write("out.h5").unwrap();
+/// builder.write(&path)?;
+/// # Ok::<(), hdf5_pure::Error>(())
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[doc(alias = "fcpl")]
@@ -164,7 +165,7 @@ pub struct FileCreateProperties {
     userblock: UserblockSize,
     libver_bounds: Option<(LibVer, LibVer)>,
     file_space_strategy: Option<(FileSpaceStrategy, bool, u64)>,
-    file_space_page_size: Option<u64>,
+    file_space_page_size: Option<FileSpacePageSize>,
 }
 
 impl FileCreateProperties {
@@ -232,10 +233,13 @@ impl FileCreateProperties {
         self
     }
 
-    /// Set the file-space page size, the allocation quantum under
-    /// [`FileSpaceStrategy::Page`].
+    /// Sets the page size recorded in file-space metadata.
+    ///
+    /// The writer allocates storage in pages of this size under [`FileSpaceStrategy::Page`].
+    /// When the caller sets a page size without a strategy, the writer records
+    /// [`FileSpaceStrategy::FsmAggr`].
     #[doc(alias = "H5Pset_file_space_page_size")]
-    pub const fn with_file_space_page_size(mut self, page_size: u64) -> Self {
+    pub const fn with_file_space_page_size(mut self, page_size: FileSpacePageSize) -> Self {
         self.file_space_page_size = Some(page_size);
         self
     }
@@ -256,8 +260,10 @@ impl FileCreateProperties {
         self.file_space_strategy
     }
 
-    /// Return the configured file-space page size, if any.
-    pub const fn file_space_page_size(&self) -> Option<u64> {
+    /// Returns the explicit page-size setting, or `None` if it is unset.
+    ///
+    /// An explicit [`FileSpacePageSize::DEFAULT`] is returned as `Some`.
+    pub const fn file_space_page_size(&self) -> Option<FileSpacePageSize> {
         self.file_space_page_size
     }
 }

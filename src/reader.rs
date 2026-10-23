@@ -10,6 +10,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 #[cfg(test)]
+use crate::FileSpacePageSize;
+#[cfg(test)]
 use crate::FixedPointType;
 #[cfg(test)]
 use crate::UserblockSize;
@@ -10481,7 +10483,7 @@ mod tests {
             let mut b = FileBuilder::new();
             if paged {
                 b.with_file_space_strategy(crate::FileSpaceStrategy::Page, true, 1)
-                    .with_file_space_page_size(16 * 1024);
+                    .with_file_space_page_size(FileSpacePageSize::try_from(16 * 1024).unwrap());
             }
             b.create_dataset("d")
                 .with_i32_data(&[1, 2, 3, 4])
@@ -10592,7 +10594,7 @@ mod tests {
         let no_persist = dir.path().join("no_persist.h5");
         let mut b = FileBuilder::new();
         b.with_file_space_strategy(crate::FileSpaceStrategy::Page, false, 1)
-            .with_file_space_page_size(4096);
+            .with_file_space_page_size(FileSpacePageSize::DEFAULT);
         b.create_dataset("d")
             .with_i32_data(&[1, 2, 3, 4])
             .with_shape(&[4]);
@@ -10621,7 +10623,7 @@ mod tests {
         let mut b = FileBuilder::new();
         b.with_userblock(UserblockSize::try_from(16 * 1024).unwrap());
         b.with_file_space_strategy(crate::FileSpaceStrategy::Page, true, 1)
-            .with_file_space_page_size(16 * 1024);
+            .with_file_space_page_size(FileSpacePageSize::try_from(16 * 1024).unwrap());
         b.create_dataset("d")
             .with_i32_data(&[1, 2, 3, 4])
             .with_shape(&[4]);
@@ -10675,7 +10677,7 @@ mod tests {
         let paged = |page: u64| {
             crate::FileCreateProperties::new()
                 .with_file_space_strategy(crate::FileSpaceStrategy::Page, true, 1)
-                .with_file_space_page_size(page)
+                .with_file_space_page_size(FileSpacePageSize::try_from(page).unwrap())
         };
         // 8192 clears the format's 4096 default and still falls short of this
         // file's 16 KiB page, so it fails only against the page size actually

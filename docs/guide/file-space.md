@@ -12,20 +12,29 @@ $ cargo run --example file_space
 
 [`Aggr`](crate::FileSpaceStrategy::Aggr) and [`None`](crate::FileSpaceStrategy::None) have no free-space managers, so for either the writer records a clear persist flag and the default threshold of 1, whatever the call passes for `persist` and `threshold`. The C library's `H5Pset_file_space_strategy` ignores both for those strategies too.
 
-Both are also fields on [`FileCreateProperties`](crate::FileCreateProperties), the reusable file-creation-property value (the `fcpl` analogue). Build one in a helper, then apply it with [`FileBuilder::with_create_properties`](crate::FileBuilder::with_create_properties) or [`File::create_with_options`](crate::File::create_with_options) wherever a file is written, so the call chain is written once:
+Both are also fields on [`FileCreateProperties`](crate::FileCreateProperties), the reusable file-creation-property value (the `fcpl` analogue). Build one in a helper, then apply it with [`FileBuilder::with_create_properties`](crate::FileBuilder::with_create_properties) or [`File::create_with_options`](crate::File::create_with_options) wherever a file is written, so the call chain is written once.
+
+The page-size setters accept [`FileSpacePageSize`](crate::FileSpacePageSize), with raw byte counts
+checked by [`FileSpacePageSize::try_from`](crate::FileSpacePageSize::try_from).
+[`FileCreateProperties::file_space_page_size`](crate::FileCreateProperties::file_space_page_size)
+returns an optional typed setting whose byte count is available through
+[`FileSpacePageSize::get`](crate::FileSpacePageSize::get).
 
 ```rust
-use hdf5_pure::{FileCreateProperties, FileSpaceStrategy};
+use hdf5_pure::{FileCreateProperties, FileSpacePageSize, FileSpaceStrategy};
 
-fn paged_layout() -> FileCreateProperties {
+fn paged_layout(page_size: FileSpacePageSize) -> FileCreateProperties {
     FileCreateProperties::new()
         .with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-        .with_file_space_page_size(8192)
+        .with_file_space_page_size(page_size)
 }
-# assert_eq!(paged_layout().file_space_page_size(), Some(8192));
+# let page_size = FileSpacePageSize::try_from(8192)?;
+# assert_eq!(paged_layout(page_size).file_space_page_size(), Some(page_size));
+# Ok::<(), hdf5_pure::FormatError>(())
 ```
 
 ```rust
+use hdf5_pure::FileSpacePageSize;
 # let dir = tempfile::tempdir()?;
 # let path = dir.path().join("out.h5");
 use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
@@ -33,7 +42,7 @@ use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
 let mut b = FileBuilder::new();
 b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
 b.with_file_space_strategy(FileSpaceStrategy::Page, false, 1) // strategy, persist, threshold
-    .with_file_space_page_size(8192);
+    .with_file_space_page_size(FileSpacePageSize::try_from(8192).unwrap());
 b.write(&path)?;
 
 assert_eq!(
@@ -75,12 +84,13 @@ Under [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr) and persistent [`Page`](cra
 The strategy lives in a superblock-extension message (a standalone object header the superblock points at), so it survives a reopen. [`File::file_space_strategy()`](crate::File::file_space_strategy) returns the recorded [`FileSpaceStrategy`](crate::FileSpaceStrategy), and [`File::file_space_info()`](crate::File::file_space_info) returns the full [`FileSpaceInfo`](crate::FileSpaceInfo) record (persist flag, threshold, page size, and the free-space manager addresses).
 
 ```rust
+use hdf5_pure::FileSpacePageSize;
 # let dir = tempfile::tempdir()?;
 # let path = dir.path().join("out.h5");
 # let mut b = hdf5_pure::FileBuilder::new();
 # b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
 # b.with_file_space_strategy(hdf5_pure::FileSpaceStrategy::Page, false, 1)
-#     .with_file_space_page_size(8192);
+#     .with_file_space_page_size(FileSpacePageSize::try_from(8192).unwrap());
 # b.write(&path)?;
 use hdf5_pure::File;
 
@@ -102,6 +112,7 @@ if let Some(info) = file.file_space_info() {
 [`FileSpaceStrategy::Page`](crate::FileSpaceStrategy::Page) writes a **genuine paged file**, not just a recorded label. Every allocation is aligned to the page size set by [`with_file_space_page_size`](crate::FileBuilder::with_file_space_page_size), which defaults to 4096 and must be from 512 bytes to 1 GiB, with any userblock a whole number of pages. Each page is kept homogeneous (defined precisely below), and each page's free tail is tracked in a per-page-type free-space manager. The reference HDF5 C library reads the result as a paged file, parses the managers (`H5Fget_freespace` matches the tracked total), reads every dataset, and re-paginates the file when it writes to it.
 
 ```rust
+use hdf5_pure::FileSpacePageSize;
 # let dir = tempfile::tempdir()?;
 # let path = dir.path().join("paged.h5");
 use hdf5_pure::{FileBuilder, FileSpaceStrategy, MaxExtent};
@@ -113,7 +124,7 @@ b.create_dataset("samples")
     .with_maxshape(&[MaxExtent::Unlimited])
     .with_chunks(&[256]);
 b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0) // persist so it can be grown later
-    .with_file_space_page_size(4096);
+    .with_file_space_page_size(FileSpacePageSize::DEFAULT);
 b.write(&path)?;
 # assert_eq!(
 #     hdf5_pure::File::open(&path)?.file_space_strategy(),

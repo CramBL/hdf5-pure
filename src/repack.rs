@@ -448,7 +448,7 @@ fn stage(source: &File, options: &RepackOptions) -> Result<FileBuilder, Error> {
     if let Some(info) = file_space_info {
         builder
             .with_file_space_strategy(info.strategy, false, info.threshold)
-            .with_file_space_page_size(info.page_size.get());
+            .with_file_space_page_size(info.page_size);
     }
     // Map every source object's (relative) header address to its path, so an
     // object-reference dataset can be rewritten to point at the same objects in

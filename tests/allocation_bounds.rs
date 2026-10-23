@@ -26,6 +26,7 @@
 #![cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::{
     ChunkCacheStats, EditBacking, File, FileAccessProperties, FileBuilder, FileSpaceStrategy,
     MaxExtent, MemoryStrategy, SyncPolicy,
@@ -941,7 +942,7 @@ fn gathering_writes_does_not_recopy_what_it_holds() {
     let mut builder = FileBuilder::new();
     builder
         .with_file_space_strategy(hdf5_pure::FileSpaceStrategy::Page, true, 1)
-        .with_file_space_page_size(4096);
+        .with_file_space_page_size(FileSpacePageSize::DEFAULT);
     builder
         .create_dataset("growing")
         .with_f64_data(&[1.0f64; CHUNK])
@@ -1013,7 +1014,7 @@ fn a_page_buffer_does_not_recopy_what_it_holds_across_operations() {
     let mut builder = FileBuilder::new();
     builder
         .with_file_space_strategy(hdf5_pure::FileSpaceStrategy::Page, true, 1)
-        .with_file_space_page_size(4096);
+        .with_file_space_page_size(FileSpacePageSize::DEFAULT);
     builder
         .create_dataset("growing")
         .with_f64_data(&[1.0f64; CHUNK])

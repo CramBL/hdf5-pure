@@ -21,6 +21,7 @@ use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileCreateProperties;
+use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
 use hdf5_pure::LibVer;
@@ -435,7 +436,7 @@ fn paged_userblock_properties(userblock: u64) -> FileCreateProperties {
     FileCreateProperties::new()
         .with_userblock(UserblockSize::try_from(userblock).unwrap())
         .with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-        .with_file_space_page_size(4096)
+        .with_file_space_page_size(FileSpacePageSize::DEFAULT)
 }
 
 /// A file that persists its free-space managers under the default `FsmAggr`
@@ -604,13 +605,13 @@ fn auto_matches_bounded_on_every_pair_bounded_accepts() {
             "page-persisting",
             FileCreateProperties::new()
                 .with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-                .with_file_space_page_size(4096),
+                .with_file_space_page_size(FileSpacePageSize::DEFAULT),
         ),
         (
             "page-transient",
             FileCreateProperties::new()
                 .with_file_space_strategy(FileSpaceStrategy::Page, false, 0)
-                .with_file_space_page_size(4096),
+                .with_file_space_page_size(FileSpacePageSize::DEFAULT),
         ),
         (
             "userblock",
@@ -621,7 +622,7 @@ fn auto_matches_bounded_on_every_pair_bounded_accepts() {
             FileCreateProperties::new()
                 .with_userblock(UserblockSize::try_from(4096).unwrap())
                 .with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-                .with_file_space_page_size(4096),
+                .with_file_space_page_size(FileSpacePageSize::DEFAULT),
         ),
         (
             "libver-1.8",
