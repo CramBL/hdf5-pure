@@ -327,7 +327,7 @@ fn paged_manager_capacity_survives_reference_library_mutation(
         let mut builder = FileBuilder::new();
         builder
             .with_file_space_strategy(FileSpaceStrategy::Page, true, threshold)
-            .with_file_space_page_size(page)
+            .with_file_space_page_size(FileSpacePageSize::try_from(page).unwrap())
             .with_userblock(UserblockSize::try_from(base).unwrap());
         builder.create_dataset("keep").with_u8_data(&[7; 100]);
         builder.create_dataset("victim").with_u8_data(&raw);
@@ -1107,7 +1107,7 @@ fn write_nonpersistent_page_origin(path: &Path, page_size: u64, userblock: u64, 
         let mut builder = FileBuilder::new();
         builder
             .with_file_space_strategy(FileSpaceStrategy::Page, false, 1)
-            .with_file_space_page_size(page_size)
+            .with_file_space_page_size(FileSpacePageSize::try_from(page_size).unwrap())
             .with_userblock(UserblockSize::try_from(userblock).unwrap());
         for (name, value) in [("keep", 7), ("replace", 3), ("remove", 5)] {
             builder.create_dataset(name).with_u8_data(&[value; 64]);
@@ -1328,7 +1328,7 @@ fn c_library_reads_our_strategy() {
         let mut b = FileBuilder::new();
         b.create_dataset("d").with_i32_data(&[10, 20, 30]);
         b.with_file_space_strategy(ours, false, 1)
-            .with_file_space_page_size(4096);
+            .with_file_space_page_size(FileSpacePageSize::DEFAULT);
         b.write(&path).unwrap();
 
         // The C library opens our file, reads the data, and recovers the strategy
@@ -1349,10 +1349,12 @@ fn c_library_reads_our_strategy() {
 #[rstest]
 #[case::fsm_aggr_at_the_minimum(FileSpaceStrategy::FsmAggr, FileSpacePageSize::MIN)]
 #[case::fsm_aggr_at_the_maximum(FileSpaceStrategy::FsmAggr, FileSpacePageSize::MAX)]
+#[case::fsm_aggr_at_an_irregular_size(FileSpaceStrategy::FsmAggr, FileSpacePageSize::try_from(3000).unwrap())]
+#[case::page_at_an_irregular_size(FileSpaceStrategy::Page, FileSpacePageSize::try_from(3000).unwrap())]
 #[case::page_at_the_minimum(FileSpaceStrategy::Page, FileSpacePageSize::MIN)]
 #[case::aggr_at_the_maximum(FileSpaceStrategy::Aggr, FileSpacePageSize::MAX)]
 #[case::none_at_the_maximum(FileSpaceStrategy::None, FileSpacePageSize::MAX)]
-fn libhdf5_reads_a_page_size_at_either_bound(
+fn libhdf5_reads_the_requested_page_size(
     #[case] strategy: FileSpaceStrategy,
     #[case] page_size: FileSpacePageSize,
 ) {
@@ -1361,7 +1363,7 @@ fn libhdf5_reads_a_page_size_at_either_bound(
     let mut b = FileBuilder::new();
     b.create_dataset("d").with_i32_data(&[10, 20, 30]);
     b.with_file_space_strategy(strategy, false, 1)
-        .with_file_space_page_size(page_size.get());
+        .with_file_space_page_size(page_size);
     b.write(&path).unwrap();
 
     let f = hdf5::File::open(&path).unwrap();
@@ -1380,11 +1382,10 @@ fn libhdf5_reads_a_page_size_at_either_bound(
 #[rstest]
 #[case::fsm_aggr_at_the_minimum(false, FileSpacePageSize::MIN)]
 #[case::fsm_aggr_at_the_maximum(false, FileSpacePageSize::MAX)]
+#[case::fsm_aggr_at_an_irregular_size(false, FileSpacePageSize::try_from(3000).unwrap())]
+#[case::page_at_an_irregular_size(true, FileSpacePageSize::try_from(3000).unwrap())]
 #[case::page_at_the_minimum(true, FileSpacePageSize::MIN)]
-fn the_reader_reads_a_page_size_libhdf5_writes_at_either_bound(
-    #[case] paged: bool,
-    #[case] page_size: FileSpacePageSize,
-) {
+fn reads_the_page_size_libhdf5_writes(#[case] paged: bool, #[case] page_size: FileSpacePageSize) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("bound.h5");
     hdf5::FileBuilder::new()
@@ -3304,7 +3305,7 @@ fn libhdf5_reads_and_writes_our_edited_paged_file(#[values(0, PAGE_SIZE)] userbl
     builder.create_dataset("c").with_i32_data(&[3; 100]);
     builder
         .with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-        .with_file_space_page_size(PAGE_SIZE);
+        .with_file_space_page_size(FileSpacePageSize::try_from(PAGE_SIZE).unwrap());
     builder.write(&path).unwrap();
     let stamped = Userblock::read(&path, usize::try_from(userblock).unwrap());
 
@@ -3799,7 +3800,7 @@ fn c_library_reads_our_paged_file_after_free_space_reuse() {
             .with_chunks(&[1024]);
         b.create_dataset("ceiling").with_f64_data(&kept);
         b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-            .with_file_space_page_size(4096);
+            .with_file_space_page_size(FileSpacePageSize::DEFAULT);
         b.write(&path).unwrap();
     }
     let size_before = std::fs::metadata(&path).unwrap().len();
@@ -3910,7 +3911,7 @@ fn c_library_reads_our_paged_file_after_a_cross_page_type_claim() {
             .with_chunks(&[1024]);
         b.create_dataset("ceiling").with_f64_data(&kept);
         b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-            .with_file_space_page_size(4096);
+            .with_file_space_page_size(FileSpacePageSize::DEFAULT);
         b.write(&path).unwrap();
     }
 
@@ -4072,7 +4073,7 @@ fn c_library_reads_our_paged_file_after_group_churn() {
 
     let mut b = FileBuilder::new();
     b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(16384);
+        .with_file_space_page_size(FileSpacePageSize::try_from(16384).unwrap());
     b.create_dataset("keep").with_i32_data(&[1, 2, 3, 4]);
     b.write(&path).unwrap();
 
@@ -4202,7 +4203,7 @@ fn c_library_reads_our_file_after_a_release_shortened_it() {
         let mut b = FileBuilder::new();
         b.with_file_space_strategy(strategy, true, 0);
         if paged {
-            b.with_file_space_page_size(16384);
+            b.with_file_space_page_size(FileSpacePageSize::try_from(16384).unwrap());
         }
         b.create_dataset("keep").with_i32_data(&[1, 2, 3, 4]);
         b.write(&path).unwrap();
@@ -4316,7 +4317,7 @@ fn c_library_reads_our_file_after_an_append_reused_free_space() {
         let mut b = FileBuilder::new();
         b.with_file_space_strategy(strategy, true, 1);
         if paged {
-            b.with_file_space_page_size(16384);
+            b.with_file_space_page_size(FileSpacePageSize::try_from(16384).unwrap());
         }
         b.create_dataset("keep").with_i32_data(&[1, 2, 3, 4]);
         b.write(&path).unwrap();
@@ -4705,7 +4706,7 @@ fn a_dropped_extent_of_whole_pages_that_ends_the_file_is_given_back_for_libhdf5(
     b.create_dataset("a").with_i32_data(&[1; EXTENT_ELEMENTS]);
     b.create_dataset("l").with_i32_data(&[2; 2 * PAGE_ELEMENTS]);
     b.with_file_space_strategy(FileSpaceStrategy::Page, true, THRESHOLD_ABOVE_EVERY_EXTENT)
-        .with_file_space_page_size(PAGE_SIZE);
+        .with_file_space_page_size(FileSpacePageSize::try_from(PAGE_SIZE).unwrap());
     b.write(&path).unwrap();
     let l = object_extent(&path, "l");
     assert_eq!(
@@ -4740,7 +4741,7 @@ fn a_dropped_extent_of_whole_pages_below_an_appended_tail_stays_tracked_for_libh
     b.create_dataset("l")
         .with_i32_data(&vec![2; 2 * page_size as usize / size_of::<i32>()]);
     b.with_file_space_strategy(FileSpaceStrategy::Page, true, THRESHOLD_ABOVE_EVERY_EXTENT)
-        .with_file_space_page_size(page_size);
+        .with_file_space_page_size(FileSpacePageSize::try_from(page_size).unwrap());
     b.write(&path).unwrap();
     let l = object_extent(&path, "l");
     assert_eq!(

@@ -484,7 +484,7 @@ fn warmed_base_padded(path: &Path, paged: bool, pad: usize, strategy: Option<Fil
     let mut b = FileBuilder::new();
     if paged {
         b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-            .with_file_space_page_size(4096);
+            .with_file_space_page_size(FileSpacePageSize::DEFAULT);
     } else if let Some(strategy) = strategy {
         b.with_file_space_strategy(strategy, false, 1);
     }
@@ -1012,7 +1012,7 @@ fn commit_base(path: &Path, paged: bool) {
     let mut b = FileBuilder::new();
     if paged {
         b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-            .with_file_space_page_size(4096);
+            .with_file_space_page_size(FileSpacePageSize::DEFAULT);
     }
     b.create_dataset("d")
         .with_i32_data(&(0..COMMIT_BASE).collect::<Vec<i32>>())

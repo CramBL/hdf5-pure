@@ -1,6 +1,7 @@
 //! One `FileAccessProperties` (`fapl`) for every open, and `FileCreateProperties`
 //! (`fcpl`) as a reusable creation-property value (issues #204, #205).
 
+use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::UserblockSize;
 use hdf5_pure::{
     ChunkCacheConfig, Error, File, FileAccessProperties, FileBuilder, FileCreateProperties,
@@ -132,7 +133,7 @@ fn create_properties_match_the_individual_setters() {
     let properties = FileCreateProperties::new()
         .with_userblock(UserblockSize::MIN)
         .with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 8)
-        .with_file_space_page_size(4096);
+        .with_file_space_page_size(FileSpacePageSize::DEFAULT);
 
     let from_value = {
         let mut b = FileBuilder::new();
@@ -144,7 +145,7 @@ fn create_properties_match_the_individual_setters() {
         let mut b = FileBuilder::new();
         b.with_userblock(UserblockSize::MIN);
         b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 8);
-        b.with_file_space_page_size(4096);
+        b.with_file_space_page_size(FileSpacePageSize::DEFAULT);
         b.create_dataset("d").with_f64_data(&[1.0, 2.0]);
         b.finish().unwrap()
     };
@@ -223,30 +224,15 @@ fn create_with_default_options_matches_create() {
     );
 }
 
-/// An invalid creation property is reported when the file is written, not when
-/// the properties value is built — the value is inert data.
 #[test]
-fn invalid_creation_property_is_reported_at_write_time() {
-    // A page size must be from 512 bytes to 1 GiB.
-    let properties = FileCreateProperties::new()
-        .with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-        .with_file_space_page_size(100);
+fn const_creation_properties_distinguish_unset_and_explicit_default_page_sizes() {
+    const DEFAULT: FileCreateProperties = FileCreateProperties::new();
+    const WITH_PAGE: FileCreateProperties =
+        DEFAULT.with_file_space_page_size(FileSpacePageSize::DEFAULT);
+    assert_eq!(DEFAULT.file_space_page_size(), None);
     assert_eq!(
-        properties.file_space_page_size(),
-        Some(100),
-        "the value records what it was given, without validating it"
-    );
-
-    let mut b = FileBuilder::new();
-    b.with_create_properties(properties);
-    b.create_dataset("d").with_f64_data(&[1.0]);
-    let err = b.finish().unwrap_err();
-    assert!(
-        matches!(
-            err,
-            Error::Format(FormatError::InvalidFileSpacePageSize(100))
-        ),
-        "{err:?}"
+        WITH_PAGE.file_space_page_size(),
+        Some(FileSpacePageSize::DEFAULT)
     );
 }
 
@@ -277,7 +263,7 @@ fn create_properties_reset_the_properties_they_do_not_carry() {
     let mut b = FileBuilder::new();
     b.with_libver_bounds(LibVer::Earliest, LibVer::V18);
     b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 8);
-    b.with_file_space_page_size(4096);
+    b.with_file_space_page_size(FileSpacePageSize::DEFAULT);
     b.with_userblock(UserblockSize::try_from(1024).unwrap());
     // Names none of the four above.
     b.with_create_properties(FileCreateProperties::new());
@@ -504,4 +490,69 @@ fn userblock_size_sets_signature_offset_in_buffered_streamed_and_owned_output(
         superblock::SIGNATURE
     );
     assert!(bytes[..offset].iter().all(|&byte| byte == 0));
+}
+
+#[rstest::rstest]
+#[case::unset(None, None)]
+#[case::explicit_default(None, Some(FileSpacePageSize::DEFAULT))]
+#[case::strategy_only(Some(FileSpaceStrategy::FsmAggr), None)]
+#[case::minimum(None, Some(FileSpacePageSize::MIN))]
+#[case::irregular(None, Some(FileSpacePageSize::try_from(3000).unwrap()))]
+#[case::maximum(None, Some(FileSpacePageSize::MAX))]
+fn creation_paths_preserve_page_size_configuration(
+    #[case] strategy: Option<FileSpaceStrategy>,
+    #[case] page_size: Option<FileSpacePageSize>,
+) {
+    let mut properties = FileCreateProperties::new();
+    if let Some(strategy) = strategy {
+        properties = properties.with_file_space_strategy(strategy, false, 1);
+    }
+    if let Some(page_size) = page_size {
+        properties = properties.with_file_space_page_size(page_size);
+    }
+    assert_eq!(properties.file_space_page_size(), page_size);
+    let build = || {
+        let mut builder = FileBuilder::new();
+        builder.with_file_space_page_size(FileSpacePageSize::MAX);
+        builder.with_create_properties(properties);
+        builder
+    };
+    let expected = (strategy.is_some() || page_size.is_some()).then(|| {
+        (
+            strategy.unwrap_or(FileSpaceStrategy::FsmAggr),
+            page_size.unwrap_or(FileSpacePageSize::DEFAULT),
+        )
+    });
+    let bytes = build().finish().unwrap();
+    let mut streamed = Vec::new();
+    build().finish_to(&mut streamed).unwrap();
+    assert_eq!(streamed, bytes);
+    let file = File::from_bytes(bytes.clone()).unwrap();
+    assert_eq!(
+        file.file_space_info()
+            .map(|info| (info.strategy, info.page_size)),
+        expected
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("written.h5");
+    build().write(&path).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    let file = File::open_streaming(&path).unwrap();
+    assert_eq!(
+        file.file_space_info()
+            .map(|info| (info.strategy, info.page_size)),
+        expected
+    );
+
+    let owned_path = directory.path().join("owned.h5");
+    let file =
+        File::create_with_options(&owned_path, properties, FileAccessProperties::new()).unwrap();
+    assert_eq!(
+        file.file_space_info()
+            .map(|info| (info.strategy, info.page_size)),
+        expected
+    );
+    file.close().unwrap();
+    assert_eq!(std::fs::read(&owned_path).unwrap(), bytes);
 }

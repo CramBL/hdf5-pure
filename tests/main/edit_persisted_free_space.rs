@@ -5,6 +5,7 @@ use hdf5_pure::AttrValue;
 use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
+use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::MemoryStrategy;
 use hdf5_pure::SpaceOwnership;
@@ -415,7 +416,7 @@ impl Strategy {
             Self::Page => {
                 builder
                     .with_file_space_strategy(FileSpaceStrategy::Page, persist, 1)
-                    .with_file_space_page_size(PAGE);
+                    .with_file_space_page_size(FileSpacePageSize::try_from(PAGE).unwrap());
             }
         }
     }

@@ -6,6 +6,7 @@ use hdf5_pure::AttrValue;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
+use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::StoredAddress;
 use hdf5_pure::UserblockSize;
@@ -97,7 +98,7 @@ pub fn write_metadata_tail(
     let mut builder = FileBuilder::new();
     builder
         .with_file_space_strategy(FileSpaceStrategy::Page, true, threshold)
-        .with_file_space_page_size(page)
+        .with_file_space_page_size(FileSpacePageSize::try_from(page).unwrap())
         .with_userblock(UserblockSize::try_from(userblock).unwrap());
     if userblock != 0 {
         builder.with_userblock_content(b"PAGE metadata tail");
@@ -236,5 +237,5 @@ pub fn assert_pages_homogeneous(path: &Path, page: u64, datasets: &[&str]) {
 fn configure(builder: &mut FileBuilder, page_size: u64, persist: bool) {
     builder
         .with_file_space_strategy(FileSpaceStrategy::Page, persist, 0)
-        .with_file_space_page_size(page_size);
+        .with_file_space_page_size(FileSpacePageSize::try_from(page_size).unwrap());
 }

@@ -20,6 +20,7 @@ use core::str::FromStr;
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::types::VarLenUnicode;
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::UserblockSize;
 use hdf5_pure::{AttrValue, File, FileBuilder, FileSpaceStrategy, MaxExtent};
 use rstest::rstest;
@@ -498,7 +499,7 @@ fn paged_global_heap_references_survive_creation_edit_and_reopen(
     let path = dir.path().join("paged_global_heaps.h5");
     let mut builder = FileBuilder::new();
     builder.with_file_space_strategy(FileSpaceStrategy::Page, persist, 1);
-    builder.with_file_space_page_size(page_size);
+    builder.with_file_space_page_size(FileSpacePageSize::try_from(page_size).unwrap());
     builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
     builder.set_attr("root_label", AttrValue::VarLenString("root-value".into()));
     let mut group = builder.create_group("group");

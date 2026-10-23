@@ -8,6 +8,8 @@ use test_util::disk_log::{self, DiskOp};
 use test_util::free_space;
 use test_util::object_header::v2 as object_header;
 
+#[cfg(test)]
+use crate::FileSpacePageSize;
 use crate::FormatError;
 use crate::UserblockSize;
 use crate::edit::{TailPlacement, WriteEngine};
@@ -32,7 +34,7 @@ fn final_typed_manager_sections_survive_commit_finalization_and_reopen(
     let mut builder = FileBuilder::new();
     builder
         .with_file_space_strategy(FileSpaceStrategy::Page, true, threshold)
-        .with_file_space_page_size(page)
+        .with_file_space_page_size(FileSpacePageSize::try_from(page).unwrap())
         .with_userblock(UserblockSize::try_from(base).unwrap());
     if base != 0 {
         builder.with_userblock_content(b"typed manager tail");

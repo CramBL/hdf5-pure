@@ -6,6 +6,8 @@ use hdf5_pure_space::__private::PageType;
 use rstest::rstest;
 use test_util_hdf5::userblock;
 
+#[cfg(test)]
+use crate::FileSpacePageSize;
 use crate::edit::WriteEngine;
 use crate::error::FormatError;
 use crate::object_path::ObjectPathBuf;
@@ -93,7 +95,7 @@ fn deleting_a_small_header_preserves_metadata_reuse(#[values(512, 4_096, 8_192)]
     let mut builder = FileBuilder::new();
     builder
         .with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-        .with_file_space_page_size(page);
+        .with_file_space_page_size(FileSpacePageSize::try_from(page).unwrap());
     builder.create_dataset("victim").with_i32_data(&[3; 64]);
     builder.create_dataset("keep").with_i32_data(&[7; 64]);
     builder.write(&path).unwrap();

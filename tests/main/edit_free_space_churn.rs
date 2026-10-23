@@ -15,6 +15,7 @@ use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
+use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FilterId;
 use hdf5_pure::FormatError;
@@ -1628,7 +1629,7 @@ impl Strategy {
             Self::Page => {
                 builder
                     .with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-                    .with_file_space_page_size(PAGE_BYTES);
+                    .with_file_space_page_size(FileSpacePageSize::try_from(PAGE_BYTES).unwrap());
             }
         }
     }

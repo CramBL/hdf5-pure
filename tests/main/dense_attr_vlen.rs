@@ -12,6 +12,7 @@
 //! it in after the references are patched. These tests cover both of the layouts
 //! that do so, since the reserve and the build sit on opposite sides of a branch.
 
+use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::{AttrValue, File, FileBuilder, FileSpaceStrategy};
 use test_util::fractal_heap;
 use test_util_hdf5::attr;
@@ -54,7 +55,7 @@ fn a_paged_file_stores_variable_length_attributes_densely_too() {
     let mut builder = root_with_vlen(12, &expected);
     builder
         .with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-        .with_file_space_page_size(4096);
+        .with_file_space_page_size(FileSpacePageSize::DEFAULT);
 
     let bytes = builder.finish().unwrap();
     assert!(fractal_heap::has_fractal_heap(&bytes));
@@ -166,7 +167,7 @@ fn chunked_variable_length_elements_coexist_with_dense_attributes() {
         if paged {
             builder
                 .with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-                .with_file_space_page_size(4096);
+                .with_file_space_page_size(FileSpacePageSize::DEFAULT);
         }
 
         let bytes = builder.finish().unwrap();

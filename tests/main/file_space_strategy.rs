@@ -3,12 +3,10 @@
 //! issue #21): the writer records the chosen strategy in a superblock-extension
 //! File Space Info message, and the reader reads it back.
 
-use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceStrategy;
-use hdf5_pure::FormatError;
 use hdf5_pure::StoredAddress;
 use hdf5_pure::UserblockSize;
 use hdf5_pure_core::__private::FileSpaceInfoFields;
@@ -28,7 +26,7 @@ fn each_strategy_roundtrips(#[case] strategy: FileSpaceStrategy, #[case] thresho
     let mut b = FileBuilder::new();
     b.create_dataset("d").with_i32_data(&[1, 2, 3, 4]);
     b.with_file_space_strategy(strategy, false, 7)
-        .with_file_space_page_size(8192);
+        .with_file_space_page_size(FileSpacePageSize::try_from(8192).unwrap());
     b.write(&path).unwrap();
 
     let f = File::open(&path).unwrap();
@@ -105,7 +103,7 @@ fn page_size_only_defaults_strategy() {
     let path = temp::temp_path("hdf5_pure_fss_pageonly.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("d").with_i32_data(&[9]);
-    b.with_file_space_page_size(2048);
+    b.with_file_space_page_size(FileSpacePageSize::try_from(2048).unwrap());
     b.write(&path).unwrap();
 
     let f = File::open(&path).unwrap();
@@ -115,31 +113,6 @@ fn page_size_only_defaults_strategy() {
     assert_eq!(info.strategy, FileSpaceStrategy::FsmAggr);
     assert_eq!(info.page_size.get(), 2048);
     assert_eq!(info.threshold, 1); // default
-}
-
-#[rstest]
-fn a_page_size_outside_512_bytes_to_1_gib_fails_the_writer_under_a_strategy_that_only_records_it(
-    #[values(
-        None,
-        Some(FileSpaceStrategy::FsmAggr),
-        Some(FileSpaceStrategy::Aggr),
-        Some(FileSpaceStrategy::None)
-    )]
-    strategy: Option<FileSpaceStrategy>,
-    #[values(64, (1 << 30) + 1, 2 << 30)] page_size: u64,
-) {
-    let mut b = FileBuilder::new();
-    b.create_dataset("data").with_i32_data(&[1, 2, 3]);
-    if let Some(strategy) = strategy {
-        b.with_file_space_strategy(strategy, false, 1);
-    }
-    b.with_file_space_page_size(page_size);
-
-    let err = b.finish().unwrap_err();
-    let Error::Format(FormatError::InvalidFileSpacePageSize(rejected)) = err else {
-        panic!("expected InvalidFileSpacePageSize, got {err:?}");
-    };
-    assert_eq!(rejected, page_size);
 }
 
 #[test]

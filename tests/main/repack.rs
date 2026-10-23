@@ -5,6 +5,7 @@ use hdf5_pure::BitFieldType;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::Error;
 use hdf5_pure::File;
+use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::UserblockSize;
 use hdf5_pure::{
     AttrValue, Datatype, DatatypeByteOrder, FileBuilder, FileSpaceStrategy, LibVer, MaxExtent,
@@ -508,7 +509,7 @@ fn preserves_file_space_strategy() {
     b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
     b.create_dataset("drop_me").with_f64_data(&vec![0.0; 1000]);
     b.with_file_space_strategy(FileSpaceStrategy::Page, false, 4)
-        .with_file_space_page_size(8192);
+        .with_file_space_page_size(FileSpacePageSize::try_from(8192).unwrap());
     b.write(&src).unwrap();
 
     hdf5_pure::repack(&src, &dst, &RepackOptions::new().drop_path("drop_me")).unwrap();

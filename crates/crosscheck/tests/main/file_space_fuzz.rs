@@ -30,6 +30,7 @@
 //! with the fix.
 
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
+use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
 
 use proptest::prelude::*;
@@ -109,7 +110,7 @@ proptest! {
             b.create_dataset(&format!("d{i}")).with_i32_data(data);
         }
         b.with_file_space_strategy(strategy, persist, threshold)
-            .with_file_space_page_size(page_size);
+            .with_file_space_page_size(FileSpacePageSize::try_from(page_size).unwrap());
         b.write(&path).unwrap();
 
         // hdf5-pure reads its own datasets back, and reports its tracked free space.
@@ -168,7 +169,7 @@ proptest! {
             let data: Vec<i32> = (0..chunk_size as i32).collect();
             Unlimited::new("d", &data, chunk_size as u64).add_to(&mut b);
             b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-                .with_file_space_page_size(page_size);
+                .with_file_space_page_size(FileSpacePageSize::try_from(page_size).unwrap());
             b.write(&path).unwrap();
         }
 

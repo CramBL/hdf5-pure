@@ -4,6 +4,7 @@ use std::io::Write;
 
 #[cfg(test)]
 use crate::DeflateLevel;
+use crate::FileSpacePageSize;
 use crate::UserblockSize;
 use crate::chunked_write::ByteSink;
 use crate::file_writer::FileWriter as FormatWriter;
@@ -322,17 +323,37 @@ impl FileBuilder {
         self
     }
 
-    /// Sets the file space page size in bytes, which the C library sets with
-    /// `H5Pset_file_space_page_size`.
+    /// Sets the page size recorded in file-space metadata.
     ///
-    /// The writer records the page size in the superblock extension under every strategy, and
-    /// under [`FileSpaceStrategy::Page`] aligns every allocation to it. For a page size set without
-    /// a strategy the writer records [`FileSpaceStrategy::FsmAggr`].
+    /// Use [`FileSpacePageSize::try_from`] to check a raw byte count, or
+    /// [`FileSpacePageSize::DEFAULT`] for 4096 bytes. Every byte count from 512 bytes to 1 GiB
+    /// is valid.
     ///
-    /// [`finish`](Self::finish), [`finish_to`](Self::finish_to) and [`write`](Self::write) return
-    /// [`Error::Format`] with [`FormatError::InvalidFileSpacePageSize`] if `page_size` is less than
-    /// 512 bytes or more than 1 GiB.
-    pub fn with_file_space_page_size(&mut self, page_size: u64) -> &mut Self {
+    /// The writer records the page size in the superblock extension and allocates storage in
+    /// pages of this size under [`FileSpaceStrategy::Page`]. When the caller sets a page size
+    /// without a strategy, the writer records [`FileSpaceStrategy::FsmAggr`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure::{File, FileBuilder, FileCreateProperties, FileSpacePageSize};
+    ///
+    /// let user_input = 3000;
+    /// let size = FileSpacePageSize::try_from(user_input)?;
+    /// let fcpl = FileCreateProperties::new().with_file_space_page_size(size);
+    /// assert_eq!(fcpl.file_space_page_size(), Some(size));
+    ///
+    /// let mut builder = FileBuilder::new();
+    /// builder.with_create_properties(fcpl);
+    /// builder.with_file_space_page_size(FileSpacePageSize::DEFAULT);
+    /// let file = File::from_bytes(builder.finish()?)?;
+    /// assert_eq!(
+    ///     file.file_space_info().map(|info| info.page_size),
+    ///     Some(FileSpacePageSize::DEFAULT)
+    /// );
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
+    pub fn with_file_space_page_size(&mut self, page_size: FileSpacePageSize) -> &mut Self {
         self.writer.with_file_space_page_size(page_size);
         self
     }
@@ -1434,7 +1455,7 @@ mod streaming_tests {
         let build = |produced: bool| {
             let mut b = FileBuilder::new();
             b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
-            b.with_file_space_page_size(4096);
+            b.with_file_space_page_size(FileSpacePageSize::DEFAULT);
             let ds = b.create_dataset("d");
             if produced {
                 ds.with_produced_data(

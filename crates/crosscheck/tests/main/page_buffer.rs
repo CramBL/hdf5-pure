@@ -11,6 +11,7 @@
 //! mark down, paged layout intact, data where the C library looks for it.
 
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
+use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
 
 use test_util_hdf5::{dataset::Unlimited, session};
@@ -21,7 +22,7 @@ fn build(path: &std::path::Path, paged: bool) {
     let mut b = FileBuilder::new();
     if paged {
         b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-            .with_file_space_page_size(4096);
+            .with_file_space_page_size(FileSpacePageSize::DEFAULT);
     }
     Unlimited::new("d", &(0..64).collect::<Vec<i32>>(), 64).add_to(&mut b);
     b.write(path).unwrap();
