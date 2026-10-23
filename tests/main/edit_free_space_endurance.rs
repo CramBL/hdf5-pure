@@ -1,6 +1,7 @@
 //! Tests free-space reuse across commits and repeated file opens, with NONE as a growth control.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::fs;
 use std::panic::{self, AssertUnwindSafe};
@@ -10,6 +11,7 @@ use hdf5_pure::AttrValue;
 use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
+use hdf5_pure::FileSpaceInfo;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
@@ -123,6 +125,10 @@ fn small_file_churn_plateaus_only_with_persistent_free_space(#[case] strategy: F
         );
     }
     context.assert_survivors();
+    insta::assert_snapshot!(
+        format!("free_space_endurance_{strategy:?}").to_ascii_lowercase(),
+        context.final_characteristics(extent_bytes(&recovered)),
+    );
     let final_state = context.to_string();
     file.close()
         .unwrap_or_else(|error| panic!("final close: {error:?}; {final_state}"));
@@ -190,6 +196,96 @@ impl<'a> Context<'a> {
             file_space::assert_exact_space_ownership(self.file)
         }))
         .unwrap_or_else(|_| panic!("exact ownership failed; {self}"));
+    }
+
+    /// Formats creation settings and storage ownership for the final snapshot.
+    fn final_characteristics(&self, persisted_free_bytes: u64) -> String {
+        let Self {
+            file,
+            strategy: _,
+            iteration,
+            physical: _,
+        } = self;
+        let FileSpaceInfo {
+            strategy,
+            persist,
+            threshold,
+            page_size,
+            ..
+        } = file
+            .file_space_info()
+            .unwrap_or_else(|| panic!("file-space creation settings must be present; {self}"));
+        let SpaceOwnership {
+            physical_size,
+            logical_size,
+            userblock_space,
+            live_raw_space,
+            live_metadata_space,
+            free_space_manager_space,
+            reusable_free_space,
+            unclassified_space,
+            analysis_complete,
+            trailing_slack_space,
+        } = self.unwrap(file.__space_ownership());
+        let categories = [
+            ("userblock", &userblock_space),
+            ("live raw data", &live_raw_space),
+            ("live metadata", &live_metadata_space),
+            ("free-space managers", &free_space_manager_space),
+            ("reusable free space", &reusable_free_space),
+            ("unclassified space", &unclassified_space),
+            ("trailing slack", &trailing_slack_space),
+        ];
+        let mut out = String::new();
+        writeln!(out, "small-file free-space endurance").unwrap();
+        writeln!(out, "===============================").unwrap();
+        writeln!(out).unwrap();
+        writeln!(out, "state: final reopen after {iteration} cycles").unwrap();
+        writeln!(out).unwrap();
+        writeln!(out, "creation settings").unwrap();
+        writeln!(out, "  strategy          : {strategy:?}").unwrap();
+        writeln!(out, "  persistence       : {persist}").unwrap();
+        writeln!(out, "  threshold (bytes) : {threshold}").unwrap();
+        if *strategy == FileSpaceStrategy::Page {
+            writeln!(out, "  page size (bytes) : {}", page_size.get()).unwrap();
+        }
+        writeln!(out).unwrap();
+        writeln!(out, "file").unwrap();
+        writeln!(out, "  physical size     : {physical_size} bytes").unwrap();
+        writeln!(out, "  logical EOF       : {logical_size} bytes").unwrap();
+        writeln!(
+            out,
+            "  top-level groups  : {}",
+            self.unwrap(file.root().groups()).len()
+        )
+        .unwrap();
+        writeln!(out, "  analysis complete : {analysis_complete}").unwrap();
+        writeln!(out).unwrap();
+        writeln!(out, "storage ownership").unwrap();
+        writeln!(out, "  {:<21} {:>10} {:>8}", "category", "bytes", "extents").unwrap();
+        for (label, extents) in categories {
+            writeln!(
+                out,
+                "  {label:<21} {:>10} {:>8}",
+                extent_bytes(extents),
+                extents.len()
+            )
+            .unwrap();
+        }
+        writeln!(out).unwrap();
+        writeln!(out, "accounting").unwrap();
+        writeln!(
+            out,
+            "  classified bytes        : {}",
+            extent_bytes(&userblock_space)
+                + extent_bytes(&live_raw_space)
+                + extent_bytes(&live_metadata_space)
+                + extent_bytes(&free_space_manager_space)
+                + extent_bytes(&reusable_free_space)
+        )
+        .unwrap();
+        writeln!(out, "  persisted reusable free : {persisted_free_bytes}").unwrap();
+        out
     }
 }
 

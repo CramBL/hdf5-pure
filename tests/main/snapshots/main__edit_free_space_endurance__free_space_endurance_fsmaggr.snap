@@ -1,0 +1,33 @@
+---
+source: tests/main/edit_free_space_endurance.rs
+expression: context.final_characteristics(extent_bytes(&recovered))
+---
+small-file free-space endurance
+===============================
+
+state: final reopen after 1024 cycles
+
+creation settings
+  strategy          : FsmAggr
+  persistence       : true
+  threshold (bytes) : 1
+
+file
+  physical size     : 90273 bytes
+  logical EOF       : 90273 bytes
+  top-level groups  : 16
+  analysis complete : true
+
+storage ownership
+  category                   bytes  extents
+  userblock                      0        0
+  live raw data              44800      191
+  live metadata              23037      146
+  free-space managers          999        2
+  reusable free space        21437       55
+  unclassified space             0        0
+  trailing slack                 0        0
+
+accounting
+  classified bytes        : 90273
+  persisted reusable free : 21437
