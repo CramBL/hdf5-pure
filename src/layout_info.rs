@@ -347,8 +347,10 @@ impl Filter {
 
 /// The interpreted parameters or interpretation state of a [`Filter`].
 ///
-/// The reader checks the parameter counts and values of the interpreted filters. The complete
-/// encoded parameter vector is available through [`Filter::client_data`].
+/// The reader checks the parameter counts and values of the interpreted filters. Match the
+/// interpretations needed by the application, with a fallback to [`Filter::client_data`] for
+/// the complete encoded parameter vector.
+#[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FilterParameters {
     /// The Deflate compression level.
@@ -437,7 +439,11 @@ impl ScaleOffsetParameters {
 /// specification, version 4.0][spec]. The reader preserves identifiers without a named variant in
 /// [`Custom`](Self::Custom).
 ///
+/// Use [`Self::get`] to compare numeric identifiers independently of their classification as
+/// named or [`Custom`](Self::Custom) variants.
+///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_filter
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum FilterId {
     /// Deflate compression.
