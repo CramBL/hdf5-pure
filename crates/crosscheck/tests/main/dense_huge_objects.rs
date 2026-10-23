@@ -6,19 +6,15 @@
 //! direct and nested indirect roots. Each ownership crosscheck reconstructs the complete expected
 //! extent set from the serialized structures and compares it with the ownership result.
 
-use hdf5_pure::{AttrValue, File, FileBuilder};
-use hdf5_pure_core::__private::DecodedStoredAddress;
-use hdf5_pure_format::__private;
-use hdf5_pure_format::__private::FormatWidths;
-use hdf5_pure_format::__private::FreeSpaceManagerHeaderFrame;
-use hdf5_pure_format::__private::{
-    BTREE_V2_HUGE_OBJECT, BTREE_V2_HUGE_OBJECT_DIRECT, BTreeV2Header, BTreeV2NodeInfo,
-    BTreeV2Record, FractalHeapHeader, LengthWidth, OffsetWidth,
-};
-use std::num::NonZeroU16;
 use std::path::Path;
 
+use hdf5_pure::{AttrValue, File, FileBuilder};
+use hdf5_pure_core::__private::DecodedStoredAddress;
+use hdf5_pure_format::__private::FractalHeapHeader;
+
 use test_util::fractal_heap;
+
+use crate::heap_allocations::{AllocationClass, Heap};
 
 /// Returns a unique deterministic name of about `len` bytes that starts with `d{i}_`.
 fn long_name(i: usize, len: usize) -> String {
@@ -66,12 +62,7 @@ fn assert_links_resolve(path: &Path, names: &[String]) {
     }
 }
 
-/// Verifies ownership of a heap whose messages are all huge objects written by the reference C
-/// library.
-///
-/// The format readers independently parse the heap header and walk its huge-object index to build
-/// the complete expected extent set. The returned index depth lets callers verify that a fixture
-/// contains internal nodes.
+/// Compares the collector's allocations with decoded fixture metadata and returns the index depth.
 fn assert_huge_only_heap_ownership(path: &Path) -> u16 {
     let bytes = std::fs::read(path).unwrap();
     let heap_headers = fractal_heap::header_offsets(&bytes);
@@ -93,294 +84,54 @@ fn assert_huge_only_heap_ownership(path: &Path) -> u16 {
 
     let heap_at = u64::try_from(heap_at).unwrap();
     let mut actual = hdf5_pure::__fractal_heap_storage_extents(&bytes, heap_at, 8, 8).unwrap();
-    let heap_len = u64::try_from(FractalHeapHeader::serialized_size(
-        OffsetWidth::Eight,
-        LengthWidth::Eight,
-    ))
-    .unwrap();
-    let mut expected = vec![(heap_at, heap_len)];
-
-    let tree_at = heap.btree_huge_objects_address.get();
-    let tree = BTreeV2Header::parse(&bytes, usize::try_from(tree_at).unwrap(), 8, 8).unwrap();
+    let inspected = Heap::new(&bytes, heap_at, &heap);
     assert!(
-        tree.tree_type == BTREE_V2_HUGE_OBJECT || tree.tree_type == BTREE_V2_HUGE_OBJECT_DIRECT
+        inspected
+            .allocations
+            .iter()
+            .any(|allocation| allocation.class() == AllocationClass::RawData)
     );
-    expected.push((
-        tree_at,
-        u64::try_from(__private::btree_v2_header_size(
-            OffsetWidth::Eight,
-            LengthWidth::Eight,
-        ))
-        .unwrap(),
-    ));
-
-    let node_info = BTreeV2NodeInfo::compute(
-        tree.node_size,
-        tree.record_size,
-        OffsetWidth::Eight,
-        tree.depth,
-    );
-    let mut records = Vec::new();
-    inspect_huge_index_node(
-        &bytes,
-        &tree,
-        &node_info,
-        tree.root_node_address.get(),
-        tree.num_records_in_root,
-        tree.depth,
-        &mut records,
-        &mut expected,
-    );
-    assert_eq!(
-        u64::try_from(records.len()).unwrap(),
-        heap.huge_objects_count
-    );
-    assert_eq!(tree.total_records, heap.huge_objects_count);
-    for record in records {
-        let (address, length) = if tree.tree_type == BTREE_V2_HUGE_OBJECT {
-            let record = record
-                .huge_object(OffsetWidth::Eight, LengthWidth::Eight)
-                .unwrap();
-            (record.address.get(), record.length)
-        } else {
-            let record = record
-                .huge_object_direct(OffsetWidth::Eight, LengthWidth::Eight)
-                .unwrap();
-            (record.address.get(), record.length)
-        };
-        expected.push((address, length));
-    }
-
     actual.sort_unstable();
-    expected.sort_unstable();
-    assert_eq!(
-        actual, expected,
-        "heap ownership differs from serialized structure"
+    assert!(
+        actual.iter().copied().eq(inspected.extents()),
+        "{actual:?} != {:?}",
+        inspected.allocations
     );
-
-    tree.depth
-}
-
-#[allow(clippy::too_many_arguments)]
-fn inspect_huge_index_node(
-    bytes: &[u8],
-    tree: &BTreeV2Header,
-    node_info: &BTreeV2NodeInfo,
-    address: u64,
-    records_in_node: u16,
-    depth: u16,
-    records: &mut Vec<BTreeV2Record>,
-    expected: &mut Vec<(u64, u64)>,
-) {
-    expected.push((address, u64::from(tree.node_size)));
-    let at = usize::try_from(address).unwrap();
-    let end = at + usize::try_from(tree.node_size).unwrap();
-    let node = &bytes[at..end];
-    let signature: &[u8; 4] = if depth == 0 { b"BTLF" } else { b"BTIN" };
-    assert_eq!(&node[..4], signature);
-    assert_eq!(node[4], 0);
-    assert_eq!(node[5], tree.tree_type);
-
-    let Some(depth) = NonZeroU16::new(depth) else {
-        records.extend(
-            __private::parse_btree_v2_leaf_records(node, 0, records_in_node, tree.record_size)
-                .unwrap(),
-        );
-        return;
-    };
-
-    let children = __private::parse_btree_v2_internal_child_pointers(
-        node,
-        records_in_node,
-        depth,
-        tree.record_size,
-        OffsetWidth::Eight,
-        node_info,
-    )
-    .unwrap();
-    let record_size = usize::from(tree.record_size);
-    for (i, (child_address, child_records)) in children.into_iter().enumerate() {
-        inspect_huge_index_node(
-            bytes,
-            tree,
-            node_info,
-            child_address.get(),
-            child_records,
-            depth.get() - 1,
-            records,
-            expected,
-        );
-        if i < usize::from(records_in_node) {
-            let start = 6 + i * record_size;
-            records.push(BTreeV2Record {
-                data: node[start..start + record_size].to_vec(),
-            });
-        }
-    }
-}
-
-fn read_u64(bytes: &[u8], at: usize) -> u64 {
-    u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())
-}
-
-fn read_heap_offset(bytes: &[u8], at: usize, width: usize) -> u64 {
-    let mut value = 0u64;
-    for (shift, byte) in bytes[at..at + width].iter().copied().enumerate() {
-        value |= u64::from(byte) << (shift * 8);
-    }
-    value
-}
-
-fn managed_row_size(heap: &FractalHeapHeader, row: usize) -> u64 {
-    if row <= 1 {
-        heap.starting_block_size
-    } else {
-        heap.starting_block_size << (row - 1)
-    }
-}
-
-fn managed_direct_rows(heap: &FractalHeapHeader) -> usize {
-    let start_bits = heap.starting_block_size.trailing_zeros();
-    let direct_bits = heap.max_direct_block_size.trailing_zeros();
-    usize::try_from(direct_bits - start_bits + 2).unwrap()
-}
-
-fn managed_row_offset(heap: &FractalHeapHeader, row: usize) -> u64 {
-    let width = u64::from(heap.table_width);
-    (0..row)
-        .map(|previous| managed_row_size(heap, previous) * width)
-        .sum()
-}
-
-fn managed_child_rows(heap: &FractalHeapHeader, row: usize) -> u16 {
-    let size_bits = managed_row_size(heap, row).trailing_zeros();
-    let first_row_bits =
-        heap.starting_block_size.trailing_zeros() + u64::from(heap.table_width).trailing_zeros();
-    u16::try_from(size_bits - first_row_bits + 1).unwrap()
-}
-
-fn managed_indirect_size(heap: &FractalHeapHeader, nrows: u16) -> u64 {
-    let block_offset_width = u64::from(heap.max_heap_size).div_ceil(8);
-    5 + 8 + block_offset_width + u64::from(nrows) * u64::from(heap.table_width) * 8 + 4
-}
-
-#[allow(clippy::too_many_arguments)]
-fn inspect_managed_indirect(
-    bytes: &[u8],
-    heap: &FractalHeapHeader,
-    heap_header_address: u64,
-    address: u64,
-    nrows: u16,
-    heap_offset: u64,
-    expected: &mut Vec<(u64, u64)>,
-    indirect_count: &mut usize,
-) {
-    *indirect_count += 1;
-    expected.push((address, managed_indirect_size(heap, nrows)));
-    let at = usize::try_from(address).unwrap();
-    assert_eq!(&bytes[at..at + 4], b"FHIB");
-    assert_eq!(bytes[at + 4], 0);
-    assert_eq!(read_u64(bytes, at + 5), heap_header_address);
-    let block_offset_width = usize::from(heap.max_heap_size).div_ceil(8);
-    assert_eq!(
-        read_heap_offset(bytes, at + 13, block_offset_width),
-        heap_offset
-    );
-
-    let entries_at = at + 5 + 8 + block_offset_width;
-    let direct_rows = usize::from(nrows).min(managed_direct_rows(heap));
-    for row in 0..usize::from(nrows) {
-        let block_size = managed_row_size(heap, row);
-        let row_offset = managed_row_offset(heap, row);
-        for column in 0..usize::from(heap.table_width) {
-            let slot = row * usize::from(heap.table_width) + column;
-            let child = read_u64(bytes, entries_at + slot * 8);
-            if child == u64::MAX {
-                continue;
-            }
-            let column = u64::try_from(column).unwrap();
-            let child_heap_offset = heap_offset + row_offset + column * block_size;
-            if row < direct_rows {
-                expected.push((child, block_size));
-                let child_at = usize::try_from(child).unwrap();
-                assert_eq!(&bytes[child_at..child_at + 4], b"FHDB");
-                assert_eq!(bytes[child_at + 4], 0);
-                assert_eq!(read_u64(bytes, child_at + 5), heap_header_address);
-                assert_eq!(
-                    read_heap_offset(bytes, child_at + 13, block_offset_width),
-                    child_heap_offset
-                );
-            } else {
-                inspect_managed_indirect(
-                    bytes,
-                    heap,
-                    heap_header_address,
-                    child,
-                    managed_child_rows(heap, row),
-                    child_heap_offset,
-                    expected,
-                    indirect_count,
-                );
-            }
-        }
-    }
+    inspected.huge_index_depth.unwrap()
 }
 
 fn assert_pure_managed_heap_ownership(bytes: &[u8], root_is_direct: bool) -> usize {
     let heap_headers = fractal_heap::header_offsets(bytes);
+    assert_eq!(heap_headers.len(), 1);
+    let heap_at = u64::try_from(heap_headers[0]).unwrap();
+    let heap = FractalHeapHeader::parse(bytes, usize::try_from(heap_at).unwrap(), 8, 8).unwrap();
+    let inspected = Heap::new(bytes, heap_at, &heap);
+    assert!(inspected.header.managed_objects_count > 0);
+    assert_eq!(inspected.header.huge_objects_count, 0);
     assert_eq!(
-        heap_headers.len(),
-        1,
-        "fixture should contain one fractal heap"
+        inspected
+            .header
+            .managed_block_free_space_manager_address
+            .get(),
+        u64::MAX
     );
-    let heap_at = heap_headers[0];
-    let heap = FractalHeapHeader::parse(bytes, heap_at, 8, 8).unwrap();
-    assert!(heap.managed_objects_count > 0);
-    assert_eq!(heap.huge_objects_count, 0);
     assert_eq!(
-        heap.managed_block_free_space_manager_address.get(),
-        u64::MAX,
-        "hdf5-pure writer should not emit an internal heap free-space manager"
+        inspected.header.current_rows_in_root_indirect_block == 0,
+        root_is_direct
     );
-
-    let heap_at = u64::try_from(heap_at).unwrap();
-    let mut actual = hdf5_pure::__fractal_heap_storage_extents(bytes, heap_at, 8, 8).unwrap();
-    let mut expected = vec![(
-        heap_at,
-        u64::try_from(FractalHeapHeader::serialized_size(
-            OffsetWidth::Eight,
-            LengthWidth::Eight,
-        ))
-        .unwrap(),
-    )];
-    let root = heap.root_block_address.get();
-    let mut indirect_count = 0;
-    if root_is_direct {
-        assert_eq!(heap.current_rows_in_root_indirect_block, 0);
-        expected.push((root, heap.starting_block_size));
-        let at = usize::try_from(root).unwrap();
-        assert_eq!(&bytes[at..at + 4], b"FHDB");
-    } else {
-        assert!(heap.current_rows_in_root_indirect_block > 0);
-        inspect_managed_indirect(
-            bytes,
-            &heap,
-            heap_at,
-            root,
-            heap.current_rows_in_root_indirect_block,
-            0,
-            &mut expected,
-            &mut indirect_count,
-        );
-    }
-
-    actual.sort_unstable();
-    expected.sort_unstable();
-    assert_eq!(
-        actual, expected,
-        "heap ownership differs from serialized managed blocks"
+    assert!(
+        inspected
+            .allocations
+            .iter()
+            .all(|allocation| allocation.class() == AllocationClass::Metadata)
     );
-    indirect_count
+    let actual = hdf5_pure::__fractal_heap_storage_extents(bytes, heap_at, 8, 8).unwrap();
+    assert!(
+        actual.iter().copied().eq(inspected.extents()),
+        "{actual:?} != {:?}",
+        inspected.allocations
+    );
+    inspected.indirect_blocks
 }
 
 #[test]
@@ -555,48 +306,21 @@ fn owned_storage_includes_c_written_managed_heap_with_internal_fsm() {
     let allocations =
         hdf5_pure::__fractal_heap_storage_extents(&bytes, u64::try_from(heap_at).unwrap(), 8, 8)
             .unwrap();
-    let manager_address = heap.managed_block_free_space_manager_address;
-    let manager = FreeSpaceManagerHeaderFrame::parse(
-        FormatWidths::from_sizes(8, 8).unwrap(),
-        &bytes[usize::try_from(manager_address.get()).unwrap()..],
-    )
-    .unwrap();
+    let inspected = Heap::new(&bytes, u64::try_from(heap_at).unwrap(), &heap);
+    let manager = inspected.manager.as_ref().unwrap();
     let DecodedStoredAddress::Defined(list_address) = manager.section_list_addr() else {
         panic!("expected an allocated section list")
     };
+    assert!(manager.section_list_allocated() > 0);
+    assert!(
+        inspected
+            .extents()
+            .any(|extent| extent == (list_address.get(), manager.section_list_allocated()))
+    );
     assert_eq!(heap.huge_objects_count, 0);
-    let mut expected = vec![
-        (
-            u64::try_from(heap_at).unwrap(),
-            u64::try_from(FractalHeapHeader::serialized_size(
-                OffsetWidth::Eight,
-                LengthWidth::Eight,
-            ))
-            .unwrap(),
-        ),
-        (
-            manager_address.get(),
-            hdf5_pure_format::__private::free_space_manager_header_len(
-                FormatWidths::from_sizes(8, 8).unwrap(),
-            ),
-        ),
-        (list_address.get(), manager.section_list_allocated()),
-    ];
-    if heap.current_rows_in_root_indirect_block == 0 {
-        expected.push((heap.root_block_address.get(), heap.starting_block_size));
-    } else {
-        let mut indirect_count = 0;
-        inspect_managed_indirect(
-            &bytes,
-            &heap,
-            u64::try_from(heap_at).unwrap(),
-            heap.root_block_address.get(),
-            heap.current_rows_in_root_indirect_block,
-            0,
-            &mut expected,
-            &mut indirect_count,
-        );
-    }
-    expected.sort_unstable();
-    assert_eq!(allocations, expected);
+    assert!(
+        allocations.iter().copied().eq(inspected.extents()),
+        "{allocations:?} != {:?}",
+        inspected.allocations
+    );
 }

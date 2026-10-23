@@ -1268,6 +1268,12 @@ fn c_written_filtered_link_heaps_are_reclaimed_with_their_group(
     expected.sort_unstable();
     let owned = hdf5_pure::__fractal_heap_storage_extents(&bytes, heap.address, 8, 8).unwrap();
     assert_eq!(owned, expected);
+    let inspected = crate::heap_allocations::Heap::new(&bytes, heap.address, &heap.header);
+    assert!(
+        owned.iter().copied().eq(inspected.extents()),
+        "{owned:?} != {:?}",
+        inspected.allocations
+    );
     let allocations: Vec<(u64, u64, PageClass)> = owned
         .into_iter()
         .map(|(address, len)| (address, len, PageClass::Metadata))
