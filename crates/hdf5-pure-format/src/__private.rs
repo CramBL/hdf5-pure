@@ -213,6 +213,7 @@ pub use crate::object_header::ObjectHeaderContinuation;
 pub use crate::object_header::ObjectHeaderPrefix;
 pub use crate::object_header::ObjectTimes;
 pub use crate::object_header::ParsedObjectHeaderPrefix;
+pub use crate::object_header::RecordSplice;
 pub use crate::object_header::continuation_block_messages;
 pub use crate::object_header_writer::ObjectHeaderWriter;
 pub use crate::shared_message::DatatypeLocation;
