@@ -2050,9 +2050,16 @@ fn the_free_sections_libhdf5_persists_are_read_at_the_widths_of_its_file(
     // `H5FS__cache_sinfo_deserialize` in H5FScache.c, HDF5 2.2.0, asserts on these fixtures
     // when their length width is smaller than eight bytes.
     if sizeof_size == Sizeof::Bytes8 {
+        // The C library sizes Core section addresses and lengths from the host `size_t` width
+        // (`CORE_MAXADDR` in H5FDcore.c and `H5FS__sinfo_new` in H5FSsection.c, HDF5 2.2.0).
+        let width_suffix = if matches!(driver, Driver::Core) && cfg!(target_pointer_width = "32") {
+            "-32bit"
+        } else {
+            ""
+        };
         super::file_space_oracle::checkpoint(
             &path,
-            &format!("widths-{driver:?}-{sizeof_addr:?}-{sizeof_size:?}"),
+            &format!("widths-{driver:?}-{sizeof_addr:?}-{sizeof_size:?}{width_suffix}"),
             "persisted",
         );
     }
