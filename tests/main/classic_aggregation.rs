@@ -1,12 +1,8 @@
-use std::collections::BTreeSet;
-use std::fmt::Write as _;
-
 use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::MemoryStrategy;
-use hdf5_pure::SpaceOwnership;
 use hdf5_pure::UserblockSize;
 use rstest::rstest;
 
@@ -15,6 +11,7 @@ use test_util_hdf5::aggregation::Object;
 use test_util_hdf5::aggregation::Step;
 use test_util_hdf5::aggregation::Workload;
 use test_util_hdf5::file_space;
+use test_util_hdf5::storage;
 
 #[rstest]
 #[case::mirror(MemoryStrategy::Mirrored, 0)]
@@ -38,14 +35,16 @@ fn persistent_creation_recovers_settled_spare_and_reuses_it_after_reopen(
     assert_eq!(!free.is_empty(), has_manager);
     drop(file);
     let file = File::open_rw(&path).unwrap();
-    let before = file.__space_ownership().unwrap();
-    assert!(before.analysis_complete);
-    assert_eq!(before.physical_size, before.logical_size);
-    assert_eq!(before.trailing_slack_space, []);
-    assert_eq!(!before.free_space_manager_space.is_empty(), has_manager);
-    if has_manager {
-        assert_eq!(before.unclassified_space, []);
-    }
+    assert_eq!(file.file_size(), std::fs::metadata(&path).unwrap().len());
+    assert_eq!(
+        !file
+            .file_space_info()
+            .unwrap()
+            .manager_addrs
+            .iter()
+            .all(|address| *address == hdf5_pure::DecodedStoredAddress::Undefined),
+        has_manager
+    );
     file.close().unwrap();
     let properties = FileAccessProperties::new().with_memory_strategy(backing);
     let file = File::open_rw_with_options(&path, properties).unwrap();
@@ -65,7 +64,6 @@ fn persistent_creation_recovers_settled_spare_and_reuses_it_after_reopen(
                 .any(|&(start, length)| start <= extent.start && extent.end <= start + length)
         );
     }
-    assert!(file.__space_ownership().unwrap().analysis_complete);
     file.close().unwrap();
     let file = File::open_rw_with_options(&path, properties).unwrap();
     file.root()
@@ -82,10 +80,7 @@ fn persistent_creation_recovers_settled_spare_and_reuses_it_after_reopen(
     );
     assert_eq!(file.dataset("added").unwrap().read_i32().unwrap(), [23; 16]);
     assert_eq!(file.dataset("third").unwrap().read_i32().unwrap(), [29; 16]);
-    let after = file.__space_ownership().unwrap();
-    assert!(after.analysis_complete);
-    assert_eq!(after.physical_size, after.logical_size);
-    assert_eq!(after.trailing_slack_space, []);
+    assert_eq!(file.file_size(), std::fs::metadata(&path).unwrap().len());
 }
 
 #[rstest]
@@ -107,11 +102,7 @@ fn hdf5_pure_writes_no_free_space_manager_under_aggr_or_none(
     let file = aggregation::create_file(&path, strategy, true);
     for step in workload.steps {
         step.apply(&file);
-        assert_eq!(
-            file.__space_ownership().unwrap().free_space_manager_space,
-            [],
-            "{step:?}"
-        );
+        storage::assert_no_managers(&file);
     }
     drop(file);
 
@@ -125,7 +116,7 @@ fn hdf5_pure_writes_no_free_space_manager_under_aggr_or_none(
 }
 
 #[rstest]
-fn hdf5_pure_places_every_allocation_of_an_edit_under_none_at_or_past_the_end_of_the_file(
+fn none_places_new_payloads_at_or_after_the_previous_eof(
     #[values(
         aggregation::METADATA_HEAVY,
         aggregation::SMALL_RAW,
@@ -142,26 +133,29 @@ fn hdf5_pure_places_every_allocation_of_an_edit_under_none_at_or_past_the_end_of
     let file = aggregation::create_file(&path, FileSpaceStrategy::None, false);
     let mut strings = Vec::new();
     for &step in workload.steps {
-        let before = file.__space_ownership().unwrap();
+        let before = file.file_size();
         step.apply(&file);
-        let after = file.__space_ownership().unwrap();
-
-        let placed = live_extents(&after)
-            .difference(&live_extents(&before))
-            .copied()
-            .collect::<Vec<_>>();
-        assert!(
-            placed.iter().all(|&(addr, _)| addr >= before.logical_size),
-            "{step:?} placed {placed:?} below the end of the file at {}",
-            before.logical_size
-        );
+        assert!(file.file_size() >= before);
         if let Step::Create(object) = step {
-            assert!(!placed.is_empty(), "{step:?} placed no extent");
+            match object {
+                Object::Dataset(name, _) | Object::Strings(name) => {
+                    let placed = file_space::raw_extents(&file, name);
+                    assert!(!placed.is_empty());
+                    assert!(
+                        placed.iter().all(|extent| extent.start >= before),
+                        "{step:?}: {placed:?}"
+                    );
+                }
+                Object::Group(name) => {
+                    file.group(name).unwrap();
+                }
+            }
             if let Object::Strings(name) = object {
-                strings.push((name, before.logical_size));
+                strings.push((name, before));
             }
         }
     }
+
     drop(file);
 
     let bytes = std::fs::read(&path).unwrap();
@@ -179,7 +173,7 @@ fn hdf5_pure_places_every_allocation_of_an_edit_under_none_at_or_past_the_end_of
 }
 
 #[rstest]
-fn hdf5_pure_places_a_workload_under_page_as_recorded(
+fn paged_workloads_preserve_survivors_after_reopen(
     #[values(
         aggregation::METADATA_HEAVY,
         aggregation::SMALL_RAW,
@@ -194,22 +188,27 @@ fn hdf5_pure_places_a_workload_under_page_as_recorded(
     let path = dir.path().join("workload.h5");
 
     let file = aggregation::create_file(&path, FileSpaceStrategy::Page, true);
-    let mut report = format!(
-        "PAGE allocation workload: {}\n\n\
-         All sizes and offsets are in bytes. End offsets are exclusive.\n",
-        workload.name
-    );
-    for (index, &step) in workload.steps.iter().enumerate() {
+    for step in workload.steps {
         step.apply(&file);
-        write_page_step(
-            &mut report,
-            index + 1,
-            step,
-            file.__space_ownership().unwrap(),
-        );
     }
-
-    insta::assert_snapshot!(format!("page_{}", workload.name), report);
+    file.close().unwrap();
+    let file = File::open(&path).unwrap();
+    for object in workload.surviving_objects() {
+        match object {
+            Object::Dataset(name, len) => assert_eq!(
+                file.dataset(name).unwrap().read_i32().unwrap(),
+                vec![aggregation::DATASET_VALUE; len]
+            ),
+            Object::Strings(name) => assert_eq!(
+                file.dataset(name).unwrap().read_string().unwrap(),
+                aggregation::STRINGS
+            ),
+            Object::Group(name) => {
+                file.group(name).unwrap();
+            }
+        }
+    }
+    assert_eq!(file.file_size(), std::fs::metadata(&path).unwrap().len());
 }
 
 #[rstest]
@@ -229,7 +228,7 @@ fn staged_aggr_allocations_reuse_session_windows(
     builder.write(&path).unwrap();
     let properties = FileAccessProperties::new().with_memory_strategy(backing);
     let mut file = File::open_rw_with_options(&path, properties).unwrap();
-    let original_end = file.__space_ownership().unwrap().logical_size;
+    let original_end = file.file_size();
     file.root()
         .create_dataset("first", |builder| {
             builder.with_i32_data(&[23; 16]);
@@ -237,28 +236,20 @@ fn staged_aggr_allocations_reuse_session_windows(
         .unwrap();
     file.commit().unwrap();
     let first = file_space::contiguous_extent(&file, "first");
-    let ownership = file.__space_ownership().unwrap();
-    assert!(ownership.analysis_complete);
-    assert_eq!(ownership.physical_size, ownership.logical_size);
-    assert_eq!(ownership.free_space_manager_space, []);
-    assert_eq!(ownership.trailing_slack_space, []);
-    assert!(
-        ownership
-            .unclassified_space
-            .iter()
-            .all(|&(start, length)| start + length <= original_end)
-    );
-    assert!(!ownership.reusable_free_space.is_empty());
+    let accounting = file.space_accounting().unwrap();
     assert_eq!(
-        file.space_accounting().unwrap().reusable_free_space,
-        ownership.reusable_free_space
+        std::fs::metadata(&path).unwrap().len(),
+        accounting.logical_size
     );
+    storage::assert_no_managers(&file);
+    assert!(accounting.logical_size >= original_end);
+    assert!(!accounting.reusable_free_space.is_empty());
     if reopen {
         file.close().unwrap();
         file = File::open_rw_with_options(&path, properties).unwrap();
         assert_eq!(file.space_accounting().unwrap().reusable_free_space, []);
     }
-    let before_second = file.__space_ownership().unwrap().logical_size;
+    let before_second = file.file_size();
     file.root()
         .create_dataset("second", |builder| {
             builder.with_i32_data(&[29; 16]);
@@ -270,10 +261,7 @@ fn staged_aggr_allocations_reuse_session_windows(
         assert!(second.start >= before_second);
     } else {
         assert_eq!(second.start, first.end);
-        assert_eq!(
-            file.__space_ownership().unwrap().logical_size,
-            before_second
-        );
+        assert_eq!(file.file_size(), before_second);
     }
     file.close().unwrap();
     let file = File::open(&path).unwrap();
@@ -287,89 +275,4 @@ fn staged_aggr_allocations_reuse_session_windows(
         file.superblock().eof_address,
         std::fs::metadata(&path).unwrap().len()
     );
-}
-
-/// Returns the extents that hold metadata, raw data, or a free-space manager.
-fn live_extents(ownership: &SpaceOwnership) -> BTreeSet<(u64, u64)> {
-    ownership
-        .live_metadata_space
-        .iter()
-        .chain(&ownership.live_raw_space)
-        .chain(&ownership.free_space_manager_space)
-        .copied()
-        .collect()
-}
-
-/// Writes the operation and an extent table sorted by offset within each category.
-///
-/// # Panics
-///
-/// Panics if an extent's end offset exceeds [`u64::MAX`].
-fn write_page_step(report: &mut String, number: usize, step: Step, ownership: SpaceOwnership) {
-    write!(report, "\nStep {number}: ").unwrap();
-    match step {
-        Step::Create(Object::Dataset(name, len)) => {
-            writeln!(report, "Create dataset {name:?} with {len} i32 elements").unwrap();
-        }
-        Step::Create(Object::Group(name)) => writeln!(report, "Create group {name:?}").unwrap(),
-        Step::Create(Object::Strings(name)) => {
-            writeln!(report, "Create variable-length string dataset {name:?}").unwrap();
-        }
-        Step::Delete(name) => writeln!(report, "Delete link {name:?}").unwrap(),
-    }
-    let SpaceOwnership {
-        physical_size,
-        logical_size,
-        userblock_space,
-        live_raw_space,
-        live_metadata_space,
-        free_space_manager_space,
-        reusable_free_space,
-        unclassified_space,
-        analysis_complete,
-        trailing_slack_space,
-    } = ownership;
-    writeln!(
-        report,
-        "  Physical size: {physical_size}, logical size: {logical_size}, analysis: {}",
-        if analysis_complete {
-            "complete"
-        } else {
-            "incomplete"
-        }
-    )
-    .unwrap();
-    writeln!(
-        report,
-        "  {:<19} {:>10} {:>10} {:>10}",
-        "Category", "Start", "End", "Length"
-    )
-    .unwrap();
-    let mut empty = Vec::new();
-    for (category, mut extents) in [
-        ("Userblock", userblock_space),
-        ("Live metadata", live_metadata_space),
-        ("Live raw data", live_raw_space),
-        ("Free-space managers", free_space_manager_space),
-        ("Reusable free space", reusable_free_space),
-        ("Unclassified", unclassified_space),
-        ("Trailing slack", trailing_slack_space),
-    ] {
-        if extents.is_empty() {
-            empty.push(category);
-            continue;
-        }
-        extents.sort_unstable();
-        for (start, length) in extents {
-            writeln!(
-                report,
-                "  {category:<19} {start:>10} {:>10} {length:>10}",
-                start.checked_add(length).unwrap()
-            )
-            .unwrap();
-        }
-    }
-    if !empty.is_empty() {
-        writeln!(report, "  No extents: {}", empty.join(", ")).unwrap();
-    }
 }

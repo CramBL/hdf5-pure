@@ -141,13 +141,9 @@ fn deleting_a_group_reclaims_the_collections_of_its_subtree() {
         .unwrap();
     file.commit().unwrap();
     drop(group);
-    let liveness = file.__global_heap_liveness().unwrap();
-    assert!(liveness.analysis_complete);
-    let collections: Vec<Range<u64>> = liveness
-        .referenced_collections
-        .into_iter()
-        .map(minimum_collection)
-        .collect();
+    file.close().unwrap();
+    let collections = collections(&path);
+    let file = File::open_rw(&path).unwrap();
     assert_eq!(collections.len(), 3, "{collections:?}");
 
     file.root().delete("g").unwrap();

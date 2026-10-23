@@ -11,6 +11,7 @@
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::{File, FileBuilder};
 use test_util::range;
+use test_util_hdf5::storage;
 use test_util_hdf5::{
     dataset::{Filter, Unlimited},
     file_space,
@@ -219,9 +220,17 @@ fn a_relocating_overwrite_reclaims_the_old_header_with_its_storage() {
         .pure_create(&path);
     let original_end = std::fs::metadata(&path).unwrap().len();
 
+    let bytes = std::fs::read(&path).unwrap();
+    let reader = File::open(&path).unwrap();
+    let header = storage::root_object_address(&reader, &bytes, "d");
+    let mut original = storage::header_extents(&reader, &bytes, header);
+    original.extend(
+        file_space::raw_extents(&reader, "d")
+            .iter()
+            .map(|extent| (extent.start, extent.end - extent.start)),
+    );
+    reader.close().unwrap();
     let session = File::open_rw(&path).unwrap();
-    let original = session.__space_ownership().unwrap();
-    assert!(original.analysis_complete);
     let incompressible: Vec<i32> = (0..64)
         .map(|i: i32| i.wrapping_mul(0x9E37_79B1u32 as i32))
         .collect();
@@ -236,12 +245,7 @@ fn a_relocating_overwrite_reclaims_the_old_header_with_its_storage() {
 
     let acct = session.space_accounting().unwrap();
     file_space::assert_space_accounting_consistent(&acct);
-    for (start, len) in original
-        .live_metadata_space
-        .into_iter()
-        .chain(original.live_raw_space)
-        .filter(|&(start, _)| start != 0)
-    {
+    for (start, len) in original {
         assert_eq!(
             range::covered_len(&acct.reusable_free_space, &(start..start + len)),
             len,

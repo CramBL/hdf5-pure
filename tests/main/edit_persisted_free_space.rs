@@ -8,7 +8,6 @@ use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::MemoryStrategy;
-use hdf5_pure::SpaceOwnership;
 use hdf5_pure::UserblockSize;
 use hdf5_pure_core::__private::StoredAddressExt;
 use rstest::rstest;
@@ -17,6 +16,8 @@ use test_util::range;
 use test_util::temp;
 use test_util::userblock::Userblock;
 use test_util_hdf5::file_space;
+use test_util_hdf5::paged;
+use test_util_hdf5::storage;
 
 #[rstest]
 #[case::bounded(MemoryStrategy::Bounded, 0)]
@@ -77,12 +78,10 @@ fn a_session_reuses_the_free_space_an_earlier_session_persisted(
     first.commit().unwrap();
     first.close().unwrap();
     let persisted = File::open(&path).unwrap().persisted_free_space().unwrap();
+    let bytes = std::fs::read(&path).unwrap();
     let second = File::open_rw(&path).unwrap();
-    let ownership = second.__space_ownership().unwrap();
-    assert!(ownership.analysis_complete);
-    let mut available_or_reused = ownership.reusable_free_space;
-    available_or_reused.extend(ownership.live_metadata_space);
-    available_or_reused.extend(ownership.free_space_manager_space);
+    let mut available_or_reused = second.space_accounting().unwrap().reusable_free_space;
+    available_or_reused.extend(storage::file_metadata_extents(&second, &bytes));
     assert_eq!(range::covered_len(&available_or_reused, &hole), HOLE_BYTES);
     let expected = persisted
         .iter()
@@ -136,39 +135,30 @@ fn every_commit_keeps_the_userblock_and_writes_stored_manager_addresses(
         let session = File::open_rw(&path).unwrap();
         step.apply(&session);
         session.commit().unwrap();
-        if strategy == Strategy::Page {
-            assert_owned_pages_homogeneous(&session, PAGE);
-        }
         session.close().unwrap();
+        if strategy == Strategy::Page {
+            assert_pages_homogeneous(&path);
+        }
         let settled = File::open_rw(&path).unwrap();
         let reusable = settled.space_accounting().unwrap().reusable_free_space;
-        let ownership = settled.__space_ownership().unwrap();
         settled.close().unwrap();
 
         stamped.assert_unchanged(&path);
-        let SpaceOwnership {
-            userblock_space,
-            live_raw_space,
-            live_metadata_space,
-            free_space_manager_space,
-            reusable_free_space,
-            ..
-        } = ownership;
-        assert_eq!(
-            userblock_space,
-            Vec::from_iter((userblock > 0).then_some((0, userblock)))
-        );
-        assert!(
-            live_raw_space
-                .iter()
-                .chain(&live_metadata_space)
-                .chain(&free_space_manager_space)
-                .chain(&reusable_free_space)
-                .all(|&(at, _)| at >= userblock),
-            "{step:?} allocated inside the userblock"
-        );
-
+        let bytes = std::fs::read(&path).unwrap();
         let file = File::open(&path).unwrap();
+        let free_space_manager_space = storage::manager_extents(&file, &bytes);
+        let mut allocated = storage::file_metadata_extents(&file, &bytes);
+        for dataset in file.root().datasets().unwrap() {
+            let address = storage::root_object_address(&file, &bytes, &dataset);
+            allocated.extend(storage::header_extents(&file, &bytes, address));
+            allocated.extend(
+                file_space::raw_extents(&file, &dataset)
+                    .iter()
+                    .map(|extent| (extent.start, extent.end - extent.start)),
+            );
+        }
+        storage::assert_unavailable(&file, &allocated);
+        assert!(reusable.iter().all(|&(at, _)| at >= userblock), "{step:?}");
         let stored_free = file.persisted_free_space().unwrap();
         assert_eq!(
             stored_free,
@@ -303,7 +293,7 @@ fn a_reopened_paged_session_reuses_each_page_type_in_its_own_pages(
     );
 
     let second = File::open_rw(&path).unwrap();
-    let before = second.__space_ownership().unwrap();
+    let before = second.file_size();
     second
         .root()
         .create_group_with("g", |group| {
@@ -317,17 +307,19 @@ fn a_reopened_paged_session_reuses_each_page_type_in_its_own_pages(
         })
         .unwrap();
     second.commit().unwrap();
-    let after = second.__space_ownership().unwrap();
-    assert_owned_pages_homogeneous(&second, PAGE);
+    assert_eq!(second.file_size(), before);
     second.close().unwrap();
-
-    assert_eq!(after.physical_size, before.physical_size);
-    let new_metadata = after
-        .live_metadata_space
+    assert_pages_homogeneous(&path);
+    let bytes = std::fs::read(&path).unwrap();
+    let file = File::open(&path).unwrap();
+    let mut new_metadata = storage::file_metadata_extents(&file, &bytes)
         .iter()
-        .filter(|extent| !before.live_metadata_space.contains(extent))
         .map(|&(at, _)| at)
         .collect::<BTreeSet<_>>();
+    for name in ["g", "d"] {
+        let at = storage::root_object_address(&file, &bytes, name);
+        new_metadata.insert(at);
+    }
     assert!(
         new_metadata.contains(&pages.start),
         "the group header {new_metadata:?} does not start the freed page"
@@ -422,32 +414,15 @@ impl Strategy {
     }
 }
 
-/// Asserts that no page, counted from the base address, holds both live raw data and metadata, the
-/// free-space managers included, in the ownership report of `file`.
-#[track_caller]
-fn assert_owned_pages_homogeneous(file: &File, page_size: u64) {
-    let SpaceOwnership {
-        live_raw_space,
-        live_metadata_space,
-        free_space_manager_space,
-        ..
-    } = file.__space_ownership().unwrap();
-    let base = file.superblock().base_address.get();
-    let pages = |extents: &[(u64, u64)]| {
-        extents
-            .iter()
-            .flat_map(|&(at, len)| (at - base) / page_size..=(at + len - 1 - base) / page_size)
-            .collect::<BTreeSet<_>>()
-    };
-    let metadata = pages(&live_metadata_space)
-        .union(&pages(&free_space_manager_space))
-        .copied()
-        .collect::<BTreeSet<_>>();
-    let mixed = pages(&live_raw_space)
-        .intersection(&metadata)
-        .copied()
-        .collect::<Vec<_>>();
-    assert_eq!(mixed, Vec::<u64>::new(), "pages hold raw data and metadata");
+fn assert_pages_homogeneous(path: &Path) {
+    let file = File::open(path).unwrap();
+    let datasets = file.root().datasets().unwrap();
+    file.close().unwrap();
+    paged::assert_pages_homogeneous(
+        path,
+        PAGE,
+        &datasets.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
 }
 
 fn write_fixture(path: &Path, strategy: Strategy, userblock: u64) -> Userblock {

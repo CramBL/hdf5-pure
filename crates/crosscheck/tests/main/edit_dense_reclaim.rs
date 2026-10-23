@@ -38,6 +38,7 @@ use test_util::range;
 use test_util_hdf5::absence;
 use test_util_hdf5::creation_order::{self, Indexing};
 use test_util_hdf5::group_filter;
+use test_util_hdf5::storage;
 
 fn object_location(path: &Path, object: &str) -> (hdf5::File, hdf5::Location) {
     let file = hdf5::File::open(path)
@@ -814,20 +815,14 @@ fn released_regions(path: &Path) -> Vec<(u64, u64)> {
     let file_len = u64::try_from(framed_bytes(path).len()).unwrap();
     let mut released = persistent_free(path);
     released.extend(free_space_manager_blocks(path));
-    let file = File::open_rw(path).unwrap();
+    let raw = std::fs::read(path).unwrap();
+    let file = File::open(path).unwrap();
     let base = file.superblock().base_address.get();
-    let extension = file
-        .superblock()
-        .superblock_extension_address
-        .unwrap()
-        .get();
+    let extension = file.superblock().superblock_extension_address.unwrap();
     released.extend(
-        file.__space_ownership()
-            .unwrap()
-            .live_metadata_space
+        storage::header_extents(&file, &raw, base + extension.get())
             .into_iter()
-            .filter(|&(address, _)| address == base + extension)
-            .map(|(address, length)| (address - base, length)),
+            .map(|(at, len)| (at - base, len)),
     );
     released.push((file_len, u64::MAX - file_len));
     released
@@ -955,27 +950,18 @@ fn c_written_dense_heaps_are_reclaimed_with_their_owners(
         3 * huge_objects
     );
 
+    let bytes = std::fs::read(&path).unwrap();
     let session = File::open_rw(&path).unwrap();
-    let ownership = session.__space_ownership().unwrap();
-    assert!(ownership.analysis_complete);
     let base = session.superblock().base_address.get();
-    for &(address, len, _) in &allocations {
-        assert_eq!(
-            range::covered_len(
-                &ownership.live_metadata_space,
-                &(base + address..base + address + len)
-            ) + range::covered_len(
-                &ownership.live_raw_space,
-                &(base + address..base + address + len)
-            ),
-            len
-        );
-    }
+    let mut live = allocations
+        .iter()
+        .map(|&(at, len, _)| (base + at, len))
+        .collect::<Vec<_>>();
+    live.extend(storage::file_metadata_extents(&session, &bytes));
+    storage::assert_unavailable(&session, &live);
     session.root().delete("g").unwrap();
     session.root().delete("d").unwrap();
     session.commit().unwrap();
-    let ownership = session.__space_ownership().unwrap();
-    assert!(ownership.analysis_complete);
     drop(session);
     let released = released_regions(&path);
 
@@ -1039,11 +1025,9 @@ fn c_written_heap_ghost_sections_have_only_physical_manager_ownership(
     );
     let allocations = heap_allocations(&path, 0, heaps);
     let session = File::open_rw(&path).unwrap();
-    assert!(session.__space_ownership().unwrap().analysis_complete);
     session.root().delete("g").unwrap();
     session.root().delete("d").unwrap();
     session.commit().unwrap();
-    assert!(session.__space_ownership().unwrap().analysis_complete);
     drop(session);
     let released = released_regions(&path);
     assert_released(file_space.page_size(), &released, &allocations);
@@ -1298,22 +1282,16 @@ fn c_written_filtered_link_heaps_are_reclaimed_with_their_group(
     assert_eq!(names, filtered_link_names(links));
 
     let session = File::open_rw(&path).unwrap();
-    let ownership = session.__space_ownership().unwrap();
-    assert!(ownership.analysis_complete);
     let base = session.superblock().base_address.get();
-    for &(address, len, _) in &allocations {
-        assert_eq!(
-            range::covered_len(
-                &ownership.live_metadata_space,
-                &(base + address..base + address + len)
-            ),
-            len,
-            "the heap allocation ({address}, {len}) is live metadata"
-        );
-    }
+    storage::assert_unavailable(
+        &session,
+        &allocations
+            .iter()
+            .map(|&(at, len, _)| (base + at, len))
+            .collect::<Vec<_>>(),
+    );
     session.root().delete("g").unwrap();
     session.commit().unwrap();
-    assert!(session.__space_ownership().unwrap().analysis_complete);
     drop(session);
 
     assert_released(

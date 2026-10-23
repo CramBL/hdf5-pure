@@ -126,6 +126,17 @@ fn deleting_a_small_header_preserves_metadata_reuse(#[values(512, 4_096, 8_192)]
 }
 
 fn assert_large_header_tail(engine: &WriteEngine) {
+    let owned = engine.space_ownership().unwrap();
+    assert!(owned.analysis_complete);
+    assert_eq!(
+        test_util::range::covered_len(&owned.unclassified_space, &(5_632..5_694)),
+        62
+    );
+    assert_eq!(
+        test_util::range::covered_len(&owned.unclassified_space, &(5_694..6_144)),
+        450
+    );
+
     let sections = engine.space.paged_sections().unwrap();
     assert!(
         sections

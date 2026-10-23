@@ -1,12 +1,16 @@
 #![cfg(feature = "__hdf5-1.10")]
 
+use std::path::Path;
+
 use hdf5_pure::File;
 use rstest::rstest;
 use tempfile::TempDir;
 use test_util::fractal_heap;
-use test_util::range;
+use test_util::global_heap;
+use test_util::widths::Widths;
 use test_util_hdf5::space_ownership;
 use test_util_hdf5::space_ownership::SharedStorage;
+use test_util_hdf5::storage;
 
 #[rstest]
 #[case::shared_chunked_dataspace(SharedStorage::Dataspace, false)]
@@ -14,22 +18,18 @@ use test_util_hdf5::space_ownership::SharedStorage;
 #[case::dense_shared_attribute(SharedStorage::Attribute, true)]
 #[case::compact_shared_attribute_fields(SharedStorage::AttributeFields, false)]
 #[case::dense_shared_attribute_fields(SharedStorage::AttributeFields, true)]
-fn native_shared_storage_has_incomplete_ownership(
+fn shared_metadata_retains_heap_storage_after_owner_deletion(
     #[case] storage: SharedStorage,
     #[case] dense: bool,
 ) {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("shared.h5");
     space_ownership::libhdf5_write_shared_storage(&path, storage, dense);
-    let file = File::open_rw(&path).unwrap();
-    let ownership = file.__space_ownership().unwrap();
-    assert!(!ownership.analysis_complete);
-    assert!(!ownership.unclassified_space.is_empty());
-    file.close().unwrap();
+    assert_shared_storage_survives_edit(&path, storage, dense);
 }
 
 #[test]
-fn a_native_filtered_heap_has_complete_ownership() {
+fn native_filtered_heap_storage_stays_unavailable_during_an_unrelated_edit() {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("filtered.h5");
     space_ownership::libhdf5_write_filtered_heap(&path);
@@ -40,14 +40,90 @@ fn a_native_filtered_heap_has_complete_ownership() {
         hdf5_pure::__fractal_heap_storage_extents(&bytes, u64::try_from(heaps[0]).unwrap(), 8, 8)
             .unwrap();
     let file = File::open_rw(&path).unwrap();
-    let ownership = file.__space_ownership().unwrap();
-    assert!(ownership.analysis_complete);
-    for (address, len) in allocations {
-        assert_eq!(
-            range::covered_len(&ownership.live_metadata_space, &(address..address + len)),
-            len,
-            "the heap allocation ({address}, {len}) is live metadata"
-        );
-    }
+    storage::assert_unavailable(&file, &allocations);
+    let mut names = file.group("filtered").unwrap().groups().unwrap();
+    names.sort();
+    assert_eq!(
+        names,
+        (0..12)
+            .map(|index| format!("g{index:02}"))
+            .collect::<Vec<_>>()
+    );
+    file.root()
+        .create_dataset("probe", |builder| {
+            builder.with_i32_data(&[19; 32]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    storage::assert_unavailable(&file, &allocations);
     file.close().unwrap();
+    let file = hdf5::File::open(&path).unwrap();
+    let mut names = file.group("filtered").unwrap().member_names().unwrap();
+    names.sort();
+    assert_eq!(
+        names,
+        (0..12)
+            .map(|index| format!("g{index:02}"))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        file.dataset("probe").unwrap().read_raw::<i32>().unwrap(),
+        [19; 32]
+    );
+}
+
+fn assert_shared_storage_survives_edit(path: &Path, storage: SharedStorage, dense: bool) {
+    let file = File::open_rw(path).unwrap();
+    file.root()
+        .create_dataset("probe", |builder| {
+            builder.with_vlen_strings(&["probe"]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    file.close().unwrap();
+    let bytes = std::fs::read(path).unwrap();
+    let collections = global_heap::collection_ranges(&bytes, Widths::EIGHT);
+    assert_eq!(collections.len(), 1);
+    let file = File::open_rw(path).unwrap();
+    file.root().delete("probe").unwrap();
+    file.commit().unwrap();
+    storage::assert_unavailable(
+        &file,
+        &collections
+            .iter()
+            .map(|extent| (extent.start, extent.end - extent.start))
+            .collect::<Vec<_>>(),
+    );
+    file.close().unwrap();
+    let file = hdf5::File::open(path).unwrap();
+    assert!(!file.link_exists("probe"));
+    match storage {
+        SharedStorage::Dataspace => {
+            for index in 0..2 {
+                assert_eq!(
+                    file.dataset(&format!("d{index}"))
+                        .unwrap()
+                        .read_raw::<i32>()
+                        .unwrap(),
+                    [1, 2, 3, 4, 5, 6, 7, 8]
+                );
+            }
+        }
+        SharedStorage::Attribute | SharedStorage::AttributeFields => {
+            for index in 0..2 {
+                let group = file.group(&format!("g{index}")).unwrap();
+                if dense {
+                    assert_eq!(
+                        group.attr("shared").unwrap().read_raw::<i64>().unwrap(),
+                        vec![17; 8_192]
+                    );
+                } else {
+                    assert_eq!(
+                        group.attr("shared").unwrap().read_scalar::<i64>().unwrap(),
+                        17
+                    );
+                }
+            }
+        }
+    }
 }

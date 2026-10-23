@@ -185,6 +185,8 @@ fn a_malformed_live_collection_is_an_error() {
 
 #[rstest]
 #[case::unknown_message(vec![Message::new(MessageType(0x7f), &[])])]
+#[case::shared_dataspace(vec![Message::new(MessageType::DATASPACE, &format::encode_sohm_ref(&[0; format::FHEAP_ID_LEN])).with_flags(MessageFlags::SHARED)])]
+#[case::shared_attribute(vec![Message::new(MessageType::ATTRIBUTE, &format::encode_sohm_ref(&[0; format::FHEAP_ID_LEN])).with_flags(MessageFlags::SHARED)])]
 #[case::object_reference_dataset(object_reference_dataset())]
 #[case::object_reference_attribute(vec![Message::new(
     MessageType::ATTRIBUTE,
@@ -415,7 +417,7 @@ impl SpaceOwnership {
     ///
     /// Panics if the analysis is incomplete, any byte is unclassified, the physical and logical
     /// file lengths differ, or the extents do not partition the file into nonempty ranges.
-    pub(super) fn assert_exact(&self) {
+    pub(crate) fn assert_exact(&self) {
         self.assert_classified(&[]);
     }
 
@@ -426,7 +428,7 @@ impl SpaceOwnership {
     ///
     /// Panics if the analysis is incomplete, the unclassified extents differ, the physical and
     /// logical file lengths differ, or the extents do not partition the file into nonempty ranges.
-    fn assert_classified(&self, expected_unclassified: &[(u64, u64)]) {
+    pub(crate) fn assert_classified(&self, expected_unclassified: &[(u64, u64)]) {
         let Self {
             physical_size,
             logical_size,

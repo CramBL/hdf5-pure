@@ -58,6 +58,7 @@ use test_util_hdf5::dataset::Unlimited;
 use test_util_hdf5::file_space;
 use test_util_hdf5::paged;
 use test_util_hdf5::session;
+use test_util_hdf5::storage;
 use test_util_hdf5::userblock;
 
 #[rstest]
@@ -123,17 +124,7 @@ fn created_page_tail_survives_reference_library_mutation(
     drop(file);
     let bytes = std::fs::read(&path).unwrap();
     let file = File::open_rw(&path).unwrap();
-    let unclassified = if raw_len == 513 {
-        vec![(file_space::raw_extents(&file, "d")[0].end, 511)]
-    } else {
-        Vec::new()
-    };
-    let initial_unclassified = if c_created {
-        reference_manager_unclassified(&bytes, page, &file, unclassified.clone())
-    } else {
-        unclassified.clone()
-    };
-    file_space::assert_space_ownership(&file, &initial_unclassified);
+    storage::assert_unavailable(&file, &storage::file_metadata_extents(&file, &bytes));
     file.close().unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
     if !c_created
@@ -192,15 +183,13 @@ fn created_page_tail_survives_reference_library_mutation(
         file.root().attrs().unwrap()["fill"],
         AttrValue::U8Array(vec![13; attribute_len])
     );
-    let unclassified = reference_manager_unclassified(&bytes, page, &file, unclassified);
-    file_space::assert_space_ownership(&file, &unclassified);
+    storage::assert_unavailable(&file, &storage::file_metadata_extents(&file, &bytes));
     file.root()
         .create_dataset("from_rust", |builder| {
             builder.with_u8_data(&[19; 32]);
         })
         .unwrap();
     file.commit().unwrap();
-    file_space::assert_space_ownership(&file, &unclassified);
     file.close().unwrap();
     let file = File::open(&path).unwrap();
     assert_eq!(
@@ -216,62 +205,6 @@ fn created_page_tail_survives_reference_library_mutation(
         vec![19; 32]
     );
     userblock.assert_unchanged(&path);
-}
-
-/// Adds diagnostic gaps that match partial-page tails of managers written by libhdf5.
-///
-/// Includes a tail only when ownership analysis reports that exact gap.
-/// `H5FS__cache_hdr_pre_serialize` in `H5FScache.c`, HDF5 1.10.11, places section lists during flush.
-fn reference_manager_unclassified(
-    bytes: &[u8],
-    page: u64,
-    file: &File,
-    mut expected: Vec<(u64, u64)>,
-) -> Vec<(u64, u64)> {
-    let superblock = file.superblock();
-    let widths = FormatWidths {
-        offsets: superblock.offset_size,
-        lengths: superblock.length_size,
-    };
-    let base = superblock.base_address;
-    let info = file.file_space_info().unwrap();
-    let ownership = file.__space_ownership().unwrap();
-    for address in info
-        .manager_addrs
-        .iter()
-        .filter_map(|address| match address {
-            hdf5_pure::DecodedStoredAddress::Defined(address) => Some(*address),
-            hdf5_pure::DecodedStoredAddress::Undefined => None,
-        })
-    {
-        let offset = usize::try_from(base.absolute(address).unwrap()).unwrap();
-        let header = FreeSpaceManagerHeader::parse(widths, &bytes[offset..]).unwrap();
-        for (start, length) in [
-            (
-                address.get(),
-                hdf5_pure_format::__private::free_space_manager_header_len(widths),
-            ),
-            (
-                header.section_list_addr().get(),
-                header.section_list_allocated(),
-            ),
-        ] {
-            if start % page != 0 || length % page == 0 {
-                continue;
-            }
-            let end = start + length;
-            let tail = (
-                base.absolute(StoredAddress::new(end)).unwrap(),
-                page - end % page,
-            );
-            if ownership.unclassified_space.contains(&tail) {
-                expected.push(tail);
-            }
-        }
-    }
-    expected.sort_unstable();
-    expected.dedup();
-    expected
 }
 
 #[rstest]
@@ -335,7 +268,7 @@ fn paged_manager_capacity_survives_reference_library_mutation(
         builder.write(&path).unwrap();
     }
     let userblock = Userblock::read(&path, usize::try_from(base).unwrap());
-    let file = File::open_rw(&path).unwrap();
+    let mut file = File::open_rw(&path).unwrap();
     file.root().delete("victim").unwrap();
     file.root()
         .create_dataset("added", |builder| {
@@ -348,20 +281,23 @@ fn paged_manager_capacity_survives_reference_library_mutation(
             .set_attr("generation", AttrValue::I64(generation))
             .unwrap();
         file.commit().unwrap();
-        let ownership = file.__space_ownership().unwrap();
-        assert!(ownership.analysis_complete);
-        for &(at, len) in ownership
-            .free_space_manager_space
-            .iter()
-            .chain(&ownership.live_metadata_space)
-        {
-            assert!(
-                ownership
-                    .reusable_free_space
+        file.close().unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        file = File::open_rw(&path).unwrap();
+        let mut allocated = storage::file_metadata_extents(&file, &bytes);
+        for name in ["keep", "ceiling", "added"] {
+            allocated.extend(storage::header_extents(
+                &file,
+                &bytes,
+                storage::root_object_address(&file, &bytes, name),
+            ));
+            allocated.extend(
+                file_space::raw_extents(&file, name)
                     .iter()
-                    .all(|&(free, size)| at + len <= free || free + size <= at)
+                    .map(|extent| (extent.start, extent.end - extent.start)),
             );
         }
+        storage::assert_unavailable(&file, &allocated);
     }
     let reusable = file.space_accounting().unwrap().reusable_free_space;
     file.close().unwrap();
@@ -408,7 +344,6 @@ fn paged_manager_capacity_survives_reference_library_mutation(
         file.dataset("c_added").unwrap().read_u8().unwrap(),
         [13; 100]
     );
-    assert!(file.__space_ownership().unwrap().analysis_complete);
     assert_eq!(
         file.file_space_info().unwrap().strategy,
         FileSpaceStrategy::Page
@@ -457,17 +392,21 @@ fn reclaimed_page_header_continuations_remain_compatible_with_c_mutation(
     }
     let original = std::fs::read(&path).unwrap();
     let file = File::open_rw(&path).unwrap();
-    let ownership = file.__space_ownership().unwrap();
-    assert!(ownership.analysis_complete);
-    let continuations: Vec<_> = ownership
-        .live_metadata_space
-        .iter()
-        .copied()
-        .filter(|&(address, length)| {
-            let offset = usize::try_from(address).unwrap();
-            length >= page && original[offset..].starts_with(header_bytes::CONTINUATION_SIGNATURE)
+    let owner = match action {
+        HeaderReclamation::DeleteDenseGroup
+        | HeaderReclamation::DeleteGroup
+        | HeaderReclamation::RebuildGroup => "group",
+        _ => "target",
+    };
+    let address = storage::root_object_address(&file, &original, owner);
+    let continuations = storage::header_extents(&file, &original, address)
+        .into_iter()
+        .filter(|&(at, len)| {
+            len >= page
+                && original[usize::try_from(at).unwrap()..]
+                    .starts_with(header_bytes::CONTINUATION_SIGNATURE)
         })
-        .collect();
+        .collect::<Vec<_>>();
     assert_eq!(continuations.len(), 1, "{continuations:?}");
     let (address, length) = continuations[0];
     assert_eq!((address - userblock) % page, 0);
@@ -522,11 +461,16 @@ fn reclaimed_page_header_continuations_remain_compatible_with_c_mutation(
     file.commit().unwrap();
     assert_header_reclamation_state(&file, &partial, &generic_fragment, action);
     if matches!(action, HeaderReclamation::UnlinkDataset) {
-        let after = file.__space_ownership().unwrap();
-        assert!(after.live_metadata_space.contains(&(address, length)));
         assert_eq!(
-            range::covered_len(&after.reusable_free_space, &(address..address + length)),
+            range::covered_len(
+                &file.space_accounting().unwrap().reusable_free_space,
+                &(address..address + length)
+            ),
             0
+        );
+        assert_eq!(
+            file.dataset("alias").unwrap().read_u8().unwrap(),
+            vec![3; HEADER_TARGET_ELEMENTS]
         );
     }
     file.close().unwrap();
@@ -560,7 +504,6 @@ fn reclaimed_page_header_continuations_remain_compatible_with_c_mutation(
         [23; 64]
     );
     assert_rust_header_survivors(&file, action, 11);
-    assert!(file.__space_ownership().unwrap().analysis_complete);
     file.close().unwrap();
     if userblock != 0 {
         assert_eq!(
@@ -669,29 +612,20 @@ fn assert_header_reclamation_state(
     generic_fragment: &Range<u64>,
     action: HeaderReclamation,
 ) {
-    let ownership = file.__space_ownership().unwrap();
-    assert!(ownership.analysis_complete);
+    let free = file.space_accounting().unwrap().reusable_free_space;
     assert_rust_header_survivors(file, action, 7);
     assert!(
-        ownership
-            .reusable_free_space
-            .iter()
+        free.iter()
             .all(|&(start, length)| !range::overlaps(&(start..start + length), partial)),
-        "{ownership:?}"
+        "{free:?}"
     );
     assert_eq!(
         file.dataset("anchor").unwrap().read_i32().unwrap(),
         vec![31; usize::try_from(file.file_space_info().unwrap().page_size.get() / 4 + 1).unwrap()]
     );
     if !matches!(action, HeaderReclamation::UnlinkDataset) {
-        assert_eq!(
-            range::covered_len(&ownership.unclassified_space, generic_fragment),
-            generic_fragment.end - generic_fragment.start
-        );
-        assert_eq!(
-            range::covered_len(&ownership.unclassified_space, partial),
-            partial.end - partial.start
-        );
+        assert_eq!(range::covered_len(&free, generic_fragment), 0);
+        assert_eq!(range::covered_len(&free, partial), 0);
     }
 }
 
