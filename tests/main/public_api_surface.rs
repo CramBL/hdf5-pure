@@ -275,3 +275,11 @@ fn zfp_rates_are_public_checked_builder_inputs() {
     let _: fn(&mut DatasetBuilder, ZfpRate) -> &mut DatasetBuilder = DatasetBuilder::with_zfp;
     assert_eq!(ZfpRate::try_from(16.0).unwrap().get(), 16.0);
 }
+
+#[test]
+fn chunk_filter_metadata_types_are_public() {
+    let _: fn(&hdf5_pure::Chunk) -> hdf5_pure::FilterMask = hdf5_pure::Chunk::filter_mask;
+    let _: fn(&hdf5_pure::Chunk) -> hdf5_pure::ChunkFilterView<'_> = hdf5_pure::Chunk::filters;
+    let _: hdf5_pure::FilterDisposition = hdf5_pure::FilterDisposition::BypassedRaw;
+    assert_eq!(hdf5_pure::FilterMask::NONE.raw_bits(), 0);
+}

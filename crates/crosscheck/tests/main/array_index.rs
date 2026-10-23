@@ -142,11 +142,14 @@ pub(crate) fn pure_chunks(file: &File) -> Vec<Chunk> {
         .chunks()
         .unwrap()
         .into_iter()
-        .map(|chunk| Chunk {
-            offset: chunk.offset,
-            address: chunk.address,
-            size: chunk.storage_size,
-            filter_mask: chunk.filter_mask,
+        .map(|chunk| {
+            let filter_mask = chunk.filter_mask().raw_bits();
+            Chunk {
+                offset: chunk.offset,
+                address: chunk.address,
+                size: chunk.storage_size,
+                filter_mask,
+            }
         })
         .collect();
     chunks.sort();

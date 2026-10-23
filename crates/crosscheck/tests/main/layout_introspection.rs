@@ -287,7 +287,7 @@ fn c_shuffle_then_deflate_pipeline() {
         "h5py/metno mark filters optional"
     );
     for c in ds.chunks().unwrap() {
-        assert_eq!(c.filter_mask, 0);
+        assert_eq!(c.filter_mask().raw_bits(), 0);
     }
 }
 
@@ -330,7 +330,7 @@ fn c_btree_v2_unfiltered_enumerates_multi_level_tree() {
     assert!(
         chunks
             .iter()
-            .all(|chunk| chunk.storage_size == 16 && chunk.filter_mask == 0)
+            .all(|chunk| chunk.storage_size == 16 && chunk.filter_mask().raw_bits() == 0)
     );
     assert_eq!(chunks[0].offset, vec![0, 0]);
     assert_eq!(chunk_i32_at(&path, &chunks[0]), vec![0, 1, 24, 25]);
@@ -367,7 +367,11 @@ fn c_btree_v2_filtered_reads_type_11_records() {
     assert_eq!(ds.chunk_index().unwrap(), Some(ChunkIndex::BTreeV2));
     let chunks = ds.chunks().unwrap();
     assert_eq!(chunks.len(), 100);
-    assert!(chunks.iter().all(|chunk| chunk.filter_mask == 0));
+    assert!(
+        chunks
+            .iter()
+            .all(|chunk| chunk.filter_mask().raw_bits() == 0)
+    );
     assert!(
         chunks
             .iter()

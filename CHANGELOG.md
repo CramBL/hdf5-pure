@@ -41,6 +41,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** The chunk mask field is replaced by typed inspection through `Chunk::filters` and a separate recorded-mask accessor. Dispositions follow the dataset's pipeline order and distinguish raw bypass, while bits outside the pipeline remain available for inspection.
 - **Breaking:** The rate argument of `DatasetBuilder::with_zfp` changes from a floating-point number to a checked type. Dataset-specific rate and block-budget limits are checked before encoding, while floating-point header limits depend on the data.
 - **Breaking:** Page-size settings in `FileCreateProperties` and related creation APIs change from integers to a checked size type. An unset size is distinct from an explicit default setting.
 - **Breaking:** Userblock settings in `FileBuilder::with_userblock` and related creation properties change from integers to a checked size type. Page alignment, content bounds, and platform limits are checked during output.

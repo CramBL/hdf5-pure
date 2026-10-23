@@ -19,8 +19,12 @@ use alloc::string::String;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+use alloc::sync::Arc;
+
 use core::fmt;
 use core::num::NonZeroU32;
+
+use hdf5_pure_core::__private::PipelineFilterMask;
 
 use hdf5_pure_filter::__private::{
     FILTER_DEFLATE, FILTER_FLETCHER32, FILTER_LZF, FILTER_NBIT, FILTER_RESERVED,
@@ -28,6 +32,7 @@ use hdf5_pure_filter::__private::{
 };
 
 use crate::DeflateLevel;
+use crate::FilterMask;
 use crate::FormatError;
 use crate::ScaleOffset;
 use crate::data_layout::ChunkIndexLayout;
@@ -140,14 +145,10 @@ impl ChunkIndex {
 
 /// The location and on-disk footprint of one stored chunk.
 ///
-/// A `Chunk` is a lightweight record: enumerating chunks reads only the chunk
-/// index, never the chunk data. To read one chunk, seek to
-/// [`address`](Self::address), read exactly [`storage_size`](Self::storage_size)
-/// bytes, then invert the dataset's
-/// [`filter_pipeline`](crate::Dataset::filter_pipeline) in *reverse* order
-/// (skipping the filters marked in [`filter_mask`](Self::filter_mask)). The
-/// curated analogue of `H5Dget_chunk_info`; obtain these from
-/// [`Dataset::chunks`](crate::Dataset::chunks).
+/// Obtain chunks from [`Dataset::chunks`](crate::Dataset::chunks), which reads the chunk index
+/// and filter metadata without reading chunk data. Each chunk retains the originating dataset's
+/// ordered pipeline. [`Self::filters`] reports which filters were applied, skipped, or bypassed
+/// for a raw partial edge chunk. [`Self::filter_mask`] returns the recorded bits separately.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Chunk {
@@ -161,9 +162,115 @@ pub struct Chunk {
     /// (compressed) size for a filtered dataset, or the raw chunk byte size
     /// otherwise.
     pub storage_size: u64,
-    /// Per-filter skip mask: if bit *i* is set, the *i*-th filter of the
-    /// pipeline was not applied to this chunk. `0` means every filter applies.
-    pub filter_mask: u32,
+    /// The recorded skip bits paired with the retained pipeline's length.
+    filter_mask: PipelineFilterMask,
+    filters: Arc<[Filter]>,
+    bypassed_raw: bool,
+}
+
+impl Chunk {
+    pub(crate) fn new(
+        filters: Arc<[Filter]>,
+        offset: Vec<u64>,
+        address: u64,
+        storage_size: u64,
+        recorded_mask: u32,
+        bypassed_raw: bool,
+    ) -> Result<Self, FormatError> {
+        Ok(Self {
+            filter_mask: PipelineFilterMask::from_raw_bits(recorded_mask, filters.len())?,
+            filters,
+            offset,
+            address,
+            storage_size,
+            bypassed_raw,
+        })
+    }
+
+    /// Returns the recorded skip bits for interoperability and inspection.
+    ///
+    /// Use [`Self::filters`] for filter dispositions. A zero mask may accompany a raw chunk
+    /// whose layout bypasses the pipeline.
+    pub fn filter_mask(&self) -> FilterMask {
+        self.filter_mask.recorded_mask()
+    }
+
+    /// Returns filter dispositions bound to this chunk's originating pipeline.
+    pub fn filters(&self) -> ChunkFilterView<'_> {
+        ChunkFilterView {
+            filters: &self.filters,
+            mask: self.filter_mask,
+            bypassed_raw: self.bypassed_raw,
+        }
+    }
+}
+
+/// The ordered filters and decoding dispositions of one stored chunk.
+///
+/// Obtain this view through [`Chunk::filters`]. The chunk retains its dataset's pipeline, so
+/// the filter order is preserved after the dataset is dropped. Raw partial edge chunks report
+/// [`FilterDisposition::BypassedRaw`] for every filter, independently of the recorded mask.
+#[derive(Clone, Copy, Debug)]
+pub struct ChunkFilterView<'a> {
+    filters: &'a [Filter],
+    mask: PipelineFilterMask,
+    bypassed_raw: bool,
+}
+
+impl<'a> ChunkFilterView<'a> {
+    /// Iterates over the dataset's filters and their dispositions in application order.
+    pub fn dispositions(
+        self,
+    ) -> impl DoubleEndedIterator<Item = (&'a Filter, FilterDisposition)> + ExactSizeIterator + 'a
+    {
+        self.filters
+            .iter()
+            .zip(self.mask.positions())
+            .map(move |(filter, (_, skipped))| (filter, self.disposition(skipped)))
+    }
+
+    /// Returns the filter and disposition at `index`, or `None` outside the pipeline.
+    ///
+    /// The index is a position in application order, independent of the filter identifier.
+    pub fn filter(&self, index: usize) -> Option<(&'a Filter, FilterDisposition)> {
+        self.filters
+            .get(index)
+            .zip(self.mask.is_skipped(index))
+            .map(|(filter, skipped)| (filter, self.disposition(skipped)))
+    }
+
+    /// Returns recorded mask bits outside the dataset's pipeline.
+    ///
+    /// These bits are preserved for inspection and ignored during decoding.
+    pub fn uninterpreted_bits(&self) -> u32 {
+        self.mask.uninterpreted_bits()
+    }
+
+    /// Returns whether the chunk's layout requires raw decoding without any filters.
+    pub fn bypasses_pipeline(&self) -> bool {
+        self.bypassed_raw
+    }
+
+    fn disposition(&self, skipped: bool) -> FilterDisposition {
+        if self.bypassed_raw {
+            FilterDisposition::BypassedRaw
+        } else if skipped {
+            FilterDisposition::Skipped
+        } else {
+            FilterDisposition::Applied
+        }
+    }
+}
+
+/// How a filter participates in decoding one stored chunk.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FilterDisposition {
+    /// The chunk uses pipeline decoding and this filter's skip bit is clear.
+    Applied,
+    /// The chunk is a raw partial edge chunk, so decoding bypasses the entire pipeline.
+    BypassedRaw,
+    /// The chunk uses pipeline decoding and this filter's skip bit is set.
+    Skipped,
 }
 
 /// A filter's identifier, interpreted parameters, and encoded metadata.
@@ -181,7 +288,7 @@ pub struct Filter {
     pub name: Option<String>,
     /// Whether the writer may omit this filter if it fails during output.
     ///
-    /// Each chunk's [`filter_mask`](Chunk::filter_mask) records which filters were omitted.
+    /// Inspect each chunk's disposition through [`Chunk::filters`].
     pub is_optional: bool,
     /// The interpreted parameters, or their opaque or pending classification.
     pub parameters: FilterParameters,
@@ -830,6 +937,53 @@ mod display_tests {
         let shown = hostile.to_string();
         assert!(!shown.chars().any(char::is_control), "{shown}");
         assert_eq!(shown, "evil\\u{1b}[31m\\nname(id=40000)");
+    }
+
+    #[rstest::rstest]
+    #[case::empty(0, 0, false, vec![], 0)]
+    #[case::one_skipped(1, 1, false, vec![FilterDisposition::Skipped], 0)]
+    #[case::second_skipped(2, 2, false, vec![FilterDisposition::Applied, FilterDisposition::Skipped], 0)]
+    #[case::high_bit(2, 0x8000_0002, false, vec![FilterDisposition::Applied, FilterDisposition::Skipped], 0x8000_0000)]
+    #[case::raw_bypass(2, 0, true, vec![FilterDisposition::BypassedRaw; 2], 0)]
+    #[case::raw_with_mask(2, 3, true, vec![FilterDisposition::BypassedRaw; 2], 0)]
+    #[case::full(32, u32::MAX, false, vec![FilterDisposition::Skipped; 32], 0)]
+    fn a_chunk_retains_its_pipeline_and_interprets_only_its_positions(
+        #[case] count: usize,
+        #[case] bits: u32,
+        #[case] bypassed: bool,
+        #[case] expected: Vec<FilterDisposition>,
+        #[case] uninterpreted: u32,
+    ) {
+        let filters: Arc<[Filter]> = (0..count)
+            .map(|index| {
+                Filter::from_description(FilterDescription {
+                    filter_id: 40000 + u16::try_from(index).unwrap(),
+                    name: Some(format!("custom{index}")),
+                    flags: crate::filter_pipeline::H5Z_FLAG_OPTIONAL,
+                    client_data: vec![index as u32, 17],
+                })
+                .unwrap()
+            })
+            .collect();
+        let chunk = Chunk::new(Arc::clone(&filters), vec![0], 42, 16, bits, bypassed).unwrap();
+        assert!(Arc::ptr_eq(&chunk.filters, &filters));
+        let view = chunk.filters();
+        assert_eq!(chunk.filter_mask().raw_bits(), bits);
+        assert_eq!(view.uninterpreted_bits(), uninterpreted);
+        assert_eq!(view.bypasses_pipeline(), bypassed);
+        assert_eq!(
+            view.dispositions()
+                .map(|(_, disposition)| disposition)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(view.filter(count), None);
+        assert_eq!(view.filter(32), None);
+        assert_eq!(view.filter(usize::MAX), None);
+        for (index, (filter, disposition)) in view.dispositions().enumerate() {
+            assert_eq!(filter, &filters[index]);
+            assert_eq!(view.filter(index), Some((filter, disposition)));
+        }
     }
 
     #[cfg(feature = "zfp")]

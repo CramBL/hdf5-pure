@@ -22,6 +22,7 @@ use crate::address::BaseAddressExt;
 use crate::address::OpenedImageContext;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
+use crate::chunked_read::ChunkDecoding;
 use crate::edit::GlobalHeapLiveness;
 use crate::edit::{
     AppendBuilder, AppendGeometry, AppendTarget, EditBacking, MemoryStrategy, SpaceAccounting,
@@ -6081,30 +6082,51 @@ the same commit to replace it",
         }
     }
 
-    /// Enumerate every allocated chunk of this chunked dataset — one [`Chunk`]
-    /// (logical offset, absolute file address, on-disk stored size, filter mask)
-    /// per chunk, in index order.
+    /// Returns every allocated chunk in index order, with its originating filter pipeline.
     ///
-    /// This reads only the chunk index, not the chunk data, so a caller can seek
-    /// to and decode chunks one at a time without materializing the whole
-    /// dataset. The curated analogue of `H5Dget_num_chunks` + `H5Dget_chunk_info`
-    /// (`chunks()?.len()` is the chunk count).
+    /// Reads the chunk index and filter metadata without reading chunk data. Each [`Chunk`]
+    /// retains the ordered pipeline and reports raw bypass independently of its recorded mask
+    /// through [`Chunk::filters`]. Returns an empty vector for chunked storage without any
+    /// allocated chunks.
     ///
-    /// Returns `Ok(vec![])` for a chunked dataset whose storage has not been allocated yet.
-    /// Returns `Err` if the dataset is not chunked (check [`layout`](Self::layout) or
-    /// [`is_chunked`](Self::is_chunked) first), or if its chunk index is malformed.
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the dataset is not chunked or its layout, chunk index, or
+    /// filter metadata is invalid. Propagates errors from resolving the dataset or reading
+    /// its metadata.
     pub fn chunks(&self) -> Result<Vec<Chunk>, Error> {
-        let rank = self.dataspace()?.dimensions.len();
+        let dataspace = self.dataspace()?;
+        let rank = dataspace.dimensions.len();
+        let DataLayout::Chunked {
+            flags,
+            chunk_dimensions,
+            ..
+        } = self.data_layout()?
+        else {
+            return Err(FormatError::ChunkedReadError(
+                "chunk enumeration requires a chunked dataset".into(),
+            )
+            .into());
+        };
+        let filters: Arc<[Filter]> = self.filter_pipeline()?.into();
         let addresses = self.file.addresses();
         self.raw_chunks()?
             .into_iter()
             .map(|c| {
-                Ok(Chunk {
-                    offset: c.offsets.into_iter().take(rank).collect(),
-                    address: addresses.absolute(c.address)?,
-                    storage_size: c.chunk_size.get(),
-                    filter_mask: c.filter_mask,
-                })
+                let bypassed_raw = ChunkDecoding::at_extent(
+                    flags,
+                    &chunk_dimensions,
+                    &dataspace.dimensions,
+                    &c.offsets,
+                ) == ChunkDecoding::Verbatim;
+                Ok(Chunk::new(
+                    Arc::clone(&filters),
+                    c.offsets.into_iter().take(rank).collect(),
+                    addresses.absolute(c.address)?,
+                    c.chunk_size.get(),
+                    c.filter_mask,
+                    bypassed_raw,
+                )?)
             })
             .collect()
     }

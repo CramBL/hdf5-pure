@@ -3,6 +3,7 @@ use hdf5_pure::DatasetBuilder;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
+use hdf5_pure::FilterDisposition;
 use hdf5_pure::FormatError;
 use hdf5_pure::{CustomFilterId, Error, FilterId, FilterParameters};
 use hdf5_pure_format::__private::FILTER_PIPELINE_VERSION_TWO;
@@ -85,7 +86,7 @@ fn filter_accessors_report_malformed_metadata(
     #[case] id: u16,
     #[case] values: Vec<u32>,
     #[case] expected: FormatError,
-    #[values(false, true)] detailed: bool,
+    #[values(0, 1, 2)] accessor: u8,
 ) {
     let mut builder = FileBuilder::new();
     builder
@@ -107,10 +108,10 @@ fn filter_accessors_report_malformed_metadata(
     body[0] = version;
     replace_pipeline(&mut bytes, &body);
     let dataset = File::from_bytes(bytes).unwrap().dataset("data").unwrap();
-    let error = if detailed {
-        dataset.filter_pipeline().map(|_| ()).unwrap_err()
-    } else {
-        dataset.filters().map(|_| ()).unwrap_err()
+    let error = match accessor {
+        0 => dataset.filter_pipeline().map(|_| ()).unwrap_err(),
+        1 => dataset.filters().map(|_| ()).unwrap_err(),
+        _ => dataset.chunks().map(|_| ()).unwrap_err(),
     };
     let Error::Format(actual) = error else {
         panic!("expected format error, got {error:?}")
@@ -152,6 +153,11 @@ fn opaque_filter_metadata_is_lossless(#[case] raw: u16, #[case] id: FilterId) {
     assert_eq!(pipeline[0].flags(), 0x8001);
     assert!(pipeline[0].is_optional);
     assert_eq!(pipeline[0].client_data(), values);
+    let chunks = dataset.chunks().unwrap();
+    assert_eq!(chunks.len(), 1);
+    let (filter, disposition) = chunks[0].filters().filter(0).unwrap();
+    assert_eq!(filter, &pipeline[0]);
+    assert_eq!(disposition, FilterDisposition::Applied);
 }
 
 #[test]
