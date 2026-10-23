@@ -11,6 +11,7 @@ use std::panic;
 use std::panic::AssertUnwindSafe;
 
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::UserblockSize;
 use hdf5_pure::{
     AttrValue, Error, File, FileAccessProperties, FileBuilder, FormatError, MaxExtent, ScaleOffset,
     SyncPolicy,
@@ -397,7 +398,7 @@ fn userblock_refuses_inplace_but_staged_append_dataset_works() {
     let p = dir.path().join("ub.h5");
     {
         let mut b = FileBuilder::new();
-        b.with_userblock(512);
+        b.with_userblock(UserblockSize::MIN);
         Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).add_to(&mut b);
         b.write(&p).unwrap();
     }

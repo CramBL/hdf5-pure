@@ -49,6 +49,7 @@ use crate::DeflateLevel;
 use crate::FillTime;
 use crate::SuperblockStatusFlags;
 use crate::SuperblockVersion;
+use crate::UserblockSize;
 #[cfg(test)]
 use crate::address::AddressContext;
 use crate::address::BaseAddressExt;
@@ -1129,11 +1130,10 @@ pub struct FileWriter {
     root_attrs: AttributeSpecs,
     root_committed: Vec<CommittedDatatype>,
     groups: Vec<FinishedGroup>,
-    userblock_size: u64,
-    /// Bytes to emit at the head of the userblock region, from
-    /// [`with_userblock_content`](FileWriter::with_userblock_content). The rest
-    /// of the region is zero-filled. Empty by default, which reproduces the
-    /// all-zero userblock this writer emitted before.
+    userblock_size: UserblockSize,
+    /// Bytes written at the start of the prefix, from
+    /// [`with_userblock_content`](FileWriter::with_userblock_content). The writer fills the
+    /// remaining prefix with zeros.
     userblock_content: Vec<u8>,
     /// Requested library-version bounds (low, high), validated in `finish`.
     /// `None` means no constraint (any output the writer produces is accepted).
@@ -1158,7 +1158,7 @@ impl FileWriter {
             root_attrs: AttributeSpecs::default(),
             root_committed: Vec::new(),
             groups: Vec::new(),
-            userblock_size: 0,
+            userblock_size: UserblockSize::NONE,
             userblock_content: Vec::new(),
             libver_bounds: None,
             file_space_strategy: None,
@@ -1225,26 +1225,19 @@ impl FileWriter {
         LibVer::resolve_writable(self.libver_bounds)
     }
 
-    /// Set the userblock size in bytes: zero (no userblock), or a power of two of
-    /// at least 512. Any other size is refused by [`finish`](Self::finish) with
-    /// [`FormatError::InvalidUserblockSize`].
+    /// Sets the size of the reserved prefix before the HDF5 signature.
     ///
-    /// The region will be filled with zeros; the caller can write into the
-    /// returned bytes at `[0..userblock_size]`, or supply them up front with
+    /// The writer fills the prefix with zeros unless content is supplied through
     /// [`with_userblock_content`](Self::with_userblock_content).
-    pub fn with_userblock(&mut self, size: u64) -> &mut Self {
+    pub fn with_userblock(&mut self, size: UserblockSize) -> &mut Self {
         self.userblock_size = size;
         self
     }
 
-    /// Set the bytes that occupy the head of the userblock region, so the writer
-    /// *emits* them rather than the caller patching them in afterwards. The rest
-    /// of the region is zero-filled, and `content` longer than the userblock is
-    /// refused by [`finish`](Self::finish).
+    /// Sets the bytes at the start of the reserved userblock.
     ///
-    /// The userblock is the first thing written in address order, so this is what
-    /// lets a format that wraps HDF5 in a header — MATLAB v7.3, say — be produced
-    /// by the non-seekable streaming path without a second pass over the file.
+    /// The writer fills the remaining prefix with zeros. [`finish`](Self::finish) returns
+    /// [`FormatError::UserblockContentTooLarge`] if the content exceeds the configured size.
     pub fn with_userblock_content(&mut self, content: &[u8]) -> &mut Self {
         self.userblock_content = content.to_vec();
         self
@@ -1513,26 +1506,13 @@ impl FileWriter {
             });
         }
 
-        // The userblock's size is what the superblock's base address is, and the
-        // format defines it as zero or a power of two of at least 512 bytes. A
-        // reader scans for the signature at 0, 512, 1024, … doubling, so any
-        // other size hides the superblock somewhere it will never look: the
-        // writer would emit a file that nothing, including this crate, can open.
-        // Refused here rather than at `with_userblock` so a caller who overwrites
-        // an earlier size is judged on the one that actually applies.
-        if self.userblock_size != 0
-            && (self.userblock_size < 512 || !self.userblock_size.is_power_of_two())
-        {
-            return Err(FormatError::InvalidUserblockSize(self.userblock_size));
-        }
-
         // Checked before any layout work: content that overruns its region would
         // otherwise displace the superblock, and the failure would surface as an
         // unopenable file rather than as the caller's mistake.
-        if self.userblock_content.len() as u64 > self.userblock_size {
+        if self.userblock_content.len() as u64 > self.userblock_size.get() {
             return Err(FormatError::UserblockContentTooLarge {
                 content: self.userblock_content.len() as u64,
-                userblock: self.userblock_size,
+                userblock: self.userblock_size.get(),
             });
         }
 
@@ -1550,9 +1530,9 @@ impl FileWriter {
                 // below is base-relative, so base-relative boundaries coincide
                 // with absolute ones only when the userblock is a whole number of
                 // pages (zero trivially qualifies).
-                if self.userblock_size % page_size.get() != 0 {
+                if self.userblock_size.get() % page_size.get() != 0 {
                     return Err(FormatError::UserblockNotPageAligned(
-                        self.userblock_size,
+                        self.userblock_size.get(),
                         page_size.get(),
                     ));
                 }
@@ -2982,12 +2962,7 @@ impl FileWriter {
 
         // Pass 2: compute real addresses.
         // The allocator returns stored addresses relative to the userblock base.
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "userblock_size is a small power-of-two header size used as an in-memory \
-                      buffer offset; it fits usize on every supported target"
-        )]
-        let ub = self.userblock_size as usize;
+        let ub = self.userblock_size.get().to_usize()?;
         // Under direct placement, reserve the root after the early collections and PAGE padding.
         // Under aggregation, reserve the root header through the metadata aggregate.
         let advance = |cursor: &mut u64, len: u64| -> Result<StoredAddress, FormatError> {
@@ -4957,7 +4932,7 @@ mod tests {
         let mut writer = FileWriter::new();
         writer.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
         writer.with_file_space_page_size(page_size);
-        writer.with_userblock(userblock);
+        writer.with_userblock(UserblockSize::try_from(userblock).unwrap());
         writer.set_root_attr("root_label", AttrValue::VarLenString("root-value".into()));
         writer
             .create_dataset("contiguous")

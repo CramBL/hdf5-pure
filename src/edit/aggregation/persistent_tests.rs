@@ -17,6 +17,7 @@ use crate::FileSpaceStrategy;
 use crate::FormatError;
 use crate::MaxExtent;
 use crate::MemoryStrategy;
+use crate::UserblockSize;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::chunk_index_inplace::Store;
@@ -103,7 +104,7 @@ fn active_spare_is_excluded_until_persistent_settlement(
     let path = directory.path().join("settlement.h5");
     let mut builder = FileBuilder::new();
     builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
-    builder.with_userblock(userblock);
+    builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
     builder.write(&path).unwrap();
     let mut engine = open_engine(&path, backing);
     stage_dataset(&mut engine, "first", 37);
@@ -614,7 +615,7 @@ fn stage_dataset(engine: &mut WriteEngine, path: &str, value: u8) {
 fn write_file(path: &Path, userblock: u64) {
     let mut builder = FileBuilder::new();
     builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
-    builder.with_userblock(userblock);
+    builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
     builder.create_dataset("scratch").with_u8_data(&[7; 4096]);
     builder.create_dataset("keep").with_u8_data(&[11; 4096]);
     builder.write(path).unwrap();

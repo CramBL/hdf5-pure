@@ -11,6 +11,8 @@ use hdf5_pure_format::__private::FractalHeapIdLayout;
 use hdf5_pure_format::__private::{BTREE_V2_LINK_CREATION_ORDER, BTREE_V2_LINK_NAME};
 use hdf5_pure_space::__private::Extent;
 
+#[cfg(test)]
+use crate::UserblockSize;
 use crate::access_mode::AccessMode;
 #[cfg(test)]
 use crate::address::BaseAddress;
@@ -1132,7 +1134,7 @@ mod tests {
     #[case::source(true)]
     fn path_navigation_uses_the_opened_image_context(#[case] source_backed: bool) {
         let mut builder = FileBuilder::new();
-        builder.with_userblock(512);
+        builder.with_userblock(UserblockSize::MIN);
         let mut group = builder.create_group("group");
         group.create_dataset("data").with_i32_data(&[1, 2, 3]);
         builder.add_group(group.finish());
@@ -1701,7 +1703,7 @@ mod tests {
         const UB: u64 = 512;
 
         let mut b = crate::writer::FileBuilder::new();
-        b.with_userblock(UB);
+        b.with_userblock(UserblockSize::try_from(UB).unwrap());
         b.create_dataset("d")
             .with_i32_data(&[1, 2, 3])
             .with_shape(&[3]);

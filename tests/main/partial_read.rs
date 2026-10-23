@@ -13,6 +13,7 @@ use hdf5_pure::FormatError;
 use hdf5_pure::ReadSeekSource;
 use hdf5_pure::Source;
 use hdf5_pure::StringPadding;
+use hdf5_pure::UserblockSize;
 use rstest::rstest;
 use test_util::btree_v1;
 use test_util::data_layout;
@@ -423,7 +424,7 @@ fn userblock_windows_go_through_base_framing() {
     let chunked: Vec<f64> = (0..300).map(|i| i as f64 * 0.5).collect();
     let contig: Vec<f64> = (0..40).map(f64::from).collect();
     let (buffered, streaming, _dir) = on_both_backends(|b| {
-        b.with_userblock(512);
+        b.with_userblock(UserblockSize::MIN);
         b.create_dataset("chunked")
             .with_f64_data(&chunked)
             .with_shape(&[300])

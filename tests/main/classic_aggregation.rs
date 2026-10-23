@@ -7,6 +7,7 @@ use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::MemoryStrategy;
 use hdf5_pure::SpaceOwnership;
+use hdf5_pure::UserblockSize;
 use rstest::rstest;
 
 use test_util_hdf5::aggregation;
@@ -29,7 +30,7 @@ fn persistent_creation_recovers_settled_spare_and_reuses_it_after_reopen(
     let path = directory.path().join("persistent.h5");
     let mut builder = FileBuilder::new();
     builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, threshold);
-    builder.with_userblock(userblock);
+    builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
     builder.create_dataset("values").with_i32_data(&[17; 16]);
     builder.write(&path).unwrap();
     let file = File::open(&path).unwrap();
@@ -224,7 +225,7 @@ fn staged_aggr_allocations_reuse_session_windows(
     let path = directory.path().join("session.h5");
     let mut builder = FileBuilder::new();
     builder.with_file_space_strategy(FileSpaceStrategy::Aggr, false, 1);
-    builder.with_userblock(userblock);
+    builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
     builder.write(&path).unwrap();
     let properties = FileAccessProperties::new().with_memory_strategy(backing);
     let mut file = File::open_rw_with_options(&path, properties).unwrap();

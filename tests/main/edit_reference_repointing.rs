@@ -10,6 +10,7 @@
 //! became unreadable once something reused the span.
 
 use hdf5_pure::FixedPointType;
+use hdf5_pure::UserblockSize;
 use hdf5_pure::{
     AttrValue, CompoundTypeBuilder, Datatype, DatatypeByteOrder, File, FileBuilder,
     FileSpaceStrategy, Group, Object, ReferenceType,
@@ -298,7 +299,7 @@ fn references_are_repointed_on_a_userblock_file() {
     // Stored addresses are relative to the superblock base, so a userblock is
     // where an off-by-`base` in either direction shows up.
     let mut b = FileBuilder::new();
-    b.with_userblock(1024);
+    b.with_userblock(UserblockSize::try_from(1024).unwrap());
     fixtures::reference_target_group(&mut b);
     b.create_dataset("refs").with_path_references(&["g"]);
     b.write(&path).unwrap();

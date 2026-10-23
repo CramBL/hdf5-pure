@@ -317,6 +317,7 @@ use crate::DeflateLevel;
 use crate::FillTime;
 use crate::SuperblockStatusFlags;
 use crate::SuperblockVersion;
+use crate::UserblockSize;
 use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
 use crate::address::BaseAddress;
@@ -1668,7 +1669,9 @@ pub(crate) fn create_would_refuse_reopen(
              use MemoryStrategy::Auto or MemoryStrategy::Mirrored for staged edits",
         );
     }
-    if create.userblock() != 0 && access.memory_strategy() == Some(MemoryStrategy::Bounded) {
+    if create.userblock() != UserblockSize::NONE
+        && access.memory_strategy() == Some(MemoryStrategy::Bounded)
+    {
         return Some(
             "a userblock cannot be combined with MemoryStrategy::Bounded: the bounded engine \
              cannot edit a file with a non-zero base address, so creating one this way would \
@@ -15637,7 +15640,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("paged_index.h5");
         let mut b = FileBuilder::new();
-        b.with_userblock(userblock);
+        b.with_userblock(UserblockSize::try_from(userblock).unwrap());
         b.create_dataset("d").with_i32_data(&[1; 100]);
         b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
             .with_file_space_page_size(FileSpacePageSize::MIN.get());
@@ -17511,7 +17514,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("failed_persisting_commit.h5");
         let mut b = FileBuilder::new();
-        b.with_userblock(userblock);
+        b.with_userblock(UserblockSize::try_from(userblock).unwrap());
         b.create_dataset("a").with_i32_data(&[1; 100]);
         b.create_dataset("b").with_i32_data(&[2; 400]);
         b.create_dataset("c").with_i32_data(&[3; 100]);
@@ -19240,7 +19243,7 @@ mod tests {
 
         const UB: u64 = 512;
         let mut b = FileBuilder::new();
-        b.with_userblock(UB);
+        b.with_userblock(UserblockSize::try_from(UB).unwrap());
         b.create_dataset("d").with_i32_data(&[1, 2, 3]);
         b.write(&path).unwrap();
 
@@ -19906,7 +19909,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("userblock.h5");
         let mut b = FileBuilder::new();
-        b.with_userblock(4096);
+        b.with_userblock(UserblockSize::try_from(4096).unwrap());
         b.create_dataset("d")
             .with_i32_data(&[1, 2, 3, 4])
             .with_shape(&[4]);
@@ -20112,7 +20115,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ub_buffered.h5");
         let mut b = FileBuilder::new();
-        b.with_userblock(4096);
+        b.with_userblock(UserblockSize::try_from(4096).unwrap());
         if paged {
             b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
                 .with_file_space_page_size(4096);

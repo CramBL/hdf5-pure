@@ -11,6 +11,8 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 #[cfg(test)]
 use crate::FixedPointType;
+#[cfg(test)]
+use crate::UserblockSize;
 use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
 use crate::address::BaseAddress;
@@ -7545,7 +7547,7 @@ mod tests {
         let mut builder = FileBuilder::new();
         builder
             .with_file_space_strategy(FileSpaceStrategy::Page, false, 1)
-            .with_userblock(userblock);
+            .with_userblock(UserblockSize::try_from(userblock).unwrap());
         if userblock > 0 {
             builder.with_userblock_content(b"preserve this userblock through explicit sync");
         }
@@ -7906,7 +7908,7 @@ mod tests {
     ) {
         let mut builder = FileBuilder::new();
         builder
-            .with_userblock(stored_base as u64)
+            .with_userblock(UserblockSize::try_from(stored_base as u64).unwrap())
             .with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 64);
         builder.create_dataset("data").with_i32_data(&[1, 2, 3]);
         let mut original = builder.finish().unwrap();
@@ -9042,7 +9044,7 @@ mod tests {
     fn both_paths_file_bytes(userblock: Option<u64>) -> Vec<u8> {
         let mut b = FileBuilder::new();
         if let Some(ub) = userblock {
-            b.with_userblock(ub);
+            b.with_userblock(UserblockSize::try_from(ub).unwrap());
         }
         b.create_dataset("plain")
             .with_i32_data(&(0..24).collect::<Vec<i32>>())
@@ -9149,7 +9151,7 @@ mod tests {
     fn group_child_address_base_overflow_is_rejected() {
         const UB: u64 = 512;
         let mut b = FileBuilder::new();
-        b.with_userblock(UB);
+        b.with_userblock(UserblockSize::try_from(UB).unwrap());
         let mut child = b.create_group("child");
         child.create_dataset("inner").with_i32_data(&[1, 2, 3]);
         b.add_group(child.finish());
@@ -10617,7 +10619,7 @@ mod tests {
 
         let paged_userblock = dir.path().join("paged_userblock.h5");
         let mut b = FileBuilder::new();
-        b.with_userblock(16 * 1024);
+        b.with_userblock(UserblockSize::try_from(16 * 1024).unwrap());
         b.with_file_space_strategy(crate::FileSpaceStrategy::Page, true, 1)
             .with_file_space_page_size(16 * 1024);
         b.create_dataset("d")

@@ -8,6 +8,7 @@ use hdf5_pure::FileBuilder;
 use hdf5_pure::GlobalHeapLiveness;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::StoredAddress;
+use hdf5_pure::UserblockSize;
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_format::__private as format;
 use rstest::rstest;
@@ -432,7 +433,7 @@ enum Written {
 impl Written {
     fn builder(self, userblock: u64) -> FileBuilder {
         let mut builder = FileBuilder::new();
-        builder.with_userblock(userblock);
+        builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
         match self {
             Self::Attributes(others) => {
                 builder.set_attr(

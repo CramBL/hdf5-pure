@@ -8,6 +8,7 @@
 use hdf5::dataset::Layout;
 use hdf5::file::LibraryVersion;
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::UserblockSize;
 use hdf5_pure::{File, FileBuilder, MaxExtent};
 
 use test_util_hdf5::absence;
@@ -42,7 +43,7 @@ fn pure_userblock_file_edited_then_read_by_c_library() {
     let path = dir.path().join("pure_ub.h5");
 
     let mut b = FileBuilder::new();
-    b.with_userblock(UB);
+    b.with_userblock(UserblockSize::try_from(UB).unwrap());
     b.create_dataset("alpha").with_f64_data(&[1.0, 2.0, 3.0]);
     let mut g = b.create_group("grp");
     g.create_dataset("beta").with_i32_data(&[10, 20, 30, 40]);
@@ -159,7 +160,7 @@ fn userblock_chunked_add_and_overwrite_read_by_c_library() {
 
     let seed = vec![2.0f64; 300];
     let mut b = FileBuilder::new();
-    b.with_userblock(UB);
+    b.with_userblock(UserblockSize::try_from(UB).unwrap());
     b.create_dataset("contig").with_i32_data(&[1, 2, 3]);
     b.create_dataset("c")
         .with_f64_data(&seed)
@@ -219,7 +220,7 @@ fn userblock_chunked_reclaimed_space_reused_read_by_c_library() {
 
     let seed = vec![5.0f64; 600];
     let mut b = FileBuilder::new();
-    b.with_userblock(UB);
+    b.with_userblock(UserblockSize::try_from(UB).unwrap());
     b.create_dataset("keep").with_f64_data(&[10.0, 20.0, 30.0]);
     b.create_dataset("c")
         .with_f64_data(&seed)
@@ -511,7 +512,7 @@ fn userblock_extensible_array_add_read_by_c_library() {
     let path = dir.path().join("pure_ub_ea.h5");
 
     let mut b = FileBuilder::new();
-    b.with_userblock(UB);
+    b.with_userblock(UserblockSize::try_from(UB).unwrap());
     b.create_dataset("keep").with_i32_data(&[7, 8, 9]);
     std::fs::write(&path, b.finish().unwrap()).unwrap();
 

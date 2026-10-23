@@ -23,6 +23,7 @@ use hdf5_pure::StoredAddress;
 use hdf5_pure::SuperblockStatusFlag;
 use hdf5_pure::SuperblockStatusFlags;
 use hdf5_pure::SuperblockVersion;
+use hdf5_pure::UserblockSize;
 use hdf5_pure::{BaseAddress, Error, File, FileBuilder, LibVer, MessageType, Superblock};
 
 use test_util::temp;
@@ -78,7 +79,7 @@ fn field_types(sb: &Superblock) {
 fn the_superblock_and_its_base_address_can_both_be_named() {
     let path = temp::temp_path("hdf5_pure_api_surface_superblock.h5");
     let mut b = FileBuilder::new();
-    b.with_userblock(512);
+    b.with_userblock(UserblockSize::MIN);
     b.create_dataset("alpha").with_f64_data(&[1.0]);
     std::fs::write(&path, b.finish().unwrap()).unwrap();
 
@@ -235,4 +236,18 @@ fn numeric_datatype_payloads_and_accessors_are_public() {
         Datatype::Time(TimeType::new(8, DatatypeByteOrder::LittleEndian, 64).unwrap()).type_size(),
         8
     );
+}
+
+#[test]
+fn userblock_properties_use_the_public_domain_type() {
+    use hdf5_pure::FileCreateProperties;
+
+    let _: fn(UserblockSize) -> u64 = UserblockSize::get;
+    let _: fn(hdf5_pure_core::UserblockSize) -> u64 = UserblockSize::get;
+    let _: fn(&mut FileBuilder, UserblockSize) -> &mut FileBuilder = FileBuilder::with_userblock;
+    let _: fn(FileCreateProperties, UserblockSize) -> FileCreateProperties =
+        FileCreateProperties::with_userblock;
+    let properties = FileCreateProperties::new().with_userblock(UserblockSize::MIN);
+    let size: UserblockSize = properties.userblock();
+    assert_eq!(size, UserblockSize::MIN);
 }

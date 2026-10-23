@@ -27,6 +27,7 @@ use hdf5_pure::LibVer;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::MemoryStrategy;
 use hdf5_pure::SyncPolicy;
+use hdf5_pure::UserblockSize;
 use test_util_hdf5::dataset::Unlimited;
 
 fn with_strategy(strategy: MemoryStrategy) -> FileAccessProperties {
@@ -41,7 +42,7 @@ fn plain_file(path: &std::path::Path) {
 /// The same file behind a 512-byte userblock, which the bounded engine refuses.
 fn userblock_file(path: &std::path::Path) {
     let mut b = FileBuilder::new();
-    b.with_userblock(512);
+    b.with_userblock(UserblockSize::MIN);
     Unlimited::new("d", &[1i32, 2, 3], 3).add_to(&mut b);
     b.write(path).unwrap();
 }
@@ -196,7 +197,7 @@ fn nonpersistent_page_with_userblock_uses_the_mirror() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ub_paged.h5");
     let mut b = FileBuilder::new();
-    b.with_userblock(4096);
+    b.with_userblock(UserblockSize::try_from(4096).unwrap());
     b.with_file_space_strategy(FileSpaceStrategy::Page, false, 0);
     b.create_dataset("d")
         .with_i32_data(&[1, 2, 3])
@@ -338,7 +339,7 @@ fn create_refuses_a_pair_it_could_not_reopen_before_writing_anything() {
     let ub = dir.path().join("ub.h5");
     let err = File::create_with_options(
         &ub,
-        FileCreateProperties::new().with_userblock(512),
+        FileCreateProperties::new().with_userblock(UserblockSize::MIN),
         FileAccessProperties::new().with_memory_strategy(MemoryStrategy::Bounded),
     )
     .expect_err("a userblock and a bounded guarantee cannot both hold");
@@ -353,7 +354,7 @@ fn create_refuses_a_pair_it_could_not_reopen_before_writing_anything() {
     let ok = dir.path().join("ok.h5");
     let file = File::create_with_options(
         &ok,
-        FileCreateProperties::new().with_userblock(512),
+        FileCreateProperties::new().with_userblock(UserblockSize::MIN),
         FileAccessProperties::new(),
     )
     .unwrap();
@@ -432,7 +433,7 @@ fn create_with_options_rejects_a_paged_userblock_that_is_not_a_whole_number_of_p
 
 fn paged_userblock_properties(userblock: u64) -> FileCreateProperties {
     FileCreateProperties::new()
-        .with_userblock(userblock)
+        .with_userblock(UserblockSize::try_from(userblock).unwrap())
         .with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
         .with_file_space_page_size(4096)
 }
@@ -611,11 +612,14 @@ fn auto_matches_bounded_on_every_pair_bounded_accepts() {
                 .with_file_space_strategy(FileSpaceStrategy::Page, false, 0)
                 .with_file_space_page_size(4096),
         ),
-        ("userblock", FileCreateProperties::new().with_userblock(512)),
+        (
+            "userblock",
+            FileCreateProperties::new().with_userblock(UserblockSize::MIN),
+        ),
         (
             "page-persisting-userblock",
             FileCreateProperties::new()
-                .with_userblock(4096)
+                .with_userblock(UserblockSize::try_from(4096).unwrap())
                 .with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
                 .with_file_space_page_size(4096),
         ),

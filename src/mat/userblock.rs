@@ -17,10 +17,13 @@ pub const USERBLOCK_SIZE: u64 = USERBLOCK_LEN as u64;
 /// Default description text written in the first 124 bytes.
 pub const DEFAULT_DESCRIPTION: &str = "MATLAB 7.3 MAT-file, Platform: hdf5-pure (Rust)";
 
-/// Write the MATLAB v7.3 userblock into the first 512 bytes of `file_bytes`.
+/// Writes the MATLAB v7.3 header into the first 128 bytes of `file_bytes`.
 ///
-/// Panics if `file_bytes.len() < 512`. Everything after offset 128 is left
-/// untouched (zeros from `FileBuilder::with_userblock(512)`).
+/// Leaves bytes from offset 128 onward unchanged.
+///
+/// # Panics
+///
+/// Panics if `file_bytes` is shorter than 512 bytes.
 pub fn write_header(file_bytes: &mut [u8], description: &str) {
     assert!(
         file_bytes.len() as u64 >= USERBLOCK_SIZE,

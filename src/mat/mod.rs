@@ -674,18 +674,19 @@
 //! ## Userblock header
 //!
 //! MATLAB requires a 512-byte userblock beginning with the `MATLAB 7.3 MAT-file` signature. Reserve
-//! the block with [`with_userblock(512)`](crate::FileBuilder::with_userblock) and hand the header
-//! to [`with_userblock_content`](crate::FileBuilder::with_userblock_content), which makes it part
-//! of the file the writer emits:
+//! the block with [`with_userblock`](crate::FileBuilder::with_userblock) using
+//! [`UserblockSize::MIN`](crate::UserblockSize::MIN), and pass the header to
+//! [`with_userblock_content`](crate::FileBuilder::with_userblock_content):
 //!
 //! ```rust
+//! use hdf5_pure::UserblockSize;
 //! # let dir = tempfile::tempdir()?;
 //! # let path = dir.path().join("hand_built.mat");
 //! use hdf5_pure::FileBuilder;
 //! use hdf5_pure::mat::userblock;
 //!
 //! let mut builder = FileBuilder::new();
-//! builder.with_userblock(512);
+//! builder.with_userblock(UserblockSize::MIN);
 //! builder.with_userblock_content(&userblock::header_block(userblock::DEFAULT_DESCRIPTION));
 //! builder.create_dataset("data").with_f64_data(&[1.0]);
 //!

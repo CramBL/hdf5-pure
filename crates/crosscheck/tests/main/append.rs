@@ -6,6 +6,7 @@
 //! nonzero per-chunk filter mask that the append must preserve.
 
 use hdf5_pure::FileBuilder;
+use hdf5_pure::UserblockSize;
 
 use test_util_hdf5::dataset::{self, AppendInteropFixture, Unlimited};
 
@@ -91,7 +92,7 @@ fn userblock_append_c_reads() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ub.h5");
     let mut b = FileBuilder::new();
-    b.with_userblock(512);
+    b.with_userblock(UserblockSize::MIN);
     Unlimited::new("d", &(0..10).collect::<Vec<i32>>(), 4)
         .filters(dataset::SHUFFLE_DEFLATE_6)
         .add_to(&mut b);

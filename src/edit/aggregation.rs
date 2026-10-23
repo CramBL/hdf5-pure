@@ -430,6 +430,7 @@ mod tests {
     use crate::FileSpaceStrategy;
     use crate::MaxExtent;
     use crate::MemoryStrategy;
+    use crate::UserblockSize;
     use crate::error::Error;
     use crate::error::FormatError;
     use crate::image::FileImage;
@@ -467,7 +468,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("windows.h5");
         let mut builder = FileBuilder::new();
-        builder.with_userblock(userblock);
+        builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
         builder.with_file_space_strategy(FileSpaceStrategy::Aggr, false, 1);
         builder.write(&path).unwrap();
         let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();

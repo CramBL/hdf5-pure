@@ -12,6 +12,7 @@
 //! to reach once a single oversized attribute could select dense storage on its
 //! own (#195).
 
+use hdf5_pure::UserblockSize;
 use hdf5_pure::{AttrValue, File, FileBuilder, RepackOptions};
 
 use test_util::fractal_heap;
@@ -34,7 +35,7 @@ fn one_big() -> AttrValue {
 /// attributes, so every object kind is covered by one file.
 fn write_source(path: &std::path::Path) {
     let mut builder = FileBuilder::new();
-    builder.with_userblock(USERBLOCK);
+    builder.with_userblock(UserblockSize::try_from(USERBLOCK).unwrap());
     builder.set_attr("big", one_big());
     {
         let dataset = builder.create_dataset("payload").with_f64_data(&[1.5, 2.5]);

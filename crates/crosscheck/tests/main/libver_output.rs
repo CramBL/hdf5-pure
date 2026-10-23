@@ -32,6 +32,7 @@
 //! *lower* bound of `LibVer::LATEST`, which selects the same 1.10 format the
 //! writer emits by default and must produce a file the C library reads.
 
+use hdf5_pure::UserblockSize;
 use hdf5_pure::{AttrValue, File, FileBuilder, LibVer};
 #[cfg(feature = "__hdf5-1.10")]
 use hdf5_pure::{FileAccessProperties, FileCreateProperties};
@@ -45,7 +46,7 @@ use test_util::superblock;
 fn write_v18(path: &std::path::Path) {
     let mut b = FileBuilder::new();
     b.with_libver_bounds(LibVer::Earliest, LibVer::V18);
-    b.with_userblock(512);
+    b.with_userblock(UserblockSize::MIN);
     b.set_attr("root_attr", AttrValue::AsciiString("r".into()));
     b.create_dataset("values")
         .with_f64_data(&[1.0, 2.0, 3.0])
@@ -273,4 +274,52 @@ fn c_reads_a_file_written_at_a_lower_bound_of_latest() {
         );
         assert_eq!(f.attr_names().unwrap(), vec!["root_attr".to_string()]);
     }
+}
+
+#[rstest::rstest]
+#[case(0)]
+#[case(512)]
+#[case(1024)]
+#[case(2048)]
+fn userblock_sizes_roundtrip_through_both_libraries(#[case] raw_size: u64) {
+    let directory = tempfile::tempdir().unwrap();
+    let pure_path = directory.path().join("pure.h5");
+    let size = UserblockSize::try_from(raw_size).unwrap();
+    let mut builder = FileBuilder::new();
+    builder.with_libver_bounds(LibVer::Earliest, LibVer::V18);
+    builder.with_userblock(size);
+    if size != UserblockSize::NONE {
+        builder.with_userblock_content(b"wrapper");
+    }
+    builder.create_dataset("data").with_i32_data(&[1, 2, 3]);
+    builder.write(&pure_path).unwrap();
+    let c_file = hdf5::File::open(&pure_path).unwrap();
+    assert_eq!(c_file.userblock(), size.get());
+    assert_eq!(
+        c_file.dataset("data").unwrap().read_raw::<i32>().unwrap(),
+        vec![1, 2, 3]
+    );
+    c_file.close().unwrap();
+    let pure_bytes = std::fs::read(&pure_path).unwrap();
+    if size != UserblockSize::NONE {
+        assert_eq!(&pure_bytes[..7], b"wrapper");
+    }
+
+    let c_path = directory.path().join("c.h5");
+    let c_file = hdf5::File::with_options()
+        .with_fcpl(|properties| properties.userblock(size.get()))
+        .create(&c_path)
+        .unwrap();
+    c_file
+        .new_dataset_builder()
+        .with_data(&[1i32, 2, 3])
+        .create("data")
+        .unwrap();
+    c_file.close().unwrap();
+    let file = File::open(&c_path).unwrap();
+    assert_eq!(file.superblock().base_address.get(), size.get());
+    assert_eq!(
+        file.dataset("data").unwrap().read_i32().unwrap(),
+        vec![1, 2, 3]
+    );
 }

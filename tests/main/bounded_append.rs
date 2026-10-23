@@ -3,6 +3,7 @@
 //! mirror-only.
 
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::UserblockSize;
 use hdf5_pure::{
     AttrValue, Error, File, FileAccessProperties, FileBuilder, FileSpaceStrategy, MemoryStrategy,
     MetadataCacheConfig, SyncPolicy,
@@ -227,7 +228,7 @@ fn userblock_file_is_refused_at_open() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("userblock.h5");
     let mut b = FileBuilder::new();
-    b.with_userblock(512);
+    b.with_userblock(UserblockSize::MIN);
     Unlimited::new("d", &[1, 2, 3], 2).add_to(&mut b);
     b.write(&p).unwrap();
     let err = session::open_bounded_on_close(&p).unwrap_err();

@@ -5,6 +5,7 @@
 
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::FilterId;
+use hdf5_pure::UserblockSize;
 use hdf5_pure::{
     AppendBuilder, AttrValue, Error, File, FileBuilder, FormatError, MaxExtent, ScaleOffset,
 };
@@ -279,7 +280,7 @@ fn append_to_userblock_file() {
     // so every stored address is base-relative. The append must place and index
     // its new chunks base-relative too.
     let mut b = FileBuilder::new();
-    b.with_userblock(512);
+    b.with_userblock(UserblockSize::MIN);
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4)
         .filters(&[Filter::Shuffle, Filter::Deflate(DeflateLevel::Six)])
         .add_to(&mut b);

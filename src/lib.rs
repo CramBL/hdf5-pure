@@ -663,6 +663,7 @@ pub use hdf5_pure_core::FileSpaceInfo;
 pub use hdf5_pure_core::FileSpacePageSize;
 #[doc(inline)]
 pub use hdf5_pure_core::FileSpaceStrategy;
+pub use hdf5_pure_core::UserblockSize;
 
 pub use compound::{CompoundField, CompoundType};
 #[doc(inline)]

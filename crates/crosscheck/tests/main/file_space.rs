@@ -28,6 +28,7 @@ use hdf5_pure::Layout;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::MessageType;
 use hdf5_pure::SyncPolicy;
+use hdf5_pure::UserblockSize;
 use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_core::__private::FileSpaceInfoFields;
 use hdf5_pure_core::__private::StoredAddressExt;
@@ -327,7 +328,7 @@ fn paged_manager_capacity_survives_reference_library_mutation(
         builder
             .with_file_space_strategy(FileSpaceStrategy::Page, true, threshold)
             .with_file_space_page_size(page)
-            .with_userblock(base);
+            .with_userblock(UserblockSize::try_from(base).unwrap());
         builder.create_dataset("keep").with_u8_data(&[7; 100]);
         builder.create_dataset("victim").with_u8_data(&raw);
         builder.create_dataset("ceiling").with_u8_data(&[5; 100]);
@@ -1107,7 +1108,7 @@ fn write_nonpersistent_page_origin(path: &Path, page_size: u64, userblock: u64, 
         builder
             .with_file_space_strategy(FileSpaceStrategy::Page, false, 1)
             .with_file_space_page_size(page_size)
-            .with_userblock(userblock);
+            .with_userblock(UserblockSize::try_from(userblock).unwrap());
         for (name, value) in [("keep", 7), ("replace", 3), ("remove", 5)] {
             builder.create_dataset(name).with_u8_data(&[value; 64]);
         }
@@ -3124,7 +3125,7 @@ fn libhdf5_reads_relocated_persisted_free_space_and_writes_to_the_file(
     let path = dir.path().join("ours_persisted_relocated.h5");
     let mut builder = FileBuilder::new();
     if userblock > 0 {
-        builder.with_userblock(userblock);
+        builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
         builder.with_userblock_content(b"relocated managers");
     }
     builder.create_dataset("a").with_i32_data(&[1; 100]);
@@ -3295,7 +3296,7 @@ fn libhdf5_reads_and_writes_our_edited_paged_file(#[values(0, PAGE_SIZE)] userbl
     let path = dir.path().join("ours_paged_edited.h5");
     let mut builder = FileBuilder::new();
     if userblock > 0 {
-        builder.with_userblock(userblock);
+        builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
         builder.with_userblock_content(b"paged managers");
     }
     builder.create_dataset("a").with_i32_data(&[1; 100]);

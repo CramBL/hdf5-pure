@@ -22,6 +22,7 @@
 //! (issue #293), and a test of it has to link the library.
 
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::UserblockSize;
 use hdf5_pure::{File, FileBuilder};
 
 /// Comfortably more than the read's own window budget, and not a round number of
@@ -182,7 +183,7 @@ fn a_swept_read_agrees_across_backends_and_past_a_userblock() {
         let path = dir.path().join(format!("ub{userblock}.h5"));
         let mut b = FileBuilder::new();
         if userblock > 0 {
-            b.with_userblock(userblock);
+            b.with_userblock(UserblockSize::try_from(userblock).unwrap());
         }
         b.create_dataset("t")
             .with_f64_data(&data)

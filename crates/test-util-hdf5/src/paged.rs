@@ -8,6 +8,7 @@ use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::StoredAddress;
+use hdf5_pure::UserblockSize;
 use hdf5_pure_core::__private::StoredAddressExt;
 use test_util::{
     btree_v2, bytes, fractal_heap, free_space, global_heap, local_heap, object_header, symbol_table,
@@ -97,7 +98,7 @@ pub fn write_metadata_tail(
     builder
         .with_file_space_strategy(FileSpaceStrategy::Page, true, threshold)
         .with_file_space_page_size(page)
-        .with_userblock(userblock);
+        .with_userblock(UserblockSize::try_from(userblock).unwrap());
     if userblock != 0 {
         builder.with_userblock_content(b"PAGE metadata tail");
     }

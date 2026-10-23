@@ -16,6 +16,7 @@ use crate::FormatError;
 use crate::MaxExtent;
 use crate::MemoryStrategy;
 use crate::SyncPolicy;
+use crate::UserblockSize;
 use crate::address::AddressContext;
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
@@ -45,7 +46,7 @@ fn reusable_sections_precede_retained_aggregate_windows(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("reuse.h5");
     let mut builder = FileBuilder::new();
-    builder.with_userblock(userblock);
+    builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
     if explicit {
         builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, false, 1);
     }
@@ -250,7 +251,7 @@ fn teardown_preserves_retained_interior_spare(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("teardown.h5");
     let mut builder = FileBuilder::new();
-    builder.with_userblock(userblock);
+    builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
     builder.write(&path).unwrap();
     let mut engine = open_engine(&path, backing);
     let first = engine.reserve(64, AllocationClass::Metadata).unwrap();

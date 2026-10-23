@@ -12,6 +12,7 @@
 //! need.)
 
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::UserblockSize;
 use hdf5_pure::{AttrValue, File, FileBuilder};
 
 use test_util::temp;
@@ -82,7 +83,7 @@ fn userblock_delete_chunked_dataset_roundtrip() {
     // blocks via the base-aware `chunked_storage_spans`.
     let path = temp::temp_path("hdf5_pure_ub_fu_delete_chunk.h5");
     let mut b = FileBuilder::new();
-    b.with_userblock(UB as u64);
+    b.with_userblock(UserblockSize::try_from(UB as u64).unwrap());
     b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
     let chunked: Vec<f64> = (0..800).map(|i| (i % 7) as f64 * 0.5).collect();
     b.create_dataset("c")
@@ -116,7 +117,7 @@ fn userblock_delete_then_reuse_freed_space() {
     // worse, free a still-live region the reuse then corrupts.
     let path = temp::temp_path("hdf5_pure_ub_fu_delete_reuse.h5");
     let mut b = FileBuilder::new();
-    b.with_userblock(UB as u64);
+    b.with_userblock(UserblockSize::try_from(UB as u64).unwrap());
     let big: Vec<f64> = (0..256).map(|i| i as f64).collect();
     b.create_dataset("big").with_f64_data(&big);
     b.create_dataset("keep").with_i32_data(&[7, 8, 9]);
@@ -158,7 +159,7 @@ fn userblock_delete_one_of_several_then_read_attr() {
     // the removed object. A sibling group's compact attribute must remain readable.
     let path = temp::temp_path("hdf5_pure_ub_fu_delete_attr.h5");
     let mut b = FileBuilder::new();
-    b.with_userblock(UB as u64);
+    b.with_userblock(UserblockSize::try_from(UB as u64).unwrap());
     b.create_dataset("doomed").with_f64_data(&[1.0, 2.0]);
     b.create_dataset("survivor").with_i32_data(&[5, 6]);
     let mut g = b.create_group("grp");
@@ -255,7 +256,7 @@ fn userblock_copy_chunked_dataset_roundtrip() {
     // base-relative view of the file) and rebuilds the index at the new location.
     let path = temp::temp_path("hdf5_pure_ub_fu_copy_chunk.h5");
     let mut b = FileBuilder::new();
-    b.with_userblock(UB as u64);
+    b.with_userblock(UserblockSize::try_from(UB as u64).unwrap());
     let data: Vec<f64> = (0..600).map(|i| (i % 9) as f64 * 0.25).collect();
     b.create_dataset("c")
         .with_f64_data(&data)
@@ -340,7 +341,7 @@ fn userblock_cross_file_copy_into_userblock_dest() {
 fn userblock_reference_into_deleted_space_is_refused() {
     let path = temp::temp_path("hdf5_pure_ub_fu_ref_delete.h5");
     let mut b = FileBuilder::new();
-    b.with_userblock(UB as u64);
+    b.with_userblock(UserblockSize::try_from(UB as u64).unwrap());
     b.create_dataset("alpha").with_f64_data(&[1.0, 2.0]);
     let mut g = b.create_group("grp");
     g.create_dataset("inner").with_f64_data(&[7.5, 8.5]);
@@ -393,7 +394,7 @@ fn userblock_reference_into_deleted_space_is_refused() {
 fn userblock_reference_to_an_object_the_same_commit_places() {
     let path = temp::temp_path("hdf5_pure_ub_fu_ref_same_commit.h5");
     let mut b = FileBuilder::new();
-    b.with_userblock(UB as u64);
+    b.with_userblock(UserblockSize::try_from(UB as u64).unwrap());
     b.create_dataset("alpha").with_f64_data(&[1.0, 2.0]);
     let userblock = userblock::write(&path, b, UB, MARKER);
 
