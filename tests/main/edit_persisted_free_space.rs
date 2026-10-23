@@ -8,6 +8,7 @@ use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::MemoryStrategy;
 use hdf5_pure::SpaceOwnership;
+use hdf5_pure::UserblockSize;
 use hdf5_pure_core::__private::StoredAddressExt;
 use rstest::rstest;
 use test_util::free_space;
@@ -461,7 +462,7 @@ fn write_fixture(path: &Path, strategy: Strategy, userblock: u64) -> Userblock {
 fn userblock_builder(userblock: u64) -> FileBuilder {
     let mut builder = FileBuilder::new();
     if userblock > 0 {
-        builder.with_userblock(userblock);
+        builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
         builder.with_userblock_content(USERBLOCK_CONTENT);
     }
     builder

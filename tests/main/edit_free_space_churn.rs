@@ -23,6 +23,7 @@ use hdf5_pure::MaxExtent;
 use hdf5_pure::MemoryStrategy;
 use hdf5_pure::ScaleOffset;
 use hdf5_pure::SpaceAccounting;
+use hdf5_pure::UserblockSize;
 use rstest::rstest;
 use test_util::temp;
 use test_util_hdf5::dataset::{self, Filter};
@@ -1552,7 +1553,7 @@ impl Base {
     fn write(self, path: &Path, mut builder: FileBuilder) -> Option<userblock::Userblock> {
         match self {
             Self::Userblock => {
-                builder.with_userblock(USERBLOCK_BYTES);
+                builder.with_userblock(UserblockSize::try_from(USERBLOCK_BYTES).unwrap());
                 Some(userblock::write(
                     path,
                     builder,

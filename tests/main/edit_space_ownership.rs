@@ -9,6 +9,7 @@ use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
 use hdf5_pure::SpaceOwnership;
 use hdf5_pure::StoredAddress;
+use hdf5_pure::UserblockSize;
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::AttributeInfoMessage;
@@ -43,7 +44,7 @@ fn a_contiguous_i32_dataset_has_complete_ownership(
     let path = temp::temp_path("supported_ownership.h5");
     let mut builder = FileBuilder::new();
     builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
-    builder.with_userblock(userblock);
+    builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
     builder.create_dataset("d").with_i32_data(&[1, 2, 3]);
     builder.write(&path).unwrap();
     let file = File::open_rw(&path).unwrap();
@@ -62,7 +63,7 @@ fn default_creation_leaves_only_unused_metadata_spare_unclassified(
 ) {
     let path = temp::temp_path("default_ownership.h5");
     let mut builder = FileBuilder::new();
-    builder.with_userblock(userblock);
+    builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
     builder.create_dataset("d").with_i32_data(&[1, 2, 3]);
     builder.write(&path).unwrap();
     let file = File::open_rw(&path).unwrap();

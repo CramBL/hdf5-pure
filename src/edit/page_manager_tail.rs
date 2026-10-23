@@ -9,6 +9,7 @@ use test_util::free_space;
 use test_util::object_header::v2 as object_header;
 
 use crate::FormatError;
+use crate::UserblockSize;
 use crate::edit::{TailPlacement, WriteEngine};
 use crate::image::WriteBuffering;
 use crate::object_path::ObjectPathBuf;
@@ -32,7 +33,7 @@ fn final_typed_manager_sections_survive_commit_finalization_and_reopen(
     builder
         .with_file_space_strategy(FileSpaceStrategy::Page, true, threshold)
         .with_file_space_page_size(page)
-        .with_userblock(base);
+        .with_userblock(UserblockSize::try_from(base).unwrap());
     if base != 0 {
         builder.with_userblock_content(b"typed manager tail");
     }

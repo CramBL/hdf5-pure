@@ -41,6 +41,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** Userblock settings in `FileBuilder::with_userblock` and related creation properties change from integers to a checked size type. Page alignment, content bounds, and platform limits are checked during output.
 - **Breaking:** The numeric variants of `Datatype` change from public layout fields to checked, immutable payloads. Parsing rejects invalid bit ranges and overlapping floating-point fields, while value decoding remains limited to supported encodings.
 - **Breaking:** `Dataset::filter_pipeline` and related introspection change to fallible methods with typed identifiers and parameters. Uninterpreted parameters remain available, and staged parameters are marked pending.
 - **Breaking:** The consistency flags field of `Superblock` changes from an integer to a typed flag set. Parsed flags preserve reserved bits and inconsistent access marks.

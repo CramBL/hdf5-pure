@@ -3,6 +3,7 @@ use std::path::Path;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::LibVer;
+use hdf5_pure::UserblockSize;
 use rstest::rstest;
 use test_util::superblock;
 use test_util_hdf5::reader::ReadBackend;
@@ -113,7 +114,7 @@ fn root_relocation_stores_relative_address_in_userblock_image(#[case] libver: Li
 fn write_fixture(path: &Path, libver: LibVer) {
     let mut builder = FileBuilder::new();
     builder
-        .with_userblock(512)
+        .with_userblock(UserblockSize::MIN)
         .with_libver_bounds(libver, libver);
     builder.create_dataset("child").with_i32_data(&[1, 2, 3]);
     let mut outer = builder.create_group("outer");

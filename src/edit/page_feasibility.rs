@@ -17,6 +17,7 @@ use test_util::disk_log::{self, DiskOp};
 use test_util::publication;
 use test_util_hdf5::userblock;
 
+use crate::UserblockSize;
 use crate::access_mode::AccessMode;
 use crate::address::{
     AddressContext, BaseAddress, BaseAddressExt, StoredAddress, StoredAddressExt,
@@ -56,7 +57,7 @@ fn fresh_page_placement_and_root_publication_preserve_old_allocations(
     builder
         .with_file_space_strategy(FileSpaceStrategy::Page, false, 1)
         .with_file_space_page_size(page_size)
-        .with_userblock(userblock);
+        .with_userblock(UserblockSize::try_from(userblock).unwrap());
     if userblock > 0 {
         builder.with_userblock_content(b"preserve this userblock");
     }
@@ -851,7 +852,7 @@ fn write_page_failure_fixture(path: &Path, userblock: u64) -> Vec<u8> {
     let mut builder = FileBuilder::new();
     builder
         .with_file_space_strategy(FileSpaceStrategy::Page, false, 1)
-        .with_userblock(userblock);
+        .with_userblock(UserblockSize::try_from(userblock).unwrap());
     if userblock > 0 {
         builder.with_userblock_content(b"preserve the userblock across publication recovery");
     }

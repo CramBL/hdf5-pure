@@ -1,10 +1,12 @@
 //! One `FileAccessProperties` (`fapl`) for every open, and `FileCreateProperties`
 //! (`fcpl`) as a reusable creation-property value (issues #204, #205).
 
+use hdf5_pure::UserblockSize;
 use hdf5_pure::{
     ChunkCacheConfig, Error, File, FileAccessProperties, FileBuilder, FileCreateProperties,
     FileLocking, FileSpaceStrategy, FormatError, LibVer, MemoryStrategy,
 };
+use test_util::superblock;
 
 fn write_chunked(path: &std::path::Path) {
     let mut b = FileBuilder::new();
@@ -128,7 +130,7 @@ fn the_bounded_engine_still_locks_by_default() {
 #[test]
 fn create_properties_match_the_individual_setters() {
     let properties = FileCreateProperties::new()
-        .with_userblock(512)
+        .with_userblock(UserblockSize::MIN)
         .with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 8)
         .with_file_space_page_size(4096);
 
@@ -140,7 +142,7 @@ fn create_properties_match_the_individual_setters() {
     };
     let from_setters = {
         let mut b = FileBuilder::new();
-        b.with_userblock(512);
+        b.with_userblock(UserblockSize::MIN);
         b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 8);
         b.with_file_space_page_size(4096);
         b.create_dataset("d").with_f64_data(&[1.0, 2.0]);
@@ -248,36 +250,21 @@ fn invalid_creation_property_is_reported_at_write_time() {
     );
 }
 
-/// A userblock size HDF5 does not define is refused, on the non-paged path too.
-///
-/// This used to be a recorded gap: any size was accepted, and the writer emitted
-/// a file whose superblock nothing could find, because a reader scans only the
-/// doubling sequence 0, 512, 1024, … for the signature. The property is that the
-/// refusal happens through `FileCreateProperties`, not only through
-/// `FileBuilder::with_userblock` directly.
 #[test]
-fn a_non_paged_userblock_size_must_be_a_power_of_two() {
-    let mut b = FileBuilder::new();
-    b.with_create_properties(FileCreateProperties::new().with_userblock(700));
-    b.create_dataset("d").with_f64_data(&[1.0]);
-    match b.finish() {
-        Err(Error::Format(FormatError::InvalidUserblockSize(size))) => assert_eq!(size, 700),
-        other => panic!("700 is not a power of two and must be refused, got {other:?}"),
-    }
-
-    // The property list records what it was given; the refusal is the writer's,
-    // so a caller can still build and pass around a properties value.
+fn creation_properties_preserve_typed_userblock_size() {
+    const DEFAULT: FileCreateProperties = FileCreateProperties::new();
+    const WITH_USERBLOCK: FileCreateProperties = DEFAULT.with_userblock(UserblockSize::MIN);
+    assert_eq!(DEFAULT.userblock(), UserblockSize::NONE);
+    assert_eq!(WITH_USERBLOCK.userblock(), UserblockSize::MIN);
+    let copied = WITH_USERBLOCK;
+    let mut builder = FileBuilder::new();
+    builder.with_create_properties(copied);
+    builder.create_dataset("d").with_f64_data(&[1.0]);
+    let bytes = builder.finish().unwrap();
     assert_eq!(
-        FileCreateProperties::new().with_userblock(700).userblock(),
-        700
+        &bytes[512..512 + superblock::SIGNATURE.len()],
+        superblock::SIGNATURE
     );
-
-    // A legal size still writes, and still reopens.
-    let mut b = FileBuilder::new();
-    b.with_create_properties(FileCreateProperties::new().with_userblock(1024));
-    b.create_dataset("d").with_f64_data(&[1.0]);
-    let bytes = b.finish().expect("1024 is a power of two >= 512");
-    assert_eq!(&bytes[1024..1028], b"\x89HDF");
 }
 
 /// `with_create_properties` documents that it overwrites any value set
@@ -291,7 +278,7 @@ fn create_properties_reset_the_properties_they_do_not_carry() {
     b.with_libver_bounds(LibVer::Earliest, LibVer::V18);
     b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 8);
     b.with_file_space_page_size(4096);
-    b.with_userblock(1024);
+    b.with_userblock(UserblockSize::try_from(1024).unwrap());
     // Names none of the four above.
     b.with_create_properties(FileCreateProperties::new());
     b.create_dataset("d").with_f64_data(&[1.0]);
@@ -454,4 +441,67 @@ fn an_editing_session_honors_the_library_version_bound() {
             .len(),
         100
     );
+}
+
+#[rstest::rstest]
+#[case(0)]
+#[case(512)]
+#[case(1024)]
+#[case(2048)]
+fn userblock_size_sets_signature_offset_in_buffered_streamed_and_owned_output(
+    #[case] raw_size: u64,
+) {
+    let size = UserblockSize::try_from(raw_size).unwrap();
+    let properties = FileCreateProperties::new().with_userblock(size);
+    let build = || {
+        let mut builder = FileBuilder::new();
+        builder.with_create_properties(properties);
+        if size != UserblockSize::NONE {
+            builder.with_userblock_content(b"wrapper");
+        }
+        builder.create_dataset("data").with_i32_data(&[1, 2, 3]);
+        builder
+    };
+    let buffered = build().finish().unwrap();
+    let mut streamed = Vec::new();
+    build().finish_to(&mut streamed).unwrap();
+    assert_eq!(buffered, streamed);
+    let offset = usize::try_from(raw_size).unwrap();
+    assert_eq!(
+        &buffered[offset..offset + superblock::SIGNATURE.len()],
+        superblock::SIGNATURE
+    );
+    if size != UserblockSize::NONE {
+        assert_eq!(&buffered[..7], b"wrapper");
+        assert!(buffered[7..offset].iter().all(|&byte| byte == 0));
+    }
+    let file = File::from_bytes(buffered).unwrap();
+    assert_eq!(file.superblock().base_address.get(), size.get());
+    assert_eq!(
+        file.dataset("data").unwrap().read_i32().unwrap(),
+        vec![1, 2, 3]
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("owned.h5");
+    let file = File::create_with_options(&path, properties, FileAccessProperties::new()).unwrap();
+    file.root()
+        .create_dataset("data", |builder| {
+            builder.with_i32_data(&[1, 2, 3]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    file.close().unwrap();
+    let file = File::open_streaming(&path).unwrap();
+    assert_eq!(file.superblock().base_address.get(), size.get());
+    assert_eq!(
+        file.dataset("data").unwrap().read_i32().unwrap(),
+        vec![1, 2, 3]
+    );
+    let bytes = std::fs::read(path).unwrap();
+    assert_eq!(
+        &bytes[offset..offset + superblock::SIGNATURE.len()],
+        superblock::SIGNATURE
+    );
+    assert!(bytes[..offset].iter().all(|&byte| byte == 0));
 }

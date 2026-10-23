@@ -1,6 +1,7 @@
 use hdf5_pure::CompoundField;
 use hdf5_pure::CompoundType;
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::UserblockSize;
 use hdf5_pure::{
     AttrValue, CompoundTypeBuilder, DType, Datatype, Error, File, FileBuilder, FormatError,
     MaxExtent,
@@ -560,7 +561,7 @@ fn nested_compound_type_mismatch_shows_hierarchical_path() {
 #[test]
 fn roundtrip_userblock_512() {
     let mut builder = FileBuilder::new();
-    builder.with_userblock(512);
+    builder.with_userblock(UserblockSize::MIN);
     builder
         .create_dataset("data")
         .with_f64_data(&[1.0, 2.0, 3.0]);
@@ -1314,7 +1315,7 @@ fn matching_shape_and_data_is_accepted() {
 /// Build a file with a 512-byte userblock and read a dataset back.
 fn userblock_roundtrip_f64(build: impl FnOnce(&mut FileBuilder)) -> File {
     let mut b = FileBuilder::new();
-    b.with_userblock(512);
+    b.with_userblock(UserblockSize::MIN);
     build(&mut b);
     let mut bytes = b.finish().unwrap();
     // Stamp the userblock so a stray read into it would corrupt the marker.
@@ -1373,7 +1374,7 @@ fn userblock_chunked_deflate_streaming_read() {
     let data: Vec<f64> = (0..1000).map(|i| (i % 19) as f64 * 0.25).collect();
 
     let mut b = FileBuilder::new();
-    b.with_userblock(512);
+    b.with_userblock(UserblockSize::MIN);
     b.create_dataset("d")
         .with_f64_data(&data)
         .with_shape(&[1000])

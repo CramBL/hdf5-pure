@@ -10,6 +10,7 @@
 
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::FilterId;
+use hdf5_pure::UserblockSize;
 use hdf5_pure::{ChunkIndex, Dataset, File, FileBuilder, Layout, MaxExtent};
 
 fn open(f: &File, name: &str) -> Dataset {
@@ -141,7 +142,7 @@ fn chunk_addresses_of_a_userblock_file_are_absolute() {
     let values: Vec<i32> = (0..8).collect();
     {
         let mut b = FileBuilder::new();
-        b.with_userblock(USERBLOCK);
+        b.with_userblock(UserblockSize::try_from(USERBLOCK).unwrap());
         b.create_dataset("d")
             .with_i32_data(&values)
             .with_shape(&[values.len() as u64])

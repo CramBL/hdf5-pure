@@ -36,6 +36,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
+use crate::UserblockSize;
 use crate::file_writer::AttrValue;
 use crate::mat::class::MatClass;
 use crate::mat::dims::{self, STORAGE_DIMS_BUF_LEN};
@@ -44,7 +45,7 @@ use crate::mat::identifier;
 use crate::mat::options::{Compression, EmptyMarkerEncoding, InvalidNamePolicy, Options};
 use crate::mat::producer::{self, BlockElement, DataProducer, ProducerChunks};
 use crate::mat::string_object;
-use crate::mat::userblock::{self, USERBLOCK_SIZE};
+use crate::mat::userblock;
 use crate::mat::utf16;
 use crate::type_builders::{ComplexComponent, DatasetBuilder, GroupBuilder};
 use crate::writer::FileBuilder;
@@ -137,7 +138,7 @@ impl MatBuilder {
     /// Construct a new MAT writer.
     pub fn new(options: Options) -> Self {
         let mut file = FileBuilder::new();
-        file.with_userblock(USERBLOCK_SIZE);
+        file.with_userblock(UserblockSize::MIN);
         // The upper bound is the caller's; the lower one is always `Earliest`,
         // since a MAT file has no reason to demand a *newer* reader than its
         // content forces. See `Options::libver` for why the default is 1.8.

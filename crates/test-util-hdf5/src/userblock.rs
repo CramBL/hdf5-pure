@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use hdf5_pure::UserblockSize;
 use hdf5_pure::{BaseAddress, File, FileBuilder};
 use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_format::__private as format;
@@ -77,7 +78,7 @@ pub fn write(path: &Path, builder: FileBuilder, size: usize, marker: &[u8]) -> U
 #[track_caller]
 pub fn write_edit_fixture(path: &Path, size: usize, marker: &[u8]) -> Userblock {
     let mut builder = FileBuilder::new();
-    builder.with_userblock(size as u64);
+    builder.with_userblock(UserblockSize::try_from(size as u64).unwrap());
     builder
         .create_dataset("alpha")
         .with_f64_data(&[1.0, 2.0, 3.0, 4.0]);

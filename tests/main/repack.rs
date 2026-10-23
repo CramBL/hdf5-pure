@@ -5,6 +5,7 @@ use hdf5_pure::BitFieldType;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::Error;
 use hdf5_pure::File;
+use hdf5_pure::UserblockSize;
 use hdf5_pure::{
     AttrValue, Datatype, DatatypeByteOrder, FileBuilder, FileSpaceStrategy, LibVer, MaxExtent,
     RepackOptions, ScaleOffset,
@@ -750,7 +751,7 @@ fn repacks_chunked_dataset_from_a_userblock_file() {
     let dst = temp::temp_path("hdf5_pure_repack_ub_dst.h5");
     let data: Vec<f64> = (0..1000).map(|i| i as f64 * 0.25).collect();
     let mut b = FileBuilder::new();
-    b.with_userblock(512);
+    b.with_userblock(UserblockSize::MIN);
     b.create_dataset("chk")
         .with_f64_data(&data)
         .with_shape(&[1000])

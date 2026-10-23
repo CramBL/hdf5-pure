@@ -322,12 +322,13 @@ This works because the writer computes every object's address (object headers, d
 A file with a userblock needs its header bytes to be part of what the writer emits, since a streaming write has nothing left to patch by the time it returns. [`with_userblock_content`](crate::FileBuilder::with_userblock_content) supplies them up front:
 
 ```rust
+use hdf5_pure::UserblockSize;
 # let dir = tempfile::tempdir()?;
 # let path = dir.path().join("wrapped.h5");
 use hdf5_pure::FileBuilder;
 
 let mut builder = FileBuilder::new();
-builder.with_userblock(512);
+builder.with_userblock(UserblockSize::MIN);
 builder.with_userblock_content(b"my wrapper format's header");
 builder.create_dataset("x").with_f64_data(&[1.0]);
 builder.write(&path)?;

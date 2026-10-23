@@ -8,6 +8,7 @@ use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::MaxExtent;
+use hdf5_pure::UserblockSize;
 use rstest::rstest;
 use test_util::data_layout;
 use test_util::dataspace;
@@ -33,7 +34,7 @@ fn the_collections_of_a_deleted_object_are_reclaimed_and_reused_for_raw_data(
 ) {
     let path = temp::temp_path("reclaim_collection.h5");
     let mut builder = FileBuilder::new();
-    builder.with_userblock(userblock);
+    builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
     written.add_to(&mut builder, "x");
     builder.create_dataset("keep").with_i32_data(&[1, 2, 3]);
     builder.write(&path).unwrap();

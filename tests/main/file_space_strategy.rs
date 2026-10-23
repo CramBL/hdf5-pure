@@ -10,6 +10,7 @@ use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
 use hdf5_pure::StoredAddress;
+use hdf5_pure::UserblockSize;
 use hdf5_pure_core::__private::FileSpaceInfoFields;
 use hdf5_pure_format::__private::DEFAULT_THRESHOLD;
 use rstest::rstest;
@@ -148,7 +149,7 @@ fn strategy_survives_userblock_and_empty_file() {
     let path = temp::temp_path("hdf5_pure_fss_userblock.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("d").with_i32_data(&[5, 6]);
-    b.with_userblock(512)
+    b.with_userblock(UserblockSize::MIN)
         .with_file_space_strategy(FileSpaceStrategy::None, false, 1);
     b.write(&path).unwrap();
     let f = File::open(&path).unwrap();

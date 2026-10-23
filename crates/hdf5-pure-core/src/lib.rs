@@ -21,6 +21,7 @@ mod fill_time;
 mod message_type;
 mod region;
 mod superblock;
+mod userblock_size;
 mod width;
 
 #[doc(hidden)]
@@ -57,5 +58,6 @@ pub use superblock::Superblock;
 pub use superblock::SuperblockStatusFlag;
 pub use superblock::SuperblockStatusFlags;
 pub use superblock::SuperblockVersion;
+pub use userblock_size::UserblockSize;
 pub use width::LengthWidth;
 pub use width::OffsetWidth;

@@ -63,6 +63,7 @@ use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FormatError;
 use hdf5_pure::SuperblockVersion;
+use hdf5_pure::UserblockSize;
 use rstest::rstest;
 
 use test_util::superblock;
@@ -413,7 +414,7 @@ fn editor_rejects_relocated_image(#[case] stored_base: usize, #[case] signature_
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("relocated-edit.h5");
     let mut builder = FileBuilder::new();
-    builder.with_userblock(stored_base as u64);
+    builder.with_userblock(UserblockSize::try_from(stored_base as u64).unwrap());
     builder.create_dataset("data").with_i32_data(&[1, 2, 3]);
     let original = builder.finish().unwrap();
     let mut relocated = vec![0; signature_offset];
@@ -506,7 +507,7 @@ fn c_modified_file_with_a_userblock_reads_whole() {
         let path = dir.path().join(format!("ours_then_c_{ub}.h5"));
         let mut b = FileBuilder::new();
         if ub > 0 {
-            b.with_userblock(ub);
+            b.with_userblock(UserblockSize::try_from(ub).unwrap());
         }
         b.create_dataset("values").with_f64_data(&[1.0, 2.0, 3.0]);
         b.write(&path).unwrap();
@@ -543,7 +544,7 @@ fn c_added_attribute_in_a_userblock_file_reads_whole() {
         let path = dir.path().join(format!("attr_{ub}.h5"));
         let mut b = FileBuilder::new();
         if ub > 0 {
-            b.with_userblock(ub);
+            b.with_userblock(UserblockSize::try_from(ub).unwrap());
         }
         b.create_dataset("values").with_f64_data(&[1.5]);
         b.write(&path).unwrap();

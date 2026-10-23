@@ -7,6 +7,7 @@
 use std::collections::VecDeque;
 
 use super::value::{Leaf, Value};
+use crate::UserblockSize;
 use crate::file_writer::AttrValue;
 use crate::mat::builder::{self, RefsH5Path};
 use crate::mat::class::MatClass;
@@ -14,7 +15,7 @@ use crate::mat::dims;
 use crate::mat::error::MatError;
 use crate::mat::options::Options;
 use crate::mat::transpose;
-use crate::mat::userblock::{self, USERBLOCK_SIZE};
+use crate::mat::userblock;
 use crate::mat::utf16;
 use crate::mat::value::{ComplexVec, NumVec, ScalarNum};
 use crate::type_builders::{DatasetBuilder, FinishedGroup, GroupBuilder};
@@ -80,7 +81,7 @@ pub(crate) fn emit_file_to<W: std::io::Write>(
 /// cannot come to describe different files.
 fn build_file(fields: Vec<(String, Value)>) -> FileBuilder {
     let mut builder = FileBuilder::new();
-    builder.with_userblock(USERBLOCK_SIZE);
+    builder.with_userblock(UserblockSize::MIN);
     // This emitter serves the no-options entry points, which are defined to
     // produce what `Options::default()` produces, so every file-level setting the
     // options carry has to be applied here too — the two emitters are only

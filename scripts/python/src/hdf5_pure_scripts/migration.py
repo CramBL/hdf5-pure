@@ -299,6 +299,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
         "FloatingPointType",
         "FloatingPointField",
         "TimeType",
+        "UserblockSize",
         "DeflateLevel",
         "DecodedStoredAddress",
         "FileSpacePageSize",

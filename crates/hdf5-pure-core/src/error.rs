@@ -729,10 +729,9 @@ pub enum FormatError {
     },
     /// Invalid symbol table node version.
     InvalidSymbolTableNodeVersion(u8),
-    /// A userblock size the format does not define: it must be zero, or a power
-    /// of two of at least 512 bytes. A reader looks for the superblock at 0, 512,
-    /// 1024, and so on doubling, so any other size produces a file nothing can
-    /// open.
+    /// A userblock size is nonzero and either smaller than 512 bytes or not a power of two.
+    ///
+    /// Contains the rejected byte count.
     InvalidUserblockSize(u64),
     /// A length is too large for a length field of `length_size` bytes.
     LengthTooLarge {

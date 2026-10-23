@@ -4,6 +4,7 @@ use std::io::Write;
 
 #[cfg(test)]
 use crate::DeflateLevel;
+use crate::UserblockSize;
 use crate::chunked_write::ByteSink;
 use crate::file_writer::FileWriter as FormatWriter;
 use crate::type_builders::{
@@ -165,12 +166,15 @@ impl FileBuilder {
     /// this file is written in.
     ///
     /// ```
+    /// use hdf5_pure::UserblockSize;
     /// use hdf5_pure::{FileBuilder, FileCreateProperties, LibVer};
     ///
     /// let mut builder = FileBuilder::new();
     /// builder.with_libver_bounds(LibVer::Earliest, LibVer::V18);
     /// // The list names no version, so the bound above is dropped with it.
-    /// builder.with_create_properties(FileCreateProperties::new().with_userblock(512));
+    /// builder.with_create_properties(
+    ///     FileCreateProperties::new().with_userblock(UserblockSize::MIN),
+    /// );
     /// builder.create_dataset("values").with_f64_data(&[1.0]);
     ///
     /// let bytes = builder.finish().unwrap();
@@ -182,46 +186,50 @@ impl FileBuilder {
         self
     }
 
-    /// Set the userblock size in bytes: zero (no userblock), or a power of two of
-    /// at least 512. The region is filled with zeros.
+    /// Sets the size of the reserved prefix before the HDF5 signature.
     ///
-    /// Any other size is refused by [`finish`](Self::finish) /
-    /// [`finish_to`](Self::finish_to) / [`write`](Self::write) with
-    /// [`FormatError::InvalidUserblockSize`].
-    /// The size *is* the superblock's base address, and a reader scans for the
-    /// signature at 0, 512, 1024, and so on doubling — so an unaligned size would
-    /// hide the superblock where nothing looks for it.
+    /// Use [`UserblockSize::MIN`] for 512 bytes and [`UserblockSize::try_from`] to check a raw
+    /// byte count. Pass [`UserblockSize::NONE`] to reserve zero bytes.
     ///
-    /// To put something in it, prefer
-    /// [`with_userblock_content`](Self::with_userblock_content), which works on
-    /// every output path. Patching the bytes afterwards only works with the
-    /// buffered [`finish`](Self::finish); the streaming
-    /// [`finish_to`](Self::finish_to) / [`write`](Self::write) have already emitted
-    /// the region by the time they return.
-    pub fn with_userblock(&mut self, size: u64) -> &mut Self {
+    /// The writer fills the prefix with zeros unless content is supplied through
+    /// [`with_userblock_content`](Self::with_userblock_content). Paged output requires a
+    /// userblock aligned to the file-space page size.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure::{File, FileBuilder, UserblockSize};
+    ///
+    /// let mut builder = FileBuilder::new();
+    /// builder.with_userblock(UserblockSize::MIN);
+    /// let raw_size = 1024;
+    /// builder.with_userblock(UserblockSize::try_from(raw_size)?);
+    /// builder.create_dataset("data").with_i32_data(&[1, 2, 3]);
+    /// let bytes = builder.finish()?;
+    /// let file = File::from_bytes(bytes)?;
+    /// assert_eq!(file.superblock().base_address.get(), raw_size);
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
+    pub fn with_userblock(&mut self, size: UserblockSize) -> &mut Self {
         self.writer.with_userblock(size);
         self
     }
 
-    /// Set the bytes that occupy the head of the userblock region, so the writer
-    /// emits them as part of the file. The remainder of the region stays
-    /// zero-filled, and content longer than the userblock set by
-    /// [`with_userblock`](Self::with_userblock) is refused by every output path —
-    /// [`finish`](Self::finish), [`finish_to`](Self::finish_to), and
-    /// [`write`](Self::write) — with
-    /// [`FormatError::UserblockContentTooLarge`].
+    /// Sets the bytes at the start of the reserved userblock.
     ///
-    /// Because the userblock leads the file in address order, this is what lets a
-    /// wrapper format's header — MATLAB v7.3's, for instance — be produced by the
-    /// non-seekable [`finish_to`](Self::finish_to) with no second pass.
+    /// The writer writes `content`, then fills the remaining prefix with zeros.
+    /// [`finish`](Self::finish), [`finish_to`](Self::finish_to), and [`write`](Self::write)
+    /// return [`Error::Format`] with [`FormatError::UserblockContentTooLarge`] if the content
+    /// exceeds the size set by [`with_userblock`](Self::with_userblock).
     ///
-    /// # Example
+    /// # Examples
     ///
     /// ```
+    /// use hdf5_pure::UserblockSize;
     /// use hdf5_pure::FileBuilder;
     ///
     /// let mut builder = FileBuilder::new();
-    /// builder.with_userblock(512);
+    /// builder.with_userblock(UserblockSize::MIN);
     /// builder.with_userblock_content(b"my wrapper format's header");
     /// builder.create_dataset("x").with_f64_data(&[1.0, 2.0]);
     ///
@@ -441,17 +449,20 @@ impl FileBuilder {
         sink.into_inner().flush().map_err(Error::Io)
     }
 
-    /// Serialize and write the file to the given path.
+    /// Serializes the file to `path`.
     ///
     /// Streams the file to disk (see [`finish_to`](Self::finish_to)), so a repack
     /// staging streamed chunks does not hold the whole output in memory.
     ///
-    /// The path is created when the first byte is ready, not when the call
-    /// starts, so a build refused before any byte is emitted — unsatisfiable or
-    /// too-old library-version bounds, an invalid userblock — leaves whatever was
-    /// at `path` untouched. A failure *after* that (an I/O error, or a refusal
-    /// the layout reaches) still leaves a partial file, as
+    /// The writer creates `path` when the first byte is ready. A rejection before output,
+    /// including incompatible format bounds or userblock settings, leaves an existing file
+    /// at `path` unchanged. Later failures can leave partial output, as
     /// [`finish_to`](Self::finish_to) describes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] for storage errors, or [`Error::Format`] if the settings or data
+    /// are invalid.
     pub fn write<P: AsRef<std::path::Path>>(self, path: P) -> Result<(), Error> {
         self.finish_to(LazyFile {
             path: path.as_ref().to_path_buf(),
@@ -460,14 +471,7 @@ impl FileBuilder {
     }
 }
 
-/// A [`Write`] that creates its file on the first byte written to it.
-///
-/// [`FileBuilder::write`] used `std::fs::File::create` up front, which
-/// truncates: a build the writer refuses before emitting anything — the
-/// library-version and userblock checks all run there, deliberately — returned
-/// its error having already emptied the file at the destination path. The whole
-/// point of refusing early is that nothing is destroyed, and that has to include
-/// the file the caller is overwriting.
+/// A [`Write`] adapter that creates its destination on the first write call.
 struct LazyFile {
     path: std::path::PathBuf,
     file: Option<std::fs::File>,
@@ -561,6 +565,9 @@ impl Default for FileBuilder {
 #[cfg(test)]
 mod streaming_tests {
     use std::io;
+    use std::sync::{Arc, Mutex};
+
+    use test_util::superblock;
 
     use super::*;
     use crate::chunked_write::{ChunkMeta, ChunkProvider};
@@ -568,7 +575,6 @@ mod streaming_tests {
     use crate::data_layout::ChunkedLayoutFlags;
     use crate::dataspace::MaxExtent;
     use crate::layout_info::Layout;
-    use std::sync::{Arc, Mutex};
 
     type Calls = Arc<Mutex<Vec<usize>>>;
 
@@ -588,7 +594,7 @@ mod streaming_tests {
             if let Some((strategy, persist)) = strategy {
                 builder.with_file_space_strategy(strategy, persist, 1);
             }
-            builder.with_userblock(userblock);
+            builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
             if userblock != 0 {
                 builder.with_userblock_content(b"writer prefix");
             }
@@ -718,7 +724,7 @@ mod streaming_tests {
             if let Some(strategy) = strategy {
                 builder.with_file_space_strategy(strategy, persist, 9);
             }
-            builder.with_userblock(userblock);
+            builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
             match workload {
                 0 => {
                     for i in 0..40 {
@@ -1286,7 +1292,8 @@ mod streaming_tests {
         const HEADER: &[u8] = b"a wrapper format's header";
         let build = || {
             let mut b = FileBuilder::new();
-            b.with_userblock(512).with_userblock_content(HEADER);
+            b.with_userblock(UserblockSize::MIN)
+                .with_userblock_content(HEADER);
             b.create_dataset("x").with_f64_data(&[1.0, 2.0]);
             b
         };
@@ -1311,7 +1318,7 @@ mod streaming_tests {
     #[test]
     fn an_unset_userblock_stays_zero_filled() {
         let mut b = FileBuilder::new();
-        b.with_userblock(512);
+        b.with_userblock(UserblockSize::MIN);
         b.create_dataset("x").with_f64_data(&[1.0]);
         let bytes = b.finish().unwrap();
         assert!(bytes[..512].iter().all(|&b| b == 0));
@@ -1499,46 +1506,23 @@ mod streaming_tests {
         }
     }
 
-    /// A userblock size the format does not define is refused rather than
-    /// written.
-    ///
-    /// The size is the superblock's base address, and readers scan the doubling
-    /// sequence 0, 512, 1024, … for the signature. An unaligned size therefore
-    /// produced a file that this crate itself could not reopen — silently, since
-    /// nothing checked. Sizing the region to a wrapper format's header, which is
-    /// exactly what `with_userblock_content` invites, is how a caller reaches it.
-    #[test]
-    fn a_userblock_size_the_format_does_not_define_is_refused() {
-        for size in [1u64, 511, 600, 1000, 1536] {
-            let mut b = FileBuilder::new();
-            b.with_userblock(size);
-            b.create_dataset("x").with_f64_data(&[1.0]);
-            match b.finish() {
-                Err(Error::Format(FormatError::InvalidUserblockSize(reported))) => {
-                    assert_eq!(reported, size);
-                }
-                other => panic!("expected {size} to be refused, got {other:?}"),
-            }
-        }
-
-        // The sizes the format does define still work, and the file reopens —
-        // which is the property the refusal above exists to protect.
-        for size in [0u64, 512, 1024, 2048, 4096] {
-            let mut b = FileBuilder::new();
-            b.with_userblock(size);
-            b.create_dataset("x").with_f64_data(&[1.0, 2.0]);
-            let bytes = b.finish().expect("a valid userblock size");
-            assert_eq!(
-                &bytes[size as usize..size as usize + 4],
-                b"\x89HDF",
-                "the superblock begins exactly where the userblock ends"
-            );
-            assert_eq!(
-                read_back_f64(&bytes, "x"),
-                vec![1.0, 2.0],
-                "a file with a {size}-byte userblock must reopen"
-            );
-        }
+    #[rstest::rstest]
+    #[case(0)]
+    #[case(512)]
+    #[case(1024)]
+    #[case(2048)]
+    #[case(4096)]
+    fn writes_valid_userblock_sizes(#[case] size: u64) {
+        let mut builder = FileBuilder::new();
+        builder.with_userblock(UserblockSize::try_from(size).unwrap());
+        builder.create_dataset("x").with_f64_data(&[1.0, 2.0]);
+        let bytes = builder.finish().unwrap();
+        let offset = usize::try_from(size).unwrap();
+        assert_eq!(
+            &bytes[offset..offset + superblock::SIGNATURE.len()],
+            superblock::SIGNATURE
+        );
+        assert_eq!(read_back_f64(&bytes, "x"), vec![1.0, 2.0]);
     }
 
     /// Content past the end of the region would push the superblock down and
@@ -1546,7 +1530,8 @@ mod streaming_tests {
     #[test]
     fn userblock_content_longer_than_its_region_is_refused() {
         let mut b = FileBuilder::new();
-        b.with_userblock(512).with_userblock_content(&[7u8; 513]);
+        b.with_userblock(UserblockSize::MIN)
+            .with_userblock_content(&[7u8; 513]);
         b.create_dataset("x").with_f64_data(&[1.0]);
         match b.finish() {
             Err(Error::Format(FormatError::UserblockContentTooLarge { content, userblock })) => {

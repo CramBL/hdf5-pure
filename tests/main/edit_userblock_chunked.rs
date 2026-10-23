@@ -14,6 +14,7 @@
 //!     by a later commit in the same session.
 
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::UserblockSize;
 use hdf5_pure::{File, FileBuilder, MaxExtent};
 
 use test_util::temp;
@@ -29,7 +30,7 @@ fn userblock_chunked_add_roundtrip() {
     // an untouched contiguous dataset, then read both back.
     let path = temp::temp_path("hdf5_pure_ub_chunk_add.h5");
     let mut b = FileBuilder::new();
-    b.with_userblock(UB as u64);
+    b.with_userblock(UserblockSize::try_from(UB as u64).unwrap());
     b.create_dataset("contig")
         .with_f64_data(&[1.0, 2.0, 3.0, 4.0]);
     let userblock = userblock::write(&path, b, UB, MARKER);
@@ -65,7 +66,7 @@ fn userblock_chunked_unfiltered_inplace_overwrite() {
     let path = temp::temp_path("hdf5_pure_ub_chunk_inplace.h5");
     let original: Vec<f64> = (0..200).map(|i| i as f64).collect();
     let mut b = FileBuilder::new();
-    b.with_userblock(UB as u64);
+    b.with_userblock(UserblockSize::try_from(UB as u64).unwrap());
     b.create_dataset("c")
         .with_f64_data(&original)
         .with_shape(&[200])
@@ -114,7 +115,7 @@ fn userblock_chunked_shrinking_inplace_overwrite() {
     // replacement (all equal): each new chunk re-encodes far smaller than its slot.
     let original: Vec<f64> = (0..400).map(|i| (i as f64).sin() * 1e6).collect();
     let mut b = FileBuilder::new();
-    b.with_userblock(UB as u64);
+    b.with_userblock(UserblockSize::try_from(UB as u64).unwrap());
     b.create_dataset("c")
         .with_f64_data(&original)
         .with_shape(&[400])
@@ -211,7 +212,7 @@ fn userblock_extensible_array_add_and_overwrite_roundtrip() {
     // relocating overwrite.
     let path = temp::temp_path("hdf5_pure_ub_ea.h5");
     let mut b = FileBuilder::new();
-    b.with_userblock(UB as u64);
+    b.with_userblock(UserblockSize::try_from(UB as u64).unwrap());
     b.create_dataset("keep").with_i32_data(&[7, 8, 9]);
     let userblock = userblock::write(&path, b, UB, MARKER);
 
@@ -269,7 +270,7 @@ fn userblock_single_chunk_index_add_and_overwrite() {
     // than a separate index structure. Exercise add + overwrite on a userblock file.
     let path = temp::temp_path("hdf5_pure_ub_single_chunk.h5");
     let mut b = FileBuilder::new();
-    b.with_userblock(UB as u64);
+    b.with_userblock(UserblockSize::try_from(UB as u64).unwrap());
     let userblock = userblock::write(&path, b, UB, MARKER);
 
     let added: Vec<f64> = (0..50).map(|i| i as f64 * 0.5).collect();
@@ -321,7 +322,7 @@ fn userblock_chunked_relocating_overwrite_roundtrip() {
     // compressed sizes differ, forcing the relocating path.
     let original = vec![7.0f64; 500];
     let mut b = FileBuilder::new();
-    b.with_userblock(UB as u64);
+    b.with_userblock(UserblockSize::try_from(UB as u64).unwrap());
     b.create_dataset("keep").with_i32_data(&[11, 22, 33]);
     b.create_dataset("c")
         .with_f64_data(&original)
@@ -363,7 +364,7 @@ fn userblock_chunked_add_reuses_a_freed_chunk_hole() {
     let path = temp::temp_path("hdf5_pure_ub_chunk_hole.h5");
     let victim: Vec<f64> = (0..2048).map(|i| (i % 11) as f64).collect();
     let mut b = FileBuilder::new();
-    b.with_userblock(UB as u64);
+    b.with_userblock(UserblockSize::try_from(UB as u64).unwrap());
     b.create_dataset("victim")
         .with_f64_data(&victim)
         .with_shape(&[2048])
@@ -425,7 +426,7 @@ fn userblock_chunked_overwrite_reuses_reclaimed_space() {
     // chunks that no longer fit those slots, forcing the relocating path.
     let original: Vec<f64> = (0..1200).map(|i| (i % 3) as f64).collect();
     let mut b = FileBuilder::new();
-    b.with_userblock(UB as u64);
+    b.with_userblock(UserblockSize::try_from(UB as u64).unwrap());
     b.create_dataset("keep")
         .with_f64_data(&[1.0, 2.0, 3.0, 4.0, 5.0]);
     b.create_dataset("c")

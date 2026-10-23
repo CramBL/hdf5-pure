@@ -5,6 +5,7 @@
 //! readable by the reference C implementation.
 
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::UserblockSize;
 use hdf5_pure::{
     AttrValue, CompoundTypeBuilder, Datatype, File, FileBuilder, VlenStringReadOptions,
 };
@@ -467,7 +468,7 @@ fn crosscheck_userblock() {
     let path = dir.path().join("userblock.h5");
 
     let mut builder = FileBuilder::new();
-    builder.with_userblock(512);
+    builder.with_userblock(UserblockSize::MIN);
     builder
         .create_dataset("data")
         .with_f64_data(&[1.0, 2.0, 3.0]);
@@ -992,7 +993,7 @@ fn crosscheck_dense_attributes_past_a_userblock() {
     let path = dir.path().join("ub_dense_attrs.h5");
 
     let mut builder = FileBuilder::new();
-    builder.with_userblock(512);
+    builder.with_userblock(UserblockSize::MIN);
     let ds = builder.create_dataset("data");
     ds.with_f64_data(&[1.0, 2.0]);
     for i in 0..12 {
@@ -1281,7 +1282,7 @@ fn crosscheck_userblock_all_address_types() {
     let path = dir.path().join("ub_all.h5");
 
     let mut builder = FileBuilder::new();
-    builder.with_userblock(512);
+    builder.with_userblock(UserblockSize::MIN);
 
     // Root VL attr (GCOL address must be relative to base)
     builder.set_attr(
@@ -1550,7 +1551,7 @@ fn crosscheck_matlab_userblock_header() {
     let path = dir.path().join("matlab_ub.h5");
 
     let mut builder = FileBuilder::new();
-    builder.with_userblock(512);
+    builder.with_userblock(UserblockSize::MIN);
     builder.create_dataset("data").with_f64_data(&[3.14]);
     let mut bytes = builder.finish().unwrap();
 
