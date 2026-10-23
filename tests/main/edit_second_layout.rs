@@ -16,6 +16,18 @@ use test_util::temp;
 #[rstest]
 #[case::contiguous_then_compact(None, data_layout::compact(&[0xEE; 4]))]
 #[case::contiguous_then_chunked(None, data_layout::chunked(UNDEFINED_ADDRESS, &[ELEMENTS], 1))]
+#[case::compact_then_compact(
+    Some(data_layout::compact(&[1; ELEMENTS as usize])),
+    data_layout::compact(&[0xEE; 4]),
+)]
+#[case::compact_then_contiguous(
+    Some(data_layout::compact(&[1; ELEMENTS as usize])),
+    data_layout::contiguous(UNDEFINED_ADDRESS, 0),
+)]
+#[case::compact_then_chunked(
+    Some(data_layout::compact(&[1; ELEMENTS as usize])),
+    data_layout::chunked(UNDEFINED_ADDRESS, &[ELEMENTS], 1),
+)]
 fn an_overwrite_writes_through_the_first_layout(
     #[case] first_layout: Option<Vec<u8>>,
     #[case] second_layout: Vec<u8>,
@@ -37,10 +49,19 @@ fn an_overwrite_writes_through_the_first_layout(
     let file = File::open(&path).unwrap();
     let dataset = file.dataset("d").unwrap();
     let layout = dataset.layout().unwrap();
-    assert!(
-        matches!(layout, Layout::Contiguous { size, .. } if size == u64::from(ELEMENTS)),
-        "{layout:?}"
-    );
+    if first_layout.is_some() {
+        assert_eq!(
+            layout,
+            Layout::Compact {
+                size: u64::from(ELEMENTS)
+            }
+        );
+    } else {
+        assert!(
+            matches!(layout, Layout::Contiguous { size, .. } if size == u64::from(ELEMENTS)),
+            "{layout:?}"
+        );
+    }
     assert_eq!(dataset.read_u8().unwrap(), NEW_VALUES);
 }
 

@@ -300,6 +300,7 @@ use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use hdf5_pure_format::__private::IndexSlots;
 use hdf5_pure_format::__private::LayoutVersion;
+use hdf5_pure_format::__private::MessageRecord;
 use hdf5_pure_format::__private::MessageRecordLayout;
 use hdf5_pure_format::__private::OBJECT_HEADER_PREFIX_MAX_LEN;
 use hdf5_pure_format::__private::ObjectHeaderContinuation;
@@ -334,6 +335,7 @@ use crate::chunked_write::{self, ChunkMeta, ChunkOptions, ChunkProvider, Storage
 use crate::convert::Narrow;
 use crate::data_layout::COMPACT_DATA_OFFSET;
 use crate::data_layout::ChunkedLayoutFlags;
+use crate::data_layout::LAYOUT_CLASS_COMPACT;
 use crate::data_layout::{ChunkIndexLayout, DataLayout};
 use crate::dataspace::{Dataspace, DataspaceType, Extent, MaxExtent};
 use crate::datatype::{self, Datatype};
@@ -12397,62 +12399,58 @@ fn patch_link_target(
     ))
 }
 
-/// Copy a chunk-0 message `region`, replacing the single (compact) Data Layout
-/// message's inline data with `raw` and preserving every other message verbatim.
-/// Used by `write_dataset` to overwrite a compact dataset's values. The message
-/// header (type and flags) and version byte are kept; only the inline data — and
-/// the message size and 2-byte inline-size fields — change. `raw` must fit both
-/// the compact layout's own 2-byte size field (HDF5's 64 KiB compact-storage
-/// limit) and, once the 4-byte layout preamble is added, the object header's
-/// 2-byte message-size field — the tighter of the two, which an overwrite of an
-/// existing compact dataset always satisfies.
+/// Returns a copy of `region` whose first Data Layout message holds `raw` as its compact data.
+///
+/// The rewritten record keeps its flags, its creation index, and its layout version. Every
+/// other record is copied unchanged, a later Data Layout message included.
+///
+/// # Errors
+///
+/// Returns [`Error::EditUnsupported`] if `region` lacks a Data Layout message, if the body of a
+/// record it reads runs past the end of `region`, if the byte after the version of the first
+/// Data Layout message, the layout class in versions 3 and 4, is not the compact class, or if
+/// `raw` is longer than [`OBJECT_HEADER_MESSAGE_MAX`] less [`COMPACT_DATA_OFFSET`]. Returns
+/// [`Error::Format`] if that byte is the compact class and the version is neither 3 nor 4.
 fn rebuild_compact_layout_region(region: &OhRegion, raw: &[u8]) -> Result<OhRegion, Error> {
-    // The bound is on the *message body* the layout becomes — version, class,
-    // and the 2-byte inline size ahead of the data — not on `raw` alone, or the
-    // last four lengths below the limit would truncate the size field written
-    // for them.
+    // This guard applies the bound of `encode_compact` to the whole message body
+    // the layout becomes (version, class, the 2-byte inline size and the data),
+    // and rejects a body that does not fit with `EditUnsupported`.
     if raw.len() > OBJECT_HEADER_MESSAGE_MAX - COMPACT_DATA_OFFSET {
         return Err(Error::EditUnsupported(
             "compact dataset data is too large to overwrite in place",
         ));
     }
-    let mut out = Vec::with_capacity(region.len() + raw.len());
-    let mut p = 0;
-    let mut replaced = false;
-    while let Some((msg_type, body, body_end)) = region.next_message(p)? {
-        if msg_type == MessageType::DATA_LAYOUT {
-            if body_end - body < 2 || region[body + 1] != 0 {
-                return Err(Error::EditUnsupported(
-                    "compact-layout overwrite found a non-compact data layout",
-                ));
-            }
-            let layout = DataLayout::encode_compact(LayoutVersion::try_from(region[body])?, raw)?;
-            // Message record: type byte, 2-byte size (LE), then the rest of
-            // the prefix — flags, and a creation index where the header has one
-            // — kept verbatim.
-            out.push(region[p]);
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "the guard above bounds COMPACT_DATA_OFFSET + raw.len(), this body's \
-                          exact length, to the 2-byte message-size field"
-            )]
-            out.extend_from_slice(&(layout.len() as u16).to_le_bytes());
-            out.extend_from_slice(&region[p + 3..p + region.layout().prefix_len()]);
-            out.extend_from_slice(&layout);
-            replaced = true;
-        } else {
-            out.extend_from_slice(&region[p..body_end]);
-        }
-        p = body_end;
-    }
-    if p < region.len() {
-        out.extend_from_slice(&region[p..]);
-    }
-    if !replaced {
+    // libhdf5 reads the first Data Layout message of a header (`H5O_msg_read_oh`
+    // in `H5Omessage.c`, HDF5 2.2.0).
+    let (start, record) =
+        region
+            .first_message(MessageType::DATA_LAYOUT)?
+            .ok_or(Error::EditUnsupported(
+                "compact dataset header has no data-layout message",
+            ))?;
+    let &[version, LAYOUT_CLASS_COMPACT, ..] = record.body else {
         return Err(Error::EditUnsupported(
-            "compact dataset header has no data-layout message",
+            "compact-layout overwrite found a non-compact data layout",
         ));
-    }
+    };
+    let layout = DataLayout::encode_compact(LayoutVersion::try_from(version)?, raw)?;
+    let (Some(head), Some(tail)) = (region.get(..start), region.get(record.body_range.end..))
+    else {
+        return Err(Error::Format(FormatError::Internal(
+            "a message record read from the region lies outside it".to_owned(),
+        )));
+    };
+    let mut out =
+        Vec::with_capacity(head.len() + region.layout().prefix_len() + layout.len() + tail.len());
+    out.extend_from_slice(head);
+    region.layout().write_record(
+        &mut out,
+        MessageType::DATA_LAYOUT,
+        record.flags,
+        record.creation_index.unwrap_or(0),
+        &layout,
+    );
+    out.extend_from_slice(tail);
     Ok(region.with_bytes(out))
 }
 
@@ -13772,18 +13770,28 @@ pub(crate) fn next_record(
     region: &[u8],
     msg_start: usize,
 ) -> Result<Option<(MessageType, usize, usize)>, Error> {
-    match layout.next_message(region, msg_start) {
-        Ok(record) => Ok(record.map(|record| {
+    Ok(layout
+        .next_message(region, msg_start)
+        .map_err(record_error)?
+        .map(|record| {
             (
                 record.msg_type,
                 record.body_range.start,
                 record.body_range.end,
             )
-        })),
-        Err(FormatError::UnexpectedEof { .. }) => {
-            Err(Error::EditUnsupported("malformed object header message"))
+        }))
+}
+
+/// Returns the editor's error for an error of [`MessageRecordLayout::next_message`].
+///
+/// A record whose body runs past the end of its region is reported as
+/// [`Error::EditUnsupported`], and any other error as [`Error::Format`].
+fn record_error(err: FormatError) -> Error {
+    match err {
+        FormatError::UnexpectedEof { .. } => {
+            Error::EditUnsupported("malformed object header message")
         }
-        Err(err) => Err(Error::Format(err)),
+        err => Error::Format(err),
     }
 }
 
@@ -13844,6 +13852,31 @@ impl OhRegion {
         msg_start: usize,
     ) -> Result<Option<(MessageType, usize, usize)>, Error> {
         next_record(self.props.layout, &self.bytes, msg_start)
+    }
+
+    /// Returns the first message record of `msg_type` in this region, with the offset at which
+    /// the record begins, or `None` where every record is of another type.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if the body of a record it reads runs past the end of
+    /// the region.
+    fn first_message(
+        &self,
+        msg_type: MessageType,
+    ) -> Result<Option<(usize, MessageRecord<'_>)>, Error> {
+        let mut start = 0;
+        while let Some(record) = self
+            .layout()
+            .next_message(&self.bytes, start)
+            .map_err(record_error)?
+        {
+            if record.msg_type == msg_type {
+                return Ok(Some((start, record)));
+            }
+            start = record.body_range.end;
+        }
+        Ok(None)
     }
 
     /// The creation index of the record at `msg_start`, or `None` for a header
@@ -14444,6 +14477,7 @@ mod tests {
     use hdf5_pure_format::__private::ObjectTimes;
     use hdf5_pure_space::__private::PagedSections;
     use rstest::rstest;
+    use test_util::data_layout as layout_bytes;
     use test_util::fractal_heap;
     use test_util::object_header::Message;
     use test_util::object_header::v2 as v2_bytes;
@@ -18981,69 +19015,82 @@ mod tests {
         assert!(info.indexes_creation_order);
     }
 
-    /// Build a compact data-layout message body: version, class=0, 2-byte inline
-    /// size, then the data.
-    fn compact_layout_body(version: u8, data: &[u8]) -> Vec<u8> {
-        let mut b = vec![version, 0];
-        b.extend_from_slice(&(data.len() as u16).to_le_bytes());
-        b.extend_from_slice(data);
-        b
-    }
-
-    #[test]
-    fn rebuild_compact_layout_replaces_inline_data_only() {
-        // A region with a Dataspace message, a compact Data Layout, and a trailing
-        // Attribute message: rewriting the inline data must replace exactly the
-        // layout's bytes and leave every other message verbatim.
-        let mut region = message_record(MessageType::DATASPACE, &[0xAB; 8]);
-        region.extend_from_slice(&message_record(
-            MessageType::DATA_LAYOUT,
-            &compact_layout_body(3, &[1, 2, 3, 4]),
-        ));
-        region.extend_from_slice(&message_record(MessageType::ATTRIBUTE, &[0xCD; 5]));
-
-        let out = rebuild_compact_layout_region(&plain_region(region), &[9, 8, 7, 6]).unwrap();
-
-        // Same messages in the same order; only the layout's inline data changed.
-        assert_eq!(
-            region_types(&out),
-            vec![
-                MessageType::DATASPACE,
-                MessageType::DATA_LAYOUT,
-                MessageType::ATTRIBUTE,
+    #[rstest]
+    #[case::alone(None)]
+    #[case::compact(Some(layout_bytes::compact(&[0xEE; 2])))]
+    #[case::contiguous(Some(layout_bytes::contiguous(0x800, 4)))]
+    #[case::chunked(Some(layout_bytes::chunked(0x900, &[4], 1)))]
+    fn rebuild_compact_layout_replaces_only_the_first_layout(
+        #[values(MessageRecordLayout::PLAIN, TRACKED)] record_layout: MessageRecordLayout,
+        #[case] later_layout: Option<Vec<u8>>,
+    ) {
+        let region = |inline: &[u8]| {
+            [
+                record_layout.record(MessageType::DATASPACE, &[0xAB; 8]),
+                record_layout.record_with_creation_index(
+                    MessageType::DATA_LAYOUT,
+                    MessageFlags::CONSTANT,
+                    7,
+                    &layout_bytes::compact(inline),
+                ),
+                later_layout
+                    .as_deref()
+                    .map(|later| record_layout.record(MessageType::DATA_LAYOUT, later))
+                    .unwrap_or_default(),
+                record_layout.record(MessageType::ATTRIBUTE, &[0xCD; 5]),
             ]
-        );
-        let mut p = 0;
-        while let Some((mt, body, end)) = out.next_message(p).unwrap() {
-            match mt {
-                MessageType::DATASPACE => assert_eq!(&out[body..end], &[0xAB; 8]),
-                MessageType::DATA_LAYOUT => {
-                    assert_eq!(out[body], 3, "version preserved");
-                    assert_eq!(out[body + 1], 0, "still compact");
-                    let size = u16::from_le_bytes([out[body + 2], out[body + 3]]) as usize;
-                    assert_eq!(size, 4);
-                    assert_eq!(&out[body + 4..body + 4 + size], &[9, 8, 7, 6]);
-                }
-                MessageType::ATTRIBUTE => assert_eq!(&out[body..end], &[0xCD; 5]),
-                other => panic!("unexpected message {other:?}"),
-            }
-            p = end;
-        }
+            .concat()
+        };
+        let props = ObjectHeaderPrefix::with_layout(record_layout);
+
+        let out = rebuild_compact_layout_region(
+            &OhRegion::new(region(&[1, 2, 3, 4]), props),
+            &[9, 8, 7, 6, 5],
+        )
+        .unwrap();
+
+        assert_eq!(out[..], region(&[9, 8, 7, 6, 5])[..]);
     }
 
-    #[test]
-    fn rebuild_compact_layout_refuses_non_compact() {
-        // A contiguous (class 1) data layout is not compact, so the rebuild refuses
-        // rather than corrupt it.
-        let mut region = message_record(MessageType::DATA_LAYOUT, &{
-            let mut b = vec![3u8, 1]; // version 3, class 1 (contiguous)
-            b.extend_from_slice(&0u64.to_le_bytes());
-            b.extend_from_slice(&0u64.to_le_bytes());
-            b
-        });
-        region.extend_from_slice(&message_record(MessageType::DATASPACE, &[0; 8]));
-        let err = rebuild_compact_layout_region(&plain_region(region), &[1, 2]).unwrap_err();
-        assert!(err.to_string().contains("non-compact"), "got: {err}");
+    #[rstest]
+    #[case::contiguous_only(
+        [
+            message_record(MessageType::DATA_LAYOUT, &layout_bytes::contiguous(0, 0)),
+            message_record(MessageType::DATASPACE, &[0; 8]),
+        ]
+        .concat(),
+        vec![1, 2],
+        "compact-layout overwrite found a non-compact data layout",
+    )]
+    #[case::contiguous_before_compact(
+        [
+            message_record(MessageType::DATA_LAYOUT, &layout_bytes::contiguous(0, 0)),
+            message_record(MessageType::DATA_LAYOUT, &layout_bytes::compact(&[3, 4])),
+        ]
+        .concat(),
+        vec![1, 2],
+        "compact-layout overwrite found a non-compact data layout",
+    )]
+    #[case::dataspace_only(
+        message_record(MessageType::DATASPACE, &[0; 8]),
+        vec![1, 2],
+        "compact dataset header has no data-layout message",
+    )]
+    #[case::too_large(
+        message_record(MessageType::DATA_LAYOUT, &layout_bytes::compact(&[3, 4])),
+        vec![0; OBJECT_HEADER_MESSAGE_MAX - COMPACT_DATA_OFFSET + 1],
+        "compact dataset data is too large to overwrite in place",
+    )]
+    fn rebuild_compact_layout_rejects(
+        #[case] region: Vec<u8>,
+        #[case] raw: Vec<u8>,
+        #[case] expected: &str,
+    ) {
+        let err = rebuild_compact_layout_region(&plain_region(region), &raw).unwrap_err();
+        let Error::EditUnsupported(reason) = err else {
+            panic!("expected EditUnsupported, got {err:?}");
+        };
+        assert_eq!(reason, expected);
     }
 
     #[test]

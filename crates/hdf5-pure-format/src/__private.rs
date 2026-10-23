@@ -51,6 +51,7 @@ pub use crate::data_layout::ChunkedLayoutFlags;
 pub use crate::data_layout::DONT_FILTER_PARTIAL_BOUND_CHUNKS;
 pub use crate::data_layout::DataLayout;
 pub use crate::data_layout::FilteredSingleChunk;
+pub use crate::data_layout::LAYOUT_CLASS_COMPACT;
 pub use crate::data_layout::LAYOUT_PROPERTIES_OFFSET;
 pub use crate::data_layout::LayoutVersion;
 pub use crate::data_layout::SINGLE_INDEX_WITH_FILTER;
