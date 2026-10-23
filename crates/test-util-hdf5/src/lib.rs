@@ -17,6 +17,8 @@ pub mod file_builder;
 pub mod file_space;
 pub mod fixed_string;
 pub mod fixtures;
+pub mod free_space_churn;
+pub mod free_space_endurance;
 #[cfg(feature = "hdf5")]
 pub mod global_heap;
 pub mod global_heap_fixture;
