@@ -10,6 +10,8 @@ use hdf5_pure::{
     AttrValue, CompoundTypeBuilder, Datatype, File, FileBuilder, VlenStringReadOptions,
 };
 
+use rstest::rstest;
+use test_util_hdf5::numeric;
 use test_util_hdf5::{file, fixtures};
 
 /// Read a MATLAB-style variable-length ASCII attribute from an `hdf5::Attribute`.
@@ -769,6 +771,7 @@ struct PaddedTuple(
     #[hdf5(rename = "0")] i8,
     #[hdf5(rename = "1")] u64,
     #[hdf5(rename = "2")] f32,
+    #[hdf5(rename = "3")] f64,
 );
 
 #[test]
@@ -776,19 +779,24 @@ fn c_library_reads_explicit_offset_compound() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("padded_compound.h5");
 
-    let datatype = CompoundTypeBuilder::with_size(24)
+    let datatype = CompoundTypeBuilder::with_size(32)
         .i8_field("0", 0)
         .u64_field("1", 8)
         .f32_field("2", 16)
+        .f64_field("3", 24)
         .build()
         .unwrap();
-    let expected = [PaddedTuple(-4, 17, 2.5), PaddedTuple(8, u64::MAX, -1.25)];
-    let mut raw = vec![0u8; expected.len() * 24];
+    let expected = [
+        PaddedTuple(-4, 17, 2.5, -1.5),
+        PaddedTuple(8, u64::MAX, -1.25, 6.25),
+    ];
+    let mut raw = vec![0u8; expected.len() * 32];
     for (index, value) in expected.iter().enumerate() {
-        let record = &mut raw[index * 24..(index + 1) * 24];
+        let record = &mut raw[index * 32..(index + 1) * 32];
         record[0] = value.0 as u8;
         record[8..16].copy_from_slice(&value.1.to_le_bytes());
         record[16..20].copy_from_slice(&value.2.to_le_bytes());
+        record[24..32].copy_from_slice(&value.3.to_le_bytes());
     }
 
     let mut builder = FileBuilder::new();
@@ -805,24 +813,38 @@ fn c_library_reads_explicit_offset_compound() {
 // The x86 32-bit ABI aligns `u64` to 4 bytes, not 8, so the offsets below hold
 // only on a 64-bit target.
 #[cfg(not(target_pointer_width = "32"))]
-#[test]
-fn pure_reader_decodes_c_written_padded_compound() {
+#[rstest]
+fn pure_reader_decodes_c_written_padded_compound(
+    #[values(false, true)] low: bool,
+    #[values(false, true)] high: bool,
+    #[values(false, true)] internal: bool,
+) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_padded_compound.h5");
-    let expected = [PaddedTuple(-9, 23, 4.5), PaddedTuple(3, 77, -6.25)];
+    let expected = [
+        PaddedTuple(-9, 23, 4.5, -2.25),
+        PaddedTuple(3, 77, -6.25, 5.75),
+    ];
+    let datatype = numeric::padded_compound(
+        &hdf5::Datatype::from_type::<PaddedTuple>().unwrap(),
+        [low, high, internal],
+    );
 
     let file = hdf5::File::create(&path).unwrap();
     file.new_dataset_builder()
-        .with_data(&expected)
+        .empty_as(&datatype)
+        .shape(expected.len())
         .create("padded")
+        .unwrap()
+        .write_raw(&expected)
         .unwrap();
     drop(file);
 
     let file = File::open(&path).unwrap();
     let ds = file.dataset("padded").unwrap();
     assert_eq!(
-        ds.read_compound::<(i8, u64, f32)>().unwrap(),
-        expected.map(|value| (value.0, value.1, value.2))
+        ds.read_compound::<(i8, u64, f32, f64)>().unwrap(),
+        expected.map(|value| (value.0, value.1, value.2, value.3))
     );
     match ds.datatype().unwrap() {
         Datatype::Compound { size, members } => {
@@ -832,7 +854,7 @@ fn pure_reader_decodes_c_written_padded_compound() {
                     .iter()
                     .map(|member| (member.name.as_str(), member.byte_offset))
                     .collect::<Vec<_>>(),
-                vec![("0", 0), ("1", 8), ("2", 16)]
+                vec![("0", 0), ("1", 8), ("2", 16), ("3", 24)]
             );
         }
         other => panic!("expected compound, got {other:?}"),

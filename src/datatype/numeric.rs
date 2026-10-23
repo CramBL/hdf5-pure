@@ -87,7 +87,10 @@ impl TryFrom<&Datatype> for NumericDecodePlan {
                 let element_size = NumericElementSize::new(numeric.size())?;
                 let order = FixedWidthByteOrder::try_from(numeric.byte_order())
                     .map_err(|_order| FormatError::UnsupportedVaxByteOrder)?;
-                let encoding = match (element_size.get(), numeric.layout()) {
+                let encoding = match (
+                    element_size.get(),
+                    numeric.with_padding(false, false, false).layout(),
+                ) {
                     (4, FloatingPointLayout::IEEE754_BINARY32) => NumericEncoding::Float32(order),
                     (8, FloatingPointLayout::IEEE754_BINARY64) => NumericEncoding::Float64(order),
                     _ => {

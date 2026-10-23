@@ -98,13 +98,10 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
             let bit_precision = LittleEndian::read_u16(&data[pos + 2..pos + 4]);
             pos += 4;
             Ok((
-                Datatype::FixedPoint(FixedPointType::new(
-                    size,
-                    byte_order,
-                    signed,
-                    bit_offset,
-                    bit_precision,
-                )?),
+                Datatype::FixedPoint(
+                    FixedPointType::new(size, byte_order, signed, bit_offset, bit_precision)?
+                        .with_padding(bf0 & LOW_PADDING_BIT != 0, bf0 & HIGH_PADDING_BIT != 0),
+                ),
                 pos,
             ))
         }
@@ -130,19 +127,26 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
             let exponent_bias = LittleEndian::read_u32(&data[pos + 8..pos + 12]);
             pos += 12;
             Ok((
-                Datatype::FloatingPoint(FloatingPointType::new(
-                    size,
-                    byte_order,
-                    mantissa_normalization,
-                    sign_location,
-                    bit_offset,
-                    bit_precision,
-                    exponent_location,
-                    exponent_size,
-                    mantissa_location,
-                    mantissa_size,
-                    exponent_bias,
-                )?),
+                Datatype::FloatingPoint(
+                    FloatingPointType::new(
+                        size,
+                        byte_order,
+                        mantissa_normalization,
+                        sign_location,
+                        bit_offset,
+                        bit_precision,
+                        exponent_location,
+                        exponent_size,
+                        mantissa_location,
+                        mantissa_size,
+                        exponent_bias,
+                    )?
+                    .with_padding(
+                        bf0 & LOW_PADDING_BIT != 0,
+                        bf0 & HIGH_PADDING_BIT != 0,
+                        bf0 & FLOAT_INTERNAL_PADDING_BIT != 0,
+                    ),
+                ),
                 pos,
             ))
         }
@@ -188,12 +192,10 @@ pub fn parse_datatype(data: &[u8]) -> Result<(Datatype, usize), FormatError> {
             let bit_precision = LittleEndian::read_u16(&data[pos + 2..pos + 4]);
             pos += 4;
             Ok((
-                Datatype::BitField(BitFieldType::new(
-                    size,
-                    byte_order,
-                    bit_offset,
-                    bit_precision,
-                )?),
+                Datatype::BitField(
+                    BitFieldType::new(size, byte_order, bit_offset, bit_precision)?
+                        .with_padding(bf0 & LOW_PADDING_BIT != 0, bf0 & HIGH_PADDING_BIT != 0),
+                ),
                 pos,
             ))
         }
@@ -402,7 +404,7 @@ pub fn serialize_datatype(datatype: &Datatype) -> Vec<u8> {
     match datatype {
         Datatype::FixedPoint(datatype) => {
             let layout = datatype.layout();
-            let mut bf0 = 0u8;
+            let mut bf0 = padding_bits(layout.low_padding(), layout.high_padding());
             if datatype.byte_order() == DatatypeByteOrder::BigEndian {
                 bf0 |= 0x01;
             }
@@ -426,7 +428,11 @@ pub fn serialize_datatype(datatype: &Datatype) -> Vec<u8> {
                 MantissaNormalization::LeadingOne => FLOAT_NORMALIZATION_LEADING_ONE,
                 MantissaNormalization::ImpliedLeadingOne => FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE,
             };
-            let mut bf0 = normalization << FLOAT_NORMALIZATION_SHIFT;
+            let mut bf0 = (normalization << FLOAT_NORMALIZATION_SHIFT)
+                | padding_bits(layout.low_padding(), layout.high_padding());
+            if layout.internal_padding() {
+                bf0 |= FLOAT_INTERNAL_PADDING_BIT;
+            }
             let version = match datatype.byte_order() {
                 DatatypeByteOrder::LittleEndian => DATATYPE_VERSION_ONE,
                 DatatypeByteOrder::BigEndian => {
@@ -600,7 +606,8 @@ pub fn serialize_datatype(datatype: &Datatype) -> Vec<u8> {
             buf
         }
         Datatype::BitField(datatype) => {
-            let bf0 = u8::from(datatype.byte_order() == DatatypeByteOrder::BigEndian);
+            let bf0 = padding_bits(datatype.low_padding(), datatype.high_padding())
+                | u8::from(datatype.byte_order() == DatatypeByteOrder::BigEndian);
             let mut buf = build_header(
                 BIT_FIELD_CLASS,
                 DATATYPE_VERSION_ONE,
@@ -632,6 +639,32 @@ pub fn serialize_datatype(datatype: &Datatype) -> Vec<u8> {
         _ => unreachable!("core datatype variant lacks an HDF5 encoder"),
     }
 }
+
+fn padding_bits(low: bool, high: bool) -> u8 {
+    (if low { LOW_PADDING_BIT } else { 0 }) | (if high { HIGH_PADDING_BIT } else { 0 })
+}
+
+/// Bit 1 of the fixed-point, floating-point, and bitfield class bit fields, the low padding bit.
+///
+/// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const LOW_PADDING_BIT: u8 = 0x02;
+/// Bit 2 of the fixed-point, floating-point, and bitfield class bit fields, the high padding bit.
+///
+/// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const HIGH_PADDING_BIT: u8 = 0x04;
+/// Bit 3 of the floating-point class bit field, the internal padding bit.
+///
+/// The field for datatype message versions 1 through 5 is defined in "The Datatype Message"
+/// of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const FLOAT_INTERNAL_PADDING_BIT: u8 = 0x08;
 
 fn build_header(class: u8, version: u8, bf: [u8; 3], size: u32) -> Vec<u8> {
     let mut buf = vec![0u8; 8];
@@ -1265,6 +1298,61 @@ mod tests {
         buf
     }
 
+    #[rstest]
+    #[case(FIXED_POINT_CLASS)]
+    #[case(BIT_FIELD_CLASS)]
+    fn preserves_low_and_high_padding(
+        #[case] class: u8,
+        #[values(false, true)] low: bool,
+        #[values(false, true)] high: bool,
+        #[values(false, true)] big_endian: bool,
+    ) {
+        let mut bytes = build_fixed_point(2, big_endian, false, 3, 9);
+        bytes[0] = class | (DATATYPE_VERSION_ONE << 4);
+        bytes[1] |= padding_bits(low, high);
+        let (datatype, consumed) = parse_datatype(&bytes).unwrap();
+        assert_eq!(consumed, bytes.len());
+        match &datatype {
+            Datatype::FixedPoint(numeric) => {
+                let layout = numeric.layout();
+                assert_eq!((layout.low_padding(), layout.high_padding()), (low, high));
+            }
+            Datatype::BitField(numeric) => {
+                assert_eq!((numeric.low_padding(), numeric.high_padding()), (low, high));
+            }
+            other => panic!("expected an integer or bit-field datatype, got {other:?}"),
+        }
+        assert_eq!(serialize_datatype(&datatype), bytes);
+    }
+
+    #[rstest]
+    fn preserves_floating_point_padding(
+        #[values(false, true)] low: bool,
+        #[values(false, true)] high: bool,
+        #[values(false, true)] internal: bool,
+    ) {
+        let mut bytes = build_float(4, 23, 8, 0, 23, 127);
+        bytes[1] |= padding_bits(low, high);
+        if internal {
+            bytes[1] |= FLOAT_INTERNAL_PADDING_BIT;
+        }
+        let (datatype, consumed) = parse_datatype(&bytes).unwrap();
+        assert_eq!(consumed, bytes.len());
+        let Datatype::FloatingPoint(numeric) = &datatype else {
+            panic!("expected a floating-point datatype, got {datatype:?}");
+        };
+        let layout = numeric.layout();
+        assert_eq!(
+            (
+                layout.low_padding(),
+                layout.high_padding(),
+                layout.internal_padding()
+            ),
+            (low, high, internal)
+        );
+        assert_eq!(serialize_datatype(&datatype), bytes);
+    }
+
     #[test]
     fn test_fixed_point_u8() {
         let data = build_fixed_point(1, false, false, 0, 8);
@@ -1810,11 +1898,20 @@ mod tests {
                 } else {
                     CharacterSet::Ascii
                 }),
-                base_type: Box::new(Datatype::FixedPoint(FixedPointType::new(1, if big_endian {
-                        DatatypeByteOrder::BigEndian
-                    } else {
-                        DatatypeByteOrder::LittleEndian
-                    }, false, 0, 8).unwrap())),
+                base_type: Box::new(Datatype::FixedPoint(
+                    FixedPointType::new(
+                        1,
+                        if big_endian {
+                            DatatypeByteOrder::BigEndian
+                        } else {
+                            DatatypeByteOrder::LittleEndian
+                        },
+                        false,
+                        0,
+                        8
+                    )
+                    .unwrap()
+                )),
             }
         );
         assert_eq!(serialize_datatype(&datatype), bytes);
@@ -1830,7 +1927,9 @@ mod tests {
                 is_string: false,
                 padding: None,
                 charset: None,
-                base_type: Box::new(Datatype::FixedPoint(FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap())),
+                base_type: Box::new(Datatype::FixedPoint(
+                    FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
+                )),
             }),
         };
         let mut expected = build_dt_header(

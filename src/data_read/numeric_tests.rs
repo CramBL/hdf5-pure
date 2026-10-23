@@ -276,3 +276,22 @@ fn maybe_enumeration(datatype: Datatype, enumeration: bool) -> Datatype {
         datatype
     }
 }
+
+#[rstest]
+fn decodes_ieee_binary32_with_each_padding_value(
+    #[values(false, true)] low_padding: bool,
+    #[values(false, true)] high_padding: bool,
+    #[values(false, true)] internal_padding: bool,
+) {
+    let datatype = Datatype::FloatingPoint(
+        FloatingPointType::ieee754_binary32(DatatypeByteOrder::LittleEndian).with_padding(
+            low_padding,
+            high_padding,
+            internal_padding,
+        ),
+    );
+    assert_eq!(
+        super::read_as_f64(&1.5f32.to_le_bytes(), &datatype).unwrap(),
+        [1.5],
+    );
+}
