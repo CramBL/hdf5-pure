@@ -317,8 +317,11 @@ pub(crate) struct Located {
     pub ea_bits: ExtensibleArrayBitGeometry,
     /// Address of the EA index block (`EAIB`).
     pub index_block_addr: StoredAddress,
-    /// Current number of chunks indexed (EA element count).
+    /// Number of chunk positions within the current dataset extent, including unallocated ones.
     pub num_chunks: u64,
+    /// Statistics computed from referenced blocks, invalidated before index mutation and
+    /// cached after the header publication barrier.
+    allocation_stats: Option<ExtensibleArrayStats>,
 }
 
 impl Located {
@@ -331,6 +334,7 @@ impl Located {
     /// each writer reports through its own variant. The caller resolves the path: an owned handle
     /// holds its address, and the path-addressed writers resolve against their own mirrors.
     ///
+    /// Computes allocation statistics from the index block and its referenced secondary blocks.
     /// Every read is a bounded [`Source`] window, so this works over a store with no whole-file
     /// mirror.
     ///
@@ -339,7 +343,10 @@ impl Located {
     /// Returns the error `unsupported` builds if an in-place append does not accept the dataset,
     /// and [`Error::MissingMessage`] if the object header has no dataspace, layout, or datatype
     /// message. Returns the error of a read or a parse of the object header, one of its messages,
-    /// or the Extensible Array header.
+    /// or the Extensible Array header. Returns [`Error::AppendUnsupported`] if the index block
+    /// is unallocated, or [`FormatError::InvalidExtensibleArrayGeometry`] if allocation
+    /// statistics or pointer offsets exceed [`u64::MAX`]. Propagates errors from reading block
+    /// pointers.
     pub(crate) fn locate_at<F: Store>(
         file: &F,
         oh_addr: u64,
@@ -500,26 +507,29 @@ impl Located {
             current_dim.div_ceil(chunk_elems)
         };
 
+        let mut located = Located {
+            dim0_off,
+            current_dim,
+            ohdr_chunk_start: dataspace_msg.chunk_start,
+            ohdr_chunk_msg_end: dataspace_msg.chunk_msg_end,
+            flags,
+            chunk_elems,
+            elem_bytes,
+            chunk_bytes,
+            client_id: ea_header.client_id,
+            ea_addr,
+            offset_width: widths.offsets,
+            geom,
+            idx_blk_elmts: ea_header.idx_blk_elmts as u64,
+            ea_elem_size: ea_header.element_size as usize,
+            ea_bits: ea_header.bit_geometry(),
+            index_block_addr,
+            num_chunks,
+            allocation_stats: None,
+        };
+        located.allocation_stats = Some(located.read_allocation_stats(file)?);
         Ok(LocateResult {
-            located: Located {
-                dim0_off,
-                current_dim,
-                ohdr_chunk_start: dataspace_msg.chunk_start,
-                ohdr_chunk_msg_end: dataspace_msg.chunk_msg_end,
-                flags,
-                chunk_elems,
-                elem_bytes,
-                chunk_bytes,
-                client_id: ea_header.client_id,
-                ea_addr,
-                offset_width: widths.offsets,
-                geom,
-                idx_blk_elmts: ea_header.idx_blk_elmts as u64,
-                ea_elem_size: ea_header.element_size as usize,
-                ea_bits: ea_header.bit_geometry(),
-                index_block_addr,
-                num_chunks,
-            },
+            located,
             spans: MessageSpans {
                 datatype: (datatype_msg.data_off, datatype_msg.size),
                 filter: filter_msg.map(|m| (m.data_off, m.size)),
@@ -696,18 +706,28 @@ impl Located {
         }
     }
 
-    /// Store `rec` into element slot `e` of the chunk index, allocating new data
-    /// blocks / super blocks as block boundaries are crossed, and
-    /// re-checksumming the touched block. Works for both a fresh insert (the
-    /// block is allocated on first touch) and an in-place update of an existing
-    /// element (the block already exists, so it is reused rather than
-    /// re-allocated). Handles non-paged and paged data blocks.
+    /// Writes `rec` into element slot `e`, allocating missing data or secondary blocks.
+    ///
+    /// Reuses existing blocks for element updates and recomputes the checksum of the block
+    /// or page that contains the element. Invalidates cached allocation statistics before
+    /// modifying the index. Planning a subsequent append reads block pointers again until
+    /// the header publication barrier completes successfully.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if an element range exceeds
+    /// [`u64::MAX`], or [`FormatError::ValueTooLargeForPlatform`] if a block size or element count
+    /// exceeds [`usize::MAX`]. Returns [`Error::AppendUnsupported`] if the
+    /// geometry does not cover `e`, the stored chunk size exceeds its field width, or a
+    /// checksum publication range lies outside its block. Propagates errors from reading,
+    /// encoding, allocating, writing, or synchronizing blocks.
     pub(crate) fn ea_insert<F: Store>(
-        &self,
+        &mut self,
         file: &mut F,
         e: u64,
         rec: ElemRecord,
     ) -> Result<(), Error> {
+        self.allocation_stats = None;
         let os = file.widths().offsets.get() as usize;
         let elem_size = self.ea_elem_size as u64;
         let idx = self.idx_blk_elmts;
@@ -1047,9 +1067,228 @@ impl Located {
         )
     }
 
+    /// Computes the statistics after inserting chunk records in `first_chunk..num_chunks`.
+    ///
+    /// Reuses the cached allocation counts when available and adds each missing data or
+    /// secondary block once. Counts the full capacity of a paged data block, including pages
+    /// that are uninitialized.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if a range, pointer offset,
+    /// block size, or statistic exceeds [`u64::MAX`], or
+    /// [`FormatError::ValueTooLargeForPlatform`] if a data-block index exceeds [`usize::MAX`].
+    /// Returns [`Error::AppendUnsupported`] if the geometry does not cover the range or the
+    /// index block is unallocated. Propagates errors from reading block pointers.
+    fn planned_allocation_stats(
+        &self,
+        file: &impl Store,
+        first_chunk: u64,
+        num_chunks: u64,
+    ) -> Result<ExtensibleArrayStats, Error> {
+        let mut stats = match self.allocation_stats {
+            Some(stats) => stats,
+            None => self.read_allocation_stats(file)?,
+        };
+        stats.max_idx_set = num_chunks;
+        let mut last_new_secondary = None;
+        let mut element = first_chunk.max(self.idx_blk_elmts);
+        while element < num_chunks {
+            let region = locate_data_block(&self.geom, self.idx_blk_elmts, element)?;
+            let secondary = match region.parent {
+                Parent::IndexDirect { .. } => None,
+                Parent::Super { sblk_j, .. } => {
+                    let addr = self.super_block_addr(file, sblk_j)?;
+                    if addr.is_undefined(self.offset_width) && last_new_secondary != Some(sblk_j) {
+                        self.add_super_block(
+                            &mut stats,
+                            region.super_block(self.ea_bits.page_nelmts().get()),
+                        )?;
+                        last_new_secondary = Some(sblk_j);
+                    }
+                    Some(addr)
+                }
+            };
+            let missing = if secondary.is_some_and(|addr| addr.is_undefined(self.offset_width)) {
+                true
+            } else {
+                file.read_addr_at(self.dblk_ptr_off(
+                    secondary,
+                    &region,
+                    usize::from(self.offset_width.get()),
+                    self.ea_bits.block_offset_width(),
+                )?)?
+                .is_undefined(self.offset_width)
+            };
+            if missing {
+                self.add_data_blocks(&mut stats, region.dblk_nelmts, 1)?;
+            }
+            element = ea_sum([region.db_start, region.dblk_nelmts])?.min(num_chunks);
+        }
+        Ok(stats)
+    }
+
+    /// Computes allocation statistics from defined data and secondary block pointers.
+    ///
+    /// Counts all referenced blocks, including blocks beyond the current dataset extent.
+    /// Uses the current chunk count for the maximum index and includes inline slots in the
+    /// element capacity. The version 0 header statistics are defined in "The Extensible Array
+    /// Index" of the [format specification, version 4.0][spec].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AppendUnsupported`] if the index block is unallocated, or
+    /// [`FormatError::InvalidExtensibleArrayGeometry`] if a pointer offset, block size, or
+    /// statistic exceeds [`u64::MAX`]. Propagates errors from reading block pointers.
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_extarr
+    fn read_allocation_stats(&self, file: &impl Store) -> Result<ExtensibleArrayStats, Error> {
+        if self.index_block_addr.is_undefined(self.offset_width) {
+            return Err(Error::AppendUnsupported(
+                "the dataset's extensible-array index block is not allocated",
+            ));
+        }
+        let mut stats = ExtensibleArrayStats {
+            nsuper_blks: 0,
+            super_blk_size: 0,
+            ndata_blks: 0,
+            data_blk_size: 0,
+            max_idx_set: self.num_chunks,
+            nelmts: self.idx_blk_elmts,
+        };
+        let os = u64::from(self.offset_width.get());
+        let pointers = ea_sum([
+            self.index_block_addr.get(),
+            EA_BLOCK_PREFIX_SIZE,
+            os,
+            ea_product(self.idx_blk_elmts, self.ea_elem_size.to_u64())?,
+        ])?;
+        for (ordinal, &elements) in self.geom.direct_dblk_nelmts().iter().enumerate() {
+            let count = self.allocated_pointers(
+                file,
+                ea_sum([pointers, ea_product(ordinal.to_u64(), os)?])?,
+                1,
+            )?;
+            self.add_data_blocks(&mut stats, elements, count)?;
+        }
+        for (j, &(ndblks, elements)) in self
+            .geom
+            .sblks()
+            .iter()
+            .skip(self.geom.first_indirect_sblk())
+            .take(self.geom.nsblk_addrs())
+            .enumerate()
+        {
+            let addr = self.super_block_addr(file, j)?;
+            if addr.is_undefined(self.offset_width) {
+                continue;
+            }
+            let block = SuperBlockGeometry {
+                ndblks,
+                blocks: DataBlockGeometry {
+                    dblk_nelmts: elements,
+                    page_nelmts: self.ea_bits.page_nelmts().get(),
+                },
+            };
+            self.add_super_block(&mut stats, block)?;
+            let pointers = ea_sum([addr.get(), self.block_prefix_size(), block.bitmap_size()])?;
+            let count = self.allocated_pointers(file, pointers, ndblks)?;
+            self.add_data_blocks(&mut stats, elements, count)?;
+        }
+        Ok(stats)
+    }
+
+    /// Counts defined addresses in `count` consecutive pointer slots at `offset`.
+    ///
+    /// Reads at most [`EA_POINTER_BATCH_BYTES`] bytes at a time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if a pointer offset exceeds
+    /// [`u64::MAX`]. Propagates errors from [`Source::read_at`].
+    fn allocated_pointers(
+        &self,
+        file: &impl Store,
+        mut offset: u64,
+        mut count: u64,
+    ) -> Result<u64, Error> {
+        let os = usize::from(self.offset_width.get());
+        let mut bytes = [0u8; EA_POINTER_BATCH_BYTES];
+        let mut allocated = 0;
+        while count > 0 {
+            let take = count.min((bytes.len() / os).to_u64()).to_usize()?;
+            let span = take * os;
+            file.read_at(offset, &mut bytes[..span])?;
+            allocated = ea_sum([
+                allocated,
+                bytes[..span]
+                    .chunks_exact(os)
+                    .filter(|pointer| {
+                        let mut addr = [0u8; 8];
+                        addr[..os].copy_from_slice(pointer);
+                        !StoredAddress::new(u64::from_le_bytes(addr))
+                            .is_undefined(self.offset_width)
+                    })
+                    .count()
+                    .to_u64(),
+            ])?;
+            offset = ea_sum([offset, span.to_u64()])?;
+            count -= take.to_u64();
+        }
+        Ok(allocated)
+    }
+
+    /// Adds one secondary block's allocation count and encoded size to `stats`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if a size or statistic exceeds
+    /// [`u64::MAX`].
+    fn add_super_block(
+        &self,
+        stats: &mut ExtensibleArrayStats,
+        block: SuperBlockGeometry,
+    ) -> Result<(), FormatError> {
+        let size = ea_sum([
+            self.block_prefix_size(),
+            ea_product(block.ndblks, block.blocks.npages().div_ceil(8))?,
+            ea_product(block.ndblks, u64::from(self.offset_width.get()))?,
+            EA_CHECKSUM_SIZE,
+        ])?;
+        stats.nsuper_blks = ea_sum([stats.nsuper_blks, 1])?;
+        stats.super_blk_size = ea_sum([stats.super_blk_size, size])?;
+        Ok(())
+    }
+
+    /// Adds `count` data blocks' allocation counts, encoded sizes, and element capacities.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if a size or statistic exceeds
+    /// [`u64::MAX`].
+    fn add_data_blocks(
+        &self,
+        stats: &mut ExtensibleArrayStats,
+        elements: u64,
+        count: u64,
+    ) -> Result<(), FormatError> {
+        if count == 0 {
+            return Ok(());
+        }
+        stats.ndata_blks = ea_sum([stats.ndata_blks, count])?;
+        stats.data_blk_size = ea_sum([
+            stats.data_blk_size,
+            ea_product(count, self.data_block_size(elements)?)?,
+        ])?;
+        stats.nelmts = ea_sum([stats.nelmts, ea_product(count, elements)?])?;
+        Ok(())
+    }
+
     /// Computes header statistics for a dense prefix of `num_chunks` element slots.
     ///
     /// Counts every data block in that prefix, including blocks whose pointers are undefined.
+    /// Checks that the ranges, statistics, and metadata sizes are representable before an
+    /// append reads or writes chunk data.
     ///
     /// # Errors
     ///
@@ -1057,7 +1296,7 @@ impl Located {
     /// or statistic exceeds [`u64::MAX`], or [`FormatError::ValueTooLargeForPlatform`] if a block
     /// size or data-block index exceeds [`usize::MAX`]. Returns [`Error::AppendUnsupported`] if
     /// the prefix extends beyond the geometry.
-    fn append_stats(&self, num_chunks: u64) -> Result<ExtensibleArrayStats, Error> {
+    fn dense_prefix_stats(&self, num_chunks: u64) -> Result<ExtensibleArrayStats, Error> {
         if num_chunks > self.idx_blk_elmts {
             locate_data_block(&self.geom, self.idx_blk_elmts, num_chunks - 1)?;
         }
@@ -1075,6 +1314,7 @@ impl Located {
                 return Ok(stats);
             }
             let block_size = self.data_block_size(elements)?;
+            block_size.to_usize()?;
             stats.ndata_blks = ea_sum([stats.ndata_blks, 1])?;
             stats.data_blk_size = ea_sum([stats.data_blk_size, block_size])?;
             stats.nelmts = ea_sum([stats.nelmts, elements])?;
@@ -1108,10 +1348,9 @@ impl Located {
             stats.nsuper_blks = ea_sum([stats.nsuper_blks, 1])?;
             stats.super_blk_size = ea_sum([stats.super_blk_size, super_size])?;
             stats.ndata_blks = ea_sum([stats.ndata_blks, used])?;
-            stats.data_blk_size = ea_sum([
-                stats.data_blk_size,
-                ea_product(used, self.data_block_size(elements)?)?,
-            ])?;
+            let block_size = self.data_block_size(elements)?;
+            block_size.to_usize()?;
+            stats.data_blk_size = ea_sum([stats.data_blk_size, ea_product(used, block_size)?])?;
             stats.nelmts = ea_sum([stats.nelmts, ea_product(used, elements)?])?;
             elem = end;
         }
@@ -1122,14 +1361,13 @@ impl Located {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if the size exceeds [`u64::MAX`],
-    /// or [`FormatError::ValueTooLargeForPlatform`] if it exceeds [`usize::MAX`].
+    /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if the size exceeds [`u64::MAX`].
     fn data_block_size(&self, elements: u64) -> Result<u64, FormatError> {
         let blocks = DataBlockGeometry {
             dblk_nelmts: elements,
             page_nelmts: self.ea_bits.page_nelmts().get(),
         };
-        let size = if blocks.is_paged() {
+        if blocks.is_paged() {
             ea_sum([
                 self.block_prefix_size(),
                 EA_CHECKSUM_SIZE,
@@ -1140,16 +1378,14 @@ impl Located {
                         EA_CHECKSUM_SIZE,
                     ])?,
                 )?,
-            ])?
+            ])
         } else {
             ea_sum([
                 self.block_prefix_size(),
                 ea_product(elements, self.ea_elem_size.to_u64())?,
                 EA_CHECKSUM_SIZE,
-            ])?
-        };
-        size.to_usize()?;
-        Ok(size)
+            ])
+        }
     }
 
     /// Returns the prefix length through the block-offset field of a data or secondary block.
@@ -1176,7 +1412,7 @@ pub(crate) struct AppendPlan {
     n_full: u64,
     /// New axis-0 dimension after the append (the commit value).
     new_dim: u64,
-    /// New number of indexed chunks.
+    /// Number of chunk positions within `new_dim`, including unallocated ones.
     new_num_chunks: u64,
     /// The header statistics to publish after the index writes.
     stats: ExtensibleArrayStats,
@@ -1196,7 +1432,9 @@ impl AppendPlan {
 /// Plans chunk bytes, index counts, and header statistics for an in-place append.
 ///
 /// Checks the element ranges and metadata sizes before reading a trailing chunk or encoding
-/// `raw`, the little-endian bytes of `new_elems` elements. Planning leaves the file unchanged.
+/// `raw`, the little-endian bytes of `new_elems` elements. Computes header statistics from
+/// referenced blocks and the blocks needed for the appended chunks. Planning leaves the file
+/// unchanged.
 ///
 /// `grow_visible_tail` says whether the caller may rewrite the trailing chunk of
 /// a *filtered* dataset — a chunk a reader at the old dimension can already see.
@@ -1236,8 +1474,9 @@ pub(crate) fn plan_ea_append<F: Store>(
             "append would overflow the dataset dimension",
         ))?;
     let new_num_chunks = new_dim.div_ceil(chunk_elems);
-    let stats = loc.append_stats(new_num_chunks)?;
+    loc.dense_prefix_stats(new_num_chunks)?;
     let n_full = current_dim / chunk_elems;
+    let stats = loc.planned_allocation_stats(file, n_full, new_num_chunks)?;
     let has_partial = current_dim % chunk_elems != 0;
 
     // Growing a partial trailing chunk is copy-on-write, filtered or not. The
@@ -1346,15 +1585,22 @@ pub(crate) fn plan_ea_append<F: Store>(
     })
 }
 
-/// Apply a planned append to `file` in place, ordered child-before-parent with
-/// `fsync` barriers so a crash between calls leaves either the old length or the
-/// new one, never a torn or lost view. `max_phase` runs only the first N of the
-/// four durability phases (production callers pass 4; the crash-consistency tests
-/// stop at a boundary to simulate a crash). On a full (phase-4) apply, `loc`'s
-/// cached `current_dim` / `num_chunks` are advanced to match. Shared by the
-/// general append writer and the in-place edit engine's in-place append so this ordered
-/// write sequence — the crash-safety heart of the engine — lives in exactly one
-/// place and is never copy-pasted.
+/// Applies a planned append in order from chunk data to the dataspace dimension.
+///
+/// Writes each child before publishing its address, with synchronization barriers between
+/// phases. Runs phase 1, then continues through `max_phase`, up to phase 4. Production callers
+/// pass 4. Tests stop at a phase boundary to simulate interruption.
+///
+/// Caches allocation statistics after phase 3's header publication barrier. Updates
+/// [`Located::current_dim`] and [`Located::num_chunks`] after phase 4's dimension publication
+/// barrier.
+///
+/// # Errors
+///
+/// Returns [`Error::Format`] if a file offset cannot be represented or encoded block metadata
+/// is invalid. Returns [`Error::AppendUnsupported`] if an index element or publication range
+/// lies outside its block. Propagates errors from allocating, reading, writing, or
+/// synchronizing file storage.
 pub(crate) fn apply_ea_append<F: Store>(
     file: &mut F,
     loc: &mut Located,
@@ -1421,6 +1667,7 @@ pub(crate) fn apply_ea_append<F: Store>(
     }
     loc.update_ea_header(file, stats)?;
     file.sync()?;
+    loc.allocation_stats = Some(stats);
     if max_phase < 4 {
         return Ok(());
     }
@@ -1750,6 +1997,8 @@ const EA_BLOCK_PREFIX_SIZE: u64 = 6;
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_extarr
 const EA_CHECKSUM_SIZE: u64 = 4;
+/// The maximum read size when counting allocated block pointers.
+const EA_POINTER_BATCH_BYTES: usize = 1_024;
 
 #[cfg(test)]
 mod tests {
@@ -1767,6 +2016,7 @@ mod tests {
 
     use super::*;
     use crate::access_mode::AccessMode;
+    use crate::edit::LocatedState;
     use crate::filters;
     use crate::group_v2;
     use crate::object_path::ObjectPath;
@@ -1774,6 +2024,180 @@ mod tests {
     use crate::superblock::LocatedSuperblock;
     use crate::superblock::Superblock;
     use crate::writer::FileBuilder;
+
+    #[rstest]
+    #[case::direct(4, 54, [0, 0, 3, 80])]
+    #[case::secondary(244, 444, [1, 54, 10, 496])]
+    fn retry_counts_referenced_blocks_after_interrupted_publication(
+        #[case] start: i32,
+        #[case] staged_end: i32,
+        #[case] counts: [u64; 4],
+        #[values(1, 2, 3)] phase: u8,
+        #[values(false, true)] reopen: bool,
+        #[values(false, true)] filtered: bool,
+    ) {
+        let mut store = allocation_store(start, filtered);
+        let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
+        let staged: Vec<_> = (start..staged_end).collect();
+        append_state(&mut store, &mut state, &staged, phase).unwrap();
+        assert_eq!(state.loc.allocation_stats.is_none(), phase == 2);
+        if reopen {
+            store = WindowProbeStore::open(store.data);
+            state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
+        }
+        append_state(&mut store, &mut state, &[start], 4).unwrap();
+        append_state(&mut store, &mut state, &[start + 1], 4).unwrap();
+        let [secondary, secondary_bytes, data, capacity] = if phase == 1 {
+            if start == 4 {
+                [0, 0, 1, 16]
+            } else {
+                [1, 54, 7, 304]
+            }
+        } else {
+            counts
+        };
+        assert_eq!(
+            stored_stats(&store, &state.loc),
+            [
+                secondary,
+                secondary_bytes,
+                data,
+                capacity * state.loc.ea_elem_size.to_u64() + data * 22,
+                u64::try_from(start + 2).unwrap(),
+                4 + capacity,
+            ]
+        );
+        let file = crate::File::from_bytes(store.data).unwrap();
+        assert_eq!(
+            file.dataset("d").unwrap().read_i32().unwrap(),
+            (0..start + 2).collect::<Vec<_>>()
+        );
+    }
+
+    #[rstest]
+    fn failed_index_publication_invalidates_the_allocation_snapshot(
+        #[values(false, true)] filtered: bool,
+    ) {
+        let mut store = allocation_store(4, filtered);
+        let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
+        store.reset_counters();
+        store.fail_sync = Some(4);
+        let error = append_state(&mut store, &mut state, &[4], 4).unwrap_err();
+        let Error::Io(error) = error else {
+            panic!("expected the injected I/O failure, got {error:?}");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert_eq!(error.to_string(), "injected synchronization failure");
+        assert!(state.loc.allocation_stats.is_none());
+        store.fail_sync = None;
+        append_state(&mut store, &mut state, &[4], 4).unwrap();
+        assert_eq!(
+            stored_stats(&store, &state.loc),
+            [0, 0, 1, 16 * state.loc.ea_elem_size.to_u64() + 22, 5, 20]
+        );
+        let file = crate::File::from_bytes(store.data).unwrap();
+        assert_eq!(
+            file.dataset("d").unwrap().read_i32().unwrap(),
+            [0, 1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn allocation_snapshot_is_computed_from_block_pointers() {
+        let mut store = allocation_store(4, false);
+        let (loc, _) = locate(&store);
+        loc.update_ea_header(
+            &mut store,
+            ExtensibleArrayStats {
+                nsuper_blks: u64::MAX,
+                super_blk_size: u64::MAX,
+                ndata_blks: u64::MAX,
+                data_blk_size: u64::MAX,
+                max_idx_set: 4,
+                nelmts: u64::MAX,
+            },
+        )
+        .unwrap();
+        let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
+        let before = store.data.clone();
+        let plan = state_plan(&store, &state, &[4]).unwrap();
+        assert_eq!(store.data, before);
+        apply_ea_append(&mut store, &mut state.loc, plan, 4).unwrap();
+        assert_eq!(stored_stats(&store, &state.loc), [0, 0, 1, 150, 5, 20]);
+    }
+
+    #[test]
+    fn successful_append_planning_reuses_the_allocation_snapshot() {
+        let mut store = allocation_store(50_000, false);
+        let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
+        append_state(&mut store, &mut state, &[50_000], 4).unwrap();
+        store.reset_counters();
+        let plan = state_plan(&store, &state, &[50_001]).unwrap();
+        assert_eq!(store.total_read.get(), 16);
+        assert_eq!(store.max_read.get(), 8);
+        apply_ea_append(&mut store, &mut state.loc, plan, 4).unwrap();
+        let file = crate::File::from_bytes(store.data).unwrap();
+        assert_eq!(
+            file.dataset("d").unwrap().read_i32().unwrap(),
+            (0..50_002).collect::<Vec<_>>()
+        );
+    }
+
+    fn allocation_store(n: i32, filtered: bool) -> WindowProbeStore {
+        let mut builder = FileBuilder::new();
+        let dataset = builder
+            .create_dataset("d")
+            .with_i32_data(&(0..n).collect::<Vec<_>>())
+            .with_shape(&[u64::try_from(n).unwrap()])
+            .with_maxshape(&[MaxExtent::Unlimited])
+            .with_chunks(&[1]);
+        if filtered {
+            dataset.with_deflate(DeflateLevel::One);
+        }
+        WindowProbeStore::open(builder.finish().unwrap())
+    }
+
+    fn append_state(
+        store: &mut WindowProbeStore,
+        state: &mut LocatedState,
+        values: &[i32],
+        phase: u8,
+    ) -> Result<(), Error> {
+        let plan = state_plan(store, state, values)?;
+        apply_ea_append(store, &mut state.loc, plan, phase)
+    }
+
+    fn state_plan(
+        store: &WindowProbeStore,
+        state: &LocatedState,
+        values: &[i32],
+    ) -> Result<AppendPlan, Error> {
+        plan_ea_append(
+            store,
+            &state.loc,
+            &state.datatype,
+            &state.spatial,
+            state.element_size,
+            state.pipeline.as_ref(),
+            true,
+            &i32_bytes(values),
+            values.len().to_u64(),
+            state.fill.pattern(state.element_size),
+        )
+    }
+
+    fn stored_stats(store: &WindowProbeStore, loc: &Located) -> [u64; EA_STAT_FIELDS] {
+        store
+            .read_exact_at(loc.ea_addr.get() + EA_STATS_OFFSET, EA_STAT_FIELDS * 8)
+            .unwrap()
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|field| u64::from_le_bytes(*field))
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap()
+    }
 
     #[rstest]
     #[case::first_direct(4, 4, 16, 1, 0, None, 0)]
@@ -1860,7 +2284,7 @@ mod tests {
     #[case::inline(4, 0, 0, 0, 4)]
     #[case::first_direct(5, 0, 0, 1, 20)]
     #[case::secondary(245, 1, 54, 7, 308)]
-    fn append_statistics_match_expected_allocations(
+    fn dense_prefix_statistics_match_expected_ranges(
         #[case] chunks: u64,
         #[case] secondary_count: u64,
         #[case] secondary_bytes: u64,
@@ -1872,7 +2296,7 @@ mod tests {
         let (mut loc, _) = locate(&store);
         loc.ea_elem_size = stride;
         assert_eq!(
-            loc.append_stats(chunks).unwrap(),
+            loc.dense_prefix_stats(chunks).unwrap(),
             ExtensibleArrayStats {
                 nsuper_blks: secondary_count,
                 super_blk_size: secondary_bytes,
@@ -2002,6 +2426,7 @@ mod tests {
         /// A free region within the recorded file length, created by
         /// [`with_free_tail`](Self::with_free_tail). The store allocates from it before appending.
         free: Option<(u64, u64)>,
+        fail_sync: Option<usize>,
         /// The number of allocations the store served from `free`.
         reuses: Cell<usize>,
     }
@@ -2027,6 +2452,7 @@ mod tests {
                 syncs: Cell::new(0),
                 appends: Cell::new(0),
                 free: None,
+                fail_sync: None,
                 reuses: Cell::new(0),
             }
         }
@@ -2116,6 +2542,11 @@ mod tests {
         }
         fn sync(&mut self) -> Result<(), Error> {
             self.syncs.set(self.syncs.get() + 1);
+            if self.fail_sync == Some(self.syncs.get()) {
+                return Err(Error::Io(std::io::Error::other(
+                    "injected synchronization failure",
+                )));
+            }
             Ok(())
         }
     }
@@ -3236,7 +3667,7 @@ mod tests {
     }
 
     fn replace_edge_record(store: &mut WindowProbeStore, stored: &[u8]) {
-        let (loc, _) = locate(store);
+        let (mut loc, _) = locate(store);
         let addr = StoredAddress::new(store.allocate(stored, AllocationClass::Raw).unwrap());
         store.patch_superblock_eof().unwrap();
         let rec = ElemRecord {
@@ -3301,4 +3732,9 @@ mod tests {
     // header signature and version.
     const EA_HEADER_SIGNATURE: &[u8; 4] = b"EAHD";
     const EA_HEADER_VERSION: u8 = 0;
+
+    // "The Extensible Array Index" in format specification, version 4.0, places six statistics
+    // after the version 0 header's byte fields.
+    const EA_STATS_OFFSET: u64 = 12;
+    const EA_STAT_FIELDS: usize = 6;
 }

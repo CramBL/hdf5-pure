@@ -93,10 +93,6 @@ fn c_writes_pure_reads() {
     }
 }
 
-/// The EA header's six statistics fields must match the C library byte-for-byte
-/// (the C library recomputes and would reject inconsistent computed stats; the
-/// stored max_idx_set / nelmts must also agree). Compares the headers of the two
-/// files for identical datasets.
 #[test]
 fn eahd_stats_match_c() {
     for &n in SIZES {
@@ -113,21 +109,6 @@ fn eahd_stats_match_c() {
     }
 }
 
-/// The same six statistics, published by the *in-place* append path rather than
-/// by the whole-file writer.
-///
-/// `Located::update_ea_header` writes them on every append, and until this test
-/// nothing read them back: zeroing `nelmts` or transposing two fields passed the
-/// entire suite, C-library crosschecks included, because the reference library
-/// recomputes the geometry from the block sizes rather than trusting these
-/// fields on read. They are still what `h5stat` and `H5EA__hdr_debug` report and
-/// what a future reader may believe, so they are checked against the one oracle
-/// that cannot be wrong about them: the same dataset written whole, by the C
-/// library, at the size the append grew it to.
-///
-/// Sizes are small on purpose — this grows the file one append at a time — but
-/// span the inline elements, the first direct data blocks, and the first super
-/// block, which is where the six values stop being constants.
 #[test]
 fn eahd_stats_match_c_after_an_in_place_append() {
     for &(start, grown) in &[(4usize, 20usize), (16, 300), (300, 700)] {
@@ -351,19 +332,32 @@ fn patch_unallocated_layout(
 }
 
 #[rstest]
-fn sparse_append_has_two_allocated_chunks_and_dense_header_statistics(
+#[case::inline(3, 4, None, [0, 0, 0, 0, 0])]
+#[case::skipped_direct(51, 52, None, [0, 0, 1, 22, 32])]
+#[case::secondary(244, 245, None, [1, 54, 1, 22, 64])]
+#[case::skipped_secondary(1_012, 1_013, None, [1, 86, 1, 22, 128])]
+#[case::paged(131_060, 131_061, None, [1, 598, 1, 30, 2_048])]
+#[case::existing_block(245, 246, Some(244), [1, 54, 1, 22, 64])]
+#[case::new_page(132_084, 132_085, Some(131_060), [1, 598, 1, 30, 2_048])]
+#[case::multiple_blocks(244, 504, None, [2, 108, 5, 110, 384])]
+fn sparse_append_statistics_match_allocated_blocks(
+    #[case] start: usize,
+    #[case] end: usize,
+    #[case] existing: Option<usize>,
+    #[case] counts: [u64; 5],
     #[values(false, true)] bounded: bool,
     #[values(false, true)] filtered: bool,
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("sparse_append.h5");
+    let oracle = dir.path().join("oracle.h5");
     {
         let file = file::libhdf5_create_v110(&path);
         let builder = file
             .new_dataset_builder()
             .empty_as(ByteOrder::LittleEndian.i32_datatype())
             .chunk([1])
-            .shape([Extent::resizable(244)]);
+            .shape([Extent::resizable(start)]);
         let builder = if filtered {
             builder.shuffle().deflate(6)
         } else {
@@ -371,39 +365,160 @@ fn sparse_append_has_two_allocated_chunks_and_dense_header_statistics(
         };
         let dataset = builder.create("d").unwrap();
         dataset.write_slice(&[7i32], 0..1).unwrap();
-        assert_eq!(dataset.num_chunks().unwrap(), 1);
+        if let Some(slot) = existing {
+            dataset.write_slice(&[8i32], slot..slot + 1).unwrap();
+        }
+        assert_eq!(
+            dataset.num_chunks().unwrap(),
+            1 + usize::from(existing.is_some())
+        );
     }
+    std::fs::copy(&path, &oracle).unwrap();
     let image = std::fs::read(&path).unwrap();
     let header = bytes::sole_signature(&image, EA_HEADER_SIGNATURE);
     let stride = u64::from(image[header + HEADER_ELEMENT_SIZE]);
+    let appended = vec![9i32; end - start];
+    {
+        let file = hdf5::File::open_rw(&oracle).unwrap();
+        let dataset = file.dataset("d").unwrap();
+        dataset.resize([end]).unwrap();
+        dataset.write_slice(&appended, start..end).unwrap();
+    }
     {
         let file = if bounded {
             session::open_bounded(&path).unwrap()
         } else {
             File::open_rw(&path).unwrap()
         };
-        let mut dataset = file.dataset("d").unwrap();
-        dataset.append(&[9i32]).unwrap();
+        file.dataset("d").unwrap().append(&appended).unwrap();
+    }
+    let [
+        secondary_block_count,
+        secondary_block_size,
+        data_block_count,
+        overhead,
+        capacity,
+    ] = counts;
+    let expected = extensible_array::HeaderStats {
+        secondary_block_count,
+        secondary_block_size,
+        data_block_count,
+        data_block_size: capacity * stride + overhead,
+        max_index_set: u64::try_from(end).unwrap(),
+        element_count: 4 + capacity,
+    };
+    assert_eq!(extensible_array::header_stats(&oracle), expected);
+    assert_eq!(extensible_array::header_stats(&path), expected);
+    let file = hdf5::File::open(&path).unwrap();
+    let dataset = file.dataset("d").unwrap();
+    let mut expected_values = vec![0i32; end];
+    expected_values[0] = 7;
+    if let Some(slot) = existing {
+        expected_values[slot] = 8;
+    }
+    expected_values[start..end].fill(9);
+    assert_eq!(dataset.read_raw::<i32>().unwrap(), expected_values);
+    assert_eq!(dataset.shape(), [end]);
+    assert_eq!(dataset.read_slice_1d::<i32, _>(0..1).unwrap().to_vec(), [7]);
+    assert_eq!(
+        dataset
+            .read_slice_1d::<i32, _>(start..end)
+            .unwrap()
+            .to_vec(),
+        appended
+    );
+    if let Some(slot) = existing {
+        assert_eq!(
+            dataset
+                .read_slice_1d::<i32, _>(slot..slot + 1)
+                .unwrap()
+                .to_vec(),
+            [8]
+        );
+    }
+    assert_eq!(
+        dataset.num_chunks().unwrap(),
+        1 + usize::from(existing.is_some()) + end - start
+    );
+}
+
+#[rstest]
+fn sparse_partial_tail_statistics_match_c_across_append_sessions(
+    #[values(false, true)] bounded: bool,
+    #[values(false, true)] filtered: bool,
+    #[values(false, true)] reopen: bool,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("partial.h5");
+    let oracle = dir.path().join("oracle.h5");
+    let chunk = 4_096;
+    let start = 244 * chunk + 1;
+    let appended = vec![9i32; 300_000];
+    {
+        let file = file::libhdf5_create_v110(&path);
+        let builder = file
+            .new_dataset_builder()
+            .empty_as(ByteOrder::LittleEndian.i32_datatype())
+            .chunk([chunk])
+            .shape([Extent::resizable(start)]);
+        let builder = if filtered {
+            builder.shuffle().deflate(6)
+        } else {
+            builder
+        };
+        let dataset = builder.create("d").unwrap();
+        dataset.write_slice(&[7i32], 0..1).unwrap();
+        dataset.write_slice(&[8i32], start - 1..start).unwrap();
+    }
+    std::fs::copy(&path, &oracle).unwrap();
+    let end = start + appended.len() + usize::from(!reopen);
+    {
+        let file = hdf5::File::open_rw(&oracle).unwrap();
+        let dataset = file.dataset("d").unwrap();
+        dataset.resize([end]).unwrap();
+        dataset
+            .write_slice(&appended, start..start + appended.len())
+            .unwrap();
+        if !reopen {
+            dataset.write_slice(&[10i32], end - 1..end).unwrap();
+        }
+    }
+    let open = || {
+        if bounded {
+            session::open_bounded_on_close(&path).unwrap()
+        } else {
+            File::open_rw(&path).unwrap()
+        }
+    };
+    if reopen {
+        for part in appended.chunks(100_000) {
+            let file = open();
+            file.dataset("d").unwrap().append(part).unwrap();
+        }
+    } else {
+        let file = open();
+        file.dataset("d").unwrap().append(&appended).unwrap();
+        file.dataset("d").unwrap().append(&[10i32]).unwrap();
     }
     assert_eq!(
         extensible_array::header_stats(&path),
-        extensible_array::HeaderStats {
-            secondary_block_count: 1,
-            secondary_block_size: 54,
-            data_block_count: 7,
-            data_block_size: 304 * stride + 7 * 22,
-            max_index_set: 245,
-            element_count: 308,
-        }
+        extensible_array::header_stats(&oracle)
     );
     let file = hdf5::File::open(&path).unwrap();
     let dataset = file.dataset("d").unwrap();
-    let mut expected = vec![0i32; 245];
-    expected[0] = 7;
-    expected[244] = 9;
-    assert_eq!(dataset.shape(), [245]);
-    assert_eq!(dataset.read_raw::<i32>().unwrap(), expected);
-    assert_eq!(dataset.num_chunks().unwrap(), 2);
+    let mut expected = vec![8];
+    expected.extend_from_slice(&appended);
+    if !reopen {
+        expected.push(10);
+    }
+    assert_eq!(
+        dataset
+            .read_slice_1d::<i32, _>(start - 1..end)
+            .unwrap()
+            .to_vec(),
+        expected
+    );
+    assert_eq!(dataset.num_chunks().unwrap(), 1 + end.div_ceil(chunk) - 244);
 }
 
 #[rstest]
