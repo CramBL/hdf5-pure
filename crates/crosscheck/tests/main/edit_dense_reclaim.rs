@@ -31,7 +31,6 @@ use hdf5_pure_format::__private::LinkTarget;
 use hdf5_pure_format::__private::ObjectHeader;
 use rstest::rstest;
 
-use test_util::btree_v2;
 use test_util::fractal_heap;
 use test_util::free_space;
 use test_util::range;
@@ -39,6 +38,8 @@ use test_util_hdf5::absence;
 use test_util_hdf5::creation_order::{self, Indexing};
 use test_util_hdf5::group_filter;
 use test_util_hdf5::storage;
+
+use crate::heap_allocations::{self, AllocationClass, Heap};
 
 fn object_location(path: &Path, object: &str) -> (hdf5::File, hdf5::Location) {
     let file = hdf5::File::open(path)
@@ -338,7 +339,9 @@ fn c_library_accepts_reclaimed_dense_group_indexes() {
         let heap_allocations = heap_headers
             .iter()
             .flat_map(|&heap| {
-                hdf5_pure::__fractal_heap_storage_extents(&bytes, heap, 8, 8).unwrap()
+                heap_allocations::allocations(&bytes, heap)
+                    .into_iter()
+                    .map(|allocation| allocation.extent())
             })
             .collect::<Vec<_>>();
         assert!(heap_allocations.iter().any(|&(address, _)| {
@@ -424,7 +427,11 @@ fn a_surviving_dense_group_hard_link_keeps_its_indexes_live() {
     let bytes = std::fs::read(&path).unwrap();
     let owned_heaps = heap_headers
         .iter()
-        .flat_map(|&heap| hdf5_pure::__fractal_heap_storage_extents(&bytes, heap, 8, 8).unwrap())
+        .flat_map(|&heap| {
+            heap_allocations::allocations(&bytes, heap)
+                .into_iter()
+                .map(|allocation| allocation.extent())
+        })
         .collect::<Vec<_>>();
 
     {
@@ -742,17 +749,13 @@ fn heap_allocations(
                 heap.header.huge_objects_count,
                 u64::try_from(huge_objects).unwrap()
             );
-            hdf5_pure::__fractal_heap_storage_extents(&bytes, heap.address, 8, 8).unwrap()
+            Heap::new(&bytes, heap.address, &heap.header).allocations
         })
-        .map(|(addr, len)| {
-            let at = usize::try_from(addr).unwrap();
-            let class = if HEAP_METADATA_SIGNATURES
-                .iter()
-                .any(|signature| &bytes[at..at + 4] == *signature)
-            {
-                PageClass::Metadata
-            } else {
-                PageClass::RawData
+        .map(|allocation| {
+            let (addr, len) = allocation.extent();
+            let class = match allocation.class() {
+                AllocationClass::Metadata => PageClass::Metadata,
+                AllocationClass::RawData => PageClass::RawData,
             };
             (addr, len, class)
         })
@@ -955,7 +958,7 @@ fn c_written_dense_heaps_are_reclaimed_with_their_owners(
     let base = session.superblock().base_address.get();
     let mut live = allocations
         .iter()
-        .map(|&(at, len, _)| (base + at, len))
+        .map(|&(at, len, _)| (base.checked_add(at).unwrap(), len))
         .collect::<Vec<_>>();
     live.extend(storage::file_metadata_extents(&session, &bytes));
     storage::assert_unavailable(&session, &live);
@@ -1266,17 +1269,20 @@ fn c_written_filtered_link_heaps_are_reclaimed_with_their_group(
         expected.extend(free_space_manager_extents(&bytes, manager.get()));
     }
     expected.sort_unstable();
-    let owned = hdf5_pure::__fractal_heap_storage_extents(&bytes, heap.address, 8, 8).unwrap();
-    assert_eq!(owned, expected);
-    let inspected = crate::heap_allocations::Heap::new(&bytes, heap.address, &heap.header);
+    let inspected = Heap::new(&bytes, heap.address, &heap.header);
     assert!(
-        owned.iter().copied().eq(inspected.extents()),
-        "{owned:?} != {:?}",
+        expected.iter().copied().eq(inspected.extents()),
+        "{expected:?} != {:?}",
         inspected.allocations
     );
-    let allocations: Vec<(u64, u64, PageClass)> = owned
+    let allocations: Vec<(u64, u64, PageClass)> = inspected
+        .allocations
         .into_iter()
-        .map(|(address, len)| (address, len, PageClass::Metadata))
+        .map(|allocation| {
+            assert_eq!(allocation.class(), AllocationClass::Metadata);
+            let (address, len) = allocation.extent();
+            (address, len, PageClass::Metadata)
+        })
         .collect();
     let mut names = File::open(&path)
         .unwrap()
@@ -1293,7 +1299,7 @@ fn c_written_filtered_link_heaps_are_reclaimed_with_their_group(
         &session,
         &allocations
             .iter()
-            .map(|&(at, len, _)| (base + at, len))
+            .map(|&(at, len, _)| (base.checked_add(at).unwrap(), len))
             .collect::<Vec<_>>(),
     );
     session.root().delete("g").unwrap();
@@ -1379,16 +1385,6 @@ const INDIRECT_ROOT_LINKS: usize = 200;
 // `H5Oprivate.h`, libhdf5 2.2.0.
 const LINK_HEAP_START_BLOCK_SIZE: u64 = 512;
 const ATTRIBUTE_HEAP_START_BLOCK_SIZE: u64 = 1024;
-const HEAP_METADATA_SIGNATURES: [&[u8; 4]; 8] = [
-    fractal_heap::SIGNATURE,
-    fractal_heap::DIRECT_BLOCK_SIGNATURE,
-    fractal_heap::INDIRECT_BLOCK_SIGNATURE,
-    btree_v2::SIGNATURE,
-    btree_v2::INTERNAL_SIGNATURE,
-    btree_v2::LEAF_SIGNATURE,
-    free_space::SIGNATURE,
-    free_space::SECTIONS_SIGNATURE,
-];
 // The small-sized managers for `H5FD_MEM_SUPER` and `H5FD_MEM_DRAW`, first and third in a version
 // 1 File Space Info message, defined in "The File Space Info Message" of the format
 // specification, version 4.0.

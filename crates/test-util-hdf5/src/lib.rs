@@ -26,6 +26,9 @@ pub mod global_heap;
 pub mod global_heap_fixture;
 #[cfg(feature = "__hdf5-1.10")]
 pub mod group_filter;
+pub mod heap_allocations;
+#[cfg(feature = "hdf5")]
+pub mod heap_interop;
 pub mod lock;
 pub mod mat_file;
 #[cfg(feature = "hdf5")]

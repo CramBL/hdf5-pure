@@ -1,18 +1,19 @@
 #![cfg(feature = "__hdf5-1.10")]
-//! Crosschecks fractal-heap storage ownership against independently decoded allocations.
+//! Interoperability tests for dense heap reads and live storage protection.
 //!
-//! libhdf5 produces dense links and attributes stored as huge objects, including
-//! multi-node huge-object indexes. The hdf5-pure writer produces supported managed heaps with
-//! direct and nested indirect roots. Each ownership crosscheck reconstructs the complete expected
-//! extent set from the serialized structures and compares it with the ownership result.
+//! The fixtures include managed blocks, huge-object indexes and payloads, and internal free-space
+//! managers. Their allocations are decoded from serialized metadata and checked before and after
+//! an unrelated edit.
 
 use std::path::Path;
 
-use hdf5_pure::{AttrValue, File, FileBuilder};
+use hdf5_pure::{AttrValue, File};
 use hdf5_pure_core::__private::DecodedStoredAddress;
 use hdf5_pure_format::__private::FractalHeapHeader;
 
 use test_util::fractal_heap;
+use test_util_hdf5::heap_interop;
+use test_util_hdf5::storage;
 
 use crate::heap_allocations::{AllocationClass, Heap};
 
@@ -43,27 +44,8 @@ fn write_group(path: &Path, names: &[String]) {
     file.close().unwrap();
 }
 
-/// Verifies that every `g/{name}` resolves to dataset value `i` through both readers.
-fn assert_links_resolve(path: &Path, names: &[String]) {
-    let buffered = File::open(path).unwrap();
-    let streaming = File::open_streaming(path).unwrap();
-    for (i, name) in names.iter().enumerate() {
-        let p = format!("g/{name}");
-        assert_eq!(
-            buffered.dataset(&p).unwrap().read_i32().unwrap(),
-            vec![i as i32],
-            "buffered link {i}"
-        );
-        assert_eq!(
-            streaming.dataset(&p).unwrap().read_i32().unwrap(),
-            vec![i as i32],
-            "streaming link {i}"
-        );
-    }
-}
-
-/// Compares the collector's allocations with decoded fixture metadata and returns the index depth.
-fn assert_huge_only_heap_ownership(path: &Path) -> u16 {
+/// Checks that a huge-only heap's allocations stay unavailable and returns the index depth.
+fn assert_huge_only_storage_unavailable(path: &Path) -> u16 {
     let bytes = std::fs::read(path).unwrap();
     let heap_headers = fractal_heap::header_offsets(&bytes);
     assert_eq!(
@@ -83,7 +65,6 @@ fn assert_huge_only_heap_ownership(path: &Path) -> u16 {
     assert!(heap.huge_objects_count > 0);
 
     let heap_at = u64::try_from(heap_at).unwrap();
-    let mut actual = hdf5_pure::__fractal_heap_storage_extents(&bytes, heap_at, 8, 8).unwrap();
     let inspected = Heap::new(&bytes, heap_at, &heap);
     assert!(
         inspected
@@ -91,78 +72,27 @@ fn assert_huge_only_heap_ownership(path: &Path) -> u16 {
             .iter()
             .any(|allocation| allocation.class() == AllocationClass::RawData)
     );
-    actual.sort_unstable();
-    assert!(
-        actual.iter().copied().eq(inspected.extents()),
-        "{actual:?} != {:?}",
-        inspected.allocations
-    );
+    assert_live_heap_storage(path, &inspected);
     inspected.huge_index_depth.unwrap()
 }
 
-fn assert_pure_managed_heap_ownership(bytes: &[u8], root_is_direct: bool) -> usize {
-    let heap_headers = fractal_heap::header_offsets(bytes);
-    assert_eq!(heap_headers.len(), 1);
-    let heap_at = u64::try_from(heap_headers[0]).unwrap();
-    let heap = FractalHeapHeader::parse(bytes, usize::try_from(heap_at).unwrap(), 8, 8).unwrap();
-    let inspected = Heap::new(bytes, heap_at, &heap);
-    assert!(inspected.header.managed_objects_count > 0);
-    assert_eq!(inspected.header.huge_objects_count, 0);
-    assert_eq!(
-        inspected
-            .header
-            .managed_block_free_space_manager_address
-            .get(),
-        u64::MAX
-    );
-    assert_eq!(
-        inspected.header.current_rows_in_root_indirect_block == 0,
-        root_is_direct
-    );
-    assert!(
-        inspected
-            .allocations
-            .iter()
-            .all(|allocation| allocation.class() == AllocationClass::Metadata)
-    );
-    let actual = hdf5_pure::__fractal_heap_storage_extents(bytes, heap_at, 8, 8).unwrap();
-    assert!(
-        actual.iter().copied().eq(inspected.extents()),
-        "{actual:?} != {:?}",
-        inspected.allocations
-    );
-    inspected.indirect_blocks
-}
-
-#[test]
-fn owned_storage_exactly_matches_pure_written_direct_root() {
-    let mut builder = FileBuilder::new();
-    for i in 0..9 {
-        builder.set_attr(&format!("a{i}"), AttrValue::I64(i));
-    }
-    builder.create_dataset("x").with_f64_data(&[1.0]);
-
-    let bytes = builder.finish().unwrap();
-    assert_eq!(assert_pure_managed_heap_ownership(&bytes, true), 0);
-}
-
-#[test]
-fn owned_storage_exactly_matches_pure_written_nested_indirect_root() {
-    let mut builder = FileBuilder::new();
-    for i in 0..12 {
-        let text = char::from(b'a' + u8::try_from(i).unwrap())
-            .to_string()
-            .repeat(64_000);
-        builder.set_attr(&format!("a{i:04}"), AttrValue::AsciiString(text));
-    }
-    builder.create_dataset("x").with_f64_data(&[1.0]);
-
-    let bytes = builder.finish().unwrap();
-    let indirect_count = assert_pure_managed_heap_ownership(&bytes, false);
-    assert!(
-        indirect_count >= 2,
-        "fixture should contain a nested managed indirect block"
-    );
+fn assert_live_heap_storage(path: &Path, heap: &Heap<'_>) {
+    let file = File::open_rw(path).unwrap();
+    let allocations = heap
+        .allocations
+        .iter()
+        .map(|allocation| allocation.physical_extent(&file))
+        .collect::<Vec<_>>();
+    storage::assert_unavailable(&file, &allocations);
+    file.root()
+        .create_dataset("probe", |builder| {
+            builder.with_i32_data(&[19; 32]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    storage::assert_unavailable(&file, &allocations);
+    file.close().unwrap();
+    heap_interop::assert_edit_round_trip(path);
 }
 
 #[test]
@@ -174,20 +104,21 @@ fn reads_dense_links_stored_as_huge_objects() {
     let names: Vec<String> = (0..40).map(|i| long_name(i, 4096)).collect();
     let path = dir.path().join("huge_links.h5");
     write_group(&path, &names);
-    assert_links_resolve(&path, &names);
+    heap_interop::assert_links_resolve(&path, &names);
 }
 
 #[test]
-fn owned_storage_exactly_matches_c_written_dense_link_huge_objects() {
+fn c_written_dense_link_huge_storage_stays_unavailable() {
     let dir = tempfile::tempdir().unwrap();
     let names: Vec<String> = (0..40).map(|i| long_name(i, 5000)).collect();
     let path = dir.path().join("owned_huge_links.h5");
     write_group(&path, &names);
 
     assert!(
-        assert_huge_only_heap_ownership(&path) > 0,
+        assert_huge_only_storage_unavailable(&path) > 0,
         "fixture should force a multi-node huge-object index"
     );
+    heap_interop::assert_links_resolve(&path, &names);
 }
 
 #[test]
@@ -206,7 +137,7 @@ fn reads_dense_links_mixing_managed_and_huge() {
         .collect();
     let path = dir.path().join("mixed_links.h5");
     write_group(&path, &names);
-    assert_links_resolve(&path, &names);
+    heap_interop::assert_links_resolve(&path, &names);
 }
 
 #[test]
@@ -252,7 +183,7 @@ fn reads_dense_attributes_stored_as_huge_objects() {
 }
 
 #[test]
-fn owned_storage_exactly_matches_c_written_dense_attribute_huge_objects() {
+fn c_written_dense_attribute_huge_storage_stays_unavailable() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("owned_huge_attrs.h5");
     {
@@ -279,13 +210,27 @@ fn owned_storage_exactly_matches_c_written_dense_attribute_huge_objects() {
     }
 
     assert!(
-        assert_huge_only_heap_ownership(&path) > 0,
+        assert_huge_only_storage_unavailable(&path) > 0,
         "fixture should force a multi-node huge-object index"
     );
+    let reference = hdf5::File::open(&path).unwrap();
+    let dataset = reference.dataset("data").unwrap();
+    assert_eq!(dataset.read_raw::<i32>().unwrap(), [7]);
+    for index in 0..40 {
+        let attr_name = format!("a{index}_{}", "y".repeat(5000));
+        assert_eq!(
+            dataset
+                .attr(&attr_name)
+                .unwrap()
+                .read_scalar::<i64>()
+                .unwrap(),
+            index
+        );
+    }
 }
 
 #[test]
-fn owned_storage_includes_c_written_managed_heap_with_internal_fsm() {
+fn c_written_internal_heap_manager_storage_stays_unavailable() {
     let dir = tempfile::tempdir().unwrap();
     let names: Vec<String> = (0..16).map(|i| format!("short_{i}")).collect();
     let path = dir.path().join("owned_managed_links.h5");
@@ -303,9 +248,6 @@ fn owned_storage_includes_c_written_managed_heap_with_internal_fsm() {
         "fixture must have an internal manager"
     );
 
-    let allocations =
-        hdf5_pure::__fractal_heap_storage_extents(&bytes, u64::try_from(heap_at).unwrap(), 8, 8)
-            .unwrap();
     let inspected = Heap::new(&bytes, u64::try_from(heap_at).unwrap(), &heap);
     let manager = inspected.manager.as_ref().unwrap();
     let DecodedStoredAddress::Defined(list_address) = manager.section_list_addr() else {
@@ -318,9 +260,6 @@ fn owned_storage_includes_c_written_managed_heap_with_internal_fsm() {
             .any(|extent| extent == (list_address.get(), manager.section_list_allocated()))
     );
     assert_eq!(heap.huge_objects_count, 0);
-    assert!(
-        allocations.iter().copied().eq(inspected.extents()),
-        "{allocations:?} != {:?}",
-        inspected.allocations
-    );
+    assert_live_heap_storage(&path, &inspected);
+    heap_interop::assert_links_resolve(&path, &names);
 }

@@ -1,9 +1,9 @@
-#![cfg(feature = "__hdf5-1.10")]
 //! Allocation ranges decoded from controlled fractal-heap fixtures.
 
 use std::num::NonZeroU16;
 use std::ops::Range;
 
+use hdf5_pure::File;
 use hdf5_pure_core::__private::DecodedStoredAddress;
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
@@ -20,17 +20,15 @@ use test_util::fractal_heap;
 /// Addresses are relative to the file base, and the input bytes begin at that base. The fixtures
 /// use eight-byte addresses and lengths. Filtered direct blocks retain their stored sizes, and
 /// manager section lists include their full allocated capacity.
-pub(super) struct Heap<'a> {
+pub struct Heap<'a> {
     /// The caller's parsed heap header.
-    pub(super) header: &'a FractalHeapHeader,
+    pub header: &'a FractalHeapHeader,
     /// The internal free-space manager header, when present.
-    pub(super) manager: Option<FreeSpaceManagerHeaderFrame>,
+    pub manager: Option<FreeSpaceManagerHeaderFrame>,
     /// Nonempty, in-file allocations in address order.
-    pub(super) allocations: Vec<Allocation>,
-    /// The number of managed indirect blocks, including nested blocks.
-    pub(super) indirect_blocks: usize,
+    pub allocations: Vec<Allocation>,
     /// The huge-object index depth, when the index is present.
-    pub(super) huge_index_depth: Option<u16>,
+    pub huge_index_depth: Option<u16>,
 }
 
 impl<'a> Heap<'a> {
@@ -41,7 +39,7 @@ impl<'a> Heap<'a> {
     /// Panics if a fixture allocation is empty, out of bounds, or overlaps another allocation,
     /// or if the metadata fails the fixture's structural assertions. Filtered huge-object indexes
     /// are unsupported and cause a panic.
-    pub(super) fn new(bytes: &[u8], address: u64, header: &'a FractalHeapHeader) -> Self {
+    pub fn new(bytes: &[u8], address: u64, header: &'a FractalHeapHeader) -> Self {
         let at = usize::try_from(address).unwrap();
         let mut heap = Self {
             header,
@@ -49,10 +47,17 @@ impl<'a> Heap<'a> {
             allocations: vec![Allocation::new(
                 bytes,
                 address,
-                fractal_heap::encoded_header_len(bytes, at),
-                AllocationClass::Metadata,
+                match header.filtering {
+                    FractalHeapFiltering::Unfiltered => u64::try_from(
+                        FractalHeapHeader::serialized_size(OffsetWidth::Eight, LengthWidth::Eight),
+                    )
+                    .unwrap(),
+                    FractalHeapFiltering::Filtered { .. } => {
+                        fractal_heap::encoded_header_len(bytes, at)
+                    }
+                },
+                AllocationKind::Header,
             )],
-            indirect_blocks: 0,
             huge_index_depth: None,
         };
         heap.managed(bytes, address);
@@ -67,9 +72,15 @@ impl<'a> Heap<'a> {
                 bytes,
                 manager.get(),
                 format::free_space_manager_header_len(widths),
+                AllocationKind::ManagerHeader,
             );
             if let DecodedStoredAddress::Defined(list) = frame.section_list_addr() {
-                heap.push(bytes, list.get(), frame.section_list_allocated());
+                heap.push(
+                    bytes,
+                    list.get(),
+                    frame.section_list_allocated(),
+                    AllocationKind::ManagerSectionList,
+                );
             } else {
                 assert_eq!(frame.section_list_allocated(), 0);
             }
@@ -87,17 +98,13 @@ impl<'a> Heap<'a> {
     }
 
     /// Returns each allocation as its base-relative address and allocated length.
-    pub(super) fn extents(&self) -> impl ExactSizeIterator<Item = (u64, u64)> + '_ {
+    pub fn extents(&self) -> impl ExactSizeIterator<Item = (u64, u64)> + '_ {
         self.allocations.iter().map(Allocation::extent)
     }
 
-    fn push(&mut self, bytes: &[u8], address: u64, length: u64) {
-        self.allocations.push(Allocation::new(
-            bytes,
-            address,
-            length,
-            AllocationClass::Metadata,
-        ));
+    fn push(&mut self, bytes: &[u8], address: u64, length: u64, kind: AllocationKind) {
+        self.allocations
+            .push(Allocation::new(bytes, address, length, kind));
     }
 
     fn managed(&mut self, bytes: &[u8], address: u64) {
@@ -120,7 +127,7 @@ impl<'a> Heap<'a> {
                     ..
                 } => root_direct_block_size,
             };
-            self.push(bytes, root.get(), size);
+            self.push(bytes, root.get(), size, AllocationKind::DirectBlock);
             if matches!(self.header.filtering, FractalHeapFiltering::Unfiltered) {
                 self.block_prefix(
                     bytes,
@@ -187,8 +194,7 @@ impl<'a> Heap<'a> {
             .unwrap()
             .checked_add(u64::try_from(checksum::CHECKSUM).unwrap())
             .unwrap();
-        self.push(bytes, address, len);
-        self.indirect_blocks = self.indirect_blocks.checked_add(1).unwrap();
+        self.push(bytes, address, len, AllocationKind::IndirectBlock);
         self.block_prefix(
             bytes,
             address,
@@ -226,7 +232,7 @@ impl<'a> Heap<'a> {
                     .checked_add(column.checked_mul(block_size).unwrap())
                     .unwrap();
                 if row < direct_rows {
-                    self.push(bytes, child, size);
+                    self.push(bytes, child, size, AllocationKind::DirectBlock);
                     if !filtered {
                         self.block_prefix(
                             bytes,
@@ -329,6 +335,7 @@ impl<'a> Heap<'a> {
                 LengthWidth::Eight,
             ))
             .unwrap(),
+            AllocationKind::HugeIndex,
         );
         self.huge_index_depth = Some(tree.depth);
         let node_info = BTreeV2NodeInfo::compute(
@@ -369,7 +376,7 @@ impl<'a> Heap<'a> {
                 bytes,
                 address,
                 length,
-                AllocationClass::RawData,
+                AllocationKind::HugeObject,
             ));
             total = total.checked_add(length).unwrap();
         }
@@ -403,7 +410,7 @@ impl<'a> Heap<'a> {
             bytes,
             address,
             u64::from(tree.node_size),
-            AllocationClass::Metadata,
+            AllocationKind::HugeIndex,
         );
         let node = bytes.get(allocation.range.clone()).unwrap();
         self.allocations.push(allocation);
@@ -452,41 +459,101 @@ impl<'a> Heap<'a> {
 
 /// A nonempty allocated range within the fixture bytes and its page class.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct Allocation {
+pub struct Allocation {
     range: Range<usize>,
     class: AllocationClass,
+    kind: AllocationKind,
 }
 
 impl Allocation {
-    fn new(bytes: &[u8], address: u64, length: u64, class: AllocationClass) -> Self {
+    fn new(bytes: &[u8], address: u64, length: u64, kind: AllocationKind) -> Self {
         assert_ne!(length, 0, "empty allocation at {address}");
         let end = address.checked_add(length).unwrap();
         let range = usize::try_from(address).unwrap()..usize::try_from(end).unwrap();
         bytes.get(range.clone()).unwrap();
-        Self { range, class }
+        let class = match kind {
+            AllocationKind::HugeObject => AllocationClass::RawData,
+            _ => AllocationClass::Metadata,
+        };
+        Self { range, class, kind }
+    }
+
+    /// Returns the heap structure or payload stored in this allocation.
+    pub fn kind(&self) -> AllocationKind {
+        self.kind
     }
 
     /// Returns the base-relative address and allocated length.
-    pub(super) fn extent(&self) -> (u64, u64) {
+    pub fn extent(&self) -> (u64, u64) {
         (
             u64::try_from(self.range.start).unwrap(),
             u64::try_from(self.range.len()).unwrap(),
         )
     }
 
+    /// Returns the physical file offset and allocated length in `file`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if adding the file base overflows or the allocation extends beyond `file`.
+    pub fn physical_extent(&self, file: &File) -> (u64, u64) {
+        let (address, length) = self.extent();
+        let base = file.superblock().base_address.get();
+        let start = base.checked_add(address).unwrap();
+        let end = start.checked_add(length).unwrap();
+        assert_eq!(
+            end,
+            base.checked_add(u64::try_from(self.range.end).unwrap())
+                .unwrap()
+        );
+        assert!(end <= file.file_size());
+        (start, length)
+    }
+
     /// Returns the page class for the allocated structure or payload.
-    pub(super) fn class(&self) -> AllocationClass {
+    pub fn class(&self) -> AllocationClass {
         self.class
     }
 }
 
+/// The heap structure or payload stored in an allocation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AllocationKind {
+    /// A managed direct block at its stored size.
+    DirectBlock,
+    /// The fractal heap header.
+    Header,
+    /// A huge-object index header or node.
+    HugeIndex,
+    /// A separately allocated huge-object payload.
+    HugeObject,
+    /// A managed indirect block.
+    IndirectBlock,
+    /// The internal free-space manager header.
+    ManagerHeader,
+    /// The complete internal section-list allocation, including reserved capacity.
+    ManagerSectionList,
+}
+
 /// The page class for a heap allocation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum AllocationClass {
+pub enum AllocationClass {
     /// Heap blocks, index metadata, and internal free-space manager allocations.
     Metadata,
     /// Separately allocated huge-object payloads.
     RawData,
+}
+
+/// Decodes a heap header and returns its allocations in address order.
+///
+/// Uses the fixture coordinates and widths of [`Heap::new`].
+///
+/// # Panics
+///
+/// Panics if the header cannot be parsed or [`Heap::new`] fails a fixture assertion.
+pub fn allocations(bytes: &[u8], address: u64) -> Vec<Allocation> {
+    let header = FractalHeapHeader::parse(bytes, usize::try_from(address).unwrap(), 8, 8).unwrap();
+    Heap::new(bytes, address, &header).allocations
 }
 
 fn read_integer(bytes: &[u8], cursor: &mut usize, width: usize) -> u64 {

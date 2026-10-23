@@ -12,6 +12,8 @@ use test_util_hdf5::space_ownership;
 use test_util_hdf5::space_ownership::SharedStorage;
 use test_util_hdf5::storage;
 
+use crate::heap_allocations;
+
 #[rstest]
 #[case::shared_chunked_dataspace(SharedStorage::Dataspace, false)]
 #[case::compact_shared_attribute(SharedStorage::Attribute, false)]
@@ -36,9 +38,10 @@ fn native_filtered_heap_storage_stays_unavailable_during_an_unrelated_edit() {
     let bytes = std::fs::read(&path).unwrap();
     let heaps = fractal_heap::header_offsets(&bytes);
     assert_eq!(heaps.len(), 1);
-    let allocations =
-        hdf5_pure::__fractal_heap_storage_extents(&bytes, u64::try_from(heaps[0]).unwrap(), 8, 8)
-            .unwrap();
+    let allocations = heap_allocations::allocations(&bytes, u64::try_from(heaps[0]).unwrap())
+        .into_iter()
+        .map(|allocation| allocation.extent())
+        .collect::<Vec<_>>();
     let file = File::open_rw(&path).unwrap();
     storage::assert_unavailable(&file, &allocations);
     let mut names = file.group("filtered").unwrap().groups().unwrap();

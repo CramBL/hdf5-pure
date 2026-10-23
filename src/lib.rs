@@ -429,9 +429,6 @@
 
 extern crate alloc;
 
-#[cfg(feature = "__fractal-heap-storage-crosscheck")]
-use crate::address::{BaseAddressExt, StoredAddressExt};
-
 #[cfg(doc)]
 pub mod _guide;
 
@@ -594,30 +591,6 @@ pub use file_lock::{FileLocking, WriteMarkPolicy};
 pub use chunk_cache::{ChunkCacheConfig, ChunkCacheStats};
 
 pub use source::{MetadataCacheConfig, MetadataCacheStats, Source};
-
-/// Exposes the crate-private fractal-heap ownership result to crosscheck tests.
-#[cfg(feature = "__fractal-heap-storage-crosscheck")]
-#[doc(hidden)]
-pub fn __fractal_heap_storage_extents(
-    file_data: &[u8],
-    heap_header_address: u64,
-    offset_size: u8,
-    length_size: u8,
-) -> Result<alloc::vec::Vec<(u64, u64)>, alloc::string::String> {
-    let storage = fractal_heap_storage::collect_fractal_heap_storage_from_source(
-        &source::BytesSource::new(file_data),
-        address::AddressContext::from_effective_base(address::BaseAddress::ZERO),
-        address::StoredAddress::new(heap_header_address),
-        width::FormatWidths::from_sizes(offset_size, length_size)
-            .map_err(|error| alloc::format!("{error:?}"))?,
-    )
-    .map_err(|error| alloc::format!("{error:?}"))?;
-    Ok(storage
-        .allocations()
-        .iter()
-        .map(|(extent, _)| (extent.start(), extent.len()))
-        .collect())
-}
 
 // The `Read + Seek` backend, for a caller who has one but no path. Exported
 // beside `Source` because without it every such caller reimplements the
