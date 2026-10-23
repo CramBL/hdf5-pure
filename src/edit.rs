@@ -14445,6 +14445,8 @@ mod tests {
     use test_util::widths::Widths;
 
     use super::*;
+    #[cfg(feature = "zfp")]
+    use crate::ZfpRate;
     use crate::checksum;
     use crate::data_layout::DONT_FILTER_PARTIAL_BOUND_CHUNKS;
 
@@ -16339,7 +16341,7 @@ mod tests {
                 .with_shape(&[6])
                 .with_maxshape(&[MaxExtent::Unlimited])
                 .with_chunks(&[4])
-                .with_zfp(8.0);
+                .with_zfp(ZfpRate::try_from(8.0).unwrap());
             b.write(path).unwrap();
         };
 
@@ -16384,7 +16386,7 @@ mod tests {
                 .with_shape(&[4])
                 .with_maxshape(&[MaxExtent::Unlimited])
                 .with_chunks(&[4])
-                .with_zfp(8.0);
+                .with_zfp(ZfpRate::try_from(8.0).unwrap());
             b.write(&p).unwrap();
         }
         {

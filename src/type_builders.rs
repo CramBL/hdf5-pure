@@ -15,6 +15,8 @@ use hdf5_pure_core::FillTime;
 use hdf5_pure_format::__private::GLOBAL_HEAP_MAX_OBJECTS;
 
 use crate::DeflateLevel;
+#[cfg(feature = "zfp")]
+use crate::ZfpRate;
 use crate::address::StoredAddress;
 use crate::attribute::AttributeMessage;
 use crate::chunked_write::{ChunkMeta, ChunkOptions, ChunkProvider, FilterKind, StorageAllocation};
@@ -3520,28 +3522,23 @@ impl DatasetBuilder {
         self
     }
 
-    /// Enable ZFP fixed-rate compression (implies chunked if not already set).
+    /// Enables fixed-rate ZFP compression and chunked storage.
     ///
-    /// `rate` is the number of compressed bits per value. Supports f32, f64,
-    /// i32, and i64 datasets in 1D–4D. ZFP is a standalone compressor that
-    /// consumes the raw elements itself, so it is mutually exclusive with
-    /// [`with_shuffle`](Self::with_shuffle),
-    /// [`with_scale_offset`](Self::with_scale_offset),
-    /// [`with_deflate`](Self::with_deflate) and [`with_lzf`](Self::with_lzf):
-    /// requesting any of them alongside it makes the write fail with a filter
-    /// error.
+    /// `rate` is measured in compressed bits per scalar. The writer resolves the rate against
+    /// the dataset's datatype and chunk dimensions. The supported scalar types are [`f32`],
+    /// [`f64`], [`i32`], and [`i64`], with one through four chunk dimensions.
     ///
-    /// The scalar type is derived from the dataset's datatype when the file
-    /// is written, so any of `with_{f32,f64,i32,i64}_data` or an explicit
-    /// `with_dtype` establishes it. `finish()` / `write()` returns
-    /// [`FormatError::UnsupportedZfp`] if the dataset's datatype isn't one of
-    /// the four supported scalar types, or if the chunk rank is outside 1..=4.
+    /// Writing returns [`FormatError::InvalidZfpRateForScalar`] if the rate exceeds
+    /// the scalar's width, or [`FormatError::InvalidZfpBitBudget`] if the encoded block budget
+    /// is zero. Writing returns [`FormatError::UnsupportedZfp`] for unsupported scalar types or
+    /// chunk geometry.
+    /// Floating-point block headers can require more bits depending on the data, producing
+    /// [`FormatError::FilterError`] during compression.
     ///
-    /// The resulting file is byte-compatible with the reference H5Z-ZFP
-    /// plugin (HDF5 filter ID 32013): other tools like h5py + hdf5plugin
-    /// will read and decompress it, and vice versa.
+    /// Combining ZFP with shuffle, scale-offset, deflate, or LZF returns a filter error when
+    /// writing. The encoded data is compatible with the H5Z-ZFP plugin, filter ID 32013.
     #[cfg(feature = "zfp")]
-    pub fn with_zfp(&mut self, rate: f64) -> &mut Self {
+    pub fn with_zfp(&mut self, rate: ZfpRate) -> &mut Self {
         self.chunk_options.set_filter(FilterKind::Zfp(rate));
         self
     }

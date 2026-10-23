@@ -2,6 +2,8 @@
 //! add, delete, and copy datasets and groups at any path.
 
 use hdf5_pure::DeflateLevel;
+#[cfg(feature = "zfp")]
+use hdf5_pure::ZfpRate;
 use hdf5_pure::{
     AttrValue, CharacterSet, CompoundTypeBuilder, DType, Datatype, Error, File, FileBuilder,
     FormatError, MaxExtent, Object, ReferenceType, ScaleOffset, StringPadding,
@@ -2059,7 +2061,9 @@ fn add_zfp_dataset() {
         session
             .root()
             .create_dataset("zfp", |b| {
-                b.with_f64_data(&data).with_chunks(&[64]).with_zfp(32.0);
+                b.with_f64_data(&data)
+                    .with_chunks(&[64])
+                    .with_zfp(ZfpRate::try_from(32.0).unwrap());
             })
             .unwrap();
         session.commit().unwrap();

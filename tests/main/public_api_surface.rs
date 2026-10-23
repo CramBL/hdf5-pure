@@ -265,3 +265,13 @@ fn creation_properties_use_the_public_page_size_type() {
     let page_size: Option<FileSpacePageSize> = properties.file_space_page_size();
     assert_eq!(page_size, Some(FileSpacePageSize::DEFAULT));
 }
+
+#[cfg(feature = "zfp")]
+#[test]
+fn zfp_rates_are_public_checked_builder_inputs() {
+    use hdf5_pure::{DatasetBuilder, ZfpRate};
+
+    let _: fn(hdf5_pure_core::ZfpRate) -> f64 = ZfpRate::get;
+    let _: fn(&mut DatasetBuilder, ZfpRate) -> &mut DatasetBuilder = DatasetBuilder::with_zfp;
+    assert_eq!(ZfpRate::try_from(16.0).unwrap().get(), 16.0);
+}

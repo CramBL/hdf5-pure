@@ -733,6 +733,25 @@ pub enum FormatError {
     ///
     /// Contains the rejected byte count.
     InvalidUserblockSize(u64),
+    /// The ZFP block budget is below one bit at the chunk's rank.
+    InvalidZfpBitBudget {
+        /// The rate's representation from [`f64::to_bits`].
+        rate_bits: u64,
+        /// The number of chunk dimensions.
+        rank: u32,
+    },
+    /// A requested ZFP rate is outside the finite range greater than zero through 64.
+    InvalidZfpRate {
+        /// The rejected rate's representation from [`f64::to_bits`].
+        rate_bits: u64,
+    },
+    /// A requested ZFP rate exceeds the dataset's scalar width.
+    InvalidZfpRateForScalar {
+        /// The rejected rate's representation from [`f64::to_bits`].
+        rate_bits: u64,
+        /// The scalar width in bits.
+        scalar_bits: u32,
+    },
     /// A length is too large for a length field of `length_size` bytes.
     LengthTooLarge {
         /// The length that does not fit the field.
@@ -1107,6 +1126,24 @@ pub const OBJECT_HEADER_MESSAGE_MAX: usize = u16::MAX as usize;
 impl fmt::Display for FormatError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidZfpBitBudget { rate_bits, rank } => write!(
+                f,
+                "ZFP rate {} gives zero bits per {rank}D block",
+                f64::from_bits(*rate_bits)
+            ),
+            Self::InvalidZfpRate { rate_bits } => write!(
+                f,
+                "ZFP rate {} is outside the finite range (0, 64]",
+                f64::from_bits(*rate_bits)
+            ),
+            Self::InvalidZfpRateForScalar {
+                rate_bits,
+                scalar_bits,
+            } => write!(
+                f,
+                "ZFP rate {} exceeds the {scalar_bits}-bit scalar width",
+                f64::from_bits(*rate_bits)
+            ),
             Self::RegionOutOfBounds {
                 dimension,
                 start,

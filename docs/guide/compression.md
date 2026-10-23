@@ -234,11 +234,15 @@ hdf5-pure = { version = "0.47.0", features = ["zfp"] }
 
 Or, for the runnable example, `cargo run --example compression --features zfp` if you extend it to exercise ZFP.
 
-[`with_zfp(rate)`](crate::DatasetBuilder::with_zfp) enables fixed-rate ZFP compression, where `rate` is the number of compressed bits per value. It is a pure-Rust port of the LLNL/zfp codec, registered as HDF5 filter ID 32013, and is byte-for-byte interoperable with the reference H5Z-ZFP plugin: files hdf5-pure writes are readable by `h5py` + `hdf5plugin`, and files those tools produce are readable by hdf5-pure.
+[`with_zfp`](crate::DatasetBuilder::with_zfp) enables fixed-rate ZFP compression with a
+[`ZfpRate`](crate::ZfpRate), measured in compressed bits per scalar. Convert a numeric request
+with `ZfpRate::try_from` before passing it to the builder. The constructor accepts finite,
+positive rates through 64.
 
 ```rust
 # #[cfg(feature = "zfp")] {
 # use hdf5_pure::FileBuilder;
+use hdf5_pure::ZfpRate;
 # let (ny, nx) = (32u64, 64u64);
 # let data: Vec<f32> = (0..2048u16).map(f32::from).collect();
 # let mut builder = FileBuilder::new();
@@ -247,7 +251,7 @@ builder
     .with_f32_data(&data)
     .with_shape(&[ny, nx])
     .with_chunks(&[ny, nx])
-    .with_zfp(16.0); // 16 bits per value
+    .with_zfp(ZfpRate::try_from(16.0)?); // 16 bits per value
 # builder.finish()?;
 # }
 # Ok::<(), hdf5_pure::Error>(())
@@ -259,7 +263,19 @@ The supported slice is:
 - Ranks: 1D, 2D, 3D, 4D
 - Mode: fixed-rate (`rate` bits per value)
 
-The scalar type is derived from the dataset's datatype when the file is written, so any of [`with_f32_data`](crate::DatasetBuilder::with_f32_data) / [`with_f64_data`](crate::DatasetBuilder::with_f64_data) / [`with_i32_data`](crate::DatasetBuilder::with_i32_data) / [`with_i64_data`](crate::DatasetBuilder::with_i64_data) (or an explicit [`with_dtype`](crate::DatasetBuilder::with_dtype)) establishes it. [`finish`](crate::FileBuilder::finish) / [`write`](crate::FileBuilder::write) returns [`FormatError::UnsupportedZfp`](crate::FormatError::UnsupportedZfp) if the dataset's datatype is not one of the four supported scalar types, or if the chunk rank is outside `1..=4`. ZFP is a standalone compressor, so a request for shuffle, scale-offset, deflate, or LZF on the same dataset is rejected.
+The writer resolves the rate against the dataset's datatype and chunk dimensions.
+The maximum is 32 bits per scalar for `f32` and `i32`, or 64 for `f64` and `i64`. An excessive
+rate returns [`FormatError::InvalidZfpRateForScalar`](crate::FormatError::InvalidZfpRateForScalar).
+The encoder uses the integral part of `rate * 4^rank` as the bit budget per block. A zero budget
+returns [`FormatError::InvalidZfpBitBudget`](crate::FormatError::InvalidZfpBitBudget). A positive
+budget can be too small for floating-point block headers, depending on the data. Compression
+reports that failure through [`FormatError::FilterError`](crate::FormatError::FilterError).
+
+[`finish`](crate::FileBuilder::finish) and [`write`](crate::FileBuilder::write) return
+[`FormatError::UnsupportedZfp`](crate::FormatError::UnsupportedZfp) for unsupported scalar types
+or chunk geometry. Combining ZFP with shuffle, scale-offset, deflate, or LZF on the same dataset
+returns a filter error. Files written with ZFP are compatible with the H5Z-ZFP plugin, filter
+ID 32013, including `h5py` with `hdf5plugin` installed.
 
 ## `fast-deflate` backend
 

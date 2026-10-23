@@ -6,7 +6,50 @@
 
 #![cfg(feature = "zfp")]
 
+use hdf5_pure::ZfpRate;
 use hdf5_pure::{Error, File, FileBuilder, FormatError};
+use rstest::rstest;
+
+#[rstest]
+#[case(false)]
+#[case(true)]
+fn thirty_two_bit_datasets_reject_a_sixty_four_bit_zfp_rate(#[case] integer: bool) {
+    let mut builder = FileBuilder::new();
+    let dataset = builder.create_dataset("v");
+    if integer {
+        dataset.with_i32_data(&[0; 4]);
+    } else {
+        dataset.with_f32_data(&[0.0; 4]);
+    }
+    dataset
+        .with_chunks(&[4])
+        .with_zfp(ZfpRate::try_from(64.0).unwrap());
+    let error = builder.finish().unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Error::Format(FormatError::InvalidZfpRateForScalar { rate_bits, scalar_bits: 32 })
+                if rate_bits == 64.0f64.to_bits()
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn dataset_resolution_rejects_zero_bit_zfp_budgets() {
+    let mut builder = FileBuilder::new();
+    builder
+        .create_dataset("v")
+        .with_i32_data(&[0; 4])
+        .with_chunks(&[4])
+        .with_zfp(ZfpRate::try_from(f64::MIN_POSITIVE).unwrap());
+    let error = builder.finish().unwrap_err();
+    assert!(
+        matches!(error, Error::Format(FormatError::InvalidZfpBitBudget { rate_bits, rank: 1 })
+        if rate_bits == f64::MIN_POSITIVE.to_bits()),
+        "{error:?}"
+    );
+}
 
 fn max_abs_err(a: &[f32], b: &[f32]) -> f64 {
     a.iter()
@@ -33,7 +76,7 @@ fn zfp_f32_roundtrip_rate16() {
         .create_dataset("v")
         .with_f32_data(&vals)
         .with_chunks(&[32])
-        .with_zfp(16.0);
+        .with_zfp(ZfpRate::try_from(16.0).unwrap());
     let bytes = builder.finish().unwrap();
 
     let file = File::from_bytes(bytes).unwrap();
@@ -56,7 +99,7 @@ fn zfp_f64_roundtrip_rate32() {
         .create_dataset("v")
         .with_f64_data(&vals)
         .with_chunks(&[32])
-        .with_zfp(32.0);
+        .with_zfp(ZfpRate::try_from(32.0).unwrap());
     let bytes = builder.finish().unwrap();
 
     let file = File::from_bytes(bytes).unwrap();
@@ -79,7 +122,7 @@ fn zfp_i32_roundtrip_rate32() {
         .create_dataset("v")
         .with_i32_data(&vals)
         .with_chunks(&[16])
-        .with_zfp(32.0);
+        .with_zfp(ZfpRate::try_from(32.0).unwrap());
     let bytes = builder.finish().unwrap();
 
     let file = File::from_bytes(bytes).unwrap();
@@ -104,7 +147,7 @@ fn zfp_i64_roundtrip_rate64() {
         .create_dataset("v")
         .with_i64_data(&vals)
         .with_chunks(&[16])
-        .with_zfp(64.0);
+        .with_zfp(ZfpRate::try_from(64.0).unwrap());
     let bytes = builder.finish().unwrap();
 
     let file = File::from_bytes(bytes).unwrap();
@@ -131,7 +174,7 @@ fn zfp_f32_partial_chunk_1d() {
         .create_dataset("v")
         .with_f32_data(&vals)
         .with_chunks(&[13])
-        .with_zfp(16.0);
+        .with_zfp(ZfpRate::try_from(16.0).unwrap());
     let bytes = builder.finish().unwrap();
 
     let file = File::from_bytes(bytes).unwrap();
@@ -158,7 +201,7 @@ fn zfp_f64_partial_chunk_2d() {
         .with_f64_data(&vals)
         .with_shape(&[dims[0] as u64, dims[1] as u64])
         .with_chunks(&[dims[0] as u64, dims[1] as u64])
-        .with_zfp(32.0);
+        .with_zfp(ZfpRate::try_from(32.0).unwrap());
     let bytes = builder.finish().unwrap();
 
     let file = File::from_bytes(bytes).unwrap();
@@ -183,7 +226,7 @@ fn zfp_f32_roundtrip_2d() {
         .with_f32_data(&vals)
         .with_shape(&[8, 12])
         .with_chunks(&[8, 12])
-        .with_zfp(16.0);
+        .with_zfp(ZfpRate::try_from(16.0).unwrap());
     let bytes = builder.finish().unwrap();
 
     let file = File::from_bytes(bytes).unwrap();
@@ -208,7 +251,7 @@ fn zfp_f64_roundtrip_3d() {
         .with_f64_data(&vals)
         .with_shape(&[dims[0] as u64, dims[1] as u64, dims[2] as u64])
         .with_chunks(&[dims[0] as u64, dims[1] as u64, dims[2] as u64])
-        .with_zfp(32.0);
+        .with_zfp(ZfpRate::try_from(32.0).unwrap());
     let bytes = builder.finish().unwrap();
 
     let file = File::from_bytes(bytes).unwrap();
@@ -234,7 +277,7 @@ fn zfp_f32_roundtrip_4d() {
         .with_f32_data(&vals)
         .with_shape(&dims.map(|d| d as u64))
         .with_chunks(&dims.map(|d| d as u64))
-        .with_zfp(16.0);
+        .with_zfp(ZfpRate::try_from(16.0).unwrap());
     let bytes = builder.finish().unwrap();
 
     let file = File::from_bytes(bytes).unwrap();
@@ -257,7 +300,7 @@ fn zfp_on_unsupported_scalar_errors_not_panics() {
         .create_dataset("v")
         .with_u8_data(&[1u8, 2, 3, 4])
         .with_chunks(&[4])
-        .with_zfp(16.0);
+        .with_zfp(ZfpRate::try_from(16.0).unwrap());
     let err = builder
         .finish()
         .expect_err("ZFP on u8 should error, not succeed");
@@ -286,7 +329,7 @@ fn zfp_dtype_is_sole_source_of_truth() {
         .with_dtype(hdf5_pure::make_f32_type())
         .with_shape(&[vals.len() as u64])
         .with_chunks(&[vals.len() as u64])
-        .with_zfp(16.0);
+        .with_zfp(ZfpRate::try_from(16.0).unwrap());
     let bytes = builder.finish().expect("dtype-driven ZFP should succeed");
 
     let file = File::from_bytes(bytes).unwrap();
@@ -311,7 +354,7 @@ fn zfp_with_5d_chunks_errors_not_panics() {
         .with_f32_data(&vals)
         .with_shape(&[2, 2, 2, 2, 2])
         .with_chunks(&[2, 2, 2, 2, 2])
-        .with_zfp(16.0);
+        .with_zfp(ZfpRate::try_from(16.0).unwrap());
     let err = builder
         .finish()
         .expect_err("ZFP with 5D chunks should error, not succeed");

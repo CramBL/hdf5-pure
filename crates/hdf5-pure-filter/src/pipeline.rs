@@ -5,16 +5,18 @@ use alloc::vec::Vec;
 use core::num::NonZeroU32;
 
 use hdf5_pure_core::DeflateLevel;
+#[cfg(all(test, feature = "zfp"))]
+use hdf5_pure_core::ZfpRate;
 
 use crate::error::Error;
 use crate::lzf;
 use crate::scaleoffset;
 use crate::scaleoffset::ScaleOffset;
 use crate::scaleoffset::ScaleOffsetType;
-#[cfg(feature = "zfp")]
+#[cfg(all(test, feature = "zfp"))]
 use crate::zfp;
 #[cfg(feature = "zfp")]
-use crate::zfp::ZfpElementType;
+use crate::zfp::{ResolvedZfpSettings, ZfpElementType};
 
 /// Supplies the identifier, flags, and parameters for one pipeline filter.
 ///
@@ -239,11 +241,16 @@ impl<'a> ChunkContext<'a> {
     }
 }
 
-/// Holds reusable Deflate encoder and decoder state between chunks.
+/// Holds reusable codec state and resolved ZFP settings between chunks.
 ///
-/// The state is allocated on first use. Pipelines without Deflate need no Deflate state.
+/// Codec buffers are allocated on first use. Resolved ZFP settings are reused while the
+/// pipeline position, client data, scalar type, and chunk dimensions match.
 #[derive(Default)]
 pub struct FilterScratch {
+    #[cfg(feature = "zfp")]
+    zfp: Vec<PreparedZfpFilter>,
+    #[cfg(all(feature = "zfp", test))]
+    zfp_preparations: usize,
     #[cfg(feature = "deflate")]
     encoder: Option<(DeflateLevel, flate2::write::ZlibEncoder<Vec<u8>>)>,
     #[cfg(feature = "deflate")]
@@ -254,6 +261,55 @@ impl FilterScratch {
     /// Creates empty filter scratch state.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Serializes ZFP client data and retains the settings at the pipeline's `index`.
+    #[cfg(feature = "zfp")]
+    pub fn zfp_client_data(&mut self, settings: ResolvedZfpSettings, index: usize) -> Vec<u32> {
+        let client_data = settings.client_data();
+        self.store_zfp(settings, &client_data, index);
+        client_data
+    }
+
+    #[cfg(feature = "zfp")]
+    fn zfp_settings(
+        &mut self,
+        ctx: ChunkContext<'_>,
+        client_data: &[u32],
+        index: usize,
+    ) -> Result<ResolvedZfpSettings, Error> {
+        if let Some(prepared) = self.zfp.iter().find(|prepared| prepared.index == index) {
+            if prepared.client_data == client_data
+                && prepared
+                    .settings
+                    .matches_context(ctx.chunk_dims, ctx.element_type)
+            {
+                return Ok(prepared.settings);
+            }
+        }
+        let settings =
+            ResolvedZfpSettings::from_filter(client_data, ctx.chunk_dims, ctx.element_type)?;
+        self.store_zfp(settings, client_data, index);
+        Ok(settings)
+    }
+
+    #[cfg(feature = "zfp")]
+    fn store_zfp(&mut self, settings: ResolvedZfpSettings, client_data: &[u32], index: usize) {
+        if let Some(prepared) = self.zfp.iter_mut().find(|prepared| prepared.index == index) {
+            prepared.client_data.clear();
+            prepared.client_data.extend_from_slice(client_data);
+            prepared.settings = settings;
+        } else {
+            self.zfp.push(PreparedZfpFilter {
+                index,
+                client_data: client_data.to_vec(),
+                settings,
+            });
+        }
+        #[cfg(test)]
+        {
+            self.zfp_preparations += 1;
+        }
     }
 
     #[cfg(feature = "deflate")]
@@ -279,6 +335,13 @@ impl FilterScratch {
         }
         self.decoder.as_mut().expect("built directly above")
     }
+}
+
+#[cfg(feature = "zfp")]
+struct PreparedZfpFilter {
+    index: usize,
+    client_data: Vec<u32>,
+    settings: ResolvedZfpSettings,
 }
 
 /// Reverses the active filters on one stored chunk.
@@ -340,28 +403,24 @@ pub fn decompress_chunk_with(
         let input: &[u8] = owned.as_deref().unwrap_or(compressed);
         let next = match filters.id(i) {
             FILTER_SHUFFLE => shuffle_decompress(input, ctx.element_size.get() as usize),
-            FILTER_DEFLATE => deflate_decompress(
-                scratch,
-                input,
-                inner_output_cap(expected, filters, filter_mask, i, ctx)?,
-            )?,
+            FILTER_DEFLATE => {
+                let cap = inner_output_cap(scratch, expected, filters, filter_mask, i, ctx)?;
+                deflate_decompress(scratch, input, cap)?
+            }
             FILTER_LZF => lzf::decompress(
                 input,
-                inner_output_cap(expected, filters, filter_mask, i, ctx)?,
+                inner_output_cap(scratch, expected, filters, filter_mask, i, ctx)?,
             )?,
             FILTER_FLETCHER32 => fletcher32_verify(input)?,
             FILTER_SCALEOFFSET => scaleoffset::decompress(
                 input,
                 filters.client_data(i),
-                inner_output_cap(expected, filters, filter_mask, i, ctx)?,
+                inner_output_cap(scratch, expected, filters, filter_mask, i, ctx)?,
             )?,
             #[cfg(feature = "zfp")]
-            FILTER_ZFP => zfp::decompress_filter(
-                input,
-                filters.client_data(i),
-                ctx.chunk_dims,
-                ctx.element_type,
-            )?,
+            FILTER_ZFP => scratch
+                .zfp_settings(ctx, filters.client_data(i), i)?
+                .decompress(input)?,
             other => return Err(Error::UnsupportedFilter(other)),
         };
         owned = Some(next);
@@ -393,13 +452,14 @@ fn expected_chunk_len(ctx: &ChunkContext<'_>) -> Option<usize> {
 }
 
 fn filter_max_forward_output(
+    scratch: &mut FilterScratch,
     filters: &(impl FilterSteps + ?Sized),
     index: usize,
     in_size: usize,
     ctx: ChunkContext<'_>,
 ) -> Result<usize, Error> {
     #[cfg(not(feature = "zfp"))]
-    let _ = ctx;
+    let _ = (scratch, ctx);
 
     Ok(match filters.id(index) {
         // Fletcher32 appends a 4-byte checksum.
@@ -417,11 +477,9 @@ fn filter_max_forward_output(
         FILTER_DEFLATE => in_size.saturating_add(in_size / 16).saturating_add(64),
         #[cfg(feature = "zfp")]
         // ZFP encodes full blocks even when the chunk ends with a partial block.
-        FILTER_ZFP => crate::zfp::filter_encoded_len(
-            filters.client_data(index),
-            ctx.chunk_dims,
-            ctx.element_type,
-        )?,
+        FILTER_ZFP => scratch
+            .zfp_settings(ctx, filters.client_data(index), index)?
+            .encoded_bytes(),
         _ => in_size,
     })
 }
@@ -430,6 +488,7 @@ fn filter_max_forward_output(
 const MAX_DEFLATE_EXPANSION: usize = 1032;
 
 fn inner_output_cap(
+    scratch: &mut FilterScratch,
     expected: Option<usize>,
     filters: &(impl FilterSteps + ?Sized),
     filter_mask: u32,
@@ -443,7 +502,7 @@ fn inner_output_cap(
         if j < 32 && (filter_mask >> j) & 1 == 1 {
             continue;
         }
-        size = filter_max_forward_output(filters, j, size, ctx)?;
+        size = filter_max_forward_output(scratch, filters, j, size, ctx)?;
     }
     Ok(Some(size))
 }
@@ -487,12 +546,9 @@ pub fn compress_chunk_with(
             FILTER_FLETCHER32 => fletcher32_append(input)?,
             FILTER_SCALEOFFSET => scaleoffset::compress(input, filters.client_data(i))?,
             #[cfg(feature = "zfp")]
-            FILTER_ZFP => zfp::compress_filter(
-                input,
-                filters.client_data(i),
-                ctx.chunk_dims,
-                ctx.element_type,
-            )?,
+            FILTER_ZFP => scratch
+                .zfp_settings(ctx, filters.client_data(i), i)?
+                .compress(input)?,
             other => return Err(Error::UnsupportedFilter(other)),
         };
         owned = Some(next);
@@ -1438,7 +1494,11 @@ mod tests {
         #[case] dims: &[u64],
         #[case] encoded_len: usize,
     ) {
-        let cd_values = zfp::zfp_cd_values_rate(32.0, ZfpElementType::F32, dims).unwrap();
+        let mut scratch = FilterScratch::new();
+        let settings =
+            ResolvedZfpSettings::new(ZfpRate::try_from(32.0).unwrap(), ZfpElementType::F32, dims)
+                .unwrap();
+        let cd_values = scratch.zfp_client_data(settings, 0);
         let filters = [
             FilterDescription {
                 filter_id: FILTER_ZFP,
@@ -1466,8 +1526,160 @@ mod tests {
         )
         .unwrap();
         assert_eq!(zfp_bytes.len(), encoded_len);
-        let stored = compress_chunk_with(&mut FilterScratch::new(), &data, &filters, ctx).unwrap();
-        assert_eq!(decompress_chunk(&stored, &filters, ctx, 0).unwrap(), data);
+        let stored = compress_chunk_with(&mut scratch, &data, &filters, ctx).unwrap();
+        let repeated = compress_chunk_with(&mut scratch, &data, &filters, ctx).unwrap();
+        assert_eq!(repeated, stored);
+        assert_eq!(
+            decompress_chunk_with(&mut scratch, &stored, &filters, ctx, 0).unwrap(),
+            data
+        );
+        assert_eq!(scratch.zfp_preparations, 1);
+
+        let mut reader = FilterScratch::new();
+        assert_eq!(
+            decompress_chunk_with(&mut reader, &stored, &filters, ctx, 0).unwrap(),
+            data
+        );
+        assert_eq!(
+            decompress_chunk_with(&mut reader, &stored, &filters, ctx, 0).unwrap(),
+            data
+        );
+        assert_eq!(reader.zfp_preparations, 1);
+    }
+
+    #[rstest::rstest]
+    #[cfg(feature = "zfp")]
+    #[case::geometry(&[8], ZfpElementType::F32, 4, 16.0, 32, 16)]
+    #[case::scalar(&[4], ZfpElementType::F64, 8, 16.0, 32, 8)]
+    #[case::rate(&[4], ZfpElementType::F32, 4, 32.0, 16, 16)]
+    fn prepared_zfp_settings_are_replaced_when_metadata_or_context_changes(
+        #[case] dimensions: &[u64],
+        #[case] scalar: ZfpElementType,
+        #[case] element_size: u32,
+        #[case] requested: f64,
+        #[case] decoded_bytes: usize,
+        #[case] encoded_bytes: usize,
+    ) {
+        let original =
+            ResolvedZfpSettings::new(ZfpRate::try_from(16.0).unwrap(), ZfpElementType::F32, &[4])
+                .unwrap();
+        let mut scratch = FilterScratch::new();
+        let client_data = scratch.zfp_client_data(original, 0);
+        let mut filters = [FilterDescription {
+            filter_id: FILTER_ZFP,
+            flags: 0,
+            client_data,
+        }];
+        let ctx = ChunkContext {
+            chunk_dims: &[4],
+            element_size: NonZeroU32::new(4).unwrap(),
+            element_type: Some(ZfpElementType::F32),
+            scale_offset_type: None,
+        };
+        assert_eq!(
+            compress_chunk_with(&mut scratch, &[0; 16], &filters, ctx).unwrap(),
+            [0; 8]
+        );
+        assert_eq!(scratch.zfp_preparations, 1);
+
+        if requested != 16.0 {
+            filters[0].client_data = zfp::zfp_cd_values_rate(
+                ZfpRate::try_from(requested).unwrap(),
+                ZfpElementType::F32,
+                &[4],
+            )
+            .unwrap();
+        }
+        let ctx = ChunkContext {
+            chunk_dims: dimensions,
+            element_type: Some(scalar),
+            element_size: NonZeroU32::new(element_size).unwrap(),
+            ..ctx
+        };
+        let raw = vec![0; decoded_bytes];
+        let encoded = compress_chunk_with(&mut scratch, &raw, &filters, ctx).unwrap();
+        assert_eq!(encoded, vec![0; encoded_bytes]);
+        assert_eq!(
+            decompress_chunk_with(&mut scratch, &encoded, &filters, ctx, 0).unwrap(),
+            raw
+        );
+        assert_eq!(scratch.zfp_preparations, 2);
+        let repeated = compress_chunk_with(&mut scratch, &raw, &filters, ctx).unwrap();
+        assert_eq!(repeated, encoded);
+        assert_eq!(scratch.zfp_preparations, 2);
+    }
+
+    #[test]
+    #[cfg(feature = "zfp")]
+    fn prepared_zfp_settings_check_float_headers_for_each_chunk() {
+        let settings =
+            ResolvedZfpSettings::new(ZfpRate::try_from(0.25).unwrap(), ZfpElementType::F32, &[4])
+                .unwrap();
+        let mut scratch = FilterScratch::new();
+        let client_data = scratch.zfp_client_data(settings, 0);
+        let filters = [FilterDescription {
+            filter_id: FILTER_ZFP,
+            flags: 0,
+            client_data,
+        }];
+        let ctx = ChunkContext {
+            chunk_dims: &[4],
+            element_size: NonZeroU32::new(4).unwrap(),
+            element_type: Some(ZfpElementType::F32),
+            scale_offset_type: None,
+        };
+        assert_eq!(
+            compress_chunk_with(&mut scratch, &[0; 16], &filters, ctx).unwrap(),
+            [0]
+        );
+        let nonzero = [1.0f32; 4].map(f32::to_le_bytes).concat();
+        assert_eq!(
+            compress_chunk_with(&mut scratch, &nonzero, &filters, ctx),
+            Err(Error::ZfpHeaderTooLarge {
+                budget: 1,
+                required: 9
+            })
+        );
+        assert_eq!(
+            compress_chunk_with(&mut scratch, &[0; 16], &filters, ctx).unwrap(),
+            [0]
+        );
+        assert_eq!(scratch.zfp_preparations, 1);
+    }
+
+    #[test]
+    #[cfg(feature = "zfp")]
+    fn malformed_zfp_metadata_does_not_use_or_replace_prepared_settings() {
+        let settings =
+            ResolvedZfpSettings::new(ZfpRate::try_from(16.0).unwrap(), ZfpElementType::F32, &[4])
+                .unwrap();
+        let mut scratch = FilterScratch::new();
+        let client_data = scratch.zfp_client_data(settings, 0);
+        let mut filters = [FilterDescription {
+            filter_id: FILTER_ZFP,
+            flags: 0,
+            client_data,
+        }];
+        let ctx = ChunkContext {
+            chunk_dims: &[4],
+            element_size: NonZeroU32::new(4).unwrap(),
+            element_type: Some(ZfpElementType::F32),
+            scale_offset_type: None,
+        };
+        filters[0].client_data[1] ^= 1;
+        assert_eq!(
+            compress_chunk_with(&mut scratch, &[0; 16], &filters, ctx),
+            Err(Error::ZfpFilter(
+                "ZFP: invalid or non-rate cd_values".into()
+            ))
+        );
+        assert_eq!(scratch.zfp_preparations, 1);
+        filters[0].client_data[1] ^= 1;
+        assert_eq!(
+            compress_chunk_with(&mut scratch, &[0; 16], &filters, ctx).unwrap(),
+            [0; 8]
+        );
+        assert_eq!(scratch.zfp_preparations, 1);
     }
 
     #[test]

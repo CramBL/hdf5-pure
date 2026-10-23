@@ -12,6 +12,9 @@ use alloc::{format, vec, vec::Vec};
 const HADDR_UNDEF: u64 = u64::MAX;
 use core::num::NonZeroUsize;
 
+#[cfg(feature = "zfp")]
+use hdf5_pure_filter::__private::ResolvedZfpSettings;
+
 use hdf5_pure_format::__private::ChunkIndexInfo;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::FilteredSingleChunk;
@@ -21,6 +24,8 @@ use hdf5_pure_format::__private::SlotOccupancy;
 use crate::DeflateLevel;
 #[cfg(test)]
 use crate::FloatingPointType;
+#[cfg(feature = "zfp")]
+use crate::ZfpRate;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::chunk_grid::{ChunkGrid, GridOrder};
@@ -36,7 +41,7 @@ use crate::filter_pipeline::{
     FILTER_DEFLATE, FILTER_FLETCHER32, FILTER_LZF, FILTER_SCALEOFFSET, FILTER_SHUFFLE,
     FilterDescription, FilterPipeline, H5Z_FLAG_OPTIONAL,
 };
-use crate::filters::{self, ChunkContext};
+use crate::filters::{self, ChunkContext, FilterScratch};
 use crate::layout_info::FilterId;
 use crate::scaleoffset::{self, FillAvailability, ScaleOffset};
 use crate::width::LengthWidth;
@@ -69,7 +74,7 @@ pub enum FilterKind {
     /// ZFP fixed-rate compression, in bits per value. A primary transform:
     /// it consumes the raw elements and displaces the byte filters.
     #[cfg(feature = "zfp")]
-    Zfp(f64),
+    Zfp(ZfpRate),
     /// Scale-offset, with whether the filter records the dataset's fill value.
     /// Also a primary transform: it displaces shuffle, but a byte compressor
     /// may follow it.
@@ -265,12 +270,34 @@ impl ChunkOptions {
     /// value.
     /// Returns [`FormatError::UnsupportedZfp`] if ZFP cannot encode the element type or chunk
     /// dimensions.
+    /// Returns [`FormatError::InvalidZfpRateForScalar`] if the ZFP rate exceeds the scalar width,
+    /// or [`FormatError::InvalidZfpBitBudget`] if the encoded block budget is zero.
     /// A filter parameter encoder may return another [`FormatError`].
     pub fn build_pipeline(
         &self,
         ctx: &ChunkContext<'_>,
         fill: FillPattern<'_>,
     ) -> Result<Option<FilterPipeline>, FormatError> {
+        self.encode_pipeline(None, ctx, fill)
+    }
+
+    pub(crate) fn build_pipeline_with(
+        &self,
+        scratch: &mut FilterScratch,
+        ctx: &ChunkContext<'_>,
+        fill: FillPattern<'_>,
+    ) -> Result<Option<FilterPipeline>, FormatError> {
+        self.encode_pipeline(Some(scratch), ctx, fill)
+    }
+
+    fn encode_pipeline(
+        &self,
+        mut scratch: Option<&mut FilterScratch>,
+        ctx: &ChunkContext<'_>,
+        fill: FillPattern<'_>,
+    ) -> Result<Option<FilterPipeline>, FormatError> {
+        #[cfg(not(feature = "zfp"))]
+        let _ = scratch.as_mut();
         self.refuse_conflicting_filters()?;
 
         let element_size = ctx.element_size.get();
@@ -297,14 +324,17 @@ impl ChunkOptions {
                                 .into(),
                         )
                     })?;
+                    let settings = ResolvedZfpSettings::new(rate, elem_ty, chunk_dims)
+                        .map_err(FormatError::from)?;
+                    let client_data = match scratch.as_deref_mut() {
+                        Some(scratch) => scratch.zfp_client_data(settings, filters.len()),
+                        None => settings.client_data(),
+                    };
                     FilterDescription {
                         filter_id: FILTER_ZFP,
                         name: Some("zfp".into()),
                         flags,
-                        client_data: hdf5_pure_filter::__private::zfp_cd_values_rate(
-                            rate, elem_ty, chunk_dims,
-                        )
-                        .map_err(FormatError::from)?,
+                        client_data,
                     }
                 }
                 FilterKind::ScaleOffset(mode, fill_avail) => {
@@ -997,7 +1027,11 @@ pub(crate) fn compress_chunks(
     let element_size = ctx.element_size.narrow::<NonZeroUsize>()?;
     // The same pattern the unwritten slots are padded with: a filter that
     // records the fill value has to record the one this write pads with.
-    let pipeline = options.build_pipeline(&ctx, fill)?;
+    let mut scratch = FilterScratch::new();
+    let pipeline = match allocation {
+        StorageAllocation::Allocated => options.build_pipeline_with(&mut scratch, &ctx, fill)?,
+        StorageAllocation::Unallocated => options.build_pipeline(&ctx, fill)?,
+    };
 
     // Decided from the geometry alone, and decided first: it is the step that
     // refuses a maximum shape needing an index this writer will not emit, and
@@ -1033,7 +1067,6 @@ pub(crate) fn compress_chunks(
     // One encoder for every chunk of the dataset. Building one per chunk is the
     // dominant cost of a filtered write -- ~300 KiB of hash tables apiece, 615
     // MiB over an 8 MiB dataset (issue #228).
-    let mut scratch = crate::filters::FilterScratch::new();
     for chunk_bytes in chunks {
         let c = if let Some(ref pl) = pipeline {
             filters::compress_chunk_with(&mut scratch, &chunk_bytes, pl, ctx)?
@@ -3047,17 +3080,8 @@ mod tests {
         );
     }
 
-    /// Every request naming two filters where one would displace the other is
-    /// refused, and the error names both (#233).
-    ///
-    /// The refusal is the observable part: a dropped filter leaves nothing in
-    /// the file to distinguish `with_shuffle().with_zfp(16.0)` from
-    /// `with_zfp(16.0)`, so a caller who wrote the first and got the second has
-    /// no way to find out. Asserting on the message rather than only on
-    /// `is_err()` is what keeps a refusal from being reported as some unrelated
-    /// failure that happens to also be an error.
     #[test]
-    fn conflicting_filter_requests_are_refused() {
+    fn conflicting_filter_requests_report_both_filter_names() {
         let so = ScaleOffset::FloatDScale(2);
         let fill = FillAvailability::Defined;
         let cases: &[(&str, &str, ChunkOptions)] = &[
@@ -3075,19 +3099,28 @@ mod tests {
             (
                 "scale-offset",
                 "ZFP",
-                filtered(&[FilterKind::ScaleOffset(so, fill), FilterKind::Zfp(16.0)]),
+                filtered(&[
+                    FilterKind::ScaleOffset(so, fill),
+                    FilterKind::Zfp(ZfpRate::try_from(16.0).unwrap()),
+                ]),
             ),
             #[cfg(feature = "zfp")]
             (
                 "shuffle",
                 "ZFP",
-                filtered(&[FilterKind::Shuffle, FilterKind::Zfp(16.0)]),
+                filtered(&[
+                    FilterKind::Shuffle,
+                    FilterKind::Zfp(ZfpRate::try_from(16.0).unwrap()),
+                ]),
             ),
             #[cfg(feature = "zfp")]
             (
                 "lzf",
                 "ZFP",
-                filtered(&[FilterKind::Lzf, FilterKind::Zfp(16.0)]),
+                filtered(&[
+                    FilterKind::Lzf,
+                    FilterKind::Zfp(ZfpRate::try_from(16.0).unwrap()),
+                ]),
             ),
             #[cfg(feature = "zfp")]
             (
@@ -3095,7 +3128,7 @@ mod tests {
                 "ZFP",
                 filtered(&[
                     FilterKind::Deflate(DeflateLevel::Six),
-                    FilterKind::Zfp(16.0),
+                    FilterKind::Zfp(ZfpRate::try_from(16.0).unwrap()),
                 ]),
             ),
         ];

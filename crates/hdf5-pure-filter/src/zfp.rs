@@ -10,6 +10,10 @@ extern crate alloc;
 #[cfg(not(feature = "std"))]
 use alloc::{format, vec, vec::Vec};
 
+use core::num::NonZeroU16;
+
+use hdf5_pure_core::{FormatError, ZfpRate};
+
 use crate::error::Error;
 
 /// The scalar type of a ZFP chunk.
@@ -33,6 +37,215 @@ impl ZfpElementType {
         match self {
             Self::F32 | Self::I32 => 4,
             Self::F64 | Self::I64 => 8,
+        }
+    }
+}
+
+/// Fixed-rate ZFP settings checked against a scalar type and chunk dimensions.
+///
+/// The rate is bounded by the scalar width, and each block has a positive bit budget.
+/// Compression may return [`Error::ZfpHeaderTooLarge`] for floating-point data whose block
+/// headers exceed this budget.
+#[derive(Clone, Copy, Debug)]
+pub struct ResolvedZfpSettings {
+    dims: ZfpChunkDims,
+    element_type: ZfpElementType,
+    maxbits: NonZeroU16,
+    encoded_bytes: usize,
+    decoded_bytes: usize,
+}
+
+impl ResolvedZfpSettings {
+    /// Resolves a requested rate for dimensions in row-major order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ZfpConfiguration`] if the rate exceeds the scalar width or the
+    /// encoded block budget is zero. Returns [`Error::UnsupportedZfp`] if the rank is outside
+    /// one through four or a dimension is zero or exceeds its metadata field. Returns
+    /// [`Error::ValueTooLargeForPlatform`] if a dimension exceeds `usize`, or
+    /// [`Error::ZfpSizeOverflow`] if a chunk's encoded or decoded size overflows `usize`.
+    pub fn new(
+        rate: ZfpRate,
+        element_type: ZfpElementType,
+        chunk_dims: &[u64],
+    ) -> Result<Self, Error> {
+        Self::from_dims(rate, element_type, ZfpChunkDims::try_from(chunk_dims)?)
+    }
+
+    fn from_dims(
+        rate: ZfpRate,
+        element_type: ZfpElementType,
+        dims: ZfpChunkDims,
+    ) -> Result<Self, Error> {
+        let scalar_bits = match element_type {
+            ZfpElementType::F32 | ZfpElementType::I32 => u32::BITS,
+            ZfpElementType::F64 | ZfpElementType::I64 => u64::BITS,
+        };
+        if rate.get() > f64::from(scalar_bits) {
+            return Err(Error::ZfpConfiguration(
+                FormatError::InvalidZfpRateForScalar {
+                    rate_bits: rate.get().to_bits(),
+                    scalar_bits,
+                },
+            ));
+        }
+        let block_values = BLOCK_SIZE.pow(dims.rank());
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the finite positive rate is at most 64 and a block contains at most 256 scalars"
+        )]
+        let budget = (rate.get() * block_values as f64) as u16;
+        let maxbits = NonZeroU16::new(budget).ok_or(Error::ZfpConfiguration(
+            FormatError::InvalidZfpBitBudget {
+                rate_bits: rate.get().to_bits(),
+                rank: dims.rank(),
+            },
+        ))?;
+        let decoded_bytes = dims
+            .checked_element_count()?
+            .checked_mul(element_type.byte_width())
+            .ok_or(Error::ZfpSizeOverflow)?;
+        let bits = dims
+            .checked_block_count()?
+            .checked_mul(usize::from(maxbits.get()))
+            .ok_or(Error::ZfpSizeOverflow)?;
+        Ok(Self {
+            dims,
+            element_type,
+            maxbits,
+            encoded_bytes: bits.div_ceil(8),
+            decoded_bytes,
+        })
+    }
+
+    pub(crate) fn from_filter(
+        cd_values: &[u32],
+        chunk_dims: &[u64],
+        element_type: Option<ZfpElementType>,
+    ) -> Result<Self, Error> {
+        let rate = zfp_rate_from_cd_values(cd_values)
+            .ok_or_else(|| Error::ZfpFilter("ZFP: invalid or non-rate cd_values".into()))?;
+        let rate = ZfpRate::try_from(rate).map_err(Error::ZfpConfiguration)?;
+        let element_type = element_type.ok_or_else(|| {
+            Error::ZfpFilter(
+                "ZFP: element_type missing from ChunkContext (caller must set it)".into(),
+            )
+        })?;
+        Self::new(rate, element_type, chunk_dims)
+    }
+
+    /// Serializes the scalar type, dimensions, and integral block budget as H5Z-ZFP client data.
+    pub fn client_data(self) -> Vec<u32> {
+        let Self {
+            dims,
+            element_type,
+            maxbits,
+            encoded_bytes: _,
+            decoded_bytes: _,
+        } = self;
+        let maxbits = u64::from(maxbits.get());
+        // Encode header bits into a buffer.
+        let mut w = BitWriter::new();
+        w.write(8, u64::from(b'z'));
+        w.write(8, u64::from(b'f'));
+        w.write(8, u64::from(b'p'));
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "ZFP_CODEC is the constant 5; the codec id is a single magic byte and fits u8"
+        )]
+        w.write(8, u64::from(ZFP_CODEC as u8));
+        w.write(52, zfp_meta_for(element_type, dims));
+        // Mode (12 bits short / 64 bits long). `zfp_stream_mode` short form for
+        // fixed-rate is `maxbits - 1` when maxbits ≤ 2048. Otherwise encode each
+        // stream parameter separately in 64 bits (low 12 = 0xFFF).
+        let header_bits: usize = if maxbits <= 2048 {
+            let mode = maxbits - 1;
+            w.write(12, mode);
+            32 + 52 + 12
+        } else {
+            // Long form matches zfp::zfp_stream_mode for the fixed-rate
+            // configuration produced by `zfp_stream_set_rate`:
+            //   minbits = maxbits (+ `bits` floor for floats)
+            //   maxprec = ZFP_MAX_PREC = 64
+            //   minexp  = ZFP_MIN_EXP  = -1074
+            let minbits = maxbits;
+            let maxprec: u64 = 63; // ZFP_MAX_PREC - 1
+            let minexp_enc: u64 = (-1074i64 + 16495) as u64; // 15421, fits in 15 bits
+            let mut mode: u64 = 0;
+            mode = (mode << 15) + minexp_enc;
+            mode = (mode << 7) + maxprec;
+            mode = (mode << 15) + (maxbits - 1);
+            mode = (mode << 15) + (minbits - 1);
+            mode = (mode << 12) + 0xFFF;
+            // Write 64 bits of mode, LSB-first (write() masks to n bits).
+            w.write(64, mode);
+            32 + 52 + 64
+        };
+        let mut bytes = w.finish();
+        // The BitWriter flushes 64-bit words. Trim to the exact bit budget so
+        // the resulting `cd_values` match what H5Z-ZFP writes.
+        bytes.truncate(header_bits.div_ceil(8));
+        // Pack the byte stream into u32 little-endian slots.
+        let mut cd: Vec<u32> = Vec::with_capacity(1 + bytes.len().div_ceil(4));
+        let v0 = (ZFP_VERSION_NO << 16) | (ZFP_CODEC << 12) | H5Z_FILTER_ZFP_VERSION_NO;
+        cd.push(v0);
+        for chunk in bytes.chunks(4) {
+            let mut buf = [0u8; 4];
+            buf[..chunk.len()].copy_from_slice(chunk);
+            cd.push(u32::from_le_bytes(buf));
+        }
+        cd
+    }
+
+    pub(crate) fn matches_context(
+        self,
+        dimensions: &[u64],
+        element_type: Option<ZfpElementType>,
+    ) -> bool {
+        element_type == Some(self.element_type)
+            && dimensions.len() == self.dims.as_slice().len()
+            && self
+                .dims
+                .as_slice()
+                .iter()
+                .zip(dimensions)
+                .all(|(&prepared, &current)| prepared as u64 == current)
+    }
+
+    pub(crate) fn encoded_bytes(self) -> usize {
+        self.encoded_bytes
+    }
+
+    pub(crate) fn compress(self, data: &[u8]) -> Result<Vec<u8>, Error> {
+        if data.len() != self.decoded_bytes {
+            return Err(Error::ZfpFilter(format!(
+                "ZFP: data length {} does not match dims product × element size ({})",
+                data.len(),
+                self.decoded_bytes,
+            )));
+        }
+        reject_short_float_header(data, usize::from(self.maxbits.get()), self.element_type)?;
+        match self.element_type {
+            ZfpElementType::F32 => codec_f32::compress(data, self),
+            ZfpElementType::F64 => codec_f64::compress(data, self),
+            ZfpElementType::I32 => codec_i32::compress(data, self),
+            ZfpElementType::I64 => codec_i64::compress(data, self),
+        }
+    }
+
+    pub(crate) fn decompress(self, compressed: &[u8]) -> Result<Vec<u8>, Error> {
+        if compressed.len() < self.encoded_bytes {
+            return Err(Error::TruncatedZfpStream {
+                expected: self.encoded_bytes,
+                actual: compressed.len(),
+            });
+        }
+        match self.element_type {
+            ZfpElementType::F32 => codec_f32::decompress(compressed, self),
+            ZfpElementType::F64 => codec_f64::decompress(compressed, self),
+            ZfpElementType::I32 => codec_i32::decompress(compressed, self),
+            ZfpElementType::I64 => codec_i64::decompress(compressed, self),
         }
     }
 }
@@ -1719,55 +1932,53 @@ macro_rules! impl_codec {
         pub(crate) mod $mod_name {
             use super::*;
 
-            pub(crate) fn compress(
+            pub(super) fn compress(
                 data: &[u8],
-                dims: ZfpChunkDims,
-                rate: f64,
+                settings: ResolvedZfpSettings,
             ) -> Result<Vec<u8>, Error> {
-                let expected = dims
-                    .checked_element_count()?
-                    .checked_mul($esz)
-                    .ok_or(Error::ZfpSizeOverflow)?;
-                if data.len() != expected {
-                    return Err(Error::ZfpFilter(format!(
-                        "ZFP: data length {} does not match dims product × element size ({})",
-                        data.len(),
-                        expected,
-                    )));
-                }
+                let ResolvedZfpSettings {
+                    dims,
+                    maxbits,
+                    element_type: _,
+                    encoded_bytes: _,
+                    decoded_bytes: _,
+                } = settings;
+                let maxbits = usize::from(maxbits.get());
                 match dims {
-                    ZfpChunkDims::One([nx]) => compress_1d(data, nx, rate),
-                    ZfpChunkDims::Two([ny, nx]) => compress_2d(data, ny, nx, rate),
-                    ZfpChunkDims::Three([nz, ny, nx]) => compress_3d(data, nz, ny, nx, rate),
+                    ZfpChunkDims::One([nx]) => compress_1d(data, nx, maxbits),
+                    ZfpChunkDims::Two([ny, nx]) => compress_2d(data, ny, nx, maxbits),
+                    ZfpChunkDims::Three([nz, ny, nx]) => compress_3d(data, nz, ny, nx, maxbits),
                     ZfpChunkDims::Four([nw, nz, ny, nx]) => {
-                        compress_4d(data, nw, nz, ny, nx, rate)
+                        compress_4d(data, nw, nz, ny, nx, maxbits)
                     }
                 }
             }
 
-            pub(crate) fn decompress(
+            pub(super) fn decompress(
                 compressed: &[u8],
-                dims: ZfpChunkDims,
-                rate: f64,
+                settings: ResolvedZfpSettings,
             ) -> Result<Vec<u8>, Error> {
+                let ResolvedZfpSettings {
+                    dims,
+                    maxbits,
+                    element_type: _,
+                    encoded_bytes: _,
+                    decoded_bytes: _,
+                } = settings;
+                let maxbits = usize::from(maxbits.get());
                 match dims {
-                    ZfpChunkDims::One([nx]) => decompress_1d(compressed, nx, rate),
-                    ZfpChunkDims::Two([ny, nx]) => decompress_2d(compressed, ny, nx, rate),
+                    ZfpChunkDims::One([nx]) => decompress_1d(compressed, nx, maxbits),
+                    ZfpChunkDims::Two([ny, nx]) => decompress_2d(compressed, ny, nx, maxbits),
                     ZfpChunkDims::Three([nz, ny, nx]) => {
-                        decompress_3d(compressed, nz, ny, nx, rate)
+                        decompress_3d(compressed, nz, ny, nx, maxbits)
                     }
                     ZfpChunkDims::Four([nw, nz, ny, nx]) => {
-                        decompress_4d(compressed, nw, nz, ny, nx, rate)
+                        decompress_4d(compressed, nw, nz, ny, nx, maxbits)
                     }
                 }
             }
 
-            fn compress_1d(data: &[u8], n: usize, rate: f64) -> Result<Vec<u8>, Error> {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "rate is bits-per-value (format-bounded); rate * 4 (1D block) is a small bit budget that fits usize"
-                )]
-                let maxbits = (rate * 4.0) as usize;
+            fn compress_1d(data: &[u8], n: usize, maxbits: usize) -> Result<Vec<u8>, Error> {
                 let total_bits = n.div_ceil(4) * maxbits;
                 let mut w = BitWriter::with_capacity(total_bits.div_ceil(8) + 8);
                 let mut i = 0;
@@ -1792,13 +2003,8 @@ macro_rules! impl_codec {
             fn decompress_1d(
                 compressed: &[u8],
                 n: usize,
-                rate: f64,
+                maxbits: usize,
             ) -> Result<Vec<u8>, Error> {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "rate is bits-per-value (format-bounded); rate * 4 (1D block) is a small bit budget that fits usize"
-                )]
-                let maxbits = (rate * 4.0) as usize;
                 let mut r = BitReader::new(compressed);
                 let mut output = Vec::with_capacity(n * $esz);
                 let mut i = 0;
@@ -1818,13 +2024,8 @@ macro_rules! impl_codec {
                 data: &[u8],
                 n1: usize,
                 n0: usize,
-                rate: f64,
+                maxbits: usize,
             ) -> Result<Vec<u8>, Error> {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "rate is bits-per-value (format-bounded); rate * 16 (2D block) is a small bit budget that fits usize"
-                )]
-                let maxbits = (rate * 16.0) as usize;
                 let nb1 = n1.div_ceil(4);
                 let nb0 = n0.div_ceil(4);
                 let total_bits = nb1 * nb0 * maxbits;
@@ -1861,13 +2062,8 @@ macro_rules! impl_codec {
                 compressed: &[u8],
                 n1: usize,
                 n0: usize,
-                rate: f64,
+                maxbits: usize,
             ) -> Result<Vec<u8>, Error> {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "rate is bits-per-value (format-bounded); rate * 16 (2D block) is a small bit budget that fits usize"
-                )]
-                let maxbits = (rate * 16.0) as usize;
                 let nb1 = n1.div_ceil(4);
                 let nb0 = n0.div_ceil(4);
                 let mut r = BitReader::new(compressed);
@@ -1898,13 +2094,8 @@ macro_rules! impl_codec {
                 n2: usize,
                 n1: usize,
                 n0: usize,
-                rate: f64,
+                maxbits: usize,
             ) -> Result<Vec<u8>, Error> {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "rate is bits-per-value (format-bounded); rate * 64 (3D block) is a small bit budget that fits usize"
-                )]
-                let maxbits = (rate * 64.0) as usize;
                 let nb2 = n2.div_ceil(4);
                 let nb1 = n1.div_ceil(4);
                 let nb0 = n0.div_ceil(4);
@@ -1974,13 +2165,8 @@ macro_rules! impl_codec {
                 n2: usize,
                 n1: usize,
                 n0: usize,
-                rate: f64,
+                maxbits: usize,
             ) -> Result<Vec<u8>, Error> {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "rate is bits-per-value (format-bounded); rate * 64 (3D block) is a small bit budget that fits usize"
-                )]
-                let maxbits = (rate * 64.0) as usize;
                 let nb2 = n2.div_ceil(4);
                 let nb1 = n1.div_ceil(4);
                 let nb0 = n0.div_ceil(4);
@@ -2037,13 +2223,8 @@ macro_rules! impl_codec {
                 n2: usize,
                 n1: usize,
                 n0: usize,
-                rate: f64,
+                maxbits: usize,
             ) -> Result<Vec<u8>, Error> {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "rate is bits-per-value (format-bounded); rate * 256 (4D block) is a small bit budget that fits usize"
-                )]
-                let maxbits = (rate * 256.0) as usize;
                 let nb3 = n3.div_ceil(4);
                 let nb2 = n2.div_ceil(4);
                 let nb1 = n1.div_ceil(4);
@@ -2159,13 +2340,8 @@ macro_rules! impl_codec {
                 n2: usize,
                 n1: usize,
                 n0: usize,
-                rate: f64,
+                maxbits: usize,
             ) -> Result<Vec<u8>, Error> {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "rate is bits-per-value (format-bounded); rate * 256 (4D block) is a small bit budget that fits usize"
-                )]
-                let maxbits = (rate * 256.0) as usize;
                 let nb3 = n3.div_ceil(4);
                 let nb2 = n2.div_ceil(4);
                 let nb1 = n1.div_ceil(4);
@@ -2312,16 +2488,16 @@ impl_codec!(
 ///
 /// # Errors
 ///
-/// Returns [`Error::ZfpFilter`] if the client data, rank, or scalar type is invalid.
+/// Returns [`Error::ZfpFilter`] if the client data is invalid or the scalar type is missing.
 /// Returns the errors from [`compress`] for invalid dimensions, rate, or input bytes.
+#[cfg(test)]
 pub(crate) fn compress_filter(
     data: &[u8],
     cd_values: &[u32],
     chunk_dims: &[u64],
     element_type: Option<ZfpElementType>,
 ) -> Result<Vec<u8>, Error> {
-    let (rate, dims, element_type) = filter_arguments(cd_values, chunk_dims, element_type)?;
-    compress(data, &dims[..chunk_dims.len()], rate, element_type)
+    ResolvedZfpSettings::from_filter(cd_values, chunk_dims, element_type)?.compress(data)
 }
 
 /// Decodes a chunk using fixed-rate settings from H5Z-ZFP client data.
@@ -2330,54 +2506,16 @@ pub(crate) fn compress_filter(
 ///
 /// # Errors
 ///
-/// Returns [`Error::ZfpFilter`] if the client data, rank, or scalar type is invalid.
+/// Returns [`Error::ZfpFilter`] if the client data is invalid or the scalar type is missing.
 /// Returns the errors from [`decompress`] for invalid dimensions, rate, or encoded bytes.
+#[cfg(test)]
 pub(crate) fn decompress_filter(
     data: &[u8],
     cd_values: &[u32],
     chunk_dims: &[u64],
     element_type: Option<ZfpElementType>,
 ) -> Result<Vec<u8>, Error> {
-    let (rate, dims, element_type) = filter_arguments(cd_values, chunk_dims, element_type)?;
-    decompress(data, &dims[..chunk_dims.len()], rate, element_type)
-}
-
-pub(crate) fn filter_encoded_len(
-    cd_values: &[u32],
-    chunk_dims: &[u64],
-    element_type: Option<ZfpElementType>,
-) -> Result<usize, Error> {
-    let (rate, dims, element_type) = filter_arguments(cd_values, chunk_dims, element_type)?;
-    validate_rate(rate, element_type)?;
-    checked_codec_sizes(
-        ZfpChunkDims::try_from(&dims[..chunk_dims.len()])?,
-        rate,
-        element_type,
-    )
-}
-
-fn filter_arguments(
-    cd_values: &[u32],
-    chunk_dims: &[u64],
-    element_type: Option<ZfpElementType>,
-) -> Result<(f64, [usize; 4], ZfpElementType), Error> {
-    let rate = zfp_rate_from_cd_values(cd_values)
-        .ok_or_else(|| Error::ZfpFilter("ZFP: invalid or non-rate cd_values".into()))?;
-    let element_type = element_type.ok_or_else(|| {
-        Error::ZfpFilter("ZFP: element_type missing from ChunkContext (caller must set it)".into())
-    })?;
-    let rank = chunk_dims.len();
-    if rank == 0 || rank > 4 {
-        return Err(Error::ZfpFilter(format!(
-            "ZFP: chunk rank must be 1..=4, got {rank}",
-        )));
-    }
-    validate_metadata_dimensions(chunk_dims)?;
-    let mut dims = [0usize; 4];
-    for (slot, &dimension) in dims.iter_mut().zip(chunk_dims) {
-        *slot = dimension_to_usize(dimension)?;
-    }
-    Ok((rate, dims, element_type))
+    ResolvedZfpSettings::from_filter(cd_values, chunk_dims, element_type)?.decompress(data)
 }
 
 /// Compresses a chunk at a fixed number of bits per scalar.
@@ -2389,8 +2527,10 @@ fn filter_arguments(
 /// # Errors
 ///
 /// Returns [`Error::UnsupportedZfp`] if the rank is outside one to four dimensions
-/// or any dimension is zero.
-/// Returns [`Error::ZfpFilter`] if the rate or input length is invalid.
+/// or a dimension is zero or exceeds its metadata field.
+/// Returns [`Error::ZfpConfiguration`] if the rate is outside its finite positive range,
+/// exceeds the scalar width, or the block budget is zero.
+/// Returns [`Error::ZfpFilter`] if the input length is invalid.
 /// Returns [`Error::ZfpHeaderTooLarge`] if a nonzero float block needs more header bits
 /// than the rate permits. Returns [`Error::ZfpSizeOverflow`] if a chunk size overflows `usize`.
 pub fn compress(
@@ -2399,16 +2539,9 @@ pub fn compress(
     rate: f64,
     element_type: ZfpElementType,
 ) -> Result<Vec<u8>, Error> {
-    let dims = ZfpChunkDims::try_from(dims)?;
-    validate_rate(rate, element_type)?;
-    checked_codec_sizes(dims, rate, element_type)?;
-    reject_short_float_header(data, dims, rate, element_type)?;
-    match element_type {
-        ZfpElementType::F32 => codec_f32::compress(data, dims, rate),
-        ZfpElementType::F64 => codec_f64::compress(data, dims, rate),
-        ZfpElementType::I32 => codec_i32::compress(data, dims, rate),
-        ZfpElementType::I64 => codec_i64::compress(data, dims, rate),
-    }
+    let rate = ZfpRate::try_from(rate).map_err(Error::ZfpConfiguration)?;
+    ResolvedZfpSettings::from_dims(rate, element_type, ZfpChunkDims::try_from(dims)?)?
+        .compress(data)
 }
 
 /// Decodes a fixed-rate chunk into row-major, little-endian scalars.
@@ -2416,70 +2549,25 @@ pub fn compress(
 /// # Errors
 ///
 /// Returns [`Error::UnsupportedZfp`] if the rank is outside one to four dimensions
-/// or any dimension is zero.
-/// Returns [`Error::ZfpFilter`] if the rate is invalid, [`Error::ZfpSizeOverflow`] if a
-/// chunk size overflows `usize`, or [`Error::TruncatedZfpStream`] if the input is too short.
+/// or a dimension is zero or exceeds its metadata field.
+/// Returns [`Error::ZfpConfiguration`] if the rate is outside its finite positive range,
+/// exceeds the scalar width, or the block budget is zero.
+/// Returns [`Error::ZfpSizeOverflow`] if a chunk size overflows `usize`,
+/// or [`Error::TruncatedZfpStream`] if the input is too short.
 pub fn decompress(
     compressed: &[u8],
     dims: &[usize],
     rate: f64,
     element_type: ZfpElementType,
 ) -> Result<Vec<u8>, Error> {
-    let dims = ZfpChunkDims::try_from(dims)?;
-    validate_rate(rate, element_type)?;
-    let encoded_bytes = checked_codec_sizes(dims, rate, element_type)?;
-    if compressed.len() < encoded_bytes {
-        return Err(Error::TruncatedZfpStream {
-            expected: encoded_bytes,
-            actual: compressed.len(),
-        });
-    }
-    match element_type {
-        ZfpElementType::F32 => codec_f32::decompress(compressed, dims, rate),
-        ZfpElementType::F64 => codec_f64::decompress(compressed, dims, rate),
-        ZfpElementType::I32 => codec_i32::decompress(compressed, dims, rate),
-        ZfpElementType::I64 => codec_i64::decompress(compressed, dims, rate),
-    }
-}
-
-fn validate_rate(rate: f64, element_type: ZfpElementType) -> Result<(), Error> {
-    let scalar_bits = element_type.byte_width() * 8;
-    if !rate.is_finite() || rate <= 0.0 || rate > scalar_bits as f64 {
-        return Err(Error::ZfpFilter(format!(
-            "ZFP: rate must be in (0, {scalar_bits}]; got {rate}"
-        )));
-    }
-    Ok(())
-}
-
-fn checked_codec_sizes(
-    dims: ZfpChunkDims,
-    rate: f64,
-    element_type: ZfpElementType,
-) -> Result<usize, Error> {
-    dims.checked_element_count()?
-        .checked_mul(element_type.byte_width())
-        .ok_or(Error::ZfpSizeOverflow)?;
-    let blocks = dims.checked_block_count()?;
-    let block_values = 4usize.pow(dims.rank());
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "the rate is bounded by a 64-bit scalar and a block has at most 256 values"
-    )]
-    let maxbits = (rate * block_values as f64) as usize;
-    if maxbits == 0 {
-        return Err(Error::ZfpFilter(format!(
-            "ZFP: rate {rate} gives no bits per block"
-        )));
-    }
-    let bits = blocks.checked_mul(maxbits).ok_or(Error::ZfpSizeOverflow)?;
-    Ok(bits.div_ceil(8))
+    let rate = ZfpRate::try_from(rate).map_err(Error::ZfpConfiguration)?;
+    ResolvedZfpSettings::from_dims(rate, element_type, ZfpChunkDims::try_from(dims)?)?
+        .decompress(compressed)
 }
 
 fn reject_short_float_header(
     data: &[u8],
-    dims: ZfpChunkDims,
-    rate: f64,
+    budget: usize,
     element_type: ZfpElementType,
 ) -> Result<(), Error> {
     let required = match element_type {
@@ -2487,22 +2575,10 @@ fn reject_short_float_header(
         ZfpElementType::F64 => 1 + EBITS_F64 as usize,
         ZfpElementType::I32 | ZfpElementType::I64 => return Ok(()),
     };
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "validate_rate bounds the rate by 64 bits, and a block has at most 256 values"
-    )]
-    let budget = (rate * 4usize.pow(dims.rank()) as f64) as usize;
     if budget >= required {
         return Ok(());
     }
 
-    let expected = dims
-        .checked_element_count()?
-        .checked_mul(element_type.byte_width())
-        .ok_or(Error::ZfpSizeOverflow)?;
-    if data.len() != expected {
-        return Ok(());
-    }
     let has_header = match element_type {
         ZfpElementType::F32 => data
             .as_chunks::<4>()
@@ -2544,6 +2620,10 @@ fn reject_short_float_header(
 const ZFP_VERSION_NO: u32 = 0x1010; // ZFP 1.0.1.0
 const ZFP_CODEC: u32 = 5;
 const H5Z_FILTER_ZFP_VERSION_NO: u32 = 0x111; // H5Z-ZFP 1.1.1
+// `zfp_field_metadata` uses two bits for rank and 48 bits for dimension sizes
+// (src/zfp.c, ZFP 1.0.1).
+const MAX_CHUNK_RANK: usize = 4;
+const DIMENSION_METADATA_BITS: usize = 48;
 
 /// The dimensions of a ZFP chunk, one variant per rank the codec supports.
 ///
@@ -2558,6 +2638,15 @@ pub(crate) enum ZfpChunkDims {
 }
 
 impl ZfpChunkDims {
+    fn as_slice(&self) -> &[usize] {
+        match self {
+            Self::One(dimensions) => dimensions,
+            Self::Two(dimensions) => dimensions,
+            Self::Three(dimensions) => dimensions,
+            Self::Four(dimensions) => dimensions,
+        }
+    }
+
     /// Returns the number of dimensions, 1 to 4.
     fn rank(self) -> u32 {
         match self {
@@ -2634,10 +2723,10 @@ impl TryFrom<&[u64]> for ZfpChunkDims {
 
 fn validate_metadata_dimensions(dims: &[u64]) -> Result<(), Error> {
     let rank = dims.len();
-    if !(1..=4).contains(&rank) {
+    if rank == 0 || rank > MAX_CHUNK_RANK {
         return Err(unsupported_rank(rank));
     }
-    let max = 1u64 << (48 / rank);
+    let max = 1u64 << (DIMENSION_METADATA_BITS / rank);
     for &dimension in dims {
         if dimension == 0 || dimension > max {
             return Err(Error::UnsupportedZfp(format!(
@@ -2658,18 +2747,15 @@ impl TryFrom<&[usize]> for ZfpChunkDims {
     /// Returns [`Error::UnsupportedZfp`] if the rank is outside one to four dimensions
     /// or any dimension is zero.
     fn try_from(dims: &[usize]) -> Result<Self, Error> {
-        if dims.contains(&0) {
-            return Err(Error::UnsupportedZfp(
-                "chunk dimensions must be non-zero".into(),
-            ));
+        let mut dimensions = [0u64; MAX_CHUNK_RANK];
+        for (slot, &dimension) in dimensions.iter_mut().zip(dims) {
+            *slot = dimension as u64;
         }
-        Ok(match *dims {
-            [nx] => Self::One([nx]),
-            [ny, nx] => Self::Two([ny, nx]),
-            [nz, ny, nx] => Self::Three([nz, ny, nx]),
-            [nw, nz, ny, nx] => Self::Four([nw, nz, ny, nx]),
-            _ => return Err(unsupported_rank(dims.len())),
-        })
+        Self::try_from(
+            dimensions
+                .get(..dims.len())
+                .ok_or_else(|| unsupported_rank(dims.len()))?,
+        )
     }
 }
 
@@ -2731,76 +2817,16 @@ fn zfp_meta_for(elem: ZfpElementType, dims: ZfpChunkDims) -> u64 {
 /// # Errors
 ///
 /// Returns [`Error::UnsupportedZfp`] if a dimension does not fit its metadata field
-/// or the rank is outside one to four dimensions. Returns [`Error::ZfpFilter`] if the
-/// rate is invalid. Returns [`Error::ZfpSizeOverflow`] if a chunk size overflows `usize`.
+/// or the rank is outside one to four dimensions. Returns [`Error::ZfpConfiguration`] if the
+/// rate exceeds the scalar width or gives a zero block budget.
+/// Returns [`Error::ZfpSizeOverflow`] if a chunk size overflows `usize`.
 /// Returns [`Error::ValueTooLargeForPlatform`] if a dimension does not fit `usize`.
 pub fn zfp_cd_values_rate(
-    rate: f64,
+    rate: ZfpRate,
     element_type: ZfpElementType,
     chunk_dims: &[u64],
 ) -> Result<Vec<u32>, Error> {
-    let dims = ZfpChunkDims::try_from(chunk_dims)?;
-    validate_rate(rate, element_type)?;
-    checked_codec_sizes(dims, rate, element_type)?;
-    let block_values: usize = 4usize.pow(dims.rank());
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "validate_rate bounds the rate by 64 bits, and a block has at most 256 values"
-    )]
-    let maxbits = (rate * block_values as f64) as u64;
-    // Encode header bits into a buffer.
-    let mut w = BitWriter::new();
-    w.write(8, u64::from(b'z'));
-    w.write(8, u64::from(b'f'));
-    w.write(8, u64::from(b'p'));
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "ZFP_CODEC is the constant 5; the codec id is a single magic byte and fits u8"
-    )]
-    w.write(8, u64::from(ZFP_CODEC as u8));
-    w.write(52, zfp_meta_for(element_type, dims));
-    // Rate-mode short form: mode = maxbits - 1 for maxbits ≤ 2048.
-    // Our rate × 4^rank is well inside that range for supported inputs.
-    // Mode (12 bits short / 64 bits long). `zfp_stream_mode` short form for
-    // fixed-rate is `maxbits - 1` when maxbits ≤ 2048; otherwise encode each
-    // stream parameter separately in 64 bits (low 12 = 0xFFF sentinel).
-    let header_bits: usize = if maxbits <= 2048 {
-        let mode = maxbits.saturating_sub(1);
-        w.write(12, mode);
-        32 + 52 + 12
-    } else {
-        // Long form matches zfp::zfp_stream_mode for the fixed-rate
-        // configuration produced by `zfp_stream_set_rate`:
-        //   minbits = maxbits (+ `bits` floor for floats)
-        //   maxprec = ZFP_MAX_PREC = 64
-        //   minexp  = ZFP_MIN_EXP  = -1074
-        let minbits = maxbits;
-        let maxprec: u64 = 63; // ZFP_MAX_PREC - 1
-        let minexp_enc: u64 = (-1074i64 + 16495) as u64; // 15421, fits in 15 bits
-        let mut mode: u64 = 0;
-        mode = (mode << 15) + minexp_enc;
-        mode = (mode << 7) + maxprec;
-        mode = (mode << 15) + (maxbits - 1);
-        mode = (mode << 15) + (minbits - 1);
-        mode = (mode << 12) + 0xFFF;
-        // Write 64 bits of mode, LSB-first (write() masks to n bits).
-        w.write(64, mode);
-        32 + 52 + 64
-    };
-    let mut bytes = w.finish();
-    // The BitWriter flushes 64-bit words; trim to the exact bit budget so
-    // the resulting cd_values match what H5Z-ZFP writes.
-    bytes.truncate(header_bits.div_ceil(8));
-    // Pack the byte stream into u32 little-endian slots.
-    let mut cd: Vec<u32> = Vec::with_capacity(1 + bytes.len().div_ceil(4));
-    let v0 = (ZFP_VERSION_NO << 16) | (ZFP_CODEC << 12) | H5Z_FILTER_ZFP_VERSION_NO;
-    cd.push(v0);
-    for chunk in bytes.chunks(4) {
-        let mut buf = [0u8; 4];
-        buf[..chunk.len()].copy_from_slice(chunk);
-        cd.push(u32::from_le_bytes(buf));
-    }
-    Ok(cd)
+    Ok(ResolvedZfpSettings::new(rate, element_type, chunk_dims)?.client_data())
 }
 
 /// Metadata parsed from H5Z-ZFP client data in tests.
@@ -2989,6 +3015,82 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+
+    #[rstest]
+    #[case(ZfpElementType::F32)]
+    #[case(ZfpElementType::I32)]
+    fn resolved_settings_reject_rates_above_the_scalar_width(#[case] scalar: ZfpElementType) {
+        let rate = ZfpRate::try_from(64.0).unwrap();
+        assert_eq!(
+            ResolvedZfpSettings::new(rate, scalar, &[4]).unwrap_err(),
+            Error::ZfpConfiguration(FormatError::InvalidZfpRateForScalar {
+                rate_bits: rate.get().to_bits(),
+                scalar_bits: u32::BITS,
+            })
+        );
+    }
+
+    #[rstest]
+    #[case(ZfpElementType::F64)]
+    #[case(ZfpElementType::I64)]
+    fn resolved_settings_accept_the_maximum_rate_for_sixty_four_bit_scalars(
+        #[case] scalar: ZfpElementType,
+    ) {
+        let rate = ZfpRate::try_from(64.0).unwrap();
+        let settings = ResolvedZfpSettings::new(rate, scalar, &[4]).unwrap();
+        assert_eq!(settings.maxbits.get(), 256);
+        assert_eq!(settings.encoded_bytes, 32);
+        assert_eq!(settings.compress(&[0; 32]).unwrap(), [0; 32]);
+    }
+
+    #[rstest]
+    #[case(&[4][..], 1, 0.25)]
+    #[case(&[4, 4][..], 2, 0.0625)]
+    #[case(&[4, 4, 4][..], 3, 0.015625)]
+    #[case(&[4, 4, 4, 4][..], 4, 0.00390625)]
+    fn resolved_settings_require_one_bit_per_block_at_the_actual_rank(
+        #[case] dimensions: &[u64],
+        #[case] rank: u32,
+        #[case] one_bit_rate: f64,
+    ) {
+        let tiny = ZfpRate::try_from(f64::MIN_POSITIVE).unwrap();
+        assert_eq!(
+            ResolvedZfpSettings::new(tiny, ZfpElementType::I32, dimensions).unwrap_err(),
+            Error::ZfpConfiguration(FormatError::InvalidZfpBitBudget {
+                rate_bits: tiny.get().to_bits(),
+                rank,
+            })
+        );
+        let settings = ResolvedZfpSettings::new(
+            ZfpRate::try_from(one_bit_rate).unwrap(),
+            ZfpElementType::I32,
+            dimensions,
+        )
+        .unwrap();
+        assert_eq!(settings.maxbits.get(), 1);
+        assert_eq!(settings.encoded_bytes, 1);
+    }
+
+    #[rstest]
+    #[case(16.125, 64)]
+    #[case(16.25, 65)]
+    #[case(16.999, 67)]
+    fn resolved_settings_truncate_fractional_block_budgets(
+        #[case] requested: f64,
+        #[case] budget: u16,
+    ) {
+        let settings = ResolvedZfpSettings::new(
+            ZfpRate::try_from(requested).unwrap(),
+            ZfpElementType::F32,
+            &[4],
+        )
+        .unwrap();
+        assert_eq!(settings.maxbits.get(), budget);
+        assert_eq!(
+            zfp_rate_from_cd_values(&settings.client_data()),
+            Some(f64::from(budget) / 4.0)
+        );
+    }
 
     // -- BitWriter / BitReader round-trip --
 
@@ -3187,7 +3289,8 @@ mod tests {
     #[test]
     fn cd_values_roundtrip() {
         // Integer rate at 1D f32 — short-form mode, no loss in the round-trip.
-        let cd = zfp_cd_values_rate(16.0, ZfpElementType::F32, &[16]).unwrap();
+        let cd = zfp_cd_values_rate(ZfpRate::try_from(16.0).unwrap(), ZfpElementType::F32, &[16])
+            .unwrap();
         let meta = zfp_filter_meta_from_cd_values(&cd).unwrap();
         assert_eq!(meta.rate, 16.0);
         assert_eq!(meta.element_type, ZfpElementType::F32);
@@ -3198,7 +3301,8 @@ mod tests {
     fn cd_values_matches_reference_fixture() {
         // Probed from h5py + hdf5plugin for an f32 1D 16-value ramp at rate 16:
         // `[0x10105111, 0x0570667a, 0x000000f2, 0x03f00000]`.
-        let cd = zfp_cd_values_rate(16.0, ZfpElementType::F32, &[16]).unwrap();
+        let cd = zfp_cd_values_rate(ZfpRate::try_from(16.0).unwrap(), ZfpElementType::F32, &[16])
+            .unwrap();
         assert_eq!(cd, vec![0x10105111, 0x0570667a, 0x000000f2, 0x03f00000],);
     }
 
@@ -3227,7 +3331,11 @@ mod tests {
     #[test]
     fn cd_values_rejects_5d_chunks() {
         assert_eq!(
-            zfp_cd_values_rate(16.0, ZfpElementType::F32, &[2, 2, 2, 2, 2]),
+            zfp_cd_values_rate(
+                ZfpRate::try_from(16.0).unwrap(),
+                ZfpElementType::F32,
+                &[2, 2, 2, 2, 2]
+            ),
             Err(Error::UnsupportedZfp(
                 "only 1D-4D chunks are supported, got rank 5".into()
             ))
@@ -3237,7 +3345,7 @@ mod tests {
     #[test]
     fn cd_values_rejects_zero_rank() {
         assert_eq!(
-            zfp_cd_values_rate(16.0, ZfpElementType::F32, &[]),
+            zfp_cd_values_rate(ZfpRate::try_from(16.0).unwrap(), ZfpElementType::F32, &[]),
             Err(Error::UnsupportedZfp(
                 "only 1D-4D chunks are supported, got rank 0".into()
             ))
@@ -3258,7 +3366,7 @@ mod tests {
             ] {
                 let dims: Vec<u64> = (0..rank).map(|i| 4 + i as u64).collect();
                 let rate = 12.0 + rank as f64;
-                let cd = zfp_cd_values_rate(rate, elem, &dims).unwrap();
+                let cd = zfp_cd_values_rate(ZfpRate::try_from(rate).unwrap(), elem, &dims).unwrap();
                 let fast = zfp_rate_from_cd_values(&cd)
                     .unwrap_or_else(|| panic!("fast parse failed for {elem:?} rank {rank}"));
                 let slow = zfp_filter_meta_from_cd_values(&cd).unwrap().rate;
@@ -3318,16 +3426,23 @@ mod tests {
     }
 
     #[rstest]
-    #[case(f64::NAN, "ZFP: rate must be in (0, 32]; got NaN")]
-    #[case(f64::INFINITY, "ZFP: rate must be in (0, 32]; got inf")]
-    #[case(0.0, "ZFP: rate must be in (0, 32]; got 0")]
-    #[case(-1.0, "ZFP: rate must be in (0, 32]; got -1")]
-    #[case(33.0, "ZFP: rate must be in (0, 32]; got 33")]
-    fn compress_rejects_a_bad_rate(#[case] rate: f64, #[case] reason: &str) {
-        let data = vec![0u8; 16 * 4];
+    #[case(f64::NAN)]
+    #[case(f64::INFINITY)]
+    #[case(f64::NEG_INFINITY)]
+    #[case(0.0)]
+    #[case(-1.0)]
+    #[case(64.0001)]
+    fn codec_entry_points_reject_invalid_independent_rates(#[case] rate: f64) {
+        let error = Error::ZfpConfiguration(FormatError::InvalidZfpRate {
+            rate_bits: rate.to_bits(),
+        });
         assert_eq!(
-            compress(&data, &[16], rate, ZfpElementType::F32),
-            Err(Error::ZfpFilter(reason.into()))
+            compress(&[0; 16], &[4], rate, ZfpElementType::F32),
+            Err(error.clone())
+        );
+        assert_eq!(
+            decompress(&[0; 64], &[4], rate, ZfpElementType::F32),
+            Err(error)
         );
     }
 
@@ -3343,18 +3458,6 @@ mod tests {
         assert_eq!(
             compress(&data, &[4], rate, element_type).unwrap(),
             vec![0u8; encoded_len]
-        );
-    }
-
-    #[rstest]
-    #[case(f64::NAN, "ZFP: rate must be in (0, 32]; got NaN")]
-    #[case(0.0, "ZFP: rate must be in (0, 32]; got 0")]
-    #[case(33.0, "ZFP: rate must be in (0, 32]; got 33")]
-    fn decompress_rejects_a_bad_rate(#[case] rate: f64, #[case] reason: &str) {
-        let compressed = vec![0u8; 64];
-        assert_eq!(
-            decompress(&compressed, &[4], rate, ZfpElementType::F32),
-            Err(Error::ZfpFilter(reason.into()))
         );
     }
 
@@ -3382,7 +3485,9 @@ mod tests {
     #[test]
     fn the_codec_and_filter_entry_points_encode_the_same_chunk() {
         let raw = [0u8; 16];
-        let cd_values = zfp_cd_values_rate(16.0, ZfpElementType::F32, &[4]).unwrap();
+        let cd_values =
+            zfp_cd_values_rate(ZfpRate::try_from(16.0).unwrap(), ZfpElementType::F32, &[4])
+                .unwrap();
         let encoded = compress(&raw, &[4], 16.0, ZfpElementType::F32).unwrap();
 
         assert_eq!(encoded, vec![0u8; 8]);
@@ -3398,7 +3503,9 @@ mod tests {
 
     #[test]
     fn the_filter_rejects_truncated_input_and_invalid_parameters() {
-        let cd_values = zfp_cd_values_rate(16.0, ZfpElementType::F32, &[4]).unwrap();
+        let cd_values =
+            zfp_cd_values_rate(ZfpRate::try_from(16.0).unwrap(), ZfpElementType::F32, &[4])
+                .unwrap();
         assert_eq!(
             decompress_filter(&[], &cd_values, &[4], Some(ZfpElementType::F32)),
             Err(Error::TruncatedZfpStream {
@@ -3421,30 +3528,27 @@ mod tests {
     }
 
     #[test]
-    fn the_codec_rejects_dimensions_that_cannot_be_encoded_or_multiplied() {
+    fn codec_entry_points_reject_dimensions_outside_metadata_bounds() {
         assert_eq!(
-            zfp_cd_values_rate(16.0, ZfpElementType::F32, &[0]),
+            zfp_cd_values_rate(ZfpRate::try_from(16.0).unwrap(), ZfpElementType::F32, &[0]),
             Err(Error::UnsupportedZfp(
                 "chunk dimension 0 does not fit the 1D ZFP metadata field (1..=281474976710656)"
                     .into()
             ))
         );
         assert_eq!(
-            zfp_cd_values_rate(16.0, ZfpElementType::F32, &[(1u64 << 48) + 1]),
+            zfp_cd_values_rate(ZfpRate::try_from(16.0).unwrap(), ZfpElementType::F32, &[(1u64 << 48) + 1]),
             Err(Error::UnsupportedZfp(
                 "chunk dimension 281474976710657 does not fit the 1D ZFP metadata field (1..=281474976710656)"
                     .into()
             ))
         );
         assert_eq!(
-            zfp_cd_values_rate(0.0, ZfpElementType::F32, &[4]),
-            Err(Error::ZfpFilter(
-                "ZFP: rate must be in (0, 32]; got 0".into()
+            decompress(&[], &[1 << 24, 1 << 24, 1 << 16], 64.0, ZfpElementType::F64),
+            Err(Error::UnsupportedZfp(
+                "chunk dimension 16777216 does not fit the 3D ZFP metadata field (1..=65536)"
+                    .into()
             ))
-        );
-        assert_eq!(
-            decompress(&[], &[usize::MAX, 2], 16.0, ZfpElementType::F32),
-            Err(Error::ZfpSizeOverflow)
         );
     }
 
