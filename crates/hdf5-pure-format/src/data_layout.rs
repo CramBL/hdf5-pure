@@ -655,7 +655,7 @@ const LAYOUT_VERSION_4: u8 = 4;
 
 /// Compact storage, from the Layout Class table of "The Data Layout Message",
 /// version 4.0.
-const LAYOUT_CLASS_COMPACT: u8 = 0;
+pub const LAYOUT_CLASS_COMPACT: u8 = 0;
 
 /// Contiguous storage, from the same table as [`LAYOUT_CLASS_COMPACT`].
 const LAYOUT_CLASS_CONTIGUOUS: u8 = 1;

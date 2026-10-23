@@ -16,6 +16,12 @@ use test_util_hdf5::file;
     CLayout::Contiguous,
     data_layout::chunked(UNDEFINED_ADDRESS, &[ELEMENTS], 1),
 )]
+#[case::compact_then_compact(CLayout::Compact, data_layout::compact(&[0xEE; 4]))]
+#[case::compact_then_contiguous(CLayout::Compact, data_layout::contiguous(UNDEFINED_ADDRESS, 0))]
+#[case::compact_then_chunked(
+    CLayout::Compact,
+    data_layout::chunked(UNDEFINED_ADDRESS, &[ELEMENTS], 1),
+)]
 fn libhdf5_reads_an_overwrite_through_the_first_layout(
     #[case] layout: CLayout,
     #[case] second_layout: Vec<u8>,

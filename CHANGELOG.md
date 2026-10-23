@@ -67,6 +67,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `Dataset::write_staged` rejecting the overwrite of a dataset whose object header holds more than one layout message, changing the dataset to the later layout, or writing values that a read of the dataset does not return.
 - Fixed `Dataset::append` overstating allocated Extensible Array blocks and element capacity for sparse chunk indexes, including indexes with uninitialized data-block pages.
 - Fixed `Dataset::append` overflowing Extensible Array ranges and header statistics. Ranges and metadata sizes that exceed integer limits are rejected before writes ([#856](https://github.com/CramBL/hdf5-pure/pull/856)).
 - Fixed `DatasetBuilder::with_path_references` writing unresolved references in chunked datasets, including filtered output ([#854](https://github.com/CramBL/hdf5-pure/pull/854)).
