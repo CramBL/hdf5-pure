@@ -281,8 +281,8 @@ fn sealed_variants_keep_their_attribute() {
         "    AsciiStringArraySized {",
     ] {
         assert!(
-            sealed_in_source("src/type_builders.rs", decl),
-            "`{decl}` in src/type_builders.rs lost its #[non_exhaustive]: a caller can now build \
+            sealed_in_source("src/type_builders/mod.rs", decl),
+            "`{decl}` in src/type_builders/mod.rs lost its #[non_exhaustive]: a caller can now build \
              one past `AttrValue::ascii_string_sized` and its siblings, which is where a value \
              too long for its declared width is refused. Restore the attribute."
         );

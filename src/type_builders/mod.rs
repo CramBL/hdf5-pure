@@ -3672,7 +3672,7 @@ impl GroupBuilder {
     /// before calling `configure`. Returns the callback's error if `configure` fails.
     #[doc = concat!(
         "\n# Examples\n\n```\n",
-        include_str!("../examples/attaching_groups.rs"),
+        include_str!("../../examples/attaching_groups.rs"),
         "\n```"
     )]
     pub fn create_group_with(
