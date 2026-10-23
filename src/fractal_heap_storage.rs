@@ -538,6 +538,8 @@ fn extent_in_source<S: Source + ?Sized>(
 
 #[cfg(test)]
 mod tests {
+    use alloc::format;
+    use alloc::string::ToString;
     use core::cell::RefCell;
 
     use hdf5_pure_format::__private;
@@ -550,12 +552,14 @@ mod tests {
     use test_util::fractal_heap;
     use test_util::free_space;
     use test_util::widths::Widths;
+    use test_util_hdf5::heap_allocations::{AllocationKind, Heap};
 
     use crate::access_mode::AccessMode;
     use crate::address::OpenedImageContext;
     use crate::fractal_heap::HeapObjectReader;
     use crate::source::BaseOffsetSource;
     use crate::test_data;
+    use crate::{AttrValue, FileBuilder};
 
     use super::*;
 
@@ -1015,6 +1019,75 @@ mod tests {
                 allocation(STORAGE_HEAP_AT, header_len, FractalHeapAllocation::Header),
                 allocation(STORAGE_ROOT_AT, 128, FractalHeapAllocation::DirectBlock),
             ]
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::direct_root(false)]
+    #[case::nested_indirect_root(true)]
+    fn pure_written_managed_heaps_have_exact_allocations(#[case] nested: bool) {
+        let mut builder = FileBuilder::new();
+        for index in 0..if nested { 12 } else { 9 } {
+            let value = if nested {
+                AttrValue::AsciiString(
+                    char::from(b'a' + u8::try_from(index).unwrap())
+                        .to_string()
+                        .repeat(64_000),
+                )
+            } else {
+                AttrValue::I64(index)
+            };
+            let attr_name = if nested {
+                format!("a{index:04}")
+            } else {
+                format!("a{index}")
+            };
+            builder.set_attr(&attr_name, value);
+        }
+        builder.create_dataset("x").with_f64_data(&[1.0]);
+        let file = builder.finish().unwrap();
+        let heaps = fractal_heap::header_offsets(&file);
+        assert_eq!(heaps.len(), 1);
+        let address = u64::try_from(heaps[0]).unwrap();
+        let header = FractalHeapHeader::parse(&file, heaps[0], 8, 8).unwrap();
+        assert!(header.managed_objects_count > 0);
+        assert_eq!(header.huge_objects_count, 0);
+        assert_eq!(
+            header.managed_block_free_space_manager_address.get(),
+            u64::MAX
+        );
+        assert_eq!(header.current_rows_in_root_indirect_block > 0, nested);
+        let inspected = Heap::new(&file, address, &header);
+        if nested {
+            assert!(
+                inspected
+                    .allocations
+                    .iter()
+                    .filter(|allocation| allocation.kind() == AllocationKind::IndirectBlock)
+                    .count()
+                    >= 2,
+                "the fixture contains a nested indirect block"
+            );
+        }
+        let expected = inspected.allocations.iter().map(|item| {
+            let (address, length) = item.extent();
+            allocation(
+                address,
+                length,
+                match item.kind() {
+                    AllocationKind::Header => FractalHeapAllocation::Header,
+                    AllocationKind::DirectBlock => FractalHeapAllocation::DirectBlock,
+                    AllocationKind::IndirectBlock => FractalHeapAllocation::IndirectBlock,
+                    kind => panic!("unexpected managed fixture allocation: {kind:?}"),
+                },
+            )
+        });
+        let actual = collect_fractal_heap_storage(&file, StoredAddress::new(address)).unwrap();
+        assert!(
+            actual.allocations().iter().copied().eq(expected),
+            "{:?} != {:?}",
+            actual.allocations(),
+            inspected.allocations
         );
     }
 

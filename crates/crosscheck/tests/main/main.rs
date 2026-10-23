@@ -2,6 +2,9 @@
 //! so the suite links once. `fail_if_unknown/` stays a directory module: its
 //! three files share one pair of `cfg` gates, stated once on the `mod` item.
 
+#[cfg(feature = "__hdf5-1.10")]
+use test_util_hdf5::heap_allocations;
+
 mod append;
 mod append_writer;
 mod array_index;
@@ -64,7 +67,6 @@ mod global_heap_liveness;
 mod global_heap_reads;
 mod hdf5;
 mod hdf5_release_feature;
-mod heap_allocations;
 mod layout_introspection;
 mod libver_matrix;
 mod libver_output;
