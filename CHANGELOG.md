@@ -55,16 +55,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Breaking:** `FileSpaceInfo::page_size` changes type from `u64` to `FileSpacePageSize`, which holds a page size from 512 bytes to 1 GiB ([#702](https://github.com/CramBL/hdf5-pure/pull/702)).
 - `FormatError` reports a corrupt local heap or symbol table node of a version 1 group with variants of its own, a link name that runs past the heap's data segment among them in place of `UnexpectedEof` ([#811](https://github.com/CramBL/hdf5-pure/pull/811/)).
 - `FormatError` reports a corrupt Extensible Array chunk index with variants of its own ([#806](https://github.com/CramBL/hdf5-pure/pull/806)).
-- `Dataset::append` reports malformed Extensible Array headers with the same structured errors as dataset reads. Header errors are returned before append writes.
+- `Dataset::append` reports malformed Extensible Array headers with the same structured errors as dataset reads. Header errors are returned before append writes ([#851](https://github.com/CramBL/hdf5-pure/pull/851)).
 - `File::open_rw` validates complete checksummed fractal-heap direct blocks before editing or proving storage ownership. Read-only object lookups validate block prefixes and object bounds without reading the complete block ([#750](https://github.com/CramBL/hdf5-pure/pull/750)).
 - `FormatError::UnexpectedEof` reports a superblock that the file ends inside with positions counted from the start of the file. Opening a file that ends within 15 bytes of the start of its signature returns it whatever the version byte ([#780](https://github.com/CramBL/hdf5-pure/pull/780)).
 - `FormatError` reports a corrupt Fixed Array chunk index with variants of its own ([#782](https://github.com/CramBL/hdf5-pure/pull/782)).
 
 ### Fixed
 
-- Fixed `DatasetBuilder::with_path_references` writing unresolved references in chunked datasets, including filtered output.
-- Fixed `FileBuilder::finish` and related output methods hashing unresolved heap identifiers and object-reference addresses with the `provenance` feature.
-- Fixed `Dataset::append` using incorrect Extensible Array block geometry when the secondary block parameters differ from the defaults.
+- Fixed `Dataset::append` overflowing Extensible Array ranges and header statistics. Ranges and metadata sizes that exceed integer limits are rejected before writes ([#856](https://github.com/CramBL/hdf5-pure/pull/856)).
+- Fixed `DatasetBuilder::with_path_references` writing unresolved references in chunked datasets, including filtered output ([#854](https://github.com/CramBL/hdf5-pure/pull/854)).
+- Fixed `FileBuilder::finish` and related output methods hashing unresolved heap identifiers and object-reference addresses with the `provenance` feature ([#853](https://github.com/CramBL/hdf5-pure/pull/853)).
+- Fixed `Dataset::append` using incorrect Extensible Array block geometry when the secondary block parameters differ from the defaults ([#848](https://github.com/CramBL/hdf5-pure/pull/848)).
 - Fixed `Dataset::append` filtering the partial edge chunks of a dataset whose layout exempts them from the filters ([#845](https://github.com/CramBL/hdf5-pure/pull/845)).
 - Fixed `Dataset::append_staged` filtering the partial edge chunks of a dataset whose layout exempts them from the filters, and dropping that exemption.
 - Fixed `Dataset::write_staged` filtering the partial edge chunks of a dataset whose layout exempts them from the filters, and copies and repacks of such a dataset dropping that exemption.

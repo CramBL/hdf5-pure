@@ -33,6 +33,7 @@ use test_util::extensible_array;
 use test_util_hdf5::dataset::Unlimited;
 use test_util_hdf5::file;
 use test_util_hdf5::numeric::ByteOrder;
+use test_util_hdf5::session;
 
 const SIZES: &[usize] = &[20, 300, 2000, 50000, 140000];
 
@@ -168,6 +169,8 @@ fn nondefault_geometry_round_trips_through_rust_append_and_c_mutation(
     #[case] boundary: Boundary,
     #[values(2, 4, 8, 16)] minimum_pointers: u8,
     #[values(false, true)] filtered: bool,
+    #[values(false, true)] bounded: bool,
+    #[values(32, 64)] maximum_bits: u8,
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("append.h5");
@@ -206,7 +209,13 @@ fn nondefault_geometry_round_trips_through_rust_append_and_c_mutation(
                 CByteOrder::LittleEndian
             );
         }
-        patch_unallocated_layout(target, minimum_pointers, min_elements, page_bits);
+        patch_unallocated_layout(
+            target,
+            minimum_pointers,
+            min_elements,
+            page_bits,
+            maximum_bits,
+        );
         {
             let file = hdf5::File::open_rw(target).unwrap();
             let dataset = file.dataset("d").unwrap();
@@ -215,7 +224,11 @@ fn nondefault_geometry_round_trips_through_rust_append_and_c_mutation(
         }
     }
     {
-        let file = File::open_rw(&path).unwrap();
+        let file = if bounded {
+            session::open_bounded(&path).unwrap()
+        } else {
+            File::open_rw(&path).unwrap()
+        };
         let mut dataset = file.dataset("d").unwrap();
         assert_eq!(dataset.read_i32().unwrap(), values[..start]);
         dataset.append(&values[start..grown]).unwrap();
@@ -320,14 +333,133 @@ fn invalid_headers_are_rejected_before_append_writes(
     assert_eq!(std::fs::read(&path).unwrap(), image);
 }
 
-fn patch_unallocated_layout(path: &Path, minimum_pointers: u8, min_elements: u8, page_bits: u8) {
+fn patch_unallocated_layout(
+    path: &Path,
+    minimum_pointers: u8,
+    min_elements: u8,
+    page_bits: u8,
+    maximum_bits: u8,
+) {
     let mut image = std::fs::read(path).unwrap();
     patch_layout(&mut image, |layout, tail| {
+        layout[tail + MAXIMUM_INDEX_BITS] = maximum_bits;
         layout[tail + SECONDARY_MINIMUM_POINTERS] = minimum_pointers;
         layout[tail + DATA_BLOCK_MINIMUM_ELEMENTS] = min_elements;
         layout[tail + PAGE_BITS] = page_bits;
     });
     std::fs::write(path, image).unwrap();
+}
+
+#[rstest]
+fn sparse_append_has_two_allocated_chunks_and_dense_header_statistics(
+    #[values(false, true)] bounded: bool,
+    #[values(false, true)] filtered: bool,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sparse_append.h5");
+    {
+        let file = file::libhdf5_create_v110(&path);
+        let builder = file
+            .new_dataset_builder()
+            .empty_as(ByteOrder::LittleEndian.i32_datatype())
+            .chunk([1])
+            .shape([Extent::resizable(244)]);
+        let builder = if filtered {
+            builder.shuffle().deflate(6)
+        } else {
+            builder
+        };
+        let dataset = builder.create("d").unwrap();
+        dataset.write_slice(&[7i32], 0..1).unwrap();
+        assert_eq!(dataset.num_chunks().unwrap(), 1);
+    }
+    let image = std::fs::read(&path).unwrap();
+    let header = bytes::sole_signature(&image, EA_HEADER_SIGNATURE);
+    let stride = u64::from(image[header + HEADER_ELEMENT_SIZE]);
+    {
+        let file = if bounded {
+            session::open_bounded(&path).unwrap()
+        } else {
+            File::open_rw(&path).unwrap()
+        };
+        let mut dataset = file.dataset("d").unwrap();
+        dataset.append(&[9i32]).unwrap();
+    }
+    assert_eq!(
+        extensible_array::header_stats(&path),
+        extensible_array::HeaderStats {
+            secondary_block_count: 1,
+            secondary_block_size: 54,
+            data_block_count: 7,
+            data_block_size: 304 * stride + 7 * 22,
+            max_index_set: 245,
+            element_count: 308,
+        }
+    );
+    let file = hdf5::File::open(&path).unwrap();
+    let dataset = file.dataset("d").unwrap();
+    let mut expected = vec![0i32; 245];
+    expected[0] = 7;
+    expected[244] = 9;
+    assert_eq!(dataset.shape(), [245]);
+    assert_eq!(dataset.read_raw::<i32>().unwrap(), expected);
+    assert_eq!(dataset.num_chunks().unwrap(), 2);
+}
+
+#[rstest]
+#[cfg(target_pointer_width = "64")]
+fn sparse_geometry_overflow_is_rejected_before_append_writes(
+    #[values(false, true)] bounded: bool,
+    #[values(false, true)] filtered: bool,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sparse.h5");
+    {
+        let file = file::libhdf5_create_v110(&path);
+        let dataset = file
+            .new_dataset_builder()
+            .empty_as(ByteOrder::LittleEndian.i32_datatype())
+            .chunk([1])
+            .shape([Extent::resizable(1)]);
+        let dataset = if filtered {
+            dataset.shuffle().deflate(6)
+        } else {
+            dataset
+        };
+        dataset.create("d").unwrap();
+    }
+    let mut image = std::fs::read(&path).unwrap();
+    patch_layout(&mut image, |layout, tail| {
+        layout[tail + MAXIMUM_INDEX_BITS] = 64;
+    });
+    std::fs::write(&path, image).unwrap();
+    let extent = usize::try_from(u64::MAX - 11).unwrap();
+    {
+        let file = hdf5::File::open_rw(&path).unwrap();
+        let dataset = file.dataset("d").unwrap();
+        dataset.write_raw(&[7i32]).unwrap();
+        dataset.resize([extent]).unwrap();
+        assert_eq!(dataset.shape(), [extent]);
+        assert_eq!(dataset.read_slice_1d::<i32, _>(0..1).unwrap().to_vec(), [7]);
+    }
+    let image = std::fs::read(&path).unwrap();
+    assert!(image.len() < 16_384);
+    {
+        let file = if bounded {
+            session::open_bounded(&path).unwrap()
+        } else {
+            File::open_rw(&path).unwrap()
+        };
+        let mut dataset = file.dataset("d").unwrap();
+        let error = dataset.append(&[9i32]).unwrap_err();
+        let Error::Format(error) = error else {
+            panic!("expected a format error, got {error:?}");
+        };
+        assert_eq!(error, FormatError::InvalidExtensibleArrayGeometry);
+        drop(dataset);
+        file.close().unwrap();
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), image);
 }
 
 #[rstest]
@@ -422,12 +554,17 @@ enum Boundary {
 // `H5O__layout_encode` (`H5Olayout.c`, HDF5 2.2.0) writes the index type and the
 // creation parameters in this order. Their defaults are in `H5Dpkg.h`.
 const DEFAULT_EA_LAYOUT_TAIL: [u8; 6] = [4, 32, 4, 4, 16, 10];
+const MAXIMUM_INDEX_BITS: usize = 1;
 const SECONDARY_MINIMUM_POINTERS: usize = 3;
 const DATA_BLOCK_MINIMUM_ELEMENTS: usize = 4;
 const PAGE_BITS: usize = 5;
 // "Version 2 Data Object Header Prefix" in format specification, version 4.0,
 // defines the version 2 object header signature.
 const OBJECT_HEADER_SIGNATURE: &[u8; 4] = b"OHDR";
+
+// "The Extensible Array Index" in format specification, version 4.0, places the version 0
+// header element size after the client ID.
+const HEADER_ELEMENT_SIZE: usize = 6;
 
 // "The Extensible Array Index" in format specification, version 4.0, defines the version 0
 // header signature and the positions of the minimum-element and minimum-pointer fields.

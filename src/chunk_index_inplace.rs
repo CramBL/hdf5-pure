@@ -35,13 +35,13 @@ use hdf5_pure_format::__private::EA_CLIENT_ID_UNFILTERED;
 use hdf5_pure_format::__private::ExtensibleArrayBitGeometry;
 use hdf5_pure_format::__private::ExtensibleArrayGeometry;
 use hdf5_pure_format::__private::ExtensibleArrayHeader;
+use hdf5_pure_format::__private::ExtensibleArrayStats;
 use hdf5_pure_format::__private::IndexSlots;
 use hdf5_pure_format::__private::MessageRecord;
 use hdf5_pure_format::__private::MessageRecordLayout;
 use hdf5_pure_format::__private::OBJECT_HEADER_PREFIX_MAX_LEN;
 use hdf5_pure_format::__private::ObjectHeaderContinuation;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
-use hdf5_pure_format::__private::SlotOccupancy;
 use hdf5_pure_format::__private::SuperBlockGeometry;
 use hdf5_pure_space::__private::AllocationClass;
 
@@ -611,12 +611,7 @@ impl Located {
             ));
         }
 
-        let region = locate_data_block(&self.geom, idx, e);
-        if region.ndblks == 0 {
-            return Err(Error::AppendUnsupported(
-                "chunk index geometry does not cover the appended element",
-            ));
-        }
+        let region = locate_data_block(&self.geom, idx, e)?;
         let is_paged = region.blocks(page_nelmts).is_paged();
         let slot = e - region.db_start;
 
@@ -727,12 +722,7 @@ impl Located {
             return self.publish_index_block(file, slot_off, &buf[..n]);
         }
 
-        let region = locate_data_block(&self.geom, idx, e);
-        if region.ndblks == 0 {
-            return Err(Error::AppendUnsupported(
-                "chunk index geometry does not cover the appended element",
-            ));
-        }
+        let region = locate_data_block(&self.geom, idx, e)?;
         let dblk_nelmts = region.dblk_nelmts;
         let sb_geom = region.super_block(self.ea_bits.page_nelmts().get());
         let is_paged = sb_geom.blocks.is_paged();
@@ -1003,25 +993,17 @@ impl Located {
         file.publish_checksummed(block_start, cks_off, at, value)
     }
 
-    /// Patch the six EA header statistics and recompute the header checksum.
+    /// Publishes the planned header statistics and their checksum.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AppendUnsupported`] if the statistics lie outside the header, and the
+    /// read, conversion, or write errors of [`Store::publish_checksummed`].
     pub(crate) fn update_ea_header<F: Store>(
         &self,
         file: &mut F,
-        num_chunks: u64,
+        stats: ExtensibleArrayStats,
     ) -> Result<(), Error> {
-        let stats = hdf5_pure_format::__private::extensible_array_stats(
-            &self.geom,
-            self.idx_blk_elmts,
-            self.ea_bits,
-            self.ea_elem_size,
-            self.offset_width,
-            num_chunks,
-            // This engine grows a rank-1 unlimited dataset (the parse above
-            // refuses any other), and a rank-1 index numbers its chunks
-            // 0..n with no gap to skip, so the occupancy is dense by
-            // construction and this is the predicate the walk always had.
-            SlotOccupancy::Dense(num_chunks),
-        );
         let ls = file.widths().lengths.get() as usize;
         let ea_addr = self.ea_addr.get();
         // The six statistics are adjacent length-sized fields, so they are one
@@ -1064,6 +1046,123 @@ impl Located {
             &new_dim.to_le_bytes()[..ls],
         )
     }
+
+    /// Computes header statistics for a dense prefix of `num_chunks` element slots.
+    ///
+    /// Counts every data block in that prefix, including blocks whose pointers are undefined.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if an element range, block size,
+    /// or statistic exceeds [`u64::MAX`], or [`FormatError::ValueTooLargeForPlatform`] if a block
+    /// size or data-block index exceeds [`usize::MAX`]. Returns [`Error::AppendUnsupported`] if
+    /// the prefix extends beyond the geometry.
+    fn append_stats(&self, num_chunks: u64) -> Result<ExtensibleArrayStats, Error> {
+        if num_chunks > self.idx_blk_elmts {
+            locate_data_block(&self.geom, self.idx_blk_elmts, num_chunks - 1)?;
+        }
+        let mut stats = ExtensibleArrayStats {
+            nsuper_blks: 0,
+            super_blk_size: 0,
+            ndata_blks: 0,
+            data_blk_size: 0,
+            max_idx_set: num_chunks,
+            nelmts: self.idx_blk_elmts,
+        };
+        let mut elem = self.idx_blk_elmts;
+        for &elements in self.geom.direct_dblk_nelmts() {
+            if elem >= num_chunks {
+                return Ok(stats);
+            }
+            let block_size = self.data_block_size(elements)?;
+            stats.ndata_blks = ea_sum([stats.ndata_blks, 1])?;
+            stats.data_blk_size = ea_sum([stats.data_blk_size, block_size])?;
+            stats.nelmts = ea_sum([stats.nelmts, elements])?;
+            elem = ea_sum([elem, elements])?;
+        }
+        for &(ndblks, elements) in self
+            .geom
+            .sblks()
+            .iter()
+            .skip(self.geom.first_indirect_sblk())
+            .take(self.geom.nsblk_addrs())
+        {
+            if elem >= num_chunks {
+                return Ok(stats);
+            }
+            let span = ea_product(ndblks, elements)?;
+            let end = ea_sum([elem, span])?;
+            let used = (num_chunks.min(end) - elem).div_ceil(elements);
+            let blocks = DataBlockGeometry {
+                dblk_nelmts: elements,
+                page_nelmts: self.ea_bits.page_nelmts().get(),
+            };
+            let bitmap = ea_product(ndblks, blocks.npages().div_ceil(8))?;
+            let super_size = ea_sum([
+                self.block_prefix_size(),
+                bitmap,
+                ea_product(ndblks, u64::from(self.offset_width.get()))?,
+                EA_CHECKSUM_SIZE,
+            ])?;
+            super_size.to_usize()?;
+            stats.nsuper_blks = ea_sum([stats.nsuper_blks, 1])?;
+            stats.super_blk_size = ea_sum([stats.super_blk_size, super_size])?;
+            stats.ndata_blks = ea_sum([stats.ndata_blks, used])?;
+            stats.data_blk_size = ea_sum([
+                stats.data_blk_size,
+                ea_product(used, self.data_block_size(elements)?)?,
+            ])?;
+            stats.nelmts = ea_sum([stats.nelmts, ea_product(used, elements)?])?;
+            elem = end;
+        }
+        Ok(stats)
+    }
+
+    /// Returns the encoded data-block size, including page storage and checksums.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if the size exceeds [`u64::MAX`],
+    /// or [`FormatError::ValueTooLargeForPlatform`] if it exceeds [`usize::MAX`].
+    fn data_block_size(&self, elements: u64) -> Result<u64, FormatError> {
+        let blocks = DataBlockGeometry {
+            dblk_nelmts: elements,
+            page_nelmts: self.ea_bits.page_nelmts().get(),
+        };
+        let size = if blocks.is_paged() {
+            ea_sum([
+                self.block_prefix_size(),
+                EA_CHECKSUM_SIZE,
+                ea_product(
+                    blocks.npages(),
+                    ea_sum([
+                        ea_product(blocks.page_nelmts, self.ea_elem_size.to_u64())?,
+                        EA_CHECKSUM_SIZE,
+                    ])?,
+                )?,
+            ])?
+        } else {
+            ea_sum([
+                self.block_prefix_size(),
+                ea_product(elements, self.ea_elem_size.to_u64())?,
+                EA_CHECKSUM_SIZE,
+            ])?
+        };
+        size.to_usize()?;
+        Ok(size)
+    }
+
+    /// Returns the prefix length through the block-offset field of a data or secondary block.
+    ///
+    /// Version 0 blocks are defined in "The Extensible Array Index" of the [format specification,
+    /// version 4.0][spec].
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_extarr
+    fn block_prefix_size(&self) -> u64 {
+        EA_BLOCK_PREFIX_SIZE
+            + u64::from(self.offset_width.get())
+            + self.ea_bits.block_offset_width().bytes().to_u64()
+    }
 }
 
 /// The result of planning one in-place Extensible-Array append, computed without a write: the
@@ -1079,6 +1178,8 @@ pub(crate) struct AppendPlan {
     new_dim: u64,
     /// New number of indexed chunks.
     new_num_chunks: u64,
+    /// The header statistics to publish after the index writes.
+    stats: ExtensibleArrayStats,
 }
 
 impl AppendPlan {
@@ -1092,11 +1193,10 @@ impl AppendPlan {
     }
 }
 
-/// Compute, without mutating the file, the new chunk blobs to write for an append
-/// of `new_elems` elements (`raw` little-endian bytes) to the Extensible-Array
-/// dataset described by `loc`, together with the first element index they occupy
-/// and the new dimension / chunk count. Shared by the general append writer and
-/// the in-place edit engine's in-place append so the read/plan logic lives in one place.
+/// Plans chunk bytes, index counts, and header statistics for an in-place append.
+///
+/// Checks the element ranges and metadata sizes before reading a trailing chunk or encoding
+/// `raw`, the little-endian bytes of `new_elems` elements. Planning leaves the file unchanged.
 ///
 /// `grow_visible_tail` says whether the caller may rewrite the trailing chunk of
 /// a *filtered* dataset — a chunk a reader at the old dimension can already see.
@@ -1105,6 +1205,17 @@ impl AppendPlan {
 /// unfiltered dataset, whose trailing chunk is raw and grows by relocation
 /// either way, and none on a *lossy* pipeline, which is refused here whatever the
 /// caller asks for.
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if an index range, metadata size, or
+/// header statistic exceeds [`u64::MAX`], or [`FormatError::ValueTooLargeForPlatform`] if metadata
+/// sizes or indexes exceed [`usize::MAX`].
+///
+/// Returns [`Error::AppendUnsupported`] if the new dimension overflows, the index geometry does
+/// not cover the append, a filtered tail rewrite is unsupported, or an encoded chunk size does
+/// not fit its index record. Errors from reading the trailing chunk, constructing its datatype
+/// context, splitting the element bytes, or encoding the chunks are propagated.
 pub(crate) fn plan_ea_append<F: Store>(
     file: &F,
     loc: &Located,
@@ -1124,6 +1235,8 @@ pub(crate) fn plan_ea_append<F: Store>(
         .ok_or(Error::AppendUnsupported(
             "append would overflow the dataset dimension",
         ))?;
+    let new_num_chunks = new_dim.div_ceil(chunk_elems);
+    let stats = loc.append_stats(new_num_chunks)?;
     let n_full = current_dim / chunk_elems;
     let has_partial = current_dim % chunk_elems != 0;
 
@@ -1224,12 +1337,12 @@ pub(crate) fn plan_ea_append<F: Store>(
         loc.check_stored_size(os, chunk.stored_size())?;
     }
 
-    let new_num_chunks = n_full + chunks.len() as u64;
     Ok(AppendPlan {
         chunks,
         n_full,
         new_dim,
         new_num_chunks,
+        stats,
     })
 }
 
@@ -1250,6 +1363,7 @@ pub(crate) fn apply_ea_append<F: Store>(
         n_full,
         new_dim,
         new_num_chunks,
+        stats,
     }: AppendPlan,
     max_phase: u8,
 ) -> Result<(), Error> {
@@ -1305,7 +1419,7 @@ pub(crate) fn apply_ea_append<F: Store>(
     if file.len() != recorded_eof {
         file.patch_superblock_eof()?;
     }
-    loc.update_ea_header(file, new_num_chunks)?;
+    loc.update_ea_header(file, stats)?;
     file.sync()?;
     if max_phase < 4 {
         return Ok(());
@@ -1397,34 +1511,51 @@ impl DataBlockLoc {
     }
 }
 
-/// Locate the data block containing element `e` (which is `>= idx_blk_elmts`).
-fn locate_data_block(geom: &ExtensibleArrayGeometry, idx_blk_elmts: u64, e: u64) -> DataBlockLoc {
+/// Locates a non-inline element in the direct or secondary data-block ranges.
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if `e` is an inline element or a
+/// range calculation exceeds [`u64::MAX`], or [`FormatError::ValueTooLargeForPlatform`] if the
+/// data-block index exceeds [`usize::MAX`]. Returns [`Error::AppendUnsupported`] if the geometry
+/// does not cover `e`.
+fn locate_data_block(
+    geom: &ExtensibleArrayGeometry,
+    idx_blk_elmts: u64,
+    e: u64,
+) -> Result<DataBlockLoc, Error> {
+    if e < idx_blk_elmts {
+        return Err(FormatError::InvalidExtensibleArrayGeometry.into());
+    }
     let mut elem = idx_blk_elmts;
     for (ordinal, &dn) in geom.direct_dblk_nelmts().iter().enumerate() {
-        if e < elem + dn {
-            return DataBlockLoc {
+        let end = ea_sum([elem, dn])?;
+        if e < end {
+            return Ok(DataBlockLoc {
                 db_start: elem,
                 dblk_nelmts: dn,
                 ndblks: 1,
                 sb_block_offset: 0,
                 parent: Parent::IndexDirect { ordinal },
-            };
+            });
         }
-        elem += dn;
+        elem = end;
     }
-    for j in 0..geom.nsblk_addrs() {
-        let (ndblks, dn) = geom.sblks()[geom.first_indirect_sblk() + j];
-        let span = ndblks * dn;
-        if e < elem + span {
+    for (j, &(ndblks, dn)) in geom
+        .sblks()
+        .iter()
+        .skip(geom.first_indirect_sblk())
+        .take(geom.nsblk_addrs())
+        .enumerate()
+    {
+        let span = ea_product(ndblks, dn)?;
+        let end = ea_sum([elem, span])?;
+        if e < end {
             let sb_block_offset = elem - idx_blk_elmts;
             let within = e - elem;
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "within/dn is a data-block index bounded by ndblks (small)"
-            )]
-            let dblk_local = (within / dn) as usize;
-            let db_start = elem + dblk_local as u64 * dn;
-            return DataBlockLoc {
+            let dblk_local = (within / dn).to_usize()?;
+            let db_start = ea_sum([elem, ea_product(dblk_local.to_u64(), dn)?])?;
+            return Ok(DataBlockLoc {
                 db_start,
                 dblk_nelmts: dn,
                 ndblks,
@@ -1433,17 +1564,26 @@ fn locate_data_block(geom: &ExtensibleArrayGeometry, idx_blk_elmts: u64, e: u64)
                     sblk_j: j,
                     dblk_local,
                 },
-            };
+            });
         }
-        elem += span;
+        elem = end;
     }
-    DataBlockLoc {
-        db_start: e,
-        dblk_nelmts: u64::MAX,
-        ndblks: 0,
-        sb_block_offset: 0,
-        parent: Parent::IndexDirect { ordinal: 0 },
-    }
+    Err(Error::AppendUnsupported(
+        "chunk index geometry does not cover the appended element",
+    ))
+}
+
+fn ea_sum(values: impl IntoIterator<Item = u64>) -> Result<u64, FormatError> {
+    values.into_iter().try_fold(0u64, |total, value| {
+        total
+            .checked_add(value)
+            .ok_or(FormatError::InvalidExtensibleArrayGeometry)
+    })
+}
+
+fn ea_product(left: u64, right: u64) -> Result<u64, FormatError> {
+    left.checked_mul(right)
+        .ok_or(FormatError::InvalidExtensibleArrayGeometry)
 }
 
 // ---------------------------------------------------------------------------
@@ -1598,6 +1738,19 @@ fn walk_messages(
     Ok(())
 }
 
+/// The signature, version, and client-ID width of a version 0 data or secondary block.
+///
+/// Defined in "The Extensible Array Index" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_extarr
+const EA_BLOCK_PREFIX_SIZE: u64 = 6;
+/// The checksum width of a version 0 Extensible Array block or data-block page.
+///
+/// Defined in "The Extensible Array Index" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_extarr
+const EA_CHECKSUM_SIZE: u64 = 4;
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -1621,6 +1774,175 @@ mod tests {
     use crate::superblock::LocatedSuperblock;
     use crate::superblock::Superblock;
     use crate::writer::FileBuilder;
+
+    #[rstest]
+    #[case::first_direct(4, 4, 16, 1, 0, None, 0)]
+    #[case::last_in_first_direct(19, 4, 16, 1, 0, None, 0)]
+    #[case::next_direct(20, 20, 32, 1, 0, None, 1)]
+    #[case::first_secondary(244, 244, 64, 4, 240, Some(0), 0)]
+    #[case::last_in_secondary(499, 436, 64, 4, 240, Some(0), 3)]
+    #[case::next_secondary(500, 500, 128, 4, 496, Some(1), 0)]
+    #[case::first_paged(131_060, 131_060, 2_048, 64, 131_056, Some(9), 0)]
+    #[case::next_paged_block(133_108, 133_108, 2_048, 64, 131_056, Some(9), 1)]
+    fn data_block_locations_match_expected_ranges(
+        #[case] element: u64,
+        #[case] start: u64,
+        #[case] elements: u64,
+        #[case] blocks: u64,
+        #[case] offset: u64,
+        #[case] secondary: Option<usize>,
+        #[case] local: usize,
+    ) {
+        let header = range_header(32, 4, 16);
+        let geom = ExtensibleArrayGeometry::from_header(&header, OffsetWidth::Eight).unwrap();
+        let region = locate_data_block(&geom, 4, element).unwrap();
+        assert_eq!(
+            (
+                region.db_start,
+                region.dblk_nelmts,
+                region.ndblks,
+                region.sb_block_offset
+            ),
+            (start, elements, blocks, offset)
+        );
+        match (region.parent, secondary) {
+            (Parent::IndexDirect { ordinal }, None) => assert_eq!(ordinal, local),
+            (Parent::Super { sblk_j, dblk_local }, Some(expected)) => {
+                assert_eq!((sblk_j, dblk_local), (expected, local));
+            }
+            _ => panic!("unexpected parent block"),
+        }
+    }
+
+    #[rstest]
+    #[case::span(64, 4, 16, u64::MAX - 11)]
+    #[case::endpoint(63, 16, 16, u64::MAX)]
+    fn data_block_range_overflow_is_rejected(
+        #[case] bits: u8,
+        #[case] inline: u8,
+        #[case] minimum: u8,
+        #[case] element: u64,
+    ) {
+        let header = range_header(bits, inline, minimum);
+        let geom = ExtensibleArrayGeometry::from_header(&header, OffsetWidth::Eight).unwrap();
+        let inline = u64::from(inline);
+        let error = match locate_data_block(&geom, inline, element) {
+            Ok(_) => panic!("expected a range error"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(
+                error,
+                Error::Format(FormatError::InvalidExtensibleArrayGeometry)
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn the_last_representable_secondary_range_has_the_expected_location() {
+        let header = range_header(64, 4, 16);
+        let geom = ExtensibleArrayGeometry::from_header(&header, OffsetWidth::Eight).unwrap();
+        let end = (1u128 << 64) - 12;
+        let elements = 1u64 << 34;
+        let region = locate_data_block(&geom, 4, u64::try_from(end - 1).unwrap()).unwrap();
+        assert_eq!(u128::from(region.db_start) + u128::from(elements), end);
+        assert_eq!(region.dblk_nelmts, elements);
+        assert_eq!(region.ndblks, 1 << 29);
+        assert_eq!(region.sb_block_offset, (1 << 63) - 16);
+        let Parent::Super { sblk_j, dblk_local } = region.parent else {
+            panic!("expected a secondary block");
+        };
+        assert_eq!((sblk_j, dblk_local), (55, (1 << 29) - 1));
+    }
+
+    #[rstest]
+    #[case::inline(4, 0, 0, 0, 4)]
+    #[case::first_direct(5, 0, 0, 1, 20)]
+    #[case::secondary(245, 1, 54, 7, 308)]
+    fn append_statistics_match_expected_allocations(
+        #[case] chunks: u64,
+        #[case] secondary_count: u64,
+        #[case] secondary_bytes: u64,
+        #[case] data_count: u64,
+        #[case] elements: u64,
+        #[values(8, 14)] stride: usize,
+    ) {
+        let store = WindowProbeStore::open(build_unlimited(4, 1));
+        let (mut loc, _) = locate(&store);
+        loc.ea_elem_size = stride;
+        assert_eq!(
+            loc.append_stats(chunks).unwrap(),
+            ExtensibleArrayStats {
+                nsuper_blks: secondary_count,
+                super_blk_size: secondary_bytes,
+                ndata_blks: data_count,
+                data_blk_size: (elements - 4) * stride.to_u64() + data_count * 22,
+                max_idx_set: chunks,
+                nelmts: elements,
+            }
+        );
+    }
+
+    #[rstest]
+    #[case::span(64, u64::MAX - 11)]
+    #[cfg_attr(target_pointer_width = "64", case::statistics(63, 1u64 << 61))]
+    fn append_planning_rejects_unrepresentable_ranges_before_reading(
+        #[case] bits: u8,
+        #[case] dimension: u64,
+    ) {
+        let store = WindowProbeStore::open(build_unlimited(4, 1));
+        let original = store.data.clone();
+        let (mut loc, datatype) = locate(&store);
+        let header = range_header(bits, 4, 16);
+        loc.geom = ExtensibleArrayGeometry::from_header(&header, OffsetWidth::Eight).unwrap();
+        loc.ea_bits = header.bit_geometry();
+        loc.current_dim = dimension;
+        store.reset_counters();
+        let error = match plan_ea_append(
+            &store,
+            &loc,
+            &datatype,
+            &[1],
+            loc.elem_bytes,
+            None,
+            true,
+            &9i32.to_le_bytes(),
+            1,
+            FillPattern::ZERO,
+        ) {
+            Ok(_) => panic!("expected a range error"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(
+                error,
+                Error::Format(FormatError::InvalidExtensibleArrayGeometry)
+            ),
+            "{error:?}"
+        );
+        assert_eq!(store.total_read.get(), 0);
+        assert_eq!(store.allocations.borrow().as_slice(), []);
+        assert_eq!(store.data, original);
+    }
+
+    fn range_header(bits: u8, inline: u8, minimum: u8) -> ExtensibleArrayHeader {
+        let mut bytes = EA_HEADER_SIGNATURE.to_vec();
+        bytes.extend_from_slice(&[
+            EA_HEADER_VERSION,
+            EA_CLIENT_ID_UNFILTERED,
+            8,
+            bits,
+            inline,
+            minimum,
+            4,
+            10,
+        ]);
+        bytes.resize(ExtensibleArrayHeader::serialized_size(8, 8), 0);
+        let len = bytes.len();
+        checksum::stamp_trailing(&mut bytes, 0, len);
+        ExtensibleArrayHeader::parse(&bytes, 0, 8, 8).unwrap()
+    }
 
     #[rstest]
     #[case::inline(1, 2, false, false)]
@@ -2973,4 +3295,9 @@ mod tests {
     // header element-size field and the four-byte filter mask for version 4 chunked layouts.
     const EA_HEADER_ELEMENT_SIZE: usize = 6;
     const EA_FILTER_MASK_BYTES: u8 = 4;
+
+    // "The Extensible Array Index" in format specification, version 4.0, defines the version 0
+    // header signature and version.
+    const EA_HEADER_SIGNATURE: &[u8; 4] = b"EAHD";
+    const EA_HEADER_VERSION: u8 = 0;
 }
