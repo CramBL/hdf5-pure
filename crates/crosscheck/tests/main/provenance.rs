@@ -19,6 +19,8 @@ use hdf5_pure::FileBuilder;
 #[cfg(feature = "__hdf5-1.10")]
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::Object;
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5_pure::UserblockSize;
 use hdf5_pure::VerifyResult;
 use hdf5_pure::VlenStringReadOptions;
 #[cfg(feature = "__hdf5-1.10")]
@@ -36,7 +38,7 @@ fn c_reads_values_and_final_provenance(
     #[case] data: Data,
     #[values(false, true)] page: bool,
     #[values(false, true)] dense: bool,
-    #[values(0, 4096)] userblock: u64,
+    #[values(UserblockSize::NONE, UserblockSize::try_from(4096).unwrap())] userblock: UserblockSize,
     #[values(false, true)] write: bool,
 ) {
     let build = |address| builder(data, page, dense, userblock, address);
@@ -137,7 +139,13 @@ fn c_reads_values_and_final_provenance(
 }
 
 #[cfg(feature = "__hdf5-1.10")]
-fn builder(data: Data, page: bool, dense: bool, userblock: u64, address: u64) -> FileBuilder {
+fn builder(
+    data: Data,
+    page: bool,
+    dense: bool,
+    userblock: UserblockSize,
+    address: u64,
+) -> FileBuilder {
     let mut builder = FileBuilder::new();
     builder.with_userblock(userblock);
     if page {

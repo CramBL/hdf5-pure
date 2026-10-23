@@ -6,11 +6,13 @@ use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpaceStrategy;
+use hdf5_pure::FilterMask;
 use hdf5_pure::FormatError;
 use hdf5_pure::LibVer;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::Object;
 use hdf5_pure::ScaleOffset;
+use hdf5_pure::UserblockSize;
 #[cfg(feature = "provenance")]
 use hdf5_pure::VerifyResult;
 use rstest::rstest;
@@ -32,7 +34,7 @@ fn chunked_references_resolve_every_target(
     )]
     strategy: FileSpaceStrategy,
     #[values(false, true)] dense: bool,
-    #[values(0, 4096)] userblock: u64,
+    #[values(UserblockSize::NONE, UserblockSize::try_from(4096).unwrap())] userblock: UserblockSize,
     #[values(Output::Finish, Output::Sink, Output::Write)] output: Output,
 ) {
     let mut builder = FileBuilder::new();
@@ -119,7 +121,7 @@ fn chunked_references_resolve_every_target(
     let chunks = references.chunks().unwrap();
     assert_eq!(chunks.len(), index.chunks());
     for chunk in chunks {
-        assert_eq!(chunk.filter_mask, 0);
+        assert_eq!(chunk.filter_mask(), FilterMask::NONE);
         let start = usize::try_from(chunk.address).unwrap();
         let length = usize::try_from(chunk.storage_size).unwrap();
         let stored = &bytes[start..start + length];
