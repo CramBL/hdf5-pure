@@ -36,6 +36,7 @@ mod edit_global_heap_reclaim;
 mod edit_in_place;
 mod edit_persisted_free_space;
 mod edit_reference_repointing;
+mod edit_second_layout;
 mod edit_space_accounting;
 mod edit_userblock;
 mod edit_userblock_chunked;
