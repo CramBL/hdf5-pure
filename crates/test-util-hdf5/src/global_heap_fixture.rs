@@ -5,9 +5,7 @@ use std::path::Path;
 use hdf5_pure::CharacterSet;
 use hdf5_pure::CompoundTypeBuilder;
 use hdf5_pure::Datatype;
-use hdf5_pure::File;
 use hdf5_pure::FillTime;
-use hdf5_pure::GlobalHeapLiveness;
 use hdf5_pure::ReferenceType;
 use hdf5_pure::StringPadding;
 use hdf5_pure_format::__private as format;
@@ -22,7 +20,6 @@ use test_util::object_header::Message;
 use test_util::object_header::MessageType;
 use test_util::object_header::v2::Header;
 use test_util::superblock::v2::Superblock;
-use test_util::temp;
 use test_util::widths::Widths;
 
 /// Selects where an object stores elements that refer to global heap objects.
@@ -133,20 +130,6 @@ impl Fixture {
     /// Adds a hard link from the root group to the object header at `address`.
     pub fn link(&mut self, link_name: &str, address: u64) {
         self.links.push(hard_link(link_name, address));
-    }
-
-    /// Writes the fixture and returns its [`GlobalHeapLiveness`] analysis.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the fixture cannot be written, opened, inspected, or closed.
-    pub fn liveness(self) -> GlobalHeapLiveness {
-        let path = temp::temp_path("liveness_fixture.h5");
-        self.write(&path);
-        let file = File::open_rw(&path).unwrap();
-        let liveness = file.__global_heap_liveness().unwrap();
-        file.close().unwrap();
-        liveness
     }
 
     /// Writes the complete image to `path`, with the root header and superblock finalized.

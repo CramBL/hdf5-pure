@@ -391,6 +391,10 @@ use self::aggregation::AggregateSpace;
 mod aggregation;
 mod global_heap_liveness;
 #[cfg(test)]
+mod global_heap_liveness_tests;
+#[cfg(test)]
+mod ownership_tests;
+#[cfg(test)]
 mod page_feasibility;
 #[cfg(test)]
 mod page_header_reclamation;
