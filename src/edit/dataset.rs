@@ -903,7 +903,7 @@ impl WriteEngine {
             } => {
                 let mut region = region.clone();
                 self.append_dense_attrs(&mut region, dense_attrs.clone())?;
-                let oh = super::build_v2_object_header(&region)?;
+                let oh = super::object_header::build_v2_object_header(&region)?;
                 self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
             }
             CopyTree::DatasetContiguous {
@@ -921,7 +921,7 @@ impl WriteEngine {
                         .copy_from_slice(&relative.to_le_bytes());
                 }
                 self.append_dense_attrs(&mut region, dense_attrs.clone())?;
-                let oh = super::build_v2_object_header(&region)?;
+                let oh = super::object_header::build_v2_object_header(&region)?;
                 self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
             }
             CopyTree::DatasetChunked {
@@ -954,7 +954,7 @@ impl WriteEngine {
                     region.push_link(name, base.relative(new_child)?, *creation_order);
                 }
                 self.append_dense_attrs(&mut region, dense_attrs.clone())?;
-                let oh = super::build_v2_object_header(&region)?;
+                let oh = super::object_header::build_v2_object_header(&region)?;
                 self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
             }
         }
@@ -988,13 +988,13 @@ impl WriteEngine {
                 let size_off = *addr_off + 8;
                 let raw_len = raw.len() as u64;
                 region.bytes_mut()[size_off..size_off + 8].copy_from_slice(&raw_len.to_le_bytes());
-                let oh = super::build_v2_object_header(&region)?;
+                let oh = super::object_header::build_v2_object_header(&region)?;
                 self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
             }
             MovingWrite::Compact { region, bytes } => {
                 let raw = self.resolve_overwrite_bytes(bytes)?;
-                let region = super::rebuild_compact_layout_region(region, &raw)?;
-                let oh = super::build_v2_object_header(&region)?;
+                let region = super::object_header::rebuild_compact_layout_region(region, &raw)?;
+                let oh = super::object_header::build_v2_object_header(&region)?;
                 self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
             }
             MovingWrite::Chunked {
@@ -1055,7 +1055,7 @@ impl WriteEngine {
             MovingWrite::AttrEdit { region, attrs, .. } => {
                 let mut region = region.clone();
                 self.place_edited_attrs(&mut region, attrs.clone())?;
-                let oh = super::build_v2_object_header(&region)?;
+                let oh = super::object_header::build_v2_object_header(&region)?;
                 self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
             }
         }
@@ -1197,7 +1197,7 @@ impl WriteEngine {
         )?;
         let region = replace_dataspace_message(region, new_dataspace_body)?;
         let region = replace_layout_message(&region, &layout_body)?;
-        let oh = super::build_v2_object_header(&region)?;
+        let oh = super::object_header::build_v2_object_header(&region)?;
         self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
     }
 
@@ -1332,7 +1332,7 @@ impl WriteEngine {
             })?;
         let mut new_region = replace_layout_message(region, &layout_message)?;
         self.append_dense_attrs(&mut new_region, dense_attrs)?;
-        let oh = super::build_v2_object_header(&new_region)?;
+        let oh = super::object_header::build_v2_object_header(&new_region)?;
         self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
     }
 

@@ -29,7 +29,6 @@ use crate::datatype::Datatype;
 use crate::edit;
 use crate::edit::CopyTree;
 use crate::edit::DenseAttrSet;
-use crate::edit::GROUP_INFO_BODY;
 use crate::edit::InvalidatedAddresses;
 use crate::edit::LinkCreationOrder;
 use crate::edit::Node;
@@ -37,6 +36,7 @@ use crate::edit::OhRegion;
 use crate::edit::SHARED_MESSAGE_INDEX_NAMES_A_MOVED_OBJECT;
 use crate::edit::UNDEF;
 use crate::edit::WriteEngine;
+use crate::edit::group::GROUP_INFO_BODY;
 use crate::error::Error;
 use crate::error::FormatError;
 use crate::error::OBJECT_HEADER_MESSAGE_MAX;
@@ -62,7 +62,7 @@ fn a_continuation_to_the_undefined_address_fails_the_chunk_walk() {
         .message(Message::undefined_continuation(64, Widths::EIGHT))
         .build();
 
-    let Err(err) = edit::read_oh_chunks(
+    let Err(err) = edit::object_header::read_oh_chunks(
         &BytesSource::new(header.as_slice()),
         0,
         AddressContext::from_effective_base(BaseAddress::ZERO),
@@ -98,7 +98,7 @@ fn shared_attribute_detection_uses_attribute_message_flags() {
 #[test]
 fn a_hard_link_is_retargeted_at_its_address_field() {
     let mut region = hard_link_region(&[]);
-    edit::patch_link_target(&mut region, "child", StoredAddress::new(0x2000)).unwrap();
+    edit::group::patch_link_target(&mut region, "child", StoredAddress::new(0x2000)).unwrap();
     assert_eq!(
         region[region.len() - 8..],
         0x2000u64.to_le_bytes(),
@@ -109,8 +109,8 @@ fn a_hard_link_is_retargeted_at_its_address_field() {
 #[test]
 fn a_hard_link_with_bytes_past_its_address_is_unsupported() {
     let mut region = hard_link_region(&[0]);
-    let err =
-        edit::patch_link_target(&mut region, "child", StoredAddress::new(0x2000)).unwrap_err();
+    let err = edit::group::patch_link_target(&mut region, "child", StoredAddress::new(0x2000))
+        .unwrap_err();
     let Error::EditUnsupported(reason) = err else {
         panic!("expected EditUnsupported, got {err:?}");
     };
@@ -499,7 +499,7 @@ fn a_copied_reference_attribute_is_screened_in_both_storages() {
 
 #[test]
 fn fresh_group_region_pairs_link_info_with_group_info() {
-    let types = region_types(&edit::fresh_group_region());
+    let types = region_types(&edit::group::fresh_group_region());
     assert_eq!(types, vec![MessageType::LINK_INFO, MessageType::GROUP_INFO]);
 }
 
@@ -512,7 +512,7 @@ fn ensure_group_info_appends_when_missing() {
         b
     };
     let mut region = plain_region(message_record(MessageType::LINK_INFO, &li_body));
-    edit::ensure_group_info(&mut region).unwrap();
+    edit::group::ensure_group_info(&mut region).unwrap();
     assert_eq!(
         region_types(&region),
         vec![MessageType::LINK_INFO, MessageType::GROUP_INFO]
@@ -550,8 +550,8 @@ fn links_added_to_a_tracked_group_take_consecutive_creation_indexes() {
 #[test]
 fn a_tracked_group_resumes_past_a_gap_a_deletion_left() {
     let region = link_tracked_region(3, false, &["a", "b", "c"]);
-    let mut region = edit::remove_link_from_region(&region, "a").unwrap();
-    region = edit::remove_link_from_region(&region, "c").unwrap();
+    let mut region = edit::group::remove_link_from_region(&region, "a").unwrap();
+    region = edit::group::remove_link_from_region(&region, "c").unwrap();
     let mut order = LinkCreationOrder::for_region(&region).unwrap();
     region.push_link("d", StoredAddress::new(0x200), order.take().unwrap());
     order.record(&mut region).unwrap();
@@ -570,7 +570,7 @@ fn link_creation_indexing_preserves_index_addresses_while_updating_the_counter()
     region.push_link("b", StoredAddress::new(0x200), order.take().unwrap());
     order.record(&mut region).unwrap();
 
-    let (_, _, info) = edit::find_link_info(&region).unwrap().unwrap();
+    let (_, _, info) = edit::group::find_link_info(&region).unwrap().unwrap();
     assert_eq!(info.max_creation_order, Some(2));
     assert_eq!(info.fractal_heap_address, None);
     assert_eq!(info.btree_name_index_address, None);
@@ -580,7 +580,7 @@ fn link_creation_indexing_preserves_index_addresses_while_updating_the_counter()
 
 #[test]
 fn an_untracked_group_numbers_none_of_its_links() {
-    let mut region = edit::fresh_group_region();
+    let mut region = edit::group::fresh_group_region();
     let before = region.clone();
     let mut order = LinkCreationOrder::for_region(&region).unwrap();
     assert_eq!(order.take().unwrap(), None);
@@ -595,7 +595,7 @@ fn an_untracked_group_numbers_none_of_its_links() {
 #[test]
 fn a_tracked_group_that_gains_no_link_keeps_its_maximum_byte_for_byte() {
     let region = link_tracked_region(3, false, &["a", "b", "c"]);
-    let mut after = edit::remove_link_from_region(&region, "b").unwrap();
+    let mut after = edit::group::remove_link_from_region(&region, "b").unwrap();
     let order = LinkCreationOrder::for_region(&after).unwrap();
     let before = after.clone();
     order.record(&mut after).unwrap();
@@ -606,7 +606,7 @@ fn a_tracked_group_that_gains_no_link_keeps_its_maximum_byte_for_byte() {
 #[test]
 fn max_compact_links_reads_the_declared_threshold_or_the_library_default() {
     assert_eq!(
-        edit::max_compact_links(&edit::fresh_group_region()).unwrap(),
+        edit::group::max_compact_links(&edit::group::fresh_group_region()).unwrap(),
         8
     );
     let mut gi = vec![0u8, 0x01];
@@ -614,30 +614,31 @@ fn max_compact_links_reads_the_declared_threshold_or_the_library_default() {
     gi.extend_from_slice(&2u16.to_le_bytes()); // min dense
     let mut region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
     region.push(MessageType::GROUP_INFO, &gi);
-    assert_eq!(edit::max_compact_links(&region).unwrap(), 4);
+    assert_eq!(edit::group::max_compact_links(&region).unwrap(), 4);
 }
 
 #[test]
 fn a_tracked_group_is_rejected_only_where_the_addition_would_go_dense() {
     let region = link_tracked_region(7, false, &["a", "b", "c", "d", "e", "f", "g"]);
-    edit::reject_dense_link_creation_order(&region, 8).expect("eight links still store compactly");
-    let err = edit::reject_dense_link_creation_order(&region, 9).unwrap_err();
+    edit::group::reject_dense_link_creation_order(&region, 8)
+        .expect("eight links still store compactly");
+    let err = edit::group::reject_dense_link_creation_order(&region, 9).unwrap_err();
     assert!(
         matches!(&err, Error::EditUnsupported(m) if m.contains("link creation order")
             && m.contains("dense")),
         "got: {err}",
     );
-    let mut untracked = edit::fresh_group_region();
+    let mut untracked = edit::group::fresh_group_region();
     untracked.push_link("a", StoredAddress::new(0x100), None);
-    edit::reject_dense_link_creation_order(&untracked, 99)
+    edit::group::reject_dense_link_creation_order(&untracked, 99)
         .expect("an untracked group has no creation order to lose");
 }
 
 #[test]
 fn ensure_group_info_is_idempotent() {
-    let mut region = edit::fresh_group_region();
+    let mut region = edit::group::fresh_group_region();
     let before = region.clone();
-    edit::ensure_group_info(&mut region).unwrap();
+    edit::group::ensure_group_info(&mut region).unwrap();
     assert_eq!(*region, *before);
 }
 
@@ -695,7 +696,8 @@ fn a_version_1_reference_is_rewrapped_as_the_modern_committed_form() {
     v1.extend_from_slice(&0x1111u64.to_le_bytes()); // name offset in the local heap
     v1.extend_from_slice(&0x5678u64.to_le_bytes()); // object header address
 
-    let modern = edit::modernize_shared_reference(&v1, crate::file_writer::WIDTHS).unwrap();
+    let modern =
+        edit::object_header::modernize_shared_reference(&v1, crate::file_writer::WIDTHS).unwrap();
     assert_eq!(modern[0], 2, "the version this crate writes");
     assert_eq!(
         crate::shared_message::parse_shared_ref_with_widths(&modern, crate::file_writer::WIDTHS,)
@@ -710,7 +712,8 @@ fn a_heap_reference_is_rewrapped_as_a_heap_reference() {
     let mut v3 = vec![3u8, 1];
     v3.extend_from_slice(&[9, 8, 7, 6, 5, 4, 3, 2]);
 
-    let modern = edit::modernize_shared_reference(&v3, crate::file_writer::WIDTHS).unwrap();
+    let modern =
+        edit::object_header::modernize_shared_reference(&v3, crate::file_writer::WIDTHS).unwrap();
     assert_eq!(modern, v3);
 }
 
@@ -770,9 +773,10 @@ fn a_record_walk_steps_by_the_width_the_header_declares() {
 fn a_rebuilt_header_declares_the_record_layout_it_used() {
     for layout in [MessageRecordLayout::PLAIN, TRACKED] {
         let region = attr_region(layout, &[("alpha", 3)], 4);
-        let header = edit::build_v2_object_header(&region).unwrap();
+        let header = edit::object_header::build_v2_object_header(&region).unwrap();
         let (start, end, read_back) =
-            edit::oh_region_at(&header, 0, header.len() as u64).expect("the header parses");
+            edit::object_header::oh_region_at(&header, 0, header.len() as u64)
+                .expect("the header parses");
         assert_eq!(
             read_back,
             ObjectHeaderPrefix::with_layout(layout),
@@ -800,8 +804,9 @@ fn a_headers_optional_prefix_blocks_survive_a_rebuild() {
                 let region = attr_region_in(props, &[("alpha", 3), ("beta", 5)], 6);
                 let header = v2_header_bytes(props, &region);
 
-                let (start, end, read_back) = edit::oh_region_at(&header, 0, header.len() as u64)
-                    .expect("the hand-built header parses");
+                let (start, end, read_back) =
+                    edit::object_header::oh_region_at(&header, 0, header.len() as u64)
+                        .expect("the hand-built header parses");
                 assert_eq!(read_back, props, "the prefix lost a block");
                 let parsed =
                     OhRegion::new(header[start as usize..end as usize].to_vec(), read_back);
@@ -811,9 +816,10 @@ fn a_headers_optional_prefix_blocks_survive_a_rebuild() {
                     "the message region was located wrongly for {props:?}",
                 );
 
-                let rebuilt = edit::build_v2_object_header(&parsed).unwrap();
-                let (_, _, again) = edit::oh_region_at(&rebuilt, 0, rebuilt.len() as u64)
-                    .expect("the rebuilt header parses");
+                let rebuilt = edit::object_header::build_v2_object_header(&parsed).unwrap();
+                let (_, _, again) =
+                    edit::object_header::oh_region_at(&rebuilt, 0, rebuilt.len() as u64)
+                        .expect("the rebuilt header parses");
                 assert_eq!(
                     again.attribute_phase_change, attribute_phase_change,
                     "the rebuild lost the attribute phase-change thresholds",
@@ -838,11 +844,12 @@ fn a_rebuild_stamps_the_modification_and_change_times() {
     };
     let region = attr_region_in(props, &[("alpha", 0)], 1);
 
-    let before = edit::unix_time_now().expect("a std test build reads the clock");
-    let header = edit::build_v2_object_header(&region).unwrap();
-    let after = edit::unix_time_now().expect("a std test build reads the clock");
+    let before = edit::object_header::unix_time_now().expect("a std test build reads the clock");
+    let header = edit::object_header::build_v2_object_header(&region).unwrap();
+    let after = edit::object_header::unix_time_now().expect("a std test build reads the clock");
 
-    let (_, _, read_back) = edit::oh_region_at(&header, 0, header.len() as u64).unwrap();
+    let (_, _, read_back) =
+        edit::object_header::oh_region_at(&header, 0, header.len() as u64).unwrap();
     let times = read_back.times.expect("the header still stores times");
     assert_eq!(
         (times.access, times.birth),
@@ -872,7 +879,7 @@ fn a_prefix_truncated_inside_an_optional_block_is_rejected() {
     let header = v2_header_bytes(props, &region);
     for cut in 6..6 + 16 + 4 + 1 {
         assert!(
-            edit::oh_region_at(&header[..cut], 0, header.len() as u64).is_err(),
+            edit::object_header::oh_region_at(&header[..cut], 0, header.len() as u64).is_err(),
             "a {cut}-byte prefix must not parse as a whole header",
         );
     }
@@ -1010,7 +1017,7 @@ fn rebuild_compact_layout_replaces_only_the_first_layout(
         attribute_phase_change: Some(FIXTURE_PHASE),
     };
 
-    let out = edit::rebuild_compact_layout_region(
+    let out = edit::object_header::rebuild_compact_layout_region(
         &OhRegion::new(region(&[1, 2, 3, 4]), props),
         &[9, 8, 7, 6, 5],
     )
@@ -1056,7 +1063,8 @@ fn rebuild_compact_layout_rejects(
     #[case] raw: Vec<u8>,
     #[case] expected: &str,
 ) {
-    let err = edit::rebuild_compact_layout_region(&plain_region(region), &raw).unwrap_err();
+    let err = edit::object_header::rebuild_compact_layout_region(&plain_region(region), &raw)
+        .unwrap_err();
     let Error::EditUnsupported(reason) = err else {
         panic!("expected EditUnsupported, got {err:?}");
     };
@@ -1114,7 +1122,7 @@ fn replace_dataspace_message_replaces_only_the_first_dataspace_record(
 #[rstest]
 #[case::replace_layout_message(edit::dataset::replace_layout_message)]
 #[case::replace_dataspace_message(edit::dataset::replace_dataspace_message)]
-#[case::rebuild_compact_layout_region(edit::rebuild_compact_layout_region)]
+#[case::rebuild_compact_layout_region(edit::object_header::rebuild_compact_layout_region)]
 fn a_region_rewrite_rejects_a_record_past_the_region(
     #[case] rewrite: fn(&OhRegion, &[u8]) -> Result<OhRegion, Error>,
 ) {
@@ -1220,8 +1228,11 @@ fn malformed_message_region_returns_a_header_build_error() {
     region.push(0); // flags
     region.extend_from_slice(&[0u8; 4]); // a body far shorter than declared
 
-    let err = edit::build_v2_object_header(&OhRegion::new(region, ObjectHeaderPrefix::PLAIN))
-        .unwrap_err();
+    let err = edit::object_header::build_v2_object_header(&OhRegion::new(
+        region,
+        ObjectHeaderPrefix::PLAIN,
+    ))
+    .unwrap_err();
     assert!(
         matches!(err, Error::EditUnsupported(_)),
         "an unwalkable region gave {err:?}"
@@ -1236,9 +1247,11 @@ fn rebuilt_inline_attributes_include_attribute_info() {
     region.push(0); // flags
     region.extend_from_slice(&body);
 
-    let oh =
-        edit::build_v2_object_header(&OhRegion::new(region.clone(), ObjectHeaderPrefix::PLAIN))
-            .unwrap();
+    let oh = edit::object_header::build_v2_object_header(&OhRegion::new(
+        region.clone(),
+        ObjectHeaderPrefix::PLAIN,
+    ))
+    .unwrap();
     assert_eq!(&oh[..4], b"OHDR");
     assert!(
         oh.len() > 8 + region.len() + 4,
@@ -1354,7 +1367,7 @@ fn region_links(region: &OhRegion) -> Vec<(String, Option<u64>)> {
 }
 
 fn recorded_link_max(region: &OhRegion) -> Option<u64> {
-    edit::find_link_info(region)
+    edit::group::find_link_info(region)
         .unwrap()
         .and_then(|(_, _, info)| info.max_creation_order)
 }

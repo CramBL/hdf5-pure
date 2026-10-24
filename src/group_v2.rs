@@ -1750,7 +1750,7 @@ mod tests {
         // Point the link at HADDR_UNDEF and repair the header checksum, which
         // would otherwise refuse the file before the addition is ever reached.
         bytes[target..target + 8].copy_from_slice(&u64::MAX.to_le_bytes());
-        let (chunk_at, chunk_len) = crate::edit::read_oh_chunks(
+        let (chunk_at, chunk_len) = crate::edit::object_header::read_oh_chunks(
             &crate::source::BytesSource::new(&bytes[..]),
             root_oh as u64,
             AddressContext::from_effective_base(BaseAddress::new(0)),

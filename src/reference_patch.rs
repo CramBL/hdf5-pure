@@ -45,13 +45,11 @@
 //! - **Dense (fractal-heap) attributes**, whose values are not in the header,
 //!   and an attribute held as a **shared (SOHM) record**, which is not stored in
 //!   the header either.
-//! - An **attribute's value** in a **version 1 object header** — the one
-//!   [`edit::read_oh_chunks`] declines on a well-formed file (it declines a malformed
-//!   one too). Such an object's *element data* is still reached, through the
-//!   parsed form that reads both versions ([`scan_parsed_header`]); what that
-//!   form does not hand back is the file offset an attribute inside the header
-//!   would have to be written at. Nor does it hide the objects below it: it is
-//!   descended through either way.
+//! - An **attribute's value** in a **version 1 object header**.
+//!   [`edit::object_header::read_oh_chunks`] supports version 2 headers.
+//!   [`scan_parsed_header`] reads contiguous element data from parsed headers of both versions,
+//!   whose message bodies have no file offsets for attribute patches. The walk descends through
+//!   either version to find child objects.
 //!
 //! And by datatype, every form `embedded_reference_slots` answers `None` for: an
 //! object reference **wider than 8 bytes**, a **dataset-region** reference, a
@@ -400,24 +398,10 @@ fn walk(
     Ok(plan)
 }
 
-/// Collect the byte edits owed by an object whose header [`edit::read_oh_chunks`]
-/// would not read — a version 1 header — from the parsed form that reads both.
+/// Collects reference patches in contiguous data using a parsed object header.
 ///
-/// Version 1 is not a museum piece: it is what libhdf5 writes
-/// under its default, earliest-format bounds, so a file that was never told to
-/// use the latest format carries these throughout. Leaving them out left #324
-/// unfixed for exactly those files.
-///
-/// What it reaches is narrower than the chunk walk's, and the reason is the same
-/// one that makes it cheap. [`ObjectHeader`] hands back message *bodies*, not
-/// the offsets they were read from, so this can address only what lives outside
-/// the header: a **contiguous** dataset's data block. A compact dataset's
-/// elements and an attribute's value are inside the header, and rewriting either
-/// needs an offset this does not have. There is no checksum to reseal either
-/// way — a version 1 header has none, and a data block never did.
-///
-/// Returns whether the object holds a reference-bearing datatype at all, which
-/// is what stops a file of these being *proved* free of them.
+/// The parsed messages have no file offsets for inline attribute or compact data patches.
+/// Returns whether the element datatype can contain an object reference.
 fn scan_parsed_header<S: Source + ?Sized>(
     src: &S,
     header: &ObjectHeader,
@@ -513,13 +497,10 @@ fn scan_parsed_header<S: Source + ?Sized>(
 
 /// What one object contributed to the walk beyond its byte edits.
 struct Scanned {
-    /// The caller should look for children below this object. True for a header
-    /// holding a link, link-info, or symbol-table message — and *also* for one
-    /// this could not read at all, which cannot be ruled out as a group and
-    /// which `ObjectHeader::parse_from_source` may well manage where
-    /// [`edit::read_oh_chunks`] did not. Not "this object is a group": the two results
-    /// differ exactly where it matters, and the field is named for the
-    /// instruction rather than for the fact.
+    /// Whether the caller should look for children below this object.
+    ///
+    /// True if the header contains group messages or the chunk traversal failed. The caller
+    /// can attempt the parsed-header traversal after a chunk traversal error.
     descend: bool,
     /// Some datatype in the object — its elements' or an attribute's — reaches
     /// an object address. True whether or not any address needed repointing:
@@ -529,10 +510,9 @@ struct Scanned {
     /// The object's header was read in full. False leaves the file's
     /// reference-free claim unproven, since what was not read might hold one.
     fully_read: bool,
-    /// [`edit::read_oh_chunks`] read this header, so its messages were located *in the
-    /// file* and an attribute inside it can be edited. False for a version 1
-    /// header, whose elements are reached the other way — see
-    /// [`scan_parsed_header`].
+    /// Whether the chunk traversal located the messages for patches within the header.
+    ///
+    /// False for a version 1 header, whose contiguous data is read by [`scan_parsed_header`].
     header_located: bool,
 }
 
@@ -555,7 +535,7 @@ fn scan_object<S: Source + ?Sized>(
     // is reported as a group so the caller still tries to descend through it:
     // `ObjectHeader::parse_from_source` reads both, so such a group does not
     // hide the objects below it from the walk.
-    let Ok(chunks) = edit::read_oh_chunks(src, addr, base) else {
+    let Ok(chunks) = edit::object_header::read_oh_chunks(src, addr, base) else {
         return Ok(Scanned {
             descend: true,
             holds_a_reference: false,
@@ -605,7 +585,9 @@ fn scan_object<S: Source + ?Sized>(
     for chunk in &chunks {
         let layout = chunk.layout();
         let (region, mut p) = chunk.message_region();
-        while let Some((msg_type, body, body_end)) = crate::edit::next_record(layout, region, p)? {
+        while let Some((msg_type, body, body_end)) =
+            crate::edit::object_header::next_record(layout, region, p)?
+        {
             // Absolute file offset of this message's body.
             let body_at = chunk.span.0 + body as u64;
             // The flags byte is the 4th of the record header (type, size, flags).
@@ -925,7 +907,8 @@ mod tests {
     /// [`HEADER_AT`], with the space before it filled with a byte that is not
     /// part of any address.
     fn image_with_header(region: &[u8]) -> (BytesSource<Vec<u8>>, Vec<u8>) {
-        let header = edit::build_v2_object_header(&plain_region(region.to_vec())).unwrap();
+        let header =
+            edit::object_header::build_v2_object_header(&plain_region(region.to_vec())).unwrap();
         let mut bytes = vec![0xAAu8; HEADER_AT as usize];
         bytes.extend_from_slice(&header);
         (BytesSource::new(bytes.clone()), bytes)
@@ -1239,13 +1222,14 @@ mod tests {
             AddressContext::from_effective_base(BaseAddress::new(1024)),
         ] {
             const TYPE_AT: u64 = 2048;
-            let committed = edit::build_v2_object_header(&plain_region(message_record(
-                MessageType::DATATYPE,
-                &hdf5_pure_format::__private::serialize_datatype(
-                    &type_builders::make_object_reference_type(),
-                ),
-            )))
-            .unwrap();
+            let committed =
+                edit::object_header::build_v2_object_header(&plain_region(message_record(
+                    MessageType::DATATYPE,
+                    &hdf5_pure_format::__private::serialize_datatype(
+                        &type_builders::make_object_reference_type(),
+                    ),
+                )))
+                .unwrap();
 
             // The dataset's own header: a *shared* datatype message naming the
             // committed object, and a compact element holding the address.
@@ -1261,7 +1245,8 @@ mod tests {
             layout.extend_from_slice(&8u16.to_le_bytes());
             layout.extend_from_slice(&(300u64).to_le_bytes());
             shared.extend_from_slice(&message_record(MessageType::DATA_LAYOUT, &layout));
-            let dataset = edit::build_v2_object_header(&plain_region(shared)).unwrap();
+            let dataset =
+                edit::object_header::build_v2_object_header(&plain_region(shared)).unwrap();
 
             let mut bytes = vec![0xAAu8; TYPE_AT as usize];
             bytes.extend_from_slice(&committed);

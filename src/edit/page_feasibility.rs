@@ -204,7 +204,7 @@ impl WriteEngine {
         region.push_link("added", self.addresses.relative(header).unwrap(), None);
         let root = self
             .alloc_or_append_typed(
-                &edit::build_v2_object_header(&region).unwrap(),
+                &edit::object_header::build_v2_object_header(&region).unwrap(),
                 AllocationClass::Metadata,
             )
             .unwrap();
