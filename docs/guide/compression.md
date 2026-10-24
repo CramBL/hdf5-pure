@@ -29,7 +29,7 @@ let bytes = builder.finish()?;
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
-See [Writing files](crate::_guide::writing) for the full dataset builder API.
+See [Writing files](crate::_guide::writing) for the full dataset builder API. The chunk dimensions and the filters can also be set through [`DatasetCreateProperties`](crate::DatasetCreateProperties), a dataset creation property list, as an alternative to the builder methods this page uses.
 
 ## Deflate
 

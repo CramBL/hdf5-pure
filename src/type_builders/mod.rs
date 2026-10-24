@@ -33,7 +33,7 @@ use crate::error::FormatError;
 use crate::object_path::LinkName;
 use crate::object_path::LinkNameBuf;
 use crate::object_path::ObjectPathBuf;
-use crate::scaleoffset::{FillAvailability, ScaleOffset};
+use crate::scaleoffset::ScaleOffset;
 use crate::shared_message::DatatypeLocation;
 use crate::width::LengthWidth;
 use crate::{FixedPointType, FloatingPointType};
@@ -3500,12 +3500,7 @@ impl DatasetBuilder {
     /// library (filter id 6) and vice versa.
     pub fn with_scale_offset(&mut self, mode: ScaleOffset) -> &mut Self {
         self.chunk_options
-            // `Defined` named rather than defaulted: it is this builder that
-            // chooses it on the caller's behalf, matching what the reference
-            // library records for every dataset whose fill value is not
-            // explicitly undefined, and `with_scale_offset` is where a reader
-            // looks for that choice.
-            .set_filter(FilterKind::ScaleOffset(mode, FillAvailability::Defined));
+            .set_filter(FilterKind::scale_offset(mode));
         self
     }
 
