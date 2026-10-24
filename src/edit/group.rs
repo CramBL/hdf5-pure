@@ -269,8 +269,12 @@ pub(super) fn patch_link_target(
                         "a link message holds bytes past its hard link address",
                     ));
                 }
-                region.bytes_mut()[body + address.start..body_end]
-                    .copy_from_slice(&new_addr.get().to_le_bytes());
+                hdf5_pure_format::__private::write_stored_address_at(
+                    region.bytes_mut(),
+                    body + address.start,
+                    new_addr,
+                    OFFSET_WIDTH,
+                )?;
                 return Ok(());
             }
         }
