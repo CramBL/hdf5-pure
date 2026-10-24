@@ -644,7 +644,9 @@ fn scan_object<S: Source + ?Sized>(
                 // reference C library and h5py emit an Attribute Info message
                 // for compact attributes too, to carry creation-order metadata.
                 MessageType::ATTRIBUTE_INFO
-                    if crate::edit::attribute_info_is_dense(&region[body..body_end]) =>
+                    if crate::edit::attributes::attribute_info_is_dense(
+                        &region[body..body_end],
+                    ) =>
                 {
                     out.fully_read = false;
                 }

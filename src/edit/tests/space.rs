@@ -1739,7 +1739,7 @@ fn header_region(session: &WriteEngine, addr: u64) -> OhRegion {
 }
 
 fn attribute_heap_address(session: &WriteEngine, addr: u64) -> u64 {
-    let info = edit::find_attribute_info(&header_region(session, addr))
+    let info = edit::attributes::find_attribute_info(&header_region(session, addr))
         .unwrap()
         .expect("a dense object has Attribute Info")
         .2;
