@@ -529,7 +529,7 @@ enum PendingPageEdit {
 }
 
 fn assert_preflight_refusal(engine: &mut WriteEngine) {
-    let mark = engine.staged.mark();
+    let mark = engine.staged.snapshot();
     disk_log::start();
     let error = engine.commit().unwrap_err();
     assert!(
@@ -537,7 +537,7 @@ fn assert_preflight_refusal(engine: &mut WriteEngine) {
         "{error:?}"
     );
     assert!(engine.has_staged_edits());
-    assert!(engine.staged.mark() == mark);
+    assert!(engine.staged.snapshot() == mark);
     assert!(!engine.publish_attempted);
     assert!(engine.space.reusable_sections().next().is_none());
     assert!(disk_log::take().is_empty());
@@ -796,12 +796,12 @@ fn explicit_sync_clears_pending_page_publication_and_preserves_staged_edits(
     engine.stage_page_edits();
     let published = engine.assert_page_commit_failure(&original, Failure::AfterDrain);
     stage_byte_dataset(&mut engine, "second", 11);
-    let mark = engine.staged.mark();
+    let mark = engine.staged.snapshot();
     assert!(engine.publish_attempted);
     disk_log::start();
     engine.force_sync().unwrap();
     assert!(!engine.publish_attempted);
-    assert!(engine.staged.mark() == mark);
+    assert!(engine.staged.snapshot() == mark);
     assert!(disk_log::take().is_empty());
     let records = barriers.lock().unwrap();
     assert_eq!(
@@ -823,7 +823,7 @@ fn assert_recovery_preserves_staging(
     failure: Failure,
     explicit_sync: bool,
 ) {
-    let mark = engine.staged.mark();
+    let mark = engine.staged.snapshot();
     disk_log::start();
     let error = if explicit_sync {
         engine.force_sync()
@@ -842,7 +842,7 @@ fn assert_recovery_preserves_staging(
         (_, error) => panic!("expected injected PAGE recovery failure, got {error:?}"),
     }
     assert!(engine.publish_attempted);
-    assert!(engine.staged.mark() == mark);
+    assert!(engine.staged.snapshot() == mark);
     assert!(engine.space.reusable_sections().next().is_none());
     assert!(disk_log::take().is_empty());
 }
@@ -944,7 +944,7 @@ impl WriteEngine {
     }
 
     fn assert_page_recovery_rejected(&mut self, explicit_sync: bool) {
-        let mark = self.staged.mark();
+        let mark = self.staged.snapshot();
         disk_log::start();
         let error = if explicit_sync {
             self.force_sync()
@@ -957,7 +957,7 @@ impl WriteEngine {
                 if reason == "PAGE publication bytes differ from the session image after a failed write; close and reopen the file before editing again"),
             "{error:?}"
         );
-        assert!(self.staged.mark() == mark);
+        assert!(self.staged.snapshot() == mark);
         assert!(self.space.reusable_sections().next().is_none());
         assert!(disk_log::take().is_empty());
     }

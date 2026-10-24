@@ -390,7 +390,7 @@ use crate::width::FormatWidths;
 use crate::{FixedPointType, FloatingPointType};
 
 use self::aggregation::AggregateSpace;
-use self::staging::StagedEdits;
+use self::staging::{StagedEdits, StagedScope};
 
 pub(crate) use self::staging::{StagedChild, StagedKind, StagedMeta, StagedObject};
 
@@ -4110,7 +4110,7 @@ impl WriteEngine {
         // issue #327 — a rebuilt group, which had the same defect and none of
         // the guard.
         let mut incoming_links: Option<Option<HashMap<u64, u32>>> = None;
-        for (full, fd) in &staged.writes {
+        for (full, fd) in staged.writes() {
             // A path named twice in one commit would write it twice (and double-
             // free a resized extent); require separate commits.
             if write_targets.contains(full) {
@@ -4177,7 +4177,7 @@ impl WriteEngine {
         // treated like a relocating overwrite of the dataset's header (staged
         // against its parent group so the commit patches the link). A zero-length
         // append is a no-op and is dropped here. ---
-        for (full, ab) in &staged.appends {
+        for (full, ab) in staged.appends() {
             let Some((parent, leaf)) = full.split_leaf() else {
                 return Err(Error::AppendUnsupported("cannot append to the root group"));
             };
@@ -4227,12 +4227,12 @@ impl WriteEngine {
         // `AttrEdit` header rewrite against the parent group — like a value
         // overwrite, but the data-layout message (and thus the chunk data and index)
         // is preserved verbatim, so only the header moves. ---
-        if !staged.dataset_attrs.is_empty() {
+        if !staged.dataset_attrs().is_empty() {
             // Collect the ops per dataset in first-seen path order, so multiple edits
             // to one dataset produce a single relocating header rewrite.
             let mut order: Vec<ObjectPathBuf> = Vec::new();
             let mut ops_by_path: HashMap<&ObjectPathBuf, Vec<&AttrOp>> = HashMap::new();
-            for (path, op) in &staged.dataset_attrs {
+            for (path, op) in staged.dataset_attrs() {
                 if !ops_by_path.contains_key(path) {
                     order.push(path.clone());
                 }
@@ -4326,14 +4326,7 @@ impl WriteEngine {
             inplace_writes.iter().all(|(_, b)| b.vlen.is_none()),
             "a staged variable-length overwrite must relocate, not write in place"
         );
-        if moving_writes.is_empty()
-            && staged.datasets.is_empty()
-            && staged.groups.is_empty()
-            && staged.group_attrs.is_empty()
-            && staged.deletes.is_empty()
-            && staged.copies.is_empty()
-            && staged.cross_copies.is_empty()
-        {
+        if moving_writes.is_empty() && staged.scope() == StagedScope::Datasets {
             // This path's own point of no return, and it takes the staged set
             // for the same reason the main one below does (issue #316): every
             // refusal that applies to these overwrites has already run, and a
@@ -4376,7 +4369,7 @@ impl WriteEngine {
         let mut attr_targets: Vec<ObjectPathBuf> = Vec::new();
 
         // Mark explicitly-created new groups, ensuring their ancestor chain.
-        for path in &staged.groups {
+        for path in staged.groups() {
             if path.is_empty() {
                 return Err(Error::EditUnsupported("cannot create the root group"));
             }
@@ -4389,7 +4382,7 @@ impl WriteEngine {
         // chain). The datasets themselves stay in the staged set, which the
         // preflight reads but must not empty (issue #316); `datasets_by_group`
         // below is the grouped view both the preflight and the apply loop use.
-        for (parent, fd) in &staged.datasets {
+        for (parent, fd) in staged.datasets() {
             add_targets.push(parent.join(&fd.name));
             ensure_ancestors(&mut nodes, parent);
         }
@@ -4411,14 +4404,14 @@ impl WriteEngine {
         // destination or a dataset being added in the same commit. The ops
         // themselves stay in the staged set and are looked up by path where they
         // are applied, so a refusal below still gives them back (issue #316).
-        for (path, _) in &staged.group_attrs {
+        for (path, _) in staged.group_attrs() {
             ensure_ancestors(&mut nodes, path);
             attr_targets.push(path.clone());
         }
 
         // Stage copies: validate the source subtree is copyable (read-only),
         // then treat the destination like an addition to its parent group.
-        for (src, dst) in &staged.copies {
+        for (src, dst) in staged.copies() {
             if src.is_empty() {
                 return Err(Error::EditUnsupported("cannot copy the root group"));
             }
@@ -4461,7 +4454,7 @@ impl WriteEngine {
         // source file (with foreign-address screening) when `copy_from` was
         // called, so here they are simply linked into the destination parent like
         // any other addition.
-        for (dst, _) in &staged.cross_copies {
+        for (dst, _) in staged.cross_copies() {
             let Some((parent, leaf)) = dst.split_leaf() else {
                 return Err(Error::EditUnsupported("copy destination path is empty"));
             };
@@ -4475,7 +4468,7 @@ impl WriteEngine {
         // against its parent group (which becomes dirty). `deleted_addrs` keeps
         // each removed object's header address so its owned blocks can be
         // reclaimed after the commit lands (issue #21).
-        let delete_targets = &staged.deletes;
+        let delete_targets = staged.deletes();
         let mut deleted_addrs: Vec<u64> = Vec::new();
         for (i, d) in delete_targets.iter().enumerate() {
             let Some((parent, leaf)) = d.split_leaf() else {
@@ -4672,7 +4665,7 @@ impl WriteEngine {
         // is not fully resolved here — its global heap collection is built (it
         // is self-contained, no address needed yet) but placed and patched into
         // `base_region` only in the apply loop below, once its address is known.
-        let attrs_by_group = group_by_parent(staged.group_attrs.iter().map(|(p, op)| (p, op)));
+        let attrs_by_group = group_by_parent(staged.group_attrs().iter().map(|(p, op)| (p, op)));
         // The pre-commit header address of each group this commit rewrites. An
         // edit that sends a group's attributes to a fractal heap reads the set it
         // rebuilds back out of the file, which needs the address; a group this
@@ -4716,7 +4709,7 @@ impl WriteEngine {
         // every one of those guards may still refuse, and a refusal gives the
         // caller back every edit it was holding (issue #316). The apply loop
         // rebuilds the same grouping, by the same rule, once it owns the set.
-        let datasets_by_group = group_by_parent(staged.datasets.iter().map(|(p, fd)| (p, fd)));
+        let datasets_by_group = group_by_parent(staged.datasets().iter().map(|(p, fd)| (p, fd)));
 
         // A group that tracks *link* creation order takes an addition — the
         // apply loop numbers each added link from the running maximum its Link
@@ -4778,7 +4771,7 @@ impl WriteEngine {
         // Content the caller's library-version bound cannot carry is refused
         // here, before any write, so a rejected addition leaves the commit
         // unapplied.
-        self.check_libver_admits(staged.datasets.iter().map(|(_, fd)| fd))?;
+        self.check_libver_admits(staged.datasets().iter().map(|(_, fd)| fd))?;
 
         // Enumerate what this commit's deletions reclaim, from the current
         // on-disk layout and before any byte moves. It is read here, ahead of
@@ -4884,7 +4877,7 @@ impl WriteEngine {
         // Cross-file copies need no screen for the opposite reason:
         // `reject_foreign_addresses` refuses a reference datatype outright on
         // that path.
-        for (_, fd) in staged.datasets.iter().chain(&staged.writes) {
+        for (_, fd) in staged.datasets().iter().chain(staged.writes()) {
             screen_resolved_references(&fd.dt, &fd.raw, &for_supplied)?;
         }
 
@@ -4900,14 +4893,19 @@ impl WriteEngine {
         // — but that is a refusal in another function rather than a property of
         // this collection, and the check that means what it says is the one that
         // looks.
-        if staged.datasets.iter().chain(&staged.writes).any(|(_, fd)| {
-            datatype::datatype_holds_object_address(&fd.dt)
-                || fd
-                    .attrs
-                    .iter()
-                    .any(|a| datatype::datatype_holds_object_address(&a.datatype))
-        }) || !staged.copies.is_empty()
-            || !staged.cross_copies.is_empty()
+        if staged
+            .datasets()
+            .iter()
+            .chain(staged.writes())
+            .any(|(_, fd)| {
+                datatype::datatype_holds_object_address(&fd.dt)
+                    || fd
+                        .attrs
+                        .iter()
+                        .any(|a| datatype::datatype_holds_object_address(&a.datatype))
+            })
+            || !staged.copies().is_empty()
+            || !staged.cross_copies().is_empty()
         {
             self.proved_free_of_references = false;
         }
@@ -4942,7 +4940,7 @@ impl WriteEngine {
         // superblock is repointed last — restores none of them, so no later
         // `commit` can finish a batch this one abandoned (issue #316). Nothing
         // above this line may consume from `staged`. ---
-        let mut taken = std::mem::take(staged);
+        let mut taken = std::mem::take(staged).into_apply();
         // The same paths as the borrow above, owned now that the set has moved.
         let delete_targets = std::mem::take(&mut taken.deletes);
         // The same grouping as `datasets_by_group` above, by the same rule and
@@ -5154,8 +5152,8 @@ impl WriteEngine {
             // relative to the base address. Placed
             // non-reference datasets first (recording each into `path_addr`), then
             // reference datasets — a reference to a *non-reference* sibling added
-            // in the same group's batch resolves regardless of `staged.datasets`
-            // call order (`Vec::sort_by_key` is stable, so within each of the two
+            // in the same group's batch resolves regardless of staging
+            // order (`Vec::sort_by_key` is stable, so within each of the two
             // groups the original order is preserved). Two reference datasets that
             // target each other in the same batch are still call-order-dependent —
             // whichever is placed first resolves the other, and the reverse
@@ -5399,9 +5397,9 @@ impl WriteEngine {
     ) -> Result<(), Error> {
         let unsupported_dataset =
             staged
-                .datasets
+                .datasets()
                 .iter()
-                .chain(&staged.writes)
+                .chain(staged.writes())
                 .any(|(_, dataset)| {
                     dataset.attrs_are_dense
                         || datatype::datatype_holds_object_address(&dataset.dt)
@@ -5414,7 +5412,7 @@ impl WriteEngine {
         // addresses when staged, so their datatypes cannot add object references.
         if unsupported_dataset
             || staged
-                .cross_copies
+                .cross_copies()
                 .iter()
                 .any(|(_, tree)| tree.has_dense_attributes())
             || nodes.values().any(|node| {
@@ -6671,11 +6669,8 @@ impl WriteEngine {
         let src = &self.image();
         let base = self.addresses;
         let widths = self.widths;
-        // Enforced by construction: `staged.writes` has one producer, and it
-        // refuses there. Asserted rather than re-refused because a second caller
-        // that skipped it would not fail here — a chunked builder would fall
-        // through and be written as a plain contiguous overwrite, with
-        // `chunk_options` silently dropped.
+        // `stage_dataset_write` checks these options before storing a prepared write.
+        // Skipping that check would discard chunk options during a contiguous overwrite.
         debug_assert!(
             Self::refuse_unsupported_overwrite(fd).is_ok(),
             "a staged write reached prepare_write without refuse_unsupported_overwrite"
@@ -8682,15 +8677,14 @@ impl WriteEngine {
         if self.vl_overwrite_heaps.is_empty() {
             return;
         }
-        let aliasing_edit = !staged.copies.is_empty()
-            || !staged.cross_copies.is_empty()
+        let aliasing_edit = !staged.copies().is_empty()
+            || !staged.cross_copies().is_empty()
             // A dataset staged with element bytes of its own (`with_raw_data`)
             // rather than staging its strings here, whether it is being created
             // or overwritten.
-            || staged
-                .writes
+            || staged.writes()
                 .iter()
-                .chain(&staged.datasets)
+                .chain(staged.datasets())
                 .any(|(_, fd)| {
                     fd.vl_string_staging.is_none()
                         && datatype::datatype_holds_file_address(&fd.dt)
@@ -8701,7 +8695,7 @@ impl WriteEngine {
         }
         // A deleted dataset's record would otherwise outlive it and be applied
         // to whatever later takes its path.
-        for path in &staged.deletes {
+        for path in staged.deletes() {
             self.vl_overwrite_heaps
                 .retain(|recorded, _| !recorded.overlaps(path));
         }
@@ -20622,7 +20616,7 @@ mod staged_query_tests {
         );
         // Folded into the creation rather than queued beside it, so the commit
         // has one dataset to write and no append to apply to it.
-        assert!(e.staged.appends.is_empty());
+        assert!(e.staged.appends().is_empty());
 
         e.commit().unwrap();
         let addr = crate::group_v2::resolve_path_any_from_source(
@@ -20661,7 +20655,7 @@ mod staged_query_tests {
             vec![1],
             "the refusal must leave the replacement alone"
         );
-        assert!(e.staged.appends.is_empty());
+        assert!(e.staged.appends().is_empty());
     }
 
     #[test]
@@ -20723,7 +20717,7 @@ mod staged_query_tests {
         b.append_i32(&[4]);
         e.stage_dataset_append(&ObjectPathBuf::parse("existing"), b)
             .unwrap();
-        assert_eq!(e.staged.appends.len(), 1);
+        assert_eq!(e.staged.appends().len(), 1);
 
         // And so does one made through a handle whose creation was committed
         // between the caller's check and this lock.
@@ -20731,7 +20725,7 @@ mod staged_query_tests {
         b.append_i32(&[5]);
         e.stage_dataset_append_pending(&ObjectPathBuf::parse("existing"), b)
             .unwrap();
-        assert_eq!(e.staged.appends.len(), 2);
+        assert_eq!(e.staged.appends().len(), 2);
     }
 
     #[test]
@@ -20743,7 +20737,7 @@ mod staged_query_tests {
         e.delete(&ObjectPathBuf::parse("col")).unwrap();
         // Withdrawn, not queued for a deletion the commit could not perform.
         assert_eq!(kind(&e, "col"), None);
-        assert!(e.staged.deletes.is_empty());
+        assert!(e.staged.deletes().is_empty());
         assert!(!e.has_staged_edits());
         e.commit().unwrap();
     }
@@ -20781,7 +20775,7 @@ mod staged_query_tests {
         // object in the file, which is what was asked for first.
         e.delete(&ObjectPathBuf::parse("existing")).unwrap();
         assert_eq!(kind(&e, "existing"), None);
-        assert_eq!(e.staged.deletes.len(), 1);
+        assert_eq!(e.staged.deletes().len(), 1);
         e.commit().unwrap();
         assert!(
             crate::group_v2::resolve_path_any_from_source(
