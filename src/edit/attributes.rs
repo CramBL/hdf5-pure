@@ -1,3 +1,6 @@
+//! Attribute edit preparation and compact and dense storage placement.
+
+use hdf5_pure_format::__private::RecordSplice;
 use hdf5_pure_space::__private::AllocationClass;
 
 use crate::access_mode::AccessMode;
@@ -5,7 +8,7 @@ use crate::address::AddressContext;
 use crate::attribute::StoredAttribute;
 use crate::attribute_info::AttributeInfoMessage;
 use crate::convert::Narrow;
-use crate::error::{Error, OBJECT_HEADER_MESSAGE_MAX};
+use crate::error::{Error, FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::file_writer::{DenseAttrCreationOrder, LENGTH_SIZE};
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
@@ -859,7 +862,7 @@ fn compact_attribute_info_body(region: &OhRegion) -> Result<Vec<u8>, Error> {
 ///
 /// Returns [`Error::EditUnsupported`] if a record extends past the region, an Attribute record
 /// has nonzero flags, or creation indexes are exhausted. Propagates attribute-name parsing
-/// errors.
+/// and record-splicing errors.
 ///
 /// # Panics
 ///
@@ -911,16 +914,18 @@ pub(super) fn put_attr_message(
                     info.max_creation_index = new_max;
                     info.indexes_creation_order |= layout.indexes_creation_order();
                     let encoded = info.serialize(crate::file_writer::OFFSET_WIDTH);
-                    let len: u16 = encoded.len().narrow_or_else(|| {
-                        Error::EditUnsupported("an Attribute Info message is too large to record")
+                    let splice = RecordSplice::first(
+                        layout,
+                        &region[p..body_end],
+                        MessageType::ATTRIBUTE_INFO,
+                    )?
+                    .ok_or_else(|| {
+                        FormatError::Internal(
+                            "a parsed Attribute Info record is absent from its source range"
+                                .to_owned(),
+                        )
                     })?;
-                    // Only the body and its length change: the record keeps its
-                    // own flags - libhdf5 marks this message
-                    // "don't share" - and its creation index.
-                    out.push(region[p]);
-                    out.extend_from_slice(&len.to_le_bytes());
-                    out.extend_from_slice(&region[p + 3..msg_body]);
-                    out.extend_from_slice(&encoded);
+                    splice.replace_body_into(&mut out, &encoded)?;
                     p = body_end;
                     continue;
                 }
