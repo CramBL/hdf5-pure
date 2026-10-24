@@ -2222,12 +2222,27 @@ impl FileWriter {
             )?);
         }
 
-        // Build global heap collections for variable-length string attributes.
         // Track which attribute messages need VL patching, across root, groups, and datasets.
+        // Their strings share one set of global heap collections, built below.
         struct VlPatch {
-            /// The attribute's collections, in the order their objects appear.
-            collections: Vec<Vec<u8>>,
+            /// The attribute's strings, in the order of its references.
+            strings: Vec<String>,
             attr_index: usize, // index into the relevant attrs Vec
+        }
+
+        /// Patches each attribute's references into the shared collections at
+        /// `addrs`, advancing `first` past its strings. Callers walk root, groups,
+        /// then datasets, the order the shared collections hold the strings in.
+        fn patch_shared_vl_refs(
+            patches: &[VlPatch],
+            attrs: &mut [AttributeMessage],
+            addrs: &[u64],
+            first: &mut usize,
+        ) {
+            for patch in patches {
+                type_builders::patch_vl_refs(&mut attrs[patch.attr_index].raw_data, addrs, *first);
+                *first += patch.strings.len();
+            }
         }
 
         /// Reserves raw collection allocations and returns addresses for reference patching.
@@ -2261,7 +2276,7 @@ impl FileWriter {
             for (i, (_n, v)) in attrs_raw.iter().enumerate() {
                 if let Some(strings) = v.var_len_strings() {
                     patches.push(VlPatch {
-                        collections: type_builders::build_global_heap_collections(strings),
+                        strings: strings.to_vec(),
                         attr_index: i,
                     });
                 }
@@ -2277,6 +2292,19 @@ impl FileWriter {
         }
 
         let vl_root = collect_vl_patches(&self.root_attrs);
+
+        // The C library shares a global heap collection across objects. A
+        // collection takes at least 4096 bytes, so one per attribute would make a
+        // file of many short string attributes mostly padding.
+        let attr_collections = {
+            let objects: Vec<&[u8]> = vl_root
+                .iter()
+                .chain(grp_vl.iter().flatten())
+                .chain(ds_vl.iter().flatten())
+                .flat_map(|patch| patch.strings.iter().map(String::as_bytes))
+                .collect();
+            type_builders::build_global_heap_collections_from_bytes(&objects)
+        };
 
         // ---- Committed datatypes: paths, reference counts, and agreement ----
         //
@@ -2565,15 +2593,7 @@ impl FileWriter {
         let mut collection_raw_sections = Vec::new();
         let mut collection_large_sections = Vec::new();
         let early_gcol_size = if let Some((page_size, _, _)) = paged {
-            let has_collections = vl_root.iter().any(|patch| !patch.collections.is_empty())
-                || grp_vl
-                    .iter()
-                    .flatten()
-                    .any(|patch| !patch.collections.is_empty())
-                || ds_vl
-                    .iter()
-                    .flatten()
-                    .any(|patch| !patch.collections.is_empty())
+            let has_collections = !attr_collections.is_empty()
                 || all_ds.iter().any(|dataset| {
                     dataset.storage.chunks().is_none()
                         && dataset
@@ -2626,27 +2646,14 @@ impl FileWriter {
                     },
                 )
             };
-            for patch in &vl_root {
-                let addrs = place(&patch.collections)?;
-                type_builders::patch_vl_refs(&mut root_attrs[patch.attr_index].raw_data, &addrs);
-            }
+            let addrs = place(&attr_collections)?;
+            let mut first = 0;
+            patch_shared_vl_refs(&vl_root, &mut root_attrs, &addrs, &mut first);
             for (gi, patches) in grp_vl.iter().enumerate() {
-                for patch in patches {
-                    let addrs = place(&patch.collections)?;
-                    type_builders::patch_vl_refs(
-                        &mut groups[gi].attrs[patch.attr_index].raw_data,
-                        &addrs,
-                    );
-                }
+                patch_shared_vl_refs(patches, &mut groups[gi].attrs, &addrs, &mut first);
             }
             for (di, patches) in ds_vl.iter().enumerate() {
-                for patch in patches {
-                    let addrs = place(&patch.collections)?;
-                    type_builders::patch_vl_refs(
-                        &mut all_ds[di].attrs[patch.attr_index].raw_data,
-                        &addrs,
-                    );
-                }
+                patch_shared_vl_refs(patches, &mut all_ds[di].attrs, &addrs, &mut first);
             }
             for (i, dataset) in all_ds.iter_mut().enumerate() {
                 if dataset.storage.chunks().is_some() {
@@ -3538,11 +3545,7 @@ impl FileWriter {
             .build();
             sink.put(&hdf5_pure_format::__private::serialize_superblock(&sb)?)?;
 
-            let collections = vl_root
-                .iter()
-                .map(|patch| &patch.collections)
-                .chain(grp_vl.iter().flatten().map(|patch| &patch.collections))
-                .chain(ds_vl.iter().flatten().map(|patch| &patch.collections))
+            let collections = core::iter::once(&attr_collections)
                 .chain(early_gcol.iter().filter_map(|&i| {
                     all_ds[i]
                         .vl_string_staging
@@ -3685,8 +3688,8 @@ impl FileWriter {
         }
 
         // Reserve the remaining global heaps as raw allocations and patch their references.
-        // Reserve attribute collections in root, group, and dataset order, then dataset-element
-        // collections. With aggregation enabled, retain every address for emission.
+        // Reserve the shared attribute collections, then dataset-element collections. With
+        // aggregation enabled, retain every address for emission.
         let has_vl = !vl_root.is_empty()
             || grp_vl.iter().any(|v| !v.is_empty())
             || ds_vl.iter().any(|v| !v.is_empty())
@@ -3694,42 +3697,19 @@ impl FileWriter {
 
         let gcol_start = allocation.end();
         if has_vl {
-            for patch in &vl_root {
-                let addrs = place_collections(
-                    &patch.collections,
-                    &mut allocation,
-                    &mut aggregate_collection_addresses,
-                    aggregated,
-                )?;
-                type_builders::patch_vl_refs(&mut root_attrs[patch.attr_index].raw_data, &addrs);
-            }
+            let addrs = place_collections(
+                &attr_collections,
+                &mut allocation,
+                &mut aggregate_collection_addresses,
+                aggregated,
+            )?;
+            let mut first = 0;
+            patch_shared_vl_refs(&vl_root, &mut root_attrs, &addrs, &mut first);
             for (gi, patches) in grp_vl.iter().enumerate() {
-                for patch in patches {
-                    let addrs = place_collections(
-                        &patch.collections,
-                        &mut allocation,
-                        &mut aggregate_collection_addresses,
-                        aggregated,
-                    )?;
-                    type_builders::patch_vl_refs(
-                        &mut groups[gi].attrs[patch.attr_index].raw_data,
-                        &addrs,
-                    );
-                }
+                patch_shared_vl_refs(patches, &mut groups[gi].attrs, &addrs, &mut first);
             }
             for (di, patches) in ds_vl.iter().enumerate() {
-                for patch in patches {
-                    let addrs = place_collections(
-                        &patch.collections,
-                        &mut allocation,
-                        &mut aggregate_collection_addresses,
-                        aggregated,
-                    )?;
-                    type_builders::patch_vl_refs(
-                        &mut all_ds[di].attrs[patch.attr_index].raw_data,
-                        &addrs,
-                    );
-                }
+                patch_shared_vl_refs(patches, &mut all_ds[di].attrs, &addrs, &mut first);
             }
             // Patch dataset-element references in the contiguous element bytes moved into
             // `ds_layouts[i].data`. The writer reserves chunked datasets' collections and patches
@@ -3887,11 +3867,7 @@ impl FileWriter {
                     }),
                 )
             });
-        let attribute_collections = vl_root
-            .iter()
-            .chain(grp_vl.iter().flatten())
-            .chain(ds_vl.iter().flatten())
-            .flat_map(|patch| &patch.collections);
+        let attribute_collections = attr_collections.iter();
         let late_collections = all_ds
             .iter()
             .enumerate()
@@ -4875,9 +4851,16 @@ mod tests {
         let mut writer = FileWriter::new();
         writer.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
         writer.with_file_space_page_size(FileSpacePageSize::MAX);
-        writer.set_root_attr("first", AttrValue::VarLenString("first-value".into()));
-        writer.set_root_attr("second", AttrValue::VarLenString("second-value".into()));
-        writer.set_root_attr("third", AttrValue::VarLenString("third-value".into()));
+        // String attributes share one collection, and each string dataset has its own.
+        writer
+            .create_dataset("first")
+            .with_vlen_strings(&["first-value"]);
+        writer
+            .create_dataset("second")
+            .with_vlen_strings(&["second-value"]);
+        writer
+            .create_dataset("third")
+            .with_vlen_strings(&["third-value"]);
         let mut sink = SparseSink {
             position: 0,
             chunks: Vec::new(),

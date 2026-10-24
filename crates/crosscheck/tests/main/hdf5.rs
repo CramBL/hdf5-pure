@@ -1313,7 +1313,7 @@ fn crosscheck_userblock_all_address_types() {
     );
     builder.set_attr("MATLAB_class", AttrValue::AsciiString("struct".into()));
 
-    // Nested group with its own VL attr (second GCOL)
+    // Nested group with its own VL attribute (its strings share the root's GCOL)
     let mut grp = builder.create_group("inner");
     grp.create_dataset("vals")
         .with_f64_data(&[10.0, 20.0, 30.0]);
