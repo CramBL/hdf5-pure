@@ -213,19 +213,22 @@ impl WriteEngine {
         Ok((range.start().get(), range.length()))
     }
 
-    /// Returns the on-disk byte spans `(addr, len)` of every chunk of the
-    /// version 2 object header at `addr`: chunk 0 (signature, prefix, messages,
-    /// checksum) plus each continuation (`OCHK`) block.
+    /// Returns every chunk's full on-disk span as `(absolute address, length)`.
     ///
-    /// Used to reclaim a header's storage when its object is deleted. An error
-    /// (propagated from [`super::oh_region_at`] or a malformed continuation) means the
-    /// header is not a plain v2 header this engine can fully account for, and
-    /// the caller leaves it as dead bytes of unknown extent.
+    /// The spans include the prefix, continuation signatures, and trailing checksums. The caller
+    /// uses them to reclaim storage only after the complete traversal succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if the header cannot be traversed. Propagates
+    /// parsing and source-read errors from [`super::object_header::read_oh_chunks`].
     pub(super) fn oh_chunk_spans(&self, addr: u64) -> Result<Vec<(u64, u64)>, Error> {
-        Ok(super::read_oh_chunks(&self.image(), addr, self.addresses)?
-            .into_iter()
-            .map(|chunk| chunk.span)
-            .collect())
+        Ok(
+            super::object_header::read_oh_chunks(&self.image(), addr, self.addresses)?
+                .into_iter()
+                .map(|chunk| chunk.span)
+                .collect(),
+        )
     }
 
     /// Returns the storage of the dense attribute set that the Attribute Info message in `region`
