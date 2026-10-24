@@ -87,6 +87,14 @@ pub enum FilterKind {
 }
 
 impl FilterKind {
+    /// Returns the scale-offset filter in `mode` that records the dataset's fill value.
+    pub(crate) fn scale_offset(mode: ScaleOffset) -> Self {
+        // libhdf5 records `Defined` for every dataset whose fill value is not
+        // `H5D_FILL_VALUE_UNDEFINED` (`H5Z__set_local_scaleoffset` in `src/H5Zscaleoffset.c`,
+        // release 2.2.0).
+        Self::ScaleOffset(mode, FillAvailability::Defined)
+    }
+
     /// The registered HDF5 filter id this kind is written as.
     ///
     /// Identity for every purpose that asks "is this filter in the pipeline":

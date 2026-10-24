@@ -225,6 +225,31 @@ builder
 
 A zero-element shape requires empty data. The writer returns [`FormatError::LogicalShapeDataMismatch`](crate::FormatError::LogicalShapeDataMismatch) if element data is supplied. Both examples above omit the data.
 
+## Dataset creation properties
+
+A dataset's creation properties set how it is stored: its chunk dimensions, its filters, and its fill settings. [`DatasetCreateProperties`](crate::DatasetCreateProperties) holds them apart from the dataset's data and shape, like an HDF5 dataset creation property list, and [`with_create_properties`](crate::DatasetBuilder::with_create_properties) applies them to a dataset:
+
+```rust
+use hdf5_pure::{DatasetCreateProperties, File, FileBuilder, FillTime};
+
+let properties = DatasetCreateProperties::new()
+    .with_chunks(&[4])
+    .with_fill_value(-1_i32)
+    .with_fill_time(FillTime::Alloc);
+
+let mut builder = FileBuilder::new();
+builder
+    .create_dataset("counts")
+    .with_i32_data(&[3, 1, 4, 1, 5, 9, 2, 6])
+    .with_create_properties(properties);
+
+let file = File::from_bytes(builder.finish()?)?;
+assert_eq!(file.dataset("counts")?.fill_value::<i32>()?, Some(-1));
+# Ok::<(), hdf5_pure::Error>(())
+```
+
+The builder methods such as [`with_chunks`](crate::DatasetBuilder::with_chunks) and [`with_deflate`](crate::DatasetBuilder::with_deflate) set the same properties one at a time, and a dataset written either way has the same bytes. [`with_create_properties`](crate::DatasetBuilder::with_create_properties) describes how the two combine on one dataset, and the reference for [`DatasetCreateProperties`](crate::DatasetCreateProperties) lists the HDF5 dataset creation properties it supports and the ones it does not.
+
 ## Serializing: `finish()` vs `write(path)`
 
 When the file is fully assembled, choose how to materialize it:

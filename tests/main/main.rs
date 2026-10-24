@@ -22,6 +22,7 @@ mod complex_bulk_array;
 mod complex_integer;
 mod csr_multi_dataset;
 mod dataset_access_properties;
+mod dataset_create_properties;
 mod decoded_chunk_size;
 mod dense_attr_limits;
 mod dense_attr_vlen;

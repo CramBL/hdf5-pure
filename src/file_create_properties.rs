@@ -35,29 +35,34 @@ use crate::libver::LibVer;
 /// # Supported properties
 ///
 /// HDF5 configures a file through property lists: a file-creation property list (`fcpl`, passed to
-/// `H5Fcreate`), a file-access property list (`fapl`, passed to `H5Fcreate` and `H5Fopen`), and a
-/// dataset-access property list (`dapl`, passed to `H5Dopen`). The crate exposes no property-list
-/// handles, and models all three as plain reusable values:
-/// [`FileCreateProperties`](Self), [`FileAccessProperties`](crate::FileAccessProperties), and
+/// `H5Fcreate`), a file-access property list (`fapl`, passed to `H5Fcreate` and `H5Fopen`), a
+/// dataset-creation property list (`dcpl`, passed to `H5Dcreate`), and a dataset-access property
+/// list (`dapl`, passed to `H5Dopen`). The crate exposes no property-list handles, and models all
+/// four as plain reusable values: [`FileCreateProperties`](Self),
+/// [`FileAccessProperties`](crate::FileAccessProperties),
+/// [`DatasetCreateProperties`](crate::DatasetCreateProperties), and
 /// [`DatasetAccessProperties`](crate::DatasetAccessProperties). Build one once and pass it to
 /// [`FileBuilder::with_create_properties`](crate::FileBuilder::with_create_properties) /
 /// [`File::create_with_options`](crate::File::create_with_options), to any `*_with_options` open,
-/// or to [`File::dataset_with_options`](crate::File::dataset_with_options). The equivalent
-/// [`FileBuilder`](crate::FileBuilder) methods set the same creation properties one at a time.
+/// to [`DatasetBuilder::with_create_properties`](crate::DatasetBuilder::with_create_properties), or
+/// to [`File::dataset_with_options`](crate::File::dataset_with_options). The equivalent
+/// [`FileBuilder`](crate::FileBuilder) and [`DatasetBuilder`](crate::DatasetBuilder) methods set
+/// the same creation properties one at a time.
 ///
 /// ## The `Properties` suffix
 ///
 /// A `*Properties` type models one whole HDF5 property list, so every setting on it is looked up
-/// here, the few with no C counterpart at all included
+/// in the type's table, the few with no C counterpart at all included
 /// ([`with_memory_strategy`](crate::FileAccessProperties::with_memory_strategy),
 /// [`with_sync_policy`](crate::FileAccessProperties::with_sync_policy)), which the tables mark as
-/// such. Three types end in that suffix: [`FileCreateProperties`](Self) (`fcpl`),
-/// [`FileAccessProperties`](crate::FileAccessProperties) (`fapl`), and
+/// such. Four types end in that suffix: [`FileCreateProperties`](Self) (`fcpl`),
+/// [`FileAccessProperties`](crate::FileAccessProperties) (`fapl`),
+/// [`DatasetCreateProperties`](crate::DatasetCreateProperties) (`dcpl`), and
 /// [`DatasetAccessProperties`](crate::DatasetAccessProperties) (`dapl`). Where a setting belongs to
 /// a different HDF5 class than the table it appears in, that table labels it with its real class in
 /// parentheses.
 ///
-/// Modeling a list is not covering it: each of the three models a subset of its list's properties,
+/// Modeling a list is not covering it: each of the four models a subset of its list's properties,
 /// and the tables give the whole picture by listing what is unsupported beside what works.
 ///
 /// The suffix is a positive claim only. A `*Options` or `*Config` type is silent either way, and

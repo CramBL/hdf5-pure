@@ -455,6 +455,7 @@ pub(crate) mod compound;
 pub(crate) mod convert;
 pub(crate) mod data_layout;
 pub(crate) mod data_read;
+pub(crate) mod dataset_create_properties;
 pub(crate) mod dataspace;
 pub(crate) mod datatype;
 pub(crate) mod dense_storage;
@@ -634,6 +635,7 @@ pub use element::H5Element;
 
 pub use scaleoffset::ScaleOffset;
 
+pub use dataset_create_properties::DatasetCreateProperties;
 pub use file_create_properties::FileCreateProperties;
 #[doc(inline)]
 pub use hdf5_pure_core::DeflateLevel;
