@@ -1,5 +1,6 @@
 //! Dataset overwrite compatibility and append behavior.
 
+use hdf5_pure_format::__private::ChunkedGeometry;
 use hdf5_pure_format::__private::FILTER_PIPELINE_VERSION_TWO;
 use rstest::rstest;
 
@@ -14,9 +15,9 @@ use crate::VariableLengthType;
 #[cfg(feature = "zfp")]
 use crate::ZfpRate;
 use crate::chunked_write;
-use crate::data_layout::ChunkedLayoutFlags;
 use crate::data_layout::DONT_FILTER_PARTIAL_BOUND_CHUNKS;
-use crate::dataspace::MaxExtent;
+use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags, DataLayout};
+use crate::dataspace::{Dataspace, DataspaceType, MaxExtent};
 use crate::datatype::CharacterSet;
 use crate::datatype::Datatype;
 use crate::datatype::StringPadding;
@@ -25,7 +26,7 @@ use crate::edit;
 use crate::edit::AppendBuilder;
 use crate::edit::AppendTarget;
 use crate::edit::WriteEngine;
-use crate::edit::dataset::ChunkedOverwrite;
+use crate::edit::dataset::{ChunkGeometry, ChunkedOverwrite};
 use crate::error::Error;
 use crate::file_lock::FileLocking;
 use crate::fill_value::PaddingFill;
@@ -255,10 +256,26 @@ fn a_chunked_overwrite_stores_its_partial_edge_chunks_raw_under_the_layout_flag(
     } else {
         ChunkedLayoutFlags::NONE
     };
+    let dataspace = Dataspace {
+        space_type: DataspaceType::Simple,
+        rank: shape.len().try_into().unwrap(),
+        dimensions: shape.to_vec(),
+        max_dimensions: None,
+    };
+    let layout = DataLayout::Chunked {
+        flags,
+        chunk_dimensions: chunk_dims
+            .iter()
+            .copied()
+            .chain([element_size.get() as u64])
+            .collect(),
+        index: ChunkIndexLayout::FixedArray { address: None },
+    };
     let overwrite = ChunkedOverwrite {
-        shape: shape.to_vec(),
-        chunk_dims: chunk_dims.to_vec(),
-        element_size,
+        geometry: ChunkGeometry::new(
+            &dataspace,
+            ChunkedGeometry::new(&dt, &dataspace, &layout).unwrap(),
+        ),
         flags,
         pipeline: Some(pipeline),
         padding,
