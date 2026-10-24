@@ -1,45 +1,36 @@
 //! Exercises free-space reuse with mixed raw data and metadata across editor lifecycles.
 //!
 //! The workload deletes the oldest groups under allocation pressure and verifies surviving data,
-//! deleted paths, bounded growth, and Rust ownership accounting.
+//! deleted paths, bounded growth, and reusable free space.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use hdf5_pure::AttrValue;
-use hdf5_pure::ChunkIndex;
-use hdf5_pure::DeflateLevel;
-use hdf5_pure::Error;
-use hdf5_pure::File;
-use hdf5_pure::FileAccessProperties;
-use hdf5_pure::FileBuilder;
-use hdf5_pure::FileSpacePageSize;
-use hdf5_pure::FileSpaceStrategy;
-use hdf5_pure::FilterId;
-use hdf5_pure::FormatError;
-use hdf5_pure::Layout;
-use hdf5_pure::MaxExtent;
-use hdf5_pure::MemoryStrategy;
-use hdf5_pure::ScaleOffset;
-use hdf5_pure::SpaceAccounting;
-use hdf5_pure::SyncPolicy;
-use hdf5_pure::UserblockSize;
 use test_util::temp;
+use test_util::userblock::Userblock;
 
-use crate::dataset::{self, Filter};
-use crate::file_space;
-use crate::file_space::SpaceOwnershipSummary;
-use crate::session;
-use crate::userblock;
+use super::api::{
+    AttrValue, ChunkIndex, DatasetBuilder, DeflateLevel, Error, File, FileAccessProperties,
+    FileBuilder, FileSpacePageSize, FileSpaceStrategy, FilterId, FormatError, Layout, MaxExtent,
+    MemoryStrategy, ScaleOffset, SpaceAccounting, SyncPolicy, UserblockSize,
+};
+use super::dataset;
+use super::file_space;
 
-/// Runs the churn workload and returns its growth, reuse, and ownership report.
+/// Runs the churn workload and reports file growth, reuse, and free space.
 ///
 /// # Panics
 ///
 /// Panics if a file operation fails or a workload assertion fails.
 pub fn run_churn(lifecycle: Lifecycle, strategy: Strategy, base: Base) -> ChurnReport {
-    run_churn_inner(lifecycle, strategy, base, None::<fn(&Path, &str)>)
+    run_churn_inner(
+        lifecycle,
+        strategy,
+        base,
+        None::<fn(&Path, &str)>,
+        |_, _| {},
+    )
 }
 
 /// Runs churn with observations after each intended close and before the next writing session.
@@ -56,7 +47,31 @@ pub fn run_churn_observed(
     base: Base,
     observer: impl FnMut(&Path, &str),
 ) -> ChurnReport {
-    run_churn_inner(lifecycle, strategy, base, Some(observer))
+    run_churn_inner(lifecycle, strategy, base, Some(observer), |_, _| {})
+}
+
+/// Runs churn with access to committed, closed, and reopened editing sessions.
+///
+/// The callback receives an editing-session handle and a checkpoint label after the initial open,
+/// each deletion wave, each lifecycle close and reopen, and the final commit and close.
+/// After a close, the handle refers to the closed editing session.
+///
+/// # Panics
+///
+/// Panics if a file operation fails, a workload assertion fails, or the callback panics.
+pub fn run_churn_with_checkpoints(
+    lifecycle: Lifecycle,
+    strategy: Strategy,
+    base: Base,
+    checkpoint: impl FnMut(&File, &str),
+) -> ChurnReport {
+    run_churn_inner(
+        lifecycle,
+        strategy,
+        base,
+        None::<fn(&Path, &str)>,
+        checkpoint,
+    )
 }
 
 fn run_churn_inner(
@@ -64,6 +79,7 @@ fn run_churn_inner(
     strategy: Strategy,
     base: Base,
     mut observer: Option<impl FnMut(&Path, &str)>,
+    mut checkpoint: impl FnMut(&File, &str),
 ) -> ChurnReport {
     let path = temp::temp_path(&format!(
         "hdf5_pure_free_space_churn_{}_{}_{}.h5",
@@ -80,6 +96,7 @@ fn run_churn_inner(
     assert!(base.image_size(&path) <= MAX_FILE_BYTES);
 
     let mut session = Some(base.open(&path));
+    checkpoint(session.as_ref().unwrap(), "initial-commit");
     let mut writable_opens = 1usize;
     let mut closes = 0usize;
     let mut reopens = 0usize;
@@ -192,7 +209,7 @@ fn run_churn_inner(
                 "an interior deletion wave must create reusable space or reduce pressure"
             );
             stats.deletion_reduced_pressure_or_created_free = true;
-            let ownership = base.exact_ownership(file);
+            checkpoint(file, &format!("deletion-wave-after-epoch-{sequence}"));
             deletion_waves.push(DeletionWave {
                 index: deletion_waves.len() + 1,
                 after_epoch: sequence,
@@ -203,7 +220,7 @@ fn run_churn_inner(
                 logical_size: sample.logical_size,
                 reusable_free: sample.reusable_free,
                 pressure: sample.pressure,
-                ownership,
+                reusable_free_regions: file.space_accounting().unwrap().reusable_free_space.len(),
             });
 
             if lifecycle == Lifecycle::ReopenFrequently {
@@ -221,6 +238,7 @@ fn run_churn_inner(
                     &mut reopens,
                     &mut stats,
                     &mut observer,
+                    &mut checkpoint,
                 );
             }
         } else if lifecycle == Lifecycle::ReopenFrequently
@@ -241,6 +259,7 @@ fn run_churn_inner(
                 &mut reopens,
                 &mut stats,
                 &mut observer,
+                &mut checkpoint,
             );
         }
     }
@@ -276,6 +295,7 @@ fn run_churn_inner(
             &mut reopens,
             &mut stats,
             &mut observer,
+            &mut checkpoint,
         );
     }
 
@@ -286,6 +306,7 @@ fn run_churn_inner(
         file.dataset("sentinel").unwrap().read_i32().unwrap(),
         vec![7, 11, 13, 17]
     );
+    checkpoint(file, "final-commit");
     let final_state = final_state(&path, base, file, &live);
     stats.observe_state(
         final_state.physical_size,
@@ -298,7 +319,7 @@ fn run_churn_inner(
     let after_close = closing.clone();
     closing.close().unwrap();
     closes += 1;
-    let after_close_ownership = base.exact_ownership(&after_close);
+    checkpoint(&after_close, "final-close");
     drop(after_close);
     if let Some(stamped) = stamped {
         stamped.assert_unchanged(&path);
@@ -312,6 +333,13 @@ fn run_churn_inner(
         reader.dataset("sentinel").unwrap().read_i32().unwrap(),
         vec![7, 11, 13, 17]
     );
+    let persisted = reader.persisted_free_space().unwrap();
+    let after_close = ClosedState {
+        physical_size: released_physical_size,
+        logical_size: reader.superblock().eof_address - base.userblock(),
+        persisted_free: persisted.iter().map(|&(_, len)| len).sum(),
+        persisted_free_regions: persisted.len(),
+    };
     let after_close_coverage = validate_all_epochs(&reader, &live, epochs_written);
     assert_eq!(after_close_coverage, coverage);
     reader.close().unwrap();
@@ -362,11 +390,11 @@ fn run_churn_inner(
         reopen_checkpoints,
         coverage,
         final_state,
-        after_close_ownership,
+        after_close,
     }
 }
 
-/// The allocation, lifecycle, coverage, and ownership observations from a churn run.
+/// The allocation, lifecycle, and workload coverage observed during a churn run.
 pub struct ChurnReport {
     lifecycle: Lifecycle,
     epochs_written: usize,
@@ -389,11 +417,11 @@ pub struct ChurnReport {
     reopen_checkpoints: Vec<ReopenCheckpoint>,
     coverage: Coverage,
     final_state: FinalState,
-    after_close_ownership: SpaceOwnershipSummary,
+    after_close: ClosedState,
 }
 
 impl ChurnReport {
-    /// Formats workload limits, deletion waves, reopen checkpoints, and ownership totals.
+    /// Formats workload limits, lifecycle counters, and storage measurements.
     pub fn render(&self) -> String {
         let ChurnReport {
             lifecycle,
@@ -417,7 +445,7 @@ impl ChurnReport {
             reopen_checkpoints,
             coverage,
             final_state,
-            after_close_ownership,
+            after_close,
         } = self;
         let FinalState {
             physical_size,
@@ -426,7 +454,6 @@ impl ChurnReport {
             reusable_free_regions,
             pressure,
             live_epochs,
-            ownership,
         } = final_state;
         let Coverage {
             nested_epoch_groups,
@@ -520,7 +547,7 @@ impl ChurnReport {
         writeln!(
             out,
             "  wave  after-epoch  live-before  deleted  live-after  physical  logical  reusable \
-             live-raw  live-meta  unclassified  pressure"
+             free-regions  pressure"
         )
         .unwrap();
         for wave in deletion_waves {
@@ -534,17 +561,14 @@ impl ChurnReport {
                 logical_size,
                 reusable_free,
                 pressure,
-                ownership,
+                reusable_free_regions,
             } = wave;
 
             writeln!(
                 out,
                 "  {index:>4}  {after_epoch:>11}  {active_before:>11}  {deleted:>7}  \
                  {active_after:>10}  {physical_size:>8}  {logical_size:>7}  {reusable_free:>8}  \
-                 {:>8}  {:>9}  {:>8}  {pressure:>8}",
-                ownership.live_raw_bytes,
-                ownership.live_metadata_bytes,
-                ownership.unclassified_bytes,
+                 {reusable_free_regions:>12}  {pressure:>8}",
             )
             .unwrap();
         }
@@ -552,7 +576,7 @@ impl ChurnReport {
         writeln!(out, "reopen checkpoints").unwrap();
         writeln!(
             out,
-            "  #  reason          after-epoch  physical  persisted-free  recovered-free  unclassified"
+            "  #  reason          after-epoch  physical  persisted-free  recovered-free  free-regions"
         )
         .unwrap();
         if reopen_checkpoints.is_empty() {
@@ -566,15 +590,14 @@ impl ChurnReport {
                     physical_size,
                     persisted_free,
                     recovered_free,
-                    ownership,
+                    reusable_free_regions,
                 } = checkpoint;
 
                 writeln!(
                     out,
                     "  {index:>1}  {:<14}  {after_epoch:>11}  {physical_size:>8}  \
-                     {persisted_free:>14}  {recovered_free:>14}  {:>8}",
+                     {persisted_free:>14}  {recovered_free:>14}  {reusable_free_regions:>12}",
                     reason.label(),
-                    ownership.unclassified_bytes,
                 )
                 .unwrap();
             }
@@ -683,62 +706,23 @@ impl ChurnReport {
         )
         .unwrap();
         writeln!(out).unwrap();
-        render_ownership(&mut out, "ownership while writer open", *ownership);
-        writeln!(out).unwrap();
-        render_ownership(
-            &mut out,
-            "ownership after writer close",
-            *after_close_ownership,
-        );
+        let ClosedState {
+            physical_size,
+            logical_size,
+            persisted_free,
+            persisted_free_regions,
+        } = after_close;
+        writeln!(out, "after writer close").unwrap();
+        writeln!(out, "  physical file size         : {physical_size}").unwrap();
+        writeln!(out, "  logical size               : {logical_size}").unwrap();
+        writeln!(out, "  persisted reusable free    : {persisted_free}").unwrap();
+        writeln!(
+            out,
+            "  persisted free regions     : {persisted_free_regions}"
+        )
+        .unwrap();
         out
     }
-}
-
-fn render_ownership(
-    out: &mut String,
-    heading: &str,
-    SpaceOwnershipSummary {
-        physical_size,
-        logical_size,
-        userblock_bytes: _,
-        live_raw_bytes,
-        live_metadata_bytes,
-        free_space_manager_bytes,
-        reusable_free_bytes,
-        unclassified_bytes,
-        trailing_slack_bytes,
-        live_raw_extents,
-        live_metadata_extents,
-        free_space_manager_extents,
-        reusable_free_extents,
-        unclassified_extents,
-        trailing_slack_extents,
-    }: SpaceOwnershipSummary,
-) {
-    writeln!(out, "{heading}").unwrap();
-    writeln!(out, "  physical file size       : {physical_size}").unwrap();
-    writeln!(out, "  logical EOF              : {logical_size}").unwrap();
-    writeln!(out, "  live raw bytes           : {live_raw_bytes}").unwrap();
-    writeln!(out, "  live metadata bytes      : {live_metadata_bytes}").unwrap();
-    writeln!(
-        out,
-        "  free-space-manager bytes : {free_space_manager_bytes}"
-    )
-    .unwrap();
-    writeln!(out, "  reusable free bytes      : {reusable_free_bytes}").unwrap();
-    writeln!(out, "  unclassified bytes       : {unclassified_bytes}").unwrap();
-    writeln!(out, "  trailing slack bytes     : {trailing_slack_bytes}").unwrap();
-    writeln!(out, "  live raw extents         : {live_raw_extents}").unwrap();
-    writeln!(out, "  live metadata extents    : {live_metadata_extents}").unwrap();
-    writeln!(
-        out,
-        "  manager metadata extents : {free_space_manager_extents}"
-    )
-    .unwrap();
-    writeln!(out, "  reusable free extents    : {reusable_free_extents}").unwrap();
-    writeln!(out, "  unclassified extents     : {unclassified_extents}").unwrap();
-    writeln!(out, "  trailing slack extents   : {trailing_slack_extents}").unwrap();
-    writeln!(out, "  exact partition          : yes").unwrap();
 }
 
 struct RunStats {
@@ -856,7 +840,7 @@ fn write_epoch(file: &File, spec: EpochSpec) {
         &spec.dataset_path(CONTIGUOUS),
         &spec.data(0),
         None,
-        &[],
+        Filters::None,
         true,
     );
     create_i32_dataset(
@@ -864,7 +848,7 @@ fn write_epoch(file: &File, spec: EpochSpec) {
         &spec.dataset_path(CHUNKED),
         &spec.data(1),
         Some(CHUNK),
-        &[],
+        Filters::None,
         false,
     );
     create_i32_dataset(
@@ -872,7 +856,7 @@ fn write_epoch(file: &File, spec: EpochSpec) {
         &spec.dataset_path(DEFLATE),
         &spec.compressible_data(),
         Some(CHUNK),
-        &[Filter::Deflate(DeflateLevel::Six)],
+        Filters::Deflate,
         false,
     );
     create_i32_dataset(
@@ -880,7 +864,7 @@ fn write_epoch(file: &File, spec: EpochSpec) {
         &spec.dataset_path(SHUFFLE_DEFLATE),
         &spec.data(3),
         Some(CHUNK),
-        &[Filter::Shuffle, Filter::Deflate(DeflateLevel::Six)],
+        Filters::ShuffleDeflate,
         false,
     );
     create_i32_dataset(
@@ -888,7 +872,7 @@ fn write_epoch(file: &File, spec: EpochSpec) {
         &spec.dataset_path(SCALE_OFFSET),
         &spec.scale_offset_data(),
         Some(CHUNK),
-        &[Filter::ScaleOffset(ScaleOffset::Integer(0))],
+        Filters::ScaleOffset,
         false,
     );
 
@@ -917,10 +901,7 @@ fn write_epoch(file: &File, spec: EpochSpec) {
                             u64::try_from(RANK2_COLS).unwrap(),
                         ])
                         .with_chunks(&[RANK2_CHUNK_ROWS, RANK2_CHUNK_COLS]);
-                    dataset::apply_filters(
-                        builder,
-                        &[Filter::ScaleOffset(ScaleOffset::Integer(0))],
-                    );
+                    builder.with_scale_offset(ScaleOffset::Integer(0));
                 })
                 .unwrap();
             let single = spec.single_chunk_data();
@@ -940,7 +921,7 @@ fn create_i32_dataset(
     path: &str,
     values: &[i32],
     chunk: Option<usize>,
-    filters: &[Filter],
+    filters: Filters,
     compact_attrs: bool,
 ) {
     file.root()
@@ -949,7 +930,7 @@ fn create_i32_dataset(
             if let Some(chunk) = chunk {
                 builder.with_chunks(&[u64::try_from(chunk).unwrap()]);
             }
-            dataset::apply_filters(builder, filters);
+            filters.configure(builder);
             if compact_attrs {
                 builder
                     .set_attr("attr_layout", AttrValue::String("compact".into()))
@@ -1001,12 +982,16 @@ fn reopen_session(
     reopens: &mut usize,
     stats: &mut RunStats,
     observer: &mut Option<impl FnMut(&Path, &str)>,
+    checkpoint: &mut impl FnMut(&File, &str),
 ) {
-    session
-        .take()
-        .expect("an editing session is open")
-        .close()
-        .unwrap();
+    let closing = session.take().expect("an editing session is open");
+    let closed = closing.clone();
+    closing.close().unwrap();
+    checkpoint(
+        &closed,
+        &format!("closed-{}-after-epoch-{after_epoch}", reason.label()),
+    );
+    drop(closed);
     *closes += 1;
     let physical_size = base.image_size(path);
     assert!(physical_size <= MAX_FILE_BYTES);
@@ -1016,7 +1001,8 @@ fn reopen_session(
             &format!("{}-after-epoch-{after_epoch}", reason.label()),
         );
     }
-    let persisted_free = persisted_free_bytes(path);
+    let persisted = File::open(path).unwrap().persisted_free_space().unwrap();
+    let persisted_free = persisted.iter().map(|&(_, len)| len).sum();
     let reopened = base.open(path);
     let acct = reopened.space_accounting().unwrap();
     let reopened_pressure = pressure(base, &acct);
@@ -1025,7 +1011,18 @@ fn reopen_session(
         "a reopened bounded session must recover all persisted reusable free space"
     );
     validate_reopen_live_data(&reopened, live, epochs_written);
-    let ownership = base.exact_ownership(&reopened);
+    assert_eq!(
+        coalesced_sections(acct.reusable_free_space.iter().copied()),
+        coalesced_sections(
+            persisted
+                .iter()
+                .map(|&(at, len)| (at + base.userblock(), len))
+        )
+    );
+    checkpoint(
+        &reopened,
+        &format!("reopened-{}-after-epoch-{after_epoch}", reason.label()),
+    );
     let recovered_free = acct.reusable_free_bytes;
     stats.observe_state(
         physical_size,
@@ -1042,19 +1039,25 @@ fn reopen_session(
         physical_size,
         persisted_free,
         recovered_free,
-        ownership,
+        reusable_free_regions: acct.reusable_free_space.len(),
     });
     *session = Some(reopened);
 }
 
-fn persisted_free_bytes(path: &Path) -> u64 {
-    File::open(path)
-        .unwrap()
-        .persisted_free_space()
-        .unwrap()
-        .iter()
-        .map(|&(_, len)| len)
-        .sum()
+fn coalesced_sections(sections: impl IntoIterator<Item = (u64, u64)>) -> Vec<(u64, u64)> {
+    let mut sections = sections.into_iter().collect::<Vec<_>>();
+    sections.sort_unstable();
+    let mut coalesced = Vec::<(u64, u64)>::new();
+    for (at, len) in sections {
+        if let Some((previous, previous_len)) = coalesced.last_mut()
+            && *previous + *previous_len == at
+        {
+            *previous_len += len;
+        } else {
+            coalesced.push((at, len));
+        }
+    }
+    coalesced
 }
 
 fn validate_all_epochs(file: &File, live: &VecDeque<usize>, epochs_written: usize) -> Coverage {
@@ -1115,7 +1118,6 @@ fn final_state(path: &Path, base: Base, file: &File, live: &VecDeque<usize>) -> 
         reusable_free_regions: acct.reusable_free_space.len(),
         pressure,
         live_epochs: live.len(),
-        ownership: base.exact_ownership(file),
     }
 }
 
@@ -1542,6 +1544,31 @@ impl EpochFlavor {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Filters {
+    Deflate,
+    None,
+    ScaleOffset,
+    ShuffleDeflate,
+}
+
+impl Filters {
+    fn configure(self, builder: &mut DatasetBuilder) {
+        match self {
+            Self::Deflate => {
+                builder.with_deflate(DeflateLevel::Six);
+            }
+            Self::None => {}
+            Self::ScaleOffset => {
+                builder.with_scale_offset(ScaleOffset::Integer(0));
+            }
+            Self::ShuffleDeflate => {
+                builder.with_shuffle().with_deflate(DeflateLevel::Six);
+            }
+        }
+    }
+}
+
 /// The userblock configuration for a churn file.
 ///
 /// Reports subtract the userblock length from physical and logical file sizes. Files with a
@@ -1569,16 +1596,18 @@ impl Base {
         }
     }
 
-    fn write(self, path: &Path, mut builder: FileBuilder) -> Option<userblock::Userblock> {
+    fn write(self, path: &Path, mut builder: FileBuilder) -> Option<Userblock> {
         match self {
             Self::Userblock => {
                 builder.with_userblock(UserblockSize::try_from(USERBLOCK_BYTES).unwrap());
-                Some(userblock::write(
-                    path,
-                    builder,
+                let mut bytes = builder.finish().unwrap();
+                let stamped = Userblock::stamp(
+                    &mut bytes,
                     usize::try_from(USERBLOCK_BYTES).unwrap(),
                     b"churn",
-                ))
+                );
+                std::fs::write(path, bytes).unwrap();
+                Some(stamped)
             }
             Self::Zero => {
                 builder.write(path).unwrap();
@@ -1588,16 +1617,16 @@ impl Base {
     }
 
     fn open(self, path: &Path) -> File {
-        match self {
-            Self::Userblock => File::open_rw_with_options(
-                path,
-                FileAccessProperties::new()
-                    .with_memory_strategy(MemoryStrategy::Mirrored)
-                    .with_sync_policy(SyncPolicy::OnClose),
-            )
-            .unwrap(),
-            Self::Zero => session::open_bounded_on_close(path).unwrap(),
-        }
+        File::open_rw_with_options(
+            path,
+            FileAccessProperties::new()
+                .with_memory_strategy(match self {
+                    Self::Userblock => MemoryStrategy::Mirrored,
+                    Self::Zero => MemoryStrategy::Bounded,
+                })
+                .with_sync_policy(SyncPolicy::OnClose),
+        )
+        .unwrap()
     }
 
     fn image_size(self, path: &Path) -> u64 {
@@ -1606,17 +1635,6 @@ impl Base {
 
     fn logical_size(self, acct: &SpaceAccounting) -> u64 {
         acct.logical_size - self.userblock()
-    }
-
-    #[track_caller]
-    fn exact_ownership(self, file: &File) -> SpaceOwnershipSummary {
-        let ownership = file_space::assert_exact_space_ownership(file);
-        assert_eq!(ownership.userblock_bytes, self.userblock());
-        SpaceOwnershipSummary {
-            physical_size: ownership.physical_size - self.userblock(),
-            logical_size: ownership.logical_size - self.userblock(),
-            ..ownership
-        }
     }
 }
 
@@ -1719,7 +1737,7 @@ struct DeletionWave {
     logical_size: u64,
     reusable_free: u64,
     pressure: u64,
-    ownership: SpaceOwnershipSummary,
+    reusable_free_regions: usize,
 }
 
 struct ReopenCheckpoint {
@@ -1729,7 +1747,7 @@ struct ReopenCheckpoint {
     physical_size: u64,
     persisted_free: u64,
     recovered_free: u64,
-    ownership: SpaceOwnershipSummary,
+    reusable_free_regions: usize,
 }
 
 struct FinalState {
@@ -1739,7 +1757,13 @@ struct FinalState {
     reusable_free_regions: usize,
     pressure: u64,
     live_epochs: usize,
-    ownership: SpaceOwnershipSummary,
+}
+
+struct ClosedState {
+    physical_size: u64,
+    logical_size: u64,
+    persisted_free: u64,
+    persisted_free_regions: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

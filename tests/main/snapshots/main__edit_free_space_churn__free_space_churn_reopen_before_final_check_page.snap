@@ -39,27 +39,27 @@ reuse
   post-churn writes without growth      : 63
 
 deletion waves
-  wave  after-epoch  live-before  deleted  live-after  physical  logical  reusable live-raw  live-meta  unclassified  pressure
-     1           26           27        5          22  30388224  30388224   5600543  24570890     184099         0  24787681
-     2           31           27        5          22  30822400  30822400   5889886  24715841     180276         0  24932514
-     3           35           26        4          22  30822400  30822400   5888922  24716786     180276         0  24933478
-     4           39           26        4          22  30822400  30822400   5888925  24716802     180276         0  24933475
-     5           43           26        4          22  30822400  30822400   5889996  24715712     180276         0  24932404
-     6           47           26        4          22  30822400  30822400   5890631  24715039     180276         0  24931769
-     7           51           26        4          22  30822400  30822400   5890037  24715481     180276         0  24932363
-     8           55           26        4          22  30498816  30498816   5566793  24716604     180276         0  24932023
-     9           59           26        4          22  30441472  30441472   5507728  24718762     180276         0  24933744
-    10           63           26        4          22  30441472  30441472   5506113  24720301     180276         0  24935359
-    11           67           26        4          22  30441472  30441472   5504548  24721866     180276         0  24936924
-    12           71           26        4          22  30441472  30441472   5503604  24722867     180276         0  24937868
-    13           75           26        4          22  30441472  30441472   5502534  24723918     180276         0  24938938
-    14           79           26        4          22  30441472  30441472   5501896  24724404     180276         0  24939576
-    15           83           26        4          22  30441472  30441472   5501973  24724384     180276         0  24939499
-    16           87           26        4          22  30441472  30441472   5501708  24724516     180276         0  24939764
+  wave  after-epoch  live-before  deleted  live-after  physical  logical  reusable free-regions  pressure
+     1           26           27        5          22  30388224  30388224   5600543            95  24787681
+     2           31           27        5          22  30822400  30822400   5889886            91  24932514
+     3           35           26        4          22  30822400  30822400   5888922            94  24933478
+     4           39           26        4          22  30822400  30822400   5888925            97  24933475
+     5           43           26        4          22  30822400  30822400   5889996           100  24932404
+     6           47           26        4          22  30822400  30822400   5890631           105  24931769
+     7           51           26        4          22  30822400  30822400   5890037           116  24932363
+     8           55           26        4          22  30498816  30498816   5566793           109  24932023
+     9           59           26        4          22  30441472  30441472   5507728            98  24933744
+    10           63           26        4          22  30441472  30441472   5506113            99  24935359
+    11           67           26        4          22  30441472  30441472   5504548           102  24936924
+    12           71           26        4          22  30441472  30441472   5503604            98  24937868
+    13           75           26        4          22  30441472  30441472   5502534           103  24938938
+    14           79           26        4          22  30441472  30441472   5501896           104  24939576
+    15           83           26        4          22  30441472  30441472   5501973           110  24939499
+    16           87           26        4          22  30441472  30441472   5501708           101  24939764
 
 reopen checkpoints
-  #  reason          after-epoch  physical  persisted-free  recovered-free  unclassified
-  1  final-check              90  30441472         2242581         2242581         0
+  #  reason          after-epoch  physical  persisted-free  recovered-free  free-regions
+  1  final-check              90  30441472         2242581         2242581           100
 
 final
   physical file size         : 30441472
@@ -96,36 +96,8 @@ coverage
     compressible                     : 25
     incompressible                   : 25
 
-ownership while writer open
-  physical file size       : 30441472
-  logical EOF              : 30441472
-  live raw bytes           : 27980619
-  live metadata bytes      : 205815
-  free-space-manager bytes : 12457
-  reusable free bytes      : 2242581
-  unclassified bytes       : 0
-  trailing slack bytes     : 0
-  live raw extents         : 8461
-  live metadata extents    : 569
-  manager metadata extents : 6
-  reusable free extents    : 100
-  unclassified extents     : 0
-  trailing slack extents   : 0
-  exact partition          : yes
-
-ownership after writer close
-  physical file size       : 30441472
-  logical EOF              : 30441472
-  live raw bytes           : 27980619
-  live metadata bytes      : 205815
-  free-space-manager bytes : 12457
-  reusable free bytes      : 2242581
-  unclassified bytes       : 0
-  trailing slack bytes     : 0
-  live raw extents         : 8461
-  live metadata extents    : 569
-  manager metadata extents : 6
-  reusable free extents    : 100
-  unclassified extents     : 0
-  trailing slack extents   : 0
-  exact partition          : yes
+after writer close
+  physical file size         : 30441472
+  logical size               : 30441472
+  persisted reusable free    : 2242581
+  persisted free regions     : 632
