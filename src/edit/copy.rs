@@ -436,10 +436,10 @@ impl WriteEngine {
                     reject_foreign_addresses(&non_link_region)?;
                     reject_foreign_dense_attrs(&dense_attrs.attrs)?;
                 }
-                let mut kids = Vec::with_capacity(children.len());
+                let mut copied_children = Vec::with_capacity(children.len());
                 for (name, creation_order, child) in children {
                     let child = base.absolute(child)?;
-                    kids.push((
+                    copied_children.push((
                         name,
                         creation_order,
                         Self::read_copy_subtree(
@@ -455,7 +455,7 @@ impl WriteEngine {
                 }
                 Ok(CopyTree::Group {
                     non_link_region,
-                    children: kids,
+                    children: copied_children,
                     dense_attrs,
                 })
             }
