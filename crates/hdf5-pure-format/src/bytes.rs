@@ -238,6 +238,33 @@ pub(crate) fn try_write_offset(
     Ok(())
 }
 
+/// Writes `addr` into the little-endian address field of `width` bytes at `pos`.
+///
+/// Encodes `u64::MAX` as the undefined address at `width`. Preserves bytes outside the field.
+///
+/// # Errors
+///
+/// Returns [`FormatError::AddressTooLarge`] if `addr` exceeds `width` and is not `u64::MAX`,
+/// or [`FormatError::UnexpectedEof`] if the field extends past `buf`. Leaves `buf` unchanged
+/// on error.
+pub fn write_stored_address_at(
+    buf: &mut [u8],
+    pos: usize,
+    addr: StoredAddress,
+    width: OffsetWidth,
+) -> Result<(), FormatError> {
+    if !width::offset_width_holds(width, addr.get()) {
+        return Err(FormatError::AddressTooLarge {
+            address: addr.get(),
+            offset_size: width.get(),
+        });
+    }
+    let len = usize::from(width.get());
+    ensure_len(buf, pos, len)?;
+    buf[pos..pos + len].copy_from_slice(&addr.get().to_le_bytes()[..len]);
+    Ok(())
+}
+
 /// Appends the decoded address `addr` to `buf` as a little-endian field of `width` bytes.
 ///
 /// # Errors
@@ -684,6 +711,63 @@ mod tests {
         write_offset(&mut buf, val, width);
 
         assert_eq!(buf, expected);
+    }
+
+    #[rstest::rstest]
+    #[case::two(OffsetWidth::Two, 0x0102, vec![2, 1])]
+    #[case::four(OffsetWidth::Four, 0x0102, vec![2, 1, 0, 0])]
+    #[case::eight(OffsetWidth::Eight, 0x0102, vec![2, 1, 0, 0, 0, 0, 0, 0])]
+    #[case::undefined(OffsetWidth::Two, u64::MAX, vec![0xFF; 2])]
+    fn a_stored_address_patch_preserves_the_bytes_around_its_field(
+        #[case] width: OffsetWidth,
+        #[case] address: u64,
+        #[case] encoded: Vec<u8>,
+    ) {
+        let mut buf = vec![0xAA; 12];
+
+        write_stored_address_at(&mut buf, 3, StoredAddress::new(address), width).unwrap();
+
+        let expected = [
+            vec![0xAA; 3],
+            encoded.clone(),
+            vec![0xAA; 9 - encoded.len()],
+        ]
+        .concat();
+        assert_eq!(buf, expected);
+    }
+
+    #[rstest::rstest]
+    #[case::too_wide(
+        OffsetWidth::Two,
+        0,
+        0x1_0000,
+        FormatError::AddressTooLarge { address: 0x1_0000, offset_size: 2 },
+    )]
+    #[case::past_the_buffer(
+        OffsetWidth::Eight,
+        5,
+        0x0102,
+        FormatError::UnexpectedEof { expected: 13, available: 12 },
+    )]
+    #[case::overflowing_position(
+        OffsetWidth::Two,
+        usize::MAX,
+        0x0102,
+        FormatError::UnexpectedEof { expected: usize::MAX, available: 12 },
+    )]
+    fn an_invalid_stored_address_patch_leaves_the_buffer_unchanged(
+        #[case] width: OffsetWidth,
+        #[case] pos: usize,
+        #[case] address: u64,
+        #[case] expected: FormatError,
+    ) {
+        let mut buf = vec![0xAA; 12];
+
+        assert_eq!(
+            write_stored_address_at(&mut buf, pos, StoredAddress::new(address), width),
+            Err(expected),
+        );
+        assert_eq!(buf, vec![0xAA; 12]);
     }
 
     #[test]
