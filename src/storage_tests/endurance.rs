@@ -4,6 +4,7 @@ use rstest::rstest;
 
 use super::file_space;
 use crate as api;
+use crate::edit::SpaceOwnership;
 use crate::{File, FileSpaceStrategy};
 
 #[expect(
@@ -20,17 +21,35 @@ mod workload;
 fn endurance_partitions_committed_and_reopened_storage(#[case] strategy: FileSpaceStrategy) {
     let mut steps = Vec::new();
     let mut closed = Vec::new();
+    let mut sessions = String::new();
+    let mut observations = String::new();
     workload::run_endurance_with_checkpoints(
         strategy,
         |path, step| {
-            super::with_reopened_file(path, |file| assert_ownership(file, strategy, step));
+            panic::catch_unwind(AssertUnwindSafe(|| {
+                super::with_reopened_file(path, |file| {
+                    assert_ownership(file, strategy, step)
+                        .write_checkpoint(&mut observations, step);
+                });
+            }))
+            .unwrap_or_else(|_| {
+                panic!("closed-file ownership assertion failed for {strategy:?}/{step}")
+            });
             closed.push(step.to_owned());
         },
         |file, step| {
-            panic::catch_unwind(AssertUnwindSafe(|| assert_ownership(file, strategy, step)))
-                .unwrap_or_else(|_| panic!("ownership assertion failed for {strategy:?}/{step}"));
+            panic::catch_unwind(AssertUnwindSafe(|| {
+                assert_ownership(file, strategy, step).write_checkpoint(&mut sessions, step);
+            }))
+            .unwrap_or_else(|_| panic!("ownership assertion failed for {strategy:?}/{step}"));
             steps.push(step.to_owned());
         },
+    );
+    insta::assert_snapshot!(
+        format!("endurance_{strategy:?}"),
+        format!(
+            "Editing checkpoints (category values are bytes/extents):\n{sessions}\nClosed-file observations:\n{observations}"
+        )
     );
     assert_eq!(
         steps,
@@ -49,7 +68,7 @@ fn endurance_partitions_committed_and_reopened_storage(#[case] strategy: FileSpa
     );
 }
 
-fn assert_ownership(file: &File, strategy: FileSpaceStrategy, step: &str) {
+fn assert_ownership(file: &File, strategy: FileSpaceStrategy, step: &str) -> SpaceOwnership {
     let owned = if strategy == FileSpaceStrategy::None {
         let owned = super::ownership(file).unwrap();
         owned.assert_classified(&owned.unclassified_space);
@@ -79,11 +98,11 @@ fn assert_ownership(file: &File, strategy: FileSpaceStrategy, step: &str) {
         if strategy != FileSpaceStrategy::None {
             assert!(!owned.free_space_manager_space.is_empty());
         }
-        assert_eq!(
-            owned.reusable_free_space,
-            file.space_accounting().unwrap().reusable_free_space
-        );
     }
+    assert_eq!(
+        owned.reusable_free_space,
+        file.space_accounting().unwrap().reusable_free_space
+    );
     let mut raw = Vec::new();
     for group_path in file.root().groups().unwrap() {
         raw.extend(file_space::raw_extents(
@@ -120,4 +139,5 @@ fn assert_ownership(file: &File, strategy: FileSpaceStrategy, step: &str) {
                 .any(|&(at, len)| at <= extent.start && extent.end <= at + len)
         );
     }
+    owned
 }

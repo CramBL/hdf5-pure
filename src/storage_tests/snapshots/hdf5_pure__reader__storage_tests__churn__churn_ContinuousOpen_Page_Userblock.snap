@@ -1,0 +1,27 @@
+---
+source: src/storage_tests/churn.rs
+expression: "format!(\"Editing checkpoints (category values are bytes/extents):\\n{sessions}\\nClosed-file observations:\\n{observations}\")"
+---
+Editing checkpoints (category values are bytes/extents):
+initial-commit: complete=true physical=12288 logical=12288 userblock=4096/1 raw=16/1 metadata=321/4 manager=234/4 reusable=7621/2 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-26: complete=true physical=30392320 logical=30392320 userblock=4096/1 raw=24570890/7447 metadata=184099/518 manager=32692/6 reusable=5600543/95 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-31: complete=true physical=30826496 logical=30826496 userblock=4096/1 raw=24715841/7459 metadata=180276/496 manager=36397/6 reusable=5889886/91 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-35: complete=true physical=30826496 logical=30826496 userblock=4096/1 raw=24716786/7459 metadata=180276/496 manager=36416/6 reusable=5888922/94 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-39: complete=true physical=30826496 logical=30826496 userblock=4096/1 raw=24716802/7459 metadata=180276/496 manager=36397/6 reusable=5888925/97 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-43: complete=true physical=30826496 logical=30826496 userblock=4096/1 raw=24715712/7459 metadata=180276/496 manager=36416/6 reusable=5889996/100 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-47: complete=true physical=30826496 logical=30826496 userblock=4096/1 raw=24715039/7459 metadata=180276/496 manager=36454/6 reusable=5890631/105 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-51: complete=true physical=30826496 logical=30826496 userblock=4096/1 raw=24715481/7459 metadata=180276/496 manager=36606/6 reusable=5890037/116 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-55: complete=true physical=30502912 logical=30502912 userblock=4096/1 raw=24716604/7459 metadata=180276/496 manager=35143/6 reusable=5566793/109 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-59: complete=true physical=30445568 logical=30445568 userblock=4096/1 raw=24718762/7459 metadata=180276/496 manager=34706/6 reusable=5507728/98 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-63: complete=true physical=30445568 logical=30445568 userblock=4096/1 raw=24720301/7459 metadata=180276/496 manager=34782/6 reusable=5506113/99 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-67: complete=true physical=30445568 logical=30445568 userblock=4096/1 raw=24721866/7459 metadata=180276/496 manager=34782/6 reusable=5504548/102 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-71: complete=true physical=30445568 logical=30445568 userblock=4096/1 raw=24722867/7459 metadata=180276/496 manager=34725/6 reusable=5503604/98 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-75: complete=true physical=30445568 logical=30445568 userblock=4096/1 raw=24723918/7459 metadata=180276/496 manager=34744/6 reusable=5502534/103 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-79: complete=true physical=30445568 logical=30445568 userblock=4096/1 raw=24724404/7459 metadata=180276/496 manager=34896/6 reusable=5501896/104 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-83: complete=true physical=30445568 logical=30445568 userblock=4096/1 raw=24724384/7459 metadata=180276/496 manager=34839/6 reusable=5501973/110 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-87: complete=true physical=30445568 logical=30445568 userblock=4096/1 raw=24724516/7459 metadata=180276/496 manager=34972/6 reusable=5501708/101 unclassified=0/0 trailing=0/0
+final-commit: complete=true physical=30445568 logical=30445568 userblock=4096/1 raw=27980619/8461 metadata=205815/569 manager=12457/6 reusable=2242581/100 unclassified=0/0 trailing=0/0
+final-close: complete=true physical=30445568 logical=30445568 userblock=4096/1 raw=27980619/8461 metadata=205815/569 manager=12457/6 reusable=2242581/100 unclassified=0/0 trailing=0/0
+
+Closed-file observations:
+final-close: complete=true physical=30445568 logical=30445568 userblock=4096/1 raw=27980619/8461 metadata=205815/569 manager=12457/6 reusable=2242581/100 unclassified=0/0 trailing=0/0

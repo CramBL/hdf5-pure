@@ -1,0 +1,84 @@
+---
+source: src/storage_tests/churn.rs
+expression: "format!(\"Editing checkpoints (category values are bytes/extents):\\n{sessions}\\nClosed-file observations:\\n{observations}\")"
+---
+Editing checkpoints (category values are bytes/extents):
+initial-commit: complete=true physical=2229 logical=2229 userblock=0/0 raw=16/1 metadata=321/4 manager=117/2 reusable=1775/1 unclassified=0/0 trailing=0/0
+closed-initial-fill-after-epoch-7: complete=true physical=9006584 logical=9006584 userblock=0/0 raw=8936673/2707 metadata=66290/186 manager=459/2 reusable=3162/24 unclassified=0/0 trailing=0/0
+reopened-initial-fill-after-epoch-7: complete=true physical=9006584 logical=9006584 userblock=0/0 raw=8936673/2707 metadata=66290/186 manager=459/2 reusable=3162/24 unclassified=0/0 trailing=0/0
+closed-initial-fill-after-epoch-15: complete=true physical=18019421 logical=18019421 userblock=0/0 raw=17881609/5413 metadata=132258/368 manager=621/2 reusable=4933/39 unclassified=0/0 trailing=0/0
+reopened-initial-fill-after-epoch-15: complete=true physical=18019421 logical=18019421 userblock=0/0 raw=17881609/5413 metadata=132258/368 manager=621/2 reusable=4933/39 unclassified=0/0 trailing=0/0
+closed-initial-fill-after-epoch-23: complete=true physical=27032261 logical=27032261 userblock=0/0 raw=26828268/8119 metadata=198226/550 manager=828/2 reusable=4939/58 unclassified=0/0 trailing=0/0
+reopened-initial-fill-after-epoch-23: complete=true physical=27032261 logical=27032261 userblock=0/0 raw=26828268/8119 metadata=198226/550 manager=828/2 reusable=4939/58 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-26: complete=true physical=30314383 logical=30314383 userblock=0/0 raw=24570890/7447 metadata=184099/518 manager=954/2 reusable=5558440/63 unclassified=0/0 trailing=0/0
+closed-deletion-wave-after-epoch-26: complete=true physical=30314383 logical=30314383 userblock=0/0 raw=24570890/7447 metadata=184099/518 manager=954/2 reusable=5558440/63 unclassified=0/0 trailing=0/0
+reopened-deletion-wave-after-epoch-26: complete=true physical=30314383 logical=30314383 userblock=0/0 raw=24570890/7447 metadata=184099/518 manager=954/2 reusable=5558440/63 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-31: complete=true physical=30748307 logical=30748307 userblock=0/0 raw=24715841/7459 metadata=180276/496 manager=972/2 reusable=5851218/59 unclassified=0/0 trailing=0/0
+closed-deletion-wave-after-epoch-31: complete=true physical=30748307 logical=30748307 userblock=0/0 raw=24715841/7459 metadata=180276/496 manager=972/2 reusable=5851218/59 unclassified=0/0 trailing=0/0
+reopened-deletion-wave-after-epoch-31: complete=true physical=30748307 logical=30748307 userblock=0/0 raw=24715841/7459 metadata=180276/496 manager=972/2 reusable=5851218/59 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-35: complete=true physical=30748307 logical=30748307 userblock=0/0 raw=24716786/7459 metadata=180276/496 manager=1026/2 reusable=5850219/63 unclassified=0/0 trailing=0/0
+closed-deletion-wave-after-epoch-35: complete=true physical=30748307 logical=30748307 userblock=0/0 raw=24716786/7459 metadata=180276/496 manager=1026/2 reusable=5850219/63 unclassified=0/0 trailing=0/0
+reopened-deletion-wave-after-epoch-35: complete=true physical=30748307 logical=30748307 userblock=0/0 raw=24716786/7459 metadata=180276/496 manager=1026/2 reusable=5850219/63 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-39: complete=true physical=30748307 logical=30748307 userblock=0/0 raw=24716802/7459 metadata=180276/496 manager=1161/2 reusable=5850068/68 unclassified=0/0 trailing=0/0
+closed-deletion-wave-after-epoch-39: complete=true physical=30748307 logical=30748307 userblock=0/0 raw=24716802/7459 metadata=180276/496 manager=1161/2 reusable=5850068/68 unclassified=0/0 trailing=0/0
+reopened-deletion-wave-after-epoch-39: complete=true physical=30748307 logical=30748307 userblock=0/0 raw=24716802/7459 metadata=180276/496 manager=1161/2 reusable=5850068/68 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-43: complete=true physical=30748307 logical=30748307 userblock=0/0 raw=24715712/7459 metadata=180276/496 manager=1143/2 reusable=5851176/68 unclassified=0/0 trailing=0/0
+closed-deletion-wave-after-epoch-43: complete=true physical=30748307 logical=30748307 userblock=0/0 raw=24715712/7459 metadata=180276/496 manager=1143/2 reusable=5851176/68 unclassified=0/0 trailing=0/0
+reopened-deletion-wave-after-epoch-43: complete=true physical=30748307 logical=30748307 userblock=0/0 raw=24715712/7459 metadata=180276/496 manager=1143/2 reusable=5851176/68 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-47: complete=true physical=30748307 logical=30748307 userblock=0/0 raw=24715039/7459 metadata=180276/496 manager=1098/2 reusable=5851894/66 unclassified=0/0 trailing=0/0
+closed-deletion-wave-after-epoch-47: complete=true physical=30748307 logical=30748307 userblock=0/0 raw=24715039/7459 metadata=180276/496 manager=1098/2 reusable=5851894/66 unclassified=0/0 trailing=0/0
+reopened-deletion-wave-after-epoch-47: complete=true physical=30748307 logical=30748307 userblock=0/0 raw=24715039/7459 metadata=180276/496 manager=1098/2 reusable=5851894/66 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-51: complete=true physical=30748307 logical=30748307 userblock=0/0 raw=24715481/7459 metadata=180276/496 manager=1134/2 reusable=5851416/67 unclassified=0/0 trailing=0/0
+closed-deletion-wave-after-epoch-51: complete=true physical=30748307 logical=30748307 userblock=0/0 raw=24715481/7459 metadata=180276/496 manager=1134/2 reusable=5851416/67 unclassified=0/0 trailing=0/0
+reopened-deletion-wave-after-epoch-51: complete=true physical=30748307 logical=30748307 userblock=0/0 raw=24715481/7459 metadata=180276/496 manager=1134/2 reusable=5851416/67 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-55: complete=true physical=30319296 logical=30319296 userblock=0/0 raw=24716604/7459 metadata=180276/496 manager=1089/2 reusable=5421327/65 unclassified=0/0 trailing=0/0
+closed-deletion-wave-after-epoch-55: complete=true physical=30319296 logical=30319296 userblock=0/0 raw=24716604/7459 metadata=180276/496 manager=1089/2 reusable=5421327/65 unclassified=0/0 trailing=0/0
+reopened-deletion-wave-after-epoch-55: complete=true physical=30319296 logical=30319296 userblock=0/0 raw=24716604/7459 metadata=180276/496 manager=1089/2 reusable=5421327/65 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-59: complete=true physical=30319296 logical=30319296 userblock=0/0 raw=24718762/7459 metadata=180276/496 manager=1143/2 reusable=5419115/67 unclassified=0/0 trailing=0/0
+closed-deletion-wave-after-epoch-59: complete=true physical=30319296 logical=30319296 userblock=0/0 raw=24718762/7459 metadata=180276/496 manager=1143/2 reusable=5419115/67 unclassified=0/0 trailing=0/0
+reopened-deletion-wave-after-epoch-59: complete=true physical=30319296 logical=30319296 userblock=0/0 raw=24718762/7459 metadata=180276/496 manager=1143/2 reusable=5419115/67 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-63: complete=true physical=30319296 logical=30319296 userblock=0/0 raw=24720301/7459 metadata=180276/496 manager=1206/2 reusable=5417513/70 unclassified=0/0 trailing=0/0
+closed-deletion-wave-after-epoch-63: complete=true physical=30319296 logical=30319296 userblock=0/0 raw=24720301/7459 metadata=180276/496 manager=1206/2 reusable=5417513/70 unclassified=0/0 trailing=0/0
+reopened-deletion-wave-after-epoch-63: complete=true physical=30319296 logical=30319296 userblock=0/0 raw=24720301/7459 metadata=180276/496 manager=1206/2 reusable=5417513/70 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-67: complete=true physical=30319296 logical=30319296 userblock=0/0 raw=24721866/7459 metadata=180276/496 manager=1251/2 reusable=5415903/73 unclassified=0/0 trailing=0/0
+closed-deletion-wave-after-epoch-67: complete=true physical=30319296 logical=30319296 userblock=0/0 raw=24721866/7459 metadata=180276/496 manager=1251/2 reusable=5415903/73 unclassified=0/0 trailing=0/0
+reopened-deletion-wave-after-epoch-67: complete=true physical=30319296 logical=30319296 userblock=0/0 raw=24721866/7459 metadata=180276/496 manager=1251/2 reusable=5415903/73 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-71: complete=true physical=30319296 logical=30319296 userblock=0/0 raw=24722867/7459 metadata=180276/496 manager=1278/2 reusable=5414875/76 unclassified=0/0 trailing=0/0
+closed-deletion-wave-after-epoch-71: complete=true physical=30319296 logical=30319296 userblock=0/0 raw=24722867/7459 metadata=180276/496 manager=1278/2 reusable=5414875/76 unclassified=0/0 trailing=0/0
+reopened-deletion-wave-after-epoch-71: complete=true physical=30319296 logical=30319296 userblock=0/0 raw=24722867/7459 metadata=180276/496 manager=1278/2 reusable=5414875/76 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-75: complete=true physical=30319296 logical=30319296 userblock=0/0 raw=24723918/7459 metadata=180276/496 manager=1305/2 reusable=5413797/76 unclassified=0/0 trailing=0/0
+closed-deletion-wave-after-epoch-75: complete=true physical=30319296 logical=30319296 userblock=0/0 raw=24723918/7459 metadata=180276/496 manager=1305/2 reusable=5413797/76 unclassified=0/0 trailing=0/0
+reopened-deletion-wave-after-epoch-75: complete=true physical=30319296 logical=30319296 userblock=0/0 raw=24723918/7459 metadata=180276/496 manager=1305/2 reusable=5413797/76 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-79: complete=true physical=30319296 logical=30319296 userblock=0/0 raw=24724404/7459 metadata=180276/496 manager=1206/2 reusable=5413410/71 unclassified=0/0 trailing=0/0
+closed-deletion-wave-after-epoch-79: complete=true physical=30319296 logical=30319296 userblock=0/0 raw=24724404/7459 metadata=180276/496 manager=1206/2 reusable=5413410/71 unclassified=0/0 trailing=0/0
+reopened-deletion-wave-after-epoch-79: complete=true physical=30319296 logical=30319296 userblock=0/0 raw=24724404/7459 metadata=180276/496 manager=1206/2 reusable=5413410/71 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-83: complete=true physical=29624504 logical=29624504 userblock=0/0 raw=24724384/7459 metadata=180276/496 manager=1242/2 reusable=4718602/71 unclassified=0/0 trailing=0/0
+closed-deletion-wave-after-epoch-83: complete=true physical=29624504 logical=29624504 userblock=0/0 raw=24724384/7459 metadata=180276/496 manager=1242/2 reusable=4718602/71 unclassified=0/0 trailing=0/0
+reopened-deletion-wave-after-epoch-83: complete=true physical=29624504 logical=29624504 userblock=0/0 raw=24724384/7459 metadata=180276/496 manager=1242/2 reusable=4718602/71 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-87: complete=true physical=30060534 logical=30060534 userblock=0/0 raw=24724516/7459 metadata=180276/496 manager=1233/2 reusable=5154509/71 unclassified=0/0 trailing=0/0
+closed-deletion-wave-after-epoch-87: complete=true physical=30060534 logical=30060534 userblock=0/0 raw=24724516/7459 metadata=180276/496 manager=1233/2 reusable=5154509/71 unclassified=0/0 trailing=0/0
+reopened-deletion-wave-after-epoch-87: complete=true physical=30060534 logical=30060534 userblock=0/0 raw=24724516/7459 metadata=180276/496 manager=1233/2 reusable=5154509/71 unclassified=0/0 trailing=0/0
+final-commit: complete=true physical=30060534 logical=30060534 userblock=0/0 raw=27980619/8461 metadata=205815/569 manager=1143/2 reusable=1872957/71 unclassified=0/0 trailing=0/0
+final-close: complete=true physical=30060534 logical=30060534 userblock=0/0 raw=27980619/8461 metadata=205815/569 manager=1143/2 reusable=1872957/71 unclassified=0/0 trailing=0/0
+
+Closed-file observations:
+initial-fill-after-epoch-7: complete=true physical=9006584 logical=9006584 userblock=0/0 raw=8936673/2707 metadata=66290/186 manager=459/2 reusable=3162/24 unclassified=0/0 trailing=0/0
+initial-fill-after-epoch-15: complete=true physical=18019421 logical=18019421 userblock=0/0 raw=17881609/5413 metadata=132258/368 manager=621/2 reusable=4933/39 unclassified=0/0 trailing=0/0
+initial-fill-after-epoch-23: complete=true physical=27032261 logical=27032261 userblock=0/0 raw=26828268/8119 metadata=198226/550 manager=828/2 reusable=4939/58 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-26: complete=true physical=30314383 logical=30314383 userblock=0/0 raw=24570890/7447 metadata=184099/518 manager=954/2 reusable=5558440/63 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-31: complete=true physical=30748307 logical=30748307 userblock=0/0 raw=24715841/7459 metadata=180276/496 manager=972/2 reusable=5851218/59 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-35: complete=true physical=30748307 logical=30748307 userblock=0/0 raw=24716786/7459 metadata=180276/496 manager=1026/2 reusable=5850219/63 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-39: complete=true physical=30748307 logical=30748307 userblock=0/0 raw=24716802/7459 metadata=180276/496 manager=1161/2 reusable=5850068/68 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-43: complete=true physical=30748307 logical=30748307 userblock=0/0 raw=24715712/7459 metadata=180276/496 manager=1143/2 reusable=5851176/68 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-47: complete=true physical=30748307 logical=30748307 userblock=0/0 raw=24715039/7459 metadata=180276/496 manager=1098/2 reusable=5851894/66 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-51: complete=true physical=30748307 logical=30748307 userblock=0/0 raw=24715481/7459 metadata=180276/496 manager=1134/2 reusable=5851416/67 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-55: complete=true physical=30319296 logical=30319296 userblock=0/0 raw=24716604/7459 metadata=180276/496 manager=1089/2 reusable=5421327/65 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-59: complete=true physical=30319296 logical=30319296 userblock=0/0 raw=24718762/7459 metadata=180276/496 manager=1143/2 reusable=5419115/67 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-63: complete=true physical=30319296 logical=30319296 userblock=0/0 raw=24720301/7459 metadata=180276/496 manager=1206/2 reusable=5417513/70 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-67: complete=true physical=30319296 logical=30319296 userblock=0/0 raw=24721866/7459 metadata=180276/496 manager=1251/2 reusable=5415903/73 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-71: complete=true physical=30319296 logical=30319296 userblock=0/0 raw=24722867/7459 metadata=180276/496 manager=1278/2 reusable=5414875/76 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-75: complete=true physical=30319296 logical=30319296 userblock=0/0 raw=24723918/7459 metadata=180276/496 manager=1305/2 reusable=5413797/76 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-79: complete=true physical=30319296 logical=30319296 userblock=0/0 raw=24724404/7459 metadata=180276/496 manager=1206/2 reusable=5413410/71 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-83: complete=true physical=29624504 logical=29624504 userblock=0/0 raw=24724384/7459 metadata=180276/496 manager=1242/2 reusable=4718602/71 unclassified=0/0 trailing=0/0
+deletion-wave-after-epoch-87: complete=true physical=30060534 logical=30060534 userblock=0/0 raw=24724516/7459 metadata=180276/496 manager=1233/2 reusable=5154509/71 unclassified=0/0 trailing=0/0
+final-close: complete=true physical=30060534 logical=30060534 userblock=0/0 raw=27980619/8461 metadata=205815/569 manager=1143/2 reusable=1872957/71 unclassified=0/0 trailing=0/0

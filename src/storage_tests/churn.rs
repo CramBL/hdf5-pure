@@ -8,6 +8,7 @@ use self::workload::{Base, Lifecycle, Strategy};
 use super::file_space;
 use crate as api;
 use crate::File;
+use crate::edit::SpaceOwnership;
 
 #[expect(
     dead_code,
@@ -29,19 +30,30 @@ fn churn_partitions_committed_closed_and_reopened_storage(
 ) {
     let mut steps = Vec::new();
     let mut observed = Vec::new();
+    let mut sessions = String::new();
+    let mut observations = String::new();
     workload::run_churn_with_checkpoints(
         lifecycle,
         strategy,
         base,
         |path, step| {
-            super::with_reopened_file(path, |file| {
-                assert_ownership(file, lifecycle, strategy, base, step);
+            panic::catch_unwind(AssertUnwindSafe(|| {
+                super::with_reopened_file(path, |file| {
+                    assert_ownership(file, lifecycle, strategy, base, step)
+                        .write_checkpoint(&mut observations, step);
+                });
+            }))
+            .unwrap_or_else(|_| {
+                panic!(
+                    "closed-file ownership assertion failed for {lifecycle:?}/{strategy:?}/{base:?}/{step}"
+                )
             });
             observed.push(step.to_owned());
         },
         |file, step| {
             panic::catch_unwind(AssertUnwindSafe(|| {
-                assert_ownership(file, lifecycle, strategy, base, step);
+                assert_ownership(file, lifecycle, strategy, base, step)
+                    .write_checkpoint(&mut sessions, step);
             }))
             .unwrap_or_else(|_| {
                 panic!("ownership assertion failed for {lifecycle:?}/{strategy:?}/{base:?}/{step}")
@@ -49,6 +61,14 @@ fn churn_partitions_committed_closed_and_reopened_storage(
             steps.push(step.to_owned());
         },
     );
+    if cfg!(not(feature = "fast-deflate")) {
+        insta::assert_snapshot!(
+            format!("churn_{lifecycle:?}_{strategy:?}_{base:?}"),
+            format!(
+                "Editing checkpoints (category values are bytes/extents):\n{sessions}\nClosed-file observations:\n{observations}"
+            )
+        );
+    }
     assert_eq!(steps.first().unwrap(), "initial-commit");
     assert_eq!(&steps[steps.len() - 2..], ["final-commit", "final-close"]);
     assert!(
@@ -83,7 +103,13 @@ fn churn_partitions_committed_closed_and_reopened_storage(
     }
 }
 
-fn assert_ownership(file: &File, lifecycle: Lifecycle, strategy: Strategy, base: Base, step: &str) {
+fn assert_ownership(
+    file: &File,
+    lifecycle: Lifecycle,
+    strategy: Strategy,
+    base: Base,
+    step: &str,
+) -> SpaceOwnership {
     let owned = file_space::assert_exact_space_ownership(file);
     assert_eq!(
         owned.userblock_space,
@@ -158,6 +184,7 @@ fn assert_ownership(file: &File, lifecycle: Lifecycle, strategy: Strategy, base:
             expected
         );
     }
+    owned
 }
 
 fn raw_extents(file: &File) -> Vec<Range<u64>> {

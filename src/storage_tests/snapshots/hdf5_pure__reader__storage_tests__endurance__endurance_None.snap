@@ -1,0 +1,57 @@
+---
+source: src/storage_tests/endurance.rs
+expression: "format!(\"Editing checkpoints (category values are bytes/extents):\\n{sessions}\\nClosed-file observations:\\n{observations}\")"
+---
+Editing checkpoints (category values are bytes/extents):
+initial-commit: complete=true physical=67780 logical=67780 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=39/1 trailing=0/0
+commit-64: complete=true physical=365736 logical=365736 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=297995/17 trailing=0/0
+reopen-64: complete=true physical=365736 logical=365736 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=297995/17 trailing=0/0
+commit-128: complete=true physical=663692 logical=663692 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=595951/17 trailing=0/0
+reopen-128: complete=true physical=663692 logical=663692 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=595951/17 trailing=0/0
+commit-192: complete=true physical=961648 logical=961648 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=893907/17 trailing=0/0
+reopen-192: complete=true physical=961648 logical=961648 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=893907/17 trailing=0/0
+commit-256: complete=true physical=1259604 logical=1259604 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=1191863/17 trailing=0/0
+reopen-256: complete=true physical=1259604 logical=1259604 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=1191863/17 trailing=0/0
+commit-320: complete=true physical=1557560 logical=1557560 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=1489819/17 trailing=0/0
+reopen-320: complete=true physical=1557560 logical=1557560 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=1489819/17 trailing=0/0
+commit-384: complete=true physical=1855516 logical=1855516 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=1787775/17 trailing=0/0
+reopen-384: complete=true physical=1855516 logical=1855516 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=1787775/17 trailing=0/0
+commit-448: complete=true physical=2153472 logical=2153472 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=2085731/17 trailing=0/0
+reopen-448: complete=true physical=2153472 logical=2153472 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=2085731/17 trailing=0/0
+commit-512: complete=true physical=2451428 logical=2451428 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=2383687/17 trailing=0/0
+reopen-512: complete=true physical=2451428 logical=2451428 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=2383687/17 trailing=0/0
+commit-576: complete=true physical=2749384 logical=2749384 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=2681643/17 trailing=0/0
+reopen-576: complete=true physical=2749384 logical=2749384 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=2681643/17 trailing=0/0
+commit-640: complete=true physical=3047340 logical=3047340 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=2979599/17 trailing=0/0
+reopen-640: complete=true physical=3047340 logical=3047340 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=2979599/17 trailing=0/0
+commit-704: complete=true physical=3345296 logical=3345296 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=3277555/17 trailing=0/0
+reopen-704: complete=true physical=3345296 logical=3345296 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=3277555/17 trailing=0/0
+commit-768: complete=true physical=3643252 logical=3643252 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=3575511/17 trailing=0/0
+reopen-768: complete=true physical=3643252 logical=3643252 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=3575511/17 trailing=0/0
+commit-832: complete=true physical=3941208 logical=3941208 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=3873467/17 trailing=0/0
+reopen-832: complete=true physical=3941208 logical=3941208 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=3873467/17 trailing=0/0
+commit-896: complete=true physical=4239164 logical=4239164 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=4171423/17 trailing=0/0
+reopen-896: complete=true physical=4239164 logical=4239164 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=4171423/17 trailing=0/0
+commit-960: complete=true physical=4537120 logical=4537120 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=4469379/17 trailing=0/0
+reopen-960: complete=true physical=4537120 logical=4537120 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=4469379/17 trailing=0/0
+commit-1024: complete=true physical=4835076 logical=4835076 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=4767335/17 trailing=0/0
+reopen-1024: complete=true physical=4835076 logical=4835076 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=4767335/17 trailing=0/0
+
+Closed-file observations:
+reopen-64: complete=true physical=365736 logical=365736 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=297995/17 trailing=0/0
+reopen-128: complete=true physical=663692 logical=663692 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=595951/17 trailing=0/0
+reopen-192: complete=true physical=961648 logical=961648 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=893907/17 trailing=0/0
+reopen-256: complete=true physical=1259604 logical=1259604 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=1191863/17 trailing=0/0
+reopen-320: complete=true physical=1557560 logical=1557560 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=1489819/17 trailing=0/0
+reopen-384: complete=true physical=1855516 logical=1855516 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=1787775/17 trailing=0/0
+reopen-448: complete=true physical=2153472 logical=2153472 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=2085731/17 trailing=0/0
+reopen-512: complete=true physical=2451428 logical=2451428 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=2383687/17 trailing=0/0
+reopen-576: complete=true physical=2749384 logical=2749384 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=2681643/17 trailing=0/0
+reopen-640: complete=true physical=3047340 logical=3047340 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=2979599/17 trailing=0/0
+reopen-704: complete=true physical=3345296 logical=3345296 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=3277555/17 trailing=0/0
+reopen-768: complete=true physical=3643252 logical=3643252 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=3575511/17 trailing=0/0
+reopen-832: complete=true physical=3941208 logical=3941208 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=3873467/17 trailing=0/0
+reopen-896: complete=true physical=4239164 logical=4239164 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=4171423/17 trailing=0/0
+reopen-960: complete=true physical=4537120 logical=4537120 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=4469379/17 trailing=0/0
+reopen-1024: complete=true physical=4835076 logical=4835076 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=4767335/17 trailing=0/0
+final-close: complete=true physical=4835076 logical=4835076 userblock=0/0 raw=44800/191 metadata=22941/146 manager=0/0 reusable=0/0 unclassified=4767335/17 trailing=0/0

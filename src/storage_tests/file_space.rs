@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::ops::Range;
 
 pub(super) use test_util_hdf5::file_space::{
@@ -95,4 +96,45 @@ pub(super) fn assert_space_accounting_consistent(accounting: &crate::SpaceAccoun
             .iter()
             .all(|&(at, len)| at + len <= accounting.logical_size)
     );
+}
+
+impl SpaceOwnership {
+    /// Appends completeness, file sizes, and category byte and extent totals for the checkpoint.
+    pub(super) fn write_checkpoint(&self, report: &mut String, step: &str) {
+        let Self {
+            physical_size,
+            logical_size,
+            userblock_space,
+            live_raw_space,
+            live_metadata_space,
+            free_space_manager_space,
+            reusable_free_space,
+            unclassified_space,
+            analysis_complete,
+            trailing_slack_space,
+        } = self;
+        write!(
+            report,
+            "{step}: complete={analysis_complete} physical={physical_size} logical={logical_size}"
+        )
+        .unwrap();
+        for (category, extents) in [
+            ("userblock", userblock_space),
+            ("raw", live_raw_space),
+            ("metadata", live_metadata_space),
+            ("manager", free_space_manager_space),
+            ("reusable", reusable_free_space),
+            ("unclassified", unclassified_space),
+            ("trailing", trailing_slack_space),
+        ] {
+            write!(
+                report,
+                " {category}={}/{}",
+                extents.iter().map(|&(_, len)| len).sum::<u64>(),
+                extents.len()
+            )
+            .unwrap();
+        }
+        report.push('\n');
+    }
 }
