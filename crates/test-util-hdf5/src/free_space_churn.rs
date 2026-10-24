@@ -52,26 +52,22 @@ pub fn run_churn_observed(
 
 /// Runs churn with access to committed, closed, and reopened editing sessions.
 ///
-/// The callback receives an editing-session handle and a checkpoint label after the initial open,
-/// each deletion wave, each lifecycle close and reopen, and the final commit and close.
-/// After a close, the handle refers to the closed editing session.
+/// The checkpoint callback receives an editing-session handle and a label after the initial open,
+/// each deletion wave, each lifecycle close and reopen, and the final commit and close. After a
+/// close, the handle refers to the closed editing session. The observer receives the closed file's
+/// path and a label before each reopen and after the final close.
 ///
 /// # Panics
 ///
-/// Panics if a file operation fails, a workload assertion fails, or the callback panics.
+/// Panics if a file operation fails, a workload assertion fails, or either callback panics.
 pub fn run_churn_with_checkpoints(
     lifecycle: Lifecycle,
     strategy: Strategy,
     base: Base,
+    observer: impl FnMut(&Path, &str),
     checkpoint: impl FnMut(&File, &str),
 ) -> ChurnReport {
-    run_churn_inner(
-        lifecycle,
-        strategy,
-        base,
-        None::<fn(&Path, &str)>,
-        checkpoint,
-    )
+    run_churn_inner(lifecycle, strategy, base, Some(observer), checkpoint)
 }
 
 fn run_churn_inner(

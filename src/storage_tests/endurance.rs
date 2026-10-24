@@ -19,17 +19,32 @@ mod workload;
 #[case::none(FileSpaceStrategy::None)]
 fn endurance_partitions_committed_and_reopened_storage(#[case] strategy: FileSpaceStrategy) {
     let mut steps = Vec::new();
-    workload::run_endurance_with_checkpoints(strategy, |file, step| {
-        panic::catch_unwind(AssertUnwindSafe(|| assert_ownership(file, strategy, step)))
-            .unwrap_or_else(|_| panic!("ownership assertion failed for {strategy:?}/{step}"));
-        steps.push(step.to_owned());
-    });
+    let mut closed = Vec::new();
+    workload::run_endurance_with_checkpoints(
+        strategy,
+        |path, step| {
+            super::with_reopened_file(path, |file| assert_ownership(file, strategy, step));
+            closed.push(step.to_owned());
+        },
+        |file, step| {
+            panic::catch_unwind(AssertUnwindSafe(|| assert_ownership(file, strategy, step)))
+                .unwrap_or_else(|_| panic!("ownership assertion failed for {strategy:?}/{step}"));
+            steps.push(step.to_owned());
+        },
+    );
     assert_eq!(
         steps,
         std::iter::once("initial-commit".to_owned())
             .chain(
                 (1..=16).flat_map(|i| [format!("commit-{}", i * 64), format!("reopen-{}", i * 64)])
             )
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        closed,
+        (1..=16)
+            .map(|i| format!("reopen-{}", i * 64))
+            .chain(std::iter::once("final-close".to_owned()))
             .collect::<Vec<_>>()
     );
 }
@@ -60,7 +75,7 @@ fn assert_ownership(file: &File, strategy: FileSpaceStrategy, step: &str) {
     };
     assert!(!owned.live_metadata_space.is_empty());
     assert!(owned.userblock_space.is_empty());
-    if step.starts_with("reopen-") {
+    if step.starts_with("reopen-") || step == "final-close" {
         if strategy != FileSpaceStrategy::None {
             assert!(!owned.free_space_manager_space.is_empty());
         }

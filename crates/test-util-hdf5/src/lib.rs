@@ -23,6 +23,7 @@ pub mod fixed_string;
 pub mod fixtures;
 pub mod free_space_churn;
 pub mod free_space_endurance;
+pub mod free_space_threshold;
 #[cfg(feature = "hdf5")]
 pub mod global_heap;
 pub mod global_heap_fixture;

@@ -28,15 +28,27 @@ fn churn_partitions_committed_closed_and_reopened_storage(
     #[values(Base::Zero, Base::Userblock)] base: Base,
 ) {
     let mut steps = Vec::new();
-    workload::run_churn_with_checkpoints(lifecycle, strategy, base, |file, step| {
-        panic::catch_unwind(AssertUnwindSafe(|| {
-            assert_ownership(file, lifecycle, strategy, base, step);
-        }))
-        .unwrap_or_else(|_| {
-            panic!("ownership assertion failed for {lifecycle:?}/{strategy:?}/{base:?}/{step}")
-        });
-        steps.push(step.to_owned());
-    });
+    let mut observed = Vec::new();
+    workload::run_churn_with_checkpoints(
+        lifecycle,
+        strategy,
+        base,
+        |path, step| {
+            super::with_reopened_file(path, |file| {
+                assert_ownership(file, lifecycle, strategy, base, step);
+            });
+            observed.push(step.to_owned());
+        },
+        |file, step| {
+            panic::catch_unwind(AssertUnwindSafe(|| {
+                assert_ownership(file, lifecycle, strategy, base, step);
+            }))
+            .unwrap_or_else(|_| {
+                panic!("ownership assertion failed for {lifecycle:?}/{strategy:?}/{base:?}/{step}")
+            });
+            steps.push(step.to_owned());
+        },
+    );
     assert_eq!(steps.first().unwrap(), "initial-commit");
     assert_eq!(&steps[steps.len() - 2..], ["final-commit", "final-close"]);
     assert!(
@@ -55,6 +67,8 @@ fn churn_partitions_committed_closed_and_reopened_storage(
         .filter_map(|step| step.strip_prefix("reopened-"))
         .collect::<Vec<_>>();
     assert_eq!(closed, reopened);
+    assert_eq!(observed.len(), reopened.len() + 1);
+    assert_eq!(observed.last().unwrap(), "final-close");
     match lifecycle {
         Lifecycle::ContinuousOpen => assert!(reopened.is_empty()),
         Lifecycle::ReopenBeforeFinalCheck => {

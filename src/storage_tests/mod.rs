@@ -1,13 +1,15 @@
 //! Storage mutation tests with access to the editor's private analyses.
 
 use std::collections::BTreeSet;
+use std::fs;
+use std::path::Path;
 
 use test_util::temp;
 
 use crate::edit::{GlobalHeapLiveness, SpaceOwnership};
 use crate::error::Error;
 use crate::reader::{Backend, File};
-use crate::{AttrValue, FileBuilder};
+use crate::{AttrValue, FileAccessProperties, FileBuilder, MemoryStrategy};
 
 mod churn;
 mod classic_aggregation;
@@ -16,6 +18,8 @@ mod file_space;
 mod paged_write;
 mod persisted_free_space;
 mod reclamation;
+mod threshold;
+mod trailing_slack;
 
 #[test]
 fn deleting_a_subtree_removes_its_three_reachable_collections() {
@@ -61,7 +65,7 @@ fn deleting_a_subtree_removes_its_three_reachable_collections() {
 /// # Panics
 ///
 /// Panics if the editing-session mutex is poisoned.
-fn ownership(file: &File) -> Result<SpaceOwnership, Error> {
+pub(crate) fn ownership(file: &File) -> Result<SpaceOwnership, Error> {
     let Backend::Edit(engine) = &file.inner.backend else {
         return Err(Error::ReadOnly);
     };
@@ -83,4 +87,17 @@ fn liveness(file: &File) -> Result<GlobalHeapLiveness, Error> {
         return Err(Error::ReadOnly);
     };
     engine.lock().unwrap().global_heap_liveness()
+}
+
+/// Runs an observation in a mirrored editing session and checks that the file bytes are unchanged.
+fn with_reopened_file(path: &Path, observe: impl FnOnce(&File)) {
+    let before = fs::read(path).unwrap();
+    let file = File::open_rw_with_options(
+        path,
+        FileAccessProperties::new().with_memory_strategy(MemoryStrategy::Mirrored),
+    )
+    .unwrap();
+    observe(&file);
+    file.close().unwrap();
+    assert_eq!(fs::read(path).unwrap(), before);
 }

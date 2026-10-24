@@ -45,18 +45,20 @@ pub fn run_endurance_observed(
 
 /// Runs endurance with access to committed and reopened editing sessions.
 ///
-/// The callback receives the writable file and a checkpoint label after the initial commit,
-/// before each checkpoint close, and after reopening. The returned report describes the final
-/// reopened state before its editing session closes.
+/// The checkpoint callback receives the writable file and a label after the initial commit,
+/// before each checkpoint close, and after reopening. The observer receives the closed file's
+/// path and a label before each reopen and after the final close. The returned report describes
+/// the final reopened state before its editing session closes.
 ///
 /// # Panics
 ///
-/// Panics if a file operation fails, a workload assertion fails, or the callback panics.
+/// Panics if a file operation fails, a workload assertion fails, or either callback panics.
 pub fn run_endurance_with_checkpoints(
     strategy: FileSpaceStrategy,
+    observer: impl FnMut(&Path, &str),
     checkpoint: impl FnMut(&File, &str),
 ) -> String {
-    run_endurance_inner(strategy, None::<fn(&Path, &str)>, checkpoint)
+    run_endurance_inner(strategy, Some(observer), checkpoint)
 }
 
 fn run_endurance_inner(
