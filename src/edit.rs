@@ -364,6 +364,7 @@ mod page_header_reclamation;
 mod page_manager_tail;
 mod paged_persistence;
 mod reclaim;
+mod root_reclamation;
 mod staging;
 
 pub use self::append::AppendBuilder;
@@ -3093,6 +3094,9 @@ impl WriteEngine {
     /// attempts to restore prior values from the undo journal. Rollback is disabled once
     /// publication is attempted because a failed publication write may already have changed the file.
     ///
+    /// After publication, reference patching or optional root-header reclamation can fail.
+    /// The committed tree retains the batch's values, including its in-place overwrites.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::EditUnsupported`] if an edit or an encountered file structure cannot
@@ -4531,14 +4535,22 @@ impl WriteEngine {
         // rather than of a structure read back out of the file, which is the one
         // span where a stale answer would not be caught by anything else.
         retain_disjoint_in_bounds(&mut to_free, self.image.len());
-        let to_free = self.stored_spans(to_free)?;
+        let mut to_free = self.stored_spans(to_free)?;
 
         // A persisting file keeps its freed space recorded on disk rather than
         // truncating it away, so its commit takes a different tail: one that
         // rewrites the on-disk managers rather than only repointing the superblock.
         if self.persist.is_some() {
+            let root_reclamation = self.plan_root_reclamation(new_root, &mut to_free)?;
             self.commit_persisting_releasing_reserve(new_root, to_free)?;
-            return self.repoint_stored_references(&relocations);
+            if root_reclamation.is_some() {
+                self.proved_free_of_references = true;
+            }
+            self.repoint_stored_references(&relocations)?;
+            if let Some(reclamation) = root_reclamation {
+                self.reclaim_root_metadata(reclamation)?;
+            }
+            return Ok(());
         }
 
         if self.fresh_page_boundary.is_some() {

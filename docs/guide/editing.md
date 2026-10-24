@@ -466,7 +466,22 @@ The metadata cache is **off** by default, which is why a bounded session's resid
 
 [`commit()`](crate::File::commit) appends each new dataset (its data blob and object header) and each new group, then appends rewritten object headers for every touched group and its ancestors up to the root (omitting any deleted links), and finally repoints the superblock at the new root.
 
-The appended data is `fsync`ed before the root is repointed, so the "repoint last" guarantee is real: if the process or machine fails during a commit, the original file is still intact and readable, because the superblock still points at the old root. (Under [`SyncPolicy::OnClose`](crate::SyncPolicy::OnClose) the repoint is still last, and during the session only a *process* failure is ordered against. See [Choosing the fsync cadence](#choosing-the-fsync-cadence).) The cost of a commit scales with the size of the edit, not the size of the file.
+With persistent [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr), the editor can reuse the original
+root-header allocation when it is below the free-section threshold and both headers occupy one
+chunk of the same size. It first publishes the replacement root, then copies that header into
+the reserved original extent and publishes its location. This requires a tree proved free of
+object references and an original root without an incoming hard link. Other object headers
+follow ordinary threshold admission.
+
+Without an explicit page buffer, the editor writes and `fsync`s each replacement before publishing
+its address in the superblock. A failure before the first publication leaves the previous root
+readable. During root-header reclamation, the first published root remains readable until the
+second publication. Under [`SyncPolicy::OnClose`](crate::SyncPolicy::OnClose), the editor orders
+writes against process failures and defers synchronization until close. See
+[Choosing the fsync cadence](#choosing-the-fsync-cadence).
+
+The editor can reorder writes across publication barriers when using an
+[explicit page buffer](#letting-pages-live-longer).
 
 **Edit validation runs before the first content write.** A validation error leaves the file on disk untouched. In a non-persistent PAGE session recovering from a publication error, the editor first drains pending writes from the preceding attempt.
 
