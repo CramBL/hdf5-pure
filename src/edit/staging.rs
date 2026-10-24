@@ -401,7 +401,7 @@ impl WriteEngine {
     /// it. A deletion alone preserves visibility of the committed object. For an ancestor
     /// deletion, each removed ancestor must also have a staged group creation.
     pub(crate) fn staged_object(&self, path: &ObjectPathBuf) -> Option<StagedObject> {
-        if self.stages_no_creations() {
+        if !self.has_staged_creations() {
             return None;
         }
         if path.is_empty() {
@@ -460,7 +460,7 @@ impl WriteEngine {
     /// merges these children with committed links using [`StagedChild::replaces_link`].
     /// Committed paths are not resolved individually during this listing.
     pub(crate) fn staged_children(&self, parent: &ObjectPathBuf) -> Vec<StagedChild> {
-        if self.stages_no_creations() {
+        if !self.has_staged_creations() {
             return Vec::new();
         }
         // A rebuilt group's committed children are removed with the old group.
@@ -756,9 +756,9 @@ impl WriteEngine {
         }
     }
 
-    /// Returns whether both creation collections are empty.
-    fn stages_no_creations(&self) -> bool {
-        self.staged.groups.is_empty() && self.staged.datasets.is_empty()
+    /// Returns whether a group or dataset creation is staged.
+    fn has_staged_creations(&self) -> bool {
+        !self.staged.groups.is_empty() || !self.staged.datasets.is_empty()
     }
 }
 
