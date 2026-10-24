@@ -283,8 +283,6 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-use core::num::NonZeroUsize;
-
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::PhysicalAddress;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
@@ -301,7 +299,6 @@ use hdf5_pure_space::__private::{
     PageType, SessionSpace, SessionSpaceSnapshot,
 };
 
-use crate::DatatypeByteOrder;
 use crate::SuperblockStatusFlags;
 use crate::SuperblockVersion;
 use crate::UserblockSize;
@@ -320,7 +317,6 @@ use crate::data_layout::COMPACT_DATA_OFFSET;
 use crate::data_layout::ChunkedLayoutFlags;
 use crate::data_layout::DataLayout;
 use crate::data_layout::LAYOUT_CLASS_COMPACT;
-use crate::dataspace::MaxExtent;
 use crate::datatype::{self, Datatype};
 use crate::error::{Error, FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::file_create_properties::FileCreateProperties;
@@ -350,7 +346,6 @@ use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 #[cfg(any(test, feature = "__page-publication-crosscheck"))]
 use crate::page_publication_failure::{PagePublicationFailure, PublicationFailureImage};
 use crate::reader::FileAccessProperties;
-use crate::shared_message::DatatypeLocation;
 use crate::source::SourceMetadata;
 use crate::source::{BaseOffsetSource, MetadataCacheConfig, Source};
 use crate::superblock;
@@ -361,6 +356,7 @@ use crate::type_builders::{self, AttrValue, ObjectRefTarget};
 use crate::width::FormatWidths;
 
 use self::aggregation::AggregateSpace;
+use self::dataset::{FlatDataset, MovingWrite, WritePlan};
 use self::staging::{StagedEdits, StagedScope};
 
 pub(crate) use self::staging::{StagedChild, StagedKind, StagedMeta, StagedObject};
@@ -384,10 +380,9 @@ mod reclaim;
 mod staging;
 
 pub use self::append::AppendBuilder;
-#[cfg(test)]
-pub(crate) use self::append::locate_dataset_state;
 pub(crate) use self::append::{AppendGeometry, AppendTarget, LocatedState};
-use self::dataset::{FlatDataset, MovingWrite, OverwriteBytes, WritePlan};
+#[cfg(test)]
+pub(crate) use self::append::{datatype_is_raw_appendable, locate_dataset_state};
 pub use global_heap_liveness::GlobalHeapLiveness;
 
 /// An undefined on-disk address (all bits set), HDF5's "no address" sentinel.
@@ -1255,18 +1250,14 @@ impl Placement {
     }
 }
 
-/// The data-only durability barrier: an ordering point always, and an `fsync`
-/// only when this session's [`SyncPolicy`] keeps the cadence.
+/// Orders pending writes and applies the data-sync policy.
 ///
-/// One function rather than one per caller because the commit path
-/// ([`WriteEngine::barrier_data`]) and the append engine's phase boundaries
-/// ([`crate::chunk_index_inplace::Store::sync`]) are the same point reached from two owners of the
-/// image, and a barrier that orders at one and not the other is a
-/// crash-consistency defect no test on the default policy can see (issue #288).
+/// [`SyncPolicy::Always`] calls [`FileImage::sync_data`]. [`SyncPolicy::OnClose`] issues an
+/// ordering barrier without forcing data to durable storage.
 ///
-/// The match is exhaustive on purpose, as at [`WriteEngine::barrier`]:
-/// `SyncPolicy` is sealed to the outside but not to this crate, so a policy
-/// added later fails to compile here until someone decides what it means.
+/// # Errors
+///
+/// Returns [`Error::Io`] if the barrier fails.
 fn barrier_data(image: &mut dyn FileImage, sync_policy: SyncPolicy) -> Result<(), Error> {
     match sync_policy {
         SyncPolicy::Always => image.sync_data(),
@@ -3448,7 +3439,7 @@ impl WriteEngine {
         // in place (no header rewrite, no superblock flip), while a resize or
         // compact rewrite relocates the header and is staged against its parent
         // group so the commit below rebuilds it and patches the link. ---
-        let mut inplace_writes: Vec<(u64, OverwriteBytes)> = Vec::new();
+        let mut inplace_writes: Vec<(u64, Vec<u8>)> = Vec::new();
         let mut moving_writes: Vec<(ObjectPathBuf, LinkNameBuf, u64, MovingWrite)> = Vec::new();
         let mut write_targets: Vec<ObjectPathBuf> = Vec::new();
         // The file-wide hard-link count, computed lazily the first time a commit
@@ -3486,11 +3477,7 @@ impl WriteEngine {
                 }
                 // A chunked in-place overwrite never carries staging — a staged
                 // one is a `ChunkPayload::Deferred`, which relocates.
-                WritePlan::InPlaceChunks { writes } => inplace_writes.extend(
-                    writes
-                        .into_iter()
-                        .map(|(at, raw)| (at, OverwriteBytes::ready(raw))),
-                ),
+                WritePlan::InPlaceChunks { writes } => inplace_writes.extend(writes),
                 WritePlan::Moving(mw) => {
                     // A relocating overwrite rewrites the dataset's header and data
                     // address. Every variant is base-aware on a userblock file: the
@@ -3535,7 +3522,7 @@ impl WriteEngine {
             let Some((parent, leaf)) = full.split_leaf() else {
                 return Err(Error::AppendUnsupported("cannot append to the root group"));
             };
-            if ab.raw.is_empty() {
+            if ab.raw().is_empty() {
                 continue; // nothing to append
             }
             // A dataset overwritten or appended earlier in this commit would be
@@ -3676,10 +3663,6 @@ impl WriteEngine {
         // relocate — such an overwrite places a global heap collection, and an
         // append moves end-of-file, which only the superblock this path leaves
         // untouched records (issue #321).
-        debug_assert!(
-            inplace_writes.iter().all(|(_, b)| b.vlen.is_none()),
-            "a staged variable-length overwrite must relocate, not write in place"
-        );
         if moving_writes.is_empty() && staged.scope() == StagedScope::Datasets {
             // This path's own point of no return, and it takes the staged set
             // for the same reason the main one below does (issue #316): every
@@ -3698,10 +3681,7 @@ impl WriteEngine {
             // dataset's values are the ones it had (issue #344).
             drop(std::mem::take(staged));
             for (data_addr, bytes) in &inplace_writes {
-                // Every entry here stages nothing (the guard above), so this
-                // hands back the staged bytes unchanged and unallocated.
-                let raw = self.resolve_overwrite_bytes(bytes)?;
-                self.write_inplace_journaled(*data_addr, &raw)?;
+                self.write_inplace_journaled(*data_addr, bytes)?;
             }
             self.barrier()?;
             return Ok(());
@@ -4519,92 +4499,23 @@ impl WriteEngine {
             // within each half is what the paragraph above promises.
             group_datasets.sort_by_key(|fd| fd.reference_targets.is_some());
             for mut fd in group_datasets {
-                // Place each variable-length attribute's global heap collection
-                // and patch its placeholder heap address. Unlike VL-string
-                // *data* (`vl_string_staging`, refused when chunked below), a
-                // chunked/extensible dataset can carry a VL *attribute* just
-                // fine — attributes live in the object header, not inside a
-                // chunk, so patching them here before either apply branch runs
-                // covers both.
-                for (idx, collections) in std::mem::take(&mut fd.vl_attrs) {
-                    let addrs = self.place_vl_collections(&collections)?;
-                    type_builders::patch_vl_refs(&mut fd.attrs[idx].raw_data, &addrs);
-                }
-                // Resolve an object-reference dataset's per-element targets now
-                // that every earlier-placed object in this commit is in
-                // `path_addr` (chunked datasets never carry these —
-                // `flatten_dataset` refuses that combination).
-                if let Some(patches) = fd.reference_targets.take() {
-                    for patch in &patches {
-                        let addr = Self::resolve_reference_target(
-                            &patch.target,
-                            &path_addr,
-                            &nodes,
-                            &add_targets,
-                            &write_targets,
-                            &delete_targets,
-                            &for_supplied,
-                            &self.image(),
-                            &self.superblock,
-                            self.widths,
-                            self.addresses,
-                        )?;
-                        type_builders::write_reference_address(
-                            &mut fd.raw,
-                            patch.byte_offset,
-                            addr,
-                        );
-                    }
-                }
-                let oh = if fd.chunk_options.is_chunked() || fd.maxshape.is_some() {
-                    self.build_chunked_dataset(&fd)?
-                } else {
-                    // A staged variable-length-string dataset's element
-                    // references still carry a placeholder heap address; place
-                    // its collection and patch them before `raw` is appended
-                    // (chunked datasets never carry staging — refused above).
-                    if let Some(staging) = fd.vl_string_staging.take() {
-                        if !staging.collections.is_empty() {
-                            let addrs = self.place_vl_collections(&staging.collections)?;
-                            type_builders::patch_vl_refs_masked(
-                                &mut fd.raw,
-                                &staging.patch_offsets,
-                                &addrs,
-                            );
-                        }
-                    }
-                    // A zero-element dataset has no data block to allocate; its
-                    // layout address is the undefined-address sentinel (never
-                    // base-relative — see `build_dataset_oh`'s empty-data callers
-                    // in the whole-file writer), matching every reader's and the
-                    // reference C library's convention for "no storage allocated".
-                    let data_addr = if fd.raw.is_empty() {
-                        StoredAddress::new(UNDEF)
-                    } else {
-                        base.relative(self.alloc_or_append_typed(&fd.raw, AllocationClass::Raw)?)?
-                    };
-                    // Attributes this dataset keeps in a fractal heap are placed
-                    // now — after the variable-length patching above, so the heap
-                    // holds resolved references — and the header names the heap
-                    // instead of carrying them inline.
-                    let attr_info = self.place_dense_attrs_if_needed(&fd)?;
-                    file_writer::build_dataset_oh(
-                        &fd.dt,
-                        // Committed datatypes are refused when a dataset is
-                        // staged (`flatten_dataset`), so every type here is
-                        // written into the dataset's own header.
-                        &DatatypeLocation::Inline,
-                        &fd.ds,
-                        data_addr,
-                        fd.raw.len() as u64,
-                        &fd.attrs,
-                        attr_info.as_deref(),
-                        fd.fill_time.unwrap_or_default(),
-                        fd.fill.as_deref(),
-                        self.libver(),
-                    )?
-                };
-                let oh_addr = self.alloc_or_append_typed(&oh, AllocationClass::Metadata)?;
+                self.resolve_dataset_attributes(&mut fd)?;
+                fd.resolve_references(|target| {
+                    Self::resolve_reference_target(
+                        target,
+                        &path_addr,
+                        &nodes,
+                        &add_targets,
+                        &write_targets,
+                        &delete_targets,
+                        &for_supplied,
+                        &self.image(),
+                        &self.superblock,
+                        self.widths,
+                        self.addresses,
+                    )
+                })?;
+                let oh_addr = self.write_dataset(&mut fd)?;
                 region.push_link(
                     fd.name.as_str(),
                     base.relative(oh_addr)?,
@@ -4650,21 +4561,10 @@ impl WriteEngine {
             path_addr.insert(key.clone(), addr);
         }
 
-        // Same-length in-place overwrites (`write_dataset`) write straight into
-        // their existing, already-referenced data blocks. Those blocks are
-        // reachable from both the old and the new root (the dataset's header is
-        // unchanged), so the write is independent of the superblock flip; it is
-        // ordered before the barrier sync below so the new bytes are durable
-        // alongside everything else this commit appended.
-        // Nothing resolved here allocates: `prepare_write` plans a staged
-        // variable-length overwrite as a relocating write rather than an
-        // in-place one (issue #321), so every entry hands its staged bytes back
-        // untouched — which the `vlen.is_none()` assertion guarding the fast
-        // path states for the whole list, this one included. The journal below
-        // is what costs here, and it is not free: see `inplace_undo`.
+        // Prepared in-place bytes require no heap allocation. Journal existing data before writing
+        // it.
         for (data_addr, bytes) in &inplace_writes {
-            let raw = self.resolve_overwrite_bytes(bytes)?;
-            self.write_inplace_journaled(*data_addr, &raw)?;
+            self.write_inplace_journaled(*data_addr, bytes)?;
         }
 
         // Every group's new header address is known now that the apply loop has
@@ -5923,18 +5823,17 @@ impl WriteEngine {
         Ok(GroupInfo { region, link_names })
     }
 
-    /// Parse the object header at `addr` into a copyable model, validating that
-    /// every message can be reproduced faithfully (verbatim message bytes, with
-    /// only the contiguous data address and child link targets repointed).
-    /// Dense (fractal-heap) attribute storage is read out of the source heap into
-    /// a parsed attribute set carried on the model (`dense_attrs`) and re-emitted
-    /// into a fresh heap on write, within the bounds that heap declares (see
-    /// `file_writer::dense_attrs_check`), an attribute too large to hold as a
-    /// managed object is re-emitted as a *huge* object. Rejects multi-chunk
-    /// headers, dense or soft/external links, old-version data layouts, external
-    /// data storage ([`reject_external_storage`]), and headers that are neither a
-    /// dataset nor a group. (A *chunked* layout is modelled, not rejected  -
-    /// [`ObjModel::DatasetChunked`].)
+    /// Parses an object header and attribute storage for copying.
+    ///
+    /// Dense attributes are read into an owned set for replacement storage. Hard-link children and
+    /// contiguous data locations are recorded separately from the retained header messages.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] for external storage, unsupported layouts or links, or an
+    /// object that is neither a dataset nor a group. Returns metadata and attribute read, parse,
+    /// and
+    /// storage-planning errors.
     fn read_object<S: Source + ?Sized>(
         src: &S,
         access_mode: AccessMode,
@@ -5943,29 +5842,12 @@ impl WriteEngine {
     ) -> Result<ObjModel, Error> {
         let region = Self::gather_oh_messages(src, addr, base)?;
 
-        // Ahead of the layout classification below, where external storage and
-        // never-allocated storage would otherwise share one undefined address
-        // and one result  -  and ahead of the dense-attribute read, so a header
-        // this cannot copy says why in place of failing as something else.
         reject_external_storage(&region)?;
 
-        // First pass: detect whether attributes are stored densely (a defined
-        // fractal-heap address in the Attribute Info message). A dense object is
-        // copied by reading its attributes out of the source heap and rebuilding
-        // a fresh heap on write, so its Attribute Info message and any inline
-        // Attribute messages are dropped from the verbatim region  -  the rebuilt
-        // region carries neither, and `dense_attrs` carries the parsed set.
         let mut dense = false;
         let mut p = 0;
         while let Some((msg_type, body, body_end)) = region.next_message(p)? {
             if msg_type == MessageType::ATTRIBUTE_INFO {
-                // An Attribute Info message does not by itself mean dense
-                // storage: libhdf5 and h5py emit one (with an
-                // *undefined* fractal-heap address) even for compact, inline
-                // attributes in the latest format, to carry attribute
-                // creation-order metadata. Only a *defined* heap address is real
-                // dense (fractal-heap) storage. A message that cannot be parsed
-                // is rejected conservatively.
                 let ai = crate::attribute_info::AttributeInfoMessage::parse_with_offset_width(
                     &region[body..body_end],
                     crate::file_writer::OFFSET_WIDTH,
@@ -5986,8 +5868,6 @@ impl WriteEngine {
         let dense_attrs = if dense {
             let stored = read_object_attrs(src, access_mode, addr, base)?;
             let set = dense_attr_set(&region, stored)?;
-            // The typed error identifies the offending attribute, which the previous
-            // blanket `EditUnsupported` message could not.
             crate::file_writer::dense_attrs_check(&set.attrs).map_err(Error::Format)?;
             set
         } else {
@@ -6010,10 +5890,6 @@ impl WriteEngine {
             let mut keep = true;
             match msg_type {
                 MessageType::ATTRIBUTE_INFO => {
-                    // Already parsed in the first pass, drop the dense Attribute
-                    // Info message so the rebuilt header references the fresh heap
-                    // (spliced in on write) in place of the source one. A compact
-                    // (undefined-heap) Attribute Info message is kept verbatim.
                     if dense {
                         keep = false;
                     }
@@ -6135,21 +6011,13 @@ impl WriteEngine {
         }
     }
 
-    /// When `attrs` is non-empty, build a fresh dense (fractal-heap) attribute
-    /// blob for it, place it, and splice the matching Attribute Info message onto
-    /// `region`. A no-op for an empty set.
+    /// Places a nonempty dense attribute set and adds its Attribute Info message to `region`.
     ///
-    /// The blob produced by [`DenseAttrPlan::build`] is fully
-    /// relocatable: every address it embeds is `base + fixed offset`, and its
-    /// length is the same for every base, so it can go into a freed metadata
-    /// region as readily as at end-of-file — the base it is built for is whichever
-    /// address it gets. The reservation comes from the plan the blob is then
-    /// built from, so sizing it costs no bytes. The freshly built heap is always
-    /// same-file, so it never aliases the source heap even for an in-file copy.
-    /// The caller has already validated [`dense_attrs_check`].
+    /// The caller checks the set with [`file_writer::dense_attrs_check`] before commit application.
     ///
-    /// [`DenseAttrPlan::build`]: crate::file_writer::DenseAttrPlan::build
-    /// [`dense_attrs_check`]: crate::file_writer::dense_attrs_check
+    /// # Errors
+    ///
+    /// Returns the errors of [`place_dense_attrs`](Self::place_dense_attrs) for a nonempty set.
     fn append_dense_attrs(
         &mut self,
         region: &mut OhRegion,
@@ -6163,23 +6031,13 @@ impl WriteEngine {
         Ok(())
     }
 
-    /// Place dense attribute storage for a staged dataset whose set needs it,
-    /// returning the Attribute Info message naming the heap — or `None` when the
-    /// set belongs in the object header, where the header builders write it
-    /// inline. Which it is was decided and validated when the dataset was staged
-    /// ([`FlatDataset::attrs_are_dense`]).
-    fn place_dense_attrs_if_needed(&mut self, fd: &FlatDataset) -> Result<Option<Vec<u8>>, Error> {
-        if !fd.attrs_are_dense {
-            return Ok(None);
-        }
-        self.place_dense_attrs(&fd.attrs, DenseAttrCreationOrder::Untracked)
-            .map(Some)
-    }
-
-    /// Build a fresh dense attribute blob for `attrs`, place it, and return the
-    /// Attribute Info message naming it — the header's whole share of dense
-    /// storage. See [`append_dense_attrs`](Self::append_dense_attrs) for why the
-    /// blob may be placed anywhere.
+    /// Writes dense attribute storage and returns its Attribute Info message.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`file_writer::dense_attrs_plan`] if attributes cannot be encoded.
+    /// Returns [`Error::Format`] if heap addresses or allocation geometry are invalid, and
+    /// [`Error::Io`] if writing the heap or allocation padding fails.
     fn place_dense_attrs(
         &mut self,
         attrs: &[crate::attribute::AttributeMessage],
@@ -6453,29 +6311,16 @@ impl WriteEngine {
         }
     }
 
-    /// Writes a relocatable blob of `len` bytes for `class`.
+    /// Reserves `len` bytes, builds content for that address, and writes it.
     ///
-    /// Reserves its address, builds its bytes with `build`, and writes them at that address.
-    /// Returns the address and whatever else `build` produced (typically the
-    /// object-header message naming the blob, which embeds the same address).
-    ///
-    /// `build` receives the address the blob will occupy. Every address the blob
-    /// embeds is written in that same form, which a reader resolves against the
-    /// file's base address.
-    ///
-    /// `len` must be the length `build` will produce; [`place`](Self::place)
-    /// rejects a mismatch. For every blob placed this way the length is a function
-    /// of the content alone — the addresses sit in fixed-width fields — so every
-    /// caller derives it, and none builds the blob to measure it:
-    /// [`DenseAttrPlan::blob_len`](crate::file_writer::DenseAttrPlan::blob_len)
-    /// for a dense attribute heap, and [`crate::chunked_write::chunked_data_len`] / [`crate::chunked_write::plan_chunked_data_verbatim`]
-    /// for a whole chunked data region, both of which size their index through
-    /// [`chunk_index_len`](crate::chunked_write::chunk_index_len).
+    /// `build` receives a stored address relative to the file's base. The length must match the
+    /// reservation exactly. Returns the physical address and the additional value produced by
+    /// `build`.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Format`] if address resolution or placement is invalid. Returns any error
-    /// from reserving space, `build`, or writing the bytes.
+    /// Returns [`Error::Format`] for invalid address conversion or a placement-length mismatch.
+    /// Returns allocation, I/O, and `build` errors.
     fn place_relocatable<T>(
         &mut self,
         len: u64,
@@ -6488,16 +6333,14 @@ impl WriteEngine {
         Ok((addr, extra))
     }
 
-    /// Place one variable-length dataset's or attribute's already-built,
-    /// self-contained global heap collections (from
-    /// [`type_builders::build_global_heap_collections`] or a
-    /// [`crate::type_builders::VlStringStaging::collections`]) and return, in the same order, the
-    /// base-relative addresses its variable-length references should be patched
-    /// to. A `GCOL` blob embeds no addresses of its own, so it can be appended
-    /// (or dropped into reused free space) at any point in the apply loop,
-    /// unlike a group or dataset header, which must be built last so it can name
-    /// its children's real addresses. Each collection is placed independently,
-    /// so they need not land contiguously.
+    /// Places heap collections and returns their base-relative addresses in the same order.
+    ///
+    /// Collections are allocated independently and may occupy noncontiguous regions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if allocation geometry or base-relative address conversion is
+    /// invalid. Returns [`Error::Io`] if writing a collection or allocation padding fails.
     // `H5MF_aggr_vfd_alloc` in `H5MFaggr.c`, HDF5 2.2.0, assigns `H5FD_MEM_GHEAP`
     // to the raw-data aggregator.
     fn place_vl_collections(&mut self, collections: &[Vec<u8>]) -> Result<Vec<u64>, Error> {
@@ -6862,12 +6705,17 @@ enum ObjModel {
 /// which is what lets a cross-file copy read the source at staging time and apply
 /// it at commit time.
 enum CopyTree {
-    /// A compact dataset: the header region is written verbatim (data is inline).
-    /// `dense_attrs`, when non-empty, is re-emitted into a freshly built fractal
-    /// heap appended just before the header, whose Attribute Info message is
-    /// spliced into the region on write.
-    DatasetVerbatim {
+    /// Stored chunks with checked geometry and their verbatim filter-pipeline message.
+    ///
+    /// The copy writer rebuilds the index and layout while preserving payload bytes, sizes, and
+    /// filter masks. Dense attributes are written into separate replacement storage.
+    DatasetChunked {
         region: OhRegion,
+        geometry: dataset::ChunkGeometry,
+        flags: ChunkedLayoutFlags,
+        pipeline_message: Option<Vec<u8>>,
+        meta: Vec<ChunkMeta>,
+        chunk_bytes: Vec<Vec<u8>>,
         dense_attrs: DenseAttrSet,
     },
     /// A contiguous dataset: `data` is written first and its new address patched
@@ -6885,30 +6733,9 @@ enum CopyTree {
         data: Option<Vec<u8>>,
         dense_attrs: DenseAttrSet,
     },
-    /// A chunked dataset, filtered or not.
-    ///
-    /// The header `region` is written verbatim except its data layout message, which is replaced
-    /// by one that addresses the rebuilt index and stores the source's `flags`. The stored bytes
-    /// of each chunk in `chunk_bytes`, in dense row-major grid order with their sizes and filter
-    /// masks in `meta`, and the source `pipeline_message` are copied unchanged, so the copy keeps
-    /// the filter pipeline and every chunk byte for byte. The index type is chosen again from
-    /// `maxshape` and the chunk count, as a Single Chunk, a Fixed Array or an Extensible Array, so
-    /// a source indexed by a version 1 B-tree or an Implicit index is copied with one of those
-    /// three. See [`DatasetVerbatim`](CopyTree::DatasetVerbatim) for `dense_attrs`.
-    DatasetChunked {
+    /// A compact dataset header with inline values and separately rebuilt dense attributes.
+    DatasetVerbatim {
         region: OhRegion,
-        /// The dataset's current shape. Held because the index's element
-        /// numbering is taken over the *maximum* chunk grid, which needs both
-        /// extents (see [`crate::chunk_grid`]).
-        shape: Vec<u64>,
-        chunk_dims: Vec<u64>,
-        element_size: NonZeroUsize,
-        /// The layout flags of the source, which the new layout message stores.
-        flags: ChunkedLayoutFlags,
-        maxshape: Option<Vec<MaxExtent>>,
-        pipeline_message: Option<Vec<u8>>,
-        meta: Vec<ChunkMeta>,
-        chunk_bytes: Vec<Vec<u8>>,
         dense_attrs: DenseAttrSet,
     },
     /// A group: every non-link message verbatim, plus the `(name, creation
@@ -6941,67 +6768,33 @@ impl CopyTree {
     }
 }
 
-/// The addresses this commit invalidates, against which a reference it writes is
-/// screened (issue #317).
+/// Records physical addresses invalidated by a commit for object-reference screening.
 ///
-/// An object reference *is* an object-header address, so a commit can falsify one
-/// two ways. It can **remove** the object: a deletion frees its header and
-/// storage, and a group's whole subtree with it
-/// ([`WriteEngine::collect_free_spans`] is the walk that enumerates it), so the
-/// address survives the commit only until the next allocation reuses the span and
-/// then reads as whatever landed there. Or it can **move** it: a dirty group and
-/// a relocating dataset write are both rebuilt at a fresh address, and the old
-/// header is freed once the superblock is repointed.
-///
-/// Both are screened here because on the *path* side neither can come out as a
-/// pre-commit address: [`WriteEngine::resolve_reference_target`] rejects a deleted
-/// path by name, and a dirty group or a write target it either rejects as "still
-/// writing" or  -  once this commit has placed the target  -  resolves to the address
-/// it lands on. An address that skipped either check would be the one form that
-/// writes the value the commit is vacating, which is the defect this
-/// exists to close.
-///
-/// The removal spans are the very ones the commit hands to the free-space
-/// manager, taken from one walk in place of two, so the screen and the reclaimer
-/// cannot come to disagree about what this commit removes.
+/// Removed spans are also used for storage reclamation. Moved entries identify old object-header
+/// addresses whose replacements are published by the commit.
 struct InvalidatedAddresses {
     /// Absolute `(offset, length)` file spans this commit's deletions reclaim, as
     /// [`collect_free_spans`](WriteEngine::collect_free_spans) reports them.
     removed: Vec<(u64, u64)>,
-    /// Absolute pre-commit object-header addresses this commit rewrites
-    /// elsewhere: every existing group it dirties, and every dataset write that
-    /// relocates (a resizing or compact overwrite, a staged append, an attribute
-    /// edit). An in-place overwrite does not relocate and is not here. The path
-    /// side rejects it anyway, deliberately conservatively  -  `write_targets`
-    /// records that a dataset is written, not which plan it got  -  while this list
-    /// is filled from the plans themselves.
+    /// Superseded object-header addresses from relocating dataset writes and rebuilt groups.
     moved: Vec<u64>,
     /// The address context used to compare stored object references with physical positions.
     base: AddressContext,
 }
 
 impl InvalidatedAddresses {
-    /// Whether this commit invalidates anything at all, so a caller with nothing
-    /// cheap to check can skip its own work. Worth testing on the copy screen,
-    /// whose `moved` is empty by construction, the supplied screen's never is,
-    /// since every commit that builds one rebuilds its root group.
+    /// Returns whether the commit preserves every recorded address.
     fn is_empty(&self) -> bool {
         self.removed.is_empty() && self.moved.is_empty()
     }
 
-    /// The rejection for `stored`  -  one object-reference element exactly as it is
-    /// written to disk  -  or `None` when it refers to a surviving object.
+    /// Returns a rejection for a reference into removed storage or a superseded header.
     ///
-    /// The null (`0`) and undefined ([`UNDEF`]) references name no object at all,
-    /// so neither is screened: the same two values
-    /// [`crate::repack()`] copies through verbatim without
-    /// resolving, and the two [`crate::reader`] rejects to dereference.
+    /// Null, undefined, and unresolvable stored addresses are excluded from this screen.
     fn refusal(&self, stored: StoredAddress) -> Option<&'static str> {
         if stored.get() == 0 || stored.get() == UNDEF {
             return None;
         }
-        // An address that cannot even be shifted into the file is not one of
-        // ours, leave it to whatever reads it.
         let abs = self.base.absolute(stored).ok()?;
         if self
             .removed
@@ -7110,49 +6903,11 @@ pub(crate) fn pipeline_lossless(pipeline: &FilterPipeline) -> bool {
     ))
 }
 
-/// The refusal both append paths raise for a lossy pipeline sitting on a partial
-/// trailing chunk. Named here beside the predicate it goes with, and used from
-/// [`crate::chunk_index_inplace`] as well as the staged
-/// rebuild above.
+/// The shared rejection for re-encoding a lossy partial trailing chunk.
 pub(crate) const LOSSY_TAIL_REFUSAL: &str = "this dataset's filter pipeline is lossy (ZFP, or float D-scale scale-offset), and its \
      length is not a whole multiple of the chunk length: growing that trailing chunk would \
      decode and re-encode values that are already committed, changing them. Append whole \
      chunks from a chunk-aligned length instead";
-
-/// Whether a datatype's raw on-disk bytes can be appended verbatim from a caller
-/// via [`AppendBuilder::append_raw`]. True only when every scalar leaf is safe to
-/// write as flat little-endian bytes:
-///
-/// - one-byte fixed-point leaves are byte-order agnostic, all other numeric
-///   leaves (fixed-point, floating-point, time, bit field) must be little-endian,
-///   or the caller's little-endian bytes would silently misencode into a
-///   big-endian (or VAX) field
-/// - string and opaque leaves are byte arrays with no numeric byte order, so they
-///   are order-agnostic and safe
-/// - aggregates (enumeration, array, compound) are appendable if every leaf is
-/// - variable-length and reference leaves embed global-heap or object addresses
-///   that a flat byte append cannot reproduce, so they are never raw-appendable.
-///
-/// A typed `append_*` bypasses this: it checks full datatype equality instead, so
-/// it already refuses every non-little-endian and non-scalar dataset.
-pub(crate) fn datatype_is_raw_appendable(dt: &Datatype) -> bool {
-    match dt {
-        Datatype::FixedPoint(numeric) => {
-            numeric.size().get() == 1 || numeric.byte_order() == DatatypeByteOrder::LittleEndian
-        }
-        Datatype::FloatingPoint(numeric) => numeric.byte_order() == DatatypeByteOrder::LittleEndian,
-        Datatype::Time(numeric) => numeric.byte_order() == DatatypeByteOrder::LittleEndian,
-        Datatype::BitField(numeric) => numeric.byte_order() == DatatypeByteOrder::LittleEndian,
-        Datatype::String { .. } | Datatype::Opaque { .. } => true,
-        Datatype::Enumeration { base_type, .. } | Datatype::Array { base_type, .. } => {
-            datatype_is_raw_appendable(base_type)
-        }
-        Datatype::Compound { members, .. } => members
-            .iter()
-            .all(|m| datatype_is_raw_appendable(&m.datatype)),
-        Datatype::VariableLength(_) | Datatype::Reference { .. } | _ => false,
-    }
-}
 
 /// The chunk-0 message region of a fresh, empty compact-link group: a LinkInfo
 /// message advertising no dense storage, followed by a GroupInfo message.
@@ -7222,17 +6977,10 @@ fn ensure_attribute_info(region: &mut OhRegion) -> Result<(), Error> {
     Ok(())
 }
 
-/// Encode a complete object-header Link message (4-byte record header + body)
-/// for a hard link `name -> addr`. The caller must have validated that the body
-/// fits the u16 size field (see [`dataset::flatten_dataset`]), group names are short.
+/// Serializes a hard link using the caller's message-record layout.
 ///
-/// `creation_order` is the link's creation index, which a group tracking **link**
-/// creation order carries on every link and no other group carries at all
-/// ([`LinkCreationOrder`] is what hands one out). It is a flagged field of the
-/// Link message *body*, quite separate from the object header's own per-message
-/// creation index: that one records an *attribute*'s creation order, and the
-/// reference C library writes it as the zero [`MessageRecordLayout::record`] passes
-/// for every other message type.
+/// The caller ensures that the serialized body fits an object-header message. `creation_order`
+/// is the link's creation index, separate from the header record's attribute creation index.
 fn encode_link_message(
     layout: MessageRecordLayout,
     name: &str,
