@@ -69,7 +69,14 @@ Whole-file writes under `Aggr` or `FsmAggr` use separate metadata and raw aggreg
 
 Under `FsmAggr`, the writer reuses abandoned aggregate spare subject to the free-section threshold before reserving more aggregate space. With persistence enabled, it releases the aggregate reservations after placement and records the remaining reusable spare in a free-space manager. The manager's own allocations are excluded from its free sections. If no sections remain after tail release and threshold admission, the writer records the persist flag with undefined manager addresses. With persistence disabled, the construction free list is discarded after output, so its unused interior regions are unavailable after reopening. `Aggr` also leaves unused interior reservations allocated without a manager.
 
-Under [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr), ordinary read-write sessions try reusable freed space before the metadata or raw aggregate, with persistence enabled or disabled. This also applies to a file without a recorded strategy. Abandoned aggregate spare is tracked subject to the free-section threshold. Active reservations remain exclusive to the session across commits and are excluded from persisted free sections. A commit may surrender both windows when their spare permits releasing a larger dead suffix. Clean teardown returns unused spare through the persistent managers, or forgets the session free list when persistence is disabled. Reopening starts with empty aggregate windows. SWMR sessions under `FsmAggr` use no classic aggregates.
+Under [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr), ordinary read-write sessions try reusable
+freed space before the metadata or raw aggregate, with persistence enabled or disabled. This also
+applies to a file without a recorded strategy. Abandoned aggregate spare is tracked subject to the
+free-section threshold. Active reservations are excluded from persisted free sections. A commit may
+surrender both windows when their spare permits releasing a larger dead suffix, or when recycling
+sub-threshold persistent manager storage. Clean teardown returns unused spare through the persistent
+managers, or forgets the session free list when persistence is disabled. Reopening starts with empty
+aggregate windows. SWMR sessions under `FsmAggr` use no classic aggregates.
 
 Under `FsmAggr` and persistent [`Page`](crate::FileSpaceStrategy::Page), edits reuse freed space through free-space managers. Non-persistent PAGE sessions append in fresh pages and retain freed extents without reuse. Under `Aggr` and [`None`](crate::FileSpaceStrategy::None), deletion discards the freed extents. `None` allocates at the end of the file and retains its length after deletion.
 
@@ -151,7 +158,18 @@ Passing `persist = true` under [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr) or
 
 [`File::persisted_free_space()`](crate::File::persisted_free_space) returns the tracked free regions as `(address, length)` pairs sorted by address, and a read-write session seeds its free list from them, so reuse spans sessions.
 
-Every commit rewrites those manager blocks, and they are themselves placed in free space where any fits, so a file under delete-and-recreate churn settles at a steady size. Active aggregate spare remains reserved and is excluded from those blocks. Close or drop returns unused spare through a manager rewrite, even if allocation within a window left the file length unchanged. An uncertain publication prevents this cleanup. Under [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr) a threshold above the length of the blocks is the exception: the file grows by a set of blocks on each commit that appends the new set at its end, since the session drops each superseded set that is isolated from tracked free space.
+The editor places replacement manager blocks in reusable free space where they fit. Under
+[`FsmAggr`](crate::FileSpaceStrategy::FsmAggr), it reserves a contiguous allocation for its extension
+and managers that is smaller than the threshold. It first publishes replacement metadata elsewhere,
+then rewrites the reserved allocation and publishes it again if the new metadata fits.
+The reserved allocation is excluded from ordinary free-section admission. Unused aggregate spare
+is released through ordinary threshold admission during recycling. Close or drop also returns
+unused spare through a manager rewrite. An uncertain publication prevents this cleanup.
+
+Repeated fixed-width root attribute updates reach a stable file length across commits and reopen
+cycles when the [conditions for reusing the root header](crate::_guide::editing#how-it-works) hold
+and replacement manager metadata fits its reserved allocation. Other relocated metadata follows
+ordinary threshold admission and may leave sub-threshold gaps.
 
 Freed space that reaches the end of the file is given back to the filesystem: the commit shortens the file to where the run starts, to a page boundary on a paged file, and the managers it writes cover nothing above the new length. A few blocks' worth is kept for the tails the following commits have to write, and a run that would return less than that is left alone, so what this guarantees is that the file ends just above its last live allocation, not that a delete never makes a file longer. For a guaranteed shrink that also moves live objects down, use [repack](crate::_guide::repack).
 

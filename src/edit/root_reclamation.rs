@@ -109,7 +109,7 @@ impl WriteEngine {
     ///
     /// The caller must first publish the replacement root. The superseded extent is then
     /// unreferenced and available for the copy. The replacement extent is released through
-    /// ordinary threshold admission after the second publication.
+    /// ordinary threshold admission when publishing the copied header.
     ///
     /// # Errors
     ///

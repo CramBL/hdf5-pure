@@ -19,11 +19,11 @@
 //!    yields a file whose every row, recorded strategy, and manager free-space
 //!    total the C library reads back exactly.
 //!
-//! 3. **Threshold admission.** For any threshold and any interior deletions under
-//!    `FsmAggr`, a session tracks a deleted extent whose preceding dataset is kept
-//!    exactly when the extent is at least the threshold, and neither the session nor
-//!    the file tracks a dropped extent afterwards. The C library reads every kept
-//!    dataset, and its `H5Fget_freespace` equals the persisted free space.
+//! 3. **Threshold admission.** Under [`FileSpaceStrategy::FsmAggr`], checks a deleted extent whose
+//!    preceding dataset is kept. Reusable free space and reallocated metadata cover its whole length
+//!    when it meets the threshold, and zero bytes otherwise. Dropped extents remain outside
+//!    session and persisted free sections. Checks surviving values and persisted free-space
+//!    totals through the C library.
 //!
 //! A failing case is shrunk to its minimal reproducer and recorded under
 //! `tests/proptest-regressions/`; commit that file so the reproducer travels
@@ -255,12 +255,18 @@ proptest! {
                 file.commit().unwrap();
                 let isolated = !deleted[i - 1];
                 let len = extent.end - extent.start;
-                let tracked = range::covered_len(
-                    &file.space_accounting().unwrap().reusable_free_space,
-                    &extent,
-                );
+                let ownership = file.__space_ownership().unwrap();
+                prop_assert!(ownership.analysis_complete);
+                let accounted = [
+                    &ownership.reusable_free_space,
+                    &ownership.live_metadata_space,
+                    &ownership.free_space_manager_space,
+                ]
+                .into_iter()
+                .map(|sections| range::covered_len(sections, &extent))
+                .sum::<u64>();
                 if isolated {
-                    prop_assert_eq!(tracked, if len >= threshold { len } else { 0 });
+                    prop_assert_eq!(accounted, if len >= threshold { len } else { 0 });
                     if len < threshold {
                         dropped.push(extent);
                     }

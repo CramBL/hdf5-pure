@@ -2,9 +2,11 @@ use std::fs;
 use std::io::Error as IoError;
 use std::io::ErrorKind;
 
+use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use rstest::rstest;
 
 use crate::AttrValue;
+use crate::DecodedStoredAddress;
 use crate::Error;
 use crate::File;
 use crate::FileAccessProperties;
@@ -24,13 +26,15 @@ use crate::source::Source;
 use crate::type_builders::DatasetBuilder;
 
 #[rstest]
-#[case::mirrored(MemoryStrategy::Mirrored, 0)]
-#[case::bounded(MemoryStrategy::Bounded, 0)]
-#[case::userblock(MemoryStrategy::Mirrored, 512)]
-fn fixed_size_root_reclaims_its_original_allocation(
+#[case::mirrored(MemoryStrategy::Mirrored, 0, false)]
+#[case::bounded(MemoryStrategy::Bounded, 0, false)]
+#[case::userblock(MemoryStrategy::Mirrored, 512, false)]
+#[case::tracked_space(MemoryStrategy::Mirrored, 0, true)]
+fn fixed_width_root_updates_reach_stable_physical_length(
     #[case] backing: MemoryStrategy,
     #[case] userblock: u64,
-    #[values(4_096, u64::MAX)] threshold: u64,
+    #[case] tracked: bool,
+    #[values(1, 200, 4_096, u64::MAX)] threshold: u64,
     #[values(false, true)] reopen: bool,
 ) {
     let directory = tempfile::tempdir().unwrap();
@@ -40,13 +44,24 @@ fn fixed_size_root_reclaims_its_original_allocation(
     builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
     builder.set_attr("generation", AttrValue::I64(-1));
     builder.create_dataset("keep").with_i32_data(&[1, 2, 3]);
+    if tracked {
+        builder.create_dataset("hole").with_u8_data(&[9; 8_192]);
+        builder.create_dataset("guard").with_u8_data(&[7; 8_192]);
+    }
     builder.write(&path).unwrap();
     let original = fs::read(&path).unwrap();
     let options = FileAccessProperties::new().with_memory_strategy(backing);
     let mut file = File::open_rw_with_options(&path, options).unwrap();
+    if tracked {
+        file.root().delete("hole").unwrap();
+        file.commit().unwrap();
+        file.close().unwrap();
+        file = File::open_rw_with_options(&path, options).unwrap();
+    }
     let root = file.superblock().root_group_address;
-    let root_addr = file.superblock().base_address.get() + root.get();
-    for generation in 0..4 {
+    let mut lengths = Vec::new();
+    let mut closed_lengths = Vec::new();
+    for generation in 0..12 {
         file.root()
             .set_attr("generation", AttrValue::I64(generation))
             .unwrap();
@@ -55,28 +70,50 @@ fn fixed_size_root_reclaims_its_original_allocation(
             file.root().attrs().unwrap()["generation"],
             AttrValue::I64(generation)
         );
+        lengths.push(fs::metadata(&path).unwrap().len());
         let ownership = file.__space_ownership().unwrap();
         assert!(ownership.analysis_complete);
         let accounting = file.space_accounting().unwrap();
-        assert!(
-            accounting
-                .reusable_free_space
-                .iter()
-                .all(|&(addr, len)| root_addr < addr || root_addr >= addr + len)
-        );
+        let root_addr =
+            file.superblock().base_address.get() + file.superblock().root_group_address.get();
+        if threshold > 1 && !tracked {
+            assert!(
+                accounting
+                    .reusable_free_space
+                    .iter()
+                    .all(|&(addr, len)| root_addr < addr || root_addr >= addr + len)
+            );
+        }
         if reopen {
             file.close().unwrap();
+            closed_lengths.push(fs::metadata(&path).unwrap().len());
             file = File::open_rw_with_options(&path, options).unwrap();
-            assert_eq!(file.superblock().root_group_address, root);
+            if threshold > 1 && !tracked {
+                assert_eq!(file.superblock().root_group_address, root);
+            }
         }
+    }
+    assert!(
+        lengths[4..].iter().all(|&len| len == lengths[4]),
+        "{lengths:?}"
+    );
+    if reopen {
+        assert!(
+            closed_lengths[4..]
+                .iter()
+                .all(|&len| len == closed_lengths[4]),
+            "{closed_lengths:?}"
+        );
     }
     file.close().unwrap();
     let file = File::open(&path).unwrap();
-    assert_eq!(file.superblock().root_group_address, root);
+    if threshold > 1 && !tracked {
+        assert_eq!(file.superblock().root_group_address, root);
+    }
     assert_eq!(file.dataset("keep").unwrap().read_i32().unwrap(), [1, 2, 3]);
     assert_eq!(
         file.root().attrs().unwrap()["generation"],
-        AttrValue::I64(3)
+        AttrValue::I64(11)
     );
     assert_eq!(
         &fs::read(&path).unwrap()[..userblock as usize],
@@ -136,6 +173,10 @@ fn root_reclamation_skips_reference_bearing_files() {
 #[case::root_copy(Failure::RootCopy, true, false, false)]
 #[case::second_publication(Failure::BeforeSecondPublish, true, false, false)]
 #[case::second_publication_barrier(Failure::SecondBarrier, true, true, false)]
+#[case::tail_reuse_copy(Failure::TailCopy, true, false, false)]
+#[case::tail_reuse_publication(Failure::TailPublish, true, false, false)]
+#[case::tail_reuse_barrier(Failure::TailBarrier, true, false, false)]
+#[case::tail_reuse_truncation(Failure::TailTruncate, true, false, false)]
 #[case::reference_proof_rollback(Failure::BeforeFirstPublish, false, false, true)]
 fn root_reclamation_failure_preserves_a_readable_committed_root(
     #[case] failure: Failure,
@@ -155,12 +196,20 @@ fn root_reclamation_failure_preserves_a_readable_committed_root(
             .with_path_references(&["keep"]);
     }
     builder.write(&path).unwrap();
-    let root = File::open(&path).unwrap().superblock().root_group_address;
+    let file = File::open(&path).unwrap();
+    let root = file.superblock().root_group_address;
+    let tail = file
+        .superblock()
+        .superblock_extension_address
+        .unwrap()
+        .get();
+    drop(file);
     let mut engine = WriteEngine::open_imaged(&path, Some(FileLocking::Enabled), |handle, _| {
         Ok(Box::new(FailingImage {
             inner: WriteEngine::read_mirror(handle)?,
             failure,
             root: root.get(),
+            tail,
             publications: 0,
             failed: false,
         }))
@@ -225,6 +274,129 @@ fn root_reclamation_failure_preserves_a_readable_committed_root(
     file.persisted_free_space().unwrap();
 }
 
+#[rstest]
+#[case::before_publication(Failure::BeforeFirstPublish, false)]
+#[case::copy(Failure::TailCopy, true)]
+#[case::publication(Failure::TailPublish, true)]
+#[case::barrier(Failure::TailBarrier, true)]
+fn tail_recycling_failure_preserves_committed_manager_sections(
+    #[case] failure: Failure,
+    #[case] updated: bool,
+    #[values(false, true)] section_list: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("manager-failure.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 4_096);
+    builder.set_attr("generation", AttrValue::I64(-1));
+    builder.create_dataset("hole").with_u8_data(&[9; 8_192]);
+    builder.create_dataset("keep").with_u8_data(&[7; 8_192]);
+    builder.write(&path).unwrap();
+    let file = File::open_rw(&path).unwrap();
+    file.root().delete("hole").unwrap();
+    file.commit().unwrap();
+    file.close().unwrap();
+    let bytes = fs::read(&path).unwrap();
+    let file = File::open(&path).unwrap();
+    let root = file.superblock().root_group_address.get();
+    let info = file.file_space_info().unwrap();
+    let manager = info
+        .manager_addrs
+        .iter()
+        .find_map(|addr| match addr {
+            DecodedStoredAddress::Defined(addr) => Some(addr.get()),
+            DecodedStoredAddress::Undefined => None,
+        })
+        .unwrap();
+    let tail = if section_list {
+        FreeSpaceManagerHeader::parse(file.widths(), &bytes[usize::try_from(manager).unwrap()..])
+            .unwrap()
+            .section_list_addr()
+            .get()
+    } else {
+        manager
+    };
+    drop(file);
+    let mut engine = WriteEngine::open_imaged(&path, Some(FileLocking::Enabled), |handle, _| {
+        Ok(Box::new(FailingImage {
+            inner: WriteEngine::read_mirror(handle)?,
+            failure,
+            root,
+            tail,
+            publications: 0,
+            failed: false,
+        }))
+    })
+    .unwrap();
+    engine
+        .set_write_buffering(WriteBuffering::Unbuffered)
+        .unwrap();
+    engine
+        .set_group_attr(&ObjectPathBuf::root(), "generation", AttrValue::I64(7))
+        .unwrap();
+    let err = engine.commit().unwrap_err();
+    let Error::Io(err) = err else {
+        panic!("expected injected I/O failure, got {err:?}");
+    };
+    assert_eq!(err.kind(), ErrorKind::Other);
+    if engine.publish_attempted {
+        assert!(!engine.aggregation.unwrap().publication_confirmed);
+        let issued = engine.issued_bytes();
+        engine.finalize_persist().unwrap();
+        assert_eq!(engine.issued_bytes(), issued);
+    }
+    drop(engine);
+    let file = File::open(&path).unwrap();
+    assert_eq!(
+        file.root().attrs().unwrap()["generation"],
+        AttrValue::I64(if updated { 7 } else { -1 })
+    );
+    assert_eq!(file.dataset("keep").unwrap().read_u8().unwrap(), [7; 8_192]);
+    assert!(!file.persisted_free_space().unwrap().is_empty());
+    drop(file);
+    let file = File::open_rw(&path).unwrap();
+    assert!(file.__space_ownership().unwrap().analysis_complete);
+}
+
+#[test]
+fn empty_manager_recycling_recovers_exact_allocation_after_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("empty-manager.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 4_096);
+    builder.create_dataset("hole").with_u8_data(&[9; 8_192]);
+    builder.create_dataset("keep").with_u8_data(&[7; 8_192]);
+    builder.write(&path).unwrap();
+    let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+    engine.delete(&ObjectPathBuf::parse("hole")).unwrap();
+    engine.commit().unwrap();
+    let mut replacement = DatasetBuilder::new("");
+    replacement.with_u8_data(&[5; 8_192]);
+    engine
+        .stage_created_dataset(&ObjectPathBuf::parse("replacement"), replacement)
+        .unwrap();
+    engine.commit().unwrap();
+    let owned = engine.persist.as_ref().unwrap().old_blocks.clone();
+    engine.force_sync().unwrap();
+    drop(engine);
+    let file = File::open(&path).unwrap();
+    assert_eq!(file.persisted_free_space().unwrap(), []);
+    assert!(
+        file.file_space_info()
+            .unwrap()
+            .manager_addrs
+            .iter()
+            .all(|addr| *addr == DecodedStoredAddress::Undefined)
+    );
+    assert_eq!(
+        file.dataset("replacement").unwrap().read_u8().unwrap(),
+        [5; 8_192]
+    );
+    drop(file);
+    let engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+    assert_eq!(engine.persist.as_ref().unwrap().old_blocks, owned);
+}
+
 #[derive(Clone, Copy)]
 enum Failure {
     BeforeFirstPublish,
@@ -232,12 +404,17 @@ enum Failure {
     FirstBarrier,
     RootCopy,
     SecondBarrier,
+    TailBarrier,
+    TailCopy,
+    TailPublish,
+    TailTruncate,
 }
 
 struct FailingImage {
     inner: MirrorImage,
     failure: Failure,
     root: u64,
+    tail: u64,
     publications: usize,
     failed: bool,
 }
@@ -263,6 +440,7 @@ impl FileImage for FailingImage {
             inner,
             failure,
             root,
+            tail,
             publications,
             failed,
         } = self;
@@ -270,12 +448,18 @@ impl FileImage for FailingImage {
             if offset == 0
                 && matches!(
                     (*failure, *publications),
-                    (Failure::BeforeFirstPublish, 0) | (Failure::BeforeSecondPublish, 1)
+                    (Failure::BeforeFirstPublish, 0)
+                        | (Failure::BeforeSecondPublish, 2)
+                        | (Failure::TailPublish, 1)
                 )
             {
                 return Self::fail(failed);
             }
-            if offset == *root && *publications == 1 && matches!(failure, Failure::RootCopy) {
+            if offset == *tail && *publications == 1 && matches!(failure, Failure::TailCopy) {
+                inner.write_at(offset, &bytes[..bytes.len() / 2])?;
+                return Self::fail(failed);
+            }
+            if offset == *root && *publications == 2 && matches!(failure, Failure::RootCopy) {
                 inner.write_at(offset, &bytes[..bytes.len() / 2])?;
                 return Self::fail(failed);
             }
@@ -288,7 +472,18 @@ impl FileImage for FailingImage {
     }
 
     fn truncate(&mut self, length: u64) -> Result<(), Error> {
-        self.inner.truncate(length)
+        let Self {
+            inner,
+            failure,
+            root: _,
+            tail: _,
+            publications,
+            failed,
+        } = self;
+        if !*failed && *publications == 2 && matches!(failure, Failure::TailTruncate) {
+            return Self::fail(failed);
+        }
+        inner.truncate(length)
     }
 
     fn sync_data(&mut self) -> Result<(), Error> {
@@ -300,6 +495,7 @@ impl FileImage for FailingImage {
             inner,
             failure,
             root: _,
+            tail: _,
             publications,
             failed,
         } = self;
@@ -307,7 +503,9 @@ impl FileImage for FailingImage {
         if !*failed
             && matches!(
                 (*failure, *publications),
-                (Failure::FirstBarrier, 1) | (Failure::SecondBarrier, 2)
+                (Failure::FirstBarrier, 1)
+                    | (Failure::SecondBarrier, 3)
+                    | (Failure::TailBarrier, 2)
             )
         {
             return Self::fail(failed);
