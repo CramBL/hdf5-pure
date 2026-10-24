@@ -24,6 +24,7 @@ use hdf5_pure::FileSpaceInfo;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
+use hdf5_pure::FreeSpaceManagerRole;
 use hdf5_pure::Layout;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::MessageType;
@@ -2167,6 +2168,76 @@ fn libhdf5_truncates_the_maximum_section_size_and_writes_section_sizes_as_wide_a
 }
 
 #[rstest]
+fn supported_free_sections_match_libhdf5(
+    #[values(false, true)] paged: bool,
+    #[values(0, 4096)] userblock_size: u64,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("supported-free-sections.h5");
+    {
+        let file = hdf5::FileBuilder::new()
+            .with_fapl(|properties| properties.libver_v110())
+            .with_fcpl(|properties| {
+                properties.userblock(userblock_size).file_space_strategy(
+                    CStrategy::FreeSpaceManager {
+                        paged,
+                        persist: true,
+                        threshold: 1,
+                    },
+                )
+            })
+            .create(&path)
+            .unwrap();
+        file.new_dataset_builder()
+            .with_data(&[1i32; 100])
+            .create("a")
+            .unwrap();
+        file.new_dataset_builder()
+            .with_data(&[2i32; 400])
+            .create("b")
+            .unwrap();
+        file.new_dataset_builder()
+            .with_data(&[3i32; 100])
+            .create("c")
+            .unwrap();
+        file.unlink("b").unwrap();
+        file.close().unwrap();
+    }
+    let native = hdf5::File::open(&path).unwrap();
+    let mut expected = file_space::libhdf5_free_sections(&native).unwrap();
+    expected.sort_unstable();
+    let free_bytes = native.free_space();
+    drop(native);
+    assert_supported_free_sections(&path, &expected);
+    let report = File::open(&path)
+        .unwrap()
+        .persisted_free_sections()
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.free_sections().free_bytes(), free_bytes);
+    if paged {
+        assert!(
+            report
+                .managers()
+                .iter()
+                .all(|manager| match manager.slot() {
+                    0 => manager.role() == FreeSpaceManagerRole::PageSmallMetadata,
+                    2 => manager.role() == FreeSpaceManagerRole::PageSmallRawData,
+                    6 => manager.role() == FreeSpaceManagerRole::PageLargeGeneric,
+                    _ => manager.role() == FreeSpaceManagerRole::Unknown,
+                })
+        );
+    } else {
+        assert!(
+            report
+                .managers()
+                .iter()
+                .all(|manager| manager.role() == FreeSpaceManagerRole::FsmAggr)
+        );
+    }
+}
+
+#[rstest]
 fn the_free_sections_libhdf5_persists_are_read_at_the_widths_of_its_file(
     #[values(Driver::Sec2, Driver::Core)] driver: Driver,
     #[values(Sizeof::Bytes2, Sizeof::Bytes4, Sizeof::Bytes8)] sizeof_addr: Sizeof,
@@ -2178,6 +2249,7 @@ fn the_free_sections_libhdf5_persists_are_read_at_the_widths_of_its_file(
     let free_c = hdf5::File::open(&path).unwrap().free_space();
 
     let free = File::open(&path).unwrap().persisted_free_space().unwrap();
+    assert_supported_free_sections(&path, &free);
 
     assert!(
         free.contains(&(freed, 1600)),
@@ -3022,6 +3094,7 @@ fn assert_version_0_free_space_reads_as_libhdf5_reads_it(
         ))
     );
     let free = f.persisted_free_space().unwrap();
+    assert_supported_free_sections(&path, &free);
     assert!(free.contains(&(freed - userblock, 1600)), "{free:?}");
     assert_eq!(free.iter().map(|&(_, len)| len).sum::<u64>(), free_c);
     // `H5FS__cache_sinfo_deserialize` in H5FScache.c, HDF5 2.2.0, asserts on these fixtures
@@ -5219,6 +5292,49 @@ fn c_create_n(file: &hdf5::File) {
         .unwrap()
         .write(&[9; TAIL_ELEMENTS])
         .unwrap();
+}
+
+fn assert_supported_free_sections(path: &Path, expected: &[(u64, u64)]) {
+    let buffered = File::open(path)
+        .unwrap()
+        .persisted_free_sections()
+        .unwrap()
+        .unwrap();
+    let streamed = File::open_streaming(path)
+        .unwrap()
+        .persisted_free_sections()
+        .unwrap()
+        .unwrap();
+    assert_eq!(buffered, streamed);
+    let all = buffered.free_sections();
+    assert_eq!(
+        all.sections()
+            .iter()
+            .map(|section| (section.address(), section.length().get()))
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(all.section_count(), expected.len());
+    assert_eq!(
+        all.free_bytes(),
+        expected.iter().map(|&(_, length)| length).sum::<u64>()
+    );
+    assert_eq!(
+        buffered
+            .managers()
+            .iter()
+            .map(|manager| manager.free_sections().section_count())
+            .sum::<usize>(),
+        all.section_count()
+    );
+    assert_eq!(
+        buffered
+            .managers()
+            .iter()
+            .map(|manager| manager.free_sections().free_bytes())
+            .sum::<u64>(),
+        all.free_bytes()
+    );
 }
 
 fn page(threshold: u64) -> CStrategy {

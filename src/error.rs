@@ -141,6 +141,11 @@ pub enum Error {
     FileMarkedInUse(String),
     /// A format, filter, or file-operation error reported through [`FormatError`].
     Format(FormatError),
+    /// Persisted free-section inspection was requested on a writable handle.
+    ///
+    /// [`File::persisted_free_sections`](crate::File::persisted_free_sections) requires a
+    /// read-only handle.
+    FreeSectionInspectionUnsupported,
     /// An operation that needs exclusive access to the open file (e.g.
     /// [`crate::File::refresh`]) was requested while owned [`crate::Dataset`] /
     /// [`crate::Group`] handles, or a clone of the [`crate::File`], are still
@@ -294,6 +299,12 @@ impl fmt::Display for Error {
                 f,
                 "operation needs exclusive file access: drop outstanding Dataset/Group handles and File clones first"
             ),
+            Error::FreeSectionInspectionUnsupported => {
+                write!(
+                    f,
+                    "persisted free sections cannot be inspected on a writable handle"
+                )
+            }
             Error::ReadOnly => write!(
                 f,
                 "cannot write to a read-only file; open it with File::open_rw"

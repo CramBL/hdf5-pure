@@ -49,6 +49,9 @@ use crate::file_lock::{self, FileLocking, OpenIntent, OpenTarget, WriteMarkPolic
 use crate::file_space_info::{FileSpaceInfo, FileSpaceStrategy};
 use crate::fill_value::{FillPattern, FillValueMessage, FillValueView};
 use crate::filter_pipeline::FilterPipeline;
+use crate::free_sections::{
+    FreeSection, FreeSectionCoordinates, FreeSections, PersistedFreeSections,
+};
 use crate::free_space_manager;
 use crate::group_v1;
 use crate::group_v1::GroupEntry;
@@ -3766,6 +3769,164 @@ impl File {
     /// [`FormatError::InvalidFreeSpaceManager`], which holds a message that describes the defect.
     pub fn persisted_free_space(&self) -> Result<Vec<(u64, u64)>, Error> {
         Ok(self.inner.persisted_free_space()?)
+    }
+
+    /// Returns the sections recorded in the file's persisted free-space managers.
+    ///
+    /// Reads managers through buffered or streaming sources without requiring a whole-file
+    /// copy. Returns `None` if the File Space Info message is absent or persistence is disabled.
+    /// Configured persistence with zero sections returns `Some` with an empty report.
+    ///
+    /// Section and manager addresses are relative to the HDF5 base address. Every section has
+    /// [`FreeSectionCoordinates::Stored`] coordinates. For a relocated source image, the reader
+    /// resolves stored addresses against the effective base of that image.
+    ///
+    /// Each defined manager has a report, including empty managers and managers with an unknown
+    /// role. The combined count and free-byte total equal the sums of the per-manager values.
+    /// Session-reusable space is available through
+    /// [`reusable_free_sections`](Self::reusable_free_sections).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FreeSectionInspectionUnsupported`] if this is a writable handle.
+    /// Returns [`Error::Format`] if File Space Info records the same manager header address in
+    /// multiple slots, File Space Info or manager metadata is malformed or truncated, an
+    /// allocation or section exceeds the file allocation, or an address or byte total
+    /// overflows. Source read errors are also reported through [`Error::Format`].
+    ///
+    /// # Examples
+    ///
+    /// Absence of persistence and configured persistence with zero sections are distinct:
+    ///
+    /// ```
+    /// use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
+    ///
+    /// let file = File::from_bytes(FileBuilder::new().finish()?)?;
+    /// assert_eq!(file.persisted_free_sections()?, None);
+    ///
+    /// let mut builder = FileBuilder::new();
+    /// builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    /// let file = File::from_bytes(builder.finish()?)?;
+    /// let report = file.persisted_free_sections()?.expect("persistence is configured");
+    /// assert_eq!(report.free_sections().section_count(), 0);
+    /// assert_eq!(report.free_sections().free_bytes(), 0);
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
+    ///
+    /// Reads sections through a streaming handle and compares the combined count with the
+    /// manager counts:
+    ///
+    /// ```
+    /// # use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
+    /// use hdf5_pure::FreeSectionCoordinates;
+    /// # let directory = tempfile::tempdir()?;
+    /// # let path = directory.path().join("free-sections.h5");
+    /// # let mut builder = FileBuilder::new();
+    /// # builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    /// # builder.create_dataset("a").with_i32_data(&[1; 100]);
+    /// # builder.create_dataset("b").with_i32_data(&[2; 400]);
+    /// # builder.create_dataset("c").with_i32_data(&[3; 100]);
+    /// # builder.write(&path)?;
+    /// # {
+    /// #     let file = File::open_rw(&path)?;
+    /// #     file.root().delete("b")?;
+    /// #     file.commit()?;
+    /// # }
+    ///
+    /// let file = File::open_streaming(&path)?;
+    /// let report = file.persisted_free_sections()?.expect("persistence is configured");
+    /// let sections = report.free_sections();
+    /// let section = sections.sections().first().expect("deleted storage is free");
+    /// assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
+    /// assert_eq!(section.end_address() - section.address(), section.length().get());
+    /// assert_eq!(
+    ///     report.managers().iter().map(|manager| manager.free_sections().section_count())
+    ///         .sum::<usize>(),
+    ///     sections.section_count(),
+    /// );
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
+    pub fn persisted_free_sections(&self) -> Result<Option<PersistedFreeSections>, Error> {
+        if matches!(self.inner.backend, Backend::Edit(_)) {
+            return Err(Error::FreeSectionInspectionUnsupported);
+        }
+        let Some(info) = self.inner.parse_file_space_info()? else {
+            return Ok(None);
+        };
+        if !info.persist {
+            return Ok(None);
+        }
+        let stored_eof = self
+            .inner
+            .superblock
+            .eof_address
+            .checked_sub(self.inner.superblock.base_address.get())
+            .ok_or_else(|| {
+                FormatError::InvalidFreeSpaceManager(
+                    "the end of file is below the stored base address".into(),
+                )
+            })?;
+        Ok(Some(PersistedFreeSections::read(
+            &self.inner.source(),
+            self.inner.widths,
+            self.inner.addresses().effective_base(),
+            stored_eof,
+            &info,
+        )?))
+    }
+
+    /// Returns the free sections currently reusable by this editing session.
+    ///
+    /// Reports the same allocation state as [`space_accounting`](Self::space_accounting):
+    /// committed changes and immediate in-place appends. Staged edits affect the report after
+    /// [`commit`](Self::commit). Sections use [`FreeSectionCoordinates::Absolute`] physical
+    /// offsets from the beginning of the file, counting any userblock prefix.
+    ///
+    /// The report can include session aggregate reservations and space absent from persisted
+    /// managers. Persisted manager contents are available through
+    /// [`persisted_free_sections`](Self::persisted_free_sections) on a read-only handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ReadOnly`] if the file was opened read-only. Returns [`Error::Format`]
+    /// if a section has zero length or its end address or the total free bytes overflow.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
+    /// use hdf5_pure::FreeSectionCoordinates;
+    /// # let directory = tempfile::tempdir()?;
+    /// # let path = directory.path().join("reusable-sections.h5");
+    /// # let mut builder = FileBuilder::new();
+    /// # builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, false, 1);
+    /// # builder.create_dataset("a").with_i32_data(&[1; 100]);
+    /// # builder.create_dataset("b").with_i32_data(&[2; 400]);
+    /// # builder.create_dataset("c").with_i32_data(&[3; 100]);
+    /// # builder.write(&path)?;
+    ///
+    /// let file = File::open_rw(&path)?;
+    /// file.root().delete("b")?;
+    /// file.commit()?;
+    /// let sections = file.reusable_free_sections()?;
+    /// assert!(sections.section_count() > 0);
+    /// assert_eq!(sections.free_bytes(), file.space_accounting()?.reusable_free_bytes);
+    /// for section in sections.sections() {
+    ///     assert_eq!(section.coordinates(), FreeSectionCoordinates::Absolute);
+    /// }
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
+    pub fn reusable_free_sections(&self) -> Result<FreeSections, Error> {
+        let accounting = self.space_accounting()?;
+        Ok(FreeSections::new(
+            accounting
+                .reusable_free_space
+                .into_iter()
+                .map(|(address, length)| {
+                    FreeSection::new(address, length, FreeSectionCoordinates::Absolute)
+                })
+                .collect::<Result<Vec<_>, FormatError>>()?,
+        )?)
     }
 
     /// Returns the physical byte length of the backing store.

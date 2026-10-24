@@ -473,6 +473,7 @@ pub(crate) mod filters;
 pub(crate) mod fixed_array;
 pub(crate) mod fractal_heap;
 pub(crate) mod fractal_heap_storage;
+pub(crate) mod free_sections;
 pub(crate) mod free_space_manager;
 pub(crate) mod global_heap;
 pub(crate) mod group_v1;
@@ -637,6 +638,10 @@ pub use scaleoffset::ScaleOffset;
 
 pub use dataset_create_properties::DatasetCreateProperties;
 pub use file_create_properties::FileCreateProperties;
+pub use free_sections::{
+    FreeSection, FreeSectionCoordinates, FreeSections, FreeSpaceManagerRole,
+    FreeSpaceManagerSections, PersistedFreeSections,
+};
 #[doc(inline)]
 pub use hdf5_pure_core::DeflateLevel;
 #[doc(inline)]
