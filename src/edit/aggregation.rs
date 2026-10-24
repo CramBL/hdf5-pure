@@ -195,6 +195,18 @@ impl AggregateSpace {
         Ok(self)
     }
 
+    /// Clears both aggregate windows and marks the persistent managers for rewriting.
+    ///
+    /// Preserves EOA and the publication confirmation state. The caller returns the unused
+    /// extents through ordinary threshold admission.
+    pub(super) fn without_spare(self) -> Self {
+        Self {
+            policy: ClassicAggregators::new(),
+            manager_dirty: true,
+            ..self
+        }
+    }
+
     fn extend(image: &mut dyn FileImage, end: u64) -> Result<(), Error> {
         let padding = [0; 4096];
         while image.len() < end {
