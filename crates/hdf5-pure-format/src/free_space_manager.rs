@@ -257,8 +257,9 @@ impl FreeSpaceManagerHeaderFrame {
     /// # Errors
     ///
     /// Returns [`FormatError::InvalidFreeSpaceManager`] if the client ID is not 1, the section
-    /// counts do not describe fully serialized sections, the class count exceeds 3, or a
-    /// nonempty manager has an undefined section-list address or insufficient used bytes.
+    /// counts do not describe fully serialized sections, the class count exceeds 3, an empty
+    /// manager records nonzero free bytes, or a nonempty manager has an undefined section-list
+    /// address or insufficient used bytes.
     pub fn file_header(&self) -> Result<FreeSpaceManagerHeader, FormatError> {
         let Self {
             client_id,
@@ -308,6 +309,11 @@ impl FreeSpaceManagerHeaderFrame {
             section_list_allocated,
         };
         if total_sections == 0 {
+            if total_space != 0 {
+                return Err(FormatError::InvalidFreeSpaceManager(format!(
+                    "the empty manager tracks {total_space} bytes"
+                )));
+            }
             return Ok(header);
         }
         if section_list_addr == DecodedStoredAddress::Undefined {
@@ -692,8 +698,9 @@ impl FreeSpaceManagerHeader {
     /// section count, the "Number of Un-Serialized Sections" field is not 0, the header counts more
     /// section classes than the 3 the C library registers for the file client (`H5MF.c`, HDF5
     /// 2.2.0), the address space is 0 bits or wider than 64 bits, the used length exceeds the
-    /// allocated length, or a header of one or more sections stores the undefined address for
-    /// its section list or a used length too short for its sections.
+    /// allocated length, an empty manager records nonzero free bytes, or a header of one or
+    /// more sections stores the undefined address for its section list or a used length too
+    /// short for its sections.
     pub fn parse(widths: FormatWidths, data: &[u8]) -> Result<FreeSpaceManagerHeader, FormatError> {
         FreeSpaceManagerHeaderFrame::parse(widths, data)?.file_header()
     }
@@ -2636,6 +2643,10 @@ mod tests {
     #[case::empty_manager_used_past_its_allocation(
         vec![(6, vec![0; 8]), (14, vec![0; 8]), (22, vec![0; 8]), (70, vec![34, 0, 0, 0, 0, 0, 0, 0])],
         "the section list uses 35 bytes, more than the 34 bytes allocated to it"
+    )]
+    #[case::empty_manager_with_free_bytes(
+        vec![(14, vec![0; 8]), (22, vec![0; 8]), (54, vec![0xFF; 8])],
+        "the empty manager tracks 1600 bytes"
     )]
     #[case::no_section_list(
         vec![(54, vec![0xFF; 8])],
