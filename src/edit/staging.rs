@@ -2,16 +2,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::{AppendBuilder, AttrOp, CopyTree, FlatDataset, WriteEngine};
+use super::copy::CopyTree;
+use super::{AppendBuilder, AttrOp, FlatDataset, WriteEngine};
 use crate::access_mode::AccessMode;
-use crate::address::BaseAddressExt;
 use crate::dataspace::MaxExtent;
 use crate::datatype::Datatype;
 use crate::error::Error;
-use crate::file_writer::{LENGTH_WIDTH, OFFSET_WIDTH};
 use crate::layout_info::FilterId;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
-use crate::source::BytesSource;
 use crate::type_builders::AttrValue;
 
 impl WriteEngine {
@@ -172,85 +170,6 @@ impl WriteEngine {
             }
         }
         self.staged.push(StagedOp::DeleteObject(path.clone()));
-        Ok(())
-    }
-
-    /// Stages a deep copy of a committed object for the next [`commit`](Self::commit).
-    ///
-    /// The source is read during the commit. The destination must be available, and the
-    /// source subtree must use storage the editor can reproduce.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::EditUnsupported`] if a live buffered appender overlaps either path.
-    pub fn copy(&mut self, src: &ObjectPathBuf, dst: &ObjectPathBuf) -> Result<(), Error> {
-        self.refuse_if_claimed(src)?;
-        self.refuse_if_claimed(dst)?;
-        self.staged
-            .push(StagedOp::CopyObject(src.clone(), dst.clone()));
-        Ok(())
-    }
-
-    /// Reads a source subtree from another file and stages its copy at `dst`.
-    ///
-    /// The subtree is read before this call returns. The destination is written by the next
-    /// [`commit`](Self::commit), which checks destination collisions.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::EditUnsupported`] if the source is streamed, uses a userblock or
-    /// widths other than eight bytes, either path is the root, or a live buffered appender
-    /// overlaps `dst`. Returns the read or preparation error if the source subtree cannot
-    /// be resolved or reproduced without references to storage in the source file.
-    pub fn copy_from(
-        &mut self,
-        source: &crate::reader::File,
-        src: &ObjectPathBuf,
-        dst: &ObjectPathBuf,
-    ) -> Result<(), Error> {
-        let src_data = source.in_memory_image().ok_or(Error::EditUnsupported(
-            "cross-file copy requires a buffered source file (File::open or File::from_bytes), not a streaming one",
-        ))?;
-        let src_sb = source.superblock();
-        if src_sb.offset_size != OFFSET_WIDTH || src_sb.length_size != LENGTH_WIDTH {
-            return Err(Error::EditUnsupported(
-                "cross-file copy requires the source file to use 8-byte offsets and lengths",
-            ));
-        }
-        if !source.base_address().is_zero() {
-            return Err(Error::EditUnsupported(
-                "cross-file copy requires the source file to have no userblock (base address 0)",
-            ));
-        }
-
-        if src.is_empty() {
-            return Err(Error::EditUnsupported("cannot copy the root group"));
-        }
-        if dst.is_empty() {
-            return Err(Error::EditUnsupported("copy destination path is empty"));
-        }
-
-        let src_addr = crate::group_v2::resolve_path_any(
-            src_data,
-            source.access_mode(),
-            src_sb,
-            source.widths(),
-            source.addresses(),
-            &src.as_path(),
-        )?;
-        // The source has base address zero, so its stored addresses are absolute.
-        let tree = Self::read_copy_subtree(
-            &BytesSource::new(src_data),
-            source.access_mode(),
-            src_addr,
-            0,
-            true,
-            source.addresses(),
-            source.widths(),
-        )?;
-        self.refuse_if_claimed(dst)?;
-        self.staged
-            .push(StagedOp::CopyObjectFrom(dst.clone(), tree));
         Ok(())
     }
 

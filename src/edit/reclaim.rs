@@ -37,9 +37,8 @@ use crate::object_header::ObjectHeader;
 use crate::source::{BaseOffsetSource, Source, SourceMetadata};
 
 use super::GlobalHeapLiveness;
-use super::{
-    MAX_COPY_DEPTH, MAX_LINK_GRAPH_NODES, ObjModel, OhRegion, SpaceOwnership, WriteEngine,
-};
+use super::copy::{MAX_COPY_DEPTH, ObjModel};
+use super::{MAX_LINK_GRAPH_NODES, OhRegion, SpaceOwnership, WriteEngine};
 
 /// The spans `(address, length)` of the global heap collections that the objects a commit deletes
 /// refer to, as [`WriteEngine::deleted_collections`] returns them.
