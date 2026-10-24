@@ -85,6 +85,24 @@ impl<'a> RecordSplice<'a> {
         )
     }
 
+    /// Appends a copy of the source region with `body` in the selected record to `region`.
+    ///
+    /// Preserves the record's flags and creation index, unrelated source bytes, and the
+    /// existing contents of `region`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ObjectHeaderMessageTooLarge`] if `body` is longer than
+    /// [`OBJECT_HEADER_MESSAGE_MAX`], leaving `region` unchanged.
+    pub fn replace_body_into(&self, region: &mut Vec<u8>, body: &[u8]) -> Result<(), FormatError> {
+        self.replace_record_into(
+            region,
+            self.record.flags,
+            self.record.creation_index.unwrap_or(0),
+            body,
+        )
+    }
+
     /// Returns a copy of the region in which the selected record has `flags`, `creation_index`,
     /// and `body`.
     ///
@@ -100,6 +118,34 @@ impl<'a> RecordSplice<'a> {
         creation_index: u16,
         body: &[u8],
     ) -> Result<Vec<u8>, FormatError> {
+        let mut region = Vec::with_capacity(self.replacement_len(body)?);
+        self.replace_record_into(&mut region, flags, creation_index, body)?;
+        Ok(region)
+    }
+
+    fn replace_record_into(
+        &self,
+        region: &mut Vec<u8>,
+        flags: MessageFlags,
+        creation_index: u16,
+        body: &[u8],
+    ) -> Result<(), FormatError> {
+        let Self {
+            layout,
+            head,
+            record,
+            tail,
+        } = self;
+        region.reserve(self.replacement_len(body)?);
+        region.extend_from_slice(head);
+        // The type was read from the 1-byte type field and the check above bounds the body,
+        // so neither assertion of `write_record` fails.
+        layout.write_record(region, record.msg_type, flags, creation_index, body);
+        region.extend_from_slice(tail);
+        Ok(())
+    }
+
+    fn replacement_len(&self, body: &[u8]) -> Result<usize, FormatError> {
         let Self {
             layout,
             head,
@@ -112,14 +158,7 @@ impl<'a> RecordSplice<'a> {
                 size: body.len(),
             });
         }
-        let mut region =
-            Vec::with_capacity(head.len() + layout.prefix_len() + body.len() + tail.len());
-        region.extend_from_slice(head);
-        // The type was read from the 1-byte type field and the check above bounds the body,
-        // so neither assertion of `write_record` fails.
-        layout.write_record(&mut region, record.msg_type, flags, creation_index, body);
-        region.extend_from_slice(tail);
-        Ok(region)
+        Ok(head.len() + layout.prefix_len() + body.len() + tail.len())
     }
 }
 
@@ -247,6 +286,55 @@ mod tests {
                 size: OBJECT_HEADER_MESSAGE_MAX + 1,
             })
         );
+    }
+
+    #[rstest]
+    #[case::empty_body(Vec::new())]
+    #[case::short_body(vec![0x77; 6])]
+    #[case::largest_body(vec![0x77; OBJECT_HEADER_MESSAGE_MAX])]
+    fn a_replacement_can_be_appended_to_an_existing_buffer(
+        #[values(MessageRecordLayout::PLAIN, TRACKED)] layout: MessageRecordLayout,
+        #[case] body: Vec<u8>,
+    ) {
+        let region = records_around(layout, first_data_layout_record(layout));
+        let splice = RecordSplice::first(layout, &region, MessageType::DATA_LAYOUT)
+            .unwrap()
+            .unwrap();
+        let mut out = vec![0x99; 5];
+
+        splice.replace_body_into(&mut out, &body).unwrap();
+
+        let mut expected = vec![0x99; 5];
+        expected.extend_from_slice(&records_around(
+            layout,
+            layout.record_with_creation_index(
+                MessageType::DATA_LAYOUT,
+                MessageFlags::CONSTANT,
+                7,
+                &body,
+            ),
+        ));
+        assert_eq!(out, expected);
+    }
+
+    #[rstest]
+    fn an_oversized_replacement_leaves_the_output_buffer_unchanged(
+        #[values(MessageRecordLayout::PLAIN, TRACKED)] layout: MessageRecordLayout,
+    ) {
+        let region = records_around(layout, first_data_layout_record(layout));
+        let splice = RecordSplice::first(layout, &region, MessageType::DATA_LAYOUT)
+            .unwrap()
+            .unwrap();
+        let mut out = vec![0x99; 5];
+
+        assert_eq!(
+            splice.replace_body_into(&mut out, &vec![0; OBJECT_HEADER_MESSAGE_MAX + 1]),
+            Err(FormatError::ObjectHeaderMessageTooLarge {
+                message_type: MessageType::DATA_LAYOUT.to_u16(),
+                size: OBJECT_HEADER_MESSAGE_MAX + 1,
+            })
+        );
+        assert_eq!(out, vec![0x99; 5]);
     }
 
     fn records_around(layout: MessageRecordLayout, data_layout: Vec<u8>) -> Vec<u8> {

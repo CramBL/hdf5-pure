@@ -39,17 +39,16 @@ impl WriteEngine {
         let region = Self::gather_oh_messages(&self.image(), ext_addr, self.addresses)?;
         rewrite_extension_region_bytes(&region, widths, info)
     }
-    /// Collect every message of the object header at `addr` into one contiguous
-    /// region, following continuation blocks across chunks and dropping the
-    /// `Continuation` messages themselves. Re-emitting the result through
-    /// [`build_v2_object_header`] collapses a multi-chunk header (as the
-    /// reference C library often writes) into a single chunk, which is how this
-    /// editor rebuilds headers. The chunk-0 prefix is validated by
-    /// [`oh_region_at`]. Each continuation block must be a well-formed `OCHK`
-    /// block within the file.
+
+    /// Collects a version 2 header's records into one region for reconstruction.
     ///
-    /// Reads each header chunk out of `src` as one bounded buffer, so this serves a session whose file is not
-    /// mirrored in memory (issue #198).
+    /// Reads each chunk into a bounded buffer and omits continuation records and trailing gaps.
+    /// Preserves the chunk 0 prefix properties for [`build_v2_object_header`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if the header cannot be traversed. Propagates
+    /// parsing and source-read errors from [`read_oh_chunks`].
     pub(super) fn gather_oh_messages<S: Source + ?Sized>(
         src: &S,
         addr: u64,
@@ -133,36 +132,70 @@ pub(crate) fn rewrite_extension_region_bytes(
     info: &FileSpaceInfo,
 ) -> Result<OhRegion, Error> {
     let new_body = hdf5_pure_format::__private::serialize_file_space_info_v1(widths, info)?;
-    // The message body is the fixed-size File Space Info record (≤ 125 bytes),
-    // so it always fits the u16 size field.
-    let new_len: u16 = new_body
-        .len()
-        .narrow_or_else(|| Error::EditUnsupported("File Space Info message too large"))?;
-    let mut out = Vec::with_capacity(region.len());
-    let mut p = 0;
-    let mut replaced = false;
-    while let Some((msg_type, _body, body_end)) = region.next_message(p)? {
-        if msg_type == MessageType::FILE_SPACE_INFO {
-            out.push(region[p]); // message type byte
-            out.extend_from_slice(&new_len.to_le_bytes());
-            // Preserve the message flags (0x14) and, where the header carries
-            // one, the record's creation index.
-            out.extend_from_slice(&region[p + 3..p + region.layout().prefix_len()]);
-            out.extend_from_slice(&new_body);
-            replaced = true;
-        } else {
-            out.extend_from_slice(&region[p..body_end]);
-        }
-        p = body_end;
-    }
-    if !replaced {
-        // Persistence is armed only when the extension already carries a File
-        // Space Info message. An absent message is an error.
-        return Err(Error::EditUnsupported(
+    HeaderRewrite::parse(region)?
+        .replace_bodies(MessageType::FILE_SPACE_INFO, &new_body)?
+        .ok_or(Error::EditUnsupported(
             "a persisting file's superblock extension has no File Space Info message",
-        ));
+        ))
+}
+
+/// A source region whose record boundaries have been checked before rewriting.
+///
+/// The immutable borrow retains the bytes and prefix properties used during that check.
+struct HeaderRewrite<'a> {
+    region: &'a OhRegion,
+}
+
+impl<'a> HeaderRewrite<'a> {
+    /// Checks every record boundary, including records after a possible replacement.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if a record extends past the region.
+    fn parse(region: &'a OhRegion) -> Result<Self, Error> {
+        let mut msg_start = 0;
+        while let Some((_, _, body_end)) = region.next_message(msg_start)? {
+            msg_start = body_end;
+        }
+        Ok(Self { region })
     }
-    Ok(region.with_bytes(out))
+
+    /// Replaces every body of `msg_type`, preserving record metadata and unrelated bytes.
+    ///
+    /// Returns `None` if the region contains no record of `msg_type`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if `body` exceeds the message size limit.
+    fn replace_bodies(
+        &self,
+        msg_type: MessageType,
+        body: &[u8],
+    ) -> Result<Option<OhRegion>, Error> {
+        let region = self.region;
+        let mut out = Vec::with_capacity(region.len());
+        let mut msg_start = 0;
+        let mut replaced = false;
+        while let Some((record_type, _, body_end)) = region.next_message(msg_start)? {
+            let bytes = &region[msg_start..body_end];
+            if record_type == msg_type {
+                let splice = RecordSplice::first(region.layout(), bytes, msg_type)
+                    .map_err(record_error)?
+                    .ok_or_else(|| {
+                        Error::Format(FormatError::Internal(
+                            "a parsed message record is absent from its source region".into(),
+                        ))
+                    })?;
+                splice.replace_body_into(&mut out, body)?;
+                replaced = true;
+            } else {
+                out.extend_from_slice(bytes);
+            }
+            msg_start = body_end;
+        }
+        out.extend_from_slice(&region[msg_start..]);
+        Ok(replaced.then(|| region.with_bytes(out)))
+    }
 }
 
 /// Returns the absolute chunk 0 message range and parsed prefix properties.
@@ -235,8 +268,13 @@ impl OhChunk {
     }
 }
 
-/// Read chunk 0 of the version 2 object header at `addr` out of `src`.
-pub(super) fn read_oh_chunk0<S: Source + ?Sized>(src: &S, addr: u64) -> Result<OhChunk, Error> {
+/// Reads chunk 0 with its checksum excluded from the message buffer.
+///
+/// # Errors
+///
+/// Returns [`Error::EditUnsupported`] for an unsupported or truncated header. Propagates
+/// parsing and source-read errors.
+fn read_oh_chunk0<S: Source + ?Sized>(src: &S, addr: u64) -> Result<OhChunk, Error> {
     let file_len = src.len();
     let window = file_len
         .saturating_sub(addr)
@@ -298,18 +336,20 @@ pub(crate) fn read_oh_chunks<S: Source + ?Sized>(
     Ok(chunks)
 }
 
-/// Reads the `OCHK` continuation block a continuation message points at.
+/// Reads the continuation block named by `region[body..body_end]`.
 ///
-/// `region[body..body_end]` is the continuation message's body: the block's
-/// base-relative address followed by its length.
+/// Decodes the base-relative address before reading the block and excludes its checksum from
+/// the returned message buffer. The version 2 block fields are defined in "The Object Header
+/// Continuation Message" of the [format specification, version 4.0][spec].
 ///
 /// # Errors
 ///
-/// Returns [`Error::EditUnsupported`] if the message ends inside its fields, if the block runs
-/// past the end of `src` or is shorter than its signature and checksum, or if the block does not
-/// begin with `OCHK`. Returns [`Error::Format`] if the message stores the undefined address, if
-/// adding the effective base to the address overflows, or if a read of `src` fails.
-pub(super) fn read_oh_continuation<S: Source + ?Sized>(
+/// Returns [`Error::EditUnsupported`] if the message is truncated, the block is out of bounds,
+/// or its signature is invalid. Returns [`Error::Format`] if the address is undefined, address
+/// conversion overflows, or a source read fails.
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_continuation
+fn read_oh_continuation<S: Source + ?Sized>(
     src: &S,
     region: &[u8],
     body: usize,
@@ -379,11 +419,8 @@ pub(crate) fn next_record(
         }))
 }
 
-/// Returns the editor's error for an error of [`MessageRecordLayout::next_message`].
-///
-/// A record whose body runs past the end of its region is reported as
-/// [`Error::EditUnsupported`], and any other error as [`Error::Format`].
-pub(super) fn record_error(err: FormatError) -> Error {
+/// Maps a truncated record to [`Error::EditUnsupported`] and other failures to [`Error::Format`].
+fn record_error(err: FormatError) -> Error {
     match err {
         FormatError::UnexpectedEof { .. } => {
             Error::EditUnsupported("malformed object header message")
@@ -401,13 +438,6 @@ pub(super) fn record_error(err: FormatError) -> Error {
 pub(crate) struct OhRegion {
     bytes: Vec<u8>,
     props: ObjectHeaderPrefix,
-}
-
-impl core::ops::Deref for OhRegion {
-    type Target = [u8];
-    fn deref(&self) -> &[u8] {
-        &self.bytes
-    }
 }
 
 impl OhRegion {
@@ -504,20 +534,20 @@ impl OhRegion {
     }
 }
 
-/// Re-encode a shared-message reference in the modern form, for a message being
-/// rewrapped from a version 1 object header into a version 2 one.
+impl core::ops::Deref for OhRegion {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+/// Re-encodes a shared-message reference for a version 2 object header.
 ///
-/// A version 1 header carries the oldest reference encoding: a symbol-table
-/// entry, with the object-header address buried behind a local-heap address.
-/// Copying those bytes into a version 2 header would put an encoding there that
-/// no writer of such a header has produced since the format gained one. Parsing
-/// and re-encoding gives the shape every current reader and writer uses.
+/// Preserves the referenced object address or shared-message heap ID.
 ///
-/// Which shape that is depends on where the message lives. An object header is
-/// named by the version 2 form this crate already writes for a committed
-/// datatype. The shared-message heap has no encoding before version 3, so a heap
-/// reference gets that one. Both name exactly what the version 1 reference named,
-/// so the message keeps its single copy and its reference count is unchanged.
+/// # Errors
+///
+/// Returns [`Error::Format`] if the reference is truncated or has an unsupported version.
 pub(super) fn modernize_shared_reference(
     body: &[u8],
     widths: FormatWidths,
@@ -549,24 +579,11 @@ pub(crate) fn build_v2_object_header(region: &OhRegion) -> Result<Vec<u8>, Error
     Ok(build_v2_object_header_verbatim(&owned))
 }
 
-/// [`build_v2_object_header`] without the attribute-storage normalization, for
-/// the region that function has already normalized.
+/// Serializes a normalized region and updates existing modification and change times.
 ///
-/// **The header's optional prefix blocks are re-emitted, and its timestamps are
-/// stamped.** A region carries whatever chunk 0's prefix declared
-/// ([`ObjectHeaderPrefix`]), so a rewrite of a header from libhdf5,
-/// h5py or netCDF-4 puts its four timestamps and any attribute phase-change
-/// thresholds back where it found them, with the flag bits that announce them.
-///
-/// Of those, the **modification and change times are moved to now**: this
-/// function runs once per rebuilt header, and every rebuild is a modification.
-/// Access and birth times are the object's own history and are copied verbatim
-/// ([`ObjectTimes::touched`](hdf5_pure_format::__private::ObjectTimes::touched) says
-/// how that compares with `H5O_touch_oh`).
-/// Under `no_std` there is no clock to read, so all four are preserved as they
-/// were.
-/// A header this crate creates from nothing omits timestamps.
-pub(super) fn build_v2_object_header_verbatim(region: &OhRegion) -> Vec<u8> {
+/// Preserves access and birth times, and the optional attribute phase-change thresholds.
+/// Preserves all timestamps if the system clock is unavailable.
+fn build_v2_object_header_verbatim(region: &OhRegion) -> Vec<u8> {
     let prefix = region.props();
     let stamped = ObjectHeaderPrefix {
         times: prefix.times.map(|times| match unix_time_now() {
@@ -597,3 +614,226 @@ pub(super) fn unix_time_now() -> Option<u32> {
 
 /// The traversal limit for header chunks, including cyclic continuation chains.
 const MAX_OH_CHUNKS: usize = 256;
+
+#[cfg(test)]
+mod tests {
+    use hdf5_pure_format::__private::AttributePhaseChange;
+    use hdf5_pure_format::__private::ObjectTimes;
+    use rstest::rstest;
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    use test_util::allocation;
+    use test_util::file_space_info as info_bytes;
+    use test_util::object_header::v2::HeaderFlags;
+    use test_util::widths::Widths;
+
+    use crate::file_space_info::{self, FileSpacePageSize, FileSpaceStrategy};
+    use crate::file_writer::WIDTHS;
+    use crate::source::BytesSource;
+    use crate::superblock;
+
+    use super::*;
+
+    #[rstest]
+    #[case::one_message(false, vec![1, 2, 3, 4])]
+    #[case::repeated_message(true, vec![1, 2, 3, 4])]
+    #[case::version_0(false, info_bytes::version_0(
+        Widths::EIGHT,
+        info_bytes::ALL_PERSIST,
+        1,
+        &[u64::MAX; info_bytes::VERSION_0_MANAGERS],
+    ))]
+    fn an_extension_rewrite_preserves_record_metadata_and_unrelated_bytes(
+        #[values(MessageRecordLayout::PLAIN, TRACKED)] layout: MessageRecordLayout,
+        #[case] repeated: bool,
+        #[case] source_body: Vec<u8>,
+    ) {
+        let info = file_space_info::persistent_placeholder(
+            FileSpaceStrategy::Page,
+            7,
+            FileSpacePageSize::DEFAULT,
+        );
+        let body =
+            hdf5_pure_format::__private::serialize_file_space_info_v1(WIDTHS, &info).unwrap();
+        let props = ObjectHeaderPrefix {
+            layout,
+            times: Some(ObjectTimes {
+                access: 1,
+                modification: 2,
+                change: 3,
+                birth: 4,
+            }),
+            attribute_phase_change: Some(AttributePhaseChange {
+                max_compact: 12,
+                min_dense: 5,
+            }),
+        };
+        let region_bytes = |body: &[u8]| {
+            [
+                layout.record_with_creation_index(
+                    MessageType::DATATYPE,
+                    MessageFlags::SHARED,
+                    9,
+                    &[0xAB; 7],
+                ),
+                layout.record_with_creation_index(
+                    MessageType::FILE_SPACE_INFO,
+                    MessageFlags::FORBID_SHARING | MessageFlags::MARK_IF_UNKNOWN,
+                    3,
+                    body,
+                ),
+                layout.record(MessageType::GROUP_INFO, &[0; 2]),
+                if repeated {
+                    layout.record_with_creation_index(
+                        MessageType::FILE_SPACE_INFO,
+                        MessageFlags::CONSTANT,
+                        11,
+                        body,
+                    )
+                } else {
+                    Vec::new()
+                },
+                vec![0x11, 0x22, 0x33],
+            ]
+            .concat()
+        };
+        let source = OhRegion::new(region_bytes(&source_body), props);
+
+        let rewritten = rewrite_extension_region_bytes(&source, WIDTHS, &info).unwrap();
+
+        assert_eq!(rewritten.props(), props);
+        assert_eq!(&rewritten[..], &region_bytes(&body));
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[rstest]
+    #[case::plain(MessageRecordLayout::PLAIN, "plain_extension_growth")]
+    #[case::tracked(TRACKED, "tracked_extension_growth")]
+    fn a_growing_extension_rewrite_keeps_the_allocation_count(
+        #[case] layout: MessageRecordLayout,
+        #[case] measurement: &'static str,
+    ) {
+        let old_body = info_bytes::version_0(
+            Widths::EIGHT,
+            info_bytes::ALL_PERSIST,
+            1,
+            &[u64::MAX; info_bytes::VERSION_0_MANAGERS],
+        );
+        let source = OhRegion::new(
+            [
+                layout.record(MessageType::FILE_SPACE_INFO, &old_body),
+                layout.record(MessageType::NIL, &[0; 2]),
+            ]
+            .concat(),
+            ObjectHeaderPrefix::with_layout(layout),
+        );
+        let info = file_space_info::persistent_placeholder(
+            FileSpaceStrategy::FsmAggr,
+            1,
+            FileSpacePageSize::DEFAULT,
+        );
+
+        let (rewritten, measured) = allocation::measure(measurement, || {
+            rewrite_extension_region_bytes(&source, WIDTHS, &info).unwrap()
+        });
+
+        assert_eq!(measured.blocks, 3, "{measured}");
+        let new_body =
+            hdf5_pure_format::__private::serialize_file_space_info_v1(WIDTHS, &info).unwrap();
+        assert_eq!(
+            &rewritten[..],
+            &[
+                layout.record(MessageType::FILE_SPACE_INFO, &new_body),
+                layout.record(MessageType::NIL, &[0; 2]),
+            ]
+            .concat(),
+        );
+    }
+
+    #[rstest]
+    #[case::before_replacement(false)]
+    #[case::after_replacement(true)]
+    fn an_extension_rewrite_rejects_a_record_past_the_source_region(
+        #[values(MessageRecordLayout::PLAIN, TRACKED)] layout: MessageRecordLayout,
+        #[case] after_replacement: bool,
+    ) {
+        let info = file_space_info::persistent_placeholder(
+            FileSpaceStrategy::Page,
+            7,
+            FileSpacePageSize::DEFAULT,
+        );
+        let mut bytes = if after_replacement {
+            layout.record(MessageType::FILE_SPACE_INFO, &[1, 2])
+        } else {
+            Vec::new()
+        };
+        let mut malformed = layout.record(MessageType::GROUP_INFO, &[0; 2]);
+        malformed.pop();
+        bytes.extend_from_slice(&malformed);
+        let source = OhRegion::new(bytes, ObjectHeaderPrefix::with_layout(layout));
+
+        let err = rewrite_extension_region_bytes(&source, WIDTHS, &info).unwrap_err();
+
+        let Error::EditUnsupported(reason) = err else {
+            panic!("expected EditUnsupported, got {err:?}");
+        };
+        assert_eq!(reason, "malformed object header message");
+    }
+
+    #[rstest]
+    fn an_extension_without_file_space_info_is_rejected(
+        #[values(MessageRecordLayout::PLAIN, TRACKED)] layout: MessageRecordLayout,
+    ) {
+        let info = file_space_info::persistent_placeholder(
+            FileSpaceStrategy::Page,
+            7,
+            FileSpacePageSize::DEFAULT,
+        );
+        let source = OhRegion::new(
+            layout.record(MessageType::GROUP_INFO, &[0; 2]),
+            ObjectHeaderPrefix::with_layout(layout),
+        );
+
+        let err = rewrite_extension_region_bytes(&source, WIDTHS, &info).unwrap_err();
+
+        let Error::EditUnsupported(reason) = err else {
+            panic!("expected EditUnsupported, got {err:?}");
+        };
+        assert_eq!(
+            reason,
+            "a persisting file's superblock extension has no File Space Info message"
+        );
+    }
+
+    #[test]
+    fn an_extension_written_by_libhdf5_keeps_its_unmodified_record_bytes() {
+        let source =
+            BytesSource::new(include_bytes!("../../tests/data/c/paged_index.h5").as_slice());
+        let located = superblock::read(&source).unwrap();
+        let addresses = AddressContext::from_effective_base(located.superblock.base_address);
+        let extension = addresses
+            .absolute(located.superblock.superblock_extension_address.unwrap())
+            .unwrap();
+        let region = WriteEngine::gather_oh_messages(&source, extension, addresses).unwrap();
+        let splice = region
+            .splice_first(MessageType::FILE_SPACE_INFO)
+            .unwrap()
+            .unwrap();
+        let info = hdf5_pure_format::__private::parse_file_space_info(
+            located.widths,
+            splice.record().body,
+        )
+        .unwrap();
+
+        let rewritten = rewrite_extension_region_bytes(&region, located.widths, &info).unwrap();
+
+        assert_eq!(rewritten.props(), region.props());
+        assert_eq!(&rewritten[..], &region[..]);
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[global_allocator]
+    static ALLOC: heapscope::Alloc = heapscope::Alloc::system();
+
+    const TRACKED: MessageRecordLayout =
+        MessageRecordLayout::from_header_flags(HeaderFlags::TRACKS_CREATION_ORDER.0);
+}
