@@ -27,7 +27,6 @@ use crate::data_layout::COMPACT_DATA_OFFSET;
 use crate::datatype;
 use crate::datatype::Datatype;
 use crate::edit;
-use crate::edit::CopyTree;
 use crate::edit::DenseAttrSet;
 use crate::edit::InvalidatedAddresses;
 use crate::edit::LinkCreationOrder;
@@ -36,6 +35,7 @@ use crate::edit::OhRegion;
 use crate::edit::SHARED_MESSAGE_INDEX_NAMES_A_MOVED_OBJECT;
 use crate::edit::UNDEF;
 use crate::edit::WriteEngine;
+use crate::edit::copy::{self, CopyTree};
 use crate::edit::group::GROUP_INFO_BODY;
 use crate::error::Error;
 use crate::error::FormatError;
@@ -133,7 +133,7 @@ fn a_copied_compact_reference_dataset_is_screened() {
             region: compact_reference_region(address),
             dense_attrs: DenseAttrSet::default(),
         };
-        let got = edit::screen_copied_references(
+        let got = copy::screen_copied_references(
             &tree,
             AddressContext::from_effective_base(BaseAddress::ZERO),
             crate::file_writer::WIDTHS,
@@ -151,7 +151,7 @@ fn a_copied_compact_reference_dataset_is_screened() {
         )),
         dense_attrs: DenseAttrSet::default(),
     };
-    let err = edit::screen_copied_references(
+    let err = copy::screen_copied_references(
         &no_layout,
         AddressContext::from_effective_base(BaseAddress::ZERO),
         crate::file_writer::WIDTHS,
@@ -186,7 +186,7 @@ fn a_copy_whose_committed_datatype_cannot_be_read_reports_the_read_failure() {
         dense_attrs: DenseAttrSet::default(),
     };
 
-    let err = edit::screen_copied_references(
+    let err = copy::screen_copied_references(
         &tree,
         AddressContext::from_effective_base(BaseAddress::ZERO),
         crate::file_writer::WIDTHS,
@@ -481,7 +481,7 @@ fn a_copied_reference_attribute_is_screened_in_both_storages() {
             dense_attrs: DenseAttrSet::default(),
         };
         for (storage, tree) in [("dense", &dense), ("inline", &inline)] {
-            let got = edit::screen_copied_references(
+            let got = copy::screen_copied_references(
                 tree,
                 AddressContext::from_effective_base(BaseAddress::ZERO),
                 crate::file_writer::WIDTHS,
@@ -729,11 +729,11 @@ fn a_rewrapped_shared_message_keeps_its_flag() {
 fn reject_foreign_addresses_rejects_any_shared_message() {
     let mut shared = message_record(MessageType::DATASPACE, &[0u8; 8]);
     shared[3] = MessageFlags::SHARED.get(); // set the message's shared flag
-    let err = edit::reject_foreign_addresses(&plain_region(shared)).unwrap_err();
+    let err = copy::reject_foreign_addresses(&plain_region(shared)).unwrap_err();
     assert!(err.to_string().contains("shared"), "got: {err}");
 
     let plain = message_record(MessageType::DATASPACE, &[0u8; 8]);
-    edit::reject_foreign_addresses(&plain_region(plain)).unwrap();
+    copy::reject_foreign_addresses(&plain_region(plain)).unwrap();
 }
 
 #[test]

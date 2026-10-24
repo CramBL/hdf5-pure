@@ -305,10 +305,7 @@ use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::attribute::StoredAttribute;
 use crate::attribute_info::AttributeInfoMessage;
-use crate::chunked_write::ChunkMeta;
 use crate::convert::Narrow;
-use crate::data_layout::ChunkedLayoutFlags;
-use crate::data_layout::DataLayout;
 use crate::datatype::{self, Datatype};
 use crate::error::{Error, FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::file_create_properties::FileCreateProperties;
@@ -325,7 +322,6 @@ use crate::free_space_manager;
 use crate::free_space_manager::PersistedSections;
 use crate::image::{FileImage, HandleImage, MirrorImage, WriteBuffering};
 use crate::libver::LibVer;
-use crate::link_message::{LinkMessage, LinkTarget};
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
@@ -342,6 +338,7 @@ use crate::type_builders::{self, AttrValue, ObjectRefTarget};
 use crate::width::FormatWidths;
 
 use self::aggregation::AggregateSpace;
+use self::copy::CopyTree;
 use self::dataset::{FlatDataset, MovingWrite, WritePlan};
 use self::group::LinkCreationOrder;
 pub(crate) use self::object_header::OhRegion;
@@ -351,6 +348,7 @@ pub(crate) use self::staging::{StagedChild, StagedKind, StagedMeta, StagedObject
 
 mod aggregation;
 mod append;
+mod copy;
 mod dataset;
 mod global_heap_liveness;
 #[cfg(test)]
@@ -482,11 +480,6 @@ const REFERENCE_ATTRIBUTE_WOULD_LEAVE_THE_HEADER: &str = "an attribute holding a
 /// objects were written by one and edited by the other must not disagree about
 /// where the eighth attribute lives.
 const MAX_COMPACT_ATTRS: usize = crate::file_writer::DENSE_ATTR_THRESHOLD;
-
-/// Recursion-depth cap for object copy, guarding against a stack overflow on a
-/// pathological or cyclic hard-link graph (HDF5 hard links can form cycles).
-/// Far deeper than any real group hierarchy.
-const MAX_COPY_DEPTH: u32 = 1000;
 
 /// Upper bound on the number of object headers walked when counting hard links
 /// across the file (issue #77 / reclaim safety). Far beyond any real file; a
@@ -4163,7 +4156,7 @@ impl WriteEngine {
             };
             for key in &keys {
                 for (_, tree) in &nodes[key].copies {
-                    screen_copied_references(
+                    copy::screen_copied_references(
                         tree,
                         self.addresses,
                         self.widths,
@@ -5592,194 +5585,6 @@ impl WriteEngine {
         Ok(())
     }
 
-    /// Parses an object header and attribute storage for copying.
-    ///
-    /// Dense attributes are read into an owned set for replacement storage. Hard-link children and
-    /// contiguous data locations are recorded separately from the retained header messages.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::EditUnsupported`] for external storage, unsupported layouts or links, or an
-    /// object that is neither a dataset nor a group. Returns metadata and attribute read, parse,
-    /// and
-    /// storage-planning errors.
-    fn read_object<S: Source + ?Sized>(
-        src: &S,
-        access_mode: AccessMode,
-        addr: u64,
-        base: AddressContext,
-    ) -> Result<ObjModel, Error> {
-        let region = Self::gather_oh_messages(src, addr, base)?;
-
-        reject_external_storage(&region)?;
-
-        let mut dense = false;
-        let mut p = 0;
-        while let Some((msg_type, body, body_end)) = region.next_message(p)? {
-            if msg_type == MessageType::ATTRIBUTE_INFO {
-                let ai = crate::attribute_info::AttributeInfoMessage::parse_with_offset_width(
-                    &region[body..body_end],
-                    crate::file_writer::OFFSET_WIDTH,
-                )?;
-                if ai.fractal_heap_address.is_some() {
-                    dense = true;
-                }
-            }
-            p = body_end;
-        }
-
-        // If dense, read the attribute set out of the source fractal heap now (so
-        // the source buffer need not outlive the read) and validate it can be
-        // re-emitted into a fresh heap on write. The read is [`read_object_attrs`],
-        // shared with the attribute editor: both need the source framed past its
-        // userblock before the heap walk, and one home for that framing is what
-        // keeps the two from coming to disagree about it.
-        let dense_attrs = if dense {
-            let stored = read_object_attrs(src, access_mode, addr, base)?;
-            let set = dense_attr_set(&region, stored)?;
-            crate::file_writer::dense_attrs_check(&set.attrs).map_err(Error::Format)?;
-            set
-        } else {
-            DenseAttrSet::default()
-        };
-
-        let mut layout: Option<(usize, usize)> = None; // (body offset in kept, size)
-        let mut has_link_info = false;
-        // (name, creation index, target address) per hard link. The creation
-        // index is `None` unless the source group tracks link creation order,
-        // and is carried so a copy of one that does reproduces its order.
-        let mut children: Vec<(String, Option<u64>, StoredAddress)> = Vec::new();
-        // The rebuilt chunk-0 region: every message kept verbatim except hard
-        // Link messages (carried as `children`) and, when dense, the Attribute
-        // Info message and inline Attribute messages (carried as `dense_attrs`).
-        let mut kept = OhRegion::empty(region.props());
-
-        let mut p = 0;
-        while let Some((msg_type, body, body_end)) = region.next_message(p)? {
-            let mut keep = true;
-            match msg_type {
-                MessageType::ATTRIBUTE_INFO => {
-                    if dense {
-                        keep = false;
-                    }
-                }
-                MessageType::ATTRIBUTE => {
-                    // A dense object should carry no inline Attribute messages,
-                    // but drop any defensively so the rebuilt header's only
-                    // attribute storage is the fresh heap.
-                    if dense {
-                        keep = false;
-                    }
-                }
-                MessageType::LINK_INFO => {
-                    has_link_info = true;
-                    let mut q = body + 2;
-                    if body_end - body >= 2 && region[body + 1] & 0x01 != 0 {
-                        q += 8;
-                    }
-                    if q + 8 <= body_end {
-                        let heap_addr = u64::from_le_bytes(region[q..q + 8].try_into().unwrap());
-                        if heap_addr != u64::MAX {
-                            return Err(Error::EditUnsupported(
-                                "a group uses dense (fractal-heap) link storage (not supported in place yet)",
-                            ));
-                        }
-                    }
-                }
-                MessageType::LINK => {
-                    keep = false;
-                    match LinkMessage::parse_with_offset_width(
-                        &region[body..body_end],
-                        OFFSET_WIDTH,
-                    ) {
-                        Ok(LinkMessage {
-                            name,
-                            link_target:
-                                LinkTarget::Hard {
-                                    object_header_address,
-                                },
-                            creation_order,
-                            ..
-                        }) => children.push((name, creation_order, object_header_address)),
-                        _ => {
-                            return Err(Error::EditUnsupported(
-                                "a group contains a soft/external link (not copyable in place yet)",
-                            ));
-                        }
-                    }
-                }
-                MessageType::DATA_LAYOUT => {
-                    // Record the layout body offset within the *kept* region so a
-                    // contiguous dataset's data-address field can be repointed
-                    // even after earlier messages were dropped.
-                    layout = Some((kept.len() + (body - p), body_end - body));
-                }
-                _ => {}
-            }
-            if keep {
-                kept.push_bytes(&region[p..body_end]);
-            }
-            p = body_end;
-        }
-
-        if let Some((lbody, lsize)) = layout {
-            let version = kept[lbody];
-            if !(version == 3 || version == 4) || lsize < 2 {
-                return Err(Error::EditUnsupported(
-                    "an unsupported data-layout version cannot be copied in place yet",
-                ));
-            }
-            let class = kept[lbody + 1];
-            match class {
-                0 => Ok(ObjModel::DatasetVerbatim {
-                    region: kept,
-                    dense_attrs,
-                }),
-                1 => {
-                    if lbody + 18 > kept.len() {
-                        return Err(Error::EditUnsupported("malformed contiguous data layout"));
-                    }
-                    let data_addr = StoredAddress::new(u64::from_le_bytes(
-                        kept[lbody + 2..lbody + 10].try_into().unwrap(),
-                    ));
-                    let data_size =
-                        u64::from_le_bytes(kept[lbody + 10..lbody + 18].try_into().unwrap());
-                    Ok(ObjModel::DatasetContiguous {
-                        region: kept,
-                        addr_off: lbody + 2,
-                        data_addr,
-                        data_size,
-                        dense_attrs,
-                    })
-                }
-                // Chunked: the verbatim header carries the data-layout and filter-
-                // pipeline messages; `read_copy_subtree` (which holds the source
-                // buffer) enumerates and captures the chunk bytes and rebuilds the
-                // index on write.
-                2 => Ok(ObjModel::DatasetChunked {
-                    region: kept,
-                    dense_attrs,
-                }),
-                _ => Err(Error::EditUnsupported(
-                    "an unsupported data-layout class cannot be copied in place yet",
-                )),
-            }
-        } else if has_link_info {
-            // A copied group must carry a Group Info message so the copy stays
-            // writable by the C library, even when the source omitted it.
-            group::ensure_group_info(&mut kept)?;
-            Ok(ObjModel::Group {
-                non_link_region: kept,
-                children,
-                dense_attrs,
-            })
-        } else {
-            Err(Error::EditUnsupported(
-                "an object is neither a contiguous/compact dataset nor a group",
-            ))
-        }
-    }
-
     /// Places a nonempty dense attribute set and adds its Attribute Info message to `region`.
     ///
     /// The caller checks the set with [`crate::file_writer::dense_attrs_check`] before commit
@@ -6422,121 +6227,6 @@ struct Node {
 enum AttrOp {
     Set { name: String, value: AttrValue },
     Remove { name: String },
-}
-
-/// A source object parsed for copying. Headers are reproduced from their
-/// verbatim message bytes; only the contiguous data address and child link
-/// targets are repointed to the freshly-written copies.
-enum ObjModel {
-    /// A compact dataset (data inline in the header): copy the region verbatim.
-    /// `dense_attrs` is empty unless the source stored its attributes densely, in
-    /// which case the Attribute Info message and inline Attribute messages have
-    /// been stripped from `region` and the parsed set is carried here to be
-    /// re-emitted into a fresh fractal heap on write.
-    DatasetVerbatim {
-        region: OhRegion,
-        dense_attrs: DenseAttrSet,
-    },
-    /// A contiguous dataset: copy the region, repointing the data address at
-    /// `addr_off` (region-relative) to a fresh copy of `[data_addr, +data_size)`.
-    /// See [`DatasetVerbatim`](ObjModel::DatasetVerbatim) for `dense_attrs`.
-    DatasetContiguous {
-        region: OhRegion,
-        addr_off: usize,
-        data_addr: StoredAddress,
-        data_size: u64,
-        dense_attrs: DenseAttrSet,
-    },
-    /// A chunked (and possibly filtered) dataset: the verbatim header `region`
-    /// (datatype, dataspace, fill value, data layout, and filter pipeline kept as
-    /// written). The chunk data is not captured here — [`read_copy_subtree`](WriteEngine::read_copy_subtree)
-    /// enumerates and reads the chunks (it holds the source buffer), repointing the
-    /// rebuilt index on write. See [`DatasetVerbatim`](ObjModel::DatasetVerbatim)
-    /// for `dense_attrs`.
-    DatasetChunked {
-        region: OhRegion,
-        dense_attrs: DenseAttrSet,
-    },
-    /// A group: every non-link message verbatim, plus its hard-link children to
-    /// copy and re-link as `(name, creation index, target address)`. See
-    /// [`DatasetVerbatim`](ObjModel::DatasetVerbatim) for `dense_attrs`.
-    Group {
-        non_link_region: OhRegion,
-        children: Vec<(String, Option<u64>, StoredAddress)>,
-        dense_attrs: DenseAttrSet,
-    },
-}
-
-/// An object subtree fully read out of a source buffer and owning every byte it
-/// will write, the read result of [`WriteEngine::read_copy_subtree`] and the
-/// input to [`WriteEngine::write_copy_subtree`]. Unlike [`ObjModel`] (a single
-/// object still referencing source addresses) it is recursive and self-contained:
-/// a contiguous dataset owns its data bytes, and a group owns its children, so it
-/// can be written into the destination without the source buffer still in hand —
-/// which is what lets a cross-file copy read the source at staging time and apply
-/// it at commit time.
-enum CopyTree {
-    /// Stored chunks with checked geometry and their verbatim filter-pipeline message.
-    ///
-    /// The copy writer rebuilds the index and layout while preserving payload bytes, sizes, and
-    /// filter masks. Dense attributes are written into separate replacement storage.
-    DatasetChunked {
-        region: OhRegion,
-        geometry: dataset::ChunkGeometry,
-        flags: ChunkedLayoutFlags,
-        pipeline_message: Option<Vec<u8>>,
-        meta: Vec<ChunkMeta>,
-        chunk_bytes: Vec<Vec<u8>>,
-        dense_attrs: DenseAttrSet,
-    },
-    /// A contiguous dataset: `data` is written first and its new address patched
-    /// into the header `region` at `addr_off` before the header is written. See
-    /// [`DatasetVerbatim`](CopyTree::DatasetVerbatim) for `dense_attrs`.
-    ///
-    /// `data` is `None` when the source allocated no storage at all: nothing is
-    /// written and `addr_off` keeps the undefined address the source stored, so
-    /// the copy declares the same absent storage rather than a block at a real
-    /// address. That is a statement about storage, not about length (issue
-    /// #336).
-    DatasetContiguous {
-        region: OhRegion,
-        addr_off: usize,
-        data: Option<Vec<u8>>,
-        dense_attrs: DenseAttrSet,
-    },
-    /// A compact dataset header with inline values and separately rebuilt dense attributes.
-    DatasetVerbatim {
-        region: OhRegion,
-        dense_attrs: DenseAttrSet,
-    },
-    /// A group: every non-link message verbatim, plus the `(name, creation
-    /// index, subtree)` children to write first and re-link by name. See
-    /// [`DatasetVerbatim`](CopyTree::DatasetVerbatim) for `dense_attrs`.
-    Group {
-        non_link_region: OhRegion,
-        children: Vec<(String, Option<u64>, CopyTree)>,
-        dense_attrs: DenseAttrSet,
-    },
-}
-
-impl CopyTree {
-    fn has_dense_attributes(&self) -> bool {
-        match self {
-            Self::DatasetVerbatim { dense_attrs, .. }
-            | Self::DatasetContiguous { dense_attrs, .. }
-            | Self::DatasetChunked { dense_attrs, .. } => !dense_attrs.is_empty(),
-            Self::Group {
-                children,
-                dense_attrs,
-                ..
-            } => {
-                !dense_attrs.is_empty()
-                    || children
-                        .iter()
-                        .any(|(_, _, child)| child.has_dense_attributes())
-            }
-        }
-    }
 }
 
 /// Records physical addresses invalidated by a commit for object-reference screening.
@@ -7552,132 +7242,6 @@ fn encode_attr_body(name: &str, value: &AttrValue) -> Result<Vec<u8>, Error> {
     Ok(body)
 }
 
-/// Refuse to copy a dataset whose element bytes live in files outside this one
-/// (`H5Pset_external`, the External Data Files header message, type 7), which
-/// this crate does not follow (issue #336).
-///
-/// Such a dataset carries a *contiguous* layout message with an undefined data
-/// address, the same encoding a never-written dataset uses — and
-/// [`read_copy_subtree`](WriteEngine::read_copy_subtree) copies that encoding as
-/// the storage it does not have. The layout alone cannot tell the two apart, so
-/// naming this message is the only thing standing between a dataset that holds
-/// data and a copy carrying its schema and none of it. [`crate::repack()`]
-/// rejects the same shape for the same reason.
-///
-/// Applied on both copy paths rather than only the cross-file one: an in-file
-/// copy would reproduce the header without its data just as readily. It is also
-/// the only screen that reads this message at all — [`reject_foreign_addresses`]
-/// inspects shared messages, datatypes, and attributes, not this body, which
-/// carries a local-heap address that would dangle in another file.
-fn reject_external_storage(region: &OhRegion) -> Result<(), Error> {
-    let mut p = 0;
-    while let Some((msg_type, _, body_end)) = region.next_message(p)? {
-        if msg_type == MessageType::EXTERNAL_DATA_FILES {
-            return Err(Error::EditUnsupported(
-                "a dataset stores its elements in external files (H5Pset_external), \
-                 which a copy cannot reproduce -- its data lives in files this crate \
-                 does not read",
-            ));
-        }
-        p = body_end;
-    }
-    Ok(())
-}
-
-/// Refuse to copy an object whose header embeds a *source-file* absolute address
-/// that a verbatim copy into another file cannot translate. An in-file copy keeps
-/// these valid by sharing the source file's heaps and objects; a cross-file copy
-/// cannot. Three things qualify:
-///
-/// - a **variable-length** datatype, whose element bytes are global-heap
-///   references (collection address + index) into the source file's heap;
-/// - a **reference** datatype (object or dataset-region), whose element bytes are
-///   absolute object addresses in the source file;
-/// - any **shared message** ([`MessageFlags::SHARED`] set): a committed datatype, but also a shared
-///   dataspace, fill value, or filter-pipeline message, whose body is a reference into the source
-///   file's shared-message storage.
-///
-/// The scan covers a copied object's whole message region (a dataset's or a
-/// group's): it refuses any shared message outright, and inspects Datatype
-/// messages (the element type) and Attribute messages (their own datatype),
-/// recursing through compound members, array elements, and enumeration bases so a
-/// nested variable-length or reference occurrence is caught too. It is applied
-/// only on the cross-file path; the same-file [`copy`](crate::File::copy)
-/// deliberately keeps these forms (their addresses stay valid in one file).
-fn reject_foreign_addresses(region: &OhRegion) -> Result<(), Error> {
-    let mut p = 0;
-    while let Some((msg_type, body, body_end)) = region.next_message(p)? {
-        // A *shared* message stores, in place of its real body, a reference into
-        // the source file's shared-message storage — an object-header address or a
-        // fractal-heap (SOHM) id — which means nothing in another file. This
-        // catches committed (shared) datatypes and shared attributes as well as a
-        // shared dataspace, fill value, or filter-pipeline message, all of which
-        // HDF5 may place in the shared-message table. Refuse any of them, whatever
-        // the message type. The flags byte is the 4th of the record header (type,
-        // size, flags); `next_message` returning `Some` guarantees
-        // `p + 4 <= region.len()`.
-        if MessageFlags::new(region[p + 3]).is_shared() {
-            return Err(Error::EditUnsupported(
-                "a shared (committed/SOHM) object-header message cannot be copied to another file yet",
-            ));
-        }
-        match msg_type {
-            MessageType::DATATYPE => {
-                let (dt, _) = hdf5_pure_format::__private::parse_datatype(&region[body..body_end])?;
-                if datatype::datatype_holds_file_address(&dt) {
-                    return Err(Error::EditUnsupported(
-                        "variable-length or reference datasets cannot be copied to another file yet",
-                    ));
-                }
-            }
-            MessageType::ATTRIBUTE => {
-                // An attribute's *own* datatype or dataspace field can be a
-                // reference to a committed message, which the record's shared
-                // flag above does not report: that flag describes the attribute
-                // message, not the fields inside it. The reference addresses the
-                // source file, so it cannot travel any more than a shared record
-                // can — and the parse below cannot resolve it here in any case.
-                if crate::attribute::AttributeMessage::shares_a_field(&region[body..body_end]) {
-                    return Err(Error::EditUnsupported(
-                        "an attribute with a committed (shared) datatype cannot be copied to another file yet",
-                    ));
-                }
-                let attr = crate::attribute::AttributeMessage::parse_with_length_width(
-                    &region[body..body_end],
-                    crate::file_writer::LENGTH_WIDTH,
-                )?;
-                if datatype::datatype_holds_file_address(&attr.datatype) {
-                    return Err(Error::EditUnsupported(
-                        "variable-length or reference attributes cannot be copied to another file yet",
-                    ));
-                }
-            }
-            _ => {}
-        }
-        p = body_end;
-    }
-    Ok(())
-}
-
-/// Cross-file screen for a dense (fractal-heap) attribute set. The bytes parsed
-/// out of the source heap can embed source-file absolute addresses just as inline
-/// attribute messages can — variable-length (global-heap) or reference attribute
-/// data — which would dangle in another file. [`reject_foreign_addresses`] screens
-/// the verbatim object-header region but not heap-resident attribute bytes, so a
-/// dense attribute set is screened here instead. Same-file copies skip this (their
-/// addresses stay valid); the fresh heap built on write is same-file by
-/// construction, so only the source datatypes matter.
-fn reject_foreign_dense_attrs(attrs: &[crate::attribute::AttributeMessage]) -> Result<(), Error> {
-    for attr in attrs {
-        if datatype::datatype_holds_file_address(&attr.datatype) {
-            return Err(Error::EditUnsupported(
-                "variable-length or reference dense (fractal-heap) attributes cannot be copied to another file yet",
-            ));
-        }
-    }
-    Ok(())
-}
-
 /// Refuse a commit that removes or moves an object header the file's
 /// shared-message (SOHM) index names.
 ///
@@ -7764,203 +7328,6 @@ fn screen_resolved_references(
     for (_, stored) in datatype::stored_object_references(raw, dt.type_size() as usize, &slots) {
         if let Some(refusal) = invalidated.refusal(StoredAddress::new(stored)) {
             return Err(Error::EditUnsupported(refusal));
-        }
-    }
-    Ok(())
-}
-
-/// Screen an in-file copy's subtree against the space this commit reclaims
-/// (issue #317).
-///
-/// An in-file copy re-emits its source's element bytes verbatim, which is what
-/// keeps a copied variable-length or reference dataset valid: the addresses
-/// still name the same file, so nothing has to be rewritten. A deletion in the
-/// same commit takes that away for object references alone. The editor
-/// reclaims a global heap collection on a delete only when it is unreferenced
-/// by the objects reachable from the commit's new root group, and the copy is
-/// one of those objects, so its variable-length elements keep pointing at data
-/// that is still there.
-///
-/// Every element that can be read is screened by address, through the same
-/// [`screen_resolved_references`] a staged dataset's bytes go through: a
-/// contiguous dataset's data block, a compact dataset's inline data, and every
-/// attribute, inline or dense. A committed (shared) datatype is resolved through
-/// `src` first, so a copy of an object with a named type is screened like any
-/// other rather than refused for carrying a type this could not read.
-///
-/// One form cannot be read at all and so is refused by *datatype*, and only when
-/// it holds an object reference: a **chunked** dataset, whose addresses sit
-/// inside chunks this path carries compressed and never decodes — the same
-/// obstacle that makes [`crate::repack()`] reject a chunked object-reference
-/// dataset outright.
-///
-/// `src` is the session's image framed at its base address, the view a stored
-/// (base-relative) shared-message address indexes directly.
-fn screen_copied_references(
-    tree: &CopyTree,
-    addresses: AddressContext,
-    widths: FormatWidths,
-    invalidated: &InvalidatedAddresses,
-    src: &(impl Source + ?Sized),
-) -> Result<(), Error> {
-    if invalidated.is_empty() {
-        return Ok(());
-    }
-    use crate::shared_message::SharedResolver as _;
-    // No shared-message table: a heap-stored message is refused rather than
-    // followed here, and this screen treats an unreadable datatype as one it
-    // cannot clear, which is the conservative answer.
-    let resolver = crate::shared_message::SourceResolver::new(
-        src,
-        addresses,
-        AccessMode::ReadWrite,
-        widths,
-        None,
-    );
-    let (region, dense_attrs) = match tree {
-        CopyTree::DatasetVerbatim {
-            region,
-            dense_attrs,
-        }
-        | CopyTree::DatasetContiguous {
-            region,
-            dense_attrs,
-            ..
-        }
-        | CopyTree::DatasetChunked {
-            region,
-            dense_attrs,
-            ..
-        }
-        | CopyTree::Group {
-            non_link_region: region,
-            dense_attrs,
-            ..
-        } => (region, dense_attrs),
-    };
-    for attr in &dense_attrs.attrs {
-        screen_resolved_references(&attr.datatype, &attr.raw_data, invalidated)?;
-    }
-
-    // One walk of the header: the object's own element datatype, the compact
-    // data the layout message may carry, and every inline attribute.
-    let mut element_dt: Option<Datatype> = None;
-    let mut compact: Option<Vec<u8>> = None;
-    let mut p = 0;
-    while let Some((msg_type, body, body_end)) = region.next_message(p)? {
-        // The flags byte is the 4th of the record header (type, size, flags);
-        // `next_message` returning `Some` guarantees it is in bounds.
-        let shared = MessageFlags::new(region[p + 3]).is_shared();
-        match msg_type {
-            MessageType::DATATYPE => {
-                // A committed datatype's message body is a pointer into the
-                // file's shared-message storage rather than an encoded type, so
-                // read the type it names before parsing.
-                let committed;
-                let encoded = if shared {
-                    committed = resolver
-                        .resolve(&region[body..body_end], MessageType::DATATYPE)
-                        .map_err(|source| Error::CopyScreenUnreadable {
-                            message: MessageType::DATATYPE,
-                            source,
-                        })?;
-                    &committed[..]
-                } else {
-                    &region[body..body_end]
-                };
-                let (dt, _) = hdf5_pure_format::__private::parse_datatype(encoded)?;
-                element_dt = Some(dt);
-            }
-            MessageType::DATA_LAYOUT => {
-                if let Ok(DataLayout::Compact { data }) =
-                    DataLayout::parse_with_widths(&region[body..body_end], widths)
-                {
-                    compact = Some(data);
-                }
-            }
-            MessageType::ATTRIBUTE => {
-                // A *shared record* is the whole attribute message held in the
-                // file's shared-message table, which is a different indirection
-                // from the committed datatype `parse_resolving` follows inside
-                // the fields — and a rare one this path has never modelled. Its
-                // elements cannot be reached here, so it is refused.
-                if shared {
-                    return Err(Error::EditUnsupported(
-                        "a copy in this commit carries a shared (SOHM) attribute message, whose \
-                         elements cannot be screened against the same commit's deletions; use \
-                         separate commits",
-                    ));
-                }
-                // `parse_resolving` rather than `parse`: an attribute's own
-                // datatype field can name a committed message, which the record's
-                // shared flag does not report — that flag describes the attribute
-                // message, not the fields inside it — and `parse` refuses one.
-                let attr = crate::attribute::AttributeMessage::parse_resolving_with_length_width(
-                    &region[body..body_end],
-                    widths.lengths,
-                    &resolver,
-                )
-                .map_err(|source| Error::CopyScreenUnreadable {
-                    message: MessageType::ATTRIBUTE,
-                    source,
-                })?;
-                screen_resolved_references(&attr.datatype, &attr.raw_data, invalidated)?;
-            }
-            _ => {}
-        }
-        p = body_end;
-    }
-
-    match tree {
-        // Compact: the elements are inline in the data-layout message. A layout
-        // that did not yield them leaves a reference datatype unscreened, so it
-        // is refused for the same reason a chunked one is.
-        CopyTree::DatasetVerbatim { .. } => match (&element_dt, &compact) {
-            (Some(dt), Some(data)) => screen_resolved_references(dt, data, invalidated)?,
-            (Some(dt), None) if datatype::datatype_holds_object_address(dt) => {
-                return Err(Error::EditUnsupported(
-                    "a compact object-reference dataset's elements could not be read to screen \
-                     them against this commit's deletions; use separate commits",
-                ));
-            }
-            _ => {}
-        },
-        // No Datatype message means no declared reference, here and in the
-        // chunked arm below: such a header is not a dataset any reader can
-        // interpret, so there is nothing in it to dangle. That is why only the
-        // compact arm above refuses on a missing piece — there the datatype is
-        // present and says a reference is in bytes it could not reach.
-        CopyTree::DatasetContiguous { data, .. } => {
-            // A dataset whose storage the source never allocated (`None`) stores
-            // no elements, so it holds no address that could dangle. Skipped
-            // rather than screened as an empty run of element bytes: when
-            // `screen_resolved_references` cannot map a datatype's addresses — a
-            // dataset-region reference, a variable length of references, one
-            // wider than eight bytes — it refuses *unconditionally*, before it
-            // reads a byte, so an empty run would refuse this dataset for
-            // elements it does not have.
-            if let (Some(dt), Some(data)) = (&element_dt, data) {
-                screen_resolved_references(dt, data, invalidated)?;
-            }
-        }
-        // Chunked: `chunk_bytes` are carried exactly as the source stored them,
-        // filters and all, so there is nothing here to decode addresses out of.
-        CopyTree::DatasetChunked { .. } => {
-            if element_dt
-                .as_ref()
-                .is_some_and(datatype::datatype_holds_object_address)
-            {
-                return Err(Error::EditUnsupported(
-                    "a chunked object-reference dataset cannot be copied in a commit that also \
-                     deletes objects: its addresses live inside chunks this path does not \
-                     decode; use separate commits",
-                ));
-            }
-        }
-        CopyTree::Group { children, .. } => {
-            for (_, _, child) in children {
-                screen_copied_references(child, addresses, widths, invalidated, src)?;
-            }
         }
     }
     Ok(())

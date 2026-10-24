@@ -16,7 +16,6 @@ use hdf5_pure_space::__private::PageType;
 
 use crate::FillTime;
 use crate::VariableLengthType;
-use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
@@ -52,8 +51,8 @@ use super::staging::{StagedKind, StagedOp};
 use crate::file_writer::DenseAttrCreationOrder;
 
 use super::{
-    AppendBuilder, CopyTree, DenseAttrSet, EditedAttrs, LOSSY_TAIL_REFUSAL, MAX_COPY_DEPTH,
-    ObjModel, OhRegion, Placement, UNDEF, WriteEngine,
+    AppendBuilder, DenseAttrSet, EditedAttrs, LOSSY_TAIL_REFUSAL, OhRegion, Placement, UNDEF,
+    WriteEngine,
 };
 
 impl WriteEngine {
@@ -704,262 +703,6 @@ impl WriteEngine {
         })
     }
 
-    /// Captures a copyable object subtree in an owned [`CopyTree`].
-    ///
-    /// Chunk payloads retain their stored bytes and filter masks. An in-file copy may share heap
-    /// and
-    /// object references. A cross-file copy rejects references into the source file.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::EditUnsupported`] for excessive nesting or storage the editor cannot
-    /// reproduce.
-    /// Returns metadata and payload read or parse errors.
-    pub(super) fn read_copy_subtree<S: Source + ?Sized>(
-        src: &S,
-        access_mode: AccessMode,
-        addr: u64,
-        depth: u32,
-        cross_file: bool,
-        base: AddressContext,
-        widths: FormatWidths,
-    ) -> Result<CopyTree, Error> {
-        if depth >= MAX_COPY_DEPTH {
-            return Err(Error::EditUnsupported(
-                "copy source nests too deeply (possible hard-link cycle)",
-            ));
-        }
-        match Self::read_object(src, access_mode, addr, base)? {
-            ObjModel::DatasetVerbatim {
-                region,
-                dense_attrs,
-            } => {
-                if cross_file {
-                    super::reject_foreign_addresses(&region)?;
-                    super::reject_foreign_dense_attrs(&dense_attrs.attrs)?;
-                }
-                Ok(CopyTree::DatasetVerbatim {
-                    region,
-                    dense_attrs,
-                })
-            }
-            ObjModel::DatasetContiguous {
-                region,
-                addr_off,
-                data_addr,
-                data_size,
-                dense_attrs,
-            } => {
-                if cross_file {
-                    super::reject_foreign_addresses(&region)?;
-                    super::reject_foreign_dense_attrs(&dense_attrs.attrs)?;
-                }
-                // Preserve an undefined data address without allocating a data block.
-                let data = if data_addr.is_undefined(OFFSET_WIDTH) {
-                    None
-                } else {
-                    let start = base.absolute(data_addr)?;
-                    start
-                        .checked_add(data_size)
-                        .filter(|&e| e <= src.len())
-                        .ok_or(Error::EditUnsupported("dataset data is out of bounds"))?;
-                    let len = data_size.to_usize()?;
-                    Some(src.read_exact_at(start, len)?)
-                };
-                Ok(CopyTree::DatasetContiguous {
-                    region,
-                    addr_off,
-                    data,
-                    dense_attrs,
-                })
-            }
-            ObjModel::DatasetChunked {
-                region,
-                dense_attrs,
-            } => {
-                if cross_file {
-                    super::reject_foreign_addresses(&region)?;
-                    super::reject_foreign_dense_attrs(&dense_attrs.attrs)?;
-                }
-                let ChunkedHeaderParts {
-                    dt,
-                    ds,
-                    layout,
-                    pipeline_message,
-                } = parse_chunked_header(&region, widths)?;
-                let DataLayout::Chunked { index, flags, .. } = layout else {
-                    return Err(Error::EditUnsupported("dataset is not chunked"));
-                };
-                if !index.enumerable() {
-                    return Err(Error::EditUnsupported(
-                        "a chunked dataset with a version-2 B-tree chunk index cannot be \
-                         copied in place yet",
-                    ));
-                }
-                let geometry = ChunkedGeometry::new(&dt, &ds, &layout)?;
-
-                let dview = BaseOffsetSource {
-                    inner: src,
-                    base: base.effective_base(),
-                };
-
-                let infos = chunked_read::enumerate_chunks_from_source(
-                    &dview,
-                    &layout,
-                    &ds,
-                    crate::file_writer::WIDTHS,
-                )?;
-                let grid = chunked_read::plan_dense_grid(infos, &ds.dimensions, geometry.spatial).ok_or(
-                    Error::EditUnsupported(
-                        "a chunked dataset with unallocated (sparse) chunks cannot be copied in place yet",
-                    ),
-                )?;
-                if grid.grid_order.is_empty() {
-                    return Err(Error::EditUnsupported(
-                        "an empty chunked dataset cannot be copied in place yet",
-                    ));
-                }
-
-                let mut meta = Vec::with_capacity(grid.grid_order.len());
-                let mut chunk_bytes = Vec::with_capacity(grid.grid_order.len());
-                for ci in &grid.grid_order {
-                    let len = ci.chunk_size.to_usize()?;
-                    ci.address
-                        .get()
-                        .checked_add(len as u64)
-                        .filter(|&e| e <= dview.len())
-                        .ok_or(Error::EditUnsupported("chunk data is out of bounds"))?;
-                    chunk_bytes.push(dview.read_exact_at(ci.address.get(), len)?);
-                    meta.push(ChunkMeta {
-                        compressed_size: ci.chunk_size.get(),
-                        filter_mask: ci.filter_mask,
-                    });
-                }
-
-                let geometry = ChunkGeometry::new(&ds, geometry);
-                Ok(CopyTree::DatasetChunked {
-                    region,
-                    geometry,
-                    flags,
-                    pipeline_message,
-                    meta,
-                    chunk_bytes,
-                    dense_attrs,
-                })
-            }
-            ObjModel::Group {
-                non_link_region,
-                children,
-                dense_attrs,
-            } => {
-                if cross_file {
-                    super::reject_foreign_addresses(&non_link_region)?;
-                    super::reject_foreign_dense_attrs(&dense_attrs.attrs)?;
-                }
-                let mut kids = Vec::with_capacity(children.len());
-                for (name, creation_order, child) in children {
-                    let child = base.absolute(child)?;
-                    kids.push((
-                        name,
-                        creation_order,
-                        Self::read_copy_subtree(
-                            src,
-                            access_mode,
-                            child,
-                            depth + 1,
-                            cross_file,
-                            base,
-                            widths,
-                        )?,
-                    ));
-                }
-                Ok(CopyTree::Group {
-                    non_link_region,
-                    children: kids,
-                    dense_attrs,
-                })
-            }
-        }
-    }
-
-    /// Writes an owned copy subtree and returns its root object-header address.
-    ///
-    /// Children are placed before their parent links. Stored addresses use the destination file's
-    /// base.
-    /// Unallocated contiguous storage remains unallocated.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors of [`write_chunked_relocatable`](Self::write_chunked_relocatable) for
-    /// chunked copies. Returns [`Error::EditUnsupported`] if a retained header cannot be rebuilt,
-    /// [`Error::Format`] if header encoding, attribute encoding, or allocation geometry is invalid,
-    /// and [`Error::Io`] if writing the copy fails.
-    pub(super) fn write_copy_subtree(&mut self, node: &CopyTree) -> Result<u64, Error> {
-        let base = self.addresses;
-        match node {
-            CopyTree::DatasetVerbatim {
-                region,
-                dense_attrs,
-            } => {
-                let mut region = region.clone();
-                self.append_dense_attrs(&mut region, dense_attrs.clone())?;
-                let oh = super::object_header::build_v2_object_header(&region)?;
-                self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
-            }
-            CopyTree::DatasetContiguous {
-                region,
-                addr_off,
-                data,
-                dense_attrs,
-            } => {
-                let mut region = region.clone();
-                // Preserve an undefined data address without allocating a data block.
-                if let Some(data) = data {
-                    let new_data_addr = self.alloc_or_append_typed(data, AllocationClass::Raw)?;
-                    let relative = base.relative(new_data_addr)?.get();
-                    region.bytes_mut()[*addr_off..*addr_off + 8]
-                        .copy_from_slice(&relative.to_le_bytes());
-                }
-                self.append_dense_attrs(&mut region, dense_attrs.clone())?;
-                let oh = super::object_header::build_v2_object_header(&region)?;
-                self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
-            }
-            CopyTree::DatasetChunked {
-                region,
-                geometry,
-                flags,
-                pipeline_message,
-                meta,
-                chunk_bytes,
-                dense_attrs,
-            } => self.write_chunked_relocatable(
-                region,
-                geometry,
-                *flags,
-                pipeline_message.as_deref(),
-                meta,
-                &SliceChunkProvider {
-                    chunks: chunk_bytes,
-                },
-                dense_attrs.clone(),
-            ),
-            CopyTree::Group {
-                non_link_region,
-                children,
-                dense_attrs,
-            } => {
-                let mut region = non_link_region.clone();
-                for (name, creation_order, child) in children {
-                    let new_child = self.write_copy_subtree(child)?;
-                    region.push_link(name, base.relative(new_child)?, *creation_order);
-                }
-                self.append_dense_attrs(&mut region, dense_attrs.clone())?;
-                let oh = super::object_header::build_v2_object_header(&region)?;
-                self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
-            }
-        }
-    }
-
     /// Writes a relocating edit and returns its new object-header address.
     ///
     /// The caller publishes the parent link and reclaims superseded storage after commit
@@ -1284,7 +1027,7 @@ impl WriteEngine {
         clippy::too_many_arguments,
         reason = "the verbatim rebuild combines the header, geometry, encoding, payload, and attributes"
     )]
-    fn write_chunked_relocatable(
+    pub(super) fn write_chunked_relocatable(
         &mut self,
         region: &OhRegion,
         geometry: &ChunkGeometry,
@@ -2012,58 +1755,6 @@ pub(super) fn overwrite_datatypes_match(disk: &Datatype, staged: &Datatype) -> b
         _ => disk == staged,
     }
 }
-/// Parsed dataset metadata with the filter pipeline preserved as stored bytes.
-struct ChunkedHeaderParts {
-    dt: crate::datatype::Datatype,
-    ds: Dataspace,
-    layout: DataLayout,
-    pipeline_message: Option<Vec<u8>>,
-}
-
-/// Parses the metadata required to copy stored chunks.
-///
-/// # Errors
-///
-/// Returns [`Error::EditUnsupported`] for a missing required message or a non-chunked layout.
-/// Returns header-record, datatype, dataspace, and layout parse errors.
-fn parse_chunked_header(
-    region: &OhRegion,
-    widths: FormatWidths,
-) -> Result<ChunkedHeaderParts, Error> {
-    let mut datatype: Option<(usize, usize)> = None;
-    let mut dataspace: Option<(usize, usize)> = None;
-    let mut layout: Option<(usize, usize)> = None;
-    let mut pipeline: Option<(usize, usize)> = None;
-    let mut p = 0;
-    while let Some((msg_type, body, body_end)) = region.next_message(p)? {
-        match msg_type {
-            MessageType::DATATYPE => datatype = Some((body, body_end)),
-            MessageType::DATASPACE => dataspace = Some((body, body_end)),
-            MessageType::DATA_LAYOUT => layout = Some((body, body_end)),
-            MessageType::FILTER_PIPELINE => pipeline = Some((body, body_end)),
-            _ => {}
-        }
-        p = body_end;
-    }
-    let (dt_b, dt_e) = datatype.ok_or(Error::EditUnsupported("dataset header has no datatype"))?;
-    let (ds_b, ds_e) =
-        dataspace.ok_or(Error::EditUnsupported("dataset header has no dataspace"))?;
-    let (lb, le) = layout.ok_or(Error::EditUnsupported("dataset header has no data layout"))?;
-    let (dt, _) = hdf5_pure_format::__private::parse_datatype(&region[dt_b..dt_e])?;
-    let ds = Dataspace::parse_with_length_width(&region[ds_b..ds_e], widths.lengths)?;
-    let dl = DataLayout::parse_with_widths(&region[lb..le], widths)?;
-    if !matches!(dl, DataLayout::Chunked { .. }) {
-        return Err(Error::EditUnsupported("dataset is not chunked"));
-    }
-    let pipeline_message = pipeline.map(|(b, e)| region[b..e].to_vec());
-    Ok(ChunkedHeaderParts {
-        dt,
-        ds,
-        layout: dl,
-        pipeline_message,
-    })
-}
-
 /// Copies staged element bytes and their deferred variable-length work.
 ///
 /// The pending set remains intact if commit preparation rejects the write.
@@ -2333,21 +2024,6 @@ fn try_rebuild_index_in_place<S: Source + ?Sized>(
         .checked_add(new_index.len() as u64)
         .filter(|&e| e <= src.len())?;
     Some((index_addr.get(), new_index))
-}
-
-/// Provides stored chunk bytes from an owned copy in dense row-major order.
-struct SliceChunkProvider<'a> {
-    chunks: &'a [Vec<u8>],
-}
-
-impl ChunkProvider for SliceChunkProvider<'_> {
-    fn chunk_bytes(&self, index: usize, out: &mut Vec<u8>) -> Result<(), FormatError> {
-        let chunk = self.chunks.get(index).ok_or_else(|| {
-            FormatError::ChunkedReadError("chunk index out of range for in-memory provider".into())
-        })?;
-        out.extend_from_slice(chunk);
-        Ok(())
-    }
 }
 
 /// Provides encoded chunk bytes from a relocating overwrite in dense row-major order.
