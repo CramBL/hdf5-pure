@@ -364,7 +364,9 @@ mod page_header_reclamation;
 mod page_manager_tail;
 mod paged_persistence;
 mod reclaim;
+mod root_reclamation;
 mod staging;
+mod tail_recycling;
 
 pub use self::append::AppendBuilder;
 pub(crate) use self::append::{AppendGeometry, AppendTarget, LocatedState};
@@ -1122,21 +1124,17 @@ pub(crate) fn create_would_refuse_reopen(
     None
 }
 
-/// Whether a persisting file's tail rewrite may grow the file to place its
-/// manager blocks.
-///
-/// The two callers want opposite things from a tail that will not fit in free
-/// space, and the difference is not a preference: a commit publishing a tree
-/// *must* record its free space somewhere, while the shrink pass exists only to
-/// make the file smaller and would defeat itself by appending.
+/// Selects storage for a persistent extension and its free-space managers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TailPlacement {
-    /// Place the tail in free space where it fits and past end-of-file where it
-    /// does not. Every commit that publishes a tree.
+    /// Uses reusable free space where the tail fits, or appends it at EOA.
     Anywhere,
-    /// Place the tail in free space or not at all: when nothing fits, the
-    /// rewrite is abandoned before it writes a byte and the file is left exactly
-    /// as the commit before it published.
+    /// Reserves the current tail for recycling while publishing a replacement elsewhere.
+    Preserve,
+    /// Uses the reserved extent if the tail fits, or allocates elsewhere and returns the
+    /// extent through ordinary threshold admission.
+    Recycle(FreeExtent),
+    /// Uses existing free space, or leaves the file unchanged.
     ReuseOnly,
 }
 
@@ -2892,14 +2890,17 @@ impl WriteEngine {
         }
     }
 
-    /// Rewrite the on-disk free-space managers for a persisting commit, giving
-    /// the unspent append reserve back first so the managers record it, and then
-    /// give any trailing free space the rewrite exposed back to the filesystem.
+    /// Publishes a persistent commit after returning the unspent append reserve.
     ///
-    /// Every caller that publishes a *tree* takes this rather than
-    /// [`commit_persisting`](Self::commit_persisting) directly. The one caller
-    /// that does not is [`reserve_for_immediate_append`](Self::reserve_for_immediate_append),
-    /// whose whole purpose is to publish managers that leave the reserve out.
+    /// Reserves eligible sub-threshold manager storage during the first publication, then
+    /// recycles it in a separate publication. Other commits use ordinary tail placement.
+    /// Attempts to relocate a trailing manager allocation before truncating.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if aggregate planning, address resolution, or metadata
+    /// serialization fails. Returns [`Error::EditUnsupported`] if the extension cannot be
+    /// rewritten. Returns [`Error::Io`] if writing, synchronizing, or truncating fails.
     fn commit_persisting_releasing_reserve(
         &mut self,
         new_root: u64,
@@ -2907,7 +2908,12 @@ impl WriteEngine {
     ) -> Result<(), Error> {
         self.release_aggregates_for_tail(&mut to_free)?;
         self.release_reserve();
-        self.commit_persisting(new_root, to_free, TailPlacement::Anywhere)?;
+        if let Some(target) = self.recyclable_flat_tail() {
+            self.commit_persisting(new_root, Vec::new(), TailPlacement::Preserve)?;
+            self.recycle_flat_tail(new_root, to_free, target)?;
+        } else {
+            self.commit_persisting(new_root, to_free, TailPlacement::Anywhere)?;
+        }
         self.shrink_to_the_trailing_free_run(new_root)
     }
 
@@ -3092,6 +3098,9 @@ impl WriteEngine {
     /// On failure before root publication is attempted, the editor restores allocator state and
     /// attempts to restore prior values from the undo journal. Rollback is disabled once
     /// publication is attempted because a failed publication write may already have changed the file.
+    ///
+    /// After publication, reference patching or optional root-header reclamation can fail.
+    /// The committed tree retains the batch's values, including its in-place overwrites.
     ///
     /// # Errors
     ///
@@ -4531,14 +4540,22 @@ impl WriteEngine {
         // rather than of a structure read back out of the file, which is the one
         // span where a stale answer would not be caught by anything else.
         retain_disjoint_in_bounds(&mut to_free, self.image.len());
-        let to_free = self.stored_spans(to_free)?;
+        let mut to_free = self.stored_spans(to_free)?;
 
         // A persisting file keeps its freed space recorded on disk rather than
         // truncating it away, so its commit takes a different tail: one that
         // rewrites the on-disk managers rather than only repointing the superblock.
         if self.persist.is_some() {
+            let root_reclamation = self.plan_root_reclamation(new_root, &mut to_free)?;
             self.commit_persisting_releasing_reserve(new_root, to_free)?;
-            return self.repoint_stored_references(&relocations);
+            if root_reclamation.is_some() {
+                self.proved_free_of_references = true;
+            }
+            self.repoint_stored_references(&relocations)?;
+            if let Some(reclamation) = root_reclamation {
+                self.reclaim_root_metadata(reclamation)?;
+            }
+            return Ok(());
         }
 
         if self.fresh_page_boundary.is_some() {
@@ -4788,27 +4805,23 @@ impl WriteEngine {
         self.barrier()
     }
 
-    /// Commit tail for a file that persists its free space (issue #21). Unlike
-    /// the non-persisting path, freed space is *retained* and recorded on disk —
-    /// matching the reference library's persistent free-space strategy — so a
-    /// later reopen (by this crate or the C library) recovers it.
+    /// Publishes `new_root` with replacement persistent free-space metadata.
     ///
-    /// The post-commit free list (this commit's vacated regions plus the now-dead
-    /// old free-space-manager and extension blocks) is serialized into a fresh
-    /// `FSHD`/`FSSE` pair and a rewritten superblock-extension File Space Info
-    /// message. The three are written as one contiguous tail, placed in space an
-    /// *earlier* commit freed where it fits ([`flat_tail_layout`](Self::flat_tail_layout))
-    /// and appended at end-of-file where it does not. Nothing live or
-    /// still-referenced is overwritten either way, and the superblock — repointed
-    /// last — is the linearization point, so a crash before it leaves the prior
-    /// file (root, extension, and managers) wholly intact.
+    /// Writes the extension and manager blocks as one contiguous allocation according to
+    /// `placement`. [`TailPlacement::Preserve`] excludes the current allocation from returned
+    /// free space. [`TailPlacement::Recycle`] can reuse a reserved allocation after an earlier
+    /// publication made it unreferenced. Returned extents follow ordinary threshold admission.
     ///
-    /// The tail used to always append. Every commit then grew the file by one
-    /// tail and freed its predecessor's, so a delete-and-recreate workload grew
-    /// without bound while reporting all of that as reusable — the same defect
-    /// [`commit_persisting_paged`](Self::commit_persisting_paged) had for its own
-    /// tail (issue #286), on the strategy the paged one was measured against
-    /// (issue #358).
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if address resolution, metadata serialization, or aggregate
+    /// reconciliation fails. Returns [`Error::EditUnsupported`] if the extension cannot be
+    /// rewritten. Returns [`Error::Io`] if writing, synchronizing, or truncating fails. For PAGE,
+    /// returns the errors from [`Self::commit_persisting_paged`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if persistence is disabled.
     fn commit_persisting(
         &mut self,
         new_root: u64,
@@ -4822,7 +4835,7 @@ impl WriteEngine {
         }
         let widths = self.widths;
         let offset_width = widths.offsets;
-        let (strategy, threshold, page_size, old_blocks) = {
+        let (strategy, threshold, page_size, mut old_blocks) = {
             // Copy what we need so no borrow of `self.persist` is held across the
             // `&mut self` writes below; the old state stays in place so a failure
             // leaves the session reusable.
@@ -4837,6 +4850,9 @@ impl WriteEngine {
                 ps.old_blocks.clone(),
             )
         };
+        if placement == TailPlacement::Preserve {
+            old_blocks.clear();
+        }
         let base = self.addresses;
 
         // The extension address is stored relative to the base address, and every
@@ -4877,8 +4893,19 @@ impl WriteEngine {
         let limit = (placement == TailPlacement::ReuseOnly)
             .then(|| old_blocks.iter().map(|extent| extent.start()).min())
             .flatten();
-        let (post, placed_at, tail_len, eoa) =
-            self.flat_tail_layout(current_eoa, &to_free, &old_blocks, ext_len, widths, limit);
+        let recycled = if let TailPlacement::Recycle(target) = placement {
+            let layout =
+                self.recycled_tail_layout(current_eoa, &to_free, &old_blocks, ext_len, target);
+            if layout.is_none() {
+                old_blocks.push(target);
+            }
+            layout
+        } else {
+            None
+        };
+        let (post, placed_at, tail_len, eoa) = recycled.unwrap_or_else(|| {
+            self.flat_tail_layout(current_eoa, &to_free, &old_blocks, ext_len, widths, limit)
+        });
         if placed_at.is_none() && placement == TailPlacement::ReuseOnly {
             // The shrink pass appends nothing: growing the file by a tail is the
             // opposite of what it was called for. Nothing has been written and the

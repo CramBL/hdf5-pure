@@ -15,9 +15,9 @@ file-space properties
 
 file sizes (absolute bytes)
   measurement                           bytes
-  hdf5-pure stored EOF                  10484
-  libhdf5 H5Fget_filesize               10484
-  physical file                         10484
+  hdf5-pure stored EOF                   8255
+  libhdf5 H5Fget_filesize                8255
+  physical file                          8255
 
 free-space sections (stored addresses, byte lengths)
   index |        hdf5-pure         |         libhdf5          | match
@@ -41,7 +41,7 @@ ownership (Rust)
   live metadata                             6           1139
   free-space managers                       0              0
   reusable free space                       0              0
-  unclassified                              6           4449
+  unclassified                              4           2220
   trailing slack                            0              0
 
 exact section map equal: true

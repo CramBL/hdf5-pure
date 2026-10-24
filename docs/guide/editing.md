@@ -466,7 +466,23 @@ The metadata cache is **off** by default, which is why a bounded session's resid
 
 [`commit()`](crate::File::commit) appends each new dataset (its data blob and object header) and each new group, then appends rewritten object headers for every touched group and its ancestors up to the root (omitting any deleted links), and finally repoints the superblock at the new root.
 
-The appended data is `fsync`ed before the root is repointed, so the "repoint last" guarantee is real: if the process or machine fails during a commit, the original file is still intact and readable, because the superblock still points at the old root. (Under [`SyncPolicy::OnClose`](crate::SyncPolicy::OnClose) the repoint is still last, and during the session only a *process* failure is ordered against. See [Choosing the fsync cadence](#choosing-the-fsync-cadence).) The cost of a commit scales with the size of the edit, not the size of the file.
+With persistent [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr), the editor can reuse the original
+root-header allocation when it is below the free-section threshold and both headers occupy one
+chunk of the same size. It first publishes the replacement root, then copies that header into
+the reserved original extent and publishes its location. This requires a tree proved free of
+object references and an original root without an incoming hard link. Other object headers
+follow ordinary threshold admission.
+
+Without an explicit page buffer, the editor writes and `fsync`s each replacement before publishing
+its address in the superblock. A failure before the first publication leaves the previous root
+readable. During root-header reclamation, the committed replacement root remains readable while
+the editor copies it into the reserved original extent. Under
+[`SyncPolicy::OnClose`](crate::SyncPolicy::OnClose), the editor orders writes against process
+failures and defers synchronization until close. See
+[Choosing the fsync cadence](#choosing-the-fsync-cadence).
+
+The editor can reorder writes across publication barriers when using an
+[explicit page buffer](#letting-pages-live-longer).
 
 **Edit validation runs before the first content write.** A validation error leaves the file on disk untouched. In a non-persistent PAGE session recovering from a publication error, the editor first drains pending writes from the preceding attempt.
 
@@ -482,7 +498,11 @@ Overwriting the same dataset again reclaims the collection the previous overwrit
 
 ## Choosing the fsync cadence
 
-Those barriers are `fsync`s, and by default there is one at every durability point: five per append *batch* (a [`Dataset::append`](crate::Dataset::append) larger than about a megabyte is applied in several), two or three per commit, one at [`close`](crate::File::close). That is a strong guarantee and a real cost, and an application that wants durability at its own cadence instead sets [`SyncPolicy`](crate::SyncPolicy) on the fapl.
+By default, the editor calls `fsync` at every durability barrier and at
+[`File::close`](crate::File::close). Recycling root or manager metadata can require several
+publications in one commit, each with barriers before and after the superblock write. A caller
+configures the cadence with [`SyncPolicy`](crate::SyncPolicy) through
+[`FileAccessProperties`](crate::FileAccessProperties).
 
 ```rust
 # let dir = tempfile::tempdir()?;
@@ -678,7 +698,14 @@ With persistence enabled under PAGE, or under `FsmAggr`, the space a deletion fr
 
 Under [`FileSpaceStrategy::Aggr`](crate::FileSpaceStrategy::Aggr), staged edits and immediate appends use separate metadata and raw aggregates with 2048-byte refill blocks. Unused reservations remain available across commits within the session. A clean close or drop releases unused aggregate space at EOA after publishing the shorter EOA with the current root, unless publication is uncertain. Both `Aggr` and [`FileSpaceStrategy::None`](crate::FileSpaceStrategy::None) discard freed extents. `None` allocates at the end of the file and retains its length after deletion.
 
-Under [`FileSpaceStrategy::FsmAggr`](crate::FileSpaceStrategy::FsmAggr), ordinary read-write sessions try reusable freed space before the metadata or raw aggregate, with persistence enabled or disabled, including when the file has no recorded strategy. Abandoned aggregate spare is tracked subject to the free-section threshold. Active reservations remain available across commits and are excluded from persisted free sections. A commit may surrender both windows when their spare permits releasing a larger dead suffix. Persistent close or drop returns unused spare through replacement managers before truncating, provided publication completed successfully. Reopening starts with empty aggregate windows. SWMR sessions under `FsmAggr` use no classic aggregates.
+Under [`FileSpaceStrategy::FsmAggr`](crate::FileSpaceStrategy::FsmAggr), ordinary read-write sessions
+try reusable freed space before the metadata or raw aggregate, with persistence enabled or disabled,
+including when the file has no recorded strategy. Abandoned aggregate spare is tracked subject to
+the free-section threshold. Active reservations are excluded from persisted free sections. A commit
+may surrender both windows when their spare permits releasing a larger dead suffix, or when recycling
+sub-threshold persistent manager storage. Persistent close or drop returns unused spare through
+replacement managers before truncating, provided publication completed successfully. Reopening starts
+with empty aggregate windows. SWMR sessions under `FsmAggr` use no classic aggregates.
 
 Two things stay behind. A file that persists its free space rewrites its free-space managers on every commit and cannot put them where the previous set still is, so a few of those blocks' worth of the run is kept for the commits that follow. A run that would give back less than it keeps is left where it is, since trimming the top off a hole the next write was about to fill costs more than it returns. The result is that the file ends just above its last live allocation, and a delete can still make a file longer: recording free space on disk costs metadata that has to go somewhere, and libhdf5 grows a file to persist its managers too.
 
@@ -701,7 +728,14 @@ editor validates the checksum on the decoded bytes.
 
 On a persistent paged file ([`FileSpaceStrategy::Page`](crate::FileSpaceStrategy::Page)) an allocation is served from free space of the page type it is writing, or from a page that is wholly free, since a page with nothing in it has no type to contradict, so reuse cannot make metadata and raw data share a page. Freed space whose page type cannot be established, a whole-file-generic free section recorded by another writer, or a chunk index that writer placed among its metadata, is recorded and never handed out, which costs some space and keeps the page separation.
 
-On any file that persists its free space, the blocks a commit rewrites to record it, the superblock extension and the free-space managers themselves, are placed in free space where any fits, and appended only when none does. Each commit supersedes the previous set, so in the steady state a commit's blocks land in space an earlier commit's vacated, and a delete-and-recreate workload holds the file at its size, where each commit would otherwise add a set (paged: a page). When a commit had to append those blocks *above* the run it just freed, the shape a delete leaves, it moves them down into that run in a second, tail-only rewrite and truncates to them, which is how the delete-then-commit case gives its space back within the same session.
+The editor places persistent extension and manager blocks in reusable free space where they fit,
+or appends them when no region is large enough. Under `FsmAggr`, it can recycle a contiguous allocation
+for its extension and managers that is smaller than the threshold by publishing a replacement
+elsewhere first. It then rewrites the reserved allocation and publishes it again if the metadata fits,
+without admitting that allocation as ordinary free space. Larger replacements follow ordinary
+allocation and threshold admission. After publication, the editor may move trailing managers into
+earlier free space and truncate the file. The [file-space guide](crate::_guide::file_space)
+describes the conditions for fixed-width root updates to reach a stable length across sessions.
 
 An immediate [`Dataset::append`](crate::Dataset::append) (and a [`BufferedAppender`](crate::BufferedAppender) flush) draws on free space too. A file that forgets its free space at close spends it directly. A file that persists its free space first removes a batch of space from the on-disk managers in a separate publication. A batch gathers every hole the appended chunk fits in, up to a megabyte of them. Appends spend the reserved batch before aggregate capacity under `FsmAggr`, whose active reservations are also excluded from persisted free sections. A crash can strand the unspent remainder of a batch. The SWMR writer always appends at the end of the file, because its readers may be reading a region the writer freed. A dataset written into a fragmented file may have its chunks placed in several holes. Sequential reads then fetch each chunk separately, where a single run coalesces adjacent ones. [`repack`](crate::repack()) restores a single run.
 

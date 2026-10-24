@@ -26,7 +26,7 @@ hdf5-release-feature VERSION:
 hdf5-versions *ARGS:
     @{{ uv }} hdf5-build --list {{ ARGS }}
 
-# Test every release scripts/hdf5-releases.toml lists with `FEATURES`.
+# Tests every release with `FEATURES` and checks the bundled free-space snapshots.
 test-hdf5-all FEATURES="serde,ndarray,provenance" PROFILE="test":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -35,6 +35,9 @@ test-hdf5-all FEATURES="serde,ndarray,provenance" PROFILE="test":
             "$version" {{ quote(FEATURES) }} \
             --cargo-profile {{ quote(PROFILE) }}
     done
+    unset HDF5_DIR
+    INSTA_UPDATE=no {{ quote(just_executable()) }} interop::test-bundled \
+        --cargo-profile {{ quote(PROFILE) }} --test main file_space
 
 # Run cross tests on libhdf5 `VERSION` with `FEATURES` and `ARGS`. Built under tmp/hdf5 on first use.
 test-hdf5 VERSION FEATURES="serde,ndarray,provenance" *ARGS: (hdf5-build VERSION)

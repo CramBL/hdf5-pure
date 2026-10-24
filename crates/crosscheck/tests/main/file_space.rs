@@ -56,11 +56,148 @@ use test_util::widths::Widths;
 use test_util_hdf5::absence;
 use test_util_hdf5::dataset::Unlimited;
 use test_util_hdf5::file_space;
+use test_util_hdf5::file_space_oracle::FreeSpaceOracleCheckpoint;
 use test_util_hdf5::file_space_oracle::SectionMap;
 use test_util_hdf5::paged;
 use test_util_hdf5::session;
 use test_util_hdf5::storage;
 use test_util_hdf5::userblock;
+
+#[rstest]
+#[case::large_threshold(4_096, false, false, false)]
+#[case::maximum_threshold(u64::MAX, false, false, false)]
+#[case::cyclic_layout(4_096, true, false, false)]
+#[case::aliased_root(4_096, false, false, true)]
+#[case::aliased_root_maximum_threshold(u64::MAX, false, false, true)]
+#[case::aliased_root_cyclic_layout(4_096, true, false, true)]
+#[case::ordinary_threshold(1, false, false, false)]
+#[case::tracked_space(4_096, false, true, false)]
+#[case::intermediate_threshold(200, false, true, false)]
+fn c_written_fixed_width_root_updates_reach_stable_physical_length(
+    #[case] threshold: u64,
+    #[case] cycle: bool,
+    #[case] tracked: bool,
+    #[case] alias: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("root-reclamation.h5");
+    {
+        let file = hdf5::FileBuilder::new()
+            .with_fapl(|fapl| fapl.libver_v110())
+            .with_fcpl(|fcpl| fcpl.file_space_strategy(fsm_aggr(true, threshold)))
+            .create(&path)
+            .unwrap();
+        file.new_dataset::<i32>()
+            .shape([3])
+            .create("keep")
+            .unwrap()
+            .write_raw(&[1, 2, 3])
+            .unwrap();
+        file.new_attr::<i64>()
+            .create("generation")
+            .unwrap()
+            .write_scalar(&-1)
+            .unwrap();
+        if tracked {
+            let data = vec![7u8; 8_192];
+            file.new_dataset::<u8>()
+                .shape([8_192])
+                .create("hole")
+                .unwrap()
+                .write_raw(&data)
+                .unwrap();
+            file.new_dataset::<u8>()
+                .shape([8_192])
+                .create("guard")
+                .unwrap()
+                .write_raw(&data)
+                .unwrap();
+        }
+        if alias {
+            file.link_hard("/", "root_alias").unwrap();
+        }
+        if cycle {
+            file.create_group("cycle")
+                .unwrap()
+                .link_hard(".", "again")
+                .unwrap();
+        }
+        file.close().unwrap();
+    }
+    if tracked {
+        let file = File::open_rw(&path).unwrap();
+        file.root().delete("hole").unwrap();
+        file.commit().unwrap();
+        file.close().unwrap();
+    }
+    let mut roots = Vec::new();
+    let mut lengths = Vec::new();
+    let mut closed_lengths = Vec::new();
+    let mut managers = Vec::new();
+    for generation in 0..12 {
+        let file = File::open_rw(&path).unwrap();
+        file.root()
+            .set_attr("generation", AttrValue::I64(generation))
+            .unwrap();
+        file.commit().unwrap();
+        roots.push(file.superblock().root_group_address);
+        lengths.push(std::fs::metadata(&path).unwrap().len());
+        let sections = file.space_accounting().unwrap().reusable_free_space;
+        file.close().unwrap();
+        closed_lengths.push(std::fs::metadata(&path).unwrap().len());
+        let reopened = File::open(&path).unwrap();
+        assert_eq!(reopened.persisted_free_space().unwrap(), sections);
+        managers.push(reopened.file_space_info().unwrap().manager_addrs.clone());
+        drop(reopened);
+        FreeSpaceOracleCheckpoint::observe(&path, "root-reclamation", "updated")
+            .unwrap()
+            .assert_equal();
+        let file = hdf5::File::open(&path).unwrap();
+        assert_eq!(
+            file.attr("generation")
+                .unwrap()
+                .read_scalar::<i64>()
+                .unwrap(),
+            generation
+        );
+        assert_eq!(
+            file.dataset("keep").unwrap().read_raw::<i32>().unwrap(),
+            [1, 2, 3]
+        );
+        if alias {
+            assert_eq!(
+                file.group("root_alias")
+                    .unwrap()
+                    .attr("generation")
+                    .unwrap()
+                    .read_scalar::<i64>()
+                    .unwrap(),
+                -1
+            );
+        }
+        if cycle {
+            assert!(file.link_exists("cycle/again/again"));
+        }
+        file.close().unwrap();
+    }
+    if threshold > 1 {
+        assert!(roots[4..].iter().all(|&root| root == roots[4]), "{roots:?}");
+        assert!(
+            managers[4..].iter().all(|set| set == &managers[4]),
+            "{managers:?}"
+        );
+    }
+    assert!(
+        lengths[4..].iter().all(|&len| len == lengths[4]),
+        "{lengths:?}"
+    );
+    assert!(
+        closed_lengths[4..]
+            .iter()
+            .all(|&len| len == closed_lengths[4]),
+        "{closed_lengths:?}"
+    );
+}
 
 #[rstest]
 #[case::before_exact_fill(false, 512, 0, 17, 512)]
@@ -4499,6 +4636,12 @@ fn a_sub_threshold_extent_is_tracked_only_beside_a_tracked_extent_as_libhdf5_tra
     #[case] deletions: &[&str],
     #[case] tracked: u64,
 ) {
+    let datasets = [
+        ("a", 1, 100),
+        ("b", 2, THRESHOLD_ELEMENTS),
+        ("c", 3, SUB_THRESHOLD_ELEMENTS),
+        ("e", 4, 100),
+    ];
     let dir = tempfile::tempdir().unwrap();
     let ours = dir.path().join("ours.h5");
     let theirs = dir.path().join("theirs.h5");
@@ -4508,12 +4651,7 @@ fn a_sub_threshold_extent_is_tracked_only_beside_a_tracked_extent_as_libhdf5_tra
             .with_fcpl(|fcpl| fcpl.file_space_strategy(fsm_aggr(persist, THRESHOLD)))
             .create(&ours)
             .unwrap();
-        for (name, value, len) in [
-            ("a", 1, 100),
-            ("b", 2, THRESHOLD_ELEMENTS),
-            ("c", 3, SUB_THRESHOLD_ELEMENTS),
-            ("e", 4, 100),
-        ] {
+        for (name, value, len) in datasets {
             file.new_dataset::<i32>()
                 .shape((len,))
                 .create(name)
@@ -4551,6 +4689,18 @@ fn a_sub_threshold_extent_is_tracked_only_beside_a_tracked_extent_as_libhdf5_tra
     };
     let (ours_reopened, ours_total) = {
         let file = File::open(&ours).unwrap();
+        let reference = hdf5::File::open(&ours).unwrap();
+        for (path, value, len) in datasets {
+            if deletions.contains(&path) {
+                continue;
+            }
+            let expected = vec![value; len];
+            assert_eq!(file.dataset(path).unwrap().read_i32().unwrap(), expected);
+            assert_eq!(
+                reference.dataset(path).unwrap().read_raw::<i32>().unwrap(),
+                expected
+            );
+        }
         let free = file.persisted_free_space().unwrap();
         (
             range::covered_len(&free, &extent),
