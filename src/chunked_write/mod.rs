@@ -28,6 +28,7 @@ use crate::address::StoredAddressExt;
 use crate::chunk_grid::{ChunkGrid, GridOrder};
 use crate::convert::Narrow;
 use crate::data_layout::ChunkedLayoutFlags;
+use crate::data_layout::DONT_FILTER_PARTIAL_BOUND_CHUNKS;
 use crate::data_layout::DataLayout;
 use crate::dataspace::{Extent, MaxExtent};
 use crate::error::FormatError;
@@ -166,6 +167,11 @@ pub struct ChunkOptions {
     /// [`push_filter`](Self::push_filter), which appends one exactly where the
     /// caller wants it.
     pub filters: Vec<FilterSpec>,
+    /// Whether the filter pipeline applies to a partial edge chunk, a chunk that extends past the
+    /// dataset's extent, or `None` where the caller sets no policy.
+    ///
+    /// The writer creates a dataset under `None` as under [`PartialEdgeFiltering::Apply`].
+    pub(crate) partial_edge_filtering: Option<PartialEdgeFiltering>,
 }
 
 impl ChunkOptions {
@@ -460,7 +466,7 @@ impl ChunkOptions {
             .collect::<Result<Vec<u32>, _>>()?;
         Ok(ChunkedHeader {
             layout_message: kind.layout_message(
-                ChunkedLayoutFlags::NONE,
+                self.layout_flags(),
                 &chunk_dims,
                 element_size,
                 &[ChunkRecord {
@@ -540,6 +546,46 @@ impl ChunkOptions {
             );
         }
         Ok(())
+    }
+
+    /// Returns the data layout flags of the partial edge filtering policy, or of
+    /// [`PartialEdgeFiltering::Apply`] where the caller sets none.
+    fn layout_flags(&self) -> ChunkedLayoutFlags {
+        self.partial_edge_filtering
+            .unwrap_or_default()
+            .layout_flags()
+    }
+}
+
+/// Whether the writer runs the partial edge chunks of a created dataset through the filter
+/// pipeline.
+///
+/// Under [`Skip`](Self::Skip) the writer sets the [`DONT_FILTER_PARTIAL_BOUND_CHUNKS`] flag of the
+/// version 4 data layout message, defined in "The Data Layout Message" of the [format
+/// specification, version 4.0][spec]. The C library sets the flag with `H5Pset_chunk_opts` and
+/// `H5D_CHUNK_DONT_FILTER_PARTIAL_CHUNKS`.
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum PartialEdgeFiltering {
+    /// The filter pipeline applies to every chunk.
+    #[default]
+    Apply,
+    /// A partial edge chunk is stored as its data, padded to a whole chunk with the fill value.
+    #[cfg_attr(
+        not(all(test, feature = "deflate")),
+        expect(dead_code, reason = "only the crate's deflate tests construct `Skip`")
+    )]
+    Skip,
+}
+
+impl PartialEdgeFiltering {
+    /// Returns the data layout flags for this policy.
+    pub(crate) fn layout_flags(self) -> ChunkedLayoutFlags {
+        match self {
+            Self::Apply => ChunkedLayoutFlags::NONE,
+            Self::Skip => ChunkedLayoutFlags::new(DONT_FILTER_PARTIAL_BOUND_CHUNKS),
+        }
     }
 }
 
@@ -968,6 +1014,9 @@ pub(crate) struct CompressedChunkSet {
     chunks: Vec<PreparedChunk>,
     chunk_dims_u32: Vec<u32>,
     element_size: NonZeroUsize,
+    /// The layout flags of [`ChunkOptions::partial_edge_filtering`], which the layout message
+    /// stores with the bit of a filtered Single Chunk index added.
+    flags: ChunkedLayoutFlags,
     has_filters: bool,
     /// Which index this set gets, decided once from the maximum chunk grid.
     kind: ChunkIndexKind,
@@ -1006,8 +1055,9 @@ impl CompressedChunkSet {
 /// Splits `raw_data` into chunks and encodes each one for storage, the dataset's only pass of the
 /// filter pipeline.
 ///
-/// [`assemble_chunked_at`] lays the set out at an address without encoding the chunks again. An
-/// unallocated dataset has no chunks.
+/// A partial edge chunk is stored as its data where [`ChunkOptions::partial_edge_filtering`] holds
+/// [`PartialEdgeFiltering::Skip`]. [`assemble_chunked_at`] lays the set out at an address without
+/// encoding the chunks again. An unallocated dataset has no chunks.
 ///
 /// # Errors
 ///
@@ -1048,6 +1098,8 @@ pub(crate) fn compress_chunks(
         allocation,
     )?;
 
+    let flags = options.layout_flags();
+
     // An unallocated dataset is not split. The splitter emits a chunk for every
     // slot the shape implies and this dataset supplies no bytes for them, so it
     // would write out the whole grid — and write it wrong, since a chunk that
@@ -1064,7 +1116,7 @@ pub(crate) fn compress_chunks(
             &mut scratch,
             pipeline.as_ref(),
             ctx,
-            ChunkedLayoutFlags::NONE,
+            flags,
             shape,
             fill,
             raw_data,
@@ -1084,6 +1136,7 @@ pub(crate) fn compress_chunks(
         chunks,
         chunk_dims_u32,
         element_size,
+        flags,
         has_filters,
         kind,
         slot_of_chunk,
@@ -1334,7 +1387,7 @@ fn chunk_index_layout(
     index_address: StoredAddress,
 ) -> Result<Vec<u8>, FormatError> {
     set.kind.layout_message(
-        ChunkedLayoutFlags::NONE,
+        set.flags,
         &set.chunk_dims_u32,
         set.element_size,
         written_chunks,
@@ -1889,7 +1942,6 @@ mod tests {
     use crate::chunked_read;
     use crate::convert;
     use crate::data_layout::ChunkIndexLayout;
-    use crate::data_layout::DONT_FILTER_PARTIAL_BOUND_CHUNKS;
     use crate::data_layout::DataLayout;
     use crate::dataspace::{Dataspace, DataspaceType};
     use crate::datatype::layout::FloatingPointLayout;
@@ -1897,6 +1949,7 @@ mod tests {
     use crate::fill_value::FillPattern;
     use crate::read_spec::RawReadSpec;
 
+    mod partial_edge;
     mod zfp;
 
     fn make_f64_type() -> Datatype {

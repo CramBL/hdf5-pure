@@ -1,11 +1,9 @@
 pub use hdf5_pure_format::__private::ChunkIndexLayout;
 pub use hdf5_pure_format::__private::ChunkedLayoutFlags;
+pub use hdf5_pure_format::__private::DONT_FILTER_PARTIAL_BOUND_CHUNKS;
 pub use hdf5_pure_format::__private::DataLayout;
 
 #[cfg(feature = "std")]
 pub use hdf5_pure_format::__private::COMPACT_DATA_OFFSET;
 #[cfg(feature = "std")]
 pub use hdf5_pure_format::__private::LAYOUT_CLASS_COMPACT;
-
-#[cfg(test)]
-pub use hdf5_pure_format::__private::DONT_FILTER_PARTIAL_BOUND_CHUNKS;
