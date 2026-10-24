@@ -23,6 +23,7 @@ use hdf5_pure::MaxExtent;
 use hdf5_pure::MemoryStrategy;
 use hdf5_pure::ScaleOffset;
 use hdf5_pure::SpaceAccounting;
+use hdf5_pure::SyncPolicy;
 use hdf5_pure::UserblockSize;
 use test_util::temp;
 
@@ -1590,10 +1591,12 @@ impl Base {
         match self {
             Self::Userblock => File::open_rw_with_options(
                 path,
-                FileAccessProperties::new().with_memory_strategy(MemoryStrategy::Mirrored),
+                FileAccessProperties::new()
+                    .with_memory_strategy(MemoryStrategy::Mirrored)
+                    .with_sync_policy(SyncPolicy::OnClose),
             )
             .unwrap(),
-            Self::Zero => session::open_bounded(path).unwrap(),
+            Self::Zero => session::open_bounded_on_close(path).unwrap(),
         }
     }
 
