@@ -1,4 +1,5 @@
 #![cfg(feature = "__hdf5-1.10")]
+//! Crosschecks symbol-table group paths, dataset values, and serialized link addresses.
 
 use std::path::Path;
 
@@ -6,9 +7,11 @@ use hdf5::plist::file_create::SharedMessageIndex;
 use hdf5::plist::file_create::SharedMessageType;
 use hdf5::plist::file_create::Sizeof;
 use hdf5::plist::file_create::SizeofInfo;
+use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::SuperblockVersion;
 use rstest::rstest;
+use test_util_hdf5::symbol_table;
 
 use crate::c_object;
 
@@ -59,14 +62,16 @@ fn write_libhdf5_file(path: &Path, creation: Creation, links: usize) {
         .create(path)
         .unwrap();
     let nested = file.create_group("nested").unwrap();
-    for (group, count) in [(&*file, links), (&nested, 3)] {
+    for (group, count, value_base) in [(&*file, links, 0i32), (&nested, 3, NESTED_VALUE_BASE)] {
         for index in 0..count {
             group
                 .new_dataset::<i32>()
                 .shape([1])
-                .create(format!("a dataset whose name fills the local heap {index:03}").as_str())
+                .create(dataset_name(index).as_str())
                 .unwrap()
-                .write_raw(&[i32::try_from(index).unwrap()])
+                .write_raw(&[value_base
+                    .checked_add(i32::try_from(index).unwrap())
+                    .unwrap()])
                 .unwrap();
         }
     }
@@ -92,17 +97,51 @@ fn libhdf5_links(path: &Path, group: &str) -> Vec<(String, u64)> {
     links
 }
 
-fn hdf5_pure_links(file: &File, group: &str) -> Vec<(String, u64)> {
-    let mut links: Vec<(String, u64)> = file
-        .group(group)
-        .unwrap()
-        .__links()
-        .unwrap()
-        .into_iter()
-        .map(|(name, address)| (name, address.get()))
-        .collect();
-    links.sort();
-    links
+fn dataset_name(index: usize) -> String {
+    format!("a dataset whose name fills the local heap {index:03}")
+}
+
+fn assert_group_members(
+    file: &File,
+    path: &str,
+    datasets: usize,
+    child_group: &str,
+    value_base: i32,
+) {
+    let group = file.group(path).unwrap();
+    let expected_names = (0..datasets).map(dataset_name).collect::<Vec<_>>();
+    let mut names = group.datasets().unwrap();
+    names.sort();
+    assert_eq!(names, expected_names);
+    assert_eq!(group.groups().unwrap(), [child_group]);
+    let child_path = format!("{}/{child_group}", path.trim_end_matches('/'));
+    let child = group.group(child_group).unwrap();
+    file.group(&child_path).unwrap();
+    let error = file.dataset(&child_path).unwrap_err();
+    let Error::NotADataset(actual) = error else {
+        panic!("expected NotADataset, got {error:?}");
+    };
+    assert_eq!(actual, child_path.trim_start_matches('/'));
+    if child_group == "leaf" {
+        assert_eq!(child.groups().unwrap(), Vec::<String>::new());
+        assert_eq!(child.datasets().unwrap(), Vec::<String>::new());
+    }
+    for (index, name) in expected_names.iter().enumerate() {
+        let dataset_path = format!("{}/{name}", path.trim_end_matches('/'));
+        let expected = [value_base
+            .checked_add(i32::try_from(index).unwrap())
+            .unwrap()];
+        assert_eq!(
+            file.dataset(&dataset_path).unwrap().read_i32().unwrap(),
+            expected
+        );
+        assert_eq!(group.dataset(name).unwrap().read_i32().unwrap(), expected);
+        let error = file.group(&dataset_path).unwrap_err();
+        let Error::NotAGroup(actual) = error else {
+            panic!("expected NotAGroup, got {error:?}");
+        };
+        assert_eq!(actual, dataset_path.trim_start_matches('/'));
+    }
 }
 
 #[rstest]
@@ -117,7 +156,7 @@ fn hdf5_pure_links(file: &File, group: &str) -> Vec<(String, u64)> {
     Creation { group_leaf_node_k: 16, shared_messages: true, superblock_version: SuperblockVersion::Two, ..DEFAULT },
     100
 )]
-fn both_readers_list_the_links_and_addresses_libhdf5_lists(
+fn both_readers_resolve_symbol_table_links_whose_addresses_match_libhdf5(
     #[case] creation: Creation,
     #[case] links: usize,
 ) {
@@ -130,16 +169,24 @@ fn both_readers_list_the_links_and_addresses_libhdf5_lists(
         .map(|group| libhdf5_links(&path, group))
         .collect();
     assert_eq!(expected[0].len(), links + 1);
-    for file in [
-        File::open(&path).unwrap(),
-        File::open_streaming(&path).unwrap(),
-    ] {
+    let bytes = std::fs::read(&path).unwrap();
+    let file = File::open(&path).unwrap();
+    let fixture = symbol_table::Fixture::new(&file, &bytes);
+    let root = fixture.links(file.superblock().root_group_address);
+    let nested = root.iter().find(|(name, _)| name == "nested").unwrap().1;
+    let decoded = [root, fixture.links(nested)].map(|links| {
+        links
+            .into_iter()
+            .map(|(name, address)| (name, address.get()))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(decoded.as_slice(), expected);
+    for file in [file, File::open_streaming(&path).unwrap()] {
         assert_eq!(file.superblock().version, creation.superblock_version);
         assert_eq!(file.superblock().base_address.get(), creation.userblock);
-        let listed: Vec<Vec<(String, u64)>> = GROUPS
-            .iter()
-            .map(|group| hdf5_pure_links(&file, group))
-            .collect();
-        assert_eq!(listed, expected);
+        assert_group_members(&file, "/", links, "nested", 0);
+        assert_group_members(&file, "/nested", 3, "leaf", NESTED_VALUE_BASE);
     }
 }
+
+const NESTED_VALUE_BASE: i32 = 1000;

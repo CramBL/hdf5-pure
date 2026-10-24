@@ -43,4 +43,5 @@ pub mod soft_link;
 #[cfg(feature = "__hdf5-1.10")]
 pub mod space_ownership;
 pub mod storage;
+pub mod symbol_table;
 pub mod userblock;

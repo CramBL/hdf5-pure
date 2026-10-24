@@ -392,8 +392,6 @@ num-complex = ["dep:num-complex", "serde"]
 __heap-baseline = []
 # Enables publication-failure injection for PAGE crosschecks.
 __page-publication-crosscheck = ["std"]
-# Exposes the links a group lists, with their object header addresses, to crosscheck tests.
-__group-links-crosscheck = ["std"]
 
 [dependencies]
 hdf5-pure-core.workspace = true

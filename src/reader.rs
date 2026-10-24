@@ -4439,23 +4439,6 @@ impl Group {
         }))
     }
 
-    /// Returns the name of each on-disk child of the group, with the address the file stores for
-    /// its object header, to crosscheck tests.
-    ///
-    /// # Errors
-    ///
-    /// Returns the error of locating the group's object header, such as [`Error::StaleHandle`], and
-    /// [`Error::Format`] if the group's structures do not parse.
-    #[cfg(feature = "__group-links-crosscheck")]
-    #[doc(hidden)]
-    pub fn __links(&self) -> Result<Vec<(String, StoredAddress)>, Error> {
-        Ok(self
-            .children()?
-            .into_iter()
-            .map(|entry| (entry.name, entry.object_header_address))
-            .collect())
-    }
-
     /// Read all attributes of this group.
     ///
     /// Each value takes the [`AttrValue`] variant that describes its on-disk
