@@ -8,145 +8,103 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- `FixedPointType::with_padding` and related numeric datatype methods configure padding bits. Metadata reads and writes preserve the bits, including those of variable-length base types.
-- `FormatError::ChunkElementSizeMismatch` reports a chunked dataset whose layout stores an element size other than the size of its datatype. An append rejects such a dataset before it writes ([#845](https://github.com/CramBL/hdf5-pure/pull/845)).
-- `File::dataset` and related group lookups follow relative, absolute, and chained soft links. External links remain unsupported, and soft link traversal is bounded.
-- `DatasetBuilder::with_unallocated_storage` declares datasets before their element data is available, with configurable fill and chunk settings. Combining unallocated storage with element data is rejected.
-- `FileBuilder::create_group_with` and its nested-group counterpart configure and attach groups through a callback. Attachment occurs only after the callback succeeds.
-- `Dataset::read_raw_region` and related typed reads select unit-stride regions along every dataset dimension. Bounds must fit the current shape, while row-window reads retain their clamping behavior ([#836](https://github.com/CramBL/hdf5-pure/pull/836)).
-- `File::open_rw` supports mirrored staged edits of non-persistent PAGE files in fresh typed pages. Commits require supported attribute storage and a tree proved free of object references, while old space remains unavailable for reuse ([#793](https://github.com/CramBL/hdf5-pure/pull/793)).
-- `FileBuilder::with_file_space_strategy` uses metadata and raw aggregates for new persistent `FsmAggr` files. Remaining reusable spare is persisted for later sessions, subject to the free-section threshold ([#789](https://github.com/CramBL/hdf5-pure/pull/789)).
-- `FileBuilder` uses separate metadata and raw aggregates for new files under `FsmAggr` with persistence disabled, including when the strategy is unset. Abandoned spare is reused during construction subject to the free-section threshold, while unused interior space remains allocated after output ([#787](https://github.com/CramBL/hdf5-pure/pull/787)).
-- `repack_into` repacks an open `File` into any `Write` sink, such as an in-memory buffer, and `repack_to_path` repacks it into a new file at a path. Both run the fidelity checks of `repack` ([#772](https://github.com/CramBL/hdf5-pure/pull/772)).
-- `FileBuilder::with_file_space_strategy` uses separate metadata and raw aggregates for new files under `Aggr`. Unused tails at the end of allocation are released before output, while interior unused reservations remain allocated without a free-space manager ([#785](https://github.com/CramBL/hdf5-pure/pull/785)).
-- `File::open_rw` uses separate metadata and raw aggregates for staged edits and immediate appends in persistent `FsmAggr` sessions. Active reservations are excluded from persisted free space until released ([#783](https://github.com/CramBL/hdf5-pure/pull/783)).
-- `File::open_rw` uses separate metadata and raw aggregates for staged edits and immediate appends under `FsmAggr` with persistence disabled, including files without a recorded strategy. Freed storage is reused before aggregate reservations, which last only for the session ([#781](https://github.com/CramBL/hdf5-pure/pull/781)).
-- `Dataset::append` shares the session's metadata and raw aggregates with staged edits under the `Aggr` file-space strategy. Unused reservations are available within the session, while freed object extents remain unavailable for reuse ([#778](https://github.com/CramBL/hdf5-pure/pull/778)).
-- `Group::groups` and related listings and attribute reads support dense link and attribute storage whose fractal heap is filtered. Huge objects in such a heap remain unsupported ([#776](https://github.com/CramBL/hdf5-pure/pull/776)).
-- `File::open_rw` reclaims the filtered fractal heap of dense attribute or link storage that becomes dead. A filtered heap with huge objects or a filter without a decoder stays allocated ([#776](https://github.com/CramBL/hdf5-pure/pull/776)).
-- `Group::delete` reclaims the variable-length data of the deleted objects, in each global heap collection that only those objects refer to. Every collection stays allocated when the editor cannot read each object that can refer to one ([#779](https://github.com/CramBL/hdf5-pure/pull/779)).
-- `File::commit` uses separate metadata and raw aggregates for staged edits under the `Aggr` file-space strategy. Unused reservations are available across commits within the session, while freed object extents remain unavailable for reuse ([#777](https://github.com/CramBL/hdf5-pure/pull/777)).
-- `File::open_rw` reclaims managed-space free-space manager headers and complete allocated section lists with their dead fractal heaps, including reserved capacity. Invalid or unsupported manager metadata prevents heap reclamation ([#758](https://github.com/CramBL/hdf5-pure/pull/758)).
-- `DatasetBuilder::with_fill_time` selects when a dataset writes its fill value, with the policy preserved across repacking and reported by dataset reads. Modifying the fill time of an existing dataset remains unsupported ([#755](https://github.com/CramBL/hdf5-pure/pull/755)).
-- `FormatError` reports unsupported serialized free-space section classes with their client and class identifiers. These diagnostics apply to internal fractal-heap manager parsing ([#757](https://github.com/CramBL/hdf5-pure/pull/757)).
-- `FormatError` distinguishes invalid fractal-heap geometry from block prefixes with an incorrect owner or heap offset. These diagnostics apply to internal parsing of block regions ([#749](https://github.com/CramBL/hdf5-pure/pull/749)).
-- `FormatError` distinguishes a supplied region whose byte count differs from its declared length from one that does not contain a required physical range. These diagnostics apply to internal metadata region operations ([#745](https://github.com/CramBL/hdf5-pure/pull/745)).
-- `StoredAddress` is a supported public type for inspecting base-relative metadata addresses. Its constructors are outside the supported API ([#732](https://github.com/CramBL/hdf5-pure/pull/732)).
-- Fractal-heap storage ownership enumeration accounts for heap headers, managed direct and indirect blocks, huge-object version 2 B-tree metadata, and separately allocated huge-object payloads. Filtered heaps are rejected when complete ownership cannot be proven.
-- `Dataset::chunks` and dataset reads support version 2 B-tree chunk indexes with client types 10 and 11. Creating or mutating those indexes remains unsupported ([#718](https://github.com/CramBL/hdf5-pure/pull/718)).
-- `File::open_rw` reclaims version 2 B-tree index metadata and raw chunks when deleting a dataset's final hard link. Paged files keep B-tree metadata and raw chunks in their respective page classes ([#719](https://github.com/CramBL/hdf5-pure/pull/719)).
-- `File::open_rw` reclaims dense-attribute version 2 B-tree name and creation-order indexes when their dense attribute set becomes dead ([#720](https://github.com/CramBL/hdf5-pure/pull/720)).
-- `File::open_rw` reclaims a deleted group that stores its links densely, with its subtree, and the fractal heap of dense attribute or link storage that becomes dead ([#721](https://github.com/CramBL/hdf5-pure/pull/721)).
-- `FormatError::Internal` reports a condition that only a bug in this crate can produce, such as a superblock value too wide for its field ([#675](https://github.com/CramBL/hdf5-pure/pull/675)).
-- `File::open_rw` edits a paged file with a userblock, with a page buffer or without, and read-write file creation writes one. The editor holds such a file in a whole-file mirror ([#751](https://github.com/CramBL/hdf5-pure/pull/751)).
+- `FixedPointType::with_padding` and related numeric APIs configure padding bits that survive metadata reads and writes ([#862](https://github.com/CramBL/hdf5-pure/pull/862)).
+- `FormatError::ChunkElementSizeMismatch` reports a chunk layout whose element size disagrees with its datatype ([#845](https://github.com/CramBL/hdf5-pure/pull/845)).
+- `File::dataset` and related lookups follow relative, absolute, and chained soft links ([#771](https://github.com/CramBL/hdf5-pure/pull/771), [#849](https://github.com/CramBL/hdf5-pure/pull/849)).
+- `DatasetBuilder::with_unallocated_storage` creates datasets without allocating element storage ([#840](https://github.com/CramBL/hdf5-pure/pull/840)).
+- `FileBuilder::create_group_with` and nested group creation attach groups after a successful callback ([#837](https://github.com/CramBL/hdf5-pure/pull/837)).
+- `Dataset::read_raw_region` and related typed reads select unit-stride regions across every dimension ([#836](https://github.com/CramBL/hdf5-pure/pull/836)).
+- `File::open_rw` supports mirrored staged edits of non-persistent PAGE files with supported attribute storage and no object references. Old storage is not reused ([#793](https://github.com/CramBL/hdf5-pure/pull/793), [#800](https://github.com/CramBL/hdf5-pure/pull/800)).
+- `repack_into` and the path-based counterpart repack an open file into a writer or a new file ([#772](https://github.com/CramBL/hdf5-pure/pull/772)).
+- `Group::groups` and related link and attribute reads support filtered fractal heaps, excluding huge objects ([#776](https://github.com/CramBL/hdf5-pure/pull/776)).
+- `File::open_rw` reclaims dead dense link and attribute storage, including deleted group subtrees. Unsupported heaps remain allocated ([#720](https://github.com/CramBL/hdf5-pure/pull/720), [#721](https://github.com/CramBL/hdf5-pure/pull/721), [#734](https://github.com/CramBL/hdf5-pure/pull/734), [#758](https://github.com/CramBL/hdf5-pure/pull/758), [#776](https://github.com/CramBL/hdf5-pure/pull/776)).
+- `Group::delete` reclaims global-heap collections proved unreferenced by surviving objects ([#779](https://github.com/CramBL/hdf5-pure/pull/779)).
+- `DatasetBuilder::with_fill_time` configures the fill-write policy, which dataset inspection reports and repacking preserves ([#752](https://github.com/CramBL/hdf5-pure/pull/752), [#755](https://github.com/CramBL/hdf5-pure/pull/755)).
+- `StoredAddress` exposes encoded base-relative addresses and width-aware undefined-address inspection ([#732](https://github.com/CramBL/hdf5-pure/pull/732), [#768](https://github.com/CramBL/hdf5-pure/pull/768)).
+- `Dataset::chunks` and dataset reads support version 2 B-tree chunk indexes ([#718](https://github.com/CramBL/hdf5-pure/pull/718)).
+- `File::open_rw` reclaims version 2 B-tree chunk indexes and raw chunks when deleting the final hard link ([#719](https://github.com/CramBL/hdf5-pure/pull/719)).
+- `FormatError::Internal` reports violations of internal invariants ([#675](https://github.com/CramBL/hdf5-pure/pull/675)).
+- `File::open_rw` and read-write creation support paged files with userblocks through a whole-file mirror ([#751](https://github.com/CramBL/hdf5-pure/pull/751)).
 
 ### Changed
 
-- **Breaking:** The public fields of `Datatype::VariableLength` are replaced by a string or sequence payload. String padding and character-set metadata are required.
-- **Breaking:** Exhaustive matches on `FilterId` and related parameter interpretations require a fallback. Numeric identifiers and raw parameters remain available for inspection.
-- **Breaking:** The chunk mask field is replaced by typed inspection through `Chunk::filters` and a separate recorded-mask accessor. Dispositions follow the dataset's pipeline order and distinguish raw bypass, while bits outside the pipeline remain available for inspection.
-- **Breaking:** The rate argument of `DatasetBuilder::with_zfp` changes from a floating-point number to a checked type. Dataset-specific rate and block-budget limits are checked before encoding, while floating-point header limits depend on the data.
-- **Breaking:** Page-size settings in `FileCreateProperties` and related creation APIs change from integers to a checked size type. An unset size is distinct from an explicit default setting.
-- **Breaking:** Userblock settings in `FileBuilder::with_userblock` and related creation properties change from integers to a checked size type. Page alignment, content bounds, and platform limits are checked during output.
-- **Breaking:** The numeric variants of `Datatype` change from public layout fields to checked, immutable payloads. Parsing rejects invalid bit ranges and overlapping floating-point fields, while value decoding remains limited to supported encodings.
-- **Breaking:** `Dataset::filter_pipeline` and related introspection change to fallible methods with typed identifiers and parameters. Uninterpreted parameters remain available, and staged parameters are marked pending.
-- **Breaking:** The consistency flags field of `Superblock` changes from an integer to a typed flag set. Parsed flags preserve reserved bits and inconsistent access marks.
-- **Breaking:** The version and width fields of `Superblock` change from integers to enums restricted to supported values. The library-version conversion also requires a typed version.
-- **Breaking:** The level type of `DatasetBuilder::with_deflate` and related compression settings changes from integers to an enum restricted to zero through nine ([#833](https://github.com/CramBL/hdf5-pure/pull/833)).
-- **Breaking:** The address fields of `FileSpaceInfo` change type from integers to decoded stored addresses.
-- **Breaking:** `StoredAddress::is_undefined` no longer accepts a raw integer width.
-- **Breaking:** The base-relative address fields of `Superblock` change type from integers to stored addresses. Base and end-of-file addresses retain their absolute coordinates ([#733](https://github.com/CramBL/hdf5-pure/pull/733)).
-- **Breaking:** The `flate2` Cargo feature is removed. Enable `deflate` instead. The `provenance` feature no longer exposes `sha2` as a selectable feature ([#689](https://github.com/CramBL/hdf5-pure/pull/689)).
-- **Breaking:** `FormatError::InvalidFreeSpaceManager` holds a message that describes the invalid free-space manager, and a write returns it for a free section too large to persist at the file's length width.
-- **Breaking:** `File::persisted_free_space` reports a malformed free-space manager as an error, which changes its return type ([#698](https://github.com/CramBL/hdf5-pure/pull/698)).
-- **Breaking:** `FileSpaceInfo::page_size` changes type from `u64` to `FileSpacePageSize`, which holds a page size from 512 bytes to 1 GiB ([#702](https://github.com/CramBL/hdf5-pure/pull/702)).
-- `FormatError` reports a corrupt local heap or symbol table node of a version 1 group with variants of its own, a link name that runs past the heap's data segment among them in place of `UnexpectedEof` ([#811](https://github.com/CramBL/hdf5-pure/pull/811/)).
-- `FormatError` reports a corrupt Extensible Array chunk index with variants of its own ([#806](https://github.com/CramBL/hdf5-pure/pull/806)).
-- `Dataset::append` reports malformed Extensible Array headers with the same structured errors as dataset reads. Header errors are returned before append writes ([#851](https://github.com/CramBL/hdf5-pure/pull/851)).
-- `File::open_rw` validates complete checksummed fractal-heap direct blocks before editing or proving storage ownership. Read-only object lookups validate block prefixes and object bounds without reading the complete block ([#750](https://github.com/CramBL/hdf5-pure/pull/750)).
-- `FormatError::UnexpectedEof` reports a superblock that the file ends inside with positions counted from the start of the file. Opening a file that ends within 15 bytes of the start of its signature returns it whatever the version byte ([#780](https://github.com/CramBL/hdf5-pure/pull/780)).
-- `FormatError` reports a corrupt Fixed Array chunk index with variants of its own ([#782](https://github.com/CramBL/hdf5-pure/pull/782)).
+- **Breaking:** The public fields of `Datatype::VariableLength` are replaced by typed string and sequence payloads ([#862](https://github.com/CramBL/hdf5-pure/pull/862)).
+- **Breaking:** The public chunk mask field is replaced by typed inspection through `Chunk::filters` and a mask accessor ([#855](https://github.com/CramBL/hdf5-pure/pull/855)).
+- **Breaking:** The rate argument of `DatasetBuilder::with_zfp` changes from a floating-point number to a checked type ([#855](https://github.com/CramBL/hdf5-pure/pull/855)).
+- **Breaking:** Page-size fields and settings replace integers with `FileSpacePageSize`, including file-space inspection. Sizes from 512 bytes through 1 GiB are supported, including non-powers of two ([#702](https://github.com/CramBL/hdf5-pure/pull/702), [#855](https://github.com/CramBL/hdf5-pure/pull/855)).
+- **Breaking:** Userblock settings in `FileBuilder::with_userblock` and related creation properties replace integers with a checked size type ([#855](https://github.com/CramBL/hdf5-pure/pull/855)).
+- **Breaking:** Numeric `Datatype` variants replace public layout fields with checked, immutable payloads and layout accessors ([#826](https://github.com/CramBL/hdf5-pure/pull/826), [#855](https://github.com/CramBL/hdf5-pure/pull/855), [#862](https://github.com/CramBL/hdf5-pure/pull/862)).
+- **Breaking:** `Dataset::filter_pipeline` and related introspection become fallible and replace raw filter fields with typed metadata ([#852](https://github.com/CramBL/hdf5-pure/pull/852)).
+- **Breaking:** The version, width, flag, and base-relative address fields of `Superblock` replace integers with typed values. Root addresses are base-relative, while base and end-of-file addresses remain absolute ([#733](https://github.com/CramBL/hdf5-pure/pull/733), [#850](https://github.com/CramBL/hdf5-pure/pull/850), [#852](https://github.com/CramBL/hdf5-pure/pull/852)).
+- **Breaking:** Compression settings in `DatasetBuilder::with_deflate` and related APIs replace integer levels with a checked enum ([#833](https://github.com/CramBL/hdf5-pure/pull/833)).
+- **Breaking:** The address fields of `FileSpaceInfo` replace integers with decoded stored addresses ([#769](https://github.com/CramBL/hdf5-pure/pull/769)).
+- **Breaking:** The `flate2` and implicit `sha2` Cargo features are removed ([#689](https://github.com/CramBL/hdf5-pure/pull/689)).
+- **Breaking:** `FormatError::InvalidFreeSpaceManager` changes from a unit variant to a variant with a diagnostic message ([#697](https://github.com/CramBL/hdf5-pure/pull/697)).
+- **Breaking:** `File::persisted_free_space` changes its return type to report malformed-manager errors ([#698](https://github.com/CramBL/hdf5-pure/pull/698)).
+- `FileBuilder` uses separate metadata and raw aggregates when creating files under the classic aggregation strategies ([#785](https://github.com/CramBL/hdf5-pure/pull/785), [#787](https://github.com/CramBL/hdf5-pure/pull/787), [#789](https://github.com/CramBL/hdf5-pure/pull/789)).
+- `File::open_rw` shares metadata and raw aggregates between staged edits and immediate appends under the classic aggregation strategies ([#777](https://github.com/CramBL/hdf5-pure/pull/777), [#778](https://github.com/CramBL/hdf5-pure/pull/778), [#781](https://github.com/CramBL/hdf5-pure/pull/781), [#783](https://github.com/CramBL/hdf5-pure/pull/783)).
+- `FormatError` distinguishes malformed metadata regions, fractal heaps, legacy groups, and array chunk indexes ([#745](https://github.com/CramBL/hdf5-pure/pull/745), [#749](https://github.com/CramBL/hdf5-pure/pull/749), [#757](https://github.com/CramBL/hdf5-pure/pull/757), [#782](https://github.com/CramBL/hdf5-pure/pull/782), [#806](https://github.com/CramBL/hdf5-pure/pull/806), [#811](https://github.com/CramBL/hdf5-pure/pull/811), [#851](https://github.com/CramBL/hdf5-pure/pull/851)).
 
 ### Fixed
 
-- Fixed integer overflow and saturated chunk byte counts in `Dataset::write_staged` and related chunked edits when the uncompressed chunk size exceeds `u64::MAX`.
-- Fixed `Dataset::write_staged` rejecting the overwrite of a dataset whose object header holds more than one layout message, changing the dataset to the later layout, or writing values that a read of the dataset does not return.
-- Fixed `Dataset::datatype` and related metadata reads accepting reserved variable-length subtype codes, nonzero reserved bits, or string metadata on sequences.
-- Fixed `Dataset::append` overstating allocated Extensible Array blocks and element capacity for sparse chunk indexes, including indexes with uninitialized data-block pages.
-- Fixed `Dataset::append` overflowing Extensible Array ranges and header statistics. Ranges and metadata sizes that exceed integer limits are rejected before writes ([#856](https://github.com/CramBL/hdf5-pure/pull/856)).
+- Fixed `Dataset::shape` and related reads or edits accepting malformed fractal-heap metadata or panicking on invalid identifiers ([#722](https://github.com/CramBL/hdf5-pure/pull/722), [#724](https://github.com/CramBL/hdf5-pure/pull/724), [#749](https://github.com/CramBL/hdf5-pure/pull/749), [#750](https://github.com/CramBL/hdf5-pure/pull/750)).
+- Fixed inconsistent truncated-superblock errors and lost file positions in `FormatError` end-of-file diagnostics ([#780](https://github.com/CramBL/hdf5-pure/pull/780), [#813](https://github.com/CramBL/hdf5-pure/pull/813)).
+- Fixed overflowing or saturated chunk byte counts in `Dataset::write_staged` and related chunked edits ([#868](https://github.com/CramBL/hdf5-pure/pull/868)).
+- Fixed `Dataset::write_staged` overwriting the wrong layout or values when an object header contains multiple Data Layout messages ([#861](https://github.com/CramBL/hdf5-pure/pull/861)).
+- Fixed `Dataset::datatype` accepting reserved variable-length metadata or string metadata on sequences ([#862](https://github.com/CramBL/hdf5-pure/pull/862)).
+- Fixed `Dataset::append` overstating allocated blocks and capacity in sparse Extensible Array indexes ([#857](https://github.com/CramBL/hdf5-pure/pull/857)).
+- Fixed overflowing Extensible Array ranges and statistics in `Dataset::append` ([#856](https://github.com/CramBL/hdf5-pure/pull/856)).
 - Fixed `DatasetBuilder::with_path_references` writing unresolved references in chunked datasets, including filtered output ([#854](https://github.com/CramBL/hdf5-pure/pull/854)).
-- Fixed `FileBuilder::finish` and related output methods hashing unresolved heap identifiers and object-reference addresses with the `provenance` feature ([#853](https://github.com/CramBL/hdf5-pure/pull/853)).
-- Fixed `Dataset::append` using incorrect Extensible Array block geometry when the secondary block parameters differ from the defaults ([#848](https://github.com/CramBL/hdf5-pure/pull/848)).
-- Fixed `Dataset::append` filtering the partial edge chunks of a dataset whose layout exempts them from the filters ([#845](https://github.com/CramBL/hdf5-pure/pull/845)).
-- Fixed `Dataset::append_staged` filtering the partial edge chunks of a dataset whose layout exempts them from the filters, and dropping that exemption.
-- Fixed `Dataset::write_staged` filtering the partial edge chunks of a dataset whose layout exempts them from the filters, and copies and repacks of such a dataset dropping that exemption.
-- Fixed `Dataset::read_raw` and related dataset reads accepting present chunks shorter or longer than their full logical size. Absent chunks retain fill-value behavior.
-- Fixed `FileBuilder::finish` and related attribute writers declaring non-ASCII names as ASCII or omitting their character-set declaration.
-- Fixed `FileBuilder::finish` and related output methods accepting empty attribute names or embedded null bytes. Invalid or oversized names are rejected before output.
-- Fixed `FileBuilder::set_attr` and related attribute setters writing duplicate attributes for repeated names. Later calls replace the staged attribute at its first insertion position.
-- Fixed truncated variable-length descriptor counts in files serialized through `FileBuilder::finish` and related output methods. Elements with more than `u32::MAX` base elements are rejected.
-- Fixed `Dataset::read_raw` and related filter operations rejecting shuffle input with an incomplete trailing element ([#828](https://github.com/CramBL/hdf5-pure/pull/828)).
-- Fixed lost byte counts and incorrect platform-limit errors in `FormatError` dataset size-mismatch diagnostics when logical lengths exceed the host pointer width. Buffer allocations remain subject to host limits ([#824](https://github.com/CramBL/hdf5-pure/pull/824)).
-- Fixed `Dataset::read_raw_rows` rejecting empty selections when row coordinates or inner extents exceed the host pointer width. Nonempty output buffers are subject to host limits ([#822](https://github.com/CramBL/hdf5-pure/pull/822)).
-- Fixed `Dataset::read_f64` and related numeric reads omitting offset fixed-point values or interpreting unsupported floating-point layouts as IEEE values. Numeric reads reject invalid bit ranges and unsupported encodings, while metadata inspection remains available.
-- Fixed `FileBuilder::write` leaving metadata page tails untracked in persistent PAGE files when manager storage exactly fills a page ([#820](https://github.com/CramBL/hdf5-pure/pull/820)).
-- Fixed `File::persisted_free_space` rejecting section lists with nonzero unused bytes before their checksum. Checksum verification includes those bytes when enabled.
-- Fixed loss of source positions above `usize::MAX` in `FormatError` end-of-file diagnostics, while slice-local diagnostics retain host-sized byte counts ([#813](github.com/CramBL/hdf5-pure/pull/813)).
-- Fixed `File::commit` losing reusable PAGE manager-page tails after reopen, with free-space persistence enabled ([#815](https://github.com/CramBL/hdf5-pure/pull/815)).
-- Fixed platform-limit classification in `FormatError` diagnostics for fixed-width integer overflow, while host-sized conversions retain their platform-limit classification ([#810](https://github.com/CramBL/hdf5-pure/pull/810)).
-- Fixed `File::open` and related opens accepting a superblock whose group leaf node K is 0 ([#811](https://github.com/CramBL/hdf5-pure/pull/811/)).
-- Fixed `Group::groups` and related reads accepting a version 1 group whose symbol table node holds more links than the superblock's group leaf node K allows, or whose local heap has an undefined data segment address. The link count is checked in files with a version 0 or 1 superblock only ([#811](https://github.com/CramBL/hdf5-pure/pull/811/)).
-- Fixed `Group::groups` and related reads of a file opened with `File::open` accepting a version 1 group whose local heap data segment ends past the end of the file, or whose soft link has an invalid name ([#811](https://github.com/CramBL/hdf5-pure/pull/811/)).
-- Fixed `Dataset::chunks` and related reads accepting an Extensible Array chunk index with an invalid header, or with blocks that do not match it ([#806](https://github.com/CramBL/hdf5-pure/pull/806)).
-- Fixed `Dataset::chunks` and related reads misreading an Extensible Array chunk index whose super blocks each hold 8 or more data block addresses ([#806](https://github.com/CramBL/hdf5-pure/pull/806)).
-- Fixed `Dataset::chunks` and related reads requesting an entire unpaged Fixed Array chunk index in one buffer. Encoded metadata is read in bounded windows, while memory for collected chunk records grows with the number of defined entries ([#805](https://github.com/CramBL/hdf5-pure/pull/805)).
-- Fixed `File::commit` returning partial tails of large PAGE object-header chunks to small free lists after deletion or replacement. Ambiguous tails remain unavailable for reuse ([#808](https://github.com/CramBL/hdf5-pure/pull/808)).
-- Fixed `Dataset::read_raw_rows` rejecting chunked windows above row `usize::MAX` on 32-bit targets. Output buffers and decoded chunks remain subject to host limits ([#799](https://github.com/CramBL/hdf5-pure/pull/799)).
-- Fixed `Dataset::read_raw_rows` rejecting small chunked row windows because the full dataset extent exceeds the host pointer width. Output buffers remain subject to host limits ([#797](https://github.com/CramBL/hdf5-pure/pull/797)).
-- Fixed `File::commit` losing published additions, replacements, and deletions when retrying after a non-persistent PAGE publication error ([#800](https://github.com/CramBL/hdf5-pure/pull/800)).
-- Fixed `File::sync` leaving reads and retained handles on an earlier root after completing pending writes from a failed non-persistent PAGE commit ([#800](https://github.com/CramBL/hdf5-pure/pull/800)).
-- Fixed `mat::from_file` and `mat::from_bytes` failing with `MatError::UnknownClass("canonical empty")` on a struct-array field that MATLAB never set. The field decodes to `[]`, an empty double ([#774](https://github.com/CramBL/hdf5-pure/pull/774)).
-- Fixed `Group::datasets`, `Group::groups` and path lookup failing on a version 1 (symbol-table) group that holds a soft link, whose entry the reader resolved as a child at the undefined address. The soft link is passed over, as in a version 2 group ([#771](https://github.com/CramBL/hdf5-pure/pull/771)).
-- Fixed `File::open_rw` converting a version 1 group that holds a soft link into one whose link points at the undefined address. The conversion returns `Error::EditUnsupported` instead ([#771](https://github.com/CramBL/hdf5-pure/pull/771)).
-- Fixed `Dataset::chunks` and related reads accepting a Fixed Array chunk index whose header has a reserved client ID, or whose data block has a version other than 0 or a client ID or header address that differs from the header's ([#782](https://github.com/CramBL/hdf5-pure/pull/782)).
-- Fixed `Dataset::chunks` and related reads failing on a Fixed Array chunk index whose header stores the undefined data block address. Such an index reads as empty ([#782](https://github.com/CramBL/hdf5-pure/pull/782)).
-- Fixed `Dataset::write_staged` rejecting compatible one-byte fixed-point datatypes whose byte-order fields differ, including nested variable-length base types. All other datatype fields remain checked ([#763](https://github.com/CramBL/hdf5-pure/pull/763)).
-- Fixed `Dataset::read_string` and related reads of variable-length data failing on a file that stores 2- or 4-byte lengths. Reads reject a global heap collection that is smaller than 4096 bytes or malformed after the object they read ([#760](https://github.com/CramBL/hdf5-pure/pull/760)).
-- Fixed global heap collections sharing metadata pages in files created through `FileBuilder::with_file_space_strategy`. Paged edits also place replacement collections in raw pages ([#763](https://github.com/CramBL/hdf5-pure/pull/763)).
-- Fixed `File::open_rw` neither reusing nor updating the free space a file with a userblock persists ([#747](https://github.com/CramBL/hdf5-pure/pull/747)).
-- Fixed a `no_std` build compiling an internal lock that lets two live guards borrow the chunk cache mutably at once ([#743](https://github.com/CramBL/hdf5-pure/pull/743)).
-- Fixed `File::commit` losing ownership of spare free-space section-list capacity after reopening a file that is not paged and reuses a persistent manager allocation ([#740](https://github.com/CramBL/hdf5-pure/pull/740)).
-- Fixed `File::open_rw` leaving spare capacity allocated when replacing persistent free-space section lists. Recovery reads only the used bytes of each list ([#741](https://github.com/CramBL/hdf5-pure/pull/741)).
-- Fixed `File::open` and related snapshot reads accepting files shorter than their recorded end-of-file position after relocation. Version-3 SWMR opens accept files shorter than that position ([#739](https://github.com/CramBL/hdf5-pure/pull/739)).
-- Fixed `File::open` and related read entry points locating metadata and data at incorrect positions after the HDF5 image is moved within a file. Editing a relocated image remains unsupported.
-- Fixed `File::superblock` reporting the root address in physical coordinates after opening a file with a userblock.
-- Fixed `Group::groups` and related listings returning the members of a group out of order when a chunk of its version 2 object header refers to more than one continuation block ([#730](https://github.com/CramBL/hdf5-pure/pull/730)).
-- Fixed reads of a version 2 object header whose continuation message is too short for its fields or stores the undefined address. Such a header is now rejected on read ([#729](https://github.com/CramBL/hdf5-pure/pull/729)).
-- Fixed a panic in `Dataset::shape` and related metadata reads on files whose shared-message heap declares IDs longer than eight bytes (#[724](https://github.com/CramBL/hdf5-pure/pull/724)).
-- Fixed `Dataset::chunks` and related windowed reads failing on sparse Extensible Arrays with logical element indexes above `u32::MAX` on 32-bit platforms, provided each required metadata read fits the platform's address space ([#717](https://github.com/CramBL/hdf5-pure/pull/717))
-- Fixed `File::open_rw` tracking a freed region of a paged file that is shorter than the free-space threshold and does not merge into free space. Page tails stay tracked whatever the threshold ([#705](https://github.com/CramBL/hdf5-pure/pull/705)).
-- Fixed `Dataset::read_raw_rows` and typed row reads accepting compact or allocated contiguous datasets whose declared storage extent conflicts with the byte length implied by the dataspace and datatype, including empty selections ([#704](https://github.com/CramBL/hdf5-pure/pull/704)).
-- Fixed `FileBuilder::with_file_space_page_size` accepting a page size outside 512 bytes to 1 GiB. The writer takes any page size in that range under the paged strategy, a power of two or not ([#702](https://github.com/CramBL/hdf5-pure/pull/702)).
-- Fixed `File::open_rw` editing a file whose file space page size is outside 512 bytes to 1 GiB ([#702](https://github.com/CramBL/hdf5-pure/pull/702)).
-- Fixed `File::file_space_info` returning a file space page size outside 512 bytes to 1 GiB. It returns `None` for such a file ([#702](https://github.com/CramBL/hdf5-pure/pull/702)).
-- Fixed `repack` writing the default file space settings for a source whose settings do not parse. It rejects such a source ([#702](https://github.com/CramBL/hdf5-pure/pull/702)).
-- Fixed `File::open_rw` tracking an isolated freed region shorter than the free-space threshold of a file that is not paged. A file that persists its free space with a threshold above the length of its free-space managers grows by a set of managers on each commit that appends one at its end ([#701](https://github.com/CramBL/hdf5-pure/pull/701)).
-- Fixed `File::open_rw` reusing freed space in a file whose file space strategy has no free-space managers. Such a file keeps its length when a deletion frees its end ([#700](https://github.com/CramBL/hdf5-pure/pull/700)).
-- Fixed `FileBuilder::with_file_space_strategy` recording persistence and a custom threshold for a file space strategy that has no free-space managers ([#700](https://github.com/CramBL/hdf5-pure/pull/700)).
-- Fixed `File::file_space_info` returning `None` for a file that stores its file space settings at version 0. An edit that persists free space writes the settings back at version 1 ([#699](https://github.com/CramBL/hdf5-pure/pull/699)).
-- Fixed `File::open_rw` reusing the free regions of a free-space manager whose version, checksum, or section counts are invalid ([#698](https://github.com/CramBL/hdf5-pure/pull/698)).
-- Fixed `File::commit` freeing live data that a damaged free-space manager header points to as its section list ([#698](https://github.com/CramBL/hdf5-pure/pull/698)).
-- Fixed `File::persisted_free_space` misreading the free regions of a file that stores 2- or 4-byte lengths ([#697](https://github.com/CramBL/hdf5-pure/pull/697)).
-- Fixed `File::commit` writing malformed file space settings to a file that persists its free space and stores 2- or 4-byte addresses or lengths ([#696](https://github.com/CramBL/hdf5-pure/pull/696)).
-- Fixed a panic in `Dataset::append` when a crafted Extensible Array header encodes unsupported bit geometry ([#693](https://github.com/CramBL/hdf5-pure/pull/693)).
-- Fixed incorrect member offset widths when reading and writing `Datatype::Compound` values whose element sizes are between 65,536 and 16,777,215 bytes ([#688](https://github.com/CramBL/hdf5-pure/pull/688)).
+- Fixed `FileBuilder::finish` hashing unresolved variable-length and object-reference values with the `provenance` feature ([#853](https://github.com/CramBL/hdf5-pure/pull/853)).
+- Fixed `Dataset::append` using incorrect geometry when Extensible Array secondary blocks use parameters other than the defaults ([#848](https://github.com/CramBL/hdf5-pure/pull/848)).
+- Fixed `Dataset::append` and related edits, copies, and repacks dropping or ignoring the partial-edge chunk filter exemption ([#845](https://github.com/CramBL/hdf5-pure/pull/845), [#846](https://github.com/CramBL/hdf5-pure/pull/846), [#847](https://github.com/CramBL/hdf5-pure/pull/847)).
+- Fixed `Dataset::read_raw` and related reads accepting present chunks with incorrect decoded lengths ([#839](https://github.com/CramBL/hdf5-pure/pull/839)).
+- Fixed `FileBuilder::finish` and related attribute writers omitting or declaring an incorrect character set for non-ASCII attribute names ([#838](https://github.com/CramBL/hdf5-pure/pull/838)).
+- Fixed `FileBuilder::finish` and related output methods accepting empty, null-containing, or oversized attribute names ([#835](https://github.com/CramBL/hdf5-pure/pull/835)).
+- Fixed `FileBuilder::set_attr` and related setters writing duplicate attributes for repeated names ([#834](https://github.com/CramBL/hdf5-pure/pull/834)).
+- Fixed truncated variable-length element counts in `FileBuilder::finish` and related output methods ([#830](https://github.com/CramBL/hdf5-pure/pull/830)).
+- Fixed `Dataset::read_raw` and related filter operations rejecting shuffle input with incomplete trailing elements ([#828](https://github.com/CramBL/hdf5-pure/pull/828)).
+- Fixed lost logical byte counts in `FormatError` dataset size-mismatch diagnostics on 32-bit targets ([#824](https://github.com/CramBL/hdf5-pure/pull/824)).
+- Fixed `Dataset::read_raw_rows` rejecting small or empty windows because dataset extents or coordinates exceed the host pointer width ([#797](https://github.com/CramBL/hdf5-pure/pull/797), [#799](https://github.com/CramBL/hdf5-pure/pull/799), [#822](https://github.com/CramBL/hdf5-pure/pull/822)).
+- Fixed `Dataset::read_f64` and related numeric reads omitting offset integer values or misinterpreting unsupported floating-point layouts ([#826](https://github.com/CramBL/hdf5-pure/pull/826)).
+- Fixed `FileBuilder::write` and persistent PAGE edits losing reusable manager-page tails after reopening ([#815](https://github.com/CramBL/hdf5-pure/pull/815), [#820](https://github.com/CramBL/hdf5-pure/pull/820)).
+- Fixed `FormatError` classifying fixed-width integer overflow as a platform limit ([#810](https://github.com/CramBL/hdf5-pure/pull/810)).
+- Fixed `Group::groups` and related reads accepting malformed version 1 group metadata or an invalid superblock leaf-node capacity ([#811](https://github.com/CramBL/hdf5-pure/pull/811)).
+- Fixed `Dataset::chunks` and related reads accepting malformed or inconsistent Extensible Array metadata ([#806](https://github.com/CramBL/hdf5-pure/pull/806)).
+- Fixed `Dataset::chunks` and related reads misreading Extensible Array super blocks with eight or more data-block addresses ([#806](https://github.com/CramBL/hdf5-pure/pull/806)).
+- Fixed `Dataset::chunks` and related reads buffering entire unpaged Fixed Array indexes ([#805](https://github.com/CramBL/hdf5-pure/pull/805)).
+- Fixed `File::commit` returning ambiguous tails of large PAGE object headers to small free lists ([#808](https://github.com/CramBL/hdf5-pure/pull/808)).
+- Fixed `mat::from_file` and related deserialization failing on unset MATLAB struct-array fields ([#774](https://github.com/CramBL/hdf5-pure/pull/774)).
+- Fixed `File::open_rw` corrupting soft links when converting version 1 groups ([#771](https://github.com/CramBL/hdf5-pure/pull/771)).
+- Fixed `Dataset::chunks` and related reads accepting invalid Fixed Array metadata or rejecting empty indexes ([#782](https://github.com/CramBL/hdf5-pure/pull/782)).
+- Fixed `Dataset::write_staged` rejecting equivalent one-byte integer datatypes with different byte-order metadata ([#763](https://github.com/CramBL/hdf5-pure/pull/763)).
+- Fixed `Dataset::read_string` and related reads misinterpreting 2- and 4-byte lengths or accepting malformed global-heap collections ([#760](https://github.com/CramBL/hdf5-pure/pull/760)).
+- Fixed `FileBuilder::finish` and editing placing global-heap collections in metadata pages under PAGE allocation ([#763](https://github.com/CramBL/hdf5-pure/pull/763)).
+- Fixed `File::open_rw` ignoring persisted free space in files with userblocks ([#747](https://github.com/CramBL/hdf5-pure/pull/747)).
+- Fixed `File::commit` losing ownership of persistent section-list capacity across reopen or leaving it allocated after replacement ([#740](https://github.com/CramBL/hdf5-pure/pull/740), [#741](https://github.com/CramBL/hdf5-pure/pull/741)).
+- Fixed `File::open` and related snapshot reads using incorrect addresses or accepting truncated files after image relocation ([#737](https://github.com/CramBL/hdf5-pure/pull/737), [#739](https://github.com/CramBL/hdf5-pure/pull/739)).
+- Fixed `Group::groups` and related listings returning members out of order across multiple object-header continuations ([#730](https://github.com/CramBL/hdf5-pure/pull/730)).
+- Fixed reads and `Dataset::append` accepting malformed version 2 object headers and continuation messages ([#695](https://github.com/CramBL/hdf5-pure/pull/695), [#729](https://github.com/CramBL/hdf5-pure/pull/729)).
+- Fixed `Dataset::chunks` and related reads failing on sparse Extensible Array indexes above `u32::MAX` on 32-bit targets ([#717](https://github.com/CramBL/hdf5-pure/pull/717)).
+- Fixed `File::commit` tracking isolated freed PAGE regions below the free-space threshold ([#705](https://github.com/CramBL/hdf5-pure/pull/705)).
+- Fixed `Dataset::read_raw_rows` accepting compact or contiguous storage extents inconsistent with the dataset shape and datatype ([#704](https://github.com/CramBL/hdf5-pure/pull/704)).
+- Fixed `File::commit` tracking isolated freed regions below the free-space threshold in files without paging ([#701](https://github.com/CramBL/hdf5-pure/pull/701)).
+- Fixed `File::open_rw` reusing freed object storage under strategies without free-space managers ([#700](https://github.com/CramBL/hdf5-pure/pull/700)).
+- Fixed `FileBuilder::with_file_space_strategy` recording inapplicable persistence and threshold settings for strategies without free-space managers ([#700](https://github.com/CramBL/hdf5-pure/pull/700)).
+- Fixed `File::file_space_info` omitting version 0 file-space settings ([#699](https://github.com/CramBL/hdf5-pure/pull/699)).
+- Fixed edits through `File::open_rw` reusing unverified free regions or freeing live data through malformed free-space managers ([#698](https://github.com/CramBL/hdf5-pure/pull/698)).
+- Fixed `File::persisted_free_space` and related edits misinterpreting 2- and 4-byte address or length fields ([#696](https://github.com/CramBL/hdf5-pure/pull/696), [#697](https://github.com/CramBL/hdf5-pure/pull/697)).
+- Fixed `Dataset::append` panicking on unsupported Extensible Array bit geometry ([#693](https://github.com/CramBL/hdf5-pure/pull/693)).
+- Fixed incorrect member offset widths in `Datatype::Compound` elements from 65,536 through 16,777,215 bytes ([#688](https://github.com/CramBL/hdf5-pure/pull/688)).
 - Fixed `AttrValue` missing from the crate root under `no_std` with `alloc` ([#635](https://github.com/CramBL/hdf5-pure/pull/635)).
-- Fixed `Dataset::read` decoding a truncated ZFP chunk to zeros, and `DatasetBuilder::with_zfp` writing float blocks whose rate cannot hold their headers ([#620](https://github.com/CramBL/hdf5-pure/pull/620)).
-- Fixed `Dataset::read` failing on ZFP chunks whose partial blocks are followed by Deflate ([#632](https://github.com/CramBL/hdf5-pure/pull/632)).
-- Fixed truncated length fields when writing a link name of 4 GiB or more, or a version 2 object header whose first chunk reaches 4 GiB ([#675](https://github.com/CramBL/hdf5-pure/pull/675)).
-- Fixed reads accepting a version 1 object header whose message data size is not a multiple of eight ([#615](https://github.com/CramBL/hdf5-pure/pull/615)).
-- Fixed `repack` and `File::commit` writing a truncated chunk size into a filtered chunk index when a stored chunk is too large for the index's size field ([#690](https://github.com/CramBL/hdf5-pure/pull/690)).
-- Fixed `Dataset::append` accepting a damaged version 2 object header, and reading past a continuation message too short for its fields ([#695](https://github.com/CramBL/hdf5-pure/pull/695)).
+- Fixed truncated ZFP chunks decoding to zeros in `Dataset::read` and ZFP float output exceeding its header budget ([#620](https://github.com/CramBL/hdf5-pure/pull/620)).
+- Fixed `Dataset::read` failing on partial ZFP blocks followed by Deflate ([#632](https://github.com/CramBL/hdf5-pure/pull/632)).
+- Fixed `FileBuilder::finish` and related writers truncating length fields for oversized link names or first version 2 object-header chunks ([#675](https://github.com/CramBL/hdf5-pure/pull/675)).
+- Fixed `Dataset::shape` and related reads accepting unaligned version 1 object-header message sizes ([#615](https://github.com/CramBL/hdf5-pure/pull/615)).
+- Fixed `repack` and editing truncating stored chunk sizes that exceed the chunk index field width ([#690](https://github.com/CramBL/hdf5-pure/pull/690)).
+- Fixed `Dataset::fill_value` and reads requiring fill data accepting malformed fill-value policy metadata ([#748](https://github.com/CramBL/hdf5-pure/pull/748), [#752](https://github.com/CramBL/hdf5-pure/pull/752)).
+- Fixed `File::open_rw` accepting malformed file-space settings before editing ([#793](https://github.com/CramBL/hdf5-pure/pull/793)).
+- Fixed `repack` replacing malformed file-space settings with defaults ([#702](https://github.com/CramBL/hdf5-pure/pull/702)).
 
 ## [0.47.0] - 2026-09-20
 
