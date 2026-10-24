@@ -24,8 +24,8 @@ use crate::datatype::layout::FloatingPointLayout;
 use crate::edit;
 use crate::edit::AppendBuilder;
 use crate::edit::AppendTarget;
-use crate::edit::ChunkedOverwrite;
 use crate::edit::WriteEngine;
+use crate::edit::dataset::ChunkedOverwrite;
 use crate::error::Error;
 use crate::file_lock::FileLocking;
 use crate::fill_value::PaddingFill;
@@ -79,8 +79,14 @@ fn overwrite_ignores_one_byte_order_and_requires_matching_layout(
         .unwrap(),
     );
     assert_ne!(disk, staged);
-    assert_eq!(edit::overwrite_datatypes_match(&disk, &staged), compatible);
-    assert_eq!(edit::overwrite_datatypes_match(&staged, &disk), compatible);
+    assert_eq!(
+        edit::dataset::overwrite_datatypes_match(&disk, &staged),
+        compatible
+    );
+    assert_eq!(
+        edit::dataset::overwrite_datatypes_match(&staged, &disk),
+        compatible
+    );
 }
 
 #[rstest]
@@ -172,8 +178,14 @@ fn overwrite_requires_matching_nested_fields_except_one_byte_order(
     #[case] compatible: bool,
 ) {
     assert_ne!(disk, staged);
-    assert_eq!(edit::overwrite_datatypes_match(&disk, &staged), compatible);
-    assert_eq!(edit::overwrite_datatypes_match(&staged, &disk), compatible);
+    assert_eq!(
+        edit::dataset::overwrite_datatypes_match(&disk, &staged),
+        compatible
+    );
+    assert_eq!(
+        edit::dataset::overwrite_datatypes_match(&staged, &disk),
+        compatible
+    );
 }
 
 #[rstest]

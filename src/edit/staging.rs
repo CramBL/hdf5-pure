@@ -2,134 +2,19 @@
 
 use std::collections::{HashMap, HashSet};
 
-use hdf5_pure_format::__private::ChunkedGeometry;
-
-use super::{AppendBuilder, AttrOp, CopyTree, FlatDataset, LOSSY_TAIL_REFUSAL, WriteEngine};
+use super::{AppendBuilder, AttrOp, CopyTree, FlatDataset, WriteEngine};
 use crate::access_mode::AccessMode;
 use crate::address::BaseAddressExt;
-use crate::data_layout::DataLayout;
-use crate::dataspace::{Dataspace, MaxExtent};
+use crate::dataspace::MaxExtent;
 use crate::datatype::Datatype;
 use crate::error::Error;
 use crate::file_writer::{LENGTH_WIDTH, OFFSET_WIDTH};
 use crate::layout_info::FilterId;
-use crate::message_type::MessageType;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::source::BytesSource;
-use crate::type_builders::{AttrValue, DatasetBuilder};
+use crate::type_builders::AttrValue;
 
 impl WriteEngine {
-    /// Stages a prepared dataset for creation at `path` on the next [`commit`](Self::commit).
-    ///
-    /// The dataset name is taken from the last component of `path`. The parent group must
-    /// exist in the file or be created in the same commit. [`super::flatten_dataset`] prepares
-    /// and checks the builder before it is stored in the staged set.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::EditUnsupported`] if `path` is the root, collides with an existing
-    /// object, or overlaps a live buffered appender. Returns the preparation error if
-    /// [`super::flatten_dataset`] cannot prepare `builder`.
-    pub(crate) fn stage_created_dataset(
-        &mut self,
-        path: &ObjectPathBuf,
-        builder: DatasetBuilder,
-    ) -> Result<(), Error> {
-        self.refuse_if_claimed(path)?;
-        let Some((parent, leaf)) = path.split_leaf() else {
-            return Err(Error::EditUnsupported("dataset path has an empty name"));
-        };
-        self.refuse_creation_collision(path, StagedKind::Dataset)?;
-        self.staged
-            .push_dataset(parent, super::flatten_dataset(builder, leaf)?);
-        Ok(())
-    }
-
-    /// Stages replacement values for an existing dataset on the next [`commit`](Self::commit).
-    ///
-    /// The replacement is prepared by [`super::flatten_dataset`]. Shape and datatype
-    /// compatibility with the committed dataset are checked during the commit.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::EditUnsupported`] if `path` is the root or overlaps a live buffered
-    /// appender, or if `builder` specifies chunking, attributes, fill settings, or
-    /// unresolved reference targets. Returns the preparation error if
-    /// [`super::flatten_dataset`] cannot prepare `builder`.
-    pub(crate) fn stage_dataset_write(
-        &mut self,
-        path: &ObjectPathBuf,
-        builder: DatasetBuilder,
-    ) -> Result<(), Error> {
-        self.refuse_if_claimed(path)?;
-        let Some((_, leaf)) = path.split_leaf() else {
-            return Err(Error::EditUnsupported("cannot overwrite the root group"));
-        };
-        let fd = super::flatten_dataset(builder, leaf)?;
-        Self::refuse_unsupported_overwrite(&fd)?;
-        self.staged.push(StagedOp::WriteDataset(path.clone(), fd));
-        Ok(())
-    }
-
-    /// Stages an append to a committed dataset for the next [`commit`](Self::commit).
-    ///
-    /// The commit checks the dataset's append geometry and storage. A lossy partial trailing
-    /// chunk is rejected at staging when its geometry can be read.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::EditUnsupported`] if a dataset creation is staged at `path` or a live buffered
-    /// appender overlaps it. Returns [`Error::AppendUnsupported`] if a nonempty append would
-    /// re-encode a partial trailing chunk through a lossy pipeline.
-    pub(crate) fn stage_dataset_append(
-        &mut self,
-        path: &ObjectPathBuf,
-        builder: AppendBuilder,
-    ) -> Result<(), Error> {
-        self.refuse_if_claimed(path)?;
-        if self.staged.dataset_at(path).is_some() {
-            // This handle addresses the committed object being replaced at this path.
-            return Err(Error::EditUnsupported(
-                "a dataset is staged at this path in the same commit, so an append through a \
-                 handle onto the object the file holds there could only grow the object being \
-                 replaced; append through the handle that staged the creation, or commit first",
-            ));
-        }
-        self.refuse_lossy_partial_tail(path, &builder)?;
-        self.staged
-            .push(StagedOp::AppendDataset(path.clone(), builder));
-        Ok(())
-    }
-
-    /// Extends a staged dataset creation with the appended elements.
-    ///
-    /// The caller checks that its handle addresses a pending creation. If another thread
-    /// commits that creation before this call, the append is staged against the committed
-    /// dataset instead.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::EditUnsupported`] if a live buffered appender overlaps `path`, or if
-    /// an atomic batch is open while a creation is staged there. Returns the error from
-    /// [`extend_staged_dataset`](Self::extend_staged_dataset) for an incompatible pending
-    /// append, or from [`refuse_lossy_partial_tail`](Self::refuse_lossy_partial_tail) for a
-    /// committed dataset.
-    pub(crate) fn stage_dataset_append_pending(
-        &mut self,
-        path: &ObjectPathBuf,
-        builder: AppendBuilder,
-    ) -> Result<(), Error> {
-        self.refuse_if_claimed(path)?;
-        if self.staged.dataset_at(path).is_none() {
-            self.refuse_lossy_partial_tail(path, &builder)?;
-            self.staged
-                .push(StagedOp::AppendDataset(path.clone(), builder));
-            return Ok(());
-        }
-        self.refuse_mid_batch()?;
-        self.extend_staged_dataset(path, &builder)
-    }
-
     /// Rolls back the additions made by `f` if it returns an error.
     ///
     /// Nested batches preserve the outer batch's restriction on modifying or withdrawing
@@ -218,7 +103,7 @@ impl WriteEngine {
     ///
     /// The next [`commit`](Self::commit) relocates the dataset header and requires a single
     /// hard link. To set attributes on a staged creation, use
-    /// [`DatasetBuilder::set_attr`] before staging it.
+    /// [`DatasetBuilder::set_attr`](crate::DatasetBuilder::set_attr) before staging it.
     ///
     /// # Errors
     ///
@@ -500,183 +385,6 @@ impl WriteEngine {
         out
     }
 
-    /// Adds elements to the prepared bytes and leading dimension of a staged creation.
-    ///
-    /// Chunked storage and an unlimited dimension are not required. With the `provenance`
-    /// feature, digest attributes are recomputed from the extended bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::AppendUnsupported`] for mixed or mismatched element types, unresolved
-    /// per-element references, a scalar or zero-byte row, an incomplete row, arithmetic
-    /// overflow, or a leading dimension beyond its declared maximum.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the caller has not established that a dataset is staged at `path`.
-    fn extend_staged_dataset(
-        &mut self,
-        path: &ObjectPathBuf,
-        builder: &AppendBuilder,
-    ) -> Result<(), Error> {
-        if builder.dt_conflict() {
-            return Err(Error::AppendUnsupported(
-                "this append mixes element datatypes; use one element type per append",
-            ));
-        }
-        // The caller finds this dataset before entering the append helper.
-        let fd = self
-            .staged
-            .dataset_at_mut(path)
-            .expect("caller checked a dataset is staged at this path");
-        if fd.vl_string_staging.is_some() || fd.reference_targets.is_some() {
-            return Err(Error::AppendUnsupported(
-                "a staged variable-length-string or object-reference dataset cannot be appended \
-                 to before it is committed: its per-element side table is built with the \
-                 dataset. Supply every element through the builder that creates it",
-            ));
-        }
-        if let Some(dt) = builder.elem_dt() {
-            if *dt != fd.dt {
-                return Err(Error::AppendUnsupported(
-                    "appended element datatype does not match the staged dataset's datatype",
-                ));
-            }
-        }
-        let Some((lead, inner)) = fd.ds.dimensions.split_first() else {
-            return Err(Error::AppendUnsupported(
-                "a scalar dataset has no dimension to append along",
-            ));
-        };
-        // A leading-dimension row includes every trailing extent.
-        let mut row_bytes = u64::from(fd.dt.type_size());
-        for &d in inner {
-            row_bytes = row_bytes.checked_mul(d).ok_or(Error::AppendUnsupported(
-                "staged dataset row size overflows",
-            ))?;
-        }
-        if row_bytes == 0 {
-            return Err(Error::AppendUnsupported(
-                "a staged dataset whose rows hold no bytes cannot be appended to",
-            ));
-        }
-        let bytes = builder.raw();
-        if bytes.len() as u64 % row_bytes != 0 {
-            return Err(Error::AppendUnsupported(
-                "appended byte length is not a whole number of rows of the staged dataset",
-            ));
-        }
-        let grown = lead
-            .checked_add(bytes.len() as u64 / row_bytes)
-            .ok_or(Error::AppendUnsupported("staged dataset length overflows"))?;
-        if let Some(max) = fd
-            .ds
-            .max_dimensions
-            .as_ref()
-            .and_then(|m| m.first().copied())
-            && matches!(max, MaxExtent::Fixed(limit) if limit < grown)
-        {
-            return Err(Error::AppendUnsupported(
-                "appending would grow the staged dataset past its maximum shape",
-            ));
-        }
-        fd.raw.extend_from_slice(bytes);
-        fd.ds.dimensions[0] = grown;
-        #[cfg(feature = "provenance")]
-        fd.rebuild_provenance();
-        Ok(())
-    }
-
-    /// Rejects an append that would re-encode a lossy partial trailing chunk.
-    ///
-    /// Empty appends are accepted. If the committed geometry cannot be read, its validation
-    /// is deferred to [`prepare_append`](Self::prepare_append).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::AppendUnsupported`] if the committed dataset is rank one, its
-    /// pipeline is lossy, and its length is not a multiple of the chunk length.
-    fn refuse_lossy_partial_tail(
-        &self,
-        path: &ObjectPathBuf,
-        builder: &AppendBuilder,
-    ) -> Result<(), Error> {
-        if builder.raw().is_empty() {
-            return Ok(());
-        }
-        if self.appends_onto_a_lossy_partial_tail(path) {
-            return Err(Error::AppendUnsupported(LOSSY_TAIL_REFUSAL));
-        }
-        Ok(())
-    }
-
-    /// Returns whether readable rank-one geometry requires a lossy trailing-chunk rewrite.
-    ///
-    /// Returns `false` if any required metadata cannot be resolved or parsed.
-    fn appends_onto_a_lossy_partial_tail(&self, path: &ObjectPathBuf) -> bool {
-        let Ok(addr) = crate::group_v2::resolve_path_any_from_source(
-            &self.image(),
-            AccessMode::ReadWrite,
-            &self.superblock,
-            self.widths,
-            self.addresses,
-            &path.as_path(),
-        ) else {
-            return false;
-        };
-        let Ok(region) = Self::gather_oh_messages(&self.image(), addr, self.addresses) else {
-            return false;
-        };
-        let mut datatype: Option<(usize, usize)> = None;
-        let mut dataspace: Option<(usize, usize)> = None;
-        let mut layout: Option<(usize, usize)> = None;
-        let mut filter: Option<(usize, usize)> = None;
-        let mut p = 0;
-        while let Ok(Some((msg_type, body, body_end))) = region.next_message(p) {
-            match msg_type {
-                MessageType::DATATYPE => datatype = Some((body, body_end)),
-                MessageType::DATASPACE => dataspace = Some((body, body_end)),
-                MessageType::DATA_LAYOUT => layout = Some((body, body_end)),
-                MessageType::FILTER_PIPELINE => filter = Some((body, body_end)),
-                _ => {}
-            }
-            p = body_end;
-        }
-        let (Some((fb, fe)), Some((dt_b, dt_e)), Some((ds_b, ds_e)), Some((lb, le))) =
-            (filter, datatype, dataspace, layout)
-        else {
-            return false;
-        };
-        let Ok(pipeline) = crate::filter_pipeline::parse_filter_pipeline(&region[fb..fe]) else {
-            return false;
-        };
-        if super::pipeline_lossless(&pipeline) {
-            return false;
-        }
-        let Ok((disk_dt, _)) = hdf5_pure_format::__private::parse_datatype(&region[dt_b..dt_e])
-        else {
-            return false;
-        };
-        let Ok(disk_ds) =
-            Dataspace::parse_with_length_width(&region[ds_b..ds_e], self.widths.lengths)
-        else {
-            return false;
-        };
-        let Ok(dl) = DataLayout::parse_with_widths(&region[lb..le], self.widths) else {
-            return false;
-        };
-        if disk_ds.dimensions.len() != 1 {
-            return false;
-        }
-        let Ok(geometry) = ChunkedGeometry::new(&disk_dt, &disk_ds, &dl) else {
-            return false;
-        };
-        match (geometry.spatial.first(), disk_ds.dimensions.first()) {
-            (Some(&chunk_elems), Some(&dim0)) if chunk_elems != 0 => dim0 % chunk_elems != 0,
-            _ => false,
-        }
-    }
-
     /// Rejects changes to existing staged work during an atomic batch.
     ///
     /// [`StagedEdits::rewind`] restores counts and indexes for additions only.
@@ -684,7 +392,7 @@ impl WriteEngine {
     /// # Errors
     ///
     /// Returns [`Error::EditUnsupported`] if a batch is open.
-    fn refuse_mid_batch(&self) -> Result<(), Error> {
+    pub(super) fn refuse_mid_batch(&self) -> Result<(), Error> {
         if self.staging_batch {
             return Err(Error::EditUnsupported(
                 "an edit that changes or withdraws an already-staged object cannot be made \
@@ -704,7 +412,7 @@ impl WriteEngine {
     ///
     /// Returns [`Error::EditUnsupported`] if a committed object survives at `path`, or a
     /// staged creation conflicts with `kind`.
-    fn refuse_creation_collision(
+    pub(super) fn refuse_creation_collision(
         &self,
         path: &ObjectPathBuf,
         kind: StagedKind,
@@ -764,7 +472,7 @@ impl WriteEngine {
 
 /// Pending operations and indexes derived from their creation paths.
 ///
-/// Created datasets and value replacements are prepared by [`super::flatten_dataset`].
+/// Created datasets and value replacements are prepared by [`super::dataset::flatten_dataset`].
 /// During commit preflight, the engine borrows this set and restores it on rejection.
 /// Batch marks record all operation counts, while creation indexes are updated with the vectors.
 #[derive(Default)]
@@ -896,7 +604,7 @@ impl StagedEdits {
     }
 
     /// Stages a prepared dataset creation and indexes its full path.
-    fn push_dataset(&mut self, parent: ObjectPathBuf, fd: FlatDataset) {
+    pub(super) fn push_dataset(&mut self, parent: ObjectPathBuf, fd: FlatDataset) {
         self.push(StagedOp::CreateDataset(parent, fd));
     }
 
@@ -906,7 +614,7 @@ impl StagedEdits {
     }
 
     /// Records one typed operation and updates any creation index.
-    fn push(&mut self, operation: StagedOp) {
+    pub(super) fn push(&mut self, operation: StagedOp) {
         match operation {
             StagedOp::AppendDataset(path, builder) => self.appends.push((path, builder)),
             StagedOp::CopyObject(src, dst) => self.copies.push((src, dst)),
@@ -979,7 +687,7 @@ impl StagedEdits {
     }
 
     /// Returns the prepared dataset at `path` after checking its indexed position.
-    fn dataset_at_mut(&mut self, path: &ObjectPathBuf) -> Option<&mut FlatDataset> {
+    pub(super) fn dataset_at_mut(&mut self, path: &ObjectPathBuf) -> Option<&mut FlatDataset> {
         let i = self.dataset_position(path)?;
         self.datasets.get_mut(i).map(|(_, fd)| fd)
     }
@@ -1078,7 +786,7 @@ impl StagedEdits {
     }
 
     /// Returns the prepared dataset at `path` after checking its indexed position.
-    fn dataset_at(&self, path: &ObjectPathBuf) -> Option<&FlatDataset> {
+    pub(super) fn dataset_at(&self, path: &ObjectPathBuf) -> Option<&FlatDataset> {
         let i = self.dataset_position(path)?;
         self.datasets.get(i).map(|(_, fd)| fd)
     }
@@ -1160,7 +868,7 @@ pub(crate) struct StagedMeta {
 }
 
 /// An operation accepted by the staged-set mutation interface.
-enum StagedOp {
+pub(super) enum StagedOp {
     AppendDataset(ObjectPathBuf, AppendBuilder),
     CopyObject(ObjectPathBuf, ObjectPathBuf),
     CopyObjectFrom(ObjectPathBuf, CopyTree),

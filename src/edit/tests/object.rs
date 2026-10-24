@@ -1077,7 +1077,7 @@ fn replace_layout_message_replaces_only_the_first_layout_record(
     );
     let body = layout_bytes::contiguous(0x900, 16);
 
-    let out = edit::replace_layout_message(&region, &body).unwrap();
+    let out = edit::dataset::replace_layout_message(&region, &body).unwrap();
 
     let expected = records_around(
         record_layout,
@@ -1101,7 +1101,7 @@ fn replace_dataspace_message_replaces_only_the_first_dataspace_record(
     );
     let body = [0x22; 12];
 
-    let out = edit::replace_dataspace_message(&region, &body).unwrap();
+    let out = edit::dataset::replace_dataspace_message(&region, &body).unwrap();
 
     let expected = records_around(
         record_layout,
@@ -1112,8 +1112,8 @@ fn replace_dataspace_message_replaces_only_the_first_dataspace_record(
 }
 
 #[rstest]
-#[case::replace_layout_message(edit::replace_layout_message)]
-#[case::replace_dataspace_message(edit::replace_dataspace_message)]
+#[case::replace_layout_message(edit::dataset::replace_layout_message)]
+#[case::replace_dataspace_message(edit::dataset::replace_dataspace_message)]
 #[case::rebuild_compact_layout_region(edit::rebuild_compact_layout_region)]
 fn a_region_rewrite_rejects_a_record_past_the_region(
     #[case] rewrite: fn(&OhRegion, &[u8]) -> Result<OhRegion, Error>,
@@ -1133,7 +1133,7 @@ fn a_region_rewrite_rejects_a_record_past_the_region(
 fn replace_layout_message_rejects_a_header_without_a_layout() {
     let region = plain_region(message_record(MessageType::DATASPACE, &[0; 8]));
 
-    let err = edit::replace_layout_message(&region, &[1, 2]).unwrap_err();
+    let err = edit::dataset::replace_layout_message(&region, &[1, 2]).unwrap_err();
 
     let Error::EditUnsupported(reason) = err else {
         panic!("expected EditUnsupported, got {err:?}");
@@ -1151,7 +1151,7 @@ fn replace_dataspace_message_rejects_a_header_without_a_dataspace() {
         &layout_bytes::compact(&[3, 4]),
     ));
 
-    let err = edit::replace_dataspace_message(&region, &[1, 2]).unwrap_err();
+    let err = edit::dataset::replace_dataspace_message(&region, &[1, 2]).unwrap_err();
 
     let Error::AppendUnsupported(reason) = err else {
         panic!("expected AppendUnsupported, got {err:?}");
