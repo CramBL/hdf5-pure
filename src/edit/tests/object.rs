@@ -912,6 +912,86 @@ fn a_new_compact_attribute_takes_the_next_creation_index() {
     );
 }
 
+#[rstest]
+#[case::single_info(false)]
+#[case::repeated_info(true)]
+fn an_attribute_info_rewrite_preserves_record_metadata_and_unrelated_bytes(
+    #[values(
+        TRACKED,
+        MessageRecordLayout::from_header_flags(HeaderFlags::TRACKS_CREATION_ORDER.0)
+    )]
+    layout: MessageRecordLayout,
+    #[case] repeated: bool,
+) {
+    let props = ObjectHeaderPrefix {
+        layout,
+        times: Some(FIXTURE_TIMES),
+        attribute_phase_change: Some(FIXTURE_PHASE),
+    };
+    let records = |max, indexed| {
+        let info = AttributeInfoMessage {
+            max_creation_index: Some(max),
+            indexes_creation_order: indexed,
+            fractal_heap_address: None,
+            btree_name_index_address: None,
+            btree_creation_order_address: None,
+        }
+        .serialize(OFFSET_WIDTH);
+        let first_info = layout.record_with_creation_index(
+            MessageType::ATTRIBUTE_INFO,
+            MessageFlags::FORBID_SHARING,
+            9,
+            &info,
+        );
+        let second_info = if repeated {
+            layout.record_with_creation_index(
+                MessageType::ATTRIBUTE_INFO,
+                MessageFlags::CONSTANT,
+                12,
+                &info,
+            )
+        } else {
+            Vec::new()
+        };
+        [
+            layout.record_with_creation_index(
+                UNKNOWN_MESSAGE_TYPE,
+                MessageFlags::CONSTANT,
+                4,
+                &[0xAB; 3],
+            ),
+            first_info,
+            layout.record_with_creation_index(
+                MessageType::ATTRIBUTE,
+                MessageFlags::NONE,
+                0,
+                &attr_body("alpha", 1),
+            ),
+            second_info,
+        ]
+        .concat()
+    };
+    let source = OhRegion::new([records(1, false), vec![0xCD; 2]].concat(), props);
+
+    let out = edit::attributes::set_attr_in_region(&source, "beta", &AttrValue::I64(2)).unwrap();
+
+    assert_eq!(out.props(), props);
+    assert_eq!(
+        &out[..],
+        &[
+            records(2, layout.indexes_creation_order()),
+            layout.record_with_creation_index(
+                MessageType::ATTRIBUTE,
+                MessageFlags::NONE,
+                1,
+                &attr_body("beta", 2),
+            ),
+            vec![0xCD; 2],
+        ]
+        .concat(),
+    );
+}
+
 #[test]
 fn an_overwritten_compact_attribute_keeps_its_creation_index() {
     let region = attr_region(TRACKED, &[("alpha", 0), ("beta", 1)], 2);
