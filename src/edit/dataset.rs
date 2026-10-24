@@ -1777,30 +1777,15 @@ impl ChunkedOverwrite {
             element_size,
             ..
         } = geometry;
-        let split = chunked_write::split_into_chunks(
-            raw,
+        Ok(PreparedChunk::encode_dataset(
+            &mut FilterScratch::new(),
+            pipeline.as_ref(),
+            ChunkContext::from_datatype(chunk_dims, dt)?,
+            *flags,
             shape,
-            chunk_dims,
-            *element_size,
             padding.pattern(*element_size),
-        )?;
-        let ctx = ChunkContext::from_datatype(chunk_dims, dt)?;
-        let mut scratch = FilterScratch::new();
-        let mut offsets = vec![0; shape.len()];
-        Ok(split
-            .into_iter()
-            .map(|logical| {
-                let decoding = ChunkDecoding::at_extent(*flags, chunk_dims, shape, &offsets);
-                advance_row_major(chunk_dims, shape, &mut offsets);
-                PreparedChunk::encode(
-                    &mut scratch,
-                    pipeline.as_ref(),
-                    ctx,
-                    ChunkEncoding::for_decoding(decoding),
-                    logical,
-                )
-            })
-            .collect::<Result<_, _>>()?)
+            raw,
+        )?)
     }
 }
 
@@ -1832,18 +1817,6 @@ impl ChunkGeometry {
             raw_size,
             maxshape: maxshape.map(<[MaxExtent]>::to_vec),
         }
-    }
-}
-
-/// Advances `offsets`, the element offsets of a chunk in a dataset of extent `shape`, to the next
-/// chunk in row-major grid order, and back to the first chunk after the last.
-fn advance_row_major(chunk_dims: &[u64], shape: &[u64], offsets: &mut [u64]) {
-    for ((&chunk, &dim), offset) in chunk_dims.iter().zip(shape).zip(offsets).rev() {
-        *offset = offset.saturating_add(chunk);
-        if *offset < dim {
-            return;
-        }
-        *offset = 0;
     }
 }
 

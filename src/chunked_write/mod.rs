@@ -36,8 +36,10 @@ use crate::filter_pipeline::{
     FILTER_DEFLATE, FILTER_FLETCHER32, FILTER_LZF, FILTER_SCALEOFFSET, FILTER_SHUFFLE,
     FilterDescription, FilterPipeline, H5Z_FLAG_OPTIONAL,
 };
-use crate::filters::{self, ChunkContext, FilterScratch};
+use crate::filters::ChunkContext;
+use crate::filters::FilterScratch;
 use crate::layout_info::FilterId;
+use crate::prepared_chunk::PreparedChunk;
 use crate::scaleoffset::{self, FillAvailability, ScaleOffset};
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
@@ -962,15 +964,15 @@ pub(crate) fn chunk_index_len(
 /// [`assemble_chunked_at`] twice — sizing at a dummy address, then emitting at
 /// the real one — instead of recompressing the whole dataset each pass.
 pub(crate) struct CompressedChunkSet {
-    /// Per-chunk compressed bytes, in dense row-major grid order.
-    compressed: Vec<Vec<u8>>,
+    /// The chunks as the writer stores them, in dense row-major grid order.
+    chunks: Vec<PreparedChunk>,
     chunk_dims_u32: Vec<u32>,
     element_size: NonZeroUsize,
     has_filters: bool,
     /// Which index this set gets, decided once from the maximum chunk grid.
     kind: ChunkIndexKind,
-    /// The element slot each chunk of `compressed` occupies, in the same order.
-    /// Identical to `0..compressed.len()` unless the maximum shape is wider than
+    /// The element slot each chunk of `chunks` occupies, in the same order.
+    /// Identical to `0..chunks.len()` unless the maximum shape is wider than
     /// the shape in some dimension past the first.
     slot_of_chunk: Vec<u64>,
     /// How many slots the index spans; see [`IndexSlots`].
@@ -1001,10 +1003,19 @@ impl CompressedChunkSet {
     }
 }
 
-/// Split `raw_data` into chunks and compress each one, producing the
-/// address-independent [`CompressedChunkSet`]. This performs the dataset's only
-/// pass of the filter pipeline (shuffle/deflate/ZFP/…); [`assemble_chunked_at`]
-/// then lays the result out at a concrete address without recompressing.
+/// Splits `raw_data` into chunks and encodes each one for storage, the dataset's only pass of the
+/// filter pipeline.
+///
+/// [`assemble_chunked_at`] lays the set out at an address without encoding the chunks again. An
+/// unallocated dataset has no chunks.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ChunkedReadError`] if the chunk index of the geometry is unsupported or
+/// exceeds the writer's index limits. Returns [`FormatError::InvalidChunkGeometry`] if a chunk of
+/// an allocated dataset is larger than [`u32::MAX`] bytes. Returns the errors of
+/// [`ChunkOptions::build_pipeline`] for the filters, and of [`PreparedChunk::encode_dataset`] for
+/// the chunks.
 pub(crate) fn compress_chunks(
     raw_data: &[u8],
     shape: &[u64],
@@ -1044,30 +1055,24 @@ pub(crate) fn compress_chunks(
     // overhanging the edge takes the fill pattern. `plan_index_slots` already
     // answered for the same `allocation`, so the assertion below still pairs the
     // two.
-    let chunks = match allocation {
-        StorageAllocation::Allocated => {
-            split_into_chunks(raw_data, shape, chunk_dims, element_size, fill)?
-        }
-        StorageAllocation::Unallocated => Vec::new(),
-    };
-    let num_chunks = chunks.len();
-    let has_filters = pipeline.is_some();
-    debug_assert_eq!(slot_of_chunk.len(), num_chunks);
-
-    let mut compressed = Vec::with_capacity(num_chunks);
+    //
     // One encoder for every chunk of the dataset. Building one per chunk is the
     // dominant cost of a filtered write -- ~300 KiB of hash tables apiece, 615
     // MiB over an 8 MiB dataset (issue #228).
-    for chunk_bytes in chunks {
-        let c = if let Some(ref pl) = pipeline {
-            filters::compress_chunk_with(&mut scratch, &chunk_bytes, pl, ctx)?
-        } else {
-            // No pipeline: the split already produced an owned chunk buffer;
-            // move it into the set instead of cloning.
-            chunk_bytes
-        };
-        compressed.push(c);
-    }
+    let chunks = match allocation {
+        StorageAllocation::Allocated => PreparedChunk::encode_dataset(
+            &mut scratch,
+            pipeline.as_ref(),
+            ctx,
+            ChunkedLayoutFlags::NONE,
+            shape,
+            fill,
+            raw_data,
+        )?,
+        StorageAllocation::Unallocated => Vec::new(),
+    };
+    let has_filters = pipeline.is_some();
+    debug_assert_eq!(slot_of_chunk.len(), chunks.len());
 
     #[expect(
         clippy::cast_possible_truncation,
@@ -1076,7 +1081,7 @@ pub(crate) fn compress_chunks(
     let chunk_dims_u32: Vec<u32> = chunk_dims.iter().map(|&d| d as u32).collect();
 
     Ok(CompressedChunkSet {
-        compressed,
+        chunks,
         chunk_dims_u32,
         element_size,
         has_filters,
@@ -1260,14 +1265,14 @@ fn plan_chunk_slots(
     data_address: StoredAddress,
 ) -> (Vec<ChunkRecord>, StoredAddress) {
     let mut cursor = data_address;
-    let mut written_chunks = Vec::with_capacity(set.compressed.len());
-    for chunk in &set.compressed {
+    let mut written_chunks = Vec::with_capacity(set.chunks.len());
+    for chunk in &set.chunks {
         written_chunks.push(ChunkRecord {
             address: cursor,
-            stored_size: chunk.len() as u64,
-            filter_mask: 0,
+            stored_size: chunk.stored_size(),
+            filter_mask: chunk.filter_mask(),
         });
-        cursor = cursor.offset(chunk.len() as u64);
+        cursor = cursor.offset(chunk.stored_size());
     }
     (written_chunks, cursor)
 }
@@ -1374,7 +1379,7 @@ fn plan_chunked_at(
 ) -> Result<(usize, Vec<u8>, Vec<u8>), FormatError> {
     let (written_chunks, index_address) = plan_chunk_slots(set, data_address);
     let (index, layout_message) = chunk_index_bytes(set, &written_chunks, index_address)?;
-    let chunk_bytes_total: usize = set.compressed.iter().map(Vec::len).sum();
+    let chunk_bytes_total: usize = set.chunks.iter().map(|chunk| chunk.bytes().len()).sum();
     Ok((chunk_bytes_total, index, layout_message))
 }
 
@@ -1455,8 +1460,8 @@ pub(crate) fn assemble_chunked_at(
     // One exact allocation for chunks plus index: the buffer is filled to its
     // capacity, never doubled and copied.
     let mut data_buf = Vec::with_capacity(chunk_bytes_total + index.len());
-    for chunk in &set.compressed {
-        data_buf.extend_from_slice(chunk);
+    for chunk in &set.chunks {
+        data_buf.extend_from_slice(chunk.bytes());
     }
     data_buf.extend_from_slice(&index);
 
@@ -2009,6 +2014,33 @@ mod tests {
         }
     }
 
+    #[rstest]
+    #[case::just_over(1 << 29)]
+    #[case::unallocatable(1 << 40)]
+    fn a_created_chunk_larger_than_u32_max_bytes_is_rejected(#[case] chunk_len: u64) {
+        let chunk_dims = [chunk_len];
+        let Err(err) = compress_chunks(
+            &[0; 8],
+            &[1],
+            ChunkContext::basic(&chunk_dims, 8),
+            &ChunkOptions {
+                chunk_dims: Some(chunk_dims.to_vec()),
+                ..ChunkOptions::default()
+            },
+            None,
+            FillPattern::ZERO,
+            StorageAllocation::Allocated,
+        ) else {
+            panic!("expected InvalidChunkGeometry");
+        };
+        assert_eq!(
+            err,
+            FormatError::InvalidChunkGeometry(
+                "chunk logical byte size exceeds the reader's single-chunk allocation limit"
+            )
+        );
+    }
+
     /// A dataset that stores nothing is planned as storing nothing, whatever
     /// its shape says (issue #293).
     ///
@@ -2098,7 +2130,7 @@ mod tests {
             StorageAllocation::Unallocated,
         )
         .expect("an unallocated set");
-        assert_eq!(set.compressed.len(), 0, "no chunk was encoded");
+        assert_eq!(set.chunks.len(), 0, "no chunk was encoded");
         assert_eq!(
             chunked_data_len(&set).unwrap(),
             0,
@@ -2131,7 +2163,7 @@ mod tests {
             StorageAllocation::Allocated,
         )
         .expect("a dense set");
-        assert_eq!(dense.compressed.len(), 10);
+        assert_eq!(dense.chunks.len(), 10);
         assert!(chunked_data_len(&dense).unwrap() >= 4000);
     }
 

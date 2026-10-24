@@ -489,6 +489,7 @@ pub(crate) mod object_header_writer;
 pub(crate) mod object_path;
 #[cfg(test)]
 pub(crate) mod placed_source;
+pub(crate) mod prepared_chunk;
 pub(crate) mod read_region;
 pub(crate) mod read_spec;
 pub(crate) mod scaleoffset;
@@ -522,8 +523,6 @@ pub(crate) mod file_lock;
 pub(crate) mod image;
 #[cfg(all(feature = "std", any(test, feature = "__page-publication-crosscheck")))]
 pub(crate) mod page_publication_failure;
-#[cfg(feature = "std")]
-pub(crate) mod prepared_chunk;
 #[cfg(feature = "std")]
 pub(crate) mod reader;
 #[cfg(feature = "std")]

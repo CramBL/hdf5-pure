@@ -1,13 +1,23 @@
-//! The chunks an append or a chunked overwrite writes, encoded for the extent the write publishes
-//! and, in an in-place append, for the extent before it.
+//! The chunks a dataset creation, an append, or a chunked overwrite writes, encoded for the extent
+//! the write publishes and, in an in-place append, for the extent before it.
+
+#[cfg(not(feature = "std"))]
+use alloc::format;
+#[cfg(not(feature = "std"))]
+use alloc::vec;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 use hdf5_pure_core::__private::PipelineFilterMask;
 
 use crate::chunked_read;
 use crate::chunked_read::ChunkDecoding;
 use crate::chunked_read::ChunkFiltering;
+use crate::chunked_write;
 use crate::convert::Narrow;
+use crate::data_layout::ChunkedLayoutFlags;
 use crate::error::FormatError;
+use crate::fill_value::FillPattern;
 use crate::filter_pipeline::FilterPipeline;
 use crate::filters;
 use crate::filters::ChunkContext;
@@ -22,6 +32,59 @@ pub(crate) struct PreparedChunk {
 }
 
 impl PreparedChunk {
+    /// Splits `raw`, the data of a dataset of extent `shape`, into whole chunks of `ctx` and
+    /// encodes each one for storage, in row-major grid order.
+    ///
+    /// The elements of a chunk past `shape` take `fill`. Where `flags` has
+    /// [`DONT_FILTER_PARTIAL_BOUND_CHUNKS`] set, a chunk that extends past `shape` is stored as its
+    /// data. Every other chunk is stored as the output of `pipeline`, or as its data where
+    /// `pipeline` is `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidChunkGeometry`] if a chunk is larger than [`u32::MAX`] bytes.
+    /// Returns [`FormatError::UnreadableFillValue`] if a chunk extends past `shape` and `fill` is
+    /// [`FillPattern::UNKNOWN`]. Returns the errors of [`filters::compress_chunk_with`] for a
+    /// filtered chunk.
+    ///
+    /// [`DONT_FILTER_PARTIAL_BOUND_CHUNKS`]: crate::data_layout::DONT_FILTER_PARTIAL_BOUND_CHUNKS
+    pub(crate) fn encode_dataset(
+        scratch: &mut FilterScratch,
+        pipeline: Option<&FilterPipeline>,
+        ctx: ChunkContext<'_>,
+        flags: ChunkedLayoutFlags,
+        shape: &[u64],
+        fill: FillPattern<'_>,
+        raw: &[u8],
+    ) -> Result<Vec<Self>, FormatError> {
+        let element_size = ctx.element_size.narrow()?;
+        chunked_read::bounded_chunk_len(ctx.chunk_dims, element_size)?;
+        let split =
+            chunked_write::split_into_chunks(raw, shape, ctx.chunk_dims, element_size, fill)?;
+        let mut offsets = flags
+            .partial_edge_chunks_stored_raw()
+            .then(|| vec![0; shape.len()]);
+        let mut chunks = Vec::with_capacity(split.len());
+        for logical in split {
+            let decoding = match offsets.as_deref_mut() {
+                Some(offsets) => {
+                    let decoding = ChunkDecoding::at_extent(flags, ctx.chunk_dims, shape, offsets);
+                    advance_row_major(ctx.chunk_dims, shape, offsets);
+                    decoding
+                }
+                None => ChunkDecoding::Pipeline,
+            };
+            chunks.push(Self::encode(
+                scratch,
+                pipeline,
+                ctx,
+                ChunkEncoding::for_decoding(decoding),
+                logical,
+            )?);
+        }
+        Ok(chunks)
+    }
+
     /// Encodes `logical`, the data of a whole chunk, in the form of `encoding`.
     ///
     /// # Errors
@@ -117,6 +180,18 @@ impl ChunkEncoding {
             ChunkDecoding::Pipeline => Self::Filtered,
             ChunkDecoding::Verbatim => Self::Raw,
         }
+    }
+}
+
+/// Advances `offsets`, the element offsets of a chunk in a dataset of extent `shape`, to the next
+/// chunk in row-major grid order, and back to the first chunk after the last.
+fn advance_row_major(chunk_dims: &[u64], shape: &[u64], offsets: &mut [u64]) {
+    for ((&chunk, &dim), offset) in chunk_dims.iter().zip(shape).zip(offsets).rev() {
+        *offset = offset.saturating_add(chunk);
+        if *offset < dim {
+            return;
+        }
+        *offset = 0;
     }
 }
 
