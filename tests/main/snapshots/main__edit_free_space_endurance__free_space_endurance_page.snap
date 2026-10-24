@@ -1,6 +1,6 @@
 ---
 source: tests/main/edit_free_space_endurance.rs
-expression: context.final_characteristics(extent_bytes(&recovered))
+expression: "free_space_endurance::run_endurance(strategy)"
 ---
 small-file free-space endurance
 ===============================
@@ -16,19 +16,11 @@ creation settings
 file
   physical size     : 323584 bytes
   logical EOF       : 323584 bytes
+  live free bytes   : 253002
+  live free sections: 63
+  persisted sections: 118
+  cycles            : 1024
   top-level groups  : 16
-  analysis complete : true
-
-storage ownership
-  category                   bytes  extents
-  userblock                      0        0
-  live raw data              44800      191
-  live metadata              23037      146
-  free-space managers         2745        6
-  reusable free space       253002       63
-  unclassified space             0        0
-  trailing slack                 0        0
 
 accounting
-  classified bytes        : 323584
   persisted reusable free : 253002

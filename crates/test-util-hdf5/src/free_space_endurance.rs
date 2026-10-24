@@ -5,25 +5,17 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::fs;
-use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 
-use hdf5_pure::AttrValue;
-use hdf5_pure::Error;
-use hdf5_pure::File;
-use hdf5_pure::FileBuilder;
-use hdf5_pure::FileSpaceInfo;
-use hdf5_pure::FileSpacePageSize;
-use hdf5_pure::FileSpaceStrategy;
-use hdf5_pure::FormatError;
-use hdf5_pure::Layout;
-use hdf5_pure::SpaceOwnership;
 use test_util::temp;
 
-use crate::file_space;
-use crate::session;
+use super::api::{
+    AttrValue, Error, File, FileAccessProperties, FileBuilder, FileSpaceInfo, FileSpacePageSize,
+    FileSpaceStrategy, FormatError, Layout, MemoryStrategy, SyncPolicy,
+};
+use super::file_space;
 
-/// Replaces groups repeatedly and reports final creation settings and Rust ownership totals.
+/// Replaces groups repeatedly and reports file sizes and reusable free space.
 ///
 /// Persistent strategies must stay within the size bound and reuse recovered holes. The
 /// [`FileSpaceStrategy::None`] control must grow beyond that bound.
@@ -32,7 +24,7 @@ use crate::session;
 ///
 /// Panics if a file operation fails or a workload assertion fails.
 pub fn run_endurance(strategy: FileSpaceStrategy) -> String {
-    run_endurance_inner(strategy, None::<fn(&Path, &str)>)
+    run_endurance_inner(strategy, None::<fn(&Path, &str)>, |_, _| {})
 }
 
 /// Runs endurance with observations at each closed reopen checkpoint and after the final close.
@@ -48,12 +40,29 @@ pub fn run_endurance_observed(
     strategy: FileSpaceStrategy,
     observer: impl FnMut(&Path, &str),
 ) -> String {
-    run_endurance_inner(strategy, Some(observer))
+    run_endurance_inner(strategy, Some(observer), |_, _| {})
+}
+
+/// Runs endurance with access to committed and reopened editing sessions.
+///
+/// The callback receives the writable file and a checkpoint label after the initial commit,
+/// before each checkpoint close, and after reopening. The returned report describes the final
+/// reopened state before its editing session closes.
+///
+/// # Panics
+///
+/// Panics if a file operation fails, a workload assertion fails, or the callback panics.
+pub fn run_endurance_with_checkpoints(
+    strategy: FileSpaceStrategy,
+    checkpoint: impl FnMut(&File, &str),
+) -> String {
+    run_endurance_inner(strategy, None::<fn(&Path, &str)>, checkpoint)
 }
 
 fn run_endurance_inner(
     strategy: FileSpaceStrategy,
     mut observer: Option<impl FnMut(&Path, &str)>,
+    mut checkpoint: impl FnMut(&File, &str),
 ) -> String {
     let path = temp::temp_path("free_space_endurance.h5");
     let mut builder = FileBuilder::new();
@@ -62,12 +71,13 @@ fn run_endurance_inner(
         builder.with_file_space_page_size(FileSpacePageSize::try_from(4_096).unwrap());
     }
     builder.write(&path).unwrap();
-    let mut file = session::open_bounded_on_close(&path).unwrap();
+    let mut file = open_writer(&path).unwrap();
     for sequence in 0..LIVE_GROUPS {
         GroupSpec::new(sequence).write(&Context::new(&file, &path, strategy, 0));
     }
     Context::new(&file, &path, strategy, 0).unwrap(file.commit());
     Context::new(&file, &path, strategy, 0).assert_size();
+    checkpoint(&file, "initial-commit");
     let mut sizes = Vec::with_capacity(CYCLES);
     let mut recovered = Vec::new();
     let mut reused_after_reopen = false;
@@ -95,7 +105,6 @@ fn run_endurance_inner(
         }
         context.assert_survivors();
         if strategy != FileSpaceStrategy::None {
-            context.assert_exact_ownership();
             if !recovered.is_empty() {
                 assert!(
                     reused_after_reopen,
@@ -103,6 +112,7 @@ fn run_endurance_inner(
                 );
             }
         }
+        checkpoint(&file, &format!("commit-{iteration}"));
         let before_close = context.to_string();
         file.close()
             .unwrap_or_else(|error| panic!("close: {error:?}; {before_close}"));
@@ -118,10 +128,11 @@ fn run_endurance_inner(
         reader
             .close()
             .unwrap_or_else(|error| panic!("close reader: {error:?}; {before_close}"));
+        file_space::assert_eof_matches_physical_size(&path);
         if let Some(observer) = &mut observer {
             observer(&path, &format!("reopen-{iteration}"));
         }
-        file = session::open_bounded_on_close(&path)
+        file = open_writer(&path)
             .unwrap_or_else(|error| panic!("reopen writer: {error:?}; {before_close}"));
         let context = Context::new(&file, &path, strategy, iteration);
         if strategy != FileSpaceStrategy::None {
@@ -130,8 +141,8 @@ fn run_endurance_inner(
                 extent_bytes(&recovered),
                 "reopening must recover every persisted free byte; {context}"
             );
-            context.assert_exact_ownership();
         }
+        checkpoint(&file, &format!("reopen-{iteration}"));
         reused_after_reopen = false;
     }
     let context = Context::new(&file, &path, strategy, CYCLES);
@@ -156,7 +167,7 @@ fn run_endurance_inner(
         );
     }
     context.assert_survivors();
-    let report = context.final_characteristics(extent_bytes(&recovered));
+    let report = context.final_characteristics(&recovered);
     let final_state = context.to_string();
     file.close()
         .unwrap_or_else(|error| panic!("final close: {error:?}; {final_state}"));
@@ -223,20 +234,13 @@ impl<'a> Context<'a> {
         }
     }
 
-    fn assert_exact_ownership(&self) {
-        panic::catch_unwind(AssertUnwindSafe(|| {
-            file_space::assert_exact_space_ownership(self.file)
-        }))
-        .unwrap_or_else(|_| panic!("exact ownership failed; {self}"));
-    }
-
-    /// Formats creation settings and storage ownership for the final snapshot.
-    fn final_characteristics(&self, persisted_free_bytes: u64) -> String {
+    /// Formats creation settings, file sizes, and reusable free space for the final snapshot.
+    fn final_characteristics(&self, persisted: &[(u64, u64)]) -> String {
         let Self {
             file,
             strategy: _,
             iteration,
-            physical: _,
+            physical,
         } = self;
         let FileSpaceInfo {
             strategy,
@@ -247,27 +251,8 @@ impl<'a> Context<'a> {
         } = file
             .file_space_info()
             .unwrap_or_else(|| panic!("file-space creation settings must be present; {self}"));
-        let SpaceOwnership {
-            physical_size,
-            logical_size,
-            userblock_space,
-            live_raw_space,
-            live_metadata_space,
-            free_space_manager_space,
-            reusable_free_space,
-            unclassified_space,
-            analysis_complete,
-            trailing_slack_space,
-        } = self.unwrap(file.__space_ownership());
-        let categories = [
-            ("userblock", &userblock_space),
-            ("live raw data", &live_raw_space),
-            ("live metadata", &live_metadata_space),
-            ("free-space managers", &free_space_manager_space),
-            ("reusable free space", &reusable_free_space),
-            ("unclassified space", &unclassified_space),
-            ("trailing slack", &trailing_slack_space),
-        ];
+        let accounting = self.unwrap(file.space_accounting());
+        file_space::assert_space_accounting_consistent(&accounting);
         let mut out = String::new();
         writeln!(out, "small-file free-space endurance").unwrap();
         writeln!(out, "===============================").unwrap();
@@ -283,40 +268,41 @@ impl<'a> Context<'a> {
         }
         writeln!(out).unwrap();
         writeln!(out, "file").unwrap();
-        writeln!(out, "  physical size     : {physical_size} bytes").unwrap();
-        writeln!(out, "  logical EOF       : {logical_size} bytes").unwrap();
+        writeln!(out, "  physical size     : {physical} bytes").unwrap();
+        writeln!(
+            out,
+            "  logical EOF       : {} bytes",
+            accounting.logical_size
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "  live free bytes   : {}",
+            accounting.reusable_free_bytes
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "  live free sections: {}",
+            accounting.reusable_free_space.len()
+        )
+        .unwrap();
+        writeln!(out, "  persisted sections: {}", persisted.len()).unwrap();
+        writeln!(out, "  cycles            : {iteration}").unwrap();
         writeln!(
             out,
             "  top-level groups  : {}",
             self.unwrap(file.root().groups()).len()
         )
         .unwrap();
-        writeln!(out, "  analysis complete : {analysis_complete}").unwrap();
-        writeln!(out).unwrap();
-        writeln!(out, "storage ownership").unwrap();
-        writeln!(out, "  {:<21} {:>10} {:>8}", "category", "bytes", "extents").unwrap();
-        for (label, extents) in categories {
-            writeln!(
-                out,
-                "  {label:<21} {:>10} {:>8}",
-                extent_bytes(extents),
-                extents.len()
-            )
-            .unwrap();
-        }
         writeln!(out).unwrap();
         writeln!(out, "accounting").unwrap();
         writeln!(
             out,
-            "  classified bytes        : {}",
-            extent_bytes(&userblock_space)
-                + extent_bytes(&live_raw_space)
-                + extent_bytes(&live_metadata_space)
-                + extent_bytes(&free_space_manager_space)
-                + extent_bytes(&reusable_free_space)
+            "  persisted reusable free : {}",
+            extent_bytes(persisted)
         )
         .unwrap();
-        writeln!(out, "  persisted reusable free : {persisted_free_bytes}").unwrap();
         out
     }
 }
@@ -338,33 +324,7 @@ impl Display for Context<'_> {
             file.space_accounting()
                 .map(|accounting| accounting.reusable_free_bytes)
                 .or_else(|_| file.persisted_free_space().map(|free| extent_bytes(&free))),
-        )?;
-        match file.__space_ownership() {
-            Ok(SpaceOwnership {
-                physical_size: _,
-                logical_size,
-                userblock_space: _,
-                live_raw_space,
-                live_metadata_space,
-                free_space_manager_space,
-                reusable_free_space: _,
-                unclassified_space,
-                analysis_complete,
-                trailing_slack_space,
-            }) => write!(
-                formatter,
-                ", analysis_complete={}, logical_size={}, live_raw={}, live_metadata={}, \
-                 manager_bytes={}, unclassified_bytes={}, trailing_slack_bytes={}",
-                analysis_complete,
-                logical_size,
-                extent_bytes(&live_raw_space),
-                extent_bytes(&live_metadata_space),
-                extent_bytes(&free_space_manager_space),
-                extent_bytes(&unclassified_space),
-                extent_bytes(&trailing_slack_space),
-            ),
-            Err(error) => write!(formatter, ", ownership_error={error:?}"),
-        }
+        )
     }
 }
 
@@ -519,6 +479,15 @@ impl GroupSpec {
             .map(|offset| i32::try_from(self.sequence * 10_000 + index * 100 + offset).unwrap())
             .collect()
     }
+}
+
+fn open_writer(path: &Path) -> Result<File, Error> {
+    File::open_rw_with_options(
+        path,
+        FileAccessProperties::new()
+            .with_memory_strategy(MemoryStrategy::Bounded)
+            .with_sync_policy(SyncPolicy::OnClose),
+    )
 }
 
 fn extent_bytes(extents: &[(u64, u64)]) -> u64 {

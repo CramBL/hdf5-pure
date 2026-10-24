@@ -10,6 +10,7 @@ use crate::reader::{Backend, File};
 use crate::{AttrValue, FileBuilder};
 
 mod classic_aggregation;
+mod endurance;
 mod file_space;
 mod paged_write;
 mod persisted_free_space;
