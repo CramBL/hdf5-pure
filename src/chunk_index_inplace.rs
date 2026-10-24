@@ -30,6 +30,7 @@
 use core::num::NonZeroUsize;
 
 use hdf5_pure_format::__private::BlockOffsetWidth;
+use hdf5_pure_format::__private::ChunkedGeometry;
 use hdf5_pure_format::__private::DataBlockGeometry;
 use hdf5_pure_format::__private::EA_CLIENT_ID_UNFILTERED;
 use hdf5_pure_format::__private::ExtensibleArrayBitGeometry;
@@ -260,8 +261,6 @@ const MAX_EA_ELEM: usize = 8 + 8 + 4;
 /// Absolute file offsets of the object-header messages a caller may need to
 /// parse after locating a dataset.
 pub(crate) struct MessageSpans {
-    /// `(data_off, size)` of the Datatype message.
-    pub datatype: (u64, usize),
     /// `(data_off, size)` of the Filter Pipeline message, when present.
     pub filter: Option<(u64, usize)>,
     /// The Fill Value message, when present: its type (which distinguishes the
@@ -271,9 +270,9 @@ pub(crate) struct MessageSpans {
     pub fill: Option<(MessageType, u64, usize)>,
 }
 
-/// Result of locating a dataset: its maintained geometry plus the message spans
-/// and filter status the caller needs to decide policy.
+/// Pairs parsed datatype and checked append geometry with remaining message locations.
 pub(crate) struct LocateResult {
+    pub datatype: Datatype,
     pub located: Located,
     pub spans: MessageSpans,
 }
@@ -325,28 +324,21 @@ pub(crate) struct Located {
 }
 
 impl Located {
-    /// Locates the dataset whose object header is at `oh_addr`, and reads its dataspace, its
-    /// layout with the layout flags, and the geometry of its Extensible Array.
+    /// Reads the datatype and checked geometry for an immediate append at `oh_addr`.
     ///
-    /// The result records whether the dataset is filtered and holds the spans of its datatype,
-    /// filter pipeline, and fill value messages, and the caller decides whether it accepts the
-    /// filters. `unsupported` builds the caller's error for a dataset it cannot append to, so
-    /// each writer reports through its own variant. The caller resolves the path: an owned handle
-    /// holds its address, and the path-addressed writers resolve against their own mirrors.
+    /// The dataset must be rank one, unlimited, and indexed by an allocated Extensible Array.
+    /// The caller supplies `unsupported` for policy rejections and decides which filters it accepts.
+    /// The result includes filter and fill message locations for that decision.
     ///
-    /// Computes allocation statistics from the index block and its referenced secondary blocks.
-    /// Every read is a bounded [`Source`] window, so this works over a store with no whole-file
-    /// mirror.
+    /// Allocation statistics are computed from referenced index blocks. Each metadata read uses a
+    /// bounded [`Source`] window.
     ///
     /// # Errors
     ///
-    /// Returns the error `unsupported` builds if an in-place append does not accept the dataset,
-    /// and [`Error::MissingMessage`] if the object header has no dataspace, layout, or datatype
-    /// message. Returns the error of a read or a parse of the object header, one of its messages,
-    /// or the Extensible Array header. Returns [`Error::AppendUnsupported`] if the index block
-    /// is unallocated, or [`FormatError::InvalidExtensibleArrayGeometry`] if allocation
-    /// statistics or pointer offsets exceed [`u64::MAX`]. Propagates errors from reading block
-    /// pointers.
+    /// Returns [`Error::MissingMessage`] for a missing dataspace, layout, or datatype. Returns
+    /// [`Error::Format`] for malformed chunk geometry, inconsistent element sizes, invalid index
+    /// geometry, or metadata read and parse errors. Returns [`Error::AppendUnsupported`] for an
+    /// unallocated index block, and `unsupported` for other unsupported storage or metadata.
     pub(crate) fn locate_at<F: Store>(
         file: &F,
         oh_addr: u64,
@@ -423,26 +415,19 @@ impl Located {
         // Parse the layout: must be a v4 chunked Extensible Array (index type 4).
         let layout_bytes = file.read_metadata_at(layout_msg.data_off, layout_msg.size)?;
         let layout = DataLayout::parse_with_widths(&layout_bytes, widths)?;
-        let (ea_addr, chunk_dims, flags) = match layout {
+        let (ea_addr, flags) = match &layout {
             DataLayout::Chunked {
-                chunk_dimensions,
                 index:
                     ChunkIndexLayout::ExtensibleArray {
                         address: Some(addr),
                     },
                 flags,
                 ..
-            } => (addr, chunk_dimensions, flags),
+            } => (*addr, *flags),
             DataLayout::Chunked {
                 index: ChunkIndexLayout::ExtensibleArray { address: None },
                 ..
             } => {
-                // An Extensible Array whose header/index block is not allocated
-                // yet: an empty dataset the C library created without writing any
-                // chunk (this crate's writer allocates it eagerly). In-place
-                // growth needs an existing index; make the first append through
-                // `Dataset::append_staged`, which materializes the index, or
-                // create the dataset with initial data.
                 return Err(unsupported(
                     "the dataset's extensible-array index is not allocated yet (an empty \
                      dataset with no chunks); write initial data at creation or make the \
@@ -455,21 +440,29 @@ impl Located {
                 ));
             }
         };
-        // chunk_dimensions for a v4 layout includes the element-size pseudo
-        // dimension as its last entry; the leading entry is the axis-0 chunk size.
-        if chunk_dims.len() != 2 {
-            return Err(unsupported(
-                "unexpected chunk dimensionality (expected a rank-1 chunked layout)",
-            ));
+        let dt_bytes = file.read_metadata_at(datatype_msg.data_off, datatype_msg.size)?;
+        let (datatype, _) = hdf5_pure_format::__private::parse_datatype(&dt_bytes)?;
+        let element_size: NonZeroUsize = datatype.element_size()?.narrow()?;
+        if let DataLayout::Chunked {
+            chunk_dimensions, ..
+        } = &layout
+            && let Some(&stored_size) = chunk_dimensions.last()
+            && stored_size != element_size.get() as u64
+        {
+            return Err(FormatError::ChunkElementSizeMismatch {
+                datatype: element_size.get(),
+                layout: stored_size.to_usize()?,
+            }
+            .into());
         }
-        let chunk_elems = chunk_dims[0];
-        // A zero element-size pseudo-dimension is a malformed layout; refuse
-        // rather than divide by it when validating an append length. The binding
-        // carries that refusal forward, so no later step re-checks it.
-        let Some(elem_bytes) = NonZeroUsize::new(chunk_dims[1].to_usize()?) else {
-            return Err(unsupported("dataset has a zero-sized element"));
-        };
-        let chunk_bytes = chunk_elems.to_usize()? * elem_bytes.get();
+        let ChunkedGeometry {
+            spatial,
+            element_size: elem_bytes,
+            raw_size,
+            ..
+        } = ChunkedGeometry::new(&datatype, &dataspace, &layout)?;
+        let chunk_elems = spatial[0];
+        let chunk_bytes = raw_size.to_usize()?;
 
         let array = crate::extensible_array::read_header(file, widths, ea_addr)?;
         let ea_header = array.header();
@@ -501,11 +494,7 @@ impl Located {
         // the chunk count from the *committed* dimension so the next append rolls
         // forward from the last commit -- overwriting any slots a crashed writer
         // wrote but never committed -- instead of appending past them.
-        let num_chunks = if chunk_elems == 0 {
-            ea_header.max_idx_set
-        } else {
-            current_dim.div_ceil(chunk_elems)
-        };
+        let num_chunks = current_dim.div_ceil(chunk_elems);
 
         let mut located = Located {
             dim0_off,
@@ -529,9 +518,9 @@ impl Located {
         };
         located.allocation_stats = Some(located.read_allocation_stats(file)?);
         Ok(LocateResult {
+            datatype,
             located,
             spans: MessageSpans {
-                datatype: (datatype_msg.data_off, datatype_msg.size),
                 filter: filter_msg.map(|m| (m.data_off, m.size)),
                 fill: fill_msg.map(|m| (m.msg_type, m.data_off, m.size)),
             },
@@ -2569,10 +2558,7 @@ mod tests {
     fn locate(store: &WindowProbeStore) -> (Located, crate::datatype::Datatype) {
         let result =
             Located::locate_at(store, dataset_address(store), Error::AppendUnsupported).unwrap();
-        let (dt_off, dt_size) = result.spans.datatype;
-        let dt_bytes = store.read_metadata_at(dt_off, dt_size).unwrap();
-        let (datatype, _) = hdf5_pure_format::__private::parse_datatype(&dt_bytes).unwrap();
-        (result.located, datatype)
+        (result.located, result.datatype)
     }
 
     fn dataset_address(store: &WindowProbeStore) -> u64 {
@@ -2920,6 +2906,84 @@ mod tests {
             panic!("expected AppendUnsupported, got {error:?}");
         };
         assert_eq!(reason, "malformed filtered extensible-array element width");
+    }
+
+    #[rstest]
+    #[case::zero_chunk(0, "chunk dimensions must be nonzero")]
+    #[case::chunk_byte_overflow(u64::MAX, "chunk logical byte size exceeds the addressable range")]
+    fn immediate_append_rejects_zero_or_overflowing_chunk_geometry(
+        #[case] chunk_elems: u64,
+        #[case] expected: &str,
+    ) {
+        let mut store = WindowProbeStore::open(build_unlimited(6, 4));
+        let walk = walk_v2_object_header(&store, dataset_address(&store), store.widths).unwrap();
+        let mut header = v2_bytes::Header::new();
+        for msg_type in [
+            MessageType::DATASPACE,
+            MessageType::DATATYPE,
+            MessageType::DATA_LAYOUT,
+        ] {
+            let message = walk
+                .messages
+                .iter()
+                .find(|msg| msg.msg_type == msg_type)
+                .unwrap();
+            let mut body = store
+                .read_metadata_at(message.data_off, message.size)
+                .unwrap();
+            if msg_type == MessageType::DATA_LAYOUT {
+                let dimensions = body[V4_DIMENSION_COUNT_OFFSET] as usize;
+                let old_width = body[V4_DIMENSION_WIDTH_OFFSET] as usize;
+                let suffix = body[V4_DIMENSIONS_OFFSET + dimensions * old_width..].to_vec();
+                body.truncate(V4_DIMENSIONS_OFFSET);
+                body[V4_DIMENSION_WIDTH_OFFSET] = FIXTURE_DIMENSION_BYTES;
+                body.extend_from_slice(&chunk_elems.to_le_bytes());
+                body.extend_from_slice(&4_u64.to_le_bytes());
+                body.extend_from_slice(&suffix);
+            }
+            header = header.message(Message::new(RecordType(msg_type.to_u16()), &body));
+        }
+        let at = store.data.len() as u64;
+        store.data.extend(header.build());
+        let original = store.data.clone();
+        let Err(error) = edit::locate_dataset_state(&store, at) else {
+            panic!("expected invalid chunk geometry");
+        };
+        let Error::Format(FormatError::InvalidChunkGeometry(reason)) = error else {
+            panic!("expected InvalidChunkGeometry, got {error:?}");
+        };
+        assert_eq!(reason, expected);
+        assert_eq!(store.data, original);
+    }
+
+    #[rstest]
+    #[case::unfiltered(false)]
+    #[case::filtered(true)]
+    fn locating_append_state_reads_the_datatype_once(#[case] filtered: bool) {
+        let store = if filtered {
+            EdgeFilter::Shuffle.store()
+        } else {
+            WindowProbeStore::open(build_unlimited(6, 4))
+        };
+        let at = dataset_address(&store);
+        let walk = walk_v2_object_header(&store, at, store.widths).unwrap();
+        let datatype = walk
+            .messages
+            .iter()
+            .find(|msg| msg.msg_type == MessageType::DATATYPE)
+            .unwrap();
+        store.reset_counters();
+        let state = edit::locate_dataset_state(&store, at).unwrap();
+        assert_eq!(state.datatype, crate::type_builders::make_i32_type());
+        assert_eq!(
+            store
+                .reads
+                .borrow()
+                .iter()
+                .filter(|&&(at, len)| at == datatype.data_off && len == datatype.size)
+                .count(),
+            1,
+        );
     }
 
     #[test]
@@ -3737,4 +3801,10 @@ mod tests {
     // after the version 0 header's byte fields.
     const EA_STATS_OFFSET: u64 = 12;
     const EA_STAT_FIELDS: usize = 6;
+    // "The Data Layout Message" in the format specification, version 4.0, defines the version 4
+    // chunked-layout prefix: flags, dimensionality, and dimension-size encoded length.
+    const V4_DIMENSION_COUNT_OFFSET: usize = LAYOUT_PROPERTIES_OFFSET + 1;
+    const V4_DIMENSION_WIDTH_OFFSET: usize = V4_DIMENSION_COUNT_OFFSET + 1;
+    const V4_DIMENSIONS_OFFSET: usize = V4_DIMENSION_WIDTH_OFFSET + 1;
+    const FIXTURE_DIMENSION_BYTES: u8 = 8;
 }

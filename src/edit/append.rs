@@ -834,37 +834,24 @@ pub(crate) fn validate_gathered_append(st: &LocatedState, b: &AppendBuilder) -> 
     Ok((raw.len() / st.element_size) as u64)
 }
 
-/// Locates the dataset at `oh_addr` in `file` and builds its [`LocatedState`] for an in-place
-/// append.
+/// Reads checked geometry, the datatype, and encoding metadata for an immediate append.
 ///
-/// An in-place append accepts a dataset of rank 1 with an unlimited dimension, indexed by an
-/// Extensible Array with a nonzero chunk length, whose filter pipeline the engine can encode again.
+/// The dataset must be rank one, unlimited, and indexed by an allocated Extensible Array. The
+/// filter
+/// pipeline must be re-encodable. Unreadable fill metadata is rejected only when padding is needed.
 ///
 /// # Errors
 ///
-/// Returns [`Error::AppendInPlaceUnsupported`] if an in-place append does not accept the dataset,
-/// and [`FormatError::ChunkElementSizeMismatch`] if the layout stores an element size other than
-/// the size of the datatype. Returns the error of a read or a parse of the dataset's metadata.
+/// Returns [`Error::AppendInPlaceUnsupported`] for unsupported geometry, filters, or storage.
+/// Returns [`Error::Format`] for malformed chunk geometry or inconsistent element sizes, and
+/// metadata read and parse errors.
 pub(crate) fn locate_dataset_state<F: Store>(
     file: &F,
     oh_addr: u64,
 ) -> Result<LocatedState, Error> {
     let result = Located::locate_at(file, oh_addr, Error::AppendInPlaceUnsupported)?;
-    if result.located.chunk_elems == 0 {
-        return Err(Error::AppendInPlaceUnsupported(
-            "in-place append requires a nonzero chunk length",
-        ));
-    }
-    let (dt_off, dt_size) = result.spans.datatype;
-    let dt_bytes = file.read_metadata_at(dt_off, dt_size)?;
-    let (datatype, _) = hdf5_pure_format::__private::parse_datatype(&dt_bytes)?;
-    let element_size: NonZeroUsize = datatype.element_size()?.narrow()?;
-    if element_size != result.located.elem_bytes {
-        return Err(Error::Format(FormatError::ChunkElementSizeMismatch {
-            datatype: element_size.get(),
-            layout: result.located.elem_bytes.get(),
-        }));
-    }
+    let datatype = result.datatype;
+    let element_size = result.located.elem_bytes;
     let pipeline = match result.spans.filter {
         Some((fb, fsize)) => {
             let fp_bytes = file.read_metadata_at(fb, fsize)?;
