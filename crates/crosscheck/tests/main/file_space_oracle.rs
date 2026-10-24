@@ -14,6 +14,8 @@ use hdf5::{MajorErrorCode, MinorErrorCode};
 use hdf5_pure::{File, FileBuilder, FileSpacePageSize, FileSpaceStrategy, UserblockSize};
 use hdf5_sys::h5f;
 use rstest::rstest;
+use test_util::object_header::v2::{self, Header, HeaderFlags, Timestamps};
+use test_util::{bytes, checksum};
 use test_util_hdf5::file_space;
 use test_util_hdf5::file_space_oracle::{
     self, ExtentError, FreeSpaceOracleCheckpoint, OracleError, SectionMap,
@@ -377,6 +379,39 @@ fn rejects_c_api_error() {
     assert!(source.contains_minor(MinorErrorCode::BadType), "{source:?}");
 }
 
+#[rstest]
+#[case::plain(HeaderFlags::default())]
+#[case::attribute_thresholds(HeaderFlags::STORES_ATTRIBUTE_PHASE_CHANGE)]
+#[case::wide_chunk_size(HeaderFlags::CHUNK_SIZE_WIDTH)]
+fn timestamp_normalization_preserves_header_shape(#[case] flags: HeaderFlags) {
+    let mut first = Header::new()
+        .flags(flags)
+        .timestamps(Timestamps {
+            access: 1,
+            modification: 2,
+            change: 3,
+            birth: 4,
+        })
+        .build();
+    let mut second = Header::new()
+        .flags(flags)
+        .timestamps(Timestamps {
+            access: 5,
+            modification: 6,
+            change: 7,
+            birth: 8,
+        })
+        .build();
+    let expected = Header::new()
+        .flags(flags)
+        .timestamps(Timestamps::default())
+        .build();
+    normalize_timestamps(&mut first);
+    normalize_timestamps(&mut second);
+    assert_eq!(first, expected);
+    assert_eq!(second, expected);
+}
+
 /// Asserts exact section-map equality and snapshots the paired report with the bundled build.
 ///
 /// # Panics
@@ -394,7 +429,106 @@ fn observe(path: &Path, case: &str, step: &str) -> FreeSpaceOracleCheckpoint {
     let observation = FreeSpaceOracleCheckpoint::observe(path, case, step)
         .unwrap_or_else(|error| panic!("{case}/{step}: {error:?}"));
     observation.assert_equal();
+    capture_ownership_fixture(path, &observation);
     observation
+}
+
+/// Writes a timestamp-normalized checkpoint image during bundled test-data generation.
+///
+/// Rewrites the workload file with the same image before subsequent edits and checks that both
+/// libraries report the original section maps, sizes, and creation properties.
+///
+/// # Panics
+///
+/// Panics if a file operation or observation fails, or the normalized report differs.
+fn capture_ownership_fixture(path: &Path, expected: &FreeSpaceOracleCheckpoint) {
+    let case = &expected.case;
+    let step = &expected.step;
+    if !cfg!(feature = "__hdf5-bundled")
+        || std::env::var_os("HDF5_PURE_UPDATE_TEST_DATA").is_none()
+        || ["endurance/", "churn/", "stored-eof/"]
+            .iter()
+            .any(|prefix| case.starts_with(prefix))
+    {
+        return;
+    }
+    let name = case
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let directory = test_util::data("c/ownership").join(name);
+    fs::create_dir_all(&directory).unwrap();
+    let mut image = fs::read(path).unwrap();
+    normalize_timestamps(&mut image);
+    fs::write(path, &image).unwrap();
+    let destination = directory.join(format!("{step}.h5"));
+    fs::write(&destination, image).unwrap();
+    let normalized = FreeSpaceOracleCheckpoint::observe(&destination, case, step).unwrap();
+    normalized.assert_equal();
+    assert_eq!(normalized.render(), expected.render());
+}
+
+/// Zeros timestamps in checksum-valid version 2 object-header chunks and updates their checksums.
+///
+/// The four timestamps precede the optional attribute thresholds and chunk-size field in
+/// "Version 2 Data Object Header Prefix" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_two
+fn normalize_timestamps(image: &mut [u8]) {
+    const VERSION: u8 = 2;
+    const TIMES_LEN: usize = 4 * size_of::<u32>();
+    const PHASE_CHANGE_LEN: usize = 2 * size_of::<u16>();
+    let offsets = image
+        .windows(v2::SIGNATURE.len())
+        .enumerate()
+        .filter_map(|(at, bytes)| (bytes == v2::SIGNATURE).then_some(at))
+        .collect::<Vec<_>>();
+    for at in offsets {
+        let version = at + v2::SIGNATURE.len();
+        if image.get(version) != Some(&VERSION) {
+            continue;
+        }
+        let Some(&flags) = image.get(version + size_of::<u8>()) else {
+            continue;
+        };
+        let flags = HeaderFlags(flags);
+        if !flags.stores_times() {
+            continue;
+        }
+        let times = version + 2 * size_of::<u8>();
+        let size_at = times
+            + TIMES_LEN
+            + if flags.stores_attribute_phase_change() {
+                PHASE_CHANGE_LEN
+            } else {
+                0
+            };
+        let width = flags.chunk_size_width();
+        if image.get(size_at..size_at + width).is_none() {
+            continue;
+        }
+        let Ok(chunk_len) = usize::try_from(bytes::uint_at(image, size_at, width)) else {
+            continue;
+        };
+        let Some(end) = (size_at + width).checked_add(chunk_len) else {
+            continue;
+        };
+        let Some(chunk) = image.get(at..end) else {
+            continue;
+        };
+        if image.get(end..end + checksum::CHECKSUM) != Some(&checksum::lookup3(chunk).to_le_bytes())
+        {
+            continue;
+        }
+        image[times..times + TIMES_LEN].fill(0);
+        checksum::restamp(image, at, end + checksum::CHECKSUM - at);
+    }
 }
 
 fn append_checkpoint(out: &mut String, path: &Path, case: &str, step: &str, persist: bool) {

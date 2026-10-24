@@ -1,0 +1,5 @@
+---
+source: src/storage_tests/c_origin.rs
+expression: report
+---
+persisted: complete=true physical=27360 logical=27360 userblock=512/1 raw=23200/3 metadata=1155/6 manager=252/4 reusable=2241/3 unclassified=0/0 trailing=0/0

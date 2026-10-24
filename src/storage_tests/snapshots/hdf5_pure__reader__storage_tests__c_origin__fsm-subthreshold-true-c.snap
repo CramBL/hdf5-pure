@@ -1,0 +1,6 @@
+---
+source: src/storage_tests/c_origin.rs
+expression: report
+---
+c-close: complete=true physical=8124 logical=8124 userblock=0/0 raw=4896/3 metadata=1155/6 manager=0/0 reusable=0/0 unclassified=2073/4 trailing=0/0
+rust-close: complete=true physical=8255 logical=8255 userblock=0/0 raw=4896/3 metadata=1139/6 manager=0/0 reusable=0/0 unclassified=2220/4 trailing=0/0

@@ -1,0 +1,5 @@
+---
+source: src/storage_tests/c_origin.rs
+expression: report
+---
+persisted: unavailable=only 8-byte offsets and lengths are supported for in-place editing

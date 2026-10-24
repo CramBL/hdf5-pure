@@ -1,0 +1,14 @@
+---
+source: src/storage_tests/c_origin.rs
+expression: report
+---
+c-delete: complete=true physical=114688 logical=114688 userblock=0/0 raw=800/2 metadata=305/5 manager=0/0 reusable=0/0 unclassified=113583/5 trailing=0/0
+c-reuse: complete=true physical=114688 logical=114688 userblock=0/0 raw=12800/3 metadata=624/7 manager=0/0 reusable=0/0 unclassified=101264/7 trailing=0/0
+created: complete=true physical=24576 logical=24576 userblock=0/0 raw=17184/3 metadata=392/6 manager=0/0 reusable=0/0 unclassified=7000/2 trailing=0/0
+manager-rewrite-0: complete=true physical=49152 logical=49152 userblock=0/0 raw=800/2 metadata=305/5 manager=0/0 reusable=0/0 unclassified=48047/5 trailing=0/0
+manager-rewrite-1: complete=true physical=73728 logical=73728 userblock=0/0 raw=800/2 metadata=305/5 manager=0/0 reusable=0/0 unclassified=72623/5 trailing=0/0
+manager-rewrite-2: complete=true physical=98304 logical=98304 userblock=0/0 raw=800/2 metadata=305/5 manager=0/0 reusable=0/0 unclassified=97199/5 trailing=0/0
+rust-deletion: complete=true physical=28672 logical=28672 userblock=0/0 raw=800/2 metadata=305/5 manager=0/0 reusable=0/0 unclassified=27567/5 trailing=0/0
+rust-reuse-0: complete=true physical=45056 logical=45056 userblock=0/0 raw=12800/3 metadata=402/6 manager=0/0 reusable=0/0 unclassified=31854/6 trailing=0/0
+rust-reuse-1: complete=true physical=69632 logical=69632 userblock=0/0 raw=13200/3 metadata=402/6 manager=0/0 reusable=0/0 unclassified=56030/6 trailing=0/0
+rust-reuse-2: complete=true physical=94208 logical=94208 userblock=0/0 raw=13600/3 metadata=402/6 manager=0/0 reusable=0/0 unclassified=80206/6 trailing=0/0

@@ -2,6 +2,9 @@
 
 `1.8/` holds files HDF5 1.8.23 wrote, described there.
 
+`ownership/` holds closed-file checkpoints from workloads using both libraries. Their writers,
+private ownership checks, and regeneration are described in [OWNERSHIP.md](OWNERSHIP.md).
+
 The files listed below are written by `crates/crosscheck/tests/main/c_test_data.rs` for unit tests
 that need what only the C library writes, and `just test-data::c` rewrites them
 with the release `hdf5-metno` bundles:
