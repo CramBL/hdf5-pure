@@ -56,11 +56,94 @@ use test_util::widths::Widths;
 use test_util_hdf5::absence;
 use test_util_hdf5::dataset::Unlimited;
 use test_util_hdf5::file_space;
+use test_util_hdf5::file_space_oracle::FreeSpaceOracleCheckpoint;
 use test_util_hdf5::file_space_oracle::SectionMap;
 use test_util_hdf5::paged;
 use test_util_hdf5::session;
 use test_util_hdf5::storage;
 use test_util_hdf5::userblock;
+
+#[rstest]
+#[case::large_threshold(4_096, false)]
+#[case::maximum_threshold(u64::MAX, false)]
+#[case::cyclic_layout(4_096, true)]
+fn c_written_fixed_width_root_updates_reclaim_the_root_allocation(
+    #[case] threshold: u64,
+    #[case] cycle: bool,
+    #[values(false, true)] alias: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("root-reclamation.h5");
+    {
+        let file = hdf5::FileBuilder::new()
+            .with_fapl(|fapl| fapl.libver_v110())
+            .with_fcpl(|fcpl| fcpl.file_space_strategy(fsm_aggr(true, threshold)))
+            .create(&path)
+            .unwrap();
+        file.new_dataset::<i32>()
+            .shape([3])
+            .create("keep")
+            .unwrap()
+            .write_raw(&[1, 2, 3])
+            .unwrap();
+        file.new_attr::<i64>()
+            .create("generation")
+            .unwrap()
+            .write_scalar(&-1)
+            .unwrap();
+        if alias {
+            file.link_hard("/", "root_alias").unwrap();
+        }
+        if cycle {
+            file.create_group("cycle")
+                .unwrap()
+                .link_hard(".", "again")
+                .unwrap();
+        }
+        file.close().unwrap();
+    }
+    let mut roots = Vec::new();
+    for generation in 0..6 {
+        let file = File::open_rw(&path).unwrap();
+        file.root()
+            .set_attr("generation", AttrValue::I64(generation))
+            .unwrap();
+        file.commit().unwrap();
+        roots.push(file.superblock().root_group_address);
+        file.close().unwrap();
+        FreeSpaceOracleCheckpoint::observe(&path, "root-reclamation", "updated")
+            .unwrap()
+            .assert_equal();
+        let file = hdf5::File::open(&path).unwrap();
+        assert_eq!(
+            file.attr("generation")
+                .unwrap()
+                .read_scalar::<i64>()
+                .unwrap(),
+            generation
+        );
+        assert_eq!(
+            file.dataset("keep").unwrap().read_raw::<i32>().unwrap(),
+            [1, 2, 3]
+        );
+        if alias {
+            assert_eq!(
+                file.group("root_alias")
+                    .unwrap()
+                    .attr("generation")
+                    .unwrap()
+                    .read_scalar::<i64>()
+                    .unwrap(),
+                -1
+            );
+        }
+        if cycle {
+            assert!(file.link_exists("cycle/again/again"));
+        }
+        file.close().unwrap();
+    }
+    assert!(roots[2..].iter().all(|&root| root == roots[2]), "{roots:?}");
+}
 
 #[rstest]
 #[case::before_exact_fill(false, 512, 0, 17, 512)]
