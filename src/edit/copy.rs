@@ -495,9 +495,12 @@ impl WriteEngine {
                 // Preserve an undefined data address without allocating a data block.
                 if let Some(data) = data {
                     let new_data_addr = self.alloc_or_append_typed(data, AllocationClass::Raw)?;
-                    let relative = base.relative(new_data_addr)?.get();
-                    region.bytes_mut()[*addr_off..*addr_off + 8]
-                        .copy_from_slice(&relative.to_le_bytes());
+                    hdf5_pure_format::__private::write_stored_address_at(
+                        region.bytes_mut(),
+                        *addr_off,
+                        base.relative(new_data_addr)?,
+                        OFFSET_WIDTH,
+                    )?;
                 }
                 self.append_dense_attrs(&mut region, dense_attrs.clone())?;
                 let oh = super::object_header::build_v2_object_header(&region)?;
