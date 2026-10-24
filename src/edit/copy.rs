@@ -23,11 +23,12 @@ use crate::object_path::ObjectPathBuf;
 use crate::source::{BaseOffsetSource, BytesSource, Source};
 use crate::width::FormatWidths;
 
+use super::attributes::{self, DenseAttrSet};
 use super::dataset::{self, ChunkGeometry};
 use super::group;
 use super::object_header::OhRegion;
 use super::staging::StagedOp;
-use super::{DenseAttrSet, InvalidatedAddresses, WriteEngine};
+use super::{InvalidatedAddresses, WriteEngine};
 
 impl WriteEngine {
     /// Stages a deep copy of a committed object for the next [`commit`](Self::commit).
@@ -153,8 +154,8 @@ impl WriteEngine {
 
         // Read dense attributes into owned messages and check that they can be serialized.
         let dense_attrs = if dense {
-            let stored = super::read_object_attrs(src, access_mode, addr, base)?;
-            let set = super::dense_attr_set(&region, stored)?;
+            let stored = attributes::read_object_attrs(src, access_mode, addr, base)?;
+            let set = attributes::dense_attr_set(&region, stored)?;
             crate::file_writer::dense_attrs_check(&set.attrs).map_err(Error::Format)?;
             set
         } else {

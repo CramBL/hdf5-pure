@@ -27,7 +27,6 @@ use crate::data_layout::COMPACT_DATA_OFFSET;
 use crate::datatype;
 use crate::datatype::Datatype;
 use crate::edit;
-use crate::edit::DenseAttrSet;
 use crate::edit::InvalidatedAddresses;
 use crate::edit::LinkCreationOrder;
 use crate::edit::Node;
@@ -35,6 +34,7 @@ use crate::edit::OhRegion;
 use crate::edit::SHARED_MESSAGE_INDEX_NAMES_A_MOVED_OBJECT;
 use crate::edit::UNDEF;
 use crate::edit::WriteEngine;
+use crate::edit::attributes::DenseAttrSet;
 use crate::edit::copy::{self, CopyTree};
 use crate::edit::group::GROUP_INFO_BODY;
 use crate::error::Error;
@@ -85,14 +85,14 @@ fn shared_attribute_detection_uses_attribute_message_flags() {
         .serialize(crate::file_writer::OFFSET_WIDTH, LENGTH_SIZE)
         .unwrap();
     let private = message_record(MessageType::ATTRIBUTE, &body);
-    assert!(!edit::region_has_shared_attr(&plain_region(private.clone())).unwrap());
+    assert!(!edit::attributes::region_has_shared_attr(&plain_region(private.clone())).unwrap());
 
     let mut shared = private.clone();
     shared[3] = MessageFlags::SHARED.get();
-    assert!(edit::region_has_shared_attr(&plain_region(shared)).unwrap());
+    assert!(edit::attributes::region_has_shared_attr(&plain_region(shared)).unwrap());
     let mut other = message_record(MessageType::DATASPACE, &body);
     other[3] = MessageFlags::SHARED.get();
-    assert!(!edit::region_has_shared_attr(&plain_region(other)).unwrap());
+    assert!(!edit::attributes::region_has_shared_attr(&plain_region(other)).unwrap());
 }
 
 #[test]
@@ -722,7 +722,7 @@ fn a_rewrapped_shared_message_keeps_its_flag() {
     let mut region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
     region.push_shared(MessageType::ATTRIBUTE, &[3, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
     assert_eq!(region[3], MessageFlags::SHARED.get());
-    assert!(edit::region_has_shared_attr(&region).unwrap());
+    assert!(edit::attributes::region_has_shared_attr(&region).unwrap());
 }
 
 #[test]
@@ -888,7 +888,7 @@ fn a_prefix_truncated_inside_an_optional_block_is_rejected() {
 #[test]
 fn a_new_compact_attribute_takes_the_next_creation_index() {
     let region = attr_region(TRACKED, &[("alpha", 0), ("beta", 1)], 2);
-    let out = edit::set_attr_in_region(&region, "gamma", &AttrValue::I64(5)).unwrap();
+    let out = edit::attributes::set_attr_in_region(&region, "gamma", &AttrValue::I64(5)).unwrap();
     assert_eq!(
         walk_attrs(&out),
         vec![
@@ -897,7 +897,7 @@ fn a_new_compact_attribute_takes_the_next_creation_index() {
             ("gamma".to_string(), Some(2)),
         ],
     );
-    let (record, _, info) = edit::find_attribute_info(&out)
+    let (record, _, info) = edit::attributes::find_attribute_info(&out)
         .unwrap()
         .expect("an info message");
     assert_eq!(info.max_creation_index, Some(3));
@@ -916,10 +916,10 @@ fn a_new_compact_attribute_takes_the_next_creation_index() {
 fn an_overwritten_compact_attribute_keeps_its_creation_index() {
     let region = attr_region(TRACKED, &[("alpha", 0), ("beta", 1)], 2);
     assert_eq!(
-        edit::attr_creation_index(&region, "alpha").unwrap(),
+        edit::attributes::attr_creation_index(&region, "alpha").unwrap(),
         Some(0)
     );
-    let out = edit::set_attr_in_region(&region, "alpha", &AttrValue::I64(9)).unwrap();
+    let out = edit::attributes::set_attr_in_region(&region, "alpha", &AttrValue::I64(9)).unwrap();
     assert_eq!(
         walk_attrs(&out),
         vec![
@@ -927,7 +927,7 @@ fn an_overwritten_compact_attribute_keeps_its_creation_index() {
             ("alpha".to_string(), Some(0))
         ],
     );
-    let (_, _, info) = edit::find_attribute_info(&out)
+    let (_, _, info) = edit::attributes::find_attribute_info(&out)
         .unwrap()
         .expect("an info message");
     assert_eq!(
@@ -940,7 +940,7 @@ fn an_overwritten_compact_attribute_keeps_its_creation_index() {
 #[test]
 fn a_deletion_leaves_the_creation_index_counter_where_it_was() {
     let region = attr_region(TRACKED, &[("alpha", 0), ("beta", 1), ("gamma", 2)], 3);
-    let after = edit::remove_attr_from_region(&region, "gamma", true).unwrap();
+    let after = edit::attributes::remove_attr_from_region(&region, "gamma", true).unwrap();
     assert_eq!(
         walk_attrs(&after),
         vec![
@@ -949,13 +949,17 @@ fn a_deletion_leaves_the_creation_index_counter_where_it_was() {
         ],
     );
     assert_eq!(
-        edit::next_attr_creation_index(&after).unwrap(),
+        edit::attributes::next_attr_creation_index(&after).unwrap(),
         3,
         "the highest index still in use is 1, but the counter is 3"
     );
 
-    let out = edit::put_attr_message(&after, "delta", &attr_body("delta", 1), None).unwrap();
-    assert_eq!(edit::attr_creation_index(&out, "delta").unwrap(), Some(3));
+    let out =
+        edit::attributes::put_attr_message(&after, "delta", &attr_body("delta", 1), None).unwrap();
+    assert_eq!(
+        edit::attributes::attr_creation_index(&out, "delta").unwrap(),
+        Some(3)
+    );
 }
 
 #[test]
@@ -970,9 +974,13 @@ fn a_tracked_header_without_an_info_message_gains_one() {
         );
         region.push_bytes(&record);
     }
-    assert!(edit::find_attribute_info(&region).unwrap().is_none());
-    edit::ensure_attribute_info(&mut region).unwrap();
-    let (_, _, info) = edit::find_attribute_info(&region)
+    assert!(
+        edit::attributes::find_attribute_info(&region)
+            .unwrap()
+            .is_none()
+    );
+    edit::attributes::ensure_attribute_info(&mut region).unwrap();
+    let (_, _, info) = edit::attributes::find_attribute_info(&region)
         .unwrap()
         .expect("an info message");
     assert_eq!(info.max_creation_index, Some(5));
@@ -1424,7 +1432,8 @@ fn walk_attrs(region: &OhRegion) -> Vec<(String, Option<u16>)> {
     let mut p = 0;
     while let Some((msg_type, body, body_end)) = region.next_message(p).unwrap() {
         if msg_type == MessageType::ATTRIBUTE {
-            let name = edit::parse_compact_attr_name(region, p, body, body_end).unwrap();
+            let name =
+                edit::attributes::parse_compact_attr_name(region, p, body, body_end).unwrap();
             out.push((name, region.creation_index(p)));
         }
         p = body_end;

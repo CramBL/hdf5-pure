@@ -47,13 +47,11 @@ use crate::type_builders::{
 use crate::width::FormatWidths;
 
 use super::append;
+use super::attributes::{DenseAttrSet, EditedAttrs};
 use super::staging::{StagedKind, StagedOp};
 use crate::file_writer::DenseAttrCreationOrder;
 
-use super::{
-    AppendBuilder, DenseAttrSet, EditedAttrs, LOSSY_TAIL_REFUSAL, OhRegion, Placement, UNDEF,
-    WriteEngine,
-};
+use super::{AppendBuilder, LOSSY_TAIL_REFUSAL, OhRegion, Placement, UNDEF, WriteEngine};
 
 impl WriteEngine {
     /// Stages a prepared dataset for creation at `path` on the next [`commit`](Self::commit).

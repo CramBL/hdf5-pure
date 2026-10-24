@@ -565,17 +565,18 @@ pub(super) fn modernize_shared_reference(
 
 /// Builds a single-chunk version 2 header with normalized attribute information.
 ///
-/// Calls [`super::ensure_attribute_info`] before serializing the prefix, records, and checksum.
+/// Calls [`super::attributes::ensure_attribute_info`] before serializing the prefix, records,
+/// and checksum.
 /// Preserves the prefix's optional fields and updates existing modification and change times
 /// when the system clock is available.
 ///
 /// # Errors
 ///
 /// Returns [`Error::EditUnsupported`] if a record extends past the region. Propagates other
-/// errors from [`super::ensure_attribute_info`].
+/// errors from [`super::attributes::ensure_attribute_info`].
 pub(crate) fn build_v2_object_header(region: &OhRegion) -> Result<Vec<u8>, Error> {
     let mut owned = region.clone();
-    super::ensure_attribute_info(&mut owned)?;
+    super::attributes::ensure_attribute_info(&mut owned)?;
     Ok(build_v2_object_header_verbatim(&owned))
 }
 

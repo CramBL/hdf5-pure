@@ -2,15 +2,15 @@
 
 use std::collections::{HashMap, HashSet};
 
+use super::attributes::AttrOp;
 use super::copy::CopyTree;
-use super::{AppendBuilder, AttrOp, FlatDataset, WriteEngine};
+use super::{AppendBuilder, FlatDataset, WriteEngine};
 use crate::access_mode::AccessMode;
 use crate::dataspace::MaxExtent;
 use crate::datatype::Datatype;
 use crate::error::Error;
 use crate::layout_info::FilterId;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
-use crate::type_builders::AttrValue;
 
 impl WriteEngine {
     /// Rolls back the additions made by `f` if it returns an error.
@@ -51,95 +51,6 @@ impl WriteEngine {
         self.refuse_if_claimed(path)?;
         self.refuse_creation_collision(path, StagedKind::Group)?;
         self.staged.push_group(path.clone());
-        Ok(())
-    }
-
-    /// Stages an attribute addition or replacement for the next [`commit`](Self::commit).
-    ///
-    /// The group may be committed or staged. [`super::plan_attr_ops`] plans attribute storage
-    /// when the commit rebuilds its header.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::EditUnsupported`] if a live buffered appender overlaps `path`.
-    pub fn set_group_attr(
-        &mut self,
-        path: &ObjectPathBuf,
-        name: &str,
-        value: AttrValue,
-    ) -> Result<(), Error> {
-        self.refuse_if_claimed(path)?;
-        self.staged.push(StagedOp::EditGroupAttribute(
-            path.clone(),
-            AttrOp::Set {
-                name: name.to_string(),
-                value,
-            },
-        ));
-        Ok(())
-    }
-
-    /// Stages attribute removal from a group for the next [`commit`](Self::commit).
-    ///
-    /// The attribute must exist after earlier staged attribute operations are applied.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::EditUnsupported`] if a live buffered appender overlaps `path`.
-    pub fn remove_group_attr(&mut self, path: &ObjectPathBuf, name: &str) -> Result<(), Error> {
-        self.refuse_if_claimed(path)?;
-        self.staged.push(StagedOp::EditGroupAttribute(
-            path.clone(),
-            AttrOp::Remove {
-                name: name.to_string(),
-            },
-        ));
-        Ok(())
-    }
-
-    /// Stages an attribute addition or replacement on a committed dataset.
-    ///
-    /// The next [`commit`](Self::commit) relocates the dataset header and requires a single
-    /// hard link. To set attributes on a staged creation, use
-    /// [`DatasetBuilder::set_attr`](crate::DatasetBuilder::set_attr) before staging it.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::EditUnsupported`] if a live buffered appender overlaps `path`.
-    pub fn set_dataset_attr(
-        &mut self,
-        path: &ObjectPathBuf,
-        name: &str,
-        value: AttrValue,
-    ) -> Result<(), Error> {
-        self.refuse_if_claimed(path)?;
-        self.staged.push(StagedOp::EditDatasetAttribute(
-            path.clone(),
-            AttrOp::Set {
-                name: name.to_string(),
-                value,
-            },
-        ));
-        Ok(())
-    }
-
-    /// Stages attribute removal from a committed dataset.
-    ///
-    /// The attribute must exist after earlier staged attribute operations are applied.
-    /// The next [`commit`](Self::commit) relocates the dataset header and requires a single
-    /// hard link.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::EditUnsupported`] if a live buffered appender overlaps `path`.
-    pub fn remove_dataset_attr(&mut self, path: &ObjectPathBuf, name: &str) -> Result<(), Error> {
-        self.refuse_if_claimed(path)?;
-        self.staged.push(StagedOp::EditDatasetAttribute(
-            path.clone(),
-            AttrOp::Remove {
-                name: name.to_string(),
-            },
-        ));
         Ok(())
     }
 
