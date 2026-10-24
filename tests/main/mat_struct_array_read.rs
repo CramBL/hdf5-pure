@@ -9,9 +9,11 @@
 
 use hdf5_pure::mat;
 use serde::Deserialize;
+use serde::de::IgnoredAny;
 use test_util_hdf5::mat_file;
 
 const FIXTURE: &str = "tests/data/h5py/mat/struct_array_v73.mat";
+const MISMATCHED_FIXTURE: &str = "tests/data/h5py/mat/struct_array_mismatched_v73.mat";
 
 #[derive(Deserialize, Debug, PartialEq)]
 #[allow(non_snake_case)]
@@ -140,6 +142,25 @@ fn nested_scalar_struct_in_array_decodes() {
             },
         ]
     );
+}
+
+/// A struct array whose fields hold the same number of references in different
+/// dimensions is rejected. Read anyway, the transpose would pair the wrong elements.
+#[test]
+fn a_struct_array_field_of_other_dimensions_is_rejected() {
+    let bytes = mat_file::read_fixture(MISMATCHED_FIXTURE);
+    let err = mat::from_bytes::<IgnoredAny>(&bytes).unwrap_err();
+    let mat::MatError::StructArrayFieldShape {
+        field,
+        expected,
+        actual,
+    } = &err
+    else {
+        panic!("expected StructArrayFieldShape, got {err:?}");
+    };
+    assert_eq!(field, "b");
+    assert_eq!(expected, &[3, 2]);
+    assert_eq!(actual, &[2, 3]);
 }
 
 /// Regression guard: a scalar (1×1) struct must still read as a single struct,

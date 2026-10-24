@@ -178,7 +178,8 @@ fn read_struct_array(
 
     // Every field's reference dataset shares the struct array's dimensions.
     let first = group.dataset(first_name).map_err(MatError::Hdf5)?;
-    let (rows, cols, total) = shape_decomposition(&first.shape().map_err(MatError::Hdf5)?)?;
+    let shape = first.shape().map_err(MatError::Hdf5)?;
+    let (rows, cols, total) = shape_decomposition(&shape)?;
 
     // Decode each field's per-element values in column-major storage order. Each
     // value is wrapped in `Option` so the transpose below can move it out exactly
@@ -186,6 +187,16 @@ fn read_struct_array(
     let mut columns: Vec<(String, Vec<Option<MatValue>>)> = Vec::with_capacity(field_names.len());
     for name in &field_names {
         let ds = group.dataset(name).map_err(MatError::Hdf5)?;
+        // MATLAB writes every field in the array's dimensions. A malformed file may store a
+        // field in other dimensions with the same element count, which would mix up elements.
+        let field_shape = ds.shape().map_err(MatError::Hdf5)?;
+        if field_shape != shape {
+            return Err(MatError::StructArrayFieldShape {
+                field: name.clone(),
+                expected: shape,
+                actual: field_shape,
+            });
+        }
         let members = ds.dereference().map_err(MatError::Hdf5)?;
         if members.len() != total {
             return Err(MatError::Custom(format!(

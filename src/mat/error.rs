@@ -34,6 +34,18 @@ pub enum MatError {
         /// What the file contained.
         actual: String,
     },
+    /// A field of a struct array has different dimensions from the array's first field.
+    ///
+    /// Every field holds one reference per array element, so all fields share the array's
+    /// dimensions.
+    StructArrayFieldShape {
+        /// The field whose dimensions differ.
+        field: String,
+        /// The array's dimensions, as the file stores them.
+        expected: Vec<u64>,
+        /// The field's dimensions, as the file stores them.
+        actual: Vec<u64>,
+    },
     /// A required struct field was missing from the file.
     MissingField(String),
     /// A `MATLAB_class` attribute value wasn't recognized.
@@ -166,6 +178,14 @@ impl fmt::Display for MatError {
             MatError::ShapeMismatch { expected, actual } => {
                 write!(f, "shape mismatch: expected {expected}, got {actual}")
             }
+            MatError::StructArrayFieldShape {
+                field,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "struct array field {field:?} has dimensions {actual:?}, not the array's {expected:?}"
+            ),
             MatError::MissingField(name) => write!(f, "missing required field: {name}"),
             MatError::UnknownClass(c) => write!(f, "unknown MATLAB_class: {c:?}"),
             MatError::UnsupportedMatlabClass(c) => write!(
