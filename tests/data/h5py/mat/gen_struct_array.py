@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = "==3.14.*"
+# dependencies = [
+#     "h5py==3.16.0",
+#     "numpy==2.4.4",
+# ]
+# ///
 """Generate `struct_array_v73.mat`, a synthetic MATLAB v7.3 file exercising the
 struct-*array* on-disk layout (issue #127).
 
@@ -16,7 +23,8 @@ implemented by the `foreverallama/matio` writer (`matwriter7.write_struct_array`
 A scalar (1x1) struct, by contrast, stores its fields as direct value datasets;
 `scalar` below pins that the reader still treats those as a struct, not an array.
 
-Regenerate with:  python3 tests/data/h5py/mat/gen_struct_array.py
+Regenerate both files with `just test-data::mat`. `--mismatched` writes
+only `struct_array_mismatched_v73.mat`, a malformed struct array.
 """
 
 import sys
@@ -161,5 +169,25 @@ def main(out):
     print("wrote", out)
 
 
+def main_mismatched(out):
+    """`mismatched`: a malformed 2x3 struct array whose field `b` is stored 3x2.
+    Both fields hold six references, so only their dimensions tell them apart."""
+    with h5py.File(out, "w", userblock_size=512) as f:
+        g = Gen(f)
+        mg = f.create_group("mismatched")
+        add_class(mg, "struct")
+        for field, shape in [("a", (2, 3)), ("b", (3, 2))]:
+            refs = np.empty(shape, dtype=h5py.ref_dtype)
+            for flat in range(6):
+                refs[np.unravel_index(flat, shape)] = g.double_scalar(float(flat)).ref
+            mg.create_dataset(field, data=refs.T, dtype=h5py.ref_dtype)
+        set_fields(mg, ["a", "b"])
+
+    print("wrote", out)
+
+
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "struct_array_v73.mat")
+    if len(sys.argv) > 1 and sys.argv[1] == "--mismatched":
+        main_mismatched(sys.argv[2] if len(sys.argv) > 2 else "struct_array_mismatched_v73.mat")
+    else:
+        main(sys.argv[1] if len(sys.argv) > 1 else "struct_array_v73.mat")

@@ -19,5 +19,19 @@ guard). Read and asserted by `tests/main/mat_struct_array_read.rs`.
 Regenerate with:
 
 ```
-python3 tests/data/h5py/mat/gen_struct_array.py tests/data/h5py/mat/struct_array_v73.mat
+uv run tests/data/h5py/mat/gen_struct_array.py tests/data/h5py/mat/struct_array_v73.mat
 ```
+
+## `struct_array_mismatched_v73.mat`
+
+A malformed struct array: `mismatched` is 2×3, and its field `b` is stored 3×2.
+Both fields hold six references, so only their dimensions tell them apart. Read
+by `tests/main/mat_struct_array_read.rs`, which checks that the read fails.
+
+Regenerate with:
+
+```
+uv run tests/data/h5py/mat/gen_struct_array.py --mismatched tests/data/h5py/mat/struct_array_mismatched_v73.mat
+```
+
+`just test-data::mat` regenerates both files.

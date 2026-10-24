@@ -47,6 +47,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `mat::from_file` and related deserialization pairing the wrong elements of struct arrays whose fields have different dimensions ([#877](https://github.com/CramBL/hdf5-pure/pull/877)).
 - Fixed `Dataset::shape` and related reads or edits accepting malformed fractal-heap metadata or panicking on invalid identifiers ([#722](https://github.com/CramBL/hdf5-pure/pull/722), [#724](https://github.com/CramBL/hdf5-pure/pull/724), [#749](https://github.com/CramBL/hdf5-pure/pull/749), [#750](https://github.com/CramBL/hdf5-pure/pull/750)).
 - Fixed inconsistent truncated-superblock errors and lost file positions in `FormatError` end-of-file diagnostics ([#780](https://github.com/CramBL/hdf5-pure/pull/780), [#813](https://github.com/CramBL/hdf5-pure/pull/813)).
 - Fixed overflowing or saturated chunk byte counts in `Dataset::write_staged` and related chunked edits ([#868](https://github.com/CramBL/hdf5-pure/pull/868)).
