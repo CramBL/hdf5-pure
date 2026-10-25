@@ -701,6 +701,49 @@ mod tests {
     const EXTENT_AT: u64 = PAGE + 1024;
     const THRESHOLD_OF_THREE_PAGES: u64 = 3 * PAGE;
 
+    #[test]
+    fn page_mutations_update_and_restore_cached_totals() {
+        let mut paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
+        let totals = |paged: &PagedEdit| {
+            [
+                paged.meta.total_bytes(),
+                paged.raw.total_bytes(),
+                paged.dead.total_bytes(),
+                paged.unclassified.total_bytes(),
+            ]
+        };
+        paged.seed(extent(PAGE, PAGE / 2), Some(PageType::Meta));
+        paged.track(extent(PAGE + PAGE / 2, PAGE / 2), FreeClass::Dead);
+        paged.seed(extent(3 * PAGE + 100, 50), None);
+        assert_eq!(totals(&paged), [PAGE / 2, 0, PAGE / 2, 50]);
+        paged.finish_seed();
+        assert_eq!(totals(&paged), [0, PAGE, 0, 50]);
+        let snapshot = paged.allocation_snapshot();
+        assert_eq!(paged.allocate(100, PageType::Meta), Some(extent(PAGE, 100)));
+        assert_eq!(totals(&paged), [PAGE - 100, 0, 0, 50]);
+        paged.restore_allocation(snapshot);
+        assert_eq!(totals(&paged), [0, PAGE, 0, 50]);
+        let (post, eoa) = paged.post_free(
+            1,
+            6 * PAGE,
+            [(extent(2 * PAGE, 100), PageType::Raw.into())],
+            [extent(4 * PAGE + 100, 50)],
+        );
+        assert_eq!(eoa, 6 * PAGE);
+        assert_eq!(
+            [
+                post.meta.total_bytes(),
+                post.raw.total_bytes(),
+                post.dead.total_bytes(),
+                post.unclassified.total_bytes(),
+            ],
+            [50, PAGE + 100, 0, 50]
+        );
+        assert_eq!(totals(&paged), [0, PAGE, 0, 50]);
+        paged.adopt_post_free(post, false, None);
+        assert_eq!(totals(&paged), [50, PAGE + 100, 0, 50]);
+    }
+
     #[rstest::rstest]
     #[case::below_threshold(8_192, 200)]
     #[case::page_tail(1, 512)]
@@ -1161,6 +1204,15 @@ mod tests {
     }
 
     fn paged_sections(post: &PagedPostFree) -> [Vec<(u64, u64)>; 3] {
+        for list in [&post.meta, &post.raw, &post.dead, &post.unclassified] {
+            assert_eq!(
+                u128::from(list.total_bytes()),
+                list.extents()
+                    .iter()
+                    .map(|extent| u128::from(extent.len()))
+                    .sum::<u128>()
+            );
+        }
         [&post.meta, &post.raw, &post.dead].map(FreeList::sections)
     }
     fn extent(start: u64, len: u64) -> Extent {
