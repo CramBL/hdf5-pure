@@ -1,11 +1,14 @@
 //! Storage reclamation, page classification, free lists, and append reserves.
 
+use core::num::NonZeroU64;
 use std::path::Path;
 
 use hdf5_pure_format::__private::FractalHeapHeader;
+use hdf5_pure_space::__private::AGGREGATE_BLOCK_SIZE;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::Extent as FreeExtent;
 use hdf5_pure_space::__private::FreeClass;
+use hdf5_pure_space::__private::FreeList;
 use hdf5_pure_space::__private::ManagerKind;
 use hdf5_pure_space::__private::ManagerSections;
 use hdf5_pure_space::__private::PageType;
@@ -38,6 +41,7 @@ use crate::edit::Placement;
 use crate::edit::SyncPolicy;
 use crate::edit::TailPlacement;
 use crate::edit::WriteEngine;
+use crate::edit::aggregation::AggregateSpace;
 use crate::edit::reclaim;
 use crate::error::Error;
 use crate::error::FormatError;
@@ -63,6 +67,80 @@ use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 use crate::writer::FileBuilder;
+
+#[rstest]
+#[case::flat(FileSpaceStrategy::FsmAggr)]
+#[case::page(FileSpaceStrategy::Page)]
+fn reusable_space_stats_include_and_release_append_reserves(#[case] strategy: FileSpaceStrategy) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("reserve-summary.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_strategy(strategy, true, 1);
+    builder
+        .create_dataset("scratch")
+        .with_i32_data(&vec![1; 32_768]);
+    builder
+        .create_dataset("keep")
+        .with_i32_data(&vec![2; 4_096]);
+    builder.write(&path).unwrap();
+    let mut session = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+    session.delete(&ObjectPathBuf::parse("/scratch")).unwrap();
+    session.commit().unwrap();
+    session.reserve_for_immediate_append(16_384).unwrap();
+    assert!(session.reserved.total_bytes() >= 16_384);
+    let reserved = session.reusable_space_stats().unwrap();
+    let accounting = session.space_accounting().unwrap();
+    assert_eq!(
+        (reserved.logical_size(), reserved.reusable_free_bytes()),
+        (accounting.logical_size, accounting.reusable_free_bytes)
+    );
+    session.release_reserve();
+    assert!(session.reserved.is_empty());
+    assert_eq!(session.reusable_space_stats().unwrap(), reserved);
+}
+
+#[rstest]
+#[case::reserve(true, 1)]
+#[case::aggregate(false, AGGREGATE_BLOCK_SIZE - 1)]
+fn reusable_space_stats_check_additional_byte_sums(#[case] reserve: bool, #[case] expected: u64) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("summary-overflow.h5");
+    FileBuilder::new().write(&path).unwrap();
+    let mut session = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+    session.space = SessionSpace::from_strategy(
+        Some(FileSpaceStrategy::FsmAggr),
+        1,
+        FileSpacePageSize::DEFAULT,
+    );
+    session.aggregation = None;
+    session
+        .space
+        .seed_persisted(None, FreeExtent::new(0, u64::MAX).unwrap());
+    if reserve {
+        session.reserved.free(FreeExtent::new(0, 1).unwrap());
+    } else {
+        let mut aggregation = AggregateSpace::new(session.end_of_allocation().unwrap().get());
+        aggregation
+            .reserve(
+                session.addresses,
+                &mut session.space,
+                NonZeroU64::new(1).unwrap(),
+                AllocationClass::Raw,
+            )
+            .unwrap();
+        session.aggregation = Some(aggregation);
+    }
+    assert_eq!(
+        session.reusable_space_stats().unwrap_err(),
+        FormatError::OffsetOverflow {
+            offset: u64::MAX,
+            length: expected
+        }
+    );
+    session.aggregation = None;
+    session.reserved = FreeList::new();
+    session.space = SessionSpace::Disabled;
+}
 
 #[rstest]
 #[case::index(AllocationClass::Metadata)]
@@ -1237,6 +1315,7 @@ fn failed_persistent_commit_preserves_live_bytes_and_reusable_space(
         bytes
     };
     let before = live_bytes(&s);
+    let summary_before = s.reusable_space_stats().unwrap();
 
     let good_ext = s.superblock.superblock_extension_address;
     s.superblock.superblock_extension_address = Some(StoredAddress::ZERO);
@@ -1252,6 +1331,19 @@ fn failed_persistent_commit_preserves_live_bytes_and_reusable_space(
 
     assert_eq!(s.superblock.eof_address, eof);
     assert_eq!(s.space_accounting().unwrap().reusable_free_space, free);
+    let summary_after = s.reusable_space_stats().unwrap();
+    let accounting = s.space_accounting().unwrap();
+    assert_eq!(
+        summary_after.reusable_free_bytes(),
+        summary_before.reusable_free_bytes()
+    );
+    assert_eq!(
+        (
+            summary_after.logical_size(),
+            summary_after.reusable_free_bytes()
+        ),
+        (accounting.logical_size, accounting.reusable_free_bytes)
+    );
     assert!(
         live_bytes(&s) == before,
         "the failed commit changed live bytes"

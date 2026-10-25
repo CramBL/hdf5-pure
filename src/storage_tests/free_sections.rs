@@ -16,6 +16,8 @@ use crate::FreeSections;
 use crate::Layout;
 use crate::MaxExtent;
 use crate::MemoryStrategy;
+use crate::ReusableSpaceStats;
+use crate::SyncPolicy;
 use crate::UserblockSize;
 use crate::source::BytesSource;
 
@@ -51,6 +53,87 @@ fn persistence_configuration_is_distinct_from_empty_sections(
     }
     let error = file.reusable_free_sections().unwrap_err();
     assert!(matches!(error, Error::ReadOnly), "{error:?}");
+    let error = file.reusable_space_stats().unwrap_err();
+    assert!(matches!(error, Error::ReadOnly), "{error:?}");
+}
+
+#[rstest]
+#[case::flat_persistent(FileSpaceStrategy::FsmAggr, true, 0)]
+#[case::flat_transient(FileSpaceStrategy::FsmAggr, false, 0)]
+#[case::page_persistent(FileSpaceStrategy::Page, true, 0)]
+#[case::page_transient(FileSpaceStrategy::Page, false, 0)]
+#[case::aggregates(FileSpaceStrategy::Aggr, false, 0)]
+#[case::disabled(FileSpaceStrategy::None, false, 0)]
+#[case::flat_userblock(FileSpaceStrategy::FsmAggr, true, 512)]
+#[case::page_userblock(FileSpaceStrategy::Page, true, 4_096)]
+fn reusable_space_stats_match_session_transitions(
+    #[case] strategy: FileSpaceStrategy,
+    #[case] persist: bool,
+    #[case] userblock: u64,
+    #[values(MemoryStrategy::Mirrored, MemoryStrategy::Auto)] memory: MemoryStrategy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("summary-state.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_strategy(strategy, persist, 1);
+    builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
+    builder
+        .create_dataset("log")
+        .with_i32_data(&vec![1; 4_096])
+        .with_chunks(&[4_096])
+        .with_maxshape(&[MaxExtent::Unlimited]);
+    builder
+        .create_dataset("scratch")
+        .with_i32_data(&vec![7; 16_384]);
+    builder.create_dataset("keep").with_i32_data(&[9; 256]);
+    builder.write(&path).unwrap();
+    let options = FileAccessProperties::new()
+        .with_memory_strategy(memory)
+        .with_sync_policy(SyncPolicy::OnClose);
+    let file = File::open_rw_with_options(&path, options).unwrap();
+    let initial = assert_summary_and_sections(&file);
+    file.root().delete("scratch").unwrap();
+    assert_eq!(assert_summary_and_sections(&file), initial);
+    file.commit().unwrap();
+    let committed = assert_summary_and_sections(&file);
+    if userblock == 0 && (strategy != FileSpaceStrategy::Page || persist) {
+        file.dataset("log")
+            .unwrap()
+            .append(&vec![2; 4_096])
+            .unwrap();
+    } else {
+        file.dataset("log")
+            .unwrap()
+            .append_staged(|builder| {
+                builder.append_i32(&vec![2; 4_096]);
+            })
+            .unwrap();
+        assert_eq!(assert_summary_and_sections(&file), committed);
+        file.commit().unwrap();
+    }
+    assert!(!file.has_staged_edits());
+    let appended = assert_summary_and_sections(&file);
+    file.root()
+        .create_dataset("marker", |builder| {
+            builder.with_i32_data(&[3; 4]);
+        })
+        .unwrap();
+    assert_eq!(assert_summary_and_sections(&file), appended);
+    file.commit().unwrap();
+    assert_summary_and_sections(&file);
+    let closed = file.clone();
+    file.close().unwrap();
+    let settled = assert_summary_and_sections(&closed);
+    drop(closed);
+    let reopened = File::open_rw_with_options(&path, options).unwrap();
+    let recovered = assert_summary_and_sections(&reopened);
+    assert_eq!(recovered.logical_size(), settled.logical_size());
+    if persist {
+        assert_eq!(
+            recovered.reusable_free_bytes(),
+            settled.reusable_free_bytes()
+        );
+    }
 }
 
 #[rstest]
@@ -264,4 +347,48 @@ fn relocated_sources_preserve_stored_section_coordinates(
         File::from_bytes(relocated).unwrap()
     };
     assert_eq!(file.persisted_free_sections().unwrap(), expected);
+}
+
+fn assert_summary_and_sections(file: &File) -> ReusableSpaceStats {
+    let summary = file.reusable_space_stats().unwrap();
+    let accounting = file.space_accounting().unwrap();
+    assert_eq!(
+        (summary.logical_size(), summary.reusable_free_bytes()),
+        (accounting.logical_size, accounting.reusable_free_bytes)
+    );
+    let sections = file.reusable_free_sections().unwrap();
+    assert_eq!(
+        sections
+            .sections()
+            .iter()
+            .map(|section| (section.address(), section.length().get()))
+            .collect::<Vec<_>>(),
+        accounting.reusable_free_space
+    );
+    assert_eq!(sections.free_bytes(), summary.reusable_free_bytes());
+    assert_eq!(
+        sections.section_count(),
+        accounting.reusable_free_space.len()
+    );
+    assert!(
+        sections
+            .sections()
+            .iter()
+            .all(|section| section.coordinates() == FreeSectionCoordinates::Absolute)
+    );
+    assert!(
+        sections
+            .sections()
+            .windows(2)
+            .all(|pair| pair[0].end_address() <= pair[1].address())
+    );
+    assert_eq!(
+        sections
+            .sections()
+            .iter()
+            .map(|section| section.length().get())
+            .sum::<u64>(),
+        sections.free_bytes()
+    );
+    summary
 }

@@ -13,6 +13,8 @@ use hdf5::File as Hdf5File;
 use hdf5::FileBuilder as Hdf5FileBuilder;
 #[cfg(feature = "__hdf5-1.10")]
 use hdf5::plist::file_create::FileSpaceStrategy as Hdf5FileSpaceStrategy;
+use hdf5_pure::FileAccessProperties;
+use hdf5_pure::SyncPolicy;
 use hdf5_pure::{File, FileBuilder, FileSpaceStrategy, Layout, SpaceAccounting, SpaceOwnership};
 use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_format::__private as format;
@@ -22,6 +24,40 @@ use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use crate::dataset::Unlimited;
 #[cfg(feature = "__hdf5-1.10")]
 use crate::file_space_oracle::OracleError;
+
+/// Creates a writable session after committing deletions of `holes` alternating datasets.
+///
+/// Creates `2 * holes + 1` datasets and deletes every other one, leaving a final survivor.
+/// The free-section count depends on the strategy and metadata layout. The returned session
+/// uses [`SyncPolicy::OnClose`].
+///
+/// # Panics
+///
+/// Panics if the object count overflows, or creating, opening, deleting, or committing fails.
+pub fn fragmented_session(path: &Path, strategy: FileSpaceStrategy, holes: usize) -> File {
+    let objects = holes
+        .checked_mul(2)
+        .and_then(|count| count.checked_add(1))
+        .expect("the fixture object count fits usize");
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_strategy(strategy, true, 1);
+    for index in 0..objects {
+        builder
+            .create_dataset(&format!("data_{index:05}"))
+            .with_i32_data(&[7; 256]);
+    }
+    builder.write(path).unwrap();
+    let file = File::open_rw_with_options(
+        path,
+        FileAccessProperties::new().with_sync_policy(SyncPolicy::OnClose),
+    )
+    .unwrap();
+    for index in (0..holes * 2).step_by(2) {
+        file.root().delete(&format!("data_{index:05}")).unwrap();
+    }
+    file.commit().unwrap();
+    file
+}
 
 /// Returns the total zero-padding length of the persisted free-space section lists.
 ///

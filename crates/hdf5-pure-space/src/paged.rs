@@ -269,6 +269,24 @@ impl PagedEdit {
         self.track(extent, ty.into());
     }
 
+    /// Returns the sum of the cached metadata and raw-data free-byte totals.
+    ///
+    /// Excludes dead and unclassified extents.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the sum exceeds [`u64::MAX`].
+    pub(crate) fn reusable_bytes(&self) -> Result<u64, FormatError> {
+        let metadata = self.meta.total_bytes();
+        let raw = self.raw.total_bytes();
+        metadata
+            .checked_add(raw)
+            .ok_or(FormatError::OffsetOverflow {
+                offset: metadata,
+                length: raw,
+            })
+    }
+
     /// Returns the reusable metadata and raw-data extents.
     pub(crate) fn reusable_extents(&self) -> (&[Extent], &[Extent]) {
         (self.meta.extents(), self.raw.extents())
@@ -700,6 +718,20 @@ mod tests {
     const SHORT_OF_THRESHOLD: u64 = THRESHOLD_IN_A_PAGE - 1;
     const EXTENT_AT: u64 = PAGE + 1024;
     const THRESHOLD_OF_THREE_PAGES: u64 = 3 * PAGE;
+
+    #[test]
+    fn reusable_bytes_check_the_page_list_sum() {
+        let mut paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
+        paged.meta.free(extent(0, u64::MAX));
+        paged.raw.free(extent(0, 1));
+        assert_eq!(
+            paged.reusable_bytes(),
+            Err(FormatError::OffsetOverflow {
+                offset: u64::MAX,
+                length: 1
+            })
+        );
+    }
 
     #[test]
     fn page_mutations_update_and_restore_cached_totals() {

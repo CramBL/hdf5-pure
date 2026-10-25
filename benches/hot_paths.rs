@@ -12,13 +12,17 @@
 //! cargo bench --bench hot_paths
 //! ```
 //!
-//! Each group fixes a representative dataset size; compare the reported times
-//! before and after a change rather than reading absolute numbers.
+//! Dataset groups use representative sizes. The reusable-space statistics group varies the
+//! number of free sections under flat and paged strategies, with fixture setup outside the
+//! timed loop. Compare times for the same workload and environment.
 
+use criterion::BenchmarkId;
 use criterion::{Criterion, criterion_group, criterion_main};
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::FileSpacePageSize;
+use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::{File, FileBuilder, MaxExtent};
+use test_util_hdf5::file_space;
 
 /// Build a file image from a configuring closure.
 fn build(configure: impl FnOnce(&mut FileBuilder)) -> Vec<u8> {
@@ -313,12 +317,33 @@ fn bench_page_buffer(c: &mut Criterion) {
     g.finish();
 }
 
+fn bench_reusable_space_stats(c: &mut Criterion) {
+    let directory = tempfile::tempdir().unwrap();
+    let mut group = c.benchmark_group("reusable_space_stats");
+    for strategy in [FileSpaceStrategy::FsmAggr, FileSpaceStrategy::Page] {
+        for holes in [16, 128, 1_024] {
+            let path = directory.path().join(format!("{strategy:?}-{holes}.h5"));
+            let file = file_space::fragmented_session(&path, strategy, holes);
+            let sections = file.reusable_free_sections().unwrap().section_count();
+            assert!(sections >= holes / 2);
+            group.bench_function(
+                BenchmarkId::new(format!("{strategy:?}"), sections),
+                |bench| {
+                    bench.iter(|| std::hint::black_box(file.reusable_space_stats().unwrap()));
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_contiguous_decode,
     bench_chunked_assembly,
     bench_write,
     bench_mat_roundtrip,
-    bench_page_buffer
+    bench_page_buffer,
+    bench_reusable_space_stats
 );
 criterion_main!(benches);
