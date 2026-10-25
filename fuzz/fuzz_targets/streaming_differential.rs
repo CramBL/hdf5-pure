@@ -39,7 +39,7 @@ fn assert_same_file_metadata(buffered: &File, streaming: &File) {
 
     let left = buffered.superblock();
     let right = streaming.superblock();
-    assert_eq!(left.version, right.version);
+    assert_eq!(left.version(), right.version());
     assert_eq!(left.offset_size, right.offset_size);
     assert_eq!(left.length_size, right.length_size);
     assert_eq!(left.base_address, right.base_address);
