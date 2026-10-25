@@ -12,6 +12,7 @@ use crate::address::AddressContext;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::convert::Narrow;
+use crate::edit::commit::PublicationState;
 use crate::error::Error;
 use crate::error::FormatError;
 use crate::image::FileImage;
@@ -296,7 +297,7 @@ impl WriteEngine {
             .absolute(self.superblock.root_group_address)?;
         let snapshot = self.snapshot_free();
         self.aggregation = Some(AggregateSpace::new(aggregation.eoa));
-        self.publish_attempted = false;
+        self.publication = PublicationState::Ready;
         let result = self.commit_persisting_releasing_reserve(
             root,
             spare
@@ -310,7 +311,7 @@ impl WriteEngine {
                 })
                 .collect(),
         );
-        if result.is_err() && !self.publish_attempted {
+        if result.is_err() && !self.publication.attempted() {
             self.restore_free(snapshot);
         } else if let Some(state) = &mut self.aggregation {
             state.publication_confirmed = result.is_ok();
@@ -402,9 +403,9 @@ impl WriteEngine {
             let root = self
                 .addresses
                 .absolute(self.superblock.root_group_address)?;
-            self.publish_attempted = false;
+            self.publication = PublicationState::Ready;
             let result = self.publish_nonpersisting(root, Some(end));
-            if result.is_ok() || self.publish_attempted {
+            if result.is_ok() || self.publication.attempted() {
                 aggregation.publication_confirmed = result.is_ok();
                 self.aggregation = Some(aggregation);
                 if let Some(post) = post {
@@ -628,7 +629,7 @@ mod tests {
             panic!("expected reserved-storage write failure, got {error:?}");
         };
         assert_eq!(error.kind(), ErrorKind::Other);
-        assert!(!engine.publish_attempted);
+        assert!(!engine.publication.attempted());
         assert_eq!(engine.aggregation, state);
         engine.finalize_persist().unwrap();
         drop(engine);
@@ -658,7 +659,7 @@ mod tests {
             panic!("expected device write failure, got {error:?}");
         };
         assert_eq!(error.kind(), ErrorKind::Other);
-        assert!(engine.publish_attempted);
+        assert!(engine.publication.attempted());
         assert_ne!(engine.aggregation, original);
         drop(engine);
         let file = File::open(&path).unwrap();
@@ -706,7 +707,7 @@ mod tests {
             panic!("expected transient publication failure, got {error:?}");
         };
         assert_eq!(error.kind(), ErrorKind::Other);
-        assert!(engine.publish_attempted);
+        assert!(engine.publication.attempted());
         let published = File::from_bytes(engine.image.as_slice().unwrap().to_vec()).unwrap();
         let expected = if applied {
             vec!["keep", "values"]

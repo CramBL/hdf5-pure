@@ -1,0 +1,954 @@
+//! Root publication, persistent free-space metadata, and PAGE publication recovery.
+//!
+//! Content is written before the publication barrier. The superblock write and its barrier
+//! precede truncation and stored-reference updates. Durability follows [`SyncPolicy`].
+
+use std::collections::BTreeMap;
+
+use hdf5_pure_core::__private::PhysicalAddress;
+use hdf5_pure_space::__private as free_space;
+#[cfg(doc)]
+use hdf5_pure_space::__private::SessionSpace;
+use hdf5_pure_space::__private::{
+    AllocationClass, Extent as FreeExtent, FreeClass, FreeList, ManagerKind, ManagerSections,
+    PageType,
+};
+
+use super::PublicationState;
+use crate::SuperblockVersion;
+use crate::address::{StoredAddress, StoredAddressExt};
+#[cfg(doc)]
+use crate::edit::SyncPolicy;
+use crate::edit::object_header;
+use crate::edit::{MAX_LINK_GRAPH_NODES, TailPlacement, UNDEF, WriteEngine};
+use crate::edit::{PersistState, paged_persistence};
+use crate::error::{Error, FormatError};
+use crate::file_space_info::{self, NUM_FILE_FSM_MANAGERS};
+use crate::free_space_manager;
+use crate::source::Source;
+use crate::superblock::{self, Superblock};
+use crate::width::FormatWidths;
+
+/// Stores the root and address changes after replacement objects have been written.
+pub(super) struct AppliedTree {
+    /// Absolute address of the replacement root header.
+    pub(super) root: u64,
+    /// Stored-address spans eligible for release when the root is published.
+    pub(super) freed: Vec<(StoredAddress, u64, FreeClass)>,
+    /// Absolute old and replacement header addresses for stored-reference updates.
+    pub(super) relocations: BTreeMap<u64, u64>,
+}
+
+/// Stores a proposed superblock together with its serialized bytes.
+///
+/// Serialization completes before publication is marked uncertain.
+struct SuperblockPublication {
+    superblock: Superblock,
+    bytes: Vec<u8>,
+}
+
+impl SuperblockPublication {
+    /// Serializes a proposed superblock before publication begins.
+    ///
+    /// # Errors
+    ///
+    /// Returns the serialization error if the proposed superblock cannot be encoded.
+    fn new(superblock: Superblock) -> Result<Self, Error> {
+        let bytes = hdf5_pure_format::__private::serialize_superblock(&superblock)?;
+        Ok(Self { superblock, bytes })
+    }
+}
+
+impl WriteEngine {
+    /// Publishes a written tree through the session's persistent or non-persistent path.
+    ///
+    /// Stored-reference updates run after root publication. Non-persistent PAGE commits require
+    /// a tree proved free of object references and retain superseded storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns the publication, reference-update, or root-reclamation error. Errors after
+    /// publication leave rollback disabled.
+    pub(super) fn publish_tree(&mut self, tree: AppliedTree) -> Result<(), Error> {
+        let AppliedTree {
+            root: new_root,
+            freed: mut to_free,
+            relocations,
+        } = tree;
+        if self.persist.is_some() {
+            let root_reclamation = self.plan_root_reclamation(new_root, &mut to_free)?;
+            self.commit_persisting_releasing_reserve(new_root, to_free)?;
+            if root_reclamation.is_some() {
+                self.proved_free_of_references = true;
+            }
+            self.repoint_stored_references(&relocations)?;
+            if let Some(reclamation) = root_reclamation {
+                self.reclaim_root_metadata(reclamation)?;
+            }
+            return Ok(());
+        }
+
+        if self.fresh_page_boundary.is_some() {
+            self.pad_to_page()?;
+            return self.publish_nonpersisting(new_root, None);
+        }
+
+        let mut trunc_to = self.release_freed(to_free)?;
+        if let Some(aggregation) = self.aggregation {
+            let end = self
+                .addresses
+                .resolve(StoredAddress::new(aggregation.eoa()))?;
+            if end.get() < self.image.len() {
+                trunc_to = Some(end);
+            }
+        }
+        self.publish_nonpersisting(new_root, trunc_to)?;
+        self.repoint_stored_references(&relocations)
+    }
+
+    /// Publishes a persistent commit after returning the unspent append reserve.
+    ///
+    /// Reserves eligible sub-threshold manager storage during the first publication, then
+    /// recycles it in a separate publication. Other commits use ordinary tail placement.
+    /// Attempts to relocate a trailing manager allocation before truncating.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if aggregate planning, address resolution, or metadata
+    /// serialization fails. Returns [`Error::EditUnsupported`] if the extension cannot be
+    /// rewritten. Returns [`Error::Io`] if writing, synchronizing, or truncating fails.
+    pub(in crate::edit) fn commit_persisting_releasing_reserve(
+        &mut self,
+        new_root: u64,
+        mut to_free: Vec<(StoredAddress, u64, FreeClass)>,
+    ) -> Result<(), Error> {
+        self.release_aggregates_for_tail(&mut to_free)?;
+        self.release_reserve();
+        if let Some(target) = self.recyclable_flat_tail() {
+            self.commit_persisting(new_root, Vec::new(), TailPlacement::Preserve)?;
+            self.recycle_flat_tail(new_root, to_free, target)?;
+        } else {
+            self.commit_persisting(new_root, to_free, TailPlacement::Anywhere)?;
+        }
+        self.shrink_to_the_trailing_free_run(new_root)
+    }
+
+    /// Relocates persistent manager blocks into earlier free space before truncating.
+    ///
+    /// Runs after the root publication makes the preceding commit's freed regions reusable.
+    /// The manager tail must end at EOA or, for a flat file, adjoin a tracked free run reaching
+    /// EOA. The combined run below and above the tail must meet the retention threshold in
+    /// [`FreeList::release_trailing_run`].
+    ///
+    /// [`TailPlacement::ReuseOnly`] requires the replacement to fit below the old manager tail.
+    /// The writer publishes the replacement with the current root before truncating.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if metadata serialization or address resolution fails. Returns
+    /// [`Error::Io`] if writing, synchronizing, or truncating fails.
+    pub(in crate::edit) fn shrink_to_the_trailing_free_run(
+        &mut self,
+        new_root: u64,
+    ) -> Result<(), Error> {
+        let Some(persist) = self.persist.as_ref() else {
+            return Ok(());
+        };
+        let (Some(tail_start), Some(tail_end)) = (
+            persist.old_blocks.iter().map(|extent| extent.start()).min(),
+            persist.old_blocks.iter().map(|extent| extent.end()).max(),
+        ) else {
+            return Ok(());
+        };
+        // A flat tail may have published reusable space above it. That space contains no live
+        // allocations and can be released by the same manager rewrite.
+        let eoa = self.end_of_allocation()?.get();
+        if tail_end != eoa
+            && (self.space.is_paged() || self.space.trailing_run_start(eoa) != tail_end)
+        {
+            return Ok(());
+        }
+        // Apply the retention threshold of `FreeList::release_trailing_run` to the combined
+        // free run and old tail before attempting a rewrite.
+        let run_start = self.space.trailing_run_start(tail_start);
+        if eoa - run_start < 2 * free_space::TRAILING_RESERVE_TAILS * (tail_end - tail_start) {
+            return Ok(());
+        }
+        self.commit_persisting(new_root, Vec::new(), TailPlacement::ReuseOnly)
+    }
+
+    /// Verifies pending PAGE publication and clears its recovery state on success.
+    ///
+    /// The caller completes its ordering or synchronization barrier first. Later staged edits
+    /// remain pending if verification fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error from [`recover_page_publication`](Self::recover_page_publication).
+    pub(in crate::edit) fn complete_page_publication(&mut self) -> Result<(), Error> {
+        if self.fresh_page_boundary.is_some() && self.publication.attempted() {
+            self.recover_page_publication()?;
+            self.publication = PublicationState::Ready;
+        }
+        Ok(())
+    }
+
+    /// Adopts the published PAGE root and EOA after verifying the accepted superblock bytes.
+    ///
+    /// Other superblock fields must match the session's framing. Before consuming staged edits
+    /// in another commit, the caller drains pending writes through a barrier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if the file bytes differ from the accepted image or
+    /// superblock framing. Returns the read, serialization, or parsing error if recovery fails.
+    pub(in crate::edit) fn recover_page_publication(&mut self) -> Result<(), Error> {
+        let len = hdf5_pure_format::__private::serialize_superblock(&self.superblock)?.len();
+        let accepted = self.image.read_exact_at(self.sb_sig_off, len)?;
+        let mut published = vec![0; len];
+        self.image.read_disk_at(self.sb_sig_off, &mut published)?;
+        if published != accepted {
+            return Err(Error::EditUnsupported(
+                "PAGE publication bytes differ from the session image after a failed write; \
+                 close and reopen the file before editing again",
+            ));
+        }
+        let recovered = superblock::read(published.as_slice())?.superblock;
+        let mut expected = self.superblock.clone();
+        expected.root_group_address = recovered.root_group_address;
+        expected.eof_address = recovered.eof_address;
+        if hdf5_pure_format::__private::serialize_superblock(&expected)? != published {
+            return Err(Error::EditUnsupported(
+                "PAGE superblock framing changed after a failed publication; \
+                 close and reopen the file before editing again",
+            ));
+        }
+        self.superblock = recovered;
+        Ok(())
+    }
+
+    /// Publishes the root and EOA after the content barrier, then applies any requested truncation.
+    ///
+    /// A non-persistent PAGE commit retains its File Space Info message and passes no truncation.
+    ///
+    /// # Errors
+    ///
+    /// Returns the address-conversion, serialization, write, synchronization, or truncation error.
+    pub(in crate::edit) fn publish_nonpersisting(
+        &mut self,
+        new_root: u64,
+        trunc_to: Option<PhysicalAddress>,
+    ) -> Result<(), Error> {
+        let base = self.addresses;
+        let new_eof = trunc_to.map_or(self.image.len(), PhysicalAddress::get);
+        self.barrier()?;
+        if matches!(
+            self.superblock.version,
+            SuperblockVersion::Two | SuperblockVersion::Three
+        ) {
+            // Adopt the proposed superblock after the publication write and barrier succeed.
+            let mut new_sb = self.superblock.clone();
+            new_sb.root_group_address = base.relative(new_root)?;
+            new_sb.eof_address = new_eof;
+            // Preserve this session's status flags, including an active crash mark.
+            new_sb.consistency_flags = self.held_status_flags;
+            self.publish_superblock(SuperblockPublication::new(new_sb)?)?;
+        } else {
+            self.publication = PublicationState::Uncertain;
+            self.repoint_v0v1_root(base.relative(new_root)?, new_eof)?;
+            self.barrier()?;
+            self.superblock.root_group_address = self.addresses.relative(new_root)?;
+            self.superblock.eof_address = new_eof;
+            self.publication = PublicationState::Published;
+        }
+
+        // Publish the smaller EOF before truncating, preserving a complete file if interrupted.
+        if let Some(cut) = trunc_to {
+            self.truncate_published(cut)?;
+        }
+        Ok(())
+    }
+
+    /// Records the regions a non-persisting commit vacated under the active reusable-space
+    /// strategy, and returns the file position to truncate the file to when the flat free run
+    /// reaches the end of allocation.
+    ///
+    /// Disabled strategies discard the regions. A non-persistent PAGE commit skips this step
+    /// and retains every freed extent without making it reusable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressBelowBase`] if the image ends below the base address, and
+    /// [`FormatError::OffsetOverflow`] if the truncation point plus the base address exceeds
+    /// [`u64::MAX`]. Returns [`FormatError::Internal`] if aggregate state exceeds EOA or the
+    /// flat reusable-space strategy changes during release.
+    pub(in crate::edit) fn release_freed(
+        &mut self,
+        to_free: Vec<(StoredAddress, u64, FreeClass)>,
+    ) -> Result<Option<PhysicalAddress>, FormatError> {
+        let eoa = self.end_of_allocation()?;
+        if let Some(aggregation) = &mut self.aggregation {
+            return aggregation
+                .release_freed(
+                    &mut self.space,
+                    to_free
+                        .into_iter()
+                        .filter_map(|(addr, len, _)| FreeExtent::new(addr.get(), len)),
+                )?
+                .map(|cut| self.addresses.resolve(StoredAddress::new(cut)))
+                .transpose();
+        }
+        self.space
+            .release_freed(
+                eoa.get(),
+                to_free
+                    .into_iter()
+                    .filter_map(|(addr, len, _)| FreeExtent::new(addr.get(), len)),
+            )
+            .map(|cut| self.addresses.resolve(StoredAddress::new(cut)))
+            .transpose()
+    }
+
+    /// Returns `spans` with each file position converted to a stored address.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressBelowBase`] if a span starts below the base address.
+    pub(in crate::edit) fn stored_spans(
+        &self,
+        spans: Vec<(u64, u64, FreeClass)>,
+    ) -> Result<Vec<(StoredAddress, u64, FreeClass)>, FormatError> {
+        spans
+            .into_iter()
+            .map(|(at, len, class)| Ok((self.addresses.relative(at)?, len, class)))
+            .collect()
+    }
+
+    /// Repoints stored references to object headers relocated by this commit.
+    ///
+    /// The caller publishes the replacement root first so the reference walk reads the
+    /// committed tree. The writes end with a barrier under [`SyncPolicy`]. A failure between
+    /// publication and that barrier can leave stale references in the committed tree.
+    ///
+    /// The walk is bounded by [`MAX_LINK_GRAPH_NODES`] and skipped after the tree has been
+    /// proved free of object references.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reference-planning, write, or barrier error.
+    fn repoint_stored_references(&mut self, relocations: &BTreeMap<u64, u64>) -> Result<(), Error> {
+        if self.proved_free_of_references {
+            return Ok(());
+        }
+        let plan = crate::reference_patch::plan(
+            &self.image(),
+            &self.superblock,
+            self.widths,
+            self.addresses,
+            relocations,
+            MAX_LINK_GRAPH_NODES,
+        )?;
+        // Cache only a complete proof that the tree contains no object references.
+        if plan.proved_free_of_references() {
+            self.proved_free_of_references = true;
+        }
+        if plan.is_empty() {
+            return Ok(());
+        }
+        plan.apply(self)?;
+        self.barrier()
+    }
+
+    /// Publishes `new_root` with replacement persistent free-space metadata.
+    ///
+    /// Writes the extension and manager blocks as one contiguous allocation according to
+    /// `placement`. [`TailPlacement::Preserve`] excludes the current allocation from returned
+    /// free space. [`TailPlacement::Recycle`] can reuse a reserved allocation after an earlier
+    /// publication made it unreferenced. Returned extents follow ordinary threshold admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if address resolution, metadata serialization, or aggregate
+    /// reconciliation fails. Returns [`Error::EditUnsupported`] if the extension cannot be
+    /// rewritten. Returns [`Error::Io`] if writing, synchronizing, or truncating fails. For PAGE,
+    /// returns the errors from [`Self::commit_persisting_paged`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if persistence is disabled.
+    pub(in crate::edit) fn commit_persisting(
+        &mut self,
+        new_root: u64,
+        to_free: Vec<(StoredAddress, u64, FreeClass)>,
+        placement: TailPlacement,
+    ) -> Result<(), Error> {
+        // PAGE uses separate managers for each page type.
+        if self.space.is_paged() {
+            return self.commit_persisting_paged(new_root, to_free, placement);
+        }
+        let widths = self.widths;
+        let offset_width = widths.offsets;
+        let (strategy, threshold, page_size, mut old_blocks) = {
+            // Only persistent commit paths call this method.
+            let ps = self
+                .persist
+                .as_ref()
+                .expect("commit_persisting is only called when persistence is armed");
+            (
+                ps.strategy,
+                ps.threshold,
+                ps.page_size,
+                ps.old_blocks.clone(),
+            )
+        };
+        if placement == TailPlacement::Preserve {
+            old_blocks.clear();
+        }
+        let base = self.addresses;
+
+        // Resolve the stored extension address before reading its object header.
+        let old_ext_addr = base.absolute(
+            self.superblock
+                .superblock_extension_address
+                .filter(|a| !a.is_undefined(offset_width))
+                .ok_or(Error::EditUnsupported(
+                    "a persisting file has no superblock extension to update",
+                ))?,
+        )?;
+
+        // File Space Info has a fixed size, so placeholder addresses give the extension's length.
+        let placeholder = file_space_info::persistent_single_manager(
+            offset_width,
+            strategy,
+            threshold,
+            page_size,
+            0,
+            0,
+        );
+        let ext_len = object_header::build_v2_object_header(
+            &self.rewrite_extension_region(old_ext_addr, &placeholder)?,
+        )?
+        .len() as u64;
+
+        // Reserve from previously reusable space. This commit's pending frees remain live
+        // until the root publication and cannot supply the tail reservation.
+        let current_eoa = self.end_of_allocation()?.get();
+        let limit = (placement == TailPlacement::ReuseOnly)
+            .then(|| old_blocks.iter().map(|extent| extent.start()).min())
+            .flatten();
+        let recycled = if let TailPlacement::Recycle(target) = placement {
+            let layout =
+                self.recycled_tail_layout(current_eoa, &to_free, &old_blocks, ext_len, target);
+            if layout.is_none() {
+                old_blocks.push(target);
+            }
+            layout
+        } else {
+            None
+        };
+        let (post, placed_at, tail_len, eoa) = recycled.unwrap_or_else(|| {
+            self.flat_tail_layout(current_eoa, &to_free, &old_blocks, ext_len, widths, limit)
+        });
+        if placed_at.is_none() && placement == TailPlacement::ReuseOnly {
+            // The shrink pass requires a reusable allocation below the old tail.
+            return Ok(());
+        }
+        let reused = placed_at.is_some();
+        let ext_addr = placed_at.unwrap_or(current_eoa);
+        let managers = ManagerSections::flat(post.extents().iter().copied());
+        let plan = free_space_manager::plan_managers(
+            &managers,
+            StoredAddress::new(ext_addr).offset(ext_len),
+            widths,
+        );
+        // For a reused tail, truncate to the planned EOA after publication. The post-commit
+        // free list excludes dropped trailing regions and the suffix released by
+        // `FreeList::release_trailing_run`. An appended tail ends the file itself.
+        let final_eoa = if reused { eoa } else { ext_addr + tail_len };
+        debug_assert!(
+            ext_addr + tail_len <= final_eoa,
+            "the tail must end at or below the end-of-allocation it was placed under"
+        );
+        let final_eof = self.addresses.resolve(StoredAddress::new(final_eoa))?;
+        let aggregation = self
+            .aggregation
+            .map(|state| state.reconcile(final_eoa))
+            .transpose()?;
+
+        let flat_block = match plan.blocks.as_slice() {
+            [] => None,
+            [block] if block.kind == ManagerKind::Flat => Some(block),
+            [block] => {
+                return Err(Error::Format(FormatError::Internal(format!(
+                    "flat free-space plan produced a {:?} manager",
+                    block.kind
+                ))));
+            }
+            _ => {
+                return Err(Error::Format(FormatError::Internal(
+                    "flat free-space plan produced more than one manager".into(),
+                )));
+            }
+        };
+
+        // An empty free list is recorded with persistence enabled and undefined manager addresses.
+        let ext_oh = if let Some(block) = flat_block {
+            // Retain the extension below the manager blocks when an appended manager tail
+            // is discarded. A reused tail retains the final EOA.
+            let eoa_pre_fsm = if reused {
+                final_eoa
+            } else {
+                block.fshd_addr.get()
+            };
+            let info = file_space_info::persistent_single_manager(
+                offset_width,
+                strategy,
+                threshold,
+                page_size,
+                block.fshd_addr.get(),
+                eoa_pre_fsm,
+            );
+            object_header::build_v2_object_header(
+                &self.rewrite_extension_region(old_ext_addr, &info)?,
+            )?
+        } else {
+            // With no managers to allocate, libhdf5 records the final end of allocation
+            // (`H5MF_settle_meta_data_fsm` and `H5MF__close_aggrfs` in `H5MF.c`, HDF5 1.14.6).
+            let info = file_space_info::persistent_empty(
+                offset_width,
+                strategy,
+                threshold,
+                page_size,
+                final_eoa,
+            );
+            object_header::build_v2_object_header(
+                &self.rewrite_extension_region(old_ext_addr, &info)?,
+            )?
+        };
+        // The reservation uses the same fixed message size as the real extension.
+        debug_assert_eq!(
+            ext_oh.len() as u64,
+            ext_len,
+            "extension length must be stable across the placeholder and real messages"
+        );
+
+        let new_old_blocks = vec![FreeExtent::new(ext_addr, tail_len).ok_or(Error::Format(
+            FormatError::OffsetOverflow {
+                offset: ext_addr,
+                length: tail_len,
+            },
+        ))?];
+
+        // The extension and manager blocks remain unreferenced until root publication.
+        let region = (ext_addr, tail_len);
+        self.write_tail_block(region, StoredAddress::new(ext_addr), &ext_oh)?;
+        if let Some(block) = flat_block {
+            let fshd_len = hdf5_pure_format::__private::free_space_manager_header_len(widths);
+            let fsse_allocated = tail_len
+                .checked_sub(ext_len)
+                .and_then(|manager_len| manager_len.checked_sub(fshd_len))
+                .ok_or(Error::Format(FormatError::Internal(
+                    "flat free-space tail is shorter than its extension and manager header".into(),
+                )))?;
+            let (fshd, fsse) =
+                hdf5_pure_format::__private::serialize_free_space_manager_with_allocation(
+                    widths,
+                    &block.sections,
+                    block.fshd_addr,
+                    block.fsse_addr,
+                    block.class,
+                    Some(fsse_allocated),
+                )?;
+            self.write_tail_block(region, block.fshd_addr, &fshd)?;
+            self.write_tail_block(region, block.fsse_addr, &fsse)?;
+        }
+        // Complete the content barrier before publishing the root, EOF, and extension.
+        self.barrier()?;
+        let mut new_sb = self.superblock.clone();
+        new_sb.root_group_address = self.addresses.relative(new_root)?;
+        new_sb.eof_address = final_eof.get();
+        new_sb.superblock_extension_address = Some(StoredAddress::new(ext_addr));
+        // Preserve any status flags held by this session.
+        new_sb.consistency_flags = self.held_status_flags;
+        let publication = SuperblockPublication::new(new_sb)?;
+        let confirmed = self
+            .aggregation
+            .as_ref()
+            .is_none_or(|state| state.publication_confirmed);
+        if let Some(state) = &mut self.aggregation {
+            state.publication_confirmed = false;
+        }
+        self.publish_superblock(publication)?;
+
+        self.space.adopt_flat_post_free(post);
+        self.persist = Some(PersistState {
+            strategy,
+            threshold,
+            page_size,
+            old_blocks: new_old_blocks,
+        });
+        self.aggregation = aggregation;
+        if let Some(state) = &mut self.aggregation {
+            state.publication_confirmed = false;
+        }
+
+        // Publish the smaller EOF before truncating. The adopted managers exclude the suffix.
+        if final_eof < PhysicalAddress::new(self.image.len()) {
+            self.truncate_published(final_eof)?;
+        }
+
+        // Record the file length associated with the published managers.
+        self.fsm_len = self.image.len();
+        if let Some(state) = &mut self.aggregation {
+            state.publication_confirmed = confirmed;
+        }
+        Ok(())
+    }
+
+    /// Returns prospective flat free space and EOA after releasing trailing regions.
+    ///
+    /// The result includes eligible `to_free` and `old_blocks` spans under the session's
+    /// retention threshold. Those spans remain live until publication, so this method computes
+    /// a temporary list through [`SessionSpace::flat_post_free`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the session does not use a flat free-space strategy.
+    pub(in crate::edit) fn flat_post_free(
+        &self,
+        eof: u64,
+        to_free: &[(StoredAddress, u64, FreeClass)],
+        old_blocks: &[FreeExtent],
+    ) -> (FreeList, u64) {
+        let extents = to_free
+            .iter()
+            .filter_map(|&(addr, len, _)| FreeExtent::new(addr.get(), len))
+            .chain(old_blocks.iter().copied());
+        // PAGE sessions are dispatched before a flat tail is planned.
+        self.space
+            .flat_post_free(eof, extents)
+            .expect("the flat commit tail requires a flat session strategy")
+    }
+
+    /// Reserves a flat manager tail and computes the free space and EOA to publish.
+    ///
+    /// Returns the prospective free list, reserved stored address, reserved length, and EOA.
+    /// The address is [`None`] when the caller must append at `current_eoa`. In that case,
+    /// the returned EOA is `current_eoa`, before appending the tail.
+    ///
+    /// Reservations come from session free space, then the immediate-append reserve when
+    /// available. With a `limit`, only session extents ending at or below it are eligible.
+    /// Placement retries with a larger reservation when the serialized managers outgrow it.
+    /// After bounded retries, the caller appends. Spare reservation bytes remain owned by
+    /// the manager allocation until it is superseded.
+    ///
+    /// The caller restores its allocation snapshot after a failure before publication.
+    pub(in crate::edit) fn flat_tail_layout(
+        &mut self,
+        current_eoa: u64,
+        to_free: &[(StoredAddress, u64, FreeClass)],
+        old_blocks: &[FreeExtent],
+        ext_len: u64,
+        widths: FormatWidths,
+        limit: Option<u64>,
+    ) -> (FreeList, Option<u64>, u64, u64) {
+        /// Limits reservation retries when the serialized manager length increases.
+        const ROUNDS: usize = 4;
+
+        // Size the append fallback before trying reservations from reusable space.
+        let (probe, _) = self.flat_post_free(current_eoa, to_free, old_blocks);
+        let managers = ManagerSections::flat(probe.extents().iter().copied());
+        let appended_len = ext_len + free_space_manager::manager_blocks_len(&managers, widths);
+        let mut proposed = appended_len;
+
+        for _ in 0..ROUNDS {
+            let allocation = if let Some(limit) = limit {
+                self.space.allocate_flat_below(proposed, limit)
+            } else {
+                self.space.allocate(proposed, AllocationClass::Metadata)
+            };
+            let (reserved, from_reserve) = match allocation {
+                Some(extent) => (extent, false),
+                None if limit.is_none() => match self.reserved.alloc(proposed) {
+                    Some(extent) => (extent, true),
+                    None => break,
+                },
+                None => break,
+            };
+            let at = reserved.start();
+            let (mut post, eoa) = self.flat_post_free(current_eoa, to_free, old_blocks);
+            // Exclude the released suffix before sizing the managers. The tail reservation
+            // has already been removed from this list, so the trailing run starts at or
+            // above the reservation's end.
+            let eoa = post.release_trailing_run(eoa, proposed);
+            let managers = ManagerSections::flat(post.extents().iter().copied());
+            let len = ext_len + free_space_manager::manager_blocks_len(&managers, widths);
+            if len <= proposed {
+                debug_assert!(
+                    at + proposed <= eoa,
+                    "a reused tail at {at} of {proposed} bytes runs past the end-of-allocation \
+                     {eoa} it was placed under"
+                );
+                return (post, Some(at), proposed, eoa);
+            }
+            if from_reserve {
+                self.reserved.free(reserved);
+            } else {
+                self.space
+                    .return_allocation(reserved, AllocationClass::Metadata);
+            }
+            proposed = len;
+        }
+        // Append beyond the current EOA, retaining the prospective free list below the tail.
+        (probe, None, appended_len, current_eoa)
+    }
+
+    /// Publishes the root, extension, and final per-class free sections of a persistent PAGE edit.
+    ///
+    /// Plans the complete metadata reservation before writing. The serialized managers and the
+    /// adopted session state include the same page tails and exclude the complete reservation,
+    /// including owned section-list padding. Placement uses appended pages or space already free
+    /// before this publication. Pending object frees and superseded managers cannot fund it.
+    ///
+    /// Writes the planned blocks before publishing their addresses in the superblock. Publishes
+    /// a smaller EOA before truncating the file, and adopts the planned state after publication
+    /// and any truncation succeed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if the persistent extension cannot be updated,
+    /// a format error if planning or serialization fails, or an I/O error if writing,
+    /// synchronization, or truncation fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if persistence is disabled.
+    pub(in crate::edit) fn commit_persisting_paged(
+        &mut self,
+        new_root: u64,
+        to_free: Vec<(StoredAddress, u64, FreeClass)>,
+        placement: TailPlacement,
+    ) -> Result<(), Error> {
+        let widths = self.widths;
+        let offset_width = widths.offsets;
+        let (strategy, threshold, page_size, old_blocks) = {
+            // Only persistent commit paths call this method.
+            let ps = self
+                .persist
+                .as_ref()
+                .expect("commit_persisting is only called when persistence is armed");
+            (
+                ps.strategy,
+                ps.threshold,
+                ps.page_size,
+                ps.old_blocks.clone(),
+            )
+        };
+
+        let base = self.addresses;
+
+        // Record existing tail padding before planning the metadata reservation.
+        self.pad_to_page()?;
+
+        // Resolve the stored extension address before reading its object header.
+        let old_ext_addr = base.absolute(
+            self.superblock
+                .superblock_extension_address
+                .filter(|a| !a.is_undefined(offset_width))
+                .ok_or(Error::EditUnsupported(
+                    "a persisting file has no superblock extension to update",
+                ))?,
+        )?;
+
+        // Placeholder addresses give the extension's length before placement.
+        let placeholder = file_space_info::persistent_managers(
+            strategy,
+            threshold,
+            page_size,
+            [UNDEF; NUM_FILE_FSM_MANAGERS],
+            0,
+        );
+        let ext_len = object_header::build_v2_object_header(
+            &self.rewrite_extension_region(old_ext_addr, &placeholder)?,
+        )?
+        .len() as u64;
+
+        let current_eoa = self.end_of_allocation()?.get();
+        let freed: Vec<_> = to_free
+            .iter()
+            .filter_map(|&(addr, len, class)| {
+                FreeExtent::new(addr.get(), len).map(|extent| (extent, class))
+            })
+            .collect();
+        let Some(plan) = paged_persistence::PagedPersistencePlan::new(
+            &self.space,
+            current_eoa,
+            &freed,
+            &old_blocks,
+            ext_len,
+            widths,
+            placement == TailPlacement::ReuseOnly,
+        )?
+        else {
+            return Ok(());
+        };
+        let paged_persistence::PagedPersistencePlan {
+            tail,
+            slots,
+            blocks,
+        } = plan;
+        let ext_addr = tail.allocation.start();
+        let blocks_len = tail.allocation.len();
+        let final_eoa = tail.final_eoa;
+        let reused = !tail.appended;
+        if reused {
+            let reserved = self.space.allocate(blocks_len, AllocationClass::Metadata);
+            if reserved != Some(tail.allocation) {
+                return Err(FormatError::Internal(
+                    "a PAGE tail reservation differs from its pure plan".into(),
+                )
+                .into());
+            }
+        } else {
+            self.begin_page(PageType::Meta)?;
+        }
+        let final_eof = self.addresses.resolve(StoredAddress::new(final_eoa))?;
+
+        let info = if blocks.is_empty() {
+            file_space_info::persistent_empty(
+                offset_width,
+                strategy,
+                threshold,
+                page_size,
+                final_eoa,
+            )
+        } else {
+            file_space_info::persistent_managers(
+                strategy,
+                threshold,
+                page_size,
+                slots.map(StoredAddress::get),
+                final_eoa,
+            )
+        };
+        let ext_oh = object_header::build_v2_object_header(
+            &self.rewrite_extension_region(old_ext_addr, &info)?,
+        )?;
+        debug_assert_eq!(
+            ext_oh.len() as u64,
+            ext_len,
+            "extension length must be stable across the placeholder and real messages"
+        );
+
+        // Include section-list padding in the allocation recorded for future reclamation.
+        let new_old_blocks = vec![FreeExtent::new(ext_addr, blocks_len).ok_or(Error::Format(
+            FormatError::OffsetOverflow {
+                offset: ext_addr,
+                length: blocks_len,
+            },
+        ))?];
+
+        // The extension and manager blocks remain unreferenced until root publication.
+        let region = (ext_addr, blocks_len);
+        self.write_tail_block(region, StoredAddress::new(ext_addr), &ext_oh)?;
+        for block in &blocks {
+            self.write_tail_block(region, block.header_address, &block.header)?;
+            self.write_tail_block(region, block.section_list_address, &block.section_list)?;
+        }
+        // Extend an appended reservation to the page-aligned EOF computed by the plan.
+        if !reused {
+            self.pad_zeros_to(final_eof.get())?;
+        }
+        // Complete the content barrier before publishing the root, EOF, and extension.
+        self.barrier()?;
+        let mut new_sb = self.superblock.clone();
+        new_sb.root_group_address = self.addresses.relative(new_root)?;
+        new_sb.eof_address = final_eof.get();
+        new_sb.superblock_extension_address = Some(StoredAddress::new(ext_addr));
+        // Preserve the crash mark throughout a page-buffered session.
+        new_sb.consistency_flags = self.held_status_flags;
+        self.publish_superblock(SuperblockPublication::new(new_sb)?)?;
+
+        // Complete EOF publication before removing the trailing suffix.
+        if final_eof < PhysicalAddress::new(self.image.len()) {
+            self.truncate_published(final_eof)?;
+        }
+
+        // Adopt prospective free space after publication and any truncation succeed.
+        self.space.adopt_paged_post_free(tail.post, !reused, None);
+        self.persist = Some(PersistState {
+            strategy,
+            threshold,
+            page_size,
+            old_blocks: new_old_blocks,
+        });
+        // The rewritten managers describe persistent free sections at this file length.
+        self.fsm_len = self.image.len();
+        Ok(())
+    }
+
+    /// Publishes a replacement root and EOF in a version 0 or 1 superblock.
+    ///
+    /// Clears the root symbol-table entry's cached metadata and writes the object-header
+    /// address last. These fields are defined in "Format Signature and Superblock" and
+    /// ["Symbol Table Entry"][entry] of the [format specification, version 4.0][spec].
+    ///
+    /// # Errors
+    ///
+    /// Returns the write error if a field cannot be updated.
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_boot_super
+    /// [entry]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_symboltableentry
+    fn repoint_v0v1_root(&mut self, new_root: StoredAddress, new_eof: u64) -> Result<(), Error> {
+        let os = self.superblock.offset_size.get();
+        let addr_width = u64::from(os);
+        // Field layout after the fixed prefix: base / free-space / EOF / driver
+        // addresses, then the root symbol-table entry (link-name offset, object
+        // header address, cache type(4), reserved(4), scratch(16)). The prefix is
+        // 24 bytes for v0 and 28 for v1 (the latter adds indexed-storage-K).
+        let var_start = if self.superblock.version == SuperblockVersion::Zero {
+            24
+        } else {
+            28
+        };
+        let base = self.sb_sig_off + var_start;
+        let eof_off = base + 2 * addr_width;
+        let ste = base + 4 * addr_width;
+        let oh_addr_off = ste + addr_width;
+        let cache_off = ste + 2 * addr_width;
+        self.write_at(eof_off, &new_eof.to_le_bytes()[..usize::from(os)])?;
+        self.write_at(cache_off, &[0u8; 4])?; // cache type = none
+        self.write_at(cache_off + 8, &[0u8; 16])?; // clear scratch-pad
+        self.write_at(
+            oh_addr_off,
+            &new_root.get().to_le_bytes()[..usize::from(os)],
+        )?;
+        Ok(())
+    }
+
+    /// Marks publication uncertain before writing, then adopts the superblock after its barrier.
+    ///
+    /// # Errors
+    ///
+    /// Returns the write or barrier error, retaining [`PublicationState::Uncertain`].
+    fn publish_superblock(&mut self, publication: SuperblockPublication) -> Result<(), Error> {
+        let SuperblockPublication { superblock, bytes } = publication;
+        self.publication = PublicationState::Uncertain;
+        self.write_at(self.sb_sig_off, &bytes)?;
+        self.barrier()?;
+        self.superblock = superblock;
+        self.publication = PublicationState::Published;
+        Ok(())
+    }
+
+    /// Truncates after confirmed EOF publication and applies the session's barrier.
+    ///
+    /// # Errors
+    ///
+    /// Returns the truncation or barrier error.
+    fn truncate_published(&mut self, cut: PhysicalAddress) -> Result<(), Error> {
+        debug_assert_eq!(self.publication, PublicationState::Published);
+        self.image.truncate(cut.get())?;
+        self.barrier()
+    }
+}
