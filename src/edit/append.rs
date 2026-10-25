@@ -435,7 +435,8 @@ impl WriteEngine {
             return Err(Error::AppendInPlaceUnsupported(
                 "in-place append is not supported on a paged file \
                  (H5F_FSPACE_STRATEGY_PAGE) without persisted free space; recreate the \
-                 file with with_file_space_strategy(FileSpaceStrategy::Page, true, ..)",
+                 file with with_file_space_settings(FileSpaceSettings::new(\
+                 FileSpaceStrategy::Page).with_persistence(true))",
             ));
         }
 

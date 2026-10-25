@@ -18,13 +18,13 @@ pub use crate::page_publication_failure::PagePublicationFailure;
 /// ```
 /// use std::io::ErrorKind;
 ///
-/// use hdf5_pure::{Error, File, FileBuilder, FileSpaceStrategy, SyncPolicy};
+/// use hdf5_pure::{Error, File, FileBuilder, FileSpaceSettings, FileSpaceStrategy, SyncPolicy};
 /// use hdf5_pure::__private::{self, PagePublicationFailure};
 ///
 /// # let directory = tempfile::tempdir()?;
 /// # let path = directory.path().join("publication.h5");
 /// let mut builder = FileBuilder::new();
-/// builder.with_file_space_strategy(FileSpaceStrategy::Page, false, 1);
+/// builder.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::Page));
 /// builder.create_dataset("keep").with_u8_data(&[7; 64]);
 /// builder.write(&path)?;
 /// let file = __private::open_page_publication_failure(
@@ -73,13 +73,13 @@ pub fn open_page_publication_failure(
 /// ```
 /// use std::io::ErrorKind;
 ///
-/// use hdf5_pure::{Error, File, FileBuilder, FileSpaceStrategy, SyncPolicy};
+/// use hdf5_pure::{Error, File, FileBuilder, FileSpaceSettings, FileSpaceStrategy, SyncPolicy};
 /// use hdf5_pure::__private::{self, PagePublicationFailure};
 ///
 /// # let directory = tempfile::tempdir()?;
 /// # let path = directory.path().join("snapshot.h5");
 /// # let mut builder = FileBuilder::new();
-/// # builder.with_file_space_strategy(FileSpaceStrategy::Page, false, 1);
+/// # builder.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::Page));
 /// # builder.create_dataset("keep").with_u8_data(&[7; 64]);
 /// # builder.write(&path)?;
 /// let original = std::fs::read(&path)?;

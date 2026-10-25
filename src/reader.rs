@@ -3758,11 +3758,15 @@ impl File {
     ///
     /// ```
     /// use hdf5_pure::{File, FileSpaceStrategy};
-    /// # use hdf5_pure::FileBuilder;
+    /// # use hdf5_pure::{FileBuilder, FileSpaceSettings};
     /// # let directory = tempfile::tempdir()?;
     /// # let path = directory.path().join("settings.h5");
     /// # let mut builder = FileBuilder::new();
-    /// # builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 128);
+    /// # builder.with_file_space_settings(
+    /// #     FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+    /// #         .with_persistence(true)
+    /// #         .with_threshold(128),
+    /// # );
     /// # builder.create_dataset("data").with_i32_data(&[1, 2, 3]);
     /// # builder.write(&path)?;
     /// let file = File::open(&path)?;
@@ -3820,11 +3824,14 @@ impl File {
     ///
     /// ```
     /// use hdf5_pure::File;
-    /// # use hdf5_pure::{FileBuilder, FileSpaceStrategy};
+    /// # use hdf5_pure::{FileBuilder, FileSpaceSettings, FileSpaceStrategy};
     /// # let directory = tempfile::tempdir()?;
     /// # let path = directory.path().join("raw-file-space-info.h5");
     /// # let mut builder = FileBuilder::new();
-    /// # builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    /// # builder.with_file_space_settings(
+    /// #     FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+    /// #         .with_persistence(true),
+    /// # );
     /// # builder.create_dataset("data").with_i32_data(&[1, 2, 3]);
     /// # builder.write(&path)?;
     /// let file = File::open(&path)?;
@@ -3842,8 +3849,7 @@ impl File {
     /// Returns the free regions the free-space managers of the file track, as `(address, length)`
     /// pairs sorted by address.
     ///
-    /// A file persists its free space when its writer passes `persist` as `true` to
-    /// [`FileBuilder::with_file_space_strategy`](crate::FileBuilder::with_file_space_strategy).
+    /// Persistence is enabled through [`FileSpaceSettings::with_persistence`].
     /// The C library takes the same flag in `H5Pset_file_space_strategy`. The addresses are
     /// relative to the base address. Returns an empty `Vec` if the file does not persist its free
     /// space, and on a handle that reads the file on demand or edits it, such as one
@@ -3887,13 +3893,16 @@ impl File {
     /// Absence of persistence and configured persistence with zero sections are distinct:
     ///
     /// ```
-    /// use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
+    /// use hdf5_pure::{File, FileBuilder, FileSpaceSettings, FileSpaceStrategy};
     ///
     /// let file = File::from_bytes(FileBuilder::new().finish()?)?;
     /// assert_eq!(file.persisted_free_sections()?, None);
     ///
     /// let mut builder = FileBuilder::new();
-    /// builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    /// builder.with_file_space_settings(
+    ///     FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+    ///         .with_persistence(true),
+    /// );
     /// let file = File::from_bytes(builder.finish()?)?;
     /// let report = file.persisted_free_sections()?.expect("persistence is configured");
     /// assert_eq!(report.free_sections().section_count(), 0);
@@ -3905,12 +3914,15 @@ impl File {
     /// manager counts:
     ///
     /// ```
-    /// # use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
+    /// # use hdf5_pure::{File, FileBuilder, FileSpaceSettings, FileSpaceStrategy};
     /// use hdf5_pure::FreeSectionCoordinates;
     /// # let directory = tempfile::tempdir()?;
     /// # let path = directory.path().join("free-sections.h5");
     /// # let mut builder = FileBuilder::new();
-    /// # builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    /// # builder.with_file_space_settings(
+    /// #     FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+    /// #         .with_persistence(true),
+    /// # );
     /// # builder.create_dataset("a").with_i32_data(&[1; 100]);
     /// # builder.create_dataset("b").with_i32_data(&[2; 400]);
     /// # builder.create_dataset("c").with_i32_data(&[3; 100]);
@@ -3982,12 +3994,12 @@ impl File {
     /// # Examples
     ///
     /// ```
-    /// # use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
+    /// # use hdf5_pure::{File, FileBuilder, FileSpaceSettings, FileSpaceStrategy};
     /// use hdf5_pure::FreeSectionCoordinates;
     /// # let directory = tempfile::tempdir()?;
     /// # let path = directory.path().join("reusable-sections.h5");
     /// # let mut builder = FileBuilder::new();
-    /// # builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, false, 1);
+    /// # builder.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::FsmAggr));
     /// # builder.create_dataset("a").with_i32_data(&[1; 100]);
     /// # builder.create_dataset("b").with_i32_data(&[2; 400]);
     /// # builder.create_dataset("c").with_i32_data(&[3; 100]);
@@ -10886,7 +10898,8 @@ mod tests {
                     "a page buffer on a paged file needs its free space persisted: staged \
                      commits without persisted free space require ordered publication without \
                      page buffering; recreate the file with \
-                     with_file_space_strategy(FileSpaceStrategy::Page, true, ..), or drop \
+                     with_file_space_settings(FileSpaceSettings::new(\
+                     FileSpaceStrategy::Page).with_persistence(true)), or drop \
                      the page buffer"
                 ))
             ),

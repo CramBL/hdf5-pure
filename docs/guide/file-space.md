@@ -1,4 +1,10 @@
-A written HDF5 file can record how it manages free space: which allocation strategy it uses, whether freed regions are tracked across closes, and the page size used for paged allocation. This page covers [`FileBuilder::with_file_space_strategy`](crate::FileBuilder::with_file_space_strategy) and [`with_file_space_page_size`](crate::FileBuilder::with_file_space_page_size), which mirror HDF5's `H5Pset_file_space_strategy` and `H5Pset_file_space_page_size`, and how the choice interacts with [editing](crate::_guide::editing) and [repacking](crate::_guide::repack).
+[`FileSpaceSettings`](crate::FileSpaceSettings) configures a file's allocation strategy,
+persistence, free-section threshold, and page size. Apply the value through
+[`FileBuilder::with_file_space_settings`](crate::FileBuilder::with_file_space_settings) or
+[`FileCreateProperties::with_file_space_settings`](crate::FileCreateProperties::with_file_space_settings).
+The settings are separate from the raw File Space Info message and from observations of free
+sections. This page also describes how the configuration affects [editing](crate::_guide::editing)
+and [repacking](crate::_guide::repack).
 
 A runnable example lives at [`examples/file_space.rs`](https://github.com/CramBL/hdf5-pure/blob/main/examples/file_space.rs). Run it with:
 
@@ -6,30 +12,50 @@ A runnable example lives at [`examples/file_space.rs`](https://github.com/CramBL
 $ cargo run --example file_space
 ```
 
-## Recording a strategy
+## Configuring file-space management
 
-[`FileBuilder::with_file_space_strategy(strategy, persist, threshold)`](crate::FileBuilder::with_file_space_strategy) records the file-space management strategy, whether free space is persisted across closes, and the smallest free section the managers will track. [`with_file_space_page_size(size)`](crate::FileBuilder::with_file_space_page_size) sets the file-space page size used for paged allocation. Both are recorded in the file's superblock extension, so the reference HDF5 C library and a later reopen observe the choice.
+[`FileSpaceSettings::new`](crate::FileSpaceSettings::new) selects the strategy with persistence
+disabled, threshold 1, and [`FileSpacePageSize::DEFAULT`](crate::FileSpacePageSize::DEFAULT).
+[`FileSpaceSettings::default`](crate::FileSpaceSettings::default) selects
+[`FsmAggr`](crate::FileSpaceStrategy::FsmAggr). The C library configures these properties with
+`H5Pset_file_space_strategy` and `H5Pset_file_space_page_size`.
 
-[`Aggr`](crate::FileSpaceStrategy::Aggr) and [`None`](crate::FileSpaceStrategy::None) have no free-space managers, so for either the writer records a clear persist flag and the default threshold of 1, whatever the call passes for `persist` and `threshold`. The C library's `H5Pset_file_space_strategy` ignores both for those strategies too.
+[`Aggr`](crate::FileSpaceStrategy::Aggr) and [`None`](crate::FileSpaceStrategy::None) have no
+free-space managers. Their effective settings always have persistence disabled and threshold 1.
+The setters ignore inputs for those two fields, as `H5Pset_file_space_strategy` does for strategies
+without managers (`H5Pfcpl.c`, HDF5 2.2.0). Page size is retained under every strategy and affects
+allocation only under [`Page`](crate::FileSpaceStrategy::Page).
 
-Both are also fields on [`FileCreateProperties`](crate::FileCreateProperties), the reusable file-creation-property value (the `fcpl` analogue). Build one in a helper, then apply it with [`FileBuilder::with_create_properties`](crate::FileBuilder::with_create_properties) or [`File::create_with_options`](crate::File::create_with_options) wherever a file is written, so the call chain is written once.
+[`FileCreateProperties`](crate::FileCreateProperties) stores one optional settings value.
+[`FileCreateProperties::file_space_settings`](crate::FileCreateProperties::file_space_settings)
+returns that value, including normalized fields and defaults. New creation properties leave it
+unset, so the writer omits the File Space Info message. Passing an explicit default requests a
+message. Any explicit settings require the HDF5 1.10 writer format.
 
-The page-size setters accept [`FileSpacePageSize`](crate::FileSpacePageSize), with raw byte counts
-checked by [`FileSpacePageSize::try_from`](crate::FileSpacePageSize::try_from).
-[`FileCreateProperties::file_space_page_size`](crate::FileCreateProperties::file_space_page_size)
-returns an optional typed setting whose byte count is available through
+Apply the properties with [`FileBuilder::with_create_properties`](crate::FileBuilder::with_create_properties)
+or [`File::create_with_options`](crate::File::create_with_options).
+Applying creation properties replaces all earlier creation options, including clearing file-space
+settings when the supplied properties leave them unset.
+
+[`FileSpaceSettings::with_page_size`](crate::FileSpaceSettings::with_page_size) takes the checked
+[`FileSpacePageSize`](crate::FileSpacePageSize) value. Construct it with
+[`FileSpacePageSize::try_from`](crate::FileSpacePageSize::try_from), and read its byte count with
 [`FileSpacePageSize::get`](crate::FileSpacePageSize::get).
 
 ```rust
-use hdf5_pure::{FileCreateProperties, FileSpacePageSize, FileSpaceStrategy};
+use hdf5_pure::{FileCreateProperties, FileSpacePageSize, FileSpaceSettings, FileSpaceStrategy};
 
 fn paged_layout(page_size: FileSpacePageSize) -> FileCreateProperties {
-    FileCreateProperties::new()
-        .with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-        .with_file_space_page_size(page_size)
+    let settings = FileSpaceSettings::new(FileSpaceStrategy::Page)
+        .with_persistence(true)
+        .with_page_size(page_size);
+    FileCreateProperties::new().with_file_space_settings(settings)
 }
-# let page_size = FileSpacePageSize::try_from(8192)?;
-# assert_eq!(paged_layout(page_size).file_space_page_size(), Some(page_size));
+let page_size = FileSpacePageSize::try_from(8192)?;
+assert_eq!(
+    paged_layout(page_size).file_space_settings().map(|settings| settings.page_size()),
+    Some(page_size)
+);
 # Ok::<(), hdf5_pure::FormatError>(())
 ```
 
@@ -37,12 +63,14 @@ fn paged_layout(page_size: FileSpacePageSize) -> FileCreateProperties {
 use hdf5_pure::FileSpacePageSize;
 # let dir = tempfile::tempdir()?;
 # let path = dir.path().join("out.h5");
-use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
+use hdf5_pure::{File, FileBuilder, FileSpaceSettings, FileSpaceStrategy};
 
 let mut b = FileBuilder::new();
 b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
-b.with_file_space_strategy(FileSpaceStrategy::Page, false, 1) // strategy, persist, threshold
-    .with_file_space_page_size(FileSpacePageSize::try_from(8192).unwrap());
+b.with_file_space_settings(
+    FileSpaceSettings::new(FileSpaceStrategy::Page)
+        .with_page_size(FileSpacePageSize::try_from(8192)?),
+);
 b.write(&path)?;
 
 assert_eq!(
@@ -82,7 +110,10 @@ Under `FsmAggr` and persistent [`Page`](crate::FileSpaceStrategy::Page), edits r
 
 ## The threshold parameter
 
-The `threshold` argument is the smallest free-space section, in bytes, that the free-space managers track, and the C library's default is `1` (every freed section is eligible). Under [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr) and [`Page`](crate::FileSpaceStrategy::Page) it is recorded in the file and round-trips through libhdf5.
+[`FileSpaceSettings::with_threshold`](crate::FileSpaceSettings::with_threshold) sets the
+free-section admission threshold in bytes. The default is 1, and zero is accepted. Under
+[`FsmAggr`](crate::FileSpaceStrategy::FsmAggr) and [`Page`](crate::FileSpaceStrategy::Page), the writer
+records the threshold in the File Space Info message.
 
 Under [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr) and persistent [`Page`](crate::FileSpaceStrategy::Page), a read-write session tracks a freed region of at least the threshold. It tracks a shorter one only where the region adjoins tracked free space, which it merges into, and drops it otherwise, as the C library does. A dropped region is not reused. Under [`Page`](crate::FileSpaceStrategy::Page) a region shorter than a page merges only with free space in its own page. The writer and the editors track page tails whatever the threshold, and so does the C library.
 
@@ -99,10 +130,13 @@ available through [`File::reusable_space_stats`](crate::File::reusable_space_sta
 use hdf5_pure::FileSpacePageSize;
 # let dir = tempfile::tempdir()?;
 # let path = dir.path().join("out.h5");
-# let mut b = hdf5_pure::FileBuilder::new();
+# use hdf5_pure::{FileBuilder, FileSpaceSettings, FileSpaceStrategy};
+# let mut b = FileBuilder::new();
 # b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
-# b.with_file_space_strategy(hdf5_pure::FileSpaceStrategy::Page, false, 1)
-#     .with_file_space_page_size(FileSpacePageSize::try_from(8192).unwrap());
+# b.with_file_space_settings(
+#     FileSpaceSettings::new(FileSpaceStrategy::Page)
+#         .with_page_size(FileSpacePageSize::try_from(8192)?),
+# );
 # b.write(&path)?;
 use hdf5_pure::File;
 
@@ -137,6 +171,25 @@ the current published metadata on editing handles.
 
 ### API migration
 
+Creation properties and builders use one [`FileSpaceSettings`](crate::FileSpaceSettings) value.
+The split creation methods are removed:
+
+| Removed creation API | Replacement |
+|---|---|
+| `FileCreateProperties::with_file_space_strategy` | `FileCreateProperties::with_file_space_settings` |
+| `FileCreateProperties::with_file_space_page_size` | `FileSpaceSettings::with_page_size`, then apply the value |
+| `FileCreateProperties::file_space_strategy` | `FileCreateProperties::file_space_settings`, then inspect the value |
+| `FileCreateProperties::file_space_page_size` | `FileCreateProperties::file_space_settings`, then `FileSpaceSettings::page_size` |
+| `FileBuilder::with_file_space_strategy` | `FileBuilder::with_file_space_settings` |
+| `FileBuilder::with_file_space_page_size` | `FileSpaceSettings::with_page_size`, then apply the value |
+
+The page-size-only configuration is an explicit
+[`FileSpaceSettings::new`](crate::FileSpaceSettings::new) with
+[`FsmAggr`](crate::FileSpaceStrategy::FsmAggr), followed by
+[`with_page_size`](crate::FileSpaceSettings::with_page_size). It records the same configuration.
+The configuration getter returns effective values, including defaults. The old getters exposed
+separately requested values.
+
 The recorded-settings and raw-message accessors distinguish absence from parse failure. The raw
 accessor was public before version 0.47.0. Its return type changes from an optional borrowed value
 to a fallible optional owned value.
@@ -155,13 +208,17 @@ uses pages only under [`Page`](crate::FileSpaceStrategy::Page).
 
 ## Paged files (`FileSpaceStrategy::Page`)
 
-[`FileSpaceStrategy::Page`](crate::FileSpaceStrategy::Page) writes a **genuine paged file**, not just a recorded label. Every allocation is aligned to the page size set by [`with_file_space_page_size`](crate::FileBuilder::with_file_space_page_size), which defaults to 4096 and must be from 512 bytes to 1 GiB, with any userblock a whole number of pages. Each page is kept homogeneous (defined precisely below), and each page's free tail is tracked in a per-page-type free-space manager. The reference HDF5 C library reads the result as a paged file, parses the managers (`H5Fget_freespace` matches the tracked total), reads every dataset, and re-paginates the file when it writes to it.
+The writer uses the configured page size for [`Page`](crate::FileSpaceStrategy::Page) allocation.
+[`FileSpacePageSize`](crate::FileSpacePageSize) supports sizes from 512 bytes through 1 GiB and
+defaults to 4096 bytes. A userblock must occupy a whole number of pages. With persistence enabled,
+the writer records page tails in per-page-type free-space managers. The page allocation categories
+and editing restrictions are described below.
 
 ```rust
 use hdf5_pure::FileSpacePageSize;
 # let dir = tempfile::tempdir()?;
 # let path = dir.path().join("paged.h5");
-use hdf5_pure::{File, FileBuilder, FileSpaceStrategy, MaxExtent};
+use hdf5_pure::{File, FileBuilder, FileSpaceSettings, FileSpaceStrategy, MaxExtent};
 
 let mut b = FileBuilder::new();
 b.create_dataset("samples")
@@ -169,8 +226,12 @@ b.create_dataset("samples")
     .with_shape(&[1000])
     .with_maxshape(&[MaxExtent::Unlimited])
     .with_chunks(&[256]);
-b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0) // persist so it can be grown later
-    .with_file_space_page_size(FileSpacePageSize::DEFAULT);
+b.with_file_space_settings(
+    FileSpaceSettings::new(FileSpaceStrategy::Page)
+        .with_persistence(true)
+        .with_threshold(0)
+        .with_page_size(FileSpacePageSize::DEFAULT),
+);
 b.write(&path)?;
 assert_eq!(
     File::open(&path)?.file_space_settings()?.map(|settings| settings.strategy()),
@@ -217,11 +278,13 @@ An in-place [`Dataset::append`](crate::Dataset::append) reuses persisted free sp
 ```rust
 # let dir = tempfile::tempdir()?;
 # let path = dir.path().join("managed.h5");
-use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
+use hdf5_pure::{File, FileBuilder, FileSpaceSettings, FileSpaceStrategy};
 
 let mut builder = FileBuilder::new();
 builder.create_dataset("keep").with_i32_data(&[1, 2, 3]);
-builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1); // persist = true
+builder.with_file_space_settings(
+    FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+);
 builder.write(&path)?;
 
 // Create then delete a dataset through the owned-handle editor; the freed
@@ -241,7 +304,7 @@ let free = file.persisted_free_space()?;
 let total_free: u64 = free.iter().map(|&(_, len)| len).sum();
 println!("persisted free regions: {}", free.len());
 println!("total persisted free bytes: {total_free}");
-# assert!(total_free > 0);
+assert!(total_free > 0);
 # Ok::<(), hdf5_pure::Error>(())
 ```
 

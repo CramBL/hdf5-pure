@@ -1937,7 +1937,8 @@ impl WriteEngine {
                 "a page buffer on a paged file needs its free space persisted: staged commits \
                  without persisted free space require ordered publication without page \
                  buffering; recreate the file with \
-                 with_file_space_strategy(FileSpaceStrategy::Page, true, ..), or drop the \
+                 with_file_space_settings(FileSpaceSettings::new(\
+                 FileSpaceStrategy::Page).with_persistence(true)), or drop the \
                  page buffer",
             ));
         }

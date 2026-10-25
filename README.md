@@ -161,13 +161,17 @@ The [repack guide](https://docs.rs/hdf5-pure/latest/hdf5_pure/_guide/repack/inde
 documents the fidelity guarantee, verbatim chunk-copy path, re-encoding fallbacks, reference
 handling, and the cases that are rejected.
 
-### File-space strategy
+### File-space management
 
-`FileBuilder::with_file_space_strategy` records the allocation strategy, persistence choice, and
-free-space threshold. `with_file_space_page_size` configures paged allocation. Paged files that
-will later be edited normally need persisted page information: a `FileSpaceStrategy::Page` file
-created with `persist = false` is normally rejected by `File::open_rw` because the editor cannot
-preserve metadata/raw-data page segregation.
+`FileSpaceSettings` combines the allocation strategy, persistence choice, free-space threshold,
+and checked page size. Apply it with `FileBuilder::with_file_space_settings` or through
+`FileCreateProperties`. Unset settings omit the File Space Info message, while an explicit default
+value records it. `File::file_space_settings` reads the recorded configuration and reports
+malformed metadata as an error.
+
+Persistent paged files support staged edits. Immediate appends also require a file without a
+userblock. Nonpersistent paged files require mirrored editing, support eligible staged edits, and
+reject immediate appends.
 
 See the [file-space guide](https://docs.rs/hdf5-pure/latest/hdf5_pure/_guide/file_space/index.html)
 for strategy semantics, persisted free-space reuse, paged files, and editing behavior.

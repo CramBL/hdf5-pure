@@ -252,9 +252,11 @@ fn const_creation_properties_distinguish_unset_and_explicit_default_page_sizes()
         FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
             .with_page_size(FileSpacePageSize::DEFAULT),
     );
-    assert_eq!(DEFAULT.file_space_page_size(), None);
+    assert_eq!(DEFAULT.file_space_settings(), None);
     assert_eq!(
-        WITH_PAGE.file_space_page_size(),
+        WITH_PAGE
+            .file_space_settings()
+            .map(|settings| settings.page_size()),
         Some(FileSpacePageSize::DEFAULT)
     );
 }

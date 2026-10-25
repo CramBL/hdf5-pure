@@ -1,9 +1,7 @@
 //! File-creation properties as one reusable value — the `fcpl` analogue.
 
-use crate::FileSpacePageSize;
 use crate::FileSpaceSettings;
 use crate::UserblockSize;
-use crate::file_space_info::FileSpaceStrategy;
 use crate::libver::LibVer;
 
 /// File-creation properties applied when writing a new HDF5 file.
@@ -30,8 +28,9 @@ use crate::libver::LibVer;
 /// equivalent [`FileBuilder`](crate::FileBuilder) methods set the same fields one
 /// at a time and interoperate freely with this.
 ///
-/// Userblock and page sizes are checked when [`UserblockSize`] and [`FileSpacePageSize`] are
-/// constructed. Constraints between settings are checked when writing.
+/// Userblock and page sizes are checked when [`UserblockSize`] and
+/// [`FileSpacePageSize`](crate::FileSpacePageSize) are constructed. Constraints between settings
+/// are checked when writing.
 ///
 /// # Supported properties
 ///
@@ -91,7 +90,7 @@ use crate::libver::LibVer;
 /// | Status | Meaning |
 /// |---|---|
 /// | **Genuine** | The property changes the on-disk result exactly as HDF5 specifies, verified against libhdf5. |
-/// | **Recorded** | The value is written to the file and round-trips through the C library, and the layout stays as it was, which is correct for a fresh file, since it has no free space to manage yet. |
+/// | **Recorded** | Stored in metadata with no effect on storage placement |
 /// | **Read-only** | Honored when a file is read, with no write-side effect. |
 /// | **Behavioral** | Changes how the crate operates on the file, its memory and its durability, without changing a byte of the result. There is nothing on disk to verify against the C library. |
 /// | **Assertion** | Validated on write, and cannot change the emitted format. |
@@ -105,24 +104,37 @@ use crate::libver::LibVer;
 /// [`FileBuilder::with_create_properties`](crate::FileBuilder::with_create_properties).
 /// [`File::create_with_options(path, fcpl, fapl)`](crate::File::create_with_options) applies them
 /// on the owned-handle path, mirroring `H5Fcreate(name, flags, fcpl_id, fapl_id)`. It returns an
-/// open read-write handle, so a creation and access pair the reopen would reject (a paged file
-/// with `persist = false`, or a userblock under
-/// [`MemoryStrategy::Bounded`](crate::MemoryStrategy::Bounded)) fails before anything is written.
+/// open read-write handle. The constructor rejects
+/// [`MemoryStrategy::Bounded`](crate::MemoryStrategy::Bounded) combined with nonpersistent paged
+/// settings or a userblock before writing.
+///
+/// [`FileSpaceSettings`] configures the file-space rows below. Apply the value with
+/// [`with_file_space_settings`](Self::with_file_space_settings). The writer uses separate metadata
+/// and raw aggregates under [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr) and
+/// [`Aggr`](crate::FileSpaceStrategy::Aggr). With persistence enabled under `FsmAggr`, it records
+/// eligible unused aggregate space from creation. Under [`Page`](crate::FileSpaceStrategy::Page),
+/// it allocates within pages of the configured size and persists tracked page tails when enabled.
+/// Under `Aggr` and [`None`](crate::FileSpaceStrategy::None), persistence is disabled and the
+/// threshold is 1. Page size is recorded under every strategy and affects allocation under `Page`.
+/// The page-size row distinguishes paged allocation from recording under the other strategies.
 ///
 /// | HDF5 property (C API) | `hdf5-pure` | Status | Behavior |
 /// |---|---|---|---|
-/// | `H5Pset_file_space_strategy(PAGE, …)` | [`with_file_space_strategy(FileSpaceStrategy::Page, …)`](Self::with_file_space_strategy) | **Genuine** | Real page-aligned allocation: metadata and raw data occupy separate pages, and each page's free tail is tracked in a per-page-type `FSHD`/`FSSE` manager. The C library reads it as paged and `H5Fget_freespace` matches the tracked total. |
-/// | `H5Pset_file_space_strategy(FSM_AGGR, …)` | `…(FsmAggr, …)` | **Recorded** | The strategy is stored in the superblock extension, and the layout stays sequential. Freed regions become tracked once a read-write session deletes an object. |
-/// | `H5Pset_file_space_strategy(AGGR / NONE, …)` | `…(Aggr / None, …)` | **Recorded** | The strategy is stored in the superblock extension, and the layout stays sequential. A read-write session reuses no freed region and allocates at the end of the file. |
-/// | `persist` flag | 2nd argument of [`with_file_space_strategy`](Self::with_file_space_strategy) | **Genuine** (paged) / **Recorded** (`FsmAggr`) | Paged: per-page-type managers are written from creation. `FsmAggr`: the flag records intent, and managers appear after a later delete. The writer ignores it under `Aggr` and `None`, as the C library does. |
-/// | `threshold` | 3rd argument of [`with_file_space_strategy`](Self::with_file_space_strategy) | **Genuine** | Round-trips through the C library under `FsmAggr` and `Page`. A read-write session tracks a freed region shorter than the threshold only where the region adjoins tracked free space, which under `Page` is free space in its own page for a region shorter than a page. Page tails are tracked whatever its value. The writer ignores it under `Aggr` and `None`, as the C library does. |
-/// | `H5Pset_file_space_page_size` | [`with_file_space_page_size`](Self::with_file_space_page_size) | **Genuine** (paged) / **Recorded** (non-paged) | The writer records the page size under every strategy and allocates storage in pages of this size under [`Page`](crate::FileSpaceStrategy::Page). [`FileSpacePageSize::DEFAULT`] is 4096 bytes. |
+/// | `H5Pset_file_space_strategy` | [`new`][space-new] | **Genuine** | Allocation strategy |
+/// | `persist` flag | [`with_persistence`][space-persist] | **Genuine** | Manager persistence |
+/// | `threshold` | [`with_threshold`][space-threshold] | **Genuine** | Section admission |
+/// | `H5Pset_file_space_page_size` | [`with_page_size`][page] | **Genuine/Recorded** | Paging |
 /// | `H5Pset_userblock` | [`with_userblock`](Self::with_userblock) | **Genuine** | Reserves a zero-filled prefix with a [`UserblockSize`]. Under [`Page`](crate::FileSpaceStrategy::Page), the writer requires a whole number of pages. [`FileBuilder::with_userblock_content`](crate::FileBuilder::with_userblock_content) supplies its contents on every output path. |
 /// | `H5Pset_libver_bounds` (`fapl`) | [`with_libver_bounds`](Self::with_libver_bounds) | **Genuine** (1.8 / 1.10) | A format selector between the two the writer emits: `high` picks the v2 (HDF5 1.8) superblock at `Earliest..=V18` and the v3 (1.10) one at anything reaching 1.10, and a lower bound above 1.10 (`V112`, `V114`, `LATEST`) selects the 1.10 format too. As in the C library, the low bound permits newer encodings and requires none. An upper bound older than 1.8, or below the lower bound, is rejected with [`FormatError::LibverBoundsUnsatisfiable`](crate::FormatError::LibverBoundsUnsatisfiable). HDF5 classes this as a file-access property, and it sits here because this crate resolves the bound at write time. |
 /// | `H5Pset_fill_value` / `H5Pset_fill_time` (`dcpl`) | [`DatasetBuilder::with_fill_value`](crate::DatasetBuilder::with_fill_value), [`with_fill_time`](crate::DatasetBuilder::with_fill_time) | **Genuine** (per dataset) | Encodes the fill value and fill time in a v3 Fill Value message, and [`Dataset::fill_value`](crate::Dataset::fill_value) and [`Dataset::fill_time`](crate::Dataset::fill_time) read them back, from this crate's files and the C library's. |
 /// | `H5Pset_obj_track_times` (`ocpl`) | none | **Unsupported** | Every object is written with times untracked, which is equivalent to `false`, and tracking cannot be enabled. |
 /// | `H5Pset_sym_k` / `H5Pset_istore_k` | none | **N/A** | The v3 superblock omits these fields, and every group is new-style, with link messages and a v2 object header. |
 /// | `H5Pset_link_phase_change` / `H5Pset_est_link_info` (`gcpl`) | none | **Unsupported** | The Group Info message is written minimal, so the C library's defaults apply (max-compact 8, min-dense 6), and the thresholds are not tunable. |
+///
+/// [space-new]: crate::FileSpaceSettings::new
+/// [space-persist]: crate::FileSpaceSettings::with_persistence
+/// [space-threshold]: crate::FileSpaceSettings::with_threshold
+/// [page]: crate::FileSpaceSettings::with_page_size
 ///
 /// ## Compliance and known limits
 ///
@@ -136,13 +148,15 @@ use crate::libver::LibVer;
 ///
 /// The limits that come with it:
 ///
-/// - A paged file must persist its free space to be mutated. Both editors grow a paged `persist =
-///   true` file, keeping pages homogeneous and the end of allocation page-aligned. A paged file
-///   created without `persist = true` has no record of which pages hold metadata and which hold
-///   raw data, so it cannot be grown at all. Recreate it with `persist = true`.
-/// - Free space is under-reported and never over-reported. A final metadata-page tail and the old
-///   bytes of a relocated partial chunk are left untracked, so `H5Fget_freespace` can read slightly
-///   low. The file stays valid.
+/// - Persistent paged files support staged commits and immediate appends through mirrored or
+///   bounded editing, subject to the access-mode restrictions. Nonpersistent paged files require
+///   mirrored editing and support eligible staged commits, with new allocations in fresh pages.
+///   Immediate appends are unsupported. The [editing guide](crate::_guide::editing) gives the
+///   attribute-storage and object-reference restrictions.
+/// - Persisted free sections and session-reusable space have separate inspection methods:
+///   [`File::persisted_free_sections`](crate::File::persisted_free_sections) and
+///   [`File::reusable_free_sections`](crate::File::reusable_free_sections). Their sections and
+///   coordinate systems can differ.
 /// - The reader supports File Space Info message versions 0 and 1. The writer emits version 1.
 ///
 /// [Limitations](crate#limitations) has the full set of deliberate rejections.
@@ -152,12 +166,15 @@ use crate::libver::LibVer;
 /// ```
 /// # let directory = tempfile::tempdir()?;
 /// # let path = directory.path().join("out.h5");
-/// use hdf5_pure::{FileBuilder, FileCreateProperties, FileSpacePageSize, FileSpaceStrategy};
+/// use hdf5_pure::{
+///     FileBuilder, FileCreateProperties, FileSpacePageSize, FileSpaceSettings, FileSpaceStrategy,
+/// };
 ///
-/// let page_size = FileSpacePageSize::try_from(8192)?;
-/// let properties = FileCreateProperties::new()
-///     .with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-///     .with_file_space_page_size(page_size);
+/// let settings = FileSpaceSettings::new(FileSpaceStrategy::Page)
+///     .with_persistence(true)
+///     .with_threshold(128)
+///     .with_page_size(FileSpacePageSize::try_from(8192)?);
+/// let properties = FileCreateProperties::new().with_file_space_settings(settings);
 ///
 /// let mut builder = FileBuilder::new();
 /// builder.with_create_properties(properties);
@@ -220,48 +237,6 @@ impl FileCreateProperties {
         self
     }
 
-    /// Set the file-space management strategy, whether free space persists across
-    /// close, and the smallest free-space section tracked.
-    ///
-    /// [`FileSpaceStrategy::Aggr`] and [`FileSpaceStrategy::None`] have no free-space managers,
-    /// so for either the writer records a clear persist flag and the default threshold of 1,
-    /// whatever the caller passes for `persist` and `threshold`. `H5Pset_file_space_strategy`
-    /// ignores both for those strategies too.
-    #[doc(alias = "H5Pset_file_space_strategy")]
-    pub const fn with_file_space_strategy(
-        mut self,
-        strategy: FileSpaceStrategy,
-        persist: bool,
-        threshold: u64,
-    ) -> Self {
-        let page_size = match self.file_space_settings {
-            Some(settings) => settings.page_size(),
-            None => FileSpacePageSize::DEFAULT,
-        };
-        self.file_space_settings = Some(
-            FileSpaceSettings::new(strategy)
-                .with_persistence(persist)
-                .with_threshold(threshold)
-                .with_page_size(page_size),
-        );
-        self
-    }
-
-    /// Sets the page size recorded in file-space metadata.
-    ///
-    /// The writer allocates storage in pages of this size under [`FileSpaceStrategy::Page`].
-    /// When the caller sets a page size without a strategy, the writer records
-    /// [`FileSpaceStrategy::FsmAggr`].
-    #[doc(alias = "H5Pset_file_space_page_size")]
-    pub const fn with_file_space_page_size(mut self, page_size: FileSpacePageSize) -> Self {
-        let settings = match self.file_space_settings {
-            Some(settings) => settings,
-            None => FileSpaceSettings::new(FileSpaceStrategy::FsmAggr),
-        };
-        self.file_space_settings = Some(settings.with_page_size(page_size));
-        self
-    }
-
     /// Sets the file-space configuration recorded in the superblock extension.
     ///
     /// Replaces the configured strategy, persistence flag, threshold, and page size together.
@@ -270,6 +245,8 @@ impl FileCreateProperties {
     ///
     /// The writer requires the HDF5 1.10 format when settings are configured. It checks the
     /// format bound and constraints between settings when writing.
+    #[doc(alias = "H5Pset_file_space_strategy")]
+    #[doc(alias = "H5Pset_file_space_page_size")]
     pub const fn with_file_space_settings(mut self, settings: FileSpaceSettings) -> Self {
         self.file_space_settings = Some(settings);
         self
@@ -291,31 +268,6 @@ impl FileCreateProperties {
     /// Return the configured library-version bounds, if any.
     pub const fn libver_bounds(&self) -> Option<(LibVer, LibVer)> {
         self.libver_bounds
-    }
-
-    /// Returns the effective strategy, persistence flag, and threshold, or `None` if unset.
-    ///
-    /// The values are those of [`Self::file_space_settings`], including the default strategy
-    /// when only a page size was configured and normalization under strategies without managers.
-    pub const fn file_space_strategy(&self) -> Option<(FileSpaceStrategy, bool, u64)> {
-        match self.file_space_settings {
-            Some(settings) => Some((
-                settings.strategy(),
-                settings.persist(),
-                settings.threshold(),
-            )),
-            None => None,
-        }
-    }
-
-    /// Returns the effective page size, or `None` if file-space settings are unset.
-    ///
-    /// Configuring a strategy without a page size returns [`FileSpacePageSize::DEFAULT`].
-    pub const fn file_space_page_size(&self) -> Option<FileSpacePageSize> {
-        match self.file_space_settings {
-            Some(settings) => Some(settings.page_size()),
-            None => None,
-        }
     }
 }
 
