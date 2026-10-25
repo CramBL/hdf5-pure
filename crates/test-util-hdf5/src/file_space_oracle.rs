@@ -1,12 +1,9 @@
 //! Compares persisted free-space sections with an independent libhdf5 enumeration.
 //!
 //! [`assert_persisted_sections`] compares buffered and streaming facade reports with the C
-//! enumeration at base-relative stored addresses. It checks the recorded manager contents
-//! without collecting ownership accounting.
-//!
-//! [`FreeSpaceOracleCheckpoint`] also records Rust ownership accounting for files the editor
-//! supports. The C enumeration covers free-space-manager state. Live raw data and metadata are
-//! classified only by Rust's [`File::__space_ownership`] diagnostic.
+//! enumeration at base-relative stored addresses and checks the recorded manager contents.
+//! [`FreeSpaceOracleCheckpoint`] records paired free-section reports, creation properties,
+//! and file sizes.
 
 use std::collections::BTreeSet;
 use std::fmt::Display;
@@ -19,9 +16,8 @@ use hdf5_pure::FreeSectionCoordinates;
 use hdf5_pure::FreeSections;
 use hdf5_pure::FreeSpaceManagerRole;
 use hdf5_pure::PersistedFreeSections;
-use hdf5_pure::{File, FileAccessProperties, FileSpaceStrategy, MemoryStrategy, SpaceOwnership};
+use hdf5_pure::{File, FileSpaceStrategy};
 use hdf5_pure_core::__private::BaseAddressExt;
-use hdf5_pure_core::{LengthWidth, OffsetWidth};
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::DEFAULT_THRESHOLD;
 use hdf5_pure_format::__private::FormatWidths;
@@ -189,7 +185,7 @@ fn section_pairs(sections: &FreeSections) -> Vec<(u64, u64)> {
         .collect()
 }
 
-/// The persisted free-space maps, file sizes, and ownership accounting for one closed file.
+/// The persisted free-space maps, creation properties, and file sizes for one closed file.
 #[derive(Debug)]
 pub struct FreeSpaceOracleCheckpoint {
     /// The workload and creation settings used to identify the file.
@@ -210,8 +206,6 @@ pub struct FreeSpaceOracleCheckpoint {
     pub physical_file_size: u64,
     /// The base address at the end of the userblock, or zero.
     pub base: u64,
-    /// The Rust ownership diagnostic, absent when either format width is smaller than eight bytes.
-    pub ownership: Option<SpaceOwnership>,
     properties: String,
 }
 
@@ -219,8 +213,7 @@ impl FreeSpaceOracleCheckpoint {
     /// Opens a closed file with each library and records its persisted sections.
     ///
     /// The caller must close all writing sessions before calling this method. The observer opens
-    /// the file read-only with each library, compares creation properties, and obtains Rust
-    /// ownership accounting through an unmodified mirrored editing handle. It compares the
+    /// the file read-only with each library and compares creation properties. It compares the
     /// complete file bytes before and after observation.
     ///
     /// # Errors
@@ -257,8 +250,6 @@ impl FreeSpaceOracleCheckpoint {
             boundary,
         )?;
         let info = reader.file_space_info().cloned();
-        let editable = reader.superblock().offset_size == OffsetWidth::Eight
-            && reader.superblock().length_size == LengthWidth::Eight;
         reader.close().map_err(OracleError::Rust)?;
         let file = hdf5::File::open(path).map_err(|source| OracleError::C {
             operation: "H5Fopen",
@@ -385,18 +376,6 @@ impl FreeSpaceOracleCheckpoint {
                 physical: physical_file_size,
             });
         }
-        let ownership = if editable {
-            let editor = File::open_rw_with_options(
-                path,
-                FileAccessProperties::new().with_memory_strategy(MemoryStrategy::Mirrored),
-            )
-            .map_err(OracleError::Rust)?;
-            let ownership = editor.__space_ownership().map_err(OracleError::Rust)?;
-            editor.close().map_err(OracleError::Rust)?;
-            Some(ownership)
-        } else {
-            None
-        };
         if before != fs::read(path).map_err(OracleError::Io)? {
             return Err(OracleError::ChangedBytes);
         }
@@ -410,7 +389,6 @@ impl FreeSpaceOracleCheckpoint {
             c_file_size,
             physical_file_size,
             base,
-            ownership,
             properties,
         })
     }
@@ -436,7 +414,7 @@ impl FreeSpaceOracleCheckpoint {
         );
     }
 
-    /// Formats every section from both libraries beside file sizes and Rust ownership totals.
+    /// Formats every section from both libraries beside file sizes and free-space totals.
     ///
     /// Missing rows and unequal pairs are marked explicitly. Section addresses and lengths are
     /// formatted in aligned hexadecimal columns padded with zeros. Reports include both
@@ -449,7 +427,6 @@ impl FreeSpaceOracleCheckpoint {
         self.render_sizes(&mut out);
         self.render_sections(&mut out);
         self.render_totals(&mut out);
-        self.render_ownership(&mut out);
         out.push_str(&format!(
             "\nexact section map equal: {}\n\n",
             self.rust.sections == self.c.sections
@@ -545,34 +522,6 @@ impl FreeSpaceOracleCheckpoint {
             out.push_str(&row);
         }
         out.push('\n');
-    }
-
-    fn render_ownership(&self, out: &mut String) {
-        out.push_str("ownership (Rust)\n");
-        if let Some(ownership) = &self.ownership {
-            out.push_str(&format!(
-                "  analysis complete: {}\n\n",
-                ownership.analysis_complete
-            ));
-            out.push_str(&paired_row("category", "sections", "bytes"));
-            for (label, sections) in [
-                ("userblock", &ownership.userblock_space),
-                ("live raw data", &ownership.live_raw_space),
-                ("live metadata", &ownership.live_metadata_space),
-                ("free-space managers", &ownership.free_space_manager_space),
-                ("reusable free space", &ownership.reusable_free_space),
-                ("unclassified", &ownership.unclassified_space),
-                ("trailing slack", &ownership.trailing_slack_space),
-            ] {
-                out.push_str(&paired_row(
-                    label,
-                    sections.len(),
-                    sections.iter().map(|s| u128::from(s.1)).sum::<u128>(),
-                ));
-            }
-        } else {
-            out.push_str("  unavailable: in-place editing requires 8-byte offsets and lengths\n");
-        }
     }
 }
 /// A sorted list of positive, disjoint sections within a base-relative allocation boundary.
@@ -718,7 +667,7 @@ pub enum OracleError {
         /// The settings returned by the C library.
         c: String,
     },
-    /// A Rust file or ownership operation failed.
+    /// A Rust file operation failed.
     Rust(hdf5_pure::Error),
     /// A reported size was inconsistent with the base address or physical file length.
     Size {

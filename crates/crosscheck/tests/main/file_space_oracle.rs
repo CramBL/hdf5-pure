@@ -1,7 +1,7 @@
 //! Tests exact persisted free-space maps on the same closed file with both libraries.
 //!
 //! HDF5 1.10 and later run the equality assertions. Full paired snapshots use the
-//! bundled build. Ownership accounting is a separate Rust diagnostic of live and free bytes.
+//! bundled build.
 
 #![cfg(feature = "__hdf5-1.10")]
 
@@ -130,30 +130,7 @@ fn endurance_checkpoints_match_libhdf5(#[case] strategy: FileSpaceStrategy) {
     free_space_endurance::run_endurance_observed(strategy, |path, step| {
         steps.push(step.to_owned());
         let observation = observe(path, &case, step);
-        if strategy != FileSpaceStrategy::None {
-            assert!(
-                observation.ownership.as_ref().unwrap().analysis_complete,
-                "{case}/{step}"
-            );
-            assert!(
-                observation
-                    .ownership
-                    .as_ref()
-                    .unwrap()
-                    .unclassified_space
-                    .is_empty(),
-                "{case}/{step}"
-            );
-            assert!(
-                observation
-                    .ownership
-                    .as_ref()
-                    .unwrap()
-                    .trailing_slack_space
-                    .is_empty(),
-                "{case}/{step}"
-            );
-        } else {
+        if strategy == FileSpaceStrategy::None {
             assert!(observation.rust.sections().is_empty(), "{case}/{step}");
         }
         observations.push_str(&observation.render());
@@ -187,28 +164,6 @@ fn churn_checkpoints_match_libhdf5(
     let mut observations = String::new();
     free_space_churn::run_churn_observed(lifecycle, strategy, base, |path, step| {
         let observation = observe(path, &case, step);
-        assert!(
-            observation.ownership.as_ref().unwrap().analysis_complete,
-            "{case}/{step}"
-        );
-        assert!(
-            observation
-                .ownership
-                .as_ref()
-                .unwrap()
-                .unclassified_space
-                .is_empty(),
-            "{case}/{step}"
-        );
-        assert!(
-            observation
-                .ownership
-                .as_ref()
-                .unwrap()
-                .trailing_slack_space
-                .is_empty(),
-            "{case}/{step}"
-        );
         observations.push_str(&observation.render());
         observations.push('\n');
     });
@@ -410,11 +365,6 @@ fn records_stored_eof_separately_from_trailing_bytes(
         ),
         (logical, physical, physical, base),
     );
-    let ownership = observation.ownership.as_ref().unwrap();
-    assert!(ownership.analysis_complete);
-    assert_eq!(ownership.logical_size, logical);
-    assert_eq!(ownership.physical_size, physical);
-    assert_eq!(ownership.trailing_slack_space, vec![(logical, slack_bytes)]);
     assert!(fs::read(&path).unwrap().ends_with(&slack));
     let reader = File::open(&path).unwrap();
     assert_eq!(

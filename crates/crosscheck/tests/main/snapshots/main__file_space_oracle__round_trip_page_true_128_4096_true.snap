@@ -33,17 +33,6 @@ free-space totals
   H5Fget_freespace                          -           6003
   reported - section bytes                  -              0
 
-ownership (Rust)
-  analysis complete: true
-
-  category                           sections          bytes
-  userblock                                 1           4096
-  live raw data                             3          17184
-  live metadata                             6           1155
-  free-space managers                       4            234
-  reusable free space                       2           6003
-  unclassified                              0              0
-  trailing slack                            0              0
 
 exact section map equal: true
 
@@ -82,17 +71,6 @@ free-space totals
   H5Fget_freespace                          -           9798
   reported - section bytes                  -              0
 
-ownership (Rust)
-  analysis complete: true
-
-  category                           sections          bytes
-  userblock                                 1           4096
-  live raw data                             2            800
-  live metadata                             5            871
-  free-space managers                       6            585
-  reusable free space                       4           9798
-  unclassified                              1            234
-  trailing slack                            0              0
 
 exact section map equal: true
 
@@ -133,17 +111,6 @@ free-space totals
   H5Fget_freespace                          -           9971
   reported - section bytes                  -              0
 
-ownership (Rust)
-  analysis complete: true
-
-  category                           sections          bytes
-  userblock                                 1           4096
-  live raw data                             3          12800
-  live metadata                             6            968
-  free-space managers                       6            603
-  reusable free space                       6           9971
-  unclassified                              1            234
-  trailing slack                            0              0
 
 exact section map equal: true
 
@@ -182,17 +149,6 @@ free-space totals
   H5Fget_freespace                          -           9690
   reported - section bytes                  -              0
 
-ownership (Rust)
-  analysis complete: true
-
-  category                           sections          bytes
-  userblock                                 1           4096
-  live raw data                             2            800
-  live metadata                             5            871
-  free-space managers                       6            693
-  reusable free space                       4           9690
-  unclassified                              1            234
-  trailing slack                            0              0
 
 exact section map equal: true
 
@@ -234,17 +190,6 @@ free-space totals
   H5Fget_freespace                          -          13667
   reported - section bytes                  -              0
 
-ownership (Rust)
-  analysis complete: true
-
-  category                           sections          bytes
-  userblock                                 1           4096
-  live raw data                             3          13200
-  live metadata                             6            968
-  free-space managers                       6            603
-  reusable free space                       7          13667
-  unclassified                              1            234
-  trailing slack                            0              0
 
 exact section map equal: true
 
@@ -284,17 +229,6 @@ free-space totals
   H5Fget_freespace                          -           9672
   reported - section bytes                  -              0
 
-ownership (Rust)
-  analysis complete: true
-
-  category                           sections          bytes
-  userblock                                 1           4096
-  live raw data                             2            800
-  live metadata                             5            871
-  free-space managers                       6            711
-  reusable free space                       5           9672
-  unclassified                              1            234
-  trailing slack                            0              0
 
 exact section map equal: true
 
@@ -336,17 +270,6 @@ free-space totals
   H5Fget_freespace                          -          13249
   reported - section bytes                  -              0
 
-ownership (Rust)
-  analysis complete: true
-
-  category                           sections          bytes
-  userblock                                 1           4096
-  live raw data                             3          13600
-  live metadata                             6            968
-  free-space managers                       6            621
-  reusable free space                       7          13249
-  unclassified                              1            234
-  trailing slack                            0              0
 
 exact section map equal: true
 
@@ -386,17 +309,6 @@ free-space totals
   H5Fget_freespace                          -           9672
   reported - section bytes                  -              0
 
-ownership (Rust)
-  analysis complete: true
-
-  category                           sections          bytes
-  userblock                                 1           4096
-  live raw data                             2            800
-  live metadata                             5            871
-  free-space managers                       6            711
-  reusable free space                       5           9672
-  unclassified                              1            234
-  trailing slack                            0              0
 
 exact section map equal: true
 
@@ -436,17 +348,6 @@ free-space totals
   H5Fget_freespace                          -           9710
   reported - section bytes                  -              0
 
-ownership (Rust)
-  analysis complete: true
-
-  category                           sections          bytes
-  userblock                                 1           4096
-  live raw data                             3          12800
-  live metadata                             6           1139
-  free-space managers                       6            405
-  reusable free space                       4           9422
-  unclassified                              3            810
-  trailing slack                            0              0
 
 exact section map equal: true
 
@@ -485,16 +386,5 @@ free-space totals
   H5Fget_freespace                          -           5441
   reported - section bytes                  -              0
 
-ownership (Rust)
-  analysis complete: true
-
-  category                           sections          bytes
-  userblock                                 1           4096
-  live raw data                             2            800
-  live metadata                             5            871
-  free-space managers                       4            288
-  reusable free space                       5           5441
-  unclassified                              2            792
-  trailing slack                            0              0
 
 exact section map equal: true

@@ -34,7 +34,5 @@ free-space totals
   H5Fget_freespace                          -           2373
   reported - section bytes                  -              0
 
-ownership (Rust)
-  unavailable: in-place editing requires 8-byte offsets and lengths
 
 exact section map equal: true

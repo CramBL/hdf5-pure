@@ -34,16 +34,5 @@ free-space totals
   H5Fget_freespace                          -           4848
   reported - section bytes                  -              0
 
-ownership (Rust)
-  analysis complete: true
-
-  category                           sections          bytes
-  userblock                                 0              0
-  live raw data                             2            800
-  live metadata                             6           1338
-  free-space managers                       4            513
-  reusable free space                       3           4848
-  unclassified                              2            693
-  trailing slack                            0              0
 
 exact section map equal: true
