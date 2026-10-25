@@ -1216,7 +1216,7 @@ struct PersistState {
 ///
 /// This is the mutating-session counterpart of the read-only accounting on
 /// [`File`](crate::File) ([`file_size`](crate::File::file_size) and
-/// [`persisted_free_space`](crate::File::persisted_free_space)): it describes the
+/// [`persisted_free_sections`](crate::File::persisted_free_sections)): it describes the
 /// file *as the session currently holds it*, taken atomically at the moment of
 /// the [`space_accounting`](crate::File::space_accounting) call.
 ///
@@ -1282,19 +1282,17 @@ pub struct SpaceAccounting {
     /// persisting file read this as "space this session will reuse rather than
     /// grow for", not as "space the very next commit can fill".
     ///
-    /// It is also not the on-disk view. That reserve is deliberately absent from
-    /// the free-space managers for as long as the session holds it, so
-    /// [`File::persisted_free_space`](crate::File::persisted_free_space) — which
-    /// reads those managers — reports less than this by whatever is reserved,
-    /// and is the figure to compare against what another tool would find.
+    /// The editor excludes these reservations from persisted managers while the session holds them.
+    /// The reusable-byte total can therefore exceed the persisted section-byte total reported through
+    /// [`File::persisted_free_sections`](crate::File::persisted_free_sections).
     pub reusable_free_bytes: u64,
     /// The reusable free regions as `(offset, length)` pairs, sorted ascending by
     /// offset and fully coalesced (no two regions touch or overlap).
     ///
     /// The offsets are **absolute** file offsets (from byte 0, including any
     /// userblock prefix), matching [`logical_size`](Self::logical_size). This
-    /// differs from [`File::persisted_free_space`](crate::File::persisted_free_space),
-    /// whose pairs are relative to the superblock's base address. The two coincide
+    /// differs from [`File::persisted_free_sections`](crate::File::persisted_free_sections),
+    /// whose sections are relative to the superblock's base address. The two coincide
     /// for a file with no userblock (base address 0). Empty when nothing is reusable.
     pub reusable_free_space: Vec<(u64, u64)>,
 }

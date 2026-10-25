@@ -21,8 +21,8 @@
 //!
 //! 3. **Subthreshold deletion.** Under [`FileSpaceStrategy::FsmAggr`], checks that an isolated
 //!    deleted extent below the threshold is absent from reusable and persisted free sections.
-//!    Checks typed and tuple reports and persistence configuration. The C library reads surviving
-//!    values and reports matching free-space totals.
+//!    Checks session-reusable and persisted sections and persistence configuration. The C library
+//!    reads surviving values and reports matching free-space totals.
 //!
 //! A failing case is shrunk to its minimal reproducer and recorded under
 //! `tests/proptest-regressions/`; commit that file so the reproducer travels
@@ -31,6 +31,7 @@
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
+use hdf5_pure::FreeSectionCoordinates;
 use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
 
 use proptest::prelude::*;
@@ -276,29 +277,25 @@ proptest! {
         };
 
         let reader = File::open(&path).unwrap();
-        let free = reader.persisted_free_space().unwrap();
         let sections = reader.persisted_free_sections().unwrap();
         prop_assert_eq!(sections.is_some(), persist);
-        if let Some(report) = sections {
-            prop_assert_eq!(
-                &report
-                    .free_sections()
-                    .sections()
-                    .iter()
-                    .map(|section| (section.address(), section.length().get()))
-                    .collect::<Vec<_>>(),
-                &free
-            );
+        if let Some(report) = &sections {
+            for extent in &dropped {
+                for section in report.free_sections().sections() {
+                    prop_assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
+                    prop_assert!(
+                        section.end_address() <= extent.start || section.address() >= extent.end,
+                        "stored section {section:?} overlaps {extent:?}"
+                    );
+                }
+            }
         }
         drop(reader);
-        for extent in &dropped {
-            prop_assert_eq!(range::covered_len(&free, extent), 0);
-        }
         let f = hdf5::File::open(&path).unwrap();
         for (i, values) in data.iter().enumerate().filter(|&(i, _)| !deleted[i]) {
             let got = f.dataset(&format!("d{i}")).unwrap().read_raw::<i32>().unwrap();
             prop_assert_eq!(&got, values);
         }
-        prop_assert_eq!(f.free_space(), free.iter().map(|&(_, len)| len).sum::<u64>());
+        prop_assert_eq!(f.free_space(), sections.as_ref().map_or(0, |report| report.free_sections().free_bytes()));
     }
 }

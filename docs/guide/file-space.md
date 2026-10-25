@@ -198,6 +198,7 @@ to a fallible optional owned value.
 |---|---|
 | `File::file_space_strategy() -> Option<FileSpaceStrategy>` | `file.file_space_settings()?` |
 | `File::file_space_info() -> Option<&FileSpaceInfo>` | `File::file_space_info() -> Result<Option<FileSpaceInfo>, Error>` |
+| `File::persisted_free_space()` | `File::persisted_free_sections()` |
 
 The strategy-only getter is removed. Read a strategy with
 [`FileSpaceSettings::strategy`](crate::FileSpaceSettings::strategy).
@@ -205,6 +206,11 @@ The strategy-only getter is removed. Read a strategy with
 [`Aggr`](crate::FileSpaceStrategy::Aggr) and [`None`](crate::FileSpaceStrategy::None) to persistence
 disabled and threshold 1. The recorded page size is retained under every strategy, and allocation
 uses pages only under [`Page`](crate::FileSpaceStrategy::Page).
+
+The tuple-based persisted-space accessor is removed. Inspect section addresses and nonzero
+lengths through [`FreeSections::sections`](crate::FreeSections::sections), or read the total with
+[`FreeSections::free_bytes`](crate::FreeSections::free_bytes). The report distinguishes absent
+persistence from configured persistence with zero sections.
 
 ## Paged files (`FileSpaceStrategy::Page`)
 
@@ -256,7 +262,9 @@ Deleting from a persistent paged file returns the space to the per-page-type fre
 
 Passing `persist = true` under [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr) or [`Page`](crate::FileSpaceStrategy::Page) records that freed space should be tracked on disk across closes. Under [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr) the writer records unused aggregate spare from creation, subject to the threshold. For a file with no reusable sections, the writer records the persist flag with undefined manager addresses. A genuine paged file (above) already tracks its page-tail free space from creation. When a later edit frees a region, by deleting a dataset for example, the freed region is recorded in on-disk free-space-manager blocks (`FSHD`/`FSSE`), and a later session, this crate's or libhdf5's, recovers and reuses it.
 
-[`File::persisted_free_space()`](crate::File::persisted_free_space) returns the tracked free regions as `(address, length)` pairs sorted by address, and a read-write session seeds its free list from them, so reuse spans sessions.
+[`File::persisted_free_sections`](crate::File::persisted_free_sections) returns a typed report of
+the tracked free regions, sorted by address, with combined and per-manager totals. A read-write
+session recovers these regions into its free list, so reuse spans sessions.
 
 The editor places replacement manager blocks in reusable free space where they fit. Under
 [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr), it reserves a contiguous allocation for its extension
@@ -300,14 +308,25 @@ file.close()?;
 
 // Later opens can read the persisted free regions.
 let file = File::open(&path)?;
-let free = file.persisted_free_space()?;
-let total_free: u64 = free.iter().map(|&(_, len)| len).sum();
-println!("persisted free regions: {}", free.len());
+let report = file.persisted_free_sections()?.expect("persistence is configured");
+let free = report.free_sections();
+let total_free = free.free_bytes();
+println!("persisted free regions: {}", free.section_count());
 println!("total persisted free bytes: {total_free}");
 assert!(total_free > 0);
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
-[`persisted_free_space()`](crate::File::persisted_free_space) returns an empty list when the file does not persist free space, and on a handle that reads the file on demand or edits it. It returns an error for a malformed free-space manager. A read-write session opens such a file and skips the free regions of that manager, and in a file that is not paged those of every other manager too. The addresses are file offsets relative to the base address, and [reading data](crate::_guide::reading) is unaffected by the presence or absence of these managers.
+[`File::persisted_free_sections`](crate::File::persisted_free_sections) returns `Ok(None)` when
+the file does not record persistence and `Ok(Some(report))` when persistence is configured,
+including when the report has zero sections. Buffered and streaming readers support this
+inspection. Editing handles return
+[`Error::FreeSectionInspectionUnsupported`](crate::Error::FreeSectionInspectionUnsupported).
+Malformed free-space metadata returns [`Error::Format`](crate::Error::Format). A read-write
+session skips free regions from every persisted manager if any manager cannot be read or parsed.
+Section addresses use
+[`FreeSectionCoordinates::Stored`](crate::FreeSectionCoordinates::Stored), relative to the HDF5
+base address. [Reading data](crate::_guide::reading) is unaffected by the presence or absence of
+these managers.
 
 When free space is not persisted under [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr), an ordinary read-write session reuses freed space before aggregate reservations, with both kept in memory for that session alone. Under [`Aggr`](crate::FileSpaceStrategy::Aggr), staged edits and immediate appends use unused aggregate reservations within the session. Under `Aggr` and [`None`](crate::FileSpaceStrategy::None), freed extents are discarded. If churn has left a file with unused gaps and you want to reclaim them outright, [repacking](crate::_guide::repack) rewrites the file compactly.

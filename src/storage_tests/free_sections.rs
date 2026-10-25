@@ -211,15 +211,6 @@ fn stored_and_reusable_views_have_distinct_coordinates(
             .unwrap()
             .unwrap()
     );
-    assert_eq!(
-        report
-            .free_sections()
-            .sections()
-            .iter()
-            .map(|s| (s.address(), s.length().get()))
-            .collect::<Vec<_>>(),
-        buffered.persisted_free_space().unwrap()
-    );
     assert!(report.free_sections().section_count() > 0);
     assert!(
         report

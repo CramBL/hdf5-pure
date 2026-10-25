@@ -58,9 +58,6 @@ pub fn assert_persisted_sections(path: &Path) {
         .as_ref()
         .map(|report| section_pairs(report.free_sections()))
         .unwrap_or_default();
-    let mut legacy = reader.persisted_free_space().unwrap();
-    legacy.sort_unstable();
-    assert_eq!(rust, legacy, "tuple compatibility; {path:?}");
     if let Some(report) = &report {
         assert_manager_sections(&reader, report, &bytes);
     }
