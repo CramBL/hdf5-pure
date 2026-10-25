@@ -7,7 +7,7 @@ use hdf5_pure_core::__private::PhysicalAddress;
 use crate::address::AddressContext;
 use crate::error::Error;
 use crate::file_writer::{LENGTH_WIDTH, OFFSET_WIDTH};
-use crate::superblock::{LocatedSuperblock, Superblock};
+use crate::superblock::{self, LocatedSuperblock, Superblock};
 use crate::width::FormatWidths;
 
 /// The superblock and address domain of an editable file.
@@ -70,20 +70,17 @@ impl FileContext {
         Ok(ProposedSuperblock { superblock })
     }
 
-    /// Prepares a PAGE recovery proposal from the parsed publication bytes.
+    /// Parses the published superblock for PAGE recovery.
     ///
-    /// The caller parses `recovered` from `published` and compares `published` with the accepted
-    /// file image before recovery. Only the root and end-of-file addresses may change.
+    /// The caller compares `published` with the accepted file image before recovery. Only the
+    /// root and end-of-file addresses may change.
     ///
     /// # Errors
     ///
     /// Returns [`Error::EditUnsupported`] if other encoded fields differ from the session's
-    /// superblock. Returns [`Error::Format`] if serialization fails.
-    pub(super) fn recover(
-        &self,
-        recovered: Superblock,
-        published: &[u8],
-    ) -> Result<ProposedSuperblock, Error> {
+    /// superblock. Returns [`Error::Format`] if parsing or serialization fails.
+    pub(super) fn recover(&self, published: &[u8]) -> Result<ProposedSuperblock, Error> {
+        let recovered = superblock::read(published)?.superblock;
         let mut expected = self.superblock.clone();
         expected.root_group_address = recovered.root_group_address;
         expected.eof_address = recovered.eof_address;
@@ -378,7 +375,7 @@ mod tests {
             recovered.superblock_extension_address = Some(StoredAddress::new(256));
         }
         let published = hdf5_pure_format::__private::serialize_superblock(&recovered).unwrap();
-        let result = context.recover(recovered.clone(), &published);
+        let result = context.recover(&published);
         assert_eq!(context.superblock(), &before);
         if base.is_some()
             || offsets.is_some()
@@ -397,9 +394,87 @@ mod tests {
             assert_eq!(context.superblock(), &before);
         } else {
             context.adopt(result.unwrap()).unwrap();
+            recovered.checksum = Some(u32::from_le_bytes(*published.last_chunk().unwrap()));
             assert_eq!(context.superblock(), &recovered);
             assert_eq!(context.signature().get(), 512);
         }
+    }
+
+    #[rstest]
+    #[case::missing_signature(Some((0, 0)), 48, FormatError::SignatureNotFound)]
+    #[case::version(Some((8, 4)), 48, FormatError::UnsupportedVersion(4))]
+    #[case::offset_width(Some((9, 3)), 48, FormatError::InvalidOffsetSize(3))]
+    #[case::length_width(Some((10, 5)), 48, FormatError::InvalidLengthSize(5))]
+    #[case::candidate_truncated(
+        None,
+        10,
+        FormatError::UnexpectedSourceEof { expected: 15, available: 10 }
+    )]
+    #[case::superblock_truncated(
+        None,
+        47,
+        FormatError::UnexpectedSourceEof { expected: 48, available: 47 }
+    )]
+    fn recovery_preserves_parsing_errors(
+        #[case] changed: Option<(usize, u8)>,
+        #[case] len: usize,
+        #[case] expected: FormatError,
+    ) {
+        let context = FileContext::new(located(512, Widths::EIGHT)).unwrap();
+        let before = context.superblock().clone();
+        let mut published = v2::Superblock::new(Widths::EIGHT)
+            .base_address(512)
+            .root_header_address(192)
+            .eof_address(8192)
+            .build();
+        if let Some((at, value)) = changed {
+            published[at] = value;
+        }
+        published.truncate(len);
+        let Error::Format(error) = context.recover(&published).unwrap_err() else {
+            panic!("expected superblock parsing error");
+        };
+        assert_eq!(error, expected);
+        assert_eq!(context.superblock(), &before);
+    }
+
+    #[test]
+    fn recovery_rejects_a_checksum_mismatch() {
+        let context = FileContext::new(located(512, Widths::EIGHT)).unwrap();
+        let before = context.superblock().clone();
+        let mut published = v2::Superblock::new(Widths::EIGHT)
+            .base_address(512)
+            .root_header_address(192)
+            .eof_address(8192)
+            .build();
+        #[cfg(feature = "checksum")]
+        let computed = u32::from_le_bytes(*published.last_chunk().unwrap());
+        *published.last_mut().unwrap() ^= 0xFF;
+        let error = context.recover(&published).unwrap_err();
+        #[cfg(feature = "checksum")]
+        {
+            let Error::Format(error) = error else {
+                panic!("expected superblock checksum mismatch");
+            };
+            assert_eq!(
+                error,
+                FormatError::ChecksumMismatch {
+                    expected: computed ^ 0xFF00_0000,
+                    computed,
+                }
+            );
+        }
+        #[cfg(not(feature = "checksum"))]
+        {
+            let Error::EditUnsupported(reason) = error else {
+                panic!("expected changed publication framing");
+            };
+            assert_eq!(
+                reason,
+                "PAGE superblock framing changed after a failed publication; close and reopen the file before editing again"
+            );
+        }
+        assert_eq!(context.superblock(), &before);
     }
 
     fn located(base: u64, widths: Widths) -> LocatedSuperblock {
