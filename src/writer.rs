@@ -4,6 +4,7 @@ use std::io::Write;
 
 #[cfg(test)]
 use crate::DeflateLevel;
+#[cfg(test)]
 use crate::FileSpacePageSize;
 use crate::FileSpaceSettings;
 use crate::UserblockSize;
@@ -17,6 +18,7 @@ use crate::type_builders::{
 use crate::datatype::Datatype;
 use crate::error::{Error, FormatError};
 use crate::file_create_properties::FileCreateProperties;
+#[cfg(test)]
 use crate::file_space_info::FileSpaceStrategy;
 use crate::libver::LibVer;
 use crate::object_path::ObjectPathBuf;
@@ -303,72 +305,32 @@ impl FileBuilder {
     ///
     /// [`Self::with_create_properties`] replaces all creation properties, including clearing this
     /// setting when the supplied properties leave it unset.
-    pub fn with_file_space_settings(&mut self, settings: FileSpaceSettings) -> &mut Self {
-        self.writer.with_file_space_settings(settings);
-        self
-    }
-
-    /// Sets the file-space management strategy, as `H5Pset_file_space_strategy` does.
-    ///
-    /// The writer records the strategy, persist flag, and free-section `threshold` in the
-    /// superblock extension. With `persist = true`, it records reusable free space in
-    /// on-disk free-space managers for later sessions.
-    ///
-    /// [`FileSpaceStrategy::Aggr`] and [`FileSpaceStrategy::None`] have no free-space managers,
-    /// so for either the writer records a clear persist flag and the default threshold of 1,
-    /// whatever the caller passes for `persist` and `threshold`. `H5Pset_file_space_strategy`
-    /// ignores both for those strategies too.
-    ///
-    /// Under [`FileSpaceStrategy::Aggr`] or [`FileSpaceStrategy::FsmAggr`], the writer uses
-    /// separate metadata and raw aggregates with 2048-byte refill blocks. This also applies
-    /// when the strategy is unset. Under `FsmAggr`, the writer reuses abandoned aggregate spare
-    /// subject to `threshold` before reserving more aggregate space. Unused tails at the end of
-    /// allocation are released before output. With persistence enabled, the writer records the
-    /// remaining reusable spare, including settled aggregate reservations, in free-space managers.
-    /// Otherwise, unused interior reservations remain allocated after output.
-    pub fn with_file_space_strategy(
-        &mut self,
-        strategy: FileSpaceStrategy,
-        persist: bool,
-        threshold: u64,
-    ) -> &mut Self {
-        self.writer
-            .with_file_space_strategy(strategy, persist, threshold);
-        self
-    }
-
-    /// Sets the page size recorded in file-space metadata.
-    ///
-    /// Use [`FileSpacePageSize::try_from`] to check a raw byte count, or
-    /// [`FileSpacePageSize::DEFAULT`] for 4096 bytes. Every byte count from 512 bytes to 1 GiB
-    /// is valid.
-    ///
-    /// The writer records the page size in the superblock extension and allocates storage in
-    /// pages of this size under [`FileSpaceStrategy::Page`]. When the caller sets a page size
-    /// without a strategy, the writer records [`FileSpaceStrategy::FsmAggr`].
     ///
     /// # Examples
     ///
     /// ```
-    /// use hdf5_pure::{File, FileBuilder, FileCreateProperties, FileSpacePageSize};
+    /// use hdf5_pure::{
+    ///     File, FileBuilder, FileCreateProperties, FileSpacePageSize, FileSpaceSettings,
+    /// };
     ///
     /// let user_input = 3000;
     /// let size = FileSpacePageSize::try_from(user_input)?;
-    /// let fcpl = FileCreateProperties::new().with_file_space_page_size(size);
-    /// assert_eq!(fcpl.file_space_page_size(), Some(size));
+    /// let settings = FileSpaceSettings::default().with_page_size(size);
+    /// let properties = FileCreateProperties::new().with_file_space_settings(settings);
+    /// assert_eq!(properties.file_space_settings(), Some(settings));
     ///
     /// let mut builder = FileBuilder::new();
-    /// builder.with_create_properties(fcpl);
-    /// builder.with_file_space_page_size(FileSpacePageSize::DEFAULT);
+    /// builder.with_create_properties(properties);
+    /// builder.with_file_space_settings(settings.with_page_size(FileSpacePageSize::DEFAULT));
     /// let file = File::from_bytes(builder.finish()?)?;
     /// assert_eq!(
-    ///     file.file_space_info()?.map(|info| info.page_size),
+    ///     file.file_space_settings()?.map(|settings| settings.page_size()),
     ///     Some(FileSpacePageSize::DEFAULT)
     /// );
     /// # Ok::<(), hdf5_pure::Error>(())
     /// ```
-    pub fn with_file_space_page_size(&mut self, page_size: FileSpacePageSize) -> &mut Self {
-        self.writer.with_file_space_page_size(page_size);
+    pub fn with_file_space_settings(&mut self, settings: FileSpaceSettings) -> &mut Self {
+        self.writer.with_file_space_settings(settings);
         self
     }
 

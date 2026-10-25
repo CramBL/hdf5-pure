@@ -1259,48 +1259,6 @@ impl FileWriter {
         self
     }
 
-    /// Sets the file-space management strategy, as `H5Pset_file_space_strategy` does.
-    ///
-    /// The writer records the choice in the superblock extension. `persist` requests on-disk
-    /// free-space managers. The writer applies `threshold` to freed sections, retaining shorter
-    /// regions that merge with tracked free space. It tracks page tails independently of
-    /// `threshold`.
-    /// [`FileSpaceStrategy::Aggr`] and [`FileSpaceStrategy::None`] have no managers, so the
-    /// writer records a clear persist flag and the default threshold of 1 for them.
-    ///
-    /// Under [`FileSpaceStrategy::Aggr`] or [`FileSpaceStrategy::FsmAggr`], the writer uses
-    /// separate metadata and raw aggregates and releases unused tails at EOA before output.
-    /// This also applies when the strategy is unset. Under `FsmAggr`, the writer reuses abandoned
-    /// aggregate spare subject to `threshold` before reserving more aggregate space. With
-    /// `persist = true`, it records remaining reusable spare in on-disk managers for later
-    /// sessions. Otherwise, unused interior reservations remain allocated after output.
-    pub fn with_file_space_strategy(
-        &mut self,
-        strategy: FileSpaceStrategy,
-        persist: bool,
-        threshold: u64,
-    ) -> &mut Self {
-        self.with_file_space_settings(
-            FileSpaceSettings::new(strategy)
-                .with_persistence(persist)
-                .with_threshold(threshold)
-                .with_page_size(self.file_space_settings.unwrap_or_default().page_size()),
-        );
-        self
-    }
-
-    /// Sets the page size recorded in file-space metadata.
-    ///
-    /// The writer allocates storage in pages of this size under [`FileSpaceStrategy::Page`].
-    pub fn with_file_space_page_size(&mut self, page_size: FileSpacePageSize) -> &mut Self {
-        self.with_file_space_settings(
-            self.file_space_settings
-                .unwrap_or_default()
-                .with_page_size(page_size),
-        );
-        self
-    }
-
     /// Whether anything staged needs the 1.10 format, i.e. whether an
     /// `Earliest..=V18` bound would be refused with
     /// [`FormatError::LibverTooOldForContent`].

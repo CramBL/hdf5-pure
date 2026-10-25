@@ -78,12 +78,6 @@ fn settings_have_identical_creation_paths(
     let mut streamed = Vec::new();
     build(true).finish_to(&mut streamed).unwrap();
     assert_eq!(streamed, bytes);
-    let mut legacy = FileBuilder::new();
-    legacy.with_userblock(properties.userblock());
-    legacy.with_file_space_strategy(strategy, persist, threshold);
-    legacy.with_file_space_page_size(page_size);
-    legacy.create_dataset("data").with_i32_data(&[1, 2, 3]);
-    assert_eq!(legacy.finish().unwrap(), bytes);
     let file = File::from_bytes(bytes.clone()).unwrap();
     assert_eq!(file.file_space_settings().unwrap(), Some(settings));
     assert_eq!(file.dataset("data").unwrap().read_i32().unwrap(), [1, 2, 3]);
@@ -103,13 +97,15 @@ fn settings_have_identical_creation_paths(
 }
 
 #[test]
-fn page_size_only_matches_explicit_default_strategy_settings() {
+fn default_settings_roundtrip_with_a_custom_page_size() {
     let size = FileSpacePageSize::try_from(8192).unwrap();
-    let mut legacy = FileBuilder::new();
-    legacy.with_file_space_page_size(size);
     let mut builder = FileBuilder::new();
     builder.with_file_space_settings(FileSpaceSettings::default().with_page_size(size));
-    assert_eq!(legacy.finish().unwrap(), builder.finish().unwrap());
+    let file = File::from_bytes(builder.finish().unwrap()).unwrap();
+    assert_eq!(
+        file.file_space_settings().unwrap(),
+        Some(FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_page_size(size))
+    );
 }
 
 #[test]

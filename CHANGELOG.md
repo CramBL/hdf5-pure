@@ -32,7 +32,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- **Breaking:** `FileCreateProperties` replaces file-space values requested by callers with normalized effective settings, including defaults when a setting is configured.
+- **Breaking:** The split file-space setters and getters on `FileCreateProperties` and file-space builder setters are removed in favor of one settings value ([#898](https://github.com/CramBL/hdf5-pure/pull/898)).
 - **Breaking:** `File::file_space_info` replaces optional borrowed inspection with fallible owned inspection, and the strategy-only getter is removed. Malformed file-space metadata returns an error while absent metadata remains distinct ([#894](https://github.com/CramBL/hdf5-pure/pull/894)).
 - **Breaking:** The public fields of `Datatype::VariableLength` are replaced by typed string and sequence payloads ([#862](https://github.com/CramBL/hdf5-pure/pull/862)).
 - **Breaking:** The public chunk mask field is replaced by typed inspection through `Chunk::filters` and a mask accessor ([#855](https://github.com/CramBL/hdf5-pure/pull/855)).

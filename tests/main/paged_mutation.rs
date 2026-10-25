@@ -162,7 +162,8 @@ fn paged_non_persist_mirror_supports_staged_append() {
             reason,
             "in-place append is not supported on a paged file \
             (H5F_FSPACE_STRATEGY_PAGE) without persisted free space; recreate the \
-            file with with_file_space_strategy(FileSpaceStrategy::Page, true, ..)"
+            file with with_file_space_settings(FileSpaceSettings::new(\
+            FileSpaceStrategy::Page).with_persistence(true))"
         );
         dataset
             .append_staged(|builder| {

@@ -85,7 +85,8 @@ Fidelity checks and drop-path validation run before output bytes are written. Da
 | Attributes | every datatype above, carried across with the source's own encoding (width, charset, string padding, and rank included) on datasets, groups, and root |
 | File-space strategy | the source's strategy, page size, and threshold (carried forward as non-persistent) |
 
-A repacked file has no free space to persist, so even when the source recorded a persistent file-space strategy the compact output carries that strategy forward as non-persistent. See [File-space strategy](crate::_guide::file_space) for what that controls.
+Repacking preserves the source's recorded strategy, page size, and threshold and disables
+persistence. See [File-space management](crate::_guide::file_space) for the configuration details.
 
 Attributes keep their own encoding. An attribute is copied as the source encoded it, not as [`AttrValue`](crate::AttrValue) renders it. That matters because [`AttrValue`](crate::AttrValue) is a deliberately lossy convenience view: it has no byte order, no sub-width precision, no string padding rule, and no rank above one, so an attribute rebuilt from one would come back in this crate's own layout and flattened. Only an attribute whose element bytes hold a *location*, variable-length data or a reference, cannot be copied as-is. A variable-length string keeps its datatype and dataspace while its strings are written into the new file's heap, and a reference attribute is rejected. See [Attributes](crate::_guide::groups_attributes#attributes) for what a *read* still normalizes.
 

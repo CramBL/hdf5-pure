@@ -307,17 +307,18 @@ fn userblock_properties_use_the_public_domain_type() {
 }
 
 #[test]
-fn creation_properties_use_the_public_page_size_type() {
+fn creation_properties_use_public_file_space_settings() {
     use hdf5_pure::{FileCreateProperties, FileSpacePageSize};
 
-    let _: fn(&mut FileBuilder, FileSpacePageSize) -> &mut FileBuilder =
-        FileBuilder::with_file_space_page_size;
-    let _: fn(FileCreateProperties, FileSpacePageSize) -> FileCreateProperties =
-        FileCreateProperties::with_file_space_page_size;
-    let properties =
-        FileCreateProperties::new().with_file_space_page_size(FileSpacePageSize::DEFAULT);
-    let page_size: Option<FileSpacePageSize> = properties.file_space_page_size();
-    assert_eq!(page_size, Some(FileSpacePageSize::DEFAULT));
+    let _: fn(&mut FileBuilder, FileSpaceSettings) -> &mut FileBuilder =
+        FileBuilder::with_file_space_settings;
+    let _: fn(FileCreateProperties, FileSpaceSettings) -> FileCreateProperties =
+        FileCreateProperties::with_file_space_settings;
+    let _: fn(&FileCreateProperties) -> Option<FileSpaceSettings> =
+        FileCreateProperties::file_space_settings;
+    let settings = FileSpaceSettings::default().with_page_size(FileSpacePageSize::DEFAULT);
+    let properties = FileCreateProperties::new().with_file_space_settings(settings);
+    assert_eq!(properties.file_space_settings(), Some(settings));
 }
 
 #[cfg(feature = "zfp")]
