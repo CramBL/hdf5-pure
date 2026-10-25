@@ -142,7 +142,16 @@ impl WriteEngine {
             }
         }
 
-        let reusable_free_space = self.space_accounting()?.reusable_free_space;
+        let mut reusable_free_space = self
+            .reusable_ranges()
+            .map(|range| {
+                let range = range?;
+                Ok((range.start().get(), range.length()))
+            })
+            .collect::<Result<Vec<_>, FormatError>>()?;
+        if self.aggregation.is_some() && !self.space.is_enabled() {
+            reusable_free_space.sort_unstable();
+        }
         let mut claimed = userblock_space
             .iter()
             .chain(&live_raw_space)

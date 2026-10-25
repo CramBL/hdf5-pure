@@ -20,6 +20,7 @@ use test_util::widths::Widths;
 
 use super::common;
 use crate::FileSpaceSettings;
+use crate::FreeSectionCoordinates;
 use crate::UserblockSize;
 use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
@@ -90,10 +91,12 @@ fn reusable_space_stats_include_and_release_append_reserves(#[case] strategy: Fi
     session.reserve_for_immediate_append(16_384).unwrap();
     assert!(session.reserved.total_bytes() >= 16_384);
     let reserved = session.reusable_space_stats().unwrap();
-    let accounting = session.space_accounting().unwrap();
-    assert_eq!(
-        (reserved.logical_size(), reserved.reusable_free_bytes()),
-        (accounting.logical_size, accounting.reusable_free_bytes)
+    assert_eq!(reserved.logical_size(), session.image.len());
+    let sections = session.reusable_free_sections().unwrap();
+    test_util_hdf5::assert_free_sections_consistent!(
+        &reserved,
+        &sections,
+        FreeSectionCoordinates::Absolute
     );
     session.release_reserve();
     assert!(session.reserved.is_empty());
@@ -1288,7 +1291,7 @@ fn failed_paged_commit_leaves_the_free_lists_untouched() {
     b.write(&path).unwrap();
 
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
-    let before = s.space_accounting().unwrap().reusable_free_space;
+    let before = s.reusable_free_sections().unwrap();
     let good_ext = s.context.superblock().superblock_extension_address;
     let mut superblock = s.context.superblock().clone();
     superblock.superblock_extension_address = Some(StoredAddress::ZERO);
@@ -1301,7 +1304,7 @@ fn failed_paged_commit_leaves_the_free_lists_untouched() {
     );
 
     assert_eq!(
-        s.space_accounting().unwrap().reusable_free_space,
+        s.reusable_free_sections().unwrap(),
         before,
         "a failed commit must not record still-live regions as free"
     );
@@ -1357,15 +1360,16 @@ fn failed_persistent_commit_preserves_live_bytes_and_reusable_space(
     s.delete(&ObjectPathBuf::parse("/b")).unwrap();
     s.commit().unwrap();
     let eof = s.context.superblock().eof_address;
-    let free = s.space_accounting().unwrap().reusable_free_space;
+    let free = s.reusable_free_sections().unwrap();
     let live_bytes = |s: &WriteEngine| {
         let mut bytes = s
             .image()
             .read_exact_at(0, usize::try_from(eof).unwrap())
             .unwrap();
-        for &(at, len) in &free {
-            let at = usize::try_from(at).unwrap();
-            bytes[at..at + usize::try_from(len).unwrap()].fill(0);
+        for section in free.sections() {
+            assert_eq!(section.coordinates(), FreeSectionCoordinates::Absolute);
+            let at = usize::try_from(section.address()).unwrap();
+            bytes[at..at + usize::try_from(section.length().get()).unwrap()].fill(0);
         }
         bytes
     };
@@ -1388,19 +1392,18 @@ fn failed_persistent_commit_preserves_live_bytes_and_reusable_space(
     );
 
     assert_eq!(s.context.superblock().eof_address, eof);
-    assert_eq!(s.space_accounting().unwrap().reusable_free_space, free);
+    assert_eq!(s.reusable_free_sections().unwrap(), free);
     let summary_after = s.reusable_space_stats().unwrap();
-    let accounting = s.space_accounting().unwrap();
+    assert_eq!(summary_after.logical_size(), s.image.len());
+    let sections = s.reusable_free_sections().unwrap();
     assert_eq!(
         summary_after.reusable_free_bytes(),
         summary_before.reusable_free_bytes()
     );
-    assert_eq!(
-        (
-            summary_after.logical_size(),
-            summary_after.reusable_free_bytes()
-        ),
-        (accounting.logical_size, accounting.reusable_free_bytes)
+    test_util_hdf5::assert_free_sections_consistent!(
+        &summary_after,
+        &sections,
+        FreeSectionCoordinates::Absolute
     );
     assert!(
         live_bytes(&s) == before,
@@ -1694,21 +1697,18 @@ fn the_append_reserve_is_reported_as_one_coalesced_free_list() {
     for round in 0..16 {
         s.append_inplace_i32_phased("t0", &batch, 4).unwrap();
         reserved_ever |= !s.reserved.is_empty();
-        let acct = s.space_accounting().unwrap();
-        let regions = &acct.reusable_free_space;
-        for w in regions.windows(2) {
-            let ((a_addr, a_len), (b_addr, _)) = (w[0], w[1]);
+        let sections = s.reusable_free_sections().unwrap();
+        for pair in sections.sections().windows(2) {
             assert!(
-                a_addr + a_len < b_addr,
-                "round {round}: [{a_addr}, {}) and [{b_addr}, ..) touch or overlap, \
-                 though reusable_free_space is documented as fully coalesced: {regions:?}",
-                a_addr + a_len
+                pair[0].end_address() < pair[1].address(),
+                "round {round}: reusable sections touch or overlap: {sections:?}"
             );
         }
-        assert_eq!(
-            acct.reusable_free_bytes,
-            regions.iter().map(|&(_, len)| len).sum::<u64>(),
-            "round {round}: the total must be the summed length of the regions"
+        let stats = s.reusable_space_stats().unwrap();
+        test_util_hdf5::assert_free_sections_consistent!(
+            &stats,
+            &sections,
+            FreeSectionCoordinates::Absolute
         );
     }
     assert!(

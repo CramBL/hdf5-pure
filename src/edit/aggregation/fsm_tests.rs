@@ -14,6 +14,7 @@ use crate::FileSpacePageSize;
 use crate::FileSpaceSettings;
 use crate::FileSpaceStrategy;
 use crate::FormatError;
+use crate::FreeSectionCoordinates;
 use crate::MaxExtent;
 use crate::MemoryStrategy;
 use crate::SyncPolicy;
@@ -185,9 +186,10 @@ fn accounting_coalesces_spare_with_adjacent_reusable_bytes() {
     let address = engine.place(reservation, &[19; 64]).unwrap();
     let extent = Extent::new(address, 64).unwrap();
     engine.space.return_allocation(extent, AllocationClass::Raw);
-    assert_eq!(
-        engine.space_accounting().unwrap().reusable_free_space,
-        [(address, 2048)]
+    test_util_hdf5::assert_free_sections!(
+        &engine.reusable_free_sections().unwrap(),
+        &[(address, 2048)],
+        FreeSectionCoordinates::Absolute
     );
     assert_eq!(
         engine.reusable_space_stats().unwrap().reusable_free_bytes(),
@@ -213,7 +215,7 @@ fn failed_reservation_preserves_abandoned_spare_and_policy() {
     let reservation = engine.reserve(64, AllocationClass::Raw).unwrap();
     engine.place(reservation, &[23; 64]).unwrap();
     let state = engine.aggregation;
-    let space = engine.space_accounting().unwrap().reusable_free_space;
+    let space = engine.reusable_free_sections().unwrap();
     let error = engine
         .reserve(u64::MAX, AllocationClass::Metadata)
         .unwrap_err();
@@ -223,10 +225,7 @@ fn failed_reservation_preserves_abandoned_spare_and_policy() {
     assert_eq!(offset, engine.image.len());
     assert_eq!(length, u64::MAX);
     assert_eq!(engine.aggregation, state);
-    assert_eq!(
-        engine.space_accounting().unwrap().reusable_free_space,
-        space
-    );
+    assert_eq!(engine.reusable_free_sections().unwrap(), space);
 }
 
 #[test]
@@ -241,12 +240,12 @@ fn rollback_restores_spare_returned_during_refill() {
     engine.place(reservation, &[23; 64]).unwrap();
     let snapshot = engine.snapshot_free();
     let state = engine.aggregation;
-    let free = engine.space_accounting().unwrap().reusable_free_space;
+    let free = engine.reusable_free_sections().unwrap();
     let placement = engine.reserve(64, AllocationClass::Metadata).unwrap();
     assert_eq!(engine.space.reusable_sections().count(), 1);
     engine.restore_free(snapshot);
     assert_eq!(engine.aggregation, state);
-    assert_eq!(engine.space_accounting().unwrap().reusable_free_space, free);
+    assert_eq!(engine.reusable_free_sections().unwrap(), free);
     let retry = engine.reserve(64, AllocationClass::Metadata).unwrap();
     assert_eq!(retry.address(), placement.address());
 }

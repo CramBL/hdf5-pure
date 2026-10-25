@@ -25,10 +25,17 @@ use crate::address::OpenedImageContext;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::chunked_read::ChunkDecoding;
-use crate::edit::{
-    AppendBuilder, AppendGeometry, AppendTarget, EditBacking, MemoryStrategy, SpaceAccounting,
-    StagedChild, StagedKind, StagedMeta, StagedObject, SyncPolicy, WriteEngine,
-};
+use crate::edit::AppendBuilder;
+use crate::edit::AppendGeometry;
+use crate::edit::AppendTarget;
+use crate::edit::EditBacking;
+use crate::edit::MemoryStrategy;
+use crate::edit::StagedChild;
+use crate::edit::StagedKind;
+use crate::edit::StagedMeta;
+use crate::edit::StagedObject;
+use crate::edit::SyncPolicy;
+use crate::edit::WriteEngine;
 use crate::element::H5Element;
 use crate::type_builders::{DatasetBuilder, VL_REF_SIZE};
 
@@ -51,10 +58,11 @@ use crate::file_lock::{self, FileLocking, OpenIntent, OpenTarget, WriteMarkPolic
 use crate::file_space_info::FileSpaceInfo;
 use crate::fill_value::{FillPattern, FillValueMessage, FillValueView};
 use crate::filter_pipeline::FilterPipeline;
+#[cfg(doc)]
+use crate::free_sections::FreeSectionCoordinates;
+use crate::free_sections::FreeSections;
+use crate::free_sections::PersistedFreeSections;
 use crate::free_sections::ReusableSpaceStats;
-use crate::free_sections::{
-    FreeSection, FreeSectionCoordinates, FreeSections, PersistedFreeSections,
-};
 use crate::group_v1;
 use crate::group_v1::GroupEntry;
 use crate::group_v2::{self, ChildLookup};
@@ -3308,10 +3316,10 @@ impl File {
 
     /// Returns a snapshot of this writable session's logical size and reusable free bytes.
     ///
-    /// Reports the same scalar values as [`space_accounting`](Self::space_accounting),
-    /// including committed changes and immediate appends. Staged edits affect the statistics
+    /// Reports committed changes and immediate appends. Staged edits affect the statistics
     /// when applied by [`commit`](Self::commit). Unused append reserves and classic aggregate
     /// reservations are included in the reusable total.
+    /// See [`ReusableSpaceStats::reusable_free_bytes`] for reservation and persistence semantics.
     ///
     /// Computes the values from cached counters without allocating or enumerating free sections.
     /// The counter work takes constant time with respect to the number of free sections.
@@ -3353,26 +3361,6 @@ impl File {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 Ok(session.reusable_space_stats()?)
-            }
-            _ => Err(Error::ReadOnly),
-        }
-    }
-
-    /// Report this read-write file's live space usage as a [`SpaceAccounting`] —
-    /// the current logical size, total reusable free bytes, and reusable free
-    /// regions. It reflects committed state plus immediate in-place appends, not
-    /// edits still staged for [`commit`](Self::commit).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::ReadOnly`] if the file was opened read-only, such as with [`File::open`],
-    /// and [`Error::Format`] if a free region ends past [`u64::MAX`] once the base address is
-    /// added.
-    pub fn space_accounting(&self) -> Result<SpaceAccounting, Error> {
-        match &self.inner.backend {
-            Backend::Edit(m) => {
-                let session = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                Ok(session.space_accounting()?)
             }
             _ => Err(Error::ReadOnly),
         }
@@ -3921,14 +3909,15 @@ impl File {
 
     /// Returns the free sections currently reusable by this editing session.
     ///
-    /// Reports the same allocation state as [`space_accounting`](Self::space_accounting):
-    /// committed changes and immediate in-place appends. Staged edits affect the report after
+    /// Reports committed changes and immediate in-place appends. Staged edits affect the report after
     /// [`commit`](Self::commit). Sections use [`FreeSectionCoordinates::Absolute`] physical
     /// offsets from the beginning of the file, counting any userblock prefix.
     ///
     /// The report can include session aggregate reservations and space absent from persisted
     /// managers. Persisted manager contents are available through
     /// [`persisted_free_sections`](Self::persisted_free_sections) on a read-only handle.
+    /// For the same session state, the byte total equals [`ReusableSpaceStats::reusable_free_bytes`].
+    /// Adjacent sections can remain separate across page types.
     ///
     /// # Errors
     ///
@@ -3962,16 +3951,15 @@ impl File {
     /// # Ok::<(), hdf5_pure::Error>(())
     /// ```
     pub fn reusable_free_sections(&self) -> Result<FreeSections, Error> {
-        let accounting = self.space_accounting()?;
-        Ok(FreeSections::new(
-            accounting
-                .reusable_free_space
-                .into_iter()
-                .map(|(address, length)| {
-                    FreeSection::new(address, length, FreeSectionCoordinates::Absolute)
-                })
-                .collect::<Result<Vec<_>, FormatError>>()?,
-        )?)
+        match &self.inner.backend {
+            Backend::Edit(engine) => {
+                let session = engine
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                Ok(session.reusable_free_sections()?)
+            }
+            _ => Err(Error::ReadOnly),
+        }
     }
 
     /// Returns the physical byte length of the backing store.

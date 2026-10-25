@@ -20,9 +20,8 @@ use crate::width::FormatWidths;
 /// A snapshot of a writable session's logical size and reusable free bytes.
 ///
 /// [`File::reusable_space_stats`](crate::File::reusable_space_stats) reads both values under
-/// the session lock. They have the same meaning as the scalar fields of
-/// [`SpaceAccounting`](crate::SpaceAccounting), including committed changes and immediate
-/// appends. Staged edits affect these values when applied by a commit.
+/// the session lock. They include committed changes and immediate appends. Staged edits affect
+/// these values when applied by a commit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReusableSpaceStats {
     logical_size: u64,
@@ -42,19 +41,48 @@ impl ReusableSpaceStats {
     /// Includes the userblock prefix and any trailing bytes. This equals
     /// [`File::file_size`](crate::File::file_size) for the same session state, and can decrease
     /// when a commit truncates free space at the end of the file.
+    ///
+    /// Opening a file preserves its recorded end-of-file address. Unaccounted trailing bytes
+    /// can therefore make this length exceed
+    /// [`Superblock::eof_address`](crate::Superblock::eof_address).
     pub const fn logical_size(&self) -> u64 {
         self.logical_size
     }
 
     /// Returns the free bytes tracked as reusable when the snapshot was taken.
     ///
-    /// Includes unused append reserves and classic aggregate reservations. On paged files,
-    /// includes the reusable metadata and raw-data lists and excludes dead or unclassified
-    /// space. The total can differ from persisted manager contents and does not guarantee
-    /// that a particular write fits. See [`SpaceAccounting::reusable_free_bytes`]
-    /// for allocation and reservation semantics.
+    /// Includes tracked regions freed by committed edits and regions recovered from persisted
+    /// managers on open. A fresh nonpersistent session does not recover holes from earlier
+    /// sessions. Under [`FileSpaceStrategy::None`](crate::FileSpaceStrategy::None), the total is
+    /// zero.
+    /// On paged files, includes the reusable metadata and raw-data lists and excludes dead or
+    /// unclassified space.
     ///
-    /// [`SpaceAccounting::reusable_free_bytes`]: crate::SpaceAccounting::reusable_free_bytes
+    /// Under [`FileSpaceStrategy::Aggr`](crate::FileSpaceStrategy::Aggr) and
+    /// [`FileSpaceStrategy::FsmAggr`](crate::FileSpaceStrategy::FsmAggr), includes unused metadata
+    /// and raw aggregate reservations for staged edits and immediate appends, even when the
+    /// spare is shorter than the free-section threshold.
+    ///
+    /// Under [`FileSpaceStrategy::FsmAggr`](crate::FileSpaceStrategy::FsmAggr), the editor admits
+    /// abandoned interior spare under the threshold and adjacency rules for freed extents. A
+    /// shorter region is tracked only when it adjoins tracked free space. Under
+    /// [`FileSpaceStrategy::Aggr`](crate::FileSpaceStrategy::Aggr), the editor discards abandoned
+    /// interior spare.
+    ///
+    /// The total does not guarantee that a particular write fits or predict its growth. A tracked
+    /// range can be truncated away when a commit releases free space at the end of the file.
+    ///
+    /// # Reservations
+    ///
+    /// Includes unused immediate-append reserves. The editor removes these reserves from the
+    /// persisted managers before an append writes into them. A staged commit places its objects
+    /// outside the append reserve, then returns unused reserve space when rewriting the managers.
+    /// The remaining free space is available to subsequent commits. Clean teardown of a persistent
+    /// session also returns unused reservations through a manager rewrite.
+    ///
+    /// The editor excludes held reservations from persisted managers, so this total can exceed
+    /// the persisted section-byte total reported through
+    /// [`File::persisted_free_sections`](crate::File::persisted_free_sections).
     pub const fn reusable_free_bytes(&self) -> u64 {
         self.reusable_free_bytes
     }

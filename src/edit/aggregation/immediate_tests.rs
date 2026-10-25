@@ -303,7 +303,7 @@ fn failed_commit_restores_spare_returned_during_refill() {
     let reservation = engine.reserve(64, AllocationClass::Raw).unwrap();
     engine.place(reservation, &[23; 64]).unwrap();
     let state = engine.aggregation;
-    let free = engine.space_accounting().unwrap().reusable_free_space;
+    let free = engine.reusable_free_sections().unwrap();
     engine.create_group(&ObjectPathBuf::parse("group")).unwrap();
     let error = engine.commit().unwrap_err();
     let Error::Io(error) = error else {
@@ -312,7 +312,7 @@ fn failed_commit_restores_spare_returned_during_refill() {
     assert_eq!(error.kind(), ErrorKind::Other);
     assert!(!engine.publication.attempted());
     assert_eq!(engine.aggregation, state);
-    assert_eq!(engine.space_accounting().unwrap().reusable_free_space, free);
+    assert_eq!(engine.reusable_free_sections().unwrap(), free);
     assert_eq!(engine.space.reusable_sections().count(), 0);
     drop(engine);
     assert_eq!(

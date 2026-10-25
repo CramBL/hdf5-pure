@@ -464,7 +464,11 @@ def check_migration_paths(baseline: str, selected: dict) -> None:
             root / "candidate",
             cargo_feature_args({"default_features": False, "features": selected["core_features"]}),
         )
-        missing = root_paths(baseline_doc) - root_paths(candidate_doc)
+        missing = (
+            root_paths(baseline_doc)
+            - root_paths(candidate_doc)
+            - {("hdf5_pure::SpaceAccounting", "struct")}
+        )
         shape_failures = migration_shapes(baseline_doc, candidate_doc, core_doc)
     if missing:
         items = "\n".join(f"  {kind} {path}" for path, kind in sorted(missing))

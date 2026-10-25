@@ -619,7 +619,7 @@ pub use writer::FileBuilder;
 pub use appender::BufferedAppender;
 
 #[cfg(feature = "std")]
-pub use edit::{AppendBuilder, EditBacking, MemoryStrategy, SpaceAccounting, SyncPolicy};
+pub use edit::{AppendBuilder, EditBacking, MemoryStrategy, SyncPolicy};
 
 #[cfg(feature = "std")]
 pub use repack::{RepackOptions, repack, repack_into, repack_to_path};
