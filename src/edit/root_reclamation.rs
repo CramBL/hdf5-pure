@@ -1,5 +1,7 @@
 //! Reuse of a superseded root header after publication.
 
+use hdf5_pure_core::__private::PhysicalAddress;
+
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::convert::Narrow;
@@ -34,7 +36,7 @@ impl WriteEngine {
     /// inspecting the prospective tree.
     pub(super) fn plan_root_reclamation(
         &self,
-        new_root: u64,
+        new_root: PhysicalAddress,
         to_free: &mut Vec<(StoredAddress, u64, FreeClass)>,
     ) -> Result<Option<RootReclamation>, Error> {
         let Some(persist) = &self.persist else {
@@ -51,11 +53,11 @@ impl WriteEngine {
         let old_root = self
             .context
             .addresses()
-            .absolute(self.context.superblock().root_group_address)?;
+            .resolve(self.context.superblock().root_group_address)?;
         if old_root >= new_root {
             return Ok(None);
         }
-        let Ok(old_spans) = self.oh_chunk_spans(old_root) else {
+        let Ok(old_spans) = self.oh_chunk_spans(old_root.get()) else {
             return Ok(None);
         };
         let [(target_addr, target_len)] = old_spans.as_slice() else {
@@ -64,7 +66,7 @@ impl WriteEngine {
         if *target_len >= persist.threshold {
             return Ok(None);
         }
-        let new_spans = self.oh_chunk_spans(new_root)?;
+        let new_spans = self.oh_chunk_spans(new_root.get())?;
         let [(source_addr, source_len)] = new_spans.as_slice() else {
             return Ok(None);
         };
@@ -74,7 +76,7 @@ impl WriteEngine {
         let Some(incoming) = self.count_incoming_hard_links() else {
             return Ok(None);
         };
-        if incoming.contains_key(&old_root) {
+        if incoming.contains_key(&old_root.get()) {
             return Ok(None);
         }
         let Some(target) = self.stored_extent(*target_addr, *target_len) else {
@@ -91,7 +93,7 @@ impl WriteEngine {
         };
         if !self.proved_free_of_references {
             let mut prospective = self.context.superblock().clone();
-            prospective.root_group_address = self.context.addresses().relative(new_root)?;
+            prospective.root_group_address = self.context.addresses().relative(new_root.get())?;
             if !crate::reference_patch::prove_free_of_references(
                 &self.image(),
                 &prospective,
@@ -128,11 +130,11 @@ impl WriteEngine {
         let target_addr = self
             .context
             .addresses()
-            .absolute(StoredAddress::new(target.start()))?;
+            .resolve(StoredAddress::new(target.start()))?;
         let bytes = self
             .image
             .read_exact_at(source_addr, source.len().to_usize()?)?;
-        self.write_at(target_addr, &bytes)?;
+        self.write_at(target_addr.get(), &bytes)?;
         self.commit_persisting_releasing_reserve(
             target_addr,
             vec![(

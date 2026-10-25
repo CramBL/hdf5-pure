@@ -2760,7 +2760,7 @@ impl WriteEngine {
         match self.commit_persisting(
             self.context
                 .addresses()
-                .absolute(self.context.superblock().root_group_address)?,
+                .resolve(self.context.superblock().root_group_address)?,
             Vec::new(),
             TailPlacement::Anywhere,
         ) {

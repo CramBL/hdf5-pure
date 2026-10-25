@@ -1011,7 +1011,7 @@ fn a_reuse_only_tail_rewrite_that_cannot_place_itself_writes_nothing() {
     let root = s
         .context
         .addresses()
-        .absolute(s.context.superblock().root_group_address)
+        .resolve(s.context.superblock().root_group_address)
         .unwrap();
     let len_before = s.image.len();
     let ext_before = s.context.superblock().superblock_extension_address;

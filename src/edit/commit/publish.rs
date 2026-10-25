@@ -31,8 +31,8 @@ use crate::width::FormatWidths;
 
 /// Stores the root and address changes after replacement objects have been written.
 pub(super) struct AppliedTree {
-    /// Absolute address of the replacement root header.
-    pub(super) root: u64,
+    /// Physical position of the replacement root header.
+    pub(super) root: PhysicalAddress,
     /// Stored-address spans eligible for release when the root is published.
     pub(super) freed: Vec<(StoredAddress, u64, FreeClass)>,
     /// Absolute old and replacement header addresses for stored-reference updates.
@@ -100,7 +100,7 @@ impl WriteEngine {
     /// rewritten. Returns [`Error::Io`] if writing, synchronizing, or truncating fails.
     pub(in crate::edit) fn commit_persisting_releasing_reserve(
         &mut self,
-        new_root: u64,
+        new_root: PhysicalAddress,
         mut to_free: Vec<(StoredAddress, u64, FreeClass)>,
     ) -> Result<(), Error> {
         self.release_aggregates_for_tail(&mut to_free)?;
@@ -130,7 +130,7 @@ impl WriteEngine {
     /// [`Error::Io`] if writing, synchronizing, or truncating fails.
     pub(in crate::edit) fn shrink_to_the_trailing_free_run(
         &mut self,
-        new_root: u64,
+        new_root: PhysicalAddress,
     ) -> Result<(), Error> {
         let Some(persist) = self.persist.as_ref() else {
             return Ok(());
@@ -212,11 +212,11 @@ impl WriteEngine {
     /// Returns the address-conversion, serialization, write, synchronization, or truncation error.
     pub(in crate::edit) fn publish_nonpersisting(
         &mut self,
-        new_root: u64,
+        new_root: PhysicalAddress,
         trunc_to: Option<PhysicalAddress>,
     ) -> Result<(), Error> {
         let base = self.context.addresses();
-        let new_eof = trunc_to.map_or(self.image.len(), PhysicalAddress::get);
+        let new_eof = trunc_to.unwrap_or_else(|| PhysicalAddress::new(self.image.len()));
         self.barrier()?;
         if matches!(
             self.context.superblock().version,
@@ -224,16 +224,16 @@ impl WriteEngine {
         ) {
             // Adopt the proposed superblock after the publication write and barrier succeed.
             let mut new_sb = self.context.superblock().clone();
-            new_sb.root_group_address = base.relative(new_root)?;
-            new_sb.eof_address = new_eof;
+            new_sb.root_group_address = base.relative(new_root.get())?;
+            new_sb.eof_address = new_eof.get();
             // Preserve this session's status flags, including an active crash mark.
             new_sb.consistency_flags = self.held_status_flags;
             self.publish_superblock(self.context.propose(new_sb)?.encode()?)?;
         } else {
-            let stored_root = base.relative(new_root)?;
+            let stored_root = base.relative(new_root.get())?;
             let mut superblock = self.context.superblock().clone();
             superblock.root_group_address = stored_root;
-            superblock.eof_address = new_eof;
+            superblock.eof_address = new_eof.get();
             let proposed = self.context.propose(superblock)?;
             self.publication = PublicationState::Uncertain;
             self.repoint_v0v1_root(stored_root, new_eof)?;
@@ -358,7 +358,7 @@ impl WriteEngine {
     /// Panics if persistence is disabled.
     pub(in crate::edit) fn commit_persisting(
         &mut self,
-        new_root: u64,
+        new_root: PhysicalAddress,
         to_free: Vec<(StoredAddress, u64, FreeClass)>,
         placement: TailPlacement,
     ) -> Result<(), Error> {
@@ -549,7 +549,7 @@ impl WriteEngine {
         // Complete the content barrier before publishing the root, EOF, and extension.
         self.barrier()?;
         let mut new_sb = self.context.superblock().clone();
-        new_sb.root_group_address = self.context.addresses().relative(new_root)?;
+        new_sb.root_group_address = self.context.addresses().relative(new_root.get())?;
         new_sb.eof_address = final_eof.get();
         new_sb.superblock_extension_address = Some(StoredAddress::new(ext_addr));
         // Preserve any status flags held by this session.
@@ -709,7 +709,7 @@ impl WriteEngine {
     /// Panics if persistence is disabled.
     pub(in crate::edit) fn commit_persisting_paged(
         &mut self,
-        new_root: u64,
+        new_root: PhysicalAddress,
         to_free: Vec<(StoredAddress, u64, FreeClass)>,
         placement: TailPlacement,
     ) -> Result<(), Error> {
@@ -850,7 +850,7 @@ impl WriteEngine {
         // Complete the content barrier before publishing the root, EOF, and extension.
         self.barrier()?;
         let mut new_sb = self.context.superblock().clone();
-        new_sb.root_group_address = self.context.addresses().relative(new_root)?;
+        new_sb.root_group_address = self.context.addresses().relative(new_root.get())?;
         new_sb.eof_address = final_eof.get();
         new_sb.superblock_extension_address = Some(StoredAddress::new(ext_addr));
         // Preserve the crash mark throughout a page-buffered session.
@@ -887,7 +887,11 @@ impl WriteEngine {
     ///
     /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_boot_super
     /// [entry]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_symboltableentry
-    fn repoint_v0v1_root(&mut self, new_root: StoredAddress, new_eof: u64) -> Result<(), Error> {
+    fn repoint_v0v1_root(
+        &mut self,
+        new_root: StoredAddress,
+        new_eof: PhysicalAddress,
+    ) -> Result<(), Error> {
         let os = self.context.superblock().offset_size.get();
         let addr_width = u64::from(os);
         // Field layout after the fixed prefix: base / free-space / EOF / driver
@@ -904,7 +908,7 @@ impl WriteEngine {
         let ste = base + 4 * addr_width;
         let oh_addr_off = ste + addr_width;
         let cache_off = ste + 2 * addr_width;
-        self.write_at(eof_off, &new_eof.to_le_bytes()[..usize::from(os)])?;
+        self.write_at(eof_off, &new_eof.get().to_le_bytes()[..usize::from(os)])?;
         self.write_at(cache_off, &[0u8; 4])?; // cache type = none
         self.write_at(cache_off + 8, &[0u8; 16])?; // clear scratch-pad
         self.write_at(

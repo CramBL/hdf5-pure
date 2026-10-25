@@ -312,7 +312,7 @@ impl WriteEngine {
         let root = self
             .context
             .addresses()
-            .absolute(self.context.superblock().root_group_address)?;
+            .resolve(self.context.superblock().root_group_address)?;
         let snapshot = self.snapshot_free();
         self.aggregation = Some(AggregateSpace::new(aggregation.eoa));
         self.publication = PublicationState::Ready;
@@ -422,7 +422,7 @@ impl WriteEngine {
             let root = self
                 .context
                 .addresses()
-                .absolute(self.context.superblock().root_group_address)?;
+                .resolve(self.context.superblock().root_group_address)?;
             self.publication = PublicationState::Ready;
             let result = self.publish_nonpersisting(root, Some(end));
             if result.is_ok() || self.publication.attempted() {

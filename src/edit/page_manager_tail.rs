@@ -143,7 +143,7 @@ fn recovered_metadata_tail_can_hold_a_rebuilt_header() {
     let root = engine
         .context
         .addresses()
-        .absolute(engine.context.superblock().root_group_address)
+        .resolve(engine.context.superblock().root_group_address)
         .unwrap();
     let before = issued_bytes(&engine);
     disk_log::start();
