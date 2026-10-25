@@ -1,5 +1,6 @@
 //! Commit rollback, append publication, buffering, and synchronization.
 
+use hdf5_pure_core::__private::PhysicalAddress;
 use rstest::rstest;
 
 use super::common;
@@ -19,7 +20,7 @@ use crate::edit::SWMR_WRITE_FLAGS;
 use crate::edit::SyncPolicy;
 use crate::edit::WRITE_GATHER_BYTES;
 use crate::edit::WriteEngine;
-use crate::error::Error;
+use crate::error::{Error, FormatError};
 use crate::file_lock::FileLocking;
 use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::FileSpaceStrategy;
@@ -116,6 +117,99 @@ fn failed_flag_publication_preserves_the_confirmed_context(
         drop(engine);
         assert_eq!(std::fs::read(&path).unwrap(), original);
     }
+}
+
+#[rstest]
+#[case::legacy(
+    "c/1.8/v1_superblock.h5",
+    SuperblockVersion::One,
+    MemoryStrategy::Mirrored,
+    0
+)]
+#[case::modern(
+    "c/1.8/v2_superblock.h5",
+    SuperblockVersion::Two,
+    MemoryStrategy::Mirrored,
+    0
+)]
+#[case::modern_bounded(
+    "c/1.8/v2_superblock.h5",
+    SuperblockVersion::Two,
+    MemoryStrategy::Bounded,
+    0
+)]
+#[case::modern_userblock(
+    "c/1.8/v2_superblock.h5",
+    SuperblockVersion::Two,
+    MemoryStrategy::Mirrored,
+    512
+)]
+fn publication_encodes_the_physical_root_once(
+    #[case] fixture: &str,
+    #[case] version: SuperblockVersion,
+    #[case] backing: MemoryStrategy,
+    #[case] userblock: usize,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = test_util::copy_data(fixture, directory.path());
+    if userblock != 0 {
+        test_util_hdf5::userblock::prepend(&path, &vec![0xA5; userblock]);
+    }
+    let mut engine = WriteEngine::open_rw_with_strategy(
+        &path,
+        MetadataCacheConfig::disabled(),
+        FileLocking::Enabled,
+        backing,
+    )
+    .unwrap();
+    assert_eq!(engine.context.superblock().version, version);
+    let stored_root = engine.context.superblock().root_group_address;
+    let root = engine.context.addresses().resolve(stored_root).unwrap();
+    assert_eq!(root.get(), userblock as u64 + stored_root.get());
+    let eof = engine.image.len();
+    engine.publish_nonpersisting(root, None).unwrap();
+    assert_eq!(engine.context.superblock().root_group_address, stored_root);
+    assert_eq!(engine.context.superblock().eof_address, eof);
+    drop(engine);
+    let file = crate::reader::File::open(&path).unwrap();
+    assert_eq!(file.superblock().root_group_address, stored_root);
+    assert_eq!(file.superblock().eof_address, eof);
+    assert_eq!(
+        file.dataset("values").unwrap().read_f64().unwrap(),
+        vec![1.5, 2.5, 3.5, 4.5]
+    );
+    drop(file);
+    assert_eq!(
+        &std::fs::read(&path).unwrap()[..userblock],
+        &vec![0xA5; userblock]
+    );
+}
+
+#[rstest]
+#[case::before_base(0)]
+#[case::last_userblock_byte(511)]
+fn publication_rejects_a_physical_root_below_base(#[case] root: u64) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = test_util::copy_data("c/1.8/v2_superblock.h5", directory.path());
+    test_util_hdf5::userblock::prepend(&path, &[0xA5; 512]);
+    let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+    let before = engine.context.superblock().clone();
+    let bytes = engine.page_publication_snapshot().unwrap();
+    let error = engine
+        .publish_nonpersisting(PhysicalAddress::new(root), None)
+        .unwrap_err();
+    let Error::Format(error) = error else {
+        panic!("expected a root below the address base");
+    };
+    assert_eq!(
+        error,
+        FormatError::AddressBelowBase {
+            address: root,
+            base: 512
+        }
+    );
+    assert_eq!(engine.context.superblock(), &before);
+    assert_eq!(engine.page_publication_snapshot().unwrap(), bytes);
 }
 
 #[rstest]

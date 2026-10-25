@@ -93,7 +93,7 @@ impl WriteEngine {
         self.commit_persisting_releasing_reserve(
             self.context
                 .addresses()
-                .absolute(self.context.superblock().root_group_address)?,
+                .resolve(self.context.superblock().root_group_address)?,
             Vec::new(),
         )
     }

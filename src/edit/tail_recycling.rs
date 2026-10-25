@@ -1,5 +1,6 @@
 //! Recycling of persistent extension and manager storage after publication.
 
+use hdf5_pure_core::__private::PhysicalAddress;
 use hdf5_pure_space::__private::ManagerSections;
 
 use crate::address::StoredAddress;
@@ -29,7 +30,7 @@ impl WriteEngine {
     /// [`Self::commit_persisting`] if rewriting or publishing the replacement metadata fails.
     pub(super) fn recycle_flat_tail(
         &mut self,
-        root: u64,
+        root: PhysicalAddress,
         mut to_free: Vec<(StoredAddress, u64, FreeClass)>,
         target: FreeExtent,
     ) -> Result<(), Error> {

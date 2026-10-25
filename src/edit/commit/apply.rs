@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use hdf5_pure_core::__private::PhysicalAddress;
 use hdf5_pure_space::__private::{AllocationClass, FreeClass, PageType};
 
 use super::plan::{
@@ -219,7 +220,7 @@ impl WriteEngine {
         );
         edit::retain_disjoint_in_bounds(&mut to_free, self.image.len());
         Ok(AppliedTree {
-            root: new_root,
+            root: PhysicalAddress::new(new_root),
             freed: self.stored_spans(to_free)?,
             relocations,
         })

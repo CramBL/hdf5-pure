@@ -7,6 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use hdf5_pure_core::__private::PhysicalAddress;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::FreeClass;
 use hdf5_pure_space::__private::PageType;
@@ -134,7 +135,7 @@ fn fresh_page_placement_and_root_publication_preserve_old_allocations(
     assert_eq!(engine.release_freed(freed.unwrap()).unwrap(), None);
     assert!(engine.space.reusable_sections().next().is_none());
     engine
-        .publish_nonpersisting(userblock + root, None)
+        .publish_nonpersisting(PhysicalAddress::new(userblock + root), None)
         .unwrap();
     engine.finalize_persist().unwrap();
     let operations = disk_log::take();
