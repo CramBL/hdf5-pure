@@ -1,5 +1,4 @@
-//! What the read paths are allowed to allocate, as rules rather than as numbers
-//! (issue #228).
+//! Allocation bounds for reads and writable-session statistics (issue #228).
 //!
 //! Every bound here is a statement about how the work *scales* — a windowed read
 //! allocates on the order of its window, a chunked read allocates a fixed number
@@ -18,7 +17,9 @@
 //! these tests share a process without serializing against each other: what a
 //! region records is what the calling thread allocated inside it, and nothing
 //! else. That last part is also how a test here could go quiet, which is why each
-//! one asserts a floor as well as a ceiling — see [`allocation::Measured`].
+//! one checks that allocation measurement is active. Read bounds assert a floor as well as a
+//! ceiling, and statistics polls use a separate allocating control before asserting zero
+//! allocations. See [`allocation::Measured`].
 
 // heapscope unwinds with the frame-pointer convention, which it implements for
 // x86_64 and aarch64 only, and on any other target the profiler errors at
@@ -44,11 +45,99 @@ use test_util::object_header::MessageType;
 use test_util::object_header::v2::Header;
 use test_util::superblock::v2::Superblock;
 use test_util::widths::Widths;
+use test_util_hdf5::file_space;
 
 use allocation::measure;
 
 #[global_allocator]
 static ALLOC: heapscope::Alloc = heapscope::Alloc::system();
+
+#[rstest]
+#[case::flat(
+    FileSpaceStrategy::FsmAggr,
+    false,
+    "flat_stats_poll",
+    "flat_stats_control"
+)]
+#[case::page(
+    FileSpaceStrategy::Page,
+    false,
+    "page_stats_poll",
+    "page_stats_control"
+)]
+#[case::flat_reserve(
+    FileSpaceStrategy::FsmAggr,
+    true,
+    "flat_reserve_poll",
+    "flat_reserve_control"
+)]
+#[case::page_reserve(
+    FileSpaceStrategy::Page,
+    true,
+    "page_reserve_poll",
+    "page_reserve_control"
+)]
+#[case::aggregates(
+    FileSpaceStrategy::Aggr,
+    false,
+    "aggregate_stats_poll",
+    "aggregate_stats_control"
+)]
+fn reusable_space_stats_poll_without_allocating(
+    #[case] strategy: FileSpaceStrategy,
+    #[case] reserve: bool,
+    #[case] region: &'static str,
+    #[case] control: &'static str,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let file =
+        file_space::fragmented_session(&directory.path().join("fragmented.h5"), strategy, 32);
+    if reserve {
+        file.root()
+            .create_dataset("log", |builder| {
+                builder
+                    .with_i32_data(&[])
+                    .with_shape(&[0])
+                    .with_chunks(&[64])
+                    .with_maxshape(&[MaxExtent::Unlimited]);
+            })
+            .unwrap();
+        file.commit().unwrap();
+        file.dataset("log").unwrap().append(&[1; 64]).unwrap();
+    } else if strategy == FileSpaceStrategy::Aggr {
+        file.root()
+            .create_dataset("spare", |builder| {
+                builder.with_i32_data(&[3; 4]);
+            })
+            .unwrap();
+        file.commit().unwrap();
+    }
+    let sections = file.reusable_free_sections().unwrap();
+    assert!(
+        sections.section_count()
+            >= if strategy == FileSpaceStrategy::Aggr {
+                1
+            } else {
+                16
+            }
+    );
+    let expected = file.reusable_space_stats().unwrap();
+    assert_eq!(expected.reusable_free_bytes(), sections.free_bytes());
+    let (probe, positive) = allocation::measure(control, || std::hint::black_box(vec![0u8; 1_024]));
+    assert!(positive.blocks > 0, "{positive}");
+    assert!(positive.bytes >= 1_024, "{positive}");
+    drop(probe);
+    let (observed, measured) = allocation::measure(region, || {
+        let mut observed = expected;
+        for _ in 0..10_000 {
+            observed = std::hint::black_box(&file).reusable_space_stats().unwrap();
+        }
+        observed
+    });
+    assert_eq!(observed, expected);
+    assert_eq!(measured.blocks, 0, "{measured}");
+    assert_eq!(measured.bytes, 0, "{measured}");
+}
 
 #[rstest]
 #[case::compact_whole(true, 0, u64::MAX, "compact_whole_baseline", "compact_whole_rows")]

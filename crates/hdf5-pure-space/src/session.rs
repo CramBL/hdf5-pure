@@ -306,6 +306,22 @@ impl SessionSpace {
         }
     }
 
+    /// Returns the sum of the cached reusable free-list byte totals.
+    ///
+    /// Returns zero when reusable allocation is disabled. The caller accounts for append
+    /// reserves and aggregate reservations separately.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the paged free-list total exceeds [`u64::MAX`].
+    pub fn reusable_bytes(&self) -> Result<u64, FormatError> {
+        match self {
+            Self::Disabled => Ok(0),
+            Self::Flat(space) => Ok(space.free.total_bytes()),
+            Self::Paged(space) => space.paged.reusable_bytes(),
+        }
+    }
+
     /// Returns reusable extents in ascending address order.
     pub fn reusable_sections(&self) -> impl Iterator<Item = Extent> + '_ {
         let (first, second) = match self {

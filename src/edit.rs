@@ -313,6 +313,7 @@ use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::FileSpaceStrategy;
 use crate::file_writer::{LENGTH_WIDTH, OFFSET_WIDTH};
 use crate::filter_pipeline::FilterPipeline;
+use crate::free_sections::ReusableSpaceStats;
 use crate::free_space_manager;
 use crate::free_space_manager::PersistedSections;
 use crate::image::{FileImage, HandleImage, MirrorImage, WriteBuffering};
@@ -2540,6 +2541,40 @@ impl WriteEngine {
         } else {
             EditBacking::Mirrored
         }
+    }
+
+    /// Returns the logical size and reusable bytes from cached session counters.
+    ///
+    /// Includes append reserves when free-space management is enabled, plus unused classic
+    /// aggregate reservations. Computes the total without enumerating free sections.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the byte sum exceeds [`u64::MAX`].
+    pub(crate) fn reusable_space_stats(&self) -> Result<ReusableSpaceStats, FormatError> {
+        let mut reusable_free_bytes = self.space.reusable_bytes()?;
+        if self.space.is_enabled() {
+            reusable_free_bytes = reusable_free_bytes
+                .checked_add(self.reserved.total_bytes())
+                .ok_or(FormatError::OffsetOverflow {
+                    offset: reusable_free_bytes,
+                    length: self.reserved.total_bytes(),
+                })?;
+        }
+        if let Some(aggregation) = self.aggregation {
+            let unused = aggregation.unused_bytes()?;
+            reusable_free_bytes =
+                reusable_free_bytes
+                    .checked_add(unused)
+                    .ok_or(FormatError::OffsetOverflow {
+                        offset: reusable_free_bytes,
+                        length: unused,
+                    })?;
+        }
+        Ok(ReusableSpaceStats::new(
+            self.image.len(),
+            reusable_free_bytes,
+        ))
     }
 
     /// Returns a snapshot of this session's live space usage, the current file size and the free

@@ -638,6 +638,7 @@ pub use scaleoffset::ScaleOffset;
 
 pub use dataset_create_properties::DatasetCreateProperties;
 pub use file_create_properties::FileCreateProperties;
+pub use free_sections::ReusableSpaceStats;
 pub use free_sections::{
     FreeSection, FreeSectionCoordinates, FreeSections, FreeSpaceManagerRole,
     FreeSpaceManagerSections, PersistedFreeSections,

@@ -17,6 +17,49 @@ use crate::free_space_manager;
 use crate::source::Source;
 use crate::width::FormatWidths;
 
+/// A snapshot of a writable session's logical size and reusable free bytes.
+///
+/// [`File::reusable_space_stats`](crate::File::reusable_space_stats) reads both values under
+/// the session lock. They have the same meaning as the scalar fields of
+/// [`SpaceAccounting`](crate::SpaceAccounting), including committed changes and immediate
+/// appends. Staged edits affect these values when applied by a commit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReusableSpaceStats {
+    logical_size: u64,
+    reusable_free_bytes: u64,
+}
+
+impl ReusableSpaceStats {
+    pub(crate) fn new(logical_size: u64, reusable_free_bytes: u64) -> Self {
+        Self {
+            logical_size,
+            reusable_free_bytes,
+        }
+    }
+
+    /// Returns the session's file-image length in bytes at the time of the snapshot.
+    ///
+    /// Includes the userblock prefix and any trailing bytes. This equals
+    /// [`File::file_size`](crate::File::file_size) for the same session state, and can decrease
+    /// when a commit truncates free space at the end of the file.
+    pub const fn logical_size(&self) -> u64 {
+        self.logical_size
+    }
+
+    /// Returns the free bytes tracked as reusable when the snapshot was taken.
+    ///
+    /// Includes unused append reserves and classic aggregate reservations. On paged files,
+    /// includes the reusable metadata and raw-data lists and excludes dead or unclassified
+    /// space. The total can differ from persisted manager contents and does not guarantee
+    /// that a particular write fits. See [`SpaceAccounting::reusable_free_bytes`]
+    /// for allocation and reservation semantics.
+    ///
+    /// [`SpaceAccounting::reusable_free_bytes`]: crate::SpaceAccounting::reusable_free_bytes
+    pub const fn reusable_free_bytes(&self) -> u64 {
+        self.reusable_free_bytes
+    }
+}
+
 /// The free sections recorded in a file's persisted managers.
 ///
 /// [`File::persisted_free_sections`](crate::File::persisted_free_sections) returns this report

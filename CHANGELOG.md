@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `File::reusable_space_stats` reads a writable session's logical size and reusable free bytes without allocations after platform mutex initialization. The reusable total includes append reserves and unused aggregates and does not guarantee that a particular write fits.
 - `File::persisted_free_sections` inspects typed, base-relative free sections and per-manager totals through buffered or streaming readers, while editing sessions have a separate view of reusable space at physical offsets.
 - `DatasetCreateProperties` configures a dataset's chunk dimensions, filters, and fill settings as a dataset creation property list, an alternative to the builder methods that set them one at a time. Applying it replaces the settings those methods made earlier.
 - `FixedPointType::with_padding` and related numeric APIs configure padding bits that survive metadata reads and writes ([#862](https://github.com/CramBL/hdf5-pure/pull/862)).

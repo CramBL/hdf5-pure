@@ -170,6 +170,23 @@ impl AggregateSpace {
         Ok(Some(eoa))
     }
 
+    /// Returns the total unused bytes in the metadata and raw-data aggregates.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the sum exceeds [`u64::MAX`].
+    pub(super) fn unused_bytes(self) -> Result<u64, FormatError> {
+        // The aggregate policy stores at most one metadata span and one raw-data span.
+        self.unused().try_fold(0u64, |total, extent| {
+            total
+                .checked_add(extent.len())
+                .ok_or(FormatError::OffsetOverflow {
+                    offset: total,
+                    length: extent.len(),
+                })
+        })
+    }
+
     pub(super) fn unused(self) -> impl Iterator<Item = Extent> {
         [AllocationClass::Metadata, AllocationClass::Raw]
             .into_iter()

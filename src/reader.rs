@@ -49,6 +49,7 @@ use crate::file_lock::{self, FileLocking, OpenIntent, OpenTarget, WriteMarkPolic
 use crate::file_space_info::{FileSpaceInfo, FileSpaceStrategy};
 use crate::fill_value::{FillPattern, FillValueMessage, FillValueView};
 use crate::filter_pipeline::FilterPipeline;
+use crate::free_sections::ReusableSpaceStats;
 use crate::free_sections::{
     FreeSection, FreeSectionCoordinates, FreeSections, PersistedFreeSections,
 };
@@ -3348,6 +3349,58 @@ impl File {
                 session.has_staged_edits()
             }
             _ => false,
+        }
+    }
+
+    /// Returns a snapshot of this writable session's logical size and reusable free bytes.
+    ///
+    /// Reports the same scalar values as [`space_accounting`](Self::space_accounting),
+    /// including committed changes and immediate appends. Staged edits affect the statistics
+    /// when applied by [`commit`](Self::commit). Unused append reserves and classic aggregate
+    /// reservations are included in the reusable total.
+    ///
+    /// Computes the values from cached counters without allocating or enumerating free sections.
+    /// The counter work takes constant time with respect to the number of free sections.
+    ///
+    /// The method acquires the session lock. On some platforms, the first lock initializes mutex
+    /// state and can allocate. After initialization, polling does not allocate. Acquiring the
+    /// lock can wait for another operation on the same session.
+    ///
+    /// These values describe session state. They do not predict whether a particular write fits
+    /// or how much physical storage is available. For section enumeration, use
+    /// [`reusable_free_sections`](Self::reusable_free_sections).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ReadOnly`] if the file was opened read-only. Returns [`Error::Format`]
+    /// with [`FormatError::OffsetOverflow`] if the reusable-byte sum exceeds [`u64::MAX`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use hdf5_pure::{File, FileBuilder, MaxExtent};
+    /// # let directory = tempfile::tempdir()?;
+    /// # let path = directory.path().join("session-stats.h5");
+    /// # let mut builder = FileBuilder::new();
+    /// # builder.create_dataset("log").with_i32_data(&[1; 4]).with_chunks(&[4])
+    /// #     .with_maxshape(&[MaxExtent::Unlimited]);
+    /// # builder.write(&path)?;
+    /// let file = File::open_rw(&path)?;
+    /// file.dataset("log")?.append(&[2; 4])?;
+    /// let stats = file.reusable_space_stats()?;
+    /// assert_eq!(stats.logical_size(), file.file_size());
+    /// assert!(stats.reusable_free_bytes() <= stats.logical_size());
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
+    pub fn reusable_space_stats(&self) -> Result<ReusableSpaceStats, Error> {
+        match &self.inner.backend {
+            Backend::Edit(engine) => {
+                let session = engine
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                Ok(session.reusable_space_stats()?)
+            }
+            _ => Err(Error::ReadOnly),
         }
     }
 
