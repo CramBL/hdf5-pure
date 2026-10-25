@@ -20,6 +20,7 @@ use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
+use hdf5_pure::FileCreateProperties;
 use hdf5_pure::FileSpaceInfo;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
@@ -1395,6 +1396,7 @@ fn recorded_settings_are_equivalent_for_rust_and_libhdf5_files(
     #[case] threshold: u64,
     #[values(false, true)] c_origin: bool,
     #[values(false, true)] streaming: bool,
+    #[values(false, true)] from_properties: bool,
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("recorded-settings.h5");
@@ -1432,13 +1434,28 @@ fn recorded_settings_are_equivalent_for_rust_and_libhdf5_files(
         file.close().unwrap();
     } else {
         let mut builder = FileBuilder::new();
-        builder.with_file_space_strategy(strategy, persist, threshold);
-        builder.with_file_space_page_size(page_size);
+        if from_properties {
+            builder.with_create_properties(
+                FileCreateProperties::new().with_file_space_settings(expected),
+            );
+        } else {
+            builder.with_file_space_settings(expected);
+        }
         builder.with_userblock(UserblockSize::try_from(8192).unwrap());
         builder.create_dataset("data").with_i32_data(&[1, 2, 3]);
         builder.write(&path).unwrap();
         let file = hdf5::File::open(&path).unwrap();
         let properties = file.create_plist().unwrap();
+        let c_strategy = match strategy {
+            FileSpaceStrategy::FsmAggr | FileSpaceStrategy::Page => CStrategy::FreeSpaceManager {
+                paged: strategy == FileSpaceStrategy::Page,
+                persist: expected.persist(),
+                threshold: expected.threshold(),
+            },
+            FileSpaceStrategy::Aggr => CStrategy::PageAggregation,
+            FileSpaceStrategy::None => CStrategy::None,
+        };
+        assert_eq!(properties.get_file_space_strategy().unwrap(), c_strategy);
         assert_eq!(
             properties.get_file_space_page_size().unwrap(),
             page_size.get()

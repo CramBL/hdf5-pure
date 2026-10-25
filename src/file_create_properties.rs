@@ -1,6 +1,7 @@
 //! File-creation properties as one reusable value — the `fcpl` analogue.
 
 use crate::FileSpacePageSize;
+use crate::FileSpaceSettings;
 use crate::UserblockSize;
 use crate::file_space_info::FileSpaceStrategy;
 use crate::libver::LibVer;
@@ -169,18 +170,17 @@ use crate::libver::LibVer;
 pub struct FileCreateProperties {
     userblock: UserblockSize,
     libver_bounds: Option<(LibVer, LibVer)>,
-    file_space_strategy: Option<(FileSpaceStrategy, bool, u64)>,
-    file_space_page_size: Option<FileSpacePageSize>,
+    file_space_settings: Option<FileSpaceSettings>,
 }
 
 impl FileCreateProperties {
-    /// Constructs properties with no userblock and the default format and file-space settings.
+    /// Constructs properties that reserve zero prefix bytes and leave format and file-space
+    /// settings unset.
     pub const fn new() -> Self {
         Self {
             userblock: UserblockSize::NONE,
             libver_bounds: None,
-            file_space_strategy: None,
-            file_space_page_size: None,
+            file_space_settings: None,
         }
     }
 
@@ -234,7 +234,16 @@ impl FileCreateProperties {
         persist: bool,
         threshold: u64,
     ) -> Self {
-        self.file_space_strategy = Some((strategy, persist, threshold));
+        let page_size = match self.file_space_settings {
+            Some(settings) => settings.page_size(),
+            None => FileSpacePageSize::DEFAULT,
+        };
+        self.file_space_settings = Some(
+            FileSpaceSettings::new(strategy)
+                .with_persistence(persist)
+                .with_threshold(threshold)
+                .with_page_size(page_size),
+        );
         self
     }
 
@@ -245,8 +254,33 @@ impl FileCreateProperties {
     /// [`FileSpaceStrategy::FsmAggr`].
     #[doc(alias = "H5Pset_file_space_page_size")]
     pub const fn with_file_space_page_size(mut self, page_size: FileSpacePageSize) -> Self {
-        self.file_space_page_size = Some(page_size);
+        let settings = match self.file_space_settings {
+            Some(settings) => settings,
+            None => FileSpaceSettings::new(FileSpaceStrategy::FsmAggr),
+        };
+        self.file_space_settings = Some(settings.with_page_size(page_size));
         self
+    }
+
+    /// Sets the file-space configuration recorded in the superblock extension.
+    ///
+    /// Replaces the configured strategy, persistence flag, threshold, and page size together.
+    /// Passing [`FileSpaceSettings::default`] requests a recorded File Space Info message.
+    /// The writer omits this message when the settings are left unset by [`Self::new`].
+    ///
+    /// The writer requires the HDF5 1.10 format when settings are configured. It checks the
+    /// format bound and constraints between settings when writing.
+    pub const fn with_file_space_settings(mut self, settings: FileSpaceSettings) -> Self {
+        self.file_space_settings = Some(settings);
+        self
+    }
+
+    /// Returns the effective file-space configuration, or `None` if it is unset.
+    ///
+    /// Explicit default settings are returned as `Some`. The values are normalized as described
+    /// by [`FileSpaceSettings`], including under strategies without free-space managers.
+    pub const fn file_space_settings(&self) -> Option<FileSpaceSettings> {
+        self.file_space_settings
     }
 
     /// Returns the reserved prefix size, with [`UserblockSize::NONE`] for zero bytes.
@@ -259,17 +293,29 @@ impl FileCreateProperties {
         self.libver_bounds
     }
 
-    /// Return the configured file-space strategy, persist flag, and threshold, if
-    /// any.
+    /// Returns the effective strategy, persistence flag, and threshold, or `None` if unset.
+    ///
+    /// The values are those of [`Self::file_space_settings`], including the default strategy
+    /// when only a page size was configured and normalization under strategies without managers.
     pub const fn file_space_strategy(&self) -> Option<(FileSpaceStrategy, bool, u64)> {
-        self.file_space_strategy
+        match self.file_space_settings {
+            Some(settings) => Some((
+                settings.strategy(),
+                settings.persist(),
+                settings.threshold(),
+            )),
+            None => None,
+        }
     }
 
-    /// Returns the explicit page-size setting, or `None` if it is unset.
+    /// Returns the effective page size, or `None` if file-space settings are unset.
     ///
-    /// An explicit [`FileSpacePageSize::DEFAULT`] is returned as `Some`.
+    /// Configuring a strategy without a page size returns [`FileSpacePageSize::DEFAULT`].
     pub const fn file_space_page_size(&self) -> Option<FileSpacePageSize> {
-        self.file_space_page_size
+        match self.file_space_settings {
+            Some(settings) => Some(settings.page_size()),
+            None => None,
+        }
     }
 }
 

@@ -46,6 +46,7 @@ use hdf5_pure_space::__private::AllocationClass;
 
 #[cfg(test)]
 use crate::DeflateLevel;
+use crate::FileSpaceSettings;
 use crate::FillTime;
 use crate::SuperblockVersion;
 use crate::UserblockSize;
@@ -75,7 +76,6 @@ use crate::file_space_info::DEFAULT_THRESHOLD;
 use crate::file_space_info::FileSpaceInfo;
 use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::FileSpaceStrategy;
-use crate::file_space_info::FreeSpaceSettings;
 use crate::file_space_info::NUM_FILE_FSM_MANAGERS;
 use crate::fill_value::FillPattern;
 use crate::free_space_manager;
@@ -1140,11 +1140,7 @@ pub struct FileWriter {
     /// Requested library-version bounds (low, high), validated in `finish`.
     /// `None` means no constraint (any output the writer produces is accepted).
     libver_bounds: Option<(LibVer, LibVer)>,
-    /// File-space strategy `(strategy, persist, threshold)` from
-    /// `with_file_space_strategy`. `None` leaves the file-space defaults.
-    file_space_strategy: Option<(FileSpaceStrategy, bool, u64)>,
-    /// File-space page size from `with_file_space_page_size`.
-    file_space_page_size: Option<FileSpacePageSize>,
+    file_space_settings: Option<FileSpaceSettings>,
 }
 
 impl Default for FileWriter {
@@ -1163,8 +1159,7 @@ impl FileWriter {
             userblock_size: UserblockSize::NONE,
             userblock_content: Vec::new(),
             libver_bounds: None,
-            file_space_strategy: None,
-            file_space_page_size: None,
+            file_space_settings: None,
         }
     }
 
@@ -1213,8 +1208,7 @@ impl FileWriter {
     pub(crate) fn apply_create_properties(&mut self, properties: &FileCreateProperties) {
         self.userblock_size = properties.userblock();
         self.libver_bounds = properties.libver_bounds();
-        self.file_space_strategy = properties.file_space_strategy();
-        self.file_space_page_size = properties.file_space_page_size();
+        self.file_space_settings = properties.file_space_settings();
     }
 
     /// The format to write, being the newest this crate produces that the
@@ -1259,6 +1253,12 @@ impl FileWriter {
         sink.put_zeros(ub - content.len())
     }
 
+    /// Sets the complete file-space configuration for the emitted File Space Info message.
+    pub fn with_file_space_settings(&mut self, settings: FileSpaceSettings) -> &mut Self {
+        self.file_space_settings = Some(settings);
+        self
+    }
+
     /// Sets the file-space management strategy, as `H5Pset_file_space_strategy` does.
     ///
     /// The writer records the choice in the superblock extension. `persist` requests on-disk
@@ -1280,7 +1280,12 @@ impl FileWriter {
         persist: bool,
         threshold: u64,
     ) -> &mut Self {
-        self.file_space_strategy = Some((strategy, persist, threshold));
+        self.with_file_space_settings(
+            FileSpaceSettings::new(strategy)
+                .with_persistence(persist)
+                .with_threshold(threshold)
+                .with_page_size(self.file_space_settings.unwrap_or_default().page_size()),
+        );
         self
     }
 
@@ -1288,7 +1293,11 @@ impl FileWriter {
     ///
     /// The writer allocates storage in pages of this size under [`FileSpaceStrategy::Page`].
     pub fn with_file_space_page_size(&mut self, page_size: FileSpacePageSize) -> &mut Self {
-        self.file_space_page_size = Some(page_size);
+        self.with_file_space_settings(
+            self.file_space_settings
+                .unwrap_or_default()
+                .with_page_size(page_size),
+        );
         self
     }
 
@@ -1312,39 +1321,9 @@ impl FileWriter {
         fn group_needs(group: &FinishedGroup) -> bool {
             any_chunked(&group.datasets) || group.sub_groups.iter().any(group_needs)
         }
-        self.records_file_space()
+        self.file_space_settings.is_some()
             || any_chunked(&self.root_datasets)
             || self.groups.iter().any(group_needs)
-    }
-
-    /// Returns `true` if the writer writes a File Space Info message, which it does for a file
-    /// space strategy or a page size the caller sets.
-    fn records_file_space(&self) -> bool {
-        self.file_space_strategy.is_some() || self.file_space_page_size.is_some()
-    }
-
-    /// Returns the file space settings the writer records, or `None` if the caller sets neither a
-    /// strategy nor a page size.
-    ///
-    /// When the caller sets only a page size, the writer uses [`FileSpaceStrategy::FsmAggr`].
-    /// When the caller sets only a strategy, the writer uses [`FileSpacePageSize::DEFAULT`].
-    fn file_space_config(&self) -> Option<FileSpaceConfig> {
-        if !self.records_file_space() {
-            return None;
-        }
-        let (strategy, persist, threshold) = self.file_space_strategy.unwrap_or((
-            FileSpaceStrategy::FsmAggr,
-            false,
-            DEFAULT_THRESHOLD,
-        ));
-        Some(FileSpaceConfig {
-            strategy,
-            persist,
-            threshold,
-            page_size: self
-                .file_space_page_size
-                .unwrap_or(FileSpacePageSize::DEFAULT),
-        })
     }
 
     pub fn create_group(&mut self, name: &str) -> GroupBuilder {
@@ -1473,14 +1452,16 @@ impl FileWriter {
     /// from its provider one chunk at a time here, never all held at once.
     pub(crate) fn finish_to_sink<S: ByteSink>(self, sink: &mut S) -> Result<(), FormatError> {
         let libver = self.resolve_libver()?;
-        let file_space = self.file_space_config();
+        let file_space = self.file_space_settings;
         let reuse_threshold = match file_space {
             None => Some(DEFAULT_THRESHOLD),
-            Some(config) if config.strategy == FileSpaceStrategy::FsmAggr => Some(config.threshold),
+            Some(settings) if settings.strategy() == FileSpaceStrategy::FsmAggr => {
+                Some(settings.threshold())
+            }
             Some(_) => None,
         };
         let aggregated = reuse_threshold.is_some()
-            || file_space.is_some_and(|config| config.strategy == FileSpaceStrategy::Aggr);
+            || file_space.is_some_and(|settings| settings.strategy() == FileSpaceStrategy::Aggr);
         let mut allocation =
             FileAllocation::new(SUPERBLOCK_SIZE as u64, aggregated, reuse_threshold);
 
@@ -1510,12 +1491,8 @@ impl FileWriter {
         // persisting, emit per-page-type free-space managers. Gated entirely on
         // the Page strategy so every other strategy keeps its exact byte layout.
         let paged = match file_space {
-            Some(FileSpaceConfig {
-                strategy: FileSpaceStrategy::Page,
-                persist,
-                threshold,
-                page_size,
-            }) => {
+            Some(settings) if settings.strategy() == FileSpaceStrategy::Page => {
+                let page_size = settings.page_size();
                 // File-space pages are measured from the file base; the layout
                 // below is base-relative, so base-relative boundaries coincide
                 // with absolute ones only when the userblock is a whole number of
@@ -1526,7 +1503,7 @@ impl FileWriter {
                         page_size.get(),
                     ));
                 }
-                Some((page_size, persist, threshold))
+                Some((page_size, settings.persist(), settings.threshold()))
             }
             _ => None,
         };
@@ -1535,18 +1512,13 @@ impl FileWriter {
         // is independent of the file layout, so build it up front and place it
         // after all other content below.
         let ext_oh = file_space
-            .map(|config| file_space_extension_oh(&config.info()))
+            .map(|settings| file_space_extension_oh(&file_space_placeholder(settings)))
             .transpose()?;
         // Persistent File Space Info requires final manager addresses and the EOA before
         // manager allocation. Retain the settings for the rewrite after placement.
-        let nonpaged_persist: Option<(FileSpaceStrategy, u64, FileSpacePageSize)> = file_space
-            .filter(|config| config.strategy != FileSpaceStrategy::Page)
-            .and_then(|config| {
-                config
-                    .free_space()
-                    .filter(|settings| settings.persist)
-                    .map(|settings| (config.strategy, settings.threshold, config.page_size))
-            });
+        let nonpaged_persist = file_space.filter(|settings| {
+            settings.strategy() != FileSpaceStrategy::Page && settings.persist()
+        });
         struct DsFlat {
             /// Link name in the owning group.
             name: LinkNameBuf,
@@ -4006,21 +3978,21 @@ impl FileWriter {
         // Replace the placeholder with the manager address and pre-manager EOA, or the final
         // EOA if no manager is needed. The message has the same length in either case.
         let real_ext_oh = match (&ext_oh, nonpaged_persist) {
-            (Some(_), Some((strategy, threshold, np_page_size))) => {
+            (Some(_), Some(settings)) => {
                 let info = match &manager {
                     Some(manager) => file_space_info::persistent_single_manager(
                         OFFSET_WIDTH,
-                        strategy,
-                        threshold,
-                        np_page_size,
+                        settings.strategy(),
+                        settings.threshold(),
+                        settings.page_size(),
                         manager.header_address.get(),
                         manager.header_address.get(),
                     ),
                     None => file_space_info::persistent_empty(
                         OFFSET_WIDTH,
-                        strategy,
-                        threshold,
-                        np_page_size,
+                        settings.strategy(),
+                        settings.threshold(),
+                        settings.page_size(),
                         cursor2,
                     ),
                 };
@@ -4279,40 +4251,24 @@ impl<'a> TryFrom<&'a str> for AttributeName<'a> {
     }
 }
 
-/// The file-space settings resolved for output.
-#[derive(Clone, Copy, Debug)]
-struct FileSpaceConfig {
-    strategy: FileSpaceStrategy,
-    persist: bool,
-    threshold: u64,
-    page_size: FileSpacePageSize,
-}
-
-impl FileSpaceConfig {
-    /// Returns the File Space Info message used to size the superblock extension.
-    ///
-    /// Persistent messages have undefined manager addresses and an undefined pre-manager EOA
-    /// until placement is complete. For strategies without managers, the writer uses the
-    /// nonpersistent form and the default threshold.
-    fn info(&self) -> FileSpaceInfo {
-        let Self {
-            strategy,
-            persist,
-            threshold,
-            page_size,
-        } = *self;
-        let free_space = FreeSpaceSettings::of(strategy, persist, threshold);
-        let threshold = free_space.map_or(DEFAULT_THRESHOLD, |settings| settings.threshold);
-        if free_space.is_some_and(|settings| settings.persist) {
-            file_space_info::persistent_placeholder(strategy, threshold, page_size)
-        } else {
-            file_space_info::non_persistent(OFFSET_WIDTH, strategy, threshold, page_size)
-        }
-    }
-
-    /// Returns the settings of the free-space managers, or `None` under a strategy without them.
-    fn free_space(&self) -> Option<FreeSpaceSettings> {
-        FreeSpaceSettings::of(self.strategy, self.persist, self.threshold)
+/// Returns the File Space Info message used to size the superblock extension.
+///
+/// Persistent manager addresses and the pre-manager end of allocation are undefined until
+/// placement is complete.
+fn file_space_placeholder(settings: FileSpaceSettings) -> FileSpaceInfo {
+    if settings.persist() {
+        file_space_info::persistent_placeholder(
+            settings.strategy(),
+            settings.threshold(),
+            settings.page_size(),
+        )
+    } else {
+        file_space_info::non_persistent(
+            OFFSET_WIDTH,
+            settings.strategy(),
+            settings.threshold(),
+            settings.page_size(),
+        )
     }
 }
 

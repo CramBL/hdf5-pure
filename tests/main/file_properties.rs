@@ -514,7 +514,12 @@ fn creation_paths_preserve_page_size_configuration(
     if let Some(page_size) = page_size {
         properties = properties.with_file_space_page_size(page_size);
     }
-    assert_eq!(properties.file_space_page_size(), page_size);
+    assert_eq!(
+        properties
+            .file_space_settings()
+            .map(|settings| settings.page_size()),
+        page_size.or(strategy.map(|_| FileSpacePageSize::DEFAULT))
+    );
     let build = || {
         let mut builder = FileBuilder::new();
         builder.with_file_space_page_size(FileSpacePageSize::MAX);

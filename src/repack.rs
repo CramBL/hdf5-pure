@@ -442,19 +442,16 @@ fn stage(source: &File, options: &RepackOptions) -> Result<FileBuilder, Error> {
     }
 
     let mut builder = FileBuilder::new();
-    // Carry the source's file-space strategy forward. The repacked file is
-    // compact with no free space, so the strategy and its page size/threshold
-    // are preserved but `persist` is reset to false — there is nothing to
-    // persist, and writing persistent free-space blocks is a separate feature.
-    let file_space_info = file.parse_file_space_info().map_err(|err| {
-        Error::RepackUnsupported(format!(
+    // Repacking preserves the source's recorded strategy, threshold, and page size, with persistence
+    // disabled.
+    let settings = file.file_space_settings().map_err(|err| match err {
+        Error::Format(err) => Error::RepackUnsupported(format!(
             "the File Space Info of the source cannot be read: {err}"
-        ))
+        )),
+        err => err,
     })?;
-    if let Some(info) = file_space_info {
-        builder
-            .with_file_space_strategy(info.strategy, false, info.threshold)
-            .with_file_space_page_size(info.page_size);
+    if let Some(settings) = settings {
+        builder.with_file_space_settings(settings.with_persistence(false));
     }
     // Map every source object's (relative) header address to its path, so an
     // object-reference dataset can be rewritten to point at the same objects in
