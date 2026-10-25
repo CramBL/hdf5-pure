@@ -430,6 +430,10 @@ required-features = ["ndarray"]
 name = "hot_paths"
 harness = false
 
+[[bench]]
+name = "chunk_index"
+harness = false
+
 # Style-preference clippy lints muted crate-wide. The remaining clippy
 # surface is still on (`-D warnings` in CI), so genuinely problematic
 # patterns continue to fail the build.

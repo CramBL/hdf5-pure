@@ -12,12 +12,40 @@ use crate::widths::Widths;
 ///
 /// A node of level zero is a leaf, whose children are the structures the tree
 /// indexes. A node above it has other nodes as children.
+///
+/// Both sibling addresses are written as the undefined address, as in a tree one node wide per
+/// level. [`node_with_siblings`] writes a node with its sibling addresses.
 #[track_caller]
 pub fn node(
     node_type: NodeType,
     level: u8,
     keys: &[Vec<u8>],
     children: &[u64],
+    widths: Widths,
+) -> Vec<u8> {
+    node_with_siblings(node_type, level, keys, children, None, None, widths)
+}
+
+/// The bytes of one node, as [`node`] builds them, with the addresses of its left and right
+/// siblings at its level.
+///
+/// A sibling of `None` is written as the undefined address, the value "Version 1 B-trees" of the
+/// [format specification, version 4.0][spec] defines for the left sibling of the leftmost node at
+/// a level and the right sibling of the rightmost one.
+///
+/// # Panics
+///
+/// Panics if `keys` does not hold one more key than `children` has addresses.
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v1
+#[track_caller]
+pub fn node_with_siblings(
+    node_type: NodeType,
+    level: u8,
+    keys: &[Vec<u8>],
+    children: &[u64],
+    left_sibling: Option<u64>,
+    right_sibling: Option<u64>,
     widths: Widths,
 ) -> Vec<u8> {
     assert_eq!(
@@ -30,10 +58,12 @@ pub fn node(
     node.push(node_type.0);
     node.push(level);
     node.extend_from_slice(&(children.len() as u16).to_le_bytes());
-    // The siblings at this level, both undefined in every tree these fixtures
-    // build, which is one node wide per level.
-    bytes::push_undefined_address(&mut node, widths.offset);
-    bytes::push_undefined_address(&mut node, widths.offset);
+    for sibling in [left_sibling, right_sibling] {
+        match sibling {
+            Some(address) => bytes::push_uint(&mut node, address, widths.offset),
+            None => bytes::push_undefined_address(&mut node, widths.offset),
+        }
+    }
     for (key, &child) in keys.iter().zip(children) {
         node.extend_from_slice(key);
         bytes::push_uint(&mut node, child, widths.offset);

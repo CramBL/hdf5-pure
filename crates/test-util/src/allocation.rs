@@ -90,7 +90,7 @@ fn start_profiling() {
 /// they have to be checked — otherwise this helper would be exactly the
 /// zero-returning getter that design exists to prevent.
 #[track_caller]
-pub fn measure<R>(name: &'static str, work: impl FnOnce() -> R) -> (R, Measured) {
+pub fn measure<R>(name: &str, work: impl FnOnce() -> R) -> (R, Measured) {
     start_profiling();
 
     let result = {
