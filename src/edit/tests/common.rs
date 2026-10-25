@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use crate::FileSpaceSettings;
 use crate::access_mode::AccessMode;
 use crate::dataspace::MaxExtent;
 use crate::edit::MemoryStrategy;
@@ -54,8 +55,11 @@ pub(super) fn gather_fixture(path: &std::path::Path, tables: usize, paged: bool)
     use crate::writer::FileBuilder;
     let mut b = FileBuilder::new();
     if paged {
-        b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-            .with_file_space_page_size(FileSpacePageSize::try_from(16 * 1024).unwrap());
+        b.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page)
+                .with_persistence(true)
+                .with_page_size(FileSpacePageSize::try_from(16 * 1024).unwrap()),
+        );
     }
     for t in 0..tables {
         b.create_dataset(&std::format!("t{t}"))

@@ -40,7 +40,8 @@ fn persistence_configuration_is_distinct_from_empty_sections(
 ) {
     let mut builder = FileBuilder::new();
     if let Some((strategy, persist)) = strategy {
-        builder.with_file_space_strategy(strategy, persist, 1);
+        builder
+            .with_file_space_settings(FileSpaceSettings::new(strategy).with_persistence(persist));
     }
     let bytes = builder.finish().unwrap();
     let file = if streaming {
@@ -93,7 +94,7 @@ fn reusable_space_stats_match_session_transitions(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("summary-state.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(strategy, persist, 1);
+    builder.with_file_space_settings(FileSpaceSettings::new(strategy).with_persistence(persist));
     builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
     builder
         .create_dataset("log")
@@ -163,7 +164,7 @@ fn stored_and_reusable_views_have_distinct_coordinates(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("free-sections.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(strategy, true, 1);
+    builder.with_file_space_settings(FileSpaceSettings::new(strategy).with_persistence(true));
     builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
     builder.create_dataset("a").with_i32_data(&[1; 100]);
     builder.create_dataset("b").with_i32_data(&[2; 400]);
@@ -244,7 +245,9 @@ fn reusable_sections_follow_commits_and_immediate_appends(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("session-timing.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+    );
     builder
         .create_dataset("log")
         .with_i32_data(&[1; 4_096])
@@ -359,7 +362,9 @@ fn assert_current_file_space_metadata(file: &File) -> u64 {
 #[rstest]
 fn malformed_file_space_info_is_reported(#[values(false, true)] streaming: bool) {
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+    );
     builder.create_dataset("data").with_i32_data(&[1, 2, 3]);
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("malformed-fsinfo.h5");
@@ -417,7 +422,7 @@ fn invalid_file_space_metadata_returns_the_format_error(
     #[values(false, true)] streaming: bool,
 ) {
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, false, 1);
+    builder.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::FsmAggr));
     builder.create_dataset("data").with_i32_data(&[1, 2, 3]);
     let mut bytes = builder.finish().unwrap();
     let extension = usize::try_from(
@@ -466,7 +471,7 @@ fn an_extension_without_file_space_info_has_no_recorded_settings(
     #[values(false, true)] streaming: bool,
 ) {
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, false, 1);
+    builder.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::FsmAggr));
     let mut bytes = builder.finish().unwrap();
     let extension = usize::try_from(
         File::from_bytes(bytes.clone())
@@ -495,7 +500,7 @@ fn an_extension_without_file_space_info_has_no_recorded_settings(
 #[test]
 fn unreadable_extension_returns_a_source_error_without_preventing_dataset_reads() {
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, false, 1);
+    builder.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::FsmAggr));
     builder.create_dataset("data").with_i32_data(&[1, 2, 3]);
     let bytes = builder.finish().unwrap();
     let extension = File::from_bytes(bytes.clone())
@@ -555,8 +560,12 @@ fn recorded_settings_match_the_writer_configuration(
 ) {
     let page_size = FileSpacePageSize::try_from(page_size).unwrap();
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(strategy, persist, threshold);
-    builder.with_file_space_page_size(page_size);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(strategy)
+            .with_persistence(persist)
+            .with_threshold(threshold)
+            .with_page_size(page_size),
+    );
     if userblock {
         builder.with_userblock(UserblockSize::try_from(8192).unwrap());
     }
@@ -590,7 +599,9 @@ fn corrupted_manager_checksums_return_the_decode_error(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("corrupt-manager-checksum.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+    );
     builder.with_userblock(UserblockSize::try_from(512).unwrap());
     builder.create_dataset("a").with_i32_data(&[1; 100]);
     builder.create_dataset("b").with_i32_data(&[2; 400]);
@@ -654,7 +665,9 @@ fn relocated_sources_preserve_stored_section_coordinates(
     let path = directory.path().join("relocated-free-sections.h5");
     let mut builder = FileBuilder::new();
     builder.with_userblock(UserblockSize::try_from(512).unwrap());
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+    );
     builder.create_dataset("a").with_i32_data(&[1; 100]);
     builder.create_dataset("b").with_i32_data(&[2; 400]);
     builder.create_dataset("c").with_i32_data(&[3; 100]);

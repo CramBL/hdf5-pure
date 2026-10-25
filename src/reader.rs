@@ -7800,7 +7800,7 @@ mod tests {
         let path = dir.path().join("sync_page.h5");
         let mut builder = FileBuilder::new();
         builder
-            .with_file_space_strategy(FileSpaceStrategy::Page, false, 1)
+            .with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::Page))
             .with_userblock(UserblockSize::try_from(userblock).unwrap());
         if userblock > 0 {
             builder.with_userblock_content(b"preserve this userblock through explicit sync");
@@ -8052,7 +8052,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("failed_sync.h5");
         let mut builder = FileBuilder::new();
-        builder.with_file_space_strategy(FileSpaceStrategy::Page, false, 1);
+        builder.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::Page));
         builder.create_dataset("keep").with_u8_data(&[7; 64]);
         builder.write(&path).unwrap();
         let file = File::open_page_publication_failure(&path, failure, sync, gathered).unwrap();
@@ -8169,7 +8169,11 @@ mod tests {
         let mut builder = FileBuilder::new();
         builder
             .with_userblock(UserblockSize::try_from(stored_base as u64).unwrap())
-            .with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 64);
+            .with_file_space_settings(
+                FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+                    .with_persistence(true)
+                    .with_threshold(64),
+            );
         builder.create_dataset("data").with_i32_data(&[1, 2, 3]);
         let mut original = builder.finish().unwrap();
         let canonical = File::from_bytes(original.clone()).unwrap();
@@ -10748,8 +10752,11 @@ mod tests {
             let path = dir.path().join(name);
             let mut b = FileBuilder::new();
             if paged {
-                b.with_file_space_strategy(crate::FileSpaceStrategy::Page, true, 1)
-                    .with_file_space_page_size(FileSpacePageSize::try_from(16 * 1024).unwrap());
+                b.with_file_space_settings(
+                    FileSpaceSettings::new(FileSpaceStrategy::Page)
+                        .with_persistence(true)
+                        .with_page_size(FileSpacePageSize::try_from(16 * 1024).unwrap()),
+                );
             }
             b.create_dataset("d")
                 .with_i32_data(&[1, 2, 3, 4])
@@ -10859,8 +10866,10 @@ mod tests {
 
         let no_persist = dir.path().join("no_persist.h5");
         let mut b = FileBuilder::new();
-        b.with_file_space_strategy(crate::FileSpaceStrategy::Page, false, 1)
-            .with_file_space_page_size(FileSpacePageSize::DEFAULT);
+        b.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page)
+                .with_page_size(FileSpacePageSize::DEFAULT),
+        );
         b.create_dataset("d")
             .with_i32_data(&[1, 2, 3, 4])
             .with_shape(&[4]);
@@ -10888,8 +10897,11 @@ mod tests {
         let paged_userblock = dir.path().join("paged_userblock.h5");
         let mut b = FileBuilder::new();
         b.with_userblock(UserblockSize::try_from(16 * 1024).unwrap());
-        b.with_file_space_strategy(crate::FileSpaceStrategy::Page, true, 1)
-            .with_file_space_page_size(FileSpacePageSize::try_from(16 * 1024).unwrap());
+        b.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page)
+                .with_persistence(true)
+                .with_page_size(FileSpacePageSize::try_from(16 * 1024).unwrap()),
+        );
         b.create_dataset("d")
             .with_i32_data(&[1, 2, 3, 4])
             .with_shape(&[4]);
@@ -10941,9 +10953,11 @@ mod tests {
     fn create_with_options_refuses_a_page_buffer_it_could_not_reopen_with() {
         let dir = tempfile::tempdir().unwrap();
         let paged = |page: u64| {
-            crate::FileCreateProperties::new()
-                .with_file_space_strategy(crate::FileSpaceStrategy::Page, true, 1)
-                .with_file_space_page_size(FileSpacePageSize::try_from(page).unwrap())
+            crate::FileCreateProperties::new().with_file_space_settings(
+                FileSpaceSettings::new(FileSpaceStrategy::Page)
+                    .with_persistence(true)
+                    .with_page_size(FileSpacePageSize::try_from(page).unwrap()),
+            )
         };
         // 8192 clears the format's 4096 default and still falls short of this
         // file's 16 KiB page, so it fails only against the page size actually
@@ -11068,7 +11082,9 @@ mod tests {
             // Persisting, so the ordinary branch has manager re-homing to do:
             // an immediate append below leaves the on-disk managers mid-file,
             // and settling them is the write no earlier sync could cover.
-            b.with_file_space_strategy(crate::FileSpaceStrategy::FsmAggr, true, 1);
+            b.with_file_space_settings(
+                FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+            );
             b.write(&path).unwrap();
 
             let syncs = Arc::new(AtomicU64::new(0));

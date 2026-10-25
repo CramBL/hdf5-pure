@@ -12,6 +12,7 @@ use crate::AttrValue;
 use crate::File;
 use crate::FileBuilder;
 use crate::FileSpacePageSize;
+use crate::FileSpaceSettings;
 use crate::FileSpaceStrategy;
 use crate::UserblockSize;
 use crate::edit::SpaceOwnership;
@@ -306,12 +307,16 @@ impl Strategy {
     fn configure(self, builder: &mut FileBuilder, persist: bool) {
         match self {
             Self::FsmAggr => {
-                builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, persist, 1);
+                builder.with_file_space_settings(
+                    FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(persist),
+                );
             }
             Self::Page => {
-                builder
-                    .with_file_space_strategy(FileSpaceStrategy::Page, persist, 1)
-                    .with_file_space_page_size(FileSpacePageSize::try_from(PAGE).unwrap());
+                builder.with_file_space_settings(
+                    FileSpaceSettings::new(FileSpaceStrategy::Page)
+                        .with_persistence(persist)
+                        .with_page_size(FileSpacePageSize::try_from(PAGE).unwrap()),
+                );
             }
         }
     }

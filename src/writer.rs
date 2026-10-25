@@ -627,7 +627,9 @@ mod streaming_tests {
         let build = |produced_calls: &Calls, chunk_calls: &Calls| {
             let mut builder = FileBuilder::new();
             if let Some((strategy, persist)) = strategy {
-                builder.with_file_space_strategy(strategy, persist, 1);
+                builder.with_file_space_settings(
+                    FileSpaceSettings::new(strategy).with_persistence(persist),
+                );
             }
             builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
             if userblock != 0 {
@@ -757,7 +759,11 @@ mod streaming_tests {
         let build = || {
             let mut builder = FileBuilder::new();
             if let Some(strategy) = strategy {
-                builder.with_file_space_strategy(strategy, persist, 9);
+                builder.with_file_space_settings(
+                    FileSpaceSettings::new(strategy)
+                        .with_persistence(persist)
+                        .with_threshold(9),
+                );
             }
             builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
             match workload {
@@ -904,7 +910,9 @@ mod streaming_tests {
     ) {
         let mut builder = FileBuilder::new();
         if let Some(strategy) = strategy {
-            builder.with_file_space_strategy(strategy, persist, 1);
+            builder.with_file_space_settings(
+                FileSpaceSettings::new(strategy).with_persistence(persist),
+            );
         }
         let calls = Calls::default();
         builder.create_dataset("data").with_produced_data(
@@ -951,7 +959,9 @@ mod streaming_tests {
         }
         let mut builder = FileBuilder::new();
         if let Some(strategy) = strategy {
-            builder.with_file_space_strategy(strategy, persist, 1);
+            builder.with_file_space_settings(
+                FileSpaceSettings::new(strategy).with_persistence(persist),
+            );
         }
         builder.create_dataset("data").with_u8_data(&[17; 19]);
         let error = builder.finish_to(BrokenOutput).unwrap_err();
@@ -1473,8 +1483,11 @@ mod streaming_tests {
 
         let build = |produced: bool| {
             let mut b = FileBuilder::new();
-            b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
-            b.with_file_space_page_size(FileSpacePageSize::DEFAULT);
+            b.with_file_space_settings(
+                FileSpaceSettings::new(FileSpaceStrategy::Page)
+                    .with_persistence(true)
+                    .with_page_size(FileSpacePageSize::DEFAULT),
+            );
             let ds = b.create_dataset("d");
             if produced {
                 ds.with_produced_data(

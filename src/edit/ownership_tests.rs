@@ -30,6 +30,7 @@ use crate::Error;
 use crate::File;
 use crate::FileBuilder;
 use crate::FileLocking;
+use crate::FileSpaceSettings;
 use crate::FileSpaceStrategy;
 use crate::FormatError;
 use crate::Layout;
@@ -48,7 +49,9 @@ fn a_contiguous_i32_dataset_has_complete_ownership(
 ) {
     let path = temp::temp_path("supported_ownership.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+    );
     builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
     builder.create_dataset("d").with_i32_data(&[1, 2, 3]);
     builder.write(&path).unwrap();
@@ -122,7 +125,9 @@ fn variable_length_collections_are_live_raw_space(
 ) {
     let path = temp::temp_path("variable_length_ownership.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+    );
     if dataset {
         builder
             .create_dataset("d")

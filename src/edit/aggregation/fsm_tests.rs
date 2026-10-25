@@ -11,6 +11,7 @@ use crate::File;
 use crate::FileBuilder;
 use crate::FileLocking;
 use crate::FileSpacePageSize;
+use crate::FileSpaceSettings;
 use crate::FileSpaceStrategy;
 use crate::FormatError;
 use crate::MaxExtent;
@@ -48,7 +49,7 @@ fn reusable_sections_precede_retained_aggregate_windows(
     let mut builder = FileBuilder::new();
     builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
     if explicit {
-        builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, false, 1);
+        builder.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::FsmAggr));
     }
     builder.create_dataset("scratch").with_u8_data(&[7; 4096]);
     builder.create_dataset("keep").with_u8_data(&[11; 4096]);
@@ -92,7 +93,9 @@ fn abandoned_spare_uses_the_session_threshold(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("threshold.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, false, threshold);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_threshold(threshold),
+    );
     builder.write(&path).unwrap();
     let mut engine = open_engine(&path, MemoryStrategy::Mirrored);
     let start = engine.image.len();
@@ -131,7 +134,9 @@ fn subthreshold_spare_merges_into_an_adjacent_tracked_section() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("merge.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, false, 100);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_threshold(100),
+    );
     builder.write(&path).unwrap();
     let mut engine = open_engine(&path, MemoryStrategy::Mirrored);
     let reservation = engine.reserve(2000, AllocationClass::Metadata).unwrap();
@@ -161,7 +166,7 @@ fn fsm_aggregates_remain_disabled_for_swmr(#[values(false, true)] explicit: bool
     let path = directory.path().join("swmr.h5");
     let mut builder = FileBuilder::new();
     if explicit {
-        builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, false, 1);
+        builder.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::FsmAggr));
     }
     builder.write(&path).unwrap();
     let engine = WriteEngine::open_swmr_writer(&path, SyncPolicy::Always).unwrap();

@@ -8,8 +8,9 @@ use test_util::disk_log::{self, DiskOp};
 use test_util::free_space;
 use test_util::object_header::v2 as object_header;
 
-#[cfg(test)]
 use crate::FileSpacePageSize;
+#[cfg(test)]
+use crate::FileSpaceSettings;
 use crate::FormatError;
 use crate::UserblockSize;
 use crate::edit::ownership_tests;
@@ -34,8 +35,12 @@ fn final_typed_manager_sections_survive_commit_finalization_and_reopen(
     let path = dir.path().join("typed.h5");
     let mut builder = FileBuilder::new();
     builder
-        .with_file_space_strategy(FileSpaceStrategy::Page, true, threshold)
-        .with_file_space_page_size(FileSpacePageSize::try_from(page).unwrap())
+        .with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page)
+                .with_persistence(true)
+                .with_threshold(threshold)
+                .with_page_size(FileSpacePageSize::try_from(page).unwrap()),
+        )
         .with_userblock(UserblockSize::try_from(base).unwrap());
     if base != 0 {
         builder.with_userblock_content(b"typed manager tail");
@@ -86,7 +91,9 @@ fn append_reserve_publication_and_finalization_persist_their_final_sections() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("reserve.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true),
+    );
     builder.create_dataset("keep").with_u8_data(&[7; 100]);
     builder.create_dataset("hole").with_u8_data(&[3; 16_384]);
     builder.write(&path).unwrap();
@@ -131,7 +138,9 @@ fn recovered_metadata_tail_can_hold_a_rebuilt_header() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("reuse.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true),
+    );
     builder.create_dataset("keep").with_u8_data(&[7; 100]);
     builder.write(&path).unwrap();
     let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
@@ -229,7 +238,9 @@ fn manager_metadata_failures_preserve_ownership_and_reopen_the_issued_state(
     let path = dir.path().join("failure.h5");
     let control_path = dir.path().join("control.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true),
+    );
     builder.create_dataset("keep").with_u8_data(&[7; 100]);
     builder.create_dataset("replace").with_u8_data(&[3; 100]);
     builder.create_dataset("remove").with_u8_data(&[5; 100]);

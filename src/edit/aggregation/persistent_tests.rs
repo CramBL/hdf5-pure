@@ -13,6 +13,7 @@ use crate::Error;
 use crate::File;
 use crate::FileBuilder;
 use crate::FileLocking;
+use crate::FileSpaceSettings;
 use crate::FileSpaceStrategy;
 use crate::FormatError;
 use crate::MaxExtent;
@@ -103,7 +104,9 @@ fn active_spare_is_excluded_until_persistent_settlement(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("settlement.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+    );
     builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
     builder.write(&path).unwrap();
     let mut engine = open_engine(&path, backing);
@@ -172,7 +175,9 @@ fn persistent_staged_edits_and_immediate_appends_survive_reopen(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("lifecycle.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+    );
     builder
         .create_dataset("values")
         .with_u8_data(&vec![7; chunk])
@@ -299,7 +304,11 @@ fn abandoned_persistent_spare_uses_threshold(#[case] threshold: u64, #[case] tra
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("threshold.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, threshold);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_persistence(true)
+            .with_threshold(threshold),
+    );
     builder.write(&path).unwrap();
     let mut engine = open_engine(&path, MemoryStrategy::Mirrored);
     let start = engine.image.len();
@@ -615,7 +624,9 @@ fn stage_dataset(engine: &mut WriteEngine, path: &str, value: u8) {
 
 fn write_file(path: &Path, userblock: u64) {
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+    );
     builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
     builder.create_dataset("scratch").with_u8_data(&[7; 4096]);
     builder.create_dataset("keep").with_u8_data(&[11; 4096]);

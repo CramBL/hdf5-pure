@@ -6,6 +6,7 @@ use test_util::temp;
 use test_util_hdf5::dataset::{Filter, Unlimited};
 
 use super::file_space;
+use crate::FileSpaceSettings;
 use crate::edit::SpaceOwnership;
 use crate::{
     AttrValue, DeflateLevel, Error, File, FileAccessProperties, FileBuilder, FileSpacePageSize,
@@ -21,7 +22,7 @@ fn edited_storage_partitions_every_byte_across_close_and_reopen(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("partition.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(strategy, true, 1);
+    builder.with_file_space_settings(FileSpaceSettings::new(strategy).with_persistence(true));
     builder.create_dataset("first").with_u8_data(&[7; 8_192]);
     builder.create_dataset("hole").with_u8_data(&[9; 8_192]);
     builder.create_dataset("last").with_u8_data(&[11; 8_192]);
@@ -77,7 +78,11 @@ fn isolated_deletion_classifies_exactly_the_bytes_admitted_by_the_threshold(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("threshold.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, persist, threshold);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_persistence(persist)
+            .with_threshold(threshold),
+    );
     builder.create_dataset("first").with_i32_data(&[7; 256]);
     builder.create_dataset("hole").with_i32_data(&[9; 256]);
     builder.create_dataset("last").with_i32_data(&[11; 256]);
@@ -115,8 +120,11 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
     let path = temp::temp_path("hdf5_pure_fs_paged_tail_reuse.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("seed").with_i32_data(&[0i32; 4]);
-    b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-        .with_file_space_page_size(FileSpacePageSize::try_from(PAGE).unwrap());
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_page_size(FileSpacePageSize::try_from(PAGE).unwrap()),
+    );
     b.write(&path).unwrap();
     let start_len = std::fs::metadata(&path).unwrap().len();
 
@@ -211,7 +219,9 @@ fn a_reused_flat_manager_tail_preserves_its_spare_allocation_across_reopen() {
             .create_dataset(&format!("keep{index}"))
             .with_i32_data(&[9i32; 4]);
     }
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+    );
     builder.write(&path).unwrap();
 
     let open = || {
@@ -388,10 +398,14 @@ fn a_relocating_overwrite_reclaims_the_old_header_with_its_storage() {
 
 fn churn_fixture(path: &Path, strategy: FileSpaceStrategy) -> File {
     let mut b = FileBuilder::new();
-    b.with_file_space_strategy(strategy, true, 0);
-    if strategy == FileSpaceStrategy::Page {
-        b.with_file_space_page_size(FileSpacePageSize::try_from(RECLAIM_PAGE).unwrap());
-    }
+    let settings = FileSpaceSettings::new(strategy)
+        .with_persistence(true)
+        .with_threshold(0);
+    b.with_file_space_settings(if strategy == FileSpaceStrategy::Page {
+        settings.with_page_size(FileSpacePageSize::try_from(RECLAIM_PAGE).unwrap())
+    } else {
+        settings
+    });
     // The surviving group retains metadata allocations between scratch deletions.
     let mut keep = b.create_group("keep");
     keep.set_attr("kind", AttrValue::I64(1));

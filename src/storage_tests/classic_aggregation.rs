@@ -13,6 +13,7 @@ use crate::File;
 use crate::FileAccessProperties;
 use crate::FileBuilder;
 use crate::FileCreateProperties;
+use crate::FileSpaceSettings;
 use crate::FileSpaceStrategy;
 use crate::MemoryStrategy;
 use crate::UserblockSize;
@@ -31,7 +32,11 @@ fn persistent_creation_recovers_settled_spare_and_reuses_it_after_reopen(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("persistent.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, threshold);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_persistence(true)
+            .with_threshold(threshold),
+    );
     builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
     builder.create_dataset("values").with_i32_data(&[17; 16]);
     builder.write(&path).unwrap();
@@ -226,7 +231,7 @@ fn staged_aggr_allocations_reuse_session_windows(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("session.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::Aggr, false, 1);
+    builder.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::Aggr));
     builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
     builder.write(&path).unwrap();
     let properties = FileAccessProperties::new().with_memory_strategy(backing);
@@ -376,7 +381,8 @@ fn write_page_step(report: &mut String, number: usize, step: Step, ownership: Sp
 fn create_file(path: &Path, strategy: FileSpaceStrategy, persist: bool) -> File {
     File::create_with_options(
         path,
-        FileCreateProperties::new().with_file_space_strategy(strategy, persist, 1),
+        FileCreateProperties::new()
+            .with_file_space_settings(FileSpaceSettings::new(strategy).with_persistence(persist)),
         FileAccessProperties::default(),
     )
     .unwrap()

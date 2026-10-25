@@ -9,6 +9,7 @@ use crate::DeflateLevel;
 use crate::File;
 use crate::FileBuilder;
 use crate::FileLocking;
+use crate::FileSpaceSettings;
 use crate::FileSpaceStrategy;
 use crate::MaxExtent;
 use crate::MemoryStrategy;
@@ -328,7 +329,7 @@ fn write_appendable(
     strategy: FileSpaceStrategy,
 ) {
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(strategy, false, 1);
+    builder.with_file_space_settings(FileSpaceSettings::new(strategy));
     let dataset = builder.create_dataset("values");
     dataset
         .with_i32_data(&(0..initial).collect::<Vec<_>>())
