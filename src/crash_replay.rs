@@ -123,6 +123,7 @@ use std::path::Path;
 
 use test_util::disk_log::{self, DiskOp};
 
+use crate::FileSpaceSettings;
 use crate::chunk_index_inplace::alloc_probe;
 use crate::dataspace::MaxExtent;
 use crate::edit::{AppendBuilder, AppendTarget, MemoryStrategy, SyncPolicy, WriteEngine};
@@ -483,10 +484,13 @@ fn warmed_base(path: &Path, paged: bool) {
 fn warmed_base_padded(path: &Path, paged: bool, pad: usize, strategy: Option<FileSpaceStrategy>) {
     let mut b = FileBuilder::new();
     if paged {
-        b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-            .with_file_space_page_size(FileSpacePageSize::DEFAULT);
+        b.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page)
+                .with_persistence(true)
+                .with_page_size(FileSpacePageSize::DEFAULT),
+        );
     } else if let Some(strategy) = strategy {
-        b.with_file_space_strategy(strategy, false, 1);
+        b.with_file_space_settings(FileSpaceSettings::new(strategy));
     }
     {
         let d = b.create_dataset("d");
@@ -843,7 +847,9 @@ const RESERVE_ROUNDS: i32 = 20;
 /// it.
 fn warmed_base_with_a_persisted_hole(path: &Path) {
     let mut b = FileBuilder::new();
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+    );
     b.create_dataset("d")
         .with_i32_data(&[0i32])
         .with_shape(&[1])
@@ -1011,8 +1017,11 @@ fn slot_values(g: i32) -> Vec<i32> {
 fn commit_base(path: &Path, paged: bool) {
     let mut b = FileBuilder::new();
     if paged {
-        b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-            .with_file_space_page_size(FileSpacePageSize::DEFAULT);
+        b.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page)
+                .with_persistence(true)
+                .with_page_size(FileSpacePageSize::DEFAULT),
+        );
     }
     b.create_dataset("d")
         .with_i32_data(&(0..COMMIT_BASE).collect::<Vec<i32>>())

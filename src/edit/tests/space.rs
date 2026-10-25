@@ -19,6 +19,7 @@ use test_util::fractal_heap;
 use test_util::widths::Widths;
 
 use super::common;
+use crate::FileSpaceSettings;
 use crate::UserblockSize;
 use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
@@ -75,7 +76,7 @@ fn reusable_space_stats_include_and_release_append_reserves(#[case] strategy: Fi
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("reserve-summary.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(strategy, true, 1);
+    builder.with_file_space_settings(FileSpaceSettings::new(strategy).with_persistence(true));
     builder
         .create_dataset("scratch")
         .with_i32_data(&vec![1; 32_768]);
@@ -150,7 +151,9 @@ fn array_append_preserves_raw_page_reuse(#[case] class: AllocationClass) {
     let path = dir.path().join("page_reuse.h5");
     let mut builder = FileBuilder::new();
     builder.create_dataset("keep").with_i32_data(&[1, 2, 3, 4]);
-    builder.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true),
+    );
     builder.write(&path).unwrap();
     let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     let before = engine.space.paged_sections().unwrap();
@@ -242,9 +245,12 @@ fn dense_attribute_storage_is_classified_by_its_stored_pages(#[values(0, 512)] u
     group.set_attr("huge0", AttrValue::AsciiString("y".repeat(71_267)));
     group.set_attr("huge1", AttrValue::AsciiString("y".repeat(70_000)));
     builder.add_group(group.finish());
-    builder
-        .with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(FileSpacePageSize::try_from(DENSE_ATTRIBUTE_PAGE_SIZE).unwrap());
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_threshold(0)
+            .with_page_size(FileSpacePageSize::try_from(DENSE_ATTRIBUTE_PAGE_SIZE).unwrap()),
+    );
     builder.write(&path).unwrap();
     prepend_userblock(&path, userblock);
 
@@ -622,8 +628,11 @@ fn page_zero_classification_is_relative_to_the_base_address(#[values(0, 512)] us
     let mut b = FileBuilder::new();
     b.with_userblock(UserblockSize::try_from(userblock).unwrap());
     b.create_dataset("d").with_i32_data(&[1; 100]);
-    b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-        .with_file_space_page_size(FileSpacePageSize::MIN);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_page_size(FileSpacePageSize::MIN),
+    );
     b.write(&path).unwrap();
     let s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
 
@@ -642,8 +651,12 @@ fn paged_open_seeds_each_manager_by_slot() {
     b.create_dataset("d")
         .with_i32_data(&(0..1000).collect::<Vec<i32>>())
         .with_shape(&[1000]);
-    b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(FileSpacePageSize::DEFAULT);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_threshold(0)
+            .with_page_size(FileSpacePageSize::DEFAULT),
+    );
     b.write(&path).unwrap();
     let on_disk: u64 = crate::reader::File::open(&path)
         .unwrap()
@@ -766,8 +779,12 @@ fn padding_a_tail_page_of_unknown_type_records_nothing() {
         b.create_dataset("d")
             .with_i32_data(&(0..1000).collect::<Vec<i32>>())
             .with_shape(&[1000]);
-        b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-            .with_file_space_page_size(FileSpacePageSize::try_from(PAGE).unwrap());
+        b.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page)
+                .with_persistence(true)
+                .with_threshold(0)
+                .with_page_size(FileSpacePageSize::try_from(PAGE).unwrap()),
+        );
         b.write(path).unwrap();
     };
     let unknown = dir.path().join("unknown_tail.h5");
@@ -885,8 +902,12 @@ fn a_paged_allocation_only_crosses_page_types_over_whole_free_pages() {
         b.create_dataset("d")
             .with_i32_data(&(0..4000).collect::<Vec<i32>>())
             .with_shape(&[4000]);
-        b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-            .with_file_space_page_size(FileSpacePageSize::try_from(PAGE).unwrap());
+        b.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page)
+                .with_persistence(true)
+                .with_threshold(0)
+                .with_page_size(FileSpacePageSize::try_from(PAGE).unwrap()),
+        );
         b.write(path).unwrap();
         let mut s = WriteEngine::open_with_locking(path, FileLocking::Enabled).unwrap();
         s.space = SessionSpace::from_strategy(
@@ -1003,7 +1024,11 @@ fn a_reuse_only_tail_rewrite_that_cannot_place_itself_writes_nothing() {
     b.create_dataset("d")
         .with_i32_data(&(0..400).collect::<Vec<i32>>())
         .with_shape(&[400]);
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 0);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_persistence(true)
+            .with_threshold(0),
+    );
     b.write(&path).unwrap();
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     s.space = SessionSpace::from_strategy(
@@ -1053,7 +1078,11 @@ fn a_flat_tail_takes_exactly_the_extent_it_records() {
     b.create_dataset("d")
         .with_i32_data(&(0..4000).collect::<Vec<i32>>())
         .with_shape(&[4000]);
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 0);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_persistence(true)
+            .with_threshold(0),
+    );
     b.write(&path).unwrap();
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     let widths = FormatWidths {
@@ -1138,8 +1167,12 @@ fn paged_tail_allocation_releases_unused_page_bytes() {
     b.create_dataset("d")
         .with_i32_data(&(0..4000).collect::<Vec<i32>>())
         .with_shape(&[4000]);
-    b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(FileSpacePageSize::try_from(PAGE).unwrap());
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_threshold(0)
+            .with_page_size(FileSpacePageSize::try_from(PAGE).unwrap()),
+    );
     b.write(&path).unwrap();
     let before = std::fs::metadata(&path).unwrap().len();
 
@@ -1184,8 +1217,12 @@ fn deleted_chunk_index_is_freed_into_a_raw_manager() {
             .with_shape(&[200])
             .with_chunks(&[50]);
     }
-    b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(FileSpacePageSize::try_from(page).unwrap());
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_threshold(0)
+            .with_page_size(FileSpacePageSize::try_from(page).unwrap()),
+    );
     b.write(&path).unwrap();
 
     {
@@ -1242,8 +1279,12 @@ fn failed_paged_commit_leaves_the_free_lists_untouched() {
     b.create_dataset("drop")
         .with_i32_data(&(0..200).collect::<Vec<i32>>())
         .with_shape(&[200]);
-    b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(FileSpacePageSize::DEFAULT);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_threshold(0)
+            .with_page_size(FileSpacePageSize::DEFAULT),
+    );
     b.write(&path).unwrap();
 
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
@@ -1305,8 +1346,11 @@ fn failed_persistent_commit_preserves_live_bytes_and_reusable_space(
     b.create_dataset("a").with_i32_data(&[1; 100]);
     b.create_dataset("b").with_i32_data(&[2; 400]);
     b.create_dataset("c").with_i32_data(&[3; 100]);
-    b.with_file_space_strategy(strategy, true, 1)
-        .with_file_space_page_size(FileSpacePageSize::DEFAULT);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(strategy)
+            .with_persistence(true)
+            .with_page_size(FileSpacePageSize::DEFAULT),
+    );
     b.write(&path).unwrap();
 
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
@@ -1387,7 +1431,11 @@ fn a_failed_commit_leaves_no_reusable_span_the_image_names() {
     b.create_dataset("labels")
         .with_vlen_strings(&["seed-one", "seed-two"]);
     b.create_dataset("big").with_u8_data(&vec![0x5A; 40960]);
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 0);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_persistence(true)
+            .with_threshold(0),
+    );
     b.write(&path).unwrap();
 
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
@@ -1447,8 +1495,12 @@ fn a_commit_after_an_append_pads_the_raw_page_the_append_left() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("paged_interleave.h5");
     let mut b = crate::writer::FileBuilder::new();
-    b.with_file_space_strategy(crate::FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(FileSpacePageSize::try_from(PAGE).unwrap());
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_threshold(0)
+            .with_page_size(FileSpacePageSize::try_from(PAGE).unwrap()),
+    );
     b.create_dataset("d")
         .with_i32_data(&(0..64).collect::<Vec<i32>>())
         .with_shape(&[64])
@@ -1514,8 +1566,12 @@ fn an_inplace_append_to_a_paged_file_allocates_only_raw_pages() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("paged_raw.h5");
     let mut b = crate::writer::FileBuilder::new();
-    b.with_file_space_strategy(crate::FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(FileSpacePageSize::try_from(PAGE).unwrap());
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_threshold(0)
+            .with_page_size(FileSpacePageSize::try_from(PAGE).unwrap()),
+    );
     b.create_dataset("d")
         .with_i32_data(&(0..64).collect::<Vec<i32>>())
         .with_shape(&[64])
@@ -1615,7 +1671,9 @@ fn the_append_reserve_is_reported_as_one_coalesced_free_list() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("reserve_coalesced.h5");
     let mut b = FileBuilder::new();
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+    );
     b.create_dataset("t0")
         .with_i32_data(&[0i32])
         .with_shape(&[1])
@@ -1667,7 +1725,9 @@ fn an_unspent_append_reserve_goes_back_to_the_managers() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("reserve_return.h5");
     let mut b = FileBuilder::new();
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+    );
     b.create_dataset("t0")
         .with_i32_data(&(0..256).collect::<Vec<_>>())
         .with_shape(&[256])
@@ -1815,12 +1875,14 @@ fn write_dense_attribute_owner(path: &Path, huge_attrs: usize, strategy: FileSpa
     builder
         .create_dataset("keep")
         .with_i32_data(&(0..1024).collect::<Vec<_>>());
-    builder.with_file_space_strategy(strategy, true, 0);
-    if strategy == FileSpaceStrategy::Page {
-        builder.with_file_space_page_size(
-            FileSpacePageSize::try_from(DENSE_ATTRIBUTE_PAGE_SIZE).unwrap(),
-        );
-    }
+    let settings = FileSpaceSettings::new(strategy)
+        .with_persistence(true)
+        .with_threshold(0);
+    builder.with_file_space_settings(if strategy == FileSpaceStrategy::Page {
+        settings.with_page_size(FileSpacePageSize::try_from(DENSE_ATTRIBUTE_PAGE_SIZE).unwrap())
+    } else {
+        settings
+    });
     builder.write(path).unwrap();
 }
 
@@ -2139,7 +2201,9 @@ fn fragmented_persisting_fixture(
     use crate::writer::FileBuilder;
 
     let mut b = FileBuilder::new();
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+    );
     b.create_dataset("t0")
         .with_i32_data(&[0i32])
         .with_shape(&[1])

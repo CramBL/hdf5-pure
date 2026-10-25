@@ -12,6 +12,7 @@ use crate::File;
 use crate::FileAccessProperties;
 use crate::FileBuilder;
 use crate::FileLocking;
+use crate::FileSpaceSettings;
 use crate::FileSpaceStrategy;
 use crate::FormatError;
 use crate::MemoryStrategy;
@@ -40,7 +41,11 @@ fn fixed_width_root_updates_reach_stable_physical_length(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("root.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, threshold);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_persistence(true)
+            .with_threshold(threshold),
+    );
     builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
     builder.set_attr("generation", AttrValue::I64(-1));
     builder.create_dataset("keep").with_i32_data(&[1, 2, 3]);
@@ -128,7 +133,11 @@ fn ordinary_root_relocation_remains_available(#[case] threshold: u64, #[case] va
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("relocated.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, threshold);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_persistence(true)
+            .with_threshold(threshold),
+    );
     builder.set_attr("generation", AttrValue::I64(-1));
     builder.write(&path).unwrap();
     let file = File::open_rw(&path).unwrap();
@@ -147,7 +156,11 @@ fn root_reclamation_skips_reference_bearing_files() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("reference.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, u64::MAX);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_persistence(true)
+            .with_threshold(u64::MAX),
+    );
     builder.set_attr("generation", AttrValue::I64(-1));
     builder.create_dataset("refs").with_path_references(&[""]);
     builder.write(&path).unwrap();
@@ -187,7 +200,11 @@ fn root_reclamation_failure_preserves_a_readable_committed_root(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("failure.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, u64::MAX);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_persistence(true)
+            .with_threshold(u64::MAX),
+    );
     builder.set_attr("generation", AttrValue::I64(-1));
     builder.create_dataset("keep").with_i32_data(&[1, 2, 3]);
     if references {
@@ -287,7 +304,11 @@ fn tail_recycling_failure_preserves_committed_manager_sections(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("manager-failure.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 4_096);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_persistence(true)
+            .with_threshold(4_096),
+    );
     builder.set_attr("generation", AttrValue::I64(-1));
     builder.create_dataset("hole").with_u8_data(&[9; 8_192]);
     builder.create_dataset("keep").with_u8_data(&[7; 8_192]);
@@ -367,7 +388,11 @@ fn empty_manager_recycling_recovers_exact_allocation_after_reopen() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("empty-manager.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 4_096);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_persistence(true)
+            .with_threshold(4_096),
+    );
     builder.create_dataset("hole").with_u8_data(&[9; 8_192]);
     builder.create_dataset("keep").with_u8_data(&[7; 8_192]);
     builder.write(&path).unwrap();

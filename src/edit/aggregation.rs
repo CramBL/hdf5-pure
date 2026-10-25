@@ -460,6 +460,7 @@ mod tests {
     use rstest::rstest;
 
     use crate::FileLocking;
+    use crate::FileSpaceSettings;
     use crate::FileSpaceStrategy;
     use crate::MaxExtent;
     use crate::MemoryStrategy;
@@ -502,7 +503,7 @@ mod tests {
         let path = directory.path().join("windows.h5");
         let mut builder = FileBuilder::new();
         builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
-        builder.with_file_space_strategy(FileSpaceStrategy::Aggr, false, 1);
+        builder.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::Aggr));
         builder.write(&path).unwrap();
         let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
         let start = engine.image.len();
@@ -532,7 +533,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("close.h5");
         let mut builder = FileBuilder::new();
-        builder.with_file_space_strategy(FileSpaceStrategy::Aggr, false, 1);
+        builder.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::Aggr));
         builder.write(&path).unwrap();
         let mut engine = WriteEngine::open_rw_with_strategy(
             &path,
@@ -576,7 +577,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("overflow.h5");
         let mut builder = FileBuilder::new();
-        builder.with_file_space_strategy(FileSpaceStrategy::Aggr, false, 1);
+        builder.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::Aggr));
         builder.write(&path).unwrap();
         let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
         let state = engine.aggregation;
@@ -597,7 +598,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("failed.h5");
         let mut builder = FileBuilder::new();
-        builder.with_file_space_strategy(strategy, false, 1);
+        builder.with_file_space_settings(FileSpaceSettings::new(strategy));
         builder.create_dataset("keep").with_i32_data(&[7]);
         builder.write(&path).unwrap();
         let end = std::fs::metadata(&path).unwrap().len();
@@ -628,7 +629,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("rollback_reserve.h5");
         let mut builder = FileBuilder::new();
-        builder.with_file_space_strategy(strategy, false, 1);
+        builder.with_file_space_settings(FileSpaceSettings::new(strategy));
         builder.write(&path).unwrap();
         let start = std::fs::metadata(&path).unwrap().len();
         let mut engine = WriteEngine::open_torn_writes(&path, start + 64..start + 128).unwrap();
@@ -665,7 +666,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("publish.h5");
         let mut builder = FileBuilder::new();
-        builder.with_file_space_strategy(strategy, false, 1);
+        builder.with_file_space_settings(FileSpaceSettings::new(strategy));
         builder.write(&path).unwrap();
         let mut engine = WriteEngine::open_torn_writes(&path, 0..48).unwrap();
         let original = engine.aggregation;
@@ -701,7 +702,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("transient.h5");
         let mut builder = FileBuilder::new();
-        builder.with_file_space_strategy(strategy, false, 1);
+        builder.with_file_space_settings(FileSpaceSettings::new(strategy));
         builder.create_dataset("keep").with_i32_data(&[41]);
         builder.write(&path).unwrap();
         let mut engine =
@@ -765,7 +766,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("interleaved.h5");
         let mut builder = FileBuilder::new();
-        builder.with_file_space_strategy(FileSpaceStrategy::Aggr, false, 1);
+        builder.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::Aggr));
         builder
             .create_dataset("append")
             .with_i32_data(&[1, 2, 3, 4])

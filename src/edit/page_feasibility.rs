@@ -18,6 +18,7 @@ use test_util::disk_log::{self, DiskOp};
 use test_util::publication;
 use test_util_hdf5::userblock;
 
+use crate::FileSpaceSettings;
 use crate::UserblockSize;
 use crate::access_mode::AccessMode;
 use crate::address::{
@@ -56,8 +57,10 @@ fn fresh_page_placement_and_root_publication_preserve_old_allocations(
     let path = dir.path().join("fresh_pages.h5");
     let mut builder = FileBuilder::new();
     builder
-        .with_file_space_strategy(FileSpaceStrategy::Page, false, 1)
-        .with_file_space_page_size(FileSpacePageSize::try_from(page_size).unwrap())
+        .with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page)
+                .with_page_size(FileSpacePageSize::try_from(page_size).unwrap()),
+        )
         .with_userblock(UserblockSize::try_from(userblock).unwrap());
     if userblock > 0 {
         builder.with_userblock_content(b"preserve this userblock");
@@ -280,9 +283,10 @@ fn staged_commits_preserve_preexisting_bytes_outside_the_superblock(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("staged.h5");
     let mut builder = FileBuilder::new();
-    builder
-        .with_file_space_strategy(FileSpaceStrategy::Page, false, 1)
-        .with_file_space_page_size(FileSpacePageSize::try_from(page_size).unwrap());
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_page_size(FileSpacePageSize::try_from(page_size).unwrap()),
+    );
     builder.create_dataset("keep").with_u8_data(&[7; 64]);
     builder.create_dataset("replace").with_u8_data(&[3; 64]);
     builder
@@ -438,7 +442,7 @@ fn reference_updates_are_rejected_before_publication() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("references.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::Page, false, 1);
+    builder.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::Page));
     let group = builder.create_group("group");
     builder.add_group(group.finish());
     builder
@@ -466,7 +470,7 @@ fn prospective_reference_storage_is_rejected_before_mutation(#[case] operation: 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("prospective.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::Page, false, 1);
+    builder.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::Page));
     builder.create_dataset("keep").with_u8_data(&[7; 64]);
     builder.write(&path).unwrap();
     let original = fs::read(&path).unwrap();
@@ -865,7 +869,7 @@ fn assert_recovery_preserves_staging(
 fn write_page_failure_fixture(path: &Path, userblock: u64) -> Vec<u8> {
     let mut builder = FileBuilder::new();
     builder
-        .with_file_space_strategy(FileSpaceStrategy::Page, false, 1)
+        .with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::Page))
         .with_userblock(UserblockSize::try_from(userblock).unwrap());
     if userblock > 0 {
         builder.with_userblock_content(b"preserve the userblock across publication recovery");
@@ -1172,7 +1176,7 @@ fn invalid_page_eoa_is_rejected_before_mutation(#[case] eoa: u64) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("invalid_eoa.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::Page, false, 1);
+    builder.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::Page));
     builder.create_dataset("keep").with_u8_data(&[7; 64]);
     builder.write(&path).unwrap();
     let mut bytes = fs::read(&path).unwrap();
@@ -1253,7 +1257,7 @@ fn nonpersistent_page_swmr_is_rejected_before_mutation() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("swmr.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::Page, false, 1);
+    builder.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::Page));
     builder.write(&path).unwrap();
     let original = fs::read(&path).unwrap();
     let error = File::open_swmr_writer(&path).unwrap_err();

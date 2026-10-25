@@ -5,6 +5,7 @@ use rstest::rstest;
 
 use super::common;
 use crate::DeflateLevel;
+use crate::FileSpaceSettings;
 use crate::SuperblockStatusFlags;
 use crate::SuperblockVersion;
 use crate::UserblockSize;
@@ -401,7 +402,11 @@ fn failed_commit_restores_heap_collection_ownership_records() {
     let mut b = FileBuilder::new();
     b.create_dataset("labels")
         .with_vlen_strings(&["seed-one", "seed-two"]);
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 0);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_persistence(true)
+            .with_threshold(0),
+    );
     b.write(&path).unwrap();
 
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
@@ -472,7 +477,9 @@ fn a_failed_commit_that_reused_free_space_leaves_the_file_intact() {
     b.create_dataset("ceiling")
         .with_i32_data(&ceiling)
         .with_shape(&[500]);
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+    );
     b.write(&path).unwrap();
 
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
@@ -524,7 +531,11 @@ fn a_failed_commit_puts_back_the_value_it_overwrote() {
     let path = dir.path().join("inplace_partial.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("nums").with_i32_data(&[1, 2, 3]);
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 0);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_persistence(true)
+            .with_threshold(0),
+    );
     b.write(&path).unwrap();
 
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
@@ -941,7 +952,9 @@ fn bounded_persist_append_without_finalize_is_readable() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("persist_crash.h5");
     let mut b = crate::writer::FileBuilder::new();
-    b.with_file_space_strategy(crate::FileSpaceStrategy::FsmAggr, true, 1);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+    );
     b.create_dataset("d")
         .with_i32_data(&(0..6).collect::<Vec<i32>>())
         .with_shape(&[6])
@@ -972,8 +985,12 @@ fn bounded_paged_reopen_after_crash_realigns_and_stays_readable() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("paged_crash.h5");
     let mut b = crate::writer::FileBuilder::new();
-    b.with_file_space_strategy(crate::FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(FileSpacePageSize::DEFAULT);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_threshold(0)
+            .with_page_size(FileSpacePageSize::DEFAULT),
+    );
     b.create_dataset("d")
         .with_i32_data(&(0..64).collect::<Vec<i32>>())
         .with_shape(&[64])
@@ -1176,8 +1193,11 @@ fn a_smaller_budget_issues_more_writes() {
     let fixture = |path: &std::path::Path, tables: usize| {
         use crate::writer::FileBuilder;
         let mut b = FileBuilder::new();
-        b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-            .with_file_space_page_size(FileSpacePageSize::DEFAULT);
+        b.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page)
+                .with_persistence(true)
+                .with_page_size(FileSpacePageSize::DEFAULT),
+        );
         for t in 0..tables {
             b.create_dataset(&std::format!("t{t}"))
                 .with_i32_data(&(0..256).collect::<Vec<_>>())
@@ -1255,8 +1275,11 @@ fn a_page_buffer_marks_a_userblock_file_without_repointing_its_root(
     let mut b = FileBuilder::new();
     b.with_userblock(UserblockSize::try_from(4096).unwrap());
     if paged {
-        b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-            .with_file_space_page_size(FileSpacePageSize::DEFAULT);
+        b.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page)
+                .with_persistence(true)
+                .with_page_size(FileSpacePageSize::DEFAULT),
+        );
     }
     b.create_dataset("t0")
         .with_i32_data(&(0..256).collect::<Vec<_>>())
@@ -1358,9 +1381,11 @@ fn a_page_buffer_below_the_gather_budget_writes_the_same_file() {
     let run = |path: &std::path::Path, budget: usize| -> Vec<i32> {
         let file = crate::reader::File::create_with_options(
             path,
-            crate::FileCreateProperties::new()
-                .with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-                .with_file_space_page_size(FileSpacePageSize::try_from(16 * 1024).unwrap()),
+            crate::FileCreateProperties::new().with_file_space_settings(
+                FileSpaceSettings::new(FileSpaceStrategy::Page)
+                    .with_persistence(true)
+                    .with_page_size(FileSpacePageSize::try_from(16 * 1024).unwrap()),
+            ),
             crate::FileAccessProperties::new()
                 .with_sync_policy(SyncPolicy::OnClose)
                 .with_page_buffer_size(budget),
@@ -1573,7 +1598,9 @@ fn finalize_persist_has_nothing_left_to_write() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("persisting.h5");
     let mut b = FileBuilder::new();
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+    );
     b.create_dataset("t0")
         .with_i32_data(&(0..256).collect::<Vec<_>>())
         .with_shape(&[256])
@@ -1742,14 +1769,14 @@ fn sync_policy_governs_the_persisting_and_flag_barriers() {
         b.create_dataset("victim")
             .with_f64_data(&[1.5f64; 64])
             .with_shape(&[64]);
-        b.with_file_space_strategy(
-            strategy,
-            true,
-            if strategy == FileSpaceStrategy::Page {
-                0
-            } else {
-                1
-            },
+        b.with_file_space_settings(
+            FileSpaceSettings::new(strategy)
+                .with_persistence(true)
+                .with_threshold(if strategy == FileSpaceStrategy::Page {
+                    0
+                } else {
+                    1
+                }),
         );
         b.write(&path).unwrap();
 
@@ -1916,7 +1943,11 @@ fn a_failed_commit_puts_back_every_chunk_it_overwrote() {
         .with_shape(&[4096])
         .with_chunks(&[512])
         .with_deflate(DeflateLevel::Six);
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 0);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_persistence(true)
+            .with_threshold(0),
+    );
     b.write(&path).unwrap();
 
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
@@ -1955,7 +1986,11 @@ fn a_commit_does_not_replay_a_journal_it_did_not_write() {
     let path = dir.path().join("stale_journal.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("nums").with_i32_data(&[1, 2, 3]);
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 0);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_persistence(true)
+            .with_threshold(0),
+    );
     b.write(&path).unwrap();
 
     let nums_block = {
@@ -2004,7 +2039,11 @@ fn a_rollback_orders_the_values_it_puts_back() {
         let path = dir.path().join("rollback_syncs.h5");
         let mut b = FileBuilder::new();
         b.create_dataset("nums").with_i32_data(&[1, 2, 3]);
-        b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 0);
+        b.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+                .with_persistence(true)
+                .with_threshold(0),
+        );
         b.write(&path).unwrap();
 
         let syncs = Arc::new(AtomicU64::new(0));

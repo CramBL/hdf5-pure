@@ -6,8 +6,9 @@ use hdf5_pure_space::__private::PageType;
 use rstest::rstest;
 use test_util_hdf5::userblock;
 
-#[cfg(test)]
 use crate::FileSpacePageSize;
+#[cfg(test)]
+use crate::FileSpaceSettings;
 use crate::edit::WriteEngine;
 use crate::error::FormatError;
 use crate::object_path::ObjectPathBuf;
@@ -53,7 +54,9 @@ fn header_classification_uses_stored_alignment_and_preserves_physical_extents(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("userblock.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true),
+    );
     builder.create_dataset("keep").with_i32_data(&[7; 64]);
     builder.write(&path).unwrap();
     userblock::prepend(&path, &[0xA5; 512]);
@@ -93,9 +96,11 @@ fn deleting_a_small_header_preserves_metadata_reuse(#[values(512, 4_096, 8_192)]
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("small_header.h5");
     let mut builder = FileBuilder::new();
-    builder
-        .with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-        .with_file_space_page_size(FileSpacePageSize::try_from(page).unwrap());
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_page_size(FileSpacePageSize::try_from(page).unwrap()),
+    );
     builder.create_dataset("victim").with_i32_data(&[3; 64]);
     builder.create_dataset("keep").with_i32_data(&[7; 64]);
     builder.write(&path).unwrap();

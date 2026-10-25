@@ -4652,7 +4652,7 @@ mod tests {
     fn attribute_writer(paged: bool) -> FileWriter {
         let mut writer = FileWriter::new();
         if paged {
-            writer.with_file_space_strategy(FileSpaceStrategy::Page, false, 1);
+            writer.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::Page));
         }
         writer.commit_datatype("integer_type", type_builders::make_i32_type());
         writer.commit_datatype(
@@ -4831,8 +4831,11 @@ mod tests {
     #[test]
     fn small_paged_collections_can_place_metadata_above_four_gibibytes() {
         let mut writer = FileWriter::new();
-        writer.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
-        writer.with_file_space_page_size(FileSpacePageSize::MAX);
+        writer.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page)
+                .with_persistence(true)
+                .with_page_size(FileSpacePageSize::MAX),
+        );
         writer.set_root_attr("first", AttrValue::VarLenString("first-value".into()));
         writer.set_root_attr("second", AttrValue::VarLenString("second-value".into()));
         writer.set_root_attr("third", AttrValue::VarLenString("third-value".into()));
@@ -4883,8 +4886,11 @@ mod tests {
         #[case] userblock: u64,
     ) {
         let mut writer = FileWriter::new();
-        writer.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
-        writer.with_file_space_page_size(FileSpacePageSize::try_from(page_size).unwrap());
+        writer.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page)
+                .with_persistence(true)
+                .with_page_size(FileSpacePageSize::try_from(page_size).unwrap()),
+        );
         writer.with_userblock(UserblockSize::try_from(userblock).unwrap());
         writer.set_root_attr("root_label", AttrValue::VarLenString("root-value".into()));
         writer
@@ -6690,21 +6696,21 @@ mod tests {
 
         let mut fw = FileWriter::new();
         fw.with_libver_bounds(LibVer::Earliest, LibVer::V18);
-        fw.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
+        fw.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true),
+        );
         fw.create_dataset("d").with_i32_data(&[1]);
         assert!(matches!(
             fw.finish().unwrap_err(),
             FormatError::LibverTooOldForContent { .. }
         ));
 
-        // A page size on its own emits the same 1.10-only File Space Info
-        // message — `file_space_info` fires on either field — so it takes the
-        // same refusal. The guard used to test the strategy alone and let this
-        // through, writing a version 2 superblock carrying a message that did
-        // not exist before 1.10.
         let mut fw = FileWriter::new();
         fw.with_libver_bounds(LibVer::Earliest, LibVer::V18);
-        fw.with_file_space_page_size(FileSpacePageSize::DEFAULT);
+        fw.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+                .with_page_size(FileSpacePageSize::DEFAULT),
+        );
         fw.create_dataset("d").with_i32_data(&[1]);
         assert!(matches!(
             fw.finish().unwrap_err(),
