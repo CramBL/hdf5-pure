@@ -170,7 +170,8 @@ pub struct ChunkOptions {
     /// Whether the filter pipeline applies to a partial edge chunk, a chunk that extends past the
     /// dataset's extent, or `None` where the caller sets no policy.
     ///
-    /// The writer creates a dataset under `None` as under [`PartialEdgeFiltering::Apply`].
+    /// The writer creates a dataset under `None` as under [`PartialEdgeFiltering::Apply`], and a
+    /// read-write session rejects an overwrite whose options hold either policy.
     pub(crate) partial_edge_filtering: Option<PartialEdgeFiltering>,
 }
 
@@ -485,6 +486,27 @@ impl ChunkOptions {
         })
     }
 
+    /// Checks that a dataset under [`PartialEdgeFiltering::Skip`] is stored chunked.
+    ///
+    /// A dataset is stored chunked where [`is_chunked`](Self::is_chunked) returns `true` or
+    /// `maxshape` is set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::PartialEdgeSkipRequiresChunking`] if the policy is
+    /// [`PartialEdgeFiltering::Skip`] and the dataset is stored contiguous.
+    pub(crate) fn validate_partial_edge_filtering(
+        &self,
+        maxshape: Option<&[MaxExtent]>,
+    ) -> Result<(), FormatError> {
+        match self.partial_edge_filtering {
+            Some(PartialEdgeFiltering::Skip) if !self.is_chunked() && maxshape.is_none() => {
+                Err(FormatError::PartialEdgeSkipRequiresChunking)
+            }
+            None | Some(PartialEdgeFiltering::Apply | PartialEdgeFiltering::Skip) => Ok(()),
+        }
+    }
+
     /// Checks the chunk geometry of a dataset of `extent`.
     ///
     /// The check is meaningful only for a dataset stored chunked, by
@@ -560,22 +582,21 @@ impl ChunkOptions {
 /// Whether the writer runs the partial edge chunks of a created dataset through the filter
 /// pipeline.
 ///
-/// Under [`Skip`](Self::Skip) the writer sets the [`DONT_FILTER_PARTIAL_BOUND_CHUNKS`] flag of the
+/// Under [`Skip`](Self::Skip) the writer sets the `DONT_FILTER_PARTIAL_BOUND_CHUNKS` flag of the
 /// version 4 data layout message, defined in "The Data Layout Message" of the [format
 /// specification, version 4.0][spec]. The C library sets the flag with `H5Pset_chunk_opts` and
 /// `H5D_CHUNK_DONT_FILTER_PARTIAL_CHUNKS`.
 ///
+/// [`DatasetCreateProperties::with_partial_edge_filtering`] sets the policy of a dataset.
+///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
+/// [`DatasetCreateProperties::with_partial_edge_filtering`]: crate::DatasetCreateProperties::with_partial_edge_filtering
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum PartialEdgeFiltering {
+pub enum PartialEdgeFiltering {
     /// The filter pipeline applies to every chunk.
     #[default]
     Apply,
     /// A partial edge chunk is stored as its data, padded to a whole chunk with the fill value.
-    #[cfg_attr(
-        not(all(test, feature = "deflate")),
-        expect(dead_code, reason = "only the crate's deflate tests construct `Skip`")
-    )]
     Skip,
 }
 

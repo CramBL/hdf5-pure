@@ -629,6 +629,7 @@ pub use element::H5Element;
 
 pub use scaleoffset::ScaleOffset;
 
+pub use chunked_write::PartialEdgeFiltering;
 pub use dataset_create_properties::DatasetCreateProperties;
 pub use file_create_properties::FileCreateProperties;
 pub use free_sections::ReusableSpaceStats;

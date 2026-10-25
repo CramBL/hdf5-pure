@@ -2062,6 +2062,7 @@ impl FileWriter {
                     .and_then(|geometry| chunk_options.validate_geometry(geometry))
                     .map_err(FormatError::InvalidChunkGeometry)?;
             }
+            chunk_options.validate_partial_edge_filtering(maxshape.as_deref())?;
             // Variable-length string element references live in the global heap.
             // For chunked/filtered/resizable storage the references sit inside
             // chunks that are split (and possibly compressed) before the rest of

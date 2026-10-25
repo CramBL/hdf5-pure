@@ -277,6 +277,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
             "LogicalShapeDataMismatch",
             "MisplacedGlobalHeapFreeSpace",
             "MissingFractalHeapBlock",
+            "PartialEdgeSkipRequiresChunking",
             "RegionOutOfBounds",
             "RegionRankMismatch",
             "SoftLinkTraversalLimit",

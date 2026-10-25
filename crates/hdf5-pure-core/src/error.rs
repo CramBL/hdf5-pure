@@ -880,6 +880,9 @@ pub enum FormatError {
         /// The second field's size in bits.
         second_size: u8,
     },
+    /// A dataset stored contiguous is set to skip the filter pipeline for its partial edge
+    /// chunks, which only a chunked layout has.
+    PartialEdgeSkipRequiresChunking,
     /// Path not found during group traversal.
     PathNotFound(String),
     /// A dataset region extends past a dimension's current extent.
@@ -2020,6 +2023,9 @@ impl fmt::Display for FormatError {
                     f,
                     "EOF relocation underflow: {stored_eof} - {shift} is below zero"
                 )
+            }
+            Self::PartialEdgeSkipRequiresChunking => {
+                f.write_str("skipping the filters of partial edge chunks requires a chunked layout")
             }
             Self::OffsetOverflow { offset, length } => {
                 write!(

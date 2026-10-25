@@ -5860,8 +5860,9 @@ impl Dataset {
     ///
     /// This overwrites element bytes and nothing else, so a builder asking for
     /// more than that is refused by **this call**, before anything is staged:
-    /// chunking, filters or an extensible shape; an attribute; a fill value; and
-    /// [`with_path_references`](DatasetBuilder::with_path_references), whose
+    /// chunking, filters, an extensible shape,
+    /// a [`PartialEdgeFiltering`](crate::PartialEdgeFiltering) policy, an attribute, a fill
+    /// value, and [`with_path_references`](DatasetBuilder::with_path_references), whose
     /// element bytes are placeholder addresses only a newly created dataset can
     /// resolve. Set those when the dataset is created.
     ///
