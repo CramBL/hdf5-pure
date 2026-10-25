@@ -2,10 +2,13 @@
 //! survivors, and fail-loud refusal of features that cannot be reproduced.
 
 use hdf5_pure::BitFieldType;
+use hdf5_pure::DatasetBuilder;
+use hdf5_pure::DatasetCreateProperties;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FileSpacePageSize;
+use hdf5_pure::PartialEdgeFiltering;
 use hdf5_pure::UserblockSize;
 #[cfg(feature = "zfp")]
 use hdf5_pure::ZfpRate;
@@ -970,4 +973,59 @@ fn a_source_link_whose_name_is_not_a_path_component_is_rejected() {
          the object it identifies has no path in the output"
     );
     assert!(!dst.exists(), "dst must not be created when a repack fails");
+}
+
+#[rstest]
+fn a_repack_that_rebuilds_a_chunked_dataset_writes_the_bytes_of_its_source(
+    #[values(
+        RebuiltContent::Unallocated,
+        RebuiltContent::UnallocatedResizable,
+        RebuiltContent::VariableLengthStrings
+    )]
+    content: RebuiltContent,
+    #[values(PartialEdgeFiltering::Apply, PartialEdgeFiltering::Skip)]
+    filtering: PartialEdgeFiltering,
+) {
+    let src = temp::temp_path("hdf5_pure_repack_partial_edge_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_partial_edge_dst.h5");
+    let mut builder = FileBuilder::new();
+    let dataset = builder.create_dataset("d");
+    content.stage(dataset);
+    dataset.with_create_properties(
+        DatasetCreateProperties::new()
+            .with_chunks(&[4])
+            .with_shuffle()
+            .with_deflate(DeflateLevel::Six)
+            .with_partial_edge_filtering(filtering),
+    );
+    builder.write(&src).unwrap();
+
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
+
+    assert_eq!(std::fs::read(&dst).unwrap(), std::fs::read(&src).unwrap());
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RebuiltContent {
+    Unallocated,
+    UnallocatedResizable,
+    VariableLengthStrings,
+}
+
+impl RebuiltContent {
+    fn stage(self, dataset: &mut DatasetBuilder) {
+        match self {
+            Self::Unallocated => {
+                dataset.with_unallocated_storage(hdf5_pure::make_i32_type(), &[10]);
+            }
+            Self::UnallocatedResizable => {
+                dataset
+                    .with_unallocated_storage(hdf5_pure::make_i32_type(), &[10])
+                    .with_maxshape(&[MaxExtent::Unlimited]);
+            }
+            Self::VariableLengthStrings => {
+                dataset.with_vlen_strings(&["a", "bb", "ccc", "", "e", "f", "g", "h", "i", "j"]);
+            }
+        }
+    }
 }

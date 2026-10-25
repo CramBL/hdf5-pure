@@ -601,6 +601,16 @@ pub enum PartialEdgeFiltering {
 }
 
 impl PartialEdgeFiltering {
+    /// Returns the policy of a dataset whose data layout message stores `flags`.
+    #[cfg(feature = "std")]
+    pub(crate) fn from_layout_flags(flags: ChunkedLayoutFlags) -> Self {
+        if flags.partial_edge_chunks_stored_raw() {
+            Self::Skip
+        } else {
+            Self::Apply
+        }
+    }
+
     /// Returns the data layout flags for this policy.
     pub(crate) fn layout_flags(self) -> ChunkedLayoutFlags {
         match self {

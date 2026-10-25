@@ -32,8 +32,15 @@
 //! another file and a repack keep each chunk as the source stores it. Both
 //! libraries read the values and report the same chunk records, before and
 //! after libhdf5 writes the last element.
+//!
+//! A repack that re-encodes a sparse or an unallocated dataset, or restages the
+//! variable-length elements of a dataset, stores the layout flags of the source
+//! and each partial edge chunk under the flag unfiltered. The C library reads the
+//! values, and where the repack restages the elements, it stores the chunk
+//! offsets, the filter masks, and the raw chunk sizes of the dataset libhdf5
+//! creates with the same elements.
 
-#[cfg(target_endian = "little")]
+use std::cmp::Ordering;
 use std::ops::Range;
 use std::path::Path;
 
@@ -42,6 +49,8 @@ use hdf5::Hyperslab;
 use hdf5::SliceOrIndex;
 use hdf5::dataset::ChunkOpts;
 use hdf5::filters::Filter as CFilter;
+#[cfg(target_endian = "little")]
+use hdf5::types::VarLenArray;
 #[cfg(target_endian = "little")]
 use hdf5::types::VarLenUnicode;
 use hdf5_pure::ChunkIndex;
@@ -62,6 +71,7 @@ use hdf5_pure_format::__private::ObjectHeader;
 use hdf5_pure_format::__private::SINGLE_INDEX_WITH_FILTER;
 use ndarray::ArrayD;
 use ndarray::IxDyn;
+use ndarray::Slice;
 use rstest::rstest;
 use test_util_hdf5::dataset;
 use test_util_hdf5::dataset::Unlimited;
@@ -773,6 +783,314 @@ fn chunk_records(chunks: &[array_index::Chunk]) -> Vec<(Vec<u64>, u64, u32)> {
         .collect()
 }
 
+#[rstest]
+#[case::sparse_rank_1(ReEncoded::SparseFromLibhdf5, &[10], &[4])]
+#[case::sparse_partial_along_both_axes(ReEncoded::SparseFromLibhdf5, &[5, 5], &[2, 3])]
+#[case::unallocated_rank_1_from_libhdf5(ReEncoded::UnallocatedFromLibhdf5, &[10], &[4])]
+#[case::unallocated_partial_along_both_axes_from_libhdf5(
+    ReEncoded::UnallocatedFromLibhdf5,
+    &[5, 5],
+    &[2, 3],
+)]
+#[case::unallocated_rank_1_from_hdf5_pure(ReEncoded::UnallocatedFromPure, &[10], &[4])]
+#[case::unallocated_partial_along_both_axes_from_hdf5_pure(
+    ReEncoded::UnallocatedFromPure,
+    &[5, 5],
+    &[2, 3],
+)]
+fn a_repack_that_re_encodes_a_dataset_keeps_its_partial_edge_filtering(
+    #[case] source: ReEncoded,
+    #[case] shape: &[usize],
+    #[case] chunk: &[usize],
+    #[values(false, true)] raw_edges: bool,
+    #[values(Filter::Deflate, Filter::Shuffle, Filter::ShuffleDeflate)] filter: Filter,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let original = dir.path().join("partial_edge_re_encoded_source.h5");
+    let repacked = dir.path().join("partial_edge_re_encoded.h5");
+    let fixture = ChunkedFixture {
+        shape,
+        chunk,
+        filter,
+        raw_edges,
+        fill: Some(OVERWRITE_FILL),
+    };
+    let len = shape.iter().product();
+    let written: Vec<i32> = (0..len).map(|i| i as i32).collect();
+    source.create(fixture, &original, &written);
+
+    hdf5_pure::repack(&original, &repacked, &RepackOptions::new()).unwrap();
+
+    let mut values = source.values(fixture, &written);
+    fixture.assert_stored(&repacked, &values);
+    assert_eq!(
+        (chunk_offsets(&original), chunk_offsets(&repacked)),
+        source.chunk_offsets(fixture)
+    );
+    let flags = layout_flags(&repacked);
+    assert_eq!(
+        (flags.partial_edge_chunks_stored_raw(), flags),
+        (raw_edges, layout_flags(&original))
+    );
+
+    fixture.libhdf5_write_last(&repacked, 999);
+
+    values[len - 1] = 999;
+    fixture.assert_stored(&repacked, &values);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ReEncoded {
+    SparseFromLibhdf5,
+    UnallocatedFromLibhdf5,
+    UnallocatedFromPure,
+}
+
+impl ReEncoded {
+    fn create(self, fixture: ChunkedFixture<'_>, path: &Path, written: &[i32]) {
+        match self {
+            Self::SparseFromLibhdf5 => {
+                fixture.libhdf5_create_without_the_first_chunk(path, written)
+            }
+            Self::UnallocatedFromLibhdf5 => fixture.libhdf5_create_unallocated(path),
+            Self::UnallocatedFromPure => fixture.pure_create_unallocated(path),
+        }
+    }
+
+    /// Returns the values of the dataset [`create`](Self::create) creates from `written`: the fill
+    /// value, or 0 without one, in place of each element it leaves unwritten.
+    fn values(self, fixture: ChunkedFixture<'_>, written: &[i32]) -> Vec<i32> {
+        let fill = fixture.fill.unwrap_or(0);
+        written
+            .iter()
+            .enumerate()
+            .map(|(index, &value)| match self {
+                Self::SparseFromLibhdf5 if !fixture.in_first_chunk(index) => value,
+                Self::SparseFromLibhdf5
+                | Self::UnallocatedFromLibhdf5
+                | Self::UnallocatedFromPure => fill,
+            })
+            .collect()
+    }
+
+    /// Returns the offsets of the chunks the source stores and of the chunks its repack stores.
+    fn chunk_offsets(self, fixture: ChunkedFixture<'_>) -> (Vec<Vec<u64>>, Vec<Vec<u64>>) {
+        match self {
+            Self::SparseFromLibhdf5 => {
+                let grid = fixture.grid_offsets();
+                (grid[1..].to_vec(), grid)
+            }
+            Self::UnallocatedFromLibhdf5 | Self::UnallocatedFromPure => (Vec::new(), Vec::new()),
+        }
+    }
+}
+
+fn chunk_offsets(path: &Path) -> Vec<Vec<u64>> {
+    array_index::libhdf5_chunks(path, 0)
+        .iter()
+        .map(|chunk| chunk.offset().to_vec())
+        .collect()
+}
+
+#[rstest]
+#[cfg(target_endian = "little")]
+fn a_repack_that_restages_variable_length_elements_keeps_the_partial_edge_filtering(
+    #[values(
+        Restaged::CompoundsFromLibhdf5,
+        Restaged::SequencesFromLibhdf5,
+        Restaged::StringsFromLibhdf5,
+        Restaged::StringsFromPure
+    )]
+    source: Restaged,
+    #[values(false, true)] raw_edges: bool,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let original = dir.path().join("partial_edge_restaged_source.h5");
+    let repacked = dir.path().join("partial_edge_restaged.h5");
+    let repacked_again = dir.path().join("partial_edge_restaged_again.h5");
+    let reference = dir.path().join("partial_edge_restaged_reference.h5");
+    let chunk_opts = if raw_edges {
+        ChunkOpts::DONT_FILTER_PARTIAL_CHUNKS
+    } else {
+        ChunkOpts::empty()
+    };
+    source.create(&original, chunk_opts);
+    source.libhdf5_reference().create(&reference, chunk_opts);
+
+    hdf5_pure::repack(&original, &repacked, &RepackOptions::new()).unwrap();
+
+    let values = source.values();
+    assert_eq!(
+        read_c_creation_properties(&repacked),
+        (Filter::Deflate.pipeline(), Some(chunk_opts))
+    );
+    let flags = layout_flags(&repacked);
+    assert_eq!(
+        (flags.partial_edge_chunks_stored_raw(), flags),
+        (raw_edges, layout_flags(&original))
+    );
+    assert_eq!(source.read_libhdf5(&repacked), values);
+    assert_eq!(
+        array_index::pure_chunks(&File::open(&repacked).unwrap()),
+        array_index::libhdf5_chunks(&repacked, 0)
+    );
+    assert_eq!(
+        restaged_chunks(&repacked, raw_edges),
+        restaged_chunks(&reference, raw_edges)
+    );
+
+    hdf5_pure::repack(&repacked, &repacked_again, &RepackOptions::new()).unwrap();
+
+    assert_eq!(source.read_libhdf5(&repacked_again), values);
+}
+
+#[cfg(target_endian = "little")]
+#[derive(Clone, Copy, Debug)]
+enum Restaged {
+    CompoundsFromLibhdf5,
+    SequencesFromLibhdf5,
+    StringsFromLibhdf5,
+    StringsFromPure,
+}
+
+#[cfg(target_endian = "little")]
+impl Restaged {
+    fn create(self, path: &Path, chunk_opts: ChunkOpts) {
+        let indices = 0..RESTAGED_LEN;
+        match self {
+            Self::CompoundsFromLibhdf5 => libhdf5_create_restaged(
+                path,
+                chunk_opts,
+                &indices
+                    .map(|i| Labeled {
+                        id: i as i32,
+                        label: format!("element-{i}").parse().unwrap(),
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            Self::SequencesFromLibhdf5 => libhdf5_create_restaged(
+                path,
+                chunk_opts,
+                &indices
+                    .map(|i| VarLenArray::from_slice(&(0..i as i32).collect::<Vec<_>>()))
+                    .collect::<Vec<_>>(),
+            ),
+            Self::StringsFromLibhdf5 => libhdf5_create_restaged(
+                path,
+                chunk_opts,
+                &var_len_strings(indices.map(|i| format!("element-{i}"))),
+            ),
+            Self::StringsFromPure => {
+                let strings: Vec<String> = indices.map(|i| format!("element-{i}")).collect();
+                let filtering = if chunk_opts.is_empty() {
+                    PartialEdgeFiltering::Apply
+                } else {
+                    PartialEdgeFiltering::Skip
+                };
+                DatasetWriter::Buffered.create(path, "d", |builder| {
+                    builder
+                        .with_vlen_strings(&strings.iter().map(String::as_str).collect::<Vec<_>>())
+                        .with_create_properties(
+                            Filter::Deflate
+                                .create_properties(
+                                    DatasetCreateProperties::new()
+                                        .with_chunks(&[RESTAGED_CHUNK as u64]),
+                                )
+                                .with_partial_edge_filtering(filtering),
+                        );
+                });
+            }
+        }
+    }
+
+    /// Returns the source libhdf5 creates with the elements of `self`, the oracle for the
+    /// [`restaged_chunks`] of a repack of `self`.
+    fn libhdf5_reference(self) -> Self {
+        match self {
+            Self::StringsFromPure => Self::StringsFromLibhdf5,
+            Self::CompoundsFromLibhdf5 | Self::SequencesFromLibhdf5 | Self::StringsFromLibhdf5 => {
+                self
+            }
+        }
+    }
+
+    /// Returns the elements [`create`](Self::create) writes, formatted as
+    /// [`read_libhdf5`](Self::read_libhdf5) formats them.
+    fn values(self) -> Vec<String> {
+        (0..RESTAGED_LEN)
+            .map(|i| match self {
+                Self::CompoundsFromLibhdf5 => format!("{i}:element-{i}"),
+                Self::SequencesFromLibhdf5 => format!("{:?}", (0..i as i32).collect::<Vec<_>>()),
+                Self::StringsFromLibhdf5 | Self::StringsFromPure => format!("element-{i}"),
+            })
+            .collect()
+    }
+
+    fn read_libhdf5(self, path: &Path) -> Vec<String> {
+        let ds = hdf5::File::open(path).unwrap().dataset("d").unwrap();
+        match self {
+            Self::CompoundsFromLibhdf5 => ds
+                .read_raw::<Labeled>()
+                .unwrap()
+                .iter()
+                .map(|element| format!("{}:{}", element.id, element.label))
+                .collect(),
+            Self::SequencesFromLibhdf5 => ds
+                .read_raw::<VarLenArray<i32>>()
+                .unwrap()
+                .iter()
+                .map(|sequence| format!("{:?}", sequence.as_slice()))
+                .collect(),
+            Self::StringsFromLibhdf5 | Self::StringsFromPure => {
+                dataset::read_libhdf5_strings(path, "d")
+            }
+        }
+    }
+}
+
+/// Returns the offset and the filter mask of each chunk of the dataset at `path`, and the size of
+/// each partial edge chunk stored raw under `raw_edges`.
+///
+/// The size of a filtered chunk is left out: the chunk holds global heap addresses, and its
+/// compressed size depends on where each file places its heap.
+#[cfg(target_endian = "little")]
+fn restaged_chunks(path: &Path, raw_edges: bool) -> Vec<(Vec<u64>, Option<u64>, u32)> {
+    array_index::libhdf5_chunks(path, 0)
+        .iter()
+        .map(|chunk| {
+            let raw = raw_edges && chunk.offset()[0] as usize + RESTAGED_CHUNK > RESTAGED_LEN;
+            (
+                chunk.offset().to_vec(),
+                raw.then(|| chunk.size()),
+                chunk.filter_mask(),
+            )
+        })
+        .collect()
+}
+
+#[cfg(target_endian = "little")]
+#[derive(hdf5::H5Type, Clone, Debug)]
+#[repr(C)]
+struct Labeled {
+    id: i32,
+    label: VarLenUnicode,
+}
+
+#[cfg(target_endian = "little")]
+fn libhdf5_create_restaged<T: hdf5::H5Type>(path: &Path, chunk_opts: ChunkOpts, values: &[T]) {
+    let file = file::libhdf5_create_v110(path);
+    file.new_dataset::<T>()
+        .deflate(DEFLATE_LEVEL)
+        .chunk([RESTAGED_CHUNK])
+        .chunk_opts(chunk_opts)
+        .shape([values.len()])
+        .create("d")
+        .unwrap()
+        .write(values)
+        .unwrap();
+    file.close().unwrap();
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ChunkedFixture<'a> {
     shape: &'a [usize],
@@ -792,20 +1110,32 @@ impl ChunkedFixture<'_> {
     }
 
     fn pure_create(self, writer: DatasetWriter, path: &Path, data: &[i32]) {
-        let maxshape: Vec<MaxExtent> = extents_the_c_library_accepts(self.shape, self.chunk)
+        writer.create(path, "d", |builder| {
+            builder
+                .with_i32_data(data)
+                .with_shape(&self.dims())
+                .with_maxshape(&self.maxshape())
+                .with_create_properties(self.create_properties());
+        });
+    }
+
+    fn pure_create_unallocated(self, path: &Path) {
+        DatasetWriter::Buffered.create(path, "d", |builder| {
+            builder
+                .with_unallocated_storage(hdf5_pure::make_i32_type(), &self.dims())
+                .with_maxshape(&self.maxshape())
+                .with_create_properties(self.create_properties());
+        });
+    }
+
+    fn maxshape(self) -> Vec<MaxExtent> {
+        extents_the_c_library_accepts(self.shape, self.chunk)
             .iter()
             .map(|extent| match extent.max {
                 Some(max) => MaxExtent::Fixed(max as u64),
                 None => MaxExtent::Unlimited,
             })
-            .collect();
-        writer.create(path, "d", |builder| {
-            builder
-                .with_i32_data(data)
-                .with_shape(&self.dims())
-                .with_maxshape(&maxshape)
-                .with_create_properties(self.create_properties());
-        });
+            .collect()
     }
 
     fn create_properties(self) -> DatasetCreateProperties {
@@ -830,6 +1160,53 @@ impl ChunkedFixture<'_> {
 
     fn libhdf5_create(self, path: &Path, data: &[i32]) {
         let file = file::libhdf5_create_v110(path);
+        self.libhdf5_create_dataset(&file).write_raw(data).unwrap();
+        file.close().unwrap();
+    }
+
+    fn libhdf5_create_without_the_first_chunk(self, path: &Path, data: &[i32]) {
+        let file = file::libhdf5_create_v110(path);
+        let ds = self.libhdf5_create_dataset(&file);
+        let data = ArrayD::from_shape_vec(IxDyn(self.shape), data.to_vec()).unwrap();
+        for axis in 0..self.shape.len() {
+            let region: Vec<Range<usize>> = self
+                .shape
+                .iter()
+                .zip(self.chunk)
+                .enumerate()
+                .map(|(other, (&len, &edge))| match other.cmp(&axis) {
+                    Ordering::Less => 0..edge.min(len),
+                    Ordering::Equal => edge.min(len)..len,
+                    Ordering::Greater => 0..len,
+                })
+                .collect();
+            if region[axis].is_empty() {
+                continue;
+            }
+            ds.write_slice(
+                &data
+                    .slice_each_axis(|ax| Slice::from(region[ax.axis.index()].clone()))
+                    .to_owned(),
+                Hyperslab::from(
+                    region
+                        .into_iter()
+                        .map(SliceOrIndex::from)
+                        .collect::<Vec<_>>(),
+                ),
+            )
+            .unwrap();
+        }
+        drop(ds);
+        file.close().unwrap();
+    }
+
+    fn libhdf5_create_unallocated(self, path: &Path) {
+        let file = file::libhdf5_create_v110(path);
+        drop(self.libhdf5_create_dataset(&file));
+        file.close().unwrap();
+    }
+
+    fn libhdf5_create_dataset(self, file: &hdf5::File) -> hdf5::Dataset {
         let builder = file
             .new_dataset_builder()
             .empty_as(ByteOrder::LittleEndian.i32_datatype());
@@ -853,9 +1230,6 @@ impl ChunkedFixture<'_> {
             .shape(extents_the_c_library_accepts(self.shape, self.chunk))
             .create("d")
             .unwrap()
-            .write_raw(data)
-            .unwrap();
-        file.close().unwrap();
     }
 
     fn pure_overwrite(self, path: &Path, values: &[i32]) {
@@ -959,6 +1333,39 @@ impl ChunkedFixture<'_> {
             .zip(self.chunk)
             .zip(self.shape)
             .any(|((&offset, &edge), &len)| offset as usize + edge > len)
+    }
+
+    /// Returns `true` if the element at the row-major `index` lies in the chunk at the origin.
+    fn in_first_chunk(self, index: usize) -> bool {
+        self.shape
+            .iter()
+            .rev()
+            .scan(index, |remaining, &len| {
+                let coord = *remaining % len;
+                *remaining /= len;
+                Some(coord)
+            })
+            .zip(self.chunk.iter().rev())
+            .all(|(coord, &edge)| coord < edge)
+    }
+
+    /// Returns the offset of every chunk of the grid, in row-major order.
+    fn grid_offsets(self) -> Vec<Vec<u64>> {
+        self.shape
+            .iter()
+            .zip(self.chunk)
+            .fold(vec![Vec::new()], |offsets, (&len, &edge)| {
+                offsets
+                    .iter()
+                    .flat_map(|offset| {
+                        (0..len).step_by(edge).map(move |start| {
+                            let mut offset = offset.clone();
+                            offset.push(start as u64);
+                            offset
+                        })
+                    })
+                    .collect()
+            })
     }
 
     /// Returns the elements of the whole chunk at `offset`, with the fill value, or 0 without one,
@@ -1085,6 +1492,10 @@ const DEFLATE_LEVEL: u8 = 6;
 const LENGTH_SIZE: u8 = 8;
 const OFFSET_SIZE: u8 = 8;
 const OVERWRITE_FILL: i32 = -3;
+#[cfg(target_endian = "little")]
+const RESTAGED_CHUNK: usize = 4;
+#[cfg(target_endian = "little")]
+const RESTAGED_LEN: usize = 10;
 // A variable-length string element is stored as a sequence length, a global heap collection
 // address and an object index.
 #[cfg(target_endian = "little")]

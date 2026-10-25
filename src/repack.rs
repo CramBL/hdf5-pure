@@ -127,6 +127,7 @@ use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::attribute::AttributeMessage;
 use crate::chunked_read::ChunkInfo;
+use crate::chunked_write::PartialEdgeFiltering;
 use crate::chunked_write::{ChunkMeta, ChunkProvider, FilterKind, FilterSpec};
 use crate::convert::Narrow;
 use crate::data_layout::DataLayout;
@@ -1017,11 +1018,8 @@ fn copy_dataset_attrs(
     )
 }
 
-/// Carry the source dataset's resizability, chunk geometry, and filter pipeline
-/// onto the rebuilt dataset, so a repack reproduces the layout it read rather
-/// than flattening it. Shared by the fixed-size re-encode path and the
-/// variable-length re-staging paths, which both rebuild their elements from
-/// scratch and so must reapply the layout themselves.
+/// Sets the maximum dimensions, the chunk dimensions, the [`PartialEdgeFiltering`] policy, and
+/// the filter pipeline of the source dataset on `db`.
 ///
 /// `filters` are the ones [`check_pipeline`] decoded, which is what makes them
 /// safe to re-apply: there is no way to reach this with a pipeline that was not
@@ -1041,12 +1039,16 @@ fn carry_shape_and_pipeline(
     // Chunking: the v3 layout appends the element size as a trailing chunk
     // dimension, so keep only the first `rank` entries; v4 already stores `rank`.
     if let DataLayout::Chunked {
-        chunk_dimensions, ..
+        chunk_dimensions,
+        flags,
+        ..
     } = layout
     {
         let rank = dims.len();
         let logical: Vec<u64> = chunk_dimensions.iter().take(rank).copied().collect();
         db.with_chunks(&logical);
+        db.chunk_options.partial_edge_filtering =
+            Some(PartialEdgeFiltering::from_layout_flags(*flags));
     }
 
     // Re-apply the source's filters in the source's own order, each carrying
