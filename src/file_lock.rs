@@ -338,10 +338,10 @@ pub(crate) fn check_status_flags(
     intent: OpenIntent,
     target: OpenTarget<'_>,
 ) -> Result<(), Error> {
-    if superblock.version != SuperblockVersion::Three {
+    if superblock.version() != SuperblockVersion::Three {
         return Ok(());
     }
-    let flags = superblock.consistency_flags;
+    let flags = superblock.consistency_flags();
     let write = flags.contains(WRITE_ACCESS);
     let swmr = flags.contains(SWMR_WRITE_ACCESS);
     // Each arm states the whole condition: "marked open for write" describes two
@@ -417,16 +417,19 @@ pub(crate) fn clear_swmr_flag_at(path: &Path) -> Result<(), Error> {
         superblock: mut sb,
         ..
     } = superblock::read(data.as_slice())?;
-    if matches!(sb.version, SuperblockVersion::Zero | SuperblockVersion::One) {
+    if matches!(
+        sb.version(),
+        SuperblockVersion::Zero | SuperblockVersion::One
+    ) {
         // `serialize_superblock` writes only the v2/v3 layout and returns an error for a v0/v1
         // superblock. `check_status_flags`, like `H5Fopen`, reads the status flags from version 3
         // on, so a flag left in a v0/v1 superblock does not block an open.
         return Ok(());
     }
-    if sb.consistency_flags.is_empty() {
+    if sb.consistency_flags().is_empty() {
         return Ok(());
     }
-    sb.consistency_flags = SuperblockStatusFlags::new();
+    sb.set_consistency_flags(SuperblockStatusFlags::new())?;
     let bytes = hdf5_pure_format::__private::serialize_superblock(&sb)?;
     w.seek(SeekFrom::Start(address.get())).map_err(Error::Io)?;
     w.write_all(&bytes).map_err(Error::Io)?;
@@ -439,6 +442,7 @@ mod tests {
     use hdf5_pure_core::__private::SuperblockFields;
 
     use super::*;
+    use crate::SuperblockStatus;
     use crate::address::BaseAddressExt;
     use crate::address::StoredAddress;
     use crate::address::StoredAddressExt;
@@ -478,7 +482,7 @@ mod tests {
     /// irrelevant to the status-flag rules.
     fn flagged(version: SuperblockVersion, flags: SuperblockStatusFlags) -> Superblock {
         SuperblockFields {
-            version,
+            status: SuperblockStatus::new(version, flags).unwrap(),
             offset_size: OffsetWidth::Eight,
             length_size: LengthWidth::Eight,
             base_address: crate::address::BaseAddress::ZERO,
@@ -489,7 +493,6 @@ mod tests {
             indexed_storage_internal_node_k: None,
             free_space_address: None,
             driver_info_address: None,
-            consistency_flags: flags,
             superblock_extension_address: None,
             checksum: None,
         }
@@ -686,12 +689,12 @@ mod tests {
         } = crate::superblock::read(bytes.as_slice()).unwrap();
         let off = usize::try_from(address.get()).unwrap();
         assert_eq!(
-            sb.version,
+            sb.version(),
             SuperblockVersion::Three,
             "this writer emits a v3 superblock"
         );
-        sb.version = version;
-        sb.consistency_flags = flags;
+        sb.set_version(version).unwrap();
+        sb.set_consistency_flags(flags).unwrap();
         let patched = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();
         bytes[off..off + patched.len()].copy_from_slice(&patched);
         std::fs::write(path, &bytes).unwrap();
@@ -714,7 +717,7 @@ mod tests {
 
         let file = crate::File::open(&path).expect("a v2 file's status flags are not checked");
         assert_eq!(
-            file.superblock().consistency_flags,
+            file.superblock().consistency_flags(),
             SuperblockStatusFlags::swmr_write_marked()
         );
     }

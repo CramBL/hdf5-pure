@@ -422,7 +422,7 @@ impl WriteEngine {
             ));
         }
         if matches!(
-            self.context.superblock().version,
+            self.context.superblock().version(),
             SuperblockVersion::Zero | SuperblockVersion::One
         ) {
             return Err(Error::AppendInPlaceUnsupported(

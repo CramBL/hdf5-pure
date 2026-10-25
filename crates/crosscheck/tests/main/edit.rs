@@ -116,7 +116,7 @@ fn c_written_v2_file_edited_in_place() {
         .close()
         .unwrap();
     assert_eq!(
-        File::open(&path).unwrap().superblock().version,
+        File::open(&path).unwrap().superblock().version(),
         SuperblockVersion::Two
     );
 
@@ -142,7 +142,7 @@ fn c_written_v3_file_edited_in_place() {
     .close()
     .unwrap();
     assert_eq!(
-        File::open(&path).unwrap().superblock().version,
+        File::open(&path).unwrap().superblock().version(),
         SuperblockVersion::Three
     );
 
@@ -218,7 +218,7 @@ fn c_v0_symboltable_file_edited_then_read_by_c_library() {
     .unwrap();
     assert!(
         matches!(
-            File::open(&path).unwrap().superblock().version,
+            File::open(&path).unwrap().superblock().version(),
             SuperblockVersion::Zero | SuperblockVersion::One
         ),
         "expected a v0/v1 superblock from the earliest libver bound"
@@ -247,7 +247,7 @@ fn c_v0_symboltable_file_edited_then_read_by_c_library() {
     // The superblock stays version 0; the edited groups were converted to v2.
     let f = File::open(&path).unwrap();
     assert!(matches!(
-        f.superblock().version,
+        f.superblock().version(),
         SuperblockVersion::Zero | SuperblockVersion::One
     ));
     assert_eq!(
@@ -316,7 +316,7 @@ fn c_v0_root_attributes_survive_conversion() {
         file.close().unwrap();
     }
     assert!(matches!(
-        File::open(&path).unwrap().superblock().version,
+        File::open(&path).unwrap().superblock().version(),
         SuperblockVersion::Zero | SuperblockVersion::One
     ));
 
@@ -1703,7 +1703,7 @@ fn a_replaced_object_is_read_by_the_c_library() {
         fixtures::libhdf5_edit_repack_starter(&path, low, high, &[7, 8])
             .close()
             .unwrap();
-        assert_eq!(File::open(&path).unwrap().superblock().version, want_sb);
+        assert_eq!(File::open(&path).unwrap().superblock().version(), want_sb);
 
         {
             let session = File::open_rw(&path).unwrap();

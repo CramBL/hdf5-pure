@@ -120,7 +120,7 @@ impl FileContext {
         if superblock.base_address != self.superblock.base_address
             || superblock.offset_size != self.superblock.offset_size
             || superblock.length_size != self.superblock.length_size
-            || superblock.version != self.superblock.version
+            || superblock.version() != self.superblock.version()
         {
             return Err(Error::EditUnsupported(
                 "a proposed superblock changes the opened file's format or address domain",
@@ -245,7 +245,9 @@ mod tests {
         proposed.base_address = base.unwrap_or(proposed.base_address);
         proposed.offset_size = offsets.unwrap_or(proposed.offset_size);
         proposed.length_size = lengths.unwrap_or(proposed.length_size);
-        proposed.version = version.unwrap_or(proposed.version);
+        proposed
+            .set_version(version.unwrap_or(proposed.version()))
+            .unwrap();
         let Error::EditUnsupported(reason) = context.propose(proposed).unwrap_err() else {
             panic!("expected incompatible publication format");
         };
@@ -299,7 +301,9 @@ mod tests {
         let mut proposed = before.clone();
         proposed.root_group_address = StoredAddress::new(192);
         proposed.eof_address = 8192;
-        proposed.consistency_flags = SuperblockStatusFlags::write_marked();
+        proposed
+            .set_consistency_flags(SuperblockStatusFlags::write_marked())
+            .unwrap();
         let publication = context.propose(proposed.clone()).unwrap().encode().unwrap();
         assert_eq!(context.superblock(), &before);
         assert_eq!(
@@ -367,9 +371,13 @@ mod tests {
         recovered.base_address = base.unwrap_or(recovered.base_address);
         recovered.offset_size = offsets.unwrap_or(recovered.offset_size);
         recovered.length_size = lengths.unwrap_or(recovered.length_size);
-        recovered.version = version.unwrap_or(recovered.version);
+        recovered
+            .set_version(version.unwrap_or(recovered.version()))
+            .unwrap();
         if flags {
-            recovered.consistency_flags = SuperblockStatusFlags::write_marked();
+            recovered
+                .set_consistency_flags(SuperblockStatusFlags::write_marked())
+                .unwrap();
         }
         if extension {
             recovered.superblock_extension_address = Some(StoredAddress::new(256));

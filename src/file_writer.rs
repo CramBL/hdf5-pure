@@ -47,7 +47,6 @@ use hdf5_pure_space::__private::AllocationClass;
 #[cfg(test)]
 use crate::DeflateLevel;
 use crate::FillTime;
-use crate::SuperblockStatusFlags;
 use crate::SuperblockVersion;
 use crate::UserblockSize;
 #[cfg(test)]
@@ -97,6 +96,7 @@ use crate::type_builders::{
 use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
+use crate::{SuperblockStatus, SuperblockStatusFlags};
 
 // `AttrValue` lives in `type_builders`; `types` and `mat` reference it through
 // this module's path, so keep it re-exported here.
@@ -3517,7 +3517,10 @@ impl FileWriter {
             sink.reserve(eof_addr2)?;
             Self::put_userblock(sink, ub, &self.userblock_content)?;
             let sb = SuperblockFields {
-                version: superblock_version(libver),
+                status: SuperblockStatus::new(
+                    superblock_version(libver),
+                    SuperblockStatusFlags::new(),
+                )?,
                 offset_size: OFFSET_WIDTH,
                 length_size: LENGTH_WIDTH,
                 base_address: base,
@@ -3528,7 +3531,6 @@ impl FileWriter {
                 indexed_storage_internal_node_k: None,
                 free_space_address: None,
                 driver_info_address: None,
-                consistency_flags: SuperblockStatusFlags::new(),
                 superblock_extension_address: Some(StoredAddress::new(ext_addr)),
                 checksum: None,
             }
@@ -3806,7 +3808,10 @@ impl FileWriter {
         Self::put_userblock(sink, ub, &self.userblock_content)?;
 
         let sb = SuperblockFields {
-            version: superblock_version(libver),
+            status: SuperblockStatus::new(
+                superblock_version(libver),
+                SuperblockStatusFlags::new(),
+            )?,
             offset_size: OFFSET_WIDTH,
             length_size: LENGTH_WIDTH,
             base_address: BaseAddress::new(ub as u64),
@@ -3817,7 +3822,6 @@ impl FileWriter {
             indexed_storage_internal_node_k: None,
             free_space_address: None,
             driver_info_address: None,
-            consistency_flags: SuperblockStatusFlags::new(),
             superblock_extension_address: Some(
                 ext_addr
                     .map(StoredAddress::new)
@@ -5235,7 +5239,7 @@ mod tests {
         let fw = FileWriter::new();
         let bytes = fw.finish().unwrap();
         let (sb, oh) = parse_file(&bytes);
-        assert_eq!(sb.version, SuperblockVersion::Three);
+        assert_eq!(sb.version(), SuperblockVersion::Three);
         assert_eq!(oh.version, 2);
     }
 

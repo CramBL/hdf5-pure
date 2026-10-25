@@ -480,6 +480,12 @@ def test_migration_shape_admits_only_the_allowed_superblock_field_changes(field,
 @pytest.mark.parametrize(
     ("type_name", "member", "expected"),
     [
+        ("Superblock", "status", []),
+        ("Superblock", "version", []),
+        ("Superblock", "consistency_flags", []),
+        ("Superblock", "set_version", []),
+        ("Superblock", "set_consistency_flags", []),
+        ("Superblock", "unlisted", ["Superblock: inherent changed"]),
         ("FixedPointLayout", "low_padding", []),
         ("FixedPointLayout", "high_padding", []),
         ("FloatingPointLayout", "low_padding", []),
@@ -492,7 +498,7 @@ def test_migration_shape_admits_only_the_allowed_superblock_field_changes(field,
         ("FloatingPointLayout", "unlisted", ["FloatingPointLayout: inherent changed"]),
     ],
 )
-def test_migration_shape_admits_only_the_numeric_layout_getters(type_name, member, expected):
+def test_migration_shape_admits_only_the_allowed_inherent_members(type_name, member, expected):
     baseline = core_shape_fixture()
     baseline["index"]["1"]["name"] = type_name
     core = deepcopy(baseline)
@@ -565,3 +571,25 @@ def test_migration_admits_only_the_typed_variable_length_variant(
         },
     }
     assert migration_shapes(baseline, baseline, core) == expected
+
+
+@pytest.mark.parametrize(
+    ("name", "before", "after", "private_fields", "expected"),
+    [
+        ("Superblock", True, False, True, []),
+        ("Superblock", True, False, False, ["Superblock: non_exhaustive changed"]),
+        ("Superblock", False, True, True, ["Superblock: non_exhaustive changed"]),
+        ("Thing", True, False, True, ["Thing: non_exhaustive changed"]),
+        ("Thing", True, False, False, ["Thing: non_exhaustive changed"]),
+    ],
+)
+def test_migration_shape_allows_only_the_private_superblock_marker_removal(
+    name, before, after, private_fields, expected
+):
+    baseline = core_shape_fixture()
+    baseline["index"]["1"]["name"] = name
+    baseline["index"]["1"]["attrs"] = ["non_exhaustive"] if before else []
+    core = deepcopy(baseline)
+    core["index"]["1"]["attrs"] = ["non_exhaustive"] if after else []
+    core["index"]["1"]["inner"]["struct"]["kind"]["plain"]["has_stripped_fields"] = private_fields
+    assert migration_shapes(baseline, core, core) == expected

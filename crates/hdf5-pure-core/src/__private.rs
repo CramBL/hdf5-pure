@@ -22,8 +22,8 @@ use crate::LengthWidth;
 use crate::OffsetWidth;
 use crate::StoredAddress;
 use crate::Superblock;
+use crate::SuperblockStatus;
 use crate::SuperblockStatusFlags;
-use crate::SuperblockVersion;
 
 pub use crate::address::BaseAddressExt;
 pub use crate::address::DecodedStoredAddress;
@@ -94,7 +94,7 @@ pub fn enum_member(name: String, value: Vec<u8>) -> EnumMember {
 ///
 /// Each field holds the value of the [`Superblock`] field of the same name.
 pub struct SuperblockFields {
-    pub version: SuperblockVersion,
+    pub status: SuperblockStatus,
     pub offset_size: OffsetWidth,
     pub length_size: LengthWidth,
     pub base_address: BaseAddress,
@@ -105,7 +105,6 @@ pub struct SuperblockFields {
     pub indexed_storage_internal_node_k: Option<u16>,
     pub free_space_address: Option<StoredAddress>,
     pub driver_info_address: Option<StoredAddress>,
-    pub consistency_flags: SuperblockStatusFlags,
     pub superblock_extension_address: Option<StoredAddress>,
     pub checksum: Option<u32>,
 }
@@ -114,7 +113,7 @@ impl SuperblockFields {
     /// Creates a [`Superblock`] from these fields.
     pub fn build(self) -> Superblock {
         let Self {
-            version,
+            status,
             offset_size,
             length_size,
             base_address,
@@ -125,12 +124,11 @@ impl SuperblockFields {
             indexed_storage_internal_node_k,
             free_space_address,
             driver_info_address,
-            consistency_flags,
             superblock_extension_address,
             checksum,
         } = self;
         Superblock {
-            version,
+            status,
             offset_size,
             length_size,
             base_address,
@@ -141,7 +139,6 @@ impl SuperblockFields {
             indexed_storage_internal_node_k,
             free_space_address,
             driver_info_address,
-            consistency_flags,
             superblock_extension_address,
             checksum,
         }

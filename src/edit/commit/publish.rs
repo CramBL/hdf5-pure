@@ -219,7 +219,7 @@ impl WriteEngine {
         let new_eof = trunc_to.unwrap_or_else(|| PhysicalAddress::new(self.image.len()));
         self.barrier()?;
         if matches!(
-            self.context.superblock().version,
+            self.context.superblock().version(),
             SuperblockVersion::Two | SuperblockVersion::Three
         ) {
             // Adopt the proposed superblock after the publication write and barrier succeed.
@@ -227,7 +227,7 @@ impl WriteEngine {
             new_sb.root_group_address = base.relative(new_root.get())?;
             new_sb.eof_address = new_eof.get();
             // Preserve this session's status flags, including an active crash mark.
-            new_sb.consistency_flags = self.held_status_flags;
+            new_sb.set_consistency_flags(self.held_status_flags)?;
             self.publish_superblock(self.context.propose(new_sb)?.encode()?)?;
         } else {
             let stored_root = base.relative(new_root.get())?;
@@ -553,7 +553,7 @@ impl WriteEngine {
         new_sb.eof_address = final_eof.get();
         new_sb.superblock_extension_address = Some(StoredAddress::new(ext_addr));
         // Preserve any status flags held by this session.
-        new_sb.consistency_flags = self.held_status_flags;
+        new_sb.set_consistency_flags(self.held_status_flags)?;
         let publication = self.context.propose(new_sb)?.encode()?;
         let confirmed = self
             .aggregation
@@ -854,7 +854,7 @@ impl WriteEngine {
         new_sb.eof_address = final_eof.get();
         new_sb.superblock_extension_address = Some(StoredAddress::new(ext_addr));
         // Preserve the crash mark throughout a page-buffered session.
-        new_sb.consistency_flags = self.held_status_flags;
+        new_sb.set_consistency_flags(self.held_status_flags)?;
         self.publish_superblock(self.context.propose(new_sb)?.encode()?)?;
 
         // Complete EOF publication before removing the trailing suffix.
@@ -898,7 +898,7 @@ impl WriteEngine {
         // addresses, then the root symbol-table entry (link-name offset, object
         // header address, cache type(4), reserved(4), scratch(16)). The prefix is
         // 24 bytes for v0 and 28 for v1 (the latter adds indexed-storage-K).
-        let var_start = if self.context.superblock().version == SuperblockVersion::Zero {
+        let var_start = if self.context.superblock().version() == SuperblockVersion::Zero {
             24
         } else {
             28

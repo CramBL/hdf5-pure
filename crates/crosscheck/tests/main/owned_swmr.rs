@@ -65,7 +65,7 @@ fn a_superblock_reports_the_flags_the_c_library_wrote(
 
     let sb = File::open(&path).unwrap();
     let sb = sb.superblock();
-    assert_eq!(sb.version, version);
+    assert_eq!(sb.version(), version);
     if version == SuperblockVersion::One {
         assert_eq!(
             sb.indexed_storage_internal_node_k,
@@ -74,9 +74,9 @@ fn a_superblock_reports_the_flags_the_c_library_wrote(
     } else {
         assert_eq!(sb.indexed_storage_internal_node_k, None);
     }
-    assert_eq!(sb.consistency_flags, SuperblockStatusFlags::new());
+    assert_eq!(sb.consistency_flags(), SuperblockStatusFlags::new());
     assert_eq!(
-        SuperblockStatus::new(sb.version, sb.consistency_flags).unwrap(),
+        sb.status(),
         match version {
             SuperblockVersion::Zero => SuperblockStatus::Zero(0),
             SuperblockVersion::One => SuperblockStatus::One(0),

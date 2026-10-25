@@ -975,7 +975,7 @@ fn bounded_only_limitation(session: &WriteEngine) -> Option<&'static str> {
     }
 
     if matches!(
-        session.context.superblock().version,
+        session.context.superblock().version(),
         SuperblockVersion::Zero | SuperblockVersion::One
     ) {
         return Some(
@@ -1551,7 +1551,7 @@ impl WriteEngine {
                  use File::open_rw with staged edits and File::commit",
             ));
         }
-        if session.context.superblock().version != SuperblockVersion::Three
+        if session.context.superblock().version() != SuperblockVersion::Three
             || !session.context.superblock().base_address.is_zero()
             || session.persist.is_some()
         {
@@ -1574,11 +1574,12 @@ impl WriteEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Format`] if the superblock cannot be serialized, or [`Error::Io`] if
-    /// writing or syncing the image fails.
+    /// Returns [`Error::Format`] if the flags exceed the version's field width or the proposed
+    /// superblock cannot be serialized. Returns [`Error::Io`] if writing or syncing the image
+    /// fails.
     fn set_consistency_flags(&mut self, flags: SuperblockStatusFlags) -> Result<(), Error> {
         let mut superblock = self.context.superblock().clone();
-        superblock.consistency_flags = flags;
+        superblock.set_consistency_flags(flags)?;
         let publication = self.context.propose(superblock)?.encode()?;
         // A failed clear retains ownership of any mark the session may have written.
         if !flags.is_empty() {
@@ -1946,7 +1947,7 @@ impl WriteEngine {
         // it. A version-2 paged file is reachable — `LibVer::V18` writes a
         // version-2 superblock and nothing about paged file space rules it out —
         // so this is a refusal rather than an assertion (issue #308).
-        if self.context.superblock().version != SuperblockVersion::Three {
+        if self.context.superblock().version() != SuperblockVersion::Three {
             return Err(Error::EditUnsupported(
                 "a page buffer marks the file for the life of the session, so that a session \
                  that crashes leaves one every reader refuses rather than one that reads \
@@ -2184,7 +2185,7 @@ impl WriteEngine {
         let widths = context.widths();
         let base = context.addresses();
         if matches!(
-            superblock.version,
+            superblock.version(),
             SuperblockVersion::Zero | SuperblockVersion::One
         ) {
             return Ok(None); // no superblock extension exists before v2
@@ -2444,7 +2445,7 @@ impl WriteEngine {
     ///
     /// [`FileAccessProperties::with_libver_bounds`]: crate::FileAccessProperties::with_libver_bounds
     pub(crate) fn libver(&self) -> LibVer {
-        LibVer::from_superblock_version(self.context.superblock().version)
+        LibVer::from_superblock_version(self.context.superblock().version())
     }
 
     /// Constrain what this session may add, from the fapl's library-version

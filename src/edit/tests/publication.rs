@@ -85,19 +85,19 @@ fn failed_flag_publication_preserves_the_confirmed_context(
             .unwrap();
         assert!(engine.context.superblock().eof_address > before.eof_address);
         assert_eq!(
-            engine.context.superblock().consistency_flags,
+            engine.context.superblock().consistency_flags(),
             SuperblockStatusFlags::write_marked()
         );
         engine.force_sync().unwrap();
         engine.release_status_flags().unwrap();
         assert_eq!(
-            engine.context.superblock().consistency_flags,
+            engine.context.superblock().consistency_flags(),
             SuperblockStatusFlags::new()
         );
         drop(engine);
         let file = crate::reader::File::open(&path).unwrap();
         assert_eq!(
-            file.superblock().consistency_flags,
+            file.superblock().consistency_flags(),
             SuperblockStatusFlags::new()
         );
         assert_eq!(
@@ -162,7 +162,7 @@ fn publication_encodes_the_physical_root_once(
         backing,
     )
     .unwrap();
-    assert_eq!(engine.context.superblock().version, version);
+    assert_eq!(engine.context.superblock().version(), version);
     let stored_root = engine.context.superblock().root_group_address;
     let root = engine.context.addresses().resolve(stored_root).unwrap();
     assert_eq!(root.get(), userblock as u64 + stored_root.get());
@@ -795,7 +795,7 @@ fn open_rejection_precedes_image_construction() {
             ..
         } = crate::superblock::read(data.as_slice()).unwrap();
         let off = usize::try_from(address.get()).unwrap();
-        sb.consistency_flags = flags;
+        sb.set_consistency_flags(flags).unwrap();
         let mut bytes = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();
         bytes[hdf5_pure_format::__private::HDF5_SIGNATURE.len()] = version;
         data[off..off + bytes.len()].copy_from_slice(&bytes);
@@ -843,12 +843,13 @@ fn a_stale_consistency_flag_is_rejected_then_cleared_by_a_commit() {
         let off = usize::try_from(address.get()).unwrap();
         assert!(
             matches!(
-                sb.version,
+                sb.version(),
                 SuperblockVersion::Two | SuperblockVersion::Three
             ),
             "FileBuilder should emit a v2/v3 superblock"
         );
-        sb.consistency_flags = SuperblockStatusFlags::swmr_write_marked();
+        sb.set_consistency_flags(SuperblockStatusFlags::swmr_write_marked())
+            .unwrap();
         let bytes = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();
         data[off..off + bytes.len()].copy_from_slice(&bytes);
         std::fs::write(&path, &data).unwrap();
@@ -856,7 +857,7 @@ fn a_stale_consistency_flag_is_rejected_then_cleared_by_a_commit() {
             crate::superblock::read(data.as_slice())
                 .unwrap()
                 .superblock
-                .consistency_flags,
+                .consistency_flags(),
             SuperblockStatusFlags::swmr_write_marked()
         );
     }
@@ -873,8 +874,9 @@ fn a_stale_consistency_flag_is_rejected_then_cleared_by_a_commit() {
             ..
         } = crate::superblock::read(data.as_slice()).unwrap();
         let off = usize::try_from(address.get()).unwrap();
-        sb.version = SuperblockVersion::Two;
-        sb.consistency_flags = SuperblockStatusFlags::write_marked();
+        sb.set_version(SuperblockVersion::Two).unwrap();
+        sb.set_consistency_flags(SuperblockStatusFlags::write_marked())
+            .unwrap();
         let bytes = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();
         data[off..off + bytes.len()].copy_from_slice(&bytes);
         std::fs::write(&path, &data).unwrap();
@@ -894,7 +896,7 @@ fn a_stale_consistency_flag_is_rejected_then_cleared_by_a_commit() {
         crate::superblock::read(data.as_slice())
             .unwrap()
             .superblock
-            .consistency_flags,
+            .consistency_flags(),
         SuperblockStatusFlags::new(),
         "commit must clear the stale consistency flag"
     );
