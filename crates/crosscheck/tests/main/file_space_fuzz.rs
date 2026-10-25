@@ -19,11 +19,10 @@
 //!    yields a file whose every row, recorded strategy, and manager free-space
 //!    total the C library reads back exactly.
 //!
-//! 3. **Threshold admission.** Under [`FileSpaceStrategy::FsmAggr`], checks a deleted extent whose
-//!    preceding dataset is kept. Reusable free space and reallocated metadata cover its whole length
-//!    when it meets the threshold, and zero bytes otherwise. Dropped extents remain outside
-//!    session and persisted free sections. Checks surviving values and persisted free-space
-//!    totals through the C library.
+//! 3. **Subthreshold deletion.** Under [`FileSpaceStrategy::FsmAggr`], checks that an isolated
+//!    deleted extent below the threshold is absent from reusable and persisted free sections.
+//!    Checks typed and tuple reports and persistence configuration. The C library reads surviving
+//!    values and reports matching free-space totals.
 //!
 //! A failing case is shrunk to its minimal reproducer and recorded under
 //! `tests/proptest-regressions/`; commit that file so the reproducer travels
@@ -222,7 +221,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(32))]
 
     #[test]
-    fn interior_deletions_under_fsm_aggr_track_what_the_threshold_admits(
+    fn isolated_subthreshold_deletions_are_absent_from_free_sections(
         persist in any::<bool>(),
         threshold in 1u64..=8192,
         datasets in prop::collection::vec((1usize..=2048usize, any::<bool>()), 3..=6),
@@ -255,21 +254,15 @@ proptest! {
                 file.commit().unwrap();
                 let isolated = !deleted[i - 1];
                 let len = extent.end - extent.start;
-                let ownership = file.__space_ownership().unwrap();
-                prop_assert!(ownership.analysis_complete);
-                let accounted = [
-                    &ownership.reusable_free_space,
-                    &ownership.live_metadata_space,
-                    &ownership.free_space_manager_space,
-                ]
-                .into_iter()
-                .map(|sections| range::covered_len(sections, &extent))
-                .sum::<u64>();
-                if isolated {
-                    prop_assert_eq!(accounted, if len >= threshold { len } else { 0 });
-                    if len < threshold {
+                if isolated && len < threshold {
+                        let sections = file.reusable_free_sections().unwrap();
+                        let free = sections
+                            .sections()
+                            .iter()
+                            .map(|section| (section.address(), section.length().get()))
+                            .collect::<Vec<_>>();
+                        prop_assert_eq!(range::covered_len(&free, &extent), 0);
                         dropped.push(extent);
-                    }
                 }
             }
             for extent in &dropped {
@@ -281,7 +274,22 @@ proptest! {
             dropped
         };
 
-        let free = File::open(&path).unwrap().persisted_free_space().unwrap();
+        let reader = File::open(&path).unwrap();
+        let free = reader.persisted_free_space().unwrap();
+        let sections = reader.persisted_free_sections().unwrap();
+        prop_assert_eq!(sections.is_some(), persist);
+        if let Some(report) = sections {
+            prop_assert_eq!(
+                &report
+                    .free_sections()
+                    .sections()
+                    .iter()
+                    .map(|section| (section.address(), section.length().get()))
+                    .collect::<Vec<_>>(),
+                &free
+            );
+        }
+        drop(reader);
         for extent in &dropped {
             prop_assert_eq!(range::covered_len(&free, extent), 0);
         }

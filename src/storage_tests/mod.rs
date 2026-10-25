@@ -60,7 +60,7 @@ fn deleting_a_subtree_removes_its_three_reachable_collections() {
 /// # Panics
 ///
 /// Panics if the editing-session mutex is poisoned.
-fn ownership(file: &File) -> Result<SpaceOwnership, Error> {
+pub(crate) fn ownership(file: &File) -> Result<SpaceOwnership, Error> {
     let Backend::Edit(engine) = &file.inner.backend else {
         return Err(Error::ReadOnly);
     };

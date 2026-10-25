@@ -38,19 +38,16 @@ use super::WriteEngine;
 /// a chunk it cannot read or decode, a datatype that holds a reference or a variable-length type
 /// nested in another variable-length type, a datatype too small for its variable-length members,
 /// a message of a type it does not recognize, or a traversal limit.
-///
-/// This type is outside the supported API.
-#[doc(hidden)]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GlobalHeapLiveness {
+pub(crate) struct GlobalHeapLiveness {
     /// The absolute file offset of each collection, counted from byte 0 and including any
     /// userblock.
-    pub referenced_collections: BTreeSet<u64>,
+    pub(crate) referenced_collections: BTreeSet<u64>,
     /// Whether the editor read every reachable structure that can refer to a collection.
     ///
     /// A collection outside [`referenced_collections`](Self::referenced_collections) can still be
     /// live when this is `false`.
-    pub analysis_complete: bool,
+    pub(crate) analysis_complete: bool,
 }
 
 impl WriteEngine {

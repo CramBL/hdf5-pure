@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use rstest::rstest;
 use test_util::range;
 use test_util::temp;
 use test_util_hdf5::dataset::{Filter, Unlimited};
@@ -10,6 +11,103 @@ use crate::{
     AttrValue, DeflateLevel, Error, File, FileAccessProperties, FileBuilder, FileSpacePageSize,
     FileSpaceStrategy, FormatError, MaxExtent, SyncPolicy,
 };
+
+#[rstest]
+#[case::fsm(FileSpaceStrategy::FsmAggr)]
+#[case::page(FileSpaceStrategy::Page)]
+fn edited_storage_partitions_every_byte_across_close_and_reopen(
+    #[case] strategy: FileSpaceStrategy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("partition.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_strategy(strategy, true, 1);
+    builder.create_dataset("first").with_u8_data(&[7; 8_192]);
+    builder.create_dataset("hole").with_u8_data(&[9; 8_192]);
+    builder.create_dataset("last").with_u8_data(&[11; 8_192]);
+    builder.write(&path).unwrap();
+    let file = File::open_rw(&path).unwrap();
+    file_space::assert_exact_space_ownership(&file);
+    file.root().delete("hole").unwrap();
+    file.commit().unwrap();
+    let owned = file_space::assert_exact_space_ownership(&file);
+    assert!(!owned.reusable_free_space.is_empty());
+    assert!(!owned.free_space_manager_space.is_empty());
+    for payload in [
+        file_space::contiguous_extent(&file, "first"),
+        file_space::contiguous_extent(&file, "last"),
+    ] {
+        assert_eq!(
+            range::covered_len(&owned.live_raw_space, &payload),
+            payload.end - payload.start
+        );
+        assert_eq!(range::covered_len(&owned.reusable_free_space, &payload), 0);
+    }
+    for &(address, length) in &owned.free_space_manager_space {
+        let allocation = address..address.checked_add(length).unwrap();
+        assert_eq!(
+            range::covered_len(&owned.reusable_free_space, &allocation),
+            0
+        );
+    }
+    let survivor = file.clone();
+    file.close().unwrap();
+    super::ownership(&survivor).unwrap().assert_exact();
+    drop(survivor);
+    let reopened = File::open_rw(&path).unwrap();
+    file_space::assert_exact_space_ownership(&reopened);
+    assert_eq!(
+        reopened.dataset("first").unwrap().read_u8().unwrap(),
+        [7; 8_192]
+    );
+    assert_eq!(
+        reopened.dataset("last").unwrap().read_u8().unwrap(),
+        [11; 8_192]
+    );
+}
+
+#[rstest]
+#[case::below_threshold(1_025)]
+#[case::at_threshold(1_024)]
+#[case::above_threshold(1_023)]
+fn isolated_deletion_classifies_exactly_the_bytes_admitted_by_the_threshold(
+    #[case] threshold: u64,
+    #[values(false, true)] persist: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("threshold.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, persist, threshold);
+    builder.create_dataset("first").with_i32_data(&[7; 256]);
+    builder.create_dataset("hole").with_i32_data(&[9; 256]);
+    builder.create_dataset("last").with_i32_data(&[11; 256]);
+    builder.write(&path).unwrap();
+    let file = File::open_rw(&path).unwrap();
+    let deleted = file_space::contiguous_extent(&file, "hole");
+    let length = deleted.end - deleted.start;
+    file.root().delete("hole").unwrap();
+    file.commit().unwrap();
+    let owned = super::ownership(&file).unwrap();
+    assert!(owned.analysis_complete);
+    let accounted = [
+        &owned.reusable_free_space,
+        &owned.live_metadata_space,
+        &owned.free_space_manager_space,
+    ]
+    .into_iter()
+    .map(|sections| range::covered_len(sections, &deleted))
+    .sum::<u64>();
+    assert_eq!(accounted, if length >= threshold { length } else { 0 });
+    if length < threshold {
+        assert_eq!(
+            range::covered_len(&owned.unclassified_space, &deleted),
+            length
+        );
+        assert_eq!(range::covered_len(&owned.reusable_free_space, &deleted), 0);
+    }
+    assert_eq!(file.dataset("first").unwrap().read_i32().unwrap(), [7; 256]);
+    assert_eq!(file.dataset("last").unwrap().read_i32().unwrap(), [11; 256]);
+}
 
 #[test]
 fn a_paged_commit_tail_is_placed_in_free_space() {
