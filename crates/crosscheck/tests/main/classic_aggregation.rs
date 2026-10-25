@@ -6,11 +6,13 @@ use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::types::VarLenUnicode;
 use hdf5_pure::AttrValue;
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
+use hdf5_pure::FreeSectionCoordinates;
 use hdf5_pure::Layout;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::MemoryStrategy;
@@ -22,7 +24,6 @@ use test_util_hdf5::aggregation::Object;
 use test_util_hdf5::aggregation::Step;
 use test_util_hdf5::aggregation::Workload;
 use test_util_hdf5::file_space;
-use test_util_hdf5::file_space_oracle::SectionMap;
 use test_util_hdf5::storage;
 
 use crate::c_object;
@@ -47,22 +48,29 @@ fn libhdf5_recovers_and_reuses_new_file_aggregate_spare(
     builder.create_dataset("values").with_i32_data(&[17; 16]);
     builder.write(&path).unwrap();
     let file = File::open(&path).unwrap();
-    let sections = file.persisted_free_space().unwrap();
-    assert_eq!(!sections.is_empty(), has_sections);
+    let sections = file.persisted_free_sections().unwrap().unwrap();
+    assert_eq!(sections.free_sections().section_count() > 0, has_sections);
     drop(file);
     {
         let file = hdf5::File::open_rw(&path).unwrap();
-        SectionMap::new("hdf5-pure", sections.clone(), file.size() - userblock)
-            .unwrap()
-            .compare(
-                &SectionMap::new(
-                    "libhdf5",
-                    file_space::libhdf5_free_sections(&file).unwrap(),
-                    file.size() - userblock,
-                )
-                .unwrap(),
-            )
-            .unwrap();
+        let mut expected = file_space::libhdf5_free_sections(&file).unwrap();
+        expected.sort_unstable();
+        assert_eq!(sections.free_sections().section_count(), expected.len());
+        assert_eq!(
+            sections.free_sections().free_bytes(),
+            expected.iter().map(|&(_, length)| length).sum::<u64>()
+        );
+        let mut previous_end = 0;
+        for (section, (address, length)) in sections.free_sections().sections().iter().zip(expected)
+        {
+            assert!(length > 0);
+            assert!(address >= previous_end);
+            previous_end = address.checked_add(length).unwrap();
+            assert!(previous_end <= file.size() - userblock);
+            assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
+            assert_eq!(section.address(), address);
+            assert_eq!(section.length().get(), length);
+        }
         let added = file.new_dataset::<i32>().shape(16).create("added").unwrap();
         added.write_raw(&[23; 16]).unwrap();
         if has_sections {
@@ -71,7 +79,7 @@ fn libhdf5_recovers_and_reuses_new_file_aggregate_spare(
                 .iter()
                 .map(|&(_, size)| size)
                 .sum();
-            assert!(remaining < sections.iter().map(|&(_, size)| size).sum());
+            assert!(remaining < sections.free_sections().free_bytes());
         }
     }
     let bytes = std::fs::read(&path).unwrap();
@@ -254,7 +262,7 @@ fn libhdf5_reads_and_edits_an_aggregated_creation(
         [29, 31, 37]
     );
     if !(persist && strategy == Some(FileSpaceStrategy::FsmAggr)) {
-        assert_eq!(file.persisted_free_space().unwrap(), []);
+        assert_eq!(file.persisted_free_sections().unwrap(), None);
     }
     assert_eq!(
         file.superblock().eof_address,
@@ -301,7 +309,7 @@ fn libhdf5_persists_no_free_space_manager_under_aggr() {
         (info.strategy, info.persist, info.manager_addrs.as_slice()),
         (FileSpaceStrategy::Aggr, false, [].as_slice())
     );
-    assert_eq!(file.persisted_free_space().unwrap(), []);
+    assert_eq!(file.persisted_free_sections().unwrap(), None);
     let reopened = hdf5::File::open(&path).unwrap();
     assert_eq!(reopened.free_space(), 0);
     assert_eq!(file_space::libhdf5_free_sections(&reopened).unwrap(), []);
@@ -402,7 +410,11 @@ fn libhdf5_reads_and_mutates_its_classic_file_after_staged_edits(
         step.apply(&file);
         if strategy != PERSISTENT_FSM_AGGR {
             storage::assert_no_managers(&file);
-            assert_eq!(file.persisted_free_space().unwrap(), []);
+            let error = file.persisted_free_sections().unwrap_err();
+            assert!(
+                matches!(error, Error::FreeSectionInspectionUnsupported),
+                "{error:?}"
+            );
         }
     }
     file.close().unwrap();

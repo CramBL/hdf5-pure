@@ -16,6 +16,7 @@ use hdf5_pure::DecodedStoredAddress;
 use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FormatError;
+use hdf5_pure::FreeSectionCoordinates;
 use hdf5_pure::MessageType;
 use hdf5_pure_core::OffsetWidth;
 use hdf5_pure_format::__private::AccessMode;
@@ -97,11 +98,11 @@ fn c_library_accepts_persisted_reclaimed_dense_attribute_indexes() {
         }
         let free_before: u64 = File::open(&path)
             .unwrap()
-            .persisted_free_space()
+            .persisted_free_sections()
             .unwrap()
-            .iter()
-            .map(|&(_, len)| len)
-            .sum();
+            .unwrap()
+            .free_sections()
+            .free_bytes();
 
         {
             let session = File::open_rw(&path).unwrap();
@@ -117,11 +118,11 @@ fn c_library_accepts_persisted_reclaimed_dense_attribute_indexes() {
         assert_eq!(missing, "d");
         assert_eq!(pure.group("g").unwrap().attrs().unwrap().len(), 12);
         let free_after: u64 = pure
-            .persisted_free_space()
+            .persisted_free_sections()
             .unwrap()
-            .iter()
-            .map(|&(_, len)| len)
-            .sum();
+            .unwrap()
+            .free_sections()
+            .free_bytes();
         assert!(
             free_after > free_before,
             "deleting the dense dataset must add its proven storage to persisted free space"
@@ -242,7 +243,19 @@ fn write_dense_link_reclaim_fixture(
 }
 
 fn persistent_free(path: &Path) -> Vec<(u64, u64)> {
-    File::open(path).unwrap().persisted_free_space().unwrap()
+    File::open(path)
+        .unwrap()
+        .persisted_free_sections()
+        .unwrap()
+        .unwrap()
+        .free_sections()
+        .sections()
+        .iter()
+        .map(|section| {
+            assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
+            (section.address(), section.length().get())
+        })
+        .collect()
 }
 
 fn free_bytes(sections: &[(u64, u64)]) -> u64 {

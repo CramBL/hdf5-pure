@@ -119,7 +119,9 @@ proptest! {
                 let got = ours.dataset(&format!("d{i}")).unwrap().read_i32().unwrap();
                 prop_assert_eq!(&got, data);
             }
-            ours.persisted_free_space().unwrap().iter().map(|(_, l)| l).sum()
+            let report = ours.persisted_free_sections().unwrap();
+            prop_assert_eq!(report.is_some(), persist && matches!(strategy, FileSpaceStrategy::FsmAggr | FileSpaceStrategy::Page));
+            report.as_ref().map_or(0, |report| report.free_sections().free_bytes())
         };
 
         // libhdf5 recovers the strategy and reads every dataset.
@@ -194,7 +196,7 @@ proptest! {
             let ours = File::open(&path).unwrap();
             let got = ours.dataset("d").unwrap().read_i32().unwrap();
             prop_assert_eq!(&got, &want);
-            ours.persisted_free_space().unwrap().iter().map(|(_, l)| l).sum()
+            ours.persisted_free_sections().unwrap().unwrap().free_sections().free_bytes()
         };
 
         // The C library recovers the paged strategy, reads every row, and its
