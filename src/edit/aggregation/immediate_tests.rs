@@ -112,7 +112,7 @@ fn staged_and_immediate_edits_share_aggregate_windows(
         file.dataset("values").unwrap().read_i32().unwrap(),
         (0..end).collect::<Vec<_>>()
     );
-    assert_eq!(file.persisted_free_space().unwrap(), []);
+    assert_eq!(file.persisted_free_sections().unwrap(), None);
 }
 
 #[rstest]
@@ -274,7 +274,7 @@ fn failed_immediate_append_preserves_consumed_space(
         file.dataset("values").unwrap().read_i32().unwrap(),
         expected
     );
-    assert_eq!(file.persisted_free_space().unwrap(), []);
+    assert_eq!(file.persisted_free_sections().unwrap(), None);
 }
 
 #[test]

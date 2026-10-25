@@ -138,7 +138,12 @@ fn paged_persist_drop_finalizes() {
         (0..3000).collect::<Vec<i32>>()
     );
     assert!(
-        !f.persisted_free_space().unwrap().is_empty(),
+        f.persisted_free_sections()
+            .unwrap()
+            .unwrap()
+            .free_sections()
+            .section_count()
+            > 0,
         "a dropped paged handle finalizes like close"
     );
 }

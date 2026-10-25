@@ -146,7 +146,12 @@ fn paged_persist_roundtrip() {
 
     let f = File::open(&path).unwrap();
     assert!(
-        !f.persisted_free_space().unwrap().is_empty(),
+        f.persisted_free_sections()
+            .unwrap()
+            .unwrap()
+            .free_sections()
+            .section_count()
+            > 0,
         "paged persist tracks page-tail free space"
     );
 
@@ -180,7 +185,7 @@ fn paged_non_persist_is_aligned_without_managers() {
         info.manager_addrs.is_empty(),
         "non-persist records no managers"
     );
-    assert!(f.persisted_free_space().unwrap().is_empty());
+    assert_eq!(f.persisted_free_sections().unwrap(), None);
     assert_eq!(f.dataset("d").unwrap().read_i32().unwrap(), data);
 }
 

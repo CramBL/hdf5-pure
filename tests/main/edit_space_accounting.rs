@@ -186,11 +186,11 @@ fn persisting_session_seeds_reusable_free_on_open() {
     // What a plain reader recovers from the on-disk managers is the yardstick.
     let persisted: u64 = File::open(&p)
         .unwrap()
-        .persisted_free_space()
+        .persisted_free_sections()
         .unwrap()
-        .iter()
-        .map(|(_, len)| len)
-        .sum();
+        .unwrap()
+        .free_sections()
+        .free_bytes();
     assert!(
         persisted >= 1600,
         "the delete must persist as free space on disk"
