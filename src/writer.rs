@@ -567,6 +567,7 @@ mod streaming_tests {
     use test_util::superblock;
 
     use super::*;
+    use crate::FreeSectionCoordinates;
     use crate::chunked_write::{ChunkMeta, ChunkProvider};
     use crate::convert;
     use crate::data_layout::ChunkedLayoutFlags;
@@ -779,15 +780,22 @@ mod streaming_tests {
                 assert_eq!(info.manager_addrs, []);
             }
         }
-        let sections = file.persisted_free_space().unwrap();
+        let sections = file.persisted_free_sections().unwrap();
         if persistent {
             assert!(
                 sections
+                    .unwrap()
+                    .free_sections()
+                    .sections()
                     .iter()
-                    .all(|&(address, size)| size >= 9 && address + size <= length - userblock)
+                    .all(|section| {
+                        section.coordinates() == FreeSectionCoordinates::Stored
+                            && section.length().get() >= 9
+                            && section.end_address() <= length - userblock
+                    })
             );
         } else {
-            assert_eq!(sections, []);
+            assert_eq!(sections, None);
         }
         match workload {
             0 => assert_eq!(file.root().groups().unwrap().len(), 40),

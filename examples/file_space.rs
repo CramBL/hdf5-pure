@@ -178,14 +178,19 @@ fn churn(path: &Path) -> Cycle {
     drop(session); // release the lock before reading the file back
     let after_delete = len(path);
 
-    // For a persisting file, whatever the delete did not give back to the
-    // filesystem is recorded on disk and a later session draws on it; for a
-    // non-persisting file the list is empty here.
-    let free = File::open(path).unwrap().persisted_free_space().unwrap();
-    let total_free: u64 = free.iter().map(|&(_, len)| len).sum();
+    // `persisted_free_sections` returns `None` for disabled persistence. A report can contain zero
+    // sections.
+    let report = File::open(path).unwrap().persisted_free_sections().unwrap();
+    let (count, total_free) = match report {
+        Some(report) => (
+            report.free_sections().section_count(),
+            report.free_sections().free_bytes(),
+        ),
+        None => (0, 0),
+    };
     println!(
         "  after delete: {after_delete} bytes, {} persisted free region(s) ({total_free} bytes)",
-        free.len()
+        count
     );
 
     // Add a same-sized dataset in a fresh session and measure the growth.

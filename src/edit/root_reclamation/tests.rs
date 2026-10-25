@@ -148,7 +148,7 @@ fn ordinary_root_relocation_remains_available(#[case] threshold: u64, #[case] va
     file.close().unwrap();
     let file = File::open(&path).unwrap();
     assert_ne!(file.superblock().root_group_address, old_root);
-    file.persisted_free_space().unwrap();
+    file.persisted_free_sections().unwrap().unwrap();
 }
 
 #[test]
@@ -288,7 +288,7 @@ fn root_reclamation_failure_preserves_a_readable_committed_root(
             !updated || reclaimed
         );
     }
-    file.persisted_free_space().unwrap();
+    file.persisted_free_sections().unwrap().unwrap();
 }
 
 #[rstest]
@@ -373,7 +373,14 @@ fn tail_recycling_failure_preserves_committed_manager_sections(
         AttrValue::I64(if updated { 7 } else { -1 })
     );
     assert_eq!(file.dataset("keep").unwrap().read_u8().unwrap(), [7; 8_192]);
-    assert!(!file.persisted_free_space().unwrap().is_empty());
+    assert!(
+        file.persisted_free_sections()
+            .unwrap()
+            .unwrap()
+            .free_sections()
+            .section_count()
+            > 0
+    );
     drop(file);
     let file = File::open_rw(&path).unwrap();
     assert!(
@@ -409,7 +416,14 @@ fn empty_manager_recycling_recovers_exact_allocation_after_reopen() {
     engine.force_sync().unwrap();
     drop(engine);
     let file = File::open(&path).unwrap();
-    assert_eq!(file.persisted_free_space().unwrap(), []);
+    assert_eq!(
+        file.persisted_free_sections()
+            .unwrap()
+            .unwrap()
+            .free_sections()
+            .section_count(),
+        0
+    );
     assert!(
         file.file_space_info()
             .unwrap()

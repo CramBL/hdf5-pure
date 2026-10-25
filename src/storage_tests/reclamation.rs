@@ -274,11 +274,11 @@ fn a_reused_flat_manager_tail_preserves_its_spare_allocation_across_reopen() {
     );
     let reader = File::open(&path).unwrap();
     let persisted_free: u64 = reader
-        .persisted_free_space()
+        .persisted_free_sections()
         .unwrap()
-        .iter()
-        .map(|&(_, len)| len)
-        .sum();
+        .unwrap()
+        .free_sections()
+        .free_bytes();
     drop(reader);
 
     let reopened = open();

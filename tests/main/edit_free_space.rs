@@ -17,6 +17,7 @@ use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
+use hdf5_pure::FreeSectionCoordinates;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::MemoryStrategy;
 use hdf5_pure::SyncPolicy;
@@ -612,11 +613,10 @@ fn persisted_chunked_reclaim_is_disjoint_and_reusable() {
 
     let f = File::open(&path).unwrap();
     assert!(f.file_space_info().unwrap().unwrap().persist);
-    let mut free = f.persisted_free_space().unwrap();
-    free.sort();
-    for w in free.windows(2) {
+    let free = f.persisted_free_sections().unwrap().unwrap();
+    for w in free.free_sections().sections().windows(2) {
         assert!(
-            w[0].0 + w[0].1 <= w[1].0,
+            w[0].end_address() <= w[1].address(),
             "persisted free regions must be disjoint after a chunked delete: {free:?}"
         );
     }
@@ -646,10 +646,15 @@ fn persisted_free_space_survives_reopen_and_is_reused() {
         Some(FileSpaceStrategy::FsmAggr)
     );
     assert!(f.file_space_info().unwrap().unwrap().persist);
-    let free = f.persisted_free_space().unwrap();
-    let total: u64 = free.iter().map(|(_, l)| l).sum();
+    let free = f.persisted_free_sections().unwrap().unwrap();
+    let total = free.free_sections().free_bytes();
     assert!(
-        total >= 1600 && free.iter().any(|&(_, l)| l >= 1600),
+        total >= 1600
+            && free
+                .free_sections()
+                .sections()
+                .iter()
+                .any(|section| section.length().get() >= 1600),
         "the deleted dataset's storage is persisted as a free section: {free:?}"
     );
     assert_eq!(f.dataset("a").unwrap().read_i32().unwrap(), vec![1; 100]);
@@ -733,7 +738,7 @@ fn a_version_0_message_s_persisted_free_space_is_recovered_and_reused() {
                 .absolute(f.superblock().superblock_extension_address.unwrap())
                 .unwrap(),
             f.file_space_info().unwrap().unwrap(),
-            f.persisted_free_space().unwrap(),
+            f.persisted_free_sections().unwrap().unwrap(),
         )
     };
     let (version_0_managers, unused) = version_1
@@ -778,7 +783,13 @@ fn a_version_0_message_s_persisted_free_space_is_recovered_and_reused() {
             .build()
         )
     );
-    assert_eq!(f.persisted_free_space().unwrap(), free);
+    assert_eq!(
+        f.persisted_free_sections()
+            .unwrap()
+            .unwrap()
+            .free_sections(),
+        free.free_sections()
+    );
     drop(f);
 
     let eof_before = std::fs::metadata(&path).unwrap().len();
@@ -838,11 +849,10 @@ fn persisted_managers_stay_consistent_across_many_commits() {
         file_space::assert_eof_matches_physical_size(&path);
         let f = File::open(&path).unwrap();
         assert!(f.file_space_info().unwrap().unwrap().persist);
-        let mut free = f.persisted_free_space().unwrap();
-        free.sort();
-        for w in free.windows(2) {
+        let free = f.persisted_free_sections().unwrap().unwrap();
+        for w in free.free_sections().sections().windows(2) {
             assert!(
-                w[0].0 + w[0].1 <= w[1].0,
+                w[0].end_address() <= w[1].address(),
                 "persisted free regions must be disjoint: {free:?}"
             );
         }
@@ -1325,10 +1335,13 @@ fn corrupt_persisted_section_is_skipped_not_fatal() {
     // sizes are 1 and 8 bytes here.)
     let big_len = File::open(&path)
         .unwrap()
-        .persisted_free_space()
+        .persisted_free_sections()
         .unwrap()
-        .into_iter()
-        .map(|(_, len)| len)
+        .unwrap()
+        .free_sections()
+        .sections()
+        .iter()
+        .map(|section| section.length().get())
         .max()
         .expect("the deletion left a persisted free section");
     let mut bytes = std::fs::read(&path).unwrap();
@@ -1434,11 +1447,11 @@ fn paged_churn_reaches_a_steady_size() {
             drop(f);
             let persisted: u64 = File::open(&path)
                 .unwrap()
-                .persisted_free_space()
+                .persisted_free_sections()
                 .unwrap()
-                .iter()
-                .map(|(_, len)| len)
-                .sum();
+                .unwrap()
+                .free_sections()
+                .free_bytes();
             assert_eq!(
                 acct.reusable_free_bytes, persisted,
                 "round {round}: free space the session can spend must be the free \
@@ -1615,11 +1628,11 @@ fn a_paged_tail_conserves_free_space_across_layouts() {
             totals.push(
                 File::open(&path)
                     .unwrap()
-                    .persisted_free_space()
+                    .persisted_free_sections()
                     .unwrap()
-                    .iter()
-                    .map(|(_, len)| len)
-                    .sum::<u64>(),
+                    .unwrap()
+                    .free_sections()
+                    .free_bytes(),
             );
         }
         assert_eq!(
@@ -1703,11 +1716,11 @@ fn a_reused_flat_manager_tail_preserves_its_spare_allocation_across_reopen() {
     );
     let reader = File::open(&path).unwrap();
     let persisted_free: u64 = reader
-        .persisted_free_space()
+        .persisted_free_sections()
         .unwrap()
-        .iter()
-        .map(|&(_, len)| len)
-        .sum();
+        .unwrap()
+        .free_sections()
+        .free_bytes();
     drop(reader);
 
     let reopened = open();
@@ -1789,7 +1802,11 @@ fn a_persisting_commit_tail_is_placed_in_free_space() {
     // Three commits that change nothing but one attribute and the tail the commit
     // has to rewrite regardless.
     for i in 0..3 {
-        let before: Vec<(u64, u64)> = File::open(&path).unwrap().persisted_free_space().unwrap();
+        let before = File::open(&path)
+            .unwrap()
+            .persisted_free_sections()
+            .unwrap()
+            .unwrap();
         let f = File::open_rw(&path).unwrap();
         f.root().set_attr("n", AttrValue::I64(i)).unwrap();
         f.commit().unwrap();
@@ -1813,7 +1830,11 @@ fn a_persisting_commit_tail_is_placed_in_free_space() {
         );
         for addr in managers {
             assert!(
-                before.iter().any(|&(a, len)| addr >= a && addr < a + len),
+                before
+                    .free_sections()
+                    .sections()
+                    .iter()
+                    .any(|section| addr >= section.address() && addr < section.end_address()),
                 "commit {i}: a manager block landed at {addr}, which was not free \
                  before the commit ({before:?}) — the tail appended instead of \
                  reusing"
@@ -2058,7 +2079,10 @@ fn assert_released_file_is_self_consistent(path: &std::path::Path) {
     file_space::assert_eof_matches_physical_size(path);
     let len = std::fs::metadata(path).unwrap().len();
     let f = File::open(path).unwrap();
-    for (addr, size) in f.persisted_free_space().unwrap() {
+    let report = f.persisted_free_sections().unwrap().unwrap();
+    for section in report.free_sections().sections() {
+        let (addr, size) = (section.address(), section.length().get());
+        assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
         assert!(
             addr + size <= len,
             "a persisted free section [{addr}, {}) runs past the end of the \
@@ -2503,11 +2527,11 @@ fn a_persisting_file_reuses_a_hole_smaller_than_a_batch() {
     assert_eq!(file.dataset("log").unwrap().read_i32().unwrap(), payload);
     assert_eq!(file.dataset("keep").unwrap().read_i32().unwrap(), [1, 2, 3]);
     let persisted: u64 = file
-        .persisted_free_space()
+        .persisted_free_sections()
         .unwrap()
-        .iter()
-        .map(|(_, l)| l)
-        .sum();
+        .unwrap()
+        .free_sections()
+        .free_bytes();
     assert!(
         persisted + payload_bytes <= freed,
         "the managers must describe the hole less what the append placed in it \
@@ -2544,11 +2568,13 @@ const CEILING_ELEMS: usize = 4096;
 /// those managers and would write over the top of live data.
 fn assert_no_persisted_free_space_holds_live_chunks(path: &std::path::Path, datasets: &[&str]) {
     let file = File::open(path).unwrap();
-    let free = file.persisted_free_space().unwrap();
+    let free = file.persisted_free_sections().unwrap().unwrap();
     for name in datasets {
         for chunk in file.dataset(name).unwrap().chunks().unwrap() {
             let (lo, hi) = (chunk.address, chunk.address + chunk.storage_size);
-            for &(addr, len) in &free {
+            for section in free.free_sections().sections() {
+                let (addr, len) = (section.address(), section.length().get());
+                assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
                 assert!(
                     addr >= hi || lo >= addr + len,
                     "the managers advertise [{addr}, {}) as free, which overlaps a live \

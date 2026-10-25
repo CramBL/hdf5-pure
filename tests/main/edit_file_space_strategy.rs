@@ -9,6 +9,7 @@ use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
+use hdf5_pure::FreeSectionCoordinates;
 use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_core::__private::FileSpaceInfoFields;
 use hdf5_pure_format::__private::FormatWidths;
@@ -128,7 +129,7 @@ fn persisted_free_space_is_not_reused_under_a_strategy_without_a_free_space_mana
                 .absolute(file.superblock().superblock_extension_address.unwrap())
                 .unwrap(),
             file.file_space_info().unwrap().unwrap(),
-            file.persisted_free_space().unwrap(),
+            file.persisted_free_sections().unwrap().unwrap(),
         )
     };
     let relabeled = FileSpaceInfoFields {
@@ -167,12 +168,13 @@ fn persisted_free_space_is_not_reused_under_a_strategy_without_a_free_space_mana
         "{deleted:?}, {placed:?}"
     );
     let file = File::open(&path).unwrap();
+    assert_eq!(file.file_space_info().unwrap(), Some(relabeled));
     assert_eq!(
-        (
-            file.file_space_info().unwrap(),
-            file.persisted_free_space().unwrap()
-        ),
-        (Some(relabeled), free)
+        file.persisted_free_sections()
+            .unwrap()
+            .unwrap()
+            .free_sections(),
+        free.free_sections()
     );
 }
 
@@ -376,7 +378,22 @@ fn a_sub_threshold_extent_is_tracked_only_beside_a_tracked_extent(
 }
 
 fn persisted_or_reused_sections(path: &Path, persist: bool) -> Vec<(u64, u64)> {
-    let mut sections = File::open(path).unwrap().persisted_free_space().unwrap();
+    let report = File::open(path).unwrap().persisted_free_sections().unwrap();
+    assert_eq!(report.is_some(), persist);
+    let mut sections = report
+        .as_ref()
+        .map(|report| {
+            report
+                .free_sections()
+                .sections()
+                .iter()
+                .map(|section| {
+                    assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
+                    (section.address(), section.length().get())
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     if persist {
         let bytes = std::fs::read(path).unwrap();
         let file = File::open(path).unwrap();

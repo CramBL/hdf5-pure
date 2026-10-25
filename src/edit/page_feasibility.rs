@@ -160,7 +160,7 @@ fn fresh_page_placement_and_root_publication_preserve_old_allocations(
     assert_eq!(file.dataset("keep").unwrap().read_u8().unwrap(), [7; 64]);
     assert_eq!(file.dataset("added").unwrap().read_u8().unwrap(), [9; 64]);
     assert_eq!(file.file_space_info().unwrap().unwrap(), info);
-    assert_eq!(file.persisted_free_space().unwrap(), []);
+    assert_eq!(file.persisted_free_sections().unwrap(), None);
     drop(file);
     let mut reopened = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     assert!(reopened.space.reusable_sections().next().is_none());
@@ -420,7 +420,7 @@ fn staged_commits_preserve_preexisting_bytes_outside_the_superblock(
     let file = File::open(&path).unwrap();
     assert_eq!(file.dataset("second").unwrap().read_u8().unwrap(), [11; 64]);
     assert!(!file.file_space_info().unwrap().unwrap().persist);
-    assert_eq!(file.persisted_free_space().unwrap(), []);
+    assert_eq!(file.persisted_free_sections().unwrap(), None);
     assert_eq!((file.superblock().eof_address - userblock) % page_size, 0);
     assert_eq!(
         file.root().datasets().unwrap(),
@@ -1045,7 +1045,7 @@ impl WriteEngine {
                 .manager_addrs
                 .is_empty()
         );
-        assert_eq!(file.persisted_free_space().unwrap(), []);
+        assert_eq!(file.persisted_free_sections().unwrap(), None);
     }
 }
 
@@ -1099,7 +1099,7 @@ fn assert_interrupted_reopen(path: &Path, interrupted: &[u8], sync: SyncPolicy, 
             .manager_addrs
             .is_empty()
     );
-    assert_eq!(file.persisted_free_space().unwrap(), []);
+    assert_eq!(file.persisted_free_sections().unwrap(), None);
 }
 
 impl Failure {

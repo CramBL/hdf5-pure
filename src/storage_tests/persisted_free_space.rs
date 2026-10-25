@@ -14,6 +14,7 @@ use crate::FileBuilder;
 use crate::FileSpacePageSize;
 use crate::FileSpaceSettings;
 use crate::FileSpaceStrategy;
+use crate::FreeSectionCoordinates;
 use crate::UserblockSize;
 use crate::edit::SpaceOwnership;
 
@@ -31,7 +32,11 @@ fn a_session_reuses_the_free_space_an_earlier_session_persisted(
     first.root().delete("b").unwrap();
     first.commit().unwrap();
     first.close().unwrap();
-    let persisted = File::open(&path).unwrap().persisted_free_space().unwrap();
+    let persisted = File::open(&path)
+        .unwrap()
+        .persisted_free_sections()
+        .unwrap()
+        .unwrap();
     let second = File::open_rw(&path).unwrap();
     let ownership = super::ownership(&second).unwrap();
     assert!(ownership.analysis_complete);
@@ -40,22 +45,24 @@ fn a_session_reuses_the_free_space_an_earlier_session_persisted(
     available_or_reused.extend(ownership.free_space_manager_space);
     assert_eq!(range::covered_len(&available_or_reused, &hole), HOLE_BYTES);
     let expected = persisted
+        .free_sections()
+        .sections()
         .iter()
-        .filter(|&&(address, length)| {
-            address + userblock >= hole.start
-                && address + userblock + length <= hole.end
-                && length >= 1_200
+        .filter(|section| {
+            section.address() + userblock >= hole.start
+                && section.end_address() + userblock <= hole.end
+                && section.length().get() >= 1_200
         })
-        .map(|&(address, _)| address + userblock)
+        .map(|section| section.address() + userblock)
         .min()
         .unwrap();
-    assert_eq!(
-        second.space_accounting().unwrap().reusable_free_space,
-        persisted
-            .iter()
-            .map(|&(at, len)| (at + userblock, len))
-            .collect::<Vec<_>>()
-    );
+    let reusable = second.space_accounting().unwrap().reusable_free_space;
+    assert_eq!(reusable.len(), persisted.free_sections().section_count());
+    for ((address, length), section) in reusable.iter().zip(persisted.free_sections().sections()) {
+        assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
+        assert_eq!(*address, section.address() + userblock);
+        assert_eq!(*length, section.length().get());
+    }
     second
         .root()
         .create_dataset("d", |builder| {
@@ -124,15 +131,23 @@ fn every_commit_keeps_the_userblock_and_writes_stored_manager_addresses(
         );
 
         let file = File::open(&path).unwrap();
-        let stored_free = file.persisted_free_space().unwrap();
+        let stored_free = file.persisted_free_sections().unwrap().unwrap();
         assert_eq!(
-            stored_free,
-            reusable
-                .iter()
-                .map(|&(at, len)| (at - userblock, len))
-                .collect::<Vec<_>>(),
+            stored_free.free_sections().section_count(),
+            reusable.len(),
             "{step:?}"
         );
+        for (section, (address, length)) in
+            stored_free.free_sections().sections().iter().zip(&reusable)
+        {
+            assert_eq!(
+                section.coordinates(),
+                FreeSectionCoordinates::Stored,
+                "{step:?}"
+            );
+            assert_eq!(section.address(), address - userblock, "{step:?}");
+            assert_eq!(section.length().get(), *length, "{step:?}");
+        }
         let headers = file
             .file_space_info()
             .unwrap()
@@ -193,9 +208,17 @@ fn a_reopened_paged_session_reuses_each_page_type_in_its_own_pages(
     first.root().delete("pages").unwrap();
     first.commit().unwrap();
     first.close().unwrap();
-    let persisted = File::open(&path).unwrap().persisted_free_space().unwrap();
+    let persisted = File::open(&path)
+        .unwrap()
+        .persisted_free_sections()
+        .unwrap()
+        .unwrap();
     assert!(
-        persisted.contains(&(pages.start - userblock, PAGE)),
+        persisted.free_sections().sections().iter().any(|section| {
+            section.coordinates() == FreeSectionCoordinates::Stored
+                && section.address() == pages.start - userblock
+                && section.length().get() == PAGE
+        }),
         "{persisted:?}"
     );
 

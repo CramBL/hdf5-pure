@@ -567,7 +567,7 @@ mod tests {
             file.dataset("values").unwrap().read_i32().unwrap(),
             [11; 16]
         );
-        assert_eq!(file.persisted_free_space().unwrap(), []);
+        assert_eq!(file.persisted_free_sections().unwrap(), None);
     }
 
     #[rstest]

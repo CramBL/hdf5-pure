@@ -896,15 +896,19 @@ fn persisted_free_space_holds_nothing_live(path: &Path) -> Verdict {
     let Ok(chunks) = f.dataset("d").and_then(|d| d.chunks()) else {
         return Verdict::Clean;
     };
-    Verdict::of(f.persisted_free_space(), |free| {
+    Verdict::of(f.persisted_free_sections(), |report| {
+        let Some(report) = report else {
+            return Ok(());
+        };
         for c in chunks {
             let (lo, hi) = (c.address, c.address + c.storage_size);
-            for &(addr, len) in &free {
-                if addr < hi && lo < addr + len {
+            for section in report.free_sections().sections() {
+                let (addr, end) = (section.address(), section.end_address());
+                if addr < hi && lo < end {
                     return Err(std::format!(
                         "the managers advertise [{addr}, {}) as free, which overlaps a live \
                          chunk of `d` at [{lo}, {hi})",
-                        addr + len
+                        end
                     ));
                 }
             }

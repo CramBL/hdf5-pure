@@ -8050,7 +8050,15 @@ mod tests {
                 .manager_addrs
                 .is_empty()
         );
-        assert!(file.persisted_free_space().unwrap().is_empty());
+        if matches!(&file.inner.backend, Backend::Edit(_)) {
+            let error = file.persisted_free_sections().unwrap_err();
+            assert!(
+                matches!(error, Error::FreeSectionInspectionUnsupported),
+                "{error:?}"
+            );
+        } else {
+            assert_eq!(file.persisted_free_sections().unwrap(), None);
+        }
     }
 
     #[rstest]

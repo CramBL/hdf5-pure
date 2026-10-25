@@ -78,7 +78,7 @@ fn reusable_sections_precede_retained_aggregate_windows(
     let file = File::open(&path).unwrap();
     assert_eq!(file.root().datasets().unwrap(), ["keep"]);
     assert_eq!(file.dataset("keep").unwrap().read_u8().unwrap(), [11; 4096]);
-    assert_eq!(file.persisted_free_space().unwrap(), []);
+    assert_eq!(file.persisted_free_sections().unwrap(), None);
 }
 
 #[rstest]

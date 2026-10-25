@@ -155,11 +155,14 @@ fn active_spare_is_excluded_until_persistent_settlement(
     let file = File::open(&path).unwrap();
     assert_eq!(file.dataset("first").unwrap().read_u8().unwrap(), [37; 64]);
     assert!(
-        file.persisted_free_space()
+        file.persisted_free_sections()
             .unwrap()
+            .unwrap()
+            .free_sections()
+            .sections()
             .iter()
-            .any(|&(start, length)| {
-                start <= interior.start() && start + length >= interior.end()
+            .any(|section| {
+                section.address() <= interior.start() && section.end_address() >= interior.end()
             })
     );
 }
@@ -293,7 +296,7 @@ fn persistent_settlement_failure_preserves_publication_order(
     let file = File::open(&path).unwrap();
     assert_eq!(file.dataset("keep").unwrap().read_u8().unwrap(), [11; 4096]);
     assert_eq!(file.dataset("first").unwrap().read_u8().unwrap(), [37; 64]);
-    file.persisted_free_space().unwrap();
+    file.persisted_free_sections().unwrap().unwrap();
 }
 
 #[rstest]
@@ -332,10 +335,13 @@ fn abandoned_persistent_spare_uses_threshold(#[case] threshold: u64, #[case] tra
     engine.finalize_persist().unwrap();
     drop(engine);
     let file = File::open(&path).unwrap();
-    let free = file.persisted_free_space().unwrap();
+    let free = file.persisted_free_sections().unwrap().unwrap();
     assert_eq!(
-        free.iter()
-            .any(|&(at, len)| at <= extent.start() && at + len >= extent.end()),
+        free.free_sections()
+            .sections()
+            .iter()
+            .any(|section| section.address() <= extent.start()
+                && section.end_address() >= extent.end()),
         tracked
     );
 }
@@ -388,7 +394,7 @@ fn reserve_publication_failure_prevents_reuse(#[case] failure: Failure, #[case] 
     drop(engine);
     let file = File::open(&path).unwrap();
     assert_eq!(file.dataset("keep").unwrap().read_u8().unwrap(), [11; 4096]);
-    file.persisted_free_space().unwrap();
+    file.persisted_free_sections().unwrap().unwrap();
 }
 
 #[rstest]
@@ -466,7 +472,7 @@ fn releasing_spare_for_a_deletion_preserves_ownership_on_failure(
             [37; 2_000]
         );
     }
-    file.persisted_free_space().unwrap();
+    file.persisted_free_sections().unwrap().unwrap();
 }
 
 #[derive(Clone, Copy)]
@@ -606,10 +612,15 @@ fn assert_spare_excluded(engine: &WriteEngine, spare: &[Extent]) {
         )
         .unwrap();
         assert!(
-            file.persisted_free_space()
+            file.persisted_free_sections()
                 .unwrap()
+                .unwrap()
+                .free_sections()
+                .sections()
                 .iter()
-                .all(|&(at, len)| { extent.end() <= at || at + len <= extent.start() })
+                .all(|section| {
+                    extent.end() <= section.address() || section.end_address() <= extent.start()
+                })
         );
     }
 }

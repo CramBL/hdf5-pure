@@ -660,11 +660,11 @@ fn paged_open_seeds_each_manager_by_slot() {
     b.write(&path).unwrap();
     let on_disk: u64 = crate::reader::File::open(&path)
         .unwrap()
-        .persisted_free_space()
+        .persisted_free_sections()
         .unwrap()
-        .iter()
-        .map(|&(_, l)| l)
-        .sum();
+        .unwrap()
+        .free_sections()
+        .free_bytes();
 
     let s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     assert_eq!(
@@ -1318,11 +1318,11 @@ fn failed_paged_commit_leaves_the_free_lists_untouched() {
     let kept = f.dataset("keep").unwrap().read_i32().unwrap();
     assert_eq!(kept, (0..200).collect::<Vec<i32>>(), "keep survives intact");
     let freed: u64 = f
-        .persisted_free_space()
+        .persisted_free_sections()
         .unwrap()
-        .iter()
-        .map(|&(_, l)| l)
-        .sum();
+        .unwrap()
+        .free_sections()
+        .free_bytes();
     let live_end = f.file_size();
     assert!(
         freed < live_end,
@@ -1741,11 +1741,11 @@ fn an_unspent_append_reserve_goes_back_to_the_managers() {
     let persisted = |p: &std::path::Path| -> u64 {
         crate::reader::File::open(p)
             .unwrap()
-            .persisted_free_space()
+            .persisted_free_sections()
             .unwrap()
-            .iter()
-            .map(|&(_, len)| len)
-            .sum()
+            .unwrap()
+            .free_sections()
+            .free_bytes()
     };
 
     {

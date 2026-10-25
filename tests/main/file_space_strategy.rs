@@ -234,6 +234,13 @@ fn persist_true_records_reusable_spare_on_a_fresh_file() {
             .iter()
             .any(|&a| matches!(a, hdf5_pure::DecodedStoredAddress::Defined(_)))
     );
-    assert!(!f.persisted_free_space().unwrap().is_empty());
+    assert!(
+        f.persisted_free_sections()
+            .unwrap()
+            .unwrap()
+            .free_sections()
+            .section_count()
+            > 0
+    );
     assert_eq!(f.dataset("d").unwrap().read_i32().unwrap(), vec![1, 2, 3]);
 }

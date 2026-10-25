@@ -41,8 +41,8 @@ fn persistent_creation_recovers_settled_spare_and_reuses_it_after_reopen(
     builder.create_dataset("values").with_i32_data(&[17; 16]);
     builder.write(&path).unwrap();
     let file = File::open(&path).unwrap();
-    let free = file.persisted_free_space().unwrap();
-    assert_eq!(!free.is_empty(), has_manager);
+    let free = file.persisted_free_sections().unwrap().unwrap();
+    assert_eq!(free.free_sections().section_count() > 0, has_manager);
     drop(file);
     let file = File::open_rw(&path).unwrap();
     let before = super::ownership(&file).unwrap();
@@ -128,7 +128,7 @@ fn hdf5_pure_writes_no_free_space_manager_under_aggr_or_none(
         (info.strategy, info.persist, info.manager_addrs.as_slice()),
         (strategy, false, [].as_slice())
     );
-    assert_eq!(file.persisted_free_space().unwrap(), []);
+    assert_eq!(file.persisted_free_sections().unwrap(), None);
 }
 
 #[rstest]
@@ -286,7 +286,7 @@ fn staged_aggr_allocations_reuse_session_windows(
         file.dataset("second").unwrap().read_i32().unwrap(),
         [29; 16]
     );
-    assert_eq!(file.persisted_free_space().unwrap(), []);
+    assert_eq!(file.persisted_free_sections().unwrap(), None);
     assert_eq!(
         file.superblock().eof_address,
         std::fs::metadata(&path).unwrap().len()
