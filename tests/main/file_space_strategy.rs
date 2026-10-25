@@ -31,8 +31,16 @@ fn each_strategy_roundtrips(#[case] strategy: FileSpaceStrategy, #[case] thresho
 
     let f = File::open(&path).unwrap();
     // The strategy and the page size round-trip.
-    assert_eq!(f.file_space_strategy(), Some(strategy));
-    let info = f.file_space_info().expect("file records a strategy");
+    assert_eq!(
+        f.file_space_settings()
+            .unwrap()
+            .map(|settings| settings.strategy()),
+        Some(strategy)
+    );
+    let info = f
+        .file_space_info()
+        .unwrap()
+        .expect("file records a strategy");
     assert_eq!(info.strategy, strategy);
     assert!(!info.persist);
     assert_eq!(info.threshold, threshold);
@@ -62,9 +70,9 @@ fn a_strategy_without_a_free_space_manager_records_neither_persistence_nor_a_thr
 
     let f = File::open(&path).unwrap();
     assert_eq!(
-        f.file_space_info(),
+        f.file_space_info().unwrap(),
         Some(
-            &FileSpaceInfoFields {
+            FileSpaceInfoFields {
                 strategy,
                 persist: false,
                 threshold: DEFAULT_THRESHOLD,
@@ -87,8 +95,13 @@ fn no_config_writes_no_extension() {
 
     let f = File::open(&path).unwrap();
     // Default: no File Space Info message, matching the C library's behavior.
-    assert_eq!(f.file_space_strategy(), None);
-    assert!(f.file_space_info().is_none());
+    assert_eq!(
+        f.file_space_settings()
+            .unwrap()
+            .map(|settings| settings.strategy()),
+        None
+    );
+    assert!(f.file_space_info().unwrap().is_none());
     assert_eq!(
         f.superblock()
             .superblock_extension_address
@@ -109,6 +122,7 @@ fn page_size_only_defaults_strategy() {
     let f = File::open(&path).unwrap();
     let info = f
         .file_space_info()
+        .unwrap()
         .expect("page size implies a strategy record");
     assert_eq!(info.strategy, FileSpaceStrategy::FsmAggr);
     assert_eq!(info.page_size.get(), 2048);
@@ -126,7 +140,12 @@ fn strategy_survives_userblock_and_empty_file() {
         .with_file_space_strategy(FileSpaceStrategy::None, false, 1);
     b.write(&path).unwrap();
     let f = File::open(&path).unwrap();
-    assert_eq!(f.file_space_strategy(), Some(FileSpaceStrategy::None));
+    assert_eq!(
+        f.file_space_settings()
+            .unwrap()
+            .map(|settings| settings.strategy()),
+        Some(FileSpaceStrategy::None)
+    );
     assert_eq!(f.dataset("d").unwrap().read_i32().unwrap(), vec![5, 6]);
 
     let path = temp::temp_path("hdf5_pure_fss_empty.h5");
@@ -134,7 +153,12 @@ fn strategy_survives_userblock_and_empty_file() {
     b.with_file_space_strategy(FileSpaceStrategy::Aggr, false, 1);
     b.write(&path).unwrap();
     let f = File::open(&path).unwrap();
-    assert_eq!(f.file_space_strategy(), Some(FileSpaceStrategy::Aggr));
+    assert_eq!(
+        f.file_space_settings()
+            .unwrap()
+            .map(|settings| settings.strategy()),
+        Some(FileSpaceStrategy::Aggr)
+    );
 }
 
 #[test]
@@ -164,7 +188,12 @@ fn survives_in_place_edit() {
     }
 
     let f = File::open(&path).unwrap();
-    assert_eq!(f.file_space_strategy(), Some(FileSpaceStrategy::FsmAggr));
+    assert_eq!(
+        f.file_space_settings()
+            .unwrap()
+            .map(|settings| settings.strategy()),
+        Some(FileSpaceStrategy::FsmAggr)
+    );
     assert_eq!(
         f.dataset("keep").unwrap().read_i32().unwrap(),
         vec![1, 2, 3]
@@ -181,7 +210,10 @@ fn persist_true_records_reusable_spare_on_a_fresh_file() {
     b.write(&path).unwrap();
 
     let f = File::open(&path).unwrap();
-    let info = f.file_space_info().expect("file records a strategy");
+    let info = f
+        .file_space_info()
+        .unwrap()
+        .expect("file records a strategy");
     assert_eq!(info.strategy, FileSpaceStrategy::FsmAggr);
     assert!(info.persist, "persist flag is recorded");
     assert!(

@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- `FileSpaceSettings` groups file-space configuration in a portable value, with normalized settings for strategies without free-space managers.
+- `FileSpaceSettings` groups file-space configuration in a portable value, with normalized settings for strategies without free-space managers ([#894](https://github.com/CramBL/hdf5-pure/pull/894)).
 - `File::reusable_space_stats` reads a writable session's logical size and reusable free bytes without allocations after platform mutex initialization. The reusable total includes append reserves and unused aggregates and does not guarantee that a particular write fits.
 - `File::persisted_free_sections` inspects typed, base-relative free sections and per-manager totals through buffered or streaming readers, while editing sessions have a separate view of reusable space at physical offsets.
 - `DatasetCreateProperties` configures a dataset's chunk dimensions, filters, partial edge chunk filtering, and fill settings as a dataset creation property list. Applying it replaces the settings the builder methods made earlier ([#879](https://github.com/CramBL/hdf5-pure/pull/879), [#892](https://github.com/CramBL/hdf5-pure/pull/892)).
@@ -32,6 +32,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** `File::file_space_info` replaces optional borrowed inspection with fallible owned inspection, and the strategy-only getter is removed. Malformed file-space metadata returns an error while absent metadata remains distinct ([#894](https://github.com/CramBL/hdf5-pure/pull/894)).
 - **Breaking:** The public fields of `Datatype::VariableLength` are replaced by typed string and sequence payloads ([#862](https://github.com/CramBL/hdf5-pure/pull/862)).
 - **Breaking:** The public chunk mask field is replaced by typed inspection through `Chunk::filters` and a mask accessor ([#855](https://github.com/CramBL/hdf5-pure/pull/855)).
 - **Breaking:** The rate argument of `DatasetBuilder::with_zfp` changes from a floating-point number to a checked type ([#855](https://github.com/CramBL/hdf5-pure/pull/855)).

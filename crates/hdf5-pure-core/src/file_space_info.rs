@@ -111,13 +111,18 @@ pub enum FileSpaceStrategy {
     None,
 }
 
-/// A File Space Info message, the file space management settings a file stores in its superblock
-/// extension.
+/// The raw fields of a File Space Info message in the superblock extension.
 ///
-/// `hdf5_pure::File::file_space_info` returns the message of a file that has one, and
-/// `hdf5_pure::FileBuilder::with_file_space_strategy` sets the strategy of the file the builder
-/// writes. The message is defined in "The File Space Info Message" of the [format specification,
-/// version 4.0][spec].
+/// This format-inspection view includes manager addresses and placement metadata. Use
+/// [`FileSpaceSettings`] for the effective configuration. `hdf5_pure::File::file_space_info`
+/// parses this message, and `hdf5_pure::File::persisted_free_sections` reads its stored free
+/// sections.
+///
+/// A version 0 message has no page size, page-end metadata threshold, or pre-manager end of
+/// allocation. The parser supplies [`FileSpacePageSize::DEFAULT`] and a page-end threshold of 0,
+/// and leaves [`eoa_pre_fsm`](Self::eoa_pre_fsm) as `None`. Persistent version 0 messages have six
+/// manager slots, while version 1 has twelve. The message layouts are defined in "The File Space
+/// Info Message" of the [format specification, version 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_fsinfo
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,16 +135,16 @@ pub struct FileSpaceInfo {
     pub persist: bool,
     /// Smallest free-space section size the managers track.
     pub threshold: u64,
-    /// File-space page size used for paged allocation.
+    /// The recorded page size, or [`FileSpacePageSize::DEFAULT`] for a version 0 message.
     pub page_size: FileSpacePageSize,
-    /// Page-end metadata threshold (paged allocation tuning).
+    /// The page-end metadata threshold, or 0 for a version 0 message.
     pub page_end_meta_threshold: u16,
     /// The end-of-allocation address recorded before allocating free-space manager metadata, or
     /// `None` for format version 0, which has no such field.
     pub eoa_pre_fsm: Option<DecodedStoredAddress>,
     /// The addresses of the free-space manager headers, present only if [`persist`] is true. An
     /// unused slot holds [`DecodedStoredAddress::Undefined`].
-    /// `hdf5_pure::File::persisted_free_space` reads the free regions that these managers track.
+    /// A persistent version 0 message has six slots, and version 1 has twelve.
     ///
     /// [`persist`]: Self::persist
     pub manager_addrs: Vec<DecodedStoredAddress>,

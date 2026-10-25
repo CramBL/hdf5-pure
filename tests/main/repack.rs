@@ -522,8 +522,13 @@ fn preserves_file_space_strategy() {
     let f = hdf5_pure::File::open(&dst).unwrap();
     // The strategy (and its page size / threshold) carries forward; persist is
     // reset to false since the compact output has no free space to persist.
-    assert_eq!(f.file_space_strategy(), Some(FileSpaceStrategy::Page));
-    let info = f.file_space_info().unwrap();
+    assert_eq!(
+        f.file_space_settings()
+            .unwrap()
+            .map(|settings| settings.strategy()),
+        Some(FileSpaceStrategy::Page)
+    );
+    let info = f.file_space_info().unwrap().unwrap();
     assert_eq!(info.page_size.get(), 8192);
     assert_eq!(info.threshold, 4);
     assert!(!info.persist);

@@ -45,6 +45,7 @@ fn created_page_metadata_tail_is_owned(
                 .unwrap()
                 .file_space_info()
                 .unwrap()
+                .unwrap()
                 .manager_addrs
                 .first(),
             Some(&crate::DecodedStoredAddress::Undefined),

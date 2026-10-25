@@ -156,7 +156,7 @@ fn fresh_page_placement_and_root_publication_preserve_old_allocations(
     let file = File::open(&path).unwrap();
     assert_eq!(file.dataset("keep").unwrap().read_u8().unwrap(), [7; 64]);
     assert_eq!(file.dataset("added").unwrap().read_u8().unwrap(), [9; 64]);
-    assert_eq!(file.file_space_info().unwrap(), &info);
+    assert_eq!(file.file_space_info().unwrap().unwrap(), info);
     assert_eq!(file.persisted_free_space().unwrap(), []);
     drop(file);
     let mut reopened = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
@@ -415,7 +415,7 @@ fn staged_commits_preserve_preexisting_bytes_outside_the_superblock(
     drop(file);
     let file = File::open(&path).unwrap();
     assert_eq!(file.dataset("second").unwrap().read_u8().unwrap(), [11; 64]);
-    assert!(!file.file_space_info().unwrap().persist);
+    assert!(!file.file_space_info().unwrap().unwrap().persist);
     assert_eq!(file.persisted_free_space().unwrap(), []);
     assert_eq!((file.superblock().eof_address - userblock) % page_size, 0);
     assert_eq!(
@@ -1033,8 +1033,14 @@ impl WriteEngine {
         publication::assert_preserved_bytes(original, &bytes, sb_start, sb_len);
         let file = File::open(path).unwrap();
         failure.assert_page_datasets(&file, Some(("second", 11)));
-        assert!(!file.file_space_info().unwrap().persist);
-        assert!(file.file_space_info().unwrap().manager_addrs.is_empty());
+        assert!(!file.file_space_info().unwrap().unwrap().persist);
+        assert!(
+            file.file_space_info()
+                .unwrap()
+                .unwrap()
+                .manager_addrs
+                .is_empty()
+        );
         assert_eq!(file.persisted_free_space().unwrap(), []);
     }
 }
@@ -1081,8 +1087,14 @@ fn assert_interrupted_reopen(path: &Path, interrupted: &[u8], sync: SyncPolicy, 
         panic!("expected contiguous storage")
     };
     assert!(raw >= boundary);
-    assert!(!file.file_space_info().unwrap().persist);
-    assert!(file.file_space_info().unwrap().manager_addrs.is_empty());
+    assert!(!file.file_space_info().unwrap().unwrap().persist);
+    assert!(
+        file.file_space_info()
+            .unwrap()
+            .unwrap()
+            .manager_addrs
+            .is_empty()
+    );
     assert_eq!(file.persisted_free_space().unwrap(), []);
 }
 

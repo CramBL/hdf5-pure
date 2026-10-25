@@ -59,7 +59,7 @@ pub fn file_metadata_extents(file: &File, bytes: &[u8]) -> Vec<(u64, u64)> {
 ///
 /// Panics if a manager header cannot be read from `bytes` or an address cannot be represented.
 pub fn manager_extents(file: &File, bytes: &[u8]) -> Vec<(u64, u64)> {
-    let Some(info) = file.file_space_info() else {
+    let Some(info) = file.file_space_info().unwrap() else {
         return Vec::new();
     };
     let superblock = file.superblock();
@@ -226,7 +226,7 @@ pub fn assert_unavailable(file: &File, extents: &[(u64, u64)]) {
 /// Panics if a manager address is defined, persisted free space cannot be read, or a persisted
 /// free section is present.
 pub fn assert_no_managers(file: &File) {
-    if let Some(info) = file.file_space_info() {
+    if let Some(info) = file.file_space_info().unwrap() {
         assert!(
             info.manager_addrs
                 .iter()

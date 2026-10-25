@@ -299,7 +299,7 @@ fn tail_recycling_failure_preserves_committed_manager_sections(
     let bytes = fs::read(&path).unwrap();
     let file = File::open(&path).unwrap();
     let root = file.superblock().root_group_address.get();
-    let info = file.file_space_info().unwrap();
+    let info = file.file_space_info().unwrap().unwrap();
     let manager = info
         .manager_addrs
         .iter()
@@ -387,6 +387,7 @@ fn empty_manager_recycling_recovers_exact_allocation_after_reopen() {
     assert_eq!(file.persisted_free_space().unwrap(), []);
     assert!(
         file.file_space_info()
+            .unwrap()
             .unwrap()
             .manager_addrs
             .iter()

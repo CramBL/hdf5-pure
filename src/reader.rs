@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 #[cfg(test)]
 use crate::FileSpacePageSize;
+use crate::FileSpaceSettings;
 #[cfg(test)]
 use crate::FixedPointType;
 #[cfg(test)]
@@ -31,6 +32,8 @@ use crate::edit::{
 use crate::element::H5Element;
 use crate::type_builders::{DatasetBuilder, VL_REF_SIZE};
 
+#[cfg(any(doc, test))]
+use crate::FileSpaceStrategy;
 use crate::FillTime;
 use crate::SuperblockVersion;
 use crate::appender::BufferedAppender;
@@ -45,7 +48,7 @@ use crate::datatype::{Datatype, ReferenceType};
 use crate::error::{Error, FormatError};
 use crate::file_create_properties::FileCreateProperties;
 use crate::file_lock::{self, FileLocking, OpenIntent, OpenTarget, WriteMarkPolicy};
-use crate::file_space_info::{FileSpaceInfo, FileSpaceStrategy};
+use crate::file_space_info::FileSpaceInfo;
 use crate::fill_value::{FillPattern, FillValueMessage, FillValueView};
 use crate::filter_pipeline::FilterPipeline;
 use crate::free_sections::ReusableSpaceStats;
@@ -1705,6 +1708,10 @@ impl FileInner {
     /// not parse, such as [`FormatError::InvalidFileSpacePageSize`] for a page size outside
     /// 512 bytes to 1 GiB.
     fn parse_file_space_info(&self) -> Result<Option<FileSpaceInfo>, FormatError> {
+        if let Backend::Edit(engine) = &self.backend {
+            let session = engine.lock().unwrap_or_else(PoisonError::into_inner);
+            return session.parse_file_space_info();
+        }
         let Some(rel) = self.superblock.superblock_extension_address else {
             return Ok(None);
         };
@@ -2018,21 +2025,6 @@ impl FileInner {
     /// Returns the mode this file reads under.
     pub(crate) fn access_mode(&self) -> AccessMode {
         self.access_mode
-    }
-
-    /// The file-space management strategy this file records in its superblock
-    /// extension (set with `H5Pset_file_space_strategy`), or `None` if the file
-    /// records none — the default, which the C library also writes as "no
-    /// message". See [`file_space_info`](Self::file_space_info) for the full
-    /// record (persist flag, threshold, page size).
-    pub fn file_space_strategy(&self) -> Option<FileSpaceStrategy> {
-        self.file_space_info.as_ref().map(|info| info.strategy)
-    }
-
-    /// The full [`FileSpaceInfo`] recorded in this file's superblock extension,
-    /// if present and readable.
-    pub fn file_space_info(&self) -> Option<&FileSpaceInfo> {
-        self.file_space_info.as_ref()
     }
 
     /// Returns the free regions the free-space managers of the file track, as `(address, length)`
@@ -3744,16 +3736,107 @@ impl File {
         self.inner.widths()
     }
 
-    /// The file-space management strategy this file records in its superblock
-    /// extension, or `None` if it records none.
-    pub fn file_space_strategy(&self) -> Option<FileSpaceStrategy> {
-        self.inner.file_space_strategy()
+    /// Returns the file-space configuration recorded in the superblock extension.
+    ///
+    /// Returns `Ok(None)` if the file has no File Space Info message. Callers that need the
+    /// default configuration can apply [`Option::unwrap_or_default`] to the returned option.
+    /// Strategies without free-space managers use the normalized values described by
+    /// [`FileSpaceSettings`]. A version 0 message uses [`crate::FileSpacePageSize::DEFAULT`] for its
+    /// absent page-size field.
+    ///
+    /// Works with buffered, streaming, and editing handles. Editing handles read the current
+    /// published metadata, excluding staged edits. Use [`Self::reusable_space_stats`] and
+    /// [`Self::reusable_free_sections`] to inspect a writable session's reusable space, and
+    /// [`Self::file_space_info`] for raw message fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the message or its superblock-extension metadata is malformed
+    /// or unreadable, including an invalid address, object header, or page size.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure::{File, FileSpaceStrategy};
+    /// # use hdf5_pure::FileBuilder;
+    /// # let directory = tempfile::tempdir()?;
+    /// # let path = directory.path().join("settings.h5");
+    /// # let mut builder = FileBuilder::new();
+    /// # builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 128);
+    /// # builder.create_dataset("data").with_i32_data(&[1, 2, 3]);
+    /// # builder.write(&path)?;
+    /// let file = File::open(&path)?;
+    /// if let Some(settings) = file.file_space_settings()? {
+    ///     assert_eq!(settings.strategy(), FileSpaceStrategy::FsmAggr);
+    ///     assert_eq!(settings.threshold(), 128);
+    /// }
+    /// if let Some(report) = file.persisted_free_sections()? {
+    ///     println!("free bytes: {}", report.free_sections().free_bytes());
+    ///     for manager in report.managers() {
+    ///         println!(
+    ///             "slot {}: {:?}, {} sections",
+    ///             manager.slot(),
+    ///             manager.role(),
+    ///             manager.free_sections().section_count()
+    ///         );
+    ///     }
+    /// }
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
+    pub fn file_space_settings(&self) -> Result<Option<FileSpaceSettings>, Error> {
+        Ok(self.inner.parse_file_space_info()?.map(|info| {
+            let FileSpaceInfo {
+                strategy,
+                persist,
+                threshold,
+                page_size,
+                ..
+            } = info;
+            FileSpaceSettings::new(strategy)
+                .with_persistence(persist)
+                .with_threshold(threshold)
+                .with_page_size(page_size)
+        }))
     }
 
-    /// The full [`FileSpaceInfo`] recorded in this file's superblock extension,
-    /// if present and readable.
-    pub fn file_space_info(&self) -> Option<&FileSpaceInfo> {
-        self.inner.file_space_info()
+    /// Returns the parsed File Space Info message, including its storage-layout fields.
+    ///
+    /// This advanced metadata view includes the page-end metadata threshold, the end of
+    /// allocation before manager placement, and manager-address slots. Use
+    /// [`Self::file_space_settings`] for the recorded configuration and
+    /// [`Self::persisted_free_sections`] for stored free sections.
+    ///
+    /// Returns `Ok(None)` if the message is absent. Works with buffered, streaming, and editing
+    /// handles. Editing handles read the current published metadata, excluding staged edits.
+    /// Parsed version 0 messages retain their six manager slots when persistent and have no
+    /// pre-manager end-of-allocation field, as described by [`FileSpaceInfo`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the message or its superblock-extension metadata is malformed
+    /// or unreadable, including an invalid address, object header, or page size.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure::File;
+    /// # use hdf5_pure::{FileBuilder, FileSpaceStrategy};
+    /// # let directory = tempfile::tempdir()?;
+    /// # let path = directory.path().join("raw-file-space-info.h5");
+    /// # let mut builder = FileBuilder::new();
+    /// # builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    /// # builder.create_dataset("data").with_i32_data(&[1, 2, 3]);
+    /// # builder.write(&path)?;
+    /// let file = File::open(&path)?;
+    /// if let Some(info) = file.file_space_info()? {
+    ///     println!("EOA before managers: {:?}", info.eoa_pre_fsm);
+    ///     println!("manager addresses: {:?}", info.manager_addrs);
+    ///     println!("page-end metadata threshold: {}", info.page_end_meta_threshold);
+    /// }
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
+    pub fn file_space_info(&self) -> Result<Option<FileSpaceInfo>, Error> {
+        Ok(self.inner.parse_file_space_info()?)
     }
 
     /// Returns the free regions the free-space managers of the file track, as `(address, length)`
@@ -3913,9 +3996,10 @@ impl File {
     /// let file = File::open_rw(&path)?;
     /// file.root().delete("b")?;
     /// file.commit()?;
+    /// let stats = file.reusable_space_stats()?;
     /// let sections = file.reusable_free_sections()?;
     /// assert!(sections.section_count() > 0);
-    /// assert_eq!(sections.free_bytes(), file.space_accounting()?.reusable_free_bytes);
+    /// assert_eq!(stats.reusable_free_bytes(), sections.free_bytes());
     /// for section in sections.sections() {
     ///     assert_eq!(section.coordinates(), FreeSectionCoordinates::Absolute);
     /// }
@@ -3948,8 +4032,7 @@ impl File {
         self.inner.libver_bound()
     }
 
-    /// Parses the File Space Info message from the superblock extension, with the error that
-    /// [`file_space_info`](Self::file_space_info) reports as `None`.
+    /// Parses the File Space Info message with the format error before conversion to [`Error`].
     ///
     /// # Errors
     ///
@@ -7958,8 +8041,14 @@ mod tests {
             file.dataset("group/child").unwrap().read_u8().unwrap(),
             [31; 64]
         );
-        assert!(!file.file_space_info().unwrap().persist);
-        assert!(file.file_space_info().unwrap().manager_addrs.is_empty());
+        assert!(!file.file_space_info().unwrap().unwrap().persist);
+        assert!(
+            file.file_space_info()
+                .unwrap()
+                .unwrap()
+                .manager_addrs
+                .is_empty()
+        );
         assert!(file.persisted_free_space().unwrap().is_empty());
     }
 
@@ -8118,7 +8207,15 @@ mod tests {
         } else {
             File::from_bytes(relocated).unwrap()
         };
-        let info = file.parse_file_space_info().unwrap().unwrap();
+        let info = file.file_space_info().unwrap().unwrap();
+        assert_eq!(
+            file.file_space_settings().unwrap(),
+            Some(
+                FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+                    .with_persistence(true)
+                    .with_threshold(64)
+            )
+        );
         assert_eq!(info.eoa_pre_fsm, None);
         assert_eq!(info.strategy, FileSpaceStrategy::FsmAggr);
         assert!(info.persist);

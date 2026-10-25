@@ -142,7 +142,7 @@ use crate::libver::LibVer;
 /// - Free space is under-reported and never over-reported. A final metadata-page tail and the old
 ///   bytes of a relocated partial chunk are left untracked, so `H5Fget_freespace` can read slightly
 ///   low. The file stays valid.
-/// - File Space Info message version 1 is the only one emitted and read.
+/// - The reader supports File Space Info message versions 0 and 1. The writer emits version 1.
 ///
 /// [Limitations](crate#limitations) has the full set of deliberate rejections.
 ///

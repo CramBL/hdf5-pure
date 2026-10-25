@@ -174,6 +174,7 @@ fn create_properties_are_reusable_across_files() {
         let file = File::open(&path).unwrap();
         let info = file
             .file_space_info()
+            .unwrap()
             .expect("the strategy should be recorded in the superblock extension");
         assert_eq!(info.strategy, FileSpaceStrategy::FsmAggr);
         assert!(info.persist);
@@ -200,7 +201,10 @@ fn create_with_options_records_creation_properties() {
 
     let file = File::open(&path).unwrap();
     assert!(file.group("g").is_ok());
-    let info = file.file_space_info().expect("strategy should be recorded");
+    let info = file
+        .file_space_info()
+        .unwrap()
+        .expect("strategy should be recorded");
     assert_eq!(info.strategy, FileSpaceStrategy::FsmAggr);
     assert_eq!(info.threshold, 16);
 }
@@ -530,6 +534,7 @@ fn creation_paths_preserve_page_size_configuration(
     let file = File::from_bytes(bytes.clone()).unwrap();
     assert_eq!(
         file.file_space_info()
+            .unwrap()
             .map(|info| (info.strategy, info.page_size)),
         expected
     );
@@ -541,6 +546,7 @@ fn creation_paths_preserve_page_size_configuration(
     let file = File::open_streaming(&path).unwrap();
     assert_eq!(
         file.file_space_info()
+            .unwrap()
             .map(|info| (info.strategy, info.page_size)),
         expected
     );
@@ -550,6 +556,7 @@ fn creation_paths_preserve_page_size_configuration(
         File::create_with_options(&owned_path, properties, FileAccessProperties::new()).unwrap();
     assert_eq!(
         file.file_space_info()
+            .unwrap()
             .map(|info| (info.strategy, info.page_size)),
         expected
     );

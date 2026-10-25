@@ -789,6 +789,7 @@ fn free_space_manager_blocks(path: &Path) -> Vec<(u64, u64)> {
         .unwrap()
         .file_space_info()
         .unwrap()
+        .unwrap()
         .manager_addrs
         .iter()
         .filter_map(|&addr| match addr {
@@ -863,6 +864,7 @@ fn manager_sections(path: &Path, manager: usize) -> Vec<(u64, u64)> {
     let addr = File::open(path)
         .unwrap()
         .file_space_info()
+        .unwrap()
         .unwrap()
         .manager_addrs[manager];
     let DecodedStoredAddress::Defined(stored) = addr else {

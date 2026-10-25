@@ -171,6 +171,7 @@ fn every_commit_keeps_the_userblock_and_writes_stored_manager_addresses(
         let headers = file
             .file_space_info()
             .unwrap()
+            .unwrap()
             .manager_addrs
             .iter()
             .filter_map(|&addr| match addr {
@@ -251,7 +252,7 @@ fn a_deletion_that_frees_the_end_of_the_file_truncates_it(
     assert_eq!(file.file_size(), truncated);
     if strategy == Strategy::Page {
         assert_eq!(
-            file.file_space_info().unwrap().eoa_pre_fsm,
+            file.file_space_info().unwrap().unwrap().eoa_pre_fsm,
             Some(hdf5_pure::DecodedStoredAddress::Defined(
                 hdf5_pure::StoredAddress::new(truncated - userblock)
             ))

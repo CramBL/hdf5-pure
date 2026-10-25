@@ -278,6 +278,7 @@ impl<'a> Context<'a> {
             ..
         } = file
             .file_space_info()
+            .unwrap()
             .unwrap_or_else(|| panic!("file-space creation settings must be present; {self}"));
         let stats = self.unwrap(file.reusable_space_stats());
         let reusable = self.unwrap(file.reusable_free_sections());
@@ -293,7 +294,7 @@ impl<'a> Context<'a> {
         writeln!(out, "  strategy          : {strategy:?}").unwrap();
         writeln!(out, "  persistence       : {persist}").unwrap();
         writeln!(out, "  threshold (bytes) : {threshold}").unwrap();
-        if *strategy == FileSpaceStrategy::Page {
+        if strategy == FileSpaceStrategy::Page {
             writeln!(out, "  page size (bytes) : {}", page_size.get()).unwrap();
         }
         writeln!(out).unwrap();

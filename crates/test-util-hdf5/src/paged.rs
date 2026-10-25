@@ -164,8 +164,13 @@ pub fn assert_consistent(path: &Path, page_size: u64) {
     let eoa = std::fs::metadata(path).unwrap().len() - file.superblock().base_address.get();
     assert_eq!(eoa % page_size, 0, "file is a whole number of pages");
 
-    assert_eq!(file.file_space_strategy(), Some(FileSpaceStrategy::Page));
-    let info = file.file_space_info().expect("records a strategy");
+    assert_eq!(
+        file.file_space_settings()
+            .unwrap()
+            .map(|settings| settings.strategy()),
+        Some(FileSpaceStrategy::Page)
+    );
+    let info = file.file_space_info().unwrap().expect("records a strategy");
     assert!(info.persist, "still persisting");
     assert_eq!(info.page_size.get(), page_size);
     assert_eq!(

@@ -118,7 +118,7 @@ fn hdf5_pure_writes_no_free_space_manager_under_aggr_or_none(
     drop(file);
 
     let file = File::open(&path).unwrap();
-    let info = file.file_space_info().unwrap();
+    let info = file.file_space_info().unwrap().unwrap();
     assert_eq!(
         (info.strategy, info.persist, info.manager_addrs.as_slice()),
         (strategy, false, [].as_slice())

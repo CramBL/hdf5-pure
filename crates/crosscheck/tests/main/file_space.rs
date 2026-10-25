@@ -22,6 +22,7 @@ use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpaceInfo;
 use hdf5_pure::FileSpacePageSize;
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
 use hdf5_pure::FreeSpaceManagerRole;
@@ -148,7 +149,14 @@ fn c_written_fixed_width_root_updates_reach_stable_physical_length(
         closed_lengths.push(std::fs::metadata(&path).unwrap().len());
         let reopened = File::open(&path).unwrap();
         assert_eq!(reopened.persisted_free_space().unwrap(), sections);
-        managers.push(reopened.file_space_info().unwrap().manager_addrs.clone());
+        managers.push(
+            reopened
+                .file_space_info()
+                .unwrap()
+                .unwrap()
+                .manager_addrs
+                .clone(),
+        );
         drop(reopened);
         FreeSpaceOracleCheckpoint::observe(&path, "root-reclamation", "updated")
             .unwrap()
@@ -484,10 +492,10 @@ fn paged_manager_capacity_survives_reference_library_mutation(
         [13; 100]
     );
     assert_eq!(
-        file.file_space_info().unwrap().strategy,
+        file.file_space_info().unwrap().unwrap().strategy,
         FileSpaceStrategy::Page
     );
-    assert!(file.file_space_info().unwrap().persist);
+    assert!(file.file_space_info().unwrap().unwrap().persist);
     file.close().unwrap();
 }
 
@@ -760,7 +768,11 @@ fn assert_header_reclamation_state(
     );
     assert_eq!(
         file.dataset("anchor").unwrap().read_i32().unwrap(),
-        vec![31; usize::try_from(file.file_space_info().unwrap().page_size.get() / 4 + 1).unwrap()]
+        vec![
+            31;
+            usize::try_from(file.file_space_info().unwrap().unwrap().page_size.get() / 4 + 1)
+                .unwrap()
+        ]
     );
     if !matches!(action, HeaderReclamation::UnlinkDataset) {
         assert_eq!(range::covered_len(&free, generic_fragment), 0);
@@ -769,7 +781,7 @@ fn assert_header_reclamation_state(
 }
 
 fn assert_rust_header_survivors(file: &File, action: HeaderReclamation, keep: i32) {
-    let page = file.file_space_info().unwrap().page_size.get();
+    let page = file.file_space_info().unwrap().unwrap().page_size.get();
     assert_eq!(
         file.dataset("keep").unwrap().read_i32().unwrap(),
         [keep; 64]
@@ -1091,7 +1103,7 @@ fn assert_page_recovery_state(file: &File, additional: &[(&str, u8)]) {
             .get("attribute"),
         Some(&AttrValue::I32(9))
     );
-    let info = file.file_space_info().unwrap();
+    let info = file.file_space_info().unwrap().unwrap();
     assert_eq!(info.strategy, FileSpaceStrategy::Page);
     assert_eq!(info.page_size.get(), 4096);
     assert!(!info.persist);
@@ -1266,7 +1278,7 @@ fn assert_pure_page_edit(
     let file = File::open(path).unwrap();
     assert_eq!(file.superblock().base_address.get(), userblock);
     assert_eq!((file.superblock().eof_address - userblock) % page_size, 0);
-    let info = file.file_space_info().unwrap();
+    let info = file.file_space_info().unwrap().unwrap();
     assert_eq!(info.strategy, FileSpaceStrategy::Page);
     assert_eq!(info.page_size.get(), page_size);
     assert!(!info.persist);
@@ -1368,6 +1380,92 @@ fn assert_c_page_edit(path: &Path, page_size: u64) {
         c_file.fcpl().unwrap().get_file_space_page_size().unwrap(),
         page_size
     );
+}
+
+#[rstest]
+#[case::fsm_aggr(FileSpaceStrategy::FsmAggr, false, 0)]
+#[case::persistent_fsm_aggr(FileSpaceStrategy::FsmAggr, true, 128)]
+#[case::page(FileSpaceStrategy::Page, false, 0)]
+#[case::persistent_page(FileSpaceStrategy::Page, true, 128)]
+#[case::aggr(FileSpaceStrategy::Aggr, true, 128)]
+#[case::none(FileSpaceStrategy::None, true, 128)]
+fn recorded_settings_are_equivalent_for_rust_and_libhdf5_files(
+    #[case] strategy: FileSpaceStrategy,
+    #[case] persist: bool,
+    #[case] threshold: u64,
+    #[values(false, true)] c_origin: bool,
+    #[values(false, true)] streaming: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("recorded-settings.h5");
+    let page_size = FileSpacePageSize::try_from(8192).unwrap();
+    let expected = FileSpaceSettings::new(strategy)
+        .with_persistence(persist)
+        .with_threshold(threshold)
+        .with_page_size(page_size);
+    if c_origin {
+        let c_strategy = match strategy {
+            FileSpaceStrategy::FsmAggr | FileSpaceStrategy::Page => CStrategy::FreeSpaceManager {
+                paged: strategy == FileSpaceStrategy::Page,
+                persist,
+                threshold,
+            },
+            FileSpaceStrategy::Aggr => CStrategy::PageAggregation,
+            FileSpaceStrategy::None => CStrategy::None,
+        };
+        let file = hdf5::FileBuilder::new()
+            .with_fapl(|properties| properties.libver_v110())
+            .with_fcpl(|properties| {
+                properties
+                    .file_space_strategy(c_strategy)
+                    .file_space_page_size(page_size.get())
+                    .userblock(8192)
+            })
+            .create(&path)
+            .unwrap();
+        file.new_dataset::<i32>()
+            .shape(3)
+            .create("data")
+            .unwrap()
+            .write(&[1, 2, 3])
+            .unwrap();
+        file.close().unwrap();
+    } else {
+        let mut builder = FileBuilder::new();
+        builder.with_file_space_strategy(strategy, persist, threshold);
+        builder.with_file_space_page_size(page_size);
+        builder.with_userblock(UserblockSize::try_from(8192).unwrap());
+        builder.create_dataset("data").with_i32_data(&[1, 2, 3]);
+        builder.write(&path).unwrap();
+        let file = hdf5::File::open(&path).unwrap();
+        let properties = file.create_plist().unwrap();
+        assert_eq!(
+            properties.get_file_space_page_size().unwrap(),
+            page_size.get()
+        );
+        assert_eq!(
+            file.dataset("data").unwrap().read_raw::<i32>().unwrap(),
+            [1, 2, 3]
+        );
+        file.close().unwrap();
+    }
+    let file = if streaming {
+        File::open_streaming(&path).unwrap()
+    } else {
+        File::open(&path).unwrap()
+    };
+    assert_eq!(file.file_space_settings().unwrap(), Some(expected));
+    let info = file.file_space_info().unwrap().unwrap();
+    assert_eq!(
+        (info.strategy, info.persist, info.threshold, info.page_size),
+        (
+            expected.strategy(),
+            expected.persist(),
+            expected.threshold(),
+            expected.page_size()
+        )
+    );
+    assert_eq!(file.dataset("data").unwrap().read_i32().unwrap(), [1, 2, 3]);
 }
 
 #[test]
@@ -1480,6 +1578,7 @@ fn reads_the_page_size_libhdf5_writes(#[case] paged: bool, #[case] page_size: Fi
         File::open(&path)
             .unwrap()
             .file_space_info()
+            .unwrap()
             .map(|info| info.page_size),
         Some(page_size)
     );
@@ -1527,8 +1626,13 @@ fn we_read_c_library_persisted_free_space() {
     }
 
     let f = File::open(&path).unwrap();
-    assert_eq!(f.file_space_strategy(), Some(FileSpaceStrategy::FsmAggr));
-    assert!(f.file_space_info().unwrap().persist);
+    assert_eq!(
+        f.file_space_settings()
+            .unwrap()
+            .map(|settings| settings.strategy()),
+        Some(FileSpaceStrategy::FsmAggr)
+    );
+    assert!(f.file_space_info().unwrap().unwrap().persist);
 
     let free = f.persisted_free_space().unwrap();
     assert!(
@@ -1781,6 +1885,7 @@ fn c_library_reads_managers_we_placed_mid_file() {
     let ours = File::open(&path).unwrap();
     let managers: Vec<u64> = ours
         .file_space_info()
+        .unwrap()
         .expect("a persisting file records its managers")
         .manager_addrs
         .iter()
@@ -2046,7 +2151,7 @@ fn the_serializer_writes_the_message_libhdf5_writes_at_the_widths_of_its_file(
         offsets: superblock.offset_size,
         lengths: superblock.length_size,
     };
-    let info = file.file_space_info().unwrap();
+    let info = file.file_space_info().unwrap().unwrap();
     assert_eq!(
         (
             info.strategy,
@@ -2071,7 +2176,7 @@ fn the_serializer_writes_the_message_libhdf5_writes_at_the_widths_of_its_file(
             .any(|&addr| matches!(addr, hdf5_pure::DecodedStoredAddress::Defined(_))),
         "libhdf5 records a manager for the deleted dataset's space"
     );
-    let encoded = hdf5_pure_format::__private::serialize_file_space_info_v1(widths, info).unwrap();
+    let encoded = hdf5_pure_format::__private::serialize_file_space_info_v1(widths, &info).unwrap();
     // The version, strategy and persist bytes, the 2-byte page-end threshold, two lengths, the end
     // of allocation, and twelve manager addresses.
     assert_eq!(
@@ -2119,7 +2224,12 @@ fn libhdf5_truncates_the_maximum_section_size_and_writes_section_sizes_as_wide_a
     let freed = write_c_persisted_with_a_hole(&path, driver, sizeof_addr, sizeof_size, 0);
     let file = File::open(&path).unwrap();
     let (offset_size, length_size) = (file.superblock().offset_size, file.superblock().length_size);
-    let manager_addrs = file.file_space_info().unwrap().manager_addrs.clone();
+    let manager_addrs = file
+        .file_space_info()
+        .unwrap()
+        .unwrap()
+        .manager_addrs
+        .clone();
     drop(file);
     let widths = FormatWidths {
         offsets: offset_size,
@@ -2322,6 +2432,7 @@ fn the_sections_libhdf5_persists_in_an_oversized_section_list_are_read() {
     let padded: Vec<(u64, u64)> = file
         .file_space_info()
         .unwrap()
+        .unwrap()
         .manager_addrs
         .iter()
         .filter_map(|&addr| match addr {
@@ -2381,6 +2492,7 @@ fn libhdf5_loads_the_managers_the_serializer_writes_at_the_widths_of_its_file(
     };
     let managers: Vec<u64> = file
         .file_space_info()
+        .unwrap()
         .unwrap()
         .manager_addrs
         .iter()
@@ -2529,6 +2641,7 @@ fn enlarged_section_list_file(path: &Path, userblock: u64) -> (Vec<(u64, u64)>, 
     let mut bytes = std::fs::read(path).unwrap();
     let (header_at, header) = file
         .file_space_info()
+        .unwrap()
         .unwrap()
         .manager_addrs
         .iter()
@@ -2786,6 +2899,7 @@ fn deleted_dataset_manager_block(path: &std::path::Path, block: ManagerBlock) ->
         .unwrap()
         .file_space_info()
         .unwrap()
+        .unwrap()
         .manager_addrs
         .clone();
     let widths = FormatWidths::from_sizes(8, 8).unwrap();
@@ -2911,16 +3025,16 @@ fn we_read_c_library_strategy() {
     write_c(&p_none, CStrategy::None);
     let f = File::open(&p_none).unwrap();
     assert_eq!(
-        f.file_space_info(),
-        Some(&unmanaged_file_space_info(FileSpaceStrategy::None))
+        f.file_space_info().unwrap(),
+        Some(unmanaged_file_space_info(FileSpaceStrategy::None))
     );
     assert_eq!(f.dataset("d").unwrap().read_i32().unwrap(), vec![1, 2, 3]);
 
     let p_aggr = dir.path().join("c_aggr.h5");
     write_c(&p_aggr, CStrategy::PageAggregation);
     assert_eq!(
-        File::open(&p_aggr).unwrap().file_space_info(),
-        Some(&unmanaged_file_space_info(FileSpaceStrategy::Aggr))
+        File::open(&p_aggr).unwrap().file_space_info().unwrap(),
+        Some(unmanaged_file_space_info(FileSpaceStrategy::Aggr))
     );
 
     // FSM_AGGR with persist=true: the message carries free-space-manager
@@ -2937,6 +3051,7 @@ fn we_read_c_library_strategy() {
     let f = File::open(&p_persist).unwrap();
     let info = f
         .file_space_info()
+        .unwrap()
         .expect("persisted file records a strategy");
     assert_eq!(info.strategy, FileSpaceStrategy::FsmAggr);
     assert!(info.persist, "persist flag is read");
@@ -2989,6 +3104,7 @@ fn a_version_0_strategy_reads_as_libhdf5_maps_it(
     #[case] c_strategy: CStrategy,
     #[case] strategy: FileSpaceStrategy,
     #[case] threshold: u64,
+    #[values(false, true)] streaming: bool,
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_version_0.h5");
@@ -3024,10 +3140,18 @@ fn a_version_0_strategy_reads_as_libhdf5_maps_it(
         c_strategy
     );
     drop(f);
-    let f = File::open(&path).unwrap();
+    let f = if streaming {
+        File::open_streaming(&path).unwrap()
+    } else {
+        File::open(&path).unwrap()
+    };
     assert_eq!(
-        f.file_space_info(),
-        Some(&version_0_mapped(strategy, false, threshold, Vec::new()))
+        f.file_space_info().unwrap(),
+        Some(version_0_mapped(strategy, false, threshold, Vec::new()))
+    );
+    assert_eq!(
+        f.file_space_settings().unwrap(),
+        Some(FileSpaceSettings::new(strategy).with_threshold(threshold))
     );
     assert_eq!(f.dataset("d").unwrap().read_i32().unwrap(), vec![1, 2, 3]);
 }
@@ -3084,9 +3208,17 @@ fn assert_version_0_free_space_reads_as_libhdf5_reads_it(
     let (version_0_managers, _) = version_1
         .manager_addrs
         .split_at(file_space_info::VERSION_0_MANAGERS);
+    let settings = Some(FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true));
+    assert_eq!(f.file_space_settings().unwrap(), settings);
+    let streamed = File::open_streaming(&path).unwrap();
+    assert_eq!(streamed.file_space_settings().unwrap(), settings);
     assert_eq!(
-        f.file_space_info(),
-        Some(&version_0_mapped(
+        streamed.file_space_info().unwrap(),
+        f.file_space_info().unwrap()
+    );
+    assert_eq!(
+        f.file_space_info().unwrap(),
+        Some(version_0_mapped(
             FileSpaceStrategy::FsmAggr,
             true,
             1,
@@ -3587,7 +3719,11 @@ const C_PAGED_DATASETS: &[(&str, usize, CLayout)] = &[
 ///
 /// Panics if any of the six other manager addresses is not `undefined`.
 fn rewrite_as_version_0(path: &Path, widths: Widths, undefined: u64) -> FileSpaceInfo {
-    let version_1 = File::open(path).unwrap().file_space_info().unwrap().clone();
+    let version_1 = File::open(path)
+        .unwrap()
+        .file_space_info()
+        .unwrap()
+        .unwrap();
     let (version_0_managers, unused) = version_1
         .manager_addrs
         .split_at(file_space_info::VERSION_0_MANAGERS);
@@ -4828,7 +4964,7 @@ fn a_persisting_edit_that_tracks_no_free_space_records_the_end_of_allocation_for
 
     let (eoa_pre_fsm, manager_addrs, free, eof) = {
         let file = File::open(&path).unwrap();
-        let info = file.file_space_info().unwrap();
+        let info = file.file_space_info().unwrap().unwrap();
         (
             info.eoa_pre_fsm,
             info.manager_addrs.clone(),
@@ -5127,7 +5263,7 @@ fn a_paged_persisting_edit_that_tracks_no_free_space_records_the_end_of_allocati
 
     let (eoa_pre_fsm, manager_addrs, free, eof) = {
         let file = File::open(&path).unwrap();
-        let info = file.file_space_info().unwrap();
+        let info = file.file_space_info().unwrap().unwrap();
         (
             info.eoa_pre_fsm,
             info.manager_addrs.clone(),
