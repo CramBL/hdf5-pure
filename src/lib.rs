@@ -487,6 +487,7 @@ pub(crate) mod message_type;
 pub(crate) mod object_header;
 pub(crate) mod object_header_writer;
 pub(crate) mod object_path;
+pub(crate) mod parsed_chunk_index;
 #[cfg(test)]
 pub(crate) mod placed_source;
 pub(crate) mod prepared_chunk;

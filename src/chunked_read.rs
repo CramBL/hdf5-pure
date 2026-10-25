@@ -38,6 +38,8 @@ use crate::fill_value::FillPattern;
 use crate::filter_pipeline::FilterPipeline;
 use crate::filters::{self, ChunkContext, FilterScratch};
 use crate::fixed_array;
+use crate::parsed_chunk_index::IndexedChunk;
+use crate::parsed_chunk_index::ParsedChunkIndex;
 use crate::read_region::{ReadRegion, RowRegion};
 use crate::read_spec::{RawReadSpec, RawReadStorage};
 use crate::source;
@@ -761,53 +763,30 @@ impl<'a> ChunkedPlan<'a> {
     }
 }
 
-/// Put a dataset's chunks in address order, which is the order a coalescing
-/// reader has to be asked for them in (see [`crate::chunk_span`]).
+/// Sorts `chunks` in ascending order of address.
 ///
-/// Neither source of a chunk list supplies it: walking the index yields index
-/// order, and a cached index yields no order at all. A reader holds one span,
-/// so a walk that alternates between two of them re-reads a whole span at every
-/// alternation — the read stays correct and the read *volume* multiplies. The
-/// sort is free to do here because every chunk of a read scatters into a
-/// disjoint part of the output, so their order was never load-bearing.
-///
-/// Coalescing is not the only thing resting on it. A read fills the chunk cache
-/// and then stops offering (see [`CachePass`]), so the visit order also decides
-/// *which* chunks a read leaves behind — and "no order at all" above is what
-/// makes that an arbitrary subset the next read has no reason to reach first.
-/// A loop with no spans to coalesce still owes its chunks this order.
+/// The walk of a chunk index lists its chunks in index order, and a B-tree, a Fixed Array, or an
+/// Extensible Array may list a chunk at a higher address before one at a lower address.
+/// [`ParsedChunkIndex::new`] puts the chunks the cached readers visit in the same order.
 fn sort_chunks_by_address(chunks: &mut [ChunkInfo]) {
     chunks.sort_unstable_by_key(|c| c.address);
 }
 
-/// Plan coalesced reads over the chunks a read will actually fetch, or `None`
-/// when the layout has nothing to coalesce.
+/// Plans coalesced reads over `chunks`, without the chunks whose decompressed bytes `cache` holds,
+/// or returns `None` if the plan would read each chunk on its own.
 ///
-/// `wanted` picks the chunks the caller will visit — all of them for a whole
-/// read, the overlapping ones for a row window. Chunks the cache already holds
-/// are dropped on top of that: the caller skips them, so a span covering one
-/// would fetch bytes this read has no use for, which is the guarantee
-/// [`ChunkSpanReader`] is built around.
-///
-/// Planning over a chunk the read then skips anyway is only a missed
-/// opportunity, never a wrong answer, so `wanted` may be approximate where the
-/// caller's own test is fallible.
-fn plan_chunk_spans(
-    chunks: &[ChunkInfo],
-    rank: usize,
+/// The caller passes the chunks it visits: every chunk of the dataset for a whole read, and the
+/// chunks a region intersects for a read of that region. The caller skips a chunk the cache
+/// holds, so a span over it would read bytes the read does not use.
+fn plan_chunk_spans<'a>(
     cache: &ChunkCache,
-    wanted: impl Fn(&ChunkInfo) -> bool,
+    chunks: impl Iterator<Item = IndexedChunk<'a>>,
 ) -> Option<ChunkSpanReader> {
     let cached = cache.decompressed_coords();
     ChunkSpanReader::new(
         chunks
-            .iter()
-            .filter(|c| wanted(c))
-            .filter(|c| {
-                let coord = &c.offsets[..rank.min(c.offsets.len())];
-                !cached.iter().any(|held| held.as_slice() == coord)
-            })
-            .map(|c| (c.address, c.chunk_size.get())),
+            .filter(|chunk| !cached.iter().any(|held| held.as_slice() == chunk.coord))
+            .map(|chunk| (chunk.info.address, chunk.info.chunk_size.get())),
     )
 }
 
@@ -914,28 +893,23 @@ pub(crate) fn read_chunked_region_from_source(
         }
         _ => RegionCopy::Scatter(RegionScatter::new(region, chunk_dims_u64, elem_size)?),
     };
-    let chunk_overlaps = |chunk: &ChunkInfo| region.overlaps(&chunk.offsets, chunk_dims_u64);
-
-    // Walk the index once, then reuse it for later windows on this handle —
-    // keeping only this window's chunks, since each `ChunkInfo` taken out of the
-    // index owns a coordinate `Vec` and the rest would be allocated and dropped
-    // unread. Sweeping a dataset window by window makes that a product rather
-    // than a sum (issue #289).
-    let mut chunks = if let Some(chunks) = cache.indexed_chunks_matching(chunk_overlaps) {
-        chunks
-    } else {
-        let chunks = collect_chunks_for_layout_from_source(
-            source,
-            index,
-            chunk_dimensions,
-            dataspace,
-            elem_size.get() as u64,
-            widths,
-        )?;
-        cache.populate_index(&chunks, rank);
-        chunks.into_iter().filter(chunk_overlaps).collect()
-    };
-    sort_chunks_by_address(&mut chunks);
+    let parsed_index = cache.parsed_index_or_load(|| {
+        ParsedChunkIndex::new(
+            collect_chunks_for_layout_from_source(
+                source,
+                index,
+                chunk_dimensions,
+                dataspace,
+                elem_size.get() as u64,
+                widths,
+            )?,
+            rank,
+        )
+    })?;
+    let window_chunks: Vec<_> = parsed_index
+        .chunks()
+        .filter(|chunk| region.overlaps(chunk.coord, chunk_dims_u64))
+        .collect();
 
     let ctx = ChunkContext::from_datatype(chunk_dims_u64, datatype)?;
 
@@ -943,16 +917,15 @@ pub(crate) fn read_chunked_region_from_source(
     // whole chunk list would put the rows on either side of the window inside a
     // span and read them for nothing — an eight-row window measured 32 KB where
     // it needed 64 bytes.
-    let mut spans = plan_chunk_spans(&chunks, rank, cache, chunk_overlaps);
+    let mut spans = plan_chunk_spans(cache, window_chunks.iter().copied());
 
     // One decoder for the whole window; see `FilterScratch`.
     let mut scratch = FilterScratch::new();
 
-    for chunk in &chunks {
+    for IndexedChunk { info: chunk, coord } in window_chunks {
         let selected = placement.for_chunk(region, chunk, elem_size)?;
         let copy = |output: &mut [u8], bytes: &[u8]| selected.copy_to(output, bytes, elem_size);
 
-        let coord = spatial_coord(chunk, rank);
         let hit = cache.with_decompressed(pass, coord, |bytes| copy(&mut output, bytes));
         if hit.is_some() {
             continue;
@@ -1246,21 +1219,19 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
     let chunk_dims_u64 = chunk_dims;
     let chunk_dims = materialized_dims(chunk_dims_u64)?;
 
-    let mut chunks = if let Some(chunks) = cache.all_indexed_chunks() {
-        chunks
-    } else {
-        let chunks = collect_chunks_for_layout_from_source(
-            source,
-            index,
-            chunk_dimensions,
-            dataspace,
-            elem_size.get() as u64,
-            widths,
-        )?;
-        cache.populate_index(&chunks, rank);
-        chunks
-    };
-    sort_chunks_by_address(&mut chunks);
+    let parsed_index = cache.parsed_index_or_load(|| {
+        ParsedChunkIndex::new(
+            collect_chunks_for_layout_from_source(
+                source,
+                index,
+                chunk_dimensions,
+                dataspace,
+                elem_size.get() as u64,
+                widths,
+            )?,
+            rank,
+        )
+    })?;
 
     // Uncovered bytes are unallocated storage; see `assemble_chunks`.
     let mut output = fill.buffer(total_bytes)?;
@@ -1279,7 +1250,7 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
 
     // Every chunk of the dataset is wanted here; what the plan leaves out is
     // whatever the chunk cache already holds from an earlier read.
-    let mut spans = plan_chunk_spans(&chunks, rank, cache, |_| true);
+    let mut spans = plan_chunk_spans(cache, parsed_index.chunks());
 
     let pass = cache.begin_pass();
     // One decoder for every chunk of the dataset; see `FilterScratch`.
@@ -1290,8 +1261,11 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
     // chunk of every dataset this crate reads (issue #228).
     let mut chunk_offsets: Vec<usize> = Vec::with_capacity(rank);
 
-    for chunk_info in &chunks {
-        let coord = spatial_coord(chunk_info, rank);
+    for IndexedChunk {
+        info: chunk_info,
+        coord,
+    } in parsed_index.chunks()
+    {
         chunk_offsets.clear();
         for &o in coord {
             chunk_offsets.push(o.to_usize()?);
@@ -1345,19 +1319,6 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
     }
 
     Ok(output)
-}
-
-/// A chunk's spatial coordinate: its offset vector cut to the dataset's rank.
-///
-/// Borrowed from the [`ChunkInfo`] rather than copied, because the read loops
-/// need one per chunk and a dataset has as many chunks as it likes. The cut is
-/// `get(..rank)` rather than an index so a shorter offset vector yields what it
-/// has, which is what the `.take(rank)` this replaced did.
-fn spatial_coord(chunk_info: &ChunkInfo, rank: usize) -> &[u64] {
-    chunk_info
-        .offsets
-        .get(..rank)
-        .unwrap_or(&chunk_info.offsets)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2002,23 +1963,19 @@ pub fn read_chunked_data_cached(
     let chunk_dims_u64 = chunk_dims;
     let chunk_dims = materialized_dims(chunk_dims_u64)?;
 
-    let mut chunks = if let Some(chunks) = cache.all_indexed_chunks() {
-        chunks
-    } else {
-        let chunks = collect_chunks_for_layout(
-            file_data,
-            index,
-            chunk_dimensions,
-            dataspace,
-            elem_width.get().to_u64(),
-            widths,
-        )?;
-        cache.populate_index(&chunks, rank);
-        chunks
-    };
-    // This loop reads from a byte slice and has no spans to coalesce, but it owes
-    // its chunks an order all the same; see `sort_chunks_by_address`.
-    sort_chunks_by_address(&mut chunks);
+    let parsed_index = cache.parsed_index_or_load(|| {
+        ParsedChunkIndex::new(
+            collect_chunks_for_layout(
+                file_data,
+                index,
+                chunk_dimensions,
+                dataspace,
+                elem_width.get().to_u64(),
+                widths,
+            )?,
+            rank,
+        )
+    })?;
 
     // Assemble output
     // Uncovered bytes are unallocated storage; see `assemble_chunks`.
@@ -2043,9 +2000,11 @@ pub fn read_chunked_data_cached(
     // `read_chunked_data_cached_from_source`.
     let mut chunk_offsets: Vec<usize> = Vec::with_capacity(rank);
 
-    for chunk_info in &chunks {
-        let coord = spatial_coord(chunk_info, rank);
-
+    for IndexedChunk {
+        info: chunk_info,
+        coord,
+    } in parsed_index.chunks()
+    {
         chunk_offsets.clear();
         #[expect(
             clippy::cast_possible_truncation,
@@ -2336,6 +2295,7 @@ fn copy_chunk_to_output(
 
 #[cfg(test)]
 mod tests {
+    use core::ops::Range;
     #[cfg(feature = "std")]
     use std::io::Cursor;
 
@@ -4427,6 +4387,7 @@ mod tests {
     // --- Cached read tests ---
 
     use crate::chunk_cache::ChunkCache;
+    use crate::chunk_cache::ChunkCacheConfig;
 
     #[test]
     fn cached_read_populates_index_and_returns_correct_data() {
@@ -4500,6 +4461,241 @@ mod tests {
             assert_eq!(val, i as f64, "mismatch at index {i}");
         }
     }
+
+    #[derive(Clone, Copy, Debug)]
+    enum GridIndex {
+        BTreeV1,
+        ExtensibleArray,
+        FixedArray,
+        Implicit,
+    }
+
+    /// Returns the little-endian bytes of the values in `rows` and `columns` of the grid dataset,
+    /// in row-major order.
+    fn grid_bytes(rows: Range<u64>, columns: Range<u64>) -> Vec<u8> {
+        rows.flat_map(|row| columns.clone().map(move |column| grid_value(row, column)))
+            .flat_map(f32::to_le_bytes)
+            .collect()
+    }
+
+    /// Returns the value at `row` and `column` of the grid dataset, its row-major position.
+    fn grid_value(row: u64, column: u64) -> f32 {
+        let [_, columns] = GRID_DIMS;
+        (row * columns + column) as f32
+    }
+
+    /// Builds a file image of a `GRID_DIMS` dataset of `f32` in `GRID_CHUNK` chunks under the
+    /// `kind` index, and returns it with the dataset's layout and dataspace.
+    ///
+    /// The chunks are stored in the reverse of index order, except under the implicit index, whose
+    /// order fixes their addresses.
+    fn indexed_grid_file(kind: GridIndex) -> (Vec<u8>, DataLayout, Dataspace) {
+        let dataspace = Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: 2,
+            dimensions: GRID_DIMS.to_vec(),
+            max_dimensions: match kind {
+                GridIndex::ExtensibleArray => {
+                    Some(vec![MaxExtent::Unlimited, MaxExtent::Fixed(GRID_DIMS[1])])
+                }
+                GridIndex::BTreeV1 | GridIndex::FixedArray | GridIndex::Implicit => None,
+            },
+        };
+        let order = match kind {
+            GridIndex::ExtensibleArray => GridOrder::UnlimitedFirst,
+            GridIndex::BTreeV1 | GridIndex::FixedArray | GridIndex::Implicit => GridOrder::RowMajor,
+        };
+        let slots = index_grid(&dataspace, &GRID_CHUNK, order)
+            .unwrap()
+            .slots_in_extent()
+            .unwrap();
+        let address = |position: usize| match kind {
+            GridIndex::Implicit => GRID_DATA + position as u64 * GRID_CHUNK_BYTES,
+            GridIndex::BTreeV1 | GridIndex::ExtensibleArray | GridIndex::FixedArray => {
+                GRID_DATA + (slots.len() - 1 - position) as u64 * GRID_CHUNK_BYTES
+            }
+        };
+        let mut file = vec![0u8; (GRID_DATA + slots.len() as u64 * GRID_CHUNK_BYTES) as usize];
+        for (position, slot) in slots.iter().enumerate() {
+            let [row, column] = slot.offsets[..] else {
+                panic!("a grid chunk has two offsets, not {:?}", slot.offsets);
+            };
+            let payload: Vec<u8> = (row..row + GRID_CHUNK[0])
+                .flat_map(|row| {
+                    (column..column + GRID_CHUNK[1]).map(move |column| {
+                        if row < GRID_DIMS[0] && column < GRID_DIMS[1] {
+                            grid_value(row, column)
+                        } else {
+                            0.0
+                        }
+                    })
+                })
+                .flat_map(f32::to_le_bytes)
+                .collect();
+            let at = address(position) as usize;
+            file[at..at + payload.len()].copy_from_slice(&payload);
+        }
+        let (index, index_bytes) = match kind {
+            GridIndex::BTreeV1 => {
+                let chunks: Vec<_> = slots
+                    .iter()
+                    .enumerate()
+                    .map(|(position, slot)| ChunkInfo {
+                        chunk_size: StoredChunkSize::btree_v1(GRID_CHUNK_BYTES as u32),
+                        filter_mask: 0,
+                        offsets: slot.offsets.clone(),
+                        address: StoredAddress::new(address(position)),
+                    })
+                    .collect();
+                (
+                    ChunkIndexLayout::BTreeV1 {
+                        address: Some(StoredAddress::new(0)),
+                    },
+                    build_chunk_btree_leaf(&chunks, 3, WIDTHS),
+                )
+            }
+            GridIndex::ExtensibleArray | GridIndex::FixedArray => {
+                let records: Vec<_> = (0..slots.len())
+                    .map(|position| ChunkRecord {
+                        address: StoredAddress::new(address(position)),
+                        stored_size: GRID_CHUNK_BYTES,
+                        filter_mask: 0,
+                    })
+                    .collect();
+                let slot_of: Vec<_> = slots.iter().map(|slot| slot.slot).collect();
+                let array = match kind {
+                    GridIndex::ExtensibleArray => ChunkArrayKind::ExtensibleArray,
+                    _ => ChunkArrayKind::FixedArray,
+                };
+                array_index(
+                    array,
+                    &records,
+                    &slot_of,
+                    slots.len() as u64,
+                    GRID_CHUNK_BYTES,
+                )
+            }
+            GridIndex::Implicit => (
+                ChunkIndexLayout::Implicit {
+                    address: Some(StoredAddress::new(GRID_DATA)),
+                },
+                Vec::new(),
+            ),
+        };
+        assert!(index_bytes.len() as u64 <= GRID_DATA, "{kind:?}");
+        file[..index_bytes.len()].copy_from_slice(&index_bytes);
+        let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::NONE,
+            chunk_dimensions: GRID_CHUNK.iter().copied().chain([4]).collect(),
+            index,
+        };
+        (file, layout, dataspace)
+    }
+
+    #[rstest]
+    fn reads_through_a_retained_or_a_dropped_index_return_the_same_bytes(
+        #[values(
+            GridIndex::BTreeV1,
+            GridIndex::ExtensibleArray,
+            GridIndex::FixedArray,
+            GridIndex::Implicit
+        )]
+        kind: GridIndex,
+        #[values(false, true)] index_cache: bool,
+    ) {
+        let (file, layout, dataspace) = indexed_grid_file(kind);
+        let datatype = make_f32_type();
+        let spec = RawReadSpec::plain(&layout, &dataspace, &datatype);
+        let source = BytesSource::new(&file);
+        let region = ReadRegion::parse(spec, &[1, 1], &[4, 3]).unwrap();
+        let config = ChunkCacheConfig::disabled().with_index_cache(index_cache);
+        let (buffered, streaming, windowed) = (
+            ChunkCache::with_config(config),
+            ChunkCache::with_config(config),
+            ChunkCache::with_config(config),
+        );
+        let whole = grid_bytes(0..6, 0..5);
+        let window = grid_bytes(1..5, 1..4);
+        let read = || {
+            assert_eq!(
+                read_chunked_data_cached(&file, spec, FORMAT_WIDTHS, &buffered).unwrap(),
+                whole
+            );
+            assert_eq!(
+                read_chunked_data_cached_from_source(&source, spec, FORMAT_WIDTHS, &streaming)
+                    .unwrap(),
+                whole
+            );
+            assert_eq!(
+                read_chunked_region_from_source(
+                    &source,
+                    &region,
+                    FORMAT_WIDTHS,
+                    &windowed,
+                    CachePass::LRU
+                )
+                .unwrap(),
+                window
+            );
+        };
+
+        read();
+        read();
+
+        assert_eq!(buffered.stats().index_loaded(), index_cache);
+        assert_eq!(streaming.stats().index_loaded(), index_cache);
+        assert_eq!(windowed.stats().index_loaded(), index_cache);
+    }
+
+    #[rstest]
+    #[case::interior(&[1, 1], &[4, 3], 6)]
+    #[case::one_chunk(&[2, 0], &[2, 2], 1)]
+    #[case::partial_edge_chunk(&[5, 4], &[1, 1], 1)]
+    #[case::whole(&[0, 0], &[6, 5], 9)]
+    fn a_windowed_read_looks_up_only_the_chunks_it_intersects(
+        #[values(
+            GridIndex::BTreeV1,
+            GridIndex::ExtensibleArray,
+            GridIndex::FixedArray,
+            GridIndex::Implicit
+        )]
+        kind: GridIndex,
+        #[case] start: &[u64],
+        #[case] count: &[u64],
+        #[case] intersected: u64,
+    ) {
+        let (file, layout, dataspace) = indexed_grid_file(kind);
+        let datatype = make_f32_type();
+        let spec = RawReadSpec::plain(&layout, &dataspace, &datatype);
+        let region = ReadRegion::parse(spec, start, count).unwrap();
+        let cache = ChunkCache::with_config(ChunkCacheConfig::new().with_max_slots(64));
+
+        let read = read_chunked_region_from_source(
+            &BytesSource::new(&file),
+            &region,
+            FORMAT_WIDTHS,
+            &cache,
+            CachePass::LRU,
+        )
+        .unwrap();
+
+        assert_eq!(
+            read,
+            grid_bytes(start[0]..start[0] + count[0], start[1]..start[1] + count[1])
+        );
+        let stats = cache.stats();
+        assert_eq!(stats.lookups(), intersected);
+        assert_eq!(stats.cached_chunks() as u64, intersected);
+    }
+
+    const GRID_DIMS: [u64; 2] = [6, 5];
+
+    const GRID_CHUNK: [u64; 2] = [2, 2];
+
+    const GRID_CHUNK_BYTES: u64 = 16;
+
+    /// The lowest chunk address of the grid dataset, after the bytes of its index.
+    const GRID_DATA: u64 = 0x1000;
 
     // --- Windowed row-read guards (read_chunked_rows_from_source) ---
 

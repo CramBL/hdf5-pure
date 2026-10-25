@@ -26,6 +26,7 @@
 // startup.
 #![cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 
+use hdf5_pure::ChunkCacheConfig;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
@@ -509,6 +510,53 @@ fn whole_read_of_adjacent_chunks_costs_a_constant_per_chunk() {
     assert_eq!(
         &all[DATASET_BYTES - 8..],
         &((N0 - 1) as f64).to_le_bytes()[..]
+    );
+}
+
+/// With no decompressed chunk retained, the warm read reuses only the cold read's index.
+#[rstest]
+#[case::buffered(false, "warm_whole_read_buffered")]
+#[case::streaming(true, "warm_whole_read_streaming")]
+fn a_warm_whole_read_lists_its_chunks_without_an_allocation_per_chunk(
+    #[case] streaming: bool,
+    #[case] region: &'static str,
+) {
+    const CHUNKS: u64 = 2048;
+    const CHUNK_ELEMS: u64 = 8;
+
+    let data: Vec<f64> = (0..CHUNKS * CHUNK_ELEMS).map(|i| i as f64).collect();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("warm.h5");
+    let mut builder = FileBuilder::new();
+    builder
+        .create_dataset("t")
+        .with_f64_data(&data)
+        .with_shape(&[CHUNKS * CHUNK_ELEMS])
+        .with_chunks(&[CHUNK_ELEMS]);
+    builder.write(&path).unwrap();
+    let access = FileAccessProperties::new()
+        .with_chunk_cache(ChunkCacheConfig::new().with_max_bytes(0).with_max_slots(0));
+    let file = if streaming {
+        File::open_streaming_with_options(&path, access)
+    } else {
+        File::open_with_options(&path, access)
+    }
+    .unwrap();
+    let ds = file.dataset("t").unwrap();
+    let cold = ds.read_raw().unwrap();
+    assert!(ds.chunk_cache_stats().index_loaded());
+
+    let (warm, measured) = measure(region, || ds.read_raw().unwrap());
+
+    assert_eq!(warm, cold);
+    assert!(
+        measured.live_bytes >= warm.len() as u64,
+        "the dataset this read returned is not in its own measurement: {measured}"
+    );
+    assert!(
+        measured.blocks < CHUNKS / 16,
+        "a warm whole read must take its {CHUNKS} chunks from the retained index without an \
+         allocation per chunk: {measured}"
     );
 }
 

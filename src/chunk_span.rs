@@ -1,49 +1,16 @@
-//! Reading a run of adjacent chunks in one call, for the streaming readers.
+//! Coalesced reads of adjacent chunks, for the streaming chunked readers.
 //!
-//! # Why this exists
+//! A [`ChunkSpanReader`] merges the chunks that are adjacent in the file into spans, reads each
+//! span in one [`Source::read_at`] call, and serves each chunk's bytes out of the span it holds.
+//! A span is at most [`MAX_SPAN_BYTES`] long unless it is a single chunk larger than that, and the
+//! reader holds one span at a time.
 //!
-//! The streaming chunked readers fetch one chunk per [`Source::read_exact_at`],
-//! which is one `seek` plus one `read` each. That is right for the
-//! megabyte-sized chunks a file written in one pass carries, and wrong for a
-//! file written as the data arrived: a recorder that appends a row at a time
-//! produces one chunk per row, so a recording of 73 datasets over 280 rows
-//! holds 20,440 chunks of a few dozen bytes. Reading one chunk at a time cost
-//! about four times what the same read costs from a buffered
-//! [`crate::File::open`], and the whole difference was read *granularity* — the
-//! file was read exactly once, in 32-byte pieces.
-//!
-//! Those chunks are adjacent on disk. libhdf5 allocates a chunk when its chunk
-//! cache flushes rather than when the write is issued, so even a writer filling
-//! 73 datasets a row at a time lays each dataset's chunks down in one run, and
-//! this crate's writer does the same. A reader that asks for the run in one
-//! call gets the same bytes in 73 reads instead of 20,440, which brings the
-//! streaming read within about 15% of the buffered one.
-//!
-//! # What it does not spend
-//!
-//! **Memory.** A span stops at [`MAX_SPAN_BYTES`], so what a reader holds
-//! beyond the caller's own buffers is bounded by that however large the dataset
-//! is. `open_streaming` exists so that a file larger than memory still opens,
-//! and this must not spend that. The one span that may exceed the cap is a
-//! single chunk larger than it, which is read alone — exactly the read the
-//! direct path would have issued.
-//!
-//! **Read volume.** Only chunks that are exactly adjacent merge, so a span
-//! covers nothing but the chunks it was planned over. Bridging a gap between
-//! two nearby chunks would trade read count for read volume; on the layouts
-//! this targets there is no gap to bridge. It follows that the caller must plan
-//! over the chunks it will actually fetch, not over every chunk of the dataset:
-//! a chunk the caller will skip — outside a row window, or already in the chunk
-//! cache — leaves a hole that a span would cover and read for nothing.
-//!
-//! # What the caller owes it
-//!
-//! Chunks must be *asked for* in address order. A reader holds one span, so a
-//! walk that alternates between two spans re-reads a whole span at each
-//! alternation; the chunk index yields index order and a cached index yields no
-//! order at all, so neither is safe to walk unsorted. Serving out of order
-//! stays correct — [`chunk_bytes`](ChunkSpanReader::chunk_bytes) re-reads
-//! whatever span it needs — but it gives up the read count that is the point.
+//! The caller plans the spans over the chunks it fetches, not over every chunk of the dataset. A
+//! read skips a chunk outside its region or in the chunk cache, and the reader reads the whole of
+//! a span, including a skipped chunk in it. The caller requests the chunks in ascending order of
+//! address, the order of a [`ParsedChunkIndex`](crate::parsed_chunk_index::ParsedChunkIndex).
+//! Out of order, the reader returns the same bytes and reads a span again each time the caller
+//! returns to it.
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -55,13 +22,10 @@ use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::source::Source;
 
-/// Largest span read in one call, and so the most a [`ChunkSpanReader`] holds.
+/// The longest span of more than one chunk that a [`ChunkSpanReader`] reads in one call.
 ///
-/// The value is a ceiling, not a target. A chunk-per-row recording's run is one
-/// dataset long — 8,960 bytes on the file above — so any cap past a few tens of
-/// kilobytes captures the same win there; what the cap decides is the layouts
-/// where a run really is long, a dataset of 4 KiB chunks written in one pass,
-/// and there it is the whole memory bound.
+/// The limit bounds the memory of a read of a dataset whose chunks lie end to end, such as one of
+/// 4 KiB chunks written in one pass.
 pub(crate) const MAX_SPAN_BYTES: u64 = 256 * 1024;
 
 /// One contiguous byte range of the file, covering one or more chunks.

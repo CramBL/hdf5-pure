@@ -10189,17 +10189,7 @@ mod tests {
         );
     }
 
-    /// The read volume of a whole-dataset read must not depend on which read it
-    /// is. The chunk list comes from the handle's cached index on every read
-    /// after the first, and that index is a map: it yields no address order at
-    /// all. A reader holding one coalesced span re-reads a whole span each time
-    /// an unordered walk crosses back, so the second read of a dataset spanning
-    /// more than one span cost two orders of magnitude more than the first.
-    ///
-    /// A regression here is probabilistic rather than certain — the map's order
-    /// is seeded per process, and a run that happened to be sorted would pass —
-    /// but with hundreds of chunks over two spans the chance of that is nil.
-    /// Correct code passes deterministically.
+    /// The second read, through the retained index, fetches at most the dataset's bytes.
     #[test]
     fn a_second_whole_read_costs_what_the_first_did() {
         // 512 KiB of f64 in 1 KiB chunks: more than one 256 KiB span, so an
@@ -10220,13 +10210,7 @@ mod tests {
         );
     }
 
-    /// The same, for row windows: the [streaming guide](crate::_guide::streaming) walks a
-    /// dataset in windows on one handle, so every window but the first takes its chunk list from
-    /// the cached index.
-    ///
-    /// Each window here covers more than one span, which is what it takes to
-    /// see the defect: a window whose chunks all fit a single span is served
-    /// out of that one buffer whatever order it walks them in.
+    /// The loop, through the retained index, fetches at most twice the dataset's bytes.
     #[test]
     fn a_window_loop_costs_the_dataset_once() {
         // 2 MiB of f64 in 1 KiB chunks, read in 512 KiB windows — two spans
