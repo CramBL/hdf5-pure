@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 use hdf5_pure::DecodedStoredAddress;
 use hdf5_pure::Error;
 use hdf5_pure::File;
+use hdf5_pure::FreeSectionCoordinates;
 use hdf5_pure::MessageType;
 use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_format::__private as format;
@@ -191,11 +192,24 @@ pub fn assert_unavailable(file: &File, extents: &[(u64, u64)]) {
     let free = match file.space_accounting() {
         Ok(accounting) => accounting.reusable_free_space,
         Err(Error::ReadOnly) => file
-            .persisted_free_space()
+            .persisted_free_sections()
             .unwrap()
-            .into_iter()
-            .map(|(at, len)| (at + file.superblock().base_address.get(), len))
-            .collect(),
+            .as_ref()
+            .map(|report| {
+                report
+                    .free_sections()
+                    .sections()
+                    .iter()
+                    .map(|section| {
+                        assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
+                        (
+                            section.address() + file.superblock().base_address.get(),
+                            section.length().get(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         Err(error) => panic!("free-space inspection failed: {error:?}"),
     };
     let base = file.superblock().base_address.get();
@@ -219,19 +233,39 @@ pub fn assert_unavailable(file: &File, extents: &[(u64, u64)]) {
     }
 }
 
-/// Asserts that persisted free-space managers and free sections are absent.
+/// Asserts that recorded manager addresses are undefined and persisted sections are empty.
+///
+/// Checks an editing handle for unsupported persisted-section inspection.
 ///
 /// # Panics
 ///
-/// Panics if a manager address is defined, persisted free space cannot be read, or a persisted
-/// free section is present.
+/// Panics if metadata cannot be read, a manager address is defined, a persisted section is present,
+/// or inspection support differs from the handle mode.
 pub fn assert_no_managers(file: &File) {
-    if let Some(info) = file.file_space_info().unwrap() {
+    let info = file.file_space_info().unwrap();
+    if let Some(info) = &info {
         assert!(
             info.manager_addrs
                 .iter()
                 .all(|address| *address == DecodedStoredAddress::Undefined)
         );
     }
-    assert_eq!(file.persisted_free_space().unwrap(), []);
+    match file.reusable_space_stats() {
+        Ok(_) => {
+            let error = file.persisted_free_sections().unwrap_err();
+            assert!(
+                matches!(error, Error::FreeSectionInspectionUnsupported),
+                "{error:?}"
+            );
+        }
+        Err(Error::ReadOnly) => {
+            let report = file.persisted_free_sections().unwrap();
+            assert_eq!(report.is_some(), info.is_some_and(|info| info.persist));
+            if let Some(report) = report {
+                assert_eq!(report.free_sections().section_count(), 0);
+                assert_eq!(report.free_sections().free_bytes(), 0);
+            }
+        }
+        Err(error) => panic!("free-space inspection failed: {error:?}"),
+    }
 }

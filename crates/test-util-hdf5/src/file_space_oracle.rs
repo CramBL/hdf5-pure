@@ -195,7 +195,7 @@ pub struct FreeSpaceOracleCheckpoint {
     pub case: String,
     /// The close or reopen checkpoint within the workload.
     pub step: String,
-    /// The sections decoded by [`File::persisted_free_space`].
+    /// The sections decoded by [`File::persisted_free_sections`].
     pub rust: SectionMap,
     /// The sections enumerated by libhdf5 through `H5Fget_free_sections`.
     pub c: SectionMap,
@@ -249,7 +249,12 @@ impl FreeSpaceOracleCheckpoint {
             })?;
         let rust = SectionMap::new(
             "hdf5-pure",
-            reader.persisted_free_space().map_err(OracleError::Rust)?,
+            reader
+                .persisted_free_sections()
+                .map_err(OracleError::Rust)?
+                .as_ref()
+                .map(|report| section_pairs(report.free_sections()))
+                .unwrap_or_default(),
             boundary,
         )?;
         let info = reader.file_space_info().map_err(OracleError::Rust)?;

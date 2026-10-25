@@ -9,6 +9,7 @@ use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
+use hdf5_pure::FreeSectionCoordinates;
 use hdf5_pure::StoredAddress;
 use hdf5_pure::UserblockSize;
 use hdf5_pure_core::__private::StoredAddressExt;
@@ -74,6 +75,7 @@ pub fn write_small_large_i32(path: &Path, page_size: u64) {
 ///
 /// ```
 /// use hdf5_pure::File;
+/// use hdf5_pure::FreeSectionCoordinates;
 /// use test_util_hdf5::paged;
 ///
 /// # let dir = tempfile::tempdir()?;
@@ -81,7 +83,12 @@ pub fn write_small_large_i32(path: &Path, page_size: u64) {
 /// paged::write_metadata_tail(&path, 512, 0, 1, 18, 512);
 /// let file = File::open(&path)?;
 /// assert_eq!(file.dataset("d")?.read_u8()?, vec![7; 512]);
-/// assert_eq!(file.persisted_free_space()?, vec![(513, 511)]);
+/// let report = file.persisted_free_sections()?.expect("persistence is configured");
+/// let sections = report.free_sections().sections();
+/// assert_eq!(sections.len(), 1);
+/// assert_eq!(sections[0].coordinates(), FreeSectionCoordinates::Stored);
+/// assert_eq!(sections[0].address(), 513);
+/// assert_eq!(sections[0].length().get(), 511);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 ///
@@ -186,13 +193,13 @@ pub fn assert_consistent(path: &Path, page_size: u64) {
         "EOA == file size less the userblock"
     );
 
-    let mut free = file.persisted_free_space().unwrap();
-    free.sort_by_key(|&(address, _)| address);
+    let free = file.persisted_free_sections().unwrap().unwrap();
     let mut previous_end = 0u64;
-    for (address, length) in free {
-        assert!(address >= previous_end, "sections do not overlap");
-        assert!(address + length <= eoa, "section within the file");
-        previous_end = address + length;
+    for section in free.free_sections().sections() {
+        assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
+        assert!(section.address() >= previous_end, "sections do not overlap");
+        assert!(section.end_address() <= eoa, "section within the file");
+        previous_end = section.end_address();
     }
 }
 

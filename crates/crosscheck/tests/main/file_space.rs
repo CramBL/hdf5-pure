@@ -26,10 +26,13 @@ use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
+use hdf5_pure::FreeSectionCoordinates;
+use hdf5_pure::FreeSections;
 use hdf5_pure::FreeSpaceManagerRole;
 use hdf5_pure::Layout;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::MessageType;
+use hdf5_pure::PersistedFreeSections;
 use hdf5_pure::SyncPolicy;
 use hdf5_pure::UserblockSize;
 use hdf5_pure_core::__private::BaseAddressExt;
@@ -60,7 +63,6 @@ use test_util_hdf5::absence;
 use test_util_hdf5::dataset::Unlimited;
 use test_util_hdf5::file_space;
 use test_util_hdf5::file_space_oracle::FreeSpaceOracleCheckpoint;
-use test_util_hdf5::file_space_oracle::SectionMap;
 use test_util_hdf5::paged;
 use test_util_hdf5::session;
 use test_util_hdf5::storage;
@@ -149,7 +151,15 @@ fn c_written_fixed_width_root_updates_reach_stable_physical_length(
         file.close().unwrap();
         closed_lengths.push(std::fs::metadata(&path).unwrap().len());
         let reopened = File::open(&path).unwrap();
-        assert_eq!(reopened.persisted_free_space().unwrap(), sections);
+        assert_section_map(
+            reopened
+                .persisted_free_sections()
+                .unwrap()
+                .unwrap()
+                .free_sections(),
+            &sections,
+            reopened.file_size() - reopened.superblock().base_address.get(),
+        );
         managers.push(
             reopened
                 .file_space_info()
@@ -264,11 +274,11 @@ fn created_page_tail_survives_reference_library_mutation(
     let userblock = Userblock::read(&path, usize::try_from(base).unwrap());
     let file = File::open(&path).unwrap();
     let free: u64 = file
-        .persisted_free_space()
+        .persisted_free_sections()
         .unwrap()
-        .iter()
-        .map(|&(_, length)| length)
-        .sum();
+        .unwrap()
+        .free_sections()
+        .free_bytes();
     drop(file);
     let bytes = std::fs::read(&path).unwrap();
     let file = File::open_rw(&path).unwrap();
@@ -572,17 +582,22 @@ fn reclaimed_page_header_continuations_remain_compatible_with_c_mutation(
     assert!(
         File::from_bytes(original.clone())
             .unwrap()
-            .persisted_free_space()
+            .persisted_free_sections()
             .unwrap()
+            .unwrap()
+            .free_sections()
+            .sections()
             .iter()
-            .any(|&(start, length)| {
-                start + userblock == generic_fragment.start
-                    && start + userblock + length == generic_fragment.end
+            .any(|section| {
+                section.coordinates() == FreeSectionCoordinates::Stored
+                    && section.address() + userblock == generic_fragment.start
+                    && section.end_address() + userblock == generic_fragment.end
             }),
         "continuations={continuations:?}, fragment={generic_fragment:?}, free={:?}",
         File::from_bytes(original.clone())
             .unwrap()
-            .persisted_free_space()
+            .persisted_free_sections()
+            .unwrap()
             .unwrap()
     );
     match action {
@@ -631,11 +646,11 @@ fn reclaimed_page_header_continuations_remain_compatible_with_c_mutation(
     file.close().unwrap();
     let persisted_bytes: u64 = File::from_bytes(std::fs::read(&path).unwrap())
         .unwrap()
-        .persisted_free_space()
+        .persisted_free_sections()
         .unwrap()
-        .iter()
-        .map(|&(_, length)| length)
-        .sum();
+        .unwrap()
+        .free_sections()
+        .free_bytes();
 
     let file = hdf5::File::open_rw(&path).unwrap();
     assert_eq!(file.free_space(), persisted_bytes);
@@ -1113,9 +1128,15 @@ fn assert_page_recovery_state(file: &File, additional: &[(&str, u8)]) {
     assert_eq!(info.page_size.get(), 4096);
     assert!(!info.persist);
     assert!(info.manager_addrs.is_empty());
-    assert_eq!(file.persisted_free_space().unwrap(), []);
     if file.edit_backing().is_some() {
+        let error = file.persisted_free_sections().unwrap_err();
+        assert!(
+            matches!(error, Error::FreeSectionInspectionUnsupported),
+            "{error:?}"
+        );
         assert_eq!(file.space_accounting().unwrap().reusable_free_space, []);
+    } else {
+        assert_eq!(file.persisted_free_sections().unwrap(), None);
     }
 }
 
@@ -1290,7 +1311,7 @@ fn assert_pure_page_edit(
     assert_eq!(info.page_size.get(), page_size);
     assert!(!info.persist);
     assert!(info.manager_addrs.is_empty());
-    assert_eq!(file.persisted_free_space().unwrap(), []);
+    assert_eq!(file.persisted_free_sections().unwrap(), None);
     assert_eq!(file.dataset("keep").unwrap().read_u8().unwrap(), [7; 64]);
     assert_eq!(file.dataset("alias").unwrap().read_u8().unwrap(), [7; 64]);
     assert_eq!(file.dataset("from_c").unwrap().read_u8().unwrap(), [13; 64]);
@@ -1657,19 +1678,24 @@ fn we_read_c_library_persisted_free_space() {
     );
     assert!(f.file_space_info().unwrap().unwrap().persist);
 
-    let free = f.persisted_free_space().unwrap();
+    let free = f.persisted_free_sections().unwrap().unwrap();
     assert!(
-        !free.is_empty(),
+        free.free_sections().section_count() > 0,
         "expected persisted free sections from the deleted dataset"
     );
     // The freed regions are non-overlapping and account for real space (b held
     // 400 * 4 = 1600 bytes of raw data, freed as at least one large section).
-    let total: u64 = free.iter().map(|(_, len)| *len).sum();
+    let total = free.free_sections().free_bytes();
     assert!(
         total >= 1600,
         "freed space {total} should cover the dataset"
     );
-    assert!(free.iter().any(|&(_, len)| len >= 1600));
+    assert!(
+        free.free_sections()
+            .sections()
+            .iter()
+            .any(|section| section.length().get() >= 1600)
+    );
 
     // Surviving datasets still read correctly alongside the persisted managers.
     assert_eq!(f.dataset("a").unwrap().read_i32().unwrap(), vec![1; 100]);
@@ -1691,11 +1717,11 @@ fn c_library_reads_our_persisted_free_space() {
     // hdf5-pure's own reader recovers the persisted sections (covering "big").
     let ours = File::open(&path).unwrap();
     let total_ours: u64 = ours
-        .persisted_free_space()
+        .persisted_free_sections()
         .unwrap()
-        .iter()
-        .map(|(_, l)| l)
-        .sum();
+        .unwrap()
+        .free_sections()
+        .free_bytes();
     assert!(
         total_ours >= 1600,
         "we persist the freed storage: {total_ours}"
@@ -1817,8 +1843,8 @@ fn c_library_accepts_reclaimed_v2_btree_chunk_storage_and_allocates_afterward() 
         ours.dataset("keep").unwrap().read_i32().unwrap(),
         vec![1, 2, 3, 4]
     );
-    let free_after_delete = ours.persisted_free_space().unwrap();
-    let free_ours: u64 = free_after_delete.iter().map(|(_, len)| *len).sum();
+    let free_after_delete = ours.persisted_free_sections().unwrap().unwrap();
+    let free_ours = free_after_delete.free_sections().free_bytes();
     assert!(
         free_ours >= raw_bytes + filtered_bytes,
         "persisted free space {free_ours} must include every raw v2 B-tree chunk"
@@ -1935,11 +1961,11 @@ fn c_library_reads_managers_we_placed_mid_file() {
         );
     }
     let total_ours: u64 = ours
-        .persisted_free_space()
+        .persisted_free_sections()
         .unwrap()
-        .iter()
-        .map(|(_, l)| l)
-        .sum();
+        .unwrap()
+        .free_sections()
+        .free_bytes();
     drop(ours);
 
     // The C library reads the same file: survivors byte-exact, and its own
@@ -2048,11 +2074,11 @@ fn libhdf5_reads_and_edits_a_reused_manager_with_spare_allocation() {
     assert!(spare > 0, "the fixture must write an oversized allocation");
     let reader = File::open(&path).unwrap();
     let persisted_free = reader
-        .persisted_free_space()
+        .persisted_free_sections()
         .unwrap()
-        .iter()
-        .map(|&(_, len)| len)
-        .sum::<u64>();
+        .unwrap()
+        .free_sections()
+        .free_bytes();
     drop(reader);
 
     let native = hdf5::File::open(&path).unwrap();
@@ -2121,11 +2147,11 @@ fn libhdf5_reads_and_edits_a_reused_manager_with_spare_allocation() {
     assert_eq!(
         native.free_space(),
         reader
-            .persisted_free_space()
+            .persisted_free_sections()
             .unwrap()
-            .iter()
-            .map(|&(_, len)| len)
-            .sum::<u64>()
+            .unwrap()
+            .free_sections()
+            .free_bytes()
     );
 }
 
@@ -2493,11 +2519,11 @@ fn the_sections_libhdf5_persists_in_an_oversized_section_list_are_read() {
 
     assert_eq!(padded, vec![(197, 188)]);
     assert_eq!(
-        file.persisted_free_space()
+        file.persisted_free_sections()
             .unwrap()
-            .iter()
-            .map(|&(_, len)| len)
-            .sum::<u64>(),
+            .unwrap()
+            .free_sections()
+            .free_bytes(),
         free_c
     );
 }
@@ -2595,8 +2621,12 @@ fn libhdf5_loads_the_managers_the_serializer_writes_at_the_widths_of_its_file(
     );
     let free_c = file.free_space();
     drop(file);
-    let free = File::open(&path).unwrap().persisted_free_space().unwrap();
-    assert_eq!(free.iter().map(|&(_, len)| len).sum::<u64>(), free_c);
+    let free = File::open(&path)
+        .unwrap()
+        .persisted_free_sections()
+        .unwrap()
+        .unwrap();
+    assert_eq!(free.free_sections().free_bytes(), free_c);
 }
 
 #[rstest]
@@ -2607,18 +2637,20 @@ fn libhdf5_reads_a_section_list_whose_allocation_the_test_enlarges(#[case] userb
     let path = dir.path().join("enlarged_section_list.h5");
     let (free, _) = enlarged_section_list_file(&path, userblock);
     let file = hdf5::File::open(&path).unwrap();
-    assert_eq!(
-        file.free_space(),
-        free.iter().map(|&(_, len)| len).sum::<u64>()
-    );
+    assert_eq!(file.free_space(), free.free_sections().free_bytes());
     assert_eq!(
         file.dataset("a").unwrap().read_raw::<i32>().unwrap(),
         vec![1; 400]
     );
     file.close().unwrap();
     assert_eq!(
-        File::open(&path).unwrap().persisted_free_space().unwrap(),
-        free
+        File::open(&path)
+            .unwrap()
+            .persisted_free_sections()
+            .unwrap()
+            .unwrap()
+            .free_sections(),
+        free.free_sections()
     );
 }
 
@@ -2652,7 +2684,7 @@ fn an_editor_reclaims_the_complete_section_list_allocation_the_test_enlarges() {
     );
 }
 
-fn enlarged_section_list_file(path: &Path, userblock: u64) -> (Vec<(u64, u64)>, Range<u64>) {
+fn enlarged_section_list_file(path: &Path, userblock: u64) -> (PersistedFreeSections, Range<u64>) {
     write_c_persisted_with_a_hole(
         path,
         Driver::Sec2,
@@ -2662,7 +2694,7 @@ fn enlarged_section_list_file(path: &Path, userblock: u64) -> (Vec<(u64, u64)>, 
     );
     let file = File::open(path).unwrap();
     let mut superblock = file.superblock().clone();
-    let free = file.persisted_free_space().unwrap();
+    let free = file.persisted_free_sections().unwrap().unwrap();
     let widths = FormatWidths::from_sizes(8, 8).unwrap();
     let base = superblock.base_address;
     let mut bytes = std::fs::read(path).unwrap();
@@ -2762,7 +2794,7 @@ fn a_libhdf5_manager_with_an_invalid_field_is_reported_and_seeds_no_free_space(
 
     let err = File::open(&path)
         .unwrap()
-        .persisted_free_space()
+        .persisted_free_sections()
         .unwrap_err();
     let Error::Format(FormatError::InvalidFreeSpaceManager(message)) = &err else {
         panic!("expected InvalidFreeSpaceManager, got {err:?}");
@@ -2785,7 +2817,7 @@ fn a_libhdf5_section_list_whose_checksum_does_not_match_is_reported_and_seeds_no
 
     let err = File::open(&path)
         .unwrap()
-        .persisted_free_space()
+        .persisted_free_sections()
         .unwrap_err();
     let Error::Format(FormatError::ChecksumMismatch { expected, computed }) = err else {
         panic!("expected ChecksumMismatch, got {err:?}");
@@ -2820,7 +2852,7 @@ fn an_editor_never_frees_the_live_bytes_a_libhdf5_header_points_to_as_its_sectio
 
     let err = File::open(&path)
         .unwrap()
-        .persisted_free_space()
+        .persisted_free_sections()
         .unwrap_err();
     let Error::Format(FormatError::InvalidFreeSpaceManager(message)) = &err else {
         panic!("expected InvalidFreeSpaceManager, got {err:?}");
@@ -2878,7 +2910,7 @@ fn a_libhdf5_section_list_of_another_header_is_reported_and_neither_seeded_nor_r
 
     let err = File::open(&path)
         .unwrap()
-        .persisted_free_space()
+        .persisted_free_sections()
         .unwrap_err();
     let Error::Format(FormatError::InvalidFreeSpaceManager(message)) = &err else {
         panic!("expected InvalidFreeSpaceManager, got {err:?}");
@@ -3287,11 +3319,11 @@ fn libhdf5_reads_a_version_0_file_after_an_edit_reuses_its_persisted_free_space(
     }
     let total_ours: u64 = File::open(&path)
         .unwrap()
-        .persisted_free_space()
+        .persisted_free_sections()
         .unwrap()
-        .iter()
-        .map(|&(_, len)| len)
-        .sum();
+        .unwrap()
+        .free_sections()
+        .free_bytes();
 
     let f = hdf5::File::open(&path).unwrap();
     assert_eq!(
@@ -3397,20 +3429,28 @@ fn libhdf5_reads_its_file_after_an_edit_reuses_the_free_space_it_persisted(
         userblock,
     );
     let stamped = Userblock::read(&path, usize::try_from(userblock).unwrap());
-    let persisted = File::open(&path).unwrap().persisted_free_space().unwrap();
+    let persisted = File::open(&path)
+        .unwrap()
+        .persisted_free_sections()
+        .unwrap()
+        .unwrap();
     assert!(
-        persisted.contains(&(freed - userblock, 1600)),
+        persisted.free_sections().sections().iter().any(|section| {
+            section.coordinates() == FreeSectionCoordinates::Stored
+                && section.address() == freed - userblock
+                && section.length().get() == 1600
+        }),
         "{persisted:?}"
     );
 
     let session = File::open_rw(&path).unwrap();
-    assert_eq!(
-        session.space_accounting().unwrap().reusable_free_space,
-        persisted
-            .iter()
-            .map(|&(at, len)| (at + userblock, len))
-            .collect::<Vec<_>>()
-    );
+    let reusable = session.space_accounting().unwrap().reusable_free_space;
+    assert_eq!(reusable.len(), persisted.free_sections().section_count());
+    for ((address, length), section) in reusable.iter().zip(persisted.free_sections().sections()) {
+        assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
+        assert_eq!(*address, section.address() + userblock);
+        assert_eq!(*length, section.length().get());
+    }
     session
         .root()
         .create_dataset("d", |builder| {
@@ -3419,7 +3459,11 @@ fn libhdf5_reads_its_file_after_an_edit_reuses_the_free_space_it_persisted(
         .unwrap();
     session.commit().unwrap();
     session.close().unwrap();
-    let ours = File::open(&path).unwrap().persisted_free_space().unwrap();
+    let ours = File::open(&path)
+        .unwrap()
+        .persisted_free_sections()
+        .unwrap()
+        .unwrap();
 
     let f = hdf5::File::open(&path).unwrap();
     let d = f.dataset("d").unwrap();
@@ -3436,21 +3480,12 @@ fn libhdf5_reads_its_file_after_an_edit_reuses_the_free_space_it_persisted(
         f.dataset("big").unwrap().read_raw::<i32>().unwrap(),
         vec![4; 5000]
     );
-    assert_eq!(
-        f.free_space(),
-        ours.iter().map(|&(_, len)| len).sum::<u64>()
+    assert_eq!(f.free_space(), ours.free_sections().free_bytes());
+    assert_section_map(
+        ours.free_sections(),
+        &file_space::libhdf5_free_sections(&f).unwrap(),
+        f.size() - userblock,
     );
-    SectionMap::new("hdf5-pure", ours, f.size() - userblock)
-        .unwrap()
-        .compare(
-            &SectionMap::new(
-                "libhdf5",
-                file_space::libhdf5_free_sections(&f).unwrap(),
-                f.size() - userblock,
-            )
-            .unwrap(),
-        )
-        .unwrap();
     drop(d);
     f.close().unwrap();
     stamped.assert_unchanged(&path);
@@ -3491,8 +3526,12 @@ fn libhdf5_reads_relocated_persisted_free_space_and_writes_to_the_file(
     second.root().delete("c").unwrap();
     second.commit().unwrap();
     second.close().unwrap();
-    let ours = File::open(&path).unwrap().persisted_free_space().unwrap();
-    assert!(!ours.is_empty());
+    let ours = File::open(&path)
+        .unwrap()
+        .persisted_free_sections()
+        .unwrap()
+        .unwrap();
+    assert!(ours.free_sections().section_count() > 0);
 
     let f = hdf5::File::open_rw(&path).unwrap();
     assert_eq!(
@@ -3512,21 +3551,12 @@ fn libhdf5_reads_relocated_persisted_free_space_and_writes_to_the_file(
         vec![9; 300]
     );
     absence::assert_libhdf5_absent(&f.dataset("c").unwrap_err(), "c");
-    assert_eq!(
-        f.free_space(),
-        ours.iter().map(|&(_, len)| len).sum::<u64>()
+    assert_eq!(f.free_space(), ours.free_sections().free_bytes());
+    assert_section_map(
+        ours.free_sections(),
+        &file_space::libhdf5_free_sections(&f).unwrap(),
+        f.size() - userblock,
     );
-    SectionMap::new("hdf5-pure", ours, f.size() - userblock)
-        .unwrap()
-        .compare(
-            &SectionMap::new(
-                "libhdf5",
-                file_space::libhdf5_free_sections(&f).unwrap(),
-                f.size() - userblock,
-            )
-            .unwrap(),
-        )
-        .unwrap();
     f.new_dataset::<i32>()
         .shape((50,))
         .create("e")
@@ -3560,7 +3590,7 @@ fn libhdf5_reads_its_paged_file_after_an_edit_reuses_the_free_space_it_persisted
     file.close().unwrap();
     let stamped = Userblock::read(&path, usize::try_from(userblock).unwrap());
     let file = File::open(&path).unwrap();
-    let persisted = file.persisted_free_space().unwrap();
+    let persisted = file.persisted_free_sections().unwrap().unwrap();
     let big = file_space::contiguous_extent(&file, "big");
     drop(file);
     let last_page_of_big = (
@@ -3568,20 +3598,28 @@ fn libhdf5_reads_its_paged_file_after_an_edit_reuses_the_free_space_it_persisted
         PAGE_SIZE - (big.end - userblock) % PAGE_SIZE,
     );
     assert_eq!(
-        persisted.contains(&last_page_of_big),
+        persisted.free_sections().sections().iter().any(|section| {
+            section.address() == last_page_of_big.0 && section.length().get() == last_page_of_big.1
+        }),
         hdf5::library_version() < (1, 12, 0),
         "{persisted:?}"
     );
 
     let session = File::open_rw(&path).unwrap();
-    assert_eq!(
-        session.space_accounting().unwrap().reusable_free_space,
-        persisted
-            .iter()
-            .filter(|&&section| section != last_page_of_big)
-            .map(|&(at, len)| (at + userblock, len))
-            .collect::<Vec<_>>()
-    );
+    let reusable = session.space_accounting().unwrap().reusable_free_space;
+    let recovered = persisted
+        .free_sections()
+        .sections()
+        .iter()
+        .filter(|section| {
+            section.address() != last_page_of_big.0 || section.length().get() != last_page_of_big.1
+        });
+    assert_eq!(reusable.len(), recovered.clone().count());
+    for ((address, length), section) in reusable.iter().zip(recovered) {
+        assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
+        assert_eq!(*address, section.address() + userblock);
+        assert_eq!(*length, section.length().get());
+    }
     session
         .root()
         .create_dataset("d", |builder| {
@@ -3590,7 +3628,11 @@ fn libhdf5_reads_its_paged_file_after_an_edit_reuses_the_free_space_it_persisted
         .unwrap();
     session.commit().unwrap();
     session.close().unwrap();
-    let ours = File::open(&path).unwrap().persisted_free_space().unwrap();
+    let ours = File::open(&path)
+        .unwrap()
+        .persisted_free_sections()
+        .unwrap()
+        .unwrap();
 
     let f = hdf5::File::open(&path).unwrap();
     let d = f.dataset("d").unwrap();
@@ -3609,21 +3651,12 @@ fn libhdf5_reads_its_paged_file_after_an_edit_reuses_the_free_space_it_persisted
             "{name}"
         );
     }
-    assert_eq!(
-        f.free_space(),
-        ours.iter().map(|&(_, len)| len).sum::<u64>()
+    assert_eq!(f.free_space(), ours.free_sections().free_bytes());
+    assert_section_map(
+        ours.free_sections(),
+        &file_space::libhdf5_free_sections(&f).unwrap(),
+        f.size() - userblock,
     );
-    SectionMap::new("hdf5-pure", ours, f.size() - userblock)
-        .unwrap()
-        .compare(
-            &SectionMap::new(
-                "libhdf5",
-                file_space::libhdf5_free_sections(&f).unwrap(),
-                f.size() - userblock,
-            )
-            .unwrap(),
-        )
-        .unwrap();
     drop(d);
     f.close().unwrap();
 
@@ -3683,8 +3716,12 @@ fn libhdf5_reads_and_writes_our_edited_paged_file(#[values(0, PAGE_SIZE)] userbl
     second.commit().unwrap();
     second.close().unwrap();
     paged::assert_consistent(&path, PAGE_SIZE);
-    let ours = File::open(&path).unwrap().persisted_free_space().unwrap();
-    assert!(!ours.is_empty());
+    let ours = File::open(&path)
+        .unwrap()
+        .persisted_free_sections()
+        .unwrap()
+        .unwrap();
+    assert!(ours.free_sections().section_count() > 0);
 
     let f = hdf5::File::open_rw(&path).unwrap();
     assert_eq!(
@@ -3701,21 +3738,12 @@ fn libhdf5_reads_and_writes_our_edited_paged_file(#[values(0, PAGE_SIZE)] userbl
         vec![9; 300]
     );
     absence::assert_libhdf5_absent(&f.dataset("c").unwrap_err(), "c");
-    assert_eq!(
-        f.free_space(),
-        ours.iter().map(|&(_, len)| len).sum::<u64>()
+    assert_eq!(f.free_space(), ours.free_sections().free_bytes());
+    assert_section_map(
+        ours.free_sections(),
+        &file_space::libhdf5_free_sections(&f).unwrap(),
+        f.size() - userblock,
     );
-    SectionMap::new("hdf5-pure", ours, f.size() - userblock)
-        .unwrap()
-        .compare(
-            &SectionMap::new(
-                "libhdf5",
-                file_space::libhdf5_free_sections(&f).unwrap(),
-                f.size() - userblock,
-            )
-            .unwrap(),
-        )
-        .unwrap();
     f.new_dataset::<i32>()
         .shape((50,))
         .create("e")
@@ -3830,11 +3858,11 @@ fn c_library_reads_our_fresh_persisting_file(#[case] threshold: u64, #[case] has
 
     let total_ours: u64 = File::open(&path)
         .unwrap()
-        .persisted_free_space()
+        .persisted_free_sections()
         .unwrap()
-        .iter()
-        .map(|(_, l)| l)
-        .sum();
+        .unwrap()
+        .free_sections()
+        .free_bytes();
     assert_eq!(total_ours != 0, has_sections);
 
     let f = hdf5::File::open(&path).unwrap();
@@ -3875,11 +3903,11 @@ fn c_library_reads_our_paged_file(#[case] page_size: u64) {
     // hdf5-pure's own view of the tracked free space (SUPER + DRAW + LARGE tails).
     let ours = File::open(&path).unwrap();
     let total_ours: u64 = ours
-        .persisted_free_space()
+        .persisted_free_sections()
         .unwrap()
-        .iter()
-        .map(|(_, l)| l)
-        .sum();
+        .unwrap()
+        .free_sections()
+        .free_bytes();
     assert!(total_ours > 0, "paged persist tracks page-tail free space");
     drop(ours);
 
@@ -3951,11 +3979,11 @@ fn c_library_reads_our_paged_chunked_file() {
 
     let ours = File::open(&path).unwrap();
     let total_ours: u64 = ours
-        .persisted_free_space()
+        .persisted_free_sections()
         .unwrap()
-        .iter()
-        .map(|(_, l)| l)
-        .sum();
+        .unwrap()
+        .free_sections()
+        .free_bytes();
     drop(ours);
 
     let f = hdf5::File::open(&path).unwrap();
@@ -4020,11 +4048,11 @@ fn c_library_reads_our_bounded_mutated_paged_file() {
     let ours = File::open(&path).unwrap();
     assert_eq!(ours.dataset("d").unwrap().read_i32().unwrap(), want);
     let total_ours: u64 = ours
-        .persisted_free_space()
+        .persisted_free_sections()
         .unwrap()
-        .iter()
-        .map(|(_, l)| l)
-        .sum();
+        .unwrap()
+        .free_sections()
+        .free_bytes();
     drop(ours);
 
     // The C library recovers the paged strategy and reads every row.
@@ -4104,11 +4132,11 @@ fn c_library_reads_our_staged_mutated_paged_file() {
         vec![2.5f64; 512]
     );
     let total_ours: u64 = ours
-        .persisted_free_space()
+        .persisted_free_sections()
         .unwrap()
-        .iter()
-        .map(|(_, l)| l)
-        .sum();
+        .unwrap()
+        .free_sections()
+        .free_bytes();
     drop(ours);
 
     // The C library recovers the paged strategy and reads both datasets.
@@ -4209,11 +4237,11 @@ fn c_library_reads_our_paged_file_after_free_space_reuse() {
         replacement
     );
     let total_ours: u64 = ours
-        .persisted_free_space()
+        .persisted_free_sections()
         .unwrap()
-        .iter()
-        .map(|(_, l)| l)
-        .sum();
+        .unwrap()
+        .free_sections()
+        .free_bytes();
     drop(ours);
 
     let f = hdf5::File::open(&path).unwrap();
@@ -4315,11 +4343,11 @@ fn c_library_reads_our_paged_file_after_a_cross_page_type_claim() {
     let ours = File::open(&path).unwrap();
     assert_eq!(ours.dataset("ceiling").unwrap().read_f64().unwrap(), kept);
     let total_ours: u64 = ours
-        .persisted_free_space()
+        .persisted_free_sections()
         .unwrap()
-        .iter()
-        .map(|(_, l)| l)
-        .sum();
+        .unwrap()
+        .free_sections()
+        .free_bytes();
     drop(ours);
 
     let f = hdf5::File::open(&path).unwrap();
@@ -4414,11 +4442,11 @@ fn pure_bounded_mutates_c_created_paged_file() {
     let ours = File::open(&path).unwrap();
     assert_eq!(ours.dataset("d").unwrap().read_i32().unwrap(), want);
     let total_ours: u64 = ours
-        .persisted_free_space()
+        .persisted_free_sections()
         .unwrap()
-        .iter()
-        .map(|(_, l)| l)
-        .sum();
+        .unwrap()
+        .free_sections()
+        .free_bytes();
     drop(ours);
 
     // The C library reads it back and re-parses the managers.
@@ -4505,11 +4533,11 @@ fn c_library_reads_our_paged_file_after_group_churn() {
 
     let ours = File::open(&path).unwrap();
     let total_ours: u64 = ours
-        .persisted_free_space()
+        .persisted_free_sections()
         .unwrap()
-        .iter()
-        .map(|(_, l)| l)
-        .sum();
+        .unwrap()
+        .free_sections()
+        .free_bytes();
     assert!(total_ours > 0, "the churn left free space to account for");
     drop(ours);
 
@@ -4638,8 +4666,10 @@ fn c_library_reads_our_file_after_a_release_shortened_it() {
         );
         let ours = File::open(&path).unwrap();
         assert_eq!(ours.file_size(), len, "{label}: superblock EOF matches");
-        let free_ours: Vec<(u64, u64)> = ours.persisted_free_space().unwrap();
-        for &(addr, size) in &free_ours {
+        let free_ours = ours.persisted_free_sections().unwrap().unwrap();
+        for section in free_ours.free_sections().sections() {
+            assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
+            let (addr, size) = (section.address(), section.length().get());
             assert!(
                 addr + size <= len,
                 "{label}: a persisted section [{addr}, {}) runs past the {len}-byte \
@@ -4647,7 +4677,7 @@ fn c_library_reads_our_file_after_a_release_shortened_it() {
                 addr + size
             );
         }
-        let total_ours: u64 = free_ours.iter().map(|(_, l)| l).sum();
+        let total_ours = free_ours.free_sections().free_bytes();
         drop(ours);
 
         let f = hdf5::File::open(&path).unwrap();
@@ -4774,11 +4804,11 @@ fn c_library_reads_our_file_after_an_append_reused_free_space() {
         let ours = File::open(&path).unwrap();
         assert_eq!(ours.dataset("log2").unwrap().read_i32().unwrap(), payload);
         let total_ours: u64 = ours
-            .persisted_free_space()
+            .persisted_free_sections()
             .unwrap()
-            .iter()
-            .map(|(_, l)| l)
-            .sum();
+            .unwrap()
+            .free_sections()
+            .free_bytes();
         drop(ours);
 
         let f = hdf5::File::open(&path).unwrap();
@@ -4963,11 +4993,15 @@ fn a_sub_threshold_extent_is_tracked_only_beside_a_tracked_extent_as_libhdf5_tra
                 expected
             );
         }
-        let free = file.persisted_free_space().unwrap();
-        (
-            range::covered_len(&free, &extent),
-            free.iter().map(|&(_, len)| len).sum::<u64>(),
-        )
+        let report = file.persisted_free_sections().unwrap();
+        assert_eq!(report.is_some(), persist);
+        match report {
+            Some(report) => (
+                covered_free_bytes(report.free_sections(), &extent),
+                report.free_sections().free_bytes(),
+            ),
+            None => (0, 0),
+        }
     };
     let c_total = hdf5::File::open(&ours).unwrap().free_space();
 
@@ -5021,7 +5055,7 @@ fn a_persisting_edit_that_tracks_no_free_space_records_the_end_of_allocation_for
         (
             info.eoa_pre_fsm,
             info.manager_addrs.clone(),
-            file.persisted_free_space().unwrap(),
+            file.persisted_free_sections().unwrap().unwrap(),
             file.superblock().eof_address,
         )
     };
@@ -5032,7 +5066,7 @@ fn a_persisting_edit_that_tracks_no_free_space_records_the_end_of_allocation_for
             eoa_pre_fsm,
             eof,
             manager_addrs,
-            free,
+            free.free_sections().section_count(),
             c_file.dataset("a").unwrap().read_raw::<i32>().unwrap(),
             c_file.free_space(),
         ),
@@ -5042,7 +5076,7 @@ fn a_persisting_edit_that_tracks_no_free_space_records_the_end_of_allocation_for
             )),
             len,
             vec![hdf5_pure::DecodedStoredAddress::Undefined; NUM_FILE_FSM_MANAGERS],
-            Vec::new(),
+            0,
             vec![1; 100],
             0
         )
@@ -5193,8 +5227,13 @@ fn a_dropped_extent_of_whole_pages_below_an_appended_tail_stays_tracked_for_libh
     let c_file = hdf5::File::open(&path).unwrap();
     assert_eq!(
         (
-            range::covered_len(
-                &File::open(&path).unwrap().persisted_free_space().unwrap(),
+            covered_free_bytes(
+                File::open(&path)
+                    .unwrap()
+                    .persisted_free_sections()
+                    .unwrap()
+                    .unwrap()
+                    .free_sections(),
                 &l
             ),
             std::fs::metadata(&path).unwrap().len() > l.end,
@@ -5265,8 +5304,13 @@ fn a_page_tail_short_of_the_threshold_stays_tracked_as_libhdf5_tracks_it(
             range::covered_len(&file.space_accounting().unwrap().reusable_free_space, &tail);
         (tail, session)
     };
-    let ours_reopened = range::covered_len(
-        &File::open(&ours).unwrap().persisted_free_space().unwrap(),
+    let ours_reopened = covered_free_bytes(
+        File::open(&ours)
+            .unwrap()
+            .persisted_free_sections()
+            .unwrap()
+            .unwrap()
+            .free_sections(),
         &ours_tail,
     );
     let theirs_tail = {
@@ -5278,8 +5322,13 @@ fn a_page_tail_short_of_the_threshold_stays_tracked_as_libhdf5_tracks_it(
         file.close().unwrap();
         tail
     };
-    let theirs_reopened = range::covered_len(
-        &File::open(&theirs).unwrap().persisted_free_space().unwrap(),
+    let theirs_reopened = covered_free_bytes(
+        File::open(&theirs)
+            .unwrap()
+            .persisted_free_sections()
+            .unwrap()
+            .unwrap()
+            .free_sections(),
         &theirs_tail,
     );
 
@@ -5321,9 +5370,12 @@ fn a_paged_persisting_edit_that_tracks_no_free_space_records_the_end_of_allocati
         }
         File::open(&path)
             .unwrap()
-            .persisted_free_space()
+            .persisted_free_sections()
             .unwrap()
-            .is_empty()
+            .unwrap()
+            .free_sections()
+            .section_count()
+            == 0
     });
 
     let (eoa_pre_fsm, manager_addrs, free, eof) = {
@@ -5332,7 +5384,7 @@ fn a_paged_persisting_edit_that_tracks_no_free_space_records_the_end_of_allocati
         (
             info.eoa_pre_fsm,
             info.manager_addrs.clone(),
-            file.persisted_free_space().unwrap(),
+            file.persisted_free_sections().unwrap().unwrap(),
             file.superblock().eof_address,
         )
     };
@@ -5344,7 +5396,7 @@ fn a_paged_persisting_edit_that_tracks_no_free_space_records_the_end_of_allocati
             eoa_pre_fsm,
             eof,
             manager_addrs,
-            free,
+            free.free_sections().section_count(),
             c_file.dataset("a").unwrap().read_raw::<i32>().unwrap(),
             c_file.free_space(),
         ),
@@ -5354,7 +5406,7 @@ fn a_paged_persisting_edit_that_tracks_no_free_space_records_the_end_of_allocati
             )),
             len,
             vec![hdf5_pure::DecodedStoredAddress::Undefined; NUM_FILE_FSM_MANAGERS],
-            Vec::new(),
+            0,
             vec![1; PAGE_ELEMENTS],
             0
         )
@@ -5386,8 +5438,13 @@ fn paged_tracked_after_deletions(
         file.close().unwrap();
     }
     let reopened = |path: &Path| {
-        range::covered_len(
-            &File::open(path).unwrap().persisted_free_space().unwrap(),
+        covered_free_bytes(
+            File::open(path)
+                .unwrap()
+                .persisted_free_sections()
+                .unwrap()
+                .unwrap()
+                .free_sections(),
             extent,
         )
     };
@@ -5493,6 +5550,40 @@ fn c_create_n(file: &hdf5::File) {
         .unwrap()
         .write(&[9; TAIL_ELEMENTS])
         .unwrap();
+}
+
+fn assert_section_map(sections: &FreeSections, expected: &[(u64, u64)], boundary: u64) {
+    let mut expected = expected.to_vec();
+    expected.sort_unstable();
+    assert_eq!(sections.section_count(), expected.len());
+    assert_eq!(
+        sections.free_bytes(),
+        expected.iter().map(|&(_, length)| length).sum::<u64>()
+    );
+    let mut previous_end = 0;
+    for (section, (address, length)) in sections.sections().iter().zip(expected) {
+        assert!(length > 0);
+        assert!(address >= previous_end);
+        previous_end = address.checked_add(length).unwrap();
+        assert!(previous_end <= boundary);
+        assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
+        assert_eq!(section.address(), address);
+        assert_eq!(section.length().get(), length);
+    }
+}
+
+fn covered_free_bytes(sections: &FreeSections, extent: &Range<u64>) -> u64 {
+    sections
+        .sections()
+        .iter()
+        .map(|section| {
+            assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
+            section
+                .end_address()
+                .min(extent.end)
+                .saturating_sub(section.address().max(extent.start))
+        })
+        .sum()
 }
 
 fn assert_supported_free_sections(path: &Path, expected: &[(u64, u64)]) {
