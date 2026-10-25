@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::fs;
-use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 
 use hdf5_pure::AttrValue;
@@ -17,13 +16,13 @@ use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
 use hdf5_pure::Layout;
-use hdf5_pure::SpaceOwnership;
+use hdf5_pure::PersistedFreeSections;
 use test_util::temp;
 
 use crate::file_space;
 use crate::session;
 
-/// Replaces groups repeatedly and reports final creation settings and Rust ownership totals.
+/// Replaces groups repeatedly and reports creation settings and free-space measurements.
 ///
 /// Persistent strategies must stay within the size bound and reuse recovered holes. The
 /// [`FileSpaceStrategy::None`] control must grow beyond that bound.
@@ -70,6 +69,7 @@ fn run_endurance_inner(
     Context::new(&file, &path, strategy, 0).assert_size();
     let mut sizes = Vec::with_capacity(CYCLES);
     let mut recovered = Vec::new();
+    let mut persisted_free = None;
     let mut reused_after_reopen = false;
     for iteration in 1..=CYCLES {
         let context = Context::new(&file, &path, strategy, iteration);
@@ -95,7 +95,7 @@ fn run_endurance_inner(
         }
         context.assert_survivors();
         if strategy != FileSpaceStrategy::None {
-            context.assert_exact_ownership();
+            context.assert_reusable_space();
             if !recovered.is_empty() {
                 assert!(
                     reused_after_reopen,
@@ -111,7 +111,32 @@ fn run_endurance_inner(
         let context = Context::new(&reader, &path, strategy, iteration);
         context.assert_size();
         context.assert_survivors();
-        recovered = context.unwrap(reader.persisted_free_space());
+        persisted_free = context.unwrap(reader.persisted_free_sections());
+        assert_eq!(
+            persisted_free.is_some(),
+            strategy != FileSpaceStrategy::None
+        );
+        recovered = persisted_free
+            .as_ref()
+            .map(|report| {
+                report
+                    .free_sections()
+                    .sections()
+                    .iter()
+                    .map(|section| {
+                        (
+                            reader
+                                .superblock()
+                                .base_address
+                                .get()
+                                .checked_add(section.address())
+                                .unwrap(),
+                            section.length().get(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         if strategy != FileSpaceStrategy::None {
             assert!(!recovered.is_empty(), "free space must persist; {context}");
         }
@@ -130,7 +155,7 @@ fn run_endurance_inner(
                 extent_bytes(&recovered),
                 "reopening must recover every persisted free byte; {context}"
             );
-            context.assert_exact_ownership();
+            context.assert_reusable_space();
         }
         reused_after_reopen = false;
     }
@@ -156,7 +181,7 @@ fn run_endurance_inner(
         );
     }
     context.assert_survivors();
-    let report = context.final_characteristics(extent_bytes(&recovered));
+    let report = context.final_characteristics(persisted_free.as_ref());
     let final_state = context.to_string();
     file.close()
         .unwrap_or_else(|error| panic!("final close: {error:?}; {final_state}"));
@@ -223,20 +248,27 @@ impl<'a> Context<'a> {
         }
     }
 
-    fn assert_exact_ownership(&self) {
-        panic::catch_unwind(AssertUnwindSafe(|| {
-            file_space::assert_exact_space_ownership(self.file)
-        }))
-        .unwrap_or_else(|_| panic!("exact ownership failed; {self}"));
+    fn assert_reusable_space(&self) {
+        let accounting = self.unwrap(self.file.space_accounting());
+        file_space::assert_space_accounting_consistent(&accounting);
+        let sections = self.unwrap(self.file.reusable_free_sections());
+        let stats = self.unwrap(self.file.reusable_space_stats());
+        assert_eq!(
+            sections.free_bytes(),
+            accounting.reusable_free_bytes,
+            "{self}"
+        );
+        assert_eq!(stats.reusable_free_bytes(), sections.free_bytes(), "{self}");
+        assert_eq!(stats.logical_size(), accounting.logical_size, "{self}");
     }
 
-    /// Formats creation settings and storage ownership for the final snapshot.
-    fn final_characteristics(&self, persisted_free_bytes: u64) -> String {
+    /// Formats creation settings and reusable and persisted free-space totals.
+    fn final_characteristics(&self, persisted_free: Option<&PersistedFreeSections>) -> String {
         let Self {
             file,
             strategy: _,
             iteration,
-            physical: _,
+            physical,
         } = self;
         let FileSpaceInfo {
             strategy,
@@ -247,27 +279,10 @@ impl<'a> Context<'a> {
         } = file
             .file_space_info()
             .unwrap_or_else(|| panic!("file-space creation settings must be present; {self}"));
-        let SpaceOwnership {
-            physical_size,
-            logical_size,
-            userblock_space,
-            live_raw_space,
-            live_metadata_space,
-            free_space_manager_space,
-            reusable_free_space,
-            unclassified_space,
-            analysis_complete,
-            trailing_slack_space,
-        } = self.unwrap(file.__space_ownership());
-        let categories = [
-            ("userblock", &userblock_space),
-            ("live raw data", &live_raw_space),
-            ("live metadata", &live_metadata_space),
-            ("free-space managers", &free_space_manager_space),
-            ("reusable free space", &reusable_free_space),
-            ("unclassified space", &unclassified_space),
-            ("trailing slack", &trailing_slack_space),
-        ];
+        let stats = self.unwrap(file.reusable_space_stats());
+        let reusable = self.unwrap(file.reusable_free_sections());
+        assert_eq!(stats.reusable_free_bytes(), reusable.free_bytes(), "{self}");
+        let logical_size = stats.logical_size();
         let mut out = String::new();
         writeln!(out, "small-file free-space endurance").unwrap();
         writeln!(out, "===============================").unwrap();
@@ -283,7 +298,7 @@ impl<'a> Context<'a> {
         }
         writeln!(out).unwrap();
         writeln!(out, "file").unwrap();
-        writeln!(out, "  physical size     : {physical_size} bytes").unwrap();
+        writeln!(out, "  physical size     : {physical} bytes").unwrap();
         writeln!(out, "  logical EOF       : {logical_size} bytes").unwrap();
         writeln!(
             out,
@@ -291,32 +306,29 @@ impl<'a> Context<'a> {
             self.unwrap(file.root().groups()).len()
         )
         .unwrap();
-        writeln!(out, "  analysis complete : {analysis_complete}").unwrap();
         writeln!(out).unwrap();
-        writeln!(out, "storage ownership").unwrap();
-        writeln!(out, "  {:<21} {:>10} {:>8}", "category", "bytes", "extents").unwrap();
-        for (label, extents) in categories {
-            writeln!(
-                out,
-                "  {label:<21} {:>10} {:>8}",
-                extent_bytes(extents),
-                extents.len()
-            )
-            .unwrap();
+        writeln!(out, "reusable space (writable session)").unwrap();
+        writeln!(out, "  bytes             : {}", reusable.free_bytes()).unwrap();
+        writeln!(out, "  sections          : {}", reusable.section_count()).unwrap();
+        writeln!(out).unwrap();
+        writeln!(out, "persisted space (last close)").unwrap();
+        match persisted_free {
+            Some(report) => {
+                writeln!(
+                    out,
+                    "  bytes             : {}",
+                    report.free_sections().free_bytes()
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "  sections          : {}",
+                    report.free_sections().section_count()
+                )
+                .unwrap();
+            }
+            None => writeln!(out, "  persistence not configured").unwrap(),
         }
-        writeln!(out).unwrap();
-        writeln!(out, "accounting").unwrap();
-        writeln!(
-            out,
-            "  classified bytes        : {}",
-            extent_bytes(&userblock_space)
-                + extent_bytes(&live_raw_space)
-                + extent_bytes(&live_metadata_space)
-                + extent_bytes(&free_space_manager_space)
-                + extent_bytes(&reusable_free_space)
-        )
-        .unwrap();
-        writeln!(out, "  persisted reusable free : {persisted_free_bytes}").unwrap();
         out
     }
 }
@@ -331,40 +343,18 @@ impl Display for Context<'_> {
         } = self;
         write!(
             formatter,
-            "strategy={:?}, iteration={}, physical_size={}, reusable_free={:?}",
-            strategy,
-            iteration,
-            physical,
-            file.space_accounting()
-                .map(|accounting| accounting.reusable_free_bytes)
-                .or_else(|_| file.persisted_free_space().map(|free| extent_bytes(&free))),
-        )?;
-        match file.__space_ownership() {
-            Ok(SpaceOwnership {
-                physical_size: _,
-                logical_size,
-                userblock_space: _,
-                live_raw_space,
-                live_metadata_space,
-                free_space_manager_space,
-                reusable_free_space: _,
-                unclassified_space,
-                analysis_complete,
-                trailing_slack_space,
-            }) => write!(
-                formatter,
-                ", analysis_complete={}, logical_size={}, live_raw={}, live_metadata={}, \
-                 manager_bytes={}, unclassified_bytes={}, trailing_slack_bytes={}",
-                analysis_complete,
-                logical_size,
-                extent_bytes(&live_raw_space),
-                extent_bytes(&live_metadata_space),
-                extent_bytes(&free_space_manager_space),
-                extent_bytes(&unclassified_space),
-                extent_bytes(&trailing_slack_space),
-            ),
-            Err(error) => write!(formatter, ", ownership_error={error:?}"),
-        }
+            "strategy={strategy:?}, iteration={iteration}, physical_size={physical}, \
+             reusable_stats={:?}, persisted_free={:?}",
+            file.reusable_space_stats(),
+            file.persisted_free_sections().map(|report| {
+                report.map(|report| {
+                    (
+                        report.free_sections().free_bytes(),
+                        report.free_sections().section_count(),
+                    )
+                })
+            }),
+        )
     }
 }
 
