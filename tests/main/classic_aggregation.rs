@@ -1,6 +1,7 @@
 use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::MemoryStrategy;
 use hdf5_pure::UserblockSize;
@@ -26,7 +27,11 @@ fn persistent_creation_recovers_settled_spare_and_reuses_it_after_reopen(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("persistent.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, threshold);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_persistence(true)
+            .with_threshold(threshold),
+    );
     builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
     builder.create_dataset("values").with_i32_data(&[17; 16]);
     builder.write(&path).unwrap();
@@ -224,7 +229,7 @@ fn staged_aggr_allocations_reuse_session_windows(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("session.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::Aggr, false, 1);
+    builder.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::Aggr));
     builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
     builder.write(&path).unwrap();
     let properties = FileAccessProperties::new().with_memory_strategy(backing);

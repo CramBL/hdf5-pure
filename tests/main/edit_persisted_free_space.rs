@@ -6,6 +6,7 @@ use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpacePageSize;
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::MemoryStrategy;
 use hdf5_pure::UserblockSize;
@@ -28,7 +29,9 @@ fn paged_manager_tail_survives_reopen(#[case] memory: MemoryStrategy, #[case] us
     let path = dir.path().join("paged.h5");
     let mut builder = userblock_builder(userblock);
     builder.create_dataset("a").with_i32_data(&[1; 100]);
-    builder.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true),
+    );
     builder.write(&path).unwrap();
     let file = File::open_rw_with_options(
         &path,
@@ -404,12 +407,16 @@ impl Strategy {
     fn configure(self, builder: &mut FileBuilder, persist: bool) {
         match self {
             Self::FsmAggr => {
-                builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, persist, 1);
+                builder.with_file_space_settings(
+                    FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(persist),
+                );
             }
             Self::Page => {
-                builder
-                    .with_file_space_strategy(FileSpaceStrategy::Page, persist, 1)
-                    .with_file_space_page_size(FileSpacePageSize::try_from(PAGE).unwrap());
+                builder.with_file_space_settings(
+                    FileSpaceSettings::new(FileSpaceStrategy::Page)
+                        .with_persistence(persist)
+                        .with_page_size(FileSpacePageSize::try_from(PAGE).unwrap()),
+                );
             }
         }
     }

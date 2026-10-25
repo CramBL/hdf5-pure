@@ -15,6 +15,7 @@ use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpacePageSize;
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FilterId;
 use hdf5_pure::FormatError;
@@ -1605,12 +1606,16 @@ impl Strategy {
     fn configure(self, builder: &mut FileBuilder) {
         match self {
             Self::FsmAggr => {
-                builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+                builder.with_file_space_settings(
+                    FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+                );
             }
             Self::Page => {
-                builder
-                    .with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-                    .with_file_space_page_size(FileSpacePageSize::try_from(PAGE_BYTES).unwrap());
+                builder.with_file_space_settings(
+                    FileSpaceSettings::new(FileSpaceStrategy::Page)
+                        .with_persistence(true)
+                        .with_page_size(FileSpacePageSize::try_from(PAGE_BYTES).unwrap()),
+                );
             }
         }
     }

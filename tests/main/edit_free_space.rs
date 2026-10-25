@@ -14,6 +14,7 @@ use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpacePageSize;
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
 use hdf5_pure::MaxExtent;
@@ -597,7 +598,9 @@ fn persisted_chunked_reclaim_is_disjoint_and_reusable() {
         .with_f64_data(&vec![3.0; 4096])
         .with_chunks(&[512])
         .with_deflate(DeflateLevel::Six);
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+    );
     b.write(&path).unwrap();
 
     {
@@ -688,7 +691,9 @@ fn open_rw_rejects_a_paged_file_whose_page_size_is_out_of_range() {
     let path = dir.path().join("out_of_range.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("d").with_i32_data(&[1, 2, 3]);
-    b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true),
+    );
     b.write(&path).unwrap();
     let extension = {
         let file = File::open(&path).unwrap();
@@ -812,7 +817,9 @@ fn persisted_managers_stay_consistent_across_many_commits() {
         b.create_dataset(&format!("d{i}"))
             .with_i32_data(&vec![i; 200]);
     }
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+    );
     b.write(&path).unwrap();
 
     // Churn across multiple sessions: delete some, add some, each its own commit.
@@ -1016,7 +1023,9 @@ fn paged_commit_reuses_freed_space_within_its_page_type() {
     let path = temp::temp_path("hdf5_pure_fs_paged_reuse.h5");
     const ELEMS: usize = 32768;
     let mut b = FileBuilder::new();
-    b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true),
+    );
     b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
     b.create_dataset("big")
         .with_f64_data(&vec![1.0; ELEMS])
@@ -1066,7 +1075,9 @@ fn persisted_chunked_free_space_is_reused_after_a_reopen() {
     let path = temp::temp_path("hdf5_pure_fs_chunked_persist_reuse.h5");
     const ELEMS: usize = 32768;
     let mut b = FileBuilder::new();
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+    );
     b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
     b.create_dataset("big")
         .with_f64_data(&vec![1.0; ELEMS + 4096])
@@ -1297,7 +1308,9 @@ fn corrupt_persisted_section_is_skipped_not_fatal() {
     let mut b = FileBuilder::new();
     b.create_dataset("keep").with_i32_data(&[5; 50]);
     b.create_dataset("victim").with_i32_data(&[6; 300]); // 1200-byte data block
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+    );
     b.write(&path).unwrap();
     {
         let s = File::open_rw(&path).unwrap();
@@ -1377,8 +1390,11 @@ fn paged_churn_reaches_a_steady_size() {
     let path = temp::temp_path("hdf5_pure_fs_paged_churn.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("seed").with_i32_data(&[0i32; 4]);
-    b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-        .with_file_space_page_size(FileSpacePageSize::try_from(PAGE).unwrap());
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_page_size(FileSpacePageSize::try_from(PAGE).unwrap()),
+    );
     b.write(&path).unwrap();
 
     let rows: Vec<i32> = (0..500).map(|i| i % 97).collect();
@@ -1469,8 +1485,11 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
     let path = temp::temp_path("hdf5_pure_fs_paged_tail_reuse.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("seed").with_i32_data(&[0i32; 4]);
-    b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-        .with_file_space_page_size(FileSpacePageSize::try_from(PAGE).unwrap());
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_page_size(FileSpacePageSize::try_from(PAGE).unwrap()),
+    );
     b.write(&path).unwrap();
     let start_len = std::fs::metadata(&path).unwrap().len();
 
@@ -1568,8 +1587,11 @@ fn a_paged_tail_conserves_free_space_across_layouts() {
         let mut b = FileBuilder::new();
         b.create_dataset("seed")
             .with_i32_data(&(0..100 + filler as i32).collect::<Vec<i32>>());
-        b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-            .with_file_space_page_size(FileSpacePageSize::try_from(PAGE).unwrap());
+        b.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page)
+                .with_persistence(true)
+                .with_page_size(FileSpacePageSize::try_from(PAGE).unwrap()),
+        );
         b.write(&path).unwrap();
 
         // The first commit settles the tail into the file's own free space; from
@@ -1625,7 +1647,9 @@ fn a_reused_flat_manager_tail_preserves_its_spare_allocation_across_reopen() {
             .create_dataset(&format!("keep{index}"))
             .with_i32_data(&[9i32; 4]);
     }
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+    );
     builder.write(&path).unwrap();
 
     let open = || {
@@ -1748,7 +1772,9 @@ fn a_persisting_commit_tail_is_placed_in_free_space() {
     // A live object above the hole, so the deletion below leaves an interior hole
     // rather than a run reaching end-of-file.
     b.create_dataset("ceiling").with_i32_data(&[9i32; 4]);
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+    );
     b.write(&path).unwrap();
 
     // The hole the tail will move into: a fresh file has none, so the first tail
@@ -1823,7 +1849,9 @@ fn persisting_churn_reaches_a_steady_size() {
     let path = temp::temp_path("hdf5_pure_fs_flat_churn.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("seed").with_i32_data(&[0i32; 4]);
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+    );
     b.write(&path).unwrap();
 
     let rows: Vec<i32> = (0..500).map(|i| i % 97).collect();
@@ -1904,7 +1932,9 @@ fn a_persisting_tail_holds_its_size_across_layouts() {
             b.create_dataset(&format!("keep{i}"))
                 .with_i32_data(&[9i32; 4]);
         }
-        b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+        b.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+        );
         b.write(&path).unwrap();
 
         // Nine sessions per filler, 576 across the sweep, and what each one is
@@ -1959,7 +1989,9 @@ fn paged_free_space_is_reused_after_a_reopen() {
     const ELEMS: usize = 32768;
     let path = temp::temp_path("hdf5_pure_fs_paged_persist_reuse.h5");
     let mut b = FileBuilder::new();
-    b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true),
+    );
     b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
     b.create_dataset("big")
         .with_f64_data(&vec![1.0; ELEMS])
@@ -2077,7 +2109,11 @@ fn deleting_a_populated_group_releases_the_end_of_a_flat_file() {
     const ROWS: usize = 65536; // 256 KiB per dataset
     let path = temp::temp_path("hdf5_pure_fs_release_flat.h5");
     let mut b = FileBuilder::new();
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 0);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_persistence(true)
+            .with_threshold(0),
+    );
     b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
     b.write(&path).unwrap();
 
@@ -2126,8 +2162,12 @@ fn deleting_down_to_one_group_releases_a_paged_file_s_trailing_pages() {
     const GROUPS: usize = 6;
     let path = temp::temp_path("hdf5_pure_fs_release_paged.h5");
     let mut b = FileBuilder::new();
-    b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(FileSpacePageSize::try_from(RECLAIM_PAGE).unwrap());
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_threshold(0)
+            .with_page_size(FileSpacePageSize::try_from(RECLAIM_PAGE).unwrap()),
+    );
     b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
     b.write(&path).unwrap();
 
@@ -2179,7 +2219,11 @@ fn a_released_file_reopens_and_keeps_being_edited() {
     const ROWS: usize = 65536;
     let path = temp::temp_path("hdf5_pure_fs_release_reopen.h5");
     let mut b = FileBuilder::new();
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 0);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_persistence(true)
+            .with_threshold(0),
+    );
     b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
     b.write(&path).unwrap();
 
@@ -2255,10 +2299,14 @@ fn a_released_file_holds_its_length_across_many_tail_rewrites() {
     ] {
         let path = temp::temp_path(&format!("hdf5_pure_fs_release_loop_{label}.h5"));
         let mut b = FileBuilder::new();
-        b.with_file_space_strategy(strategy, true, 0);
-        if strategy == FileSpaceStrategy::Page {
-            b.with_file_space_page_size(FileSpacePageSize::try_from(RECLAIM_PAGE).unwrap());
-        }
+        let settings = FileSpaceSettings::new(strategy)
+            .with_persistence(true)
+            .with_threshold(0);
+        b.with_file_space_settings(if strategy == FileSpaceStrategy::Page {
+            settings.with_page_size(FileSpacePageSize::try_from(RECLAIM_PAGE).unwrap())
+        } else {
+            settings
+        });
         b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
         b.write(&path).unwrap();
 
@@ -2422,7 +2470,9 @@ fn a_persisting_file_reuses_a_hole_smaller_than_a_batch() {
     b.create_dataset("scratch")
         .with_i32_data(&vec![7; payload.len() + 1024]);
     b.create_dataset("ceiling").with_i32_data(&[9, 9, 9]);
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+    );
     b.write(&path).unwrap();
 
     let session = File::open_rw(&path).unwrap();
@@ -2536,10 +2586,12 @@ fn append_churn_on_a_persisting_file(
     let payload: Vec<i32> = (0..REUSE_ELEMS).collect();
     let path = temp::temp_path(name);
     let mut b = FileBuilder::new();
-    b.with_file_space_strategy(strategy, true, 1);
-    if strategy == FileSpaceStrategy::Page {
-        b.with_file_space_page_size(FileSpacePageSize::try_from(RECLAIM_PAGE).unwrap());
-    }
+    let settings = FileSpaceSettings::new(strategy).with_persistence(true);
+    b.with_file_space_settings(if strategy == FileSpaceStrategy::Page {
+        settings.with_page_size(FileSpacePageSize::try_from(RECLAIM_PAGE).unwrap())
+    } else {
+        settings
+    });
     b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
     b.write(&path).unwrap();
 
@@ -2676,8 +2728,11 @@ fn a_paged_append_reserve_keeps_pages_homogeneous() {
 
     let path = temp::temp_path("hdf5_pure_fs_paged_reserve_homogeneous.h5");
     let mut b = FileBuilder::new();
-    b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
-    b.with_file_space_page_size(FileSpacePageSize::try_from(RECLAIM_PAGE).unwrap());
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_page_size(FileSpacePageSize::try_from(RECLAIM_PAGE).unwrap()),
+    );
     b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
     // The hole the appends draw from: four megabytes of raw chunk data an earlier
     // commit gives back.
@@ -2764,10 +2819,14 @@ fn open_rw_on_close(path: &std::path::Path) -> File {
 /// return the session editing it.
 fn churn_fixture(path: &std::path::Path, strategy: FileSpaceStrategy) -> File {
     let mut b = FileBuilder::new();
-    b.with_file_space_strategy(strategy, true, 0);
-    if strategy == FileSpaceStrategy::Page {
-        b.with_file_space_page_size(FileSpacePageSize::try_from(RECLAIM_PAGE).unwrap());
-    }
+    let settings = FileSpaceSettings::new(strategy)
+        .with_persistence(true)
+        .with_threshold(0);
+    b.with_file_space_settings(if strategy == FileSpaceStrategy::Page {
+        settings.with_page_size(FileSpacePageSize::try_from(RECLAIM_PAGE).unwrap())
+    } else {
+        settings
+    });
     // Metadata only: a group carrying an attribute. It keeps the space each cycle
     // vacates interior rather than trailing without putting raw data in the pages
     // the scratch datasets' chunk indexes go into, which is what a real workload's
@@ -3110,8 +3169,12 @@ fn paged_staged_append_churn_does_not_leak_the_old_index() {
 
     let path = temp::temp_path("hdf5_pure_fs_paged_append_churn.h5");
     let mut b = FileBuilder::new();
-    b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(FileSpacePageSize::try_from(RECLAIM_PAGE).unwrap());
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_threshold(0)
+            .with_page_size(FileSpacePageSize::try_from(RECLAIM_PAGE).unwrap()),
+    );
     Unlimited::new("d", &[0i32; ROWS], ROWS as u64).add_to(&mut b);
     b.write(&path).unwrap();
 
@@ -3174,10 +3237,14 @@ fn a_multi_chunk_staged_append_fills_chunk_sized_holes() {
     ] {
         let path = temp::temp_path(name);
         let mut b = FileBuilder::new();
-        b.with_file_space_strategy(strategy, true, 0);
-        if page > 0 {
-            b.with_file_space_page_size(FileSpacePageSize::try_from(page).unwrap());
-        }
+        let settings = FileSpaceSettings::new(strategy)
+            .with_persistence(true)
+            .with_threshold(0);
+        b.with_file_space_settings(if page > 0 {
+            settings.with_page_size(FileSpacePageSize::try_from(page).unwrap())
+        } else {
+            settings
+        });
         Unlimited::new("d", &(0..CHUNK as i32).collect::<Vec<i32>>(), CHUNK as u64).add_to(&mut b);
         for i in 0..APPENDED {
             for role in ["scratch", "spacer"] {

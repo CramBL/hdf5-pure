@@ -20,6 +20,7 @@ use criterion::BenchmarkId;
 use criterion::{Criterion, criterion_group, criterion_main};
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::FileSpacePageSize;
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::{File, FileBuilder, MaxExtent};
 use test_util_hdf5::file_space;
@@ -259,8 +260,11 @@ fn bench_page_buffer(c: &mut Criterion) {
 
     let fixture = |path: &std::path::Path| {
         let mut b = FileBuilder::new();
-        b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-            .with_file_space_page_size(FileSpacePageSize::DEFAULT);
+        b.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page)
+                .with_persistence(true)
+                .with_page_size(FileSpacePageSize::DEFAULT),
+        );
         for name in &names {
             b.create_dataset(name)
                 .with_i32_data(&vec![0i32; CHUNK])

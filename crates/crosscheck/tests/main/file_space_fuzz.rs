@@ -30,6 +30,7 @@
 
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5_pure::FileSpacePageSize;
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
 
 use proptest::prelude::*;
@@ -108,8 +109,7 @@ proptest! {
         for (i, data) in datasets.iter().enumerate() {
             b.create_dataset(&format!("d{i}")).with_i32_data(data);
         }
-        b.with_file_space_strategy(strategy, persist, threshold)
-            .with_file_space_page_size(FileSpacePageSize::try_from(page_size).unwrap());
+        b.with_file_space_settings(FileSpaceSettings::new(strategy).with_persistence(persist).with_threshold(threshold).with_page_size(FileSpacePageSize::try_from(page_size).unwrap()));
         b.write(&path).unwrap();
 
         // hdf5-pure reads its own datasets back, and reports its tracked free space.
@@ -167,8 +167,7 @@ proptest! {
             let mut b = FileBuilder::new();
             let data: Vec<i32> = (0..chunk_size as i32).collect();
             Unlimited::new("d", &data, chunk_size as u64).add_to(&mut b);
-            b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-                .with_file_space_page_size(FileSpacePageSize::try_from(page_size).unwrap());
+            b.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true).with_threshold(0).with_page_size(FileSpacePageSize::try_from(page_size).unwrap()));
             b.write(&path).unwrap();
         }
 
@@ -242,7 +241,7 @@ proptest! {
         for (i, values) in data.iter().enumerate() {
             b.create_dataset(&format!("d{i}")).with_i32_data(values);
         }
-        b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, persist, threshold);
+        b.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(persist).with_threshold(threshold));
         b.write(&path).unwrap();
 
         let dropped = {

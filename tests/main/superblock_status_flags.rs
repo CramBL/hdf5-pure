@@ -9,6 +9,7 @@
 #![expect(clippy::mem_forget, reason = "the tests model a writer that crashed")]
 
 use hdf5_pure::FileSpacePageSize;
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::SuperblockStatusFlags;
 use hdf5_pure::{
     Error, File, FileAccessProperties, FileBuilder, FileLocking, FileSpaceStrategy, MemoryStrategy,
@@ -194,8 +195,11 @@ fn from_bytes_reads_a_flagged_file() {
 /// A paged file with an appendable dataset: what a page buffer requires.
 fn build_paged(path: &std::path::Path) {
     let mut b = FileBuilder::new();
-    b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-        .with_file_space_page_size(FileSpacePageSize::DEFAULT);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_page_size(FileSpacePageSize::DEFAULT),
+    );
     Unlimited::new("d", &[0i32; 64], 64).add_to(&mut b);
     b.write(path).unwrap();
 }

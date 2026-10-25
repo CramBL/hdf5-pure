@@ -5,6 +5,7 @@ use hdf5_pure::DeflateLevel;
 use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FilterMask;
 use hdf5_pure::FormatError;
@@ -40,7 +41,7 @@ fn chunked_references_resolve_every_target(
     let mut builder = FileBuilder::new();
     builder
         .with_userblock(userblock)
-        .with_file_space_strategy(strategy, false, 1);
+        .with_file_space_settings(FileSpaceSettings::new(strategy));
     let references = builder.create_dataset("refs").with_path_references(&[
         "later",
         "nested/data",

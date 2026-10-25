@@ -9,6 +9,7 @@ use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::Layout;
 use hdf5_pure::MaxExtent;
@@ -37,7 +38,11 @@ fn libhdf5_recovers_and_reuses_new_file_aggregate_spare(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("persisted.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, threshold);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_persistence(true)
+            .with_threshold(threshold),
+    );
     builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
     builder.create_dataset("values").with_i32_data(&[17; 16]);
     builder.write(&path).unwrap();
@@ -122,7 +127,11 @@ fn libhdf5_reads_and_edits_an_aggregated_creation(
     let path = directory.path().join("created.h5");
     let mut builder = FileBuilder::new();
     if let Some(strategy) = strategy {
-        builder.with_file_space_strategy(strategy, persist, 9);
+        builder.with_file_space_settings(
+            FileSpaceSettings::new(strategy)
+                .with_persistence(persist)
+                .with_threshold(9),
+        );
     }
     builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
     builder.set_attr("huge", AttrValue::AsciiString("h".repeat(70_000)));

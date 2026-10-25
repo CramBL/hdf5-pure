@@ -13,6 +13,7 @@ use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpaceInfo;
 use hdf5_pure::FileSpacePageSize;
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
 use hdf5_pure::Layout;
@@ -56,10 +57,13 @@ fn run_endurance_inner(
 ) -> String {
     let path = temp::temp_path("free_space_endurance.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(strategy, strategy != FileSpaceStrategy::None, 1);
-    if strategy == FileSpaceStrategy::Page {
-        builder.with_file_space_page_size(FileSpacePageSize::try_from(4_096).unwrap());
-    }
+    let settings =
+        FileSpaceSettings::new(strategy).with_persistence(strategy != FileSpaceStrategy::None);
+    builder.with_file_space_settings(if strategy == FileSpaceStrategy::Page {
+        settings.with_page_size(FileSpacePageSize::try_from(4_096).unwrap())
+    } else {
+        settings
+    });
     builder.write(&path).unwrap();
     let mut file = session::open_bounded(&path).unwrap();
     for sequence in 0..LIVE_GROUPS {

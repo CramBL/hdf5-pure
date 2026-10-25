@@ -472,7 +472,7 @@ fn repack_rejects_a_source_whose_file_space_info_message_does_not_parse() {
     let (src, dst) = (dir.path().join("src.h5"), dir.path().join("dst.h5"));
     let mut b = FileBuilder::new();
     b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
-    b.with_file_space_strategy(FileSpaceStrategy::Page, false, 1);
+    b.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::Page));
     b.write(&src).unwrap();
     let extension = {
         let file = File::open(&src).unwrap();

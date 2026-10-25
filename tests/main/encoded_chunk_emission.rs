@@ -7,6 +7,7 @@ use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpacePageSize;
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
 use hdf5_pure::MaxExtent;
@@ -42,9 +43,11 @@ fn buffered_and_streaming_encoded_chunks_have_identical_bytes(
         .collect();
     let build = || {
         let mut builder = FileBuilder::new();
-        builder
-            .with_file_space_strategy(strategy, true, 1)
-            .with_file_space_page_size(FileSpacePageSize::try_from(512).unwrap());
+        builder.with_file_space_settings(
+            FileSpaceSettings::new(strategy)
+                .with_persistence(true)
+                .with_page_size(FileSpacePageSize::try_from(512).unwrap()),
+        );
         if userblock {
             builder.with_userblock(UserblockSize::MIN);
         }

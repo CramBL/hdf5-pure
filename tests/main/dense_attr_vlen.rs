@@ -13,6 +13,7 @@
 //! that do so, since the reserve and the build sit on opposite sides of a branch.
 
 use hdf5_pure::FileSpacePageSize;
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::{AttrValue, File, FileBuilder, FileSpaceStrategy};
 use test_util::fractal_heap;
 use test_util_hdf5::attr;
@@ -53,9 +54,11 @@ fn a_variable_length_attribute_survives_dense_storage() {
 fn a_paged_file_stores_variable_length_attributes_densely_too() {
     let expected = ["one", "two"];
     let mut builder = root_with_vlen(12, &expected);
-    builder
-        .with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-        .with_file_space_page_size(FileSpacePageSize::DEFAULT);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_page_size(FileSpacePageSize::DEFAULT),
+    );
 
     let bytes = builder.finish().unwrap();
     assert!(fractal_heap::has_fractal_heap(&bytes));
@@ -165,9 +168,11 @@ fn chunked_variable_length_elements_coexist_with_dense_attributes() {
             .with_vlen_strings(&elements.iter().map(String::as_str).collect::<Vec<_>>())
             .with_chunks(&[3]);
         if paged {
-            builder
-                .with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-                .with_file_space_page_size(FileSpacePageSize::DEFAULT);
+            builder.with_file_space_settings(
+                FileSpaceSettings::new(FileSpaceStrategy::Page)
+                    .with_persistence(true)
+                    .with_page_size(FileSpacePageSize::DEFAULT),
+            );
         }
 
         let bytes = builder.finish().unwrap();

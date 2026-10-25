@@ -28,6 +28,7 @@
 
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::FileSpacePageSize;
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::{
     ChunkCacheStats, EditBacking, File, FileAccessProperties, FileBuilder, FileSpaceStrategy,
     MaxExtent, MemoryStrategy, SyncPolicy,
@@ -1027,9 +1028,11 @@ fn gathering_writes_does_not_recopy_what_it_holds() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("buffered.h5");
     let mut builder = FileBuilder::new();
-    builder
-        .with_file_space_strategy(hdf5_pure::FileSpaceStrategy::Page, true, 1)
-        .with_file_space_page_size(FileSpacePageSize::DEFAULT);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_page_size(FileSpacePageSize::DEFAULT),
+    );
     builder
         .create_dataset("growing")
         .with_f64_data(&[1.0f64; CHUNK])
@@ -1099,9 +1102,11 @@ fn a_page_buffer_does_not_recopy_what_it_holds_across_operations() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("page_buffered.h5");
     let mut builder = FileBuilder::new();
-    builder
-        .with_file_space_strategy(hdf5_pure::FileSpaceStrategy::Page, true, 1)
-        .with_file_space_page_size(FileSpacePageSize::DEFAULT);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_page_size(FileSpacePageSize::DEFAULT),
+    );
     builder
         .create_dataset("growing")
         .with_f64_data(&[1.0f64; CHUNK])
@@ -1230,7 +1235,11 @@ fn open_rw_of_a_persisting_fsm_file_does_not_allocate_the_file() {
     let path = dir.path().join("fsm.h5");
     let data: Vec<u64> = (0..(CHUNK_ELEMS * CHUNKS) as u64).collect();
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 0);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_persistence(true)
+            .with_threshold(0),
+    );
     builder
         .create_dataset("samples")
         .with_u64_data(&data)
@@ -1549,7 +1558,7 @@ fn encoded_chunk_finish_avoids_a_payload_sized_assembly_allocation(
         })
         .collect();
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(strategy, false, 1);
+    builder.with_file_space_settings(FileSpaceSettings::new(strategy));
     let dataset = builder.create_dataset("encoded");
     dataset.with_u8_data(&data).with_chunks(&[65_536]);
     if filtered {

@@ -9,6 +9,7 @@ use hdf5_pure::AttrValue;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FilterMask;
 use hdf5_pure::MaxExtent;
@@ -41,7 +42,7 @@ fn c_resolves_chunked_path_references_and_reads_chunk_records(
     let path = dir.path().join("references.h5");
     let mut builder = FileBuilder::new();
     builder
-        .with_file_space_strategy(strategy, true, 1)
+        .with_file_space_settings(FileSpaceSettings::new(strategy).with_persistence(true))
         .with_userblock(userblock);
     let dataset = builder
         .create_dataset("refs")

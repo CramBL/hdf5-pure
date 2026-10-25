@@ -6,6 +6,7 @@
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpacePageSize;
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::StoredAddress;
 use hdf5_pure::UserblockSize;
@@ -25,8 +26,11 @@ fn each_strategy_roundtrips(#[case] strategy: FileSpaceStrategy, #[case] thresho
     let path = dir.path().join("strategy.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("d").with_i32_data(&[1, 2, 3, 4]);
-    b.with_file_space_strategy(strategy, false, 7)
-        .with_file_space_page_size(FileSpacePageSize::try_from(8192).unwrap());
+    b.with_file_space_settings(
+        FileSpaceSettings::new(strategy)
+            .with_threshold(7)
+            .with_page_size(FileSpacePageSize::try_from(8192).unwrap()),
+    );
     b.write(&path).unwrap();
 
     let f = File::open(&path).unwrap();
@@ -65,7 +69,11 @@ fn a_strategy_without_a_free_space_manager_records_neither_persistence_nor_a_thr
     let path = dir.path().join("strategy.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("d").with_i32_data(&[1, 2, 3, 4]);
-    b.with_file_space_strategy(strategy, true, 7);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(strategy)
+            .with_persistence(true)
+            .with_threshold(7),
+    );
     b.write(&path).unwrap();
 
     let f = File::open(&path).unwrap();
@@ -112,11 +120,14 @@ fn no_config_writes_no_extension() {
 }
 
 #[test]
-fn page_size_only_defaults_strategy() {
+fn fsm_settings_record_a_custom_page_size() {
     let path = temp::temp_path("hdf5_pure_fss_pageonly.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("d").with_i32_data(&[9]);
-    b.with_file_space_page_size(FileSpacePageSize::try_from(2048).unwrap());
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_page_size(FileSpacePageSize::try_from(2048).unwrap()),
+    );
     b.write(&path).unwrap();
 
     let f = File::open(&path).unwrap();
@@ -137,7 +148,7 @@ fn strategy_survives_userblock_and_empty_file() {
     let mut b = FileBuilder::new();
     b.create_dataset("d").with_i32_data(&[5, 6]);
     b.with_userblock(UserblockSize::MIN)
-        .with_file_space_strategy(FileSpaceStrategy::None, false, 1);
+        .with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::None));
     b.write(&path).unwrap();
     let f = File::open(&path).unwrap();
     assert_eq!(
@@ -150,7 +161,7 @@ fn strategy_survives_userblock_and_empty_file() {
 
     let path = temp::temp_path("hdf5_pure_fss_empty.h5");
     let mut b = FileBuilder::new();
-    b.with_file_space_strategy(FileSpaceStrategy::Aggr, false, 1);
+    b.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::Aggr));
     b.write(&path).unwrap();
     let f = File::open(&path).unwrap();
     assert_eq!(
@@ -172,7 +183,7 @@ fn survives_in_place_edit() {
     let path = temp::temp_path("hdf5_pure_fss_edit.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, false, 1);
+    b.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::FsmAggr));
     b.write(&path).unwrap();
 
     {
@@ -206,7 +217,9 @@ fn persist_true_records_reusable_spare_on_a_fresh_file() {
     let path = temp::temp_path("hdf5_pure_fss_persist.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("d").with_i32_data(&[1, 2, 3]);
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+    );
     b.write(&path).unwrap();
 
     let f = File::open(&path).unwrap();

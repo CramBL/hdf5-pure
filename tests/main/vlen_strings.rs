@@ -1,3 +1,5 @@
+use hdf5_pure::FileSpaceSettings;
+use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::{Error, File, FormatError, VlenStringReadOptions};
 
 const FIXTURE: &str = "tests/data/unattributed/vl_strings.h5";
@@ -136,7 +138,9 @@ fn paged_vlen_dataset_spans_multiple_heap_collections() {
     let values = labels(SPLIT_COUNT);
     let refs: Vec<&str> = values.iter().map(String::as_str).collect();
     let mut builder = hdf5_pure::FileBuilder::new();
-    builder.with_file_space_strategy(hdf5_pure::FileSpaceStrategy::Page, true, 1);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true),
+    );
     builder.create_dataset("labels").with_vlen_strings(&refs);
     builder.write(&path).unwrap();
 
