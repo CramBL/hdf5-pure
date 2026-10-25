@@ -92,9 +92,9 @@ Dataset reads are fully supported across every storage layout:
 | Chunked (fixed array index) | Yes |
 | Chunked (extensible array index) | Yes |
 
-The streaming backend resolves both group forms (v2 and v1 symbol-table) and reads compact, dense, shared, and variable-length attributes, same as [`File::open`](crate::File::open). The remaining differences:
+The streaming backend resolves both group forms (v2 and v1 symbol-table) and reads compact, dense, shared, and variable-length attributes, same as [`File::open`](crate::File::open). Both backends support typed inspection through [`File::persisted_free_sections`](crate::File::persisted_free_sections). The remaining differences:
 
-- [`File::as_bytes`](crate::File::as_bytes) returns an empty slice, since there is no whole-file buffer, and [`persisted_free_space`](crate::File::persisted_free_space) returns an empty vector, since the free-space-manager blocks stay unread.
+- [`File::as_bytes`](crate::File::as_bytes) returns an empty slice, since there is no whole-file buffer.
 - A streaming file cannot be the **source** of a cross-file [`copy_from`](crate::File::copy_from): that copy requires a buffered source.
 - Chunk decompression is sequential.
 

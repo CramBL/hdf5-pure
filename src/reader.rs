@@ -55,7 +55,6 @@ use crate::free_sections::ReusableSpaceStats;
 use crate::free_sections::{
     FreeSection, FreeSectionCoordinates, FreeSections, PersistedFreeSections,
 };
-use crate::free_space_manager;
 use crate::group_v1;
 use crate::group_v1::GroupEntry;
 use crate::group_v2::{self, ChildLookup};
@@ -1014,8 +1013,7 @@ impl FileInner {
     /// index type, both group forms (v2 and v1 symbol-table), and compact,
     /// dense, shared, and variable-length attributes. What differs:
     /// [`as_bytes`](Self::as_bytes) returns an empty slice (there is no
-    /// whole-file buffer), [`persisted_free_space`](Self::persisted_free_space)
-    /// returns no regions, a streaming file cannot be the *source* of a
+    /// whole-file buffer), a streaming file cannot be the *source* of a
     /// cross-file copy, and chunk decompression is sequential (the `parallel`
     /// feature accelerates only buffered reads).
     pub fn open_streaming<P: AsRef<std::path::Path>>(path: P) -> Result<Self, Error> {
@@ -2025,41 +2023,6 @@ impl FileInner {
     /// Returns the mode this file reads under.
     pub(crate) fn access_mode(&self) -> AccessMode {
         self.access_mode
-    }
-
-    /// Returns the free regions the free-space managers of the file track, as `(address, length)`
-    /// pairs sorted by address.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors of [`free_space_manager::read_persisted_sections`] for a manager that is
-    /// malformed or out of the bounds of the file.
-    pub fn persisted_free_space(&self) -> Result<Vec<(u64, u64)>, FormatError> {
-        let Some(info) = &self.file_space_info else {
-            return Ok(Vec::new());
-        };
-        if !info.persist {
-            return Ok(Vec::new());
-        }
-        let Backend::InMemory(data) = &self.backend else {
-            return Ok(Vec::new());
-        };
-        let mut sections = free_space_manager::read_persisted_sections(
-            data,
-            self.widths,
-            self.addresses().effective_base(),
-            &info.manager_addrs,
-        )?;
-        // Distinct sections have distinct addresses in any well-formed file, so
-        // the tie-break never arises; only a malformed manager can advertise one
-        // address twice, and which of the pair is reported first is already
-        // unspecified. No `debug_assert` here: this parses untrusted bytes, which
-        // must not panic a debug build.
-        sections.sort_unstable_by_key(|s| s.addr);
-        Ok(sections
-            .into_iter()
-            .map(|s| (s.addr.get(), s.size))
-            .collect())
     }
 
     /// Returns the physical byte length of the backing store.
@@ -3844,25 +3807,6 @@ impl File {
     /// ```
     pub fn file_space_info(&self) -> Result<Option<FileSpaceInfo>, Error> {
         Ok(self.inner.parse_file_space_info()?)
-    }
-
-    /// Returns the free regions the free-space managers of the file track, as `(address, length)`
-    /// pairs sorted by address.
-    ///
-    /// Persistence is enabled through [`FileSpaceSettings::with_persistence`].
-    /// The C library takes the same flag in `H5Pset_file_space_strategy`. The addresses are
-    /// relative to the base address. Returns an empty `Vec` if the file does not persist its free
-    /// space, and on a handle that reads the file on demand or edits it, such as one
-    /// [`File::open_streaming`] or [`File::open_rw`] returns.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Format`] if a free-space manager is malformed or out of the bounds of the
-    /// file: [`FormatError::ChecksumMismatch`] if the checksum of a manager block does not match and
-    /// the `checksum` feature is enabled, and otherwise most often
-    /// [`FormatError::InvalidFreeSpaceManager`], which holds a message that describes the defect.
-    pub fn persisted_free_space(&self) -> Result<Vec<(u64, u64)>, Error> {
-        Ok(self.inner.persisted_free_space()?)
     }
 
     /// Returns the sections recorded in the file's persisted free-space managers.

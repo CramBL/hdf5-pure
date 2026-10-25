@@ -40,7 +40,8 @@ use crate::width::FormatWidths;
 /// of a section list's allocation is past the end of `data`, and the errors of
 /// [`FreeSpaceManagerHeader::parse`] and
 /// [`parse_section_info`](hdf5_pure_format::__private::parse_section_info) for each block it reads.
-pub(crate) fn read_persisted_sections(
+#[cfg(test)]
+fn read_persisted_sections(
     data: &[u8],
     widths: FormatWidths,
     base: BaseAddress,

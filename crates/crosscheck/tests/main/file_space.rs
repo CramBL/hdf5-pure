@@ -2370,13 +2370,10 @@ fn supported_free_sections_match_libhdf5(
     let mut expected = file_space::libhdf5_free_sections(&native).unwrap();
     expected.sort_unstable();
     let free_bytes = native.free_space();
+    let boundary = native.size() - userblock_size;
     drop(native);
-    assert_supported_free_sections(&path, &expected);
-    let report = File::open(&path)
-        .unwrap()
-        .persisted_free_sections()
-        .unwrap()
-        .unwrap();
+    let report = assert_supported_free_sections(&path);
+    assert_section_map(report.free_sections(), &expected, boundary);
     assert_eq!(report.free_sections().free_bytes(), free_bytes);
     if paged {
         assert!(
@@ -2411,14 +2408,16 @@ fn the_free_sections_libhdf5_persists_are_read_at_the_widths_of_its_file(
     let freed = write_c_persisted_with_a_hole(&path, driver, sizeof_addr, sizeof_size, 0);
     let free_c = hdf5::File::open(&path).unwrap().free_space();
 
-    let free = File::open(&path).unwrap().persisted_free_space().unwrap();
-    assert_supported_free_sections(&path, &free);
+    let free = assert_supported_free_sections(&path);
 
     assert!(
-        free.contains(&(freed, 1600)),
+        free.free_sections()
+            .sections()
+            .iter()
+            .any(|section| { section.address() == freed && section.length().get() == 1600 }),
         "the deleted dataset's storage at {freed} is a free section, {free:?}"
     );
-    assert_eq!(free.iter().map(|&(_, len)| len).sum::<u64>(), free_c);
+    assert_eq!(free.free_sections().free_bytes(), free_c);
     // `H5FS__cache_sinfo_deserialize` in H5FScache.c, HDF5 2.2.0, asserts on these fixtures
     // when their length width is smaller than eight bytes.
     if sizeof_size == Sizeof::Bytes8 {
@@ -3284,10 +3283,14 @@ fn assert_version_0_free_space_reads_as_libhdf5_reads_it(
             version_0_managers.to_vec(),
         ))
     );
-    let free = f.persisted_free_space().unwrap();
-    assert_supported_free_sections(&path, &free);
-    assert!(free.contains(&(freed - userblock, 1600)), "{free:?}");
-    assert_eq!(free.iter().map(|&(_, len)| len).sum::<u64>(), free_c);
+    let free = assert_supported_free_sections(&path);
+    assert!(
+        free.free_sections().sections().iter().any(|section| {
+            section.address() == freed - userblock && section.length().get() == 1600
+        }),
+        "{free:?}"
+    );
+    assert_eq!(free.free_sections().free_bytes(), free_c);
     // `H5FS__cache_sinfo_deserialize` in H5FScache.c, HDF5 2.2.0, asserts on these fixtures
     // when their length width is smaller than eight bytes.
     if sizeof_size == Sizeof::Bytes8 {
@@ -5586,7 +5589,7 @@ fn covered_free_bytes(sections: &FreeSections, extent: &Range<u64>) -> u64 {
         .sum()
 }
 
-fn assert_supported_free_sections(path: &Path, expected: &[(u64, u64)]) {
+fn assert_supported_free_sections(path: &Path) -> PersistedFreeSections {
     let buffered = File::open(path)
         .unwrap()
         .persisted_free_sections()
@@ -5599,17 +5602,10 @@ fn assert_supported_free_sections(path: &Path, expected: &[(u64, u64)]) {
         .unwrap();
     assert_eq!(buffered, streamed);
     let all = buffered.free_sections();
-    assert_eq!(
+    assert!(
         all.sections()
             .iter()
-            .map(|section| (section.address(), section.length().get()))
-            .collect::<Vec<_>>(),
-        expected
-    );
-    assert_eq!(all.section_count(), expected.len());
-    assert_eq!(
-        all.free_bytes(),
-        expected.iter().map(|&(_, length)| length).sum::<u64>()
+            .all(|section| section.coordinates() == FreeSectionCoordinates::Stored)
     );
     assert_eq!(
         buffered
@@ -5627,6 +5623,7 @@ fn assert_supported_free_sections(path: &Path, expected: &[(u64, u64)]) {
             .sum::<u64>(),
         all.free_bytes()
     );
+    buffered
 }
 
 fn page(threshold: u64) -> CStrategy {
