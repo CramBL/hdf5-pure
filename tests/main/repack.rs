@@ -8,6 +8,7 @@ use hdf5_pure::DeflateLevel;
 use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FileSpacePageSize;
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::PartialEdgeFiltering;
 use hdf5_pure::UserblockSize;
 #[cfg(feature = "zfp")]
@@ -506,32 +507,36 @@ fn repack_rejects_a_source_whose_file_space_info_message_does_not_parse() {
     );
 }
 
-#[test]
-fn preserves_file_space_strategy() {
+#[rstest]
+#[case::fsm(FileSpaceStrategy::FsmAggr, false)]
+#[case::persistent_fsm(FileSpaceStrategy::FsmAggr, true)]
+#[case::page(FileSpaceStrategy::Page, false)]
+#[case::persistent_page(FileSpaceStrategy::Page, true)]
+#[case::aggr(FileSpaceStrategy::Aggr, true)]
+#[case::none(FileSpaceStrategy::None, true)]
+fn preserves_file_space_settings_without_persistence(
+    #[case] strategy: FileSpaceStrategy,
+    #[case] persist: bool,
+) {
     let src = temp::temp_path("hdf5_pure_repack_fss_src.h5");
     let dst = temp::temp_path("hdf5_pure_repack_fss_dst.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
     b.create_dataset("drop_me").with_f64_data(&vec![0.0; 1000]);
-    b.with_file_space_strategy(FileSpaceStrategy::Page, false, 4)
-        .with_file_space_page_size(FileSpacePageSize::try_from(8192).unwrap());
+    let settings = FileSpaceSettings::new(strategy)
+        .with_persistence(persist)
+        .with_threshold(4)
+        .with_page_size(FileSpacePageSize::try_from(8192).unwrap());
+    b.with_file_space_settings(settings);
     b.write(&src).unwrap();
 
     hdf5_pure::repack(&src, &dst, &RepackOptions::new().drop_path("drop_me")).unwrap();
 
     let f = hdf5_pure::File::open(&dst).unwrap();
-    // The strategy (and its page size / threshold) carries forward; persist is
-    // reset to false since the compact output has no free space to persist.
     assert_eq!(
-        f.file_space_settings()
-            .unwrap()
-            .map(|settings| settings.strategy()),
-        Some(FileSpaceStrategy::Page)
+        f.file_space_settings().unwrap(),
+        Some(settings.with_persistence(false))
     );
-    let info = f.file_space_info().unwrap().unwrap();
-    assert_eq!(info.page_size.get(), 8192);
-    assert_eq!(info.threshold, 4);
-    assert!(!info.persist);
     assert_eq!(
         f.dataset("keep").unwrap().read_i32().unwrap(),
         vec![1, 2, 3]

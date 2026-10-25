@@ -4032,17 +4032,6 @@ impl File {
         self.inner.libver_bound()
     }
 
-    /// Parses the File Space Info message with the format error before conversion to [`Error`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::InvalidFileSpacePageSize`] if the message stores a page size outside
-    /// 512 bytes to 1 GiB, and the error of the extension's address, its object header, or the
-    /// message where one of them does not parse.
-    pub(crate) fn parse_file_space_info(&self) -> Result<Option<FileSpaceInfo>, FormatError> {
-        self.inner.parse_file_space_info()
-    }
-
     /// A `Source` view over the backend, for the streaming-capable paths.
     pub(crate) fn source(&self) -> SourceView<'_> {
         self.inner.source()

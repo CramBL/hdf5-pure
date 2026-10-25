@@ -1009,8 +1009,9 @@ pub(crate) fn create_would_refuse_reopen(
     create: &FileCreateProperties,
     access: &FileAccessProperties,
 ) -> Option<&'static str> {
-    if let Some((FileSpaceStrategy::Page, false, _)) = create.file_space_strategy()
-        && access.memory_strategy() == Some(MemoryStrategy::Bounded)
+    if create.file_space_settings().is_some_and(|settings| {
+        settings.strategy() == FileSpaceStrategy::Page && !settings.persist()
+    }) && access.memory_strategy() == Some(MemoryStrategy::Bounded)
     {
         return Some(
             "bounded editing of PAGE files without persisted free space is unsupported; \
@@ -1072,11 +1073,10 @@ pub(crate) fn create_would_refuse_reopen(
         // folded into the paged arm's `unwrap_or` because the two constants are
         // free to move apart, and because a reader comparing this function
         // against `set_page_buffer_size` should find the same rule in both.
-        let page_size = match create.file_space_strategy() {
-            Some((FileSpaceStrategy::Page, _, _)) => create
-                .file_space_page_size()
-                .unwrap_or(FileSpacePageSize::DEFAULT)
-                .get(),
+        let page_size = match create.file_space_settings() {
+            Some(settings) if settings.strategy() == FileSpaceStrategy::Page => {
+                settings.page_size().get()
+            }
             _ => DEFAULT_GATHER_PAGE,
         };
         if (access.page_buffer_size() as u64) < page_size {

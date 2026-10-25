@@ -5,6 +5,7 @@ use std::io::Write;
 #[cfg(test)]
 use crate::DeflateLevel;
 use crate::FileSpacePageSize;
+use crate::FileSpaceSettings;
 use crate::UserblockSize;
 use crate::chunked_write::ByteSink;
 use crate::file_writer::FileWriter as FormatWriter;
@@ -291,6 +292,19 @@ impl FileBuilder {
     /// one. Leaving the bounds unset is the same as leaving `high` at `Latest`.
     pub fn with_libver_bounds(&mut self, low: LibVer, high: LibVer) -> &mut Self {
         self.writer.with_libver_bounds(low, high);
+        self
+    }
+
+    /// Sets the file-space configuration recorded in the superblock extension.
+    ///
+    /// Applies the same setting as [`FileCreateProperties::with_file_space_settings`], replacing
+    /// the strategy, persistence flag, threshold, and page size together. Explicit default
+    /// settings request a recorded File Space Info message and require the HDF5 1.10 format.
+    ///
+    /// [`Self::with_create_properties`] replaces all creation properties, including clearing this
+    /// setting when the supplied properties leave it unset.
+    pub fn with_file_space_settings(&mut self, settings: FileSpaceSettings) -> &mut Self {
+        self.writer.with_file_space_settings(settings);
         self
     }
 
