@@ -9,8 +9,15 @@ use hdf5::Datatype;
 use hdf5::Extent;
 #[cfg(feature = "__hdf5-1.10")]
 use hdf5::dataset::ChunkOpts;
+use hdf5_pure::DatasetBuilder;
+use hdf5_pure::DatasetCreateProperties;
 use hdf5_pure::DeflateLevel;
-use hdf5_pure::{DatasetBuilder, File, FileBuilder, H5Element, MaxExtent, ScaleOffset};
+use hdf5_pure::File;
+use hdf5_pure::FileBuilder;
+use hdf5_pure::H5Element;
+use hdf5_pure::MaxExtent;
+use hdf5_pure::PartialEdgeFiltering;
+use hdf5_pure::ScaleOffset;
 
 /// One stage of a filter pipeline. A dataset applies its stages in the order it lists them.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -327,8 +334,6 @@ impl<'a, T: Copy> Unlimited<'a, T> {
     }
 
     /// Sets the dataset to store each partial edge chunk without the filter pipeline.
-    ///
-    /// Only `libhdf5_create` writes the setting.
     pub fn partial_edge_chunks_unfiltered(mut self) -> Self {
         self.partial_edge_chunks_unfiltered = true;
         self
@@ -349,8 +354,7 @@ impl<T: H5Element> Unlimited<'_, T> {
     ///
     /// # Panics
     ///
-    /// Panics if the caller set `partial_edge_chunks_unfiltered` or `stored_as`, or if the write
-    /// fails.
+    /// Panics if the caller set `stored_as`, or if the write fails.
     #[track_caller]
     pub fn pure_create(&self, path: &Path) {
         let mut builder = FileBuilder::new();
@@ -364,7 +368,7 @@ impl<T: H5Element> Unlimited<'_, T> {
     ///
     /// # Panics
     ///
-    /// Panics if the caller set `partial_edge_chunks_unfiltered` or `stored_as`.
+    /// Panics if the caller set `stored_as`.
     pub fn add_to(&self, builder: &mut FileBuilder) {
         let Self {
             name,
@@ -376,10 +380,6 @@ impl<T: H5Element> Unlimited<'_, T> {
             #[cfg(feature = "__hdf5-1.10")]
             ref stored,
         } = *self;
-        assert!(
-            !partial_edge_chunks_unfiltered,
-            "hdf5-pure writes no partial edge chunk option"
-        );
         #[cfg(feature = "__hdf5-1.10")]
         assert!(
             stored.is_none(),
@@ -389,8 +389,14 @@ impl<T: H5Element> Unlimited<'_, T> {
             .create_dataset(name)
             .with_data(data)
             .with_shape(&[data.len() as u64])
-            .with_maxshape(&[MaxExtent::Unlimited])
-            .with_chunks(&[chunk]);
+            .with_maxshape(&[MaxExtent::Unlimited]);
+        if partial_edge_chunks_unfiltered {
+            dataset.with_create_properties(
+                DatasetCreateProperties::new()
+                    .with_partial_edge_filtering(PartialEdgeFiltering::Skip),
+            );
+        }
+        dataset.with_chunks(&[chunk]);
         apply_filters(dataset, filters);
         if let Some(fill) = fill {
             dataset.with_fill_value(fill);
