@@ -49,7 +49,11 @@ fn main() {
 
     // The strategy is stored in a superblock-extension message and survives a
     // reopen (libhdf5 observes it too).
-    let strategy = File::open(&persisting).unwrap().file_space_strategy();
+    let strategy = File::open(&persisting)
+        .unwrap()
+        .file_space_settings()
+        .unwrap()
+        .map(|settings| settings.strategy());
     assert_eq!(strategy, Some(FileSpaceStrategy::FsmAggr));
     println!("recorded strategy: {strategy:?}\n");
 

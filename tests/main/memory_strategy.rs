@@ -491,7 +491,10 @@ fn open_rw_edits_a_persisting_fsm_file_bounded() {
         vec![10, 11]
     );
     assert_eq!(
-        reopened.file_space_strategy(),
+        reopened
+            .file_space_settings()
+            .unwrap()
+            .map(|settings| settings.strategy()),
         Some(FileSpaceStrategy::FsmAggr),
         "the bounded session must leave the file's recorded strategy alone"
     );

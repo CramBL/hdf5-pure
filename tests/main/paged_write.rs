@@ -58,6 +58,7 @@ fn created_page_metadata_tail_survives_reopen_and_reuse(
                 .unwrap()
                 .file_space_info()
                 .unwrap()
+                .unwrap()
                 .manager_addrs
                 .first(),
             Some(&hdf5_pure::DecodedStoredAddress::Undefined),
@@ -169,7 +170,7 @@ fn paged_non_persist_is_aligned_without_managers() {
     assert_eq!(bytes.len() as u64 % PAGE, 0);
 
     let f = File::open(&path).unwrap();
-    let info = f.file_space_info().unwrap();
+    let info = f.file_space_info().unwrap().unwrap();
     assert!(!info.persist);
     assert!(
         info.manager_addrs.is_empty(),
@@ -191,7 +192,7 @@ fn paged_metadata_only() {
     let bytes = std::fs::read(&path).unwrap();
     assert_eq!(bytes.len() as u64 % PAGE, 0);
     let f = File::open(&path).unwrap();
-    let info = f.file_space_info().unwrap();
+    let info = f.file_space_info().unwrap().unwrap();
     assert!(info.persist);
     let Some(hdf5_pure::DecodedStoredAddress::Defined(eoa)) = info.eoa_pre_fsm else {
         panic!("expected Defined eoa_pre_fsm");
@@ -213,7 +214,7 @@ fn paged_chunked_roundtrip() {
     assert_eq!(bytes.len() as u64 % PAGE, 0);
 
     let f = File::open(&path).unwrap();
-    let info = f.file_space_info().unwrap();
+    let info = f.file_space_info().unwrap().unwrap();
     assert!(info.persist);
     let Some(hdf5_pure::DecodedStoredAddress::Defined(eoa)) = info.eoa_pre_fsm else {
         panic!("expected Defined eoa_pre_fsm");
@@ -242,7 +243,7 @@ fn paged_exact_page_multiple_large_block() {
     assert_eq!(f.dataset("exact").unwrap().read_i32().unwrap(), big);
     // No large fragment: the generic-large manager (slot 6) is undefined.
     assert_eq!(
-        f.file_space_info().unwrap().manager_addrs[6],
+        f.file_space_info().unwrap().unwrap().manager_addrs[6],
         hdf5_pure::DecodedStoredAddress::Undefined
     );
 }
@@ -273,7 +274,7 @@ fn paged_groups_attrs_vlen() {
     assert_eq!(bytes.len() as u64 % PAGE, 0);
 
     let f = File::open(&path).unwrap();
-    assert!(f.file_space_info().unwrap().persist);
+    assert!(f.file_space_info().unwrap().unwrap().persist);
     assert_eq!(
         f.dataset("temps").unwrap().read_f64().unwrap(),
         vec![1.0, 2.0, 3.0]

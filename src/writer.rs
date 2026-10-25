@@ -348,7 +348,7 @@ impl FileBuilder {
     /// builder.with_file_space_page_size(FileSpacePageSize::DEFAULT);
     /// let file = File::from_bytes(builder.finish()?)?;
     /// assert_eq!(
-    ///     file.file_space_info().map(|info| info.page_size),
+    ///     file.file_space_info()?.map(|info| info.page_size),
     ///     Some(FileSpacePageSize::DEFAULT)
     /// );
     /// # Ok::<(), hdf5_pure::Error>(())
@@ -784,9 +784,14 @@ mod streaming_tests {
         let length = bytes.len() as u64;
         let file = crate::reader::File::from_bytes(bytes).unwrap();
         assert_eq!(file.superblock().eof_address, length);
-        assert_eq!(file.file_space_strategy(), strategy);
+        assert_eq!(
+            file.file_space_settings()
+                .unwrap()
+                .map(|settings| settings.strategy()),
+            strategy
+        );
         if let Some(strategy) = strategy {
-            let info = file.file_space_info().unwrap();
+            let info = file.file_space_info().unwrap().unwrap();
             assert_eq!((info.strategy, info.persist), (strategy, persistent));
             if !persistent {
                 assert_eq!(info.manager_addrs, []);

@@ -72,7 +72,7 @@ pub fn serialized_manager_padding(path: &Path) -> u64 {
     let file = File::open(path).unwrap();
     let superblock = file.superblock();
     let base = superblock.base_address;
-    let info = file.file_space_info().unwrap();
+    let info = file.file_space_info().unwrap().unwrap();
     let widths = FormatWidths {
         offsets: superblock.offset_size,
         lengths: superblock.length_size,

@@ -287,7 +287,7 @@ fn libhdf5_persists_no_free_space_manager_under_aggr() {
     Placements::observe(&path, aggregation::FREED_EXTENT, AGGR);
 
     let file = File::open(&path).unwrap();
-    let info = file.file_space_info().unwrap();
+    let info = file.file_space_info().unwrap().unwrap();
     assert_eq!(
         (info.strategy, info.persist, info.manager_addrs.as_slice()),
         (FileSpaceStrategy::Aggr, false, [].as_slice())

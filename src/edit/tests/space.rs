@@ -817,7 +817,10 @@ fn a_generic_large_section_is_only_reusable_as_whole_pages() {
     let dir = tempfile::tempdir().unwrap();
     let path = test_util::copy_data("c/generic_large.h5", dir.path());
     let opened = crate::reader::File::open(&path).unwrap();
-    let info = opened.file_space_info().expect("a persisting file").clone();
+    let info = opened
+        .file_space_info()
+        .unwrap()
+        .expect("a persisting file");
     drop(opened);
     assert_eq!(info.page_size.get(), PAGE);
     let bytes = std::fs::read(&path).unwrap();

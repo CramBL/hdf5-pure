@@ -46,7 +46,7 @@ b.with_file_space_strategy(FileSpaceStrategy::Page, false, 1) // strategy, persi
 b.write(&path)?;
 
 assert_eq!(
-    File::open(&path)?.file_space_strategy(),
+    File::open(&path)?.file_space_settings()?.map(|settings| settings.strategy()),
     Some(FileSpaceStrategy::Page)
 );
 # Ok::<(), hdf5_pure::Error>(())
@@ -86,9 +86,14 @@ The `threshold` argument is the smallest free-space section, in bytes, that the 
 
 Under [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr) and persistent [`Page`](crate::FileSpaceStrategy::Page), a read-write session tracks a freed region of at least the threshold. It tracks a shorter one only where the region adjoins tracked free space, which it merges into, and drops it otherwise, as the C library does. A dropped region is not reused. Under [`Page`](crate::FileSpaceStrategy::Page) a region shorter than a page merges only with free space in its own page. The writer and the editors track page tails whatever the threshold, and so does the C library.
 
-## Reading the strategy back
+## Inspecting recorded settings
 
-The strategy lives in a superblock-extension message (a standalone object header the superblock points at), so it survives a reopen. [`File::file_space_strategy()`](crate::File::file_space_strategy) returns the recorded [`FileSpaceStrategy`](crate::FileSpaceStrategy), and [`File::file_space_info()`](crate::File::file_space_info) returns the full [`FileSpaceInfo`](crate::FileSpaceInfo) record (persist flag, threshold, page size, and the free-space manager addresses).
+[`File::file_space_settings`](crate::File::file_space_settings) returns the recorded strategy,
+persistence flag, threshold, and page size as a [`FileSpaceSettings`](crate::FileSpaceSettings).
+These settings are stored in the File Space Info message of the superblock extension. They
+describe the recorded configuration. A writable session's reusable-byte total and free ranges are
+available through [`File::reusable_space_stats`](crate::File::reusable_space_stats) and
+[`File::reusable_free_sections`](crate::File::reusable_free_sections).
 
 ```rust
 use hdf5_pure::FileSpacePageSize;
@@ -102,17 +107,51 @@ use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::File;
 
 let file = File::open(&path)?;
-if let Some(info) = file.file_space_info() {
-    println!("strategy: {:?}", info.strategy);
-    println!("persist:  {}", info.persist);
-    println!("threshold: {}", info.threshold);
-    println!("page size: {}", info.page_size.get());
+if let Some(settings) = file.file_space_settings()? {
+    println!("strategy: {:?}", settings.strategy());
+    println!("persist:  {}", settings.persist());
+    println!("threshold: {}", settings.threshold());
+    println!("page size: {}", settings.page_size().get());
 }
-# assert_eq!(file.file_space_info().map(|i| i.page_size.get()), Some(8192));
+assert_eq!(
+    file.file_space_settings()?.map(|settings| settings.page_size().get()),
+    Some(8192)
+);
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
-[`file_space_strategy()`](crate::File::file_space_strategy) (and [`file_space_info()`](crate::File::file_space_info)) return `None` for a file without a recorded strategy, which is what the C library writes when the default is left in place.
+Both [`File::file_space_settings`](crate::File::file_space_settings) and
+[`File::file_space_info`](crate::File::file_space_info) return `Ok(None)` when the file has no File
+Space Info message. A malformed message or unreadable superblock extension returns
+[`Error::Format`](crate::Error::Format). Opening the file and reading unrelated datasets remain
+possible when their metadata can be read independently. Callers that need an effective fallback
+can apply [`Option::unwrap_or_default`] after propagating the inspection error.
+
+[`File::file_space_info`](crate::File::file_space_info) provides an advanced, owned
+[`FileSpaceInfo`](crate::FileSpaceInfo) view of the message, including the manager addresses,
+page-end metadata threshold, and pre-manager end of allocation. A version 0 message has no
+pre-manager end-of-allocation field and, when persistent, has six manager slots. Its page size is
+reported as [`FileSpacePageSize::DEFAULT`](crate::FileSpacePageSize::DEFAULT). Version 1 has twelve
+manager slots when persistent. Both accessors work with buffered and streaming readers and read
+the current published metadata on editing handles.
+
+### API migration
+
+The recorded-settings and raw-message accessors distinguish absence from parse failure. The raw
+accessor was public before version 0.47.0. Its return type changes from an optional borrowed value
+to a fallible optional owned value.
+
+| Previous API | Current API |
+|---|---|
+| `File::file_space_strategy() -> Option<FileSpaceStrategy>` | `file.file_space_settings()?` |
+| `File::file_space_info() -> Option<&FileSpaceInfo>` | `File::file_space_info() -> Result<Option<FileSpaceInfo>, Error>` |
+
+The strategy-only getter is removed. Read a strategy with
+[`FileSpaceSettings::strategy`](crate::FileSpaceSettings::strategy).
+[`FileSpaceSettings`](crate::FileSpaceSettings) normalizes
+[`Aggr`](crate::FileSpaceStrategy::Aggr) and [`None`](crate::FileSpaceStrategy::None) to persistence
+disabled and threshold 1. The recorded page size is retained under every strategy, and allocation
+uses pages only under [`Page`](crate::FileSpaceStrategy::Page).
 
 ## Paged files (`FileSpaceStrategy::Page`)
 
@@ -122,7 +161,7 @@ if let Some(info) = file.file_space_info() {
 use hdf5_pure::FileSpacePageSize;
 # let dir = tempfile::tempdir()?;
 # let path = dir.path().join("paged.h5");
-use hdf5_pure::{FileBuilder, FileSpaceStrategy, MaxExtent};
+use hdf5_pure::{File, FileBuilder, FileSpaceStrategy, MaxExtent};
 
 let mut b = FileBuilder::new();
 b.create_dataset("samples")
@@ -133,10 +172,10 @@ b.create_dataset("samples")
 b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0) // persist so it can be grown later
     .with_file_space_page_size(FileSpacePageSize::DEFAULT);
 b.write(&path)?;
-# assert_eq!(
-#     hdf5_pure::File::open(&path)?.file_space_strategy(),
-#     Some(FileSpaceStrategy::Page)
-# );
+assert_eq!(
+    File::open(&path)?.file_space_settings()?.map(|settings| settings.strategy()),
+    Some(FileSpaceStrategy::Page)
+);
 # Ok::<(), hdf5_pure::Error>(())
 ```
 

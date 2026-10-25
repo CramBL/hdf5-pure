@@ -126,7 +126,7 @@ fn persisted_free_space_is_not_reused_under_a_strategy_without_a_free_space_mana
                 .base_address
                 .absolute(file.superblock().superblock_extension_address.unwrap())
                 .unwrap(),
-            file.file_space_info().unwrap().clone(),
+            file.file_space_info().unwrap().unwrap(),
             file.persisted_free_space().unwrap(),
         )
     };
@@ -167,8 +167,11 @@ fn persisted_free_space_is_not_reused_under_a_strategy_without_a_free_space_mana
     );
     let file = File::open(&path).unwrap();
     assert_eq!(
-        (file.file_space_info(), file.persisted_free_space().unwrap()),
-        (Some(&relabeled), free)
+        (
+            file.file_space_info().unwrap(),
+            file.persisted_free_space().unwrap()
+        ),
+        (Some(relabeled), free)
     );
 }
 
@@ -218,9 +221,9 @@ fn editing_a_non_persisting_version_0_file_reuses_a_deleted_extent() {
 
     let file = File::open(&path).unwrap();
     assert_eq!(
-        file.file_space_info(),
+        file.file_space_info().unwrap(),
         Some(
-            &FileSpaceInfoFields {
+            FileSpaceInfoFields {
                 strategy: FileSpaceStrategy::FsmAggr,
                 persist: false,
                 threshold: 1,
@@ -254,9 +257,9 @@ fn editing_a_non_persisting_version_0_file_reuses_a_deleted_extent() {
     let file = File::open(&path).unwrap();
     assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), vec![4; 300]);
     assert_eq!(
-        file.file_space_info(),
+        file.file_space_info().unwrap(),
         Some(
-            &FileSpaceInfoFields {
+            FileSpaceInfoFields {
                 strategy: FileSpaceStrategy::FsmAggr,
                 persist: false,
                 threshold: 1,

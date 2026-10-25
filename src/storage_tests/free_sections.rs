@@ -5,12 +5,15 @@ use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use rstest::rstest;
 use test_util::file_space_info;
+use test_util::object_header;
 use test_util::widths::Widths;
 
 use crate::Error;
 use crate::File;
 use crate::FileAccessProperties;
 use crate::FileBuilder;
+use crate::FileSpacePageSize;
+use crate::FileSpaceSettings;
 use crate::FileSpaceStrategy;
 use crate::FormatError;
 use crate::FreeSectionCoordinates;
@@ -23,7 +26,7 @@ use crate::SyncPolicy;
 use crate::UserblockSize;
 use crate::address::BaseAddressExt;
 use crate::checksum;
-use crate::source::BytesSource;
+use crate::source::{BytesSource, Source};
 
 #[rstest]
 #[case::default(None)]
@@ -45,6 +48,17 @@ fn persistence_configuration_is_distinct_from_empty_sections(
     } else {
         File::from_bytes(bytes).unwrap()
     };
+    let settings = strategy
+        .map(|(strategy, persist)| FileSpaceSettings::new(strategy).with_persistence(persist));
+    assert_eq!(file.file_space_settings().unwrap(), settings);
+    assert_eq!(
+        file.file_space_info().unwrap().is_some(),
+        settings.is_some()
+    );
+    assert_eq!(
+        file.file_space_settings().unwrap().unwrap_or_default(),
+        settings.unwrap_or_default()
+    );
     let result = file.persisted_free_sections().unwrap();
     assert_eq!(
         result.is_some(),
@@ -223,8 +237,10 @@ fn stored_and_reusable_views_have_distinct_coordinates(
     );
 }
 
-#[test]
-fn reusable_sections_follow_commits_and_immediate_appends() {
+#[rstest]
+fn reusable_sections_follow_commits_and_immediate_appends(
+    #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] memory: MemoryStrategy,
+) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("session-timing.h5");
     let mut builder = FileBuilder::new();
@@ -239,7 +255,14 @@ fn reusable_sections_follow_commits_and_immediate_appends() {
         .with_i32_data(&vec![7; 16_384]);
     builder.create_dataset("keep").with_i32_data(&[9; 4]);
     builder.write(&path).unwrap();
-    let file = File::open_rw(&path).unwrap();
+    let file = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new()
+            .with_memory_strategy(memory)
+            .with_sync_policy(SyncPolicy::OnClose),
+    )
+    .unwrap();
+    let opening_extension = assert_current_file_space_metadata(&file);
     let layout = file.dataset("scratch").unwrap().layout().unwrap();
     let Layout::Contiguous {
         address: Some(start),
@@ -266,12 +289,15 @@ fn reusable_sections_follow_commits_and_immediate_appends() {
     file.root().delete("scratch").unwrap();
     assert!(file.has_staged_edits());
     assert_eq!(file.reusable_free_sections().unwrap(), before);
+    assert_eq!(assert_current_file_space_metadata(&file), opening_extension);
     file.commit().unwrap();
+    assert_ne!(assert_current_file_space_metadata(&file), opening_extension);
     assert_eq!(
         intersections(&file.reusable_free_sections().unwrap()),
         slice::from_ref(&scratch),
     );
     file.dataset("log").unwrap().append(&[2; 4_096]).unwrap();
+    assert_current_file_space_metadata(&file);
     assert!(!file.has_staged_edits());
     let chunks = file.dataset("log").unwrap().chunks().unwrap();
     assert_eq!(chunks.len(), 2);
@@ -283,12 +309,58 @@ fn reusable_sections_follow_commits_and_immediate_appends() {
         intersections(&file.reusable_free_sections().unwrap()),
         iter::once(scratch.start + 16_384..scratch.end).collect::<Vec<_>>(),
     );
+    file.root()
+        .create_dataset("replacement", |builder| {
+            builder.with_i32_data(&[3; 32]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    assert_current_file_space_metadata(&file);
+    let layout = file.dataset("replacement").unwrap().layout().unwrap();
+    let Layout::Contiguous {
+        address: Some(address),
+        size,
+    } = layout
+    else {
+        panic!("{layout:?}");
+    };
+    assert!(address <= opening_extension && opening_extension < address + size);
+    assert_eq!(
+        file.dataset("replacement").unwrap().read_i32().unwrap(),
+        [3; 32]
+    );
+}
+
+fn assert_current_file_space_metadata(file: &File) -> u64 {
+    let bytes = file
+        .inner
+        .with_source(|source| source.read_exact_at(0, usize::try_from(source.len()).unwrap()))
+        .unwrap();
+    let snapshot = File::from_bytes(bytes).unwrap();
+    assert_eq!(
+        file.file_space_info().unwrap(),
+        snapshot.file_space_info().unwrap()
+    );
+    assert_eq!(
+        file.file_space_settings().unwrap(),
+        snapshot.file_space_settings().unwrap()
+    );
+    assert_eq!(
+        file.file_space_settings().unwrap(),
+        Some(FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true))
+    );
+    snapshot
+        .superblock()
+        .superblock_extension_address
+        .unwrap()
+        .get()
 }
 
 #[rstest]
 fn malformed_file_space_info_is_reported(#[values(false, true)] streaming: bool) {
     let mut builder = FileBuilder::new();
     builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    builder.create_dataset("data").with_i32_data(&[1, 2, 3]);
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("malformed-fsinfo.h5");
     builder.write(&path).unwrap();
@@ -308,7 +380,23 @@ fn malformed_file_space_info_is_reported(#[values(false, true)] streaming: bool)
     } else {
         File::open(&path).unwrap()
     };
-    assert!(file.file_space_info().is_none());
+    let error = file.file_space_info().unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Error::Format(FormatError::UnsupportedFileSpaceInfoVersion(9))
+        ),
+        "{error:?}"
+    );
+    let error = file.file_space_settings().unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Error::Format(FormatError::UnsupportedFileSpaceInfoVersion(9))
+        ),
+        "{error:?}"
+    );
+    assert_eq!(file.dataset("data").unwrap().read_i32().unwrap(), [1, 2, 3]);
     let error = file.persisted_free_sections().unwrap_err();
     assert!(
         matches!(
@@ -317,6 +405,179 @@ fn malformed_file_space_info_is_reported(#[values(false, true)] streaming: bool)
         ),
         "{error:?}"
     );
+}
+
+#[rstest]
+#[case::invalid_page_size(0, FormatError::InvalidFileSpacePageSize(0))]
+#[case::oversized_page_size(1 << 31, FormatError::InvalidFileSpacePageSize(1 << 31))]
+#[case::invalid_extension_version(4096, FormatError::InvalidObjectHeaderVersion(9))]
+fn invalid_file_space_metadata_returns_the_format_error(
+    #[case] page_size: u64,
+    #[case] expected: FormatError,
+    #[values(false, true)] streaming: bool,
+) {
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, false, 1);
+    builder.create_dataset("data").with_i32_data(&[1, 2, 3]);
+    let mut bytes = builder.finish().unwrap();
+    let extension = usize::try_from(
+        File::from_bytes(bytes.clone())
+            .unwrap()
+            .superblock()
+            .superblock_extension_address
+            .unwrap()
+            .get(),
+    )
+    .unwrap();
+    if matches!(expected, FormatError::InvalidObjectHeaderVersion(_)) {
+        bytes[extension + 4] = 9;
+    } else {
+        let body = file_space_info::non_persistent_version_1(
+            Widths::EIGHT,
+            file_space_info::PAGE,
+            1,
+            page_size,
+        );
+        object_header::v2::replace_message(
+            &mut bytes,
+            extension,
+            object_header::MessageType::FILE_SPACE_INFO,
+            &body,
+        );
+    }
+    let file = if streaming {
+        File::from_source(BytesSource::new(bytes)).unwrap()
+    } else {
+        File::from_bytes(bytes).unwrap()
+    };
+    let Error::Format(error) = file.file_space_info().unwrap_err() else {
+        panic!("expected a File Space Info format error");
+    };
+    assert_eq!(error, expected);
+    let Error::Format(error) = file.file_space_settings().unwrap_err() else {
+        panic!("expected a file-space settings format error");
+    };
+    assert_eq!(error, expected);
+    assert_eq!(file.dataset("data").unwrap().read_i32().unwrap(), [1, 2, 3]);
+}
+
+#[rstest]
+fn an_extension_without_file_space_info_has_no_recorded_settings(
+    #[values(false, true)] streaming: bool,
+) {
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, false, 1);
+    let mut bytes = builder.finish().unwrap();
+    let extension = usize::try_from(
+        File::from_bytes(bytes.clone())
+            .unwrap()
+            .superblock()
+            .superblock_extension_address
+            .unwrap()
+            .get(),
+    )
+    .unwrap();
+    object_header::v2::replace_record(
+        &mut bytes,
+        extension,
+        object_header::MessageType::FILE_SPACE_INFO,
+        object_header::Message::nil(0),
+    );
+    let file = if streaming {
+        File::from_source(BytesSource::new(bytes)).unwrap()
+    } else {
+        File::from_bytes(bytes).unwrap()
+    };
+    assert_eq!(file.file_space_info().unwrap(), None);
+    assert_eq!(file.file_space_settings().unwrap(), None);
+}
+
+#[test]
+fn unreadable_extension_returns_a_source_error_without_preventing_dataset_reads() {
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, false, 1);
+    builder.create_dataset("data").with_i32_data(&[1, 2, 3]);
+    let bytes = builder.finish().unwrap();
+    let extension = File::from_bytes(bytes.clone())
+        .unwrap()
+        .superblock()
+        .superblock_extension_address
+        .unwrap()
+        .get();
+    let file = File::from_source(UnreadableExtension {
+        source: BytesSource::new(bytes),
+        extension,
+    })
+    .unwrap();
+    let Error::Format(error) = file.file_space_info().unwrap_err() else {
+        panic!("expected an extension source error");
+    };
+    assert_eq!(error, FormatError::Source("unreadable extension".into()));
+    let Error::Format(error) = file.file_space_settings().unwrap_err() else {
+        panic!("expected an extension source error");
+    };
+    assert_eq!(error, FormatError::Source("unreadable extension".into()));
+    assert_eq!(file.dataset("data").unwrap().read_i32().unwrap(), [1, 2, 3]);
+}
+
+struct UnreadableExtension {
+    source: BytesSource<Vec<u8>>,
+    extension: u64,
+}
+
+impl Source for UnreadableExtension {
+    fn len(&self) -> u64 {
+        self.source.len()
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError> {
+        if offset == self.extension {
+            return Err(FormatError::Source("unreadable extension".into()));
+        }
+        self.source.read_at(offset, buf)
+    }
+}
+
+#[rstest]
+#[case::fsm_aggr(FileSpaceStrategy::FsmAggr, false, 0)]
+#[case::persistent_fsm_aggr(FileSpaceStrategy::FsmAggr, true, 128)]
+#[case::page(FileSpaceStrategy::Page, false, 0)]
+#[case::persistent_page(FileSpaceStrategy::Page, true, 128)]
+#[case::aggr(FileSpaceStrategy::Aggr, true, 128)]
+#[case::none(FileSpaceStrategy::None, true, 128)]
+fn recorded_settings_match_the_writer_configuration(
+    #[case] strategy: FileSpaceStrategy,
+    #[case] persist: bool,
+    #[case] threshold: u64,
+    #[values(512, 8192)] page_size: u64,
+    #[values(false, true)] userblock: bool,
+    #[values(false, true)] streaming: bool,
+) {
+    let page_size = FileSpacePageSize::try_from(page_size).unwrap();
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_strategy(strategy, persist, threshold);
+    builder.with_file_space_page_size(page_size);
+    if userblock {
+        builder.with_userblock(UserblockSize::try_from(8192).unwrap());
+    }
+    builder.create_dataset("data").with_i32_data(&[1, 2, 3]);
+    let bytes = builder.finish().unwrap();
+    let file = if streaming {
+        File::from_source(BytesSource::new(bytes)).unwrap()
+    } else {
+        File::from_bytes(bytes).unwrap()
+    };
+    let expected = FileSpaceSettings::new(strategy)
+        .with_persistence(persist)
+        .with_threshold(threshold)
+        .with_page_size(page_size);
+    assert_eq!(file.file_space_settings().unwrap(), Some(expected));
+    let info = file.file_space_info().unwrap().unwrap();
+    assert_eq!(info.strategy, expected.strategy());
+    assert_eq!(info.persist, expected.persist());
+    assert_eq!(info.threshold, expected.threshold());
+    assert_eq!(info.page_size, expected.page_size());
+    assert_eq!(file.dataset("data").unwrap().read_i32().unwrap(), [1, 2, 3]);
 }
 
 #[rstest]
@@ -407,6 +668,7 @@ fn relocated_sources_preserve_stored_section_coordinates(
         .unwrap()
         .persisted_free_sections()
         .unwrap();
+    let expected_settings = File::open(&path).unwrap().file_space_settings().unwrap();
     let bytes = std::fs::read(&path).unwrap();
     let mut relocated = vec![0; signature];
     relocated.extend_from_slice(&bytes[512..]);
@@ -416,6 +678,7 @@ fn relocated_sources_preserve_stored_section_coordinates(
         File::from_bytes(relocated).unwrap()
     };
     assert_eq!(file.persisted_free_sections().unwrap(), expected);
+    assert_eq!(file.file_space_settings().unwrap(), expected_settings);
 }
 
 fn assert_summary_and_sections(file: &File) -> ReusableSpaceStats {

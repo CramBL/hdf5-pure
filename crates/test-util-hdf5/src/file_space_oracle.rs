@@ -48,7 +48,10 @@ pub fn assert_persisted_sections(path: &Path) {
         .persisted_free_sections()
         .unwrap();
     assert_eq!(report, streamed, "buffered/streamed sections; {path:?}");
-    let configured = reader.file_space_info().is_some_and(|info| info.persist);
+    let configured = reader
+        .file_space_info()
+        .unwrap()
+        .is_some_and(|info| info.persist);
     assert_eq!(report.is_some(), configured, "persistence; {path:?}");
     let boundary = reader.superblock().eof_address - reader.superblock().base_address.get();
     let rust = report
@@ -106,7 +109,7 @@ pub fn assert_persisted_sections(path: &Path) {
 
 /// Checks reported manager slots, roles, counts, bytes, and sections against encoded metadata.
 fn assert_manager_sections(file: &File, report: &PersistedFreeSections, bytes: &[u8]) {
-    let info = file.file_space_info().unwrap();
+    let info = file.file_space_info().unwrap().unwrap();
     let defined = info
         .manager_addrs
         .iter()
@@ -249,7 +252,7 @@ impl FreeSpaceOracleCheckpoint {
             reader.persisted_free_space().map_err(OracleError::Rust)?,
             boundary,
         )?;
-        let info = reader.file_space_info().cloned();
+        let info = reader.file_space_info().map_err(OracleError::Rust)?;
         reader.close().map_err(OracleError::Rust)?;
         let file = hdf5::File::open(path).map_err(|source| OracleError::C {
             operation: "H5Fopen",

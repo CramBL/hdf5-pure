@@ -135,6 +135,7 @@ fn every_commit_keeps_the_userblock_and_writes_stored_manager_addresses(
         let headers = file
             .file_space_info()
             .unwrap()
+            .unwrap()
             .manager_addrs
             .iter()
             .filter_map(|&addr| match addr {

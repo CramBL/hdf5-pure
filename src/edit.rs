@@ -2334,6 +2334,16 @@ impl WriteEngine {
         self.context.superblock()
     }
 
+    /// Parses the File Space Info message at the current published extension address.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the extension's absolute address exceeds `u64`,
+    /// and the parser's error if the extension's object header or the message does not parse.
+    pub(crate) fn parse_file_space_info(&self) -> Result<Option<FileSpaceInfo>, FormatError> {
+        Ok(Self::extension_fsinfo(self.image(), &self.context)?.map(|(_, info)| info))
+    }
+
     /// Returns the address and length widths validated when this session opened the file.
     pub(crate) const fn widths(&self) -> FormatWidths {
         self.context.widths()

@@ -259,9 +259,14 @@ fn persisted_free_space_file_appends_and_finalizes() {
         f.dataset("d").unwrap().read_i32().unwrap(),
         (0..25).collect::<Vec<_>>()
     );
-    assert_eq!(f.file_space_strategy(), Some(FileSpaceStrategy::FsmAggr));
+    assert_eq!(
+        f.file_space_settings()
+            .unwrap()
+            .map(|settings| settings.strategy()),
+        Some(FileSpaceStrategy::FsmAggr)
+    );
     assert!(
-        f.file_space_info().unwrap().persist,
+        f.file_space_info().unwrap().unwrap().persist,
         "the finalize keeps the persist flag set"
     );
     // The finalize freed the superseded extension + manager blocks, so the
@@ -318,7 +323,12 @@ fn persisted_free_space_drop_finalizes() {
     // The dropped-without-close file is finalized: managers are canonical, so a
     // reopen recovers persisted free space, exactly as after an explicit close.
     let f = File::open(&p).unwrap();
-    assert_eq!(f.file_space_strategy(), Some(FileSpaceStrategy::FsmAggr));
+    assert_eq!(
+        f.file_space_settings()
+            .unwrap()
+            .map(|settings| settings.strategy()),
+        Some(FileSpaceStrategy::FsmAggr)
+    );
     assert!(
         !f.persisted_free_space().unwrap().is_empty(),
         "a dropped handle finalizes like close"

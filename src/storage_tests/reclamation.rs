@@ -142,6 +142,7 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
         let f = File::open_rw(&path).unwrap();
         let managers: Vec<u64> = f
             .file_space_info()
+            .unwrap()
             .expect("a persisting file records its managers")
             .manager_addrs
             .iter()

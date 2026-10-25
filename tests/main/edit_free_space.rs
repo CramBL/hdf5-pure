@@ -608,7 +608,7 @@ fn persisted_chunked_reclaim_is_disjoint_and_reusable() {
     file_space::assert_eof_matches_physical_size(&path);
 
     let f = File::open(&path).unwrap();
-    assert!(f.file_space_info().unwrap().persist);
+    assert!(f.file_space_info().unwrap().unwrap().persist);
     let mut free = f.persisted_free_space().unwrap();
     free.sort();
     for w in free.windows(2) {
@@ -636,8 +636,13 @@ fn persisted_free_space_survives_reopen_and_is_reused() {
     // A fresh reader recovers the persisted free space across the reopen, and the
     // surviving datasets stay byte-exact alongside the on-disk managers.
     let f = File::open(&path).unwrap();
-    assert_eq!(f.file_space_strategy(), Some(FileSpaceStrategy::FsmAggr));
-    assert!(f.file_space_info().unwrap().persist);
+    assert_eq!(
+        f.file_space_settings()
+            .unwrap()
+            .map(|settings| settings.strategy()),
+        Some(FileSpaceStrategy::FsmAggr)
+    );
+    assert!(f.file_space_info().unwrap().unwrap().persist);
     let free = f.persisted_free_space().unwrap();
     let total: u64 = free.iter().map(|(_, l)| l).sum();
     assert!(
@@ -674,7 +679,7 @@ fn persisted_free_space_survives_reopen_and_is_reused() {
     assert_eq!(f.dataset("a").unwrap().read_i32().unwrap(), vec![1; 100]);
     assert_eq!(f.dataset("c").unwrap().read_i32().unwrap(), vec![3; 100]);
     // Persistence remains armed: the file still records its free space on disk.
-    assert!(f.file_space_info().unwrap().persist);
+    assert!(f.file_space_info().unwrap().unwrap().persist);
 }
 
 #[test]
@@ -722,7 +727,7 @@ fn a_version_0_message_s_persisted_free_space_is_recovered_and_reused() {
                 .base_address
                 .absolute(f.superblock().superblock_extension_address.unwrap())
                 .unwrap(),
-            f.file_space_info().unwrap().clone(),
+            f.file_space_info().unwrap().unwrap(),
             f.persisted_free_space().unwrap(),
         )
     };
@@ -754,9 +759,9 @@ fn a_version_0_message_s_persisted_free_space_is_recovered_and_reused() {
 
     let f = File::open(&path).unwrap();
     assert_eq!(
-        f.file_space_info(),
+        f.file_space_info().unwrap(),
         Some(
-            &FileSpaceInfoFields {
+            FileSpaceInfoFields {
                 strategy: FileSpaceStrategy::FsmAggr,
                 persist: true,
                 threshold: 1,
@@ -792,7 +797,7 @@ fn a_version_0_message_s_persisted_free_space_is_recovered_and_reused() {
     assert_eq!(f.dataset("d").unwrap().read_i32().unwrap(), vec![9; 300]);
     assert_eq!(f.dataset("a").unwrap().read_i32().unwrap(), vec![1; 100]);
     assert_eq!(f.dataset("c").unwrap().read_i32().unwrap(), vec![3; 100]);
-    assert!(f.file_space_info().unwrap().persist);
+    assert!(f.file_space_info().unwrap().unwrap().persist);
 }
 
 #[test]
@@ -825,7 +830,7 @@ fn persisted_managers_stay_consistent_across_many_commits() {
         // Free regions never overlap and the file remains valid after each round.
         file_space::assert_eof_matches_physical_size(&path);
         let f = File::open(&path).unwrap();
-        assert!(f.file_space_info().unwrap().persist);
+        assert!(f.file_space_info().unwrap().unwrap().persist);
         let mut free = f.persisted_free_space().unwrap();
         free.sort();
         for w in free.windows(2) {
@@ -1497,6 +1502,7 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
             .sum();
         let managers: Vec<u64> = f
             .file_space_info()
+            .unwrap()
             .expect("a persisting file records its managers")
             .manager_addrs
             .iter()
@@ -1766,6 +1772,7 @@ fn a_persisting_commit_tail_is_placed_in_free_space() {
         let f = File::open(&path).unwrap();
         let managers: Vec<u64> = f
             .file_space_info()
+            .unwrap()
             .expect("a persisting file records its managers")
             .manager_addrs
             .iter()
