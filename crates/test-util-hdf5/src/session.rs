@@ -1,23 +1,20 @@
-//! Editing sessions on a file through `hdf5-pure`'s read-write entry points.
+//! Editing sessions for tests of file contents and editing behavior.
+//!
+//! These helpers select [`SyncPolicy::OnClose`], which skips intermediate filesystem
+//! synchronization and synchronizes when the session closes. Tests of durability semantics select
+//! [`SyncPolicy::Always`] explicitly through [`File::open_rw_with_options`].
 
 use std::path::Path;
 
 use hdf5_pure::{Error, File, FileAccessProperties, FileLocking, MemoryStrategy, SyncPolicy};
 
-/// Opens `path` read-write on the bounded engine alone, so a file the engine stops accepting
-/// fails here and never falls back to the mirror.
-pub fn open_bounded(path: &Path) -> Result<File, Error> {
-    File::open_rw_with_options(
-        path,
-        FileAccessProperties::new().with_memory_strategy(MemoryStrategy::Bounded),
-    )
-}
-
-/// Opens `path` read-write on the bounded engine and flushes changes when the session closes.
+/// Opens a file for editing with bounded memory and no mirror fallback.
 ///
-/// This keeps tests that exercise append batching from paying one filesystem synchronization per
-/// append while still making the memory strategy explicit.
-pub fn open_bounded_on_close(path: &Path) -> Result<File, Error> {
+/// # Errors
+///
+/// Returns [`Error::EditUnsupported`] if the file requires a mirror. Other opening errors are
+/// documented in [`File::open_rw`].
+pub fn open_bounded(path: &Path) -> Result<File, Error> {
     File::open_rw_with_options(
         path,
         FileAccessProperties::new()
@@ -26,9 +23,22 @@ pub fn open_bounded_on_close(path: &Path) -> Result<File, Error> {
     )
 }
 
+/// Opens a file for editing with automatic memory strategy selection.
+///
+/// # Errors
+///
+/// Returns [`Error::Io`] if opening or reading fails, or another error documented in
+/// [`File::open_rw`].
+pub fn open_rw(path: &Path) -> Result<File, Error> {
+    File::open_rw_with_options(
+        path,
+        FileAccessProperties::new().with_sync_policy(SyncPolicy::OnClose),
+    )
+}
+
 /// Returns access properties for a page-buffered editing session.
 ///
-/// The session flushes on close and uses a one-mebibyte page buffer. Locking is disabled so tests
+/// The page buffer is one mebibyte. Locking is disabled so tests
 /// can inspect the file while it is open; OS locks are mandatory on Windows and would otherwise
 /// block that observation.
 pub fn page_buffered() -> FileAccessProperties {

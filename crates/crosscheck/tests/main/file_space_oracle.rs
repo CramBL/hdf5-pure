@@ -22,6 +22,7 @@ use test_util_hdf5::file_space_oracle::{
 };
 use test_util_hdf5::free_space_churn::{self, Base, Lifecycle, Strategy};
 use test_util_hdf5::free_space_endurance;
+use test_util_hdf5::session;
 
 #[rstest]
 #[case::fsm(FileSpaceStrategy::FsmAggr)]
@@ -237,14 +238,14 @@ fn edits_by_both_libraries_preserve_matching_free_sections(
     }
     let mut observations = String::new();
     append_checkpoint(&mut observations, &path, &case, "created", persist);
-    let file = File::open_rw(&path).unwrap();
+    let file = session::open_rw(&path).unwrap();
     let freed = file_space::contiguous_extent(&file, "b");
     file.root().delete("b").unwrap();
     file.commit().unwrap();
     file.close().unwrap();
     append_checkpoint(&mut observations, &path, &case, "rust-deletion", persist);
     for iteration in 0..3 {
-        let file = File::open_rw(&path).unwrap();
+        let file = session::open_rw(&path).unwrap();
         file.root()
             .create_dataset("replacement", |b| {
                 b.with_i32_data(&vec![9; 3000 + iteration * 100]);
@@ -266,7 +267,7 @@ fn edits_by_both_libraries_preserve_matching_free_sections(
             &format!("rust-reuse-{iteration}"),
             persist,
         );
-        let file = File::open_rw(&path).unwrap();
+        let file = session::open_rw(&path).unwrap();
         file.root().delete("replacement").unwrap();
         file.commit().unwrap();
         file.close().unwrap();
@@ -328,7 +329,7 @@ fn records_stored_eof_separately_from_trailing_bytes(
             .with_i32_data(&vec![value; len]);
     }
     builder.write(&path).unwrap();
-    let file = File::open_rw(&path).unwrap();
+    let file = session::open_rw(&path).unwrap();
     file.root().delete("b").unwrap();
     file.commit().unwrap();
     file.close().unwrap();

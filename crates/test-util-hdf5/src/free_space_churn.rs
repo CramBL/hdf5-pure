@@ -1562,7 +1562,7 @@ impl Base {
                     .with_sync_policy(SyncPolicy::OnClose),
             )
             .unwrap(),
-            Self::Zero => session::open_bounded_on_close(path).unwrap(),
+            Self::Zero => session::open_bounded(path).unwrap(),
         };
         assert_eq!(file.superblock().base_address.get(), self.userblock());
         file

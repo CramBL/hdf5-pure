@@ -246,7 +246,7 @@ proptest! {
         b.write(&path).unwrap();
 
         let dropped = {
-            let file = File::open_rw(&path).unwrap();
+            let file = session::open_rw(&path).unwrap();
             let mut dropped = Vec::new();
             for i in (0..data.len()).filter(|&i| deleted[i]) {
                 let extent = file_space::contiguous_extent(&file, &format!("d{i}"));
