@@ -350,6 +350,13 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
         },
     }
     allowed_added_inherent = {
+        "Superblock": {
+            "status",
+            "version",
+            "consistency_flags",
+            "set_version",
+            "set_consistency_flags",
+        },
         "FixedPointLayout": {
             "signed",
             "bit_offset",
@@ -390,6 +397,10 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
             continue
         old = public_type_shape(baseline, baseline_items[name])
         new = public_type_shape(core, core_items[name])
+        if name == "Superblock" and old["non_exhaustive"] and not new["non_exhaustive"]:
+            kind = core["index"][str(core_items[name])]["inner"].get("struct", {}).get("kind")
+            if isinstance(kind, dict) and kind.get("plain", {}).get("has_stripped_fields", False):
+                old["non_exhaustive"] = False
         if name == "Datatype" and new["variants"].get("VariableLength") == {
             "kind": "tuple",
             "fields": {

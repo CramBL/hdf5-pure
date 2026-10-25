@@ -60,7 +60,7 @@ fn file_size_matches_buffer_and_metadata() {
 fn libver_bound_reports_writer_format() {
     // Unbounded, this crate writes a version 3 superblock — the HDF5 1.10 format.
     let file = File::from_bytes(sample_file()).unwrap();
-    assert_eq!(file.superblock().version, SuperblockVersion::Three);
+    assert_eq!(file.superblock().version(), SuperblockVersion::Three);
     assert_eq!(file.libver_bound(), LibVer::V110);
     assert_eq!(file.libver_bound(), LibVer::WRITER_DEFAULT);
 }

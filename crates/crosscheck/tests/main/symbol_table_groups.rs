@@ -182,7 +182,7 @@ fn both_readers_resolve_symbol_table_links_whose_addresses_match_libhdf5(
     });
     assert_eq!(decoded.as_slice(), expected);
     for file in [file, File::open_streaming(&path).unwrap()] {
-        assert_eq!(file.superblock().version, creation.superblock_version);
+        assert_eq!(file.superblock().version(), creation.superblock_version);
         assert_eq!(file.superblock().base_address.get(), creation.userblock);
         assert_group_members(&file, "/", links, "nested", 0);
         assert_group_members(&file, "/nested", 3, "leaf", NESTED_VALUE_BASE);

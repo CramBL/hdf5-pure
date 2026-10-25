@@ -169,7 +169,7 @@ fn from_bytes_reads_a_flagged_file() {
 
     let file = File::from_bytes(std::fs::read(&path).unwrap()).unwrap();
     assert_eq!(
-        file.superblock().consistency_flags,
+        file.superblock().consistency_flags(),
         SuperblockStatusFlags::swmr_write_marked()
     );
     assert_eq!(
@@ -447,7 +447,7 @@ fn the_opt_in_reads_a_flushed_write_marked_file() {
             "{what} read something other than what the writer committed"
         );
         assert_eq!(
-            file.superblock().consistency_flags,
+            file.superblock().consistency_flags(),
             SuperblockStatusFlags::write_marked()
         );
     }

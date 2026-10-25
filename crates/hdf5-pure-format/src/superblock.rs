@@ -42,11 +42,10 @@ use crate::width::OffsetWidth;
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::UnsupportedVersion`] if the version is 0 or 1,
-/// [`FormatError::SuperblockStatusFlagsTooWide`] if the consistency flags do not fit their
-/// one-byte field, and [`FormatError::Internal`] if an address does not fit the offset width.
+/// Returns [`FormatError::UnsupportedVersion`] if the version is 0 or 1, and
+/// [`FormatError::Internal`] if an address does not fit the offset width.
 pub fn serialize_superblock(superblock: &Superblock) -> Result<Vec<u8>, FormatError> {
-    let status = SuperblockStatus::new(superblock.version, superblock.consistency_flags)?;
+    let status = superblock.status();
     let flags = match status {
         SuperblockStatus::Zero(_) | SuperblockStatus::One(_) => {
             return Err(FormatError::UnsupportedVersion(status.version().get()));
@@ -56,7 +55,7 @@ pub fn serialize_superblock(superblock: &Superblock) -> Result<Vec<u8>, FormatEr
     let offset_width = superblock.offset_size;
     let mut buf = Vec::with_capacity(48);
     buf.extend_from_slice(&HDF5_SIGNATURE);
-    buf.push(superblock.version.get());
+    buf.push(superblock.version().get());
     buf.push(offset_width.get());
     buf.push(superblock.length_size.get());
     buf.push(flags);
@@ -388,7 +387,7 @@ impl SuperblockCandidateFields {
         let root_group_address = fields.address(offsets)?;
         fields.array::<ROOT_ENTRY_TAIL_LEN>()?;
         Ok(SuperblockFields {
-            version,
+            status,
             offset_size: offsets,
             length_size: lengths,
             base_address,
@@ -399,7 +398,6 @@ impl SuperblockCandidateFields {
             indexed_storage_internal_node_k,
             free_space_address: Some(free_space_address),
             driver_info_address: Some(driver_info_address),
-            consistency_flags: status.flags(),
             superblock_extension_address: None,
             checksum: None,
         }
@@ -419,7 +417,7 @@ impl SuperblockCandidateFields {
         let root_group_address = fields.address(offsets)?;
         let checksum = fields.u32()?;
         Ok(SuperblockFields {
-            version,
+            status,
             offset_size: offsets,
             length_size: lengths,
             base_address,
@@ -430,7 +428,6 @@ impl SuperblockCandidateFields {
             indexed_storage_internal_node_k: None,
             free_space_address: None,
             driver_info_address: None,
-            consistency_flags: status.flags(),
             superblock_extension_address: Some(superblock_extension_address),
             checksum: Some(checksum),
         }
@@ -888,7 +885,7 @@ mod tests {
         let data: &[u8] = include_bytes!("../../../tests/data/c/1.8/v1_superblock.h5");
         let sb = parse(data);
 
-        assert_eq!(sb.version, SuperblockVersion::One);
+        assert_eq!(sb.version(), SuperblockVersion::One);
         assert_eq!(sb.offset_size, OffsetWidth::Eight);
         assert_eq!(sb.length_size, LengthWidth::Eight);
 
@@ -908,7 +905,7 @@ mod tests {
         // the open path. It cannot reach a rejection *here*:
         // `file_lock::check_status_flags` returns early below version 3, which is
         // why this asserts what was parsed, and not that the file opens.
-        assert_eq!(sb.consistency_flags.bits(), 0);
+        assert_eq!(sb.consistency_flags().bits(), 0);
 
         assert_eq!(sb.base_address, BaseAddress::ZERO);
         assert_eq!(sb.eof_address, data.len() as u64);
@@ -931,7 +928,7 @@ mod tests {
             OffsetWidth::Eight,
             LengthWidth::Eight,
         ));
-        sb.version = version;
+        sb.set_version(version).unwrap();
         assert_eq!(
             serialize_superblock(&sb),
             Err(FormatError::UnsupportedVersion(version.get()))
@@ -963,7 +960,7 @@ mod tests {
     #[case(0x100)]
     #[case(0x8000_0004)]
     #[case(u32::MAX)]
-    fn legacy_status_flags_that_exceed_one_byte_are_rejected_by_the_modern_serializer(
+    fn modern_superblocks_reject_status_flags_wider_than_one_byte(
         #[case] bits: u32,
         #[values(SuperblockVersion::Two, SuperblockVersion::Three)] version: SuperblockVersion,
     ) {
@@ -971,11 +968,12 @@ mod tests {
             .consistency_flags(bits)
             .build();
         let mut modern = parse(&build(version, OffsetWidth::Eight, LengthWidth::Eight));
-        modern.consistency_flags = parse(&legacy).consistency_flags;
+        let before = modern.clone();
         assert_eq!(
-            serialize_superblock(&modern),
+            modern.set_consistency_flags(parse(&legacy).consistency_flags()),
             Err(FormatError::SuperblockStatusFlagsTooWide { bits })
         );
+        assert_eq!(modern, before);
     }
 
     #[rstest]
@@ -997,7 +995,7 @@ mod tests {
             builder
         }
         .build();
-        let flags = parse(&data).consistency_flags;
+        let flags = parse(&data).consistency_flags();
         assert_eq!((flags.bits(), flags.unknown_bits()), (bits, unknown));
     }
 
@@ -1034,12 +1032,28 @@ mod tests {
         let parsed = parse(&data);
         assert_eq!(
             (
-                parsed.consistency_flags.bits(),
-                parsed.consistency_flags.unknown_bits()
+                parsed.consistency_flags().bits(),
+                parsed.consistency_flags().unknown_bits()
             ),
             (u32::from(bits), u32::from(bits & RESERVED_STATUS_BITS))
         );
         assert_eq!(serialize_superblock(&parsed).unwrap(), data);
+        let mut updated = parsed.clone();
+        updated
+            .set_consistency_flags(SuperblockStatus::Three(0).flags())
+            .unwrap();
+        assert_eq!(updated.version(), version);
+        assert_eq!(updated.consistency_flags().bits(), 0);
+        updated
+            .set_consistency_flags(parsed.consistency_flags())
+            .unwrap();
+        assert_eq!(updated.version(), version);
+        assert_eq!(updated.consistency_flags().bits(), u32::from(bits));
+        updated.set_version(SuperblockVersion::Zero).unwrap();
+        assert_eq!(updated.status(), SuperblockStatus::Zero(u32::from(bits)));
+        updated.set_version(version).unwrap();
+        assert_eq!(updated, parsed);
+        assert_eq!(serialize_superblock(&updated).unwrap(), data);
     }
 
     fn assert_parses_at(
@@ -1075,7 +1089,7 @@ mod tests {
         let (parsed, widths) = superblock.parse(region).unwrap();
 
         assert_eq!(widths, FormatWidths { offsets, lengths });
-        assert_eq!(parsed.version, version);
+        assert_eq!(parsed.version(), version);
         assert_eq!(parsed.offset_size, offsets);
         assert_eq!(parsed.length_size, lengths);
         assert_eq!(parsed.base_address, BaseAddress::ZERO);
@@ -1089,12 +1103,12 @@ mod tests {
                     parsed.indexed_storage_internal_node_k,
                     (version == SuperblockVersion::One).then_some(64)
                 );
-                assert_eq!(parsed.consistency_flags.bits(), 1);
+                assert_eq!(parsed.consistency_flags().bits(), 1);
                 assert_eq!(parsed.checksum, None);
             }
             _ => {
                 assert_eq!(parsed.group_leaf_node_k, None);
-                assert_eq!(parsed.consistency_flags.bits(), 1);
+                assert_eq!(parsed.consistency_flags().bits(), 1);
                 assert_eq!(
                     parsed.checksum,
                     Some(u32::from_le_bytes(*encoded.last_chunk().unwrap()))

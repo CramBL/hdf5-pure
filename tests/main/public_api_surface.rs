@@ -49,16 +49,10 @@ fn image_start(sb: &Superblock) -> BaseAddress {
 /// is in, since HDF5 1.8 cannot open a version 3 superblock at all — written as
 /// a function over the type rather than inline at the call site.
 fn format_of(sb: &Superblock) -> LibVer {
-    LibVer::from_superblock_version(sb.version)
+    LibVer::from_superblock_version(sb.version())
 }
 
-/// Every public field, bound to the type it is declared with.
-///
-/// A field that changes type still compiles everywhere inside the crate and is
-/// reported by no semver lint; it breaks only at a caller that named the old
-/// type, which is what this function is. Nothing here needs to run — the
-/// compile is the assertion — and it is called below only to keep `dead_code`
-/// quiet under `clippy --all-targets -D warnings`.
+/// Checks public field, accessor, and setter types through consumer bindings.
 fn field_types(sb: &Superblock) {
     let _: fn(StoredAddress) -> u64 = StoredAddress::get;
     let _: fn(hdf5_pure_core::StoredAddress) -> u64 = StoredAddress::get;
@@ -66,8 +60,15 @@ fn field_types(sb: &Superblock) {
     let _: fn(StoredAddress, OffsetWidth) -> bool = StoredAddress::is_undefined;
     let _: fn(hdf5_pure_core::OffsetWidth) -> StoredAddress = StoredAddress::undefined;
     let _: fn(StoredAddress, hdf5_pure_core::OffsetWidth) -> bool = StoredAddress::is_undefined;
-    let _: SuperblockVersion = sb.version;
-    let _: hdf5_pure_core::SuperblockVersion = sb.version;
+    let _: SuperblockStatus = sb.status();
+    let _: hdf5_pure_core::SuperblockStatus = sb.status();
+    let _: fn(&Superblock) -> SuperblockStatus = Superblock::status;
+    let _: fn(&mut Superblock, SuperblockVersion) -> Result<(), FormatError> =
+        Superblock::set_version;
+    let _: fn(&mut Superblock, SuperblockStatusFlags) -> Result<(), FormatError> =
+        Superblock::set_consistency_flags;
+    let _: SuperblockVersion = sb.version();
+    let _: hdf5_pure_core::SuperblockVersion = sb.version();
     let _: OffsetWidth = sb.offset_size;
     let _: LengthWidth = sb.length_size;
     let _: BaseAddress = sb.base_address;
@@ -78,8 +79,8 @@ fn field_types(sb: &Superblock) {
     let _: Option<u16> = sb.indexed_storage_internal_node_k;
     let _: Option<StoredAddress> = sb.free_space_address;
     let _: Option<StoredAddress> = sb.driver_info_address;
-    let _: SuperblockStatusFlags = sb.consistency_flags;
-    let _: hdf5_pure_core::SuperblockStatusFlags = sb.consistency_flags;
+    let _: SuperblockStatusFlags = sb.consistency_flags();
+    let _: hdf5_pure_core::SuperblockStatusFlags = sb.consistency_flags();
     let _: fn(SuperblockStatusFlags, SuperblockStatusFlag) -> bool =
         SuperblockStatusFlags::contains;
     let _: Option<StoredAddress> = sb.superblock_extension_address;
@@ -100,7 +101,7 @@ fn the_superblock_and_its_base_address_can_both_be_named() {
     let base: BaseAddress = image_start(sb);
     assert_eq!(base.get(), 512, "the base is the userblock size");
     assert_eq!(
-        sb.version,
+        sb.version(),
         SuperblockVersion::Three,
         "the default writer emits a version 3 superblock"
     );
@@ -444,4 +445,39 @@ fn modern_superblock_status_rejects_a_wider_legacy_field(
         SuperblockStatus::new(version, flags).unwrap_err(),
         FormatError::SuperblockStatusFlagsTooWide { bits }
     );
+}
+
+#[rstest]
+#[case(0x100)]
+#[case(0x8000_0004)]
+#[case(u32::MAX)]
+fn public_superblock_updates_reject_narrowing_without_changing_state(
+    #[case] bits: u32,
+    #[values(SuperblockVersion::Two, SuperblockVersion::Three)] version: SuperblockVersion,
+) {
+    let file = File::from_bytes(include_bytes!("../data/c/1.8/v1_superblock.h5").to_vec()).unwrap();
+    let mut superblock = file.superblock().clone();
+    superblock
+        .set_consistency_flags(SuperblockStatus::One(bits).flags())
+        .unwrap();
+    let before = superblock.clone();
+    assert_eq!(
+        superblock.set_version(version).unwrap_err(),
+        FormatError::SuperblockStatusFlagsTooWide { bits }
+    );
+    assert_eq!(superblock, before);
+    superblock
+        .set_consistency_flags(SuperblockStatusFlags::new())
+        .unwrap();
+    superblock.set_version(version).unwrap();
+    let before = superblock.clone();
+    assert_eq!(
+        superblock
+            .set_consistency_flags(SuperblockStatus::One(bits).flags())
+            .unwrap_err(),
+        FormatError::SuperblockStatusFlagsTooWide { bits }
+    );
+    assert_eq!(superblock, before);
+    assert_eq!(superblock.version(), version);
+    assert_eq!(superblock.consistency_flags().bits(), 0);
 }

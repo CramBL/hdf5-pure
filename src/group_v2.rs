@@ -1477,7 +1477,7 @@ mod tests {
         let file_data: &[u8] = include_bytes!("../tests/data/unattributed/v2_groups.h5");
         let sb = crate::superblock::read(file_data).unwrap().superblock;
         assert!(matches!(
-            sb.version,
+            sb.version(),
             SuperblockVersion::Two | SuperblockVersion::Three
         ));
 

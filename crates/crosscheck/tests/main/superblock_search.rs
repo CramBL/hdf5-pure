@@ -53,7 +53,7 @@ fn every_reader_finds_the_superblock_after_a_userblock_libhdf5_wrote(
     assert!(hdf5_pure::is_hdf5_bytes(&bytes));
     let file = backend.open(&path).unwrap();
     assert_eq!(
-        file.superblock().version,
+        file.superblock().version(),
         SuperblockVersion::try_from(version).unwrap()
     );
     assert_eq!(file.superblock().offset_size, OffsetWidth::Eight);

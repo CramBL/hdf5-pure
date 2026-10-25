@@ -6,6 +6,8 @@ use crate::width::OffsetWidth;
 
 /// The values encoded in a file's superblock.
 ///
+/// The encoding version and file consistency flags are stored together in [`SuperblockStatus`].
+///
 /// The [base address](Self::base_address) and [end-of-file address](Self::eof_address) are
 /// absolute file addresses. The other address fields hold base-relative [`StoredAddress`]
 /// values. The reader interprets those values in the opened image's address context when
@@ -21,10 +23,9 @@ use crate::width::OffsetWidth;
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_boot_super
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct Superblock {
-    /// The encoding version of the superblock.
-    pub version: SuperblockVersion,
+    /// The encoding version and file consistency flags.
+    pub(crate) status: SuperblockStatus,
     /// The width of file addresses.
     pub offset_size: OffsetWidth,
     /// The width of object sizes and other lengths.
@@ -53,12 +54,54 @@ pub struct Superblock {
     pub free_space_address: Option<StoredAddress>,
     /// Driver information block address relative to the HDF5 base address, in versions 0 and 1.
     pub driver_info_address: Option<StoredAddress>,
-    /// The file consistency flags, including reserved bits read from the file.
-    pub consistency_flags: SuperblockStatusFlags,
     /// Superblock extension address relative to the HDF5 base address, in versions 2 and 3.
     pub superblock_extension_address: Option<StoredAddress>,
     /// Jenkins lookup3 checksum (v2/v3 only).
     pub checksum: Option<u32>,
+}
+
+impl Superblock {
+    /// Changes the encoding version while preserving the file consistency flags.
+    ///
+    /// Other superblock fields are unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::SuperblockStatusFlagsTooWide`] if `version` is 2 or 3 and the
+    /// current flags contain any bit above bit 7. The superblock is unchanged on error.
+    pub fn set_version(&mut self, version: SuperblockVersion) -> Result<(), FormatError> {
+        self.status = SuperblockStatus::new(version, self.consistency_flags())?;
+        Ok(())
+    }
+
+    /// Replaces the file consistency flags while preserving the superblock version.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::SuperblockStatusFlagsTooWide`] if the version is 2 or 3 and `flags`
+    /// contains any bit above bit 7. The superblock is unchanged on error.
+    pub fn set_consistency_flags(
+        &mut self,
+        flags: SuperblockStatusFlags,
+    ) -> Result<(), FormatError> {
+        self.status = SuperblockStatus::new(self.version(), flags)?;
+        Ok(())
+    }
+
+    /// Returns the version and its consistency flags at their encoded width.
+    pub const fn status(&self) -> SuperblockStatus {
+        self.status
+    }
+
+    /// Returns the encoding version stored with the consistency flags.
+    pub const fn version(&self) -> SuperblockVersion {
+        self.status.version()
+    }
+
+    /// Returns every stored flag bit, including reserved bits.
+    pub const fn consistency_flags(&self) -> SuperblockStatusFlags {
+        self.status.flags()
+    }
 }
 
 /// The encoding version of a [`Superblock`].
@@ -278,6 +321,107 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::__private::SuperblockFields;
+    use crate::address::{BaseAddressExt, StoredAddressExt};
+
+    #[rstest]
+    #[case(
+        SuperblockStatus::Zero(0x8000_0004),
+        SuperblockVersion::Zero,
+        0x8000_0004
+    )]
+    #[case(SuperblockStatus::One(u32::MAX), SuperblockVersion::One, u32::MAX)]
+    #[case(SuperblockStatus::Two(0x84), SuperblockVersion::Two, 0x84)]
+    #[case(SuperblockStatus::Three(0x04), SuperblockVersion::Three, 0x04)]
+    fn construction_preserves_the_typed_status(
+        #[case] status: SuperblockStatus,
+        #[case] version: SuperblockVersion,
+        #[case] bits: u32,
+    ) {
+        let superblock = superblock(status);
+        assert_eq!(superblock.status(), status);
+        assert_eq!(superblock.version(), version);
+        assert_eq!(superblock.consistency_flags().bits(), bits);
+    }
+
+    #[rstest]
+    #[case(SuperblockStatus::Zero(0), SuperblockStatus::Zero(u32::MAX))]
+    #[case(SuperblockStatus::One(0), SuperblockStatus::One(0x8000_0004))]
+    #[case(SuperblockStatus::Two(0), SuperblockStatus::Two(0x84))]
+    #[case(SuperblockStatus::Three(0), SuperblockStatus::Three(0x04))]
+    fn changing_flags_preserves_version_and_other_fields(
+        #[case] initial: SuperblockStatus,
+        #[case] expected: SuperblockStatus,
+    ) {
+        let mut superblock = superblock(initial);
+        let mut before = superblock.clone();
+        superblock.set_consistency_flags(expected.flags()).unwrap();
+        before.status = expected;
+        assert_eq!(superblock, before);
+        assert_eq!(superblock.version(), initial.version());
+    }
+
+    #[rstest]
+    #[case(
+        SuperblockStatus::Zero(0x8000_0004),
+        SuperblockStatus::One(0x8000_0004)
+    )]
+    #[case(SuperblockStatus::One(u32::MAX), SuperblockStatus::Zero(u32::MAX))]
+    #[case(SuperblockStatus::Zero(0x84), SuperblockStatus::Two(0x84))]
+    #[case(SuperblockStatus::One(0x04), SuperblockStatus::Three(0x04))]
+    #[case(SuperblockStatus::Two(0xFF), SuperblockStatus::Zero(0xFF))]
+    #[case(SuperblockStatus::Three(0x84), SuperblockStatus::One(0x84))]
+    #[case(SuperblockStatus::Two(0x01), SuperblockStatus::Three(0x01))]
+    #[case(SuperblockStatus::Three(0x04), SuperblockStatus::Two(0x04))]
+    fn changing_version_preserves_flags_and_other_fields(
+        #[case] initial: SuperblockStatus,
+        #[case] expected: SuperblockStatus,
+    ) {
+        let mut superblock = superblock(initial);
+        let mut before = superblock.clone();
+        superblock.set_version(expected.version()).unwrap();
+        before.status = expected;
+        assert_eq!(superblock, before);
+        assert_eq!(superblock.consistency_flags(), initial.flags());
+    }
+
+    #[rstest]
+    #[case(0x100)]
+    #[case(0x8000_0004)]
+    #[case(u32::MAX)]
+    fn rejected_version_narrowing_preserves_the_superblock(
+        #[case] bits: u32,
+        #[values(SuperblockVersion::Zero, SuperblockVersion::One)] legacy: SuperblockVersion,
+        #[values(SuperblockVersion::Two, SuperblockVersion::Three)] modern: SuperblockVersion,
+    ) {
+        let mut superblock = superblock(
+            SuperblockStatus::new(legacy, SuperblockStatusFlags::from_bits(bits)).unwrap(),
+        );
+        let before = superblock.clone();
+        assert_eq!(
+            superblock.set_version(modern),
+            Err(FormatError::SuperblockStatusFlagsTooWide { bits })
+        );
+        assert_eq!(superblock, before);
+    }
+
+    #[rstest]
+    #[case(0x100)]
+    #[case(0x8000_0004)]
+    #[case(u32::MAX)]
+    fn rejected_wide_flags_preserve_the_superblock(
+        #[case] bits: u32,
+        #[values(SuperblockStatus::Two(0x84), SuperblockStatus::Three(0x04))]
+        status: SuperblockStatus,
+    ) {
+        let mut superblock = superblock(status);
+        let before = superblock.clone();
+        assert_eq!(
+            superblock.set_consistency_flags(SuperblockStatusFlags::from_bits(bits)),
+            Err(FormatError::SuperblockStatusFlagsTooWide { bits })
+        );
+        assert_eq!(superblock, before);
+    }
 
     #[rstest]
     #[case(
@@ -360,5 +504,23 @@ mod tests {
             ),
             expected,
         );
+    }
+    fn superblock(status: SuperblockStatus) -> Superblock {
+        SuperblockFields {
+            status,
+            offset_size: OffsetWidth::Eight,
+            length_size: LengthWidth::Eight,
+            base_address: BaseAddress::ZERO,
+            eof_address: 4096,
+            root_group_address: StoredAddress::ZERO,
+            group_leaf_node_k: None,
+            group_internal_node_k: None,
+            indexed_storage_internal_node_k: None,
+            free_space_address: None,
+            driver_info_address: None,
+            superblock_extension_address: None,
+            checksum: None,
+        }
+        .build()
     }
 }

@@ -1138,7 +1138,7 @@ impl FileInner {
         let mut data = Vec::new();
         handle.read_to_end(&mut data).map_err(Error::Io)?;
         let (superblock, widths, opened) = Self::parse_superblock(data.as_slice())?;
-        if superblock.version != SWMR_SUPERBLOCK_VERSION {
+        if superblock.version() != SWMR_SUPERBLOCK_VERSION {
             opened.require_complete(data.len() as u64)?;
         }
         file_lock::check_status_flags(
@@ -2091,7 +2091,7 @@ impl FileInner {
     /// A version 3 superblock, for example, reports [`LibVer::V110`] because it
     /// was introduced in HDF5 1.10.
     pub fn libver_bound(&self) -> LibVer {
-        LibVer::from_superblock_version(self.superblock.version)
+        LibVer::from_superblock_version(self.superblock.version())
     }
 
     fn parse_header(&self, address: u64) -> Result<ObjectHeader, FormatError> {
@@ -2689,7 +2689,7 @@ impl std::fmt::Debug for FileInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("File")
             .field("size", &self.file_size())
-            .field("superblock_version", &self.superblock.version)
+            .field("superblock_version", &self.superblock.version())
             .finish()
     }
 }
@@ -10748,11 +10748,11 @@ mod tests {
             } = crate::superblock::read(bytes.as_slice()).unwrap();
             let sig = usize::try_from(address.get()).unwrap();
             assert_eq!(
-                sb.version,
+                sb.version(),
                 SuperblockVersion::Three,
                 "the fixture must start at the newer format"
             );
-            sb.version = SuperblockVersion::Two;
+            sb.set_version(SuperblockVersion::Two).unwrap();
             let rewritten = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();
             bytes[sig..sig + rewritten.len()].copy_from_slice(&rewritten);
             std::fs::write(&old_format, &bytes).unwrap();

@@ -206,7 +206,7 @@ mod tests {
         } = reader.read(&image).unwrap();
         assert_eq!(address.get(), signature_at as u64);
         assert_eq!(
-            superblock.version,
+            superblock.version(),
             if version_0 {
                 SuperblockVersion::Zero
             } else {
@@ -236,7 +236,7 @@ mod tests {
             ..
         } = reader.read(image).unwrap();
         assert_eq!(address.get(), 512);
-        assert_eq!(superblock.version, SuperblockVersion::Zero);
+        assert_eq!(superblock.version(), SuperblockVersion::Zero);
         assert_eq!(superblock.base_address, BaseAddress::new(512));
         assert_eq!(superblock.eof_address, image.len() as u64);
     }
