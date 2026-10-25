@@ -760,9 +760,9 @@ impl Store for EditStore<'_> {
         // Preserve the consistency flags and root address when advancing the recorded EOF.
         let mut superblock = self.context.superblock().clone();
         superblock.eof_address = self.image.len();
-        let bytes = hdf5_pure_format::__private::serialize_superblock(&superblock)?;
-        self.write_at(self.context.signature().get(), &bytes)?;
-        self.context.adopt(superblock)?;
+        let publication = self.context.propose(superblock)?.encode()?;
+        self.write_at(self.context.signature().get(), publication.bytes())?;
+        self.context.adopt(publication.into_proposed())?;
         Ok(())
     }
 

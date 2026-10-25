@@ -809,6 +809,10 @@ fn explicit_sync_clears_pending_page_publication_and_preserves_staged_edits(
     assert!(engine.publication.attempted());
     disk_log::start();
     engine.force_sync().unwrap();
+    assert_eq!(
+        *engine.context.superblock(),
+        superblock::read(published.as_slice()).unwrap().superblock
+    );
     assert!(!engine.publication.attempted());
     assert!(engine.staged.snapshot() == mark);
     assert!(disk_log::take().is_empty());
@@ -917,6 +921,7 @@ impl WriteEngine {
         if let Failure::DiskWrite(completed, prefix) = failure {
             disk_log::fail_write_after(completed, prefix);
         }
+        let before = self.context.superblock().clone();
         let error = self.commit().unwrap_err();
         let Error::Io(error) = error else {
             panic!("expected injected I/O failure, got {error:?}");
@@ -939,6 +944,14 @@ impl WriteEngine {
             operation.apply(&mut replay);
         }
         assert_eq!(published, failure.publishes());
+        if failure.publishes() && !matches!(failure, Failure::PublishedRead) {
+            assert_eq!(
+                *self.context.superblock(),
+                superblock::read(replay.as_slice()).unwrap().superblock
+            );
+        } else {
+            assert_eq!(self.context.superblock(), &before);
+        }
         let file = File::from_bytes(replay.clone()).unwrap();
         failure.assert_page_datasets(&file, None);
         drop(file);

@@ -19,6 +19,7 @@ use crate::SuperblockVersion;
 use crate::address::{StoredAddress, StoredAddressExt};
 #[cfg(doc)]
 use crate::edit::SyncPolicy;
+use crate::edit::context::SuperblockPublication;
 use crate::edit::object_header;
 use crate::edit::{MAX_LINK_GRAPH_NODES, TailPlacement, UNDEF, WriteEngine};
 use crate::edit::{PersistState, paged_persistence};
@@ -26,7 +27,7 @@ use crate::error::{Error, FormatError};
 use crate::file_space_info::{self, NUM_FILE_FSM_MANAGERS};
 use crate::free_space_manager;
 use crate::source::Source;
-use crate::superblock::{self, Superblock};
+use crate::superblock;
 use crate::width::FormatWidths;
 
 /// Stores the root and address changes after replacement objects have been written.
@@ -37,26 +38,6 @@ pub(super) struct AppliedTree {
     pub(super) freed: Vec<(StoredAddress, u64, FreeClass)>,
     /// Absolute old and replacement header addresses for stored-reference updates.
     pub(super) relocations: BTreeMap<u64, u64>,
-}
-
-/// Stores a proposed superblock together with its serialized bytes.
-///
-/// Serialization completes before publication is marked uncertain.
-struct SuperblockPublication {
-    superblock: Superblock,
-    bytes: Vec<u8>,
-}
-
-impl SuperblockPublication {
-    /// Serializes a proposed superblock before publication begins.
-    ///
-    /// # Errors
-    ///
-    /// Returns the serialization error if the proposed superblock cannot be encoded.
-    fn new(superblock: Superblock) -> Result<Self, Error> {
-        let bytes = hdf5_pure_format::__private::serialize_superblock(&superblock)?;
-        Ok(Self { superblock, bytes })
-    }
 }
 
 impl WriteEngine {
@@ -219,16 +200,8 @@ impl WriteEngine {
             ));
         }
         let recovered = superblock::read(published.as_slice())?.superblock;
-        let mut expected = self.context.superblock().clone();
-        expected.root_group_address = recovered.root_group_address;
-        expected.eof_address = recovered.eof_address;
-        if hdf5_pure_format::__private::serialize_superblock(&expected)? != published {
-            return Err(Error::EditUnsupported(
-                "PAGE superblock framing changed after a failed publication; \
-                 close and reopen the file before editing again",
-            ));
-        }
-        self.context.adopt(recovered)?;
+        let proposed = self.context.recover(recovered, &published)?;
+        self.context.adopt(proposed)?;
         Ok(())
     }
 
@@ -257,15 +230,17 @@ impl WriteEngine {
             new_sb.eof_address = new_eof;
             // Preserve this session's status flags, including an active crash mark.
             new_sb.consistency_flags = self.held_status_flags;
-            self.publish_superblock(SuperblockPublication::new(new_sb)?)?;
+            self.publish_superblock(self.context.propose(new_sb)?.encode()?)?;
         } else {
-            self.publication = PublicationState::Uncertain;
-            self.repoint_v0v1_root(base.relative(new_root)?, new_eof)?;
-            self.barrier()?;
+            let stored_root = base.relative(new_root)?;
             let mut superblock = self.context.superblock().clone();
-            superblock.root_group_address = self.context.addresses().relative(new_root)?;
+            superblock.root_group_address = stored_root;
             superblock.eof_address = new_eof;
-            self.context.adopt(superblock)?;
+            let proposed = self.context.propose(superblock)?;
+            self.publication = PublicationState::Uncertain;
+            self.repoint_v0v1_root(stored_root, new_eof)?;
+            self.barrier()?;
+            self.context.adopt(proposed)?;
             self.publication = PublicationState::Published;
         }
 
@@ -581,7 +556,7 @@ impl WriteEngine {
         new_sb.superblock_extension_address = Some(StoredAddress::new(ext_addr));
         // Preserve any status flags held by this session.
         new_sb.consistency_flags = self.held_status_flags;
-        let publication = SuperblockPublication::new(new_sb)?;
+        let publication = self.context.propose(new_sb)?.encode()?;
         let confirmed = self
             .aggregation
             .as_ref()
@@ -882,7 +857,7 @@ impl WriteEngine {
         new_sb.superblock_extension_address = Some(StoredAddress::new(ext_addr));
         // Preserve the crash mark throughout a page-buffered session.
         new_sb.consistency_flags = self.held_status_flags;
-        self.publish_superblock(SuperblockPublication::new(new_sb)?)?;
+        self.publish_superblock(self.context.propose(new_sb)?.encode()?)?;
 
         // Complete EOF publication before removing the trailing suffix.
         if final_eof < PhysicalAddress::new(self.image.len()) {
@@ -945,13 +920,14 @@ impl WriteEngine {
     ///
     /// # Errors
     ///
-    /// Returns the write or barrier error, retaining [`PublicationState::Uncertain`].
+    /// Returns [`Error::EditUnsupported`] if the proposal's format or address domain differs
+    /// from the current context. Returns the write or barrier error if publication fails.
+    /// Retains [`PublicationState::Uncertain`] on error.
     fn publish_superblock(&mut self, publication: SuperblockPublication) -> Result<(), Error> {
-        let SuperblockPublication { superblock, bytes } = publication;
         self.publication = PublicationState::Uncertain;
-        self.write_at(self.context.signature().get(), &bytes)?;
+        self.write_at(self.context.signature().get(), publication.bytes())?;
         self.barrier()?;
-        self.context.adopt(superblock)?;
+        self.context.adopt(publication.into_proposed())?;
         self.publication = PublicationState::Published;
         Ok(())
     }
