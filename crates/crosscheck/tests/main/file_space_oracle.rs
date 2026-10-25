@@ -12,6 +12,7 @@ use std::path::Path;
 
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::{MajorErrorCode, MinorErrorCode};
+use hdf5_pure::FreeSpaceManagerRole;
 use hdf5_pure::{File, FileBuilder, FileSpacePageSize, FileSpaceStrategy, UserblockSize};
 use hdf5_sys::h5f;
 use rstest::rstest;
@@ -21,6 +22,99 @@ use test_util_hdf5::file_space_oracle::{
 };
 use test_util_hdf5::free_space_churn::{self, Base, Lifecycle, Strategy};
 use test_util_hdf5::free_space_endurance;
+
+#[rstest]
+#[case::fsm(FileSpaceStrategy::FsmAggr)]
+#[case::page(FileSpaceStrategy::Page)]
+fn c_created_sections_have_supported_manager_attribution(
+    #[case] strategy: FileSpaceStrategy,
+    #[values(0, 4096)] base: u64,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("c-attributed-sections.h5");
+    let file = hdf5::FileBuilder::new()
+        .with_fapl(|properties| properties.libver_v110())
+        .with_fcpl(|properties| {
+            properties
+                .file_space_strategy(CStrategy::FreeSpaceManager {
+                    paged: strategy == FileSpaceStrategy::Page,
+                    persist: true,
+                    threshold: 1,
+                })
+                .userblock(base)
+        })
+        .create(&path)
+        .unwrap();
+    for (name, len) in [
+        ("small", 128),
+        ("small_keep", 128),
+        ("large", 8192),
+        ("keep", 8192),
+    ] {
+        file.new_dataset::<i32>()
+            .shape([len])
+            .create(name)
+            .unwrap()
+            .write_raw(&vec![7; len])
+            .unwrap();
+    }
+    file.unlink("small").unwrap();
+    file.unlink("large").unwrap();
+    file.close().unwrap();
+    file_space_oracle::assert_persisted_sections(&path);
+    let report = File::open(&path)
+        .unwrap()
+        .persisted_free_sections()
+        .unwrap()
+        .unwrap();
+    assert!(report.free_sections().section_count() > 0);
+    if strategy == FileSpaceStrategy::Page {
+        let roles = report
+            .managers()
+            .iter()
+            .map(|manager| manager.role())
+            .collect::<Vec<_>>();
+        assert!(
+            roles.contains(&FreeSpaceManagerRole::PageSmallRawData),
+            "{roles:?}"
+        );
+        assert!(
+            roles.contains(&FreeSpaceManagerRole::PageLargeGeneric),
+            "{roles:?}"
+        );
+    }
+}
+
+#[rstest]
+fn c_created_empty_sections_preserve_persistence_configuration(
+    #[values(false, true)] persist: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("c-empty-sections.h5");
+    hdf5::FileBuilder::new()
+        .with_fapl(|properties| properties.libver_v110())
+        .with_fcpl(|properties| {
+            properties.file_space_strategy(CStrategy::FreeSpaceManager {
+                paged: false,
+                persist,
+                threshold: 65_535,
+            })
+        })
+        .create(&path)
+        .unwrap()
+        .close()
+        .unwrap();
+    file_space_oracle::assert_persisted_sections(&path);
+    let report = File::open(&path)
+        .unwrap()
+        .persisted_free_sections()
+        .unwrap();
+    assert_eq!(report.is_some(), persist);
+    if let Some(report) = report {
+        assert_eq!(report.free_sections().section_count(), 0);
+        assert_eq!(report.free_sections().free_bytes(), 0);
+    }
+}
 
 #[rstest]
 #[case::fsm_aggr(FileSpaceStrategy::FsmAggr)]
@@ -442,6 +536,7 @@ pub(super) fn checkpoint(path: &Path, case: &str, step: &str) {
 }
 
 fn observe(path: &Path, case: &str, step: &str) -> FreeSpaceOracleCheckpoint {
+    file_space_oracle::assert_persisted_sections(path);
     let observation = FreeSpaceOracleCheckpoint::observe(path, case, step)
         .unwrap_or_else(|error| panic!("{case}/{step}: {error:?}"));
     observation.assert_equal();

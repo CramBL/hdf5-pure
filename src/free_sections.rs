@@ -543,10 +543,53 @@ mod tests {
         }
     }
 
-    #[test]
-    fn an_empty_manager_remains_present_in_the_breakdown() {
+    #[rstest]
+    #[case::used_length(false)]
+    #[case::list_address(true)]
+    fn malformed_manager_fields_return_the_decode_error(#[case] address: bool) {
         let widths = FormatWidths::from_sizes(8, 8).unwrap();
         let (mut bytes, info) = manager_file(widths, 0, 256, 32);
+        let header_length = usize::try_from(format::free_space_manager_header_len(widths)).unwrap();
+        let header_end = 64 + header_length;
+        let length_bytes = usize::from(widths.lengths.get());
+        let used_at = header_end - size_of::<u32>() - 2 * length_bytes;
+        let used = u64::from_le_bytes(bytes[used_at..used_at + length_bytes].try_into().unwrap());
+        let expected = if address {
+            let offset_at = used_at - usize::from(widths.offsets.get());
+            bytes[offset_at..offset_at + usize::from(widths.offsets.get())]
+                .copy_from_slice(&(u64::MAX - 1).to_le_bytes());
+            FormatError::OffsetOverflow {
+                offset: u64::MAX - 1,
+                length: used,
+            }
+        } else {
+            bytes[used_at..used_at + length_bytes].copy_from_slice(&(used + 1).to_le_bytes());
+            FormatError::InvalidFreeSpaceManager(format!(
+                "the section list uses {} bytes, more than the {used} bytes allocated to it",
+                used + 1
+            ))
+        };
+        crate::checksum::stamp_trailing(&mut bytes, 64, header_length);
+        assert_eq!(
+            PersistedFreeSections::read(
+                &BytesSource::new(bytes),
+                widths,
+                BaseAddress::ZERO,
+                1024,
+                &info,
+            )
+            .unwrap_err(),
+            expected
+        );
+    }
+
+    #[rstest]
+    fn an_empty_manager_remains_present_in_the_breakdown(
+        #[values(FileSpaceStrategy::FsmAggr, FileSpaceStrategy::Page)] strategy: FileSpaceStrategy,
+    ) {
+        let widths = FormatWidths::from_sizes(8, 8).unwrap();
+        let (mut bytes, mut info) = manager_file(widths, 0, 256, 32);
+        info.strategy = strategy;
         let header_address = StoredAddress::new(64);
         let list_address = StoredAddress::new(64 + format::free_space_manager_header_len(widths));
         let (header, list) = format::serialize_free_space_manager(
