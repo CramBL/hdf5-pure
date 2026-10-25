@@ -15,6 +15,7 @@ use crate::FileBuilder;
 use crate::FileCreateProperties;
 use crate::FileSpaceSettings;
 use crate::FileSpaceStrategy;
+use crate::FreeSectionCoordinates;
 use crate::MemoryStrategy;
 use crate::UserblockSize;
 use crate::edit::SpaceOwnership;
@@ -56,8 +57,8 @@ fn persistent_creation_recovers_settled_spare_and_reuses_it_after_reopen(
     file.close().unwrap();
     let properties = FileAccessProperties::new().with_memory_strategy(backing);
     let file = File::open_rw_with_options(&path, properties).unwrap();
-    let reusable = file.space_accounting().unwrap().reusable_free_space;
-    assert_eq!(!reusable.is_empty(), has_manager);
+    let reusable = file.reusable_free_sections().unwrap();
+    assert_eq!(reusable.section_count() > 0, has_manager);
     file.root()
         .create_dataset("added", |builder| {
             builder.with_i32_data(&[23; 16]);
@@ -66,11 +67,9 @@ fn persistent_creation_recovers_settled_spare_and_reuses_it_after_reopen(
     file.commit().unwrap();
     let extent = file_space::contiguous_extent(&file, "added");
     if has_manager {
-        assert!(
-            reusable
-                .iter()
-                .any(|&(start, length)| start <= extent.start && extent.end <= start + length)
-        );
+        assert!(reusable.sections().iter().any(
+            |section| section.address() <= extent.start && extent.end <= section.end_address()
+        ));
     }
     assert!(super::ownership(&file).unwrap().analysis_complete);
     file.close().unwrap();
@@ -256,14 +255,15 @@ fn staged_aggr_allocations_reuse_session_windows(
             .all(|&(start, length)| start + length <= original_end)
     );
     assert!(!ownership.reusable_free_space.is_empty());
-    assert_eq!(
-        file.space_accounting().unwrap().reusable_free_space,
-        ownership.reusable_free_space
+    test_util_hdf5::assert_free_sections!(
+        &file.reusable_free_sections().unwrap(),
+        &ownership.reusable_free_space,
+        FreeSectionCoordinates::Absolute
     );
     if reopen {
         file.close().unwrap();
         file = File::open_rw_with_options(&path, properties).unwrap();
-        assert_eq!(file.space_accounting().unwrap().reusable_free_space, []);
+        assert_eq!(file.reusable_free_sections().unwrap().section_count(), 0);
     }
     let before_second = super::ownership(&file).unwrap().logical_size;
     file.root()

@@ -67,32 +67,3 @@ pub(super) fn assert_space_ownership(file: &File, expected: &[(u64, u64)]) -> Sp
     owned.assert_classified(expected);
     owned
 }
-
-/// Asserts sorted, disjoint reusable extents within the logical file and their byte total.
-///
-/// # Panics
-///
-/// Panics if extents overlap or exceed the logical file length, the byte total differs, or a range
-/// end cannot be represented.
-pub(super) fn assert_space_accounting_consistent(accounting: &crate::SpaceAccounting) {
-    assert_eq!(
-        accounting.reusable_free_bytes,
-        accounting
-            .reusable_free_space
-            .iter()
-            .map(|&(_, len)| len)
-            .sum::<u64>()
-    );
-    assert!(
-        accounting
-            .reusable_free_space
-            .windows(2)
-            .all(|pair| pair[0].0 + pair[0].1 <= pair[1].0)
-    );
-    assert!(
-        accounting
-            .reusable_free_space
-            .iter()
-            .all(|&(at, len)| at + len <= accounting.logical_size)
-    );
-}

@@ -9,6 +9,7 @@ use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
+use hdf5_pure::FreeSectionCoordinates;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::UserblockSize;
 use rstest::rstest;
@@ -508,30 +509,42 @@ fn assert_reused_for_raw_data(file: &File, collection: &Range<u64>) -> Vec<u8> {
 
 #[track_caller]
 fn assert_reclaimed(file: &File, collection: &Range<u64>) {
-    let accounting = file.space_accounting().unwrap();
-    let reusable = accounting
-        .reusable_free_space
-        .iter()
-        .any(|&(address, len)| address <= collection.start && collection.end <= address + len);
+    let sections = file.reusable_free_sections().unwrap();
+    assert!(
+        sections
+            .sections()
+            .iter()
+            .all(|section| section.coordinates() == FreeSectionCoordinates::Absolute)
+    );
+    let reusable = sections.sections().iter().any(|section| {
+        section.address() <= collection.start && collection.end <= section.end_address()
+    });
     assert!(
         reusable || file.file_size() <= collection.start,
         "the collection at {collection:?} is neither reusable in {:?} nor past the end of the \
          file at {}",
-        accounting.reusable_free_space,
+        sections,
         file.file_size()
     );
 }
 
 #[track_caller]
 fn assert_kept(file: &File, collection: &Range<u64>) {
-    let accounting = file.space_accounting().unwrap();
+    let sections = file.reusable_free_sections().unwrap();
     assert!(
-        accounting
-            .reusable_free_space
+        sections
+            .sections()
             .iter()
-            .all(|&(address, len)| address + len <= collection.start || collection.end <= address),
+            .all(|section| section.coordinates() == FreeSectionCoordinates::Absolute)
+    );
+    assert!(
+        sections
+            .sections()
+            .iter()
+            .all(|section| section.end_address() <= collection.start
+                || collection.end <= section.address()),
         "the collection at {collection:?} overlaps the reusable space {:?}",
-        accounting.reusable_free_space
+        sections
     );
     assert!(collection.end <= file.file_size());
 }

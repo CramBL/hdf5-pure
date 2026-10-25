@@ -20,6 +20,7 @@ pub mod file_space;
 pub mod file_space_oracle;
 pub mod fixed_string;
 pub mod fixtures;
+mod free_sections;
 pub mod free_space_churn;
 pub mod free_space_endurance;
 #[cfg(feature = "hdf5")]

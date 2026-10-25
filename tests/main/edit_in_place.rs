@@ -6311,7 +6311,10 @@ fn overwriting_a_chunked_vlen_string_dataset_reclaims_its_old_chunk_storage() {
         .unwrap();
     session.commit().unwrap();
 
-    let free = session.space_accounting().unwrap().reusable_free_bytes;
+    let free = session
+        .reusable_space_stats()
+        .unwrap()
+        .reusable_free_bytes();
     assert!(
         free >= 512 * 16,
         "the vacated chunk storage was not reclaimed: {free} free bytes"

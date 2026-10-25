@@ -56,12 +56,20 @@ fn a_session_reuses_the_free_space_an_earlier_session_persisted(
         .map(|section| section.address() + userblock)
         .min()
         .unwrap();
-    let reusable = second.space_accounting().unwrap().reusable_free_space;
-    assert_eq!(reusable.len(), persisted.free_sections().section_count());
-    for ((address, length), section) in reusable.iter().zip(persisted.free_sections().sections()) {
-        assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
-        assert_eq!(*address, section.address() + userblock);
-        assert_eq!(*length, section.length().get());
+    let reusable = second.reusable_free_sections().unwrap();
+    assert_eq!(
+        reusable.section_count(),
+        persisted.free_sections().section_count()
+    );
+    for (physical, stored) in reusable
+        .sections()
+        .iter()
+        .zip(persisted.free_sections().sections())
+    {
+        assert_eq!(physical.coordinates(), FreeSectionCoordinates::Absolute);
+        assert_eq!(stored.coordinates(), FreeSectionCoordinates::Stored);
+        assert_eq!(physical.address(), stored.address() + userblock);
+        assert_eq!(physical.length(), stored.length());
     }
     second
         .root()
@@ -103,7 +111,7 @@ fn every_commit_keeps_the_userblock_and_writes_stored_manager_addresses(
         }
         session.close().unwrap();
         let settled = File::open_rw(&path).unwrap();
-        let reusable = settled.space_accounting().unwrap().reusable_free_space;
+        let reusable = settled.reusable_free_sections().unwrap();
         let ownership = super::ownership(&settled).unwrap();
         settled.close().unwrap();
 
@@ -134,19 +142,31 @@ fn every_commit_keeps_the_userblock_and_writes_stored_manager_addresses(
         let stored_free = file.persisted_free_sections().unwrap().unwrap();
         assert_eq!(
             stored_free.free_sections().section_count(),
-            reusable.len(),
+            reusable.section_count(),
             "{step:?}"
         );
-        for (section, (address, length)) in
-            stored_free.free_sections().sections().iter().zip(&reusable)
+        for (section, physical) in stored_free
+            .free_sections()
+            .sections()
+            .iter()
+            .zip(reusable.sections())
         {
             assert_eq!(
                 section.coordinates(),
                 FreeSectionCoordinates::Stored,
                 "{step:?}"
             );
-            assert_eq!(section.address(), address - userblock, "{step:?}");
-            assert_eq!(section.length().get(), *length, "{step:?}");
+            assert_eq!(
+                physical.coordinates(),
+                FreeSectionCoordinates::Absolute,
+                "{step:?}"
+            );
+            assert_eq!(
+                section.address(),
+                physical.address() - userblock,
+                "{step:?}"
+            );
+            assert_eq!(section.length(), physical.length(), "{step:?}");
         }
         let headers = file
             .file_space_info()

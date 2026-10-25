@@ -189,7 +189,10 @@ fn accounting_coalesces_spare_with_adjacent_reusable_bytes() {
         engine.space_accounting().unwrap().reusable_free_space,
         [(address, 2048)]
     );
-    assert_eq!(engine.space_accounting().unwrap().reusable_free_bytes, 2048);
+    assert_eq!(
+        engine.reusable_space_stats().unwrap().reusable_free_bytes(),
+        2048
+    );
     engine.finalize_persist().unwrap();
     assert_eq!(engine.image.len(), address);
     assert_eq!(

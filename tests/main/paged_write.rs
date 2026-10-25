@@ -9,6 +9,7 @@ use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
+use hdf5_pure::FreeSectionCoordinates;
 use hdf5_pure::VlenStringReadOptions;
 use rstest::rstest;
 
@@ -66,9 +67,13 @@ fn created_page_metadata_tail_survives_reopen_and_reuse(
         );
     }
     let file = File::open_rw(&path).unwrap();
-    let initial = file.space_accounting().unwrap().reusable_free_space;
+    let initial = file.reusable_free_sections().unwrap();
     if exact_fill {
-        assert_eq!(initial, vec![(base + page + 1, page - 1)]);
+        test_util_hdf5::assert_free_sections!(
+            &initial,
+            &[(base + page + 1, page - 1)],
+            FreeSectionCoordinates::Absolute
+        );
     }
     assert_eq!(
         file.dataset("d").unwrap().read_u8().unwrap(),
@@ -80,17 +85,14 @@ fn created_page_metadata_tail_survives_reopen_and_reuse(
     );
     file.close().unwrap();
     let file = File::open_rw(&path).unwrap();
-    assert_eq!(
-        file.space_accounting().unwrap().reusable_free_space,
-        initial
-    );
+    assert_eq!(file.reusable_free_sections().unwrap(), initial);
     file.root()
         .create_dataset("added", |builder| {
             builder.with_u8_data(&[9; 32]);
         })
         .unwrap();
     file.commit().unwrap();
-    let reusable = file.space_accounting().unwrap().reusable_free_space;
+    let reusable = file.reusable_free_sections().unwrap();
     assert_eq!(
         file.dataset("d").unwrap().read_u8().unwrap(),
         vec![7; raw_len]
@@ -107,14 +109,12 @@ fn created_page_metadata_tail_survives_reopen_and_reuse(
     if exact_fill && threshold == 1 {
         assert!(metadata.iter().any(|&(at, len)| {
             initial
+                .sections()
                 .iter()
-                .any(|&(free, size)| free <= at && at + len <= free + size)
+                .any(|section| section.address() <= at && at + len <= section.end_address())
         }));
     }
-    assert_eq!(
-        reopened.space_accounting().unwrap().reusable_free_space,
-        reusable
-    );
+    assert_eq!(reopened.reusable_free_sections().unwrap(), reusable);
     assert_eq!(
         reopened.dataset("d").unwrap().read_u8().unwrap(),
         vec![7; raw_len]
