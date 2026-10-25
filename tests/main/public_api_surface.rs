@@ -27,6 +27,7 @@ use hdf5_pure::LengthWidth;
 use hdf5_pure::OffsetWidth;
 use hdf5_pure::StoredAddress;
 use hdf5_pure::StringPadding;
+use hdf5_pure::SuperblockStatus;
 use hdf5_pure::SuperblockStatusFlag;
 use hdf5_pure::SuperblockStatusFlags;
 use hdf5_pure::SuperblockVersion;
@@ -34,6 +35,7 @@ use hdf5_pure::UserblockSize;
 use hdf5_pure::VariableLengthStringType;
 use hdf5_pure::VariableLengthType;
 use hdf5_pure::{BaseAddress, Error, File, FileBuilder, LibVer, MessageType, Superblock};
+use rstest::rstest;
 
 use test_util::temp;
 
@@ -404,4 +406,42 @@ fn variable_length_kinds_and_string_metadata_are_public() {
     assert_eq!(string.padding(), &StringPadding::SpacePad);
     assert_eq!(string.charset(), &CharacterSet::Utf8);
     assert_eq!(string.base_type(), &hdf5_pure::make_u8_type());
+}
+
+#[rstest]
+#[case(SuperblockStatus::Zero(u32::MAX), SuperblockVersion::Zero, u32::MAX)]
+#[case(
+    SuperblockStatus::One(0x8000_0004),
+    SuperblockVersion::One,
+    0x8000_0004
+)]
+#[case(SuperblockStatus::Two(0x84), SuperblockVersion::Two, 0x84)]
+#[case(SuperblockStatus::Three(0x04), SuperblockVersion::Three, 0x04)]
+fn superblock_status_preserves_version_and_observed_bits(
+    #[case] status: SuperblockStatus,
+    #[case] version: SuperblockVersion,
+    #[case] bits: u32,
+) {
+    let _: hdf5_pure_core::SuperblockStatus = status;
+    assert_eq!(status.version(), version);
+    assert_eq!(status.flags().bits(), bits);
+    assert_eq!(
+        SuperblockStatus::new(version, status.flags()).unwrap(),
+        status
+    );
+}
+
+#[rstest]
+#[case(0x100)]
+#[case(0x8000_0004)]
+#[case(u32::MAX)]
+fn modern_superblock_status_rejects_a_wider_legacy_field(
+    #[case] bits: u32,
+    #[values(SuperblockVersion::Two, SuperblockVersion::Three)] version: SuperblockVersion,
+) {
+    let flags = SuperblockStatus::Zero(bits).flags();
+    assert_eq!(
+        SuperblockStatus::new(version, flags).unwrap_err(),
+        FormatError::SuperblockStatusFlagsTooWide { bits }
+    );
 }

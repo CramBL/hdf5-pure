@@ -110,6 +110,65 @@ impl TryFrom<u8> for SuperblockVersion {
     }
 }
 
+/// The version and file consistency flags of a superblock.
+///
+/// The superblock stores this field in four bytes in versions 0 and 1 and in one byte in
+/// versions 2 and 3. Every stored bit is preserved, including reserved bits and inconsistent
+/// access flags. The field is defined in "Format Signature and Superblock" of the [format
+/// specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_boot_super
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SuperblockStatus {
+    /// Version 0, with a four-byte file consistency field.
+    Zero(u32),
+    /// Version 1, with a four-byte file consistency field.
+    One(u32),
+    /// Version 2, with a one-byte file consistency field.
+    Two(u8),
+    /// Version 3, with a one-byte file consistency field.
+    Three(u8),
+}
+
+impl SuperblockStatus {
+    /// Creates status flags at the width of `version`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::SuperblockStatusFlagsTooWide`] if `version` is 2 or 3 and `flags`
+    /// contains any bit above bit 7.
+    pub fn new(
+        version: SuperblockVersion,
+        flags: SuperblockStatusFlags,
+    ) -> Result<Self, FormatError> {
+        Ok(match version {
+            SuperblockVersion::Zero => Self::Zero(flags.bits()),
+            SuperblockVersion::One => Self::One(flags.bits()),
+            SuperblockVersion::Two => Self::Two(u8::try_from(flags)?),
+            SuperblockVersion::Three => Self::Three(u8::try_from(flags)?),
+        })
+    }
+
+    /// Returns the version whose field width is used.
+    pub const fn version(self) -> SuperblockVersion {
+        match self {
+            Self::Zero(_) => SuperblockVersion::Zero,
+            Self::One(_) => SuperblockVersion::One,
+            Self::Two(_) => SuperblockVersion::Two,
+            Self::Three(_) => SuperblockVersion::Three,
+        }
+    }
+
+    /// Returns every flag bit, including reserved bits.
+    pub const fn flags(self) -> SuperblockStatusFlags {
+        let bits = match self {
+            Self::Zero(bits) | Self::One(bits) => bits,
+            Self::Two(bits) | Self::Three(bits) => bits as u32,
+        };
+        SuperblockStatusFlags::from_bits(bits)
+    }
+}
+
 /// The file consistency flags of a [`Superblock`].
 ///
 /// The reader preserves every stored bit, including reserved bits and an SWMR write mark
@@ -219,6 +278,42 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+
+    #[rstest]
+    #[case(
+        SuperblockStatus::Zero(0x8000_0004),
+        SuperblockVersion::Zero,
+        0x8000_0004
+    )]
+    #[case(SuperblockStatus::One(u32::MAX), SuperblockVersion::One, u32::MAX)]
+    #[case(SuperblockStatus::Two(0x84), SuperblockVersion::Two, 0x84)]
+    #[case(SuperblockStatus::Three(0x04), SuperblockVersion::Three, 0x04)]
+    fn status_preserves_its_version_and_encoded_bits(
+        #[case] status: SuperblockStatus,
+        #[case] version: SuperblockVersion,
+        #[case] bits: u32,
+    ) {
+        assert_eq!(status.version(), version);
+        assert_eq!(status.flags().bits(), bits);
+        assert_eq!(
+            SuperblockStatus::new(version, status.flags()).unwrap(),
+            status
+        );
+    }
+
+    #[rstest]
+    #[case(0x100)]
+    #[case(0x8000_0004)]
+    #[case(u32::MAX)]
+    fn modern_status_rejects_bits_wider_than_its_field(
+        #[case] bits: u32,
+        #[values(SuperblockVersion::Two, SuperblockVersion::Three)] version: SuperblockVersion,
+    ) {
+        assert_eq!(
+            SuperblockStatus::new(version, SuperblockStatusFlags::from_bits(bits)),
+            Err(FormatError::SuperblockStatusFlagsTooWide { bits })
+        );
+    }
 
     #[rstest]
     #[case(0, SuperblockVersion::Zero)]
