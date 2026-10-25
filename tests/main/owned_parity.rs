@@ -124,19 +124,22 @@ fn group_attrs_on_subgroup_and_root() {
 }
 
 #[test]
-fn space_accounting_and_read_only_refusal() {
+fn reusable_space_inspection_rejects_read_only_handles() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.h5");
     file_builder::write_i32_dataset(&path, "d", &[1, 2, 3, 4, 5]);
 
     let file = File::open_rw(&path).unwrap();
-    let acct = file.space_accounting().unwrap();
-    assert!(acct.logical_size > 0);
+    let stats = file.reusable_space_stats().unwrap();
+    assert!(stats.logical_size() > 0);
     // Release the exclusive lock before opening the file another way.
     drop(file);
 
     let ro = File::from_bytes(std::fs::read(&path).unwrap()).unwrap();
-    assert!(matches!(ro.space_accounting(), Err(Error::ReadOnly)));
+    let error = ro.reusable_space_stats().unwrap_err();
+    assert!(matches!(error, Error::ReadOnly), "{error:?}");
+    let error = ro.reusable_free_sections().unwrap_err();
+    assert!(matches!(error, Error::ReadOnly), "{error:?}");
     assert!(!ro.has_staged_edits());
 }
 

@@ -5,6 +5,7 @@ use test_util_hdf5::paged;
 use super::file_space;
 use crate::AttrValue;
 use crate::File;
+use crate::FreeSectionCoordinates;
 
 #[rstest]
 #[case::before_exact_fill(512, 0, 1, 17, 512)]
@@ -52,9 +53,13 @@ fn created_page_metadata_tail_is_owned(
         );
     }
     let file = File::open_rw(&path).unwrap();
-    let initial = file.space_accounting().unwrap().reusable_free_space;
+    let initial = file.reusable_free_sections().unwrap();
     if exact_fill {
-        assert_eq!(initial, vec![(base + page + 1, page - 1)]);
+        test_util_hdf5::assert_free_sections!(
+            &initial,
+            &[(base + page + 1, page - 1)],
+            FreeSectionCoordinates::Absolute
+        );
     }
     let unclassified = if raw_len == 513 {
         vec![(file_space::raw_extents(&file, "d")[0].end, 511)]
@@ -72,10 +77,7 @@ fn created_page_metadata_tail_is_owned(
     file_space::assert_space_ownership(&file, &unclassified);
     file.close().unwrap();
     let file = File::open_rw(&path).unwrap();
-    assert_eq!(
-        file.space_accounting().unwrap().reusable_free_space,
-        initial
-    );
+    assert_eq!(file.reusable_free_sections().unwrap(), initial);
     file.root()
         .create_dataset("added", |builder| {
             builder.with_u8_data(&[9; 32]);
@@ -90,8 +92,9 @@ fn created_page_metadata_tail_is_owned(
                 .iter()
                 .any(|&(at, len)| {
                     initial
+                        .sections()
                         .iter()
-                        .any(|&(free, size)| free <= at && at + len <= free + size)
+                        .any(|section| section.address() <= at && at + len <= section.end_address())
                 })
         );
     }
@@ -101,7 +104,7 @@ fn created_page_metadata_tail_is_owned(
         unclassified
     };
     file_space::assert_space_ownership(&file, &unclassified);
-    let reusable = file.space_accounting().unwrap().reusable_free_space;
+    let reusable = file.reusable_free_sections().unwrap();
     assert_eq!(
         file.dataset("d").unwrap().read_u8().unwrap(),
         vec![7; raw_len]
@@ -112,10 +115,7 @@ fn created_page_metadata_tail_is_owned(
     );
     file.close().unwrap();
     let reopened = File::open_rw(&path).unwrap();
-    assert_eq!(
-        reopened.space_accounting().unwrap().reusable_free_space,
-        reusable
-    );
+    assert_eq!(reopened.reusable_free_sections().unwrap(), reusable);
     assert_eq!(
         reopened.dataset("d").unwrap().read_u8().unwrap(),
         vec![7; raw_len]

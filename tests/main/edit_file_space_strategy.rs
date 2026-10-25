@@ -95,11 +95,12 @@ fn a_deletion_discards_its_extent_without_a_free_space_manager(
     file.root().delete("b").unwrap();
     file.commit().unwrap();
 
-    let free = file.space_accounting().unwrap().reusable_free_space;
-    assert_eq!(!free.is_empty(), has_aggregate);
+    let free = file.reusable_free_sections().unwrap();
+    assert_eq!(free.section_count() > 0, has_aggregate);
     assert!(
-        free.iter()
-            .all(|&(start, length)| !range::overlaps(&deleted, &(start..start + length))),
+        free.sections()
+            .iter()
+            .all(|section| !range::overlaps(&deleted, &(section.address()..section.end_address()))),
         "{deleted:?}, {free:?}"
     );
 }
@@ -294,10 +295,7 @@ fn a_deleted_extent_is_tracked_from_the_threshold_up(
         let deleted = file_space::contiguous_extent(&file, "b");
         file.root().delete("b").unwrap();
         file.commit().unwrap();
-        (
-            deleted,
-            file.space_accounting().unwrap().reusable_free_space,
-        )
+        (deleted, file.reusable_free_sections().unwrap())
     };
     let reopened = persisted_or_reused_sections(&path, persist);
 
@@ -308,7 +306,11 @@ fn a_deleted_extent_is_tracked_from_the_threshold_up(
     };
     assert_eq!(
         (
-            range::covered_len(&session, &deleted),
+            test_util_hdf5::covered_free_bytes!(
+                &session,
+                &deleted,
+                FreeSectionCoordinates::Absolute
+            ),
             range::covered_len(&reopened, &deleted)
         ),
         (tracked, if persist { tracked } else { 0 })
@@ -356,10 +358,7 @@ fn a_sub_threshold_extent_is_tracked_only_beside_a_tracked_extent(
             }
             file.commit().unwrap();
         }
-        (
-            extents,
-            file.space_accounting().unwrap().reusable_free_space,
-        )
+        (extents, file.reusable_free_sections().unwrap())
     };
     let reopened = persisted_or_reused_sections(&path, persist);
 
@@ -372,7 +371,17 @@ fn a_sub_threshold_extent_is_tracked_only_beside_a_tracked_extent(
             .sum()
     };
     assert_eq!(
-        (covered(&session), covered(&reopened)),
+        (
+            [c, e]
+                .into_iter()
+                .map(|extent| test_util_hdf5::covered_free_bytes!(
+                    &session,
+                    extent,
+                    FreeSectionCoordinates::Absolute
+                ))
+                .sum::<u64>(),
+            covered(&reopened)
+        ),
         (tracked, if persist { tracked } else { 0 })
     );
 }
@@ -424,12 +433,14 @@ fn sub_threshold_extents_that_end_the_file_are_given_back_in_one_commit() {
         })
         .unwrap();
     file.commit().unwrap();
-    let accounting = file.space_accounting().unwrap();
-    let (retained_end, _) = accounting
-        .reusable_free_space
-        .into_iter()
-        .find(|&(start, len)| start + len == accounting.logical_size)
-        .unwrap();
+    let stats = file.reusable_space_stats().unwrap();
+    let sections = file.reusable_free_sections().unwrap();
+    let retained_end = sections
+        .sections()
+        .iter()
+        .find(|section| section.end_address() == stats.logical_size())
+        .unwrap()
+        .address();
     for path in ["x", "y"] {
         file.root()
             .create_dataset(path, |b| {
@@ -442,14 +453,18 @@ fn sub_threshold_extents_that_end_the_file_are_given_back_in_one_commit() {
         file_space::contiguous_extent(&file, "x"),
         file_space::contiguous_extent(&file, "y"),
     );
-    let len = file.space_accounting().unwrap().logical_size;
+    let len = file.reusable_space_stats().unwrap().logical_size();
     file.root().delete("x").unwrap();
     file.root().delete("y").unwrap();
     file.commit().unwrap();
 
     assert_eq!(x.start - retained_end, 1977);
     assert_eq!(
-        (x.end, y.end, file.space_accounting().unwrap().logical_size),
+        (
+            x.end,
+            y.end,
+            file.reusable_space_stats().unwrap().logical_size()
+        ),
         (y.start, len, retained_end)
     );
     file.close().unwrap();

@@ -78,15 +78,16 @@ fn fixed_width_root_updates_reach_stable_physical_length(
         lengths.push(fs::metadata(&path).unwrap().len());
         let ownership = crate::reader::storage_tests::ownership(&file).unwrap();
         assert!(ownership.analysis_complete);
-        let accounting = file.space_accounting().unwrap();
+        let sections = file.reusable_free_sections().unwrap();
         let root_addr =
             file.superblock().base_address.get() + file.superblock().root_group_address.get();
         if threshold > 1 && !tracked {
             assert!(
-                accounting
-                    .reusable_free_space
+                sections
+                    .sections()
                     .iter()
-                    .all(|&(addr, len)| root_addr < addr || root_addr >= addr + len)
+                    .all(|section| root_addr < section.address()
+                        || root_addr >= section.end_address())
             );
         }
         if reopen {

@@ -7,6 +7,7 @@ use test_util_hdf5::dataset::{Filter, Unlimited};
 
 use super::file_space;
 use crate::FileSpaceSettings;
+use crate::FreeSectionCoordinates;
 use crate::edit::SpaceOwnership;
 use crate::{
     AttrValue, DeflateLevel, Error, File, FileAccessProperties, FileBuilder, FileSpacePageSize,
@@ -137,10 +138,7 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
                 .iter()
                 .map(|&(_, len)| len)
                 .sum();
-            (
-                file.space_accounting().unwrap().reusable_free_space,
-                capacity,
-            )
+            (file.reusable_free_sections().unwrap(), capacity)
         };
         let f = File::open_rw(&path).unwrap();
         f.root().set_attr("n", AttrValue::I64(i)).unwrap();
@@ -165,7 +163,10 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
         );
         for addr in managers {
             assert!(
-                before.iter().any(|&(a, len)| addr >= a && addr < a + len),
+                before
+                    .sections()
+                    .iter()
+                    .any(|section| addr >= section.address() && addr < section.end_address()),
                 "commit {i}: a manager block landed at {addr}, which was not free \
                  before the commit ({before:?}) — the tail appended instead of \
                  reusing"
@@ -178,14 +179,8 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
         );
         // Free bytes plus complete manager capacity stay constant when the file does not grow.
         if i > 0 {
-            let before_total: u64 = before.iter().map(|(_, len)| len).sum();
-            let after_total: u64 = f
-                .space_accounting()
-                .unwrap()
-                .reusable_free_space
-                .iter()
-                .map(|(_, len)| len)
-                .sum();
+            let before_total = before.free_bytes();
+            let after_total: u64 = f.reusable_space_stats().unwrap().reusable_free_bytes();
             assert_eq!(
                 after_total
                     + super::ownership(&f)
@@ -282,9 +277,10 @@ fn a_reused_flat_manager_tail_preserves_its_spare_allocation_across_reopen() {
     drop(reader);
 
     let reopened = open();
-    let recovered = reopened.space_accounting().unwrap();
+    let recovered = reopened.reusable_space_stats().unwrap();
     assert_eq!(
-        recovered.reusable_free_bytes, persisted_free,
+        recovered.reusable_free_bytes(),
+        persisted_free,
         "reopen must recover the same reusable free-space total"
     );
     let ownership = file_space::assert_exact_space_ownership(&reopened);
@@ -364,8 +360,13 @@ fn a_relocating_overwrite_reclaims_the_old_header_with_its_storage() {
         .unwrap();
     session.commit().unwrap();
 
-    let acct = session.space_accounting().unwrap();
-    file_space::assert_space_accounting_consistent(&acct);
+    let stats = session.reusable_space_stats().unwrap();
+    let sections = session.reusable_free_sections().unwrap();
+    test_util_hdf5::assert_free_sections_consistent!(
+        &stats,
+        &sections,
+        FreeSectionCoordinates::Absolute
+    );
     for (start, len) in original
         .live_metadata_space
         .into_iter()
@@ -373,17 +374,22 @@ fn a_relocating_overwrite_reclaims_the_old_header_with_its_storage() {
         .filter(|&(start, _)| start != 0)
     {
         assert_eq!(
-            range::covered_len(&acct.reusable_free_space, &(start..start + len)),
+            test_util_hdf5::covered_free_bytes!(
+                &sections,
+                &(start..start + len),
+                FreeSectionCoordinates::Absolute
+            ),
             len,
             "old allocation {start}..{} is not fully reclaimed: {:?}",
             start + len,
-            acct.reusable_free_space,
+            sections,
         );
     }
     assert_eq!(
-        acct.reusable_free_space
+        sections
+            .sections()
             .iter()
-            .filter(|&&(start, _)| start < original_end)
+            .filter(|section| section.address() < original_end)
             .count(),
         2,
     );

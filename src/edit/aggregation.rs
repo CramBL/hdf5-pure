@@ -521,7 +521,7 @@ mod tests {
         let state = engine.aggregation.unwrap();
         assert_eq!(state.eoa(), start + reserved - userblock);
         assert_eq!(
-            engine.space_accounting().unwrap().reusable_free_bytes,
+            engine.reusable_space_stats().unwrap().reusable_free_bytes(),
             state.unused().map(|extent| extent.len()).sum::<u64>()
         );
     }

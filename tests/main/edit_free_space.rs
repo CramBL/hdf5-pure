@@ -1443,7 +1443,7 @@ fn paged_churn_reaches_a_steady_size() {
             // reused rather than appended this round — an appended tail leaves the
             // remainder of the page it opened in the session's list only, where the
             // managers on disk cannot yet name it.
-            let acct = f.space_accounting().unwrap();
+            let stats = f.reusable_space_stats().unwrap();
             drop(f);
             let persisted: u64 = File::open(&path)
                 .unwrap()
@@ -1453,7 +1453,8 @@ fn paged_churn_reaches_a_steady_size() {
                 .free_sections()
                 .free_bytes();
             assert_eq!(
-                acct.reusable_free_bytes, persisted,
+                stats.reusable_free_bytes(),
+                persisted,
                 "round {round}: free space the session can spend must be the free \
                  space the file records"
             );
@@ -1516,10 +1517,7 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
                 .iter()
                 .map(|&(_, len)| len)
                 .sum();
-            (
-                file.space_accounting().unwrap().reusable_free_space,
-                capacity,
-            )
+            (file.reusable_free_sections().unwrap(), capacity)
         };
         let f = File::open_rw(&path).unwrap();
         f.root().set_attr("n", AttrValue::I64(i)).unwrap();
@@ -1549,7 +1547,10 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
         );
         for addr in managers {
             assert!(
-                before.iter().any(|&(a, len)| addr >= a && addr < a + len),
+                before
+                    .sections()
+                    .iter()
+                    .any(|section| addr >= section.address() && addr < section.end_address()),
                 "commit {i}: a manager block landed at {addr}, which was not free \
                  before the commit ({before:?}) — the tail appended instead of \
                  reusing"
@@ -1562,14 +1563,8 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
         );
         // Free bytes plus complete manager capacity stay constant when the file does not grow.
         if i > 0 {
-            let before_total: u64 = before.iter().map(|(_, len)| len).sum();
-            let after_total: u64 = f
-                .space_accounting()
-                .unwrap()
-                .reusable_free_space
-                .iter()
-                .map(|(_, len)| len)
-                .sum();
+            let before_total = before.free_bytes();
+            let after_total: u64 = f.reusable_space_stats().unwrap().reusable_free_bytes();
             assert_eq!(
                 after_total + after_capacity,
                 before_total + before_capacity,
@@ -1724,9 +1719,10 @@ fn a_reused_flat_manager_tail_preserves_its_spare_allocation_across_reopen() {
     drop(reader);
 
     let reopened = open();
-    let recovered = reopened.space_accounting().unwrap();
+    let recovered = reopened.reusable_space_stats().unwrap();
     assert_eq!(
-        recovered.reusable_free_bytes, persisted_free,
+        recovered.reusable_free_bytes(),
+        persisted_free,
         "reopen must recover the same reusable free-space total"
     );
 
@@ -2035,7 +2031,7 @@ fn paged_free_space_is_reused_after_a_reopen() {
     {
         let s = File::open_rw(&path).unwrap();
         assert!(
-            s.space_accounting().unwrap().reusable_free_bytes >= f64_data_bytes(ELEMS),
+            s.reusable_space_stats().unwrap().reusable_free_bytes() >= f64_data_bytes(ELEMS),
             "the reopened session must recover the freed dataset's pages"
         );
         s.root()
@@ -2093,7 +2089,7 @@ fn assert_released_file_is_self_consistent(path: &std::path::Path) {
     drop(f);
     let s = File::open_rw(path).unwrap();
     assert_eq!(
-        s.space_accounting().unwrap().logical_size,
+        s.reusable_space_stats().unwrap().logical_size(),
         len,
         "a reopened session must account for the file at the length the release \
          left it"
@@ -2154,7 +2150,7 @@ fn deleting_a_populated_group_releases_the_end_of_a_flat_file() {
     let after = f.file_size();
     assert_eq!(
         after,
-        f.space_accounting().unwrap().logical_size,
+        f.reusable_space_stats().unwrap().logical_size(),
         "file_size and the session's own accounting must report one length"
     );
     // Everything the group occupied reached the end of the file, so all of it
@@ -2433,7 +2429,10 @@ fn immediate_append_reuses_a_freed_hole() {
 
     session.root().delete("log").unwrap();
     session.commit().unwrap();
-    let freed = session.space_accounting().unwrap().reusable_free_bytes;
+    let freed = session
+        .reusable_space_stats()
+        .unwrap()
+        .reusable_free_bytes();
     assert!(
         freed >= payload.len() as u64 * 4,
         "the deleted dataset's chunks should be reusable (only {freed} bytes are)"
@@ -2505,7 +2504,10 @@ fn a_persisting_file_reuses_a_hole_smaller_than_a_batch() {
     // After the commit that creates the dataset, so the staged path's own
     // (legitimate) reuse is not counted against the append.
     create_log(&session, "log");
-    let freed = session.space_accounting().unwrap().reusable_free_bytes;
+    let freed = session
+        .reusable_space_stats()
+        .unwrap()
+        .reusable_free_bytes();
     assert!(freed >= payload_bytes, "expected a sizable hole");
     let size_before = session.file_size();
 
@@ -2515,7 +2517,10 @@ fn a_persisting_file_reuses_a_hole_smaller_than_a_batch() {
         size_before,
         "the append fits in the hole, so the file must not grow"
     );
-    let left = session.space_accounting().unwrap().reusable_free_bytes;
+    let left = session
+        .reusable_space_stats()
+        .unwrap()
+        .reusable_free_bytes();
     assert!(
         left + payload_bytes <= freed,
         "the append must have spent the hole: {freed} bytes were reusable before it \
@@ -2641,11 +2646,17 @@ fn append_churn_on_a_persisting_file(
 
     session.root().delete("log").unwrap();
     session.commit().unwrap();
-    let freed_before = session.space_accounting().unwrap().reusable_free_bytes;
+    let freed_before = session
+        .reusable_space_stats()
+        .unwrap()
+        .reusable_free_bytes();
 
     create_reuse_log(&session, "log2");
     session.dataset("log2").unwrap().append(&payload).unwrap();
-    let freed_after = session.space_accounting().unwrap().reusable_free_bytes;
+    let freed_after = session
+        .reusable_space_stats()
+        .unwrap()
+        .reusable_free_bytes();
     session.close().unwrap();
     let after_second = std::fs::metadata(&path).unwrap().len();
 
@@ -2772,7 +2783,10 @@ fn a_paged_append_reserve_keeps_pages_homogeneous() {
     let session = open_rw_on_close(&path);
     session.root().delete("victim").unwrap();
     session.commit().unwrap();
-    let freed = session.space_accounting().unwrap().reusable_free_bytes;
+    let freed = session
+        .reusable_space_stats()
+        .unwrap()
+        .reusable_free_bytes();
     assert!(
         freed > 2 * 1024 * 1024,
         "the fixture must leave more than two reserve batches to draw from, not {freed}"
@@ -2786,7 +2800,11 @@ fn a_paged_append_reserve_keeps_pages_homogeneous() {
             ds.append(&batch).unwrap();
         }
     }
-    let spent = freed - session.space_accounting().unwrap().reusable_free_bytes;
+    let spent = freed
+        - session
+            .reusable_space_stats()
+            .unwrap()
+            .reusable_free_bytes();
 
     // A staged commit after the appends: it allocates metadata (an object header,
     // the rewritten managers) and raw data of its own, so it is the write that
@@ -2896,22 +2914,24 @@ fn scratch_delete_releases(
 fn occupied_storage(path: &std::path::Path) -> (File, u64) {
     let bytes = std::fs::read(path).unwrap();
     let file = open_rw_on_close(path);
-    let accounting = file.space_accounting().unwrap();
+    let stats = file.reusable_space_stats().unwrap();
     let managers: u64 = storage::manager_extents(&file, &bytes)
         .iter()
         .map(|&(_, len)| len)
         .sum();
-    let occupied = accounting.logical_size - accounting.reusable_free_bytes - managers;
+    let occupied = stats.logical_size() - stats.reusable_free_bytes() - managers;
     (file, occupied)
 }
 
 /// How many whole, page-aligned free pages the session is offering back.
 fn whole_free_pages(f: &File) -> usize {
-    f.space_accounting()
+    f.reusable_free_sections()
         .unwrap()
-        .reusable_free_space
+        .sections()
         .iter()
-        .filter(|&&(addr, len)| addr % RECLAIM_PAGE == 0 && len >= RECLAIM_PAGE)
+        .filter(|section| {
+            section.address() % RECLAIM_PAGE == 0 && section.length().get() >= RECLAIM_PAGE
+        })
         .count()
 }
 
@@ -2973,10 +2993,10 @@ fn paged_delete_of_an_empty_extensible_dataset_reclaims_its_index() {
         0,
         "the live index must hold its page back"
     );
-    let before = f.space_accounting().unwrap().reusable_free_bytes;
+    let before = f.reusable_space_stats().unwrap().reusable_free_bytes();
     f.root().delete("scratch").unwrap();
     f.commit().unwrap();
-    let released = f.space_accounting().unwrap().reusable_free_bytes - before;
+    let released = f.reusable_space_stats().unwrap().reusable_free_bytes() - before;
     assert!(
         released >= index_bytes,
         "a paged delete must give back the chunk index too ({released} bytes for \
@@ -3022,9 +3042,9 @@ fn paged_group_churn_with_empty_datasets_reaches_a_steady_size() {
         f.commit().unwrap();
         f.root().delete(&name).unwrap();
         f.commit().unwrap();
-        let acct = f.space_accounting().unwrap();
+        let stats = f.reusable_space_stats().unwrap();
         sizes.push(f.file_size());
-        used.push(f.file_size() - acct.reusable_free_bytes);
+        used.push(f.file_size() - stats.reusable_free_bytes());
     }
     f.close().unwrap();
     assert_churn_settled(&sizes, &used);
@@ -3083,9 +3103,9 @@ fn populated_group_churn(
         populate(&name);
         f.root().delete(&name).unwrap();
         f.commit().unwrap();
-        let acct = f.space_accounting().unwrap();
+        let stats = f.reusable_space_stats().unwrap();
         sizes.push(f.file_size());
-        used.push(f.file_size() - acct.reusable_free_bytes);
+        used.push(f.file_size() - stats.reusable_free_bytes());
     }
     populate("last");
     f.close().unwrap();
@@ -3214,8 +3234,8 @@ fn paged_staged_append_churn_does_not_leak_the_old_index() {
             .unwrap();
         f.commit().unwrap();
     }
-    let acct = f.space_accounting().unwrap();
-    let used = f.file_size() - acct.reusable_free_bytes;
+    let stats = f.reusable_space_stats().unwrap();
+    let used = f.file_size() - stats.reusable_free_bytes();
     // What the file legitimately holds: the live rows, plus the one live index
     // over them and the headers around it, which two pages cover comfortably.
     let payload = ((FLUSHES + 1) * ROWS * 4) as u64;
@@ -3285,10 +3305,10 @@ fn a_multi_chunk_staged_append_fills_chunk_sized_holes() {
             f.root().delete(&format!("scratch{i}")).unwrap();
         }
         f.commit().unwrap();
-        let reusable = f.space_accounting().unwrap().reusable_free_space;
+        let reusable = f.reusable_free_sections().unwrap();
         let (size_before, free_before) = (
             f.file_size(),
-            f.space_accounting().unwrap().reusable_free_bytes,
+            f.reusable_space_stats().unwrap().reusable_free_bytes(),
         );
         assert!(
             free_before >= payload,
@@ -3306,15 +3326,16 @@ fn a_multi_chunk_staged_append_fills_chunk_sized_holes() {
         assert_eq!(chunks.len(), APPENDED + 1);
         for chunk in chunks.into_iter().filter(|chunk| chunk.offset != [0]) {
             assert!(
-                reusable.iter().any(|&(start, length)| {
-                    start <= chunk.address && chunk.address + chunk.storage_size <= start + length
+                reusable.sections().iter().any(|section| {
+                    section.address() <= chunk.address
+                        && chunk.address + chunk.storage_size <= section.end_address()
                 }),
                 "{name}: {chunk:?} lies outside {reusable:?}"
             );
         }
         let (size_after, free_after) = (
             f.file_size(),
-            f.space_accounting().unwrap().reusable_free_bytes,
+            f.reusable_space_stats().unwrap().reusable_free_bytes(),
         );
         assert!(
             size_after - size_before < payload,

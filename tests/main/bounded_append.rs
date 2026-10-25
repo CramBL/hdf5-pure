@@ -139,9 +139,9 @@ fn staged_surface_works_on_a_bounded_file() {
         // Transaction 1: a value overwrite and a new group.
         ds.write(&[9i32, 9, 9, 9]).unwrap();
         root.create_group("g").unwrap();
-        let before = file.space_accounting().unwrap();
+        let before = file.reusable_space_stats().unwrap();
         assert_eq!(
-            before.logical_size,
+            before.logical_size(),
             std::fs::metadata(&p).unwrap().len(),
             "a bounded session must report the file's real size"
         );
@@ -169,17 +169,15 @@ fn staged_surface_works_on_a_bounded_file() {
         // The delete freed the group's blocks into the session's own free list,
         // which a bounded session keeps like any other. Reading it back is what
         // distinguishes a working accounting from one that reports zeroes.
-        let acct = file.space_accounting().unwrap();
+        let stats = file.reusable_space_stats().unwrap();
+        let sections = file.reusable_free_sections().unwrap();
         assert!(
-            acct.reusable_free_bytes > 0,
-            "a committed delete left nothing reusable: {acct:?}"
+            stats.reusable_free_bytes() > 0,
+            "a committed delete left nothing reusable: {stats:?}"
         );
         assert_eq!(
-            acct.reusable_free_bytes,
-            acct.reusable_free_space
-                .iter()
-                .map(|(_, len)| len)
-                .sum::<u64>(),
+            stats.reusable_free_bytes(),
+            sections.free_bytes(),
             "the total must be the sum of the regions it describes"
         );
         file.close().unwrap();

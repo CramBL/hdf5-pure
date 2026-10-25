@@ -378,13 +378,10 @@ fn manager_metadata_failures_preserve_ownership_and_reopen_the_issued_state(
         matches!(error, Error::Format(FormatError::PathNotFound(ref path)) if path == "remove"),
         "{error:?}"
     );
-    let expected = file.space_accounting().unwrap().reusable_free_space;
+    let expected = file.reusable_free_sections().unwrap();
     file.close().unwrap();
     let file = File::open_rw(&path).unwrap();
-    assert_eq!(
-        file.space_accounting().unwrap().reusable_free_space,
-        expected
-    );
+    assert_eq!(file.reusable_free_sections().unwrap(), expected);
 }
 
 fn stage_batch(engine: &mut WriteEngine) {

@@ -785,7 +785,10 @@ fn a_buffered_appender_writes_into_freed_space() {
     session.root().delete("scratch").unwrap();
     session.commit().unwrap();
 
-    let before = session.space_accounting().unwrap().reusable_free_bytes;
+    let before = session
+        .reusable_space_stats()
+        .unwrap()
+        .reusable_free_bytes();
     assert!(
         before >= payload.len() as u64 * 4,
         "expected a sizable hole"
@@ -798,7 +801,10 @@ fn a_buffered_appender_writes_into_freed_space() {
         }
         app.finish().unwrap();
     }
-    let after = session.space_accounting().unwrap().reusable_free_bytes;
+    let after = session
+        .reusable_space_stats()
+        .unwrap()
+        .reusable_free_bytes();
     assert!(
         after < before / 2,
         "the buffered appender should have spent the hole ({before} -> {after})"

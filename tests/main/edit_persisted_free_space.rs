@@ -47,13 +47,10 @@ fn paged_manager_tail_survives_reopen(#[case] memory: MemoryStrategy, #[case] us
             .unwrap();
         file.commit().unwrap();
     }
-    let before = file.space_accounting().unwrap().reusable_free_space;
+    let before = file.reusable_free_sections().unwrap();
     file.close().unwrap();
     let reopened = File::open_rw(&path).unwrap();
-    assert_eq!(
-        reopened.space_accounting().unwrap().reusable_free_space,
-        before,
-    );
+    assert_eq!(reopened.reusable_free_sections().unwrap(), before);
     assert_eq!(reopened.dataset("a").unwrap().read_i32().unwrap(), [1; 100]);
     for i in 0..60 {
         assert_eq!(
@@ -88,9 +85,16 @@ fn a_session_reuses_the_free_space_an_earlier_session_persisted(
         .unwrap();
     let bytes = std::fs::read(&path).unwrap();
     let second = File::open_rw(&path).unwrap();
-    let mut available_or_reused = second.space_accounting().unwrap().reusable_free_space;
-    available_or_reused.extend(storage::file_metadata_extents(&second, &bytes));
-    assert_eq!(range::covered_len(&available_or_reused, &hole), HOLE_BYTES);
+    let available_or_reused = second.reusable_free_sections().unwrap();
+    let metadata = storage::file_metadata_extents(&second, &bytes);
+    assert_eq!(
+        test_util_hdf5::covered_free_bytes!(
+            &available_or_reused,
+            &hole,
+            FreeSectionCoordinates::Absolute
+        ) + range::covered_len(&metadata, &hole),
+        HOLE_BYTES
+    );
     let expected = persisted
         .free_sections()
         .sections()
@@ -103,12 +107,20 @@ fn a_session_reuses_the_free_space_an_earlier_session_persisted(
         .map(|section| section.address() + userblock)
         .min()
         .unwrap();
-    let reusable = second.space_accounting().unwrap().reusable_free_space;
-    assert_eq!(reusable.len(), persisted.free_sections().section_count());
-    for ((address, length), section) in reusable.iter().zip(persisted.free_sections().sections()) {
-        assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
-        assert_eq!(*address, section.address() + userblock);
-        assert_eq!(*length, section.length().get());
+    let reusable = second.reusable_free_sections().unwrap();
+    assert_eq!(
+        reusable.section_count(),
+        persisted.free_sections().section_count()
+    );
+    for (physical, stored) in reusable
+        .sections()
+        .iter()
+        .zip(persisted.free_sections().sections())
+    {
+        assert_eq!(physical.coordinates(), FreeSectionCoordinates::Absolute);
+        assert_eq!(stored.coordinates(), FreeSectionCoordinates::Stored);
+        assert_eq!(physical.address(), stored.address() + userblock);
+        assert_eq!(physical.length(), stored.length());
     }
     second
         .root()
@@ -150,7 +162,7 @@ fn every_commit_keeps_the_userblock_and_writes_stored_manager_addresses(
             assert_pages_homogeneous(&path);
         }
         let settled = File::open_rw(&path).unwrap();
-        let reusable = settled.space_accounting().unwrap().reusable_free_space;
+        let reusable = settled.reusable_free_sections().unwrap();
         settled.close().unwrap();
 
         stamped.assert_unchanged(&path);
@@ -168,23 +180,41 @@ fn every_commit_keeps_the_userblock_and_writes_stored_manager_addresses(
             );
         }
         storage::assert_unavailable(&file, &allocated);
-        assert!(reusable.iter().all(|&(at, _)| at >= userblock), "{step:?}");
+        assert!(
+            reusable
+                .sections()
+                .iter()
+                .all(|section| section.address() >= userblock),
+            "{step:?}"
+        );
         let stored_free = file.persisted_free_sections().unwrap().unwrap();
         assert_eq!(
             stored_free.free_sections().section_count(),
-            reusable.len(),
+            reusable.section_count(),
             "{step:?}"
         );
-        for (section, (address, length)) in
-            stored_free.free_sections().sections().iter().zip(&reusable)
+        for (section, physical) in stored_free
+            .free_sections()
+            .sections()
+            .iter()
+            .zip(reusable.sections())
         {
             assert_eq!(
                 section.coordinates(),
                 FreeSectionCoordinates::Stored,
                 "{step:?}"
             );
-            assert_eq!(section.address(), address - userblock, "{step:?}");
-            assert_eq!(section.length().get(), *length, "{step:?}");
+            assert_eq!(
+                physical.coordinates(),
+                FreeSectionCoordinates::Absolute,
+                "{step:?}"
+            );
+            assert_eq!(
+                section.address(),
+                physical.address() - userblock,
+                "{step:?}"
+            );
+            assert_eq!(section.length(), physical.length(), "{step:?}");
         }
         let headers = file
             .file_space_info()
@@ -257,11 +287,11 @@ fn a_deletion_that_frees_the_end_of_the_file_truncates_it(
     session.commit().unwrap();
     let truncated = std::fs::metadata(&path).unwrap().len();
     let free_end = session
-        .space_accounting()
+        .reusable_free_sections()
         .unwrap()
-        .reusable_free_space
+        .sections()
         .last()
-        .map_or(0, |&(at, len)| at + len);
+        .map_or(0, |section| section.end_address());
     session.close().unwrap();
 
     assert_eq!((grown - before, truncated - before), (growth, kept));

@@ -54,8 +54,8 @@ fn persistent_creation_recovers_settled_spare_and_reuses_it_after_reopen(
     file.close().unwrap();
     let properties = FileAccessProperties::new().with_memory_strategy(backing);
     let file = File::open_rw_with_options(&path, properties).unwrap();
-    let reusable = file.space_accounting().unwrap().reusable_free_space;
-    assert_eq!(!reusable.is_empty(), has_manager);
+    let reusable = file.reusable_free_sections().unwrap();
+    assert_eq!(reusable.section_count() > 0, has_manager);
     file.root()
         .create_dataset("added", |builder| {
             builder.with_i32_data(&[23; 16]);
@@ -64,11 +64,9 @@ fn persistent_creation_recovers_settled_spare_and_reuses_it_after_reopen(
     file.commit().unwrap();
     let extent = file_space::contiguous_extent(&file, "added");
     if has_manager {
-        assert!(
-            reusable
-                .iter()
-                .any(|&(start, length)| start <= extent.start && extent.end <= start + length)
-        );
+        assert!(reusable.sections().iter().any(
+            |section| section.address() <= extent.start && extent.end <= section.end_address()
+        ));
     }
     file.close().unwrap();
     let file = File::open_rw_with_options(&path, properties).unwrap();
@@ -242,18 +240,19 @@ fn staged_aggr_allocations_reuse_session_windows(
         .unwrap();
     file.commit().unwrap();
     let first = file_space::contiguous_extent(&file, "first");
-    let accounting = file.space_accounting().unwrap();
+    let stats = file.reusable_space_stats().unwrap();
+    let sections = file.reusable_free_sections().unwrap();
     assert_eq!(
         std::fs::metadata(&path).unwrap().len(),
-        accounting.logical_size
+        stats.logical_size()
     );
     storage::assert_no_managers(&file);
-    assert!(accounting.logical_size >= original_end);
-    assert!(!accounting.reusable_free_space.is_empty());
+    assert!(stats.logical_size() >= original_end);
+    assert!(sections.section_count() > 0);
     if reopen {
         file.close().unwrap();
         file = File::open_rw_with_options(&path, properties).unwrap();
-        assert_eq!(file.space_accounting().unwrap().reusable_free_space, []);
+        assert_eq!(file.reusable_free_sections().unwrap().section_count(), 0);
     }
     let before_second = file.file_size();
     file.root()
