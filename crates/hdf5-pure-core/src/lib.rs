@@ -60,6 +60,7 @@ pub use fill_time::FillTime;
 pub use filter_mask::FilterMask;
 pub use message_type::MessageType;
 pub use superblock::Superblock;
+pub use superblock::SuperblockStatus;
 pub use superblock::SuperblockStatusFlag;
 pub use superblock::SuperblockStatusFlags;
 pub use superblock::SuperblockVersion;

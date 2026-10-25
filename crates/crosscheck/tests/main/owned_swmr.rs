@@ -5,6 +5,7 @@
 
 use hdf5::file::LibraryVersion;
 use hdf5_pure::File;
+use hdf5_pure::SuperblockStatus;
 use hdf5_pure::SuperblockStatusFlags;
 use hdf5_pure::SuperblockVersion;
 use rstest::rstest;
@@ -74,6 +75,15 @@ fn a_superblock_reports_the_flags_the_c_library_wrote(
         assert_eq!(sb.indexed_storage_internal_node_k, None);
     }
     assert_eq!(sb.consistency_flags, SuperblockStatusFlags::new());
+    assert_eq!(
+        SuperblockStatus::new(sb.version, sb.consistency_flags).unwrap(),
+        match version {
+            SuperblockVersion::Zero => SuperblockStatus::Zero(0),
+            SuperblockVersion::One => SuperblockStatus::One(0),
+            SuperblockVersion::Two => SuperblockStatus::Two(0),
+            SuperblockVersion::Three => SuperblockStatus::Three(0),
+        }
+    );
 }
 
 /// Both libraries read the same superblock status-flags byte the same way

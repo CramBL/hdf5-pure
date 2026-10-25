@@ -319,6 +319,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
         "VariableLengthStringType",
         "VariableLengthType",
         "SuperblockVersion",
+        "SuperblockStatus",
         "SuperblockStatusFlag",
         "SuperblockStatusFlags",
     }

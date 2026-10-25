@@ -569,6 +569,7 @@ pub use hdf5_pure_core::FilterMask;
 #[cfg(feature = "std")]
 #[doc(inline)]
 pub use hdf5_pure_core::MessageType;
+pub use hdf5_pure_core::SuperblockStatus;
 pub use hdf5_pure_core::SuperblockStatusFlag;
 pub use hdf5_pure_core::SuperblockStatusFlags;
 pub use hdf5_pure_core::SuperblockVersion;
