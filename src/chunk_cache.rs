@@ -1,9 +1,10 @@
-//! Chunk cache with hash-based index and LRU eviction.
+//! The chunk cache of a dataset handle, which holds the dataset's parsed chunk index and its
+//! decompressed chunks between reads.
 //!
-//! The [`ChunkCache`] avoids re-traversing B-trees on repeated reads of chunked
-//! datasets.  On first access it scans the B-tree once and builds a
-//! `HashMap<ChunkCoord, ChunkInfo>` (the *chunk index*).  Decompressed chunk
-//! data is cached with LRU eviction controlled by a byte-budget.
+//! A [`ChunkCache`] that retains the [`ParsedChunkIndex`] the first read loads shares it with the
+//! later reads through the same [`Dataset`](crate::Dataset) handle until [`ChunkCache::clear`], so
+//! those reads list the chunks without reading the chunk index from the file. The cache keeps
+//! decompressed chunks within the byte and slot budgets of a [`ChunkCacheConfig`].
 
 #[cfg(not(feature = "std"))]
 extern crate alloc;
@@ -11,6 +12,7 @@ extern crate alloc;
 use core::fmt::Debug;
 use core::ops::DerefMut;
 
+use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
@@ -21,14 +23,10 @@ use std::sync::MutexGuard;
 #[cfg(feature = "std")]
 use std::sync::PoisonError;
 
-#[cfg(not(feature = "std"))]
-use alloc::collections::BTreeMap;
-#[cfg(feature = "std")]
-use std::collections::HashMap;
-
-use crate::chunked_read::ChunkInfo;
+use crate::error::FormatError;
 #[cfg(not(feature = "std"))]
 use crate::nosync::Mutex;
+use crate::parsed_chunk_index::ParsedChunkIndex;
 
 /// Coordinate key for a chunk — the N-dimensional offset vector.
 pub type ChunkCoord = Vec<u64>;
@@ -380,14 +378,11 @@ impl CachePass {
 // ChunkCache
 // ---------------------------------------------------------------------------
 
-/// A per-dataset chunk cache with hash-based index and LRU eviction.
+/// The cache of one dataset's parsed chunk index and decompressed chunks.
 ///
-/// # Usage
-///
-/// ```ignore
-/// let cache = ChunkCache::new();
-/// // Pass &cache to read_chunked_data — it will populate the index lazily.
-/// ```
+/// The first read loads the [`ParsedChunkIndex`], and the cache retains it for later reads if its
+/// [`ChunkCacheConfig`] enables the index cache. Decompressed chunks are kept within the byte and
+/// slot budgets of the configuration, by the admission rules [`CachePass`] describes.
 ///
 /// A lock of type `L`, a [`CacheLock`], holds the cache state, so the methods that change it take
 /// `&self`. With `std` the default lock is `std::sync::Mutex`, and the cache is `Sync`. Without
@@ -398,12 +393,9 @@ pub struct ChunkCache<L = Mutex<CacheInner>> {
 
 /// The state of a [`ChunkCache`], which its lock holds.
 pub(crate) struct CacheInner {
-    /// Hash index: chunk coordinate → ChunkInfo (offset + size in file).
-    /// Populated once per dataset on first access.
-    #[cfg(feature = "std")]
-    index: Option<HashMap<ChunkCoord, ChunkInfo>>,
-    #[cfg(not(feature = "std"))]
-    index: Option<BTreeMap<ChunkCoord, ChunkInfo>>,
+    /// The retained parsed chunk index, or `None` before a read loads one, after
+    /// [`ChunkCache::clear`], and always if the configuration disables the index cache.
+    index: Option<Arc<ParsedChunkIndex>>,
 
     /// LRU cache of decompressed chunk data.
     slots: Vec<CachedChunk>,
@@ -502,54 +494,30 @@ impl<L: CacheLock<CacheInner>> ChunkCache<L> {
 
     // ----- Index operations -----
 
-    /// Build the chunk index from a pre-collected list of `ChunkInfo`.
+    /// Returns the retained parsed chunk index, or loads one with `load` and retains it if the
+    /// configuration enables the index cache.
     ///
-    /// The `rank` parameter is used to truncate offsets to spatial dims only
-    /// (B-tree v1 stores rank+1 offsets).
-    pub fn populate_index(&self, chunks: &[ChunkInfo], rank: usize) {
+    /// The cache is unlocked while `load` runs, so reads on two threads may both load an index.
+    /// The cache retains the index of the read that finishes loading first, and the other read
+    /// returns that index.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error `load` returns, and retains nothing.
+    pub(crate) fn parsed_index_or_load(
+        &self,
+        load: impl FnOnce() -> Result<ParsedChunkIndex, FormatError>,
+    ) -> Result<Arc<ParsedChunkIndex>, FormatError> {
+        let retained = self.lock().index.clone();
+        if let Some(index) = retained {
+            return Ok(index);
+        }
+        let index = Arc::new(load()?);
         let mut inner = self.lock();
         if !inner.cache_index {
-            return;
+            return Ok(index);
         }
-        if inner.index.is_some() {
-            return; // already populated
-        }
-        #[cfg(feature = "std")]
-        let mut map = HashMap::with_capacity(chunks.len());
-        #[cfg(not(feature = "std"))]
-        let mut map = BTreeMap::new();
-
-        for ci in chunks {
-            let coord: ChunkCoord = ci.offsets.iter().take(rank).copied().collect();
-            map.insert(coord, ci.clone());
-        }
-        inner.index = Some(map);
-    }
-
-    /// Return all indexed chunks as a `Vec<ChunkInfo>` (order unspecified).
-    pub fn all_indexed_chunks(&self) -> Option<Vec<ChunkInfo>> {
-        self.indexed_chunks_matching(|_| true)
-    }
-
-    /// Return the indexed chunks `keep` accepts, as a `Vec<ChunkInfo>` (order
-    /// unspecified).
-    ///
-    /// A row window wants the chunks its rows overlap and nothing else, and the
-    /// difference is not a nicety: each [`ChunkInfo`] owns a coordinate `Vec`, so
-    /// taking the whole index and discarding most of it costs an allocation per
-    /// chunk *of the dataset* per window. A sweep of a dataset in windows paid
-    /// that as a product — 8 windows over 2,048 chunks, 16,384 allocations to
-    /// visit 2,048 chunks (issue #289). The filter runs while the lock is held,
-    /// over borrowed entries, so a rejected chunk costs no allocation at all.
-    pub fn indexed_chunks_matching(
-        &self,
-        keep: impl Fn(&ChunkInfo) -> bool,
-    ) -> Option<Vec<ChunkInfo>> {
-        let inner = self.lock();
-        inner
-            .index
-            .as_ref()
-            .map(|m| m.values().filter(|ci| keep(ci)).cloned().collect())
+        Ok(Arc::clone(inner.index.get_or_insert(index)))
     }
 
     // ----- Decompressed data cache (LRU) -----
@@ -786,11 +754,10 @@ impl<L: CacheLock<CacheInner>> ChunkCache<L> {
     ///
     /// Panics if [`CacheLock::lock`] returns an error.
     fn lock(&self) -> L::Guard<'_> {
-        // No method of the cache locks it while holding a guard, and the closures
-        // that `with_decompressed` and `indexed_chunks_matching` run under their
-        // guards only copy bytes out or test a chunk's offsets, so the lock is free
-        // here. With `std::sync::Mutex`, only a panic under a guard poisons the lock,
-        // and such a panic is a bug in the crate.
+        // No method of the cache locks it while holding a guard, and the closure that
+        // `with_decompressed` runs under its guard only copies bytes out, so the lock is free here.
+        // With `std::sync::Mutex`, only a panic under a guard poisons the lock, and such a panic is
+        // a bug in the crate.
         self.inner
             .lock()
             .expect("the chunk cache is locked by one guard at a time")
@@ -864,41 +831,53 @@ mod tests {
     use super::*;
     use crate::address::StoredAddress;
     use crate::address::StoredAddressExt;
+    use crate::chunked_read::ChunkInfo;
     use crate::chunked_read::StoredChunkSize;
     use crate::nosync;
 
-    fn make_chunk(offsets: Vec<u64>, address: u64, size: u32) -> ChunkInfo {
-        ChunkInfo {
-            chunk_size: StoredChunkSize::btree_v1(size),
-            filter_mask: 0,
-            offsets,
-            address: StoredAddress::new(address),
-        }
+    fn one_chunk_index() -> Result<ParsedChunkIndex, FormatError> {
+        ParsedChunkIndex::new(
+            vec![ChunkInfo {
+                chunk_size: StoredChunkSize::btree_v1(80),
+                filter_mask: 0,
+                offsets: vec![0, 0],
+                address: StoredAddress::new(0x1000),
+            }],
+            1,
+        )
     }
 
     #[rstest]
     #[case::std_mutex(STD_MUTEX)]
     #[case::nosync_mutex(NOSYNC_MUTEX)]
-    fn index_populate_and_lookup<L: CacheLock<CacheInner>>(#[case] _lock: PhantomData<L>) {
+    fn a_retained_index_serves_later_reads_without_a_load<L: CacheLock<CacheInner>>(
+        #[case] _lock: PhantomData<L>,
+    ) {
         let cache = ChunkCache::<L>::new();
-        let chunks = vec![
-            make_chunk(vec![0, 0, 0], 0x1000, 80),
-            make_chunk(vec![10, 0, 0], 0x2000, 80),
-        ];
-        cache.populate_index(&chunks, 2); // rank=2, truncate to [0,0] and [10,0]
-        assert!(cache.stats().index_loaded());
 
-        let mut addrs: Vec<StoredAddress> = cache
-            .all_indexed_chunks()
-            .unwrap()
-            .iter()
-            .map(|c| c.address)
-            .collect();
-        addrs.sort_unstable();
-        assert_eq!(
-            addrs,
-            vec![StoredAddress::new(0x1000), StoredAddress::new(0x2000)]
-        );
+        let first = cache.parsed_index_or_load(one_chunk_index).unwrap();
+        assert!(cache.stats().index_loaded());
+        let second = cache
+            .parsed_index_or_load(|| panic!("a retained index is not loaded again"))
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[rstest]
+    #[case::std_mutex(STD_MUTEX)]
+    #[case::nosync_mutex(NOSYNC_MUTEX)]
+    fn a_failed_load_retains_no_index<L: CacheLock<CacheInner>>(#[case] _lock: PhantomData<L>) {
+        let cache = ChunkCache::<L>::new();
+
+        let err = cache
+            .parsed_index_or_load(|| Err(FormatError::InvalidBTreeNodeType(7)))
+            .unwrap_err();
+
+        assert_eq!(err, FormatError::InvalidBTreeNodeType(7));
+        assert!(!cache.stats().index_loaded());
+        cache.parsed_index_or_load(one_chunk_index).unwrap();
+        assert!(cache.stats().index_loaded());
     }
 
     /// Test helper: clone a cached chunk's bytes if present (the production
@@ -1169,8 +1148,15 @@ mod tests {
         #[case] _lock: PhantomData<L>,
     ) {
         let cache = ChunkCache::<L>::with_config(ChunkCacheConfig::disabled());
-        let chunks = vec![make_chunk(vec![0, 0], 0x1000, 80)];
-        cache.populate_index(&chunks, 1);
+        let mut loads = 0;
+        let mut load = || {
+            loads += 1;
+            one_chunk_index()
+        };
+        let first = cache.parsed_index_or_load(&mut load).unwrap();
+        let second = cache.parsed_index_or_load(&mut load).unwrap();
+        assert_eq!(loads, 2);
+        assert!(!Arc::ptr_eq(&first, &second));
         assert!(!cache.stats().index_loaded());
 
         cache.put_decompressed(cache.begin_pass(), &[0], vec![1, 2, 3]);
@@ -1191,14 +1177,15 @@ mod tests {
     #[case::nosync_mutex(NOSYNC_MUTEX)]
     fn clear_resets_everything<L: CacheLock<CacheInner>>(#[case] _lock: PhantomData<L>) {
         let cache = ChunkCache::<L>::new();
-        let chunks = vec![make_chunk(vec![0, 0], 0x1000, 80)];
-        cache.populate_index(&chunks, 1);
+        let before = cache.parsed_index_or_load(one_chunk_index).unwrap();
         cache.put_decompressed(cache.begin_pass(), &[0], vec![1, 2, 3]);
 
         cache.clear();
         assert!(!cache.stats().index_loaded());
         assert_eq!(cache.stats().cached_chunks(), 0);
         assert_eq!(cache.stats().cached_bytes(), 0);
+        let after = cache.parsed_index_or_load(one_chunk_index).unwrap();
+        assert!(!Arc::ptr_eq(&before, &after));
     }
 
     #[rstest]

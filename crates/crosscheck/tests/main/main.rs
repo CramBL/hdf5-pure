@@ -23,6 +23,7 @@ mod c_write_compat;
 mod cell_array;
 mod chunk_btree_offset_width;
 mod chunk_filter_mask;
+mod chunk_index_cache;
 mod chunk_index_grid;
 mod chunked_references;
 mod classic_aggregation;
