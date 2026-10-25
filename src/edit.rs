@@ -376,7 +376,7 @@ pub use self::append::AppendBuilder;
 pub(crate) use self::append::{AppendGeometry, AppendTarget, LocatedState};
 #[cfg(test)]
 pub(crate) use self::append::{datatype_is_raw_appendable, locate_dataset_state};
-pub use global_heap_liveness::GlobalHeapLiveness;
+pub(crate) use global_heap_liveness::GlobalHeapLiveness;
 
 /// An undefined on-disk address (all bits set), HDF5's "no address" sentinel.
 const UNDEF: u64 = u64::MAX;
@@ -1299,42 +1299,39 @@ pub struct SpaceAccounting {
     pub reusable_free_space: Vec<(u64, u64)>,
 }
 
-/// Describes file storage identified by the editor for regression tests.
+/// The byte classification of file storage identified by the editor.
 ///
 /// Extents are absolute `(offset, length)` pairs. The editor reads reachable storage with
 /// the parsers used for reclamation and reports unsupported structures through
 /// [`analysis_complete`](Self::analysis_complete). Unclassified extents can include live
 /// storage when the analysis is incomplete.
-///
-/// This type is outside the supported API.
-#[doc(hidden)]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SpaceOwnership {
+pub(crate) struct SpaceOwnership {
     /// The physical file length in bytes.
-    pub physical_size: u64,
+    pub(crate) physical_size: u64,
     /// The end-of-file position stored in the superblock.
-    pub logical_size: u64,
+    pub(crate) logical_size: u64,
     /// The userblock, from byte 0 to the superblock, or empty for a file without one.
-    pub userblock_space: Vec<(u64, u64)>,
+    pub(crate) userblock_space: Vec<(u64, u64)>,
     /// The dataset payload allocations stored outside object headers in this file, and the global
     /// heap collections that reachable objects refer to.
-    pub live_raw_space: Vec<(u64, u64)>,
+    pub(crate) live_raw_space: Vec<(u64, u64)>,
     /// The identified object headers, indexes, heaps, and file metadata.
-    pub live_metadata_space: Vec<(u64, u64)>,
+    pub(crate) live_metadata_space: Vec<(u64, u64)>,
     /// The complete allocations of persisted free-space managers.
-    pub free_space_manager_space: Vec<(u64, u64)>,
+    pub(crate) free_space_manager_space: Vec<(u64, u64)>,
     /// The free extents available to the editor.
-    pub reusable_free_space: Vec<(u64, u64)>,
+    pub(crate) reusable_free_space: Vec<(u64, u64)>,
     /// The bytes below the logical end of file outside the identified allocations and free space.
-    pub unclassified_space: Vec<(u64, u64)>,
+    pub(crate) unclassified_space: Vec<(u64, u64)>,
     /// Whether every reachable storage structure is supported and the traversal finished.
     ///
     /// Shared messages, unsupported headers or heaps, data the editor cannot read or that holds a
     /// file address it cannot locate, and traversal limits make the analysis incomplete, even when
     /// every byte has been classified.
-    pub analysis_complete: bool,
+    pub(crate) analysis_complete: bool,
     /// The bytes between the logical end of file and the physical file length.
-    pub trailing_slack_space: Vec<(u64, u64)>,
+    pub(crate) trailing_slack_space: Vec<(u64, u64)>,
 }
 
 impl WriteEngine {

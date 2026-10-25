@@ -71,7 +71,7 @@ fn fixed_width_root_updates_reach_stable_physical_length(
             AttrValue::I64(generation)
         );
         lengths.push(fs::metadata(&path).unwrap().len());
-        let ownership = file.__space_ownership().unwrap();
+        let ownership = crate::reader::storage_tests::ownership(&file).unwrap();
         assert!(ownership.analysis_complete);
         let accounting = file.space_accounting().unwrap();
         let root_addr =
@@ -355,7 +355,11 @@ fn tail_recycling_failure_preserves_committed_manager_sections(
     assert!(!file.persisted_free_space().unwrap().is_empty());
     drop(file);
     let file = File::open_rw(&path).unwrap();
-    assert!(file.__space_ownership().unwrap().analysis_complete);
+    assert!(
+        crate::reader::storage_tests::ownership(&file)
+            .unwrap()
+            .analysis_complete
+    );
 }
 
 #[test]
