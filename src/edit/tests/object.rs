@@ -376,9 +376,7 @@ fn a_raw_reference_target_is_screened_like_a_path_one() {
                 base: AddressContext::from_effective_base(BaseAddress::ZERO),
             },
             &engine.image(),
-            engine.superblock(),
-            engine.widths(),
-            AddressContext::from_effective_base(engine.superblock().base_address),
+            &engine.context,
         )
     };
 
@@ -438,9 +436,7 @@ fn reference_targets_resolve_equivalent_path_spellings(#[case] spelling: &str) {
                 base: AddressContext::from_effective_base(BaseAddress::ZERO),
             },
             &engine.image(),
-            engine.superblock(),
-            engine.widths(),
-            AddressContext::from_effective_base(engine.superblock().base_address),
+            &engine.context,
         )
     };
 
@@ -1287,15 +1283,15 @@ fn edit_session_reports_root_address_overflow_when_resolving_a_path() {
 
     let session = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     assert_eq!(
-        session.superblock.root_group_address,
+        session.context.superblock().root_group_address,
         StoredAddress::undefined(OffsetWidth::Eight)
     );
     let err = crate::group_v2::resolve_path_any_from_source(
         session.image(),
         AccessMode::ReadWrite,
-        &session.superblock,
-        session.widths,
-        session.addresses,
+        session.context.superblock(),
+        session.context.widths(),
+        session.context.addresses(),
         &ObjectPath::parse("d"),
     )
     .map_err(Error::from)

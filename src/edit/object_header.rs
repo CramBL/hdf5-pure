@@ -35,8 +35,8 @@ impl WriteEngine {
         ext_addr: u64,
         info: &FileSpaceInfo,
     ) -> Result<OhRegion, Error> {
-        let widths = self.widths;
-        let region = Self::gather_oh_messages(&self.image(), ext_addr, self.addresses)?;
+        let widths = self.context.widths();
+        let region = Self::gather_oh_messages(&self.image(), ext_addr, self.context.addresses())?;
         rewrite_extension_region_bytes(&region, widths, info)
     }
 

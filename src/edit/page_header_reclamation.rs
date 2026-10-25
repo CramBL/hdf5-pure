@@ -59,7 +59,7 @@ fn header_classification_uses_stored_alignment_and_preserves_physical_extents(
     userblock::prepend(&path, &[0xA5; 512]);
 
     let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
-    assert_eq!(engine.addresses.effective_base().get(), 512);
+    assert_eq!(engine.context.addresses().effective_base().get(), 512);
     let physical = stored + 512;
     let spans = engine
         .object_header_free_spans(&[(physical, length)])

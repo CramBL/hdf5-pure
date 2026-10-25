@@ -64,8 +64,9 @@ impl WriteEngine {
     /// datatype or dataspace message.
     pub(crate) fn global_heap_liveness(&self) -> Result<GlobalHeapLiveness, Error> {
         self.collections_reachable_from([self
-            .addresses
-            .absolute(self.superblock.root_group_address)?])
+            .context
+            .addresses()
+            .absolute(self.context.superblock().root_group_address)?])
     }
 
     /// Returns the global heap collections that the objects reachable from the object headers in
@@ -111,14 +112,18 @@ impl WriteEngine {
                 AccessMode::ReadWrite,
                 header,
                 self.widths(),
-                self.addresses,
-                crate::group_v1::group_leaf_node_k(&self.superblock),
+                self.context.addresses(),
+                crate::group_v1::group_leaf_node_k(self.context.superblock()),
             )? {
                 if !entry
                     .object_header_address
                     .is_undefined(self.widths().offsets)
                 {
-                    child(self.addresses.absolute(entry.object_header_address)?);
+                    child(
+                        self.context
+                            .addresses()
+                            .absolute(entry.object_header_address)?,
+                    );
                 }
             }
         }
@@ -282,7 +287,7 @@ impl WriteEngine {
         slots: &ReferenceSlots,
         referenced: &mut BTreeSet<u64>,
     ) -> Result<(), FormatError> {
-        let start = self.addresses.absolute(address)?;
+        let start = self.context.addresses().absolute(address)?;
         let element_size = NonZeroU64::from(slots.element_size);
         let batch_len = element_size.saturating_mul(ELEMENT_BATCH);
         for first in (0..len).step_by(batch_len.get().to_usize()?) {
@@ -319,7 +324,7 @@ impl WriteEngine {
         crate::chunked_read::visit_decoded_chunks_from_source(
             &BaseOffsetSource {
                 inner: &self.image(),
-                base: self.addresses.effective_base(),
+                base: self.context.addresses().effective_base(),
             },
             spec,
             self.widths(),
@@ -363,10 +368,10 @@ impl WriteEngine {
         crate::attribute::visit_dense_attribute_messages_from_source(
             &BaseOffsetSource {
                 inner: &self.image(),
-                base: self.addresses.effective_base(),
+                base: self.context.addresses().effective_base(),
             },
             AccessMode::ReadWrite,
-            self.addresses,
+            self.context.addresses(),
             &info,
             heap,
             self.widths(),
@@ -459,7 +464,7 @@ impl WriteEngine {
                             available: element.len(),
                         })?;
                 if let Some(id) = VlElement::parse(reference, self.widths().offsets)?
-                    .heap_id(self.widths().offsets, self.addresses)?
+                    .heap_id(self.widths().offsets, self.context.addresses())?
                 {
                     referenced.insert(id.collection.get());
                 }

@@ -14,7 +14,6 @@ use hdf5_pure_space::__private::{FreeList, PageTransition, PageType, SessionSpac
 use crate::DatatypeByteOrder;
 use crate::SuperblockVersion;
 use crate::access_mode::AccessMode;
-use crate::address::AddressContext;
 use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
@@ -28,11 +27,11 @@ use crate::filter_pipeline::FilterPipeline;
 use crate::image::FileImage;
 use crate::message_type::MessageType;
 use crate::object_path::ObjectPathBuf;
-use crate::superblock::Superblock;
 use crate::type_builders;
 use crate::width::FormatWidths;
 
 use super::LOSSY_TAIL_REFUSAL;
+use super::context::FileContext;
 use super::staging::StagedOp;
 
 use super::{AggregateSpace, Placement, SyncPolicy, WriteEngine};
@@ -297,10 +296,7 @@ impl WriteEngine {
             let plan_result = {
                 let Self {
                     image,
-                    superblock,
-                    widths,
-                    sb_sig_off,
-                    addresses,
+                    context,
                     space,
                     aggregation,
                     located,
@@ -310,10 +306,7 @@ impl WriteEngine {
                 let st = &located[&oh_addr];
                 let store = EditStore {
                     image: image.as_mut(),
-                    superblock,
-                    widths: *widths,
-                    sb_sig_off: *sb_sig_off,
-                    addresses: *addresses,
+                    context,
                     space,
                     aggregation: aggregation.as_mut(),
                     reserve: None,
@@ -344,10 +337,7 @@ impl WriteEngine {
                 let from_reserve = self.persist.is_some() || self.space.is_paged();
                 let Self {
                     image,
-                    superblock,
-                    widths,
-                    sb_sig_off,
-                    addresses,
+                    context,
                     space,
                     aggregation,
                     located,
@@ -358,10 +348,7 @@ impl WriteEngine {
                 let st = located.get_mut(&oh_addr).expect("dataset located above");
                 let mut store = EditStore {
                     image: image.as_mut(),
-                    superblock,
-                    widths: *widths,
-                    sb_sig_off: *sb_sig_off,
-                    addresses: *addresses,
+                    context,
                     space,
                     aggregation: aggregation.as_mut(),
                     reserve: (reuse && from_reserve).then_some(reserved),
@@ -428,14 +415,14 @@ impl WriteEngine {
     /// metadata read and parse errors.
     pub(super) fn append_prepare(&mut self, target: AppendTarget<'_>) -> Result<u64, Error> {
         // Immediate append requires base-zero addresses and a version 2 or 3 superblock.
-        if !self.superblock.base_address.is_zero() {
+        if !self.context.superblock().base_address.is_zero() {
             return Err(Error::AppendInPlaceUnsupported(
                 "in-place append does not support a file with a userblock (non-zero base \
                  address); use Dataset::append_staged",
             ));
         }
         if matches!(
-            self.superblock.version,
+            self.context.superblock().version,
             SuperblockVersion::Zero | SuperblockVersion::One
         ) {
             return Err(Error::AppendInPlaceUnsupported(
@@ -479,9 +466,9 @@ impl WriteEngine {
                     let addr = crate::group_v2::resolve_path_any_from_source(
                         &self.image(),
                         AccessMode::ReadWrite,
-                        &self.superblock,
-                        self.widths,
-                        self.addresses,
+                        self.context.superblock(),
+                        self.context.widths(),
+                        self.context.addresses(),
                         &dataset.as_path(),
                     )?;
                     self.resolved.insert(dataset.clone(), addr);
@@ -529,14 +516,15 @@ impl WriteEngine {
         let Ok(addr) = crate::group_v2::resolve_path_any_from_source(
             &self.image(),
             AccessMode::ReadWrite,
-            &self.superblock,
-            self.widths,
-            self.addresses,
+            self.context.superblock(),
+            self.context.widths(),
+            self.context.addresses(),
             &path.as_path(),
         ) else {
             return false;
         };
-        let Ok(region) = Self::gather_oh_messages(&self.image(), addr, self.addresses) else {
+        let Ok(region) = Self::gather_oh_messages(&self.image(), addr, self.context.addresses())
+        else {
             return false;
         };
         let mut datatype: Option<(usize, usize)> = None;
@@ -570,11 +558,11 @@ impl WriteEngine {
             return false;
         };
         let Ok(disk_ds) =
-            Dataspace::parse_with_length_width(&region[ds_b..ds_e], self.widths.lengths)
+            Dataspace::parse_with_length_width(&region[ds_b..ds_e], self.context.widths().lengths)
         else {
             return false;
         };
-        let Ok(dl) = DataLayout::parse_with_widths(&region[lb..le], self.widths) else {
+        let Ok(dl) = DataLayout::parse_with_widths(&region[lb..le], self.context.widths()) else {
             return false;
         };
         if disk_ds.dimensions.len() != 1 {
@@ -605,10 +593,7 @@ impl WriteEngine {
     pub(super) fn store(&mut self) -> EditStore<'_> {
         EditStore {
             image: self.image.as_mut(),
-            superblock: &mut self.superblock,
-            widths: self.widths,
-            sb_sig_off: self.sb_sig_off,
-            addresses: self.addresses,
+            context: &mut self.context,
             space: &mut self.space,
             aggregation: self.aggregation.as_mut(),
             reserve: None,
@@ -663,11 +648,7 @@ pub(crate) struct LocatedState {
 /// and index blocks use the metadata aggregate. PAGE allocation uses raw pages for both.
 pub(super) struct EditStore<'a> {
     image: &'a mut dyn FileImage,
-    superblock: &'a mut Superblock,
-    widths: FormatWidths,
-    sb_sig_off: u64,
-    /// Converts stored addresses to positions in the image.
-    addresses: AddressContext,
+    context: &'a mut FileContext,
     /// Allocation state, including PAGE transitions persisted at commit or close.
     space: &'a mut SessionSpace,
     /// Classic aggregates shared with staged edits.
@@ -690,7 +671,7 @@ impl EditStore<'_> {
     /// Returns [`Error::Format`] if address conversion, PAGE geometry, or padding size is invalid.
     /// Returns [`Error::Io`] if appending the padding or bytes fails.
     fn append_into_raw_page(&mut self, bytes: &[u8]) -> Result<u64, Error> {
-        let eoa = self.addresses.relative(self.image.len())?.get();
+        let eoa = self.context.addresses().relative(self.image.len())?.get();
         if let Some(transition) = self.space.plan_transition(eoa, PageType::Raw)? {
             if let PageTransition::Pad { extent, .. } = transition {
                 self.image.append(&vec![0u8; extent.len().to_usize()?])?;
@@ -729,11 +710,11 @@ impl crate::source::Source for EditStore<'_> {
 
 impl Store for EditStore<'_> {
     fn widths(&self) -> FormatWidths {
-        self.widths
+        self.context.widths()
     }
 
     fn recorded_eof(&self) -> u64 {
-        self.superblock.eof_address
+        self.context.superblock().eof_address
     }
 
     fn allocate(&mut self, bytes: &[u8], class: AllocationClass) -> Result<u64, Error> {
@@ -746,7 +727,10 @@ impl Store for EditStore<'_> {
             None
         };
         if let Some(extent) = extent {
-            let at = self.addresses.resolve(StoredAddress::new(extent.start()))?;
+            let at = self
+                .context
+                .addresses()
+                .resolve(StoredAddress::new(extent.start()))?;
             self.image.write_at(at.get(), bytes)?;
             return Ok(at.get());
         }
@@ -755,7 +739,7 @@ impl Store for EditStore<'_> {
             NonZeroU64::new(bytes.len() as u64),
         ) {
             let Placement::Aggregated { addr, end, .. } =
-                aggregation.reserve(self.addresses, self.space, size, class)?
+                aggregation.reserve(self.context.addresses(), self.space, size, class)?
             else {
                 return Err(FormatError::Internal(
                     "aggregate reservation is not aggregated".into(),
@@ -774,11 +758,11 @@ impl Store for EditStore<'_> {
 
     fn patch_superblock_eof(&mut self) -> Result<(), Error> {
         // Preserve the consistency flags and root address when advancing the recorded EOF.
-        let mut superblock = self.superblock.clone();
+        let mut superblock = self.context.superblock().clone();
         superblock.eof_address = self.image.len();
         let bytes = hdf5_pure_format::__private::serialize_superblock(&superblock)?;
-        self.write_at(self.sb_sig_off, &bytes)?;
-        *self.superblock = superblock;
+        self.write_at(self.context.signature().get(), &bytes)?;
+        self.context.adopt(superblock)?;
         Ok(())
     }
 

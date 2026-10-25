@@ -44,13 +44,14 @@ impl WriteEngine {
             return Ok(None);
         }
         if !to_free.iter().any(|&(addr, len, _)| {
-            addr == self.superblock.root_group_address && len < persist.threshold
+            addr == self.context.superblock().root_group_address && len < persist.threshold
         }) {
             return Ok(None);
         }
         let old_root = self
-            .addresses
-            .absolute(self.superblock.root_group_address)?;
+            .context
+            .addresses()
+            .absolute(self.context.superblock().root_group_address)?;
         if old_root >= new_root {
             return Ok(None);
         }
@@ -89,13 +90,13 @@ impl WriteEngine {
             return Ok(None);
         };
         if !self.proved_free_of_references {
-            let mut prospective = self.superblock.clone();
-            prospective.root_group_address = self.addresses.relative(new_root)?;
+            let mut prospective = self.context.superblock().clone();
+            prospective.root_group_address = self.context.addresses().relative(new_root)?;
             if !crate::reference_patch::prove_free_of_references(
                 &self.image(),
                 &prospective,
-                self.widths,
-                self.addresses,
+                self.context.widths(),
+                self.context.addresses(),
                 super::MAX_LINK_GRAPH_NODES,
             )? {
                 return Ok(None);
@@ -121,10 +122,12 @@ impl WriteEngine {
     ) -> Result<(), Error> {
         let RootReclamation { target, source } = reclamation;
         let source_addr = self
-            .addresses
+            .context
+            .addresses()
             .absolute(StoredAddress::new(source.start()))?;
         let target_addr = self
-            .addresses
+            .context
+            .addresses()
             .absolute(StoredAddress::new(target.start()))?;
         let bytes = self
             .image

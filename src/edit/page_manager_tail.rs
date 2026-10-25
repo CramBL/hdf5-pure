@@ -141,8 +141,9 @@ fn recovered_metadata_tail_can_hold_a_rebuilt_header() {
         hdf5_pure_core::FileSpacePageSize::DEFAULT,
     );
     let root = engine
-        .addresses
-        .absolute(engine.superblock.root_group_address)
+        .context
+        .addresses()
+        .absolute(engine.context.superblock().root_group_address)
         .unwrap();
     let before = issued_bytes(&engine);
     disk_log::start();
@@ -175,7 +176,7 @@ fn recovered_metadata_tail_can_hold_a_rebuilt_header() {
         )
         .unwrap();
     engine.commit().unwrap();
-    let root = engine.superblock.root_group_address.get();
+    let root = engine.context.superblock().root_group_address.get();
     assert!((tail.start()..tail.end()).contains(&root));
     assert_manager_allocations_owned(&engine);
     drop(engine);
@@ -253,7 +254,7 @@ fn manager_metadata_failures_preserve_ownership_and_reopen_the_issued_state(
         })
         .collect();
     let target = if publication {
-        control.sb_sig_off
+        control.context.signature().get()
     } else if section_list {
         writes
             .iter()
@@ -262,8 +263,15 @@ fn manager_metadata_failures_preserve_ownership_and_reopen_the_issued_state(
             .0
     } else {
         control
-            .addresses
-            .absolute(control.superblock.superblock_extension_address.unwrap())
+            .context
+            .addresses()
+            .absolute(
+                control
+                    .context
+                    .superblock()
+                    .superblock_extension_address
+                    .unwrap(),
+            )
             .unwrap()
     };
     let index = writes
@@ -320,7 +328,7 @@ fn manager_metadata_failures_preserve_ownership_and_reopen_the_issued_state(
         assert!(
             issued
                 .iter()
-                .all(|(offset, _)| *offset != engine.sb_sig_off)
+                .all(|(offset, _)| *offset != engine.context.signature().get())
         );
         let previous = File::from_bytes(issued_bytes(&engine)).unwrap();
         assert_eq!(

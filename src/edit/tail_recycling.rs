@@ -97,7 +97,7 @@ impl WriteEngine {
         let managers = ManagerSections::flat(post.extents().iter().copied());
         let len = extension_len.checked_add(free_space_manager::manager_blocks_len(
             &managers,
-            self.widths,
+            self.context.widths(),
         ))?;
         if len > target.len() {
             return None;

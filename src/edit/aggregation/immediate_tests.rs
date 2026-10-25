@@ -139,7 +139,7 @@ fn immediate_phase_stops_keep_reservations_consumed(
         .append_inplace_i32_phased("values", &[97, 98], 4)
         .unwrap();
     assert_ne!(engine.aggregation.unwrap(), consumed);
-    assert_eq!(engine.superblock.eof_address, engine.image.len());
+    assert_eq!(engine.context.superblock().eof_address, engine.image.len());
     engine.finalize_persist().unwrap();
     drop(engine);
     let file = File::open(&path).unwrap();
@@ -257,7 +257,7 @@ fn failed_immediate_append_preserves_consumed_space(
         engine
             .append_inplace_i32_phased("values", &[97, 98], 4)
             .unwrap();
-        assert_eq!(engine.superblock.eof_address, engine.image.len());
+        assert_eq!(engine.context.superblock().eof_address, engine.image.len());
         engine.finalize_persist().unwrap();
     }
     drop(engine);

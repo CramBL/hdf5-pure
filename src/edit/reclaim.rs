@@ -69,7 +69,7 @@ impl WriteEngine {
     /// the logical end of file.
     pub(crate) fn space_ownership(&self) -> Result<SpaceOwnership, Error> {
         let physical_size = self.image.len();
-        let logical_size = self.superblock.eof_address;
+        let logical_size = self.context.superblock().eof_address;
         if logical_size > physical_size {
             return Err(FormatError::TruncatedFile {
                 expected_eof: logical_size,
@@ -81,8 +81,9 @@ impl WriteEngine {
         let mut live_raw_space = Vec::new();
         let mut live_metadata_space = Vec::new();
         let root = self
-            .addresses
-            .absolute(self.superblock.root_group_address)?;
+            .context
+            .addresses()
+            .absolute(self.context.superblock().root_group_address)?;
         let mut analysis_complete =
             self.collect_owned_spans(root, &mut live_raw_space, &mut live_metadata_space)?;
         let GlobalHeapLiveness {
@@ -93,24 +94,26 @@ impl WriteEngine {
         for collection in referenced_collections {
             live_raw_space.push(self.collection_span(collection)?);
         }
-        let userblock_space = Vec::from_iter((self.sb_sig_off > 0).then_some((0, self.sb_sig_off)));
+        let userblock_space = Vec::from_iter(
+            (self.context.signature().get() > 0).then_some((0, self.context.signature().get())),
+        );
 
         let superblock_len = u64::try_from(
-            hdf5_pure_format::__private::serialize_superblock(&self.superblock)?.len(),
+            hdf5_pure_format::__private::serialize_superblock(self.context.superblock())?.len(),
         )
         .map_err(|_err| FormatError::Internal("superblock length does not fit u64".into()))?;
-        live_metadata_space.push((self.sb_sig_off, superblock_len));
+        live_metadata_space.push((self.context.signature().get(), superblock_len));
 
-        if let Some(extension) = self.superblock.superblock_extension_address
+        if let Some(extension) = self.context.superblock().superblock_extension_address
             && !extension.is_undefined(self.widths().offsets)
         {
-            let extension = self.addresses.absolute(extension)?;
+            let extension = self.context.addresses().absolute(extension)?;
             let header = ObjectHeader::parse_from_source_with_widths(
                 &SourceMetadata(&self.image()),
                 AccessMode::ReadWrite,
                 extension,
                 self.widths(),
-                self.addresses.effective_base(),
+                self.context.addresses().effective_base(),
             )?;
             live_metadata_space.extend(self.oh_chunk_spans(extension)?);
             analysis_complete &= header.messages.iter().all(|message| {
@@ -126,18 +129,13 @@ impl WriteEngine {
         }
 
         let mut free_space_manager_space = Vec::new();
-        if let Some((_, info)) = Self::extension_fsinfo(
-            &self.image(),
-            &self.superblock,
-            self.widths(),
-            self.addresses,
-        )? {
+        if let Some((_, info)) = Self::extension_fsinfo(&self.image(), &self.context)? {
             if info.persist {
                 let widths = self.widths();
                 let (_, blocks) = crate::free_space_manager::read_persisted_sections_source(
                     &self.image(),
                     widths,
-                    self.addresses.effective_base(),
+                    self.context.addresses().effective_base(),
                     &info.manager_addrs,
                 )?;
                 free_space_manager_space.extend(blocks);
@@ -223,7 +221,7 @@ impl WriteEngine {
     /// parsing and source-read errors from [`super::object_header::read_oh_chunks`].
     pub(super) fn oh_chunk_spans(&self, addr: u64) -> Result<Vec<(u64, u64)>, Error> {
         Ok(
-            super::object_header::read_oh_chunks(&self.image(), addr, self.addresses)?
+            super::object_header::read_oh_chunks(&self.image(), addr, self.context.addresses())?
                 .into_iter()
                 .map(|chunk| chunk.span)
                 .collect(),
@@ -274,7 +272,7 @@ impl WriteEngine {
         let index = crate::attribute::collect_dense_attribute_index_storage_extents(
             &BaseOffsetSource {
                 inner: &self.image(),
-                base: self.addresses.effective_base(),
+                base: self.context.addresses().effective_base(),
             },
             &attr_info,
             self.widths(),
@@ -305,7 +303,7 @@ impl WriteEngine {
         let index = crate::group_v2::collect_dense_group_index_storage_extents(
             &BaseOffsetSource {
                 inner: &self.image(),
-                base: self.addresses.effective_base(),
+                base: self.context.addresses().effective_base(),
             },
             link_info,
             self.widths(),
@@ -338,7 +336,7 @@ impl WriteEngine {
         heap_address: StoredAddress,
         index: &[Extent],
     ) -> Option<Vec<(u64, u64, FreeClass)>> {
-        let base = self.addresses;
+        let base = self.context.addresses();
         let eof = self.image.len();
         let index_spans = index
             .iter()
@@ -378,13 +376,13 @@ impl WriteEngine {
         &self,
         heap_address: StoredAddress,
     ) -> Option<Vec<(u64, u64, FreeClass)>> {
-        let base = self.addresses;
+        let base = self.context.addresses();
         let storage = fractal_heap_storage::collect_fractal_heap_storage_from_source(
             &BaseOffsetSource {
                 inner: &self.image(),
                 base: base.effective_base(),
             },
-            self.addresses,
+            self.context.addresses(),
             heap_address,
             self.widths(),
         )
@@ -416,12 +414,13 @@ impl WriteEngine {
     /// each object once. Base-aware: stored child addresses are shifted by the
     /// userblock base, so the returned keys are absolute file offsets.
     pub(super) fn count_incoming_hard_links(&self) -> Option<HashMap<u64, u32>> {
-        let base = self.addresses;
+        let base = self.context.addresses();
         let mut counts: HashMap<u64, u32> = HashMap::new();
         let mut visited: HashSet<u64> = HashSet::new();
         let mut stack: Vec<u64> = vec![
-            self.addresses
-                .absolute(self.superblock.root_group_address)
+            self.context
+                .addresses()
+                .absolute(self.context.superblock().root_group_address)
                 .ok()?,
         ];
         let mut budget = MAX_LINK_GRAPH_NODES;
@@ -458,8 +457,8 @@ impl WriteEngine {
                 AccessMode::ReadWrite,
                 &header,
                 self.widths(),
-                self.addresses,
-                group_v1::group_leaf_node_k(&self.superblock),
+                self.context.addresses(),
+                group_v1::group_leaf_node_k(self.context.superblock()),
             )
             .ok()?;
             for e in entries {
@@ -508,7 +507,7 @@ impl WriteEngine {
         // data block and a group's child links: each is converted to an absolute
         // offset (a no-op on a base-0 file) before it is bounds-checked, recorded,
         // or descended into.
-        let base = self.addresses;
+        let base = self.context.addresses();
         let file_len = self.image().len();
         if depth >= MAX_COPY_DEPTH {
             return;
@@ -525,7 +524,7 @@ impl WriteEngine {
             Ok(s) => s,
             Err(_) => return,
         };
-        let region = Self::gather_oh_messages(&self.image(), addr, self.addresses).ok();
+        let region = Self::gather_oh_messages(&self.image(), addr, self.context.addresses()).ok();
         let attribute_storage = region
             .as_ref()
             .and_then(|region| self.dense_attribute_storage_spans(region, &spans));
@@ -546,7 +545,12 @@ impl WriteEngine {
             );
             return;
         }
-        match Self::read_object(&self.image(), AccessMode::ReadWrite, addr, self.addresses) {
+        match Self::read_object(
+            &self.image(),
+            AccessMode::ReadWrite,
+            addr,
+            self.context.addresses(),
+        ) {
             Ok(ObjModel::DatasetVerbatim { .. }) => {
                 self.append_object_metadata_spans(out, &spans, attribute_storage.as_deref());
             }
@@ -627,7 +631,7 @@ impl WriteEngine {
         out.extend(link_storage.into_iter().flatten().copied());
         // The recursion works in absolute offsets, matching `incoming`'s
         // keys and `oh_chunk_spans`.
-        let base = self.addresses;
+        let base = self.context.addresses();
         for child in children {
             if let Ok(c) = base.absolute(child) {
                 self.collect_free_spans(c, depth + 1, incoming, out);
@@ -667,7 +671,7 @@ impl WriteEngine {
         spans
             .iter()
             .map(|&(address, length)| {
-                let stored = self.addresses.relative(address)?;
+                let stored = self.context.addresses().relative(address)?;
                 Ok((
                     address,
                     length,
@@ -708,10 +712,10 @@ impl WriteEngine {
         let entries = crate::group_v2::resolve_dense_entries_from_source(
             &BaseOffsetSource {
                 inner: &self.image(),
-                base: self.addresses.effective_base(),
+                base: self.context.addresses().effective_base(),
             },
             AccessMode::ReadWrite,
-            self.addresses,
+            self.context.addresses(),
             &link_info,
             heap_address,
             self.widths(),
@@ -775,7 +779,7 @@ impl WriteEngine {
             .into_iter()
             .filter(|(address, _)| !referenced_collections.contains(address))
             .filter_map(|(address, len)| {
-                let stored = self.addresses.relative(address).ok()?;
+                let stored = self.context.addresses().relative(address).ok()?;
                 Some((
                     address,
                     len,
@@ -827,7 +831,8 @@ impl WriteEngine {
     /// Returns the raw chunk data and metadata index blocks of a chunked dataset separately.
     fn chunked_storage_parts(&self, addr: u64) -> Option<ChunkedStorageParts> {
         // Locate the data-layout and dataspace messages in the object header.
-        let region = Self::gather_oh_messages(&self.image(), addr, self.addresses).ok()?;
+        let region =
+            Self::gather_oh_messages(&self.image(), addr, self.context.addresses()).ok()?;
         let mut layout_msg: Option<(usize, usize)> = None;
         let mut dataspace_msg: Option<(usize, usize)> = None;
         let mut p = 0;
@@ -867,7 +872,7 @@ impl WriteEngine {
         // span address is shifted back to an absolute file offset by adding `base`
         // (a no-op on a base-0 file). The free list and the bounds check below both
         // work in absolute file offsets.
-        let base = self.addresses;
+        let base = self.context.addresses();
         let split = crate::chunked_read::collect_chunked_storage_spans(
             &BaseOffsetSource {
                 inner: &self.image(),
@@ -982,7 +987,7 @@ impl WriteEngine {
             Some(page_size) => {
                 index_abuts_chunk_data(data, index)
                     && index.iter().all(|&(at, len)| {
-                        self.addresses.relative(at).is_ok_and(|stored| {
+                        self.context.addresses().relative(at).is_ok_and(|stored| {
                             !touches_page_zero(page_size, [(stored.get(), len)])
                         })
                     })
@@ -1004,7 +1009,8 @@ impl WriteEngine {
     /// disjoint/in-bounds. Returns `None` (leave unreclaimed) on any error or
     /// violation.
     pub(super) fn chunked_index_spans(&self, addr: u64) -> Option<Vec<(u64, u64)>> {
-        let region = Self::gather_oh_messages(&self.image(), addr, self.addresses).ok()?;
+        let region =
+            Self::gather_oh_messages(&self.image(), addr, self.context.addresses()).ok()?;
         let mut layout_msg: Option<(usize, usize)> = None;
         let mut p = 0;
         loop {
@@ -1024,7 +1030,7 @@ impl WriteEngine {
         if !matches!(layout, DataLayout::Chunked { .. }) {
             return None;
         }
-        let base = self.addresses;
+        let base = self.context.addresses();
         let mut spans = chunked_read::chunk_index_spans_from_source(
             &BaseOffsetSource {
                 inner: &self.image(),
@@ -1100,7 +1106,7 @@ impl WriteEngine {
                 AccessMode::ReadWrite,
                 addr,
                 self.widths(),
-                self.addresses.effective_base(),
+                self.context.addresses().effective_base(),
             )?;
             complete &= visit(addr, &header, &mut |child| pending.push((child, depth + 1)))?;
         }
@@ -1147,7 +1153,7 @@ impl WriteEngine {
                         object_header_address,
                     } = link.link_target
                     {
-                        child(self.addresses.absolute(object_header_address)?);
+                        child(self.context.addresses().absolute(object_header_address)?);
                     }
                 }
                 MessageType::LINK_INFO => {
@@ -1196,7 +1202,7 @@ impl WriteEngine {
                 if let Some(address) = address
                     && *size > 0
                 {
-                    raw.push((self.addresses.absolute(*address)?, *size));
+                    raw.push((self.context.addresses().absolute(*address)?, *size));
                 }
             }
             DataLayout::Chunked { .. } => {
@@ -1212,7 +1218,7 @@ impl WriteEngine {
                 let storage = crate::chunked_read::collect_chunked_storage_spans(
                     &BaseOffsetSource {
                         inner: &self.image(),
-                        base: self.addresses.effective_base(),
+                        base: self.context.addresses().effective_base(),
                     },
                     &layout,
                     &dataspace,
@@ -1245,7 +1251,7 @@ impl WriteEngine {
         if let Some(heap) = info.fractal_heap_address {
             let source = BaseOffsetSource {
                 inner: &self.image(),
-                base: self.addresses.effective_base(),
+                base: self.context.addresses().effective_base(),
             };
             let index = crate::group_v2::collect_dense_group_index_storage_extents(
                 &source,
@@ -1263,13 +1269,17 @@ impl WriteEngine {
             let entries = crate::group_v2::resolve_dense_entries_from_source(
                 &source,
                 AccessMode::ReadWrite,
-                self.addresses,
+                self.context.addresses(),
                 &info,
                 heap,
                 self.widths(),
             )?;
             for entry in entries {
-                child(self.addresses.absolute(entry.object_header_address)?);
+                child(
+                    self.context
+                        .addresses()
+                        .absolute(entry.object_header_address)?,
+                );
             }
         }
 
@@ -1296,7 +1306,7 @@ impl WriteEngine {
         };
         let source = BaseOffsetSource {
             inner: &self.image(),
-            base: self.addresses.effective_base(),
+            base: self.context.addresses().effective_base(),
         };
         let index = crate::attribute::collect_dense_attribute_index_storage_extents(
             &source,
@@ -1313,7 +1323,7 @@ impl WriteEngine {
         crate::attribute::visit_dense_attribute_messages_from_source(
             &source,
             AccessMode::ReadWrite,
-            self.addresses,
+            self.context.addresses(),
             &info,
             heap,
             self.widths(),
@@ -1332,7 +1342,14 @@ impl WriteEngine {
     ) -> Result<Vec<(u64, u64)>, Error> {
         spans
             .into_iter()
-            .map(|(addr, len)| Ok((self.addresses.absolute(StoredAddress::new(addr))?, len)))
+            .map(|(addr, len)| {
+                Ok((
+                    self.context
+                        .addresses()
+                        .absolute(StoredAddress::new(addr))?,
+                    len,
+                ))
+            })
             .collect()
     }
 
@@ -1353,9 +1370,9 @@ impl WriteEngine {
         let storage = match fractal_heap_storage::collect_fractal_heap_storage_from_source(
             &BaseOffsetSource {
                 inner: &self.image(),
-                base: self.addresses.effective_base(),
+                base: self.context.addresses().effective_base(),
             },
-            self.addresses,
+            self.context.addresses(),
             heap,
             self.widths(),
         ) {
@@ -1373,7 +1390,8 @@ impl WriteEngine {
         };
         for &(extent, _) in storage.allocations() {
             metadata.push((
-                self.addresses
+                self.context
+                    .addresses()
                     .absolute(StoredAddress::new(extent.start()))?,
                 extent.len(),
             ));

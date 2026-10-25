@@ -475,7 +475,7 @@ impl WriteEngine {
     /// if writing the copy fails. Propagates errors from [`Self::write_chunked_relocatable`] for
     /// chunked copies.
     pub(super) fn write_copy_subtree(&mut self, node: &CopyTree) -> Result<u64, Error> {
-        let base = self.addresses;
+        let base = self.context.addresses();
         match node {
             CopyTree::DatasetVerbatim {
                 region,

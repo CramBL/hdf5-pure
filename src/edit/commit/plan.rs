@@ -11,6 +11,7 @@ use crate::access_mode::AccessMode;
 use crate::address::{AddressContext, StoredAddress, StoredAddressExt};
 use crate::datatype;
 use crate::edit::attributes::{self, AttrOp, EditedAttrs};
+use crate::edit::context::FileContext;
 use crate::edit::copy::{self, CopyTree};
 use crate::edit::dataset::{FlatDataset, MovingWrite, WritePlan};
 use crate::edit::group;
@@ -22,9 +23,7 @@ use crate::edit::{REFERENCE_INTO_RECLAIMED_SPACE, REFERENCE_TO_A_MOVED_OBJECT};
 use crate::error::Error;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::source::{BaseOffsetSource, Source};
-use crate::superblock::Superblock;
 use crate::type_builders::ObjectRefTarget;
-use crate::width::FormatWidths;
 
 /// Stores prepared writes before application consumes the staged inputs.
 pub(super) enum CommitPlan {
@@ -237,9 +236,9 @@ impl WriteEngine {
             let addr = crate::group_v2::resolve_path_any_from_source(
                 &self.image(),
                 AccessMode::ReadWrite,
-                &self.superblock,
-                self.widths,
-                self.addresses,
+                self.context.superblock(),
+                self.context.widths(),
+                self.context.addresses(),
                 &full.as_path(),
             )?;
             match self.prepare_write(addr, fd, full)? {
@@ -284,7 +283,7 @@ impl WriteEngine {
         staged: &StagedEdits,
         edits: &mut DatasetEdits,
     ) -> Result<(), Error> {
-        let base = self.addresses;
+        let base = self.context.addresses();
         for (full, ab) in staged.appends() {
             let Some((parent, leaf)) = full.split_leaf() else {
                 return Err(Error::AppendUnsupported("cannot append to the root group"));
@@ -300,12 +299,12 @@ impl WriteEngine {
             let addr = crate::group_v2::resolve_path_any_from_source(
                 &self.image(),
                 AccessMode::ReadWrite,
-                &self.superblock,
-                self.widths,
-                self.addresses,
+                self.context.superblock(),
+                self.context.widths(),
+                self.context.addresses(),
                 &full.as_path(),
             )?;
-            let mw = Self::prepare_append(&self.image(), addr, ab, base, self.widths)?;
+            let mw = Self::prepare_append(&self.image(), addr, ab, base, self.context.widths())?;
             let counts = edits
                 .incoming_links
                 .get_or_insert_with(|| self.count_incoming_hard_links())
@@ -337,7 +336,7 @@ impl WriteEngine {
         staged: &StagedEdits,
         edits: &mut DatasetEdits,
     ) -> Result<(), Error> {
-        let base = self.addresses;
+        let base = self.context.addresses();
         if !staged.dataset_attrs().is_empty() {
             let mut order: Vec<ObjectPathBuf> = Vec::new();
             let mut ops_by_path: HashMap<&ObjectPathBuf, Vec<&AttrOp>> = HashMap::new();
@@ -364,9 +363,9 @@ impl WriteEngine {
                 let addr = crate::group_v2::resolve_path_any_from_source(
                     &self.image(),
                     AccessMode::ReadWrite,
-                    &self.superblock,
-                    self.widths,
-                    self.addresses,
+                    self.context.superblock(),
+                    self.context.widths(),
+                    self.context.addresses(),
                     &full.as_path(),
                 )?;
                 let counts = edits
@@ -410,7 +409,7 @@ impl WriteEngine {
         moving_writes: Vec<DatasetRelocation>,
         write_targets: &[ObjectPathBuf],
     ) -> Result<DirtyGroups, Error> {
-        let base = self.addresses;
+        let base = self.context.addresses();
         let mut nodes: BTreeMap<ObjectPathBuf, Node> = BTreeMap::new();
         nodes.entry(ObjectPathBuf::root()).or_default(); // root is always dirty
         let mut add_targets: Vec<ObjectPathBuf> = Vec::new();
@@ -456,9 +455,9 @@ impl WriteEngine {
             let src_addr = crate::group_v2::resolve_path_any_from_source(
                 &self.image(),
                 AccessMode::ReadWrite,
-                &self.superblock,
-                self.widths,
-                self.addresses,
+                self.context.superblock(),
+                self.context.widths(),
+                self.context.addresses(),
                 &src.as_path(),
             )?;
             let tree = Self::read_copy_subtree(
@@ -468,7 +467,7 @@ impl WriteEngine {
                 0,
                 false,
                 base,
-                self.widths,
+                self.context.widths(),
             )?;
             copy_sources.push(src.clone());
             add_targets.push(dst.clone());
@@ -504,9 +503,9 @@ impl WriteEngine {
             let del_addr = crate::group_v2::resolve_path_any_from_source(
                 &self.image(),
                 AccessMode::ReadWrite,
-                &self.superblock,
-                self.widths,
-                self.addresses,
+                self.context.superblock(),
+                self.context.widths(),
+                self.context.addresses(),
                 &d.as_path(),
             )?;
             deleted_addrs.push(del_addr);
@@ -585,7 +584,7 @@ impl WriteEngine {
         nodes: &mut BTreeMap<ObjectPathBuf, Node>,
         incoming_links: &mut Option<Option<HashMap<u64, u32>>>,
     ) -> Result<GroupHeaders, Error> {
-        let base = self.addresses;
+        let base = self.context.addresses();
         let keys: Vec<ObjectPathBuf> = nodes.keys().cloned().collect();
         let mut superseded_addrs: Vec<(ObjectPathBuf, u64)> = Vec::new();
         for (key, node) in nodes.iter_mut() {
@@ -595,9 +594,9 @@ impl WriteEngine {
                 let addr = crate::group_v2::resolve_path_any_from_source(
                     &self.image(),
                     AccessMode::ReadWrite,
-                    &self.superblock,
-                    self.widths,
-                    self.addresses,
+                    self.context.superblock(),
+                    self.context.widths(),
+                    self.context.addresses(),
                     &key.as_path(),
                 )?;
                 if !key.is_empty() {
@@ -717,20 +716,20 @@ impl WriteEngine {
                 .map(|&(off, len, _)| (off, len))
                 .collect(),
             moved: Vec::new(),
-            base: self.addresses,
+            base: self.context.addresses(),
         };
         {
             let image = self.image();
             let framed = BaseOffsetSource {
                 inner: image,
-                base: self.addresses.effective_base(),
+                base: self.context.addresses().effective_base(),
             };
             for key in keys {
                 for (_, tree) in &nodes[key].prepared.copies {
                     copy::screen_copied_references(
                         tree,
-                        self.addresses,
-                        self.widths,
+                        self.context.addresses(),
+                        self.context.widths(),
                         &for_copied,
                         &framed,
                     )?;
@@ -775,9 +774,7 @@ impl WriteEngine {
             delete_targets,
             &for_supplied,
             &self.image(),
-            &self.superblock,
-            self.widths,
-            self.addresses,
+            &self.context,
         )?;
 
         if self.fresh_page_boundary.is_some() {
@@ -898,9 +895,9 @@ impl WriteEngine {
             })
             || !crate::reference_patch::prove_free_of_references(
                 &self.image(),
-                &self.superblock,
-                self.widths,
-                self.addresses,
+                self.context.superblock(),
+                self.context.widths(),
+                self.context.addresses(),
                 MAX_LINK_GRAPH_NODES,
             )?
         {
@@ -933,9 +930,7 @@ impl WriteEngine {
         delete_targets: &[ObjectPathBuf],
         invalidated: &InvalidatedAddresses,
         src: &(impl Source + ?Sized),
-        superblock: &Superblock,
-        widths: FormatWidths,
-        addresses: AddressContext,
+        context: &FileContext,
     ) -> Result<StoredAddress, Error> {
         let path = match target {
             ObjectRefTarget::Raw(addr) => {
@@ -946,7 +941,7 @@ impl WriteEngine {
             }
             ObjectRefTarget::Path(path) => path,
         };
-        let base = addresses;
+        let base = context.addresses();
         if let Some(&addr) = path_addr.get(path) {
             return Ok(base.relative(addr)?);
         }
@@ -972,9 +967,9 @@ impl WriteEngine {
             match crate::group_v2::resolve_path_any_from_source(
                 src,
                 AccessMode::ReadWrite,
-                superblock,
-                widths,
-                addresses,
+                context.superblock(),
+                context.widths(),
+                context.addresses(),
                 &path.as_path(),
             ) {
                 Ok(addr) => base.relative(addr)?,
@@ -992,9 +987,7 @@ impl WriteEngine {
         delete_targets: &[ObjectPathBuf],
         invalidated: &InvalidatedAddresses,
         src: &(impl Source + ?Sized),
-        superblock: &Superblock,
-        widths: FormatWidths,
-        addresses: AddressContext,
+        context: &FileContext,
     ) -> Result<BTreeMap<ObjectPathBuf, Vec<PreparedReference>>, Error> {
         let mut prepared = BTreeMap::new();
         let mut by_depth = keys.to_vec();
@@ -1022,9 +1015,7 @@ impl WriteEngine {
                                 delete_targets,
                                 invalidated,
                                 src,
-                                superblock,
-                                widths,
-                                addresses,
+                                context,
                             )?;
                             let target = match &patch.target {
                                 ObjectRefTarget::Path(path) if sim_addr.contains_key(path) => {
@@ -1039,10 +1030,10 @@ impl WriteEngine {
                         }
                         prepared.insert(dataset_path.clone(), references);
                     }
-                    sim_addr.insert(dataset_path, addresses.effective_base().get());
+                    sim_addr.insert(dataset_path, context.addresses().effective_base().get());
                 }
             }
-            sim_addr.insert(key.clone(), addresses.effective_base().get());
+            sim_addr.insert(key.clone(), context.addresses().effective_base().get());
         }
         Ok(prepared)
     }

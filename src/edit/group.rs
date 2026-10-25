@@ -32,12 +32,12 @@ impl WriteEngine {
     /// link, or an attribute is too large or has flags the conversion cannot preserve. Returns
     /// parsing and source-read errors as reported by the group and object-header readers.
     pub(super) fn reconstruct_v1_group(&self, addr: u64) -> Result<GroupInfo, Error> {
-        let base = self.addresses;
+        let base = self.context.addresses();
         let oh = ObjectHeader::parse_from_source_with_widths(
             &SourceMetadata(&self.image()),
             AccessMode::ReadWrite,
             addr,
-            self.widths,
+            self.context.widths(),
             base.effective_base(),
         )?;
         if oh
@@ -54,14 +54,16 @@ impl WriteEngine {
             .iter()
             .find(|m| m.msg_type == MessageType::SYMBOL_TABLE)
         {
-            let symbol_table =
-                SymbolTableMessage::parse_with_offset_width(&message.data, self.widths.offsets)?;
+            let symbol_table = SymbolTableMessage::parse_with_offset_width(
+                &message.data,
+                self.context.widths().offsets,
+            )?;
             if group_v1::v1_group_holds_symbolic_link_from_source(
                 &self.image(),
                 &symbol_table,
-                self.widths,
-                self.addresses,
-                group_v1::group_leaf_node_k(&self.superblock),
+                self.context.widths(),
+                self.context.addresses(),
+                group_v1::group_leaf_node_k(self.context.superblock()),
             )? {
                 return Err(Error::EditUnsupported(
                     "a version 1 group holding a soft link cannot be converted in place",
@@ -72,9 +74,9 @@ impl WriteEngine {
             &self.image(),
             AccessMode::ReadWrite,
             &oh,
-            self.widths,
-            self.addresses,
-            group_v1::group_leaf_node_k(&self.superblock),
+            self.context.widths(),
+            self.context.addresses(),
+            group_v1::group_leaf_node_k(self.context.superblock()),
         )?;
 
         let mut region = fresh_group_region();
@@ -102,7 +104,7 @@ impl WriteEngine {
                     // Re-encode the reference for the version 2 header before writing its record.
                     region.push_shared(
                         MessageType::ATTRIBUTE,
-                        &object_header::modernize_shared_reference(&m.data, self.widths)?,
+                        &object_header::modernize_shared_reference(&m.data, self.context.widths())?,
                     );
                     continue;
                 }
@@ -127,7 +129,7 @@ impl WriteEngine {
         if sig.as_deref() != Ok(&b"OHDR"[..]) {
             return self.reconstruct_v1_group(addr);
         }
-        let mut region = Self::gather_oh_messages(&self.image(), addr, self.addresses)?;
+        let mut region = Self::gather_oh_messages(&self.image(), addr, self.context.addresses())?;
         let mut p = 0;
         let mut has_link_info = false;
         let mut link_names = Vec::new();
