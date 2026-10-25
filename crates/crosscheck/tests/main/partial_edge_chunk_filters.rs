@@ -7,19 +7,30 @@
 //! of the dataset and stores each chunk that extends past the extent as it
 //! stands. Both libraries read the values back.
 //!
-//! An append through hdf5-pure, to a dataset with the flag or without it,
-//! stores each chunk it writes filtered or raw. An in-place append also stores
-//! a chunk with every filter skipped where a reader at the extent before the
-//! append and a reader at the extent after it decode the chunk differently.
-//! Both libraries read the values and report the same chunk records, before and
-//! after libhdf5 writes past the appended values.
+//! A dataset that hdf5-pure creates, buffered, staged, or streamed, with the flag
+//! or without it, stores the layout flags, the chunk offsets and the filter
+//! masks of the dataset libhdf5 creates with the same properties, and each
+//! partial edge chunk under the flag as its elements padded with the fill value.
+//! Under the flag, a dataset inside one partial chunk gets a Single Chunk index
+//! and stores that chunk raw. Both libraries read the values, before and after
+//! libhdf5 writes the last element.
+//! An append through libhdf5 filters a raw edge chunk it fills, whichever
+//! library created the dataset.
 //!
-//! A staged overwrite through hdf5-pure, to a dataset with the flag or without
-//! it, stores each partial edge chunk unfiltered under the flag and every other
-//! chunk filtered, and so does an overwrite of variable-length strings. A second
-//! overwrite, whose chunks fit their slots, keeps every chunk at its address. A
-//! copy from another file and a repack keep each chunk as the source stores it.
-//! Both libraries read the values and report the same chunk records, before and
+//! An append through hdf5-pure, to a dataset either library created with the
+//! flag or without it, stores each chunk it writes filtered or raw. An in-place
+//! append also stores a chunk with every filter skipped where a reader at the
+//! extent before the append and a reader at the extent after it decode the
+//! chunk differently. Both libraries read the values and report the same chunk
+//! records, before and after libhdf5 writes past the appended values.
+//!
+//! A staged overwrite through hdf5-pure, to a dataset either library created
+//! with the flag or without it, stores each partial edge chunk unfiltered under
+//! the flag and every other chunk filtered, and so does an overwrite of the
+//! variable-length strings of a dataset libhdf5 created. A second overwrite,
+//! whose chunks fit their slots, keeps every chunk at its address. A copy from
+//! another file and a repack keep each chunk as the source stores it. Both
+//! libraries read the values and report the same chunk records, before and
 //! after libhdf5 writes the last element.
 
 #[cfg(target_endian = "little")]
@@ -33,25 +44,40 @@ use hdf5::dataset::ChunkOpts;
 use hdf5::filters::Filter as CFilter;
 #[cfg(target_endian = "little")]
 use hdf5::types::VarLenUnicode;
+use hdf5_pure::ChunkIndex;
+use hdf5_pure::DatasetCreateProperties;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
+use hdf5_pure::Layout;
+use hdf5_pure::MaxExtent;
+use hdf5_pure::MessageType;
+use hdf5_pure::PartialEdgeFiltering;
 use hdf5_pure::RepackOptions;
+use hdf5_pure_format::__private::AccessMode;
+use hdf5_pure_format::__private::ChunkedLayoutFlags;
+use hdf5_pure_format::__private::DONT_FILTER_PARTIAL_BOUND_CHUNKS;
+use hdf5_pure_format::__private::DataLayout;
+use hdf5_pure_format::__private::ObjectHeader;
+use hdf5_pure_format::__private::SINGLE_INDEX_WITH_FILTER;
 use ndarray::ArrayD;
 use ndarray::IxDyn;
 use rstest::rstest;
 use test_util_hdf5::dataset;
 use test_util_hdf5::dataset::Unlimited;
+use test_util_hdf5::dataset_writer::DatasetWriter;
 use test_util_hdf5::file;
 use test_util_hdf5::numeric::ByteOrder;
 
 use crate::array_index;
+use crate::c_object;
 
 #[derive(Clone, Copy, Debug)]
 enum Filter {
     Deflate,
     Shuffle,
     ShuffleDeflate,
+    Unfiltered,
 }
 
 impl Filter {
@@ -60,6 +86,7 @@ impl Filter {
             Self::Deflate => vec![CFilter::Deflate(DEFLATE_LEVEL)],
             Self::Shuffle => vec![CFilter::Shuffle],
             Self::ShuffleDeflate => vec![CFilter::Shuffle, CFilter::Deflate(DEFLATE_LEVEL)],
+            Self::Unfiltered => vec![],
         }
     }
 
@@ -69,6 +96,17 @@ impl Filter {
             Self::Deflate => vec![deflate],
             Self::Shuffle => vec![dataset::Filter::Shuffle],
             Self::ShuffleDeflate => vec![dataset::Filter::Shuffle, deflate],
+            Self::Unfiltered => vec![],
+        }
+    }
+
+    fn create_properties(self, properties: DatasetCreateProperties) -> DatasetCreateProperties {
+        let deflate = DeflateLevel::try_from(DEFLATE_LEVEL).unwrap();
+        match self {
+            Self::Deflate => properties.with_deflate(deflate),
+            Self::Shuffle => properties.with_shuffle(),
+            Self::ShuffleDeflate => properties.with_shuffle().with_deflate(deflate),
+            Self::Unfiltered => properties,
         }
     }
 
@@ -77,6 +115,24 @@ impl Filter {
         match self {
             Self::Deflate | Self::Shuffle => 0b1,
             Self::ShuffleDeflate => 0b11,
+            Self::Unfiltered => 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Creator {
+    Libhdf5,
+    Pure,
+}
+
+impl Creator {
+    fn create_unlimited(self, path: &Path, unlimited: Unlimited<'_, i32>) {
+        match self {
+            Self::Libhdf5 => unlimited
+                .stored_as(ByteOrder::LittleEndian.i32_datatype())
+                .libhdf5_create(path),
+            Self::Pure => unlimited.pure_create(path),
         }
     }
 }
@@ -153,6 +209,210 @@ fn a_dataset_exempting_its_partial_chunks_from_the_filters_reads_back(
 }
 
 #[rstest]
+#[case::rank_1_partial_tail(&[10], &[4], Some(OVERWRITE_FILL))]
+#[case::rank_1_partial_tail_without_a_fill_value(&[10], &[4], None)]
+#[case::rank_1_whole_chunks(&[12], &[4], Some(OVERWRITE_FILL))]
+#[case::chunk_past_the_whole_extent(&[3], &[4], Some(OVERWRITE_FILL))]
+#[case::partial_along_both_axes(&[5, 5], &[2, 3], Some(OVERWRITE_FILL))]
+#[case::partial_along_the_inner_axis(&[4, 5], &[2, 3], Some(OVERWRITE_FILL))]
+#[case::partial_along_the_outer_axis(&[5, 6], &[2, 3], Some(OVERWRITE_FILL))]
+#[case::partial_along_the_first_and_last_of_three_axes(
+    &[3, 4, 5],
+    &[2, 4, 3],
+    Some(OVERWRITE_FILL),
+)]
+fn a_created_dataset_stores_each_chunk_as_libhdf5_creates_it(
+    #[case] shape: &[usize],
+    #[case] chunk: &[usize],
+    #[case] fill: Option<i32>,
+    #[values(false, true)] raw_edges: bool,
+    #[values(
+        Filter::Deflate,
+        Filter::Shuffle,
+        Filter::ShuffleDeflate,
+        Filter::Unfiltered
+    )]
+    filter: Filter,
+    #[values(
+        DatasetWriter::Buffered,
+        DatasetWriter::Staged,
+        DatasetWriter::Streaming
+    )]
+    writer: DatasetWriter,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let created = dir.path().join("partial_edge_created.h5");
+    let reference = dir.path().join("partial_edge_reference.h5");
+    let fixture = ChunkedFixture {
+        shape,
+        chunk,
+        filter,
+        raw_edges,
+        fill,
+    };
+    let len = shape.iter().product();
+    let mut values: Vec<i32> = (0..len).map(|i| i as i32).collect();
+    fixture.pure_create(writer, &created, &values);
+    fixture.libhdf5_create(&reference, &values);
+
+    fixture.assert_stored(&created, &values);
+    let flags = layout_flags(&created);
+    assert_eq!(
+        (flags.partial_edge_chunks_stored_raw(), flags),
+        (raw_edges, layout_flags(&reference))
+    );
+    assert_eq!(
+        chunk_offsets_and_masks(&created),
+        chunk_offsets_and_masks(&reference)
+    );
+
+    fixture.libhdf5_write_last(&created, 999);
+
+    values[len - 1] = 999;
+    fixture.assert_stored(&created, &values);
+}
+
+#[rstest]
+fn a_dataset_inside_one_partial_chunk_stores_it_raw_under_the_flag_and_a_single_chunk_index(
+    #[values(Filter::Deflate, Filter::Shuffle, Filter::ShuffleDeflate)] filter: Filter,
+    #[values(
+        DatasetWriter::Buffered,
+        DatasetWriter::Staged,
+        DatasetWriter::Streaming
+    )]
+    writer: DatasetWriter,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("partial_edge_single_chunk.h5");
+    let fixture = ChunkedFixture {
+        shape: &[3],
+        chunk: &[4],
+        filter,
+        raw_edges: true,
+        fill: Some(OVERWRITE_FILL),
+    };
+    let mut values = vec![1, 2, 3];
+    writer.create(&path, "d", |builder| {
+        builder
+            .with_i32_data(&values)
+            .with_create_properties(fixture.create_properties());
+    });
+
+    fixture.assert_stored(&path, &values);
+    assert_eq!(
+        File::open(&path)
+            .unwrap()
+            .dataset("d")
+            .unwrap()
+            .layout()
+            .unwrap(),
+        Layout::Chunked {
+            chunk_shape: vec![4],
+            index: ChunkIndex::SingleChunk,
+        }
+    );
+    assert_eq!(
+        layout_flags(&path),
+        ChunkedLayoutFlags::new(DONT_FILTER_PARTIAL_BOUND_CHUNKS | SINGLE_INDEX_WITH_FILTER)
+    );
+
+    fixture.libhdf5_write_last(&path, 999);
+
+    values[2] = 999;
+    fixture.assert_stored(&path, &values);
+}
+
+#[rstest]
+#[cfg(target_endian = "little")]
+fn a_libhdf5_append_filters_the_raw_edge_chunk_it_fills(
+    #[values(Filter::Deflate, Filter::Shuffle, Filter::ShuffleDeflate)] filter: Filter,
+    #[values(Creator::Libhdf5, Creator::Pure)] creator: Creator,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("partial_edge_filled.h5");
+    let initial: Vec<i32> = (100..106).collect();
+    creator.create_unlimited(
+        &path,
+        Unlimited::new("d", &initial, APPEND_CHUNK)
+            .filters(&filter.test_util_pipeline())
+            .fill_value(APPEND_FILL)
+            .partial_edge_chunks_unfiltered(),
+    );
+
+    let file = hdf5::File::open_rw(&path).unwrap();
+    let ds = file.dataset("d").unwrap();
+    ds.resize([8]).unwrap();
+    ds.write_slice(&[106, 107], 6..8).unwrap();
+    drop(ds);
+    file.close().unwrap();
+
+    let values: Vec<i32> = (100..108).collect();
+    assert_eq!(
+        read_c_creation_properties(&path),
+        (
+            filter.pipeline(),
+            Some(ChunkOpts::DONT_FILTER_PARTIAL_CHUNKS)
+        )
+    );
+    assert_eq!(dataset::read_libhdf5::<i32>(&path, "d"), values);
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), values);
+    let chunks = array_index::libhdf5_chunks(&path, 0);
+    assert_eq!(
+        array_index::pure_chunks(&File::open(&path).unwrap()),
+        chunks
+    );
+    let image = std::fs::read(&path).unwrap();
+    let stored: Vec<_> = chunks
+        .iter()
+        .zip(values.chunks(4))
+        .map(|(chunk, elements)| {
+            let start = usize::try_from(chunk.address()).unwrap();
+            let end = start + usize::try_from(chunk.size()).unwrap();
+            let raw: Vec<u8> = elements.iter().flat_map(|e| e.to_le_bytes()).collect();
+            (
+                chunk.offset().to_vec(),
+                image[start..end] == raw[..],
+                chunk.filter_mask(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        stored,
+        [(vec![0], false, 0), (vec![APPEND_CHUNK], false, 0)]
+    );
+}
+
+fn chunk_offsets_and_masks(path: &Path) -> Vec<(Vec<u64>, u32)> {
+    array_index::libhdf5_chunks(path, 0)
+        .iter()
+        .map(|chunk| (chunk.offset().to_vec(), chunk.filter_mask()))
+        .collect()
+}
+
+fn layout_flags(path: &Path) -> ChunkedLayoutFlags {
+    let header = c_object::header_address(&hdf5::File::open(path).unwrap(), "d");
+    let image = std::fs::read(path).unwrap();
+    let parsed = ObjectHeader::parse(
+        &image,
+        AccessMode::ReadOnly,
+        usize::try_from(header).unwrap(),
+        OFFSET_SIZE,
+        LENGTH_SIZE,
+    )
+    .unwrap();
+    let message = parsed
+        .messages
+        .into_iter()
+        .find(|message| message.msg_type == MessageType::DATA_LAYOUT)
+        .unwrap();
+    let layout = DataLayout::parse(&message.data, OFFSET_SIZE, LENGTH_SIZE).unwrap();
+    let DataLayout::Chunked { flags, .. } = layout else {
+        panic!("expected a chunked layout, got {layout:?}");
+    };
+    flags
+}
+
+#[rstest]
 #[cfg(target_endian = "little")]
 #[case::raw_tail_stays_partial(true, Some(APPEND_FILL), 100..106, &[106], &[Stored::Raw])]
 #[case::raw_tail_becomes_full(
@@ -198,6 +458,7 @@ fn an_in_place_append_stores_each_written_chunk_as_both_libraries_read_it(
     #[case] appended: &[i32],
     #[case] written: &[Stored],
     #[values(Filter::Deflate, Filter::Shuffle, Filter::ShuffleDeflate)] filter: Filter,
+    #[values(Creator::Libhdf5, Creator::Pure)] creator: Creator,
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("partial_edge_append.h5");
@@ -213,7 +474,7 @@ fn an_in_place_append_stores_each_written_chunk_as_both_libraries_read_it(
     } else {
         unlimited
     };
-    unlimited.libhdf5_create(&path);
+    creator.create_unlimited(&path, unlimited);
     let before = array_index::libhdf5_chunks(&path, 0);
 
     dataset::pure_append(&path, "d", appended);
@@ -311,14 +572,14 @@ fn a_staged_append_stores_each_written_chunk_as_both_libraries_read_it(
     #[case] appended: &[i32],
     #[case] written: &[Stored],
     #[values(Filter::Deflate, Filter::Shuffle, Filter::ShuffleDeflate)] filter: Filter,
+    #[values(Creator::Libhdf5, Creator::Pure)] creator: Creator,
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("partial_edge_staged_append.h5");
     let initial: Vec<i32> = (100..106).collect();
     let unlimited = Unlimited::new("d", &initial, APPEND_CHUNK)
         .filters(&filter.test_util_pipeline())
-        .fill_value(APPEND_FILL)
-        .stored_as(ByteOrder::LittleEndian.i32_datatype());
+        .fill_value(APPEND_FILL);
     let (unlimited, chunk_opts) = if raw_edges {
         (
             unlimited.partial_edge_chunks_unfiltered(),
@@ -327,7 +588,7 @@ fn a_staged_append_stores_each_written_chunk_as_both_libraries_read_it(
     } else {
         (unlimited, ChunkOpts::empty())
     };
-    unlimited.libhdf5_create(&path);
+    creator.create_unlimited(&path, unlimited);
     let before = array_index::libhdf5_chunks(&path, 0);
 
     dataset::pure_append_staged(&path, "d", appended);
@@ -408,6 +669,7 @@ fn a_staged_overwrite_stores_each_chunk_as_both_libraries_read_it(
     #[case] fill: Option<i32>,
     #[values(false, true)] raw_edges: bool,
     #[values(Filter::Deflate, Filter::Shuffle, Filter::ShuffleDeflate)] filter: Filter,
+    #[values(Creator::Libhdf5, Creator::Pure)] creator: Creator,
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("partial_edge_staged_overwrite.h5");
@@ -419,7 +681,11 @@ fn a_staged_overwrite_stores_each_chunk_as_both_libraries_read_it(
         fill,
     };
     let len = shape.iter().product();
-    fixture.libhdf5_create(&path, &(0..len).map(|i| i as i32).collect::<Vec<_>>());
+    fixture.create(
+        creator,
+        &path,
+        &(0..len).map(|i| i as i32).collect::<Vec<_>>(),
+    );
 
     let mut values = dataset::incompressible(7, len);
     fixture.pure_overwrite(&path, &values);
@@ -518,6 +784,50 @@ struct ChunkedFixture<'a> {
 }
 
 impl ChunkedFixture<'_> {
+    fn create(self, creator: Creator, path: &Path, data: &[i32]) {
+        match creator {
+            Creator::Libhdf5 => self.libhdf5_create(path, data),
+            Creator::Pure => self.pure_create(DatasetWriter::Streaming, path, data),
+        }
+    }
+
+    fn pure_create(self, writer: DatasetWriter, path: &Path, data: &[i32]) {
+        let maxshape: Vec<MaxExtent> = extents_the_c_library_accepts(self.shape, self.chunk)
+            .iter()
+            .map(|extent| match extent.max {
+                Some(max) => MaxExtent::Fixed(max as u64),
+                None => MaxExtent::Unlimited,
+            })
+            .collect();
+        writer.create(path, "d", |builder| {
+            builder
+                .with_i32_data(data)
+                .with_shape(&self.dims())
+                .with_maxshape(&maxshape)
+                .with_create_properties(self.create_properties());
+        });
+    }
+
+    fn create_properties(self) -> DatasetCreateProperties {
+        let chunk: Vec<u64> = self.chunk.iter().map(|&edge| edge as u64).collect();
+        let properties = self
+            .filter
+            .create_properties(DatasetCreateProperties::new().with_chunks(&chunk));
+        let properties = match self.fill {
+            Some(fill) => properties.with_fill_value(fill),
+            None => properties,
+        };
+        properties.with_partial_edge_filtering(if self.raw_edges {
+            PartialEdgeFiltering::Skip
+        } else {
+            PartialEdgeFiltering::Apply
+        })
+    }
+
+    fn dims(self) -> Vec<u64> {
+        self.shape.iter().map(|&len| len as u64).collect()
+    }
+
     fn libhdf5_create(self, path: &Path, data: &[i32]) {
         let file = file::libhdf5_create_v110(path);
         let builder = file
@@ -527,6 +837,7 @@ impl ChunkedFixture<'_> {
             Filter::Deflate => builder.deflate(DEFLATE_LEVEL),
             Filter::Shuffle => builder.shuffle(),
             Filter::ShuffleDeflate => builder.shuffle().deflate(DEFLATE_LEVEL),
+            Filter::Unfiltered => builder,
         };
         let builder = match self.fill {
             Some(fill) => builder.fill_value(fill),
@@ -548,12 +859,11 @@ impl ChunkedFixture<'_> {
     }
 
     fn pure_overwrite(self, path: &Path, values: &[i32]) {
-        let shape: Vec<u64> = self.shape.iter().map(|&len| len as u64).collect();
         let file = File::open_rw(path).unwrap();
         file.dataset("d")
             .unwrap()
             .write_staged(|builder| {
-                builder.with_i32_data(values).with_shape(&shape);
+                builder.with_i32_data(values).with_shape(&self.dims());
             })
             .unwrap();
         file.commit().unwrap();
@@ -772,6 +1082,8 @@ fn var_len_strings(strings: impl IntoIterator<Item = String>) -> Vec<VarLenUnico
 const APPEND_CHUNK: u64 = 4;
 const APPEND_FILL: i32 = 17;
 const DEFLATE_LEVEL: u8 = 6;
+const LENGTH_SIZE: u8 = 8;
+const OFFSET_SIZE: u8 = 8;
 const OVERWRITE_FILL: i32 = -3;
 // A variable-length string element is stored as a sequence length, a global heap collection
 // address and an object index.
