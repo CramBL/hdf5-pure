@@ -148,7 +148,7 @@ impl WriteEngine {
     pub(super) fn resolve_dataset_attributes(&mut self, fd: &mut FlatDataset) -> Result<(), Error> {
         for (idx, collections) in std::mem::take(&mut fd.vl_attrs) {
             let addrs = self.place_vl_collections(&collections)?;
-            type_builders::patch_vl_refs(&mut fd.attrs[idx].raw_data, &addrs);
+            type_builders::patch_vl_refs(&mut fd.attrs[idx].raw_data, &addrs, 0);
         }
         Ok(())
     }

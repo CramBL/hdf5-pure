@@ -176,7 +176,7 @@ impl WriteEngine {
                         creation_index,
                     } = pending;
                     let addrs = self.place_vl_collections(&collections)?;
-                    type_builders::patch_vl_refs(&mut msg.raw_data, &addrs);
+                    type_builders::patch_vl_refs(&mut msg.raw_data, &addrs, 0);
                     *region = put_attr_message(
                         region,
                         &msg.name,
@@ -189,7 +189,7 @@ impl WriteEngine {
             EditedAttrs::Dense(mut dense) => {
                 for (idx, collections) in std::mem::take(&mut dense.vl) {
                     let addrs = self.place_vl_collections(&collections)?;
-                    type_builders::patch_vl_refs(&mut dense.set.attrs[idx].raw_data, &addrs);
+                    type_builders::patch_vl_refs(&mut dense.set.attrs[idx].raw_data, &addrs, 0);
                 }
                 self.append_dense_attrs(region, dense.set)
             }

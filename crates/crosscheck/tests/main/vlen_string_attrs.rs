@@ -146,6 +146,69 @@ fn the_c_library_reads_every_variant_as_a_variable_length_string() {
     assert_pure_reads_the_cases(&f.dataset("d").unwrap().attrs().unwrap(), "dataset");
 }
 
+/// The strings of every variable-length attribute share the file's global heap
+/// collections. Past one collection's 65,535 objects they continue in a second,
+/// which starts within an attribute: the C library resolves each reference on
+/// both sides of that boundary to its own string.
+#[test]
+fn the_c_library_reads_string_attributes_that_share_heap_collections() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("shared.h5");
+    let mut expected = Vec::new();
+    let mut next = 0;
+    let mut values = || {
+        let values: Vec<String> = (next..next + 4_000).map(|i| format!("s{i}")).collect();
+        next += 4_000;
+        values
+    };
+    let mut b = FileBuilder::new();
+    for i in 0..6 {
+        let value = values();
+        b.set_attr(
+            &format!("a{i}"),
+            AttrValue::VarLenStringArray(value.clone()),
+        );
+        expected.push(("/".to_string(), format!("a{i}"), value));
+    }
+    let mut g = b.create_group("g");
+    for i in 0..6 {
+        let value = values();
+        g.set_attr(
+            &format!("a{i}"),
+            AttrValue::VarLenStringArray(value.clone()),
+        );
+        expected.push(("g".to_string(), format!("a{i}"), value));
+    }
+    let d = g.create_dataset("d");
+    d.with_f64_data(&[1.0]);
+    for i in 0..6 {
+        let value = values();
+        d.set_attr(
+            &format!("a{i}"),
+            AttrValue::VarLenStringArray(value.clone()),
+        );
+        expected.push(("g/d".to_string(), format!("a{i}"), value));
+    }
+    b.add_group(g.finish());
+    b.write(&path).unwrap();
+
+    let c = hdf5::File::open(&path).unwrap();
+    for (owner, name, value) in &expected {
+        let attr = match owner.as_str() {
+            "/" => c.attr(name),
+            "g" => c.group("g").unwrap().attr(name),
+            _ => c.dataset(owner).unwrap().attr(name),
+        }
+        .unwrap();
+        let got: Vec<VarLenUnicode> = attr.read_raw().unwrap();
+        assert_eq!(
+            got.iter().map(VarLenUnicode::as_str).collect::<Vec<_>>(),
+            *value,
+            "{owner} {name}"
+        );
+    }
+}
+
 /// MATLAB's shape and the standard one carry the same text over the same
 /// element bytes, and differ in the datatype alone — which is the whole reason
 /// the standard one needed a variant of its own rather than a fix to the

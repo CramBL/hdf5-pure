@@ -1058,10 +1058,12 @@ pub(crate) fn build_global_heap_collections_from_bytes(objects: &[&[u8]]) -> Vec
 
 /// Patch VL attribute references with the actual global heap collection
 /// addresses. The raw_data contains VL references with placeholder addresses
-/// (0), one per attribute element, each holding an object of the collection its
-/// position selects (see [`build_global_heap_collections_from_bytes`]);
+/// (0), one per attribute element. Element `i` holds object `first + i` of the
+/// heap objects the collections store in order, so its collection and 1-based
+/// index follow from that position (see [`build_global_heap_collections_from_bytes`]).
 /// `collection_addresses` gives those collections' placed addresses in order.
-pub(crate) fn patch_vl_refs(raw_data: &mut [u8], collection_addresses: &[u64]) {
+/// `first` is 0 for collections that hold only this attribute's strings.
+pub(crate) fn patch_vl_refs(raw_data: &mut [u8], collection_addresses: &[u64], first: usize) {
     // Only a value that writes whole variable-length references reaches a heap,
     // and [`AttrValue::var_len_strings`] is what decides which values those are.
     // This is a screen on that decision, not a proof of it: it catches a value
@@ -1076,9 +1078,13 @@ pub(crate) fn patch_vl_refs(raw_data: &mut [u8], collection_addresses: &[u64]) {
     );
     let count = raw_data.len() / VL_REF_SIZE;
     for i in 0..count {
-        let address = collection_addresses[i / GLOBAL_HEAP_MAX_OBJECTS];
+        let object = first + i;
+        let address = collection_addresses[object / GLOBAL_HEAP_MAX_OBJECTS];
         let addr_offset = i * VL_REF_SIZE + 4; // skip sequence_length
         raw_data[addr_offset..addr_offset + 8].copy_from_slice(&address.to_le_bytes());
+        let index = u32::try_from(object % GLOBAL_HEAP_MAX_OBJECTS + 1)
+            .expect("a 1-based heap object index is at most GLOBAL_HEAP_MAX_OBJECTS");
+        raw_data[addr_offset + 8..addr_offset + 12].copy_from_slice(&index.to_le_bytes());
     }
 }
 

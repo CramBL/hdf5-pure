@@ -193,6 +193,117 @@ fn repack_preserves_multi_collection_vlen_dataset() {
     assert_split_labels_roundtrip(&read, SPLIT_COUNT);
 }
 
+/// The number of global heap collections in `bytes`, counted by their signature.
+fn heap_collection_count(bytes: &[u8]) -> usize {
+    bytes.windows(4).filter(|window| *window == b"GCOL").count()
+}
+
+/// Sets `per_object` variable-length string attributes of `strings_each` strings
+/// on the root, on group `g` and on dataset `g/d`, and returns every value set,
+/// keyed by object path and attribute name.
+fn set_string_attrs(
+    builder: &mut hdf5_pure::FileBuilder,
+    per_object: usize,
+    strings_each: usize,
+) -> Vec<(&'static str, String, Vec<String>)> {
+    let mut expected = Vec::new();
+    let mut next = 0;
+    let mut values = || {
+        let values: Vec<String> = (next..next + strings_each)
+            .map(|i| format!("s{i}"))
+            .collect();
+        next += strings_each;
+        values
+    };
+    for i in 0..per_object {
+        let value = values();
+        builder.set_attr(
+            &format!("a{i}"),
+            hdf5_pure::AttrValue::VarLenStringArray(value.clone()),
+        );
+        expected.push(("/", format!("a{i}"), value));
+    }
+    let mut group = builder.create_group("g");
+    for i in 0..per_object {
+        let value = values();
+        group.set_attr(
+            &format!("a{i}"),
+            hdf5_pure::AttrValue::VarLenStringArray(value.clone()),
+        );
+        expected.push(("g", format!("a{i}"), value));
+    }
+    let dataset = group.create_dataset("d");
+    dataset.with_f64_data(&[1.0]);
+    for i in 0..per_object {
+        let value = values();
+        dataset.set_attr(
+            &format!("a{i}"),
+            hdf5_pure::AttrValue::VarLenStringArray(value.clone()),
+        );
+        expected.push(("g/d", format!("a{i}"), value));
+    }
+    builder.add_group(group.finish());
+    expected
+}
+
+fn assert_string_attrs(file: &File, expected: &[(&str, String, Vec<String>)]) {
+    for (path, name, value) in expected {
+        let attrs = match *path {
+            "/" => file.root().attrs().unwrap(),
+            "g" => file.group("g").unwrap().attrs().unwrap(),
+            _ => file.dataset(path).unwrap().attrs().unwrap(),
+        };
+        match attrs.get(name) {
+            Some(hdf5_pure::AttrValue::VarLenStringArray(read)) => {
+                assert_eq!(read, value, "{path} {name} did not round-trip");
+            }
+            other => panic!("expected {path} {name} as strings, got {other:?}"),
+        }
+    }
+}
+
+/// Every variable-length string attribute of the file shares one global heap
+/// collection, as the C library shares one across objects. A collection is at
+/// least 4,096 bytes, so a collection per attribute makes a file of many short
+/// string attributes mostly padding.
+#[test]
+fn string_attributes_share_one_heap_collection() {
+    let mut builder = hdf5_pure::FileBuilder::new();
+    let expected = set_string_attrs(&mut builder, 2, 3);
+    let bytes = builder.finish().unwrap();
+
+    assert_eq!(heap_collection_count(&bytes), 1);
+    assert_string_attrs(&File::from_bytes(bytes).unwrap(), &expected);
+}
+
+/// The paged writer places the collections in its own pass, so it needs its own
+/// coverage.
+#[test]
+fn paged_string_attributes_share_one_heap_collection() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("paged.h5");
+    let mut builder = hdf5_pure::FileBuilder::new();
+    builder.with_file_space_strategy(hdf5_pure::FileSpaceStrategy::Page, true, 1);
+    let expected = set_string_attrs(&mut builder, 2, 3);
+    builder.write(&path).unwrap();
+
+    assert_eq!(heap_collection_count(&std::fs::read(&path).unwrap()), 1);
+    assert_string_attrs(&File::open(&path).unwrap(), &expected);
+}
+
+/// Attribute strings past one collection's object limit continue in a second
+/// collection, which starts within an attribute: its strings on both sides of
+/// that boundary must point into the right collection at the right index.
+#[test]
+fn string_attributes_past_one_collection_continue_in_the_next() {
+    let mut builder = hdf5_pure::FileBuilder::new();
+    let expected = set_string_attrs(&mut builder, 6, 4_000);
+    let bytes = builder.finish().unwrap();
+
+    assert_eq!(heap_collection_count(&bytes), 2);
+    assert_string_attrs(&File::from_bytes(bytes).unwrap(), &expected);
+}
+
 /// A variable-length *attribute* outgrows the compact attribute message's
 /// 65,535-byte size field long before it reaches any heap-object boundary (16
 /// bytes of reference per element binds at ~4,090 elements). Past that field it
