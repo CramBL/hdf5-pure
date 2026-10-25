@@ -27,7 +27,6 @@ use crate::error::{Error, FormatError};
 use crate::file_space_info::{self, NUM_FILE_FSM_MANAGERS};
 use crate::free_space_manager;
 use crate::source::Source;
-use crate::superblock;
 use crate::width::FormatWidths;
 
 /// Stores the root and address changes after replacement objects have been written.
@@ -199,8 +198,7 @@ impl WriteEngine {
                  close and reopen the file before editing again",
             ));
         }
-        let recovered = superblock::read(published.as_slice())?.superblock;
-        let proposed = self.context.recover(recovered, &published)?;
+        let proposed = self.context.recover(&published)?;
         self.context.adopt(proposed)?;
         Ok(())
     }

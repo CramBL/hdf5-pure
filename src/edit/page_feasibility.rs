@@ -966,6 +966,7 @@ impl WriteEngine {
     }
 
     fn assert_page_recovery_rejected(&mut self, explicit_sync: bool) {
+        let before = self.context.superblock().clone();
         let mark = self.staged.snapshot();
         disk_log::start();
         let error = if explicit_sync {
@@ -979,6 +980,7 @@ impl WriteEngine {
                 if reason == "PAGE publication bytes differ from the session image after a failed write; close and reopen the file before editing again"),
             "{error:?}"
         );
+        assert_eq!(self.context.superblock(), &before);
         assert!(self.staged.snapshot() == mark);
         assert!(self.space.reusable_sections().next().is_none());
         assert!(disk_log::take().is_empty());
