@@ -520,9 +520,9 @@ fn an_append_into_freed_space_stays_c_readable() {
         let s = File::open_rw(&path).unwrap();
         s.root().delete("scratch").unwrap();
         s.commit().unwrap();
-        let before = s.space_accounting().unwrap().reusable_free_bytes;
+        let before = s.reusable_space_stats().unwrap().reusable_free_bytes();
         s.dataset("log").unwrap().append(&payload).unwrap();
-        let after = s.space_accounting().unwrap().reusable_free_bytes;
+        let after = s.reusable_space_stats().unwrap().reusable_free_bytes();
         // Most of the hole, rather than a byte count that happens to match the
         // payload: the point is that the append drew on the free list at all,
         // and an exact figure would be a coincidence of this fixture's sizes.

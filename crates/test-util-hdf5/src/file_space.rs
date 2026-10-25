@@ -16,7 +16,7 @@ use hdf5::plist::file_create::FileSpaceStrategy as Hdf5FileSpaceStrategy;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::SyncPolicy;
-use hdf5_pure::{File, FileBuilder, FileSpaceStrategy, Layout, SpaceAccounting};
+use hdf5_pure::{File, FileBuilder, FileSpaceStrategy, Layout};
 use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::FormatWidths;
@@ -178,32 +178,6 @@ pub fn libhdf5_write_strategy_triplet(path: &Path, strategy: Hdf5FileSpaceStrate
 
 /// Number of `i32` elements in the middle dataset of the strategy-reuse fixture.
 pub const STRATEGY_DELETED_ELEMENTS: usize = 400;
-
-/// Asserts that live file-space accounting is internally consistent.
-#[track_caller]
-pub fn assert_space_accounting_consistent(acct: &SpaceAccounting) {
-    let summed: u64 = acct.reusable_free_space.iter().map(|(_, len)| len).sum();
-    assert_eq!(
-        summed, acct.reusable_free_bytes,
-        "reusable_free_bytes must equal the summed region lengths: {:?}",
-        acct.reusable_free_space
-    );
-    for w in acct.reusable_free_space.windows(2) {
-        assert!(
-            w[0].0 + w[0].1 <= w[1].0,
-            "reusable free regions must be sorted and disjoint: {:?}",
-            acct.reusable_free_space
-        );
-    }
-    for &(addr, len) in &acct.reusable_free_space {
-        assert!(
-            addr + len <= acct.logical_size,
-            "a free region [{addr}, {}) must lie within logical_size {}",
-            addr + len,
-            acct.logical_size
-        );
-    }
-}
 
 /// Asserts that the HDF5 logical end-of-file equals the physical file length.
 #[track_caller]

@@ -182,15 +182,23 @@ pub fn root_object_address(file: &File, bytes: &[u8], link_name: &str) -> u64 {
 
 /// Asserts that allocated extents are disjoint and outside the userblock and reusable free space.
 ///
-/// Uses session accounting for writable files and persisted free space for read-only files.
+/// Uses [`File::reusable_free_sections`] for writable files and [`File::persisted_free_sections`]
+/// for read-only files, translating stored addresses to absolute file offsets.
 ///
 /// # Panics
 ///
 /// Panics if free space cannot be read, an extent is empty or exceeds the physical file length,
 /// an extent overlaps the userblock or another extent, or an allocated byte is reusable.
 pub fn assert_unavailable(file: &File, extents: &[(u64, u64)]) {
-    let free = match file.space_accounting() {
-        Ok(accounting) => accounting.reusable_free_space,
+    let free: Vec<(u64, u64)> = match file.reusable_free_sections() {
+        Ok(sections) => sections
+            .sections()
+            .iter()
+            .map(|section| {
+                assert_eq!(section.coordinates(), FreeSectionCoordinates::Absolute);
+                (section.address(), section.length().get())
+            })
+            .collect(),
         Err(Error::ReadOnly) => file
             .persisted_free_sections()
             .unwrap()

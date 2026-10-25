@@ -19,12 +19,14 @@ use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FilterId;
 use hdf5_pure::FormatError;
+use hdf5_pure::FreeSectionCoordinates;
+use hdf5_pure::FreeSections;
 use hdf5_pure::Layout;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::MemoryStrategy;
 use hdf5_pure::PersistedFreeSections;
+use hdf5_pure::ReusableSpaceStats;
 use hdf5_pure::ScaleOffset;
-use hdf5_pure::SpaceAccounting;
 use hdf5_pure::SyncPolicy;
 use hdf5_pure::UserblockSize;
 use test_util::temp;
@@ -115,8 +117,9 @@ fn run_churn_inner(
         );
 
         let file = session.as_ref().unwrap();
-        let before_acct = file.space_accounting().unwrap();
-        let before_pressure = pressure(base, &before_acct);
+        let before_stats = file.reusable_space_stats().unwrap();
+        let before_sections = file.reusable_free_sections().unwrap();
+        let before_pressure = pressure(base, &before_stats, &before_sections);
         let before_physical = base.image_size(&path);
 
         write_epoch(file, spec);
@@ -147,7 +150,7 @@ fn run_churn_inner(
         }
         if first_delete_after.is_some()
             && sample.physical_size <= before_physical
-            && sample.reusable_free < before_acct.reusable_free_bytes
+            && sample.reusable_free < before_stats.reusable_free_bytes()
             && sample.pressure > before_pressure
         {
             stats.reuse_write_observed = true;
@@ -933,8 +936,9 @@ fn collect_sample(
     cumulative_epochs_written: usize,
     cumulative_epochs_deleted: usize,
 ) -> ChurnSample {
-    let acct = file.space_accounting().unwrap();
-    let pressure = pressure(base, &acct);
+    let summary = file.reusable_space_stats().unwrap();
+    let sections = file.reusable_free_sections().unwrap();
+    let pressure = pressure(base, &summary, &sections);
     let physical_size = base.image_size(path);
     assert!(
         physical_size <= MAX_FILE_BYTES,
@@ -944,8 +948,8 @@ fn collect_sample(
         sequence,
         active_epochs,
         physical_size,
-        logical_size: base.logical_size(&acct),
-        reusable_free: acct.reusable_free_bytes,
+        logical_size: base.logical_size(&summary),
+        reusable_free: summary.reusable_free_bytes(),
         pressure,
         cumulative_epochs_written,
         cumulative_epochs_deleted,
@@ -983,17 +987,19 @@ fn reopen_session(
     }
     let persisted_free = persisted_free_bytes(path);
     let reopened = base.open(path);
-    let acct = reopened.space_accounting().unwrap();
-    let reopened_pressure = pressure(base, &acct);
+    let summary = reopened.reusable_space_stats().unwrap();
+    let sections = reopened.reusable_free_sections().unwrap();
+    let reopened_pressure = pressure(base, &summary, &sections);
     assert_eq!(
-        acct.reusable_free_bytes, persisted_free,
+        summary.reusable_free_bytes(),
+        persisted_free,
         "a reopened bounded session must recover all persisted reusable free space"
     );
     validate_reopen_live_data(&reopened, live, epochs_written);
-    let recovered_free = acct.reusable_free_bytes;
+    let recovered_free = summary.reusable_free_bytes();
     stats.observe_state(
         physical_size,
-        base.logical_size(&acct),
+        base.logical_size(&summary),
         recovered_free,
         reopened_pressure,
     );
@@ -1066,30 +1072,27 @@ fn assert_deleted_epoch(file: &File, sequence: usize) {
 }
 
 fn final_state(path: &Path, base: Base, file: &File, live: &VecDeque<usize>) -> FinalState {
-    let acct = file.space_accounting().unwrap();
-    let pressure = pressure(base, &acct);
+    let summary = file.reusable_space_stats().unwrap();
+    let sections = file.reusable_free_sections().unwrap();
+    let pressure = pressure(base, &summary, &sections);
     let physical_size = base.image_size(path);
     assert!(physical_size <= MAX_FILE_BYTES);
-    let sections = file.reusable_free_sections().unwrap();
-    let stats = file.reusable_space_stats().unwrap();
-    assert_eq!(sections.free_bytes(), acct.reusable_free_bytes);
-    assert_eq!(stats.reusable_free_bytes(), sections.free_bytes());
-    assert_eq!(stats.logical_size(), acct.logical_size);
+    assert_eq!(summary.logical_size(), file.file_size());
 
     FinalState {
         physical_size,
-        logical_size: base.logical_size(&acct),
-        reusable_free: acct.reusable_free_bytes,
+        logical_size: base.logical_size(&summary),
+        reusable_free: summary.reusable_free_bytes(),
         reusable_free_regions: sections.section_count(),
         pressure,
         live_epochs: live.len(),
     }
 }
 
-fn pressure(base: Base, acct: &SpaceAccounting) -> u64 {
-    file_space::assert_space_accounting_consistent(acct);
-    base.logical_size(acct)
-        .checked_sub(acct.reusable_free_bytes)
+fn pressure(base: Base, stats: &ReusableSpaceStats, sections: &FreeSections) -> u64 {
+    crate::assert_free_sections_consistent!(stats, sections, FreeSectionCoordinates::Absolute);
+    base.logical_size(stats)
+        .checked_sub(stats.reusable_free_bytes())
         .expect("reusable free cannot exceed logical size")
 }
 
@@ -1573,8 +1576,8 @@ impl Base {
         std::fs::metadata(path).unwrap().len() - self.userblock()
     }
 
-    fn logical_size(self, acct: &SpaceAccounting) -> u64 {
-        acct.logical_size - self.userblock()
+    fn logical_size(self, stats: &ReusableSpaceStats) -> u64 {
+        stats.logical_size() - self.userblock()
     }
 }
 

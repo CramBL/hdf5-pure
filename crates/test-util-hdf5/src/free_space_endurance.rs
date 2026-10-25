@@ -16,6 +16,7 @@ use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
+use hdf5_pure::FreeSectionCoordinates;
 use hdf5_pure::Layout;
 use hdf5_pure::PersistedFreeSections;
 use test_util::temp;
@@ -155,7 +156,9 @@ fn run_endurance_inner(
         let context = Context::new(&file, &path, strategy, iteration);
         if strategy != FileSpaceStrategy::None {
             assert_eq!(
-                context.unwrap(file.space_accounting()).reusable_free_bytes,
+                context
+                    .unwrap(file.reusable_space_stats())
+                    .reusable_free_bytes(),
                 extent_bytes(&recovered),
                 "reopening must recover every persisted free byte; {context}"
             );
@@ -253,17 +256,14 @@ impl<'a> Context<'a> {
     }
 
     fn assert_reusable_space(&self) {
-        let accounting = self.unwrap(self.file.space_accounting());
-        file_space::assert_space_accounting_consistent(&accounting);
         let sections = self.unwrap(self.file.reusable_free_sections());
         let stats = self.unwrap(self.file.reusable_space_stats());
-        assert_eq!(
-            sections.free_bytes(),
-            accounting.reusable_free_bytes,
-            "{self}"
+        crate::assert_free_sections_consistent!(
+            &stats,
+            &sections,
+            FreeSectionCoordinates::Absolute
         );
-        assert_eq!(stats.reusable_free_bytes(), sections.free_bytes(), "{self}");
-        assert_eq!(stats.logical_size(), accounting.logical_size, "{self}");
+        assert_eq!(stats.logical_size(), self.file.file_size(), "{self}");
     }
 
     /// Formats creation settings and reusable and persisted free-space totals.
