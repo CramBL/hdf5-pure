@@ -55,6 +55,7 @@ pub use error::FormatError;
 pub use error::OBJECT_HEADER_MESSAGE_MAX;
 pub use file_space_info::FileSpaceInfo;
 pub use file_space_info::FileSpacePageSize;
+pub use file_space_info::FileSpaceSettings;
 pub use file_space_info::FileSpaceStrategy;
 pub use fill_time::FillTime;
 pub use filter_mask::FilterMask;

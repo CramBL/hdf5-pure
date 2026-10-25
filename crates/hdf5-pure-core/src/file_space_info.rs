@@ -3,6 +3,96 @@ use alloc::vec::Vec;
 use crate::DecodedStoredAddress;
 use crate::FormatError;
 
+/// The effective file-space management configuration.
+///
+/// Combines a strategy, persistence flag, free-section threshold, and checked page size.
+/// [`FileSpaceStrategy::Aggr`] and [`FileSpaceStrategy::None`] have no free-space managers,
+/// so their persistence flag is always `false` and their threshold is always 1.
+///
+/// The C library configures these properties with `H5Pset_file_space_strategy` and
+/// `H5Pset_file_space_page_size`. [`FileSpaceInfo`] provides the raw on-disk message fields.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FileSpaceSettings {
+    strategy: FileSpaceStrategy,
+    persist: bool,
+    threshold: u64,
+    page_size: FileSpacePageSize,
+}
+
+impl FileSpaceSettings {
+    /// Creates settings for `strategy` with persistence disabled, threshold 1, and
+    /// [`FileSpacePageSize::DEFAULT`].
+    pub const fn new(strategy: FileSpaceStrategy) -> Self {
+        Self {
+            strategy,
+            persist: false,
+            threshold: Self::DEFAULT_THRESHOLD,
+            page_size: FileSpacePageSize::DEFAULT,
+        }
+    }
+
+    /// Sets whether free-space managers persist their sections across file close.
+    ///
+    /// Ignores `persist` for [`FileSpaceStrategy::Aggr`] and [`FileSpaceStrategy::None`].
+    pub const fn with_persistence(mut self, persist: bool) -> Self {
+        self.persist = match self.strategy {
+            FileSpaceStrategy::FsmAggr | FileSpaceStrategy::Page => persist,
+            FileSpaceStrategy::Aggr | FileSpaceStrategy::None => false,
+        };
+        self
+    }
+
+    /// Sets the minimum free-section size, in bytes, for manager tracking.
+    ///
+    /// Accepts zero. Ignores `threshold` for [`FileSpaceStrategy::Aggr`] and
+    /// [`FileSpaceStrategy::None`].
+    pub const fn with_threshold(mut self, threshold: u64) -> Self {
+        self.threshold = match self.strategy {
+            FileSpaceStrategy::FsmAggr | FileSpaceStrategy::Page => threshold,
+            FileSpaceStrategy::Aggr | FileSpaceStrategy::None => Self::DEFAULT_THRESHOLD,
+        };
+        self
+    }
+
+    /// Sets the recorded page size, which affects allocation under [`FileSpaceStrategy::Page`].
+    ///
+    /// Retains `size` under every strategy.
+    pub const fn with_page_size(mut self, size: FileSpacePageSize) -> Self {
+        self.page_size = size;
+        self
+    }
+
+    /// Returns the strategy for managing file space.
+    pub const fn strategy(&self) -> FileSpaceStrategy {
+        self.strategy
+    }
+
+    /// Returns whether free-space managers persist their sections across file close.
+    pub const fn persist(&self) -> bool {
+        self.persist
+    }
+
+    /// Returns the minimum free-section size for manager tracking, in bytes.
+    pub const fn threshold(&self) -> u64 {
+        self.threshold
+    }
+
+    /// Returns the recorded page size, including under strategies that allocate without pages.
+    pub const fn page_size(&self) -> FileSpacePageSize {
+        self.page_size
+    }
+
+    /// The threshold for newly constructed settings and strategies without managers.
+    const DEFAULT_THRESHOLD: u64 = 1;
+}
+
+impl Default for FileSpaceSettings {
+    /// Returns [`Self::new`] with [`FileSpaceStrategy::FsmAggr`].
+    fn default() -> Self {
+        Self::new(FileSpaceStrategy::FsmAggr)
+    }
+}
+
 /// File-space management strategy, mirroring HDF5's `H5F_fspace_strategy_t`
 /// (set with `H5Pset_file_space_strategy`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

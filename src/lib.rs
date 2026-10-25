@@ -644,6 +644,8 @@ pub use hdf5_pure_core::FileSpaceInfo;
 #[doc(inline)]
 pub use hdf5_pure_core::FileSpacePageSize;
 #[doc(inline)]
+pub use hdf5_pure_core::FileSpaceSettings;
+#[doc(inline)]
 pub use hdf5_pure_core::FileSpaceStrategy;
 pub use hdf5_pure_core::UserblockSize;
 #[cfg(feature = "zfp")]
