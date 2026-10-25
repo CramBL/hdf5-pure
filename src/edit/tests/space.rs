@@ -1248,7 +1248,8 @@ fn failed_paged_commit_leaves_the_free_lists_untouched() {
     let good_ext = s.context.superblock().superblock_extension_address;
     let mut superblock = s.context.superblock().clone();
     superblock.superblock_extension_address = Some(StoredAddress::ZERO);
-    s.context.adopt(superblock).unwrap();
+    let proposed = s.context.propose(superblock).unwrap();
+    s.context.adopt(proposed).unwrap();
     s.delete(&ObjectPathBuf::parse("/drop")).unwrap();
     assert!(
         s.commit().is_err(),
@@ -1262,7 +1263,8 @@ fn failed_paged_commit_leaves_the_free_lists_untouched() {
     );
     let mut superblock = s.context.superblock().clone();
     superblock.superblock_extension_address = good_ext;
-    s.context.adopt(superblock).unwrap();
+    let proposed = s.context.propose(superblock).unwrap();
+    s.context.adopt(proposed).unwrap();
     s.delete(&ObjectPathBuf::parse("/drop")).unwrap();
     s.commit()
         .expect("the session is usable after a failed commit");
@@ -1326,7 +1328,8 @@ fn failed_persistent_commit_preserves_live_bytes_and_reusable_space(
     let good_ext = s.context.superblock().superblock_extension_address;
     let mut superblock = s.context.superblock().clone();
     superblock.superblock_extension_address = Some(StoredAddress::ZERO);
-    s.context.adopt(superblock).unwrap();
+    let proposed = s.context.propose(superblock).unwrap();
+    s.context.adopt(proposed).unwrap();
     s.delete(&ObjectPathBuf::parse("/c")).unwrap();
     let err = s.commit().unwrap_err();
     assert!(
@@ -1361,7 +1364,8 @@ fn failed_persistent_commit_preserves_live_bytes_and_reusable_space(
 
     superblock.superblock_extension_address = good_ext;
 
-    s.context.adopt(superblock).unwrap();
+    let proposed = s.context.propose(superblock).unwrap();
+    s.context.adopt(proposed).unwrap();
     s.delete(&ObjectPathBuf::parse("/c")).unwrap();
     s.commit().unwrap();
     drop(s);
@@ -1398,7 +1402,8 @@ fn a_failed_commit_leaves_no_reusable_span_the_image_names() {
     let good_ext = s.context.superblock().superblock_extension_address;
     let mut superblock = s.context.superblock().clone();
     superblock.superblock_extension_address = Some(StoredAddress::ZERO);
-    s.context.adopt(superblock).unwrap();
+    let proposed = s.context.propose(superblock).unwrap();
+    s.context.adopt(proposed).unwrap();
     s.stage_dataset_write(&ObjectPathBuf::parse("/labels"), {
         let mut db = crate::type_builders::DatasetBuilder::new("");
         db.with_vlen_strings(&["round-two-aaaa", "round-two-bbbb"]);
@@ -1411,7 +1416,8 @@ fn a_failed_commit_leaves_no_reusable_span_the_image_names() {
     );
     let mut superblock = s.context.superblock().clone();
     superblock.superblock_extension_address = good_ext;
-    s.context.adopt(superblock).unwrap();
+    let proposed = s.context.propose(superblock).unwrap();
+    s.context.adopt(proposed).unwrap();
     for i in 0..4 {
         s.stage_created_dataset(&ObjectPathBuf::parse(&format!("/filler{i}")), {
             let mut db = crate::type_builders::DatasetBuilder::new("");

@@ -30,6 +30,156 @@ use crate::source::MetadataCacheConfig;
 use crate::superblock::LocatedSuperblock;
 use crate::type_builders::DatasetBuilder;
 
+#[rstest]
+#[case::raise_before_write(0, false)]
+#[case::raise_partial_write(17, false)]
+#[case::raise_completed_write(usize::MAX, false)]
+#[case::clear_before_write(0, true)]
+#[case::clear_partial_write(17, true)]
+#[case::clear_completed_write(usize::MAX, true)]
+fn failed_flag_publication_preserves_the_confirmed_context(
+    #[case] prefix: usize,
+    #[case] clearing: bool,
+    #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] backing: MemoryStrategy,
+    #[values(false, true)] gathered: bool,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("flags.h5");
+    common::build_appendable(&path, 4, 4);
+    let original = std::fs::read(&path).unwrap();
+    let mut engine = WriteEngine::open_rw_with_strategy(
+        &path,
+        MetadataCacheConfig::disabled(),
+        FileLocking::Enabled,
+        backing,
+    )
+    .unwrap();
+    if !gathered {
+        engine
+            .set_write_buffering(WriteBuffering::Unbuffered)
+            .unwrap();
+    }
+    if clearing {
+        engine
+            .set_consistency_flags(SuperblockStatusFlags::write_marked())
+            .unwrap();
+    }
+    let before = engine.context.superblock().clone();
+    test_util::disk_log::fail_write_after(0, prefix);
+    let error = if clearing {
+        engine.release_status_flags()
+    } else {
+        engine.set_consistency_flags(SuperblockStatusFlags::write_marked())
+    }
+    .unwrap_err();
+    let Error::Io(error) = error else {
+        panic!("expected injected disk write failure, got {error:?}");
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::Other);
+    assert_eq!(error.to_string(), "injected disk write failure");
+    assert_eq!(engine.context.superblock(), &before);
+    if clearing {
+        engine
+            .append_inplace_i32_phased("d", &[5, 6, 7, 8], 4)
+            .unwrap();
+        assert!(engine.context.superblock().eof_address > before.eof_address);
+        assert_eq!(
+            engine.context.superblock().consistency_flags,
+            SuperblockStatusFlags::write_marked()
+        );
+        engine.force_sync().unwrap();
+        engine.release_status_flags().unwrap();
+        assert_eq!(
+            engine.context.superblock().consistency_flags,
+            SuperblockStatusFlags::new()
+        );
+        drop(engine);
+        let file = crate::reader::File::open(&path).unwrap();
+        assert_eq!(
+            file.superblock().consistency_flags,
+            SuperblockStatusFlags::new()
+        );
+        assert_eq!(
+            file.dataset("d").unwrap().read_i32().unwrap(),
+            vec![0, 1, 2, 3, 5, 6, 7, 8]
+        );
+    } else {
+        assert_eq!(
+            engine.held_status_flags,
+            SuperblockStatusFlags::write_marked()
+        );
+        engine
+            .set_consistency_flags(SuperblockStatusFlags::new())
+            .unwrap();
+        assert_eq!(engine.context.superblock(), &before);
+        engine.force_sync().unwrap();
+        drop(engine);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+}
+
+#[rstest]
+fn context_tracks_root_publication_and_ordered_append(
+    #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] backing: MemoryStrategy,
+    #[values(SyncPolicy::Always, SyncPolicy::OnClose)] sync: SyncPolicy,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("published_context.h5");
+    common::build_appendable(&path, 4, 4);
+    let mut engine = WriteEngine::open_rw_with_strategy(
+        &path,
+        MetadataCacheConfig::disabled(),
+        FileLocking::Enabled,
+        backing,
+    )
+    .unwrap();
+    engine.set_sync_policy(sync);
+    let old_root = engine.context.superblock().root_group_address;
+    let mut added = DatasetBuilder::new("added");
+    added.with_u8_data(&[9]);
+    engine
+        .stage_created_dataset(&ObjectPathBuf::parse("added"), added)
+        .unwrap();
+    engine.commit().unwrap();
+    let root = engine.context.superblock().root_group_address;
+    assert_ne!(root, old_root);
+    let bytes = engine.page_publication_snapshot().unwrap();
+    let published = crate::superblock::read(bytes.as_slice())
+        .unwrap()
+        .superblock;
+    assert_eq!(
+        engine.context.superblock().root_group_address,
+        published.root_group_address
+    );
+    assert_eq!(
+        engine.context.superblock().eof_address,
+        published.eof_address
+    );
+    engine
+        .append_inplace_i32_phased("d", &[5, 6, 7, 8], 4)
+        .unwrap();
+    assert_eq!(engine.context.superblock().root_group_address, root);
+    assert_eq!(engine.context.superblock().eof_address, engine.image.len());
+    let bytes = engine.page_publication_snapshot().unwrap();
+    let published = crate::superblock::read(bytes.as_slice())
+        .unwrap()
+        .superblock;
+    assert_eq!(
+        engine.context.superblock().root_group_address,
+        published.root_group_address
+    );
+    assert_eq!(
+        engine.context.superblock().eof_address,
+        published.eof_address
+    );
+    drop(engine);
+    let file = crate::reader::File::open(&path).unwrap();
+    assert_eq!(
+        file.dataset("d").unwrap().read_i32().unwrap(),
+        vec![0, 1, 2, 3, 5, 6, 7, 8]
+    );
+}
+
 #[test]
 fn append_inplace_crash_consistency_partial_tail_prefix() {
     use crate::reader::File as PureFile;
@@ -173,7 +323,8 @@ fn failed_commit_restores_heap_collection_ownership_records() {
     let good_ext = s.context.superblock().superblock_extension_address;
     let mut superblock = s.context.superblock().clone();
     superblock.superblock_extension_address = Some(StoredAddress::ZERO);
-    s.context.adopt(superblock).unwrap();
+    let proposed = s.context.propose(superblock).unwrap();
+    s.context.adopt(proposed).unwrap();
     s.stage_dataset_write(&ObjectPathBuf::parse("/labels"), {
         let mut db = crate::type_builders::DatasetBuilder::new("");
         db.with_vlen_strings(&["round-two-aaaa", "round-two-bbbb"]);
@@ -191,7 +342,8 @@ fn failed_commit_restores_heap_collection_ownership_records() {
     );
     let mut superblock = s.context.superblock().clone();
     superblock.superblock_extension_address = good_ext;
-    s.context.adopt(superblock).unwrap();
+    let proposed = s.context.propose(superblock).unwrap();
+    s.context.adopt(proposed).unwrap();
     s.stage_dataset_write(&ObjectPathBuf::parse("/labels"), {
         let mut db = crate::type_builders::DatasetBuilder::new("");
         db.with_vlen_strings(&["round-three-a", "round-three-b"]);
@@ -240,7 +392,8 @@ fn a_failed_commit_that_reused_free_space_leaves_the_file_intact() {
     );
     let mut superblock = s.context.superblock().clone();
     superblock.superblock_extension_address = Some(StoredAddress::ZERO);
-    s.context.adopt(superblock).unwrap();
+    let proposed = s.context.propose(superblock).unwrap();
+    s.context.adopt(proposed).unwrap();
     let mut db = crate::type_builders::DatasetBuilder::new("fresh");
     db.with_f64_data(&vec![7.5f64; 4096])
         .with_shape(&[4096])
@@ -285,7 +438,8 @@ fn a_failed_commit_puts_back_the_value_it_overwrote() {
     let good_ext = s.context.superblock().superblock_extension_address;
     let mut superblock = s.context.superblock().clone();
     superblock.superblock_extension_address = Some(StoredAddress::ZERO);
-    s.context.adopt(superblock).unwrap();
+    let proposed = s.context.propose(superblock).unwrap();
+    s.context.adopt(proposed).unwrap();
     s.stage_dataset_write(&ObjectPathBuf::parse("/nums"), {
         let mut db = crate::type_builders::DatasetBuilder::new("");
         db.with_i32_data(&[9, 9, 9]);
@@ -305,7 +459,8 @@ fn a_failed_commit_puts_back_the_value_it_overwrote() {
     );
     let mut superblock = s.context.superblock().clone();
     superblock.superblock_extension_address = good_ext;
-    s.context.adopt(superblock).unwrap();
+    let proposed = s.context.propose(superblock).unwrap();
+    s.context.adopt(proposed).unwrap();
     s.stage_created_dataset(&ObjectPathBuf::parse("/later"), {
         let mut db = crate::type_builders::DatasetBuilder::new("");
         db.with_i32_data(&[7]);
@@ -1622,7 +1777,8 @@ fn an_undo_replays_two_hard_links_to_one_block_newest_first() {
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     let mut superblock = s.context.superblock().clone();
     superblock.superblock_extension_address = Some(StoredAddress::ZERO);
-    s.context.adopt(superblock).unwrap();
+    let proposed = s.context.propose(superblock).unwrap();
+    s.context.adopt(proposed).unwrap();
     for (name, data) in [("/aa", [9, 9, 9]), ("/bb", [8, 8, 8])] {
         s.stage_dataset_write(&ObjectPathBuf::parse(name), {
             let mut db = crate::type_builders::DatasetBuilder::new("");
@@ -1670,7 +1826,8 @@ fn a_failed_commit_puts_back_every_chunk_it_overwrote() {
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     let mut superblock = s.context.superblock().clone();
     superblock.superblock_extension_address = Some(StoredAddress::ZERO);
-    s.context.adopt(superblock).unwrap();
+    let proposed = s.context.propose(superblock).unwrap();
+    s.context.adopt(proposed).unwrap();
     s.stage_dataset_write(&ObjectPathBuf::parse("/grid"), {
         let mut db = crate::type_builders::DatasetBuilder::new("");
         db.with_i32_data(&vec![0i32; 4096]);
@@ -1720,7 +1877,8 @@ fn a_commit_does_not_replay_a_journal_it_did_not_write() {
     s.inplace_undo.push((nums_block, stale));
     let mut superblock = s.context.superblock().clone();
     superblock.superblock_extension_address = Some(StoredAddress::ZERO);
-    s.context.adopt(superblock).unwrap();
+    let proposed = s.context.propose(superblock).unwrap();
+    s.context.adopt(proposed).unwrap();
     s.stage_created_dataset(&ObjectPathBuf::parse("/extra"), {
         let mut db = crate::type_builders::DatasetBuilder::new("");
         db.with_i32_data(&[42]);
@@ -1758,7 +1916,8 @@ fn a_rollback_orders_the_values_it_puts_back() {
             WriteEngine::open_sync_counting(&path, SyncPolicy::Always, Arc::clone(&syncs)).unwrap();
         let mut superblock = s.context.superblock().clone();
         superblock.superblock_extension_address = Some(StoredAddress::ZERO);
-        s.context.adopt(superblock).unwrap();
+        let proposed = s.context.propose(superblock).unwrap();
+        s.context.adopt(proposed).unwrap();
         if with_overwrite {
             s.stage_dataset_write(&ObjectPathBuf::parse("/nums"), {
                 let mut db = crate::type_builders::DatasetBuilder::new("");

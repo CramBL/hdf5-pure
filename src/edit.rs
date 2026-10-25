@@ -1573,19 +1573,24 @@ impl WriteEngine {
 
     /// Writes the consistency flags in the session's superblock and physical image.
     ///
-    /// Serializes the version 2 or 3 superblock with its encoded address values, then applies
-    /// the session's data durability barrier.
+    /// Adopts the flags in the file context after the write and data durability barrier succeed.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Format`] if the superblock cannot be serialized, or [`Error::Io`] if
     /// writing or syncing the image fails.
     fn set_consistency_flags(&mut self, flags: SuperblockStatusFlags) -> Result<(), Error> {
-        self.context.set_consistency_flags(flags);
-        self.held_status_flags = flags;
-        let bytes = hdf5_pure_format::__private::serialize_superblock(self.context.superblock())?;
-        self.write_at(self.context.signature().get(), &bytes)?;
+        let mut superblock = self.context.superblock().clone();
+        superblock.consistency_flags = flags;
+        let publication = self.context.propose(superblock)?.encode()?;
+        // A failed clear retains ownership of any mark the session may have written.
+        if !flags.is_empty() {
+            self.held_status_flags = flags;
+        }
+        self.write_at(self.context.signature().get(), publication.bytes())?;
         self.barrier_data()?;
+        self.context.adopt(publication.into_proposed())?;
+        self.held_status_flags = flags;
         Ok(())
     }
 
