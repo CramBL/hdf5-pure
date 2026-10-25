@@ -36,7 +36,6 @@ use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
 
 use proptest::prelude::*;
 
-use test_util::range;
 use test_util_hdf5::{dataset::Unlimited, file_space, session};
 
 /// The four file-space strategies, each mapped to the name the C library reports.
@@ -258,18 +257,13 @@ proptest! {
                 let len = extent.end - extent.start;
                 if isolated && len < threshold {
                         let sections = file.reusable_free_sections().unwrap();
-                        let free = sections
-                            .sections()
-                            .iter()
-                            .map(|section| (section.address(), section.length().get()))
-                            .collect::<Vec<_>>();
-                        prop_assert_eq!(range::covered_len(&free, &extent), 0);
+                        prop_assert_eq!(test_util_hdf5::covered_free_bytes!(&sections, &extent, FreeSectionCoordinates::Absolute), 0);
                         dropped.push(extent);
                 }
             }
             for extent in &dropped {
                 prop_assert_eq!(
-                    range::covered_len(&file.space_accounting().unwrap().reusable_free_space, extent),
+                    test_util_hdf5::covered_free_bytes!(&file.reusable_free_sections().unwrap(), extent, FreeSectionCoordinates::Absolute),
                     0
                 );
             }

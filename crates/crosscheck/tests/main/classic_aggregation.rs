@@ -508,7 +508,7 @@ fn libhdf5_reads_and_extends_its_classic_file_after_immediate_appends(
         .flat_map(|name| file_space::raw_extents(&file, name))
         .collect::<Vec<_>>();
     let raw_cursor = before_raw.iter().map(|extent| extent.end).max().unwrap();
-    let reusable = file.space_accounting().unwrap().reusable_free_space;
+    let reusable = file.reusable_free_sections().unwrap();
     file.dataset("values")
         .unwrap()
         .append_raw(&expected[initial..])
@@ -537,9 +537,9 @@ fn libhdf5_reads_and_extends_its_classic_file_after_immediate_appends(
         );
     } else {
         assert!(placed.iter().any(|extent| {
-            reusable
-                .iter()
-                .any(|&(at, len)| at < extent.end && extent.start < at + len)
+            reusable.sections().iter().any(|section| {
+                section.address() < extent.end && extent.start < section.end_address()
+            })
         }));
     }
     file.root()
@@ -634,12 +634,15 @@ fn libhdf5_fsm_file_reuses_deleted_storage_before_aggregate_spare(
     file.root().delete("scratch").unwrap();
     file.root().delete("keep").unwrap();
     file.commit().unwrap();
-    let before = file.space_accounting().unwrap();
-    let &(free_start, free_size) = before
-        .reusable_free_space
+    let before = file.reusable_free_sections().unwrap();
+    let free = before
+        .sections()
         .iter()
-        .find(|&&(address, size)| address <= hole && hole + 4096 <= address + size)
+        .find(|section| section.address() <= hole && hole + 4096 <= section.end_address())
         .unwrap();
+    assert_eq!(free.coordinates(), FreeSectionCoordinates::Absolute);
+    let free_start = free.address();
+    let free_size = free.length().get();
     file.root()
         .create_dataset("replacement", |dataset| {
             dataset.with_u8_data(&[19; 3072]);
@@ -841,7 +844,16 @@ fn assert_classic_fixture_partition(file: &File, bytes: &[u8], datasets: &[&str]
                 .map(|raw| (raw.start, raw.end - raw.start)),
         );
     }
-    extents.extend(file.space_accounting().unwrap().reusable_free_space);
+    extents.extend(
+        file.reusable_free_sections()
+            .unwrap()
+            .sections()
+            .iter()
+            .map(|section| {
+                assert_eq!(section.coordinates(), FreeSectionCoordinates::Absolute);
+                (section.address(), section.length().get())
+            }),
+    );
     let userblock = file.superblock().base_address.get();
     if userblock > 0 {
         extents.push((0, userblock));
