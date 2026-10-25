@@ -32,6 +32,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** `File::space_accounting` and its public tuple-based report type are removed in favor of typed session inspection, which includes allocator-held reservations ([#903](https://github.com/CramBL/hdf5-pure/pull/903)).
 - **Breaking:** The split file-space setters and getters on `FileCreateProperties` and file-space builder setters are removed in favor of one settings value ([#898](https://github.com/CramBL/hdf5-pure/pull/898)).
 - **Breaking:** `File::file_space_info` replaces optional borrowed inspection with fallible owned inspection, and the strategy-only getter is removed. Malformed file-space metadata returns an error while absent metadata remains distinct ([#894](https://github.com/CramBL/hdf5-pure/pull/894)).
 - **Breaking:** The public fields of `Datatype::VariableLength` are replaced by typed string and sequence payloads ([#862](https://github.com/CramBL/hdf5-pure/pull/862)).

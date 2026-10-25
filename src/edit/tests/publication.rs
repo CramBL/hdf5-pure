@@ -485,10 +485,13 @@ fn a_failed_commit_that_reused_free_space_leaves_the_file_intact() {
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     s.delete(&ObjectPathBuf::parse("/victim")).unwrap();
     s.commit().unwrap();
-    let free_before = s.space_accounting().unwrap().reusable_free_space;
+    let free_before = s.reusable_free_sections().unwrap();
     let len_before = std::fs::metadata(&path).unwrap().len();
     assert!(
-        free_before.iter().any(|&(_, l)| l > 4096 * 8 / 2),
+        free_before
+            .sections()
+            .iter()
+            .any(|section| section.length().get() > 4096 * 8 / 2),
         "the deleted chunked dataset left a hole worth reusing: {free_before:?}"
     );
     let mut superblock = s.context.superblock().clone();
@@ -506,7 +509,7 @@ fn a_failed_commit_that_reused_free_space_leaves_the_file_intact() {
         "a commit with an unreadable extension must fail"
     );
     assert_eq!(
-        s.space_accounting().unwrap().reusable_free_space,
+        s.reusable_free_sections().unwrap(),
         free_before,
         "the failed commit gives back the region it drew from"
     );

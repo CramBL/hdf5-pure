@@ -594,3 +594,40 @@ def test_migration_shape_allows_only_the_private_superblock_marker_removal(
     core["index"]["1"]["attrs"] = ["non_exhaustive"] if after else []
     core["index"]["1"]["inner"]["struct"]["kind"]["plain"]["has_stripped_fields"] = private_fields
     assert migration_shapes(baseline, core, core) == expected
+
+
+@pytest.mark.parametrize(
+    ("name", "kind", "removed"),
+    [
+        ("SpaceAccounting", "struct", True),
+        ("SpaceAccounting", "enum", False),
+        ("File", "struct", False),
+    ],
+)
+def test_migration_admits_only_the_removed_accounting_struct(name, kind, removed):
+    archive = io.BytesIO()
+    with tarfile.open(fileobj=archive, mode="w:gz"):
+        pass
+    archive.seek(0)
+    baseline = {
+        "root": 0,
+        "index": {
+            "0": {"inner": {"module": {"items": [1]}}},
+            "1": {"name": name, "inner": {kind: {}}},
+        },
+        "paths": {},
+    }
+    candidate = {
+        "root": 0,
+        "index": {"0": {"inner": {"module": {"items": []}}}},
+        "paths": {},
+    }
+    with (
+        patch.object(migration, "urlopen", return_value=archive),
+        patch.object(migration.rustdoc_json, "build", side_effect=[baseline, candidate, candidate]),
+    ):
+        if removed:
+            check_migration_paths("0.47.0", profile("hdf5-pure", "no-std"))
+        else:
+            with pytest.raises(ValueError, match=f"{kind} hdf5_pure::{name}"):
+                check_migration_paths("0.47.0", profile("hdf5-pure", "no-std"))

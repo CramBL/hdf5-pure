@@ -183,20 +183,14 @@ fn stored_and_reusable_views_have_distinct_coordinates(
         file.root().delete("b").unwrap();
         assert_eq!(
             file.reusable_free_sections().unwrap().free_bytes(),
-            file.space_accounting().unwrap().reusable_free_bytes
+            file.reusable_space_stats().unwrap().reusable_free_bytes()
         );
         file.commit().unwrap();
         let typed = file.reusable_free_sections().unwrap();
-        let legacy = file.space_accounting().unwrap();
         assert_eq!(
-            typed
-                .sections()
-                .iter()
-                .map(|s| (s.address(), s.length().get()))
-                .collect::<Vec<_>>(),
-            legacy.reusable_free_space
+            typed.free_bytes(),
+            file.reusable_space_stats().unwrap().reusable_free_bytes()
         );
-        assert_eq!(typed.free_bytes(), legacy.reusable_free_bytes);
         assert!(typed.sections().iter().all(|s| s.coordinates()
             == FreeSectionCoordinates::Absolute
             && s.address() >= userblock));
@@ -687,44 +681,12 @@ fn relocated_sources_preserve_stored_section_coordinates(
 
 fn assert_summary_and_sections(file: &File) -> ReusableSpaceStats {
     let summary = file.reusable_space_stats().unwrap();
-    let accounting = file.space_accounting().unwrap();
-    assert_eq!(
-        (summary.logical_size(), summary.reusable_free_bytes()),
-        (accounting.logical_size, accounting.reusable_free_bytes)
-    );
+    assert_eq!(summary.logical_size(), file.file_size());
     let sections = file.reusable_free_sections().unwrap();
-    assert_eq!(
-        sections
-            .sections()
-            .iter()
-            .map(|section| (section.address(), section.length().get()))
-            .collect::<Vec<_>>(),
-        accounting.reusable_free_space
-    );
-    assert_eq!(sections.free_bytes(), summary.reusable_free_bytes());
-    assert_eq!(
-        sections.section_count(),
-        accounting.reusable_free_space.len()
-    );
-    assert!(
-        sections
-            .sections()
-            .iter()
-            .all(|section| section.coordinates() == FreeSectionCoordinates::Absolute)
-    );
-    assert!(
-        sections
-            .sections()
-            .windows(2)
-            .all(|pair| pair[0].end_address() <= pair[1].address())
-    );
-    assert_eq!(
-        sections
-            .sections()
-            .iter()
-            .map(|section| section.length().get())
-            .sum::<u64>(),
-        sections.free_bytes()
+    test_util_hdf5::assert_free_sections_consistent!(
+        &summary,
+        &sections,
+        FreeSectionCoordinates::Absolute
     );
     summary
 }

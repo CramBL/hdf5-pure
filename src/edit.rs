@@ -311,6 +311,9 @@ use crate::file_space_info::FileSpaceInfo;
 use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::FileSpaceStrategy;
 use crate::filter_pipeline::FilterPipeline;
+use crate::free_sections::FreeSection;
+use crate::free_sections::FreeSectionCoordinates;
+use crate::free_sections::FreeSections;
 use crate::free_sections::ReusableSpaceStats;
 use crate::free_space_manager;
 use crate::free_space_manager::PersistedSections;
@@ -1210,91 +1213,6 @@ struct PersistState {
     /// Each block the next persisting commit frees: the superblock extension and free-space-manager
     /// blocks. A manager header or section list that does not parse is not among them.
     old_blocks: Vec<FreeExtent>,
-}
-
-/// A snapshot of a writable file's live space usage (issue #150).
-///
-/// This is the mutating-session counterpart of the read-only accounting on
-/// [`File`](crate::File) ([`file_size`](crate::File::file_size) and
-/// [`persisted_free_sections`](crate::File::persisted_free_sections)): it describes the
-/// file *as the session currently holds it*, taken atomically at the moment of
-/// the [`space_accounting`](crate::File::space_accounting) call.
-///
-/// It reflects the committed file plus any immediate in-place appends
-/// ([`append`](crate::Dataset::append)), but **not** edits still
-/// staged for the next [`commit`](crate::File::commit) — `create_group`,
-/// `create_dataset`, `write_dataset`, `append_dataset`, `delete`, `copy`,
-/// `copy_from`, and attribute edits change these figures only when they are
-/// applied at commit. Use [`has_staged_edits`](crate::File::has_staged_edits) to
-/// tell whether such pending work exists.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct SpaceAccounting {
-    /// The session's current logical size in bytes: the byte length of the file
-    /// as the session holds it. It equals what
-    /// [`File::file_size`](crate::File::file_size) reports for the file on disk
-    /// right now (the HDF5 `H5Fget_filesize` value), because the session keeps its
-    /// in-memory mirror byte-for-byte identical to the file — every committed
-    /// write and every immediate in-place append
-    /// ([`append`](crate::Dataset::append)) updates both together.
-    ///
-    /// It is not monotonic: under a file-space strategy with free-space managers,
-    /// [`commit`](crate::File::commit) can reclaim trailing free space and *shrink*
-    /// the file. It can also exceed the superblock's
-    /// recorded end-of-file address when the file was opened carrying unaccounted
-    /// trailing bytes (the same slack [`File::file_size`](crate::File::file_size)
-    /// surfaces), since opening does not rewrite that address.
-    pub logical_size: u64,
-    /// Total reusable free bytes this session can draw from before the file has to
-    /// grow — the summed length of
-    /// [`reusable_free_space`](Self::reusable_free_space).
-    ///
-    /// Counts the holes this session's earlier commits left inside
-    /// [`logical_size`](Self::logical_size) and tracked (superseded object headers, the blocks of
-    /// deleted objects) and, for a file created with
-    /// `H5Pset_file_space_strategy(persist = true)`, the regions
-    /// seeded from the on-disk free-space managers when the session was opened (so
-    /// reuse spans sessions). A fresh non-persisting session reports `0` even if
-    /// the file contains holes left by other tools — those are never tracked. It
-    /// is neither a lower bound on the next write's growth nor a promise of
-    /// shrinkage: a region counted here may be truncated away at commit — rather
-    /// than reused — if adjacent space is later freed and the coalesced run
-    /// reaches end-of-file. A session reports `0` under [`FileSpaceStrategy::None`]. Under
-    /// [`FileSpaceStrategy::Aggr`] and [`FileSpaceStrategy::FsmAggr`],
-    /// this includes unused metadata and raw aggregate reservations for staged edits and
-    /// immediate appends.
-    /// Held aggregate spare is counted even when shorter than the free-section threshold. Once
-    /// abandoned, interior spare is admitted under the same threshold and adjacency rules as
-    /// other freed extents. At persistent session teardown, unused reservations return through a
-    /// manager rewrite. The aggregate windows themselves are session state. Under
-    /// [`FileSpaceStrategy::FsmAggr`] a commit tracks a
-    /// hole shorter than the file's [`threshold`](crate::FileSpaceInfo::threshold) only
-    /// where the hole adjoins a tracked one.
-    ///
-    /// **Which write can spend it is not uniform on a persisting file.** Such a
-    /// session may write into a hole only once it has taken that hole *out* of
-    /// the on-disk managers, so an in-place [`append`](crate::Dataset::append)
-    /// holds a reserve of up to a megabyte per draw that this figure counts and
-    /// the next [`commit`](crate::File::commit) cannot place into: the commit
-    /// gives the unspent part back in the same tail that rewrites the managers,
-    /// which runs *after* it has placed everything. The commit after that one
-    /// can. So on a
-    /// persisting file read this as "space this session will reuse rather than
-    /// grow for", not as "space the very next commit can fill".
-    ///
-    /// The editor excludes these reservations from persisted managers while the session holds them.
-    /// The reusable-byte total can therefore exceed the persisted section-byte total reported through
-    /// [`File::persisted_free_sections`](crate::File::persisted_free_sections).
-    pub reusable_free_bytes: u64,
-    /// The reusable free regions as `(offset, length)` pairs, sorted ascending by
-    /// offset and fully coalesced (no two regions touch or overlap).
-    ///
-    /// The offsets are **absolute** file offsets (from byte 0, including any
-    /// userblock prefix), matching [`logical_size`](Self::logical_size). This
-    /// differs from [`File::persisted_free_sections`](crate::File::persisted_free_sections),
-    /// whose sections are relative to the superblock's base address. The two coincide
-    /// for a file with no userblock (base address 0). Empty when nothing is reusable.
-    pub reusable_free_space: Vec<(u64, u64)>,
 }
 
 /// The byte classification of file storage identified by the editor.
@@ -2554,46 +2472,36 @@ impl WriteEngine {
         ))
     }
 
-    /// Returns a snapshot of this session's live space usage, the current file size and the free
-    /// space it can reuse.
+    /// Returns sorted reusable sections at absolute physical offsets.
     ///
-    /// This is the mutating-session analogue of the read-only accounting on
-    /// [`File`](crate::File): it answers "how big is the file right now, and how
-    /// much space can be reused before it must grow?" from the session's own live
-    /// state. The snapshot reflects the committed file plus any immediate in-place
-    /// appends ([`append_inplace_gathered`](Self::append_inplace_gathered)) but excludes edits still
-    /// staged for the next [`commit`](Self::commit); see [`SpaceAccounting`] for
-    /// the field-by-field semantics and [`has_staged_edits`](Self::has_staged_edits)
-    /// for detecting pending work.
-    ///
-    /// On a paged file (`H5F_FSPACE_STRATEGY_PAGE`) the reported regions are the
-    /// union of the per-page-type managers, which a commit draws on under the rule
-    /// paging exists for: an allocation takes a hole of the page type it is placing,
-    /// or whole pages that are free of both, so reuse never re-mixes a page
-    /// (issue #261). Space whose page type this file does not settle is recorded
-    /// and handed back to the reference library but never spent, and is excluded
-    /// from the reusable figure.
-    ///
-    /// The free lists hold stored addresses, and this function reports each region at its file
-    /// position, the stored address plus the base address.
+    /// Includes allocator-held reservations, committed changes, and immediate appends. Staged
+    /// edits affect the report after [`commit`](Self::commit). On paged files, combines reusable
+    /// metadata and raw-data lists while retaining boundaries between page types. Dead and
+    /// unclassified space is excluded.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::OffsetOverflow`] if a region ends past [`u64::MAX`] once the base
-    /// address is added.
+    /// Returns [`FormatError::OffsetOverflow`] if resolving a stored address, computing a section
+    /// end, or summing section lengths overflows. Returns [`FormatError::InvalidFreeSpaceManager`]
+    /// if a section length is zero.
     ///
     /// # Examples
     ///
-    /// ```no_run
+    /// ```
     /// use hdf5_pure::File;
+    /// use hdf5_pure::FileBuilder;
     ///
-    /// let file = File::open_rw("existing.h5")?;
-    /// let acct = file.space_accounting()?;
+    /// # let directory = tempfile::tempdir()?;
+    /// # let path = directory.path().join("session-space.h5");
+    /// # FileBuilder::new().write(&path)?;
+    /// let file = File::open_rw(&path)?;
+    /// let stats = file.reusable_space_stats()?;
+    /// let sections = file.reusable_free_sections()?;
     /// println!(
     ///     "{} bytes on disk, {} reusable in {} free region(s)",
-    ///     acct.logical_size,
-    ///     acct.reusable_free_bytes,
-    ///     acct.reusable_free_space.len(),
+    ///     stats.logical_size(),
+    ///     stats.reusable_free_bytes(),
+    ///     sections.section_count(),
     /// );
     /// # Ok::<(), hdf5_pure::Error>(())
     /// ```
@@ -2601,72 +2509,62 @@ impl WriteEngine {
         rustdoc::private_doc_tests,
         reason = "rustdoc's test mode collects a private item, so this example is compiled and run by `cargo test --doc`"
     )]
-    pub fn space_accounting(&self) -> Result<SpaceAccounting, FormatError> {
-        // The append reserve is free space this session can still spend — it is
-        // out of the on-disk managers, not out of the file — so leaving it out
-        // would make an in-place append look like it had consumed bytes it has
-        // not yet placed anything in (issue #387).
-        //
-        // It is folded back through `FreeList::free` rather than appended and
-        // sorted, because a reserve span very often *abuts* what is left of the
-        // hole it was drawn from — and the spent end of the reserve walks toward
-        // that remainder until the two touch exactly. Reported as two regions
-        // they would break the field's documented contract in the one way that
-        // misleads: a caller sizing an allocation against the largest region
-        // would be told nothing that big fits when it does.
-        //
-        // It goes back into the list it came from and no other. On a paged file
-        // that is the raw list, which is what `take_raw_span` drew it out of;
-        // the two page-type lists stay reported side by side as they always
-        // were, because a caller cannot allocate across a page-type boundary and
-        // merging them would claim it could. `FreeList::free`'s debug assertion
-        // comes along and is welcome: the reserve is drawn out of exactly this
-        // list, so an overlap here would mean that invariant had already broken.
-        //
-        // A paged file tracks its free space per page type; report the union of
-        // the two, since the caller wants one total rather than a per-manager
-        // breakdown.
-        let physical = |extent: FreeExtent| {
-            let range = FileRange::new(
-                self.context
-                    .addresses()
-                    .resolve(StoredAddress::new(extent.start()))?,
-                extent.len(),
-            )?;
-            Ok((range.start().get(), range.length()))
-        };
-        let reusable_free_space = if let Some(aggregation) = self.aggregation
-            && !self.space.is_enabled()
-        {
-            let mut extents = aggregation
-                .unused()
-                .map(physical)
-                .collect::<Result<Vec<_>, _>>()?;
-            extents.sort_unstable();
-            extents
-        } else if self.reserved.is_empty() && self.aggregation.is_none() {
-            self.space
-                .reusable_sections()
-                .map(physical)
-                .collect::<Result<Vec<_>, FormatError>>()?
-        } else {
-            self.space
-                .reusable_sections_with_raw(
-                    self.reserved.extents().iter().copied().chain(
-                        self.aggregation
-                            .into_iter()
-                            .flat_map(AggregateSpace::unused),
-                    ),
+    pub(crate) fn reusable_free_sections(&self) -> Result<FreeSections, FormatError> {
+        FreeSections::new(
+            self.reusable_ranges()
+                .map(|range| {
+                    let range = range?;
+                    FreeSection::new(
+                        range.start().get(),
+                        range.length(),
+                        FreeSectionCoordinates::Absolute,
+                    )
+                })
+                .collect::<Result<Vec<_>, FormatError>>()?,
+        )
+    }
+
+    /// Returns physical reusable ranges, including allocator-held reservations.
+    ///
+    /// Reports aggregate spare when reusable allocation is disabled. With reusable allocation
+    /// enabled, combines the free lists with append reserves and aggregate spare, preserving
+    /// page-type boundaries.
+    /// Resolves stored ranges against the opened image's effective base.
+    fn reusable_ranges(&self) -> impl Iterator<Item = Result<FileRange, FormatError>> + '_ {
+        let aggregate_only = self.aggregation.filter(|_| !self.space.is_enabled());
+        let managers_only = self.reserved.is_empty() && self.aggregation.is_none();
+        let with_reserves = aggregate_only.is_none() && !managers_only;
+        aggregate_only
+            .into_iter()
+            .flat_map(AggregateSpace::unused)
+            .chain(
+                managers_only
+                    .then(|| self.space.reusable_sections())
+                    .into_iter()
+                    .flatten(),
+            )
+            .chain(
+                with_reserves
+                    .then(|| {
+                        self.space.reusable_sections_with_raw(
+                            self.reserved.extents().iter().copied().chain(
+                                self.aggregation
+                                    .into_iter()
+                                    .flat_map(AggregateSpace::unused),
+                            ),
+                        )
+                    })
+                    .into_iter()
+                    .flatten(),
+            )
+            .map(|extent| {
+                FileRange::new(
+                    self.context
+                        .addresses()
+                        .resolve(StoredAddress::new(extent.start()))?,
+                    extent.len(),
                 )
-                .map(physical)
-                .collect::<Result<Vec<_>, FormatError>>()?
-        };
-        let reusable_free_bytes = reusable_free_space.iter().map(|(_, len)| len).sum();
-        Ok(SpaceAccounting {
-            logical_size: self.image.len(),
-            reusable_free_bytes,
-            reusable_free_space,
-        })
+            })
     }
 
     /// Whether an immediate in-place append may allocate out of already-free

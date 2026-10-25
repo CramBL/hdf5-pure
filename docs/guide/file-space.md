@@ -199,6 +199,8 @@ to a fallible optional owned value.
 | `File::file_space_strategy() -> Option<FileSpaceStrategy>` | `file.file_space_settings()?` |
 | `File::file_space_info() -> Option<&FileSpaceInfo>` | `File::file_space_info() -> Result<Option<FileSpaceInfo>, Error>` |
 | `File::persisted_free_space()` | `File::persisted_free_sections()` |
+| `File::space_accounting() -> Result<SpaceAccounting, Error>` | `File::reusable_space_stats()` for scalars or `File::reusable_free_sections()` for ranges |
+| `SpaceAccounting` | `ReusableSpaceStats` and typed section reports |
 
 The strategy-only getter is removed. Read a strategy with
 [`FileSpaceSettings::strategy`](crate::FileSpaceSettings::strategy).
@@ -211,6 +213,14 @@ The tuple-based persisted-space accessor is removed. Inspect section addresses a
 lengths through [`FreeSections::sections`](crate::FreeSections::sections), or read the total with
 [`FreeSections::free_bytes`](crate::FreeSections::free_bytes). The report distinguishes absent
 persistence from configured persistence with zero sections.
+
+The session-accounting method and report type are removed. Read logical size and reusable bytes
+through [`File::reusable_space_stats`](crate::File::reusable_space_stats), which uses cached
+counters without enumerating sections. Use
+[`File::reusable_free_sections`](crate::File::reusable_free_sections) for physical ranges,
+including allocator-held reservations. Both inspectors observe committed changes and immediate
+appends. Staged changes appear after commit. The reservation rules are described by
+[`ReusableSpaceStats::reusable_free_bytes`](crate::ReusableSpaceStats::reusable_free_bytes).
 
 ## Paged files (`FileSpaceStrategy::Page`)
 
@@ -256,7 +266,7 @@ PAGE allocations use metadata or raw pages, with the explicit array-index except
 
 Files with a userblock use stored-address page alignment relative to the effective base. [`File::open_rw`](crate::File::open_rw) selects the mirror, and staged commits preserve the userblock. Immediate [`Dataset::append`](crate::Dataset::append) returns [`Error::AppendInPlaceUnsupported`](crate::Error::AppendInPlaceUnsupported) on these files.
 
-Deleting from a persistent paged file returns the space to the per-page-type free lists, so a create/delete cycle settles at a steady size, and whole free pages at the end of the file are given back to the filesystem. Deleting a version 2 B-tree chunk-indexed dataset returns its `BTHD`, `BTIN`, and `BTLF` allocations as metadata and its recorded chunk allocations as raw data. Deleting the last hard link of an object with dense attribute or link storage returns the name and creation-order version 2 B-tree allocations and the header and blocks of each fractal heap as metadata. A heap's huge objects return as raw data where they sit apart from the heap's metadata, and as metadata where they adjoin it inside a page. A heap allocation of a page or more that begins on a page boundary is held as dead, since libhdf5 allocates it as whole pages of neither type. A freed region whose page type cannot be established is held as dead, and the page around it is returned once every other byte of it is free too. That still covers an array chunk index this crate did not lay down beside its chunk data, most often the index of an empty resizable dataset, which has no chunk data at all. [`space_accounting().reusable_free_bytes`](crate::SpaceAccounting) therefore lags a delete by up to a page on such a file, and it does not accumulate.
+Deleting from a persistent paged file returns the space to the per-page-type free lists, so a create/delete cycle settles at a steady size, and whole free pages at the end of the file are given back to the filesystem. Deleting a version 2 B-tree chunk-indexed dataset returns its `BTHD`, `BTIN`, and `BTLF` allocations as metadata and its recorded chunk allocations as raw data. Deleting the last hard link of an object with dense attribute or link storage returns the name and creation-order version 2 B-tree allocations and the header and blocks of each fractal heap as metadata. A heap's huge objects return as raw data where they sit apart from the heap's metadata, and as metadata where they adjoin it inside a page. A heap allocation of a page or more that begins on a page boundary is held as dead, since libhdf5 allocates it as whole pages of neither type. A freed region whose page type cannot be established is held as dead, and the page around it is returned once every other byte of it is free too. That still covers an array chunk index this crate did not lay down beside its chunk data, most often the index of an empty resizable dataset, which has no chunk data at all. The total from [`ReusableSpaceStats::reusable_free_bytes`](crate::ReusableSpaceStats::reusable_free_bytes) therefore lags a delete by up to a page on such a file, and it does not accumulate.
 
 ## Persisting free space across sessions
 
