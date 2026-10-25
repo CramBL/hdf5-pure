@@ -643,9 +643,7 @@ fn chunked_write_costs_a_constant_per_chunk() {
          bounds below are measuring something other than the write: {measured}"
     );
 
-    // Measured at 3.05 copies: the caller's bytes staged in the builder, the
-    // split into chunk buffers, and the assembled data region. A fourth is a
-    // regression; anything that removes one of these three lowers it.
+    // The bound includes the builder's staged elements, retained encoded chunks, and metadata.
     assert!(
         measured.bytes < (DATASET_BYTES * 7 / 2) as u64,
         "a chunked write may hold the dataset a small number of times over, not \
@@ -1517,5 +1515,74 @@ fn assert_growing_fixture_contents(
         let back = file.dataset(&format!("d{i}")).unwrap().read_f64().unwrap();
         assert_eq!(back.len(), (commits + 1) * chunk_elems as usize);
         assert_eq!(back[back.len() - 1], (chunk_elems - 1) as f64);
+    }
+}
+
+#[rstest]
+#[case::streamed_flat(false, false, FileSpaceStrategy::None, "encoded_streamed_flat")]
+#[case::buffered_flat(true, false, FileSpaceStrategy::None, "encoded_buffered_flat")]
+#[case::streamed_page(false, false, FileSpaceStrategy::Page, "encoded_streamed_page")]
+#[case::buffered_page(true, false, FileSpaceStrategy::Page, "encoded_buffered_page")]
+#[case::streamed_deflate(false, true, FileSpaceStrategy::None, "encoded_streamed_deflate")]
+#[case::buffered_deflate(true, true, FileSpaceStrategy::None, "encoded_buffered_deflate")]
+#[case::streamed_page_deflate(
+    false,
+    true,
+    FileSpaceStrategy::Page,
+    "encoded_streamed_page_deflate"
+)]
+#[case::buffered_page_deflate(true, true, FileSpaceStrategy::Page, "encoded_buffered_page_deflate")]
+fn encoded_chunk_finish_avoids_a_payload_sized_assembly_allocation(
+    #[case] buffered: bool,
+    #[case] filtered: bool,
+    #[case] strategy: FileSpaceStrategy,
+    #[case] region: &'static str,
+) {
+    const PAYLOAD: usize = 8 * 1024 * 1024;
+    let mut state = 0x9e37_79b9_u32;
+    let data: Vec<_> = (0..PAYLOAD)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state.to_le_bytes()[0]
+        })
+        .collect();
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_strategy(strategy, false, 1);
+    let dataset = builder.create_dataset("encoded");
+    dataset.with_u8_data(&data).with_chunks(&[65_536]);
+    if filtered {
+        dataset.with_deflate(DeflateLevel::Three);
+    }
+    let (output, measured) = measure(region, || {
+        if buffered {
+            Some(builder.finish().unwrap())
+        } else {
+            builder.finish_to(std::io::sink()).unwrap();
+            None
+        }
+    });
+    assert!(measured.bytes >= PAYLOAD as u64, "{measured}");
+    let byte_budget = PAYLOAD * (if filtered { 21 } else { 6 } + 4 * usize::from(buffered)) / 4;
+    let peak_budget = PAYLOAD * (if filtered { 10 } else { 6 } + 4 * usize::from(buffered)) / 4;
+    assert!(
+        measured.bytes < byte_budget as u64,
+        "{measured} against {byte_budget} bytes"
+    );
+    assert!(
+        measured.peak_bytes < peak_budget as u64,
+        "{measured} against {peak_budget} bytes at peak"
+    );
+    if let Some(output) = output {
+        assert_eq!(
+            File::from_bytes(output)
+                .unwrap()
+                .dataset("encoded")
+                .unwrap()
+                .read_raw()
+                .unwrap(),
+            data
+        );
     }
 }
