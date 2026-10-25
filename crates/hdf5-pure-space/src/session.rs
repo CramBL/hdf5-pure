@@ -605,6 +605,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn flat_mutations_update_and_restore_cached_total() {
+        let mut space = SessionSpace::from_strategy(
+            Some(FileSpaceStrategy::FsmAggr),
+            50,
+            FileSpacePageSize::DEFAULT,
+        );
+        let total = |space: &SessionSpace| {
+            let SessionSpace::Flat(flat) = space else {
+                panic!("expected flat space");
+            };
+            flat.free.total_bytes()
+        };
+        space.seed_persisted(None, Extent::new(100, 100).unwrap());
+        space.seed_persisted(None, Extent::new(300, 60).unwrap());
+        assert_eq!(total(&space), 160);
+        let snapshot = space.allocation_snapshot();
+        let allocation = space.allocate(40, AllocationClass::Raw).unwrap();
+        assert_eq!(allocation, Extent::new(300, 40).unwrap());
+        assert_eq!(total(&space), 120);
+        space.return_allocation(allocation, AllocationClass::Raw);
+        assert_eq!(total(&space), 160);
+        let (post, eoa) = space
+            .flat_post_free(
+                1_000,
+                [
+                    Extent::new(500, 30).unwrap(),
+                    Extent::new(550, 100).unwrap(),
+                ],
+            )
+            .unwrap();
+        assert_eq!(eoa, 1_000);
+        assert_eq!(post.total_bytes(), 260);
+        assert_eq!(total(&space), 160);
+        space.adopt_flat_post_free(post);
+        assert_eq!(total(&space), 260);
+        space.restore_allocation(snapshot);
+        assert_eq!(total(&space), 160);
+        assert_eq!(
+            space.reusable_sections().collect::<Vec<_>>(),
+            [
+                Extent::new(100, 100).unwrap(),
+                Extent::new(300, 60).unwrap()
+            ]
+        );
+        assert_eq!(
+            space.release_freed(1_000, [Extent::new(900, 100).unwrap()]),
+            Some(900)
+        );
+        assert_eq!(total(&space), 160);
+    }
+
+    #[test]
     fn flat_limit_allocation_retains_remainders_below_threshold() {
         let mut space = SessionSpace::from_strategy(
             Some(FileSpaceStrategy::FsmAggr),

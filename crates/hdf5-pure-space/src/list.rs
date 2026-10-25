@@ -10,10 +10,14 @@ use super::persistence::TRAILING_RESERVE_TAILS;
 /// Invariants, upheld by every method: regions are sorted by start address, are non-empty, and
 /// never touch or overlap (any two that would are merged on insertion). Allocation is best-fit to
 /// fragmentation.
+///
+/// The cached byte total equals the sum of the region lengths.
 #[derive(Clone, Debug, Default)]
 pub struct FreeList {
     /// Disjoint regions, sorted ascending by address and never adjacent.
     regions: Vec<Extent>,
+    /// The sum of the region lengths, maintained by every insertion and removal.
+    total_bytes: u64,
 }
 
 impl FreeList {
@@ -21,6 +25,7 @@ impl FreeList {
     pub fn new() -> Self {
         Self {
             regions: Vec::new(),
+            total_bytes: 0,
         }
     }
 
@@ -43,6 +48,7 @@ impl FreeList {
         let mut hi = lo;
         let mut merged_start = extent.start();
         let mut merged_end = extent.end();
+        let mut total_bytes = self.total_bytes;
         while hi < self.regions.len() && self.regions[hi].start() <= merged_end {
             debug_assert!(
                 self.regions[hi].start() >= extent.end()
@@ -53,6 +59,10 @@ impl FreeList {
                 self.regions[hi].start(),
                 self.regions[hi].end()
             );
+            // Every merged region is already included in the cached total.
+            total_bytes = total_bytes
+                .checked_sub(self.regions[hi].len())
+                .expect("merged regions are included in the cached total");
             merged_start = merged_start.min(self.regions[hi].start());
             merged_end = merged_end.max(self.regions[hi].end());
             hi += 1;
@@ -60,7 +70,13 @@ impl FreeList {
 
         let merged = Extent::new(merged_start, merged_end - merged_start)
             .expect("a merged extent contains the newly freed extent");
+        // Canonical extents are disjoint and have exclusive ends at most `u64::MAX`, so the
+        // replacement union and retained extents have a representable total.
+        let total_bytes = total_bytes
+            .checked_add(merged.len())
+            .expect("canonical free regions fit in the address space");
         self.regions.splice(lo..hi, [merged]);
+        self.total_bytes = total_bytes;
     }
 
     /// Records each of `extents` that is at least `threshold` bytes long or adjoins a recorded
@@ -124,6 +140,7 @@ impl FreeList {
             self.regions[i] = Extent::new(allocation.end(), region.end() - allocation.end())
                 .expect("the remainder is a non-empty suffix of the selected extent");
         }
+        self.subtract_bytes(len);
         Some(allocation)
     }
 
@@ -184,6 +201,7 @@ impl FreeList {
             );
         }
         self.regions.splice(i..=i, replacement);
+        self.subtract_bytes(len);
         Some(allocation)
     }
 
@@ -242,12 +260,18 @@ impl FreeList {
     /// re-filing it as one free page without a page-type classification.
     pub fn take_range(&mut self, extent: Extent) {
         let mut out = Vec::with_capacity(self.regions.len() + 1);
+        let mut total_bytes = self.total_bytes;
         for region in self.regions.drain(..) {
             // Disjoint from the range: keep the region whole.
             if region.end() <= extent.start() || region.start() >= extent.end() {
                 out.push(region);
                 continue;
             }
+            let covered = region.end().min(extent.end()) - region.start().max(extent.start());
+            // The overlap is contained in this recorded region and included in the total.
+            total_bytes = total_bytes
+                .checked_sub(covered)
+                .expect("removed bytes are included in the cached total");
             // Overlapping: keep whatever lies below and above the range. Either side may be empty,
             // and both are when the range covers the region.
             if region.start() < extent.start() {
@@ -264,6 +288,7 @@ impl FreeList {
             }
         }
         self.regions = out;
+        self.total_bytes = total_bytes;
     }
 
     /// Returns the free extents, sorted ascending by address and fully coalesced.
@@ -283,6 +308,13 @@ impl FreeList {
     /// Consumes the list and returns its checked extents.
     pub(crate) fn into_extents(self) -> Vec<Extent> {
         self.regions
+    }
+
+    /// Returns the cached sum of the free region lengths in bytes.
+    ///
+    /// Takes constant time and does not allocate.
+    pub fn total_bytes(&self) -> u64 {
+        self.total_bytes
     }
 
     /// Returns whether the list is empty.
@@ -329,6 +361,7 @@ impl FreeList {
         match self.regions.last() {
             Some(last) if last.end() == eof => {
                 let start = last.start();
+                self.subtract_bytes(last.len());
                 self.regions.pop();
                 Some(start)
             }
@@ -370,6 +403,13 @@ impl FreeList {
                     && extent.end().is_multiple_of(unit)
                     && region.len() >= unit)
         })
+    }
+    fn subtract_bytes(&mut self, length: u64) {
+        // Each caller removes an allocation or trailing extent included in the cached total.
+        self.total_bytes = self
+            .total_bytes
+            .checked_sub(length)
+            .expect("removed bytes are included in the cached total");
     }
 }
 
@@ -420,14 +460,17 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[cfg(debug_assertions)]
+    extern crate std;
+
+    #[cfg(debug_assertions)]
+    use alloc::string::String;
+    #[cfg(debug_assertions)]
+    use std::panic::{self, AssertUnwindSafe};
+
     use rstest::rstest;
 
     use super::*;
-
-    /// Exposes the canonical region list as `(addr, len)` pairs for assertions.
-    fn regions(fl: &FreeList) -> Vec<(u64, u64)> {
-        fl.sections()
-    }
 
     #[test]
     fn free_into_empty_list() {
@@ -523,6 +566,7 @@ mod tests {
         let mut fl = FreeList::new();
         fl.free(Extent::new(0, 100).unwrap());
         assert!(fl.alloc(0).is_none());
+        assert_eq!(fl.total_bytes(), 100);
     }
 
     #[rstest]
@@ -558,6 +602,10 @@ mod tests {
             expected.map(|(start, len)| Extent::new(start, len).unwrap())
         );
         assert_eq!(free.sections(), remaining);
+        assert_eq!(
+            free.total_bytes(),
+            remaining.iter().map(|&(_, len)| len).sum::<u64>()
+        );
     }
 
     #[rstest]
@@ -587,6 +635,10 @@ mod tests {
         }
         assert_eq!(free.release_trailing_run(eoa, tail_len), expected);
         assert_eq!(free.sections(), remaining);
+        assert_eq!(
+            free.total_bytes(),
+            remaining.iter().map(|&(_, len)| len).sum::<u64>()
+        );
     }
 
     #[test]
@@ -764,6 +816,109 @@ mod tests {
             expected_eoa
         );
         assert_eq!(regions(&fl), expected_regions);
+    }
+
+    #[rstest]
+    #[case::split_edges(10, 30, 16, 16, Some((16, 16)), &[(10, 6), (32, 8)], 14)]
+    #[case::lower_edge(10, 22, 16, 16, Some((16, 16)), &[(10, 6)], 6)]
+    #[case::upper_edge(16, 24, 16, 16, Some((16, 16)), &[(32, 8)], 8)]
+    #[case::exact(16, 16, 16, 16, Some((16, 16)), &[], 0)]
+    #[case::too_large(10, 30, 32, 16, None, &[(10, 30)], 30)]
+    #[case::zero_length(10, 30, 0, 16, None, &[(10, 30)], 30)]
+    #[case::zero_alignment(10, 30, 16, 0, None, &[(10, 30)], 30)]
+    #[case::maximum_end(u64::MAX - 31, 31, 16, 16,
+        Some((u64::MAX - 31, 16)), &[(u64::MAX - 15, 15)], 15)]
+    fn cached_total_tracks_aligned_allocation(
+        #[case] start: u64,
+        #[case] length: u64,
+        #[case] requested: u64,
+        #[case] alignment: u64,
+        #[case] allocated: Option<(u64, u64)>,
+        #[case] remaining: &[(u64, u64)],
+        #[case] total: u64,
+    ) {
+        let mut free = FreeList::new();
+        free.free(Extent::new(start, length).unwrap());
+        assert_eq!(
+            free.alloc_whole_units(requested, alignment),
+            allocated.map(|(start, length)| Extent::new(start, length).unwrap())
+        );
+        assert_eq!(regions(&free), remaining);
+        assert_eq!(free.total_bytes(), total);
+    }
+
+    #[test]
+    fn cached_total_covers_the_address_space_and_clones_independently() {
+        let mut free = FreeList::default();
+        assert_eq!(free.total_bytes(), 0);
+        free.free(Extent::new(0, u64::MAX - 10).unwrap());
+        free.free(Extent::new(u64::MAX - 10, 10).unwrap());
+        assert_eq!(free.total_bytes(), u64::MAX);
+        let snapshot = free.clone();
+        assert_eq!(free.alloc(10), Extent::new(0, 10));
+        assert_eq!(free.total_bytes(), u64::MAX - 10);
+        free.take_range(Extent::new(20, 10).unwrap());
+        assert_eq!(free.total_bytes(), u64::MAX - 20);
+        assert_eq!(free.take_trailing(u64::MAX), Some(30));
+        assert_eq!(free.total_bytes(), 10);
+        assert_eq!(snapshot.total_bytes(), u64::MAX);
+        free = snapshot;
+        assert_eq!(free.alloc(u64::MAX), Extent::new(0, u64::MAX));
+        assert_eq!(free.total_bytes(), 0);
+        assert_eq!(regions(&free), []);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn rejected_overlap_preserves_the_cached_total() {
+        let mut free = FreeList::new();
+        free.free(Extent::new(0, 50).unwrap());
+        free.free(Extent::new(100, 100).unwrap());
+        let error = panic::catch_unwind(AssertUnwindSafe(|| {
+            free.free(Extent::new(50, 100).unwrap());
+        }))
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<String>().map(String::as_str),
+            Some("double-free: [50, 150) overlaps free region [100, 200)")
+        );
+        assert_eq!(regions(&free), [(0, 50), (100, 100)]);
+        assert_eq!(free.total_bytes(), 150);
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[rstest]
+    #[case::partial(&[(100, 100)], (150, 100), &[(100, 150)], 150)]
+    #[case::contained(&[(100, 100)], (120, 10), &[(100, 100)], 100)]
+    #[case::containing(&[(100, 100)], (50, 200), &[(50, 200)], 200)]
+    #[case::several(&[(100, 50), (200, 50)], (125, 100), &[(100, 150)], 150)]
+    #[case::repeated(&[(100, 100)], (100, 100), &[(100, 100)], 100)]
+    #[case::maximum_end(&[(0, u64::MAX - 10)], (u64::MAX - 20, 20), &[(0, u64::MAX)], u64::MAX)]
+    fn cached_total_counts_overlapping_frees_once(
+        #[case] initial: &[(u64, u64)],
+        #[case] (start, length): (u64, u64),
+        #[case] remaining: &[(u64, u64)],
+        #[case] total: u64,
+    ) {
+        let mut free = FreeList::new();
+        for &(start, length) in initial {
+            free.free(Extent::new(start, length).unwrap());
+        }
+        free.free(Extent::new(start, length).unwrap());
+        assert_eq!(regions(&free), remaining);
+        assert_eq!(free.total_bytes(), total);
+    }
+
+    /// Checks the cached total against the region lengths and returns `(addr, len)` pairs.
+    fn regions(fl: &FreeList) -> Vec<(u64, u64)> {
+        assert_eq!(
+            u128::from(fl.total_bytes()),
+            fl.extents()
+                .iter()
+                .map(|extent| u128::from(extent.len()))
+                .sum::<u128>()
+        );
+        fl.sections()
     }
 
     const THRESHOLD: u64 = 64;
