@@ -61,7 +61,7 @@ fn run_endurance_inner(
         builder.with_file_space_page_size(FileSpacePageSize::try_from(4_096).unwrap());
     }
     builder.write(&path).unwrap();
-    let mut file = session::open_bounded_on_close(&path).unwrap();
+    let mut file = session::open_bounded(&path).unwrap();
     for sequence in 0..LIVE_GROUPS {
         GroupSpec::new(sequence).write(&Context::new(&file, &path, strategy, 0));
     }
@@ -146,7 +146,7 @@ fn run_endurance_inner(
         if let Some(observer) = &mut observer {
             observer(&path, &format!("reopen-{iteration}"));
         }
-        file = session::open_bounded_on_close(&path)
+        file = session::open_bounded(&path)
             .unwrap_or_else(|error| panic!("reopen writer: {error:?}; {before_close}"));
         let context = Context::new(&file, &path, strategy, iteration);
         if strategy != FileSpaceStrategy::None {

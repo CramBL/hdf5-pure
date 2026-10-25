@@ -21,7 +21,7 @@ fn append_and_read_through_one_handle() {
     let p = dir.path().join("a.h5");
     Unlimited::new("d", &(0..6).collect::<Vec<i32>>(), 4).pure_create(&p);
     {
-        let file = session::open_bounded_on_close(&p).unwrap();
+        let file = session::open_bounded(&p).unwrap();
         let mut ds = file.dataset("d").unwrap();
         ds.append(&[6i32, 7, 8]).unwrap();
         // The appending handle observes the new length immediately.
@@ -43,7 +43,7 @@ fn many_appends_across_calls_stay_o1() {
     let p = dir.path().join("many.h5");
     Unlimited::<i32>::new("d", &[], 8).pure_create(&p);
     {
-        let file = session::open_bounded_on_close(&p).unwrap();
+        let file = session::open_bounded(&p).unwrap();
         let mut ds = file.dataset("d").unwrap();
         let mut next = 0i32;
         for _ in 0..200 {
@@ -64,7 +64,7 @@ fn refetched_handle_observes_appends() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("refetch.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
-    let file = session::open_bounded_on_close(&p).unwrap();
+    let file = session::open_bounded(&p).unwrap();
     let mut ds = file.dataset("d").unwrap();
     ds.append(&[4i32, 5, 6, 7]).unwrap();
     let fresh = file.dataset("d").unwrap();
@@ -80,7 +80,7 @@ fn filtered_appends_start_and_end_at_any_length() {
         .filters(&[Filter::Deflate(DeflateLevel::Six)])
         .pure_create(&p);
     {
-        let file = session::open_bounded_on_close(&p).unwrap();
+        let file = session::open_bounded(&p).unwrap();
         let mut ds = file.dataset("d").unwrap();
         // Chunk-aligned.
         ds.append(&[8i32, 9, 10, 11]).unwrap();
@@ -110,7 +110,7 @@ fn large_append_batches_internally() {
     // batches + a trailing remainder.
     let total = 655_360i32 + 7;
     {
-        let file = session::open_bounded_on_close(&p).unwrap();
+        let file = session::open_bounded(&p).unwrap();
         let mut ds = file.dataset("d").unwrap();
         let batch: Vec<i32> = (3..total).collect();
         ds.append(&batch).unwrap();
@@ -131,7 +131,7 @@ fn staged_surface_works_on_a_bounded_file() {
     let p = dir.path().join("staged.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
     {
-        let file = session::open_bounded_on_close(&p).unwrap();
+        let file = session::open_bounded(&p).unwrap();
         let mut ds = file.dataset("d").unwrap();
         let root = file.root();
 
@@ -203,7 +203,7 @@ fn close_seals_writes_but_not_reads() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("close.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
-    let file = session::open_bounded_on_close(&p).unwrap();
+    let file = session::open_bounded(&p).unwrap();
     let mut ds = file.dataset("d").unwrap();
     ds.append(&[4i32]).unwrap();
     file.clone().close().unwrap();
@@ -217,7 +217,7 @@ fn bounded_open_takes_the_exclusive_lock() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("lock.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
-    let bounded = session::open_bounded_on_close(&p).unwrap();
+    let bounded = session::open_bounded(&p).unwrap();
     let err = File::open_rw(&p).unwrap_err();
     assert!(matches!(err, Error::FileLocked(_)), "got: {err:?}");
     drop(bounded);
@@ -232,7 +232,7 @@ fn userblock_file_is_refused_at_open() {
     b.with_userblock(UserblockSize::MIN);
     Unlimited::new("d", &[1, 2, 3], 2).add_to(&mut b);
     b.write(&p).unwrap();
-    let err = session::open_bounded_on_close(&p).unwrap_err();
+    let err = session::open_bounded(&p).unwrap_err();
     assert!(matches!(err, Error::EditUnsupported(_)), "got: {err:?}");
 }
 
@@ -246,7 +246,7 @@ fn persisted_free_space_file_appends_and_finalizes() {
     file_space::write_persisting_unlimited_i32(&p, 10, 4, 1);
 
     {
-        let file = session::open_bounded_on_close(&p).unwrap();
+        let file = session::open_bounded(&p).unwrap();
         let mut ds = file.dataset("d").unwrap();
         ds.append(&(10..25).collect::<Vec<i32>>()).unwrap();
         file.close().unwrap();
@@ -286,7 +286,7 @@ fn persisted_free_space_many_appends_one_finalize() {
     file_space::write_persisting_unlimited_i32(&p, 1, 16, 3);
 
     {
-        let file = session::open_bounded_on_close(&p).unwrap();
+        let file = session::open_bounded(&p).unwrap();
         let mut ds = file.dataset("d").unwrap();
         for start in (1..200).step_by(20) {
             let end = (start + 20).min(200);
@@ -311,7 +311,7 @@ fn persisted_free_space_drop_finalizes() {
     file_space::write_persisting_unlimited_i32(&p, 8, 4, 1);
 
     {
-        let file = session::open_bounded_on_close(&p).unwrap();
+        let file = session::open_bounded(&p).unwrap();
         let mut ds = file.dataset("d").unwrap();
         ds.append(&(8..16).collect::<Vec<i32>>()).unwrap();
         // Drop without close: the Drop guard runs the finalize best-effort.
@@ -344,7 +344,7 @@ fn persisted_free_space_noop_close_does_not_grow() {
     file_space::write_persisting_unlimited_i32(&p, 8, 4, 1);
     let before = std::fs::metadata(&p).unwrap().len();
 
-    session::open_bounded_on_close(&p).unwrap().close().unwrap();
+    session::open_bounded(&p).unwrap().close().unwrap();
     assert_eq!(
         std::fs::metadata(&p).unwrap().len(),
         before,
@@ -352,7 +352,7 @@ fn persisted_free_space_noop_close_does_not_grow() {
     );
     // Repeated open/close cycles also leave the size fixed.
     for _ in 0..3 {
-        session::open_bounded_on_close(&p).unwrap().close().unwrap();
+        session::open_bounded(&p).unwrap().close().unwrap();
     }
     assert_eq!(std::fs::metadata(&p).unwrap().len(), before);
 }
@@ -371,7 +371,7 @@ fn paged_non_persist_is_refused_at_open() {
         .with_file_space_page_size(FileSpacePageSize::DEFAULT);
     Unlimited::new("d", &[1, 2, 3], 2).add_to(&mut b);
     b.write(&p).unwrap();
-    let err = session::open_bounded_on_close(&p).unwrap_err();
+    let err = session::open_bounded(&p).unwrap_err();
     let Error::EditUnsupported(msg) = err else {
         panic!("paged non-persist should be refused with EditUnsupported, got: {err:?}");
     };
@@ -475,7 +475,7 @@ fn reads_match_streaming_capabilities() {
     b.add_group(grp.finish());
     b.write(&p).unwrap();
 
-    let file = session::open_bounded_on_close(&p).unwrap();
+    let file = session::open_bounded(&p).unwrap();
     // Groups, nested paths, and non-append datasets all read.
     assert_eq!(
         file.dataset("grp/nested").unwrap().read_f64().unwrap(),
@@ -503,7 +503,7 @@ fn unaligned_filtered_multi_batch_append_lands_every_element() {
         .pure_create(&p); // one element past a chunk boundary
     const ADDED: i32 = 524_288; // ~2 MiB of i32, several batches
     {
-        let file = session::open_bounded_on_close(&p).unwrap();
+        let file = session::open_bounded(&p).unwrap();
         let mut ds = file.dataset("d").unwrap();
         ds.append(&(257..257 + ADDED).collect::<Vec<i32>>())
             .unwrap();
@@ -518,7 +518,7 @@ fn unaligned_filtered_multi_batch_append_lands_every_element() {
     // refused before any batch applies, so the file is untouched.
     let before = std::fs::read(&p).unwrap();
     {
-        let file = session::open_bounded_on_close(&p).unwrap();
+        let file = session::open_bounded(&p).unwrap();
         let mut ds = file.dataset("d").unwrap();
         let mut bytes = vec![0u8; 2 * 1024 * 1024];
         bytes.push(0); // not a whole i32
@@ -539,7 +539,7 @@ fn chunk_introspection_works_on_bounded_files() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("chunks.h5");
     Unlimited::new("d", &(0..8).collect::<Vec<i32>>(), 4).pure_create(&p);
-    let file = session::open_bounded_on_close(&p).unwrap();
+    let file = session::open_bounded(&p).unwrap();
     let mut ds = file.dataset("d").unwrap();
     let chunks = ds.chunks().unwrap();
     assert_eq!(chunks.len(), 2);
@@ -562,7 +562,7 @@ fn a_bounded_commit_truncates_when_the_freed_run_reaches_the_end() {
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
 
     let (grown, shrunk) = {
-        let file = session::open_bounded_on_close(&p).unwrap();
+        let file = session::open_bounded(&p).unwrap();
         file.root()
             .create_dataset("big", |b| {
                 b.with_i32_data(&(0..2000).collect::<Vec<i32>>())

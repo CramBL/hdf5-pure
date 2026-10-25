@@ -90,6 +90,7 @@ mod repack;
 mod seals;
 mod serde_roundtrip;
 mod serde_with_options;
+mod session;
 mod streaming_reader;
 mod superblock_addresses;
 mod superblock_overflow;

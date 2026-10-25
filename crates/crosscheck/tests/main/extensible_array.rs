@@ -485,7 +485,7 @@ fn sparse_partial_tail_statistics_match_c_across_append_sessions(
     }
     let open = || {
         if bounded {
-            session::open_bounded_on_close(&path).unwrap()
+            session::open_bounded(&path).unwrap()
         } else {
             File::open_rw(&path).unwrap()
         }
