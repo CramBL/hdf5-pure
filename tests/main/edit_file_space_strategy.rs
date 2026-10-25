@@ -6,6 +6,7 @@ use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpacePageSize;
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
 use hdf5_pure_core::__private::BaseAddressExt;
@@ -337,7 +338,11 @@ fn a_sub_threshold_extent_is_tracked_only_beside_a_tracked_extent(
     b.create_dataset("g")
         .with_i32_data(&[5; THRESHOLD_ELEMENTS]);
     b.create_dataset("f").with_i32_data(&[6; 100]);
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, persist, THRESHOLD);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_persistence(persist)
+            .with_threshold(THRESHOLD),
+    );
     b.write(&path).unwrap();
 
     let (extents, session) = {
@@ -389,7 +394,9 @@ fn sub_threshold_extents_that_end_the_file_are_given_back_in_one_commit() {
     b.create_dataset("b")
         .with_i32_data(&[2; THRESHOLD_ELEMENTS]);
     b.create_dataset("c").with_i32_data(&[3; 100]);
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, false, THRESHOLD);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_threshold(THRESHOLD),
+    );
     b.write(&path).unwrap();
     let file = File::open_rw(&path).unwrap();
     file.root().delete("b").unwrap();

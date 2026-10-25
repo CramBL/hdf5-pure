@@ -10,8 +10,10 @@
 //! cargo run --example file_space
 //! ```
 
-use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
 use std::path::Path;
+
+use hdf5_pure::FileSpaceSettings;
+use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
 
 /// 4096 f64 values = 32 KiB of raw data — large enough that whether the file
 /// takes the space back or keeps a second copy is unmistakable in the byte counts.
@@ -44,7 +46,9 @@ fn main() {
     builder.create_dataset("keep").with_i32_data(&[1, 2, 3]);
     // A free-space-manager strategy that persists across sessions. Its numbers are
     // the data's own; the paged run below reports the same reuse in whole pages.
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1); // strategy, persist, threshold
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+    );
     builder.write(&persisting).expect("write file");
 
     // The strategy is stored in a superblock-extension message and survives a
@@ -69,7 +73,9 @@ fn main() {
     let paged = dir.path().join("paged.h5");
     let mut builder = FileBuilder::new();
     builder.create_dataset("keep").with_i32_data(&[1, 2, 3]);
-    builder.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true),
+    );
     builder.write(&paged).expect("write file");
 
     println!("\npaged file (strategy = Page, persist = true):");

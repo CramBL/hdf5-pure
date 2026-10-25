@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::{AttrValue, File, FileBuilder, FileSpaceStrategy};
 use rstest::rstest;
 
@@ -14,7 +15,7 @@ fn replaced_attributes_discard_unresolved_committed_paths(
 ) {
     let mut builder = FileBuilder::new();
     if paged {
-        builder.with_file_space_strategy(FileSpaceStrategy::Page, false, 1);
+        builder.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::Page));
     }
     builder.set_attr("first", AttrValue::VarLenString("preserved".into()));
     builder.set_attr_committed("replace", AttrValue::I32(7), "missing_type");

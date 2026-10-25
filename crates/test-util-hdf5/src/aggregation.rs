@@ -6,6 +6,7 @@ use std::path::Path;
 use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileCreateProperties;
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 
 /// A sequence of creations and deletions in the root group of a new file.
@@ -50,7 +51,8 @@ impl Workload {
 pub fn create_file(path: &Path, strategy: FileSpaceStrategy, persist: bool) -> File {
     File::create_with_options(
         path,
-        FileCreateProperties::new().with_file_space_strategy(strategy, persist, 1),
+        FileCreateProperties::new()
+            .with_file_space_settings(FileSpaceSettings::new(strategy).with_persistence(persist)),
         FileAccessProperties::default(),
     )
     .unwrap()

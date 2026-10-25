@@ -12,6 +12,7 @@ use std::path::Path;
 
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::{MajorErrorCode, MinorErrorCode};
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FreeSpaceManagerRole;
 use hdf5_pure::{File, FileBuilder, FileSpacePageSize, FileSpaceStrategy, UserblockSize};
 use hdf5_sys::h5f;
@@ -223,9 +224,12 @@ fn edits_by_both_libraries_preserve_matching_free_sections(
         file.close().unwrap();
     } else {
         let mut builder = FileBuilder::new();
-        builder
-            .with_file_space_strategy(strategy, persist, threshold)
-            .with_file_space_page_size(FileSpacePageSize::try_from(4096).unwrap());
+        builder.with_file_space_settings(
+            FileSpaceSettings::new(strategy)
+                .with_persistence(persist)
+                .with_threshold(threshold)
+                .with_page_size(FileSpacePageSize::try_from(4096).unwrap()),
+        );
         if base != 0 {
             builder.with_userblock(UserblockSize::try_from(base).unwrap());
         }
@@ -319,7 +323,7 @@ fn records_stored_eof_separately_from_trailing_bytes(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("trailing_bytes.h5");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(strategy, true, 1);
+    builder.with_file_space_settings(FileSpaceSettings::new(strategy).with_persistence(true));
     if base != 0 {
         builder.with_userblock(UserblockSize::try_from(base).unwrap());
     }

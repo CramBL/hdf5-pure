@@ -7,6 +7,7 @@ use hdf5_pure::AttrValue;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileSpacePageSize;
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::VlenStringReadOptions;
 use rstest::rstest;
@@ -162,8 +163,11 @@ fn paged_non_persist_is_aligned_without_managers() {
     let data: Vec<i32> = (0..300).collect();
     let mut b = FileBuilder::new();
     b.create_dataset("d").with_i32_data(&data);
-    b.with_file_space_strategy(FileSpaceStrategy::Page, false, 0)
-        .with_file_space_page_size(FileSpacePageSize::try_from(PAGE).unwrap());
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_threshold(0)
+            .with_page_size(FileSpacePageSize::try_from(PAGE).unwrap()),
+    );
     b.write(&path).unwrap();
 
     let bytes = std::fs::read(&path).unwrap();
@@ -185,8 +189,12 @@ fn paged_non_persist_is_aligned_without_managers() {
 fn paged_metadata_only() {
     let path = temp::repo_temp_path("pure_paged_b1_meta.h5");
     let mut b = FileBuilder::new();
-    b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(FileSpacePageSize::try_from(PAGE).unwrap());
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_threshold(0)
+            .with_page_size(FileSpacePageSize::try_from(PAGE).unwrap()),
+    );
     b.write(&path).unwrap();
 
     let bytes = std::fs::read(&path).unwrap();
@@ -233,8 +241,12 @@ fn paged_exact_page_multiple_large_block() {
     let big: Vec<i32> = (0..4096).collect();
     let mut b = FileBuilder::new();
     b.create_dataset("exact").with_i32_data(&big);
-    b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(FileSpacePageSize::try_from(PAGE).unwrap());
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_threshold(0)
+            .with_page_size(FileSpacePageSize::try_from(PAGE).unwrap()),
+    );
     b.write(&path).unwrap();
 
     let bytes = std::fs::read(&path).unwrap();
@@ -266,8 +278,12 @@ fn paged_groups_attrs_vlen() {
     let mut grp = b.create_group("sensors");
     grp.create_dataset("readings").with_i32_data(&[10, 20, 30]);
     b.add_group(grp.finish());
-    b.with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-        .with_file_space_page_size(FileSpacePageSize::try_from(PAGE).unwrap());
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_threshold(0)
+            .with_page_size(FileSpacePageSize::try_from(PAGE).unwrap()),
+    );
     b.write(&path).unwrap();
 
     let bytes = std::fs::read(&path).unwrap();

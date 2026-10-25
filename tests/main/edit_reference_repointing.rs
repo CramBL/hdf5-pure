@@ -9,6 +9,7 @@
 //! the file stayed *readable*, resolving to a stale copy of the object, and only
 //! became unreadable once something reused the span.
 
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FixedPointType;
 use hdf5_pure::UserblockSize;
 use hdf5_pure::{
@@ -318,7 +319,7 @@ fn references_are_repointed_on_a_userblock_file() {
 fn reference_survives_on(path: &std::path::Path, strategy: Option<FileSpaceStrategy>) {
     let mut b = FileBuilder::new();
     if let Some(strategy) = strategy {
-        b.with_file_space_strategy(strategy, true, 1);
+        b.with_file_space_settings(FileSpaceSettings::new(strategy).with_persistence(true));
     }
     fixtures::reference_target_group(&mut b);
     b.create_dataset("refs").with_path_references(&["g"]);

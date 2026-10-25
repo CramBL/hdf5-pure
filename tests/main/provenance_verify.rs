@@ -4,6 +4,7 @@
 #[cfg(any(feature = "deflate", feature = "fast-deflate"))]
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::Error;
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
 use hdf5_pure::Object;
@@ -132,7 +133,9 @@ fn address_data_builder(
 ) -> FileBuilder {
     let mut builder = FileBuilder::new();
     if page {
-        builder.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
+        builder.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true),
+        );
     }
     builder.with_userblock(userblock);
     if userblock != UserblockSize::NONE {
@@ -208,7 +211,9 @@ fn empty_variable_length_values_verify(
 ) {
     let mut builder = FileBuilder::new();
     if page {
-        builder.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
+        builder.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true),
+        );
     }
     let dataset = builder.create_dataset("data").with_vlen_strings(values);
     if chunked {
@@ -237,7 +242,9 @@ fn provenance_preserves_missing_and_undefined_reference_values(
 ) {
     let mut builder = FileBuilder::new();
     if page {
-        builder.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
+        builder.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true),
+        );
     }
     let dataset = builder.create_dataset("data");
     if path {

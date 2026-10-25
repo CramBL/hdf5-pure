@@ -12,6 +12,7 @@
 
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5_pure::FileSpacePageSize;
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
 
 use test_util_hdf5::{dataset::Unlimited, session};
@@ -21,8 +22,11 @@ use test_util_hdf5::{dataset::Unlimited, session};
 fn build(path: &std::path::Path, paged: bool) {
     let mut b = FileBuilder::new();
     if paged {
-        b.with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-            .with_file_space_page_size(FileSpacePageSize::DEFAULT);
+        b.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page)
+                .with_persistence(true)
+                .with_page_size(FileSpacePageSize::DEFAULT),
+        );
     }
     Unlimited::new("d", &(0..64).collect::<Vec<i32>>(), 64).add_to(&mut b);
     b.write(path).unwrap();

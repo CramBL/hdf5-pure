@@ -14,6 +14,7 @@ use hdf5::FileBuilder as Hdf5FileBuilder;
 #[cfg(feature = "__hdf5-1.10")]
 use hdf5::plist::file_create::FileSpaceStrategy as Hdf5FileSpaceStrategy;
 use hdf5_pure::FileAccessProperties;
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::SyncPolicy;
 use hdf5_pure::{File, FileBuilder, FileSpaceStrategy, Layout, SpaceAccounting};
 use hdf5_pure_core::__private::BaseAddressExt;
@@ -40,7 +41,7 @@ pub fn fragmented_session(path: &Path, strategy: FileSpaceStrategy, holes: usize
         .and_then(|count| count.checked_add(1))
         .expect("the fixture object count fits usize");
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(strategy, true, 1);
+    builder.with_file_space_settings(FileSpaceSettings::new(strategy).with_persistence(true));
     for index in 0..objects {
         builder
             .create_dataset(&format!("data_{index:05}"))
@@ -144,7 +145,11 @@ pub fn write_strategy_triplet(
         .create_dataset("b")
         .with_i32_data(&[2; STRATEGY_DELETED_ELEMENTS]);
     builder.create_dataset("c").with_i32_data(&[3; 100]);
-    builder.with_file_space_strategy(strategy, persist, threshold);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(strategy)
+            .with_persistence(persist)
+            .with_threshold(threshold),
+    );
     builder.write(path).unwrap();
 }
 
@@ -317,7 +322,9 @@ pub fn write_interior_hole_source(path: &Path, persist: bool) {
     builder.create_dataset("big").with_i32_data(&[7; 400]);
     builder.create_dataset("c").with_i32_data(&[3; 100]);
     if persist {
-        builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+        builder.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+        );
     }
     builder.write(path).unwrap();
 }
@@ -326,7 +333,11 @@ pub fn write_interior_hole_source(path: &Path, persist: bool) {
 pub fn write_persisting_unlimited_i32(path: &Path, len: i32, chunk: u64, threshold: u64) {
     let data: Vec<i32> = (0..len).collect();
     let mut builder = FileBuilder::new();
-    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, threshold);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_persistence(true)
+            .with_threshold(threshold),
+    );
     Unlimited::new("d", &data, chunk).add_to(&mut builder);
     builder.write(path).unwrap();
 }

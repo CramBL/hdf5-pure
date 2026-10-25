@@ -2,6 +2,7 @@
 //! (`fcpl`) as a reusable creation-property value (issues #204, #205).
 
 use hdf5_pure::FileSpacePageSize;
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::UserblockSize;
 use hdf5_pure::{
     ChunkCacheConfig, Error, File, FileAccessProperties, FileBuilder, FileCreateProperties,
@@ -132,8 +133,12 @@ fn the_bounded_engine_still_locks_by_default() {
 fn create_properties_match_the_individual_setters() {
     let properties = FileCreateProperties::new()
         .with_userblock(UserblockSize::MIN)
-        .with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 8)
-        .with_file_space_page_size(FileSpacePageSize::DEFAULT);
+        .with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+                .with_persistence(true)
+                .with_threshold(8)
+                .with_page_size(FileSpacePageSize::DEFAULT),
+        );
 
     let from_value = {
         let mut b = FileBuilder::new();
@@ -144,8 +149,12 @@ fn create_properties_match_the_individual_setters() {
     let from_setters = {
         let mut b = FileBuilder::new();
         b.with_userblock(UserblockSize::MIN);
-        b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 8);
-        b.with_file_space_page_size(FileSpacePageSize::DEFAULT);
+        b.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+                .with_persistence(true)
+                .with_threshold(8)
+                .with_page_size(FileSpacePageSize::DEFAULT),
+        );
         b.create_dataset("d").with_f64_data(&[1.0, 2.0]);
         b.finish().unwrap()
     };
@@ -160,7 +169,11 @@ fn create_properties_match_the_individual_setters() {
 #[test]
 fn create_properties_are_reusable_across_files() {
     fn shared_layout() -> FileCreateProperties {
-        FileCreateProperties::new().with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 4)
+        FileCreateProperties::new().with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+                .with_persistence(true)
+                .with_threshold(4),
+        )
     }
 
     let dir = tempfile::tempdir().unwrap();
@@ -191,7 +204,11 @@ fn create_with_options_records_creation_properties() {
 
     let file = File::create_with_options(
         &path,
-        FileCreateProperties::new().with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 16),
+        FileCreateProperties::new().with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+                .with_persistence(true)
+                .with_threshold(16),
+        ),
         FileAccessProperties::new().with_locking(FileLocking::Disabled),
     )
     .unwrap();
@@ -231,8 +248,10 @@ fn create_with_default_options_matches_create() {
 #[test]
 fn const_creation_properties_distinguish_unset_and_explicit_default_page_sizes() {
     const DEFAULT: FileCreateProperties = FileCreateProperties::new();
-    const WITH_PAGE: FileCreateProperties =
-        DEFAULT.with_file_space_page_size(FileSpacePageSize::DEFAULT);
+    const WITH_PAGE: FileCreateProperties = DEFAULT.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_page_size(FileSpacePageSize::DEFAULT),
+    );
     assert_eq!(DEFAULT.file_space_page_size(), None);
     assert_eq!(
         WITH_PAGE.file_space_page_size(),
@@ -266,10 +285,13 @@ fn creation_properties_preserve_typed_userblock_size() {
 fn create_properties_reset_the_properties_they_do_not_carry() {
     let mut b = FileBuilder::new();
     b.with_libver_bounds(LibVer::Earliest, LibVer::V18);
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 8);
-    b.with_file_space_page_size(FileSpacePageSize::DEFAULT);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_persistence(true)
+            .with_threshold(8)
+            .with_page_size(FileSpacePageSize::DEFAULT),
+    );
     b.with_userblock(UserblockSize::try_from(1024).unwrap());
-    // Names none of the four above.
     b.with_create_properties(FileCreateProperties::new());
     b.create_dataset("d").with_f64_data(&[1.0]);
     let overwritten = b.finish().unwrap();
@@ -508,11 +530,11 @@ fn creation_paths_preserve_page_size_configuration(
     #[case] page_size: Option<FileSpacePageSize>,
 ) {
     let mut properties = FileCreateProperties::new();
-    if let Some(strategy) = strategy {
-        properties = properties.with_file_space_strategy(strategy, false, 1);
-    }
-    if let Some(page_size) = page_size {
-        properties = properties.with_file_space_page_size(page_size);
+    if strategy.is_some() || page_size.is_some() {
+        properties = properties.with_file_space_settings(
+            FileSpaceSettings::new(strategy.unwrap_or(FileSpaceStrategy::FsmAggr))
+                .with_page_size(page_size.unwrap_or(FileSpacePageSize::DEFAULT)),
+        );
     }
     assert_eq!(
         properties
@@ -522,7 +544,10 @@ fn creation_paths_preserve_page_size_configuration(
     );
     let build = || {
         let mut builder = FileBuilder::new();
-        builder.with_file_space_page_size(FileSpacePageSize::MAX);
+        builder.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+                .with_page_size(FileSpacePageSize::MAX),
+        );
         builder.with_create_properties(properties);
         builder
     };

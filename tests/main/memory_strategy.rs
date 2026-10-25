@@ -22,6 +22,7 @@ use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FileCreateProperties;
 use hdf5_pure::FileSpacePageSize;
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FormatError;
 use hdf5_pure::LibVer;
@@ -51,7 +52,7 @@ fn userblock_file(path: &std::path::Path) {
 /// Writes a non-persistent PAGE file that requires mirrored staged editing.
 fn paged_nonpersist_file(path: &std::path::Path) {
     let mut b = FileBuilder::new();
-    b.with_file_space_strategy(FileSpaceStrategy::Page, false, 0);
+    b.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::Page).with_threshold(0));
     Unlimited::new("d", &[1i32, 2, 3], 3).add_to(&mut b);
     b.write(path).unwrap();
 }
@@ -199,7 +200,7 @@ fn nonpersistent_page_with_userblock_uses_the_mirror() {
     let path = dir.path().join("ub_paged.h5");
     let mut b = FileBuilder::new();
     b.with_userblock(UserblockSize::try_from(4096).unwrap());
-    b.with_file_space_strategy(FileSpaceStrategy::Page, false, 0);
+    b.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::Page).with_threshold(0));
     b.create_dataset("d")
         .with_i32_data(&[1, 2, 3])
         .with_shape(&[3]);
@@ -318,7 +319,8 @@ fn create_refuses_a_pair_it_could_not_reopen_before_writing_anything() {
     let paged = dir.path().join("paged.h5");
     let err = File::create_with_options(
         &paged,
-        FileCreateProperties::new().with_file_space_strategy(FileSpaceStrategy::Page, false, 1),
+        FileCreateProperties::new()
+            .with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::Page)),
         with_strategy(MemoryStrategy::Bounded),
     )
     .expect_err("bounded editing requires persisted PAGE managers");
@@ -435,8 +437,11 @@ fn create_with_options_rejects_a_paged_userblock_that_is_not_a_whole_number_of_p
 fn paged_userblock_properties(userblock: u64) -> FileCreateProperties {
     FileCreateProperties::new()
         .with_userblock(UserblockSize::try_from(userblock).unwrap())
-        .with_file_space_strategy(FileSpaceStrategy::Page, true, 1)
-        .with_file_space_page_size(FileSpacePageSize::DEFAULT)
+        .with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page)
+                .with_persistence(true)
+                .with_page_size(FileSpacePageSize::DEFAULT),
+        )
 }
 
 /// A file that persists its free-space managers under the default `FsmAggr`
@@ -445,7 +450,11 @@ fn paged_userblock_properties(userblock: u64) -> FileCreateProperties {
 /// userblock.
 fn fsm_persisting_file(path: &std::path::Path) {
     let mut b = FileBuilder::new();
-    b.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 0);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_persistence(true)
+            .with_threshold(0),
+    );
     Unlimited::new("samples", &[0u64, 1, 2, 3], 4).add_to(&mut b);
     b.write(path).unwrap();
 }
@@ -512,7 +521,11 @@ fn create_with_options_of_a_persisting_fsm_file_opens_bounded() {
 
     let file = File::create_with_options(
         &path,
-        FileCreateProperties::new().with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 0),
+        FileCreateProperties::new().with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+                .with_persistence(true)
+                .with_threshold(0),
+        ),
         FileAccessProperties::new(),
     )
     .unwrap();
@@ -574,47 +587,62 @@ fn auto_matches_bounded_on_every_pair_bounded_accepts() {
         ("default", FileCreateProperties::new()),
         (
             "fsm_aggr-persisting",
-            FileCreateProperties::new().with_file_space_strategy(
-                FileSpaceStrategy::FsmAggr,
-                true,
-                0,
+            FileCreateProperties::new().with_file_space_settings(
+                FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+                    .with_persistence(true)
+                    .with_threshold(0),
             ),
         ),
         (
             "fsm_aggr-transient",
-            FileCreateProperties::new().with_file_space_strategy(
-                FileSpaceStrategy::FsmAggr,
-                false,
-                0,
+            FileCreateProperties::new().with_file_space_settings(
+                FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_threshold(0),
             ),
         ),
         (
             "aggr-persisting",
-            FileCreateProperties::new().with_file_space_strategy(FileSpaceStrategy::Aggr, true, 0),
+            FileCreateProperties::new().with_file_space_settings(
+                FileSpaceSettings::new(FileSpaceStrategy::Aggr)
+                    .with_persistence(true)
+                    .with_threshold(0),
+            ),
         ),
         (
             "aggr-transient",
-            FileCreateProperties::new().with_file_space_strategy(FileSpaceStrategy::Aggr, false, 0),
+            FileCreateProperties::new().with_file_space_settings(
+                FileSpaceSettings::new(FileSpaceStrategy::Aggr).with_threshold(0),
+            ),
         ),
         (
             "none-persisting",
-            FileCreateProperties::new().with_file_space_strategy(FileSpaceStrategy::None, true, 0),
+            FileCreateProperties::new().with_file_space_settings(
+                FileSpaceSettings::new(FileSpaceStrategy::None)
+                    .with_persistence(true)
+                    .with_threshold(0),
+            ),
         ),
         (
             "none-transient",
-            FileCreateProperties::new().with_file_space_strategy(FileSpaceStrategy::None, false, 0),
+            FileCreateProperties::new().with_file_space_settings(
+                FileSpaceSettings::new(FileSpaceStrategy::None).with_threshold(0),
+            ),
         ),
         (
             "page-persisting",
-            FileCreateProperties::new()
-                .with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-                .with_file_space_page_size(FileSpacePageSize::DEFAULT),
+            FileCreateProperties::new().with_file_space_settings(
+                FileSpaceSettings::new(FileSpaceStrategy::Page)
+                    .with_persistence(true)
+                    .with_threshold(0)
+                    .with_page_size(FileSpacePageSize::DEFAULT),
+            ),
         ),
         (
             "page-transient",
-            FileCreateProperties::new()
-                .with_file_space_strategy(FileSpaceStrategy::Page, false, 0)
-                .with_file_space_page_size(FileSpacePageSize::DEFAULT),
+            FileCreateProperties::new().with_file_space_settings(
+                FileSpaceSettings::new(FileSpaceStrategy::Page)
+                    .with_threshold(0)
+                    .with_page_size(FileSpacePageSize::DEFAULT),
+            ),
         ),
         (
             "userblock",
@@ -624,8 +652,12 @@ fn auto_matches_bounded_on_every_pair_bounded_accepts() {
             "page-persisting-userblock",
             FileCreateProperties::new()
                 .with_userblock(UserblockSize::try_from(4096).unwrap())
-                .with_file_space_strategy(FileSpaceStrategy::Page, true, 0)
-                .with_file_space_page_size(FileSpacePageSize::DEFAULT),
+                .with_file_space_settings(
+                    FileSpaceSettings::new(FileSpaceStrategy::Page)
+                        .with_persistence(true)
+                        .with_threshold(0)
+                        .with_page_size(FileSpacePageSize::DEFAULT),
+                ),
         ),
         (
             "libver-1.8",

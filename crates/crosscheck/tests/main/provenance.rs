@@ -17,6 +17,8 @@ use hdf5_pure::File;
 #[cfg(feature = "__hdf5-1.10")]
 use hdf5_pure::FileBuilder;
 #[cfg(feature = "__hdf5-1.10")]
+use hdf5_pure::FileSpaceSettings;
+#[cfg(feature = "__hdf5-1.10")]
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::Object;
 #[cfg(feature = "__hdf5-1.10")]
@@ -149,7 +151,9 @@ fn builder(
     let mut builder = FileBuilder::new();
     builder.with_userblock(userblock);
     if page {
-        builder.with_file_space_strategy(FileSpaceStrategy::Page, true, 1);
+        builder.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true),
+        );
     }
     builder.create_dataset("target").with_i32_data(&[7]);
     builder
