@@ -10,26 +10,85 @@
 //!
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 
+use core::cmp::Ordering;
 use core::num::NonZeroU16;
 
 use alloc::collections::BTreeSet;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+use hdf5_pure_core::__private::FileRange;
 pub use hdf5_pure_format::__private::BTreeV2Header;
+use hdf5_pure_format::__private::BTreeV2Layout;
 use hdf5_pure_format::__private::BTreeV2NodeInfo;
 pub use hdf5_pure_format::__private::BTreeV2Record;
 use hdf5_pure_space::__private::Extent;
 
+use crate::address::AddressContext;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
-use crate::source::Source;
+use crate::source::{RangeReader, Source};
 #[cfg(test)]
 use crate::width::LengthWidth;
 use crate::width::{FormatWidths, OffsetWidth};
+
+/// Returns a copy of the matching record by binary-searching each node along one search path.
+///
+/// `compare` orders each borrowed record relative to the sought key. The tree's records must be
+/// ordered consistently with `compare`. An equal record in an internal node is a match. The
+/// reader resolves stored addresses through `addresses` and reads the encoded contents of each
+/// visited node before calling `compare`.
+///
+/// # Errors
+///
+/// Returns [`FormatError::InvalidBTreeV2Signature`] for a repeated node address, and the first
+/// error from address resolution, a node read, node parsing, or `compare`.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the internal search entry point has only unit-test callers"
+    )
+)]
+pub(crate) fn search_btree_v2(
+    reader: &(impl RangeReader + ?Sized),
+    layout: &BTreeV2Layout,
+    addresses: AddressContext,
+    mut compare: impl FnMut(&[u8]) -> Result<Ordering, FormatError>,
+) -> Result<Option<Vec<u8>>, FormatError> {
+    let Some(mut node) = layout.root() else {
+        return Ok(None);
+    };
+    let mut visited = BTreeSet::new();
+    loop {
+        if !visited.insert(node.address()) {
+            return Err(FormatError::InvalidBTreeV2Signature);
+        }
+        let range = FileRange::new(
+            addresses.resolve(node.address())?,
+            layout.encoded_len(node)?.to_u64(),
+        )?;
+        let bytes = reader.read_range(range)?;
+        let view = layout.parse(&bytes, node)?;
+        let mut left = 0;
+        let mut right = view.record_count();
+        while left < right {
+            let middle = left + (right - left) / 2;
+            match compare(view.record(middle)?)? {
+                Ordering::Less => left = middle + 1,
+                Ordering::Equal => return Ok(Some(view.record(middle)?.to_vec())),
+                Ordering::Greater => right = middle,
+            }
+        }
+        let Some(child) = view.child(left)? else {
+            return Ok(None);
+        };
+        node = child;
+    }
+}
 
 /// Returns the allocations reachable from a version 2 B-tree header using validated file widths.
 ///
@@ -468,16 +527,281 @@ mod tests {
     #[cfg(feature = "std")]
     use std::io::Cursor;
 
-    use hdf5_pure_format::__private::BTREE_V2_NODE_SIZE;
     use hdf5_pure_format::__private::BTreeV2Plan;
+    use hdf5_pure_format::__private::{BTREE_V2_LINK_NAME, BTREE_V2_NODE_SIZE};
     use test_util::btree_v2;
     use test_util::image::Image;
     use test_util::widths::Widths;
 
     use super::*;
+    use crate::address::{BaseAddress, BaseAddressExt};
     use crate::source::BytesSource;
     #[cfg(feature = "std")]
     use crate::source::ReadSeekSource;
+
+    #[rstest::rstest]
+    #[case::root(7, Some(7), 1)]
+    #[case::internal(3, Some(3), 2)]
+    #[case::left_leaf(0, Some(0), 4)]
+    #[case::right_leaf(14, Some(14), 4)]
+    #[case::absent(15, None, 4)]
+    fn indexed_search_reads_only_the_selected_path(
+        #[case] wanted: u8,
+        #[case] expected: Option<u8>,
+        #[case] reads: usize,
+    ) {
+        let tree = depth_3_tree();
+        let header = BTreeV2Header::parse(&tree.file, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
+        let layout = BTreeV2Layout::new(&header, OffsetWidth::Eight).unwrap();
+        let source = CountingSource {
+            bytes: &tree.file,
+            reads: core::cell::Cell::new(0),
+        };
+        let addresses = AddressContext::from_effective_base(BaseAddress::ZERO);
+        assert_eq!(
+            search_btree_v2(&source, &layout, addresses, |record| Ok(
+                record[0].cmp(&wanted)
+            ))
+            .unwrap()
+            .map(|record| record[0]),
+            expected
+        );
+        assert_eq!(source.reads.get(), reads);
+        assert_eq!(
+            search_btree_v2(tree.file.as_slice(), &layout, addresses, |record| Ok(
+                record[0].cmp(&wanted)
+            ))
+            .unwrap()
+            .map(|record| record[0]),
+            expected
+        );
+    }
+
+    #[test]
+    fn indexed_search_of_an_empty_tree_returns_none_with_zero_reads() {
+        let bytes = btree_v2::Header::new(BTREE_V2_LINK_NAME, 11, u64::MAX, 0).build(WIDTHS);
+        let header = BTreeV2Header::parse(&bytes, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
+        let layout = BTreeV2Layout::new(&header, OffsetWidth::Eight).unwrap();
+        let source = CountingSource {
+            bytes: &bytes,
+            reads: core::cell::Cell::new(0),
+        };
+        assert_eq!(
+            search_btree_v2(
+                &source,
+                &layout,
+                AddressContext::from_effective_base(BaseAddress::ZERO),
+                |_| { panic!("an empty tree has no record to compare") }
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(source.reads.get(), 0);
+    }
+
+    #[rstest::rstest]
+    #[case::first(0)]
+    #[case::between_records(1)]
+    #[case::middle(40)]
+    #[case::later(400)]
+    #[case::absent(5001)]
+    fn indexed_search_binary_searches_nodes_with_multiple_records(
+        #[case] wanted: u64,
+        #[values(1, 45, 46, 2500)] count: usize,
+    ) {
+        let plan = BTreeV2Plan::new(
+            BTREE_V2_LINK_NAME,
+            count,
+            11,
+            BTREE_V2_NODE_SIZE,
+            OffsetWidth::Eight,
+        )
+        .unwrap();
+        let image = plan.serialize(
+            &numbered_records(count, 11),
+            StoredAddress::new(64),
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+        );
+        let mut bytes = image.header;
+        bytes.resize(64, 0);
+        bytes.extend_from_slice(&image.nodes);
+        let header = BTreeV2Header::parse(&bytes, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
+        let layout = BTreeV2Layout::new(&header, OffsetWidth::Eight).unwrap();
+        let mut comparisons = 0;
+        let result = search_btree_v2(
+            bytes.as_slice(),
+            &layout,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+            |record| {
+                comparisons += 1;
+                Ok((u64::from_le_bytes(record[..8].try_into().unwrap()) * 2).cmp(&wanted))
+            },
+        )
+        .unwrap()
+        .map(|record| u64::from_le_bytes(record[..8].try_into().unwrap()));
+        let expected =
+            (wanted.is_multiple_of(2) && wanted / 2 < count as u64).then_some(wanted / 2);
+        assert_eq!(result, expected);
+        assert!(comparisons <= 6 * (usize::from(header.depth) + 1));
+    }
+
+    struct CountingSource<'a> {
+        bytes: &'a [u8],
+        reads: core::cell::Cell<usize>,
+    }
+
+    impl Source for CountingSource<'_> {
+        fn len(&self) -> u64 {
+            self.bytes.len() as u64
+        }
+        fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<(), FormatError> {
+            self.reads.set(self.reads.get() + 1);
+            BytesSource::new(self.bytes).read_at(offset, buffer)
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn indexed_comparison_can_read_through_the_same_metadata_cache() {
+        use crate::source::{MetadataCacheConfig, MetadataCachingSource};
+
+        let tree = depth_3_tree();
+        let header = BTreeV2Header::parse(&tree.file, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
+        let layout = BTreeV2Layout::new(&header, OffsetWidth::Eight).unwrap();
+        let source = MetadataCachingSource::new(
+            BytesSource::new(&tree.file),
+            MetadataCacheConfig::default(),
+        );
+        let addresses = AddressContext::from_effective_base(BaseAddress::ZERO);
+        assert_eq!(
+            search_btree_v2(&source, &layout, addresses, |record| {
+                assert_eq!(
+                    source.read_metadata_at(0, btree_v2::SIGNATURE.len())?,
+                    btree_v2::SIGNATURE
+                );
+                Ok(record[0].cmp(&0))
+            })
+            .unwrap(),
+            Some(rec(0))
+        );
+        assert_eq!(
+            search_btree_v2(&source, &layout, addresses, |_| {
+                Err(FormatError::InvalidLinkType(99))
+            })
+            .unwrap_err(),
+            FormatError::InvalidLinkType(99)
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::userblock(512, false)]
+    #[case::relocated(1024, false)]
+    #[case::framed(512, true)]
+    fn indexed_search_resolves_the_effective_base_once(#[case] base: u64, #[case] framed: bool) {
+        use crate::source::BaseOffsetSource;
+
+        let tree = depth_3_tree();
+        let header = BTreeV2Header::parse(&tree.file, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
+        let layout = BTreeV2Layout::new(&header, OffsetWidth::Eight).unwrap();
+        let mut bytes = vec![0; usize::try_from(base).unwrap()];
+        bytes.extend_from_slice(&tree.file);
+        let source = BytesSource::new(&bytes);
+        let mut addresses = AddressContext::from_effective_base(BaseAddress::new(base));
+        let expected = search_btree_v2(bytes.as_slice(), &layout, addresses, |record| {
+            Ok(record[0].cmp(&14))
+        })
+        .unwrap();
+        let framed_source = BaseOffsetSource {
+            inner: &source,
+            base: BaseAddress::new(base),
+        };
+        let reader: &dyn Source = if framed {
+            addresses = AddressContext::from_effective_base(BaseAddress::ZERO);
+            &framed_source
+        } else {
+            &source
+        };
+        assert_eq!(
+            search_btree_v2(reader, &layout, addresses, |record| Ok(record[0].cmp(&14))).unwrap(),
+            expected
+        );
+        assert_eq!(expected, Some(rec(14)));
+    }
+
+    #[test]
+    fn indexed_search_decodes_only_the_selected_pointer() {
+        let mut tree = depth_3_tree();
+        let root = tree.nodes[14] as usize;
+        tree.file[root + 17..root + 25].fill(0xff);
+        let checksum_at = root + 17 + 2 * 11;
+        let checksum = hdf5_pure_format::__private::jenkins_lookup3(&tree.file[root..checksum_at]);
+        tree.file[checksum_at..checksum_at + 4].copy_from_slice(&checksum.to_le_bytes());
+        let header = BTreeV2Header::parse(&tree.file, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
+        let layout = BTreeV2Layout::new(&header, OffsetWidth::Eight).unwrap();
+        let addresses = AddressContext::from_effective_base(BaseAddress::ZERO);
+        assert_eq!(
+            search_btree_v2(tree.file.as_slice(), &layout, addresses, |record| Ok(
+                record[0].cmp(&14)
+            ))
+            .unwrap(),
+            Some(rec(14))
+        );
+        assert_eq!(
+            search_btree_v2(tree.file.as_slice(), &layout, addresses, |record| Ok(
+                record[0].cmp(&0)
+            ))
+            .unwrap_err(),
+            FormatError::InvalidBTreeV2Signature
+        );
+    }
+
+    #[test]
+    fn indexed_search_reports_a_truncated_visited_node() {
+        let tree = depth_3_tree();
+        let header = BTreeV2Header::parse(&tree.file, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
+        let layout = BTreeV2Layout::new(&header, OffsetWidth::Eight).unwrap();
+        let expected = tree.nodes[14] + layout.encoded_len(layout.root().unwrap()).unwrap() as u64;
+        let bytes = &tree.file[..usize::try_from(expected - 1).unwrap()];
+        let addresses = AddressContext::from_effective_base(BaseAddress::ZERO);
+        assert_eq!(
+            search_btree_v2(bytes, &layout, addresses, |_| Ok(Ordering::Equal)).unwrap_err(),
+            FormatError::UnexpectedSourceEof {
+                expected,
+                available: expected - 1
+            }
+        );
+        assert_eq!(
+            search_btree_v2(&BytesSource::new(bytes), &layout, addresses, |_| Ok(
+                Ordering::Equal
+            ))
+            .unwrap_err(),
+            FormatError::UnexpectedSourceEof {
+                expected,
+                available: expected - 1
+            }
+        );
+    }
+
+    #[test]
+    fn indexed_search_rejects_a_cycle() {
+        let mut tree = depth_3_tree();
+        let root = tree.nodes[14] as usize;
+        tree.file[root + 17..root + 25].copy_from_slice(&(root as u64).to_le_bytes());
+        let checksum_at = root + 17 + 2 * 11;
+        let checksum = hdf5_pure_format::__private::jenkins_lookup3(&tree.file[root..checksum_at]);
+        tree.file[checksum_at..checksum_at + 4].copy_from_slice(&checksum.to_le_bytes());
+        let header = BTreeV2Header::parse(&tree.file, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
+        let layout = BTreeV2Layout::new(&header, OffsetWidth::Eight).unwrap();
+        let addresses = AddressContext::from_effective_base(BaseAddress::ZERO);
+        assert_eq!(
+            search_btree_v2(tree.file.as_slice(), &layout, addresses, |record| Ok(
+                record[0].cmp(&0)
+            ))
+            .unwrap_err(),
+            FormatError::InvalidBTreeV2Signature
+        );
+    }
 
     fn build_leaf_node(tree_type: u8, records: &[&[u8]]) -> Vec<u8> {
         let records: Vec<_> = records.iter().map(|record| record.to_vec()).collect();

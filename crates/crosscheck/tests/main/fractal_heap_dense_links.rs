@@ -20,7 +20,8 @@ use hdf5_pure::FormatError;
 use hdf5_pure_core::__private::{BaseAddressExt, FileRange, FileRegion, PhysicalAddress};
 use hdf5_pure_core::{BaseAddress, StoredAddress};
 use hdf5_pure_format::__private::{
-    FractalHeapBlock, FractalHeapBlockLayout, FractalHeapHeaderLocator, LengthWidth, OffsetWidth,
+    BTREE_V2_LINK_NAME, BTreeV2Header, BTreeV2Layout, FractalHeapBlock, FractalHeapBlockLayout,
+    FractalHeapHeaderLocator, LengthWidth, OffsetWidth,
 };
 use rstest::rstest;
 
@@ -77,6 +78,61 @@ fn reads_c_written_dense_link_groups_across_sizes() {
             assert_eq!(v, vec![i as i32], "streaming n={n} d{i}");
         }
     }
+}
+
+#[rstest]
+#[case::leaf(16)]
+#[case::internal(150)]
+#[case::larger(600)]
+fn borrowed_nodes_search_c_written_name_indexes(
+    #[case] count: usize,
+    #[values(false, true)] relocated: bool,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("indexed.h5");
+    write_dense_group(&path, count);
+    let original = std::fs::read(&path).unwrap();
+    let base = if relocated { 512 } else { 0 };
+    let mut bytes = vec![0; base];
+    bytes.extend_from_slice(&original);
+    let at = test_util::bytes::sole_signature(&bytes, test_util::btree_v2::SIGNATURE);
+    let header = BTreeV2Header::parse(&bytes, at, 8, 8).unwrap();
+    assert_eq!(header.tree_type, BTREE_V2_LINK_NAME);
+    assert_eq!(header.total_records, count as u64);
+    assert_eq!(header.depth == 0, count == 16);
+    let layout = BTreeV2Layout::new(&header, OffsetWidth::Eight).unwrap();
+    let wanted = hdf5_pure_format::__private::jenkins_lookup3(format!("d{}", count - 1).as_bytes());
+    let mut node = layout.root().unwrap();
+    let mut visited = 0;
+    let found = loop {
+        visited += 1;
+        let start = base + usize::try_from(node.address().get()).unwrap();
+        let view = layout.parse(&bytes[start..], node).unwrap();
+        let mut left = 0;
+        let mut right = view.record_count();
+        let mut matched = false;
+        while left < right {
+            let mid = left + (right - left) / 2;
+            let hash = u32::from_le_bytes(view.record(mid).unwrap()[..4].try_into().unwrap());
+            match hash.cmp(&wanted) {
+                std::cmp::Ordering::Less => left = mid + 1,
+                std::cmp::Ordering::Equal => {
+                    matched = true;
+                    break;
+                }
+                std::cmp::Ordering::Greater => right = mid,
+            }
+        }
+        if matched {
+            break true;
+        }
+        let Some(child) = view.child(left).unwrap() else {
+            break false;
+        };
+        node = child;
+    };
+    assert!(found);
+    assert!(visited <= usize::from(header.depth) + 1);
 }
 
 #[rstest]
