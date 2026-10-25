@@ -312,6 +312,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
         "DeflateLevel",
         "DecodedStoredAddress",
         "FileSpacePageSize",
+        "FileSpaceSettings",
         "FillTime",
         "LengthWidth",
         "MantissaNormalization",

@@ -19,6 +19,7 @@
 
 use hdf5_pure::CharacterSet;
 use hdf5_pure::Datatype;
+use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FilterDisposition;
 use hdf5_pure::FilterId;
 use hdf5_pure::FilterParameters;
@@ -38,6 +39,14 @@ use hdf5_pure::{BaseAddress, Error, File, FileBuilder, LibVer, MessageType, Supe
 use rstest::rstest;
 
 use test_util::temp;
+
+#[test]
+fn file_space_settings_have_one_type_across_facade_and_core() {
+    let settings: FileSpaceSettings = hdf5_pure_core::FileSpaceSettings::default();
+    let copied = settings;
+    assert_eq!(settings, copied);
+    assert_eq!(settings, Clone::clone(&settings));
+}
 
 /// A consumer's own helper over the superblock: both types in one signature,
 /// which is the thing that could not be written before.
