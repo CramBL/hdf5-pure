@@ -10,7 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `File::reusable_space_stats` reads a writable session's logical size and reusable free bytes without allocations after platform mutex initialization. The reusable total includes append reserves and unused aggregates and does not guarantee that a particular write fits.
 - `File::persisted_free_sections` inspects typed, base-relative free sections and per-manager totals through buffered or streaming readers, while editing sessions have a separate view of reusable space at physical offsets.
-- `DatasetCreateProperties` configures a dataset's chunk dimensions, filters, partial edge chunk filtering, and fill settings as a dataset creation property list, an alternative to the builder methods that set them one at a time. Applying it replaces the settings those methods made earlier.
+- `DatasetCreateProperties` configures a dataset's chunk dimensions, filters, partial edge chunk filtering, and fill settings as a dataset creation property list. Applying it replaces the settings the builder methods made earlier ([#879](https://github.com/CramBL/hdf5-pure/pull/879), [#892](https://github.com/CramBL/hdf5-pure/pull/892)).
 - `FixedPointType::with_padding` and related numeric APIs configure padding bits that survive metadata reads and writes ([#862](https://github.com/CramBL/hdf5-pure/pull/862)).
 - `FormatError::ChunkElementSizeMismatch` reports a chunk layout whose element size disagrees with its datatype ([#845](https://github.com/CramBL/hdf5-pure/pull/845)).
 - `File::dataset` and related lookups follow relative, absolute, and chained soft links ([#771](https://github.com/CramBL/hdf5-pure/pull/771), [#849](https://github.com/CramBL/hdf5-pure/pull/849)).
@@ -51,7 +51,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - Fixed `File::persisted_free_sections` counting a persisted manager more than once when multiple slots record its header address.
-- Fixed `FileBuilder::finish` and related dataset creation writing chunks of 4 GiB or more.
+- Fixed `FileBuilder::finish` and related dataset creation writing chunks of 4 GiB or more ([#892](https://github.com/CramBL/hdf5-pure/pull/892)).
 - Fixed `mat::from_file` and related deserialization pairing the wrong elements of struct arrays whose fields have different dimensions ([#877](https://github.com/CramBL/hdf5-pure/pull/877)).
 - Fixed `Dataset::shape` and related reads or edits accepting malformed fractal-heap metadata or panicking on invalid identifiers ([#722](https://github.com/CramBL/hdf5-pure/pull/722), [#724](https://github.com/CramBL/hdf5-pure/pull/724), [#749](https://github.com/CramBL/hdf5-pure/pull/749), [#750](https://github.com/CramBL/hdf5-pure/pull/750)).
 - Fixed inconsistent truncated-superblock errors and lost file positions in `FormatError` end-of-file diagnostics ([#780](https://github.com/CramBL/hdf5-pure/pull/780), [#813](https://github.com/CramBL/hdf5-pure/pull/813)).
