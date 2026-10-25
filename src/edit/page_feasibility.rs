@@ -85,21 +85,19 @@ fn fresh_page_placement_and_root_publication_preserve_old_allocations(
 
     let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     engine.sync_policy = sync;
-    assert_eq!(engine.sb_sig_off, userblock);
-    assert_eq!(engine.addresses.effective_base().get(), userblock);
-    assert_eq!(engine.superblock.eof_address, userblock + old_stored_eoa);
+    assert_eq!(engine.context.signature().get(), userblock);
+    assert_eq!(engine.context.addresses().effective_base().get(), userblock);
+    assert_eq!(
+        engine.context.superblock().eof_address,
+        userblock + old_stored_eoa
+    );
     assert_eq!(engine.image.len(), original.len() as u64);
     assert!(engine.persist.is_none());
     assert!(engine.aggregation.is_none());
     assert!(engine.space.reusable_sections().next().is_none());
-    let (_, info) = WriteEngine::extension_fsinfo(
-        &engine.image(),
-        &engine.superblock,
-        engine.widths,
-        engine.addresses,
-    )
-    .unwrap()
-    .unwrap();
+    let (_, info) = WriteEngine::extension_fsinfo(&engine.image(), &engine.context)
+        .unwrap()
+        .unwrap();
     assert_eq!(info.strategy, FileSpaceStrategy::Page);
     assert_eq!(info.page_size.get(), page_size);
     assert!(!info.persist);
@@ -113,8 +111,9 @@ fn fresh_page_placement_and_root_publication_preserve_old_allocations(
         .unwrap();
     assert!(boundary >= old_stored_eoa);
     let old_root = engine
-        .addresses
-        .absolute(engine.superblock.root_group_address)
+        .context
+        .addresses()
+        .absolute(engine.context.superblock().root_group_address)
         .unwrap();
     let root_spans = engine.oh_chunk_spans(old_root).unwrap();
     disk_log::start();
@@ -139,9 +138,10 @@ fn fresh_page_placement_and_root_publication_preserve_old_allocations(
         .unwrap();
     engine.finalize_persist().unwrap();
     let operations = disk_log::take();
-    let superblock_len = hdf5_pure_format::__private::serialize_superblock(&engine.superblock)
-        .unwrap()
-        .len();
+    let superblock_len =
+        hdf5_pure_format::__private::serialize_superblock(engine.context.superblock())
+            .unwrap()
+            .len();
     assert_publication_prefixes(&original, &operations, userblock, superblock_len);
     drop(engine);
 
@@ -183,7 +183,7 @@ impl WriteEngine {
             &dataset.dt,
             &DatatypeLocation::Inline,
             &dataset.ds,
-            self.addresses.relative(raw).unwrap(),
+            self.context.addresses().relative(raw).unwrap(),
             dataset.raw.len() as u64,
             &dataset.attrs,
             None,
@@ -196,12 +196,18 @@ impl WriteEngine {
             .alloc_or_append_typed(&header, AllocationClass::Metadata)
             .unwrap();
         let old_root = self
-            .addresses
-            .absolute(self.superblock.root_group_address)
+            .context
+            .addresses()
+            .absolute(self.context.superblock().root_group_address)
             .unwrap();
         let mut region =
-            WriteEngine::gather_oh_messages(&self.image(), old_root, self.addresses).unwrap();
-        region.push_link("added", self.addresses.relative(header).unwrap(), None);
+            WriteEngine::gather_oh_messages(&self.image(), old_root, self.context.addresses())
+                .unwrap();
+        region.push_link(
+            "added",
+            self.context.addresses().relative(header).unwrap(),
+            None,
+        );
         let root = self
             .alloc_or_append_typed(
                 &edit::object_header::build_v2_object_header(&region).unwrap(),
@@ -209,9 +215,9 @@ impl WriteEngine {
             )
             .unwrap();
         (
-            self.addresses.relative(raw).unwrap().get(),
-            self.addresses.relative(header).unwrap().get(),
-            self.addresses.relative(root).unwrap().get(),
+            self.context.addresses().relative(raw).unwrap().get(),
+            self.context.addresses().relative(header).unwrap().get(),
+            self.context.addresses().relative(root).unwrap().get(),
         )
     }
 }
@@ -321,9 +327,10 @@ fn staged_commits_preserve_preexisting_bytes_outside_the_superblock(
     engine.commit().unwrap();
     engine.finalize_persist().unwrap();
     let operations = disk_log::take();
-    let superblock_len = hdf5_pure_format::__private::serialize_superblock(&engine.superblock)
-        .unwrap()
-        .len();
+    let superblock_len =
+        hdf5_pure_format::__private::serialize_superblock(engine.context.superblock())
+            .unwrap()
+            .len();
     let owned = engine.space_ownership().unwrap();
     let boundary = original.len() as u64 - userblock;
     let raw_pages = owned
@@ -337,9 +344,9 @@ fn staged_commits_preserve_preexisting_bytes_outside_the_superblock(
     let chunks_addr = crate::group_v2::resolve_path_any_from_source(
         &engine.image(),
         AccessMode::ReadWrite,
-        &engine.superblock,
-        engine.widths,
-        engine.addresses,
+        engine.context.superblock(),
+        engine.context.widths(),
+        engine.context.addresses(),
         &ObjectPathBuf::parse("chunks").as_path(),
     )
     .unwrap();
@@ -637,7 +644,8 @@ fn publication_write_errors_require_verified_session_bytes(
     let mut control = WriteEngine::open_with_locking(&control_path, FileLocking::Enabled).unwrap();
     control.stage_page_edits();
     control.commit().unwrap();
-    let expected = hdf5_pure_format::__private::serialize_superblock(&control.superblock).unwrap();
+    let expected =
+        hdf5_pure_format::__private::serialize_superblock(control.context.superblock()).unwrap();
     drop(control);
     let barriers = Arc::new(Mutex::new(Vec::new()));
     let mut engine = WriteEngine::open_with_page_failure(
@@ -763,7 +771,7 @@ fn failed_publication_recovery_preserves_staged_edits(
     let published = engine.assert_page_commit_failure(&original, failure);
     if matches!(failure, Failure::RepeatedPublishedSync) {
         assert_eq!(
-            engine.superblock.root_group_address,
+            engine.context.superblock().root_group_address,
             superblock::read(published.as_slice())
                 .unwrap()
                 .superblock
@@ -926,7 +934,7 @@ impl WriteEngine {
         let mut published = false;
         for operation in disk_log::take() {
             if let DiskOp::Write { offset, .. } = &operation {
-                published |= *offset == self.sb_sig_off;
+                published |= *offset == self.context.signature().get();
             }
             operation.apply(&mut replay);
         }
@@ -972,13 +980,16 @@ impl WriteEngine {
         write_boundary: u64,
         failure: Failure,
     ) {
-        let sb_len = hdf5_pure_format::__private::serialize_superblock(&self.superblock)
+        let sb_len = hdf5_pure_format::__private::serialize_superblock(self.context.superblock())
             .unwrap()
             .len();
-        let accepted = self.image.read_exact_at(self.sb_sig_off, sb_len).unwrap();
+        let accepted = self
+            .image
+            .read_exact_at(self.context.signature().get(), sb_len)
+            .unwrap();
         let mut issued = vec![0; sb_len];
         self.image
-            .read_disk_at(self.sb_sig_off, &mut issued)
+            .read_disk_at(self.context.signature().get(), &mut issued)
             .unwrap();
         let pending = self.publication.attempted() && issued != accepted;
         stage_byte_dataset(&mut self, "second", 11);
@@ -989,17 +1000,17 @@ impl WriteEngine {
             let Some(DiskOp::Write { offset, bytes }) = operations.first() else {
                 panic!("expected pending superblock write before later content");
             };
-            assert_eq!(*offset, self.sb_sig_off);
+            assert_eq!(*offset, self.context.signature().get());
             assert_eq!(*bytes, accepted);
         }
         for operation in operations {
             if let DiskOp::Write { offset, .. } = &operation {
-                assert!(*offset == self.sb_sig_off || *offset >= write_boundary);
+                assert!(*offset == self.context.signature().get() || *offset >= write_boundary);
             }
             operation.apply(&mut replay);
         }
         assert!(self.space.reusable_sections().next().is_none());
-        let sb_start = usize::try_from(self.sb_sig_off).unwrap();
+        let sb_start = usize::try_from(self.context.signature().get()).unwrap();
         drop(self);
         let bytes = fs::read(path).unwrap();
         assert_eq!(bytes, replay);
@@ -1026,19 +1037,22 @@ fn assert_interrupted_reopen(path: &Path, interrupted: &[u8], sync: SyncPolicy, 
     stage_byte_dataset(&mut engine, "reopened", 23);
     disk_log::start();
     engine.commit().unwrap();
-    let sb_len = hdf5_pure_format::__private::serialize_superblock(&engine.superblock)
+    let sb_len = hdf5_pure_format::__private::serialize_superblock(engine.context.superblock())
         .unwrap()
         .len();
     for operation in disk_log::take() {
         match operation {
             DiskOp::Write { offset, .. } => {
-                assert!(offset == engine.sb_sig_off || offset >= interrupted.len() as u64)
+                assert!(
+                    offset == engine.context.signature().get()
+                        || offset >= interrupted.len() as u64
+                )
             }
             DiskOp::SetLen(len) => assert!(len >= interrupted.len() as u64),
         }
     }
     assert!(engine.space.reusable_sections().next().is_none());
-    let sb_start = usize::try_from(engine.sb_sig_off).unwrap();
+    let sb_start = usize::try_from(engine.context.signature().get()).unwrap();
     drop(engine);
     let after = fs::read(path).unwrap();
     publication::assert_preserved_bytes(interrupted, &after, sb_start, sb_len);

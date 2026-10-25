@@ -578,7 +578,8 @@ fn assert_spare_excluded(engine: &WriteEngine, spare: &[Extent]) {
     let owned = engine.space_ownership().unwrap();
     for extent in spare {
         let start = engine
-            .addresses
+            .context
+            .addresses()
             .resolve(StoredAddress::new(extent.start()))
             .unwrap()
             .get();

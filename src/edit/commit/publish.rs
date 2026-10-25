@@ -96,7 +96,8 @@ impl WriteEngine {
         let mut trunc_to = self.release_freed(to_free)?;
         if let Some(aggregation) = self.aggregation {
             let end = self
-                .addresses
+                .context
+                .addresses()
                 .resolve(StoredAddress::new(aggregation.eoa()))?;
             if end.get() < self.image.len() {
                 trunc_to = Some(end);
@@ -203,10 +204,14 @@ impl WriteEngine {
     /// Returns [`Error::EditUnsupported`] if the file bytes differ from the accepted image or
     /// superblock framing. Returns the read, serialization, or parsing error if recovery fails.
     pub(in crate::edit) fn recover_page_publication(&mut self) -> Result<(), Error> {
-        let len = hdf5_pure_format::__private::serialize_superblock(&self.superblock)?.len();
-        let accepted = self.image.read_exact_at(self.sb_sig_off, len)?;
+        let len =
+            hdf5_pure_format::__private::serialize_superblock(self.context.superblock())?.len();
+        let accepted = self
+            .image
+            .read_exact_at(self.context.signature().get(), len)?;
         let mut published = vec![0; len];
-        self.image.read_disk_at(self.sb_sig_off, &mut published)?;
+        self.image
+            .read_disk_at(self.context.signature().get(), &mut published)?;
         if published != accepted {
             return Err(Error::EditUnsupported(
                 "PAGE publication bytes differ from the session image after a failed write; \
@@ -214,7 +219,7 @@ impl WriteEngine {
             ));
         }
         let recovered = superblock::read(published.as_slice())?.superblock;
-        let mut expected = self.superblock.clone();
+        let mut expected = self.context.superblock().clone();
         expected.root_group_address = recovered.root_group_address;
         expected.eof_address = recovered.eof_address;
         if hdf5_pure_format::__private::serialize_superblock(&expected)? != published {
@@ -223,7 +228,7 @@ impl WriteEngine {
                  close and reopen the file before editing again",
             ));
         }
-        self.superblock = recovered;
+        self.context.adopt(recovered)?;
         Ok(())
     }
 
@@ -239,15 +244,15 @@ impl WriteEngine {
         new_root: u64,
         trunc_to: Option<PhysicalAddress>,
     ) -> Result<(), Error> {
-        let base = self.addresses;
+        let base = self.context.addresses();
         let new_eof = trunc_to.map_or(self.image.len(), PhysicalAddress::get);
         self.barrier()?;
         if matches!(
-            self.superblock.version,
+            self.context.superblock().version,
             SuperblockVersion::Two | SuperblockVersion::Three
         ) {
             // Adopt the proposed superblock after the publication write and barrier succeed.
-            let mut new_sb = self.superblock.clone();
+            let mut new_sb = self.context.superblock().clone();
             new_sb.root_group_address = base.relative(new_root)?;
             new_sb.eof_address = new_eof;
             // Preserve this session's status flags, including an active crash mark.
@@ -257,8 +262,10 @@ impl WriteEngine {
             self.publication = PublicationState::Uncertain;
             self.repoint_v0v1_root(base.relative(new_root)?, new_eof)?;
             self.barrier()?;
-            self.superblock.root_group_address = self.addresses.relative(new_root)?;
-            self.superblock.eof_address = new_eof;
+            let mut superblock = self.context.superblock().clone();
+            superblock.root_group_address = self.context.addresses().relative(new_root)?;
+            superblock.eof_address = new_eof;
+            self.context.adopt(superblock)?;
             self.publication = PublicationState::Published;
         }
 
@@ -295,7 +302,7 @@ impl WriteEngine {
                         .into_iter()
                         .filter_map(|(addr, len, _)| FreeExtent::new(addr.get(), len)),
                 )?
-                .map(|cut| self.addresses.resolve(StoredAddress::new(cut)))
+                .map(|cut| self.context.addresses().resolve(StoredAddress::new(cut)))
                 .transpose();
         }
         self.space
@@ -305,7 +312,7 @@ impl WriteEngine {
                     .into_iter()
                     .filter_map(|(addr, len, _)| FreeExtent::new(addr.get(), len)),
             )
-            .map(|cut| self.addresses.resolve(StoredAddress::new(cut)))
+            .map(|cut| self.context.addresses().resolve(StoredAddress::new(cut)))
             .transpose()
     }
 
@@ -320,7 +327,7 @@ impl WriteEngine {
     ) -> Result<Vec<(StoredAddress, u64, FreeClass)>, FormatError> {
         spans
             .into_iter()
-            .map(|(at, len, class)| Ok((self.addresses.relative(at)?, len, class)))
+            .map(|(at, len, class)| Ok((self.context.addresses().relative(at)?, len, class)))
             .collect()
     }
 
@@ -342,9 +349,9 @@ impl WriteEngine {
         }
         let plan = crate::reference_patch::plan(
             &self.image(),
-            &self.superblock,
-            self.widths,
-            self.addresses,
+            self.context.superblock(),
+            self.context.widths(),
+            self.context.addresses(),
             relocations,
             MAX_LINK_GRAPH_NODES,
         )?;
@@ -386,7 +393,7 @@ impl WriteEngine {
         if self.space.is_paged() {
             return self.commit_persisting_paged(new_root, to_free, placement);
         }
-        let widths = self.widths;
+        let widths = self.context.widths();
         let offset_width = widths.offsets;
         let (strategy, threshold, page_size, mut old_blocks) = {
             // Only persistent commit paths call this method.
@@ -404,11 +411,12 @@ impl WriteEngine {
         if placement == TailPlacement::Preserve {
             old_blocks.clear();
         }
-        let base = self.addresses;
+        let base = self.context.addresses();
 
         // Resolve the stored extension address before reading its object header.
         let old_ext_addr = base.absolute(
-            self.superblock
+            self.context
+                .superblock()
                 .superblock_extension_address
                 .filter(|a| !a.is_undefined(offset_width))
                 .ok_or(Error::EditUnsupported(
@@ -469,7 +477,10 @@ impl WriteEngine {
             ext_addr + tail_len <= final_eoa,
             "the tail must end at or below the end-of-allocation it was placed under"
         );
-        let final_eof = self.addresses.resolve(StoredAddress::new(final_eoa))?;
+        let final_eof = self
+            .context
+            .addresses()
+            .resolve(StoredAddress::new(final_eoa))?;
         let aggregation = self
             .aggregation
             .map(|state| state.reconcile(final_eoa))
@@ -564,8 +575,8 @@ impl WriteEngine {
         }
         // Complete the content barrier before publishing the root, EOF, and extension.
         self.barrier()?;
-        let mut new_sb = self.superblock.clone();
-        new_sb.root_group_address = self.addresses.relative(new_root)?;
+        let mut new_sb = self.context.superblock().clone();
+        new_sb.root_group_address = self.context.addresses().relative(new_root)?;
         new_sb.eof_address = final_eof.get();
         new_sb.superblock_extension_address = Some(StoredAddress::new(ext_addr));
         // Preserve any status flags held by this session.
@@ -729,7 +740,7 @@ impl WriteEngine {
         to_free: Vec<(StoredAddress, u64, FreeClass)>,
         placement: TailPlacement,
     ) -> Result<(), Error> {
-        let widths = self.widths;
+        let widths = self.context.widths();
         let offset_width = widths.offsets;
         let (strategy, threshold, page_size, old_blocks) = {
             // Only persistent commit paths call this method.
@@ -745,14 +756,15 @@ impl WriteEngine {
             )
         };
 
-        let base = self.addresses;
+        let base = self.context.addresses();
 
         // Record existing tail padding before planning the metadata reservation.
         self.pad_to_page()?;
 
         // Resolve the stored extension address before reading its object header.
         let old_ext_addr = base.absolute(
-            self.superblock
+            self.context
+                .superblock()
                 .superblock_extension_address
                 .filter(|a| !a.is_undefined(offset_width))
                 .ok_or(Error::EditUnsupported(
@@ -812,7 +824,10 @@ impl WriteEngine {
         } else {
             self.begin_page(PageType::Meta)?;
         }
-        let final_eof = self.addresses.resolve(StoredAddress::new(final_eoa))?;
+        let final_eof = self
+            .context
+            .addresses()
+            .resolve(StoredAddress::new(final_eoa))?;
 
         let info = if blocks.is_empty() {
             file_space_info::persistent_empty(
@@ -861,8 +876,8 @@ impl WriteEngine {
         }
         // Complete the content barrier before publishing the root, EOF, and extension.
         self.barrier()?;
-        let mut new_sb = self.superblock.clone();
-        new_sb.root_group_address = self.addresses.relative(new_root)?;
+        let mut new_sb = self.context.superblock().clone();
+        new_sb.root_group_address = self.context.addresses().relative(new_root)?;
         new_sb.eof_address = final_eof.get();
         new_sb.superblock_extension_address = Some(StoredAddress::new(ext_addr));
         // Preserve the crash mark throughout a page-buffered session.
@@ -900,18 +915,18 @@ impl WriteEngine {
     /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_boot_super
     /// [entry]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_symboltableentry
     fn repoint_v0v1_root(&mut self, new_root: StoredAddress, new_eof: u64) -> Result<(), Error> {
-        let os = self.superblock.offset_size.get();
+        let os = self.context.superblock().offset_size.get();
         let addr_width = u64::from(os);
         // Field layout after the fixed prefix: base / free-space / EOF / driver
         // addresses, then the root symbol-table entry (link-name offset, object
         // header address, cache type(4), reserved(4), scratch(16)). The prefix is
         // 24 bytes for v0 and 28 for v1 (the latter adds indexed-storage-K).
-        let var_start = if self.superblock.version == SuperblockVersion::Zero {
+        let var_start = if self.context.superblock().version == SuperblockVersion::Zero {
             24
         } else {
             28
         };
-        let base = self.sb_sig_off + var_start;
+        let base = self.context.signature().get() + var_start;
         let eof_off = base + 2 * addr_width;
         let ste = base + 4 * addr_width;
         let oh_addr_off = ste + addr_width;
@@ -934,9 +949,9 @@ impl WriteEngine {
     fn publish_superblock(&mut self, publication: SuperblockPublication) -> Result<(), Error> {
         let SuperblockPublication { superblock, bytes } = publication;
         self.publication = PublicationState::Uncertain;
-        self.write_at(self.sb_sig_off, &bytes)?;
+        self.write_at(self.context.signature().get(), &bytes)?;
         self.barrier()?;
-        self.superblock = superblock;
+        self.context.adopt(superblock)?;
         self.publication = PublicationState::Published;
         Ok(())
     }

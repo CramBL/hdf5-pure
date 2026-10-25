@@ -170,8 +170,10 @@ fn failed_commit_restores_heap_collection_ownership_records() {
     s.commit().unwrap();
     let recorded = s.vl_overwrite_heaps.clone();
     assert!(!recorded.is_empty(), "the good round recorded nothing");
-    let good_ext = s.superblock.superblock_extension_address;
-    s.superblock.superblock_extension_address = Some(StoredAddress::ZERO);
+    let good_ext = s.context.superblock().superblock_extension_address;
+    let mut superblock = s.context.superblock().clone();
+    superblock.superblock_extension_address = Some(StoredAddress::ZERO);
+    s.context.adopt(superblock).unwrap();
     s.stage_dataset_write(&ObjectPathBuf::parse("/labels"), {
         let mut db = crate::type_builders::DatasetBuilder::new("");
         db.with_vlen_strings(&["round-two-aaaa", "round-two-bbbb"]);
@@ -187,7 +189,9 @@ fn failed_commit_restores_heap_collection_ownership_records() {
         s.vl_overwrite_heaps, recorded,
         "a failed commit must not leave a record naming space it gave back"
     );
-    s.superblock.superblock_extension_address = good_ext;
+    let mut superblock = s.context.superblock().clone();
+    superblock.superblock_extension_address = good_ext;
+    s.context.adopt(superblock).unwrap();
     s.stage_dataset_write(&ObjectPathBuf::parse("/labels"), {
         let mut db = crate::type_builders::DatasetBuilder::new("");
         db.with_vlen_strings(&["round-three-a", "round-three-b"]);
@@ -234,7 +238,9 @@ fn a_failed_commit_that_reused_free_space_leaves_the_file_intact() {
         free_before.iter().any(|&(_, l)| l > 4096 * 8 / 2),
         "the deleted chunked dataset left a hole worth reusing: {free_before:?}"
     );
-    s.superblock.superblock_extension_address = Some(StoredAddress::ZERO);
+    let mut superblock = s.context.superblock().clone();
+    superblock.superblock_extension_address = Some(StoredAddress::ZERO);
+    s.context.adopt(superblock).unwrap();
     let mut db = crate::type_builders::DatasetBuilder::new("fresh");
     db.with_f64_data(&vec![7.5f64; 4096])
         .with_shape(&[4096])
@@ -276,8 +282,10 @@ fn a_failed_commit_puts_back_the_value_it_overwrote() {
 
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
 
-    let good_ext = s.superblock.superblock_extension_address;
-    s.superblock.superblock_extension_address = Some(StoredAddress::ZERO);
+    let good_ext = s.context.superblock().superblock_extension_address;
+    let mut superblock = s.context.superblock().clone();
+    superblock.superblock_extension_address = Some(StoredAddress::ZERO);
+    s.context.adopt(superblock).unwrap();
     s.stage_dataset_write(&ObjectPathBuf::parse("/nums"), {
         let mut db = crate::type_builders::DatasetBuilder::new("");
         db.with_i32_data(&[9, 9, 9]);
@@ -295,7 +303,9 @@ fn a_failed_commit_puts_back_the_value_it_overwrote() {
         matches!(refused, Err(Error::EditUnsupported(_))),
         "the refusal, not a rollback failure: {refused:?}"
     );
-    s.superblock.superblock_extension_address = good_ext;
+    let mut superblock = s.context.superblock().clone();
+    superblock.superblock_extension_address = good_ext;
+    s.context.adopt(superblock).unwrap();
     s.stage_created_dataset(&ObjectPathBuf::parse("/later"), {
         let mut db = crate::type_builders::DatasetBuilder::new("");
         db.with_i32_data(&[7]);
@@ -845,7 +855,7 @@ fn a_status_flag_write_leaves_a_userblock_files_root_alone() {
 
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     assert_eq!(
-        s.superblock.base_address,
+        s.context.superblock().base_address,
         BaseAddress::new(4096),
         "the fixture must have a userblock, or this test holds for a file \
          whose absolute and relative roots are the same number"
@@ -1005,7 +1015,7 @@ fn a_page_buffer_marks_a_userblock_file_without_repointing_its_root(
 
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     assert_eq!(
-        s.superblock.base_address,
+        s.context.superblock().base_address,
         BaseAddress::new(4096),
         "the fixture must have a userblock, or this test says nothing about \
          the conversion it exists for"
@@ -1180,11 +1190,11 @@ fn a_barrier_orders_the_publish_point_last_under_every_policy() {
         let order = s.image.issued_write_order()[before..].to_vec();
         let superblock = order
             .iter()
-            .position(|&(at, _)| at == s.sb_sig_off)
+            .position(|&(at, _)| at == s.context.signature().get())
             .unwrap_or_else(|| panic!("{policy:?}: the commit never wrote the superblock"));
         let content = order
             .iter()
-            .rposition(|&(at, _)| at != s.sb_sig_off)
+            .rposition(|&(at, _)| at != s.context.signature().get())
             .unwrap_or_else(|| panic!("{policy:?}: the commit wrote nothing but a superblock"));
         assert!(
             superblock > content,
@@ -1610,7 +1620,9 @@ fn an_undo_replays_two_hard_links_to_one_block_newest_first() {
     let path = test_util::copy_data("c/hard_link_undo.h5", dir.path());
 
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
-    s.superblock.superblock_extension_address = Some(StoredAddress::ZERO);
+    let mut superblock = s.context.superblock().clone();
+    superblock.superblock_extension_address = Some(StoredAddress::ZERO);
+    s.context.adopt(superblock).unwrap();
     for (name, data) in [("/aa", [9, 9, 9]), ("/bb", [8, 8, 8])] {
         s.stage_dataset_write(&ObjectPathBuf::parse(name), {
             let mut db = crate::type_builders::DatasetBuilder::new("");
@@ -1656,7 +1668,9 @@ fn a_failed_commit_puts_back_every_chunk_it_overwrote() {
     b.write(&path).unwrap();
 
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
-    s.superblock.superblock_extension_address = Some(StoredAddress::ZERO);
+    let mut superblock = s.context.superblock().clone();
+    superblock.superblock_extension_address = Some(StoredAddress::ZERO);
+    s.context.adopt(superblock).unwrap();
     s.stage_dataset_write(&ObjectPathBuf::parse("/grid"), {
         let mut db = crate::type_builders::DatasetBuilder::new("");
         db.with_i32_data(&vec![0i32; 4096]);
@@ -1704,7 +1718,9 @@ fn a_commit_does_not_replay_a_journal_it_did_not_write() {
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     let stale: Vec<u8> = [7i32, 7, 7].iter().flat_map(|v| v.to_le_bytes()).collect();
     s.inplace_undo.push((nums_block, stale));
-    s.superblock.superblock_extension_address = Some(StoredAddress::ZERO);
+    let mut superblock = s.context.superblock().clone();
+    superblock.superblock_extension_address = Some(StoredAddress::ZERO);
+    s.context.adopt(superblock).unwrap();
     s.stage_created_dataset(&ObjectPathBuf::parse("/extra"), {
         let mut db = crate::type_builders::DatasetBuilder::new("");
         db.with_i32_data(&[42]);
@@ -1740,7 +1756,9 @@ fn a_rollback_orders_the_values_it_puts_back() {
         let syncs = Arc::new(AtomicU64::new(0));
         let mut s =
             WriteEngine::open_sync_counting(&path, SyncPolicy::Always, Arc::clone(&syncs)).unwrap();
-        s.superblock.superblock_extension_address = Some(StoredAddress::ZERO);
+        let mut superblock = s.context.superblock().clone();
+        superblock.superblock_extension_address = Some(StoredAddress::ZERO);
+        s.context.adopt(superblock).unwrap();
         if with_overwrite {
             s.stage_dataset_write(&ObjectPathBuf::parse("/nums"), {
                 let mut db = crate::type_builders::DatasetBuilder::new("");

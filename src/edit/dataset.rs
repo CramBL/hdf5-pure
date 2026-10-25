@@ -158,7 +158,7 @@ impl WriteEngine {
     /// Returns [`Error::Format`] if chunk encoding, dataset-header encoding, or allocation geometry
     /// is invalid. Returns [`Error::Io`] if writing the dataset or allocation padding fails.
     pub(super) fn write_dataset(&mut self, fd: &mut FlatDataset) -> Result<u64, Error> {
-        let base = self.addresses;
+        let base = self.context.addresses();
         let oh = if fd.chunk_options.is_chunked() || fd.maxshape.is_some() {
             self.build_chunked_dataset(fd)?
         } else {
@@ -211,8 +211,8 @@ impl WriteEngine {
         path: &ObjectPathBuf,
     ) -> Result<WritePlan, Error> {
         let src = &self.image();
-        let base = self.addresses;
-        let widths = self.widths;
+        let base = self.context.addresses();
+        let widths = self.context.widths();
         // `stage_dataset_write` checks these options before storing a prepared write.
         debug_assert!(
             Self::refuse_unsupported_overwrite(fd).is_ok(),
@@ -710,7 +710,7 @@ impl WriteEngine {
     /// written. Returns [`Error::Format`] if heap addresses, chunk encoding, header messages, or
     /// allocation geometry are invalid, and [`Error::Io`] if writing replacement storage fails.
     pub(super) fn write_moving(&mut self, mw: &MovingWrite) -> Result<u64, Error> {
-        let base = self.addresses;
+        let base = self.context.addresses();
         match mw {
             MovingWrite::Contiguous {
                 region,
@@ -830,7 +830,7 @@ impl WriteEngine {
         kept_chunks: &[ChunkRecord],
         new_chunks: &[PreparedChunk],
     ) -> Result<u64, Error> {
-        let base = self.addresses;
+        let base = self.context.addresses();
         // On PAGE files, adjacency to chunk data proves that an index occupies raw pages.
         // Use one reusable region when it fits both. Otherwise place chunks separately and retain
         // unproven index bytes as dead storage during reclamation.
@@ -1247,7 +1247,7 @@ impl WriteEngine {
             .cloned()
             .unwrap_or_default();
         let mut raw = raw.clone();
-        let base = self.addresses;
+        let base = self.context.addresses();
         let addrs = self.place_vl_collections(&staging.collections)?;
         type_builders::patch_vl_refs_masked(&mut raw, &staging.patch_offsets, &addrs);
         let placed = addrs

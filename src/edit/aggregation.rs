@@ -310,8 +310,9 @@ impl WriteEngine {
             return Ok(());
         }
         let root = self
-            .addresses
-            .absolute(self.superblock.root_group_address)?;
+            .context
+            .addresses()
+            .absolute(self.context.superblock().root_group_address)?;
         let snapshot = self.snapshot_free();
         self.aggregation = Some(AggregateSpace::new(aggregation.eoa));
         self.publication = PublicationState::Ready;
@@ -370,7 +371,7 @@ impl WriteEngine {
             return Ok(None);
         };
         aggregation
-            .reserve(self.addresses, &mut self.space, size, class)
+            .reserve(self.context.addresses(), &mut self.space, size, class)
             .map(Some)
     }
 
@@ -414,12 +415,14 @@ impl WriteEngine {
             post
         });
         let end = self
-            .addresses
+            .context
+            .addresses()
             .resolve(StoredAddress::new(aggregation.eoa))?;
         if end.get() < self.image.len() {
             let root = self
-                .addresses
-                .absolute(self.superblock.root_group_address)?;
+                .context
+                .addresses()
+                .absolute(self.context.superblock().root_group_address)?;
             self.publication = PublicationState::Ready;
             let result = self.publish_nonpersisting(root, Some(end));
             if result.is_ok() || self.publication.attempted() {
@@ -553,10 +556,10 @@ mod tests {
             .unwrap();
         engine.finalize_persist().unwrap();
         assert_eq!(engine.image.len(), tail.start());
-        assert_eq!(engine.superblock.eof_address, tail.start());
+        assert_eq!(engine.context.superblock().eof_address, tail.start());
         assert!(engine.aggregation.unwrap().unused().next().is_none());
         let order = engine.image.issued_write_order();
-        assert_eq!(order.last().unwrap().0, engine.sb_sig_off);
+        assert_eq!(order.last().unwrap().0, engine.context.signature().get());
         drop(engine);
         let file = File::open(&path).unwrap();
         assert_eq!(
@@ -611,7 +614,7 @@ mod tests {
         };
         assert_eq!(error.kind(), ErrorKind::Other);
         assert_eq!(engine.aggregation, original);
-        assert_eq!(engine.superblock.eof_address, end);
+        assert_eq!(engine.context.superblock().eof_address, end);
         drop(engine);
         let file = File::open(&path).unwrap();
         assert_eq!(file.root().datasets().unwrap(), ["keep"]);

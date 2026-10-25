@@ -297,7 +297,6 @@ use crate::SuperblockVersion;
 use crate::UserblockSize;
 use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
-use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
 use crate::address::DecodedStoredAddress;
 use crate::address::StoredAddress;
@@ -311,7 +310,6 @@ use crate::file_space_info::DEFAULT_THRESHOLD;
 use crate::file_space_info::FileSpaceInfo;
 use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::FileSpaceStrategy;
-use crate::file_writer::{LENGTH_WIDTH, OFFSET_WIDTH};
 use crate::filter_pipeline::FilterPipeline;
 use crate::free_sections::ReusableSpaceStats;
 use crate::free_space_manager;
@@ -327,7 +325,6 @@ use crate::reader::FileAccessProperties;
 use crate::source::SourceMetadata;
 use crate::source::{BaseOffsetSource, MetadataCacheConfig, Source};
 use crate::superblock;
-use crate::superblock::LocatedSuperblock;
 use crate::superblock::Superblock;
 #[cfg(doc)]
 use crate::type_builders::ObjectRefTarget;
@@ -338,6 +335,7 @@ use self::commit::PublicationState;
 use self::commit::plan::InvalidatedAddresses;
 #[cfg(test)]
 use self::commit::plan::Node;
+use self::context::FileContext;
 use self::dataset::FlatDataset;
 #[cfg(doc)]
 use self::dataset::{MovingWrite, WritePlan};
@@ -352,6 +350,7 @@ mod aggregation;
 mod append;
 pub(crate) mod attributes;
 mod commit;
+mod context;
 mod copy;
 mod dataset;
 mod global_heap_liveness;
@@ -503,14 +502,7 @@ pub(crate) struct WriteEngine {
     /// what it is reading (issue #198). [`image_slice`](Self::image_slice)
     /// exposes the mirror's buffer where a caller can exploit it.
     image: Box<dyn FileImage>,
-    /// Absolute offset of the superblock signature in the file.
-    sb_sig_off: u64,
-    /// The committed superblock with addresses in their encoded coordinate systems.
-    superblock: Superblock,
-    /// The address and length widths validated while parsing the superblock.
-    widths: FormatWidths,
-    /// The mapping from stored metadata addresses to physical positions in this image.
-    addresses: AddressContext,
+    context: FileContext,
     /// Every edit this session has staged and not yet applied. Held as one
     /// value so that [`commit`](WriteEngine::commit) can take the whole set out
     /// for the duration of an attempt and put it back when that attempt
@@ -983,7 +975,7 @@ fn bounded_only_limitation(session: &WriteEngine) -> Option<&'static str> {
     }
 
     if matches!(
-        session.superblock.version,
+        session.context.superblock().version,
         SuperblockVersion::Zero | SuperblockVersion::One
     ) {
         return Some(
@@ -992,7 +984,7 @@ fn bounded_only_limitation(session: &WriteEngine) -> Option<&'static str> {
              the whole-file mirror here",
         );
     }
-    if !session.superblock.base_address.is_zero() {
+    if !session.context.superblock().base_address.is_zero() {
         return Some(
             "bounded read-write access does not support a file with a userblock \
              (non-zero base address); leave MemoryStrategy unset, or pass \
@@ -1562,8 +1554,8 @@ impl WriteEngine {
                  use File::open_rw with staged edits and File::commit",
             ));
         }
-        if session.superblock.version != SuperblockVersion::Three
-            || !session.superblock.base_address.is_zero()
+        if session.context.superblock().version != SuperblockVersion::Three
+            || !session.context.superblock().base_address.is_zero()
             || session.persist.is_some()
         {
             return Err(Error::SwmrAppendUnsupported(
@@ -1589,10 +1581,10 @@ impl WriteEngine {
     /// Returns [`Error::Format`] if the superblock cannot be serialized, or [`Error::Io`] if
     /// writing or syncing the image fails.
     fn set_consistency_flags(&mut self, flags: SuperblockStatusFlags) -> Result<(), Error> {
-        self.superblock.consistency_flags = flags;
+        self.context.set_consistency_flags(flags);
         self.held_status_flags = flags;
-        let bytes = hdf5_pure_format::__private::serialize_superblock(&self.superblock)?;
-        self.write_at(self.sb_sig_off, &bytes)?;
+        let bytes = hdf5_pure_format::__private::serialize_superblock(self.context.superblock())?;
+        self.write_at(self.context.signature().get(), &bytes)?;
         self.barrier_data()?;
         Ok(())
     }
@@ -1721,51 +1713,27 @@ impl WriteEngine {
         // handle; it leaves the handle's cursor wherever its last read ended,
         // which is why the mirror positions the handle before reading it whole.
         let probe = crate::image::BorrowedHandle::new(&handle, len);
-        let LocatedSuperblock {
-            address,
-            superblock,
-            widths,
-        } = superblock::read(&probe)?;
-        let sb_sig_off = address.get();
-
-        // Refuse a file a writer already holds, before anything is mutated. This
-        // is the one exclusion the OS lock above cannot make: a SWMR writer
-        // takes no lock, so its file is lock-free but flagged (issue #245).
+        let located = superblock::read(&probe)?;
         file_lock::check_status_flags(
-            &superblock,
+            &located.superblock,
             file_lock::OpenIntent::Write,
             file_lock::OpenTarget::Path(path),
         )?;
-        if widths.offsets != OFFSET_WIDTH || widths.lengths != LENGTH_WIDTH {
-            return Err(Error::EditUnsupported(
-                "only 8-byte offsets and lengths are supported for in-place editing",
-            ));
-        }
-        // A userblock shifts the whole HDF5 image forward by `base_address`: the
-        // superblock sits at the base address and every stored address is relative
-        // to it (the end-of-file address is the sole absolute field). The editor
-        // supports this by reading at `stored + base` and writing back
-        // `file_offset - base`. Only the canonical layout — superblock located
-        // exactly at the base address (e.g. a MATLAB v7.3 `.mat` file's 512-byte
-        // userblock) — is accepted; a base address that disagrees with the
-        // superblock's location is a relocated or malformed file we will not rewrite.
-        if superblock.base_address != BaseAddress::new(sb_sig_off) {
-            return Err(Error::EditUnsupported(
-                "a file whose superblock is not located at its base address is not editable in place",
-            ));
-        }
-        let addresses = AddressContext::from_effective_base(superblock.base_address);
+        let context = FileContext::new(located)?;
+        let superblock = context.superblock();
+        let addresses = context.addresses();
+        let sb_sig_off = context.signature().get();
 
         // `H5Fopen` rejects a page size outside 512 bytes to 1 GiB as well (`H5Ofsinfo.c` and
         // `H5Fsuper.c`, HDF5 2.2.0).
-        let file_space_info = Self::extension_fsinfo(&probe, &superblock, widths, addresses)?;
+        let file_space_info = Self::extension_fsinfo(&probe, &context)?;
         let fresh_page_boundary = if let Some((_, info)) = &file_space_info
             && info.strategy == FileSpaceStrategy::Page
             && !info.persist
         {
             let stored_eoa = addresses.relative(superblock.eof_address)?;
             let superblock_len =
-                hdf5_pure_format::__private::serialize_superblock(&superblock)?.len() as u64;
+                hdf5_pure_format::__private::serialize_superblock(superblock)?.len() as u64;
             let superblock_end =
                 sb_sig_off
                     .checked_add(superblock_len)
@@ -1802,10 +1770,7 @@ impl WriteEngine {
 
         let mut session = Self {
             image,
-            sb_sig_off,
-            addresses,
-            superblock,
-            widths,
+            context,
             staged: StagedEdits::default(),
             appender_claims: Vec::new(),
             next_appender_token: 0,
@@ -1979,7 +1944,7 @@ impl WriteEngine {
         // it. A version-2 paged file is reachable — `LibVer::V18` writes a
         // version-2 superblock and nothing about paged file space rules it out —
         // so this is a refusal rather than an assertion (issue #308).
-        if self.superblock.version != SuperblockVersion::Three {
+        if self.context.superblock().version != SuperblockVersion::Three {
             return Err(Error::EditUnsupported(
                 "a page buffer marks the file for the life of the session, so that a session \
                  that crashes leaves one every reader refuses rather than one that reads \
@@ -2030,7 +1995,7 @@ impl WriteEngine {
         if !info.persist || !self.space.is_enabled() {
             return;
         }
-        let widths = self.widths;
+        let widths = self.context.widths();
         let Ok(eoa) = self.end_of_allocation() else {
             return;
         };
@@ -2050,7 +2015,7 @@ impl WriteEngine {
                 let read = free_space_manager::read_persisted_sections_source(
                     &self.image(),
                     widths,
-                    self.addresses.effective_base(),
+                    self.context.addresses().effective_base(),
                     &[DecodedStoredAddress::Defined(addr)],
                 );
                 (
@@ -2146,7 +2111,7 @@ impl WriteEngine {
         addr: StoredAddress,
     ) -> Option<FreeExtent> {
         let len = hdf5_pure_format::__private::free_space_manager_header_len(widths);
-        let at = self.addresses.resolve(addr).ok()?;
+        let at = self.context.addresses().resolve(addr).ok()?;
         let fshd = self
             .image()
             .read_metadata_at(at.get(), len.to_usize().ok()?)
@@ -2161,7 +2126,7 @@ impl WriteEngine {
     /// Returns `None` if `at` lies below the base address, or if the extent is empty or ends past
     /// [`u64::MAX`].
     fn stored_extent(&self, at: u64, len: u64) -> Option<FreeExtent> {
-        FreeExtent::new(self.addresses.relative(at).ok()?.get(), len)
+        FreeExtent::new(self.context.addresses().relative(at).ok()?.get(), len)
     }
 
     /// Returns the first stored page boundary at or beyond both extents.
@@ -2198,25 +2163,24 @@ impl WriteEngine {
     ///
     /// Returns [`FormatError::AddressBelowBase`] if the image ends below the base address.
     fn end_of_allocation(&self) -> Result<StoredAddress, FormatError> {
-        self.addresses.relative(self.image.len())
+        self.context.addresses().relative(self.image.len())
     }
 
-    /// Reads the superblock extension of `superblock` from `source`, and returns its absolute
-    /// address and the File Space Info message in its object header, or `None` if the file has no
-    /// extension or the extension has no such message.
+    /// Reads the File Space Info message from the superblock extension.
+    ///
+    /// Returns the extension's physical position and the message, or `None` if either is absent.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the extension's absolute address exceeds `u64`,
-    /// and the parser's error if the superblock's widths, the extension's object header, or the
-    /// message does not parse.
+    /// and the parser's error if the extension's object header or the message does not parse.
     fn extension_fsinfo(
         source: &(impl Source + ?Sized),
-        superblock: &Superblock,
-        widths: FormatWidths,
-        addresses: AddressContext,
+        context: &FileContext,
     ) -> Result<Option<(u64, FileSpaceInfo)>, FormatError> {
-        let base = addresses;
+        let superblock = context.superblock();
+        let widths = context.widths();
+        let base = context.addresses();
         if matches!(
             superblock.version,
             SuperblockVersion::Zero | SuperblockVersion::One
@@ -2364,17 +2328,17 @@ impl WriteEngine {
     /// A relocating commit updates the stored root address. A clone taken before that commit
     /// holds the previous root address.
     pub(crate) fn superblock(&self) -> &Superblock {
-        &self.superblock
+        self.context.superblock()
     }
 
     /// Returns the address and length widths validated when this session opened the file.
     pub(crate) const fn widths(&self) -> FormatWidths {
-        self.widths
+        self.context.widths()
     }
 
     /// Returns the mapping between stored addresses and physical positions in this session.
     pub(crate) const fn addresses(&self) -> AddressContext {
-        self.addresses
+        self.context.addresses()
     }
 
     /// The file's shared-message (SOHM) master table, or `None` for a file that
@@ -2384,12 +2348,12 @@ impl WriteEngine {
     /// Costs one small object-header parse per commit on a file that has a
     /// superblock extension at all, and nothing on one that does not.
     fn shared_message_table(&self) -> Result<Option<crate::sohm::SohmTable>, Error> {
-        let widths = self.widths;
-        let rel = match self.superblock.superblock_extension_address {
+        let widths = self.context.widths();
+        let rel = match self.context.superblock().superblock_extension_address {
             Some(rel) if !rel.is_undefined(widths.offsets) => rel,
             _ => return Ok(None),
         };
-        let base = self.addresses;
+        let base = self.context.addresses();
         // Best-effort down to here, and strict past it. A superblock extension
         // this engine cannot parse is one nothing in this crate reads a shared
         // message through either, so it is treated as a file that shares none;
@@ -2441,13 +2405,14 @@ impl WriteEngine {
         let Some(table) = self.shared_message_table()? else {
             return Ok(());
         };
-        let base = self.addresses;
+        let base = self.context.addresses();
         let framed = BaseOffsetSource {
             inner: self.image(),
             base: base.effective_base(),
         };
         for index in &table.indexes {
-            let records = crate::sohm::read_index_records_from_source(&framed, index, self.widths)?;
+            let records =
+                crate::sohm::read_index_records_from_source(&framed, index, self.context.widths())?;
             screen_shared_message_records(&records, invalidated)?;
         }
         Ok(())
@@ -2477,7 +2442,7 @@ impl WriteEngine {
     ///
     /// [`FileAccessProperties::with_libver_bounds`]: crate::FileAccessProperties::with_libver_bounds
     pub(crate) fn libver(&self) -> LibVer {
-        LibVer::from_superblock_version(self.superblock.version)
+        LibVer::from_superblock_version(self.context.superblock().version)
     }
 
     /// Constrain what this session may add, from the fapl's library-version
@@ -2651,7 +2616,9 @@ impl WriteEngine {
         // breakdown.
         let physical = |extent: FreeExtent| {
             let range = FileRange::new(
-                self.addresses.resolve(StoredAddress::new(extent.start()))?,
+                self.context
+                    .addresses()
+                    .resolve(StoredAddress::new(extent.start()))?,
                 extent.len(),
             )?;
             Ok((range.start().get(), range.length()))
@@ -2786,8 +2753,9 @@ impl WriteEngine {
         }
         self.publication = PublicationState::Ready;
         match self.commit_persisting(
-            self.addresses
-                .absolute(self.superblock.root_group_address)?,
+            self.context
+                .addresses()
+                .absolute(self.context.superblock().root_group_address)?,
             Vec::new(),
             TailPlacement::Anywhere,
         ) {
@@ -3020,7 +2988,7 @@ impl WriteEngine {
                 bytes.len()
             ))));
         }
-        let at = self.addresses.resolve(addr)?;
+        let at = self.context.addresses().resolve(addr)?;
         if at == PhysicalAddress::new(self.image.len()) {
             let written = self.append(bytes)?;
             debug_assert_eq!(
@@ -3150,7 +3118,8 @@ impl WriteEngine {
         {
             return Ok(Placement::Reused {
                 addr: self
-                    .addresses
+                    .context
+                    .addresses()
                     .resolve(StoredAddress::new(extent.start()))?
                     .get(),
                 len,
@@ -3264,7 +3233,7 @@ impl WriteEngine {
         build: impl FnOnce(StoredAddress) -> Result<(Vec<u8>, T), Error>,
     ) -> Result<(u64, T), Error> {
         let at = self.reserve(len, class)?;
-        let (bytes, extra) = build(self.addresses.relative(at.address())?)?;
+        let (bytes, extra) = build(self.context.addresses().relative(at.address())?)?;
         let addr = self.place(at, &bytes)?;
         Ok((addr, extra))
     }
@@ -3284,7 +3253,7 @@ impl WriteEngine {
             .iter()
             .map(|collection| {
                 let addr = self.alloc_or_append_typed(collection, AllocationClass::Raw)?;
-                Ok(self.addresses.relative(addr)?.get())
+                Ok(self.context.addresses().relative(addr)?.get())
             })
             .collect()
     }

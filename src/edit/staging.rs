@@ -276,18 +276,18 @@ impl WriteEngine {
             Some(data) => crate::group_v2::resolve_path_any(
                 data,
                 AccessMode::ReadWrite,
-                &self.superblock,
-                self.widths,
-                self.addresses,
+                self.context.superblock(),
+                self.context.widths(),
+                self.context.addresses(),
                 &path.as_path(),
             )
             .is_ok(),
             None => crate::group_v2::resolve_path_any_from_source(
                 &self.image(),
                 AccessMode::ReadWrite,
-                &self.superblock,
-                self.widths,
-                self.addresses,
+                self.context.superblock(),
+                self.context.widths(),
+                self.context.addresses(),
                 &path.as_path(),
             )
             .is_ok(),

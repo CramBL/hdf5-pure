@@ -122,7 +122,7 @@ fn reusable_space_stats_check_additional_byte_sums(#[case] reserve: bool, #[case
         let mut aggregation = AggregateSpace::new(session.end_of_allocation().unwrap().get());
         aggregation
             .reserve(
-                session.addresses,
+                session.context.addresses(),
                 &mut session.space,
                 NonZeroU64::new(1).unwrap(),
                 AllocationClass::Raw,
@@ -704,9 +704,9 @@ fn a_c_written_chunk_index_is_not_reclaimed_as_raw() {
     let victim_addr = crate::group_v2::resolve_path_any(
         s.image.as_slice().unwrap(),
         AccessMode::ReadWrite,
-        &s.superblock,
-        s.widths,
-        AddressContext::from_effective_base(s.superblock.base_address),
+        s.context.superblock(),
+        s.context.widths(),
+        AddressContext::from_effective_base(s.context.superblock().base_address),
         &ObjectPath::parse("victim"),
     )
     .unwrap();
@@ -1009,11 +1009,12 @@ fn a_reuse_only_tail_rewrite_that_cannot_place_itself_writes_nothing() {
         FileSpacePageSize::DEFAULT,
     );
     let root = s
-        .addresses
-        .absolute(s.superblock.root_group_address)
+        .context
+        .addresses()
+        .absolute(s.context.superblock().root_group_address)
         .unwrap();
     let len_before = s.image.len();
-    let ext_before = s.superblock.superblock_extension_address;
+    let ext_before = s.context.superblock().superblock_extension_address;
 
     s.commit_persisting(root, Vec::new(), TailPlacement::ReuseOnly)
         .unwrap();
@@ -1023,7 +1024,8 @@ fn a_reuse_only_tail_rewrite_that_cannot_place_itself_writes_nothing() {
         "a reuse-only rewrite with nothing to reuse must leave the file alone"
     );
     assert_eq!(
-        s.superblock.superblock_extension_address, ext_before,
+        s.context.superblock().superblock_extension_address,
+        ext_before,
         "and must not have published a new extension either"
     );
 
@@ -1052,8 +1054,8 @@ fn a_flat_tail_takes_exactly_the_extent_it_records() {
     b.write(&path).unwrap();
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     let widths = FormatWidths {
-        offsets: s.superblock.offset_size,
-        lengths: s.superblock.length_size,
+        offsets: s.context.superblock().offset_size,
+        lengths: s.context.superblock().length_size,
     };
 
     let free_total =
@@ -1243,8 +1245,10 @@ fn failed_paged_commit_leaves_the_free_lists_untouched() {
 
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     let before = s.space_accounting().unwrap().reusable_free_space;
-    let good_ext = s.superblock.superblock_extension_address;
-    s.superblock.superblock_extension_address = Some(StoredAddress::ZERO);
+    let good_ext = s.context.superblock().superblock_extension_address;
+    let mut superblock = s.context.superblock().clone();
+    superblock.superblock_extension_address = Some(StoredAddress::ZERO);
+    s.context.adopt(superblock).unwrap();
     s.delete(&ObjectPathBuf::parse("/drop")).unwrap();
     assert!(
         s.commit().is_err(),
@@ -1256,7 +1260,9 @@ fn failed_paged_commit_leaves_the_free_lists_untouched() {
         before,
         "a failed commit must not record still-live regions as free"
     );
-    s.superblock.superblock_extension_address = good_ext;
+    let mut superblock = s.context.superblock().clone();
+    superblock.superblock_extension_address = good_ext;
+    s.context.adopt(superblock).unwrap();
     s.delete(&ObjectPathBuf::parse("/drop")).unwrap();
     s.commit()
         .expect("the session is usable after a failed commit");
@@ -1301,7 +1307,7 @@ fn failed_persistent_commit_preserves_live_bytes_and_reusable_space(
     let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     s.delete(&ObjectPathBuf::parse("/b")).unwrap();
     s.commit().unwrap();
-    let eof = s.superblock.eof_address;
+    let eof = s.context.superblock().eof_address;
     let free = s.space_accounting().unwrap().reusable_free_space;
     let live_bytes = |s: &WriteEngine| {
         let mut bytes = s
@@ -1317,8 +1323,10 @@ fn failed_persistent_commit_preserves_live_bytes_and_reusable_space(
     let before = live_bytes(&s);
     let summary_before = s.reusable_space_stats().unwrap();
 
-    let good_ext = s.superblock.superblock_extension_address;
-    s.superblock.superblock_extension_address = Some(StoredAddress::ZERO);
+    let good_ext = s.context.superblock().superblock_extension_address;
+    let mut superblock = s.context.superblock().clone();
+    superblock.superblock_extension_address = Some(StoredAddress::ZERO);
+    s.context.adopt(superblock).unwrap();
     s.delete(&ObjectPathBuf::parse("/c")).unwrap();
     let err = s.commit().unwrap_err();
     assert!(
@@ -1329,7 +1337,7 @@ fn failed_persistent_commit_preserves_live_bytes_and_reusable_space(
         "{err:?}"
     );
 
-    assert_eq!(s.superblock.eof_address, eof);
+    assert_eq!(s.context.superblock().eof_address, eof);
     assert_eq!(s.space_accounting().unwrap().reusable_free_space, free);
     let summary_after = s.reusable_space_stats().unwrap();
     let accounting = s.space_accounting().unwrap();
@@ -1349,7 +1357,11 @@ fn failed_persistent_commit_preserves_live_bytes_and_reusable_space(
         "the failed commit changed live bytes"
     );
 
-    s.superblock.superblock_extension_address = good_ext;
+    let mut superblock = s.context.superblock().clone();
+
+    superblock.superblock_extension_address = good_ext;
+
+    s.context.adopt(superblock).unwrap();
     s.delete(&ObjectPathBuf::parse("/c")).unwrap();
     s.commit().unwrap();
     drop(s);
@@ -1383,8 +1395,10 @@ fn a_failed_commit_leaves_no_reusable_span_the_image_names() {
     })
     .unwrap();
     s.commit().unwrap();
-    let good_ext = s.superblock.superblock_extension_address;
-    s.superblock.superblock_extension_address = Some(StoredAddress::ZERO);
+    let good_ext = s.context.superblock().superblock_extension_address;
+    let mut superblock = s.context.superblock().clone();
+    superblock.superblock_extension_address = Some(StoredAddress::ZERO);
+    s.context.adopt(superblock).unwrap();
     s.stage_dataset_write(&ObjectPathBuf::parse("/labels"), {
         let mut db = crate::type_builders::DatasetBuilder::new("");
         db.with_vlen_strings(&["round-two-aaaa", "round-two-bbbb"]);
@@ -1395,7 +1409,9 @@ fn a_failed_commit_leaves_no_reusable_span_the_image_names() {
         s.commit().is_err(),
         "a commit with an unreadable extension must fail"
     );
-    s.superblock.superblock_extension_address = good_ext;
+    let mut superblock = s.context.superblock().clone();
+    superblock.superblock_extension_address = good_ext;
+    s.context.adopt(superblock).unwrap();
     for i in 0..4 {
         s.stage_created_dataset(&ObjectPathBuf::parse(&format!("/filler{i}")), {
             let mut db = crate::type_builders::DatasetBuilder::new("");
@@ -1748,8 +1764,9 @@ fn append_reservation_rewrite_uses_reserved_free_space() {
         "no reserve was drawn, so this measured an ordinary end-of-file append"
     );
     let ext = s
-        .addresses
-        .absolute(s.superblock.superblock_extension_address.unwrap())
+        .context
+        .addresses()
+        .absolute(s.context.superblock().superblock_extension_address.unwrap())
         .unwrap();
     assert!(
         ext < len_before,

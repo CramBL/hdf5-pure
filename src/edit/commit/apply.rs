@@ -99,7 +99,7 @@ impl WriteEngine {
                 .push((leaf, tree));
         }
         let mut to_free = self.prepare_reclamation(&groups, deleted_free)?;
-        let base = self.addresses;
+        let base = self.context.addresses();
         let mut path_addr: BTreeMap<ObjectPathBuf, u64> = BTreeMap::new();
         let mut relocations: BTreeMap<u64, u64> = BTreeMap::new();
         for key in &order {
@@ -237,7 +237,7 @@ impl WriteEngine {
         groups: &BTreeMap<ObjectPathBuf, Node>,
         deleted_free: Vec<(u64, u64, FreeClass)>,
     ) -> Result<Vec<(u64, u64, FreeClass)>, Error> {
-        let base = self.addresses;
+        let base = self.context.addresses();
         let mut to_free: Vec<(u64, u64, FreeClass)> = deleted_free;
 
         for node in groups.values() {
@@ -247,7 +247,8 @@ impl WriteEngine {
             let a = replaced.address();
             if let Ok(spans) = self.oh_chunk_spans(a) {
                 if matches!(replaced, ReplacedHeader::DenseAttributes(_))
-                    && let Ok(region) = Self::gather_oh_messages(&self.image(), a, self.addresses)
+                    && let Ok(region) =
+                        Self::gather_oh_messages(&self.image(), a, self.context.addresses())
                     && let Some(storage) = self.dense_attribute_storage_spans(&region, &spans)
                 {
                     to_free.extend(storage);
@@ -308,7 +309,7 @@ impl WriteEngine {
                             ..
                         }
                     ) && let Ok(region) =
-                        Self::gather_oh_messages(&self.image(), *old_oh, self.addresses)
+                        Self::gather_oh_messages(&self.image(), *old_oh, self.context.addresses())
                         && let Some(storage) = self.dense_attribute_storage_spans(&region, &spans)
                     {
                         to_free.extend(storage);
