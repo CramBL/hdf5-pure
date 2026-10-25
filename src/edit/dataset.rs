@@ -41,9 +41,7 @@ use crate::prepared_chunk::ChunkEncoding;
 use crate::prepared_chunk::PreparedChunk;
 use crate::shared_message::DatatypeLocation;
 use crate::source::{BaseOffsetSource, Source};
-use crate::type_builders::{
-    self, DatasetBuilder, ObjectRefPatch, ObjectRefTarget, VlStringStaging,
-};
+use crate::type_builders::{self, DatasetBuilder, ObjectRefPatch, VlStringStaging};
 use crate::width::FormatWidths;
 
 use super::append;
@@ -1411,27 +1409,6 @@ pub(super) struct FlatDataset {
 }
 
 impl FlatDataset {
-    /// Patches staged object references using addresses assigned by the commit.
-    ///
-    /// # Errors
-    ///
-    /// Returns the error from `resolve` if a target cannot be resolved.
-    pub(super) fn resolve_references(
-        &mut self,
-        mut resolve: impl FnMut(&ObjectRefTarget) -> Result<StoredAddress, Error>,
-    ) -> Result<(), Error> {
-        if let Some(patches) = self.reference_targets.take() {
-            for patch in patches {
-                type_builders::write_reference_address(
-                    &mut self.raw,
-                    patch.byte_offset,
-                    resolve(&patch.target)?,
-                );
-            }
-        }
-        Ok(())
-    }
-
     /// Recomputes generated attributes over the prepared element bytes.
     ///
     /// Attribute order and serialized lengths are preserved, including the dense-storage decision.

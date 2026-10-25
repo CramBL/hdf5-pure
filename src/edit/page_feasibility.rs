@@ -539,7 +539,7 @@ fn assert_preflight_refusal(engine: &mut WriteEngine) {
     );
     assert!(engine.has_staged_edits());
     assert!(engine.staged.snapshot() == mark);
-    assert!(!engine.publish_attempted);
+    assert!(!engine.publication.attempted());
     assert!(engine.space.reusable_sections().next().is_none());
     assert!(disk_log::take().is_empty());
 }
@@ -798,10 +798,10 @@ fn explicit_sync_clears_pending_page_publication_and_preserves_staged_edits(
     let published = engine.assert_page_commit_failure(&original, Failure::AfterDrain);
     stage_byte_dataset(&mut engine, "second", 11);
     let mark = engine.staged.snapshot();
-    assert!(engine.publish_attempted);
+    assert!(engine.publication.attempted());
     disk_log::start();
     engine.force_sync().unwrap();
-    assert!(!engine.publish_attempted);
+    assert!(!engine.publication.attempted());
     assert!(engine.staged.snapshot() == mark);
     assert!(disk_log::take().is_empty());
     let records = barriers.lock().unwrap();
@@ -842,7 +842,7 @@ fn assert_recovery_preserves_staging(
         }
         (_, error) => panic!("expected injected PAGE recovery failure, got {error:?}"),
     }
-    assert!(engine.publish_attempted);
+    assert!(engine.publication.attempted());
     assert!(engine.staged.snapshot() == mark);
     assert!(engine.space.reusable_sections().next().is_none());
     assert!(disk_log::take().is_empty());
@@ -980,7 +980,7 @@ impl WriteEngine {
         self.image
             .read_disk_at(self.sb_sig_off, &mut issued)
             .unwrap();
-        let pending = self.publish_attempted && issued != accepted;
+        let pending = self.publication.attempted() && issued != accepted;
         stage_byte_dataset(&mut self, "second", 11);
         disk_log::start();
         self.commit().unwrap();

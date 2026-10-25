@@ -272,7 +272,7 @@ fn persistent_settlement_failure_preserves_publication_order(
     };
     assert_eq!(error.kind(), ErrorKind::Other);
     assert!(failed.load(Ordering::Relaxed));
-    assert_eq!(engine.publish_attempted, attempted);
+    assert_eq!(engine.publication.attempted(), attempted);
     if !attempted {
         assert_eq!(engine.aggregation, before);
         engine.finalize_persist().unwrap();
@@ -365,7 +365,7 @@ fn reserve_publication_failure_prevents_reuse(#[case] failure: Failure, #[case] 
         panic!("expected reserve publication failure, got {error:?}");
     };
     assert_eq!(error.kind(), ErrorKind::Other);
-    assert_eq!(engine.publish_attempted, attempted);
+    assert_eq!(engine.publication.attempted(), attempted);
     assert!(engine.reserved.is_empty());
     if !attempted {
         assert_eq!(engine.aggregation, before);
@@ -427,7 +427,7 @@ fn releasing_spare_for_a_deletion_preserves_ownership_on_failure(
         panic!("expected deletion publication failure, got {error:?}");
     };
     assert_eq!(error.kind(), ErrorKind::Other);
-    assert_eq!(engine.publish_attempted, attempted);
+    assert_eq!(engine.publication.attempted(), attempted);
     if !attempted {
         assert_eq!(engine.aggregation, before);
     } else {

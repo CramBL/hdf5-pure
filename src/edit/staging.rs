@@ -339,7 +339,7 @@ impl StagedEdits {
             groups: _,
             group_attrs: _,
             dataset_attrs: _,
-            deletes,
+            deletes: _,
             copies: _,
             cross_copies,
             dataset_at: _,
@@ -347,7 +347,6 @@ impl StagedEdits {
         } = self;
         StagedApply {
             datasets,
-            deletes,
             cross_copies,
         }
     }
@@ -715,8 +714,6 @@ pub(super) enum StagedOp {
 pub(super) struct StagedApply {
     /// Parent paths and prepared datasets to place.
     pub(super) datasets: Vec<(ObjectPathBuf, FlatDataset)>,
-    /// Removed links whose objects are candidates for storage reclamation.
-    pub(super) deletes: Vec<ObjectPathBuf>,
     /// Destination paths and prepared subtrees to place.
     pub(super) cross_copies: Vec<(ObjectPathBuf, CopyTree)>,
 }

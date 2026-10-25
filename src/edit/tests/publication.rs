@@ -410,7 +410,7 @@ fn a_commit_that_fails_past_its_repoint_keeps_the_value_it_published() {
         "the reference write is what failed, after the commit published: {failed:?}"
     );
     assert!(
-        s.publish_attempted,
+        s.publication.attempted(),
         "the failure has to be past the publish for this test to mean anything"
     );
     drop(s);

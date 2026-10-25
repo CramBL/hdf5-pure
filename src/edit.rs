@@ -278,7 +278,7 @@
 
 #![allow(clippy::self_named_module_files)]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -290,7 +290,6 @@ use hdf5_pure_space::__private as free_space;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::{
     Extent as FreeExtent, FreeClass, FreeList, ManagerKind, PageTransition, PageType, SessionSpace,
-    SessionSpaceSnapshot,
 };
 
 use crate::SuperblockStatusFlags;
@@ -320,7 +319,7 @@ use crate::image::{FileImage, HandleImage, MirrorImage, WriteBuffering};
 use crate::libver::LibVer;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
-use crate::object_path::{LinkNameBuf, ObjectPathBuf};
+use crate::object_path::ObjectPathBuf;
 #[cfg(any(test, feature = "__page-publication-crosscheck"))]
 use crate::page_publication_failure::{PagePublicationFailure, PublicationFailureImage};
 use crate::reader::FileAccessProperties;
@@ -334,11 +333,13 @@ use crate::type_builders::ObjectRefTarget;
 use crate::width::FormatWidths;
 
 use self::aggregation::AggregateSpace;
-use self::attributes::EditedAttrs;
-use self::copy::CopyTree;
+use self::commit::PublicationState;
+use self::commit::plan::InvalidatedAddresses;
+#[cfg(test)]
+use self::commit::plan::Node;
+use self::dataset::FlatDataset;
 #[cfg(doc)]
-use self::dataset::WritePlan;
-use self::dataset::{FlatDataset, MovingWrite};
+use self::dataset::{MovingWrite, WritePlan};
 #[cfg(test)]
 use self::group::LinkCreationOrder;
 pub(crate) use self::object_header::OhRegion;
@@ -760,18 +761,13 @@ pub(crate) struct WriteEngine {
     /// and checks unspent append reserves and aggregate state before rewriting the managers.
     /// This field is used when [`persist`](Self::persist) is `Some`.
     fsm_len: u64,
-    /// Whether a publisher attempted the superblock write that prevents commit rollback.
+    /// The latest publication attempt's completion state and rollback eligibility.
     ///
-    /// The publisher sets this before writing because an I/O error can follow a partial or
-    /// complete write. Once publication is attempted, restoring values or returning allocations
-    /// to free lists could overwrite live data.
-    ///
-    /// Non-persistent PAGE sessions retain this state after a failed publication. Before taking
-    /// another staged batch, the editor drains pending writes and verifies the issued superblock.
-    /// Explicit synchronization performs the same verification after its durable barrier.
-    /// Successful verification clears this state, including when the verified root is unchanged.
-    /// Other publishers clear it on entry to their publication attempt.
-    publish_attempted: bool,
+    /// Non-persistent PAGE sessions retain an attempted state after an error. Before consuming
+    /// another staged set, the editor completes a barrier and verifies the issued superblock.
+    /// Explicit synchronization performs the same verification. Other publishers reset the
+    /// state when beginning a new attempt.
+    publication: PublicationState,
     /// Whether a [`stage_atomically`](Self::stage_atomically) batch is open, so
     /// [`refuse_mid_batch`](Self::refuse_mid_batch) can keep
     /// [`StagedEdits::rewind`]'s truncation an exact undo.
@@ -817,32 +813,6 @@ pub(crate) struct WriteEngine {
     ///
     /// [`FileAccessProperties::with_sync_policy`]: crate::FileAccessProperties::with_sync_policy
     sync_policy: SyncPolicy,
-}
-
-/// Holds allocator state and heap allocation records from before a commit's apply loop.
-///
-/// A commit reserves bytes before publishing the new root. If it fails before attempting
-/// publication, restoring this snapshot makes those bytes available again. Once publication
-/// is attempted, the live tree may reference them, so [`WriteEngine::publish_attempted`]
-/// prevents restoration.
-struct FreeSnapshot {
-    space: SessionSpaceSnapshot,
-    aggregation: Option<AggregateSpace>,
-    /// The append reserve, which the persisting commit tail drains back into the
-    /// lists above before it rewrites the managers. A commit that then fails
-    /// before publishing leaves those managers as they were — still not listing
-    /// the reserve — so restoring it is what keeps the session's picture of the
-    /// disk exact (issue #387).
-    reserved: FreeList,
-    /// The heap-collection provenance, rolled back with the free lists.
-    ///
-    /// [`resolve_overwrite_bytes`](WriteEngine::resolve_overwrite_bytes) records
-    /// a placement in the *apply* phase, so a commit that fails after that and
-    /// before its repoint hands the space back to the free list while leaving a
-    /// record naming it. The next overwrite of that path would then free a
-    /// region already handed out — the one piece of engine state naming file
-    /// addresses that this rollback used to miss (issue #321).
-    vl_overwrite_heaps: HashMap<ObjectPathBuf, Vec<(u64, u64)>>,
 }
 
 /// How much memory a read-write open may use to hold the file being edited.
@@ -1860,7 +1830,7 @@ impl WriteEngine {
             bounded: false,
             libver_ceiling: None,
             fsm_len: len,
-            publish_attempted: false,
+            publication: PublicationState::Ready,
             staging_batch: false,
             staged_generation: 0,
             held_status_flags: SuperblockStatusFlags::new(),
@@ -2731,13 +2701,9 @@ impl WriteEngine {
     /// [`SessionSpace::Disabled`] is the other bar. Its file's strategy has no reusable
     /// free-space managers or is unreadable, so an append allocates at the end of the file.
     ///
-    /// One window is inherited rather than introduced. A commit whose superblock
-    /// write itself fails leaves [`publish_attempted`](Self::publish_attempted)
-    /// set, which withholds the free-list rollback, so the regions that commit
-    /// freed stay in the list although whether it published is unknowable
-    /// (issue #344). An append can now spend them where only a later commit could
-    /// before. That is the same trade, on a larger surface: doing nothing is
-    /// still the only answer that is never actively wrong.
+    /// After an uncertain publication, [`publication`](Self::publication) prevents rollback
+    /// of the free-space state. Reuse follows that state even when an I/O error left the
+    /// published root unconfirmed.
     fn immediate_reuse_allowed(&self) -> bool {
         !self.swmr_mode && self.space.is_enabled()
     }
@@ -2783,7 +2749,7 @@ impl WriteEngine {
         if !self.take_raw_spans(want, APPEND_RESERVE_BYTES) {
             return Ok(());
         }
-        self.publish_attempted = false;
+        self.publication = PublicationState::Ready;
         match self.commit_persisting(
             self.addresses
                 .absolute(self.superblock.root_group_address)?,
@@ -2792,7 +2758,7 @@ impl WriteEngine {
         ) {
             Ok(()) => Ok(()),
             Err(e) => {
-                if self.publish_attempted {
+                if self.publication.attempted() {
                     self.release_reserve();
                     if let Some(aggregation) = &mut self.aggregation {
                         aggregation.publication_confirmed = false;
@@ -2996,14 +2962,8 @@ impl WriteEngine {
     /// appended and in space an earlier commit left when the tail reuses it. An appended block's
     /// `addr` resolves to the current end-of-file.
     ///
-    /// The region is checked rather than asserted, for the reason
-    /// [`place`](Self::place) checks its own reservation: a reused span is followed
-    /// by live bytes, so a block running past it would silently destroy a
-    /// neighboring object, and this is the one write in a commit that lands in the
-    /// middle of a live file. The region's length is derived from the same layout
-    /// that placed these blocks, so the two cannot disagree today; the comparison
-    /// is what keeps that true if a layout ever learns a length this sizing does
-    /// not model.
+    /// Checks the block against its reserved span before writing. A reused reservation may
+    /// adjoin live storage, so a block outside the span could corrupt a neighboring object.
     ///
     /// # Errors
     ///
@@ -3115,26 +3075,18 @@ impl WriteEngine {
     /// Under [`FileSpaceStrategy::Aggr`], the reservation comes from the matching metadata
     /// or raw aggregate. Other strategies use reusable space or append at EOA.
     ///
-    /// Splitting the choice from the write is what lets a *relocatable* blob — one
-    /// whose interior addresses are all `base + fixed offset`, like a chunked
-    /// dataset's data region or a dense attribute heap — be built for a freed
-    /// region rather than only for end-of-file: its size is known from its plan
-    /// before its bytes exist, so the address can be settled first
-    /// ([`place_relocatable`](Self::place_relocatable) is that sequence).
+    /// A relocatable object is sized before its addresses are assigned. The caller then
+    /// builds its bytes for the returned address, as in
+    /// [`place_relocatable`](Self::place_relocatable).
     ///
-    /// Reuse only ever draws from free space vacated by *earlier* commits in this
-    /// session (or seeded from the on-disk managers at open) — never space the
-    /// current commit is about to free, which stays in its `to_free` list until
-    /// after the superblock repoint. The bytes it overwrites are therefore already
-    /// unreachable from the on-disk root, so a mid-commit crash cannot corrupt the
-    /// live tree: the superblock still points at the prior, intact root.
+    /// Reuse draws from space freed by earlier publications or loaded from the persisted
+    /// managers at open. Regions vacated by the current commit become reusable after its root
+    /// publication. A failed write before publication therefore leaves the live tree intact.
     ///
-    /// A persistent paged file reuses within the matching page type, or out of a page holding
-    /// nothing at all, which belongs to no type ([`SessionSpace::allocate`]). Every
-    /// page stays homogeneous either way. It never opens a page for a reused region
-    /// — the tail page is untouched by a write into the middle of the file.
-    /// A non-persistent PAGE session appends at or beyond
-    /// [`fresh_page_boundary`](Self::fresh_page_boundary) without drawing from free lists.
+    /// Persistent PAGE reservations use a matching page type or wholly free pages through
+    /// [`SessionSpace::allocate`]. Reused reservations leave the tail page unchanged.
+    /// Non-persistent PAGE sessions append at or beyond
+    /// [`fresh_page_boundary`](Self::fresh_page_boundary).
     ///
     /// # Errors
     ///
@@ -3352,107 +3304,6 @@ impl WriteEngine {
             self.vl_overwrite_heaps
                 .retain(|recorded, _| !recorded.overlaps(path));
         }
-    }
-}
-
-/// A dirty group in the edit plan: its base object-header message region and the
-/// additions targeting it.
-#[derive(Default)]
-struct Node {
-    is_new: bool,
-    /// Names of links to remove from this group (from `delete`).
-    deletes: Vec<LinkNameBuf>,
-    /// Copies to add to this group: (new link name, the source subtree read out
-    /// for writing). Built at staging time from either this file (an in-file
-    /// [`copy`](crate::File::copy)) or another open file (a cross-file
-    /// [`copy_from`](crate::File::copy_from)).
-    copies: Vec<(LinkNameBuf, CopyTree)>,
-    /// New link names this commit adds to this group by cross-file copy. The
-    /// subtrees themselves stay in the staged set — which the preflight may
-    /// still refuse, and must not empty (issue #316) — and join `copies` at the
-    /// point of no return.
-    cross_copies: Vec<LinkNameBuf>,
-    /// Value overwrites whose dataset header relocates (a resize or compact
-    /// rewrite by `write_dataset`, a staged append, an attribute edit), as (child
-    /// link name, the pre-commit object-header address, the relocation plan). On
-    /// apply, the new data and header are written and this group's existing link
-    /// to the moved header is patched to its new address — exactly like an
-    /// existing child group's link. The old address is carried rather than
-    /// re-resolved: the screen above and the reclaim below both need it, and one
-    /// derivation cannot disagree with itself.
-    writes: Vec<(LinkNameBuf, u64, MovingWrite)>,
-    base_region: OhRegion,
-    existing_links: Vec<String>,
-    /// Attribute storage prepared by [`attributes::plan_attr_ops`] for
-    /// [`WriteEngine::place_edited_attrs`]. Empty for a group without attribute edits.
-    attrs: EditedAttrs,
-    /// Whether this group's attribute edit replaces a pre-commit dense attribute set.
-    replaces_dense_storage: bool,
-}
-
-/// Records physical addresses invalidated by a commit for object-reference screening.
-///
-/// Removed spans are also used for storage reclamation. Moved entries identify old object-header
-/// addresses whose replacements are published by the commit.
-struct InvalidatedAddresses {
-    /// Absolute `(offset, length)` file spans this commit's deletions reclaim, as
-    /// [`collect_free_spans`](WriteEngine::collect_free_spans) reports them.
-    removed: Vec<(u64, u64)>,
-    /// Superseded object-header addresses from relocating dataset writes and rebuilt groups.
-    moved: Vec<u64>,
-    /// The address context used to compare stored object references with physical positions.
-    base: AddressContext,
-}
-
-impl InvalidatedAddresses {
-    /// Returns whether the commit preserves every recorded address.
-    fn is_empty(&self) -> bool {
-        self.removed.is_empty() && self.moved.is_empty()
-    }
-
-    /// Returns a rejection for a reference into removed storage or a superseded header.
-    ///
-    /// Null, undefined, and unresolvable stored addresses are excluded from this screen.
-    fn refusal(&self, stored: StoredAddress) -> Option<&'static str> {
-        if stored.get() == 0 || stored.get() == UNDEF {
-            return None;
-        }
-        let abs = self.base.absolute(stored).ok()?;
-        if self
-            .removed
-            .iter()
-            .any(|&(off, len)| abs >= off && abs - off < len)
-        {
-            return Some(REFERENCE_INTO_RECLAIMED_SPACE);
-        }
-        if self.moved.contains(&abs) {
-            return Some(REFERENCE_TO_A_MOVED_OBJECT);
-        }
-        None
-    }
-}
-
-/// Group `(parent group, item)` pairs by their parent, preserving the input
-/// order within each group.
-///
-/// The one rule by which a commit's staged datasets become per-group batches:
-/// the preflight groups borrowed ones to prove its guards, and the apply loop
-/// groups the owned ones it places, so the order
-/// [`preflight_reference_targets`](WriteEngine::preflight_reference_targets)
-/// replays is the order the apply loop uses by construction.
-fn group_by_parent<K: Ord, T>(items: impl IntoIterator<Item = (K, T)>) -> BTreeMap<K, Vec<T>> {
-    let mut out: BTreeMap<K, Vec<T>> = BTreeMap::new();
-    for (parent, item) in items {
-        out.entry(parent).or_default().push(item);
-    }
-    out
-}
-
-/// Ensure a node exists for every ancestor prefix of `path` (so each is rebuilt
-/// and can re-wire its child link). Does not set `is_new`.
-fn ensure_ancestors(nodes: &mut BTreeMap<ObjectPathBuf, Node>, path: &ObjectPathBuf) {
-    for len in 0..=path.len() {
-        nodes.entry(path.prefix(len)).or_default();
     }
 }
 

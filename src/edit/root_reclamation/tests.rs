@@ -234,11 +234,11 @@ fn root_reclamation_failure_preserves_a_readable_committed_root(
         panic!("expected injected I/O failure, got {err:?}");
     };
     assert_eq!(err.kind(), ErrorKind::Other);
-    if engine.publish_attempted {
+    if engine.publication.attempted() {
         assert!(!engine.aggregation.unwrap().publication_confirmed);
     }
     let after_failure = engine.issued_bytes();
-    if engine.publish_attempted {
+    if engine.publication.attempted() {
         engine.finalize_persist().unwrap();
         assert_eq!(engine.issued_bytes(), after_failure);
     }
@@ -339,7 +339,7 @@ fn tail_recycling_failure_preserves_committed_manager_sections(
         panic!("expected injected I/O failure, got {err:?}");
     };
     assert_eq!(err.kind(), ErrorKind::Other);
-    if engine.publish_attempted {
+    if engine.publication.attempted() {
         assert!(!engine.aggregation.unwrap().publication_confirmed);
         let issued = engine.issued_bytes();
         engine.finalize_persist().unwrap();

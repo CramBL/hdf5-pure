@@ -309,7 +309,7 @@ fn failed_commit_restores_spare_returned_during_refill() {
         panic!("expected aggregate refill write failure, got {error:?}");
     };
     assert_eq!(error.kind(), ErrorKind::Other);
-    assert!(!engine.publish_attempted);
+    assert!(!engine.publication.attempted());
     assert_eq!(engine.aggregation, state);
     assert_eq!(engine.space_accounting().unwrap().reusable_free_space, free);
     assert_eq!(engine.space.reusable_sections().count(), 0);
