@@ -935,6 +935,71 @@ impl AttributeRecord<'_> {
     }
 }
 
+/// The validated node geometry and record fields of a type 5 link-name index.
+///
+/// Each record contains a name hash followed by the link's fractal-heap ID. The heap ID has a
+/// positive length, and both fields fit within the declared record size.
+///
+/// The record is defined in "Version 2 B-trees" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+pub struct BTreeV2LinkNameIndex {
+    nodes: BTreeV2Layout,
+    heap_id_end: usize,
+}
+
+impl BTreeV2LinkNameIndex {
+    /// Creates a link-name index context from the tree header and the heap's ID length.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidBTreeNodeType`] if the tree type is not 5, and
+    /// [`FormatError::InvalidBTreeV2Signature`] if the heap ID length is zero, the record is too
+    /// short for its hash and heap ID, or the node geometry is invalid.
+    pub fn new(
+        header: &BTreeV2Header,
+        offset_width: OffsetWidth,
+        heap_id_length: u16,
+    ) -> Result<Self, FormatError> {
+        if header.tree_type != BTREE_V2_LINK_NAME {
+            return Err(FormatError::InvalidBTreeNodeType(header.tree_type));
+        }
+        let heap_id_end = usize::from(NAME_HASH_LEN) + usize::from(heap_id_length);
+        if heap_id_length == 0 || usize::from(header.record_size) < heap_id_end {
+            return Err(FormatError::InvalidBTreeV2Signature);
+        }
+        Ok(Self {
+            nodes: BTreeV2Layout::new(header, offset_width)?,
+            heap_id_end,
+        })
+    }
+
+    /// Returns the node layout with the tree's validated record-count widths.
+    pub fn nodes(&self) -> &BTreeV2Layout {
+        &self.nodes
+    }
+
+    /// Returns the name hash and a borrowed heap ID from the record bytes.
+    ///
+    /// Bytes after the heap ID are ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidBTreeV2Signature`] if `bytes` is too short for the hash and
+    /// heap ID.
+    pub fn record<'a>(&self, bytes: &'a [u8]) -> Result<(u32, &'a [u8]), FormatError> {
+        let hash = bytes
+            .get(..usize::from(NAME_HASH_LEN))
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u32::from_le_bytes)
+            .ok_or(FormatError::InvalidBTreeV2Signature)?;
+        let heap_id = bytes
+            .get(usize::from(NAME_HASH_LEN)..self.heap_id_end)
+            .ok_or(FormatError::InvalidBTreeV2Signature)?;
+        Ok((hash, heap_id))
+    }
+}
+
 /// Returns the number of records a leaf of `node_size` bytes holds, or 0 where the leaf's prefix
 /// and checksum fill the node or `record_size` is 0.
 fn max_records_leaf(node_size: u32, record_size: u16) -> u64 {
@@ -1466,6 +1531,41 @@ mod tests {
             panic!("expected invalid node");
         };
         assert_eq!(error, expected);
+    }
+
+    #[rstest]
+    #[case::short_hash(3, 7)]
+    #[case::short_id(10, 7)]
+    #[case::empty_id(11, 0)]
+    fn link_name_indexes_reject_invalid_record_widths(
+        #[case] record_size: u16,
+        #[case] heap_id_length: u16,
+    ) {
+        let bytes = btree_v2::Header::new(BTREE_V2_LINK_NAME, record_size, 256, 1).build(WIDTHS);
+        let header = BTreeV2Header::parse(&bytes, 0, 8, 8).unwrap();
+        let Err(error) = BTreeV2LinkNameIndex::new(&header, OffsetWidth::Eight, heap_id_length)
+        else {
+            panic!("expected invalid name-index record width");
+        };
+        assert_eq!(error, FormatError::InvalidBTreeV2Signature);
+    }
+
+    #[rstest]
+    #[case::exact(11)]
+    #[case::extended(15)]
+    fn link_name_records_borrow_the_heap_id(#[case] record_size: u16) {
+        let bytes = btree_v2::Header::new(BTREE_V2_LINK_NAME, record_size, 256, 1).build(WIDTHS);
+        let header = BTreeV2Header::parse(&bytes, 0, 8, 8).unwrap();
+        let index = BTreeV2LinkNameIndex::new(&header, OffsetWidth::Eight, 7).unwrap();
+        let record = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0, 0, 0, 0];
+        let (hash, id) = index.record(&record[..usize::from(record_size)]).unwrap();
+        assert_eq!(hash, 0x0403_0201);
+        assert_eq!(id, &[5, 6, 7, 8, 9, 10, 11]);
+        assert_eq!(id.as_ptr(), record[4..].as_ptr());
+        assert_eq!(
+            index.record(&record[..10]).unwrap_err(),
+            FormatError::InvalidBTreeV2Signature
+        );
     }
 
     #[test]

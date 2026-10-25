@@ -4,9 +4,11 @@
 use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use core::cmp::Ordering;
 use core::num::NonZeroU16;
 
 use hdf5_pure_core::__private::PhysicalAddress;
+use hdf5_pure_format::__private::BTreeV2LinkNameIndex;
 use hdf5_pure_format::__private::FractalHeapIdLayout;
 use hdf5_pure_format::__private::{BTREE_V2_LINK_CREATION_ORDER, BTREE_V2_LINK_NAME};
 use hdf5_pure_space::__private::Extent;
@@ -22,6 +24,7 @@ use crate::address::BaseAddressExt;
 use crate::address::StoredAddressExt;
 use crate::address::{AddressContext, StoredAddress};
 use crate::btree_v2::{self, BTreeV2Header};
+use crate::checksum;
 use crate::convert::Narrow;
 use crate::dense_storage::{self, DenseIndex};
 use crate::error::{FormatError, ResolveError};
@@ -32,8 +35,8 @@ use crate::link_message::{self, LinkMessage, LinkTarget};
 use crate::message_type::MessageType;
 use crate::object_header::{MessageFilter, ObjectHeader};
 use crate::object_path::{LinkName, ObjectPath, ObjectPathBuf, SoftLinkPath};
-use crate::source::SourceMetadata;
 use crate::source::{self, BaseOffsetSource, Source};
+use crate::source::{RangeReader, SourceMetadata};
 use crate::superblock::Superblock;
 use crate::symbol_table::SymbolTableMessage;
 use crate::width::{FormatWidths, OffsetWidth};
@@ -460,24 +463,16 @@ fn wanted_link_only<'a>(
     }
 }
 
-/// Whether `header` is a v2 group holding its links compactly, as Link messages
-/// — the case [`scan_compact_links`] can answer from the header alone, now that
-/// [`wanted_link_only`] has narrowed it to the link asked for.
+/// Returns whether the group stores its links as messages in the object header.
 ///
-/// **Only ask this of a header [`filtered_is_group`] has accepted.** A header that
-/// is no group at all has no fractal heap either, so it would answer `true` here
-/// and be scanned for links it cannot have; both callers classify first, which is
-/// what lets this ask the two questions that remain. A v1 (symbol-table) group
-/// and a dense v2 group both answer `false` and fall back to the full walk —
-/// neither stores links as Link messages, so that walk reads a header the filter
-/// took nothing from.
+/// `header` must describe a group accepted by [`filtered_is_group`].
 ///
-/// The `!is_v1_group` term is what gives the symbol table precedence, matching
-/// [`resolve_group_entries`], which checks it first: a header carrying both a
-/// Symbol Table message and a Link Info message is not something any writer here
-/// produces, but the two paths must agree on what it is, or a child that the
-/// fallback finds through the symbol table would be reported as absent by the
-/// scan.
+/// Returns `false` for a header containing a Symbol Table message, even if a Link Info message
+/// is also present, matching [`resolve_group_entries`].
+///
+/// # Errors
+///
+/// Returns the [`FormatError`] from parsing the Link Info message.
 fn holds_compact_links(
     header: &ObjectHeader,
     offset_width: OffsetWidth,
@@ -562,6 +557,7 @@ fn find_noncompact_link(
     let Some(heap_address) = info.fractal_heap_address else {
         return Ok(None);
     };
+    let reader = file_data;
     let file_data = source::frame(file_data, addresses.effective_base())?;
     let heap_header =
         crate::fractal_heap::parse_header(file_data, addresses, heap_address, widths)?;
@@ -569,10 +565,16 @@ fn find_noncompact_link(
         .btree_name_index_address
         .ok_or_else(|| FormatError::PathNotFound(String::from("no B-tree v2 name index")))?;
     let btree = BTreeV2Header::parse_with_widths(file_data, index.get().to_usize()?, widths)?;
-    let records = btree_v2::collect_btree_v2_records(file_data, &btree, widths.offsets)?;
+    let index = BTreeV2LinkNameIndex::new(&btree, widths.offsets, heap_header.heap_id_length)?;
     let layout = FractalHeapIdLayout::new(&heap_header, widths.offsets, widths.lengths);
     let mut heap =
         HeapObjectReader::new(&heap_header, addresses, heap_address, access_mode, widths);
+    if !name.as_str().contains(char::REPLACEMENT_CHARACTER) {
+        return find_indexed_dense_link(reader, &index, addresses, widths.offsets, name, |id| {
+            heap.read(file_data, layout.parse(id)?)
+        });
+    }
+    let records = btree_v2::collect_btree_v2_records(file_data, &btree, widths.offsets)?;
     let mut found = None;
     for record in &records {
         let Some(id) = record.link_heap_id(btree.tree_type, heap_header.heap_id_length) else {
@@ -624,6 +626,7 @@ fn find_noncompact_link_from_source<S: Source + ?Sized>(
     let Some(heap_address) = info.fractal_heap_address else {
         return Ok(None);
     };
+    let reader = source;
     let source = BaseOffsetSource {
         inner: source,
         base: addresses.effective_base(),
@@ -638,10 +641,16 @@ fn find_noncompact_link_from_source<S: Source + ?Sized>(
         index.get(),
         widths,
     )?;
-    let records = btree_v2::collect_btree_v2_records_from_source(&source, &btree, widths.offsets)?;
+    let index = BTreeV2LinkNameIndex::new(&btree, widths.offsets, heap_header.heap_id_length)?;
     let layout = FractalHeapIdLayout::new(&heap_header, widths.offsets, widths.lengths);
     let mut heap =
         HeapObjectReader::new(&heap_header, addresses, heap_address, access_mode, widths);
+    if !name.as_str().contains(char::REPLACEMENT_CHARACTER) {
+        return find_indexed_dense_link(reader, &index, addresses, widths.offsets, name, |id| {
+            heap.read_from_source(&source, layout.parse(id)?)
+        });
+    }
+    let records = btree_v2::collect_btree_v2_records_from_source(&source, &btree, widths.offsets)?;
     let mut found = None;
     for record in &records {
         let Some(id) = record.link_heap_id(btree.tree_type, heap_header.heap_id_length) else {
@@ -655,6 +664,46 @@ fn find_noncompact_link_from_source<S: Source + ?Sized>(
         )?);
     }
     Ok(found)
+}
+
+/// Parses a link target after matching the name hash and raw stored name bytes.
+///
+/// `reader` uses physical file coordinates. `read_heap` receives an encoded heap ID and returns
+/// its link-message bytes. On hash equality, compares the stored name bytes with `name` before
+/// decoding the matching target.
+///
+/// # Errors
+///
+/// Returns the [`FormatError`] from index traversal, heap access, name parsing, or target parsing.
+fn find_indexed_dense_link(
+    reader: &(impl RangeReader + ?Sized),
+    index: &BTreeV2LinkNameIndex,
+    addresses: AddressContext,
+    offset_width: OffsetWidth,
+    name: LinkName<'_>,
+    mut read_heap: impl FnMut(&[u8]) -> Result<Vec<u8>, FormatError>,
+) -> Result<Option<LinkTarget>, FormatError> {
+    let wanted_hash = checksum::jenkins_lookup3(name.as_str().as_bytes());
+    let mut matched = None;
+    let record = btree_v2::search_btree_v2(reader, index.nodes(), addresses, |record| {
+        let (hash, id) = index.record(record)?;
+        if hash != wanted_hash {
+            return Ok(hash.cmp(&wanted_hash));
+        }
+        let data = read_heap(id)?;
+        let order = LinkMessage::name_bytes(&data)?.cmp(name.as_str().as_bytes());
+        if order == Ordering::Equal {
+            matched = Some(data);
+        }
+        Ok(order)
+    })?;
+    if record.is_none() {
+        return Ok(None);
+    }
+    let data = matched.ok_or_else(|| {
+        FormatError::Internal(String::from("a matching B-tree record has no link message"))
+    })?;
+    LinkMessage::target_if_named(&data, offset_width, name.as_str())
 }
 
 /// Returns dense group entries using validated file widths.
@@ -1016,13 +1065,86 @@ mod tests {
     use crate::data_layout::DataLayout;
     use crate::data_read;
     use crate::dataspace::Dataspace;
-    use crate::datatype::Datatype;
+    use crate::datatype::{CharacterSet, Datatype};
     use crate::message_flags::MessageFlags;
     #[cfg(feature = "std")]
     use crate::reader::File;
     use crate::source::BytesSource;
     #[cfg(feature = "std")]
     use crate::writer::FileBuilder;
+
+    #[rstest::rstest]
+    #[case::present(true)]
+    #[case::absent(false)]
+    fn indexed_hash_collisions_compare_names_before_link_targets(#[case] present: bool) {
+        let names = ["k155448", "k69209"];
+        let hash = checksum::jenkins_lookup3(names[0].as_bytes());
+        assert_eq!(hash, checksum::jenkins_lookup3(names[1].as_bytes()));
+        let hard = LinkMessage {
+            name: names[0].into(),
+            link_target: LinkTarget::Hard {
+                object_header_address: StoredAddress::new(42),
+            },
+            creation_order: None,
+            charset: CharacterSet::Ascii,
+        }
+        .serialize(OffsetWidth::Eight);
+        let mut soft = LinkMessage {
+            name: names[1].into(),
+            link_target: LinkTarget::Soft {
+                target_path: "x".into(),
+            },
+            creation_order: None,
+            charset: CharacterSet::Ascii,
+        }
+        .serialize(OffsetWidth::Eight);
+        *soft.last_mut().unwrap() = 0xff;
+        let records: Vec<_> = (usize::from(!present)..2)
+            .map(|index| {
+                let mut record = hash.to_le_bytes().to_vec();
+                record.push(u8::try_from(index).unwrap());
+                record
+            })
+            .collect();
+        let node = btree_v2::leaf(BTREE_V2_LINK_NAME, &records);
+        let header = BTreeV2Header::parse(
+            &btree_v2::Header::new(
+                BTREE_V2_LINK_NAME,
+                5,
+                64,
+                u16::try_from(records.len()).unwrap(),
+            )
+            .build(Widths::EIGHT),
+            0,
+            8,
+            8,
+        )
+        .unwrap();
+        let index = BTreeV2LinkNameIndex::new(&header, OffsetWidth::Eight, 1).unwrap();
+        let mut bytes = vec![0; 64];
+        bytes.extend_from_slice(&node);
+        let messages = [hard, soft];
+        let mut reads = Vec::new();
+        let target = find_indexed_dense_link(
+            bytes.as_slice(),
+            &index,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+            OffsetWidth::Eight,
+            LinkName::new(names[0]).unwrap(),
+            |id| {
+                reads.push(id[0]);
+                Ok(messages[usize::from(id[0])].clone())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            target,
+            present.then_some(LinkTarget::Hard {
+                object_header_address: StoredAddress::new(42)
+            })
+        );
+        assert_eq!(reads, if present { vec![1, 0] } else { vec![1] });
+    }
 
     #[rstest::rstest]
     #[case::relative("alias/value", 3)]

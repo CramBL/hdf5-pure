@@ -52,6 +52,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `File::open_rw` shares metadata and raw aggregates between staged edits and immediate appends under the classic aggregation strategies ([#777](https://github.com/CramBL/hdf5-pure/pull/777), [#778](https://github.com/CramBL/hdf5-pure/pull/778), [#781](https://github.com/CramBL/hdf5-pure/pull/781), [#783](https://github.com/CramBL/hdf5-pure/pull/783)).
 - `FormatError` distinguishes malformed metadata regions, fractal heaps, legacy groups, and array chunk indexes ([#745](https://github.com/CramBL/hdf5-pure/pull/745), [#749](https://github.com/CramBL/hdf5-pure/pull/749), [#757](https://github.com/CramBL/hdf5-pure/pull/757), [#782](https://github.com/CramBL/hdf5-pure/pull/782), [#806](https://github.com/CramBL/hdf5-pure/pull/806), [#811](https://github.com/CramBL/hdf5-pure/pull/811), [#851](https://github.com/CramBL/hdf5-pure/pull/851)).
 
+### Performance
+
+- `File::dataset` and related lookups use the dense-group name index to avoid traversing every link ([#900](https://github.com/CramBL/hdf5-pure/pull/900)).
+
 ### Fixed
 
 - Fixed `File::persisted_free_sections` counting a persisted manager more than once when multiple slots record its header address.

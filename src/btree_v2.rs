@@ -46,13 +46,6 @@ use crate::width::{FormatWidths, OffsetWidth};
 ///
 /// Returns [`FormatError::InvalidBTreeV2Signature`] for a repeated node address, and the first
 /// error from address resolution, a node read, node parsing, or `compare`.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the internal search entry point has only unit-test callers"
-    )
-)]
 pub(crate) fn search_btree_v2(
     reader: &(impl RangeReader + ?Sized),
     layout: &BTreeV2Layout,
