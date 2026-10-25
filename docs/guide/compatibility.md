@@ -75,7 +75,7 @@ The tables cover file-format compatibility and HDF5 behavior. Features not liste
 | Sparse chunk grids | ✅ | ✅ | |
 | Partial edge chunks | ✅ | ✅ | |
 | Per-chunk filter masks | ✅ | ✅ | |
-| `H5D_CHUNK_DONT_FILTER_PARTIAL_CHUNKS` | ✅ | ❌ | |
+| `H5D_CHUNK_DONT_FILTER_PARTIAL_CHUNKS` | ✅ | ✅ | |
 | Fill value | ✅ | ✅ | |
 | `H5D_FILL_TIME_NEVER` | ✅ | ✅ | |
 

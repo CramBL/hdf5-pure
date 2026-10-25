@@ -10,6 +10,7 @@ pub mod chunk_filter;
 #[cfg(feature = "__hdf5-1.10")]
 pub mod creation_order;
 pub mod dataset;
+pub mod dataset_writer;
 pub mod dense_attr;
 #[cfg(feature = "hdf5")]
 pub mod file;

@@ -227,7 +227,7 @@ A zero-element shape requires empty data. The writer returns [`FormatError::Logi
 
 ## Dataset creation properties
 
-A dataset's creation properties set how it is stored: its chunk dimensions, its filters, and its fill settings. [`DatasetCreateProperties`](crate::DatasetCreateProperties) holds them apart from the dataset's data and shape, like an HDF5 dataset creation property list, and [`with_create_properties`](crate::DatasetBuilder::with_create_properties) applies them to a dataset:
+A dataset's creation properties set how it is stored: its chunk dimensions, its filters, whether its partial edge chunks are filtered, and its fill settings. [`DatasetCreateProperties`](crate::DatasetCreateProperties) holds them apart from the dataset's data and shape, like an HDF5 dataset creation property list, and [`with_create_properties`](crate::DatasetBuilder::with_create_properties) applies them to a dataset:
 
 ```rust
 use hdf5_pure::{DatasetCreateProperties, File, FileBuilder, FillTime};
@@ -248,7 +248,7 @@ assert_eq!(file.dataset("counts")?.fill_value::<i32>()?, Some(-1));
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
-The builder methods such as [`with_chunks`](crate::DatasetBuilder::with_chunks) and [`with_deflate`](crate::DatasetBuilder::with_deflate) set the same properties one at a time, and a dataset written either way has the same bytes. [`with_create_properties`](crate::DatasetBuilder::with_create_properties) describes how the two combine on one dataset, and the reference for [`DatasetCreateProperties`](crate::DatasetCreateProperties) lists the HDF5 dataset creation properties it supports and the ones it does not.
+The builder methods such as [`with_chunks`](crate::DatasetBuilder::with_chunks) and [`with_deflate`](crate::DatasetBuilder::with_deflate) set the same properties one at a time, apart from the filtering of partial edge chunks, and a dataset written either way has the same bytes. [`with_create_properties`](crate::DatasetBuilder::with_create_properties) describes how the two combine on one dataset, and the reference for [`DatasetCreateProperties`](crate::DatasetCreateProperties) lists the HDF5 dataset creation properties it supports and the ones it does not.
 
 ## Serializing: `finish()` vs `write(path)`
 

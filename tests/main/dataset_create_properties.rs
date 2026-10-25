@@ -1,3 +1,4 @@
+use hdf5_pure::ChunkIndex;
 use hdf5_pure::DatasetBuilder;
 use hdf5_pure::DatasetCreateProperties;
 use hdf5_pure::DeflateLevel;
@@ -7,10 +8,15 @@ use hdf5_pure::FileBuilder;
 use hdf5_pure::FillTime;
 use hdf5_pure::FilterId;
 use hdf5_pure::FormatError;
+use hdf5_pure::Layout;
+use hdf5_pure::MaxExtent;
+use hdf5_pure::PartialEdgeFiltering;
 use hdf5_pure::ScaleOffset;
 use rstest::rstest;
+use test_util_hdf5::dataset_writer::DatasetWriter;
 
 const VALUES: [i32; 8] = [-3, 0, 1, 2, 7, 8, 9, 100];
+const OVERWRITTEN: [i32; 8] = [5, 4, 3, 2, 1, 0, -1, -2];
 
 #[rstest]
 #[case::empty(|p: DatasetCreateProperties| p, |_: &mut DatasetBuilder| {})]
@@ -36,6 +42,20 @@ const VALUES: [i32; 8] = [-3, 0, 1, 2, 7, 8, 9, 100];
     |p: DatasetCreateProperties| p.with_fill_time(FillTime::Never),
     |b: &mut DatasetBuilder| { b.with_fill_time(FillTime::Never); },
 )]
+#[case::default_partial_edge_filtering(
+    |p: DatasetCreateProperties| p
+        .with_chunks(&[3])
+        .with_deflate(DeflateLevel::Six)
+        .with_partial_edge_filtering(PartialEdgeFiltering::default()),
+    |b: &mut DatasetBuilder| { b.with_chunks(&[3]).with_deflate(DeflateLevel::Six); },
+)]
+#[case::partial_edge_filtering_applied(
+    |p: DatasetCreateProperties| p
+        .with_chunks(&[3])
+        .with_deflate(DeflateLevel::Six)
+        .with_partial_edge_filtering(PartialEdgeFiltering::Apply),
+    |b: &mut DatasetBuilder| { b.with_chunks(&[3]).with_deflate(DeflateLevel::Six); },
+)]
 #[case::all(
     |p: DatasetCreateProperties| p
         .with_chunks(&[4])
@@ -54,14 +74,14 @@ const VALUES: [i32; 8] = [-3, 0, 1, 2, 7, 8, 9, 100];
 fn properties_write_the_bytes_of_the_builder_setters(
     #[case] properties: fn(DatasetCreateProperties) -> DatasetCreateProperties,
     #[case] setters: fn(&mut DatasetBuilder),
-    #[values(false, true)] staged: bool,
+    #[values(DatasetWriter::Buffered, DatasetWriter::Staged)] writer: DatasetWriter,
 ) {
-    let with_properties = write(staged, |builder| {
+    let with_properties = write(writer, |builder| {
         builder
             .with_i32_data(&VALUES)
             .with_create_properties(properties(DatasetCreateProperties::new()));
     });
-    let with_setters = write(staged, |builder| {
+    let with_setters = write(writer, |builder| {
         setters(builder.with_i32_data(&VALUES));
     });
     assert_eq!(with_properties, with_setters);
@@ -73,14 +93,14 @@ fn properties_write_the_bytes_of_the_builder_setters(
 #[case::scale_offset(|b: &mut DatasetBuilder| { b.with_scale_offset(ScaleOffset::Integer(0)); })]
 #[case::fill(|b: &mut DatasetBuilder| { b.with_fill_value(5_i32).with_fill_time(FillTime::Alloc); })]
 fn default_properties_keep_the_builder_defaults(#[case] setters: fn(&mut DatasetBuilder)) {
-    let with_properties = write(false, |builder| {
+    let with_properties = write(DatasetWriter::Buffered, |builder| {
         setters(
             builder
                 .with_i32_data(&VALUES)
                 .with_create_properties(DatasetCreateProperties::default()),
         );
     });
-    let with_setters = write(false, |builder| {
+    let with_setters = write(DatasetWriter::Buffered, |builder| {
         setters(builder.with_i32_data(&VALUES));
     });
     assert_eq!(with_properties, with_setters);
@@ -130,7 +150,7 @@ fn properties_replace_earlier_builder_settings(
     #[case] properties: fn(DatasetCreateProperties) -> DatasetCreateProperties,
     #[case] setters: fn(&mut DatasetBuilder),
 ) {
-    let replaced = write(false, |builder| {
+    let replaced = write(DatasetWriter::Buffered, |builder| {
         builder
             .with_i32_data(&VALUES)
             .with_chunks(&[4])
@@ -140,7 +160,7 @@ fn properties_replace_earlier_builder_settings(
             .with_fill_time(FillTime::Alloc)
             .with_create_properties(properties(DatasetCreateProperties::new()));
     });
-    let expected = write(false, |builder| {
+    let expected = write(DatasetWriter::Buffered, |builder| {
         setters(builder.with_i32_data(&VALUES));
     });
     assert_eq!(replaced, expected);
@@ -148,7 +168,7 @@ fn properties_replace_earlier_builder_settings(
 
 #[test]
 fn properties_replace_earlier_properties() {
-    let replaced = write(false, |builder| {
+    let replaced = write(DatasetWriter::Buffered, |builder| {
         builder
             .with_i32_data(&VALUES)
             .with_create_properties(
@@ -159,7 +179,7 @@ fn properties_replace_earlier_properties() {
             )
             .with_create_properties(DatasetCreateProperties::new().with_fletcher32());
     });
-    let expected = write(false, |builder| {
+    let expected = write(DatasetWriter::Buffered, |builder| {
         builder.with_i32_data(&VALUES).with_fletcher32();
     });
     assert_eq!(replaced, expected);
@@ -172,7 +192,7 @@ fn properties_replace_earlier_properties() {
 #[case::fill_value(|b: &mut DatasetBuilder| { b.with_fill_value(7_i32); })]
 #[case::fill_time(|b: &mut DatasetBuilder| { b.with_fill_time(FillTime::Never); })]
 fn builder_setters_override_applied_properties(#[case] setters: fn(&mut DatasetBuilder)) {
-    let overridden = write(false, |builder| {
+    let overridden = write(DatasetWriter::Buffered, |builder| {
         setters(
             builder.with_i32_data(&VALUES).with_create_properties(
                 DatasetCreateProperties::new()
@@ -184,7 +204,7 @@ fn builder_setters_override_applied_properties(#[case] setters: fn(&mut DatasetB
             ),
         );
     });
-    let expected = write(false, |builder| {
+    let expected = write(DatasetWriter::Buffered, |builder| {
         setters(
             builder
                 .with_i32_data(&VALUES)
@@ -199,11 +219,318 @@ fn builder_setters_override_applied_properties(#[case] setters: fn(&mut DatasetB
 }
 
 #[rstest]
+#[case::chunks(
+    |p: DatasetCreateProperties| p.with_chunks(&[5]),
+    |b: &mut DatasetBuilder| { b.with_chunks(&[5]); },
+)]
+#[case::deflate_level(
+    |p: DatasetCreateProperties| p.with_deflate(DeflateLevel::One),
+    |b: &mut DatasetBuilder| { b.with_deflate(DeflateLevel::One); },
+)]
+#[case::added_filter(
+    |p: DatasetCreateProperties| p.with_fletcher32(),
+    |b: &mut DatasetBuilder| { b.with_fletcher32(); },
+)]
+#[case::fill_value(
+    |p: DatasetCreateProperties| p.with_fill_value(7_i32),
+    |b: &mut DatasetBuilder| { b.with_fill_value(7_i32); },
+)]
+#[case::fill_time(
+    |p: DatasetCreateProperties| p.with_fill_time(FillTime::Never),
+    |b: &mut DatasetBuilder| { b.with_fill_time(FillTime::Never); },
+)]
+fn builder_setters_keep_the_partial_edge_filtering_of_applied_properties(
+    #[case] property: fn(DatasetCreateProperties) -> DatasetCreateProperties,
+    #[case] setter: fn(&mut DatasetBuilder),
+    #[values(DatasetWriter::Buffered, DatasetWriter::Staged)] writer: DatasetWriter,
+) {
+    let skipping = || {
+        DatasetCreateProperties::new()
+            .with_chunks(&[3])
+            .with_deflate(DeflateLevel::Six)
+            .with_partial_edge_filtering(PartialEdgeFiltering::Skip)
+    };
+    let overridden = write(writer, |builder| {
+        setter(
+            builder
+                .with_i32_data(&VALUES)
+                .with_create_properties(skipping()),
+        );
+    });
+    let expected = write(writer, |builder| {
+        builder
+            .with_i32_data(&VALUES)
+            .with_create_properties(property(skipping()));
+    });
+    assert_eq!(overridden, expected);
+    let bypassed = pipeline_bypass_by_chunk(overridden);
+    let mut last_chunk_bypassed = vec![false; bypassed.len() - 1];
+    last_chunk_bypassed.push(true);
+    assert_eq!(bypassed, last_chunk_bypassed);
+}
+
+#[test]
+fn properties_replace_earlier_partial_edge_filtering() {
+    let replaced = write(DatasetWriter::Buffered, |builder| {
+        builder
+            .with_i32_data(&VALUES)
+            .with_create_properties(
+                DatasetCreateProperties::new()
+                    .with_chunks(&[3])
+                    .with_deflate(DeflateLevel::Six)
+                    .with_partial_edge_filtering(PartialEdgeFiltering::Skip),
+            )
+            .with_create_properties(
+                DatasetCreateProperties::new()
+                    .with_chunks(&[3])
+                    .with_deflate(DeflateLevel::Six),
+            );
+    });
+    let expected = write(DatasetWriter::Buffered, |builder| {
+        builder
+            .with_i32_data(&VALUES)
+            .with_chunks(&[3])
+            .with_deflate(DeflateLevel::Six);
+    });
+    assert_eq!(replaced, expected);
+}
+
+#[rstest]
+#[case::apply(PartialEdgeFiltering::Apply, [false, false, false])]
+#[case::skip(PartialEdgeFiltering::Skip, [false, false, true])]
+fn only_a_partial_edge_chunk_under_skip_bypasses_the_pipeline(
+    #[case] filtering: PartialEdgeFiltering,
+    #[case] bypassed: [bool; 3],
+    #[values(DatasetWriter::Buffered, DatasetWriter::Staged)] writer: DatasetWriter,
+) {
+    let bytes = write(writer, |builder| {
+        builder.with_i32_data(&VALUES).with_create_properties(
+            DatasetCreateProperties::new()
+                .with_chunks(&[3])
+                .with_shuffle()
+                .with_deflate(DeflateLevel::Six)
+                .with_partial_edge_filtering(filtering),
+        );
+    });
+    let file = File::from_bytes(bytes).unwrap();
+    let dataset = file.dataset("data").unwrap();
+    let mut chunks = dataset.chunks().unwrap();
+    chunks.sort_by_key(|chunk| chunk.offset.clone());
+    let stored: Vec<_> = chunks
+        .iter()
+        .map(|chunk| {
+            (
+                chunk.offset.clone(),
+                chunk.filter_mask().raw_bits(),
+                chunk.filters().bypasses_pipeline(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        stored,
+        [
+            (vec![0], 0, bypassed[0]),
+            (vec![3], 0, bypassed[1]),
+            (vec![6], 0, bypassed[2]),
+        ]
+    );
+    assert_eq!(dataset.read_i32().unwrap(), VALUES);
+}
+
+#[rstest]
+#[case::filter_without_chunks(
+    |b: &mut DatasetBuilder| {
+        b.with_create_properties(skipping_with(|p| p.with_deflate(DeflateLevel::Six)));
+    },
+    ChunkIndex::SingleChunk,
+)]
+#[case::maxshape_without_chunks(
+    |b: &mut DatasetBuilder| {
+        b.with_maxshape(&[MaxExtent::Unlimited])
+            .with_create_properties(skipping_with(|p| p));
+    },
+    ChunkIndex::ExtensibleArray,
+)]
+fn skipping_partial_edge_filters_is_accepted_on_a_dataset_chunked_without_chunk_dimensions(
+    #[case] configure: fn(&mut DatasetBuilder),
+    #[case] index: ChunkIndex,
+    #[values(DatasetWriter::Buffered, DatasetWriter::Staged)] writer: DatasetWriter,
+) {
+    let bytes = write(writer, |builder| {
+        configure(builder.with_i32_data(&VALUES));
+    });
+    let file = File::from_bytes(bytes).unwrap();
+    let dataset = file.dataset("data").unwrap();
+    assert_eq!(
+        dataset.layout().unwrap(),
+        Layout::Chunked {
+            chunk_shape: vec![8],
+            index,
+        }
+    );
+    assert_eq!(dataset.read_i32().unwrap(), VALUES);
+}
+
+#[rstest]
+#[case::rank_1(
+    |b: &mut DatasetBuilder| { b.with_i32_data(&VALUES); },
+    |p: DatasetCreateProperties| p,
+)]
+#[case::scalar(
+    |b: &mut DatasetBuilder| { b.with_i32_data(&[1]).with_shape(&[]); },
+    |p: DatasetCreateProperties| p,
+)]
+#[case::fill_value(
+    |b: &mut DatasetBuilder| { b.with_i32_data(&VALUES); },
+    |p: DatasetCreateProperties| p.with_fill_value(-1_i32).with_fill_time(FillTime::Alloc),
+)]
+fn skipping_partial_edge_filters_on_a_contiguous_dataset_is_rejected(
+    #[case] data: fn(&mut DatasetBuilder),
+    #[case] properties: fn(DatasetCreateProperties) -> DatasetCreateProperties,
+    #[values(DatasetWriter::Buffered, DatasetWriter::Staged)] writer: DatasetWriter,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("rejected.h5");
+    FileBuilder::new().write(&path).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let skip = |builder: &mut DatasetBuilder| {
+        data(builder);
+        builder.with_create_properties(skipping_with(properties));
+    };
+
+    let err = if matches!(writer, DatasetWriter::Staged) {
+        let file = File::open_rw(&path).unwrap();
+        let err = file.root().create_dataset("data", skip).unwrap_err();
+        file.commit().unwrap();
+        err
+    } else {
+        let mut builder = FileBuilder::new();
+        skip(builder.create_dataset("data"));
+        builder.finish().unwrap_err()
+    };
+    assert!(
+        matches!(
+            err,
+            Error::Format(FormatError::PartialEdgeSkipRequiresChunking)
+        ),
+        "{err:?}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[rstest]
+#[case::contiguous(|b: &mut DatasetBuilder| { b.with_i32_data(&VALUES); })]
+#[case::chunked(|b: &mut DatasetBuilder| {
+    b.with_i32_data(&VALUES).with_chunks(&[3]).with_deflate(DeflateLevel::Six);
+})]
+#[case::chunked_skipping_partial_edge_filters(|b: &mut DatasetBuilder| {
+    b.with_i32_data(&VALUES)
+        .with_create_properties(skipping_with(|p| p.with_chunks(&[3]).with_deflate(DeflateLevel::Six)));
+})]
+fn an_overwrite_that_sets_partial_edge_filtering_is_rejected(
+    #[case] existing: fn(&mut DatasetBuilder),
+    #[values(PartialEdgeFiltering::Apply, PartialEdgeFiltering::Skip)]
+    filtering: PartialEdgeFiltering,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("overwritten.h5");
+    DatasetWriter::Streaming.create(&path, "data", existing);
+    let before = std::fs::read(&path).unwrap();
+    {
+        let file = File::open_rw(&path).unwrap();
+        let err = file
+            .dataset("data")
+            .unwrap()
+            .write_staged(|builder| {
+                builder.with_i32_data(&VALUES).with_create_properties(
+                    DatasetCreateProperties::new().with_partial_edge_filtering(filtering),
+                );
+            })
+            .unwrap_err();
+        let Error::EditUnsupported(reason) = err else {
+            panic!("expected EditUnsupported, got {err:?}");
+        };
+        assert_eq!(
+            reason,
+            "write_dataset overwrites values only; it cannot set whether partial edge \
+             chunks are filtered (set it when the dataset is created)"
+        );
+        file.commit().unwrap();
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[rstest]
+#[case::without_properties(|b: &mut DatasetBuilder| { b.with_i32_data(&OVERWRITTEN); })]
+#[case::default_properties(|b: &mut DatasetBuilder| {
+    b.with_i32_data(&OVERWRITTEN).with_create_properties(DatasetCreateProperties::new());
+})]
+fn an_overwrite_that_leaves_partial_edge_filtering_unset_keeps_skipping_partial_edge_filters(
+    #[case] overwrite: fn(&mut DatasetBuilder),
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("overwritten.h5");
+    DatasetWriter::Streaming.create(&path, "data", |builder| {
+        builder
+            .with_i32_data(&VALUES)
+            .with_create_properties(skipping_with(|p| {
+                p.with_chunks(&[3]).with_deflate(DeflateLevel::Six)
+            }));
+    });
+    {
+        let file = File::open_rw(&path).unwrap();
+        file.dataset("data")
+            .unwrap()
+            .write_staged(overwrite)
+            .unwrap();
+        file.commit().unwrap();
+    }
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(
+        pipeline_bypass_by_chunk(bytes.clone()),
+        [false, false, true]
+    );
+    let file = File::from_bytes(bytes).unwrap();
+    assert_eq!(
+        file.dataset("data").unwrap().read_i32().unwrap(),
+        OVERWRITTEN
+    );
+}
+
+#[rstest]
+fn applying_partial_edge_filters_writes_the_bytes_of_the_default_policy(
+    #[values(
+        DatasetWriter::Buffered,
+        DatasetWriter::Staged,
+        DatasetWriter::Streaming
+    )]
+    writer: DatasetWriter,
+) {
+    let write_with = |properties: DatasetCreateProperties| {
+        write(writer, |builder| {
+            builder
+                .with_i32_data(&VALUES)
+                .with_create_properties(properties);
+        })
+    };
+    let properties = DatasetCreateProperties::new()
+        .with_chunks(&[3])
+        .with_deflate(DeflateLevel::Six);
+    let applied = write_with(
+        properties
+            .clone()
+            .with_partial_edge_filtering(PartialEdgeFiltering::Apply),
+    );
+    assert_eq!(applied, write_with(properties));
+    assert_eq!(pipeline_bypass_by_chunk(applied), [false, false, false]);
+}
+
+#[rstest]
 #[case::alloc(FillTime::Alloc)]
 #[case::never(FillTime::Never)]
 #[case::if_set(FillTime::IfSet)]
 fn fill_value_and_fill_time_read_back(#[case] fill_time: FillTime) {
-    let bytes = write(false, |builder| {
+    let bytes = write(DatasetWriter::Buffered, |builder| {
         builder.with_i32_data(&VALUES).with_create_properties(
             DatasetCreateProperties::new()
                 .with_chunks(&[4])
@@ -249,7 +576,7 @@ fn fill_value_of_another_width_is_rejected(#[case] data_after_properties: bool) 
 
 #[test]
 fn properties_place_filters_in_canonical_order_with_lzf_optional() {
-    let bytes = write(false, |builder| {
+    let bytes = write(DatasetWriter::Buffered, |builder| {
         builder.with_i32_data(&VALUES).with_create_properties(
             DatasetCreateProperties::new()
                 .with_chunks(&[4])
@@ -304,18 +631,20 @@ fn conflicting_filters_are_rejected(
 
 #[cfg(feature = "zfp")]
 #[rstest]
-fn zfp_properties_write_the_bytes_of_the_builder_setter(#[values(false, true)] staged: bool) {
+fn zfp_properties_write_the_bytes_of_the_builder_setter(
+    #[values(DatasetWriter::Buffered, DatasetWriter::Staged)] writer: DatasetWriter,
+) {
     use hdf5_pure::ZfpRate;
 
     let rate = ZfpRate::try_from(16.0).unwrap();
-    let with_properties = write(staged, |builder| {
+    let with_properties = write(writer, |builder| {
         builder.with_i32_data(&VALUES).with_create_properties(
             DatasetCreateProperties::new()
                 .with_chunks(&[4])
                 .with_zfp(rate),
         );
     });
-    let with_setters = write(staged, |builder| {
+    let with_setters = write(writer, |builder| {
         builder
             .with_i32_data(&VALUES)
             .with_chunks(&[4])
@@ -324,21 +653,28 @@ fn zfp_properties_write_the_bytes_of_the_builder_setter(#[values(false, true)] s
     assert_eq!(with_properties, with_setters);
 }
 
-/// Writes a file with one dataset, `data`, that `configure` sets up, through a [`FileBuilder`],
-/// or through a read-write session that stages and commits the dataset where `staged` is true.
-fn write(staged: bool, configure: impl FnOnce(&mut DatasetBuilder)) -> Vec<u8> {
-    if !staged {
-        let mut builder = FileBuilder::new();
-        configure(builder.create_dataset("data"));
-        return builder.finish().unwrap();
-    }
+fn skipping_with(
+    properties: impl FnOnce(DatasetCreateProperties) -> DatasetCreateProperties,
+) -> DatasetCreateProperties {
+    properties(
+        DatasetCreateProperties::new().with_partial_edge_filtering(PartialEdgeFiltering::Skip),
+    )
+}
+
+fn pipeline_bypass_by_chunk(bytes: Vec<u8>) -> Vec<bool> {
+    let file = File::from_bytes(bytes).unwrap();
+    let mut chunks = file.dataset("data").unwrap().chunks().unwrap();
+    chunks.sort_by_key(|chunk| chunk.offset.clone());
+    chunks
+        .iter()
+        .map(|chunk| chunk.filters().bypasses_pipeline())
+        .collect()
+}
+
+/// Writes a file with one dataset, `data`, that `configure` sets up, through `writer`.
+fn write(writer: DatasetWriter, configure: impl FnOnce(&mut DatasetBuilder)) -> Vec<u8> {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("staged.h5");
-    FileBuilder::new().write(&path).unwrap();
-    {
-        let file = File::open_rw(&path).unwrap();
-        file.root().create_dataset("data", configure).unwrap();
-        file.commit().unwrap();
-    }
+    let path = directory.path().join("written.h5");
+    writer.create(&path, "data", configure);
     std::fs::read(path).unwrap()
 }

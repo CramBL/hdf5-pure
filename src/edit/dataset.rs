@@ -21,6 +21,8 @@ use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::chunked_read;
 use crate::chunked_read::ChunkDecoding;
+#[cfg(doc)]
+use crate::chunked_write::PartialEdgeFiltering;
 use crate::chunked_write::{self, ChunkMeta, ChunkOptions, ChunkProvider, StorageAllocation};
 use crate::convert::Narrow;
 use crate::data_layout::ChunkedLayoutFlags;
@@ -62,7 +64,9 @@ impl WriteEngine {
     ///
     /// Returns [`Error::EditUnsupported`] if `path` is the root, collides with an existing
     /// object, or overlaps a live buffered appender. Returns the preparation error if
-    /// [`flatten_dataset`] cannot prepare `builder`.
+    /// [`flatten_dataset`] cannot prepare `builder`, and [`Error::Format`] with
+    /// [`FormatError::PartialEdgeSkipRequiresChunking`] if `builder` sets
+    /// [`PartialEdgeFiltering::Skip`] on a dataset stored contiguous.
     pub(crate) fn stage_created_dataset(
         &mut self,
         path: &ObjectPathBuf,
@@ -73,8 +77,10 @@ impl WriteEngine {
             return Err(Error::EditUnsupported("dataset path has an empty name"));
         };
         self.refuse_creation_collision(path, StagedKind::Dataset)?;
-        self.staged
-            .push_dataset(parent, flatten_dataset(builder, leaf)?);
+        let fd = flatten_dataset(builder, leaf)?;
+        fd.chunk_options
+            .validate_partial_edge_filtering(fd.maxshape.as_deref())?;
+        self.staged.push_dataset(parent, fd);
         Ok(())
     }
 
@@ -86,8 +92,8 @@ impl WriteEngine {
     /// # Errors
     ///
     /// Returns [`Error::EditUnsupported`] if `path` is the root or overlaps a live buffered
-    /// appender, or if `builder` specifies chunking, attributes, fill settings, or
-    /// unresolved reference targets. Returns the preparation error if
+    /// appender, or if `builder` specifies chunking, a [`PartialEdgeFiltering`] policy, attributes,
+    /// fill settings, or unresolved reference targets. Returns the preparation error if
     /// [`flatten_dataset`] cannot prepare `builder`.
     pub(crate) fn stage_dataset_write(
         &mut self,
@@ -1170,14 +1176,21 @@ impl WriteEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::EditUnsupported`] for chunk or maximum-shape options, attributes, fill
-    /// settings,
-    /// or unresolved object-reference targets.
+    /// Returns [`Error::EditUnsupported`] for chunk or maximum-shape options, a
+    /// [`PartialEdgeFiltering`] policy, attributes, fill settings, or unresolved object-reference
+    /// targets.
     pub(super) fn refuse_unsupported_overwrite(fd: &FlatDataset) -> Result<(), Error> {
         if fd.chunk_options.is_chunked() || fd.maxshape.is_some() {
             return Err(Error::EditUnsupported(
                 "write_dataset overwrites values only; it cannot make a dataset \
                  chunked, filtered, or extensible",
+            ));
+        }
+
+        if fd.chunk_options.partial_edge_filtering.is_some() {
+            return Err(Error::EditUnsupported(
+                "write_dataset overwrites values only; it cannot set whether partial \
+                 edge chunks are filtered (set it when the dataset is created)",
             ));
         }
 

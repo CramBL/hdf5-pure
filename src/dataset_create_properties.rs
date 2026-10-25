@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 use hdf5_pure_core::FillTime;
 
 use crate::DeflateLevel;
+use crate::PartialEdgeFiltering;
 use crate::ScaleOffset;
 #[cfg(feature = "zfp")]
 use crate::ZfpRate;
@@ -15,16 +16,20 @@ use crate::chunked_write::FilterKind;
 use crate::element::H5Element;
 use crate::type_builders::DatasetBuilder;
 
-/// The creation properties of a dataset: its chunk dimensions, filters, and fill settings.
+/// The creation properties of a dataset: its chunk dimensions, filters, partial edge chunk
+/// filtering, and fill settings.
 ///
 /// This is the analogue of an HDF5 dataset creation property list (`dcpl`), the list a caller
 /// passes to `H5Dcreate` to set how the dataset is stored, apart from its data and its shape.
-/// [`DatasetBuilder::with_create_properties`] applies the properties to a dataset. Each method has
-/// the name and the effect of the [`DatasetBuilder`] method that sets the same property, and a
-/// dataset written with these properties has the bytes of one written with those methods.
+/// [`DatasetBuilder::with_create_properties`] applies the properties to a dataset. Each method
+/// other than [`with_partial_edge_filtering`](Self::with_partial_edge_filtering) has the name and
+/// the effect of the [`DatasetBuilder`] method that sets the same property, and a dataset written
+/// with these properties has the bytes of one written with those methods.
 ///
 /// The writer checks the properties against the dataset when the file is written, and returns
 /// [`FormatError::FilterError`] for two filters that cannot be combined.
+/// [`with_partial_edge_filtering`](Self::with_partial_edge_filtering) describes the check of the
+/// partial edge chunk policy.
 ///
 /// A filter method adds its filter at the position the [`DatasetBuilder`] methods give it, and a
 /// second call for the same filter replaces it in place. The writer derives the chunk dimensions
@@ -43,11 +48,11 @@ use crate::type_builders::DatasetBuilder;
 /// | `H5Pset_filter`, ZFP (filter 32013) | [`with_zfp`](Self::with_zfp) | **Supported** (`zfp` feature) | Adds the fixed-rate ZFP filter of the H5Z-ZFP plugin. The tests compare the encoded bytes with those of the plugin. |
 /// | `H5Pset_fill_value` | [`with_fill_value`](Self::with_fill_value) | **Supported** (`std` feature) | Sets a fill value of the dataset's element type. |
 /// | `H5Pset_fill_time` | [`with_fill_time`](Self::with_fill_time) | **Supported** | Sets when the writer writes the fill value to storage. |
+/// | `H5Pset_chunk_opts` | [`with_partial_edge_filtering`](Self::with_partial_edge_filtering) | **Supported** | Sets whether the writer filters the partial edge chunks, the option `H5D_CHUNK_DONT_FILTER_PARTIAL_CHUNKS` sets. |
 /// | `H5Pset_layout` | none | **Unsupported** | The writer stores a dataset chunked where chunk dimensions, a filter, or a maximum shape is set, and contiguous otherwise. |
 /// | `H5Pset_alloc_time` | none | **Unsupported** | The writer records late allocation for every dataset. |
 /// | `H5Pset_external` | none | **Unsupported** | The writer stores the raw data in the HDF5 file. |
 /// | `H5Pset_szip`, `H5Pset_nbit`, `H5Pset_filter` with another filter | none | **Unsupported** | The writer applies the filters above and no other. |
-/// | `H5Pset_chunk_opts` | none | **Unsupported** | The writer filters every chunk, the partial edge chunks included. |
 /// | `H5Pset_virtual` | none | **Unsupported** | The writer stores every dataset contiguous or chunked, as the `H5Pset_layout` row describes. |
 /// | `H5Pset_dset_no_attrs_hint` | none | **Unsupported** | The writer does not expose the dataset object-header minimization hint. |
 ///
@@ -84,7 +89,8 @@ pub struct DatasetCreateProperties {
 }
 
 impl DatasetCreateProperties {
-    /// Creates properties with no chunk dimensions, no filters, and no fill settings.
+    /// Creates properties with no chunk dimensions, no filters, no fill settings, and no partial
+    /// edge filtering policy.
     pub fn new() -> Self {
         Self::default()
     }
@@ -144,6 +150,61 @@ impl DatasetCreateProperties {
         self.with_filter(FilterKind::Zfp(rate))
     }
 
+    /// Sets whether the writer runs the partial edge chunks through the filter pipeline.
+    ///
+    /// A partial edge chunk is a chunk that extends past the dataset's extent. Under
+    /// [`PartialEdgeFiltering::Skip`] the writer stores each partial edge chunk unfiltered,
+    /// padded to a whole chunk with the fill value, and runs every other chunk through the
+    /// pipeline. The writer records the policy in a flag of the version 4 data layout message,
+    /// defined in "The Data Layout Message" of the [format specification, version 4.0][spec].
+    /// A reader needs HDF5 1.10 or newer under either policy: the writer writes that version of
+    /// the message for every chunked dataset, and HDF5 1.10.0 and later read it. A dataset
+    /// without this property has [`PartialEdgeFiltering::Apply`].
+    ///
+    /// The C library sets this policy with `H5Pset_chunk_opts` and
+    /// `H5D_CHUNK_DONT_FILTER_PARTIAL_CHUNKS`.
+    ///
+    /// A dataset under [`PartialEdgeFiltering::Skip`] has to be stored chunked, by chunk
+    /// dimensions, a filter, or a maximum shape. The writer rejects a dataset stored contiguous
+    /// with [`FormatError::PartialEdgeSkipRequiresChunking`]. A read-write session rejects an
+    /// overwrite whose properties set either policy, since an overwrite keeps the dataset's policy.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure::{DatasetCreateProperties, DeflateLevel, File, FileBuilder};
+    /// use hdf5_pure::PartialEdgeFiltering;
+    ///
+    /// let properties = DatasetCreateProperties::new()
+    ///     .with_chunks(&[4])
+    ///     .with_deflate(DeflateLevel::Six)
+    ///     .with_partial_edge_filtering(PartialEdgeFiltering::Skip);
+    ///
+    /// let mut builder = FileBuilder::new();
+    /// builder
+    ///     .create_dataset("values")
+    ///     .with_i32_data(&[3, 1, 4, 1, 5, 9])
+    ///     .with_create_properties(properties);
+    ///
+    /// let file = File::from_bytes(builder.finish()?)?;
+    /// let mut chunks = file.dataset("values")?.chunks()?;
+    /// chunks.sort_by_key(|chunk| chunk.offset.clone());
+    /// let unfiltered: Vec<bool> = chunks
+    ///     .iter()
+    ///     .map(|chunk| chunk.filters().bypasses_pipeline())
+    ///     .collect();
+    /// assert_eq!(unfiltered, [false, true]);
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
+    ///
+    /// [`FormatError::PartialEdgeSkipRequiresChunking`]: crate::FormatError::PartialEdgeSkipRequiresChunking
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
+    #[doc(alias = "H5Pset_chunk_opts")]
+    pub fn with_partial_edge_filtering(mut self, filtering: PartialEdgeFiltering) -> Self {
+        self.chunk_options.partial_edge_filtering = Some(filtering);
+        self
+    }
+
     /// Sets the fill value, which a reader returns for an element that has never been written
     /// unless the fill time is [`FillTime::Never`].
     ///
@@ -176,8 +237,8 @@ impl DatasetCreateProperties {
 }
 
 impl DatasetBuilder {
-    /// Replaces the chunk dimensions, filters, fill value, and fill time of this dataset with
-    /// `properties`.
+    /// Replaces the chunk dimensions, filters, partial edge chunk filtering, fill value, and fill
+    /// time of this dataset with `properties`.
     ///
     /// A property that `properties` leaves unset takes its default, even where a method called
     /// before this call set it. A method called after this call changes the one property it sets
