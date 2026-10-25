@@ -1,6 +1,8 @@
 use std::iter;
 use std::slice;
 
+use hdf5_pure_format::__private::FormatWidths;
+use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use rstest::rstest;
 use test_util::file_space_info;
 use test_util::widths::Widths;
@@ -19,6 +21,8 @@ use crate::MemoryStrategy;
 use crate::ReusableSpaceStats;
 use crate::SyncPolicy;
 use crate::UserblockSize;
+use crate::address::BaseAddressExt;
+use crate::checksum;
 use crate::source::BytesSource;
 
 #[rstest]
@@ -311,6 +315,71 @@ fn malformed_file_space_info_is_reported(#[values(false, true)] streaming: bool)
             error,
             Error::Format(FormatError::UnsupportedFileSpaceInfoVersion(9))
         ),
+        "{error:?}"
+    );
+}
+
+#[rstest]
+#[case::header(false)]
+#[case::section_list(true)]
+fn corrupted_manager_checksums_return_the_decode_error(
+    #[case] section_list: bool,
+    #[values(false, true)] streaming: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("corrupt-manager-checksum.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_strategy(FileSpaceStrategy::FsmAggr, true, 1);
+    builder.with_userblock(UserblockSize::try_from(512).unwrap());
+    builder.create_dataset("a").with_i32_data(&[1; 100]);
+    builder.create_dataset("b").with_i32_data(&[2; 400]);
+    builder.create_dataset("c").with_i32_data(&[3; 100]);
+    builder.write(&path).unwrap();
+    {
+        let file = File::open_rw(&path).unwrap();
+        file.root().delete("b").unwrap();
+        file.commit().unwrap();
+        file.close().unwrap();
+    }
+    let file = File::open(&path).unwrap();
+    let report = file.persisted_free_sections().unwrap().unwrap();
+    let base = file.superblock().base_address;
+    let widths = FormatWidths {
+        offsets: file.superblock().offset_size,
+        lengths: file.superblock().length_size,
+    };
+    let address = usize::try_from(base.absolute(report.managers()[0].address()).unwrap()).unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    let header = FreeSpaceManagerHeader::parse(widths, &bytes[address..]).unwrap();
+    let (at, length) = if section_list {
+        (
+            usize::try_from(base.absolute(header.section_list_addr()).unwrap()).unwrap(),
+            usize::try_from(header.section_list_used()).unwrap(),
+        )
+    } else {
+        (
+            address,
+            usize::try_from(hdf5_pure_format::__private::free_space_manager_header_len(
+                widths,
+            ))
+            .unwrap(),
+        )
+    };
+    let checksum_len = size_of::<u32>();
+    let computed = checksum::jenkins_lookup3(&bytes[at..at + length - checksum_len]);
+    bytes[at + length - checksum_len] ^= 1;
+    let expected = computed ^ 1;
+    drop(file);
+    let file = if streaming {
+        File::from_source(BytesSource::new(bytes)).unwrap()
+    } else {
+        File::from_bytes(bytes).unwrap()
+    };
+    let error = file.persisted_free_sections().unwrap_err();
+    assert!(
+        matches!(error,
+        Error::Format(FormatError::ChecksumMismatch { expected: stored, computed: actual })
+            if stored == expected && actual == computed),
         "{error:?}"
     );
 }

@@ -1,7 +1,10 @@
 //! Compares persisted free-space sections with an independent libhdf5 enumeration.
 //!
-//! The observer opens the same closed file with each library and compares section boundaries at
-//! base-relative stored addresses. It also records Rust ownership accounting for files the editor
+//! [`assert_persisted_sections`] compares buffered and streaming facade reports with the C
+//! enumeration at base-relative stored addresses. It checks the recorded manager contents
+//! without collecting ownership accounting.
+//!
+//! [`FreeSpaceOracleCheckpoint`] also records Rust ownership accounting for files the editor
 //! supports. The C enumeration covers free-space-manager state. Live raw data and metadata are
 //! classified only by Rust's [`File::__space_ownership`] diagnostic.
 
@@ -11,12 +14,180 @@ use std::fs;
 use std::path::Path;
 
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
+use hdf5_pure::DecodedStoredAddress;
+use hdf5_pure::FreeSectionCoordinates;
+use hdf5_pure::FreeSections;
+use hdf5_pure::FreeSpaceManagerRole;
+use hdf5_pure::PersistedFreeSections;
 use hdf5_pure::{File, FileAccessProperties, FileSpaceStrategy, MemoryStrategy, SpaceOwnership};
+use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_core::{LengthWidth, OffsetWidth};
+use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::DEFAULT_THRESHOLD;
+use hdf5_pure_format::__private::FormatWidths;
+use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use hdf5_sys::{h5f, h5p};
 
 use crate::file_space;
+
+/// Checks supported persisted free-section inspection against libhdf5 for a closed file.
+///
+/// The caller closes every writing session before calling this function. Compares buffered
+/// and streaming [`File::persisted_free_sections`] reports with `H5Fget_free_sections` and
+/// `H5Fget_freespace`. Checks each manager against its recorded slot and encoded contents,
+/// verifies combined and per-manager totals, and compares the complete file bytes before
+/// and after observation. Runs without collecting ownership accounting.
+///
+/// # Panics
+///
+/// Panics if either library reports an error, metadata cannot be read or parsed, reports or
+/// manager records disagree, or observation changes the file bytes.
+#[track_caller]
+pub fn assert_persisted_sections(path: &Path) {
+    let bytes = fs::read(path).unwrap();
+    let reader = File::open(path).unwrap();
+    let report = reader.persisted_free_sections().unwrap();
+    let streamed = File::open_streaming(path)
+        .unwrap()
+        .persisted_free_sections()
+        .unwrap();
+    assert_eq!(report, streamed, "buffered/streamed sections; {path:?}");
+    let configured = reader.file_space_info().is_some_and(|info| info.persist);
+    assert_eq!(report.is_some(), configured, "persistence; {path:?}");
+    let boundary = reader.superblock().eof_address - reader.superblock().base_address.get();
+    let rust = report
+        .as_ref()
+        .map(|report| section_pairs(report.free_sections()))
+        .unwrap_or_default();
+    let mut legacy = reader.persisted_free_space().unwrap();
+    legacy.sort_unstable();
+    assert_eq!(rust, legacy, "tuple compatibility; {path:?}");
+    if let Some(report) = &report {
+        assert_manager_sections(&reader, report, &bytes);
+    }
+    reader.close().unwrap();
+    let file = hdf5::File::open(path).unwrap();
+    let c = SectionMap::new(
+        "libhdf5",
+        file_space::libhdf5_free_sections(&file).unwrap(),
+        boundary,
+    )
+    .unwrap();
+    let rust = SectionMap::new("supported API", rust, boundary).unwrap();
+    rust.compare(&c)
+        .unwrap_or_else(|error| panic!("supported all-manager sections; {path:?}: {error:?}"));
+    let (c_bytes, _) = c_sizes(&file).unwrap();
+    assert_eq!(rust.bytes(), c_bytes, "H5Fget_freespace; {path:?}");
+    if let Some(report) = report {
+        let all = report.free_sections();
+        assert_eq!(all.section_count(), c.sections().len(), "count; {path:?}");
+        assert_eq!(all.free_bytes(), c.bytes(), "section bytes; {path:?}");
+        assert_eq!(
+            all.section_count(),
+            report
+                .managers()
+                .iter()
+                .map(|manager| manager.free_sections().section_count())
+                .sum::<usize>(),
+            "manager section counts; {path:?}"
+        );
+        assert_eq!(
+            all.free_bytes(),
+            report
+                .managers()
+                .iter()
+                .map(|manager| manager.free_sections().free_bytes())
+                .sum::<u64>(),
+            "manager byte totals; {path:?}"
+        );
+    }
+    file.close().unwrap();
+    assert!(
+        bytes == fs::read(path).unwrap(),
+        "observation changed bytes; {path:?}"
+    );
+}
+
+/// Checks reported manager slots, roles, counts, bytes, and sections against encoded metadata.
+fn assert_manager_sections(file: &File, report: &PersistedFreeSections, bytes: &[u8]) {
+    let info = file.file_space_info().unwrap();
+    let defined = info
+        .manager_addrs
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, &address)| match address {
+            DecodedStoredAddress::Defined(address) => Some((slot, address)),
+            DecodedStoredAddress::Undefined => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        report
+            .managers()
+            .iter()
+            .map(|manager| (manager.slot(), manager.address()))
+            .collect::<Vec<_>>(),
+        defined
+    );
+    let widths = FormatWidths {
+        offsets: file.superblock().offset_size,
+        lengths: file.superblock().length_size,
+    };
+    let base = file.superblock().base_address;
+    for manager in report.managers() {
+        let expected_role = match info.strategy {
+            FileSpaceStrategy::FsmAggr => FSM_AGGR_ROLES.get(manager.slot()),
+            FileSpaceStrategy::Page => PAGE_ROLES.get(manager.slot()),
+            FileSpaceStrategy::Aggr | FileSpaceStrategy::None => None,
+        }
+        .copied()
+        .unwrap_or(FreeSpaceManagerRole::Unknown);
+        assert_eq!(manager.role(), expected_role, "slot {}", manager.slot());
+        let address = usize::try_from(base.absolute(manager.address()).unwrap()).unwrap();
+        let header = FreeSpaceManagerHeader::parse(widths, &bytes[address..]).unwrap();
+        let sections = manager.free_sections();
+        assert_eq!(
+            u64::try_from(sections.section_count()).unwrap(),
+            header.total_sections()
+        );
+        assert_eq!(sections.free_bytes(), header.total_space());
+        if header.total_sections() == 0 {
+            assert_eq!(sections.sections(), []);
+            continue;
+        }
+        let start = usize::try_from(base.absolute(header.section_list_addr()).unwrap()).unwrap();
+        let used = usize::try_from(header.section_list_used()).unwrap();
+        let encoded = format::parse_section_info(
+            widths,
+            &bytes[start..start + used],
+            manager.address(),
+            &header,
+        )
+        .unwrap();
+        let mut encoded = encoded
+            .iter()
+            .map(|section| (section.addr.get(), section.size))
+            .collect::<Vec<_>>();
+        encoded.sort_unstable();
+        assert_eq!(
+            section_pairs(sections),
+            encoded,
+            "encoded manager slot {}",
+            manager.slot()
+        );
+    }
+}
+
+/// Checks stored coordinates and returns address-length pairs for comparison.
+fn section_pairs(sections: &FreeSections) -> Vec<(u64, u64)> {
+    sections
+        .sections()
+        .iter()
+        .map(|section| {
+            assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
+            (section.address(), section.length().get())
+        })
+        .collect()
+}
 
 /// The persisted free-space maps, file sizes, and ownership accounting for one closed file.
 #[derive(Debug)]
@@ -640,3 +811,24 @@ fn c_error(operation: &'static str) -> OracleError {
         source: hdf5::Error::query().unwrap_or_else(|source| source),
     }
 }
+
+// `H5O__fsinfo_decode` in `H5Ofsinfo.c`, HDF5 2.2.0, maps version 0 slots to managers
+// without paging.
+const FSM_AGGR_ROLES: [FreeSpaceManagerRole; 6] = [FreeSpaceManagerRole::FsmAggr; 6];
+// `H5F_mem_page_t` in `H5Fprivate.h`, HDF5 2.2.0, assigns metadata, raw, and generic indices
+// 1, 3, and 7.
+// `H5O__fsinfo_encode` in `H5Ofsinfo.c`, HDF5 2.2.0, stores each index minus one.
+const PAGE_ROLES: [FreeSpaceManagerRole; 12] = [
+    FreeSpaceManagerRole::PageSmallMetadata,
+    FreeSpaceManagerRole::Unknown,
+    FreeSpaceManagerRole::PageSmallRawData,
+    FreeSpaceManagerRole::Unknown,
+    FreeSpaceManagerRole::Unknown,
+    FreeSpaceManagerRole::Unknown,
+    FreeSpaceManagerRole::PageLargeGeneric,
+    FreeSpaceManagerRole::Unknown,
+    FreeSpaceManagerRole::Unknown,
+    FreeSpaceManagerRole::Unknown,
+    FreeSpaceManagerRole::Unknown,
+    FreeSpaceManagerRole::Unknown,
+];
