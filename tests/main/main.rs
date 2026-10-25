@@ -43,6 +43,7 @@ mod edit_userblock;
 mod edit_userblock_chunked;
 mod edit_userblock_followups;
 mod element_size;
+mod encoded_chunk_emission;
 mod enum_datatype;
 mod file_inspect;
 mod file_locking;

@@ -1031,15 +1031,11 @@ pub(crate) fn chunk_index_len(
     }
 }
 
-/// A chunked dataset's chunks already split and compressed — the expensive,
-/// **address-independent** half of building a chunked layout. The compressed
-/// bytes, the chunk-index choice, and the pipeline message do not depend on
-/// where the data lands in the file. Only the addresses embedded in the chunk
-/// index do. The writer sizes a dataset's object header in one pass and
-/// emits its data in a later pass (it needs every prior object's size to know
-/// this object's address), so it computes this set once and feeds it to
-/// [`assemble_chunked_at`] twice — sizing at a dummy address, then emitting at
-/// the real one — instead of recompressing the whole dataset each pass.
+/// A chunked dataset's encoded chunks and address-independent index properties.
+///
+/// The writer retains the chunks across sizing and placement. [`measure_chunked_at`] computes
+/// the region length and object-header messages, and [`plan_chunked_at`] finalizes the metadata
+/// for emission at a stored address. [`emit_chunked_data`] borrows the encoded bytes from this set.
 pub(crate) struct CompressedChunkSet {
     /// The chunks as the writer stores them, in dense row-major grid order.
     chunks: Vec<PreparedChunk>,
@@ -1341,13 +1337,15 @@ fn index_grid(
     ChunkGrid::new(chunk_dims, shape, maxshape, order)
 }
 
-/// Where each of a chunk set's chunks lands when the set is laid out at
-/// `data_address` — they are stored back to back from there — and the address the
-/// chunk index follows them at.
+/// Assigns consecutive stored addresses to the chunks and returns the following index address.
+///
+/// # Errors
+///
+/// Returns [`FormatError::OffsetOverflow`] if a chunk extends past [`u64::MAX`].
 fn plan_chunk_slots(
     set: &CompressedChunkSet,
     data_address: StoredAddress,
-) -> (Vec<ChunkRecord>, StoredAddress) {
+) -> Result<(Vec<ChunkRecord>, StoredAddress), FormatError> {
     let mut cursor = data_address;
     let mut written_chunks = Vec::with_capacity(set.chunks.len());
     for chunk in &set.chunks {
@@ -1356,9 +1354,14 @@ fn plan_chunk_slots(
             stored_size: chunk.stored_size(),
             filter_mask: chunk.filter_mask(),
         });
-        cursor = cursor.offset(chunk.stored_size());
+        cursor = StoredAddress::new(cursor.get().checked_add(chunk.stored_size()).ok_or(
+            FormatError::OffsetOverflow {
+                offset: cursor.get(),
+                length: chunk.stored_size(),
+            },
+        )?);
     }
-    (written_chunks, cursor)
+    Ok((written_chunks, cursor))
 }
 
 /// Build the chunk index that follows a chunk set's data at `index_address`,
@@ -1427,20 +1430,87 @@ fn chunk_index_layout(
     )
 }
 
-/// The exact byte length [`assemble_chunked_at`] produces for `set` — the same
-/// at every placement address, since the layout depends on the chunk sizes and the
-/// index shape alone.
+/// Returns the chunked data-region length before a placement address is chosen.
 ///
-/// Sizing without assembling is what lets a caller pick the dataset's address
-/// *first*: the in-place editor asks its free-space list for a region this long
-/// and, if it gets one, assembles the set straight into it rather than growing
-/// the file (issue #261).
+/// # Errors
+///
+/// Returns [`FormatError::OffsetOverflow`] if the region length exceeds [`u64::MAX`]. Propagates
+/// chunk-index slot errors.
 pub(crate) fn chunked_data_len(set: &CompressedChunkSet) -> Result<u64, FormatError> {
-    let (written_chunks, index_address) = plan_chunk_slots(set, StoredAddress::new(0));
+    let data_address = StoredAddress::new(0);
+    let (written_chunks, index_address) = plan_chunk_slots(set, data_address)?;
+    chunked_region_len(set, &written_chunks, data_address, index_address)
+}
+
+/// A chunked data region's finalized index and object-header messages.
+pub(crate) struct ChunkedPlan {
+    /// The index bytes emitted after the encoded chunks.
+    index: Vec<u8>,
+    /// The total length of the encoded chunks and index.
+    pub data_len: u64,
+    /// The version 4 data-layout message for the object header.
+    pub layout_message: Vec<u8>,
+    /// The filter-pipeline message, if the dataset has one.
+    pub pipeline_message: Option<Vec<u8>>,
+}
+
+/// Finalizes chunk addresses, index bytes, and object-header messages at `data_address`.
+///
+/// # Errors
+///
+/// Returns [`FormatError::OffsetOverflow`] if a chunk or the index extends past [`u64::MAX`].
+/// Propagates chunk-index and layout serialization errors.
+pub(crate) fn plan_chunked_at(
+    set: &CompressedChunkSet,
+    data_address: StoredAddress,
+) -> Result<ChunkedPlan, FormatError> {
+    let (written_chunks, index_address) = plan_chunk_slots(set, data_address)?;
+    let data_len = chunked_region_len(set, &written_chunks, data_address, index_address)?;
+    let (index, layout_message) = chunk_index_bytes(set, &written_chunks, index_address)?;
+    Ok(ChunkedPlan {
+        index,
+        data_len,
+        layout_message,
+        pipeline_message: set.pipeline_message.clone(),
+    })
+}
+
+/// Writes retained encoded chunks followed by the finalized chunk index.
+///
+/// The caller pairs `plan` with the [`CompressedChunkSet`] used to create it and positions `sink`
+/// at the region's start.
+///
+/// # Errors
+///
+/// Returns the error from [`ByteSink::put`] if a write fails.
+pub(crate) fn emit_chunked_data(
+    sink: &mut impl ByteSink,
+    set: &CompressedChunkSet,
+    plan: &ChunkedPlan,
+) -> Result<(), FormatError> {
+    for chunk in &set.chunks {
+        sink.put(chunk.bytes())?;
+    }
+    sink.put(&plan.index)
+}
+
+/// Returns the length from `data_address` through the end of the chunk index.
+///
+/// # Errors
+///
+/// Returns [`FormatError::OffsetOverflow`] if the index extends past [`u64::MAX`]. Returns
+/// [`FormatError::Internal`] if the region ends before `data_address`. Propagates chunk-index
+/// slot errors.
+fn chunked_region_len(
+    set: &CompressedChunkSet,
+    written_chunks: &[ChunkRecord],
+    data_address: StoredAddress,
+    index_address: StoredAddress,
+) -> Result<u64, FormatError> {
     let index_len = match set.kind.array_kind() {
         Some(array) => chunk_index_len(
             array,
-            &set.index_slots(&written_chunks)?,
+            &set.index_slots(written_chunks)?,
             set.full_chunk_bytes(),
             INDEX_OFFSET_SIZE,
             INDEX_LENGTH_SIZE,
@@ -1448,62 +1518,30 @@ pub(crate) fn chunked_data_len(set: &CompressedChunkSet) -> Result<u64, FormatEr
         ),
         None => 0,
     };
-    Ok(index_address.get() + index_len)
+    let end = index_address
+        .get()
+        .checked_add(index_len)
+        .ok_or(FormatError::OffsetOverflow {
+            offset: index_address.get(),
+            length: index_len,
+        })?;
+    end.checked_sub(data_address.get()).ok_or_else(|| {
+        FormatError::Internal("a chunked region ends before its data address".into())
+    })
 }
 
-/// The chunk-index bytes and data-layout message for `set` at `data_address`,
-/// with the total size of its chunk payload.
+/// Computes a chunked region's length and object-header messages without serializing its index.
 ///
-/// Everything [`assemble_chunked_at`] produces except the data region itself, so
-/// that [`measure_chunked_at`] can answer "how long, and what does the layout
-/// message say" without building an entire copy of the dataset.
-fn plan_chunked_at(
-    set: &CompressedChunkSet,
-    data_address: StoredAddress,
-) -> Result<(usize, Vec<u8>, Vec<u8>), FormatError> {
-    let (written_chunks, index_address) = plan_chunk_slots(set, data_address);
-    let (index, layout_message) = chunk_index_bytes(set, &written_chunks, index_address)?;
-    let chunk_bytes_total: usize = set.chunks.iter().map(|chunk| chunk.bytes().len()).sum();
-    Ok((chunk_bytes_total, index, layout_message))
-}
-
-/// The byte length and data-layout message [`assemble_chunked_at`] would produce
-/// at `data_address`, without producing the data region.
+/// # Errors
 ///
-/// The file writer sizes every object header before it emits a byte, and for a
-/// chunked dataset that needs the layout message and the length of the region —
-/// not the region. Calling `assemble_chunked_at` for it meant building a second
-/// copy of every chunk in the dataset and dropping it: 8 MiB of allocation to
-/// learn one integer, on every chunked write (issue #228).
-///
-/// Shares [`plan_chunked_at`] with the real assembly, so the length reported here
-/// and the length produced there cannot drift.
+/// Returns [`FormatError::OffsetOverflow`] if a chunk or the index extends past [`u64::MAX`].
+/// Propagates chunk-index slot and layout serialization errors.
 pub(crate) fn measure_chunked_at(
     set: &CompressedChunkSet,
     data_address: StoredAddress,
 ) -> Result<ChunkedMeasure, FormatError> {
-    let (written_chunks, index_address) = plan_chunk_slots(set, data_address);
-    // Derived from the plan already in hand rather than by building the index —
-    // and from *this* plan rather than by calling `chunked_data_len`, which
-    // would lay the chunks out a second time to reach the same answer.
-    let index_len = match set.kind.array_kind() {
-        Some(array) => chunk_index_len(
-            array,
-            &set.index_slots(&written_chunks)?,
-            set.full_chunk_bytes(),
-            INDEX_OFFSET_SIZE,
-            INDEX_LENGTH_SIZE,
-            set.has_filters,
-        ),
-        None => 0,
-    };
-    let data_len = (index_address.get() - data_address.get()) + index_len;
-    // Not building the index also stops it from *refusing*, and the only way it
-    // can is a length that does not fit this platform's `usize`. Every such
-    // check inside the build is on a part of this region, so the whole region
-    // fitting means all of them do: the refusal survives the build's removal,
-    // and stays where it was — before the writer has emitted a byte.
-    data_len.to_usize()?;
+    let (written_chunks, index_address) = plan_chunk_slots(set, data_address)?;
+    let data_len = chunked_region_len(set, &written_chunks, data_address, index_address)?;
     Ok(ChunkedMeasure {
         data_len,
         layout_message: chunk_index_layout(set, &written_chunks, index_address)?,
@@ -1530,29 +1568,26 @@ pub(crate) struct ChunkedHeader {
     pub pipeline_message: Option<Vec<u8>>,
 }
 
-/// Lays an already-[`compress`ed](compress_chunks) chunk set out at `data_address`,
-/// producing the on-disk data region (chunk bytes followed by the chunk index)
-/// and the v4 data-layout message. Cheap: this only concatenates and builds the
-/// index, so it can be run more than once (different addresses) without
-/// repeating the dataset's compression.
+/// Materializes encoded chunks and their index in a contiguous data-region buffer.
+///
+/// Uses [`plan_chunked_at`] and [`emit_chunked_data`] at `data_address`. The in-place editor
+/// requires an owned buffer for relocation.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ValueTooLargeForPlatform`] if the region length exceeds [`usize::MAX`].
+/// Propagates the errors of [`plan_chunked_at`].
 pub(crate) fn assemble_chunked_at(
     set: &CompressedChunkSet,
     data_address: StoredAddress,
 ) -> Result<ChunkedDataResult, FormatError> {
-    let (chunk_bytes_total, index, layout_message) = plan_chunked_at(set, data_address)?;
-
-    // One exact allocation for chunks plus index: the buffer is filled to its
-    // capacity, never doubled and copied.
-    let mut data_buf = Vec::with_capacity(chunk_bytes_total + index.len());
-    for chunk in &set.chunks {
-        data_buf.extend_from_slice(chunk.bytes());
-    }
-    data_buf.extend_from_slice(&index);
-
+    let plan = plan_chunked_at(set, data_address)?;
+    let mut data_buf = Vec::with_capacity(plan.data_len.to_usize()?);
+    emit_chunked_data(&mut data_buf, set, &plan)?;
     Ok(ChunkedDataResult {
         data_bytes: data_buf,
-        layout_message,
-        pipeline_message: set.pipeline_message.clone(),
+        layout_message: plan.layout_message,
+        pipeline_message: plan.pipeline_message,
     })
 }
 
@@ -3510,5 +3545,167 @@ mod tests {
         let values: Vec<f64> = serde_json::from_value(v["values"].clone()).unwrap();
         assert_eq!(values, data);
         assert_eq!(v["units"], serde_json::json!("meters"));
+    }
+    #[rstest]
+    #[case::single(&[64], &[64], None)]
+    #[case::fixed(&[256], &[32], None)]
+    #[case::fixed_paged(&[8_256], &[1], None)]
+    #[case::extensible(&[256], &[32], Some(&[MaxExtent::Unlimited][..]))]
+    #[case::extensible_blocks(&[2_048], &[8], Some(&[MaxExtent::Unlimited][..]))]
+    #[case::partial(&[3, 5], &[2, 3], None)]
+    #[case::maximum_grid(&[3, 5], &[2, 3], Some(&[MaxExtent::Fixed(8), MaxExtent::Fixed(12)][..]))]
+    #[case::empty(&[0], &[8], Some(&[MaxExtent::Unlimited][..]))]
+    fn direct_emission_uses_retained_chunks_and_matches_assembly(
+        #[case] shape: &[u64],
+        #[case] chunk_dims: &[u64],
+        #[case] maxshape: Option<&[MaxExtent]>,
+        #[values(false, true)] filtered: bool,
+        #[values(PartialEdgeFiltering::Apply, PartialEdgeFiltering::Skip)]
+        edges: PartialEdgeFiltering,
+        #[values(StorageAllocation::Allocated, StorageAllocation::Unallocated)]
+        allocation: StorageAllocation,
+        #[values(0, 0x1234_5678)] address: u64,
+    ) {
+        let mut options = chunked(chunk_dims, &[]);
+        if filtered {
+            options.set_filter(FilterKind::Shuffle);
+            options.set_filter(FilterKind::Fletcher32);
+        }
+        options.partial_edge_filtering = Some(edges);
+        let raw: Vec<_> = (0..shape.iter().product::<u64>())
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        let set = compress_chunks(
+            &raw,
+            shape,
+            ChunkContext::basic(chunk_dims, 8),
+            &options,
+            maxshape,
+            FillPattern::ZERO,
+            allocation,
+        )
+        .unwrap();
+        let address = StoredAddress::new(address);
+        let measured = measure_chunked_at(&set, address).unwrap();
+        let plan = plan_chunked_at(&set, address).unwrap();
+        let assembled = assemble_chunked_at(&set, address).unwrap();
+        let mut sink = ChunkSlices::default();
+        emit_chunked_data(&mut sink, &set, &plan).unwrap();
+        assert_eq!(sink.bytes, assembled.data_bytes);
+        assert_eq!(measured.data_len, plan.data_len);
+        assert_eq!(plan.data_len, sink.position());
+        assert_eq!(plan.layout_message, assembled.layout_message);
+        assert_eq!(plan.layout_message, measured.layout_message);
+        assert_eq!(plan.pipeline_message, assembled.pipeline_message);
+        assert_eq!(plan.pipeline_message, measured.pipeline_message);
+        let expected: Vec<_> = set
+            .chunks
+            .iter()
+            .map(|chunk| (chunk.bytes().as_ptr(), chunk.bytes().len()))
+            .chain(core::iter::once((plan.index.as_ptr(), plan.index.len())))
+            .collect();
+        assert_eq!(sink.slices, expected);
+    }
+
+    #[derive(Default)]
+    struct ChunkSlices {
+        slices: Vec<(*const u8, usize)>,
+        bytes: Vec<u8>,
+    }
+
+    impl ByteSink for ChunkSlices {
+        fn put(&mut self, bytes: &[u8]) -> Result<(), FormatError> {
+            self.slices.push((bytes.as_ptr(), bytes.len()));
+            self.bytes.extend_from_slice(bytes);
+            Ok(())
+        }
+
+        fn put_zeros(&mut self, _: usize) -> Result<(), FormatError> {
+            Err(FormatError::Internal("unexpected chunk padding".into()))
+        }
+
+        fn position(&self) -> u64 {
+            self.bytes.len() as u64
+        }
+    }
+
+    #[rstest]
+    #[case::payload(false)]
+    #[case::index(true)]
+    fn chunk_planning_rejects_region_address_overflow(#[case] indexed: bool) {
+        let chunk_dims = if indexed { &[8][..] } else { &[16][..] };
+        let set = compress_chunks(
+            &[0; 16],
+            &[16],
+            ChunkContext::basic(chunk_dims, 1),
+            &ChunkOptions::default(),
+            None,
+            FillPattern::ZERO,
+            StorageAllocation::Allocated,
+        )
+        .unwrap();
+        let total = chunked_data_len(&set).unwrap();
+        let address = StoredAddress::new(u64::MAX - total + 1);
+        let expected = FormatError::OffsetOverflow {
+            offset: if indexed {
+                address.get() + 16
+            } else {
+                address.get()
+            },
+            length: if indexed { total - 16 } else { 16 },
+        };
+        assert_eq!(measure_chunked_at(&set, address).err().unwrap(), expected);
+        assert_eq!(plan_chunked_at(&set, address).err().unwrap(), expected);
+        assert_eq!(assemble_chunked_at(&set, address).err().unwrap(), expected);
+    }
+
+    #[rstest]
+    #[case::first_chunk(0)]
+    #[case::second_chunk(1)]
+    #[case::index(2)]
+    fn direct_chunk_emission_stops_at_the_sink_error(#[case] fail_at: usize) {
+        let set = compress_chunks(
+            &[0; 16],
+            &[16],
+            ChunkContext::basic(&[8], 1),
+            &ChunkOptions::default(),
+            None,
+            FillPattern::ZERO,
+            StorageAllocation::Allocated,
+        )
+        .unwrap();
+        let plan = plan_chunked_at(&set, StoredAddress::new(64)).unwrap();
+        let mut sink = FailingChunkSink {
+            accepted: 0,
+            fail_at,
+        };
+        assert_eq!(
+            emit_chunked_data(&mut sink, &set, &plan).unwrap_err(),
+            FormatError::Internal("test sink failure".into())
+        );
+        assert_eq!(sink.accepted, fail_at);
+    }
+
+    struct FailingChunkSink {
+        accepted: usize,
+        fail_at: usize,
+    }
+
+    impl ByteSink for FailingChunkSink {
+        fn put(&mut self, _: &[u8]) -> Result<(), FormatError> {
+            if self.accepted == self.fail_at {
+                return Err(FormatError::Internal("test sink failure".into()));
+            }
+            self.accepted += 1;
+            Ok(())
+        }
+
+        fn put_zeros(&mut self, _: usize) -> Result<(), FormatError> {
+            Err(FormatError::Internal("unexpected chunk padding".into()))
+        }
+
+        fn position(&self) -> u64 {
+            0
+        }
     }
 }

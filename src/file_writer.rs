@@ -59,7 +59,7 @@ use crate::address::{BaseAddress, StoredAddress};
 use crate::attribute::AttributeMessage;
 use crate::attribute_info::AttributeInfoMessage;
 use crate::chunked_write::{
-    self, ByteSink, ChunkOptions, ChunkProvider, ChunkedMeasure, CompressedChunkSet,
+    self, ByteSink, ChunkOptions, ChunkProvider, ChunkedMeasure, ChunkedPlan, CompressedChunkSet,
     StorageAllocation, VerbatimLayout, VerbatimPlan,
 };
 use crate::convert::Narrow;
@@ -1598,11 +1598,10 @@ impl FileWriter {
                 }
             }
 
-            /// Move this dataset's contiguous data region out for the assembly
-            /// pass. A produced region leaves its provider behind in `self`, the
-            /// way a verbatim chunked one does: the emitter reaches for it there,
-            /// and the region is described twice (sizing, then placement).
-            fn take_contiguous(&mut self) -> DsData {
+            /// Removes this dataset's contiguous buffer or describes its produced region.
+            ///
+            /// A produced region's provider remains in the dataset's prepared storage.
+            fn take_contiguous(&mut self) -> DsData<'static> {
                 match self.storage.produced() {
                     Some(p) => DsData::Produced {
                         total_bytes: p.total_bytes,
@@ -1689,11 +1688,14 @@ impl FileWriter {
             }
         }
 
-        /// A dataset's data region, held in memory or read from a provider during emission.
-        enum DsData {
+        /// A dataset's data region, retained as bytes or emitted from a plan.
+        enum DsData<'a> {
+            /// Encoded chunks borrowed from the writer's retained set, with finalized metadata.
+            Encoded {
+                chunks: &'a CompressedChunkSet,
+                plan: ChunkedPlan,
+            },
             InMemory(Vec<u8>),
-            /// A verbatim chunk plan whose provider is held in the dataset's prepared storage.
-            Streamed(VerbatimPlan),
             /// A contiguous region written block by block from the provider held in the
             /// dataset's prepared storage.
             Produced {
@@ -1702,30 +1704,34 @@ impl FileWriter {
                 /// Bytes per block, the last one excepted.
                 block_bytes: u64,
             },
+            /// A verbatim chunk plan whose provider is held in the dataset's prepared storage.
+            Streamed(VerbatimPlan),
         }
-        impl DsData {
-            /// Returns the element bytes of a region held in memory, or `None`
-            /// for one whose bytes are streamed or produced at write time.
+        impl DsData<'_> {
+            /// Returns the contiguous element buffer used to patch variable-length references.
             fn in_memory_mut(&mut self) -> Option<&mut Vec<u8>> {
                 match self {
                     DsData::InMemory(bytes) => Some(bytes),
-                    DsData::Streamed(_) | DsData::Produced { .. } => None,
+                    DsData::Encoded { .. } | DsData::Streamed(_) | DsData::Produced { .. } => None,
                 }
             }
 
-            /// Writes a dataset's element bytes directly or reads them from its provider
-            /// one chunk or block at a time.
+            /// Writes the data region, including a chunk index for chunked storage.
             ///
             /// # Errors
             ///
             /// Returns [`FormatError::Internal`] if a streamed or produced region is paired
-            /// with prepared storage of another kind. Propagates provider and sink errors.
+            /// with prepared storage of another kind. Propagates provider, serialization, and
+            /// sink errors.
             fn emit(
                 &self,
                 sink: &mut impl ByteSink,
                 storage: &PreparedStorage,
             ) -> Result<(), FormatError> {
                 match self {
+                    DsData::Encoded { chunks, plan } => {
+                        chunked_write::emit_chunked_data(sink, chunks, plan)
+                    }
                     DsData::InMemory(bytes) => sink.put(bytes),
                     DsData::Streamed(plan) => {
                         let provider = storage
@@ -1761,6 +1767,7 @@ impl FileWriter {
 
             fn len(&self) -> u64 {
                 match self {
+                    DsData::Encoded { plan, .. } => plan.data_len,
                     DsData::InMemory(v) => v.len() as u64,
                     DsData::Streamed(plan) => plan.total_len,
                     DsData::Produced { total_bytes, .. } => *total_bytes,
@@ -1824,24 +1831,22 @@ impl FileWriter {
             Ok(())
         }
 
-        /// A built chunked dataset's layout/pipeline messages plus its data
-        /// region (materialized for the encode and eager-verbatim paths, planned
-        /// for the streamed verbatim path).
-        struct ChunkedBuilt {
+        /// A chunked dataset's object-header messages and planned data region.
+        struct ChunkedBuilt<'a> {
             layout_message: Vec<u8>,
             pipeline_message: Option<Vec<u8>>,
-            data: DsData,
+            data: DsData<'a>,
         }
 
-        /// What the object-header sizing pass needs from a chunked dataset: the
-        /// two messages that go in the header, and how long the data region will
-        /// be — but not the region.
+        /// Computes a chunked dataset's data-region length and object-header messages.
         ///
-        /// [`build_chunked`] materializes it, which for the sizing pass meant
-        /// allocating and dropping a whole second copy of every chunked dataset
-        /// in the file (issue #228). Both paths take their length from the same
-        /// place the emitter does, so the header sized here cannot disagree with
-        /// the bytes written later.
+        /// # Errors
+        ///
+        /// Returns the errors of planning verbatim chunks or measuring encoded chunks.
+        ///
+        /// # Panics
+        ///
+        /// Panics if an encoded dataset has no retained chunk set.
         fn measure_chunked(
             d: &DsFlat,
             data_address: StoredAddress,
@@ -1874,24 +1879,23 @@ impl FileWriter {
             }
         }
 
-        /// Build the chunked data + layout/pipeline messages for one chunked
-        /// dataset at `data_address`, dispatching to the verbatim path when the
-        /// dataset carries a raw-chunk payload, else the normal encode path. The
-        /// layout is computed from chunk *sizes* alone, so it is identical
-        /// whether the chunks are in memory or streamed.
+        /// Plans emission of a chunked dataset at `data_address`.
         ///
-        /// [`measure_chunked`] dispatches the same two ways and must reach the
-        /// same length and the same layout message, since the sizing pass uses
-        /// it and this produces what that pass sized. They were one function
-        /// until sizing stopped building a region to measure it (issue #228);
-        /// what holds them together now is
-        /// `measuring_a_chunked_region_agrees_with_assembling_it` on the encode
-        /// side and `plan_chunked_data_verbatim` being shared on the other.
-        fn build_chunked(
+        /// Encoded data borrows the retained chunk set. Verbatim data is read from its provider
+        /// during emission.
+        ///
+        /// # Errors
+        ///
+        /// Returns the errors of planning encoded or verbatim chunks.
+        ///
+        /// # Panics
+        ///
+        /// Panics if an encoded dataset has no retained chunk set.
+        fn build_chunked<'a>(
             d: &DsFlat,
             data_address: StoredAddress,
-            chunk_set: Option<&CompressedChunkSet>,
-        ) -> Result<ChunkedBuilt, FormatError> {
+            chunk_set: Option<&'a CompressedChunkSet>,
+        ) -> Result<ChunkedBuilt<'a>, FormatError> {
             if let Some(rc) = d.storage.chunks() {
                 // Verbatim chunks are always streamed: the layout is planned from
                 // chunk sizes alone, and the bytes are pulled from the provider in
@@ -1920,11 +1924,11 @@ impl FileWriter {
                 // Each cached chunk set contains the encoded final element bytes.
                 let set = chunk_set
                     .expect("an encode-path chunked dataset must have a precomputed chunk set");
-                let result = chunked_write::assemble_chunked_at(set, data_address)?;
+                let plan = chunked_write::plan_chunked_at(set, data_address)?;
                 Ok(ChunkedBuilt {
-                    layout_message: result.layout_message,
-                    pipeline_message: result.pipeline_message,
-                    data: DsData::InMemory(result.data_bytes),
+                    layout_message: plan.layout_message.clone(),
+                    pipeline_message: plan.pipeline_message.clone(),
+                    data: DsData::Encoded { chunks: set, plan },
                 })
             }
         }
@@ -3147,10 +3151,8 @@ impl FileWriter {
             }
         }
 
-        // Compute data layout (addresses + chunked data blobs) separately from OHs
-        // so we can patch VL attrs before building OHs.
-        struct DsLayout {
-            data: DsData,
+        struct DsLayout<'a> {
+            data: DsData<'a>,
             data_addr: StoredAddress,
             chunked_msgs: Option<(Vec<u8>, Option<Vec<u8>>)>,
         }
@@ -3164,7 +3166,7 @@ impl FileWriter {
         /// its bytes land.
         fn build_ds_ohs(
             all_ds: &[DsFlat],
-            ds_layouts: &[DsLayout],
+            ds_layouts: &[DsLayout<'_>],
             ds_dense_blobs: &[Option<DenseAttrBlob>],
             libver: LibVer,
         ) -> Result<Vec<Vec<u8>>, FormatError> {
@@ -3342,7 +3344,7 @@ impl FileWriter {
             // (f) Build the raw data. Small blocks pack; the region is padded to
             // a page boundary (DRAW tail). Each large block starts a fresh page
             // run and its sub-page remainder becomes a generic-large section.
-            let mut layouts: Vec<Option<DsLayout>> = (0..all_ds.len()).map(|_| None).collect();
+            let mut layouts: Vec<Option<DsLayout<'_>>> = (0..all_ds.len()).map(|_| None).collect();
             for &i in &empty_indices {
                 let raw = all_ds[i].storage.take_raw();
                 layouts[i] = Some(DsLayout {
@@ -3435,7 +3437,7 @@ impl FileWriter {
             let eof_addr2 = base.absolute(StoredAddress::new(eoa_rel))?;
             let eoa_pre_fsm = eoa_rel;
 
-            let ds_layouts: Vec<DsLayout> = layouts
+            let ds_layouts: Vec<DsLayout<'_>> = layouts
                 .into_iter()
                 .map(|layout| layout.expect("every dataset placed"))
                 .collect();
@@ -3652,7 +3654,7 @@ impl FileWriter {
             return Ok(());
         }
 
-        let mut ds_layouts: Vec<DsLayout> = Vec::new();
+        let mut ds_layouts: Vec<DsLayout<'_>> = Vec::new();
         for (i, d) in all_ds.iter_mut().enumerate() {
             if is_chunked[i] {
                 let data_address = allocation.reserve(ds_data_lens[i], AllocationClass::Raw)?;
