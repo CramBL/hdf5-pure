@@ -241,6 +241,26 @@ pub fn link_is_named(data: &[u8], name: &str) -> bool {
 }
 
 impl LinkMessage {
+    /// Returns the stored name bytes from the prefix of a version 1 Link message.
+    ///
+    /// Parses through the name, stopping before the target data. The returned slice borrows
+    /// `data` and preserves invalid UTF-8 bytes.
+    ///
+    /// The prefix is defined in "The Link Message" of the [format specification,
+    /// version 4.0][spec].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidLinkVersion`] for a version other than 1,
+    /// [`FormatError::InvalidCharacterSet`] for an unknown character set, and
+    /// [`FormatError::UnexpectedEof`] for a truncated prefix. Returns
+    /// [`FormatError::ValueTooLargeForPlatform`] if the name length exceeds [`usize::MAX`].
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_link
+    pub fn name_bytes(data: &[u8]) -> Result<&[u8], FormatError> {
+        LinkPrefix::parse(data).map(|prefix| prefix.name)
+    }
+
     /// Returns the object header address of the link in the Link message `data`, if it is a
     /// hard link named `name`.
     ///
@@ -486,6 +506,42 @@ mod tests {
     use test_util::widths::Widths;
 
     use super::*;
+
+    #[rstest]
+    #[case::hard(LinkTarget::Hard { object_header_address: StoredAddress::new(42) })]
+    #[case::soft(LinkTarget::Soft { target_path: "target".into() })]
+    #[case::external(LinkTarget::External { filename: "file.h5".into(), object_path: "/target".into() })]
+    fn link_names_borrow_prefix_bytes_before_the_target(#[case] link_target: LinkTarget) {
+        let data = LinkMessage {
+            name: "link".into(),
+            link_target,
+            creation_order: Some(7),
+            charset: CharacterSet::Utf8,
+        }
+        .serialize(OffsetWidth::Eight);
+        let prefix = LinkPrefix::parse(&data).unwrap();
+        let name = LinkMessage::name_bytes(&data[..prefix.target_pos]).unwrap();
+        assert_eq!(name, b"link");
+        assert_eq!(name.as_ptr(), prefix.name.as_ptr());
+    }
+
+    #[rstest]
+    #[case::version(vec![2, 0], FormatError::InvalidLinkVersion(2))]
+    #[case::truncated(vec![1, 0, 3, b'x'], FormatError::UnexpectedEof { expected: 6, available: 4 })]
+    #[case::charset(vec![1, 0x10, 2], FormatError::InvalidCharacterSet(2))]
+    fn borrowed_link_names_reject_malformed_prefixes(
+        #[case] data: Vec<u8>,
+        #[case] expected: FormatError,
+    ) {
+        assert_eq!(LinkMessage::name_bytes(&data).unwrap_err(), expected);
+    }
+
+    #[test]
+    fn borrowed_link_names_preserve_invalid_utf8() {
+        let mut data = build_hard_link("a", 42, 8, None, None, 1);
+        data[3] = 0xff;
+        assert_eq!(LinkMessage::name_bytes(&data).unwrap(), &[0xff]);
+    }
 
     fn build_hard_link(
         name: &str,
