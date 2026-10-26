@@ -17,6 +17,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use hdf5_pure::AttrValue;
 use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FormatError;
@@ -28,10 +29,11 @@ use hdf5_pure_core::{BaseAddress, StoredAddress};
 use hdf5_pure_format::__private::{
     BTREE_V2_ATTRIBUTE_NAME, BTREE_V2_LINK_NAME, BTreeV2Header, BTreeV2Layout, FractalHeapBlock,
     FractalHeapBlockLayout, FractalHeapGeometry, FractalHeapHeader, FractalHeapHeaderLocator,
-    FractalHeapIdKind, FractalHeapIdLayout, FractalHeapLayout, LengthWidth, ManagedHeapPlan,
-    OffsetWidth,
+    FractalHeapIdKind, FractalHeapIdLayout, FractalHeapLayout, LengthWidth, LinkMessage,
+    ManagedHeapPlan, OffsetWidth,
 };
 use rstest::rstest;
+use test_util_hdf5::heap_interop;
 
 /// Write a group of `n` single-i32 datasets `g/d{i}` with the latest format, so
 /// the C library stores the links densely in a fractal heap.
@@ -1035,6 +1037,64 @@ fn c_written_managed_ids_use_the_shared_geometry_and_field_encoding(
                 .encode_managed_id(plan.heap_offset(index), *object_length)
                 .unwrap(),
             *id
+        );
+    }
+}
+
+#[rstest]
+fn c_written_tiny_ids_borrow_their_inline_objects(#[values(false, true)] streaming: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tiny_ids.h5");
+    let expected = heap_interop::write_tiny_link_group(&path);
+
+    let image = std::fs::read(&path).unwrap();
+    let heap_at = test_util::bytes::sole_signature(&image, test_util::fractal_heap::SIGNATURE);
+    let header = FractalHeapHeader::parse(&image, heap_at, 2, 8).unwrap();
+    assert_eq!(header.heap_id_length, 7);
+    assert_eq!(header.tiny_objects_count, 16);
+    assert_eq!(header.managed_objects_count, 0);
+    let index_at = test_util::bytes::sole_signature(&image, test_util::btree_v2::SIGNATURE);
+    let tree_header = BTreeV2Header::parse(&image, index_at, 2, 8).unwrap();
+    assert_eq!(tree_header.tree_type, BTREE_V2_LINK_NAME);
+    assert_eq!(tree_header.depth, 0);
+    let tree_layout = BTreeV2Layout::new(&tree_header, OffsetWidth::Two).unwrap();
+    let root = tree_layout.root().unwrap();
+    let view = tree_layout
+        .parse(
+            &image[usize::try_from(root.address().get()).unwrap()..],
+            root,
+        )
+        .unwrap();
+    let id_layout = FractalHeapIdLayout::new(&header, OffsetWidth::Two, LengthWidth::Eight);
+    let mut parsed_names: Vec<_> = (0..view.record_count())
+        .map(|index| {
+            let id = &view.record(index).unwrap()[LINK_NAME_HASH_LEN..];
+            let parsed = id_layout.parse(id).unwrap();
+            let FractalHeapIdKind::Tiny { bytes: object } = parsed.kind() else {
+                panic!("expected a tiny ID, got {:?}", parsed.kind());
+            };
+            assert_eq!(object.len(), 6);
+            assert_eq!(object.as_ptr(), id[1..].as_ptr());
+            LinkMessage::parse_with_offset_width(object, OffsetWidth::Two)
+                .unwrap()
+                .name
+        })
+        .collect();
+    parsed_names.sort();
+    assert_eq!(parsed_names, expected);
+
+    let file = open_dense_reader(&path, streaming);
+    let mut names = file.group("g").unwrap().groups().unwrap();
+    names.sort();
+    assert_eq!(names, expected);
+    for (value, name) in expected.iter().enumerate() {
+        assert_eq!(
+            file.group(&format!("g/{name}"))
+                .unwrap()
+                .attrs()
+                .unwrap()
+                .get("value"),
+            Some(&AttrValue::I32(i32::try_from(value).unwrap()))
         );
     }
 }

@@ -66,6 +66,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `Group::groups` and related reads misinterpreting tiny objects in 18-byte fractal-heap IDs ([#924](https://github.com/CramBL/hdf5-pure/pull/924)).
 - Fixed `File::commit` overflowing tracked group link creation counters or changing file bytes before rejecting an exhausted counter. Unsupported counters in rebuilt groups are rejected during planning ([#920](https://github.com/CramBL/hdf5-pure/pull/920)).
 - Fixed `File::copy` and related copies overflowing the stack on a hard-link cycle, rejecting a source nested 1000 groups deep, and copying an object reached through two hard links as two objects. A source that reaches one object through more than one hard link is rejected ([#922](https://github.com/CramBL/hdf5-pure/pull/922)).
 - Fixed `Group::groups` and related reads misinterpreting managed heap IDs with non-byte-aligned offsets or trailing padding ([#917](https://github.com/CramBL/hdf5-pure/pull/917)).
