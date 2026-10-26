@@ -15,6 +15,7 @@ pub mod datatype;
 pub mod disk_log;
 pub mod extensible_array;
 pub mod file_space_info;
+pub mod filtered_chunks;
 pub mod fractal_heap;
 pub mod free_space;
 pub mod fuzz;

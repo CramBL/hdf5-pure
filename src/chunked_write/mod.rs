@@ -47,6 +47,13 @@ use crate::width::OffsetWidth;
 
 pub(crate) use self::gathering::ChunkTraversal;
 
+#[cfg(all(
+    test,
+    feature = "std",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod allocation_tests;
+
 mod gathering;
 mod zfp;
 

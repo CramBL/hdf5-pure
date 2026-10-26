@@ -184,6 +184,12 @@ impl PreparedChunk {
         &self.bytes
     }
 
+    /// Returns the allocated byte capacity retained by this chunk.
+    #[cfg(test)]
+    pub(crate) fn storage_capacity(&self) -> usize {
+        self.bytes.capacity()
+    }
+
     /// Returns the length of [`bytes`](Self::bytes), the chunk size the index record stores.
     pub(crate) fn stored_size(&self) -> u64 {
         self.bytes.len().to_u64()
