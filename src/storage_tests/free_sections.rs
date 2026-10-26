@@ -69,6 +69,7 @@ fn persistence_configuration_is_distinct_from_empty_sections(
         assert_eq!(report.free_sections().section_count(), 0);
         assert_eq!(report.free_sections().free_bytes(), 0);
         assert_eq!(report.managers(), []);
+        assert_eq!(report.manager_metadata_bytes(), 0);
     }
     let error = file.reusable_free_sections().unwrap_err();
     assert!(matches!(error, Error::ReadOnly), "{error:?}");
@@ -195,6 +196,7 @@ fn stored_and_reusable_views_have_distinct_coordinates(
             == FreeSectionCoordinates::Absolute
             && s.address() >= userblock));
     }
+    let before_inspection = std::fs::read(&path).unwrap();
     let buffered = File::open(&path).unwrap();
     let report = buffered.persisted_free_sections().unwrap().unwrap();
     assert_eq!(
@@ -204,6 +206,16 @@ fn stored_and_reusable_views_have_distinct_coordinates(
             .persisted_free_sections()
             .unwrap()
             .unwrap()
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before_inspection);
+    assert!(report.manager_metadata_bytes() > 0);
+    assert_eq!(
+        report.manager_metadata_bytes(),
+        report
+            .managers()
+            .iter()
+            .map(|manager| manager.metadata_bytes())
+            .sum::<u64>()
     );
     assert!(report.free_sections().section_count() > 0);
     assert!(

@@ -12,6 +12,8 @@ use hdf5_pure::StoredAddress;
 use hdf5_pure::UserblockSize;
 use hdf5_pure_core::__private::FileSpaceInfoFields;
 use hdf5_pure_format::__private::DEFAULT_THRESHOLD;
+use hdf5_pure_format::__private::FormatWidths;
+use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use rstest::rstest;
 
 use test_util::temp;
@@ -234,13 +236,25 @@ fn persist_true_records_reusable_spare_on_a_fresh_file() {
             .iter()
             .any(|&a| matches!(a, hdf5_pure::DecodedStoredAddress::Defined(_)))
     );
-    assert!(
-        f.persisted_free_sections()
-            .unwrap()
-            .unwrap()
-            .free_sections()
-            .section_count()
-            > 0
-    );
+    let report = f.persisted_free_sections().unwrap().unwrap();
+    assert!(report.free_sections().section_count() > 0);
+    let bytes = std::fs::read(&path).unwrap();
+    let widths = FormatWidths {
+        offsets: f.superblock().offset_size,
+        lengths: f.superblock().length_size,
+    };
+    let expected_total = report
+        .managers()
+        .iter()
+        .map(|manager| {
+            let address = usize::try_from(manager.address().get()).unwrap();
+            let header = FreeSpaceManagerHeader::parse(widths, &bytes[address..]).unwrap();
+            let expected = hdf5_pure_format::__private::free_space_manager_header_len(widths)
+                + header.section_list_allocated();
+            assert_eq!(manager.metadata_bytes(), expected);
+            expected
+        })
+        .sum::<u64>();
+    assert_eq!(report.manager_metadata_bytes(), expected_total);
     assert_eq!(f.dataset("d").unwrap().read_i32().unwrap(), vec![1, 2, 3]);
 }
