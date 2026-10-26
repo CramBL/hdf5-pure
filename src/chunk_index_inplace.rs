@@ -63,6 +63,7 @@ use crate::data_layout::ChunkedLayoutFlags;
 use crate::data_layout::DataLayout;
 use crate::dataspace::{Dataspace, MaxExtent};
 use crate::datatype::Datatype;
+use crate::edit::LossyTailReencoding;
 use crate::edit::{self, LOSSY_TAIL_REFUSAL};
 use crate::error::{Error, FormatError};
 use crate::fill_value::FillPattern;
@@ -1430,9 +1431,9 @@ impl AppendPlan {
 ///
 /// `grow_visible_tail` permits rewriting a trailing chunk under a filter pipeline. An
 /// exclusively locked session passes `true`, and the SWMR writer passes `false`. A partial
-/// tail stored under lossy filters is rejected. Under a lossy pipeline, a tail exempt from
-/// filtering remains raw until complete, then its filtered replacement is published after the
-/// new extent.
+/// tail stored under lossy filters is rejected unless `lossy_tail_reencoding` permits rewriting
+/// it. Under a lossy pipeline, a tail exempt from filtering remains raw until complete, then its
+/// filtered replacement is published after the new extent.
 ///
 /// # Errors
 ///
@@ -1452,6 +1453,7 @@ pub(crate) fn plan_ea_append<F: Store>(
     element_size: NonZeroUsize,
     pipeline: Option<&FilterPipeline>,
     grow_visible_tail: bool,
+    lossy_tail_reencoding: LossyTailReencoding,
     raw: &[u8],
     new_elems: u64,
     fill: FillPattern<'_>,
@@ -1469,11 +1471,10 @@ pub(crate) fn plan_ea_append<F: Store>(
     let stats = loc.planned_allocation_stats(file, n_full, new_num_chunks)?;
     let has_partial = current_dim % chunk_elems != 0;
 
-    // Relocate the partial tail without changing its live prefix before extent publication.
     // `ChunkEncoding::decodable_by` selects bytes readable at both the old and new extents.
     // The index record and its checksum are published together by `Store::publish_checksummed`.
-    // Re-encoding a tail already stored under lossy filters could change committed values,
-    // so only lossless pipelines and tails exempt from filtering can grow.
+    // Lossless rewrites preserve the live prefix. With permission to re-encode a lossy tail,
+    // the decoded prefix can change when the index record is published, before the new extent.
     //
     // When a raw tail becomes complete under a lossy pipeline, prepare a filtered copy as well.
     // Publish its record after the extent barrier: a reader at the old partial extent reads
@@ -1488,7 +1489,10 @@ pub(crate) fn plan_ea_append<F: Store>(
                  Dataset::append_staged, or append whole chunks",
             ));
         }
-        if !loc.flags.partial_edge_chunks_stored_raw() && !edit::pipeline_lossless(pl) {
+        if !loc.flags.partial_edge_chunks_stored_raw()
+            && !edit::pipeline_lossless(pl)
+            && lossy_tail_reencoding == LossyTailReencoding::Reject
+        {
             return Err(Error::AppendUnsupported(LOSSY_TAIL_REFUSAL));
         }
     }
@@ -1624,11 +1628,9 @@ pub(crate) fn apply_ea_append<F: Store>(
         return Ok(());
     }
 
-    // Phase 2: the index element writes — a fresh insert for each new chunk, or an
-    // in-place repoint of the trailing element (which only ever points at data
-    // whose live prefix reproduces the old view's bytes). This may allocate new EA
-    // blocks past EOF, covered by the phase-3 EOF patch (or draw them from freed
-    // space, in which case there is nothing for it to cover).
+    // Phase 2: insert new chunk records and repoint the trailing chunk's record.
+    // New index blocks beyond the recorded EOF are covered by the phase-3 EOF patch.
+    // Blocks allocated from freed space are already within the recorded EOF.
     for (e, (addr, chunk)) in (n_full..).zip(chunk_addrs.into_iter().zip(&chunks)) {
         let rec = ElemRecord {
             addr,
@@ -2170,6 +2172,7 @@ mod tests {
             state.element_size,
             state.pipeline.as_ref(),
             true,
+            LossyTailReencoding::Reject,
             &i32_bytes(values),
             values.len().to_u64(),
             state.fill.pattern(state.element_size),
@@ -2321,6 +2324,7 @@ mod tests {
             loc.elem_bytes,
             None,
             true,
+            LossyTailReencoding::Reject,
             &9i32.to_le_bytes(),
             1,
             FillPattern::ZERO,
@@ -2611,6 +2615,7 @@ mod tests {
             loc.elem_bytes,
             None,
             true,
+            LossyTailReencoding::Reject,
             &raw,
             new_elems,
             FillPattern::ZERO,
@@ -3518,6 +3523,7 @@ mod tests {
             state.element_size,
             state.pipeline.as_ref(),
             true,
+            LossyTailReencoding::Reject,
             &raw,
             2,
             state.fill.pattern(state.element_size),
@@ -3539,6 +3545,69 @@ mod tests {
         let chunks = dataset.chunks().unwrap();
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].filter_mask().raw_bits(), mask);
+    }
+
+    #[rstest]
+    #[case::partial_payloads(1, None, &[-0.26], &[1.46, 1.56])]
+    #[case::partial_index(2, None, &[-0.26], &[1.44, 1.54])]
+    #[case::partial_header(3, None, &[-0.26], &[1.44, 1.54])]
+    #[case::partial_index_barrier(4, Some(3), &[-0.26], &[1.44, 1.54])]
+    #[case::partial_extent_barrier(4, Some(5), &[-0.26], &[1.44, 1.54, -0.26])]
+    #[case::partial_complete(4, None, &[-0.26], &[1.44, 1.54, -0.26])]
+    #[case::full_payloads(1, None, &[-0.26, 2.0], &[1.46, 1.56])]
+    #[case::full_index(2, None, &[-0.26, 2.0], &[1.44, 1.54])]
+    #[case::full_header(3, None, &[-0.26, 2.0], &[1.44, 1.54])]
+    #[case::full_index_barrier(4, Some(3), &[-0.26, 2.0], &[1.44, 1.54])]
+    #[case::full_extent_barrier(4, Some(5), &[-0.26, 2.0], &[1.44, 1.54, -0.26, 2.04])]
+    #[case::full_complete(4, None, &[-0.26, 2.0], &[1.44, 1.54, -0.26, 2.04])]
+    fn lossy_tail_reencoding_keeps_each_recorded_extent_readable(
+        #[case] phase: u8,
+        #[case] fail_sync: Option<usize>,
+        #[case] appended: &[f64],
+        #[case] expected: &[f64],
+    ) {
+        let mut builder = FileBuilder::new();
+        builder
+            .create_dataset("d")
+            .with_f64_data(&[1.46, 1.56])
+            .with_maxshape(&[MaxExtent::Unlimited])
+            .with_chunks(&[4])
+            .with_scale_offset(ScaleOffset::FloatDScale(1));
+        let mut store = WindowProbeStore::open(builder.finish().unwrap());
+        let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
+        let plan = plan_ea_append(
+            &store,
+            &state.loc,
+            &state.datatype,
+            &state.spatial,
+            state.element_size,
+            state.pipeline.as_ref(),
+            true,
+            LossyTailReencoding::Allow,
+            &appended
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>(),
+            appended.len().to_u64(),
+            state.fill.pattern(state.element_size),
+        )
+        .unwrap();
+        store.fail_sync = fail_sync;
+        match apply_ea_append(&mut store, &mut state.loc, plan, phase) {
+            Ok(()) => assert_eq!(fail_sync, None),
+            Err(Error::Io(error)) => {
+                assert!(fail_sync.is_some());
+                assert_eq!(error.kind(), std::io::ErrorKind::Other);
+                assert_eq!(error.to_string(), "injected synchronization failure");
+            }
+            Err(error) => panic!("expected a synchronization error, got {error:?}"),
+        }
+        let file = crate::File::from_bytes(store.data).unwrap();
+        let dataset = file.dataset("d").unwrap();
+        assert_eq!(dataset.read_f64().unwrap(), expected);
+        let chunks = dataset.chunks().unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].filter_mask().raw_bits(), 0);
     }
 
     #[rstest]
@@ -3819,6 +3888,7 @@ mod tests {
             state.element_size,
             state.pipeline.as_ref(),
             true,
+            LossyTailReencoding::Reject,
             &i32_bytes(values),
             values.len() as u64,
             state.fill.pattern(state.element_size),

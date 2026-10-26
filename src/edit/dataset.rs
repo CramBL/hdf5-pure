@@ -46,6 +46,7 @@ use crate::source::{BaseOffsetSource, Source};
 use crate::type_builders::{self, DatasetBuilder, ObjectRefPatch, VlStringStaging};
 use crate::width::FormatWidths;
 
+use super::LossyTailReencoding;
 use super::append;
 use super::attributes::{DenseAttrSet, EditedAttrs};
 use super::staging::{StagedKind, StagedOp};
@@ -440,9 +441,9 @@ impl WriteEngine {
     /// # Errors
     ///
     /// Returns [`Error::AppendUnsupported`] for incompatible values, unsupported geometry or
-    /// filters, a sparse chunk grid, a partial tail stored under lossy filters, inconsistent
-    /// filter metadata, or dimension overflow. Returns metadata, chunk-decoding, and encoding
-    /// errors.
+    /// filters, a sparse chunk grid, inconsistent filter metadata, or dimension overflow.
+    /// Returns the same error for a partial tail stored under lossy filters unless the append
+    /// permits re-encoding it. Propagates metadata, chunk-decoding, and encoding errors.
     pub(super) fn prepare_append<S: Source + ?Sized>(
         src: &S,
         addr: u64,
@@ -625,6 +626,7 @@ impl WriteEngine {
 
         if has_partial
             && !flags.partial_edge_chunks_stored_raw()
+            && ab.options().lossy_tail_reencoding() == LossyTailReencoding::Reject
             && let Some(pl) = &pipeline
             && !super::pipeline_lossless(pl)
         {

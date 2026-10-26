@@ -375,7 +375,7 @@ mod root_reclamation;
 mod staging;
 mod tail_recycling;
 
-pub use self::append::AppendBuilder;
+pub use self::append::{AppendBuilder, AppendOptions, LossyTailReencoding};
 pub(crate) use self::append::{AppendGeometry, AppendTarget, LocatedState};
 #[cfg(test)]
 pub(crate) use self::append::{datatype_is_raw_appendable, locate_dataset_state};

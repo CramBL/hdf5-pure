@@ -25,6 +25,10 @@
 //! Both libraries read the values and report the same chunk
 //! records, before and after libhdf5 writes past the appended values.
 //!
+//! With explicit permission to re-encode a filtered lossy tail, both libraries read the
+//! values produced by repeated appends, including after reopening either library's file.
+//! Both libraries report the same chunk records.
+//!
 //! A staged overwrite through hdf5-pure, to a dataset either library created
 //! with the flag or without it, stores each partial edge chunk unfiltered under
 //! the flag and every other chunk filtered, and so does an overwrite of the
@@ -55,12 +59,14 @@ use hdf5::filters::Filter as CFilter;
 use hdf5::types::VarLenArray;
 #[cfg(target_endian = "little")]
 use hdf5::types::VarLenUnicode;
+use hdf5_pure::AppendOptions;
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::DatasetCreateProperties;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::Layout;
+use hdf5_pure::LossyTailReencoding;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::MessageType;
 use hdf5_pure::PartialEdgeFiltering;
@@ -416,12 +422,7 @@ fn lossy_unfiltered_tails_append_and_filter_on_completion(
     let path = dir.path().join("lossy_raw_tail.h5");
     let reference = dir.path().join("lossy_raw_tail_reference.h5");
     let filters = [dataset::Filter::ScaleOffset(ScaleOffset::FloatDScale(1))];
-    let datatype = CDatatype::from_type::<f64>().unwrap();
-    hdf5::sync::sync(|| {
-        // SAFETY: The lock serializes access and `datatype` owns a live floating-point type.
-        let status = unsafe { h5t::H5Tset_order(datatype.id(), H5T_order_t::H5T_ORDER_LE) };
-        assert_eq!(status, 0);
-    });
+    let datatype = little_endian_f64();
     let initial = Unlimited::new("d", values, 4)
         .filters(&filters)
         .partial_edge_chunks_unfiltered();
@@ -481,6 +482,82 @@ fn lossy_unfiltered_tails_append_and_filter_on_completion(
         dataset::read_pure::<f64>(&path, "d"),
         [1.5, 1.6, 1.0, 2.0, 3.46, 3.56]
     );
+}
+
+#[rstest]
+fn filtered_lossy_tails_reencode_with_explicit_permission(
+    #[values(Creator::Libhdf5, Creator::Pure)] creator: Creator,
+    #[values(false, true)] staged: bool,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reencoded_lossy_tail.h5");
+    let reference = dir.path().join("reencoded_lossy_tail_reference.h5");
+    let filters = [dataset::Filter::ScaleOffset(ScaleOffset::FloatDScale(1))];
+    let initial = Unlimited::new("d", &[1.46, 1.56], 4).filters(&filters);
+    match creator {
+        Creator::Libhdf5 => initial
+            .clone()
+            .stored_as(little_endian_f64())
+            .libhdf5_create(&path),
+        Creator::Pure => initial.pure_create(&path),
+    }
+    initial
+        .stored_as(little_endian_f64())
+        .libhdf5_create(&reference);
+    reencode_lossy_tail(&path, &reference, &[-0.26], staged);
+    reencode_lossy_tail(&path, &reference, &[2.0, 3.46], staged);
+    reencode_lossy_tail(&path, &reference, &[3.56], staged);
+    let expected = dataset::read_libhdf5::<f64>(&reference, "d");
+    assert_eq!(dataset::read_libhdf5::<f64>(&path, "d"), expected);
+    assert_eq!(dataset::read_pure::<f64>(&path, "d"), expected);
+    assert_eq!(expected, [1.44, 1.54, -0.26, 2.04, 3.46, 3.56]);
+    let chunks = array_index::libhdf5_chunks(&path, 0);
+    assert_eq!(
+        array_index::pure_chunks(&File::open(&path).unwrap()),
+        chunks
+    );
+    assert_eq!(chunks.len(), 2);
+    assert_eq!((chunks[0].filter_mask(), chunks[1].filter_mask()), (0, 0));
+}
+
+fn reencode_lossy_tail(path: &Path, reference: &Path, values: &[f64], staged: bool) {
+    {
+        let file = File::open_rw(path).unwrap();
+        let mut dataset = file.dataset("d").unwrap();
+        let options = AppendOptions::new().with_lossy_tail_reencoding(LossyTailReencoding::Allow);
+        if staged {
+            dataset
+                .append_staged_with_options(options, |builder| {
+                    builder.append_f64(values);
+                })
+                .unwrap();
+            file.commit().unwrap();
+        } else {
+            dataset.append_with_options(options, values).unwrap();
+        }
+    }
+    {
+        let file = hdf5::File::open_rw(reference).unwrap();
+        let dataset = file.dataset("d").unwrap();
+        let old_len = dataset.size();
+        dataset.resize([old_len + values.len()]).unwrap();
+        dataset
+            .write_slice(values, old_len..old_len + values.len())
+            .unwrap();
+    }
+    let expected = dataset::read_libhdf5::<f64>(reference, "d");
+    assert_eq!(dataset::read_libhdf5::<f64>(path, "d"), expected);
+    assert_eq!(dataset::read_pure::<f64>(path, "d"), expected);
+}
+
+fn little_endian_f64() -> CDatatype {
+    let datatype = CDatatype::from_type::<f64>().unwrap();
+    hdf5::sync::sync(|| {
+        // SAFETY: The lock serializes access and `datatype` owns a live floating-point type.
+        let status = unsafe { h5t::H5Tset_order(datatype.id(), H5T_order_t::H5T_ORDER_LE) };
+        assert_eq!(status, 0);
+    });
+    datatype
 }
 
 fn append_lossy_tail(path: &Path, values: &[f64], staged: bool) {

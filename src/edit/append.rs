@@ -36,6 +36,53 @@ use super::staging::StagedOp;
 
 use super::{AggregateSpace, Placement, SyncPolicy, WriteEngine};
 
+/// Options for one immediate or staged append.
+///
+/// The default rejects re-encoding an existing partial tail stored with lossy filters.
+/// [`with_lossy_tail_reencoding`](Self::with_lossy_tail_reencoding) changes that policy for
+/// the append receiving these options. The options are not stored in the file and do not
+/// affect later calls, including calls made after reopening it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AppendOptions {
+    lossy_tail_reencoding: LossyTailReencoding,
+}
+
+impl AppendOptions {
+    /// Creates options with [`LossyTailReencoding::Reject`].
+    pub const fn new() -> Self {
+        Self {
+            lossy_tail_reencoding: LossyTailReencoding::Reject,
+        }
+    }
+
+    /// Sets whether the append may re-encode an existing lossy partial tail.
+    ///
+    /// [`LossyTailReencoding::Allow`] permits changes to previously published tail values.
+    pub const fn with_lossy_tail_reencoding(mut self, reencoding: LossyTailReencoding) -> Self {
+        self.lossy_tail_reencoding = reencoding;
+        self
+    }
+
+    /// Returns the selected policy, initially [`LossyTailReencoding::Reject`].
+    pub const fn lossy_tail_reencoding(self) -> LossyTailReencoding {
+        self.lossy_tail_reencoding
+    }
+}
+
+/// Controls re-encoding of a partial trailing chunk stored with lossy filters.
+///
+/// The writer decodes the existing tail and encodes it with the appended values. Each
+/// rewrite can introduce additional quantization error in values already published in that
+/// tail. Complete chunks preceding the tail are retained.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum LossyTailReencoding {
+    /// Permits re-encoding previously published values in a lossy partial tail.
+    Allow,
+    /// Rejects growth of a partial tail stored with lossy filters.
+    #[default]
+    Reject,
+}
+
 /// Accumulates elements for a staged append along the first dimension.
 ///
 /// Repeated calls concatenate their values in call order. Typed calls record an element datatype,
@@ -49,16 +96,29 @@ pub struct AppendBuilder {
     elem_dt: Option<Datatype>,
     /// Whether typed calls used different element datatypes.
     dt_conflict: bool,
+    /// Policy retained through staging and copied append batches.
+    options: AppendOptions,
 }
 
 impl AppendBuilder {
     /// Creates an empty append buffer.
     pub(crate) fn new() -> Self {
+        Self::with_options(AppendOptions::new())
+    }
+
+    /// Creates an empty append buffer with the supplied policy.
+    pub(crate) fn with_options(options: AppendOptions) -> Self {
         Self {
             raw: Vec::new(),
             elem_dt: None,
             dt_conflict: false,
+            options,
         }
+    }
+
+    /// Returns the policy retained by this append buffer.
+    pub(crate) fn options(&self) -> AppendOptions {
+        self.options
     }
 
     /// Returns the accumulated element bytes.
@@ -76,15 +136,22 @@ impl AppendBuilder {
         self.dt_conflict
     }
 
-    /// Copies up to `byte_len` leading bytes with their datatype information.
+    /// Copies up to `byte_len` leading bytes with their datatype information and append policy.
     ///
     /// [`BufferedAppender`](crate::BufferedAppender) retains the original buffer until the write
     /// succeeds.
     pub(crate) fn head(&self, byte_len: usize) -> Self {
+        let Self {
+            raw,
+            elem_dt,
+            dt_conflict,
+            options,
+        } = self;
         Self {
-            raw: self.raw[..byte_len.min(self.raw.len())].to_vec(),
-            elem_dt: self.elem_dt.clone(),
-            dt_conflict: self.dt_conflict,
+            raw: raw[..byte_len.min(raw.len())].to_vec(),
+            elem_dt: elem_dt.clone(),
+            dt_conflict: *dt_conflict,
+            options: *options,
         }
     }
 
@@ -166,14 +233,14 @@ impl WriteEngine {
     /// Stages an append to a committed dataset for the next [`commit`](Self::commit).
     ///
     /// The commit checks the dataset's append geometry and storage. A lossy partial trailing
-    /// chunk is rejected at staging when its geometry can be read.
+    /// chunk is rejected at staging when its geometry can be read and re-encoding is forbidden.
     ///
     /// # Errors
     ///
     /// Returns [`Error::EditUnsupported`] if a dataset creation is staged at `path` or a live
     /// buffered
     /// appender overlaps it. Returns [`Error::AppendUnsupported`] if a nonempty append would
-    /// re-encode a partial trailing chunk through a lossy pipeline.
+    /// re-encode a partial trailing chunk through a lossy pipeline without permission.
     pub(crate) fn stage_dataset_append(
         &mut self,
         path: &ObjectPathBuf,
@@ -322,6 +389,7 @@ impl WriteEngine {
                     st.element_size,
                     st.pipeline.as_ref(),
                     grow_visible_tail,
+                    b.options().lossy_tail_reencoding(),
                     batch,
                     take,
                     st.fill.pattern(st.element_size),
@@ -488,22 +556,24 @@ impl WriteEngine {
         Ok(oh_addr)
     }
 
-    /// Rejects an append that would re-encode a lossy partial trailing chunk.
+    /// Rejects an append that would re-encode a lossy partial tail without permission.
     ///
-    /// Empty appends are accepted. If the committed geometry cannot be read, its validation
-    /// is deferred to [`prepare_append`](Self::prepare_append).
+    /// Empty appends and explicit permission to re-encode the tail are accepted. If the
+    /// committed geometry cannot be read, its validation is deferred to
+    /// [`prepare_append`](Self::prepare_append).
     ///
     /// # Errors
     ///
-    /// Returns [`Error::AppendUnsupported`] if the committed dataset is rank one, its
-    /// pipeline is lossy, its partial chunks are filtered, and its length is not a multiple of
-    /// the chunk length.
+    /// Returns [`Error::AppendUnsupported`] if a nonempty append would grow a rank-one
+    /// dataset's filtered lossy partial tail without permission.
     pub(super) fn refuse_lossy_partial_tail(
         &self,
         path: &ObjectPathBuf,
         builder: &AppendBuilder,
     ) -> Result<(), Error> {
-        if builder.raw().is_empty() {
+        if builder.raw().is_empty()
+            || builder.options().lossy_tail_reencoding() == LossyTailReencoding::Allow
+        {
             return Ok(());
         }
         if self.appends_onto_a_lossy_partial_tail(path) {
