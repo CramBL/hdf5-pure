@@ -4,7 +4,7 @@ use std::path::Path;
 
 use test_util_hdf5::file;
 
-/// A copy source at `g` that reaches one object through two hard links.
+/// A source group at `g` that reaches one object through two hard links.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum RepeatedObjectGraph {
     AncestorCycle,
@@ -40,7 +40,7 @@ impl RepeatedObjectGraph {
     }
 }
 
-/// A copy source at `g` whose own hard links target each of its objects once.
+/// A source group at `g` whose own hard links target each of its objects once.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum TreeGraph {
     /// A dataset of the source with a second hard link outside it.
@@ -82,17 +82,17 @@ impl TreeGraph {
         file.close().unwrap();
     }
 
-    pub(crate) fn assert_read_by_c_library(self, copy: &hdf5::Group) {
+    pub(crate) fn assert_read_by_c_library(self, group: &hdf5::Group) {
         match self {
             Self::AliasOutsideSource => {
-                assert_eq!(copy.member_names().unwrap(), vec!["d"]);
+                assert_eq!(group.member_names().unwrap(), vec!["d"]);
                 assert_eq!(
-                    copy.dataset("d").unwrap().read_raw::<i32>().unwrap(),
+                    group.dataset("d").unwrap().read_raw::<i32>().unwrap(),
                     vec![5]
                 );
             }
             Self::DeepChain => {
-                let leaf = (0..DEEP_CHAIN).fold(copy.clone(), |group, _| {
+                let leaf = (0..DEEP_CHAIN).fold(group.clone(), |group, _| {
                     assert_eq!(group.member_names().unwrap(), vec!["g"]);
                     group.group("g").unwrap()
                 });
@@ -108,7 +108,7 @@ impl TreeGraph {
                         for leaf in 0..WIDE_FAN_OUT {
                             let path = format!("{outer}/{inner}/{leaf}");
                             assert_eq!(
-                                copy.dataset(&path).unwrap().read_raw::<i32>().unwrap(),
+                                group.dataset(&path).unwrap().read_raw::<i32>().unwrap(),
                                 vec![wide_value(outer, inner, leaf)],
                                 "{path}"
                             );

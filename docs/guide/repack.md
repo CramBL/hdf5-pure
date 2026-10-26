@@ -36,7 +36,7 @@ repack(&input, &compact, &RepackOptions::new())?;
 
 ## Dropping objects
 
-[`RepackOptions::new()`](crate::RepackOptions::new) starts from a pure-compaction copy. [`RepackOptions::drop_path(path)`](crate::RepackOptions::drop_path) adds a path to omit from the output and is chainable. Dropping a group drops its whole subtree.
+[`RepackOptions::new()`](crate::RepackOptions::new) starts from a pure-compaction copy. [`RepackOptions::drop_path(path)`](crate::RepackOptions::drop_path) adds a path to omit from the output and is chainable. Dropping a group drops its whole subtree, except the objects a hard link outside it also reaches.
 
 ```rust
 # let dir = tempfile::tempdir()?;
@@ -111,6 +111,9 @@ These are reported as [`Error::RepackUnsupported`](crate::Error::RepackUnsupport
 | SZIP or an unknown filter on a path that requires re-encoding | this crate cannot encode it. Fully allocated chunked datasets preserve it verbatim |
 | an attribute whose datatype is or contains a reference | its stored address is not rewritten, and no [`AttrValue`](crate::AttrValue) can re-encode it |
 | file-space settings that do not parse | the source strategy cannot be reproduced faithfully |
+| an object with more than one path, through an alias or a cycle, unless the drop paths leave one | a repack writes each object at one path |
+| a link to an object that is not a group, a dataset, or a committed datatype | a repack writes only those three classes |
+| an open source with staged edits ([`File::has_staged_edits`](crate::File::has_staged_edits)) | a repack reads only what the file has committed |
 
 ## Verifying the result
 

@@ -111,7 +111,7 @@
 //!
 //! [#82]: https://github.com/CramBL/hdf5-pure/issues/82
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
@@ -139,8 +139,16 @@ use crate::filter_pipeline::{
     FilterPipeline,
 };
 use crate::libver::LibVer;
+use crate::object_graph::GraphObject;
+use crate::object_graph::TraversalBudget;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
-use crate::reader::{Dataset, File, Group};
+use crate::reader::Dataset;
+use crate::reader::File;
+use crate::reader::ObjectClass;
+use crate::repack::objects::Child;
+use crate::repack::objects::Placement;
+use crate::repack::objects::SourceObject;
+use crate::repack::objects::SourceObjects;
 use crate::scaleoffset::{self, ScaleOffset};
 use crate::shared_message::DatatypeLocation;
 use crate::source::Source;
@@ -153,6 +161,8 @@ use crate::width::OffsetWidth;
 use crate::writer::FileBuilder;
 #[cfg(test)]
 use crate::{FixedPointType, TimeType};
+
+mod objects;
 
 /// Options controlling a [`repack`].
 ///
@@ -331,6 +341,13 @@ impl RepackOptions {
 /// [`RepackOptions::reject_unknown_messages_only_a_writer_must_understand`] parses
 /// them as a writer does, so such a message is reported as
 /// [`FormatError::UnsupportedMessage`] before any byte reaches `dst`.
+///
+/// # Errors
+///
+/// Returns [`Error::RepackUnsupported`] if an object of `src` cannot be reproduced faithfully, if
+/// a drop path matches no link, or if, after the drop paths, an object of `src` has more than one
+/// path, through an alias or a cycle, since a repack writes each object at one path. Returns
+/// [`Error::TraversalLimitExceeded`] if `src` reaches more than 16,777,216 objects or hard links.
 pub fn repack<P: AsRef<Path>, Q: AsRef<Path>>(
     src: P,
     dst: Q,
@@ -339,7 +356,7 @@ pub fn repack<P: AsRef<Path>, Q: AsRef<Path>>(
     // Open the source for on-demand streaming reads: metadata and one working chunk are
     // resident at a time, never the whole file.
     let source = File::open_streaming_with_access_mode(src.as_ref(), options.source_access_mode())?;
-    stage(&source, options)?.write(dst)
+    stage(&source, options, REPACK_BUDGET)?.write(dst)
 }
 
 /// Repacks the open file `source` into `writer` with `options`.
@@ -355,7 +372,8 @@ pub fn repack<P: AsRef<Path>, Q: AsRef<Path>>(
 /// # Errors
 ///
 /// Returns the errors of [`repack`](fn@repack). Returns [`Error::RepackUnsupported`] if
-/// `options` sets [`RepackOptions::reject_unknown_messages_only_a_writer_must_understand`]
+/// `source` has staged edits ([`File::has_staged_edits`]), or if `options` sets
+/// [`RepackOptions::reject_unknown_messages_only_a_writer_must_understand`]
 /// and `source` was opened read-only, because its object headers are parsed in the mode the
 /// file was opened in.
 ///
@@ -384,7 +402,7 @@ pub fn repack_into(
     options: &RepackOptions,
 ) -> Result<(), Error> {
     check_source_access_mode(source, options)?;
-    stage(source, options)?.finish_to(writer)
+    stage(source, options, REPACK_BUDGET)?.finish_to(writer)
 }
 
 /// Repacks the open file `source` into a new file at `path`, applying `options`.
@@ -400,7 +418,7 @@ pub fn repack_to_path(
     options: &RepackOptions,
 ) -> Result<(), Error> {
     check_source_access_mode(source, options)?;
-    stage(source, options)?.write(path)
+    stage(source, options, REPACK_BUDGET)?.write(path)
 }
 
 /// Returns an error if `options` requests the source's object headers to be parsed as a
@@ -419,22 +437,29 @@ fn check_source_access_mode(source: &File, options: &RepackOptions) -> Result<()
 
 /// Stages every object of `source` that `options` keeps in a [`FileBuilder`], with the
 /// output format chosen, running every fidelity check before a byte is written.
-fn stage(source: &File, options: &RepackOptions) -> Result<FileBuilder, Error> {
+///
+/// The repack reads no more objects and hard links of `source` than `budget` allows.
+///
+/// # Errors
+///
+/// Returns [`Error::RepackUnsupported`] if `options` drops the root group, if the File Space Info
+/// of `source` does not parse, or if an object of `source` cannot be reproduced faithfully.
+/// Returns the errors of [`SourceObjects::discover`].
+fn stage(
+    source: &File,
+    options: &RepackOptions,
+    budget: TraversalBudget,
+) -> Result<FileBuilder, Error> {
     // Shared so each streamed dataset's chunk provider can pull from the same handle
     // during the write without an extra open.
     let file = Arc::new(source.clone());
 
-    // Parse the drop set and remember which of its paths matched an object, so an
-    // unmatched drop can be reported as an error.
     let drop: BTreeSet<ObjectPathBuf> = options
         .drop
         .iter()
         .map(|path| ObjectPathBuf::parse(path))
         .collect();
-    let mut matched: BTreeSet<ObjectPathBuf> = BTreeSet::new();
-    // No link reaches the root group, so there is none to leave out of the output,
-    // and `is_dropped` tests a prefix, under which the root group's path covers
-    // every object in the file.
+    // The root group's path ends with no link, so there is none to leave out of the output.
     if drop.iter().any(ObjectPathBuf::is_empty) {
         return Err(Error::RepackUnsupported(String::from(
             "a repack cannot drop the root group",
@@ -453,20 +478,13 @@ fn stage(source: &File, options: &RepackOptions) -> Result<FileBuilder, Error> {
     if let Some(settings) = settings {
         builder.with_file_space_settings(settings.with_persistence(false));
     }
-    // Map every source object's (relative) header address to its path, so an
-    // object-reference dataset can be rewritten to point at the same objects in
-    // the compacted output rather than at their stale source addresses.
-    let addr_map = build_object_address_map(&file)?;
-
-    let root = file.root();
+    let objects = SourceObjects::discover(&file, &drop, budget)?;
     populate(
         &mut builder,
-        &root,
-        &ObjectPathBuf::root(),
-        &drop,
-        &mut matched,
         &file,
-        &addr_map,
+        &objects,
+        objects.root(),
+        &ObjectPathBuf::root(),
     )?;
 
     // Choose the output format now that the content is staged.
@@ -505,14 +523,6 @@ fn stage(source: &File, options: &RepackOptions) -> Result<FileBuilder, Error> {
         ),
     };
     builder.with_libver_bounds(low, high);
-
-    // Every requested drop must have named a real object.
-    if let Some(missing) = drop.iter().find(|d| !matched.contains(*d)) {
-        return Err(Error::RepackUnsupported(format!(
-            "drop path does not exist in the source: {missing}"
-        )));
-    }
-
     Ok(builder)
 }
 
@@ -639,33 +649,45 @@ impl GroupSink for GroupBuilder {
     }
 }
 
-/// Copies `src`'s attributes, datasets, and subgroups into `sink`, recursively, skipping every
-/// object whose path is in `drop`. `path` identifies `src` from the root group, and has no
-/// components for the root group itself.
+/// Copies the attributes, committed datatypes, datasets, and subgroups of the group `object` into
+/// `sink`, recursively. `path` identifies `object` from the root group, and has no components for
+/// the root group itself.
+///
+/// # Errors
+///
+/// Returns [`Error::RepackUnsupported`] if a link of `object` targets an object that is neither a
+/// group, a dataset, nor a committed datatype, or if an object under `object` cannot be reproduced
+/// faithfully.
 fn populate<S: GroupSink>(
     sink: &mut S,
-    src: &Group,
-    path: &ObjectPathBuf,
-    drop: &BTreeSet<ObjectPathBuf>,
-    matched: &mut BTreeSet<ObjectPathBuf>,
     file: &Arc<File>,
-    addr_map: &HashMap<u64, ObjectPathBuf>,
+    objects: &SourceObjects,
+    object: &GraphObject<SourceObject, String>,
+    path: &ObjectPathBuf,
 ) -> Result<(), Error> {
     // Attributes, copied verbatim where their bytes travel and re-encoded where
     // they do not; refused rather than dropped if neither is possible.
-    let owner = if path.is_empty() {
-        "root group".to_string()
-    } else {
-        format!("group {path}")
-    };
+    let group = file.group_at(object.value.id.header_address(), path.clone());
+    let owner = group_owner(path);
     copy_attrs(
         sink,
-        src.attr_messages()?,
-        || src.attrs(),
+        group.attr_messages()?,
+        || group.attrs(),
         &owner,
-        drop,
-        addr_map,
+        objects,
     )?;
+
+    let mut children = objects.children(object)?;
+    if let Some(child) = children
+        .iter()
+        .find(|child| child.object.value.class == ObjectClass::Unknown)
+    {
+        return Err(Error::RepackUnsupported(format!(
+            "{owner}: the link {:?} refers to an object that is neither a group, a dataset nor a \
+             committed datatype",
+            child.link_name
+        )));
+    }
 
     // Committed (`H5Tcommit`) datatype objects. Neither a group nor a dataset, so
     // the two walks below never see one: without this loop the object and its
@@ -673,55 +695,50 @@ fn populate<S: GroupSink>(
     // stops resolving. Placed before the datasets so the type exists in the
     // output before anything references it (the writer resolves by path, so the
     // order is not load-bearing, but it matches how the file reads).
-    for name in src.named_datatypes()? {
-        let name = link_name_in(&owner, &name)?;
-        let child_path = path.join(&name);
-        if drop.contains(&child_path) {
-            matched.insert(child_path);
-            continue;
-        }
-        let (datatype, _) = src.named_datatype_at(name.as_str())?;
-        check_datatype(&datatype, &format!("committed datatype {child_path}"))?;
-        sink.sink_commit_datatype(name.as_str(), datatype);
+    for child in children_of_class(&children, ObjectClass::NamedDatatype) {
+        let datatype = file.named_datatype_at(child.object.value.id.header_address())?;
+        check_datatype(&datatype, &format!("committed datatype {}", child.path))?;
+        sink.sink_commit_datatype(child.link_name, datatype);
     }
 
     // Datasets, sorted by name.
-    let mut dataset_names = src.datasets()?;
-    dataset_names.sort_unstable();
-    for name in dataset_names {
-        let name = link_name_in(&owner, &name)?;
-        let child_path = path.join(&name);
-        if drop.contains(&child_path) {
-            matched.insert(child_path);
-            continue;
-        }
-        let ds = src.dataset(name.as_str())?;
+    children.sort_unstable_by_key(|child| child.link_name);
+    for child in children_of_class(&children, ObjectClass::Dataset) {
+        let ds = file.dataset_at(child.object.value.id.header_address(), child.path.clone())?;
         emit_dataset(
-            sink.sink_dataset(name.as_str()),
+            sink.sink_dataset(child.link_name),
             &ds,
-            &child_path,
+            child.path,
             file,
-            drop,
-            addr_map,
+            objects,
         )?;
     }
 
     // Subgroups, sorted by name; built depth-first into a FinishedGroup.
-    let mut group_names = src.groups()?;
-    group_names.sort_unstable();
-    for name in group_names {
-        let name = link_name_in(&owner, &name)?;
-        let child_path = path.join(&name);
-        if drop.contains(&child_path) {
-            matched.insert(child_path);
-            continue;
-        }
-        let child = src.group(name.as_str())?;
-        let mut gb = GroupBuilder::new(name.as_str());
-        populate(&mut gb, &child, &child_path, drop, matched, file, addr_map)?;
+    for child in children_of_class(&children, ObjectClass::Group) {
+        let mut gb = GroupBuilder::new(child.link_name);
+        populate(&mut gb, file, objects, child.object, child.path)?;
         sink.sink_add_group(gb.finish());
     }
     Ok(())
+}
+
+fn children_of_class<'a>(
+    children: &'a [Child<'a>],
+    class: ObjectClass,
+) -> impl Iterator<Item = &'a Child<'a>> {
+    children
+        .iter()
+        .filter(move |child| child.object.value.class == class)
+}
+
+/// Returns how an error message identifies the group at `path`.
+fn group_owner(path: &ObjectPathBuf) -> String {
+    if path.is_empty() {
+        "root group".to_string()
+    } else {
+        format!("group {path}")
+    }
 }
 
 /// Capture one dataset's full description and stage it on `db`, or fail with a
@@ -731,15 +748,14 @@ fn emit_dataset(
     ds: &Dataset,
     path: &ObjectPathBuf,
     file: &Arc<File>,
-    drop: &BTreeSet<ObjectPathBuf>,
-    addr_map: &HashMap<u64, ObjectPathBuf>,
+    objects: &SourceObjects,
 ) -> Result<(), Error> {
     // A committed (`H5Tcommit`) element type lives in its own object header. The
     // dataset is reproduced naming the same type rather than inlining a copy of
     // it, which would read back correctly and still lose the name every C-library
     // reader reports.
     if let Some(address) = ds.committed_datatype_address()? {
-        let type_path = committed_type_path(address, &format!("dataset {path}"), drop, addr_map)?;
+        let type_path = committed_type_path(address, &format!("dataset {path}"), objects)?;
         db.with_committed_datatype_path(type_path);
     }
 
@@ -838,7 +854,7 @@ fn emit_dataset(
             &layout,
             &filters,
         );
-        copy_dataset_attrs(db, ds, path, drop, addr_map)?;
+        copy_dataset_attrs(db, ds, path, objects)?;
         return Ok(());
     }
 
@@ -849,7 +865,7 @@ fn emit_dataset(
     if vl_data::is_vlen_string_datatype(&datatype) {
         emit_vlen_string_dataset(db, ds, path, &datatype, &dims, &layout, &pipeline)?;
         // VL-string datasets carry attributes the same way as any other.
-        copy_dataset_attrs(db, ds, path, drop, addr_map)?;
+        copy_dataset_attrs(db, ds, path, objects)?;
         return Ok(());
     }
 
@@ -860,7 +876,7 @@ fn emit_dataset(
     // path so a chunked one is refused (not copied with stale references).
     if is_nonstring_vlen(&datatype) {
         emit_vlen_sequence_dataset(db, ds, path, &datatype, &dims, &layout, &pipeline)?;
-        copy_dataset_attrs(db, ds, path, drop, addr_map)?;
+        copy_dataset_attrs(db, ds, path, objects)?;
         return Ok(());
     }
 
@@ -870,8 +886,8 @@ fn emit_dataset(
     // rather than copied. Routed here before the verbatim chunk-copy path so a
     // chunked one is refused (not copied with stale addresses).
     if is_object_reference(&datatype) {
-        emit_object_reference_dataset(db, ds, path, &dims, &layout, file, drop, addr_map)?;
-        copy_dataset_attrs(db, ds, path, drop, addr_map)?;
+        emit_object_reference_dataset(db, ds, path, &dims, &layout, file, objects)?;
+        copy_dataset_attrs(db, ds, path, objects)?;
         return Ok(());
     }
 
@@ -898,10 +914,9 @@ fn emit_dataset(
             &vlen_slots,
             &reference_slots,
             file,
-            drop,
-            addr_map,
+            objects,
         )?;
-        copy_dataset_attrs(db, ds, path, drop, addr_map)?;
+        copy_dataset_attrs(db, ds, path, objects)?;
         return Ok(());
     }
 
@@ -954,7 +969,7 @@ fn emit_dataset(
 
             // Carry the dataset's attributes, refusing any that cannot be
             // represented.
-            copy_dataset_attrs(db, ds, path, drop, addr_map)?;
+            copy_dataset_attrs(db, ds, path, objects)?;
             return Ok(());
         }
 
@@ -988,7 +1003,7 @@ fn emit_dataset(
     );
 
     // Carry the dataset's attributes, refusing if any cannot be represented.
-    copy_dataset_attrs(db, ds, path, drop, addr_map)?;
+    copy_dataset_attrs(db, ds, path, objects)?;
 
     Ok(())
 }
@@ -1002,16 +1017,14 @@ fn copy_dataset_attrs(
     db: &mut DatasetBuilder,
     ds: &Dataset,
     path: &ObjectPathBuf,
-    drop: &BTreeSet<ObjectPathBuf>,
-    addr_map: &HashMap<u64, ObjectPathBuf>,
+    objects: &SourceObjects,
 ) -> Result<(), Error> {
     copy_attrs(
         db,
         ds.attr_messages()?,
         || ds.attrs(),
         &format!("dataset {path}"),
-        drop,
-        addr_map,
+        objects,
     )
 }
 
@@ -1188,8 +1201,7 @@ fn emit_embedded_address_dataset(
     vlen_slots: &[EmbeddedVlSlot],
     reference_slots: &[usize],
     file: &Arc<File>,
-    drop: &BTreeSet<ObjectPathBuf>,
-    addr_map: &HashMap<u64, ObjectPathBuf>,
+    objects: &SourceObjects,
 ) -> Result<(), Error> {
     // This path re-encodes, so a lossy filter cannot be reproduced — the same
     // guard the other re-staging paths apply.
@@ -1232,7 +1244,7 @@ fn emit_embedded_address_dataset(
     // variable-length staging below consumes `raw`. The two kinds occupy disjoint
     // slots, so reading one is unaffected by rewriting the other.
     let reference_patches =
-        resolve_embedded_references(&raw, datatype, dims, path, drop, addr_map, reference_slots)?;
+        resolve_embedded_references(&raw, datatype, dims, path, objects, reference_slots)?;
 
     if vlen_slots.is_empty() {
         db.with_embedded_object_references(datatype.clone(), raw, n_elements, reference_patches);
@@ -1266,8 +1278,7 @@ fn resolve_embedded_references(
     datatype: &Datatype,
     dims: &[u64],
     path: &ObjectPathBuf,
-    drop: &BTreeSet<ObjectPathBuf>,
-    addr_map: &HashMap<u64, ObjectPathBuf>,
+    objects: &SourceObjects,
     slots: &[usize],
 ) -> Result<Vec<ObjectRefPatch>, Error> {
     if slots.is_empty() {
@@ -1300,7 +1311,7 @@ fn resolve_embedded_references(
             ));
             patches.push(ObjectRefPatch {
                 byte_offset: at,
-                target: resolve_reference_address(v, path, drop, addr_map)?,
+                target: resolve_reference_address(v, path, objects)?,
             });
         }
     }
@@ -1460,8 +1471,7 @@ fn copy_attrs<S, F>(
     mut messages: Vec<AttributeMessage>,
     decode: F,
     owner: &str,
-    drop: &BTreeSet<ObjectPathBuf>,
-    addr_map: &HashMap<u64, ObjectPathBuf>,
+    objects: &SourceObjects,
 ) -> Result<(), Error>
 where
     S: AttrSink + ?Sized,
@@ -1483,10 +1493,9 @@ where
                 DatatypeLocation::Committed(address) => {
                     let name = &message.name;
                     Some(committed_type_path(
-                        address.get(),
+                        address,
                         &format!("{owner} attribute {name:?}"),
-                        drop,
-                        addr_map,
+                        objects,
                     )?)
                 }
                 DatatypeLocation::Inline => None,
@@ -1639,75 +1648,21 @@ fn is_object_reference(dt: &Datatype) -> bool {
     )
 }
 
-/// Returns the link name `name` spells, in the group `owner` describes.
+/// Returns the link name `name` spells, in the group at `parent`.
 ///
 /// # Errors
 ///
-/// Returns [`Error::RepackUnsupported`] naming `owner` and `name` if `name` is not a component
-/// of an object path: the empty name, `.`, or a name holding `/`. A source can hold such a
-/// link, and the object under it has no path in the output.
-fn link_name_in(owner: &str, name: &str) -> Result<LinkNameBuf, Error> {
+/// Returns [`Error::RepackUnsupported`] if `name` is not a component of an object path: the empty
+/// name, `.`, or a name holding `/`. The error reports the group and `name`. A source can hold
+/// such a link, and the object under it has no path in the output.
+fn link_name_in(parent: &ObjectPathBuf, name: &str) -> Result<LinkNameBuf, Error> {
     LinkNameBuf::new(name).ok_or_else(|| {
         Error::RepackUnsupported(format!(
-            "{owner}: the link {name:?} has a name that is not a component of an object path, \
-             so the object it identifies has no path in the output"
+            "{}: the link {name:?} has a name that is not a component of an object path, \
+             so the object it identifies has no path in the output",
+            group_owner(parent)
         ))
     })
-}
-
-/// Whether `path` is dropped from the output: either listed in `drop`, or nested
-/// under a dropped group (so its whole subtree is gone).
-fn is_dropped(path: &ObjectPathBuf, drop: &BTreeSet<ObjectPathBuf>) -> bool {
-    drop.iter().any(|dropped| path.starts_with(dropped))
-}
-
-/// Returns a map from each source object's header address to its path from the root group, for
-/// resolving object references. With a zero base address (the case object
-/// references are repacked for) the stored reference value is exactly this
-/// header address, so the lookup is direct.
-fn build_object_address_map(file: &File) -> Result<HashMap<u64, ObjectPathBuf>, Error> {
-    let mut map = HashMap::new();
-    let root = file.root();
-    // The root group can itself be referenced (the writer registers it under its
-    // own path, the one with no components).
-    map.insert(root.header_address()?, ObjectPathBuf::root());
-    collect_addresses(&root, &ObjectPathBuf::root(), &mut map)?;
-    Ok(map)
-}
-
-/// Recursively record `(header address -> path)` for every dataset, committed
-/// datatype, and subgroup.
-fn collect_addresses(
-    group: &Group,
-    prefix: &ObjectPathBuf,
-    map: &mut HashMap<u64, ObjectPathBuf>,
-) -> Result<(), Error> {
-    // A link whose name is not a component of an object path leaves its object with no
-    // path in the output. It is left out of the map here, and `populate` reports it
-    // where the object would be copied.
-    for (name, ds) in group.iter_datasets()? {
-        if let Some(name) = LinkNameBuf::new(&name) {
-            map.insert(ds.header_address()?, prefix.join(&name));
-        }
-    }
-    // A committed datatype is an object with an address like any other: a dataset
-    // or attribute naming one is resolved through this map, and an object
-    // reference may point straight at it.
-    for name in group.named_datatypes()? {
-        let (_, address) = group.named_datatype_at(&name)?;
-        if let Some(name) = LinkNameBuf::new(&name) {
-            map.insert(address, prefix.join(&name));
-        }
-    }
-    for (name, child) in group.iter_groups()? {
-        let Some(name) = LinkNameBuf::new(&name) else {
-            continue;
-        };
-        let child_path = prefix.join(&name);
-        map.insert(child.header_address()?, child_path.clone());
-        collect_addresses(&child, &child_path, map)?;
-    }
-    Ok(())
 }
 
 /// The destination path of the committed datatype at source `address`.
@@ -1718,33 +1673,36 @@ fn collect_addresses(
 /// output holds it). Both would otherwise surface as a dataset pointing at an
 /// object that is not there.
 fn committed_type_path(
-    address: u64,
+    address: StoredAddress,
     user: &str,
-    drop: &BTreeSet<ObjectPathBuf>,
-    addr_map: &HashMap<u64, ObjectPathBuf>,
+    objects: &SourceObjects,
 ) -> Result<ObjectPathBuf, Error> {
-    let path = addr_map.get(&address).ok_or_else(|| {
-        Error::RepackUnsupported(format!(
+    match objects.placement(address)? {
+        Some(Placement::Kept(path)) => Ok(path.clone()),
+        Some(Placement::Dropped(path)) => Err(Error::RepackUnsupported(format!(
+            "{user}: names the committed datatype {}, which this repack drops",
+            dropped_object(path.as_ref(), address)
+        ))),
+        None => Err(Error::RepackUnsupported(format!(
             "{user}: names a committed datatype that is not reachable by a hard link in the \
              source, so it has no place in the output"
-        ))
-    })?;
-    // `is_dropped` rather than a membership test: dropping a group drops its whole
-    // subtree, so a committed type inside one leaves the output without ever being
-    // named in the drop set.
-    if is_dropped(path, drop) {
-        return Err(Error::RepackUnsupported(format!(
-            "{user}: names the committed datatype {:?}, which this repack drops",
-            path.to_string()
-        )));
+        ))),
     }
-    Ok(path.clone())
+}
+
+/// Returns how an error message identifies a dropped object: by its path under a drop path, or
+/// by `address` where the object has none.
+fn dropped_object(path: Option<&ObjectPathBuf>, address: StoredAddress) -> String {
+    match path {
+        Some(path) => format!("{:?}", path.to_string()),
+        None => format!("at address {:#x}", address.get()),
+    }
 }
 
 /// Re-emit an object-reference dataset faithfully: rewrite each stored address to
 /// point at its target's destination location instead of its stale source one.
 ///
-/// Each reference is read, resolved through `addr_map` to a source path, and
+/// Each reference is read, resolved through `objects` to its path in the output, and
 /// re-staged as a path target the writer resolves once destination addresses are
 /// known. Null (address 0) and undefined (`HADDR_UNDEF`) references are carried
 /// verbatim. Refused by name: chunked/filtered or resizable layouts, a non-zero
@@ -1759,8 +1717,7 @@ fn emit_object_reference_dataset(
     dims: &[u64],
     layout: &DataLayout,
     file: &Arc<File>,
-    drop: &BTreeSet<ObjectPathBuf>,
-    addr_map: &HashMap<u64, ObjectPathBuf>,
+    objects: &SourceObjects,
 ) -> Result<(), Error> {
     if matches!(layout, DataLayout::Chunked { .. }) {
         return Err(Error::RepackUnsupported(format!(
@@ -1804,7 +1761,7 @@ fn emit_object_reference_dataset(
         let mut targets = Vec::with_capacity(n_elements);
         for chunk in raw[..needed].as_chunks::<8>().0 {
             let v = StoredAddress::new(u64::from_le_bytes(*chunk));
-            targets.push(resolve_reference_address(v, path, drop, addr_map)?);
+            targets.push(resolve_reference_address(v, path, objects)?);
         }
         targets
     };
@@ -1854,20 +1811,17 @@ fn check_embedded_reference_layout(
 fn resolve_reference_address(
     address: StoredAddress,
     path: &ObjectPathBuf,
-    drop: &BTreeSet<ObjectPathBuf>,
-    addr_map: &HashMap<u64, ObjectPathBuf>,
+    objects: &SourceObjects,
 ) -> Result<ObjectRefTarget, Error> {
     if address.get() == 0 || address.is_undefined(OBJECT_REFERENCE_WIDTH) {
         return Ok(ObjectRefTarget::Raw(address));
     }
-    match addr_map.get(&address.get()) {
-        Some(target_path) if is_dropped(target_path, drop) => {
-            Err(Error::RepackUnsupported(format!(
-                "dataset {path}: object reference to dropped object {:?} cannot be repacked",
-                target_path.to_string()
-            )))
-        }
-        Some(target_path) => Ok(ObjectRefTarget::Path(target_path.clone())),
+    match objects.placement(address)? {
+        Some(Placement::Kept(target_path)) => Ok(ObjectRefTarget::Path(target_path.clone())),
+        Some(Placement::Dropped(target_path)) => Err(Error::RepackUnsupported(format!(
+            "dataset {path}: object reference to dropped object {} cannot be repacked",
+            dropped_object(target_path.as_ref(), address)
+        ))),
         None => Err(Error::RepackUnsupported(format!(
             "dataset {path}: object reference to address {:#x} resolves to no hard-linked \
              object in the source (dangling, or a region target not supported yet)",
@@ -1875,6 +1829,9 @@ fn resolve_reference_address(
         ))),
     }
 }
+
+/// The most objects and the most hard links a repack reads from its source.
+const REPACK_BUDGET: TraversalBudget = TraversalBudget::new(1 << 24, 1 << 24);
 
 /// Byte width of the object references this repack resolves.
 ///
@@ -2013,7 +1970,92 @@ mod tests {
     use crate::address::StoredAddressExt;
     use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags};
     use crate::filter_pipeline::FilterDescription;
+    use crate::object_graph::TraversalLimit;
     use crate::scaleoffset::{FillAvailability, ScaleOffsetFill};
+    use crate::superblock::LocatedSuperblock;
+
+    #[rstest]
+    #[case::objects(TraversalBudget::new(3, 3), TraversalLimit::Objects, 3)]
+    #[case::links(TraversalBudget::new(4, 2), TraversalLimit::Links, 2)]
+    fn a_repack_past_its_budget_reports_the_limit_it_exceeds(
+        #[case] budget: TraversalBudget,
+        #[case] limit: TraversalLimit,
+        #[case] maximum: usize,
+    ) {
+        let err = stage(&budget_source(), &RepackOptions::new(), budget)
+            .map(|_| ())
+            .unwrap_err();
+        let Error::TraversalLimitExceeded {
+            limit: exceeded,
+            maximum: allowed,
+        } = err
+        else {
+            panic!("expected TraversalLimitExceeded, got {err:?}");
+        };
+        assert_eq!((exceeded, allowed), (limit, maximum));
+    }
+
+    #[test]
+    fn a_repack_within_its_budget_stages_every_object() {
+        let bytes = stage(
+            &budget_source(),
+            &RepackOptions::new(),
+            TraversalBudget::new(4, 3),
+        )
+        .unwrap()
+        .finish()
+        .unwrap();
+        let file = File::from_bytes(bytes).unwrap();
+        assert_eq!(file.group("g").unwrap().datasets().unwrap(), ["a", "b"]);
+        assert_eq!(file.dataset("g/a").unwrap().read_i32().unwrap(), [1]);
+        assert_eq!(file.dataset("g/b").unwrap().read_i32().unwrap(), [2]);
+    }
+
+    #[test]
+    fn a_repack_rejects_a_root_that_is_not_a_group() {
+        let mut builder = FileBuilder::new();
+        builder.create_dataset("plain").with_i32_data(&[1]);
+        let mut bytes = builder.finish().unwrap();
+        let dataset = File::from_bytes(bytes.clone())
+            .unwrap()
+            .dataset("plain")
+            .unwrap()
+            .header_address()
+            .unwrap();
+        let LocatedSuperblock {
+            address,
+            mut superblock,
+            ..
+        } = crate::superblock::read(bytes.as_slice()).unwrap();
+        assert!(superblock.base_address.is_zero());
+        superblock.root_group_address = StoredAddress::new(dataset);
+        let rewritten = hdf5_pure_format::__private::serialize_superblock(&superblock).unwrap();
+        let at = usize::try_from(address.get()).unwrap();
+        bytes[at..at + rewritten.len()].copy_from_slice(&rewritten);
+
+        let err = stage(
+            &File::from_bytes(bytes).unwrap(),
+            &RepackOptions::new(),
+            REPACK_BUDGET,
+        )
+        .map(|_| ())
+        .unwrap_err();
+
+        assert!(
+            matches!(&err, Error::NotAGroup(path) if path.is_empty()),
+            "{err:?}"
+        );
+    }
+
+    // The root group, `g`, and the two datasets of `g`: four objects and three hard links.
+    fn budget_source() -> File {
+        let mut builder = FileBuilder::new();
+        let mut group = builder.create_group("g");
+        group.create_dataset("a").with_i32_data(&[1]);
+        group.create_dataset("b").with_i32_data(&[2]);
+        builder.add_group(group.finish());
+        File::from_bytes(builder.finish().unwrap()).unwrap()
+    }
 
     #[rstest]
     #[case(None, DeflateLevel::Six)]
@@ -2203,25 +2245,6 @@ mod tests {
 
         std::fs::remove_file(&src).ok();
         std::fs::remove_file(&dst).ok();
-    }
-
-    /// The dropped path itself, and every path under a dropped group, since dropping a group
-    /// drops its whole subtree. A partial-name collision is not one of them.
-    #[rstest]
-    #[case("lone", true)]
-    #[case("g/old", true)]
-    #[case("g/old/child", true)]
-    #[case("g/old/a/b", true)]
-    #[case("g", false)]
-    #[case("g/older", false)]
-    #[case("lonely", false)]
-    #[case("other/old", false)]
-    fn is_dropped_matches_self_and_ancestors(#[case] path: &str, #[case] dropped: bool) {
-        let drop: BTreeSet<ObjectPathBuf> = ["g/old", "lone"]
-            .iter()
-            .map(|path| ObjectPathBuf::parse(path))
-            .collect();
-        assert_eq!(is_dropped(&ObjectPathBuf::parse(path), &drop), dropped);
     }
 
     const FILTER_PIPELINE_VERSION_TWO: u8 = 2;

@@ -257,7 +257,8 @@ pub enum Error {
     ///
     /// [`crate::File::copy_from`], and the [`crate::File::commit`] that applies a
     /// [`crate::File::copy`], return this for a source that reaches more objects or hard links
-    /// than a copy reads.
+    /// than a copy reads. [`crate::repack()`], [`crate::repack_into`], and
+    /// [`crate::repack_to_path`] return it for a source that reaches more than a repack reads.
     TraversalLimitExceeded {
         /// The count the graph exceeds.
         limit: TraversalLimit,

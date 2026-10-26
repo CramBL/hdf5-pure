@@ -19,8 +19,12 @@ use hdf5_pure::{
 };
 use hdf5_pure_core::__private::BaseAddressExt;
 use rstest::rstest;
+use test_util::bytes;
 use test_util::file_space_info;
 use test_util::fuzz;
+use test_util::object_header::Message;
+use test_util::object_header::MessageType;
+use test_util::object_header::v2;
 use test_util::widths::Widths;
 use test_util::{superblock, temp};
 use test_util_hdf5::dataset::{Filter, Unlimited};
@@ -299,6 +303,91 @@ fn drops_whole_group_subtree() {
     assert_eq!(f.root().datasets().unwrap(), vec!["root_ds".to_string()]);
     assert!(f.group("doomed").is_err());
     assert!(f.dataset("doomed/a").is_err());
+}
+
+#[rstest]
+fn a_repack_rejects_a_source_with_staged_edits_before_it_writes(
+    #[values(true, false)] into_writer: bool,
+) {
+    let src = temp::temp_path("hdf5_pure_repack_staged_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_staged_dst.h5");
+    let mut b = FileBuilder::new();
+    b.create_dataset("kept").with_i32_data(&[1]);
+    b.write(&src).unwrap();
+    let session = File::open_rw(&src).unwrap();
+    session
+        .root()
+        .create_dataset("staged", |dataset| {
+            dataset.with_i32_data(&[2]);
+        })
+        .unwrap();
+
+    let err = if into_writer {
+        let mut bytes = WRITER_CONTENT.to_vec();
+        let err = hdf5_pure::repack_into(&session, &mut bytes, &RepackOptions::new()).unwrap_err();
+        assert_eq!(bytes, WRITER_CONTENT);
+        err
+    } else {
+        hdf5_pure::repack_to_path(&session, &dst, &RepackOptions::new()).unwrap_err()
+    };
+
+    let Error::RepackUnsupported(reason) = &err else {
+        panic!("expected RepackUnsupported, got {err:?}");
+    };
+    assert_eq!(
+        reason,
+        "the source holds staged edits, and a repack reads only what the source has committed"
+    );
+    assert!(!dst.exists(), "dst must not be created when a repack fails");
+}
+
+#[test]
+fn a_repack_accepts_a_drop_path_under_a_dropped_group() {
+    let src = temp::temp_path("hdf5_pure_repack_drop_nested_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_drop_nested_dst.h5");
+    let mut b = FileBuilder::new();
+    b.create_dataset("kept").with_i32_data(&[1]);
+    let mut g = b.create_group("doomed");
+    g.create_dataset("a").with_i32_data(&[2]);
+    b.add_group(g.finish());
+    b.write(&src).unwrap();
+
+    let options = RepackOptions::new()
+        .drop_path("doomed")
+        .drop_path("doomed/a");
+    hdf5_pure::repack(&src, &dst, &options).unwrap();
+
+    let f = File::open(&dst).unwrap();
+    assert_eq!(f.root().datasets().unwrap(), ["kept"]);
+    assert!(f.root().groups().unwrap().is_empty());
+}
+
+#[test]
+fn a_repack_rejects_a_link_to_an_object_of_an_unknown_class() {
+    let src = temp::temp_path("hdf5_pure_repack_unknown_class_src.h5");
+    let dst = temp::temp_path("hdf5_pure_repack_unknown_class_dst.h5");
+    let mut b = FileBuilder::new();
+    b.create_dataset("odd").with_u8_data(&[1, 2]);
+    let mut image = b.finish().unwrap();
+    let header_at = *bytes::signature_offsets(&image, v2::SIGNATURE)
+        .last()
+        .expect("the dataset's object header follows the root group's");
+    for msg_type in [MessageType::DATATYPE, MessageType::DATA_LAYOUT] {
+        v2::replace_record(&mut image, header_at, msg_type, Message::nil(0));
+    }
+    std::fs::write(&src, image).unwrap();
+
+    let err = hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap_err();
+
+    let Error::RepackUnsupported(reason) = &err else {
+        panic!("expected RepackUnsupported, got {err:?}");
+    };
+    assert_eq!(
+        reason,
+        "root group: the link \"odd\" refers to an object that is neither a group, a dataset nor \
+         a committed datatype"
+    );
+    assert!(!dst.exists(), "dst must not be created when a repack fails");
 }
 
 #[test]
@@ -1039,3 +1128,5 @@ impl RebuiltContent {
         }
     }
 }
+
+const WRITER_CONTENT: &[u8] = b"held by the caller";
