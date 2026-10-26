@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use hdf5_pure::AppendOptions;
+use hdf5_pure::BufferedAppender;
 use hdf5_pure::Dataset;
 use hdf5_pure::DatasetCreateProperties;
 use hdf5_pure::Error;
@@ -304,6 +305,274 @@ fn lossy_tail_options_preserve_raw_and_lossless_tail_support(#[case] raw_lossy: 
         )
         .unwrap();
     assert_eq!(file.dataset("d").unwrap().read_f64().unwrap(), [1.46, 2.56]);
+}
+
+#[rstest]
+#[case::scale_offset(Filter::ScaleOffset)]
+#[cfg_attr(feature = "zfp", case::zfp(Filter::Zfp))]
+fn buffered_lossy_tails_reencode_after_flushes_reopening_and_automatic_writes(
+    #[case] filter: Filter,
+    #[values(BufferedInput::Raw, BufferedInput::Typed)] input: BufferedInput,
+    #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] memory: MemoryStrategy,
+    #[values(false, true)] finish: bool,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("buffered_reencoded_tail.h5");
+    filter.create(&path, PartialEdgeFiltering::Apply, &[]);
+    let options = AppendOptions::new().with_lossy_tail_reencoding(LossyTailReencoding::Allow);
+    let complete;
+    {
+        let file = File::open_rw_with_options(
+            &path,
+            FileAccessProperties::new().with_memory_strategy(memory),
+        )
+        .unwrap();
+        let mut dataset = file.dataset("d").unwrap();
+        let mut appender = dataset.buffered_appender_with_options(options).unwrap();
+        input.write(&mut appender, &[1.5]).unwrap();
+        appender.flush().unwrap();
+        input.write(&mut appender, &[2.5]).unwrap();
+        appender.flush().unwrap();
+        assert_eq!(file.dataset("d").unwrap().read_f64().unwrap(), [1.5, 2.5]);
+        input.write(&mut appender, &[1.0, 2.0, 3.5, 4.5]).unwrap();
+        assert_eq!(
+            file.dataset("d").unwrap().read_f64().unwrap(),
+            [1.5, 2.5, 1.0, 2.0]
+        );
+        assert_eq!(appender.buffered_elements(), 2);
+        assert_eq!(
+            appender.unwritten(),
+            [3.5_f64, 4.5]
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>()
+        );
+        complete = file.dataset("d").unwrap().chunks().unwrap()[0].clone();
+        appender.flush().unwrap();
+        input.write(&mut appender, &[5.5]).unwrap();
+        if finish {
+            appender.finish().unwrap();
+        } else {
+            drop(appender);
+        }
+        assert_eq!(
+            file.dataset("d").unwrap().read_f64().unwrap(),
+            [1.5, 2.5, 1.0, 2.0, 3.5, 4.5, 5.5]
+        );
+        assert_buffered_lossy_rejection(dataset.buffered_appender().unwrap_err());
+    }
+    let file = File::open_rw(&path).unwrap();
+    let mut dataset = file.dataset("d").unwrap();
+    assert_buffered_lossy_rejection(
+        dataset
+            .buffered_appender_with_options(AppendOptions::new())
+            .unwrap_err(),
+    );
+    let mut appender = dataset.buffered_appender_with_options(options).unwrap();
+    input.write(&mut appender, &[-0.5]).unwrap();
+    appender.finish().unwrap();
+    assert_eq!(
+        dataset.read_f64().unwrap(),
+        [1.5, 2.5, 1.0, 2.0, 3.5, 4.5, 5.5, -0.5]
+    );
+    assert_eq!(dataset.chunks().unwrap()[0], complete);
+}
+
+#[rstest]
+#[case::scale_offset(Filter::ScaleOffset)]
+#[cfg_attr(feature = "zfp", case::zfp(Filter::Zfp))]
+fn buffered_lossy_permission_preserves_a_split_element_until_completed(#[case] filter: Filter) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("buffered_split_element.h5");
+    filter.create(&path, PartialEdgeFiltering::Apply, &[1.5]);
+    let file = File::open_rw(&path).unwrap();
+    let mut dataset = file.dataset("d").unwrap();
+    let mut appender = dataset
+        .buffered_appender_with_options(
+            AppendOptions::new().with_lossy_tail_reencoding(LossyTailReencoding::Allow),
+        )
+        .unwrap();
+    let bytes = 2.5_f64.to_le_bytes();
+    appender.append_raw(&bytes[..5]).unwrap();
+    let error = appender.flush().unwrap_err();
+    let Error::AppendInPlaceUnsupported(reason) = error else {
+        panic!("expected an incomplete-element rejection, got {error:?}");
+    };
+    assert_eq!(
+        reason,
+        "the buffered byte length is not a whole number of elements; append the rest of \
+         the trailing element before flushing"
+    );
+    assert_eq!(appender.unwritten(), &bytes[..5]);
+    assert_eq!(appender.buffered_elements(), 0);
+    appender.append_raw(&bytes[5..]).unwrap();
+    appender.flush().unwrap();
+    appender.append(&[3.5]).unwrap();
+    assert_eq!(appender.discard(), 3.5_f64.to_le_bytes());
+    assert_eq!(dataset.read_f64().unwrap(), [1.5, 2.5]);
+}
+
+#[test]
+fn buffered_lossy_permission_retains_unwritten_bytes_after_a_failed_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("buffered_failed_write.h5");
+    Filter::ScaleOffset.create(&path, PartialEdgeFiltering::Apply, &[1.5]);
+    let before = std::fs::read(&path).unwrap();
+    {
+        let file = File::open_rw(&path).unwrap();
+        let mut dataset = file.dataset("d").unwrap();
+        let mut appender = dataset
+            .buffered_appender_with_options(
+                AppendOptions::new().with_lossy_tail_reencoding(LossyTailReencoding::Allow),
+            )
+            .unwrap();
+        appender.append(&[1_i32, 2]).unwrap();
+        let error = appender.flush().unwrap_err();
+        let Error::AppendInPlaceUnsupported(reason) = error else {
+            panic!("expected a datatype rejection, got {error:?}");
+        };
+        assert_eq!(
+            reason,
+            "append datatype does not match the on-disk dataset (wrong element type or byte order)"
+        );
+        let expected: Vec<_> = [1_i32, 2]
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        assert_eq!(appender.unwritten(), expected);
+        let error = appender.flush().unwrap_err();
+        let Error::AppendInPlaceUnsupported(reason) = error else {
+            panic!("expected a failed-appender rejection, got {error:?}");
+        };
+        assert_eq!(
+            reason,
+            "this buffered appender failed a write and holds unwritten elements; read them \
+             back with BufferedAppender::unwritten and start a new appender"
+        );
+        assert_eq!(appender.discard(), expected);
+        assert_eq!(dataset.read_f64().unwrap(), [1.5]);
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[rstest]
+#[case::scale_offset(Filter::ScaleOffset)]
+#[cfg_attr(feature = "zfp", case::zfp(Filter::Zfp))]
+fn buffered_lossy_flush_rejects_a_partial_tail_without_permission(#[case] filter: Filter) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("buffered_default_flush.h5");
+    filter.create(&path, PartialEdgeFiltering::Apply, &[1.5, 2.5, 1.0, 2.0]);
+    let before = std::fs::read(&path).unwrap();
+    {
+        let file = File::open_rw(&path).unwrap();
+        let mut dataset = file.dataset("d").unwrap();
+        let mut appender = dataset
+            .buffered_appender_with_options(AppendOptions::new())
+            .unwrap();
+        appender.append(&[3.5]).unwrap();
+        let error = appender.flush().unwrap_err();
+        let Error::AppendInPlaceUnsupported(reason) = error else {
+            panic!("expected a lossy partial-flush rejection, got {error:?}");
+        };
+        assert_eq!(
+            reason,
+            "this dataset's filter pipeline is lossy, and flushing these elements would \
+             leave its length short of a chunk boundary — a later write would then have \
+             to re-encode already-committed values; buffer until the elements complete \
+             a chunk, or end the appender with BufferedAppender::finish, which writes \
+             the partial tail"
+        );
+        assert_eq!(appender.buffered_elements(), 1);
+        assert_eq!(appender.discard(), 3.5_f64.to_le_bytes());
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[rstest]
+#[case::raw_lossy(true)]
+#[case::lossless(false)]
+fn buffered_lossy_permission_preserves_raw_and_lossless_tails(#[case] raw_lossy: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("buffered_other_tail.h5");
+    if raw_lossy {
+        Filter::ScaleOffset.create(&path, PartialEdgeFiltering::Skip, &[1.46]);
+    } else {
+        let mut builder = FileBuilder::new();
+        builder
+            .create_dataset("d")
+            .with_f64_data(&[1.46])
+            .with_chunks(&[4])
+            .with_maxshape(&[MaxExtent::Unlimited])
+            .with_fletcher32();
+        builder.write(&path).unwrap();
+    }
+    let file = File::open_rw(&path).unwrap();
+    let mut dataset = file.dataset("d").unwrap();
+    let mut appender = dataset
+        .buffered_appender_with_options(
+            AppendOptions::new().with_lossy_tail_reencoding(LossyTailReencoding::Allow),
+        )
+        .unwrap();
+    appender.append(&[2.56]).unwrap();
+    appender.flush().unwrap();
+    appender.finish().unwrap();
+    assert_eq!(dataset.read_f64().unwrap(), [1.46, 2.56]);
+}
+
+#[test]
+fn filtered_swmr_buffered_append_rejects_lossy_tail_reencoding() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("buffered_swmr.h5");
+    Filter::ScaleOffset.create(&path, PartialEdgeFiltering::Apply, &[1.5]);
+    let file = File::open_swmr_writer(&path).unwrap();
+    let error = file
+        .dataset("d")
+        .unwrap()
+        .buffered_appender_with_options(
+            AppendOptions::new().with_lossy_tail_reencoding(LossyTailReencoding::Allow),
+        )
+        .unwrap_err();
+    let Error::SwmrAppendUnsupported(reason) = error else {
+        panic!("expected the buffered SWMR rejection, got {error:?}");
+    };
+    assert_eq!(
+        reason,
+        "a SWMR writer cannot write a partial trailing chunk, which is what a buffered \
+         appender exists to do; append whole chunks with Dataset::append instead"
+    );
+}
+
+#[derive(Clone, Copy, Debug)]
+enum BufferedInput {
+    Raw,
+    Typed,
+}
+
+impl BufferedInput {
+    fn write(self, appender: &mut BufferedAppender<'_>, values: &[f64]) -> Result<(), Error> {
+        match self {
+            Self::Raw => appender.append_raw(
+                &values
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes())
+                    .collect::<Vec<_>>(),
+            ),
+            Self::Typed => appender.append(values),
+        }
+    }
+}
+
+fn assert_buffered_lossy_rejection(error: Error) {
+    let Error::AppendInPlaceUnsupported(reason) = error else {
+        panic!("expected a buffered lossy-tail rejection, got {error:?}");
+    };
+    assert_eq!(
+        reason,
+        "this dataset's filter pipeline is lossy and its length is not a whole multiple \
+         of the chunk length, so a buffered appender's first write would have to \
+         re-encode already-committed values; append whole chunks from a chunk-aligned \
+         length instead"
+    );
 }
 
 #[derive(Clone, Copy, Debug)]

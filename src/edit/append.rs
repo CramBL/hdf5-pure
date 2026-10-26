@@ -36,12 +36,13 @@ use super::staging::StagedOp;
 
 use super::{AggregateSpace, Placement, SyncPolicy, WriteEngine};
 
-/// Options for one immediate or staged append.
+/// Options for immediate, staged, or buffered appends.
 ///
 /// The default rejects re-encoding an existing partial tail stored with lossy filters.
 /// [`with_lossy_tail_reencoding`](Self::with_lossy_tail_reencoding) changes that policy for
-/// the append receiving these options. The options are not stored in the file and do not
-/// affect later calls, including calls made after reopening it.
+/// the append receiving these options. A [`BufferedAppender`](crate::BufferedAppender)
+/// uses the supplied policy for every write during its lifetime. The options are not stored
+/// in the file and do not affect other append calls, including calls made after reopening it.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AppendOptions {
     lossy_tail_reencoding: LossyTailReencoding,

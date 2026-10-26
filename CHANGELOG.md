@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- `AppendOptions` permits explicitly re-encoding a filtered lossy partial tail through immediate and staged appends. Each rewrite can introduce additional quantization error in previously published tail values.
+- `AppendOptions` permits explicitly re-encoding a filtered lossy partial tail through immediate, staged, and buffered appends. Each rewrite can introduce additional quantization error in previously published tail values ([#916](https://github.com/CramBL/hdf5-pure/pull/916)).
 - `FileSpaceSettings` groups file-space configuration in a portable value, with normalized settings for strategies without free-space managers ([#894](https://github.com/CramBL/hdf5-pure/pull/894)).
 - `File::reusable_space_stats` reads a writable session's logical size and reusable free bytes without allocations after platform mutex initialization. The reusable total includes append reserves and unused aggregates and does not guarantee that a particular write fits.
 - `File::persisted_free_sections` inspects typed, base-relative free sections, per-manager totals, and persisted manager metadata allocation bytes through buffered or streaming readers. The metadata count includes unused section-list capacity, while editing sessions have a separate view of reusable space at physical offsets ([#906](https://github.com/CramBL/hdf5-pure/pull/906)).
