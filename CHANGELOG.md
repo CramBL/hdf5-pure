@@ -49,13 +49,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Breaking:** `FormatError::InvalidFreeSpaceManager` changes from a unit variant to a variant with a diagnostic message ([#697](https://github.com/CramBL/hdf5-pure/pull/697)).
 - **Breaking:** `File::persisted_free_space` is removed in favor of typed persisted-section inspection, which distinguishes absent persistence from an empty report ([#698](https://github.com/CramBL/hdf5-pure/pull/698), [#903](https://github.com/CramBL/hdf5-pure/pull/903)).
 - `FileBuilder::finish` and related output methods emit encoded chunks directly from their retained buffers ([#895](https://github.com/CramBL/hdf5-pure/pull/895)).
-- `Dataset::read_raw` and related reads of a chunked dataset list its chunks from the retained chunk index without an allocation per chunk.
 - `FileBuilder` uses separate metadata and raw aggregates when creating files under the classic aggregation strategies ([#785](https://github.com/CramBL/hdf5-pure/pull/785), [#787](https://github.com/CramBL/hdf5-pure/pull/787), [#789](https://github.com/CramBL/hdf5-pure/pull/789)).
 - `File::open_rw` shares metadata and raw aggregates between staged edits and immediate appends under the classic aggregation strategies ([#777](https://github.com/CramBL/hdf5-pure/pull/777), [#778](https://github.com/CramBL/hdf5-pure/pull/778), [#781](https://github.com/CramBL/hdf5-pure/pull/781), [#783](https://github.com/CramBL/hdf5-pure/pull/783)).
 - `FormatError` distinguishes malformed metadata regions, fractal heaps, legacy groups, and array chunk indexes ([#745](https://github.com/CramBL/hdf5-pure/pull/745), [#749](https://github.com/CramBL/hdf5-pure/pull/749), [#757](https://github.com/CramBL/hdf5-pure/pull/757), [#782](https://github.com/CramBL/hdf5-pure/pull/782), [#806](https://github.com/CramBL/hdf5-pure/pull/806), [#811](https://github.com/CramBL/hdf5-pure/pull/811), [#851](https://github.com/CramBL/hdf5-pure/pull/851)).
 
 ### Performance
 
+- `Dataset::read_raw` and related reads of a chunked dataset list its chunks from the retained chunk index without an allocation per chunk, and load an implicit chunk index without a list of its chunk positions beside it ([#902](https://github.com/CramBL/hdf5-pure/pull/902)).
 - `File::dataset` and related lookups use the dense-group name index to avoid traversing every link ([#900](https://github.com/CramBL/hdf5-pure/pull/900)).
 
 ### Fixed
