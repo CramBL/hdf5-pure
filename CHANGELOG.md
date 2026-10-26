@@ -63,6 +63,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `Group::groups` and related reads misinterpreting managed heap IDs with non-byte-aligned offsets or trailing padding ([#917](https://github.com/CramBL/hdf5-pure/pull/917)).
 - Fixed `File::persisted_free_sections` counting a persisted manager more than once when multiple slots record its header address.
 - Fixed `FileBuilder::finish` and related dataset creation writing chunks of 4 GiB or more ([#892](https://github.com/CramBL/hdf5-pure/pull/892)).
 - Fixed `mat::from_file` and related deserialization pairing the wrong elements of struct arrays whose fields have different dimensions ([#877](https://github.com/CramBL/hdf5-pure/pull/877)).

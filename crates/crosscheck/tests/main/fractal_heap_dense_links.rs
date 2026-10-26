@@ -27,7 +27,8 @@ use hdf5_pure_core::__private::{
 use hdf5_pure_core::{BaseAddress, StoredAddress};
 use hdf5_pure_format::__private::{
     BTREE_V2_ATTRIBUTE_NAME, BTREE_V2_LINK_NAME, BTreeV2Header, BTreeV2Layout, FractalHeapBlock,
-    FractalHeapBlockLayout, FractalHeapHeaderLocator, LengthWidth, OffsetWidth,
+    FractalHeapBlockLayout, FractalHeapGeometry, FractalHeapHeader, FractalHeapHeaderLocator,
+    FractalHeapIdKind, FractalHeapIdLayout, FractalHeapLayout, LengthWidth, OffsetWidth,
 };
 use rstest::rstest;
 
@@ -902,3 +903,93 @@ const BTREE_HEADER_TYPE_OFFSET: usize = 5;
 const BTREE_HEADER_RECORD_SIZE_OFFSET: usize = 10;
 const LINK_NAME_HASH_LEN: usize = 4;
 const INDEX_CHECKSUM_LEN: usize = 4;
+
+#[rstest]
+#[case::group(false, 512, 32, 7)]
+#[case::attributes(true, 1024, 40, 8)]
+fn c_written_managed_ids_use_the_shared_geometry_and_field_encoding(
+    #[case] attributes: bool,
+    #[case] starting_block_size: u64,
+    #[case] heap_bits: u16,
+    #[case] id_length: u16,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("managed-ids.h5");
+    let file = hdf5::FileBuilder::new()
+        .with_fapl(|properties| properties.libver_latest())
+        .create(&path)
+        .unwrap();
+    let group = file.create_group("g").unwrap();
+    for index in 0..16 {
+        let name = format!("entry_{index}");
+        if attributes {
+            group
+                .new_attr::<i32>()
+                .shape(())
+                .create(name.as_str())
+                .unwrap()
+                .write_scalar(&index)
+                .unwrap();
+        } else {
+            group.create_group(name.as_str()).unwrap();
+        }
+    }
+    drop(group);
+    file.close().unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let heap_at = test_util::bytes::sole_signature(&bytes, test_util::fractal_heap::SIGNATURE);
+    let header = FractalHeapHeader::parse(&bytes, heap_at, 8, 8).unwrap();
+    assert_eq!(header.starting_block_size, starting_block_size);
+    assert_eq!(header.max_heap_size, heap_bits);
+    assert_eq!(header.heap_id_length, id_length);
+    let geometry = FractalHeapGeometry::new(
+        header.table_width,
+        header.starting_block_size,
+        header.max_direct_block_size,
+        header.max_heap_size,
+    )
+    .unwrap();
+    let layout = FractalHeapLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight).unwrap();
+    assert_eq!(layout.geometry(), &geometry);
+    assert_eq!(geometry.block_size_for_row(0), Ok(starting_block_size));
+    assert_eq!(geometry.row_offset(1), Ok(starting_block_size * 4));
+    let index_at = test_util::bytes::sole_signature(&bytes, test_util::btree_v2::SIGNATURE);
+    let tree_header = BTreeV2Header::parse(&bytes, index_at, 8, 8).unwrap();
+    assert_eq!(
+        tree_header.tree_type,
+        if attributes {
+            BTREE_V2_ATTRIBUTE_NAME
+        } else {
+            BTREE_V2_LINK_NAME
+        }
+    );
+    let tree_layout = BTreeV2Layout::new(&tree_header, OffsetWidth::Eight).unwrap();
+    let root = tree_layout.root().unwrap();
+    assert_eq!(tree_header.depth, 0);
+    let view = tree_layout
+        .parse(
+            &bytes[usize::try_from(root.address().get()).unwrap()..],
+            root,
+        )
+        .unwrap();
+    let record = view.record(0).unwrap();
+    let id = if attributes {
+        &record[..usize::from(id_length)]
+    } else {
+        &record[LINK_NAME_HASH_LEN..]
+    };
+    let id_layout = FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight);
+    let FractalHeapIdKind::Managed {
+        heap_offset,
+        object_length,
+    } = id_layout.parse(id).unwrap().kind()
+    else {
+        panic!("expected a managed object ID");
+    };
+    assert_eq!(
+        header
+            .encode_managed_id(heap_offset, object_length)
+            .unwrap(),
+        id
+    );
+}
