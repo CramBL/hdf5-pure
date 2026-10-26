@@ -92,6 +92,7 @@ mod shuffle;
 mod soft_link;
 mod sohm;
 mod space_ownership;
+mod streamed_filtered_creation;
 mod superblock_addresses;
 mod superblock_search;
 mod swmr_append;

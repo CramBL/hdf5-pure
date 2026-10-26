@@ -45,6 +45,8 @@ use crate::scaleoffset::{self, FillAvailability, ScaleOffset};
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 
+pub(crate) use self::gathering::ChunkTraversal;
+
 mod gathering;
 mod zfp;
 
@@ -1877,6 +1879,7 @@ mod tests {
     use crate::datatype::layout::FloatingPointLayout;
     use crate::datatype::{Datatype, byte_order};
     use crate::fill_value::FillPattern;
+    use crate::filters;
     use crate::read_spec::RawReadSpec;
 
     mod partial_edge;
@@ -2082,6 +2085,123 @@ mod tests {
         .expect("an unallocated resizable plan");
         assert!(matches!(kind, ChunkIndexKind::ExtensibleArray), "{kind:?}");
         assert!(slots.is_empty());
+    }
+
+    #[rstest]
+    #[case::rank_one(&[19], &[4], 38)]
+    #[case::short_rank_one(&[19], &[4], 17)]
+    #[case::full_width(&[8, 6], &[2, 6], 96)]
+    #[case::short_full_width(&[8, 6], &[2, 6], 71)]
+    #[case::gathered(&[8, 6], &[2, 3], 96)]
+    #[case::edges(&[7, 5], &[2, 3], 70)]
+    #[case::short_edges(&[7, 5], &[2, 3], 33)]
+    #[case::slabs(&[3, 4, 5], &[1, 4, 5], 120)]
+    #[case::gathered_rank_three(&[3, 4, 5], &[2, 3, 2], 120)]
+    #[case::empty(&[0, 4], &[2, 2], 0)]
+    fn incremental_encoding_matches_collected_chunk_bytes(
+        #[case] shape: &[u64],
+        #[case] chunks: &[u64],
+        #[case] input_len: usize,
+        #[values(
+            None,
+            Some(FilterKind::Shuffle),
+            Some(FilterKind::Lzf),
+            Some(FilterKind::Fletcher32)
+        )]
+        filter: Option<FilterKind>,
+        #[values(PartialEdgeFiltering::Apply, PartialEdgeFiltering::Skip)]
+        edges: PartialEdgeFiltering,
+    ) {
+        let raw = (0..input_len)
+            .map(|byte| u8::try_from(byte).unwrap())
+            .collect::<Vec<_>>();
+        let fill = FillPattern::new(FillTime::IfSet, Some(&[241, 242]), convert::nz(2));
+        let ctx = ChunkContext::basic(chunks, 2);
+        let mut options = ChunkOptions {
+            partial_edge_filtering: Some(edges),
+            ..ChunkOptions::default()
+        };
+        if let Some(filter) = filter {
+            options.set_filter(filter);
+        }
+        let pipeline = options.build_pipeline(&ctx, fill).unwrap();
+        let mut scratch = FilterScratch::new();
+        let expected = split_into_chunks(&raw, shape, chunks, convert::nz(2), fill)
+            .unwrap()
+            .into_iter()
+            .enumerate()
+            .map(|(index, logical)| {
+                let mut remaining = index.to_u64();
+                let mut partial = false;
+                for (&dimension, &chunk) in shape.iter().zip(chunks).rev() {
+                    let count = dimension.div_ceil(chunk);
+                    let offset = (remaining % count) * chunk;
+                    remaining /= count;
+                    partial |= chunk > dimension - offset;
+                }
+                match &pipeline {
+                    Some(pipeline) if edges == PartialEdgeFiltering::Apply || !partial => {
+                        filters::compress_chunk_with(&mut scratch, &logical, pipeline, ctx).unwrap()
+                    }
+                    _ => logical,
+                }
+            })
+            .collect::<Vec<_>>();
+        let actual = compress_chunks(
+            &raw,
+            shape,
+            ctx,
+            &options,
+            None,
+            fill,
+            StorageAllocation::Allocated,
+        )
+        .unwrap();
+        assert_eq!(
+            actual
+                .chunks
+                .iter()
+                .map(PreparedChunk::bytes)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(actual.has_filters, pipeline.is_some());
+        assert_eq!(
+            actual
+                .chunks
+                .iter()
+                .map(PreparedChunk::filter_mask)
+                .collect::<Vec<_>>(),
+            vec![0; expected.len()]
+        );
+        assert_eq!(
+            actual.slot_of_chunk,
+            (0..expected.len().to_u64()).collect::<Vec<_>>()
+        );
+    }
+
+    #[rstest]
+    #[case::empty(&[0, 4], StorageAllocation::Allocated)]
+    #[case::unallocated(&[7, 5], StorageAllocation::Unallocated)]
+    fn filtered_datasets_without_chunks_skip_gathering(
+        #[case] shape: &[u64],
+        #[case] allocation: StorageAllocation,
+    ) {
+        let mut options = ChunkOptions::default();
+        options.set_filter(FilterKind::Shuffle);
+        let set = compress_chunks(
+            &[],
+            shape,
+            ChunkContext::basic(&[2, 2], 2),
+            &options,
+            None,
+            FillPattern::UNKNOWN,
+            allocation,
+        )
+        .unwrap();
+        assert!(set.chunks.is_empty());
+        assert!(set.has_filters);
+        assert!(set.slot_of_chunk.is_empty());
     }
 
     /// The encoder does not split an unallocated dataset into chunks.

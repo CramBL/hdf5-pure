@@ -15,7 +15,7 @@ use crate::fill_value::FillPattern;
 /// Dimensions, strides, and logical offsets are in elements and use [`u64`]. Buffer lengths
 /// and indices are converted to [`usize`] when needed for allocation or copying.
 #[derive(Debug)]
-pub(super) struct ChunkTraversal<'a> {
+pub(crate) struct ChunkTraversal<'a> {
     shape: &'a [u64],
     chunk_dims: &'a [u64],
     counts: Vec<u64>,
@@ -40,7 +40,7 @@ impl<'a> ChunkTraversal<'a> {
     /// dimension is zero, or a derived count, stride, or byte length exceeds [`u64::MAX`].
     /// Returns [`FormatError::ValueTooLargeForPlatform`] if the full chunk byte length exceeds
     /// [`usize::MAX`].
-    pub(super) fn new(
+    pub(crate) fn new(
         shape: &'a [u64],
         chunk_dims: &'a [u64],
         element_size: NonZeroUsize,
@@ -86,7 +86,7 @@ impl<'a> ChunkTraversal<'a> {
     /// # Errors
     ///
     /// Returns an error from `visitor` immediately.
-    pub(super) fn visit(
+    pub(crate) fn visit(
         &mut self,
         mut visitor: impl FnMut(&mut Self) -> Result<(), FormatError>,
     ) -> Result<(), FormatError> {
@@ -115,7 +115,7 @@ impl<'a> ChunkTraversal<'a> {
     /// Returns [`FormatError::Internal`] if `destination` has a length other than
     /// [`byte_len`](Self::byte_len). Returns [`FormatError::UnreadableFillValue`] if this is a
     /// partial edge chunk and `fill` is unknown.
-    pub(super) fn gather(
+    pub(crate) fn gather(
         &mut self,
         raw: &[u8],
         fill: FillPattern<'_>,
@@ -139,12 +139,7 @@ impl<'a> ChunkTraversal<'a> {
                 "chunk gathering destination has an incorrect length".into(),
             ));
         }
-        let whole = shape
-            .iter()
-            .zip(chunk_dims)
-            .zip(offsets)
-            .all(|((&dimension, &chunk), &offset)| chunk <= dimension - offset);
-        if !whole {
+        if !self.is_whole() {
             destination.fill(0);
             fill.apply(destination)?;
         } else if self.input_end()? > raw.len().to_u64() {
@@ -181,14 +176,55 @@ impl<'a> ChunkTraversal<'a> {
         Ok(())
     }
 
+    /// Borrows the current chunk from `raw` when its full contents occupy one available slice.
+    ///
+    /// Returns `None` for a partial edge chunk, a chunk with gaps between its rows, or input
+    /// that ends before the chunk's last byte.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidChunkGeometry`] if a derived byte offset exceeds
+    /// [`u64::MAX`].
+    pub(crate) fn contiguous<'b>(&self, raw: &'b [u8]) -> Result<Option<&'b [u8]>, FormatError> {
+        if !self.is_whole() {
+            return Ok(None);
+        }
+        let start = self
+            .offsets
+            .iter()
+            .zip(&self.dataset_strides)
+            .try_fold(0, |sum, (offset, stride)| {
+                checked_add(sum, checked_mul(*offset, *stride)?)
+            })?;
+        let start = checked_mul(start, self.element_size.get().to_u64())?;
+        let end = self.input_end()?;
+        if end.checked_sub(start) != Some(self.byte_len.to_u64()) || end > raw.len().to_u64() {
+            return Ok(None);
+        }
+        Ok(raw.get(start.narrow::<usize>()?..end.narrow::<usize>()?))
+    }
+
+    /// Returns the current chunk's dataset offsets in elements.
+    pub(crate) fn offsets(&self) -> &[u64] {
+        &self.offsets
+    }
+
     /// Returns the number of chunks in the grid, including partial edge chunks.
-    pub(super) fn chunk_count(&self) -> u64 {
+    pub(crate) fn chunk_count(&self) -> u64 {
         self.count
     }
 
     /// Returns the full chunk byte length, including edge padding.
-    pub(super) fn byte_len(&self) -> usize {
+    pub(crate) fn byte_len(&self) -> usize {
         self.byte_len
+    }
+
+    fn is_whole(&self) -> bool {
+        self.shape
+            .iter()
+            .zip(self.chunk_dims)
+            .zip(&self.offsets)
+            .all(|((&dimension, &chunk), &offset)| chunk <= dimension - offset)
     }
 
     /// Returns the byte offset past the last element of the current full chunk in dataset order.
@@ -286,6 +322,55 @@ mod tests {
 
     use super::*;
     use crate::convert;
+
+    #[rstest]
+    #[case::rank_one(&[7], &[3], 14, &[true, true, false])]
+    #[case::short_rank_one(&[7], &[3], 9, &[true, false, false])]
+    #[case::full_width(&[4, 6], &[2, 6], 48, &[true, true])]
+    #[case::short_full_width(&[4, 6], &[2, 6], 47, &[true, false])]
+    #[case::partial_rows(&[4, 6], &[2, 3], 48, &[false; 4])]
+    #[case::single_rows(&[2, 6], &[1, 3], 24, &[true; 4])]
+    #[case::slabs(&[2, 3, 4], &[1, 3, 4], 48, &[true, true])]
+    #[case::frames(&[2, 3, 4], &[2, 1, 4], 48, &[false; 3])]
+    #[case::trailing_runs(&[1, 2, 4], &[1, 1, 2], 16, &[true; 4])]
+    #[case::degenerate(&[2, 1, 4], &[1, 1, 4], 16, &[true, true])]
+    #[case::oversized(&[2, 2], &[3, 2], 24, &[false])]
+    fn borrows_only_complete_contiguous_chunks(
+        #[case] shape: &[u64],
+        #[case] chunks: &[u64],
+        #[case] input_len: usize,
+        #[case] expected: &[bool],
+    ) {
+        let raw = (0..input_len)
+            .map(|byte| u8::try_from(byte).unwrap())
+            .collect::<Vec<_>>();
+        let mut traversal = ChunkTraversal::new(shape, chunks, convert::nz(2)).unwrap();
+        let mut borrowed = Vec::new();
+        traversal
+            .visit(|chunk| {
+                let contiguous = chunk.contiguous(&raw)?;
+                borrowed.push(contiguous.is_some());
+                if let Some(contiguous) = contiguous {
+                    let mut gathered = vec![0; chunk.byte_len()];
+                    chunk.gather(&raw, FillPattern::ZERO, &mut gathered)?;
+                    assert_eq!(contiguous, gathered);
+                    let start = chunk
+                        .offsets
+                        .iter()
+                        .zip(&chunk.dataset_strides)
+                        .map(|(offset, stride)| offset * stride)
+                        .sum::<u64>()
+                        * 2;
+                    assert_eq!(
+                        contiguous.as_ptr(),
+                        raw[usize::try_from(start).unwrap()..].as_ptr()
+                    );
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(borrowed, expected);
+    }
 
     #[rstest]
     #[case::rank_one(&[7], &[3], &[0, 3, 6])]

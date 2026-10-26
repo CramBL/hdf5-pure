@@ -13,7 +13,7 @@ use hdf5_pure_core::__private::PipelineFilterMask;
 use crate::chunked_read;
 use crate::chunked_read::ChunkDecoding;
 use crate::chunked_read::ChunkFiltering;
-use crate::chunked_write;
+use crate::chunked_write::ChunkTraversal;
 use crate::convert::Narrow;
 use crate::data_layout::ChunkedLayoutFlags;
 use crate::error::FormatError;
@@ -32,8 +32,12 @@ pub(crate) struct PreparedChunk {
 }
 
 impl PreparedChunk {
-    /// Splits `raw`, the data of a dataset of extent `shape`, into whole chunks of `ctx` and
-    /// encodes each one for storage, in row-major grid order.
+    /// Encodes the whole chunks of a dataset in dense row-major order.
+    ///
+    /// The encoder borrows complete contiguous input from `raw` for filtered chunks or gathers
+    /// into one reusable full-chunk buffer. For chunks stored without filtering, the writer
+    /// reuses gathered buffers as the stored bytes. Encoded chunks remain in the returned
+    /// collection for layout planning and emission.
     ///
     /// The elements of a chunk past `shape` take `fill`. Where `flags` has
     /// [`DONT_FILTER_PARTIAL_BOUND_CHUNKS`] set, a chunk that extends past `shape` is stored as its
@@ -42,7 +46,11 @@ impl PreparedChunk {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::InvalidChunkGeometry`] if a chunk is larger than [`u32::MAX`] bytes.
+    /// Returns [`FormatError::InvalidChunkGeometry`] if a chunk is larger than [`u32::MAX`] bytes,
+    /// the non-scalar geometry is invalid, or a derived count, stride, or offset exceeds
+    /// [`u64::MAX`]. Returns [`FormatError::ValueTooLargeForPlatform`] if an element size, chunk
+    /// count, or chunk byte length exceeds [`usize::MAX`]. Returns [`FormatError::Internal`] if
+    /// a scalar input has a length other than the full logical chunk length.
     /// Returns [`FormatError::UnreadableFillValue`] if a chunk extends past `shape` and `fill` is
     /// [`FillPattern::UNKNOWN`]. Returns the errors of [`filters::compress_chunk_with`] for a
     /// filtered chunk.
@@ -59,29 +67,46 @@ impl PreparedChunk {
     ) -> Result<Vec<Self>, FormatError> {
         let element_size = ctx.element_size.narrow()?;
         chunked_read::bounded_chunk_len(ctx.chunk_dims, element_size)?;
-        let split =
-            chunked_write::split_into_chunks(raw, shape, ctx.chunk_dims, element_size, fill)?;
-        let mut offsets = flags
-            .partial_edge_chunks_stored_raw()
-            .then(|| vec![0; shape.len()]);
-        let mut chunks = Vec::with_capacity(split.len());
-        for logical in split {
-            let decoding = match offsets.as_deref_mut() {
-                Some(offsets) => {
-                    let decoding = ChunkDecoding::at_extent(flags, ctx.chunk_dims, shape, offsets);
-                    advance_row_major(ctx.chunk_dims, shape, offsets);
-                    decoding
-                }
-                None => ChunkDecoding::Pipeline,
-            };
-            chunks.push(Self::encode(
+        if shape.is_empty() {
+            return Ok(vec![Self::encode(
                 scratch,
                 pipeline,
                 ctx,
-                ChunkEncoding::for_decoding(decoding),
-                logical,
-            )?);
+                ChunkEncoding::Filtered,
+                raw.to_vec(),
+            )?]);
         }
+        let mut traversal = ChunkTraversal::new(shape, ctx.chunk_dims, element_size)?;
+        let mut chunks = Vec::with_capacity(traversal.chunk_count().narrow()?);
+        let mut gathered = Vec::new();
+        traversal.visit(|chunk| {
+            let encoding = ChunkEncoding::for_decoding(ChunkDecoding::at_extent(
+                flags,
+                ctx.chunk_dims,
+                shape,
+                chunk.offsets(),
+            ));
+            let prepared = match (encoding, pipeline) {
+                (ChunkEncoding::Filtered, Some(pipeline)) => {
+                    let logical = match chunk.contiguous(raw)? {
+                        Some(logical) => logical,
+                        None => {
+                            gathered.resize(chunk.byte_len(), 0);
+                            chunk.gather(raw, fill, &mut gathered)?;
+                            &gathered
+                        }
+                    };
+                    Self::encode_filtered(scratch, pipeline, ctx, logical)?
+                }
+                _ => {
+                    let mut logical = vec![0; chunk.byte_len()];
+                    chunk.gather(raw, fill, &mut logical)?;
+                    Self::encode(scratch, pipeline, ctx, encoding, logical)?
+                }
+            };
+            chunks.push(prepared);
+            Ok(())
+        })?;
         Ok(chunks)
     }
 
@@ -101,28 +126,57 @@ impl PreparedChunk {
         encoding: ChunkEncoding,
         logical: Vec<u8>,
     ) -> Result<Self, FormatError> {
+        if let (ChunkEncoding::Filtered, Some(pipeline)) = (encoding, pipeline) {
+            return Self::encode_filtered(scratch, pipeline, ctx, &logical);
+        }
+        Self::check_logical_length(ctx, logical.len())?;
+        let filtering = match encoding {
+            ChunkEncoding::Filtered => ChunkFiltering::Filtered { filter_mask: 0 },
+            ChunkEncoding::FiltersSkipped => ChunkFiltering::Filtered {
+                filter_mask: every_filter_skipped(pipeline)?,
+            },
+            ChunkEncoding::Raw => ChunkFiltering::Raw,
+        };
+        Ok(Self {
+            bytes: logical,
+            filtering,
+        })
+    }
+
+    /// Encodes borrowed full-chunk bytes through `pipeline`, recording a filter mask of zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if `logical` is not the full chunk length of `ctx`.
+    /// Propagates chunk-size errors from [`chunked_read::bounded_chunk_len`] and filter errors
+    /// from [`filters::compress_chunk_with`].
+    pub(crate) fn encode_filtered(
+        scratch: &mut FilterScratch,
+        pipeline: &FilterPipeline,
+        ctx: ChunkContext<'_>,
+        logical: &[u8],
+    ) -> Result<Self, FormatError> {
+        Self::check_logical_length(ctx, logical.len())?;
+        Ok(Self {
+            bytes: filters::compress_chunk_with(scratch, logical, pipeline, ctx)?,
+            filtering: ChunkFiltering::Filtered { filter_mask: 0 },
+        })
+    }
+
+    /// Checks that `actual` equals the full logical chunk length of `ctx`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the lengths differ. Propagates chunk-size errors
+    /// from [`chunked_read::bounded_chunk_len`].
+    fn check_logical_length(ctx: ChunkContext<'_>, actual: usize) -> Result<(), FormatError> {
         let expected = chunked_read::bounded_chunk_len(ctx.chunk_dims, ctx.element_size.narrow()?)?;
-        if logical.len() != expected {
+        if actual != expected {
             return Err(FormatError::Internal(format!(
-                "a chunk prepared for storage holds {} of its {expected} logical bytes",
-                logical.len()
+                "a chunk prepared for storage holds {actual} of its {expected} logical bytes"
             )));
         }
-        let (bytes, filtering) = match (encoding, pipeline) {
-            (ChunkEncoding::Filtered, Some(pipeline)) => (
-                filters::compress_chunk_with(scratch, &logical, pipeline, ctx)?,
-                ChunkFiltering::Filtered { filter_mask: 0 },
-            ),
-            (ChunkEncoding::Filtered, None) => {
-                (logical, ChunkFiltering::Filtered { filter_mask: 0 })
-            }
-            (ChunkEncoding::FiltersSkipped, pipeline) => {
-                let filter_mask = every_filter_skipped(pipeline)?;
-                (logical, ChunkFiltering::Filtered { filter_mask })
-            }
-            (ChunkEncoding::Raw, _) => (logical, ChunkFiltering::Raw),
-        };
-        Ok(Self { bytes, filtering })
+        Ok(())
     }
 
     /// Returns the bytes stored for the chunk.
@@ -180,18 +234,6 @@ impl ChunkEncoding {
             ChunkDecoding::Pipeline => Self::Filtered,
             ChunkDecoding::Verbatim => Self::Raw,
         }
-    }
-}
-
-/// Advances `offsets`, the element offsets of a chunk in a dataset of extent `shape`, to the next
-/// chunk in row-major grid order, and back to the first chunk after the last.
-fn advance_row_major(chunk_dims: &[u64], shape: &[u64], offsets: &mut [u64]) {
-    for ((&chunk, &dim), offset) in chunk_dims.iter().zip(shape).zip(offsets).rev() {
-        *offset = offset.saturating_add(chunk);
-        if *offset < dim {
-            return;
-        }
-        *offset = 0;
     }
 }
 
@@ -293,6 +335,50 @@ mod tests {
                 value: 33,
                 maximum: 32,
             }
+        );
+    }
+
+    #[rstest]
+    #[case::raw(ChunkEncoding::Raw, false, 0)]
+    #[case::skipped(ChunkEncoding::FiltersSkipped, true, 1)]
+    #[case::unfiltered(ChunkEncoding::Filtered, false, 0)]
+    fn raw_encoding_keeps_the_owned_buffer(
+        #[case] encoding: ChunkEncoding,
+        #[case] with_pipeline: bool,
+        #[case] mask: u32,
+    ) {
+        let logical = vec![7; 16];
+        let pointer = logical.as_ptr();
+        let pipeline = with_pipeline.then(|| shuffles(1));
+        let chunk = PreparedChunk::encode(
+            &mut FilterScratch::new(),
+            pipeline.as_ref(),
+            ChunkContext::basic(&[4], 4),
+            encoding,
+            logical,
+        )
+        .unwrap();
+        assert_eq!(chunk.bytes().as_ptr(), pointer);
+        assert_eq!(chunk.bytes(), &[7; 16]);
+        assert_eq!(chunk.filter_mask(), mask);
+    }
+
+    #[rstest]
+    #[case::short(12)]
+    #[case::long(20)]
+    fn borrowed_encoding_rejects_a_logical_chunk_of_another_length(#[case] len: usize) {
+        let error = PreparedChunk::encode_filtered(
+            &mut FilterScratch::new(),
+            &shuffles(1),
+            ChunkContext::basic(&[4], 4),
+            &vec![7; len],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            FormatError::Internal(format!(
+                "a chunk prepared for storage holds {len} of its 16 logical bytes"
+            ))
         );
     }
 
