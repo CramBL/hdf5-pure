@@ -793,7 +793,7 @@ impl<S: Source + ?Sized> CopyReader<'_, S> {
         &self,
         budget: TraversalBudget,
         addr: u64,
-    ) -> Result<ObjectTree<CopySource>, Error> {
+    ) -> Result<ObjectTree<CopySource, CopyLinkLabel>, Error> {
         let root = ObjectId::new(PhysicalAddress::new(addr));
         ObjectGraph::discover(budget, root, |id| self.expand(id))?
             .into_tree()
@@ -806,7 +806,10 @@ impl<S: Source + ?Sized> CopyReader<'_, S> {
     /// # Errors
     ///
     /// Returns the errors [`node`](Self::node) returns.
-    fn build_copy_tree(&self, tree: ObjectTree<CopySource>) -> Result<CopyTree, Error> {
+    fn build_copy_tree(
+        &self,
+        tree: ObjectTree<CopySource, CopyLinkLabel>,
+    ) -> Result<CopyTree, Error> {
         let (descendants, root) = tree.into_parts();
         let mut nodes = CopyTreeBuilder::default();
         let mut ids = Vec::with_capacity(descendants.len());
@@ -825,7 +828,7 @@ impl<S: Source + ?Sized> CopyReader<'_, S> {
     /// Returns [`Error::EditUnsupported`] if a cross-file copy reads an object with references
     /// into the source file, and [`Error::Format`] if a link's address overflows. Returns the
     /// errors [`WriteEngine::read_object`] returns.
-    fn expand(&self, id: ObjectId) -> Result<Expansion<CopySource>, Error> {
+    fn expand(&self, id: ObjectId) -> Result<Expansion<CopySource, CopyLinkLabel>, Error> {
         let Self {
             src,
             access_mode,
@@ -848,8 +851,10 @@ impl<S: Source + ?Sized> CopyReader<'_, S> {
             .into_iter()
             .map(|(name, creation_order, target)| {
                 Ok(HardLink {
-                    name,
-                    creation_order,
+                    label: CopyLinkLabel {
+                        name,
+                        creation_order,
+                    },
                     target: ObjectId::resolve(base, target)?,
                 })
             })
@@ -871,7 +876,11 @@ impl<S: Source + ?Sized> CopyReader<'_, S> {
     /// Returns [`Error::EditUnsupported`] if the editor cannot reproduce the storage of a dataset
     /// or the storage extends past the source, and [`Error::Format`] if a link of `object` targets
     /// an object that is not in `ids`. Propagates payload read and parse errors.
-    fn node(&self, object: GraphObject<CopySource>, ids: &[CopyNodeId]) -> Result<CopyNode, Error> {
+    fn node(
+        &self,
+        object: GraphObject<CopySource, CopyLinkLabel>,
+        ids: &[CopyNodeId],
+    ) -> Result<CopyNode, Error> {
         let Self {
             src, base, widths, ..
         } = *self;
@@ -988,8 +997,11 @@ impl<S: Source + ?Sized> CopyReader<'_, S> {
                     .into_iter()
                     .map(
                         |HardLink {
-                             name,
-                             creation_order,
+                             label:
+                                 CopyLinkLabel {
+                                     name,
+                                     creation_order,
+                                 },
                              target,
                          }| {
                             let target = ids.get(target.get()).copied().ok_or_else(|| {
@@ -1119,6 +1131,13 @@ impl CopySource {
             } => (region, dense_attrs),
         }
     }
+}
+
+/// The name and the creation index of a hard link a copy reproduces.
+struct CopyLinkLabel {
+    name: String,
+    /// The creation index of the link, or `None` if its Link message has none.
+    creation_order: Option<u64>,
 }
 
 /// Parsed dataset metadata with the filter pipeline preserved as stored bytes.
