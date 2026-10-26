@@ -3,6 +3,7 @@
 use alloc::format;
 use alloc::vec::Vec;
 use core::num::NonZeroU64;
+use core::ops::Range;
 
 use hdf5_pure_space::__private::ManagerKind;
 
@@ -94,10 +95,13 @@ impl ReusableSpaceStats {
 /// when persistence is configured, including when every manager is empty or undefined. Section
 /// and manager addresses are relative to the HDF5 base address. The combined sections contain
 /// every section from the individual managers, including those with an unknown role.
+/// [`manager_metadata_bytes`](Self::manager_metadata_bytes) measures the file storage allocated
+/// to the managers themselves.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PersistedFreeSections {
     managers: Vec<FreeSpaceManagerSections>,
     free_sections: FreeSections,
+    manager_metadata_bytes: u64,
 }
 
 impl PersistedFreeSections {
@@ -106,9 +110,9 @@ impl PersistedFreeSections {
     /// # Errors
     ///
     /// Returns [`FormatError::InvalidFreeSpaceManager`] if multiple slots record the same
-    /// manager header address, a section has zero length, or a section or manager allocation
-    /// exceeds the file allocation. Returns [`FormatError::OffsetOverflow`] if an address,
-    /// section end, or byte total overflows.
+    /// manager header address, manager allocations overlap, a section has zero length, or a
+    /// section or manager allocation exceeds the file allocation. Returns
+    /// [`FormatError::OffsetOverflow`] if an address, section end, or byte total overflows.
     /// Other failures are the errors of [`free_space_manager::read_persisted_sections_source`].
     pub(crate) fn read(
         source: &impl Source,
@@ -119,6 +123,7 @@ impl PersistedFreeSections {
     ) -> Result<Self, FormatError> {
         let mut managers = Vec::new();
         let mut all_sections = Vec::new();
+        let mut allocations = Vec::<Range<u64>>::new();
         for (slot, &address) in info.manager_addrs.iter().enumerate() {
             let DecodedStoredAddress::Defined(address) = address else {
                 continue;
@@ -143,6 +148,7 @@ impl PersistedFreeSections {
                 &[DecodedStoredAddress::Defined(address)],
             )?;
             let physical_eof = base.absolute(StoredAddress::new(stored_eof))?;
+            let mut metadata_bytes = 0u64;
             for (address, length) in blocks {
                 let end = address
                     .checked_add(length)
@@ -155,6 +161,25 @@ impl PersistedFreeSections {
                         "the manager allocation at {address}, {length} bytes long, exceeds the file allocation"
                     )));
                 }
+                if let Some(previous) = allocations
+                    .iter()
+                    .find(|previous| address < previous.end && previous.start < end)
+                {
+                    return Err(FormatError::InvalidFreeSpaceManager(format!(
+                        "the manager allocation at {address}, {length} bytes long, overlaps the \
+                         manager allocation at {}, {} bytes long",
+                        previous.start,
+                        previous.end - previous.start,
+                    )));
+                }
+                allocations.push(address..end);
+                metadata_bytes =
+                    metadata_bytes
+                        .checked_add(length)
+                        .ok_or(FormatError::OffsetOverflow {
+                            offset: metadata_bytes,
+                            length,
+                        })?;
             }
             let sections = sections
                 .into_iter()
@@ -191,11 +216,20 @@ impl PersistedFreeSections {
                 address,
                 role,
                 free_sections: FreeSections::new(sections)?,
+                metadata_bytes,
             });
         }
+        let manager_metadata_bytes = managers.iter().try_fold(0u64, |sum, manager| {
+            sum.checked_add(manager.metadata_bytes())
+                .ok_or(FormatError::OffsetOverflow {
+                    offset: sum,
+                    length: manager.metadata_bytes(),
+                })
+        })?;
         Ok(Self {
             managers,
             free_sections: FreeSections::new(all_sections)?,
+            manager_metadata_bytes,
         })
     }
 
@@ -212,6 +246,23 @@ impl PersistedFreeSections {
     pub const fn free_sections(&self) -> &FreeSections {
         &self.free_sections
     }
+
+    /// Returns the file bytes allocated to persisted manager headers and section lists.
+    ///
+    /// This is the checked sum of [`FreeSpaceManagerSections::metadata_bytes`] for every
+    /// defined manager, including managers with an unknown role. It includes unused section-list
+    /// capacity and is zero when every manager slot is undefined.
+    ///
+    /// Excludes the free sections themselves, the File Space Info message and its object header,
+    /// userblocks, dataset storage and other metadata, aggregate or append reservations, dead
+    /// or unclassified storage, and trailing file slack. It measures persisted manager storage only.
+    ///
+    /// The C library's `H5Fget_info2` reports free-space-manager metadata for an open handle.
+    /// `H5FS_size` can use an in-memory section-list size (`H5FS.c`, HDF5 1.14.6), so that
+    /// statistic can differ from this allocation count.
+    pub const fn manager_metadata_bytes(&self) -> u64 {
+        self.manager_metadata_bytes
+    }
 }
 
 /// The sections recorded in one defined File Space Info manager slot.
@@ -225,6 +276,7 @@ pub struct FreeSpaceManagerSections {
     address: StoredAddress,
     role: FreeSpaceManagerRole,
     free_sections: FreeSections,
+    metadata_bytes: u64,
 }
 
 impl FreeSpaceManagerSections {
@@ -251,6 +303,21 @@ impl FreeSpaceManagerSections {
     /// Returns this manager's sections in stored, base-relative coordinates.
     pub const fn free_sections(&self) -> &FreeSections {
         &self.free_sections
+    }
+
+    /// Returns the file bytes allocated to this manager's header and section list.
+    ///
+    /// Includes the width-dependent `FSHD` header size and the allocated `FSSE` section-list
+    /// size, including unused capacity. A manager without a section-list allocation occupies
+    /// its header size. The reader checks allocation bounds, overlaps, and arithmetic before
+    /// constructing the report.
+    ///
+    /// The version 0 header and section list are defined in "Free-space Index" of the
+    /// [format specification, version 4.0][spec].
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_freespaceindex
+    pub const fn metadata_bytes(&self) -> u64 {
+        self.metadata_bytes
     }
 }
 
@@ -499,6 +566,25 @@ mod tests {
             (manager.slot(), manager.address().get(), manager.role()),
             (slot, 64, role)
         );
+        let header_bytes = 4
+            + 1
+            + 1
+            + 4 * u64::from(length_width)
+            + 4 * 2
+            + u64::from(length_width)
+            + u64::from(offset_width)
+            + 2 * u64::from(length_width)
+            + 4;
+        let list_bytes = 4
+            + 1
+            + u64::from(offset_width)
+            + 1
+            + u64::from(length_width)
+            + u64::from(offset_width)
+            + 1
+            + 4;
+        assert_eq!(manager.metadata_bytes(), header_bytes + list_bytes);
+        assert_eq!(report.manager_metadata_bytes(), header_bytes + list_bytes);
         assert_eq!(manager.free_sections(), report.free_sections());
         assert_eq!(report.free_sections().section_count(), 1);
         assert_eq!(report.free_sections().free_bytes(), 32);
@@ -643,6 +729,134 @@ mod tests {
         assert_eq!(report.managers()[0].free_sections().section_count(), 0);
         assert_eq!(report.managers()[0].free_sections().free_bytes(), 0);
         assert_eq!(report.managers()[0].free_sections(), report.free_sections());
+        assert_eq!(report.managers()[0].metadata_bytes(), 82 + 17);
+        assert_eq!(report.manager_metadata_bytes(), 82 + 17);
+    }
+
+    #[rstest]
+    fn a_header_without_a_section_list_counts_its_allocation(
+        #[values(2, 4, 8)] offset_width: u8,
+        #[values(2, 4, 8)] length_width: u8,
+    ) {
+        let widths = FormatWidths::from_sizes(offset_width, length_width).unwrap();
+        let (mut header, _) = format::serialize_free_space_manager(
+            widths,
+            &[],
+            StoredAddress::new(64),
+            StoredAddress::undefined(widths.offsets),
+            format::SECTION_CLASS_SIMPLE,
+        )
+        .unwrap();
+        let length_bytes = usize::from(length_width);
+        let used_at = header.len() - 4 - 2 * length_bytes;
+        header[used_at..used_at + 2 * length_bytes].fill(0);
+        let header_len = header.len();
+        crate::checksum::stamp_trailing(&mut header, 0, header_len);
+        let (mut bytes, info) = manager_file(widths, 0, 256, 32);
+        bytes[64..64 + header_len].copy_from_slice(&header);
+        let report = PersistedFreeSections::read(
+            &BytesSource::new(bytes),
+            widths,
+            BaseAddress::ZERO,
+            1024,
+            &info,
+        )
+        .unwrap();
+        let expected = 18 + u64::from(offset_width) + 7 * u64::from(length_width);
+        assert_eq!(report.managers()[0].metadata_bytes(), expected);
+        assert_eq!(report.manager_metadata_bytes(), expected);
+        assert_eq!(report.free_sections().free_bytes(), 0);
+    }
+
+    #[rstest]
+    fn section_list_capacity_counts_beyond_the_used_bytes(
+        #[values(2, 4, 8)] offset_width: u8,
+        #[values(2, 4, 8)] length_width: u8,
+    ) {
+        let widths = FormatWidths::from_sizes(offset_width, length_width).unwrap();
+        let (mut bytes, info) = manager_file(widths, 0, 256, 32);
+        let header_len = usize::try_from(format::free_space_manager_header_len(widths)).unwrap();
+        let length_bytes = usize::from(length_width);
+        let allocated_at = 64 + header_len - 4 - length_bytes;
+        let mut encoded = [0u8; 8];
+        encoded[..length_bytes].copy_from_slice(&bytes[allocated_at..allocated_at + length_bytes]);
+        let used = u64::from_le_bytes(encoded);
+        let allocated = used + 47;
+        bytes[allocated_at..allocated_at + length_bytes]
+            .copy_from_slice(&allocated.to_le_bytes()[..length_bytes]);
+        crate::checksum::stamp_trailing(&mut bytes, 64, header_len);
+        let report = PersistedFreeSections::read(
+            &BytesSource::new(bytes),
+            widths,
+            BaseAddress::ZERO,
+            1024,
+            &info,
+        )
+        .unwrap();
+        assert_eq!(
+            report.managers()[0].metadata_bytes(),
+            u64::try_from(header_len).unwrap() + allocated
+        );
+        assert_eq!(
+            report.manager_metadata_bytes(),
+            u64::try_from(header_len).unwrap() + allocated
+        );
+        assert_eq!(report.free_sections().free_bytes(), 32);
+    }
+
+    #[rstest]
+    #[case::overlaps_header(
+        400,
+        Some(
+            "the manager allocation at 512, 82 bytes long, overlaps the manager allocation at 146, 400 bytes long"
+        )
+    )]
+    #[case::overlaps_section_list(
+        548,
+        Some(
+            "the manager allocation at 0, 548 bytes long, overlaps the manager allocation at 64, 82 bytes long"
+        )
+    )]
+    #[case::adjacent(366, None)]
+    fn manager_allocations_reject_overlaps(#[case] capacity: u64, #[case] reason: Option<&str>) {
+        let widths = FormatWidths::from_sizes(8, 8).unwrap();
+        let (mut bytes, mut info) = manager_file(widths, 0, 256, 32);
+        let (header, list) = format::serialize_free_space_manager(
+            widths,
+            &[StoredSection {
+                addr: StoredAddress::new(320),
+                size: 16,
+            }],
+            StoredAddress::new(512),
+            StoredAddress::new(594),
+            format::SECTION_CLASS_SIMPLE,
+        )
+        .unwrap();
+        bytes[512..594].copy_from_slice(&header);
+        bytes[594..594 + list.len()].copy_from_slice(&list);
+        info.manager_addrs[1] = DecodedStoredAddress::Defined(StoredAddress::new(512));
+        if capacity == 548 {
+            bytes.copy_within(146..181, 0);
+            bytes[118..126].copy_from_slice(&0u64.to_le_bytes());
+        }
+        bytes[134..142].copy_from_slice(&capacity.to_le_bytes());
+        crate::checksum::stamp_trailing(&mut bytes, 64, 82);
+        let result = PersistedFreeSections::read(
+            &BytesSource::new(bytes),
+            widths,
+            BaseAddress::ZERO,
+            1024,
+            &info,
+        );
+        if let Some(reason) = reason {
+            assert_eq!(
+                result.unwrap_err(),
+                FormatError::InvalidFreeSpaceManager(reason.into())
+            );
+        } else {
+            let report = result.unwrap();
+            assert_eq!(report.manager_metadata_bytes(), 82 + capacity + 82 + 35);
+        }
     }
 
     #[test]
@@ -692,8 +906,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn distinct_managers_combine_their_sections() {
+    #[rstest]
+    #[case::flat(FileSpaceStrategy::FsmAggr, 1, FreeSpaceManagerRole::FsmAggr)]
+    #[case::page_raw(FileSpaceStrategy::Page, 2, FreeSpaceManagerRole::PageSmallRawData)]
+    #[case::page_large(FileSpaceStrategy::Page, 6, FreeSpaceManagerRole::PageLargeGeneric)]
+    #[case::unknown(FileSpaceStrategy::Page, 7, FreeSpaceManagerRole::Unknown)]
+    fn distinct_managers_combine_their_sections(
+        #[case] strategy: FileSpaceStrategy,
+        #[case] slot: usize,
+        #[case] role: FreeSpaceManagerRole,
+    ) {
         let widths = FormatWidths::from_sizes(8, 8).unwrap();
         let (mut bytes, mut info) = manager_file(widths, 0, 256, 32);
         let header_address = StoredAddress::new(512);
@@ -710,7 +932,8 @@ mod tests {
         .unwrap();
         bytes[512..512 + header.len()].copy_from_slice(&header);
         bytes[512 + header.len()..512 + header.len() + list.len()].copy_from_slice(&list);
-        info.manager_addrs[1] = DecodedStoredAddress::Defined(header_address);
+        info.strategy = strategy;
+        info.manager_addrs[slot] = DecodedStoredAddress::Defined(header_address);
         let report = PersistedFreeSections::read(
             &BytesSource::new(bytes),
             widths,
@@ -725,6 +948,10 @@ mod tests {
         assert_eq!(report.free_sections().section_count(), 2);
         assert_eq!(report.free_sections().free_bytes(), 48);
         assert_eq!(report.managers().len(), 2);
+        assert_eq!(report.managers()[0].metadata_bytes(), 117);
+        assert_eq!(report.managers()[1].metadata_bytes(), 117);
+        assert_eq!(report.manager_metadata_bytes(), 234);
+        assert_eq!(report.managers()[1].role(), role);
         assert_eq!(report.managers()[0].free_sections().sections(), [first]);
         assert_eq!(report.managers()[1].free_sections().sections(), [second]);
         assert_eq!(
@@ -739,7 +966,7 @@ mod tests {
                 report.managers()[1].slot(),
                 report.managers()[1].address().get()
             ),
-            (1, 512)
+            (slot, 512)
         );
     }
 

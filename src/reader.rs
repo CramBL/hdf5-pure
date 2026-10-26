@@ -3809,6 +3809,9 @@ impl File {
     ///
     /// Each defined manager has a report, including empty managers and managers with an unknown
     /// role. The combined count and free-byte total equal the sums of the per-manager values.
+    /// [`PersistedFreeSections::manager_metadata_bytes`] reports the file bytes allocated to
+    /// manager headers and section lists, including unused list capacity. A manager with zero
+    /// free sections can occupy file storage.
     /// Session-reusable space is available through
     /// [`reusable_free_sections`](Self::reusable_free_sections).
     ///
@@ -3816,9 +3819,9 @@ impl File {
     ///
     /// Returns [`Error::FreeSectionInspectionUnsupported`] if this is a writable handle.
     /// Returns [`Error::Format`] if File Space Info records the same manager header address in
-    /// multiple slots, File Space Info or manager metadata is malformed or truncated, an
-    /// allocation or section exceeds the file allocation, or an address or byte total
-    /// overflows. Source read errors are also reported through [`Error::Format`].
+    /// multiple slots, File Space Info or manager metadata is malformed or truncated,
+    /// manager allocations overlap, an allocation or section exceeds the file allocation, or an
+    /// address or byte total overflows. Source read errors are also reported through [`Error::Format`].
     ///
     /// # Examples
     ///
@@ -3839,11 +3842,12 @@ impl File {
     /// let report = file.persisted_free_sections()?.expect("persistence is configured");
     /// assert_eq!(report.free_sections().section_count(), 0);
     /// assert_eq!(report.free_sections().free_bytes(), 0);
+    /// assert_eq!(report.manager_metadata_bytes(), 0);
     /// # Ok::<(), hdf5_pure::Error>(())
     /// ```
     ///
-    /// Reads sections through a streaming handle and compares the combined count with the
-    /// manager counts:
+    /// Reads sections through a streaming handle, prints free bytes and manager metadata bytes,
+    /// and compares the combined count with the manager counts:
     ///
     /// ```
     /// # use hdf5_pure::{File, FileBuilder, FileSpaceSettings, FileSpaceStrategy};
@@ -3868,6 +3872,8 @@ impl File {
     /// let file = File::open_streaming(&path)?;
     /// let report = file.persisted_free_sections()?.expect("persistence is configured");
     /// let sections = report.free_sections();
+    /// println!("Free section bytes: {}", sections.free_bytes());
+    /// println!("Persisted manager metadata bytes: {}", report.manager_metadata_bytes());
     /// let section = sections.sections().first().expect("deleted storage is free");
     /// assert_eq!(section.coordinates(), FreeSectionCoordinates::Stored);
     /// assert_eq!(section.end_address() - section.address(), section.length().get());

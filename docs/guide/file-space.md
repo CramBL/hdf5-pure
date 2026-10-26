@@ -276,6 +276,25 @@ Passing `persist = true` under [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr) or
 the tracked free regions, sorted by address, with combined and per-manager totals. A read-write
 session recovers these regions into its free list, so reuse spans sessions.
 
+[`PersistedFreeSections::manager_metadata_bytes`](crate::PersistedFreeSections::manager_metadata_bytes)
+reports the bytes allocated on disk to the persisted managers themselves: each `FSHD` header
+and its `FSSE` section-list allocation, including unused list capacity. The total equals the sum
+of [`FreeSpaceManagerSections::metadata_bytes`](crate::FreeSpaceManagerSections::metadata_bytes)
+for the defined managers. A manager with only a header has zero free-section bytes and positive
+metadata bytes. Undefined slots contribute zero.
+
+For a report named `report`, `report.free_sections().free_bytes()` measures tracked free regions,
+and `report.manager_metadata_bytes()` measures their persisted bookkeeping. The latter excludes
+the File Space Info message and its object header, userblocks, dataset storage and other metadata,
+the free regions themselves, aggregate or append reservations, dead or unclassified storage, and
+trailing slack. It measures only persisted manager allocations. Relocating a file image or adding
+a userblock leaves this byte count unchanged.
+
+The C library's `H5Fget_info2` reports free-space-manager metadata for the open handle, which can
+include managers active only in memory. `H5FS_size` uses the in-memory section-list size when that
+list is loaded and the allocated size otherwise (`H5FS.c`, HDF5 1.14.6). Its result can therefore
+differ from the persisted allocation count.
+
 The editor places replacement manager blocks in reusable free space where they fit. Under
 [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr), it reserves a contiguous allocation for its extension
 and managers that is smaller than the threshold. It first publishes replacement metadata elsewhere,
