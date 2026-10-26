@@ -2127,7 +2127,7 @@ fn a_vlen_string_dataset_keeps_its_pipeline_order_and_optional_flags() {
 
 /// The attribute encodings this crate writes only through a crate-private seam:
 /// a fixed-width string with null termination and a Null dataspace, which the C
-/// library's own API cannot express. `src/repack.rs` commits its source file as
+/// library's own API cannot express. `src/repack/mod.rs` commits its source file as
 /// `tests/data/pure/exotic_attributes.h5` and checks the fixture still
 /// holds them. Repacked through the public API, the C library finds every
 /// attribute it found in the source, and can open each.

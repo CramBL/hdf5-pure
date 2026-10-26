@@ -909,8 +909,8 @@ fn c_finds_colliding_names_after_a_repack() {
 /// pass just as well on a file that was never broken.
 ///
 /// What this does *not* guard is the tie-break itself, and the reason is worth
-/// knowing: `repack` re-sets the attributes it read in name order (`sorted` in
-/// `repack.rs`), so the rebuild is handed a list on which a hash-only stable sort
+/// knowing: `repack` re-sets the attributes it read in name order (`copy_attrs` in
+/// `src/repack/mod.rs`), so the rebuild is handed a list on which a hash-only stable sort
 /// already produces name order within a hash group. Deleting the tie-break leaves
 /// this test green. The sort is guarded by
 /// [`c_finds_colliding_names_in_a_multi_level_index`] and its single-leaf sibling;
