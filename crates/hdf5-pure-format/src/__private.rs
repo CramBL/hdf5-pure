@@ -210,6 +210,10 @@ pub use crate::link_info::LinkInfoMessage;
 pub use crate::link_message::LinkMessage;
 pub use crate::link_message::LinkTarget;
 pub use crate::link_message::link_is_named;
+pub use crate::link_storage::{
+    GroupLinkStorage, LinkCreationCounter, LinkCreationPolicy, LinkStorageError, OwnedLink,
+    OwnedLinkTarget,
+};
 pub use crate::local_heap::LocalHeap;
 pub use crate::local_heap::LocalHeapDataSegment;
 pub use crate::local_heap::LocalHeapLocator;

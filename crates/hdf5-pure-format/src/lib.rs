@@ -50,6 +50,7 @@ mod free_space_manager;
 mod global_heap;
 mod link_info;
 mod link_message;
+mod link_storage;
 mod local_heap;
 mod message_flags;
 mod message_type;

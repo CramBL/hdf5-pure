@@ -63,6 +63,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `File::commit` overflowing tracked group link creation counters or changing file bytes before rejecting an exhausted counter. Unsupported counters in rebuilt groups are rejected during planning ([#920](https://github.com/CramBL/hdf5-pure/pull/920)).
 - Fixed `Group::groups` and related reads misinterpreting managed heap IDs with non-byte-aligned offsets or trailing padding ([#917](https://github.com/CramBL/hdf5-pure/pull/917)).
 - Fixed `File::persisted_free_sections` counting a persisted manager more than once when multiple slots record its header address.
 - Fixed `FileBuilder::finish` and related dataset creation writing chunks of 4 GiB or more ([#892](https://github.com/CramBL/hdf5-pure/pull/892)).
