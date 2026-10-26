@@ -439,6 +439,12 @@ harness = false
 name = "chunk_index"
 harness = false
 
+# Measure dense and sparse whole reads with cold and warm parsed indexes.
+[[bench]]
+name = "dense_chunk_reads"
+harness = false
+required-features = ["std"]
+
 # Style-preference clippy lints muted crate-wide. The remaining clippy
 # surface is still on (`-D warnings` in CI), so genuinely problematic
 # patterns continue to fail the build.
