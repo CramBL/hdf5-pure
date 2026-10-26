@@ -623,9 +623,9 @@ pub(crate) fn bounded_chunk_len(
 ///
 /// The output byte length must fit [`usize`] before the reader reads the chunk index.
 /// Dataset dimensions are converted to host-sized indexes only for a nonempty output.
-/// For a nonempty dataset with proven dense coverage, the reader allocates output without
-/// initialization.
-/// Otherwise, the reader initializes output from the fill pattern.
+/// Returns an empty vector for a zero-element dataset without consulting the fill pattern.
+/// For nonempty output, allocates without initialization if dense coverage is proven and uses
+/// the fill pattern otherwise.
 ///
 /// # Errors
 ///
@@ -657,7 +657,7 @@ pub fn read_chunked_data_from_source<S: Source + ?Sized>(
         return spec.unallocated_buffer();
     };
     if total_bytes == 0 {
-        return fill.buffer(0);
+        return Ok(Vec::new());
     }
     let index = ParsedChunkIndex::new(chunks, chunk_dims_u64, ds_dims)?;
     let mut assembly = WholeAssembly::new(&index, chunk_dims_u64, ds_dims, elem_size, fill)?;
@@ -1169,9 +1169,9 @@ fn row_major_strides(dims: &[usize]) -> Result<Vec<usize>, FormatError> {
 /// Reads a whole chunked dataset from a [`Source`] with index and decoded-chunk caching.
 ///
 /// Dataset dimensions are converted to host-sized indexes only for a nonempty output.
-/// For a nonempty dataset with proven dense coverage, the reader allocates output without
-/// initialization.
-/// Otherwise, the reader initializes output from the fill pattern.
+/// Returns an empty vector for a zero-element dataset without consulting the fill pattern.
+/// For nonempty output, allocates without initialization if dense coverage is proven and uses
+/// the fill pattern otherwise.
 ///
 /// # Errors
 ///
@@ -1212,7 +1212,7 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
     bounded_chunk_len(chunk_dims, elem_size)?;
     let total_bytes = spec.byte_len()?;
     if total_bytes == 0 {
-        return fill.buffer(0);
+        return Ok(Vec::new());
     }
     let chunk_dims_u64 = chunk_dims;
 
@@ -1888,9 +1888,9 @@ pub(crate) fn chunk_index_spans_from_source<S: Source + ?Sized>(
 /// Reads a whole chunked dataset from a file buffer with index and decoded-chunk caching.
 ///
 /// Dataset dimensions are converted to host-sized indexes only for a nonempty output.
-/// For a nonempty dataset with proven dense coverage, the reader allocates output without
-/// initialization.
-/// Otherwise, the reader initializes output from the fill pattern.
+/// Returns an empty vector for a zero-element dataset without consulting the fill pattern.
+/// For nonempty output, allocates without initialization if dense coverage is proven and uses
+/// the fill pattern otherwise.
 ///
 /// # Errors
 ///
@@ -1933,7 +1933,7 @@ pub fn read_chunked_data_cached(
     bounded_chunk_len(chunk_dims, elem_size)?;
     let total_bytes = spec.byte_len()?;
     if total_bytes == 0 {
-        return fill.buffer(0);
+        return Ok(Vec::new());
     }
     let chunk_dims_u64 = chunk_dims;
 
@@ -2638,6 +2638,9 @@ fn multiply_offset(offset: usize, length: usize) -> Result<usize, FormatError> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(feature = "std"))]
+    use alloc::boxed::Box;
+
     use core::ops::Range;
     #[cfg(feature = "std")]
     use std::io::Cursor;
@@ -5814,6 +5817,7 @@ mod tests {
     #[case(true)]
     fn whole_chunked_reads_return_an_empty_output_for_large_zero_element_geometry(
         #[case] allocated: bool,
+        #[values(false, true)] unreadable_fill: bool,
     ) {
         let bytes = build_chunk_btree_leaf(&[], 3, WIDTHS);
         let layout = DataLayout::Chunked {
@@ -5830,7 +5834,12 @@ mod tests {
             max_dimensions: None,
         };
         let datatype = make_f64_type();
-        let spec = RawReadSpec::plain(&layout, &dataspace, &datatype);
+        let fill = if unreadable_fill {
+            FillPattern::UNKNOWN
+        } else {
+            FillPattern::ZERO
+        };
+        let spec = RawReadSpec::parse(&layout, &dataspace, &datatype, None, fill).unwrap();
         let source = BytesSource::new(&bytes);
         assert_eq!(
             read_chunked_data_from_source(&source, spec, FORMAT_WIDTHS).unwrap(),
@@ -5844,6 +5853,91 @@ mod tests {
         assert_eq!(
             read_chunked_data_cached(&bytes, spec, FORMAT_WIDTHS, &ChunkCache::new()).unwrap(),
             Vec::<u8>::new()
+        );
+    }
+
+    #[rstest]
+    #[case::rank(vec![4, 8], FormatError::ChunkedReadError("rank mismatch: dataspace has 2 dims, layout has 2 chunk dims (rank=1)".into()))]
+    #[case::no_dimensions(vec![], FormatError::ChunkedReadError("chunked layout has no dimensions".into()))]
+    #[case::oversized_chunk(vec![u64::MAX, 2, 8], FormatError::InvalidChunkGeometry("chunk logical byte size exceeds the reader's single-chunk allocation limit"))]
+    fn empty_chunked_reads_preserve_geometry_validation(
+        #[case] chunk_dimensions: Vec<u64>,
+        #[case] error: FormatError,
+        #[values(false, true)] allocated: bool,
+    ) {
+        let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::NONE,
+            chunk_dimensions,
+            index: ChunkIndexLayout::BTreeV1 {
+                address: allocated.then_some(StoredAddress::new(0)),
+            },
+        };
+        let dataspace = Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: 2,
+            dimensions: vec![0, 0],
+            max_dimensions: None,
+        };
+        let datatype = make_f64_type();
+        let spec =
+            RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::UNKNOWN).unwrap();
+        let source = BytesSource::new(b"");
+        let expected = if allocated {
+            Err(error)
+        } else {
+            Ok(Vec::new())
+        };
+        assert_eq!(
+            read_chunked_data_from_source(&source, spec, FORMAT_WIDTHS),
+            expected
+        );
+        assert_eq!(
+            read_chunked_data_cached_from_source(&source, spec, FORMAT_WIDTHS, &ChunkCache::new()),
+            expected
+        );
+        assert_eq!(
+            read_chunked_data_cached(b"", spec, FORMAT_WIDTHS, &ChunkCache::new()),
+            expected
+        );
+    }
+
+    #[rstest]
+    fn empty_chunked_reads_reject_zero_width_datatypes(#[values(false, true)] allocated: bool) {
+        let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::NONE,
+            chunk_dimensions: vec![4, 1, 8],
+            index: ChunkIndexLayout::BTreeV1 {
+                address: allocated.then_some(StoredAddress::new(0)),
+            },
+        };
+        let dataspace = Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: 2,
+            dimensions: vec![0, 0],
+            max_dimensions: None,
+        };
+        let datatype = Datatype::Array {
+            base_type: Box::new(make_f64_type()),
+            dimensions: vec![0],
+        };
+        let spec =
+            RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::UNKNOWN).unwrap();
+        let source = BytesSource::new(b"");
+        let expected = FormatError::ZeroSizedDatatype {
+            class: ARRAY_DATATYPE_CLASS,
+        };
+        assert_eq!(
+            read_chunked_data_from_source(&source, spec, FORMAT_WIDTHS).unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            read_chunked_data_cached_from_source(&source, spec, FORMAT_WIDTHS, &ChunkCache::new())
+                .unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            read_chunked_data_cached(b"", spec, FORMAT_WIDTHS, &ChunkCache::new()).unwrap_err(),
+            expected
         );
     }
 
@@ -5886,6 +5980,12 @@ mod tests {
         );
     }
 
+    /// The class field value for an array datatype.
+    ///
+    /// Defined in "The Datatype Message" of the [format specification, version 4.0][spec].
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+    const ARRAY_DATATYPE_CLASS: u8 = 10;
     // "The Data Storage - Filter Pipeline Message" in format specification, version 4.0,
     // defines pipeline message version 2.
     const FILTER_PIPELINE_VERSION: u8 = 2;
