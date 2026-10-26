@@ -230,6 +230,35 @@ fn pure_reads_c_written_chunked_f64_fill() {
     assert_eq!(ds.read_f64().unwrap(), vec![1.0, 2.0, 3.0, 4.0]);
 }
 
+#[rstest]
+fn pure_reads_c_written_dense_edge_chunks(
+    #[values(false, true)] filtered: bool,
+    #[values(false, true)] streaming: bool,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dense_edges.h5");
+    let expected: Vec<i32> = (0..45).collect();
+    {
+        let file = file::libhdf5_create_v110(&path);
+        let builder = file
+            .new_dataset::<i32>()
+            .shape((3, 5, 3))
+            .chunk((2, 3, 2))
+            .fill_value(-7);
+        let builder = if filtered { builder.shuffle() } else { builder };
+        let dataset = builder.create("d").unwrap();
+        dataset.write_raw(&expected).unwrap();
+    }
+    let file = if streaming {
+        File::open_streaming(&path).unwrap()
+    } else {
+        File::open(&path).unwrap()
+    };
+    let dataset = file.dataset("d").unwrap();
+    assert_eq!(dataset.read_i32().unwrap(), expected);
+    assert_eq!(dataset.read_i32().unwrap(), expected);
+}
+
 /// Create an i32 dataset whose fill value is explicitly *undefined* (a version-3
 /// message with the "undefined" bit set), with libhdf5.
 fn c_write_i32_no_fill(path: &std::path::Path) {

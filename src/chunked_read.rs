@@ -8,6 +8,7 @@ use alloc::{borrow::Cow, format, vec, vec::Vec};
 #[cfg(feature = "std")]
 use std::borrow::Cow;
 
+use core::mem::MaybeUninit;
 use core::num::{NonZeroU64, NonZeroUsize};
 
 use hdf5_pure_core::__private::FileRange;
@@ -51,37 +52,6 @@ use crate::source::SourceMetadata;
 use crate::width::{FormatWidths, OffsetWidth};
 #[cfg(test)]
 use crate::{FixedPointType, FloatingPointType};
-
-/// Decodes every chunk, reading each chunk's bytes from a [`Source`].
-///
-/// Decoding is sequential: a `ReadSeekSource` serializes on its mutex, so
-/// there is nothing for a concurrent decoder to overlap with here.
-fn decode_all_chunks_from_source<S: Source + ?Sized>(
-    source: &S,
-    flags: ChunkedLayoutFlags,
-    chunk_dims: &[u64],
-    ds_dims: &[u64],
-    pipeline: Option<&FilterPipeline>,
-    ctx: ChunkContext<'_>,
-    chunks: &[ChunkInfo],
-) -> Result<Vec<Vec<u8>>, FormatError> {
-    let mut result = Vec::with_capacity(chunks.len());
-    // One decoder for every chunk; see `FilterScratch`.
-    let mut scratch = FilterScratch::new();
-    for chunk_info in chunks {
-        result.push(read_decoded_chunk(
-            source,
-            &mut scratch,
-            flags,
-            chunk_dims,
-            ds_dims,
-            pipeline,
-            ctx,
-            chunk_info,
-        )?);
-    }
-    Ok(result)
-}
 
 /// Reads the stored bytes of `chunk` from `source` and decodes them with [`decode_chunk`].
 ///
@@ -653,13 +623,17 @@ pub(crate) fn bounded_chunk_len(
 ///
 /// The output byte length must fit [`usize`] before the reader reads the chunk index.
 /// Dataset dimensions are converted to host-sized indexes only for a nonempty output.
+/// For a nonempty dataset with proven dense coverage, the reader allocates output without
+/// initialization.
+/// Otherwise, the reader initializes output from the fill pattern.
 ///
 /// # Errors
 ///
 /// Returns [`FormatError::ValueTooLargeForPlatform`] if the output byte length or a required
 /// buffer index exceeds [`usize::MAX`], and errors from reading the datatype, fill value,
 /// chunk geometry, index, or payloads. Returns [`FormatError::DataSizeMismatch`] if a present
-/// chunk decodes to a byte length other than its full logical size.
+/// chunk decodes to a byte length other than its full logical size, and
+/// [`FormatError::OffsetOverflow`] if output size or placement arithmetic overflows.
 pub fn read_chunked_data_from_source<S: Source + ?Sized>(
     source: &S,
     spec: RawReadSpec<'_>,
@@ -674,8 +648,6 @@ pub fn read_chunked_data_from_source<S: Source + ?Sized>(
     let total_bytes = spec.byte_len()?;
     let Some(ChunkedPlan {
         flags,
-        rank,
-        chunk_dims,
         ds_dims,
         chunk_dims_u64,
         elem_size,
@@ -687,35 +659,29 @@ pub fn read_chunked_data_from_source<S: Source + ?Sized>(
     if total_bytes == 0 {
         return fill.buffer(0);
     }
-    let ds_dims = materialized_dims(ds_dims)?;
+    let index = ParsedChunkIndex::new(chunks, chunk_dims_u64, ds_dims)?;
+    let mut assembly = WholeAssembly::new(&index, chunk_dims_u64, ds_dims, elem_size, fill)?;
     let ctx = ChunkContext::from_datatype(chunk_dims_u64, datatype)?;
-    let decoded_chunks = decode_all_chunks_from_source(
-        source,
-        flags,
-        chunk_dims_u64,
-        &dataspace.dimensions,
-        pipeline,
-        ctx,
-        &chunks,
-    )?;
-    assemble_chunks(
-        &chunks,
-        &decoded_chunks,
-        rank,
-        &chunk_dims,
-        &ds_dims,
-        elem_size,
-        total_bytes,
-        fill,
-    )
+    let mut scratch = FilterScratch::new();
+    for IndexedChunk { info, .. } in index.chunks() {
+        let decoded = read_decoded_chunk(
+            source,
+            &mut scratch,
+            flags,
+            chunk_dims_u64,
+            &dataspace.dimensions,
+            pipeline,
+            ctx,
+            info,
+        )?;
+        assembly.place(&decoded)?;
+    }
+    assembly.finish()
 }
 
 /// The geometry of a chunked dataset and the allocated chunks its chunk index lists.
 struct ChunkedPlan<'a> {
     flags: ChunkedLayoutFlags,
-    rank: usize,
-    /// The size of a chunk in elements along each dimension of the dataset.
-    chunk_dims: Vec<usize>,
     /// The complete dataset dimensions at file width.
     ds_dims: &'a [u64],
     /// The chunk dimensions at file width, excluding the trailing element-size dimension.
@@ -733,8 +699,9 @@ impl<'a> ChunkedPlan<'a> {
     /// Returns [`FormatError::ChunkedReadError`] if `spec` describes another layout or its chunk
     /// rank differs from the dataspace rank, [`FormatError::ZeroSizedDatatype`] if the size of
     /// the datatype is 0, [`FormatError::ValueTooLargeForPlatform`] if the size of the datatype or
-    /// a chunk dimension exceeds [`usize::MAX`], [`FormatError::InvalidChunkGeometry`] if a chunk
-    /// exceeds the reader's single-chunk allocation limit, and the errors of a malformed chunk index.
+    /// decoded chunk byte count exceeds [`usize::MAX`], [`FormatError::InvalidChunkGeometry`] if
+    /// a chunk exceeds the reader's single-chunk allocation limit, and the errors of a malformed
+    /// chunk index.
     fn new(
         source: &(impl Source + ?Sized),
         spec: RawReadSpec<'a>,
@@ -754,7 +721,7 @@ impl<'a> ChunkedPlan<'a> {
             return Ok(None);
         }
         let elem_size = crate::datatype::element_size_usize(spec.datatype())?;
-        let (rank, chunk_dims, ds_dims) = chunked_dims(chunk_dimensions, spec.dataspace())?;
+        let (_, chunk_dims, ds_dims) = chunked_dims(chunk_dimensions, spec.dataspace())?;
         bounded_chunk_len(chunk_dims, elem_size)?;
         let chunks = collect_chunks_for_layout_from_source(
             source,
@@ -765,11 +732,8 @@ impl<'a> ChunkedPlan<'a> {
             widths,
         )?;
         let chunk_dims_u64 = chunk_dims;
-        let chunk_dims = materialized_dims(chunk_dims_u64)?;
         Ok(Some(Self {
             flags,
-            rank,
-            chunk_dims,
             ds_dims,
             chunk_dims_u64,
             elem_size,
@@ -939,11 +903,12 @@ pub(crate) fn read_chunked_region_from_source(
     let mut scratch = FilterScratch::new();
 
     for IndexedChunk { info: chunk, coord } in window_chunks {
-        let selected = placement.for_chunk(region, chunk, elem_size)?;
-        let copy = |output: &mut [u8], bytes: &[u8]| selected.copy_to(output, bytes, elem_size);
+        let mut selected = placement.for_chunk(region, chunk, elem_size)?;
+        let mut copy = |output: &mut [u8], bytes: &[u8]| selected.copy_to(output, bytes, elem_size);
 
         let hit = cache.with_decompressed(pass, coord, |bytes| copy(&mut output, bytes));
-        if hit.is_some() {
+        if let Some(copied) = hit {
+            copied?;
             continue;
         }
 
@@ -955,7 +920,7 @@ pub(crate) fn read_chunked_region_from_source(
         let filtering =
             ChunkFiltering::for_chunk(flags, chunk_dims_u64, &dataspace.dimensions, chunk);
         let dec = decode_chunk(&mut scratch, stored, pipeline, ctx, filtering)?;
-        copy(&mut output, &dec);
+        copy(&mut output, &dec)?;
         match dec {
             Cow::Owned(bytes) => cache.put_decompressed(pass, coord, bytes), // move
             Cow::Borrowed(bytes) => cache.put_decompressed_slice(pass, coord, bytes),
@@ -1003,12 +968,12 @@ impl RegionCopy<'_> {
 
 /// Element strides and reusable intersection buffers for multidimensional placement.
 struct RegionScatter {
-    chunk_dimensions: Vec<usize>,
-    chunk_strides: Vec<usize>,
+    /// Chunk dimensions followed by their row-major element strides.
+    chunk_geometry: Vec<usize>,
     output_dimensions: Vec<usize>,
     output_strides: Vec<usize>,
-    offsets: Vec<usize>,
-    dimensions: Vec<usize>,
+    /// Output offsets, intersection dimensions, and scatter coordinates, each of dataset rank.
+    intersection: Vec<usize>,
 }
 
 impl RegionScatter {
@@ -1017,12 +982,15 @@ impl RegionScatter {
         chunk_dimensions: &[u64],
         element_size: NonZeroUsize,
     ) -> Result<Self, FormatError> {
-        let chunk_dimensions = materialized_dims(chunk_dimensions)?;
         let rank = chunk_dimensions.len();
-        let chunk_strides = row_major_strides(&chunk_dimensions)?;
+        let mut chunk_geometry = Vec::with_capacity(multiply_offset(rank, 2)?);
+        for &dimension in chunk_dimensions {
+            chunk_geometry.push(dimension.to_usize()?);
+        }
+        let chunk_strides = row_major_strides(&chunk_geometry)?;
+        chunk_geometry.extend(chunk_strides);
         Ok(Self {
-            chunk_dimensions,
-            chunk_strides,
+            chunk_geometry,
             output_dimensions: region
                 .axes()
                 .map(|axis| axis.count().to_usize())
@@ -1034,8 +1002,7 @@ impl RegionScatter {
                         .map(|stride| stride / element_size.get())
                 })
                 .collect::<Result<Vec<_>, _>>()?,
-            offsets: Vec::with_capacity(rank),
-            dimensions: Vec::with_capacity(rank),
+            intersection: vec![0; multiply_offset(rank, 3)?],
         })
     }
 
@@ -1045,19 +1012,28 @@ impl RegionScatter {
         chunk: &ChunkInfo,
         element_size: NonZeroUsize,
     ) -> Result<RegionChunk<'_>, FormatError> {
-        self.offsets.clear();
-        self.dimensions.clear();
+        let Self {
+            chunk_geometry,
+            output_dimensions,
+            output_strides,
+            intersection,
+        } = self;
+        let rank = chunk_geometry.len() / 2;
+        let (chunk_dimensions, chunk_strides) = chunk_geometry.split_at(rank);
+        let (offsets, scratch) = intersection.split_at_mut(rank);
+        let (dimensions, _) = scratch.split_at_mut(rank);
         let mut advance = 0u64;
-        for (((axis, &offset), &dimension), &stride) in region
+        for (dimension_index, (((axis, &offset), &dimension), &stride)) in region
             .axes()
             .zip(&chunk.offsets)
-            .zip(&self.chunk_dimensions)
-            .zip(&self.chunk_strides)
+            .zip(chunk_dimensions)
+            .zip(chunk_strides)
+            .enumerate()
         {
             let start = axis.start().max(offset);
             let end = axis.end().min(offset.saturating_add(dimension as u64));
-            self.offsets.push((start - axis.start()).to_usize()?);
-            self.dimensions.push((end - start).to_usize()?);
+            offsets[dimension_index] = (start - axis.start()).to_usize()?;
+            dimensions[dimension_index] = (end - start).to_usize()?;
             let skip = (start - offset)
                 .checked_mul(stride as u64)
                 .and_then(|skip| skip.checked_mul(element_size.get() as u64))
@@ -1073,22 +1049,16 @@ impl RegionScatter {
                 })?;
         }
         let source = advance.to_usize()?;
-        match (
-            self.offsets.first(),
-            self.dimensions.first(),
-            self.output_strides.first(),
-        ) {
+        match (offsets.first(), dimensions.first(), output_strides.first()) {
             (Some(&offset), Some(&count), Some(&stride))
-                if self
-                    .dimensions
+                if dimensions
                     .iter()
                     .skip(1)
-                    .eq(self.chunk_dimensions.iter().skip(1))
-                    && self
-                        .output_dimensions
+                    .eq(chunk_dimensions.iter().skip(1))
+                    && output_dimensions
                         .iter()
                         .skip(1)
-                        .eq(self.chunk_dimensions.iter().skip(1)) =>
+                        .eq(chunk_dimensions.iter().skip(1)) =>
             {
                 Ok(RegionChunk::Band {
                     source,
@@ -1113,47 +1083,56 @@ enum RegionChunk<'a> {
     },
     Scatter {
         source: usize,
-        geometry: &'a RegionScatter,
+        geometry: &'a mut RegionScatter,
     },
 }
 
 impl RegionChunk<'_> {
-    fn copy_to(&self, output: &mut [u8], bytes: &[u8], element_size: NonZeroUsize) {
+    fn copy_to(
+        &mut self,
+        output: &mut [u8],
+        bytes: &[u8],
+        element_size: NonZeroUsize,
+    ) -> Result<(), FormatError> {
         match self {
             Self::Band {
                 destination,
                 source,
                 length,
-            } => row_band_copy(output, *destination, bytes, *source, *length, element_size),
+            } => {
+                row_band_copy(output, *destination, bytes, *source, *length, element_size);
+                Ok(())
+            }
             Self::Scatter { source, geometry } => {
                 let RegionScatter {
-                    chunk_dimensions,
-                    chunk_strides,
+                    chunk_geometry,
                     output_dimensions,
                     output_strides,
-                    offsets,
-                    dimensions,
+                    intersection,
                 } = geometry;
+                let rank = chunk_geometry.len() / 2;
+                let (_, chunk_strides) = chunk_geometry.split_at(rank);
+                let (offsets, scratch) = intersection.split_at_mut(rank);
+                let (dimensions, coord) = scratch.split_at_mut(rank);
                 place_chunk(
                     bytes.get(*source..).unwrap_or(&[]),
-                    output,
+                    ScatterDestination::Initialized(output),
                     offsets,
                     dimensions,
                     output_dimensions,
                     output_strides,
                     chunk_strides,
                     element_size,
-                    chunk_dimensions.len(),
-                );
+                    coord,
+                )
             }
         }
     }
 }
 
-/// Copy one chunk's overlapping row band into the window buffer at `dst`, clamped
-/// to the bytes present on each side (element-aligned). An edge or short chunk
-/// copies only its valid prefix and never reads or writes out of bounds — the same
-/// discipline as [`copy_chunk_to_output`].
+/// Copies the available whole elements of a chunk's row band into the output window.
+///
+/// Clips `band` to the bytes present in the chunk and output buffer.
 fn row_band_copy(
     output: &mut [u8],
     dst: usize,
@@ -1190,15 +1169,17 @@ fn row_major_strides(dims: &[usize]) -> Result<Vec<usize>, FormatError> {
 /// Reads a whole chunked dataset from a [`Source`] with index and decoded-chunk caching.
 ///
 /// Dataset dimensions are converted to host-sized indexes only for a nonempty output.
-/// For a nonempty dataset, the reader consults the fill pattern only if dense chunk coverage
-/// is unproven.
+/// For a nonempty dataset with proven dense coverage, the reader allocates output without
+/// initialization.
+/// Otherwise, the reader initializes output from the fill pattern.
 ///
 /// # Errors
 ///
 /// Returns [`FormatError::ValueTooLargeForPlatform`] if the output byte length or a required
 /// buffer index exceeds [`usize::MAX`], and errors from reading the datatype, fill value,
 /// chunk geometry, index, or payloads. Returns [`FormatError::DataSizeMismatch`] if a present
-/// chunk decodes to a byte length other than its full logical size.
+/// chunk decodes to a byte length other than its full logical size, and
+/// [`FormatError::OffsetOverflow`] if output size or placement arithmetic overflows.
 pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
     source: &S,
     spec: RawReadSpec<'_>,
@@ -1227,15 +1208,13 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
     }
 
     let elem_size = crate::datatype::element_size_usize(datatype)?;
-    let (rank, chunk_dims, ds_dims) = chunked_dims(chunk_dimensions, dataspace)?;
+    let (_, chunk_dims, ds_dims) = chunked_dims(chunk_dimensions, dataspace)?;
     bounded_chunk_len(chunk_dims, elem_size)?;
     let total_bytes = spec.byte_len()?;
     if total_bytes == 0 {
         return fill.buffer(0);
     }
-    let ds_dims = materialized_dims(ds_dims)?;
     let chunk_dims_u64 = chunk_dims;
-    let chunk_dims = materialized_dims(chunk_dims_u64)?;
 
     let parsed_index = cache.parsed_index_or_load(|| {
         ParsedChunkIndex::new(
@@ -1252,25 +1231,7 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
         )
     })?;
 
-    // Uncovered bytes are unallocated storage; see `assemble_chunks`.
-    let mut output = if parsed_index
-        .dense_coverage(chunk_dims_u64, &dataspace.dimensions)
-        .is_some()
-    {
-        vec![0; total_bytes]
-    } else {
-        fill.buffer(total_bytes)?
-    };
-
-    let mut ds_strides = vec![1usize; rank];
-    for i in (0..rank.saturating_sub(1)).rev() {
-        ds_strides[i] = ds_strides[i + 1] * ds_dims[i + 1];
-    }
-
-    let mut chunk_strides = vec![1usize; rank];
-    for i in (0..rank.saturating_sub(1)).rev() {
-        chunk_strides[i] = chunk_strides[i + 1] * chunk_dims[i + 1];
-    }
+    let mut assembly = WholeAssembly::new(&parsed_index, chunk_dims_u64, ds_dims, elem_size, fill)?;
 
     let ctx = ChunkContext::from_datatype(chunk_dims_u64, datatype)?;
 
@@ -1281,37 +1242,15 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
     let pass = cache.begin_pass();
     // One decoder for every chunk of the dataset; see `FilterScratch`.
     let mut scratch = FilterScratch::new();
-    // Refilled per chunk rather than allocated per chunk. It holds `rank`
-    // integers — 8 bytes for a 1-D dataset, invisible beside the chunk it
-    // describes — but allocating it here is an allocator round trip for every
-    // chunk of every dataset this crate reads (issue #228).
-    let mut chunk_offsets: Vec<usize> = Vec::with_capacity(rank);
-
     for IndexedChunk {
         info: chunk_info,
         coord,
     } in parsed_index.chunks()
     {
-        chunk_offsets.clear();
-        for &o in coord {
-            chunk_offsets.push(o.to_usize()?);
-        }
-
         // Scatter straight from the cached chunk under the lock (no copy out).
-        let hit = cache.with_decompressed(pass, coord, |bytes| {
-            place_chunk(
-                bytes,
-                &mut output,
-                &chunk_offsets,
-                &chunk_dims,
-                &ds_dims,
-                &ds_strides,
-                &chunk_strides,
-                elem_size,
-                rank,
-            );
-        });
-        if hit.is_some() {
+        let hit = cache.with_decompressed(pass, coord, |bytes| assembly.place(bytes));
+        if let Some(placed) = hit {
+            placed?;
             continue;
         }
 
@@ -1327,24 +1266,14 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
         let filtering =
             ChunkFiltering::for_chunk(flags, chunk_dims_u64, &dataspace.dimensions, chunk_info);
         let dec = decode_chunk(&mut scratch, stored, pipeline, ctx, filtering)?;
-        place_chunk(
-            &dec,
-            &mut output,
-            &chunk_offsets,
-            &chunk_dims,
-            &ds_dims,
-            &ds_strides,
-            &chunk_strides,
-            elem_size,
-            rank,
-        );
+        assembly.place(&dec)?;
         match dec {
             Cow::Owned(bytes) => cache.put_decompressed(pass, coord, bytes), // move
             Cow::Borrowed(bytes) => cache.put_decompressed_slice(pass, coord, bytes),
         }
     }
 
-    Ok(output)
+    assembly.finish()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1956,74 +1885,20 @@ pub(crate) fn chunk_index_spans_from_source<S: Source + ?Sized>(
     collect_chunk_index_spans(source, *index, chunk_dimensions.len(), widths)
 }
 
-/// Scatters the decoded chunks into the dense output buffer. Pure (no file
-/// access): shared by the buffered and streaming chunked readers.
-fn assemble_chunks(
-    chunks: &[ChunkInfo],
-    decoded: &[Vec<u8>],
-    rank: usize,
-    chunk_dims: &[usize],
-    ds_dims: &[usize],
-    elem_size: NonZeroUsize,
-    total_bytes: usize,
-    fill: FillPattern<'_>,
-) -> Result<Vec<u8>, FormatError> {
-    // Whatever no chunk writes over is storage that was never allocated, so the
-    // buffer starts as the fill pattern rather than as zeros. A sparse chunk
-    // grid — some chunks written, others never — is the case this covers that a
-    // zeroed buffer got silently wrong.
-    let mut output = fill.buffer(total_bytes)?;
-
-    let mut ds_strides = vec![1usize; rank];
-    for i in (0..rank.saturating_sub(1)).rev() {
-        ds_strides[i] = ds_strides[i + 1] * ds_dims[i + 1];
-    }
-    let mut chunk_strides = vec![1usize; rank];
-    for i in (0..rank.saturating_sub(1)).rev() {
-        chunk_strides[i] = chunk_strides[i + 1] * chunk_dims[i + 1];
-    }
-
-    for (chunk_info, decoded) in chunks.iter().zip(decoded.iter()) {
-        // B-tree v1 (v3) offsets have rank+1 dims; v4 index offsets have rank dims
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "chunk coordinate offsets are bounded by ds_dims, which already fit usize"
-        )]
-        let chunk_offsets: Vec<usize> = chunk_info
-            .offsets
-            .iter()
-            .take(rank)
-            .map(|&o| o as usize)
-            .collect();
-
-        place_chunk(
-            decoded,
-            &mut output,
-            &chunk_offsets,
-            chunk_dims,
-            ds_dims,
-            &ds_strides,
-            &chunk_strides,
-            elem_size,
-            rank,
-        );
-    }
-
-    Ok(output)
-}
-
 /// Reads a whole chunked dataset from a file buffer with index and decoded-chunk caching.
 ///
 /// Dataset dimensions are converted to host-sized indexes only for a nonempty output.
-/// For a nonempty dataset, the reader consults the fill pattern only if dense chunk coverage
-/// is unproven.
+/// For a nonempty dataset with proven dense coverage, the reader allocates output without
+/// initialization.
+/// Otherwise, the reader initializes output from the fill pattern.
 ///
 /// # Errors
 ///
 /// Returns [`FormatError::ValueTooLargeForPlatform`] if the output byte length or a required
 /// buffer index exceeds [`usize::MAX`], and errors from reading the datatype, fill value,
 /// chunk geometry, index, or payloads. Returns [`FormatError::DataSizeMismatch`] if a present
-/// chunk decodes to a byte length other than its full logical size.
+/// chunk decodes to a byte length other than its full logical size, and
+/// [`FormatError::OffsetOverflow`] if output size or placement arithmetic overflows.
 pub fn read_chunked_data_cached(
     file_data: &[u8],
     spec: RawReadSpec<'_>,
@@ -2054,15 +1929,13 @@ pub fn read_chunked_data_cached(
     // Taken once as a proven-non-zero width; see the buffered reader above.
     let elem_width = datatype.element_size()?;
     let elem_size = elem_width.narrow::<NonZeroUsize>()?;
-    let (rank, chunk_dims, ds_dims) = chunked_dims(chunk_dimensions, dataspace)?;
+    let (_, chunk_dims, ds_dims) = chunked_dims(chunk_dimensions, dataspace)?;
     bounded_chunk_len(chunk_dims, elem_size)?;
     let total_bytes = spec.byte_len()?;
     if total_bytes == 0 {
         return fill.buffer(0);
     }
-    let ds_dims = materialized_dims(ds_dims)?;
     let chunk_dims_u64 = chunk_dims;
-    let chunk_dims = materialized_dims(chunk_dims_u64)?;
 
     let parsed_index = cache.parsed_index_or_load(|| {
         ParsedChunkIndex::new(
@@ -2079,63 +1952,22 @@ pub fn read_chunked_data_cached(
         )
     })?;
 
-    // Assemble output
-    // Uncovered bytes are unallocated storage; see `assemble_chunks`.
-    let mut output = if parsed_index
-        .dense_coverage(chunk_dims_u64, &dataspace.dimensions)
-        .is_some()
-    {
-        vec![0; total_bytes]
-    } else {
-        fill.buffer(total_bytes)?
-    };
-
-    let mut ds_strides = vec![1usize; rank];
-    for i in (0..rank.saturating_sub(1)).rev() {
-        ds_strides[i] = ds_strides[i + 1] * ds_dims[i + 1];
-    }
-
-    let mut chunk_strides = vec![1usize; rank];
-    for i in (0..rank.saturating_sub(1)).rev() {
-        chunk_strides[i] = chunk_strides[i + 1] * chunk_dims[i + 1];
-    }
+    let mut assembly = WholeAssembly::new(&parsed_index, chunk_dims_u64, ds_dims, elem_size, fill)?;
 
     let ctx = ChunkContext::from_datatype(chunk_dims_u64, datatype)?;
 
     let pass = cache.begin_pass();
     // One decoder for every chunk of the dataset; see `FilterScratch`.
     let mut scratch = FilterScratch::new();
-    // Refilled per chunk rather than allocated per chunk; see the counterpart in
-    // `read_chunked_data_cached_from_source`.
-    let mut chunk_offsets: Vec<usize> = Vec::with_capacity(rank);
-
     for IndexedChunk {
         info: chunk_info,
         coord,
     } in parsed_index.chunks()
     {
-        chunk_offsets.clear();
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "chunk coordinate offsets are bounded by ds_dims, which already fit usize"
-        )]
-        chunk_offsets.extend(coord.iter().map(|&o| o as usize));
-
         // Scatter straight from the cached chunk under the lock (no copy out).
-        let hit = cache.with_decompressed(pass, coord, |bytes| {
-            place_chunk(
-                bytes,
-                &mut output,
-                &chunk_offsets,
-                &chunk_dims,
-                &ds_dims,
-                &ds_strides,
-                &chunk_strides,
-                elem_size,
-                rank,
-            );
-        });
-        if hit.is_some() {
+        let hit = cache.with_decompressed(pass, coord, |bytes| assembly.place(bytes));
+        if let Some(placed) = hit {
+            placed?;
             continue;
         }
 
@@ -2158,24 +1990,14 @@ pub fn read_chunked_data_cached(
             ctx,
             filtering,
         )?;
-        place_chunk(
-            &dec,
-            &mut output,
-            &chunk_offsets,
-            &chunk_dims,
-            &ds_dims,
-            &ds_strides,
-            &chunk_strides,
-            elem_size,
-            rank,
-        );
+        assembly.place(&dec)?;
         match dec {
             Cow::Owned(bytes) => cache.put_decompressed(pass, coord, bytes), // move
             Cow::Borrowed(bytes) => cache.put_decompressed_slice(pass, coord, bytes),
         }
     }
 
-    Ok(output)
+    assembly.finish()
 }
 
 /// Walks `index` in the file image `file_data` and returns one [`ChunkInfo`] per chunk the file
@@ -2272,125 +2094,415 @@ fn materialized_dims(dims: &[u64]) -> Result<Vec<usize>, FormatError> {
     dims.iter().map(|&dim| dim.to_usize()).collect()
 }
 
-/// Places one decoded chunk into the dense output buffer, handling the
-/// scalar (`rank == 0`) case and delegating the N-D case to the row-copy kernel.
-/// Shared by the buffered, cached, and streaming chunked readers so they all use
-/// the same scatter logic.
-#[allow(clippy::too_many_arguments)]
-fn place_chunk(
-    chunk_data: &[u8],
-    output: &mut [u8],
-    chunk_offsets: &[usize],
-    chunk_dims: &[usize],
-    ds_dims: &[usize],
-    ds_strides: &[usize],
-    chunk_strides: &[usize],
-    elem_size: NonZeroUsize,
-    rank: usize,
-) {
-    if rank == 0 {
-        let copy_len = chunk_data.len().min(output.len());
-        output[..copy_len].copy_from_slice(&chunk_data[..copy_len]);
-    } else {
-        copy_chunk_to_output(
-            chunk_data,
+/// Assembles complete decoded chunks in the parsed index's descriptor order.
+///
+/// Dense output is allocated only with the index's coverage proof for the supplied geometry.
+/// Each successful placement writes the descriptor's complete in-extent contribution before
+/// advancing to the next descriptor. Finalization requires every descriptor to be placed.
+/// An incomplete dense buffer has length zero and can be dropped safely.
+struct WholeAssembly<'a> {
+    remaining: &'a [ChunkInfo],
+    output: AssemblyBuffer,
+    geometry: WholeScatter,
+    chunk_bytes: usize,
+}
+
+impl<'a> WholeAssembly<'a> {
+    /// Selects dense or fill-initialized output for the index and geometry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidChunkGeometry`] if a decoded chunk exceeds the allocation
+    /// limit, [`FormatError::ValueTooLargeForPlatform`] if a dimension or chunk size exceeds
+    /// [`usize::MAX`], [`FormatError::OffsetOverflow`] if stride or output size arithmetic
+    /// overflows, and [`FormatError::Internal`] if the ranks differ. Returns
+    /// [`FormatError::UnreadableFillValue`] if density is unproven and the fill is unreadable.
+    fn new(
+        index: &'a ParsedChunkIndex,
+        chunk_dims: &[u64],
+        ds_dims: &[u64],
+        element_size: NonZeroUsize,
+        fill: FillPattern<'_>,
+    ) -> Result<Self, FormatError> {
+        let chunk_bytes = bounded_chunk_len(chunk_dims, element_size)?;
+        let geometry = WholeScatter::new(chunk_dims, ds_dims, element_size)?;
+        let length = geometry.byte_len()?;
+        let output = match index.dense_coverage(chunk_dims, ds_dims) {
+            Some(coverage) => AssemblyBuffer::dense(length, coverage),
+            None => AssemblyBuffer::Fill(fill.buffer(length)?),
+        };
+        Ok(Self {
+            remaining: index.descriptors(),
             output,
-            chunk_offsets,
+            geometry,
+            chunk_bytes,
+        })
+    }
+
+    /// Writes the next descriptor's complete clipped contribution from `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::DataSizeMismatch`] if the length of `bytes` differs from the full
+    /// logical chunk size, [`FormatError::Internal`] if every descriptor has already been placed,
+    /// and the errors of [`WholeScatter::place`].
+    fn place(&mut self, bytes: &[u8]) -> Result<(), FormatError> {
+        let Self {
+            remaining,
+            output,
+            geometry,
+            chunk_bytes,
+        } = self;
+        if bytes.len() != *chunk_bytes {
+            return Err(FormatError::DataSizeMismatch {
+                expected: *chunk_bytes,
+                actual: bytes.len(),
+            });
+        }
+        let (chunk, rest) = remaining.split_first().ok_or_else(|| {
+            FormatError::Internal("output assembly has no remaining chunk".into())
+        })?;
+        geometry.place(output.destination(), chunk, bytes)?;
+        *remaining = rest;
+        Ok(())
+    }
+
+    /// Returns the initialized output after every descriptor has been placed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if any descriptor remains unplaced.
+    fn finish(self) -> Result<Vec<u8>, FormatError> {
+        let Self {
+            remaining,
+            output,
+            geometry: _,
+            chunk_bytes: _,
+        } = self;
+        if !remaining.is_empty() {
+            return Err(FormatError::Internal(
+                "output assembly has chunks remaining".into(),
+            ));
+        }
+        Ok(match output {
+            AssemblyBuffer::Dense { mut bytes, length } => {
+                // SAFETY: DenseCoverage proves the immutable descriptors partition the output.
+                // Each descriptor advances only after its complete clipped contribution is written.
+                unsafe {
+                    bytes.set_len(length);
+                }
+                bytes
+            }
+            AssemblyBuffer::Fill(bytes) => bytes,
+        })
+    }
+}
+
+/// Output storage whose dense variant remains at length zero during assembly.
+///
+/// Writes to dense storage use its [`MaybeUninit`] spare capacity. [`WholeAssembly::finish`]
+/// sets the length only after complete placement under the coverage proof.
+enum AssemblyBuffer {
+    Dense { bytes: Vec<u8>, length: usize },
+    Fill(Vec<u8>),
+}
+
+impl AssemblyBuffer {
+    fn dense(length: usize, _coverage: &DenseCoverage) -> Self {
+        Self::Dense {
+            bytes: Vec::with_capacity(length),
+            length,
+        }
+    }
+
+    fn destination(&mut self) -> ScatterDestination<'_> {
+        match self {
+            Self::Dense { bytes, length } => {
+                ScatterDestination::Spare(&mut bytes.spare_capacity_mut()[..*length])
+            }
+            Self::Fill(bytes) => ScatterDestination::Initialized(bytes),
+        }
+    }
+}
+
+/// Initialized or spare output bytes for the shared scatter calculations.
+///
+/// The caller can copy bytes into either form without reading spare storage.
+enum ScatterDestination<'a> {
+    Initialized(&'a mut [u8]),
+    Spare(&'a mut [MaybeUninit<u8>]),
+}
+
+impl ScatterDestination<'_> {
+    fn copy(&mut self, offset: usize, source: &[u8]) -> Result<(), FormatError> {
+        let end = add_offset(offset, source.len())?;
+        match self {
+            Self::Initialized(bytes) => bytes
+                .get_mut(offset..end)
+                .ok_or_else(|| FormatError::Internal("scatter exceeds output extent".into()))?
+                .copy_from_slice(source),
+            Self::Spare(bytes) => {
+                let destination = bytes
+                    .get_mut(offset..end)
+                    .ok_or_else(|| FormatError::Internal("scatter exceeds output extent".into()))?;
+                for (destination, &source) in destination.iter_mut().zip(source) {
+                    destination.write(source);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Host-sized row-major geometry and reusable coordinates for whole-dataset placement.
+struct WholeScatter {
+    chunk_dims: Vec<usize>,
+    ds_dims: Vec<usize>,
+    ds_strides: Vec<usize>,
+    chunk_strides: Vec<usize>,
+    offsets: Vec<usize>,
+    coord: Vec<usize>,
+    element_size: NonZeroUsize,
+}
+
+impl WholeScatter {
+    /// Converts dimensions to buffer indexes and computes checked element strides.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the ranks differ,
+    /// [`FormatError::ValueTooLargeForPlatform`] if a dimension exceeds [`usize::MAX`], and
+    /// [`FormatError::OffsetOverflow`] if a stride calculation overflows.
+    fn new(
+        chunk_dims: &[u64],
+        ds_dims: &[u64],
+        element_size: NonZeroUsize,
+    ) -> Result<Self, FormatError> {
+        if chunk_dims.len() != ds_dims.len() {
+            return Err(FormatError::Internal("scatter ranks differ".into()));
+        }
+        let chunk_dims = materialized_dims(chunk_dims)?;
+        let ds_dims = materialized_dims(ds_dims)?;
+        Ok(Self {
+            ds_strides: row_major_strides(&ds_dims)?,
+            chunk_strides: row_major_strides(&chunk_dims)?,
+            offsets: Vec::with_capacity(chunk_dims.len()),
+            coord: vec![0; chunk_dims.len()],
+            chunk_dims,
+            ds_dims,
+            element_size,
+        })
+    }
+
+    fn place(
+        &mut self,
+        output: ScatterDestination<'_>,
+        chunk: &ChunkInfo,
+        bytes: &[u8],
+    ) -> Result<(), FormatError> {
+        let Self {
             chunk_dims,
             ds_dims,
             ds_strides,
             chunk_strides,
-            elem_size,
-            rank,
-        );
+            offsets,
+            coord,
+            element_size,
+        } = self;
+        offsets.clear();
+        for &offset in chunk.offsets.iter().take(chunk_dims.len()) {
+            offsets.push(offset.to_usize()?);
+        }
+        place_chunk(
+            bytes,
+            output,
+            offsets,
+            chunk_dims,
+            ds_dims,
+            ds_strides,
+            chunk_strides,
+            *element_size,
+            coord,
+        )
+    }
+
+    /// Returns the output byte count for the dataset extent and element size.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the byte count exceeds [`usize::MAX`].
+    fn byte_len(&self) -> Result<usize, FormatError> {
+        self.ds_dims
+            .iter()
+            .try_fold(self.element_size.get(), |length, &dimension| {
+                multiply_offset(length, dimension)
+            })
     }
 }
 
-/// Copy chunk data into the output buffer at the correct N-D position.
+/// Writes every in-extent element of a chunk through shared row-major placement geometry.
 ///
-/// The innermost dimension is contiguous in both the chunk and the dataset (both
-/// have stride 1 there in a row-major layout), so each in-bounds row of the
-/// chunk is moved with a single `copy_from_slice` instead of one tiny copy per
-/// element. Only the outer `rank - 1` dimensions are walked (with an odometer),
-/// which removes the per-element flat→N-D coordinate division/modulo that
-/// dominated the old kernel. Edge chunks that overhang the dataset are clamped in
-/// the innermost dimension (a shortened row) and skipped per-row in the outer
-/// dimensions (a row whose outer global coordinate is past the dataset bound),
-/// reproducing the old per-element out-of-bounds skip exactly. The per-row length
-/// is also clamped to the bytes actually available on both sides, so a malformed
-/// (short) chunk copies only its valid prefix and is never an out-of-bounds
-/// access — matching the old per-element guard's silent-skip behavior.
+/// Copies contiguous trailing dimensions together, uses a fixed-stride loop for one outer
+/// dimension, and reuses `coord` for higher ranks. Reads complete source runs and initializes
+/// complete destination runs, including when the destination is spare capacity.
+///
+/// # Errors
+///
+/// Returns [`FormatError::Internal`] if the ranks differ or a copy exceeds the source or
+/// destination extent, and [`FormatError::OffsetOverflow`] if placement arithmetic overflows.
 #[allow(clippy::too_many_arguments)]
-fn copy_chunk_to_output(
+fn place_chunk(
     chunk_data: &[u8],
-    output: &mut [u8],
+    mut output: ScatterDestination<'_>,
     chunk_offsets: &[usize],
     chunk_dims: &[usize],
     ds_dims: &[usize],
     ds_strides: &[usize],
     chunk_strides: &[usize],
     elem_size: NonZeroUsize,
-    rank: usize,
-) {
-    debug_assert!(rank >= 1, "rank == 0 is handled by the callers");
-    // Row contiguity (the whole optimization) relies on a unit innermost stride
-    // in both layouts, which the row-major stride construction guarantees.
-    debug_assert_eq!(chunk_strides[rank - 1], 1);
-    debug_assert_eq!(ds_strides[rank - 1], 1);
-
-    let inner = rank - 1;
-
-    // In-bounds run length along the contiguous innermost dimension: the chunk
-    // is stored at full size but may hang over the dataset's edge.
-    let inner_row_len = chunk_dims[inner].min(ds_dims[inner].saturating_sub(chunk_offsets[inner]));
-    if inner_row_len == 0 {
-        return; // the chunk lies entirely past the inner edge
+    coord: &mut [usize],
+) -> Result<(), FormatError> {
+    let rank = ds_dims.len();
+    if [
+        chunk_offsets.len(),
+        chunk_dims.len(),
+        ds_strides.len(),
+        chunk_strides.len(),
+        coord.len(),
+    ]
+    .iter()
+    .any(|&length| length != rank)
+    {
+        return Err(FormatError::Internal("scatter ranks differ".into()));
     }
-    let row_bytes = inner_row_len * elem_size.get();
-    // Destination offset contributed by the innermost dimension (stride 1).
-    let inner_dst = chunk_offsets[inner] * ds_strides[inner];
-
-    // Walk the outer dimensions with an odometer (`coord` is the chunk-local
-    // coordinate of each outer dim), copying one contiguous row per step.
-    let outer_total: usize = chunk_dims[..inner].iter().product();
-    let mut coord = vec![0usize; inner];
-
-    for _ in 0..outer_total {
-        let mut chunk_base = 0usize;
-        let mut ds_base = inner_dst;
-        let mut in_bounds = true;
-        for d in 0..inner {
-            chunk_base += coord[d] * chunk_strides[d];
-            let global = chunk_offsets[d] + coord[d];
-            if global >= ds_dims[d] {
-                in_bounds = false;
+    if rank == 0 {
+        return copy_scatter_run(chunk_data, &mut output, 0, 0, elem_size.get());
+    }
+    if chunk_dims.contains(&0) {
+        return Ok(());
+    }
+    if chunk_offsets
+        .iter()
+        .zip(ds_dims)
+        .any(|(&offset, &extent)| offset >= extent)
+    {
+        return Ok(());
+    }
+    let mut inner = rank - 1;
+    let count = |axis: usize| chunk_dims[axis].min(ds_dims[axis] - chunk_offsets[axis]);
+    let mut contiguous = count(inner);
+    while inner > 0
+        && chunk_offsets[inner] == 0
+        && count(inner) == chunk_dims[inner]
+        && count(inner) == ds_dims[inner]
+        && chunk_strides[inner - 1] == contiguous
+        && ds_strides[inner - 1] == contiguous
+    {
+        inner -= 1;
+        contiguous = multiply_offset(contiguous, count(inner))?;
+    }
+    let length = multiply_offset(contiguous, elem_size.get())?;
+    let base = chunk_offsets
+        .iter()
+        .zip(ds_strides)
+        .try_fold(0, |base, (&offset, &stride)| {
+            add_offset(base, multiply_offset(offset, stride)?)
+        })?;
+    if inner == 0 {
+        return copy_scatter_run(
+            chunk_data,
+            &mut output,
+            0,
+            multiply_offset(base, elem_size.get())?,
+            length,
+        );
+    }
+    if inner == 1 {
+        for row in 0..count(0) {
+            copy_scatter_run(
+                chunk_data,
+                &mut output,
+                multiply_offset(multiply_offset(row, chunk_strides[0])?, elem_size.get())?,
+                multiply_offset(
+                    add_offset(base, multiply_offset(row, ds_strides[0])?)?,
+                    elem_size.get(),
+                )?,
+                length,
+            )?;
+        }
+        return Ok(());
+    }
+    coord.fill(0);
+    loop {
+        let (source, destination) = coord[..inner]
+            .iter()
+            .zip(&chunk_strides[..inner])
+            .zip(&ds_strides[..inner])
+            .try_fold(
+                (0, base),
+                |(source, destination),
+                 ((&position, &chunk_stride), &ds_stride)|
+                 -> Result<_, FormatError> {
+                    Ok((
+                        add_offset(source, multiply_offset(position, chunk_stride)?)?,
+                        add_offset(destination, multiply_offset(position, ds_stride)?)?,
+                    ))
+                },
+            )?;
+        copy_scatter_run(
+            chunk_data,
+            &mut output,
+            multiply_offset(source, elem_size.get())?,
+            multiply_offset(destination, elem_size.get())?,
+            length,
+        )?;
+        let mut axis = inner;
+        loop {
+            if axis == 0 {
+                return Ok(());
+            }
+            axis -= 1;
+            coord[axis] += 1;
+            if coord[axis] < count(axis) {
                 break;
             }
-            ds_base += global * ds_strides[d];
-        }
-
-        if in_bounds {
-            let src = chunk_base * elem_size.get();
-            let dst = ds_base * elem_size.get();
-            // Clamp to the bytes available on each side, on an element boundary.
-            let mut avail = row_bytes
-                .min(chunk_data.len().saturating_sub(src))
-                .min(output.len().saturating_sub(dst));
-            avail -= avail % elem_size;
-            if avail > 0 {
-                output[dst..dst + avail].copy_from_slice(&chunk_data[src..src + avail]);
-            }
-        }
-
-        // Advance the odometer over the outer dims (last outer dim varies fastest).
-        for d in (0..inner).rev() {
-            coord[d] += 1;
-            if coord[d] < chunk_dims[d] {
-                break;
-            }
-            coord[d] = 0;
+            coord[axis] = 0;
         }
     }
+}
+
+fn copy_scatter_run(
+    source: &[u8],
+    destination: &mut ScatterDestination<'_>,
+    source_offset: usize,
+    destination_offset: usize,
+    length: usize,
+) -> Result<(), FormatError> {
+    let end = add_offset(source_offset, length)?;
+    destination.copy(
+        destination_offset,
+        source
+            .get(source_offset..end)
+            .ok_or_else(|| FormatError::Internal("scatter exceeds decoded chunk extent".into()))?,
+    )
+}
+
+fn add_offset(offset: usize, length: usize) -> Result<usize, FormatError> {
+    offset
+        .checked_add(length)
+        .ok_or(FormatError::OffsetOverflow {
+            offset: offset as u64,
+            length: length as u64,
+        })
+}
+
+fn multiply_offset(offset: usize, length: usize) -> Result<usize, FormatError> {
+    offset
+        .checked_mul(length)
+        .ok_or(FormatError::OffsetOverflow {
+            offset: offset as u64,
+            length: length as u64,
+        })
 }
 
 #[cfg(test)]
@@ -2535,17 +2647,19 @@ mod tests {
         assert_eq!(visits, 1);
     }
 
+    #[cfg(feature = "std")]
     #[rstest]
     #[case::dense_zero(false, false, 0)]
     #[case::dense_nonzero(false, false, 7)]
     #[case::dense_unknown(false, true, 0)]
     #[case::sparse_nonzero(true, false, 7)]
     #[case::sparse_unknown(true, true, 0)]
-    fn cached_whole_reads_consult_fill_only_for_uncovered_storage(
+    fn whole_reads_consult_fill_only_for_uncovered_storage(
         #[case] sparse: bool,
         #[case] unknown: bool,
         #[case] fill_value: i32,
-        #[values(false, true)] from_source: bool,
+        #[values(0, 1, 2, 3, 4)] reader: u8,
+        #[values(false, true)] filtered: bool,
     ) {
         let mut file_data = vec![0; 0x2000];
         let mut chunks = Vec::new();
@@ -2561,10 +2675,21 @@ mod tests {
                     })
                 })
                 .collect();
+            let mask = if i % 2 == 0 { 0 } else { FIRST_FILTER_MASK };
+            let bytes = if filtered && mask == 0 {
+                filters::compress_chunk(
+                    &bytes,
+                    &shuffle_pipeline(),
+                    ChunkContext::basic(&[2, 3], 4),
+                )
+                .unwrap()
+            } else {
+                bytes
+            };
             file_data[address..address + bytes.len()].copy_from_slice(&bytes);
             chunks.push(ChunkInfo {
                 chunk_size: StoredChunkSize::btree_v1(24),
-                filter_mask: 0,
+                filter_mask: mask,
                 offsets: vec![offsets[0] as u64, offsets[1] as u64, 0],
                 address: StoredAddress::new(address as u64),
             });
@@ -2591,20 +2716,11 @@ mod tests {
         } else {
             FillPattern::new(FillTime::IfSet, Some(&fill_bytes), convert::nz(4))
         };
-        let spec = RawReadSpec::parse(&layout, &dataspace, &datatype, None, fill).unwrap();
+        let pipeline = filtered.then(shuffle_pipeline);
+        let spec =
+            RawReadSpec::parse(&layout, &dataspace, &datatype, pipeline.as_ref(), fill).unwrap();
         let cache = ChunkCache::new();
-        let read = || {
-            if from_source {
-                read_chunked_data_cached_from_source(
-                    &crate::source::BytesSource::new(&file_data),
-                    spec,
-                    FORMAT_WIDTHS,
-                    &cache,
-                )
-            } else {
-                read_chunked_data_cached(&file_data, spec, FORMAT_WIDTHS, &cache)
-            }
-        };
+        let read = || whole_read(&file_data, spec, &cache, reader);
         if sparse && unknown {
             assert_eq!(read().unwrap_err(), FormatError::UnreadableFillValue);
             assert_eq!(read().unwrap_err(), FormatError::UnreadableFillValue);
@@ -2621,7 +2737,282 @@ mod tests {
             .collect();
         assert_eq!(read().unwrap(), expected);
         assert_eq!(read().unwrap(), expected);
-        assert_eq!(cache.stats().hits(), if sparse { 3 } else { 4 });
+        assert_eq!(
+            cache.stats().hits(),
+            if reader == 2 || reader == 4 {
+                0
+            } else if sparse {
+                3
+            } else {
+                4
+            }
+        );
+    }
+
+    #[cfg(feature = "std")]
+    fn whole_read(
+        bytes: &[u8],
+        spec: RawReadSpec<'_>,
+        cache: &ChunkCache,
+        reader: u8,
+    ) -> Result<Vec<u8>, FormatError> {
+        match reader {
+            0 => read_chunked_data_cached(bytes, spec, FORMAT_WIDTHS, cache),
+            1 => read_chunked_data_cached_from_source(
+                &BytesSource::new(bytes),
+                spec,
+                FORMAT_WIDTHS,
+                cache,
+            ),
+            2 => read_chunked_data_from_source(&BytesSource::new(bytes), spec, FORMAT_WIDTHS),
+            3 => read_chunked_data_cached_from_source(
+                &ReadSeekSource::new(Cursor::new(bytes)).unwrap(),
+                spec,
+                FORMAT_WIDTHS,
+                cache,
+            ),
+            4 => read_chunked_data_from_source(
+                &ReadSeekSource::new(Cursor::new(bytes)).unwrap(),
+                spec,
+                FORMAT_WIDTHS,
+            ),
+            _ => Err(FormatError::Internal(format!("unknown reader {reader}"))),
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[rstest]
+    fn whole_dense_reads_reject_malformed_later_chunks(
+        #[values(0, 1, 2, 3, 4)] reader: u8,
+        #[values(4, 12)] length: usize,
+        #[values(false, true)] cached: bool,
+    ) {
+        let chunks = [
+            ChunkInfo {
+                offsets: vec![0, 0],
+                address: StoredAddress::new(512),
+                chunk_size: StoredChunkSize::btree_v1(8),
+                filter_mask: 0,
+            },
+            ChunkInfo {
+                offsets: vec![2, 0],
+                address: StoredAddress::new(520),
+                chunk_size: StoredChunkSize::btree_v1(u32::try_from(length).unwrap()),
+                filter_mask: 0,
+            },
+        ];
+        let mut bytes = build_chunk_btree_leaf(&chunks, 2, WIDTHS);
+        bytes.resize(520 + length, 1);
+        let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::NONE,
+            chunk_dimensions: vec![2, 4],
+            index: ChunkIndexLayout::BTreeV1 {
+                address: Some(StoredAddress::new(0)),
+            },
+        };
+        let dataspace = Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: 1,
+            dimensions: vec![4],
+            max_dimensions: None,
+        };
+        let datatype = crate::type_builders::make_i32_type();
+        let spec =
+            RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::UNKNOWN).unwrap();
+        let cache = ChunkCache::new();
+        if cached {
+            cache.put_decompressed(CachePass::LRU, &[2], vec![1; length]);
+        }
+        assert_eq!(
+            whole_read(&bytes, spec, &cache, reader).unwrap_err(),
+            FormatError::DataSizeMismatch {
+                expected: 8,
+                actual: length
+            }
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[rstest]
+    #[case::io(false, FormatError::UnexpectedSourceEof { expected: 528, available: 524 })]
+    #[case::decoding(true, FormatError::UnsupportedFilter(999))]
+    fn whole_dense_reads_abandon_io_and_decode_errors(
+        #[case] decoding: bool,
+        #[case] expected: FormatError,
+        #[values(0, 1, 2, 3, 4)] reader: u8,
+    ) {
+        let chunks = [
+            ChunkInfo {
+                offsets: vec![0, 0],
+                address: StoredAddress::new(512),
+                chunk_size: StoredChunkSize::btree_v1(8),
+                filter_mask: FIRST_FILTER_MASK,
+            },
+            ChunkInfo {
+                offsets: vec![2, 0],
+                address: StoredAddress::new(520),
+                chunk_size: StoredChunkSize::btree_v1(8),
+                filter_mask: 0,
+            },
+        ];
+        let mut bytes = build_chunk_btree_leaf(&chunks, 2, WIDTHS);
+        bytes.resize(if decoding { 528 } else { 524 }, 1);
+        let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::NONE,
+            chunk_dimensions: vec![2, 4],
+            index: ChunkIndexLayout::BTreeV1 {
+                address: Some(StoredAddress::new(0)),
+            },
+        };
+        let dataspace = Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: 1,
+            dimensions: vec![4],
+            max_dimensions: None,
+        };
+        let datatype = crate::type_builders::make_i32_type();
+        let pipeline = decoding.then(|| FilterPipeline {
+            version: FILTER_PIPELINE_VERSION,
+            filters: vec![FilterDescription {
+                filter_id: 999,
+                name: None,
+                flags: 0,
+                client_data: vec![],
+            }],
+        });
+        let spec = RawReadSpec::parse(
+            &layout,
+            &dataspace,
+            &datatype,
+            pipeline.as_ref(),
+            FillPattern::UNKNOWN,
+        )
+        .unwrap();
+        assert_eq!(
+            whole_read(&bytes, spec, &ChunkCache::new(), reader).unwrap_err(),
+            expected
+        );
+    }
+
+    fn assembly_index(chunk_dims: &[u64], ds_dims: &[u64]) -> ParsedChunkIndex {
+        let grid = ChunkGrid::new(chunk_dims, ds_dims, None, GridOrder::RowMajor).unwrap();
+        let chunks = grid
+            .slots_in_extent()
+            .unwrap()
+            .enumerate()
+            .map(|(slot, chunk)| ChunkInfo {
+                offsets: chunk.offsets,
+                chunk_size: StoredChunkSize::v4(chunk_dims.iter().product::<u64>() * 4),
+                filter_mask: 0,
+                address: StoredAddress::new(0x1000 - u64::try_from(slot).unwrap() * 32),
+            })
+            .collect();
+        ParsedChunkIndex::new(chunks, chunk_dims, ds_dims).unwrap()
+    }
+
+    fn assembly_payload(chunk: &ChunkInfo, chunk_dims: &[u64], ds_dims: &[u64]) -> Vec<u8> {
+        (0..chunk_dims.iter().product::<u64>())
+            .flat_map(|mut flat| {
+                let mut linear = 0;
+                let mut stride = 1;
+                for ((&dimension, &extent), &offset) in
+                    chunk_dims.iter().zip(ds_dims).zip(&chunk.offsets).rev()
+                {
+                    linear += (offset + flat % dimension) * stride;
+                    flat /= dimension;
+                    stride *= extent;
+                }
+                i32::try_from(linear).unwrap().to_le_bytes()
+            })
+            .collect()
+    }
+
+    #[rstest]
+    #[case::rank_one(&[3], &[5])]
+    #[case::rank_two_rows(&[2, 3], &[3, 5])]
+    #[case::rank_two_band(&[2, 5], &[3, 5])]
+    #[case::rank_two_inner_overhang(&[2, 7], &[3, 5])]
+    #[case::rank_three(&[2, 3, 2], &[3, 5, 3])]
+    #[case::rank_three_band(&[2, 5, 3], &[3, 5, 3])]
+    #[case::rank_three_trailing_band(&[2, 3, 3], &[3, 5, 3])]
+    #[case::rank_four(&[2, 2, 2, 2], &[3, 3, 3, 3])]
+    fn dense_assembly_writes_every_clipped_element(
+        #[case] chunk_dims: &[u64],
+        #[case] ds_dims: &[u64],
+    ) {
+        let index = assembly_index(chunk_dims, ds_dims);
+        let mut assembly = WholeAssembly::new(
+            &index,
+            chunk_dims,
+            ds_dims,
+            convert::nz(4),
+            FillPattern::UNKNOWN,
+        )
+        .unwrap();
+        let AssemblyBuffer::Dense { bytes, length } = &assembly.output else {
+            panic!("expected dense assembly");
+        };
+        assert_eq!(bytes.len(), 0);
+        assert_eq!(
+            *length,
+            usize::try_from(ds_dims.iter().product::<u64>() * 4).unwrap()
+        );
+        for chunk in index.descriptors() {
+            assembly
+                .place(&assembly_payload(chunk, chunk_dims, ds_dims))
+                .unwrap();
+        }
+        let expected: Vec<_> = (0..i32::try_from(ds_dims.iter().product::<u64>()).unwrap())
+            .flat_map(i32::to_le_bytes)
+            .collect();
+        assert_eq!(assembly.finish().unwrap(), expected);
+    }
+
+    #[rstest]
+    fn dense_assembly_rejects_incomplete_traversal(#[values(0, 1)] completed: usize) {
+        let index = assembly_index(&[2], &[4]);
+        let mut assembly =
+            WholeAssembly::new(&index, &[2], &[4], convert::nz(4), FillPattern::UNKNOWN).unwrap();
+        for chunk in index.descriptors().iter().take(completed) {
+            assembly
+                .place(&assembly_payload(chunk, &[2], &[4]))
+                .unwrap();
+        }
+        assert_eq!(
+            assembly.finish().unwrap_err(),
+            FormatError::Internal("output assembly has chunks remaining".into())
+        );
+    }
+
+    #[rstest]
+    fn dense_assembly_rejects_wrong_payload_lengths(#[values(4, 12)] length: usize) {
+        let index = assembly_index(&[2], &[4]);
+        let mut assembly =
+            WholeAssembly::new(&index, &[2], &[4], convert::nz(4), FillPattern::UNKNOWN).unwrap();
+        assembly.place(&[1; 8]).unwrap();
+        assert_eq!(
+            assembly.place(&vec![2; length]).unwrap_err(),
+            FormatError::DataSizeMismatch {
+                expected: 8,
+                actual: length
+            }
+        );
+        assert_eq!(
+            assembly.finish().unwrap_err(),
+            FormatError::Internal("output assembly has chunks remaining".into())
+        );
+    }
+
+    #[test]
+    fn dense_assembly_abandons_failed_placement() {
+        let mut bytes = Vec::<u8>::with_capacity(7);
+        let mut output = ScatterDestination::Spare(bytes.spare_capacity_mut());
+        copy_scatter_run(&[1; 8], &mut output, 0, 0, 4).unwrap();
+        assert_eq!(
+            copy_scatter_run(&[1; 8], &mut output, 4, 4, 4).unwrap_err(),
+            FormatError::Internal("scatter exceeds output extent".into())
+        );
+        assert_eq!(bytes.len(), 0);
     }
 
     fn shuffle_pipeline() -> FilterPipeline {
@@ -2665,19 +3056,9 @@ mod tests {
         );
     }
 
-    /// A chunk grid with a *hole* — some chunks allocated, others never — reads
-    /// the hole as the fill value.
-    ///
-    /// It goes through `read_chunked_data_from_source` deliberately: that reader
-    /// is the only one reaching [`assemble_chunks`], and the unallocated-*index*
-    /// test below returns from [`RawReadSpec::unallocated_buffer`] before ever
-    /// getting there, so without a sparse grid, the fill `assemble_chunks`
-    /// writes before it places a chunk has no coverage at all.
-    ///
-    /// The index holds the first and last of four chunk slots, so the hole is
-    /// interior rather than a tail.
     #[test]
     fn a_hole_in_the_chunk_grid_reads_as_fill() {
+        // The first and last of four chunk slots are allocated, leaving an interior hole.
         let elem = 8usize;
         let chunk_elems = 2usize;
         let mut file_data = vec![0u8; 0x10000];
