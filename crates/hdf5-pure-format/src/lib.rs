@@ -44,6 +44,7 @@ mod fixture;
 mod fractal_heap;
 mod fractal_heap_block;
 mod fractal_heap_free_space;
+mod fractal_heap_geometry;
 mod fractal_heap_write;
 mod free_space_manager;
 mod global_heap;
