@@ -1,12 +1,8 @@
 //! A write-side chunk buffer for appends ([`BufferedAppender`]).
 //!
-//! [`Dataset::append`](crate::Dataset::append) writes on every call: it encodes
-//! the appended elements, places the chunks they land in, extends the chunk
-//! index, and fsyncs five times so a power loss leaves either the old length or
-//! the new one. That is the right trade for a caller appending a chunk at a
-//! time, and the wrong one for a caller appending a hundred elements at a time
-//! into a chunk that holds a thousand — which pays the whole sequence ten times
-//! over to write one chunk.
+//! [`Dataset::append`](crate::Dataset::append) writes each batch immediately, with barriers
+//! governed by [`SyncPolicy`](crate::SyncPolicy).
+//! A caller appending fewer elements than a chunk holds can buffer them to reduce file writes.
 //!
 //! A [`BufferedAppender`] holds appended elements in memory and writes them
 //! only when they complete a chunk, so the file sees one append per chunk
@@ -99,17 +95,14 @@ use crate::reader::Dataset;
 /// prefix so the on-disk length lands back on a chunk boundary, which keeps the
 /// re-encoding to the first write rather than one per call.
 ///
-/// A **lossy** pipeline (ZFP, or float D-scale scale-offset) cannot have that
-/// chunk re-encoded at all — the values it holds would change — so an appender
-/// over a lossy dataset that already sits on a partial trailing chunk is refused
-/// when it is constructed. One over a chunk-aligned lossy dataset is fine, and
-/// stays fine as long as its writes land on boundaries. A mid-stream
-/// [`flush`](Self::flush) is what would break that, so on a lossy dataset a
-/// flush that would leave the length unaligned is refused at the call, with the
-/// buffer untouched: [`finish`](Self::finish) (and the flush a drop makes) writes
-/// the partial tail, because it is the last write the appender will make and
-/// there is no later one for the unaligned length to refuse. Buffer until a whole
-/// chunk, or finish.
+/// A partial tail stored under lossy filters (ZFP or float D-scale scale-offset) cannot
+/// grow, because re-encoding it could change committed values. Construction rejects such a
+/// tail, and [`flush`](Self::flush) rejects a write that would leave a partial tail.
+/// [`finish`](Self::finish) writes the partial tail and consumes the appender.
+///
+/// Under [`PartialEdgeFiltering::Skip`](crate::PartialEdgeFiltering::Skip), partial tails
+/// stay unfiltered and can grow, including after repeated flushes. With a lossy pipeline,
+/// the writer filters a tail when it becomes complete.
 ///
 /// ```no_run
 /// # use hdf5_pure::File;
@@ -132,10 +125,7 @@ pub struct BufferedAppender<'a> {
     /// cannot leave this appender writing against a stale length.
     chunk_elems: u64,
     element_size: NonZeroUsize,
-    /// Whether the pipeline is lossy, and so cannot have a partial trailing
-    /// chunk re-encoded. Checked at construction, again by every non-terminal
-    /// [`flush`](BufferedAppender::flush) — which is the only way this type could
-    /// leave a tail for a later write to regrow — and reported by [`Debug`].
+    /// Whether partial chunks use lossy filters and cannot grow after publication.
     lossy_filters: bool,
     /// Elements appended but not yet written, as little-endian bytes.
     pending: AppendBuilder,
@@ -193,12 +183,8 @@ impl<'a> BufferedAppender<'a> {
             ));
         }
         let chunk_elems = g.chunk_elems.max(1);
-        // A *lossy* pipeline (ZFP, float D-scale scale-offset) cannot have a
-        // partial trailing chunk grown at all — that would re-encode committed
-        // values. An appender over one that is already sitting on such a chunk
-        // could not make even its first write, so it is refused here for the same
-        // reason the SWMR case above is, rather than accepting elements it would
-        // then have to hand back.
+        // A partial tail stored under lossy filters cannot grow without re-encoding
+        // committed values. Reject it before accepting elements into the buffer.
         if g.lossy_filters && g.current_dim % chunk_elems != 0 {
             return Err(Error::AppendInPlaceUnsupported(
                 "this dataset's filter pipeline is lossy and its length is not a whole multiple \
@@ -280,25 +266,17 @@ impl<'a> BufferedAppender<'a> {
         self.chunk_elems
     }
 
-    /// Write every buffered element to the file now, including a partial
-    /// trailing chunk.
+    /// Writes every buffered element to the file, including a partial trailing chunk.
     ///
-    /// This is the durability point, and under a lossless pipeline it costs one
-    /// in-place write whatever the dataset's alignment. Flushing a partial chunk
-    /// does leave the on-disk length unaligned, so the next write re-encodes that
-    /// trailing chunk; let the appender batch where the last few elements can
-    /// wait.
+    /// A partial tail is rewritten by the next write. Under
+    /// [`PartialEdgeFiltering::Skip`](crate::PartialEdgeFiltering::Skip), it stays unfiltered
+    /// until complete, even with a lossy pipeline.
     ///
-    /// Under a **lossy** pipeline (ZFP, or float D-scale scale-offset) that
-    /// trailing chunk cannot be re-encoded at all, so a flush that would leave the
-    /// on-disk length unaligned is refused here, before anything is written and
-    /// with every buffered element still buffered. Left to happen, it would strand
-    /// the appender one call later: the *next* write is the one that has to regrow
-    /// the tail, and it fails with the lossy refusal and poisons the appender —
-    /// reporting a loss of the caller's elements at a call that did nothing wrong.
-    /// Keep buffering until the elements complete a chunk, or end the appender
-    /// with [`finish`](Self::finish), which writes the partial tail because no
-    /// write follows it.
+    /// # Errors
+    ///
+    /// Returns [`Error::AppendInPlaceUnsupported`] if a write has already failed, the buffer
+    /// ends within an element, or filtering a partial chunk would prevent later appends under
+    /// a lossy pipeline. Propagates errors from the immediate append.
     pub fn flush(&mut self) -> Result<(), Error> {
         self.flush_prefix(Terminal::No)
     }
@@ -342,17 +320,18 @@ impl<'a> BufferedAppender<'a> {
         std::mem::replace(&mut self.pending, AppendBuilder::new()).into_raw()
     }
 
-    /// Flush every buffered element and consume the appender.
+    /// Flushes every buffered element and consumes the appender.
     ///
-    /// Prefer this to dropping, which performs the same flush but cannot report
-    /// its error. Note that consuming the appender also consumes the buffer: if
-    /// this returns `Err`, the elements that did not land are gone with it. Use
-    /// [`flush`](Self::flush) instead when you mean to recover them through
-    /// [`unwritten`](Self::unwritten), and `finish` once it has succeeded.
+    /// Prefer this to dropping, which performs the same flush but cannot report its error.
+    /// The appender is consumed even on error. Use [`flush`](Self::flush) to retain unwritten
+    /// elements for recovery through [`unwritten`](Self::unwritten).
     ///
-    /// This is also the one flush that writes a partial trailing chunk onto a
-    /// **lossy** dataset. [`flush`](Self::flush) refuses that, because the write
-    /// after it could not regrow the tail; here there is no write after it.
+    /// Writes a partial tail even under a lossy pipeline, since the appender is consumed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AppendInPlaceUnsupported`] if a write has already failed or the buffer
+    /// ends within an element. Propagates errors from the immediate append.
     pub fn finish(mut self) -> Result<(), Error> {
         self.finished = true;
         self.flush_prefix(Terminal::Yes)

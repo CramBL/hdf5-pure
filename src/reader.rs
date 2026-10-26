@@ -5634,9 +5634,9 @@ impl Dataset {
         Ok(self.resolved()?.at.address)
     }
 
-    /// Append `data` to this dataset in place, growing it along its first
-    /// (unlimited) dimension. Every handle onto the dataset reads the new length
-    /// afterwards, this one included.
+    /// Appends `data` in place along the first, unlimited dimension.
+    ///
+    /// Every handle onto the dataset reads the new length afterwards.
     ///
     /// The file must have been opened for writing with [`File::open_rw`];
     /// a read-only file returns
@@ -5653,14 +5653,15 @@ impl Dataset {
     /// element is repointed once those bytes are on the disk. The bytes the old
     /// chunk occupied are left for [`repack`](crate::repack()).
     ///
-    /// Two things still require a chunk-aligned starting length. A **lossy**
-    /// pipeline (ZFP, or float D-scale scale-offset) is refused, because
-    /// re-encoding the trailing chunk would change values that are already
-    /// committed rather than reproduce them. And a trailing chunk the chunk index
-    /// does not name — one a writer allocated lazily, which the reference C
-    /// library does for a chunk it has not written — cannot be read to be grown,
-    /// so it is refused too; append whole chunks, or use
-    /// [`append_staged`](Self::append_staged).
+    /// A partial tail stored under lossy filters (ZFP or float D-scale scale-offset) cannot
+    /// grow, because re-encoding it could change committed values. Under
+    /// [`PartialEdgeFiltering::Skip`](crate::PartialEdgeFiltering::Skip), partial tails stay
+    /// unfiltered and can grow. With a lossy pipeline, the writer filters a tail when it
+    /// becomes complete, after publishing the new extent. An interruption between those
+    /// updates can leave the completed chunk unfiltered.
+    ///
+    /// A trailing chunk absent from the chunk index cannot be read to be grown. Such a dataset
+    /// requires a chunk-aligned starting length or [`append_staged`](Self::append_staged).
     ///
     /// The append is immediate and crash-atomic (no `commit` needed) — under the
     /// default [`SyncPolicy::Always`]. Under [`SyncPolicy::OnClose`] the same
@@ -5695,6 +5696,13 @@ impl Dataset {
     /// a commit has run; re-open the dataset by path to keep appending. A
     /// path-named handle is unaffected, because the path is resolved afresh every
     /// time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ReadOnly`] if the file is read-only, or [`Error::AppendInPlaceUnsupported`]
+    /// if the dataset or input is unsupported or conflicts with staged edits. Returns
+    /// [`Error::SwmrAppendUnsupported`] for filtered or unaligned SWMR appends. Propagates
+    /// metadata, allocation, encoding, and I/O errors.
     pub fn append<T: H5Element>(&mut self, data: &[T]) -> Result<(), Error> {
         let g = self.append_geometry()?;
         self.append_batches(g, data.len() as u64, |b, r| {
@@ -5939,18 +5947,15 @@ impl Dataset {
         self.with_session_mut(|session, path| session.stage_dataset_write(path, builder))
     }
 
-    /// Stage an append to this dataset applied on [`File::commit`] — the staged,
-    /// index-rebuilding counterpart of the immediate [`append`](Self::append).
+    /// Stages an append to this dataset for publication by [`File::commit`].
     ///
     /// Unlike [`append`](Self::append) (immediate, amortized `O(1)`,
     /// Extensible-Array only), this rebuilds the chunk index on commit and so
     /// also grows datasets whose Extensible-Array index is not yet allocated.
-    /// Like it, a dataset under a **lossy** pipeline (ZFP, or float D-scale
-    /// scale-offset) whose length is not a whole multiple of its chunk length
-    /// is refused: growing that trailing chunk would decode and re-encode
-    /// values that are already committed, changing them. That one is refused
-    /// *here*, by this call, rather than at the commit — nothing is staged, and
-    /// edits staged beside it are unaffected.
+    /// An append that grows a partial tail stored under lossy filters (ZFP or float D-scale
+    /// scale-offset) is rejected before any changes are staged. Under
+    /// [`PartialEdgeFiltering::Skip`](crate::PartialEdgeFiltering::Skip), partial tails stay
+    /// unfiltered and can grow. With a lossy pipeline, the writer filters a tail when complete.
     /// Configure the appended elements through `build` on the
     /// [`AppendBuilder`]; repeated calls within the builder concatenate in
     /// order. The dataset must be chunked, unlimited along axis 0,
@@ -5962,6 +5967,12 @@ impl Dataset {
     /// [`Error::ReadOnly`].
     /// The closure configures a standalone builder, not the file, so it may read
     /// the same [`File`]; nothing it stages resolves until [`File::commit`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ReadOnly`] if the file is read-only, or [`Error::AppendUnsupported`]
+    /// if growing the partial tail would re-encode lossy values. Propagates errors from
+    /// resolving the dataset or checking for conflicting staged edits.
     pub fn append_staged(&mut self, build: impl FnOnce(&mut AppendBuilder)) -> Result<(), Error> {
         // A dataset *this handle* names and this session has not written has no
         // bytes to grow, so the elements are folded into the pending creation

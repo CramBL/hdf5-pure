@@ -1397,6 +1397,8 @@ pub(crate) struct AppendPlan {
     /// `n_full`. The first is the rewritten trailing chunk when the current length is not a
     /// multiple of the chunk length.
     chunks: Vec<PreparedChunk>,
+    /// Filtered replacement for a completed raw tail, published after the new extent.
+    completed_tail: Option<PreparedChunk>,
     /// Element index the first new chunk occupies.
     n_full: u64,
     /// New axis-0 dimension after the append (the commit value).
@@ -1412,6 +1414,7 @@ impl AppendPlan {
     pub(crate) fn largest_stored_size(&self) -> u64 {
         self.chunks
             .iter()
+            .chain(self.completed_tail.iter())
             .map(PreparedChunk::stored_size)
             .max()
             .unwrap_or(0)
@@ -1425,13 +1428,11 @@ impl AppendPlan {
 /// referenced blocks and the blocks needed for the appended chunks. Planning leaves the file
 /// unchanged.
 ///
-/// `grow_visible_tail` says whether the caller may rewrite the trailing chunk of
-/// a *filtered* dataset — a chunk a reader at the old dimension can already see.
-/// A `File::open_rw` session holds an exclusive lock and passes `true`; the SWMR
-/// writer, whose readers are the point, passes `false`. It has no bearing on an
-/// unfiltered dataset, whose trailing chunk is raw and grows by relocation
-/// either way, and none on a *lossy* pipeline, which is refused here whatever the
-/// caller asks for.
+/// `grow_visible_tail` permits rewriting a trailing chunk under a filter pipeline. An
+/// exclusively locked session passes `true`, and the SWMR writer passes `false`. A partial
+/// tail stored under lossy filters is rejected. Under a lossy pipeline, a tail exempt from
+/// filtering remains raw until complete, then its filtered replacement is published after the
+/// new extent.
 ///
 /// # Errors
 ///
@@ -1468,51 +1469,16 @@ pub(crate) fn plan_ea_append<F: Store>(
     let stats = loc.planned_allocation_stats(file, n_full, new_num_chunks)?;
     let has_partial = current_dim % chunk_elems != 0;
 
-    // Growing a partial trailing chunk is copy-on-write, filtered or not. The
-    // rewritten chunk is written to a *fresh* allocation in phase 1 and the old
-    // slot is never touched, so the only mutation of already-visible state is
-    // phase 2's repoint of element `n_full`. That element write is the same
-    // write `ea_insert` makes for a brand-new element in a block that already
-    // holds visible ones: since issue #307 every element goes out through
-    // `Store::publish_checksummed`, one write running from the changed byte
-    // through the checksum that covers it, so a filtered element's three fields
-    // and their checksum are as atomic as an unfiltered element's one address.
+    // Relocate the partial tail without changing its live prefix before extent publication.
+    // `ChunkEncoding::decodable_by` selects bytes readable at both the old and new extents.
+    // The index record and its checksum are published together by `Store::publish_checksummed`.
+    // Re-encoding a tail already stored under lossy filters could change committed values,
+    // so only lossless pipelines and tails exempt from filtering can grow.
     //
-    // A crash between the phases leaves a readable prefix. After phase 1 nothing
-    // points at the new chunk. After phase 2 a reader still bounded by the old
-    // dimension decodes the new chunk instead of the old one, and
-    // `split_into_chunks` padded it to a whole chunk with the dataset's fill
-    // value, so it yields the same element count with the old live prefix
-    // byte-identical — which holds because the pipelines this admits are
-    // lossless, the condition the next paragraph enforces. Phases 3 and 4 are the
-    // ordinary in-progress states. A chunk the layout flags exempt from the filters at either
-    // dimension is stored as its data, so a reader at either dimension decodes it to the same
-    // data. See `ChunkEncoding::decodable_by`.
-    //
-    // Reusing the old slot when the re-encoded bytes happen to fit is the option
-    // this does *not* take: overwriting a chunk in place is not one atomic write,
-    // and a reader crossing it would decode a mix of two encodings.
-    //
-    // What copy-on-write does *not* buy is a lossy filter. Rewriting the tail
-    // decodes the committed chunk and encodes it again, and for ZFP fixed-rate or
-    // float D-scale scale-offset that round trip is not the identity: the chunk's
-    // new neighbours move the quantization, so values a reader has already seen
-    // come back different. Measured on a chunk of 4 f64 at ZFP rate 8, growing
-    // `[4.5, 5.5]` by two elements read the committed pair back as `[16.0, 0.0]`.
-    // Refused for every caller, `grow_visible_tail` or not.
-    //
-    // The SWMR writer passes `grow_visible_tail = false`. In production that is
-    // defence in depth rather than a reachable message: `append_inplace_gathered`
-    // refuses every filtered SWMR append before it gets here. It is stated as a
-    // parameter anyway because it is this function that knows *why* the rewrite
-    // is safe, and the reason — an exclusive lock, no reader mid-sequence — is
-    // the caller's property, not this function's.
-    //
-    // The appended *length* has never been constrained. An unaligned length only
-    // makes the last chunk this append writes a partial one, and that chunk's
-    // index element is a fresh insert past the old dimension — invisible until
-    // phase 4 publishes the new dimension, exactly like every whole chunk beside
-    // it.
+    // When a raw tail becomes complete under a lossy pipeline, prepare a filtered copy as well.
+    // Publish its record after the extent barrier: a reader at the old partial extent reads
+    // the chunk's bytes verbatim, regardless of its filter mask. Before that barrier, the
+    // raw copy preserves the old prefix. After it, either copy is readable at the new extent.
     if has_partial && let Some(pl) = pipeline {
         if !grow_visible_tail {
             return Err(Error::AppendUnsupported(
@@ -1522,7 +1488,7 @@ pub(crate) fn plan_ea_append<F: Store>(
                  Dataset::append_staged, or append whole chunks",
             ));
         }
-        if !edit::pipeline_lossless(pl) {
+        if !loc.flags.partial_edge_chunks_stored_raw() && !edit::pipeline_lossless(pl) {
             return Err(Error::AppendUnsupported(LOSSY_TAIL_REFUSAL));
         }
     }
@@ -1546,10 +1512,24 @@ pub(crate) fn plan_ea_append<F: Store>(
     let split =
         chunked_write::split_into_chunks(&tail_raw, &[tail_len_elems], spatial, element_size, fill)
             .map_err(Error::Format)?;
+    let filter_completed_tail = has_partial
+        && loc.flags.partial_edge_chunks_stored_raw()
+        && new_dim / chunk_elems > n_full
+        && pipeline.is_some_and(|pipeline| !edit::pipeline_lossless(pipeline));
+    let mut completed_tail = None;
     let chunks = (n_full..)
         .zip(split)
         .map(|(e, logical)| {
             let offset = e * chunk_elems;
+            if e == n_full && filter_completed_tail {
+                completed_tail = Some(PreparedChunk::encode(
+                    &mut scratch,
+                    pipeline,
+                    ctx,
+                    ChunkEncoding::Filtered,
+                    logical.clone(),
+                )?);
+            }
             let current = (offset < current_dim).then(|| loc.decoding_at(offset, current_dim));
             let encoding = ChunkEncoding::decodable_by(current, loc.decoding_at(offset, new_dim));
             PreparedChunk::encode(&mut scratch, pipeline, ctx, encoding, logical)
@@ -1561,12 +1541,13 @@ pub(crate) fn plan_ea_append<F: Store>(
     // in phase 2 — by then phase 1 has already placed the chunk bytes, and the
     // refusal would leave them behind unreferenced.
     let os = file.widths().offsets.get() as usize;
-    for chunk in &chunks {
+    for chunk in chunks.iter().chain(completed_tail.iter()) {
         loc.check_stored_size(os, chunk.stored_size())?;
     }
 
     Ok(AppendPlan {
         chunks,
+        completed_tail,
         n_full,
         new_dim,
         new_num_chunks,
@@ -1574,7 +1555,7 @@ pub(crate) fn plan_ea_append<F: Store>(
     })
 }
 
-/// Applies a planned append in order from chunk data to the dataspace dimension.
+/// Publishes a planned append with synchronization barriers between its storage updates.
 ///
 /// Writes each child before publishing its address, with synchronization barriers between
 /// phases. Runs phase 1, then continues through `max_phase`, up to phase 4. Production callers
@@ -1582,7 +1563,8 @@ pub(crate) fn plan_ea_append<F: Store>(
 ///
 /// Caches allocation statistics after phase 3's header publication barrier. Updates
 /// [`Located::current_dim`] and [`Located::num_chunks`] after phase 4's dimension publication
-/// barrier.
+/// barrier. If a raw tail becomes complete under a lossy pipeline, publishes its filtered
+/// replacement after that barrier. An interruption can leave the completed chunk unfiltered.
 ///
 /// # Errors
 ///
@@ -1595,6 +1577,7 @@ pub(crate) fn apply_ea_append<F: Store>(
     loc: &mut Located,
     AppendPlan {
         chunks,
+        completed_tail,
         n_full,
         new_dim,
         new_num_chunks,
@@ -1621,6 +1604,16 @@ pub(crate) fn apply_ea_append<F: Store>(
             file.allocate(chunk.bytes(), AllocationClass::Raw)?,
         ));
     }
+    let completed_record = completed_tail
+        .as_ref()
+        .map(|chunk| {
+            Ok::<_, Error>(ElemRecord {
+                addr: StoredAddress::new(file.allocate(chunk.bytes(), AllocationClass::Raw)?),
+                stored_size: chunk.stored_size(),
+                filter_mask: chunk.filter_mask(),
+            })
+        })
+        .transpose()?;
     file.sync()?;
     if file.len() != recorded_eof {
         file.patch_superblock_eof()?;
@@ -1661,12 +1654,17 @@ pub(crate) fn apply_ea_append<F: Store>(
         return Ok(());
     }
 
-    // Phase 4: publish the dataspace dimension — the single commit point.
+    // Phase 4: publish the dataspace dimension before publishing a filtered tail.
     loc.patch_dimension(file, new_dim)?;
     file.sync()?;
 
     loc.current_dim = new_dim;
     loc.num_chunks = new_num_chunks;
+    if let Some(record) = completed_record {
+        loc.ea_insert(file, n_full, record)?;
+        file.sync()?;
+        loc.allocation_stats = Some(stats);
+    }
     Ok(())
 }
 
@@ -2004,6 +2002,9 @@ mod tests {
     use test_util::widths::Widths;
 
     use super::*;
+    use crate::DatasetCreateProperties;
+    use crate::PartialEdgeFiltering;
+    use crate::ScaleOffset;
     use crate::access_mode::AccessMode;
     use crate::edit::LocatedState;
     use crate::filters;
@@ -3476,6 +3477,68 @@ mod tests {
         assert_eq!(stored_chunks(&store.data), chunks);
         let file = crate::File::from_bytes(store.data).unwrap();
         assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), values);
+    }
+
+    #[rstest]
+    #[case::payloads(1, None, &[1.46, 1.56], 0)]
+    #[case::index(2, None, &[1.46, 1.56], 1)]
+    #[case::header(3, None, &[1.46, 1.56], 1)]
+    #[case::extent_barrier(4, Some(5), &[1.46, 1.56, 1.0, 2.0], 1)]
+    #[case::filtered_barrier(4, Some(6), &[1.5, 1.6, 1.0, 2.0], 0)]
+    #[case::complete(4, None, &[1.5, 1.6, 1.0, 2.0], 0)]
+    fn lossy_raw_tail_publication_remains_readable_at_each_barrier(
+        #[case] phase: u8,
+        #[case] fail_sync: Option<usize>,
+        #[case] expected: &[f64],
+        #[case] mask: u32,
+    ) {
+        let mut builder = FileBuilder::new();
+        builder
+            .create_dataset("d")
+            .with_f64_data(&[1.46, 1.56])
+            .with_shape(&[2])
+            .with_maxshape(&[MaxExtent::Unlimited])
+            .with_create_properties(
+                DatasetCreateProperties::new()
+                    .with_chunks(&[4])
+                    .with_scale_offset(ScaleOffset::FloatDScale(1))
+                    .with_partial_edge_filtering(PartialEdgeFiltering::Skip),
+            );
+        let mut store = WindowProbeStore::open(builder.finish().unwrap());
+        let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
+        let raw: Vec<_> = [1.0_f64, 2.0]
+            .into_iter()
+            .flat_map(f64::to_le_bytes)
+            .collect();
+        let plan = plan_ea_append(
+            &store,
+            &state.loc,
+            &state.datatype,
+            &state.spatial,
+            state.element_size,
+            state.pipeline.as_ref(),
+            true,
+            &raw,
+            2,
+            state.fill.pattern(state.element_size),
+        )
+        .unwrap();
+        store.fail_sync = fail_sync;
+        match apply_ea_append(&mut store, &mut state.loc, plan, phase) {
+            Ok(()) => assert_eq!(fail_sync, None),
+            Err(Error::Io(error)) => {
+                assert!(fail_sync.is_some());
+                assert_eq!(error.kind(), std::io::ErrorKind::Other);
+                assert_eq!(error.to_string(), "injected synchronization failure");
+            }
+            Err(error) => panic!("expected a synchronization error, got {error:?}"),
+        }
+        let file = crate::File::from_bytes(store.data).unwrap();
+        let dataset = file.dataset("d").unwrap();
+        assert_eq!(dataset.read_f64().unwrap(), expected);
+        let chunks = dataset.chunks().unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].filter_mask().raw_bits(), mask);
     }
 
     #[rstest]
