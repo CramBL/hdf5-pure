@@ -5,7 +5,7 @@ set working-directory := ".."
 
 default: miri heap-baseline
 
-# Miri over the MAT buffers and the tests whose names contain `nosync`: the single-threaded mutex and the chunk cache over it.
+# Check MAT buffers, single-threaded cache synchronization, and dense output assembly with Miri.
 miri $MIRIFLAGS="-Zmiri-strict-provenance": miri-toolchain
     # Miri artifacts contain compiler-specific metadata. Store them under the pinned nightly so
     # artifacts from another Miri toolchain cannot share this target directory. cargo-miri adds its
@@ -13,6 +13,7 @@ miri $MIRIFLAGS="-Zmiri-strict-provenance": miri-toolchain
     CARGO_TARGET_DIR="target/{{ NIGHTLY }}" cargo +{{ NIGHTLY }} miri test --locked -p hdf5-pure --no-default-features --features std,serde --lib mat::complex
     CARGO_TARGET_DIR="target/{{ NIGHTLY }}" cargo +{{ NIGHTLY }} miri test --locked -p hdf5-pure --no-default-features --features std,serde --lib mat::transpose
     CARGO_TARGET_DIR="target/{{ NIGHTLY }}" cargo +{{ NIGHTLY }} miri test --locked -p hdf5-pure --no-default-features --features std --lib nosync
+    CARGO_TARGET_DIR="target/{{ NIGHTLY }}" cargo +{{ NIGHTLY }} miri test --locked -p hdf5-pure --no-default-features --features std --lib chunked_read::tests::dense_assembly
 
 # Install the pinned nightly with Miri and the standard library sources it builds.
 miri-toolchain:

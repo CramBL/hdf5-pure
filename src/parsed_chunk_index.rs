@@ -73,6 +73,11 @@ impl ParsedChunkIndex {
             .filter(|coverage| coverage.matches(chunk_dims, ds_dims))
     }
 
+    /// Borrows the complete descriptor slice in the same address order as [`Self::chunks`].
+    pub(crate) fn descriptors(&self) -> &[ChunkInfo] {
+        &self.chunks
+    }
+
     /// Returns an iterator over the chunks in ascending order of address, each with its
     /// coordinate.
     pub(crate) fn chunks(&self) -> impl ExactSizeIterator<Item = IndexedChunk<'_>> {
