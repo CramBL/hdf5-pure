@@ -2674,6 +2674,21 @@ fn libhdf5_reads_a_section_list_whose_allocation_the_test_enlarges(#[case] userb
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("enlarged_section_list.h5");
     let (free, _) = enlarged_section_list_file(&path, userblock);
+    let manager = free
+        .managers()
+        .iter()
+        .find(|manager| {
+            manager.free_sections().free_bytes() == 1600
+                && manager.free_sections().section_count() == 1
+        })
+        .unwrap();
+    assert_eq!(manager.metadata_bytes(), 82 + 35);
+    // Enumeration of this enlarged list reaches `H5FS__sinfo_unlock`'s used/allocated-length
+    // assertion (`H5FSsection.c`, HDF5 2.2.0). A fresh `H5Fget_info2` query uses allocated capacity.
+    assert_eq!(
+        super::file_space_oracle::assert_manager_metadata_bytes(&path),
+        free.manager_metadata_bytes() + 16,
+    );
     let file = hdf5::File::open(&path).unwrap();
     assert_eq!(file.free_space(), free.free_sections().free_bytes());
     assert_eq!(
