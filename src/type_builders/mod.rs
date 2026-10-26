@@ -2788,9 +2788,11 @@ impl DatasetBuilder {
     ///
     /// Sets the current shape to `dims`, where an empty slice describes a scalar. Chunk
     /// geometry, maximum shape, filters, and fill settings can be configured separately.
+    /// File builders and [`Group::create_dataset`](crate::Group::create_dataset) support these
+    /// declarations in new and writable files.
     ///
-    /// Finalizing the file returns [`FormatError::ConflictingDatasetStorage`] if element
-    /// data or a data provider is also supplied. Element checksums require data for a
+    /// File finalization and editor staging return [`FormatError::ConflictingDatasetStorage`]
+    /// if element data or a data provider is also supplied. Element checksums require data for a
     /// nonempty dataset.
     ///
     /// # Examples

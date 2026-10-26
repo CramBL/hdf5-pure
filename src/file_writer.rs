@@ -1545,8 +1545,9 @@ impl FileWriter {
             ///
             /// # Errors
             ///
-            /// Returns [`FormatError::ZeroSizedDatatype`] if an element has zero width, or
-            /// [`FormatError::UnsupportedFilter`] if a filter has no encoder.
+            /// Returns [`FormatError::ZeroSizedDatatype`] if an element has zero width,
+            /// [`FormatError::UnsupportedFilter`] if a filter has no encoder, or
+            /// [`FormatError::InvalidChunkGeometry`] if a chunk is larger than [`u32::MAX`] bytes.
             ///
             /// Returns [`FormatError::ChunkedReadError`] if the chunk-index geometry is
             /// unsupported or exceeds the writer's index limits, or
@@ -4307,12 +4308,12 @@ fn paged_metadata_section_allocation(
 /// The value reserved for an unlimited maximum dimension.
 ///
 /// `H5Screate_simple` rejects this value in current dimensions (`H5S.c`, HDF5 1.14.6).
-const UNLIMITED_DIMENSION: u64 = u64::MAX;
+pub(crate) const UNLIMITED_DIMENSION: u64 = u64::MAX;
 
 /// The largest dataset rank accepted by the writer.
 ///
 /// `H5Screate_simple` uses `H5S_MAX_RANK` for this bound (`H5S.c`, HDF5 1.14.6).
-const MAX_DATASET_RANK: u8 = 32;
+pub(crate) const MAX_DATASET_RANK: u8 = 32;
 
 #[cfg(test)]
 mod tests {

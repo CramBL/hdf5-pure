@@ -962,10 +962,10 @@ impl CompressedChunkSet {
 /// # Errors
 ///
 /// Returns [`FormatError::ChunkedReadError`] if the chunk index of the geometry is unsupported or
-/// exceeds the writer's index limits. Returns [`FormatError::InvalidChunkGeometry`] if a chunk of
-/// an allocated dataset is larger than [`u32::MAX`] bytes. Returns the errors of
-/// [`ChunkOptions::build_pipeline`] for the filters, and of [`PreparedChunk::encode_dataset`] for
-/// the chunks.
+/// exceeds the writer's index limits. Returns [`FormatError::InvalidChunkGeometry`] if a chunk
+/// is larger than [`u32::MAX`] bytes, including a chunk of an unallocated dataset. Returns the
+/// errors of [`ChunkOptions::build_pipeline`] for the filters, and of
+/// [`PreparedChunk::encode_dataset`] for the chunks.
 pub(crate) fn compress_chunks(
     raw_data: &[u8],
     shape: &[u64],
@@ -977,6 +977,7 @@ pub(crate) fn compress_chunks(
 ) -> Result<CompressedChunkSet, FormatError> {
     let chunk_dims = ctx.chunk_dims;
     let element_size = ctx.element_size.narrow::<NonZeroUsize>()?;
+    crate::chunked_read::bounded_chunk_len(chunk_dims, element_size)?;
     // The same pattern the unwritten slots are padded with: a filter that
     // records the fill value has to record the one this write pads with.
     let mut scratch = FilterScratch::new();
@@ -1026,11 +1027,10 @@ pub(crate) fn compress_chunks(
     let has_filters = pipeline.is_some();
     debug_assert_eq!(slot_of_chunk.len(), chunks.len());
 
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "chunk dimensions written into the on-disk u32 dimension fields selected for this file"
-    )]
-    let chunk_dims_u32: Vec<u32> = chunk_dims.iter().map(|&d| d as u32).collect();
+    let mut chunk_dims_u32 = Vec::with_capacity(chunk_dims.len());
+    for &dimension in chunk_dims {
+        chunk_dims_u32.push(dimension.narrow()?);
+    }
 
     Ok(CompressedChunkSet {
         chunks,
@@ -2010,10 +2010,18 @@ mod tests {
     #[rstest]
     #[case::just_over(1 << 29)]
     #[case::unallocatable(1 << 40)]
-    fn a_created_chunk_larger_than_u32_max_bytes_is_rejected(#[case] chunk_len: u64) {
+    fn a_created_chunk_larger_than_u32_max_bytes_is_rejected(
+        #[case] chunk_len: u64,
+        #[values(StorageAllocation::Allocated, StorageAllocation::Unallocated)]
+        allocation: StorageAllocation,
+    ) {
         let chunk_dims = [chunk_len];
+        let raw: &[u8] = match allocation {
+            StorageAllocation::Allocated => &[0; 8],
+            StorageAllocation::Unallocated => &[],
+        };
         let Err(err) = compress_chunks(
-            &[0; 8],
+            raw,
             &[1],
             ChunkContext::basic(&chunk_dims, 8),
             &ChunkOptions {
@@ -2022,7 +2030,7 @@ mod tests {
             },
             None,
             FillPattern::ZERO,
-            StorageAllocation::Allocated,
+            allocation,
         ) else {
             panic!("expected InvalidChunkGeometry");
         };

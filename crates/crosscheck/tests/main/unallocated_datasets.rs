@@ -1,9 +1,12 @@
 #![cfg(feature = "__hdf5-1.10")]
 
+use std::path::Path;
+
 use hdf5::Extent;
 use hdf5::datatype::ByteOrder as CByteOrder;
 use hdf5::filters::Filter;
 use hdf5::plist::dataset_create::Layout;
+use hdf5_pure::DatasetBuilder;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
@@ -11,6 +14,35 @@ use hdf5_pure::MaxExtent;
 use rstest::rstest;
 use test_util_hdf5::file;
 use test_util_hdf5::numeric::ByteOrder;
+
+#[derive(Clone, Copy, Debug)]
+enum Creation {
+    Buffered,
+    Edit,
+    Streaming,
+}
+
+impl Creation {
+    fn write(self, path: &Path, configure: impl FnOnce(&mut DatasetBuilder)) {
+        match self {
+            Creation::Buffered | Creation::Streaming => {
+                let mut builder = FileBuilder::new();
+                configure(builder.create_dataset("schema"));
+                if matches!(self, Creation::Streaming) {
+                    builder.write(path).unwrap();
+                } else {
+                    std::fs::write(path, builder.finish().unwrap()).unwrap();
+                }
+            }
+            Creation::Edit => {
+                FileBuilder::new().write(path).unwrap();
+                let file = File::open_rw(path).unwrap();
+                file.root().create_dataset("schema", configure).unwrap();
+                file.commit().unwrap();
+            }
+        }
+    }
+}
 
 #[rstest]
 #[case::contiguous(false, false, false)]
@@ -22,7 +54,7 @@ fn schemas_match_reference_unallocated_storage(
     #[case] filtered: bool,
     #[case] extensible: bool,
     #[values(None, Some(-7_i32))] fill: Option<i32>,
-    #[values(false, true)] streaming: bool,
+    #[values(Creation::Buffered, Creation::Streaming, Creation::Edit)] creation: Creation,
     #[values(ByteOrder::BigEndian, ByteOrder::LittleEndian)] reference_order: ByteOrder,
 ) {
     let directory = tempfile::tempdir().unwrap();
@@ -53,27 +85,22 @@ fn schemas_match_reference_unallocated_storage(
         drop(dataset);
         reference.close().unwrap();
     }
-    let mut builder = FileBuilder::new();
-    let schema = builder
-        .create_dataset("schema")
-        .with_unallocated_storage(hdf5_pure::make_i32_type(), &[3, 4]);
-    if let Some(fill) = fill {
-        schema.with_fill_value(fill);
-    }
-    if chunked {
-        schema.with_chunks(&[2, 2]);
-    }
-    if filtered {
-        schema.with_shuffle().with_deflate(DeflateLevel::Six);
-    }
-    if extensible {
-        schema.with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Fixed(4)]);
-    }
-    if streaming {
-        builder.write(&pure_path).unwrap();
-    } else {
-        std::fs::write(&pure_path, builder.finish().unwrap()).unwrap();
-    }
+    let configure = |schema: &mut DatasetBuilder| {
+        schema.with_unallocated_storage(hdf5_pure::make_i32_type(), &[3, 4]);
+        if let Some(fill) = fill {
+            schema.with_fill_value(fill);
+        }
+        if chunked {
+            schema.with_chunks(&[2, 2]);
+        }
+        if filtered {
+            schema.with_shuffle().with_deflate(DeflateLevel::Six);
+        }
+        if extensible {
+            schema.with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Fixed(4)]);
+        }
+    };
+    creation.write(&pure_path, configure);
     let reference = hdf5::File::open(&reference_path)
         .unwrap()
         .dataset("schema")
@@ -153,5 +180,64 @@ fn schemas_match_reference_unallocated_storage(
             .read_i32()
             .unwrap(),
         vec![fill.unwrap_or(0); 12]
+    );
+}
+
+#[rstest]
+fn schemas_preserve_the_largest_version_four_chunk(
+    #[values(Creation::Buffered, Creation::Streaming, Creation::Edit)] creation: Creation,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let reference_path = directory.path().join("reference.h5");
+    let pure_path = directory.path().join("pure.h5");
+    let chunk_len = usize::try_from(u32::MAX).unwrap();
+    {
+        let reference = file::libhdf5_create_v110(&reference_path);
+        reference
+            .new_dataset::<u8>()
+            .shape((Extent::resizable(1),))
+            .chunk((chunk_len,))
+            .fill_value(42_u8)
+            .create("schema")
+            .unwrap();
+        reference.close().unwrap();
+    }
+    creation.write(&pure_path, |schema| {
+        schema
+            .with_unallocated_storage(hdf5_pure::make_u8_type(), &[1])
+            .with_chunks(&[u64::from(u32::MAX)])
+            .with_maxshape(&[MaxExtent::Unlimited])
+            .with_fill_value(42_u8);
+    });
+    let reference = hdf5::File::open(&reference_path)
+        .unwrap()
+        .dataset("schema")
+        .unwrap();
+    let dataset = hdf5::File::open(&pure_path)
+        .unwrap()
+        .dataset("schema")
+        .unwrap();
+    assert_eq!(reference.chunk(), Some(vec![chunk_len]));
+    assert_eq!(dataset.chunk(), reference.chunk());
+    assert_eq!(reference.storage_size(), 0);
+    assert_eq!(dataset.storage_size(), 0);
+    assert_eq!(dataset.shape(), reference.shape());
+    assert_eq!(
+        File::open(&reference_path)
+            .unwrap()
+            .dataset("schema")
+            .unwrap()
+            .chunk_shape()
+            .unwrap(),
+        Some(vec![u64::from(u32::MAX)])
+    );
+    assert_eq!(
+        File::open(&pure_path)
+            .unwrap()
+            .dataset("schema")
+            .unwrap()
+            .chunk_shape()
+            .unwrap(),
+        Some(vec![u64::from(u32::MAX)])
     );
 }
