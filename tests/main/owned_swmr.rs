@@ -140,12 +140,9 @@ fn swmr_post_close_append_is_sealed() {
     ));
 }
 
-/// A writer that exits without a clean close (simulated by leaking the handle so
-/// `Drop` never runs) leaves the flag set; `clear_swmr_flag` recovers it. The
-/// leak + exclusive-relock is most predictable on Unix advisory locks.
 #[test]
 #[cfg(unix)]
-fn clear_swmr_flag_recovers_a_stale_flag() {
+fn clear_status_flags_recovers_a_stale_flag() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("r.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&path);
@@ -156,7 +153,7 @@ fn clear_swmr_flag_recovers_a_stale_flag() {
     std::mem::forget(file);
     assert_eq!(superblock::consistency_flags(&path), SWMR_WRITE_FLAGS);
 
-    File::clear_swmr_flag(&path).unwrap();
+    File::clear_status_flags(&path).unwrap();
     assert_eq!(superblock::consistency_flags(&path), 0);
 }
 

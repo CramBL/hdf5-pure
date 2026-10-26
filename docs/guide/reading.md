@@ -39,7 +39,9 @@ let file = File::open_with_options(&path, props)?;
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
-The opt-in unlocks nothing else: a SWMR pair still belongs to [`File::open_swmr`](crate::File::open_swmr), and [`File::open_rw`](crate::File::open_rw) rejects such a file whatever it says. [`File::from_bytes`](crate::File::from_bytes) does not consult the byte at all, at the cost of a copy of the file. [`File::clear_swmr_flag`](crate::File::clear_swmr_flag) recovers a file a writer left flagged when it exited, and the [SWMR](crate::_guide::swmr) guide walks the writer side that raises the flag.
+The opt-in unlocks nothing else: a SWMR pair still belongs to [`File::open_swmr`](crate::File::open_swmr), and [`File::open_rw`](crate::File::open_rw) rejects such a file whatever it says. [`File::from_bytes`](crate::File::from_bytes) does not consult the byte at all, at the cost of a copy of the file. After the writer has stopped, [`File::clear_status_flags`](crate::File::clear_status_flags)
+clears its status flags without guaranteeing data integrity. See the
+[SWMR guide](crate::_guide::swmr#recovering-a-flagged-file) for recovery limits.
 
 ```rust
 # let dir = tempfile::tempdir()?;

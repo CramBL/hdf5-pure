@@ -107,9 +107,6 @@ fn h5py_swmr_reads_pure_appends_concurrently() {
     );
 }
 
-/// The superblock SWMR-write flag (0x05) is set while a writer is open and
-/// cleared on a clean close (matching h5py/C); `clear_swmr_flag` recovers a
-/// file left flagged by a crashed writer.
 #[test]
 fn swmr_flag_lifecycle() {
     let dir = tempfile::tempdir().unwrap();
@@ -157,10 +154,10 @@ fn swmr_flag_lifecycle() {
         0x05,
         "flag left set after simulated crash"
     );
-    File::clear_swmr_flag(&path).unwrap();
+    File::clear_status_flags(&path).unwrap();
     assert_eq!(
         superblock::consistency_flags(&path),
         0x00,
-        "clear_swmr_flag recovers the file"
+        "clear_status_flags recovers the file"
     );
 }

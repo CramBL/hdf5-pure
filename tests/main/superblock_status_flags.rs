@@ -4,7 +4,7 @@
 //! so a writer that exits without one leaves it set. These tests pin which opens
 //! that byte turns away — a plain read, a streaming read, an editor, a second
 //! SWMR writer — which follow it — a SWMR reader — and that
-//! `File::clear_swmr_flag` restores all of them.
+//! `File::clear_status_flags` clears the flags.
 
 #![expect(clippy::mem_forget, reason = "the tests model a writer that crashed")]
 
@@ -44,7 +44,7 @@ fn assert_marked_in_use(err: Error, what: &str) {
         "{what} must report the status flag, got {err:?}"
     );
     assert!(
-        msg.contains("clear_swmr_flag"),
+        msg.contains("clear_status_flags"),
         "{what} must name the recovery, got: {msg}"
     );
 }
@@ -125,8 +125,6 @@ fn a_swmr_reader_follows_a_flagged_file() {
     writer.close().unwrap();
 }
 
-/// `clear_swmr_flag` is the documented recovery, so every open it was blocking
-/// has to work afterwards — including the SWMR writer, whose own flag it cleared.
 #[test]
 fn clearing_the_flag_restores_every_open() {
     let dir = tempfile::tempdir().unwrap();
@@ -134,7 +132,7 @@ fn clearing_the_flag_restores_every_open() {
     build_swmr(&path);
     flag_as_if_crashed(&path);
 
-    File::clear_swmr_flag(&path).unwrap();
+    File::clear_status_flags(&path).unwrap();
     assert_eq!(superblock::consistency_flags(&path), 0x00);
 
     assert_eq!(
@@ -158,9 +156,8 @@ fn clearing_the_flag_restores_every_open() {
 
 /// `File::from_bytes` does not check the flag: the caller already holds a
 /// snapshot, there is no live file to coordinate over, and it is the way out for
-/// a flagged file on a read-only mount, where the recovery `clear_swmr_flag`
-/// needs write access it cannot get. The C library *does* check under its
-/// in-memory driver, so this is a deliberate divergence, not parity.
+/// a flagged file on a read-only mount. `clear_status_flags` requires write access.
+/// The C library checks the flag under its in-memory driver.
 #[test]
 fn from_bytes_reads_a_flagged_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -346,7 +343,7 @@ fn a_crashed_page_buffered_session_leaves_a_file_every_open_refuses() {
 
     // And the documented recovery reaches this mark too, since it clears the
     // byte whole. What comes back is access, not a promise about the contents.
-    File::clear_swmr_flag(&path).unwrap();
+    File::clear_status_flags(&path).unwrap();
     assert_eq!(superblock::consistency_flags(&path), 0x00);
     File::open(&path).unwrap();
 }
@@ -547,8 +544,7 @@ fn an_unbuffered_editor_raises_no_mark() {
 ///
 /// `close` is the documented ending, but `drop` is the one a `?` on an unrelated
 /// error takes, and a session that left the mark standing there would leave a
-/// file nothing can open until `clear_swmr_flag` — an availability failure with
-/// no crash behind it. Both teardowns write, and both must finish the job.
+/// file that requires `clear_status_flags` despite a clean shutdown.
 #[test]
 fn dropping_a_page_buffered_session_takes_the_mark_down() {
     let dir = tempfile::tempdir().unwrap();

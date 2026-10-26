@@ -117,27 +117,12 @@ pub enum Error {
     /// disabled per editing open with [`crate::FileLocking::Disabled`] or globally with
     /// `HDF5_USE_FILE_LOCKING=FALSE`. The payload describes the lock conflict.
     FileLocked(String),
-    /// The file could not be opened because its superblock's status-flags byte
-    /// marks it as held by a writer - the durable flag
-    /// [`crate::File::open_swmr_writer`] raises, and which a page-buffered
-    /// session ([`crate::FileAccessProperties::with_page_buffer_size`]) raises
-    /// alone. Unlike [`FileLocked`](Self::FileLocked) this outlives the process
-    /// that set it, so it means either that a writer is active *or* that one
-    /// exited without clearing it. The payload names
-    /// [`crate::File::clear_swmr_flag`] (the `h5clear -s` equivalent) as the
-    /// recovery for the latter.
+    /// The superblock status flags mark the file as open for writing.
     ///
-    /// Which reader can get at the file depends on which mark it is, and the
-    /// payload identifies the one that applies:
-    ///
-    /// - both bits, a live SWMR writer: follow it with
-    ///   [`crate::File::open_swmr`].
-    /// - the write bit alone, which no SWMR reader can follow: read a snapshot
-    ///   with
-    ///   [`crate::FileAccessProperties::with_write_mark_policy`], once the
-    ///   writer has synced or closed.
-    ///
-    /// The payload is a human-readable reason.
+    /// Ordinary and SWMR writers can leave these flags set after an interrupted session.
+    /// The payload describes the flags and the applicable read or recovery options.
+    /// [`crate::File::clear_status_flags`] clears them after the writer has stopped, without
+    /// guaranteeing data integrity.
     FileMarkedInUse(String),
     /// A format, filter, or file-operation error reported through [`FormatError`].
     Format(FormatError),

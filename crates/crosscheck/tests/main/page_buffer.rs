@@ -63,7 +63,7 @@ fn the_c_library_refuses_a_file_a_crashed_page_buffered_session_left_marked() {
         "the C library refused it for some other reason: {c_err}"
     );
 
-    File::clear_swmr_flag(&path).unwrap();
+    File::clear_status_flags(&path).unwrap();
     hdf5::File::open(&path)
         .expect("clearing the mark recovers the file for the C library")
         .close()

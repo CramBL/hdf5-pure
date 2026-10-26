@@ -1,50 +1,17 @@
-//! The two guards that decide who may open a file: OS advisory locking for the
-//! in-place editor (issue #73), and the superblock's durable status-flags byte
-//! (issue #245).
+//! OS file locking and superblock status flags for filesystem opens.
 //!
-//! Locking is the crash-safe half of HDF5's concurrency model and the `hdf5-pure`
-//! analogue of `H5Pset_file_locking` / the `HDF5_USE_FILE_LOCKING` environment
-//! variable. It is deliberately distinct from the *superblock consistency flag*
-//! (the durable `status_flags` byte a SWMR writer sets; see [`crate::File::open_swmr_writer`]):
+//! [`acquire_exclusive`] attempts to acquire an exclusive OS lock. The OS releases a lock when
+//! the process exits. [`check_status_flags`] checks the durable superblock flags, which can
+//! remain set after a writer exits without closing the file.
 //!
-//! - An **OS lock** is owned by the kernel and tied to the open file. It is
-//!   released automatically when the process exits *for any reason* — clean exit,
-//!   panic, `SIGKILL`, even power loss — so it never leaves stale state and is
-//!   the authoritative signal for "a writer is alive *right now*".
-//! - The **on-disk flag** is just a byte; only userspace code at clean shutdown
-//!   can reset it, so a crash freezes it set. Recover it with
-//!   [`crate::File::clear_swmr_flag`] (the `h5clear -s` equivalent).
-//!   A crash freezing it set is also what makes it useful beyond SWMR — see
-//!   [`WRITE_ACCESS`], which a page-buffered session raises for its lifetime.
+//! With locking enabled, editors acquire an exclusive lock. Readers and SWMR writers run without a
+//! lock so that a
+//! SWMR writer can publish appends to concurrent readers, including on Windows, where a file
+//! lock blocks reads through other handles.
 //!
-//! Both are enforced here: [`acquire_exclusive`] takes the lock, and
-//! [`check_status_flags`] refuses an open the on-disk byte says is unsafe
-//! (issue #245). The two cover different windows — the lock catches a live
-//! writer in this or another process, the flag catches one that is live *or*
-//! crashed, including a SWMR writer that holds no lock at all.
-//!
-//! ## Lock scope: the in-place editor only
-//!
-//! Only [`crate::File::open_rw`] (and the [`crate::File::clear_swmr_flag`]
-//! recovery rewrite) take a lock — an **exclusive** one — so a second editor or
-//! a concurrent writer cannot open the file. [`crate::File::open_swmr_writer`] and the
-//! readers ([`crate::File::open`] and friends) take **no** lock, on purpose:
-//!
-//! - SWMR is single-writer-*by-contract* and is designed for concurrent reads;
-//!   the reference library itself runs SWMR with file locking disabled. Holding
-//!   a lock would defeat the "multiple-reader" half.
-//! - Crucially, [`std::fs::File`] locking is **advisory on Unix** (`flock`) but
-//!   **mandatory on Windows** (`LockFileEx`): a held lock there blocks *reads* by
-//!   every other handle, not just other lock attempts. A whole-file lock on a
-//!   SWMR writer would therefore make the file unreadable to its readers on
-//!   Windows. Confining locking to the exclusive editor keeps reads working on
-//!   every platform. (One consequence: while an editor holds the lock, a
-//!   concurrent read of the same file is permitted on Unix but blocked by the OS
-//!   on Windows — drop the editor before reading the file back.)
-//!
-//! Locking uses the cross-platform [`std::fs::File`] lock API, so it adds no
-//! dependency, and it lives only in the already `std`-gated edit path, so
-//! `no_std`/`wasm` builds are unaffected.
+//! [`crate::File::clear_status_flags`] clears flags left by an interrupted ordinary or SWMR
+//! writer, including a page-buffered session. The caller must ensure that the writer has
+//! stopped, since the exclusive-lock attempt cannot exclude a live SWMR writer.
 
 use std::fs::{File, TryLockError};
 use std::path::Path;
@@ -134,8 +101,8 @@ pub(crate) fn acquire_exclusive(
         // is tolerated, not active contention.
         Err(TryLockError::WouldBlock) => Err(Error::FileLocked(format!(
             "{}: file is already locked by another process. If a previous writer \
-             crashed, the OS lock is released automatically (try again); a leftover \
-             on-disk SWMR flag can be cleared with File::clear_swmr_flag. Set \
+             crashed, the OS lock is released automatically (try again); leftover \
+             on-disk status flags can be cleared with File::clear_status_flags. Set \
              HDF5_USE_FILE_LOCKING=FALSE or pass FileLocking::Disabled to bypass locking.",
             path.display(),
         ))),
@@ -219,7 +186,7 @@ pub(crate) enum OpenIntent {
 /// makes that alone — but both shape what the error can usefully say, and the
 /// difference is not only cosmetic. Two of the three recoveries a refused
 /// snapshot read would otherwise be told to try, [`crate::File::open_swmr`] and
-/// [`crate::File::clear_swmr_flag`], need a filesystem path; naming them to a
+/// [`crate::File::clear_status_flags`], need a filesystem path. Naming them to a
 /// caller who opened a byte source would be advice it cannot take.
 ///
 /// A closed set rather than a `&dyn Display`, so the wording every refusal
@@ -228,7 +195,7 @@ pub(crate) enum OpenIntent {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum OpenTarget<'a> {
     /// A file opened by name, which the refusal reports and whose flag
-    /// [`crate::File::clear_swmr_flag`] can clear in place.
+    /// [`crate::File::clear_status_flags`] can clear in place.
     Path(&'a Path),
     /// Bytes handed to [`crate::File::from_source`], which have no name and no
     /// in-place recovery.
@@ -240,7 +207,7 @@ impl OpenTarget<'_> {
     /// both the target and the mark.
     ///
     /// The target, because a source has no path for `open_swmr` to follow or for
-    /// `clear_swmr_flag` to write to. The mark, because `open_swmr` follows a
+    /// `clear_status_flags` to write to. The mark, because `open_swmr` follows a
     /// SWMR writer and nothing else: naming it to a caller refused by
     /// [`WRITE_ACCESS`] alone would name a recovery that fails in its turn, the
     /// mismatched pair a SWMR reader refuses (issue #419). That caller's opt-in
@@ -256,12 +223,12 @@ impl OpenTarget<'_> {
             (Self::Path(_), true) => {
                 "Use File::open_swmr to follow a live SWMR writer, or File::from_bytes to read \
                  the bytes as they stand; if a writer exited without closing the file, clear \
-                 the flag with File::clear_swmr_flag"
+                 the flag with File::clear_status_flags"
             }
             (Self::Source, true) => {
                 "Use File::from_bytes to read the bytes as they stand; following a live writer \
                  with File::open_swmr, and clearing a flag a writer left behind with \
-                 File::clear_swmr_flag, both need a filesystem path"
+                 File::clear_status_flags, both need a filesystem path"
             }
             (Self::Path(_), false) => {
                 "No SWMR writer holds it, so no reader can follow it as one. Pass \
@@ -269,14 +236,14 @@ impl OpenTarget<'_> {
                  read it as it stands, which is a consistent snapshot once the writer has called \
                  File::sync or closed the file, or use File::from_bytes to read the bytes as they \
                  stand; if a writer exited without closing the file, clear the flag with \
-                 File::clear_swmr_flag"
+                 File::clear_status_flags"
             }
             (Self::Source, false) => {
                 "No SWMR writer holds it, so no reader can follow it as one. Pass \
                  FileAccessProperties::with_write_mark_policy(WriteMarkPolicy::AllowSnapshot) to \
                  read it as it stands, which is a consistent snapshot once the writer has called \
                  File::sync or closed the file, or use File::from_bytes to read the bytes as they \
-                 stand; clearing a flag a writer left behind with File::clear_swmr_flag needs a \
+                 stand; clearing a flag a writer left behind with File::clear_status_flags needs a \
                  filesystem path"
             }
         }
@@ -298,7 +265,7 @@ impl core::fmt::Display for OpenTarget<'_> {
 /// The byte records that a writer holds the file. It is *durable*, so it means
 /// either "a writer is active right now" or "a writer exited without clearing
 /// it" — the two are indistinguishable from the byte alone, which is why the
-/// refusal names [`crate::File::clear_swmr_flag`] as the recovery rather than
+/// error reports [`crate::File::clear_status_flags`] as the recovery, without
 /// guessing. The rules, one per intent:
 ///
 /// - [`Write`](OpenIntent::Write) refuses either bit: a second writer must not
@@ -351,7 +318,7 @@ pub(crate) fn check_status_flags(
         OpenIntent::Write if write || swmr => format!(
             "the superblock marks the file as open for write (status flags {flags:#04x}), so \
              another writer holds it. Open it read-only, or — if a writer exited without \
-             closing the file — clear the flag with File::clear_swmr_flag",
+             closing the file — clear the flag with File::clear_status_flags",
             flags = flags.bits(),
         ),
         // The opt-in is checked inside the arm rather than in its guard so that
@@ -371,7 +338,7 @@ pub(crate) fn check_status_flags(
         OpenIntent::SwmrRead if write != swmr => format!(
             "the superblock's status flags disagree ({flags:#04x}): a SWMR reader needs a SWMR \
              writer (both the write and SWMR-write bits) or a quiescent file (neither). Clear \
-             them with File::clear_swmr_flag if a writer exited without closing the file",
+             them with File::clear_status_flags if a writer exited without closing the file",
             flags = flags.bits(),
         ),
         _ => return Ok(()),
@@ -379,21 +346,16 @@ pub(crate) fn check_status_flags(
     Err(Error::FileMarkedInUse(format!("{target}: {reason}.")))
 }
 
-/// Clear a stale status flag left in `path` by a writer that exited without a
-/// clean close — the `h5clear -s` equivalent, behind
-/// [`File::clear_swmr_flag`](crate::File::clear_swmr_flag). Safe to call on a
-/// file whose flag is already clear.
+/// Clears the status flags in `path` and updates the superblock checksum.
 ///
-/// It clears the byte whole, so it recovers a page-buffered session's crash mark
-/// ([`WRITE_ACCESS`]) as well as a SWMR writer's pair. What it recovers is
-/// *access*, not correctness: a page-buffered writer that crashed may have left
-/// the file inconsistent in ways no checksum shows, which is the whole reason
-/// the mark stands. `h5clear` makes the same trade.
+/// Version 0 and 1 superblocks are left unchanged. [`check_status_flags`] checks version 3,
+/// and the serializer supports versions 2 and 3.
 ///
-/// This is the one recovery rewrite that takes the exclusive lock without going
-/// through the editor, which is why it lives beside the locking policy it
-/// depends on.
-pub(crate) fn clear_swmr_flag_at(path: &Path) -> Result<(), Error> {
+/// # Errors
+///
+/// Returns [`Error::FileLocked`], [`Error::Io`], or [`Error::Format`] under the conditions
+/// documented by [`crate::File::clear_status_flags`].
+pub(crate) fn clear_status_flags_at(path: &Path) -> Result<(), Error> {
     use std::fs::OpenOptions;
     use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -405,10 +367,8 @@ pub(crate) fn clear_swmr_flag_at(path: &Path) -> Result<(), Error> {
         .write(true)
         .open(path)
         .map_err(Error::Io)?;
-    // Refuse to clear the flag out from under a live writer: an exclusive
-    // lock here fails with `FileLocked` if another writer still holds the
-    // file. A stale flag from a *crashed* writer has no live lock, so this
-    // succeeds and the recovery proceeds.
+    // With locking enabled, a conflicting lock prevents clearing flags. A SWMR writer runs
+    // without a lock, so the caller must ensure that it has stopped.
     acquire_exclusive(&w, FileLocking::Enabled, path)?;
     let mut data = Vec::new();
     w.read_to_end(&mut data).map_err(Error::Io)?;
@@ -557,9 +517,15 @@ mod tests {
         let msg = err.to_string();
         assert!(matches!(err, Error::FileMarkedInUse(_)), "got {err:?}");
         // `from_bytes` is named because it is the only way through for a flagged
-        // file on a read-only mount, where `clear_swmr_flag` cannot get the write
+        // file on a read-only mount, where `clear_status_flags` cannot get the write
         // access it needs.
-        for part in ["d.h5", "0x05", "clear_swmr_flag", "open_swmr", "from_bytes"] {
+        for part in [
+            "d.h5",
+            "0x05",
+            "clear_status_flags",
+            "open_swmr",
+            "from_bytes",
+        ] {
             assert!(msg.contains(part), "refusal does not mention {part}: {msg}");
         }
     }
@@ -567,7 +533,7 @@ mod tests {
     /// The recovery a source is offered is the one a source can reach.
     ///
     /// Two of the three the path refusal names — `open_swmr` to follow the
-    /// writer, `clear_swmr_flag` to clear what one left behind — take a path,
+    /// writer, `clear_status_flags` to clear what one left behind - take a path,
     /// so handing them to a caller that opened a byte source would be advice it
     /// cannot take. The refusal has to say which half applies, and the check
     /// below is that it does: the path wording contains none of this text, so
@@ -621,7 +587,7 @@ mod tests {
             "FileAccessProperties::with_write_mark_policy(WriteMarkPolicy::AllowSnapshot)",
             "File::sync",
             "from_bytes",
-            "clear_swmr_flag",
+            "clear_status_flags",
         ] {
             assert!(msg.contains(part), "refusal does not mention {part}: {msg}");
         }
@@ -651,7 +617,7 @@ mod tests {
             "the refusal does not name the opt-in a source can take: {msg}"
         );
         assert!(
-            msg.contains("File::clear_swmr_flag needs a filesystem path"),
+            msg.contains("File::clear_status_flags needs a filesystem path"),
             "the refusal offers a path-only recovery without saying it needs a path: {msg}"
         );
         assert!(!msg.contains("open_swmr"), "got {msg}");
