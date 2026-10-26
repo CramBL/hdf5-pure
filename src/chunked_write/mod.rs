@@ -45,6 +45,7 @@ use crate::scaleoffset::{self, FillAvailability, ScaleOffset};
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 
+mod gathering;
 mod zfp;
 
 /// The on-disk address and length widths every chunk index *this module* writes
@@ -524,11 +525,7 @@ impl ChunkOptions {
     /// Returns a reason for the first problem found, for the caller to map to its
     /// own error type: a scalar shape, chunk dimensions of another rank than the
     /// shape, a zero chunk dimension, a zero-element shape with no explicit chunk
-    /// dimensions, or more than one unlimited dimension. Without these checks
-    /// [`split_into_chunks`] panics on such a geometry, since it indexes
-    /// `chunk_dims` by the shape's rank and divides by each chunk dimension, and
-    /// a writer given more than one unlimited dimension writes a dataset the C
-    /// library fails to open.
+    /// dimensions, or more than one unlimited dimension.
     pub(crate) fn validate_geometry(&self, extent: Extent<'_>) -> Result<(), &'static str> {
         let shape = extent.dims();
         if shape.is_empty() {
@@ -650,18 +647,19 @@ pub struct ChunkedDataResult {
     pub pipeline_message: Option<Vec<u8>>,
 }
 
-/// Split raw data into chunk-sized pieces based on shape and chunk dimensions.
+/// Collects full chunk buffers in dense row-major order.
 ///
-/// Chunks are whole even where the dataset's edge falls inside one; the slots
-/// past that edge take `fill`. That is not cosmetic padding: an allocated chunk
-/// is expected to hold the dataset's fill value wherever nothing has been
-/// written, so those slots are what a reader returns once the dataset is
-/// extended into them. Passing [`FillPattern::ZERO`] where the dataset has no
-/// fill value keeps this on a plain zeroed allocation (issue #296).
+/// Partial edge chunks are padded with `fill`. Copies available whole elements from `raw_data`
+/// into their chunk slots. Missing input within a full chunk remains zero. Returns one copy
+/// of `raw_data` for a scalar shape and an empty collection for a zero extent.
 ///
-/// `fill` is a parameter rather than a field on [`ChunkContext`] on purpose:
-/// every caller has to name it, so a new write path cannot inherit zeros by
-/// omission.
+/// # Errors
+///
+/// Returns [`FormatError::InvalidChunkGeometry`] for a non-scalar shape if the chunk rank
+/// differs, a chunk dimension is zero, or a derived count, stride, or byte length exceeds
+/// [`u64::MAX`]. Returns [`FormatError::ValueTooLargeForPlatform`] if the chunk count or full
+/// chunk byte length exceeds [`usize::MAX`]. Returns [`FormatError::UnreadableFillValue`] if
+/// an edge chunk needs padding and `fill` is unknown.
 pub fn split_into_chunks(
     raw_data: &[u8],
     shape: &[u64],
@@ -669,151 +667,17 @@ pub fn split_into_chunks(
     element_size: NonZeroUsize,
     fill: FillPattern<'_>,
 ) -> Result<Vec<Vec<u8>>, FormatError> {
-    let rank = shape.len();
-    if rank == 0 {
+    if shape.is_empty() {
         return Ok(vec![raw_data.to_vec()]);
     }
-
-    // Compute number of chunks per dimension
-    let mut num_chunks_per_dim = Vec::with_capacity(rank);
-    for d in 0..rank {
-        num_chunks_per_dim.push(shape[d].div_ceil(chunk_dims[d]));
-    }
-    let total_chunks: u64 = num_chunks_per_dim.iter().product();
-
-    // Dataset strides (row-major)
-    let mut ds_strides = vec![1usize; rank];
-    for i in (0..rank.saturating_sub(1)).rev() {
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "dataset dimension derived from the in-memory write request; bounded by addressable memory"
-        )]
-        let dim = shape[i + 1] as usize;
-        ds_strides[i] = ds_strides[i + 1] * dim;
-    }
-
-    // Chunk strides
-    let mut chunk_strides = vec![1usize; rank];
-    for i in (0..rank.saturating_sub(1)).rev() {
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "chunk dimension derived from the in-memory write request; bounded by addressable memory"
-        )]
-        let dim = chunk_dims[i + 1] as usize;
-        chunk_strides[i] = chunk_strides[i + 1] * dim;
-    }
-
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "chunk/dataset dimensions derived from the in-memory write request; bounded by addressable memory"
-    )]
-    let (chunk_dims_us, shape_us): (Vec<usize>, Vec<usize>) = (
-        chunk_dims.iter().map(|&d| d as usize).collect(),
-        shape.iter().map(|&d| d as usize).collect(),
-    );
-    let chunk_total_elements: usize = chunk_dims_us.iter().product();
-
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "total_chunks derived from the in-memory write request; bounded by addressable memory"
-    )]
-    let mut buffers = Vec::with_capacity(total_chunks as usize);
-
-    // Innermost dimension is contiguous in both the dataset (`raw_data`) and the
-    // chunk buffer, so each in-bounds row is gathered with a single
-    // `copy_from_slice`. Only the outer `rank - 1` dims are walked (odometer),
-    // matching the read-side `copy_chunk_to_output` kernel.
-    let inner = rank - 1;
-    let mut coord = vec![0usize; inner];
-    // Both refilled per chunk rather than allocated per chunk. Together with the
-    // dataset-space offsets this loop used to return and no caller ever read,
-    // that was three allocator round trips for every chunk of every dataset this
-    // crate writes (issue #228). The order the offsets encoded is still a
-    // correctness property -- the emitter writes chunks in it -- and the split
-    // tests pin it by asserting each chunk's contents, which says the same thing.
-    let mut offsets_us = vec![0usize; rank];
-    let mut offsets = vec![0u64; rank];
-
-    for linear_idx in 0..total_chunks {
-        // Convert linear index to chunk grid coordinates and the chunk's
-        // dataset-space offset, straight into this chunk's slice of `coords`.
-        let mut remaining = linear_idx;
-        for d in (0..rank).rev() {
-            offsets[d] = (remaining % num_chunks_per_dim[d]) * chunk_dims[d];
-            remaining /= num_chunks_per_dim[d];
-        }
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "chunk offset derived from the in-memory write request; bounded by addressable memory"
-        )]
-        for (slot, &o) in offsets_us.iter_mut().zip(offsets.iter()) {
-            *slot = o as usize;
-        }
-
-        // A chunk wholly inside the dataset has no slot the data will not reach,
-        // so it needs no fill: the row copies below overwrite every byte of it.
-        // For rank > 1 an "overhang" is not only a trailing run — a partial
-        // chunk has gaps between its in-bounds rows — which is why this asks
-        // whether the whole chunk is in bounds rather than trying to name the
-        // uncovered region.
-        let whole_chunk_in_bounds =
-            (0..rank).all(|d| offsets_us[d] + chunk_dims_us[d] <= shape_us[d]);
-
-        let mut chunk_bytes = vec![0u8; chunk_total_elements * element_size.get()];
-        if !whole_chunk_in_bounds {
-            // Fill first, data over it: the rows copied below overwrite exactly
-            // the in-bounds region, leaving every uncovered slot holding the
-            // fill value.
-            fill.apply(&mut chunk_bytes)?;
-        }
-
-        // In-bounds run length along the contiguous innermost dimension.
-        let inner_row_len =
-            chunk_dims_us[inner].min(shape_us[inner].saturating_sub(offsets_us[inner]));
-        if inner_row_len > 0 {
-            let row_bytes = inner_row_len * element_size.get();
-            let inner_src = offsets_us[inner] * ds_strides[inner];
-            let outer_total: usize = chunk_dims_us[..inner].iter().product();
-            for c in coord.iter_mut() {
-                *c = 0;
-            }
-            for _ in 0..outer_total {
-                let mut dst_base = 0usize;
-                let mut src_base = inner_src;
-                let mut in_bounds = true;
-                for d in 0..inner {
-                    dst_base += coord[d] * chunk_strides[d];
-                    let global = offsets_us[d] + coord[d];
-                    if global >= shape_us[d] {
-                        in_bounds = false;
-                        break;
-                    }
-                    src_base += global * ds_strides[d];
-                }
-
-                if in_bounds {
-                    let src = src_base * element_size.get();
-                    let dst = dst_base * element_size.get();
-                    let mut avail = row_bytes.min(raw_data.len().saturating_sub(src));
-                    avail -= avail % element_size;
-                    if avail > 0 {
-                        chunk_bytes[dst..dst + avail].copy_from_slice(&raw_data[src..src + avail]);
-                    }
-                }
-
-                for d in (0..inner).rev() {
-                    coord[d] += 1;
-                    if coord[d] < chunk_dims_us[d] {
-                        break;
-                    }
-                    coord[d] = 0;
-                }
-            }
-        }
-
-        buffers.push(chunk_bytes);
-    }
-
+    let mut traversal = gathering::ChunkTraversal::new(shape, chunk_dims, element_size)?;
+    let mut buffers = Vec::with_capacity(traversal.chunk_count().narrow()?);
+    traversal.visit(|chunk| {
+        let mut bytes = vec![0; chunk.byte_len()];
+        chunk.gather(raw_data, fill, &mut bytes)?;
+        buffers.push(bytes);
+        Ok(())
+    })?;
     Ok(buffers)
 }
 
