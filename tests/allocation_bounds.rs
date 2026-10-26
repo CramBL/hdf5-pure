@@ -27,6 +27,7 @@
 #![cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 
 use hdf5_pure::ChunkCacheConfig;
+use hdf5_pure::ChunkIndex;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
@@ -557,6 +558,77 @@ fn a_warm_whole_read_lists_its_chunks_without_an_allocation_per_chunk(
         measured.blocks < CHUNKS / 16,
         "a warm whole read must take its {CHUNKS} chunks from the retained index without an \
          allocation per chunk: {measured}"
+    );
+}
+
+#[rstest]
+#[case::buffered(false, "cold_implicit_read_buffered", "warm_implicit_read_buffered")]
+#[case::streaming(true, "cold_implicit_read_streaming", "warm_implicit_read_streaming")]
+fn a_cold_implicit_read_bounds_extra_allocations_beyond_a_warm_read(
+    #[case] streaming: bool,
+    #[case] cold_region: &'static str,
+    #[case] warm_region: &'static str,
+) {
+    const CHUNKS: u64 = 131_072;
+
+    let data: Vec<u8> = (0..CHUNKS).flat_map(|i| (i as f64).to_le_bytes()).collect();
+    let mut image = Image::starting_with(&[0; 64]);
+    let data_address = image.append(&data) as u64;
+    let image = image.build_with_dataset(
+        "data",
+        [
+            Message::new(
+                MessageType::DATASPACE,
+                &dataspace::v2(
+                    1,
+                    dataspace::Flags::NONE,
+                    dataspace::Kind::SIMPLE,
+                    &[CHUNKS],
+                    None,
+                ),
+            ),
+            Message::new(MessageType::DATATYPE, &datatype::f64_le()),
+            Message::new(
+                MessageType::DATA_LAYOUT,
+                &data_layout::implicit(data_address, &[1], 8),
+            ),
+        ],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("implicit.h5");
+    std::fs::write(&path, image).unwrap();
+    let access = FileAccessProperties::new()
+        .with_chunk_cache(ChunkCacheConfig::new().with_max_bytes(0).with_max_slots(0));
+    let file = if streaming {
+        File::open_streaming_with_options(&path, access)
+    } else {
+        File::open_with_options(&path, access)
+    }
+    .unwrap();
+    let ds = file.dataset("data").unwrap();
+    assert_eq!(ds.chunk_index().unwrap(), Some(ChunkIndex::Implicit));
+
+    let (cold_bytes, cold) = measure(cold_region, || ds.read_raw().unwrap());
+    let (warm_bytes, warm) = measure(warm_region, || ds.read_raw().unwrap());
+
+    assert_eq!(cold_bytes, data);
+    assert_eq!(warm_bytes, data);
+    assert!(ds.chunk_cache_stats().index_loaded());
+    assert!(
+        cold.live_bytes >= warm.live_bytes + CHUNKS * 8,
+        "the index the cold read retained is not in its own measurement: cold: {cold}; warm: \
+         {warm}"
+    );
+    assert!(
+        warm.live_bytes >= warm_bytes.len() as u64,
+        "the dataset the warm read returned is not in its own measurement: {warm}"
+    );
+    let index_bytes = cold.live_bytes - warm.live_bytes;
+    assert!(
+        cold.bytes - warm.bytes < index_bytes + CHUNKS * 8,
+        "a cold read through an implicit index of {CHUNKS} chunks must allocate the \
+         {index_bytes} bytes of the index it retains and little else beside the warm read: \
+         cold: {cold}; warm: {warm}"
     );
 }
 
