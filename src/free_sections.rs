@@ -257,7 +257,7 @@ impl PersistedFreeSections {
     /// userblocks, dataset storage and other metadata, aggregate or append reservations, dead
     /// or unclassified storage, and trailing file slack. It measures persisted manager storage only.
     ///
-    /// The C library's `H5Fget_info2` reports free-space-manager metadata for an open handle.
+    /// libhdf5's `H5Fget_info2` reports free-space-manager metadata for an open handle.
     /// `H5FS_size` can use an in-memory section-list size (`H5FS.c`, HDF5 1.14.6), so that
     /// statistic can differ from this allocation count.
     pub const fn manager_metadata_bytes(&self) -> u64 {

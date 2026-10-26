@@ -168,18 +168,18 @@ const OH_FLAG_CREATION_ORDER_TRACKED: u8 = 0x04;
 const OH_FLAG_CREATION_ORDER_INDEXED: u8 = 0x08;
 
 /// Bit 4 of the flags, set where the prefix stores the attribute phase change values, from the
-/// same section as [`OH_FLAG_CREATION_ORDER_TRACKED`]. The C library calls it
+/// same section as [`OH_FLAG_CREATION_ORDER_TRACKED`]. libhdf5 calls it
 /// `H5O_HDR_ATTR_STORE_PHASE_CHANGE`.
 const OH_FLAG_ATTRIBUTE_PHASE_CHANGE: u8 = 0x10;
 
 /// Bit 5 of the flags, set where the prefix stores the four times, from the same section as
-/// [`OH_FLAG_CREATION_ORDER_TRACKED`]. The C library calls it `H5O_HDR_STORE_TIMES`.
+/// [`OH_FLAG_CREATION_ORDER_TRACKED`]. libhdf5 calls it `H5O_HDR_STORE_TIMES`.
 const OH_FLAG_STORE_TIMES: u8 = 0x20;
 
 /// The access, modification, change, and birth times a version 2 object header prefix stores,
 /// each in seconds since the Unix epoch.
 ///
-/// The prefix stores them where bit 5 of its flags is set. The C library sets that bit on every
+/// The prefix stores them where bit 5 of its flags is set. libhdf5 sets that bit on every
 /// version 2 header it writes by default: `H5O_CRT_OHDR_FLAGS_DEF` is `H5O_HDR_STORE_TIMES`
 /// (`H5Opkg.h`, HDF5 2.2.0).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -239,7 +239,7 @@ impl ObjectTimes {
 /// The attribute phase change values a version 2 object header prefix stores, which
 /// `H5Pset_attr_phase_change` sets.
 ///
-/// The prefix stores them where bit 4 of its flags is set. The C library sets that bit only where
+/// The prefix stores them where bit 4 of its flags is set. libhdf5 sets that bit only where
 /// the values differ from its defaults of 8 and 6 (`H5O_apply_ohdr` in `H5Oint.c`, HDF5 2.2.0).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AttributePhaseChange {

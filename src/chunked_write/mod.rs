@@ -560,7 +560,7 @@ impl ChunkOptions {
                  (its shape has none to derive)",
             );
         }
-        // The C library indexes a dataspace with two unlimited
+        // libhdf5 indexes a dataspace with two unlimited
         // dimensions using a version-2 B-tree, which this crate does not
         // write. An Extensible Array cannot number such a dataspace at all,
         // since it has only one dimension it can grow along. Writing one
@@ -590,7 +590,7 @@ impl ChunkOptions {
 ///
 /// Under [`Skip`](Self::Skip) the writer sets the `DONT_FILTER_PARTIAL_BOUND_CHUNKS` flag of the
 /// version 4 data layout message, defined in "The Data Layout Message" of the [format
-/// specification, version 4.0][spec]. The C library sets the flag with `H5Pset_chunk_opts` and
+/// specification, version 4.0][spec]. libhdf5 sets the flag with `H5Pset_chunk_opts` and
 /// `H5D_CHUNK_DONT_FILTER_PARTIAL_CHUNKS`.
 ///
 /// [`DatasetCreateProperties::with_partial_edge_filtering`] sets the policy of a dataset.

@@ -7,7 +7,7 @@
 //!
 //! The two libraries reach the same dataset from opposite directions, and the
 //! difference is what these tests pin. This crate allocates the chunk index
-//! eagerly, so its empty dataset names an index over zero chunks. The C library
+//! eagerly, so its empty dataset refers to an index over zero chunks. libhdf5
 //! allocates lazily and leaves the layout message's address undefined until the
 //! first chunk is written, so *its* empty dataset names no index at all. Both are
 //! valid, and reading either has to yield an empty buffer rather than an error.
@@ -74,7 +74,7 @@ fn c_grows_an_empty_chunked_dataset_added_in_place() {
 
 /// The same dataset without `maxshape`: a fixed-shape empty chunked dataset,
 /// whose index is a fixed array over zero chunks rather than an extensible one.
-/// The C library has to accept that too, or the edit engine is emitting a
+/// libhdf5 has to accept that too, or the edit engine is emitting a
 /// structure only its own reader understands.
 #[test]
 fn c_reads_a_fixed_shape_empty_chunked_dataset_added_in_place() {
@@ -469,7 +469,7 @@ fn pure_fills_the_gaps_of_a_partially_written_chunked_dataset() {
 /// written. This crate answers that with deterministic zeros rather than with
 /// the declared value, which would assert data nothing ever put there.
 ///
-/// **The C library is deliberately not the oracle here**, unlike every other
+/// **libhdf5 is deliberately not the oracle here**, unlike every other
 /// test in this file. It has nothing to read for such a dataset, so `H5Dread`
 /// leaves the caller's buffer as it found it: the identical file yields zeros on
 /// macOS and the fill bytes on Linux, purely from what the last allocation left

@@ -260,7 +260,7 @@ const VERSION_0: u8 = 0;
 /// The version of the message that HDF5 1.10.1 and later write, and the one the writer writes.
 const VERSION_1: u8 = 1;
 
-// The strategy codes of a version 0 message. The C library names their type
+// The strategy codes of a version 0 message. libhdf5 names their type
 // `H5F_file_space_type_t`.
 const FILE_SPACE_ALL_PERSIST: u8 = 1;
 const FILE_SPACE_ALL: u8 = 2;
@@ -273,12 +273,12 @@ const VERSION_0_MANAGERS: usize = 6;
 
 /// The page-end metadata threshold of a version 0 message mapped to version 1.
 ///
-/// The C library sets it to `H5F_FILE_SPACE_PGEND_META_THRES` (`H5Fprivate.h`, HDF5 2.2.0).
+/// libhdf5 sets it to `H5F_FILE_SPACE_PGEND_META_THRES` (`H5Fprivate.h`, HDF5 2.2.0).
 const DEFAULT_PAGE_END_META_THRESHOLD: u16 = 0;
 
 /// The default free-space section threshold.
 ///
-/// The C library calls this value `H5F_FREE_SPACE_THRESHOLD_DEF`.
+/// libhdf5 calls this value `H5F_FREE_SPACE_THRESHOLD_DEF`.
 pub const DEFAULT_THRESHOLD: u64 = 1;
 
 /// The number of free-space manager addresses a persisting version 1 message stores, the addresses

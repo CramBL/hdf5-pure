@@ -1571,7 +1571,7 @@ fn c_library_reads_our_strategy() {
                 threshold: 1,
             },
         ),
-        // The C library maps the AGGR strategy onto its `PageAggregation` name.
+        // libhdf5 maps the AGGR strategy onto its `PageAggregation` name.
         (FileSpaceStrategy::Aggr, CStrategy::PageAggregation),
         (FileSpaceStrategy::None, CStrategy::None),
     ]
@@ -1586,7 +1586,7 @@ fn c_library_reads_our_strategy() {
         );
         b.write(&path).unwrap();
 
-        // The C library opens our file, reads the data, and recovers the strategy
+        // libhdf5 opens our file, reads the data, and recovers the strategy
         // from the superblock-extension File Space Info message.
         let f = hdf5::File::open(&path).unwrap();
         assert_eq!(
@@ -1669,7 +1669,7 @@ fn reads_the_page_size_libhdf5_writes(#[case] paged: bool, #[case] page_size: Fi
 
 #[test]
 fn we_read_c_library_persisted_free_space() {
-    // The C library writes a persisted FSM file with real free space (a deleted
+    // libhdf5 writes a persisted FSM file with real free space (a deleted
     // dataset). hdf5-pure must follow the File Space Info manager addresses to the
     // on-disk FSHD/FSSE blocks and recover the freed sections.
     let dir = tempfile::tempdir().unwrap();
@@ -1767,7 +1767,7 @@ fn c_library_reads_our_persisted_free_space() {
     );
     drop(ours);
 
-    // The C library opens the same file: strategy and persist flag round-trip,
+    // libhdf5 opens the same file: strategy and persist flag round-trip,
     // the survivors read byte-exact, and `H5Fget_freespace` parses our managers.
     let f = hdf5::File::open(&path).unwrap();
     let strategy = f.create_plist().unwrap().get_file_space_strategy().unwrap();
@@ -1929,7 +1929,7 @@ fn c_library_accepts_reclaimed_v2_btree_chunk_storage_and_allocates_afterward() 
 fn c_library_reads_managers_we_placed_mid_file() {
     // A file's first persisted free-space managers have no earlier free region to occupy,
     // which places them at end-of-file. Once a file has free space, later commits can place
-    // managers in it (issue #358). The C library then has to find the extension and managers
+    // managers in it (issue #358). libhdf5 then has to find the extension and managers
     // below live data and accept an `eoa_fsm_fsalloc` that spans the whole file. Several commits
     // ensure the final managers moved into space an earlier set vacated.
     let dir = tempfile::tempdir().unwrap();
@@ -2007,7 +2007,7 @@ fn c_library_reads_managers_we_placed_mid_file() {
         .free_bytes();
     drop(ours);
 
-    // The C library reads the same file: survivors byte-exact, and its own
+    // libhdf5 reads the same file: survivors byte-exact, and its own
     // free-space total — which it can only get by parsing the managers we placed
     // mid-file — agrees with ours to the byte.
     let f = hdf5::File::open(&path).unwrap();
@@ -2460,7 +2460,7 @@ fn the_free_sections_libhdf5_persists_are_read_at_the_widths_of_its_file(
     // `H5FS__cache_sinfo_deserialize` in H5FScache.c, HDF5 2.2.0, asserts on these fixtures
     // when their length width is smaller than eight bytes.
     if sizeof_size == Sizeof::Bytes8 {
-        // The C library sizes Core section addresses and lengths from the host `size_t` width
+        // libhdf5 sizes Core section addresses and lengths from the host `size_t` width
         // (`CORE_MAXADDR` in H5FDcore.c and `H5FS__sinfo_new` in H5FSsection.c, HDF5 2.2.0).
         let width_suffix = if matches!(driver, Driver::Core) && cfg!(target_pointer_width = "32") {
             "-32bit"
@@ -3986,7 +3986,7 @@ fn c_library_reads_our_paged_file(#[case] page_size: u64) {
     assert!(total_ours > 0, "paged persist tracks page-tail free space");
     drop(ours);
 
-    // The C library recovers the paged strategy and reads every dataset.
+    // libhdf5 recovers the paged strategy and reads every dataset.
     let f = hdf5::File::open(&path).unwrap();
     let strategy = f.create_plist().unwrap().get_file_space_strategy().unwrap();
     assert_eq!(
@@ -4018,7 +4018,7 @@ fn c_library_reads_our_paged_file(#[case] page_size: u64) {
     );
     drop(f);
 
-    // The C library reopens the paged file read-write and adds a dataset, then
+    // libhdf5 reopens the paged file read-write and adds a dataset, then
     // reads everything back: the paged layout survives a C round-trip.
     {
         let f = hdf5::File::open_rw(&path).unwrap();
@@ -4043,7 +4043,7 @@ fn c_library_reads_our_paged_file(#[case] page_size: u64) {
 fn c_library_reads_our_paged_chunked_file() {
     // Paged interop for chunked datasets: hdf5-pure writes a paged persisting
     // file with a small chunked dataset and a large compressed (shuffle+deflate)
-    // chunked dataset whose data begins a page-aligned run. The C library must
+    // chunked dataset whose data begins a page-aligned run. libhdf5 must
     // read both, parse the managers, and reopen read-write.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ours_paged_chunked.h5");
@@ -4130,7 +4130,7 @@ fn c_library_reads_our_bounded_mutated_paged_file() {
         .free_bytes();
     drop(ours);
 
-    // The C library recovers the paged strategy and reads every row.
+    // libhdf5 recovers the paged strategy and reads every row.
     let f = hdf5::File::open(&path).unwrap();
     assert_eq!(
         f.create_plist().unwrap().get_file_space_strategy().unwrap(),
@@ -4151,7 +4151,7 @@ fn c_library_reads_our_bounded_mutated_paged_file() {
     );
     drop(f);
 
-    // The C library reopens the mutated paged file read-write and appends more
+    // libhdf5 reopens the mutated paged file read-write and appends more
     // rows, then reads everything back: the paged layout survives a C round-trip.
     {
         let f = hdf5::File::open_rw(&path).unwrap();
@@ -4214,7 +4214,7 @@ fn c_library_reads_our_staged_mutated_paged_file() {
         .free_bytes();
     drop(ours);
 
-    // The C library recovers the paged strategy and reads both datasets.
+    // libhdf5 recovers the paged strategy and reads both datasets.
     let f = hdf5::File::open(&path).unwrap();
     assert_eq!(
         f.create_plist().unwrap().get_file_space_strategy().unwrap(),
@@ -4239,7 +4239,7 @@ fn c_library_reads_our_staged_mutated_paged_file() {
     );
     drop(f);
 
-    // The C library reopens the file read-write and appends: the paged layout the
+    // libhdf5 reopens the file read-write and appends: the paged layout the
     // staged commit produced survives a C round-trip.
     {
         let f = hdf5::File::open_rw(&path).unwrap();
@@ -4524,7 +4524,7 @@ fn pure_bounded_mutates_c_created_paged_file() {
         .free_bytes();
     drop(ours);
 
-    // The C library reads it back and re-parses the managers.
+    // libhdf5 reads it back and re-parses the managers.
     let f = hdf5::File::open(&path).unwrap();
     assert_eq!(
         f.create_plist().unwrap().get_file_space_strategy().unwrap(),
@@ -4549,7 +4549,7 @@ fn c_library_reads_our_paged_file_after_group_churn() {
     // to agree with it (issue #388). hdf5-pure creates a paged persisting file,
     // then repeatedly creates and deletes a scratch group of empty resizable
     // chunked datasets — the shape whose chunk index the reclaim used to drop,
-    // leaving the page it sat in unaccountable. The C library must recover the
+    // leaving the page it sat in unaccountable. libhdf5 must recover the
     // strategy, read the surviving objects, and report exactly the free space our
     // managers record, which it can only do by parsing the FSHD/FSSE blocks the
     // churn rewrote.

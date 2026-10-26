@@ -17,7 +17,7 @@ $ cargo run --example file_space
 [`FileSpaceSettings::new`](crate::FileSpaceSettings::new) selects the strategy with persistence
 disabled, threshold 1, and [`FileSpacePageSize::DEFAULT`](crate::FileSpacePageSize::DEFAULT).
 [`FileSpaceSettings::default`](crate::FileSpaceSettings::default) selects
-[`FsmAggr`](crate::FileSpaceStrategy::FsmAggr). The C library configures these properties with
+[`FsmAggr`](crate::FileSpaceStrategy::FsmAggr). libhdf5 configures these properties with
 `H5Pset_file_space_strategy` and `H5Pset_file_space_page_size`.
 
 [`Aggr`](crate::FileSpaceStrategy::Aggr) and [`None`](crate::FileSpaceStrategy::None) have no
@@ -290,7 +290,7 @@ the free regions themselves, aggregate or append reservations, dead or unclassif
 trailing slack. It measures only persisted manager allocations. Relocating a file image or adding
 a userblock leaves this byte count unchanged.
 
-The C library's `H5Fget_info2` reports free-space-manager metadata for the open handle, which can
+libhdf5's `H5Fget_info2` reports free-space-manager metadata for the open handle, which can
 include managers active only in memory. `H5FS_size` uses the in-memory section-list size when that
 list is loaded and the allocated size otherwise (`H5FS.c`, HDF5 1.14.6). Its result can therefore
 differ from the persisted allocation count.

@@ -95,7 +95,7 @@ fn c_reads_every_part_of_a_1_8_format_file() {
     assert_eq!(f.loc_info().unwrap().num_attrs, 1);
 }
 
-/// The C library must also be able to *modify* the file, not merely read it —
+/// libhdf5 must also be able to *modify* the file. This is
 /// the check that caught the missing Group Info message in earlier releases.
 ///
 /// Written without a userblock, unlike the read test above. A userblock file the
@@ -134,7 +134,7 @@ fn c_writes_into_a_1_8_format_file() {
             .unwrap();
     }
 
-    // The C library's additions land in a file this crate still reads whole.
+    // libhdf5's additions land in a file this crate still reads whole.
     let f = File::open(&path).unwrap();
     assert_eq!(f.libver_bound(), LibVer::V18);
     assert_eq!(
@@ -198,7 +198,7 @@ fn an_edit_session_keeps_a_1_8_file_in_the_1_8_format() {
     );
     drop(f);
 
-    // The C library reads the edited file whole, including the attribute the
+    // libhdf5 reads the edited file whole, including the attribute the
     // edit added — which it can only count because the rewritten header carries
     // an Attribute Info message.
     let f = hdf5::File::open(&path).unwrap();
@@ -214,7 +214,7 @@ fn an_edit_session_keeps_a_1_8_file_in_the_1_8_format() {
 /// A *lower* bound of `LibVer::LATEST` licenses newer encodings without
 /// requiring any, so both entry points write the 1.10 format under it — the
 /// reading `H5Pset_libver_bounds` has, where the low bound is a floor and the
-/// library is free to stay below the ceiling. The C library reading the result
+/// library is free to stay below the ceiling. libhdf5 reading the result
 /// is what says the file is a real one and not merely one this crate accepted.
 #[cfg(feature = "__hdf5-1.10")]
 #[test]

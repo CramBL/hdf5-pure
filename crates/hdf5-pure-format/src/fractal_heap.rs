@@ -1283,7 +1283,7 @@ impl FractalHeapIdLayout {
 
 /// The encoded byte widths and offset bit count of a managed heap ID.
 ///
-/// The length field follows the whole-byte offset field. The C library computes these widths in
+/// The length field follows the whole-byte offset field. libhdf5 computes these widths in
 /// `H5HF_hdr_finish_init_phase1` in `H5HFhdr.c` (HDF5 1.10.11).
 #[derive(Clone, Copy, Debug)]
 struct ManagedHeapIdLayout {

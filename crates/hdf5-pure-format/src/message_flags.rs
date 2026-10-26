@@ -11,7 +11,7 @@ use crate::access_mode::AccessMode;
 /// Version 2 object headers store the same field as version 1 object headers, defined in "Version
 /// 1 Data Object Header Prefix" of the [format specification, version 4.0][spec].
 ///
-/// The C library defines the same eight bits as `H5O_MSG_FLAG_CONSTANT` through
+/// libhdf5 defines the same eight bits as `H5O_MSG_FLAG_CONSTANT` through
 /// `H5O_MSG_FLAG_FAIL_IF_UNKNOWN_ALWAYS` in `H5Oprivate.h`, release 2.2.0.
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_one

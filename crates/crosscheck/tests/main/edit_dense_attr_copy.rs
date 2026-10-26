@@ -156,7 +156,7 @@ fn copy_reproduces_a_multi_level_dense_name_index() {
     }
     drop(f);
 
-    // The C library, opening each by name: a copy whose records landed out of
+    // libhdf5, opening each by name: a copy whose records landed out of
     // order still iterates cleanly and still fails to be searched.
     let c = hdf5::File::open(&path).unwrap();
     let ds = c.dataset("payload_copy").unwrap();

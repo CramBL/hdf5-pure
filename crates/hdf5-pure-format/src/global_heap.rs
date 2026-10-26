@@ -457,7 +457,7 @@ impl IndexSet {
     }
 }
 
-// The C library pads the collection header and each object header to a multiple of 8 bytes at
+// libhdf5 pads the collection header and each object header to a multiple of 8 bytes at
 // every length width, in `H5HG_SIZEOF_HDR` and `H5HG_SIZEOF_OBJHDR` (`H5HGpkg.h`, HDF5 1.8.23 to
 // 2.2.0).
 fn header_len(lengths: LengthWidth) -> u64 {
@@ -472,7 +472,7 @@ fn header_len(lengths: LengthWidth) -> u64 {
 /// size the specification defines, is padded to 4096. Each object stores a reference count of 1.
 /// The collection is defined in "Global Heap" of the [format specification, version 4.0][spec].
 ///
-/// The C library pads a header to a multiple of 8 bytes at every length width (`H5HG_SIZEOF_HDR`
+/// libhdf5 pads a header to a multiple of 8 bytes at every length width (`H5HG_SIZEOF_HDR`
 /// and `H5HG_SIZEOF_OBJHDR` in `H5HGpkg.h`, HDF5 2.2.0).
 ///
 /// # Errors

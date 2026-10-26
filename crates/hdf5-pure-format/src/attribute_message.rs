@@ -485,7 +485,7 @@ fn decode_type_and_space(
     length_width: LengthWidth,
     resolver: &dyn SharedResolver,
 ) -> Result<(Datatype, Dataspace, DatatypeLocation), FormatError> {
-    // The C library rejects a flags byte that sets any other bit (`H5Oattr.c`, HDF5 2.1.0).
+    // libhdf5 rejects a flags byte that sets any other bit (`H5Oattr.c`, HDF5 2.1.0).
     if flags & !FLAG_ALL != 0 {
         return Err(FormatError::InvalidAttributeFlags(flags));
     }

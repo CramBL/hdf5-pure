@@ -68,7 +68,7 @@ fn c_sees_no_fill_value_when_pure_sets_none() {
     fb.write(&path).unwrap();
 
     // The crate writes HDF5's *default* fill message (neither the "defined" nor
-    // the "undefined" bit set). The C library resolves that default to the type's
+    // the "undefined" bit set). libhdf5 resolves that default to the type's
     // implicit zero, so it reports `Some(0)` — whereas the pure reader reports
     // `None` for the same message, since there is no *user-defined* value. Both
     // describe the same on-disk state: unwritten elements read back as zero.
@@ -263,7 +263,7 @@ fn pure_reads_none_when_c_sets_no_fill() {
 fn c_reads_pure_scaleoffset_dataset_data_and_fill() {
     // A dataset fill value coexists with the scale-offset filter: the pure writer
     // emits the fill-undefined form of the filter (its own on-disk contract) plus
-    // a defined dataset Fill Value message. The C library decodes the data through
+    // a defined dataset Fill Value message. libhdf5 decodes the data through
     // the filter's own fill config (so the data is intact) and reports the dataset
     // fill value separately — the two do not collide.
     let dir = tempfile::tempdir().unwrap();

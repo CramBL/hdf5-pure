@@ -28,7 +28,8 @@ use hdf5_pure_core::{BaseAddress, StoredAddress};
 use hdf5_pure_format::__private::{
     BTREE_V2_ATTRIBUTE_NAME, BTREE_V2_LINK_NAME, BTreeV2Header, BTreeV2Layout, FractalHeapBlock,
     FractalHeapBlockLayout, FractalHeapGeometry, FractalHeapHeader, FractalHeapHeaderLocator,
-    FractalHeapIdKind, FractalHeapIdLayout, FractalHeapLayout, LengthWidth, OffsetWidth,
+    FractalHeapIdKind, FractalHeapIdLayout, FractalHeapLayout, LengthWidth, ManagedHeapPlan,
+    OffsetWidth,
 };
 use rstest::rstest;
 
@@ -912,6 +913,7 @@ fn c_written_managed_ids_use_the_shared_geometry_and_field_encoding(
     #[case] starting_block_size: u64,
     #[case] heap_bits: u16,
     #[case] id_length: u16,
+    #[values(0, 64)] name_padding: usize,
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("managed-ids.h5");
@@ -921,7 +923,7 @@ fn c_written_managed_ids_use_the_shared_geometry_and_field_encoding(
         .unwrap();
     let group = file.create_group("g").unwrap();
     for index in 0..16 {
-        let name = format!("entry_{index}");
+        let name = format!("entry_{index}{}", "x".repeat(name_padding));
         if attributes {
             group
                 .new_attr::<i32>()
@@ -992,4 +994,47 @@ fn c_written_managed_ids_use_the_shared_geometry_and_field_encoding(
             .unwrap(),
         id
     );
+    let mut placements = (0..view.record_count())
+        .map(|index| {
+            let record = view.record(index).unwrap();
+            let id = if attributes {
+                &record[..usize::from(id_length)]
+            } else {
+                &record[LINK_NAME_HASH_LEN..]
+            };
+            let FractalHeapIdKind::Managed {
+                heap_offset,
+                object_length,
+            } = id_layout.parse(id).unwrap().kind()
+            else {
+                panic!("expected a managed object ID")
+            };
+            (heap_offset, object_length, id.to_vec())
+        })
+        .collect::<Vec<_>>();
+    placements.sort_unstable_by_key(|entry| entry.0);
+    let sizes: Vec<u64> = placements.iter().map(|entry| entry.1).collect();
+    let plan = if attributes {
+        ManagedHeapPlan::attributes(&sizes, OffsetWidth::Eight)
+    } else {
+        ManagedHeapPlan::group_links(&sizes, OffsetWidth::Eight)
+    }
+    .unwrap();
+    assert_eq!(plan.managed_space(), header.managed_space);
+    assert_eq!(plan.allocated_space(), header.allocated_managed_space);
+    assert_eq!(plan.free_space(), header.free_space_in_managed_blocks);
+    assert_eq!(
+        plan.allocation_iterator(),
+        header.direct_block_allocation_iterator_offset
+    );
+    assert_eq!(plan.root_rows(), header.current_rows_in_root_indirect_block);
+    for (index, (heap_offset, object_length, id)) in placements.iter().enumerate() {
+        assert_eq!(plan.heap_offset(index), *heap_offset);
+        assert_eq!(
+            header
+                .encode_managed_id(plan.heap_offset(index), *object_length)
+                .unwrap(),
+            *id
+        );
+    }
 }

@@ -184,7 +184,7 @@ It reports **every** attribute message, including the ones [`attrs()`](crate::Gr
 
 A **committed** (shared) type, created with `H5Tcommit`, is stored on the attribute as a reference to the type's own object header, and both this and [`Dataset::datatype()`](crate::Dataset::datatype) follow that reference and report the type stored there. netCDF-4 user-defined types and h5py's `f["t"] = np.dtype(...)` reach a file this way. What neither channel reports is the type's *name*: two attributes sharing `/mytype` give the same [`Datatype`](crate::Datatype) as one that spells it out inline.
 
-A boolean attribute needs both channels. The C library gives `H5T_NATIVE_HBOOL`, what h5py writes for every `np.bool_`, an `enum[FALSE, TRUE]` over an 8-bit base, so the value arrives as `0` or `1`, the same as an `i8`, and only the datatype records which it was. No [`AttrValue`](crate::AttrValue) variant writes an enumeration, so the example below writes an `i8`, which the datatype check separates from a boolean:
+A boolean attribute needs both channels. libhdf5 gives `H5T_NATIVE_HBOOL`, what h5py writes for every `np.bool_`, an `enum[FALSE, TRUE]` over an 8-bit base, so the value arrives as `0` or `1`, the same as an `i8`, and only the datatype records which it was. No [`AttrValue`](crate::AttrValue) variant writes an enumeration, so the example below writes an `i8`, which the datatype check separates from a boolean:
 
 ```rust
 # use hdf5_pure::{AttrValue, File, FileBuilder};

@@ -689,7 +689,7 @@ fn without_checksum(bytes: &[u8]) -> Result<&[u8], FormatError> {
 /// writer builds, 1024 elements.
 ///
 /// The writer stores it in the "Page Bits" field of both the header and the version 4 data layout
-/// message. The C library calls this value `H5D_FARRAY_MAX_DBLK_PAGE_NELMTS_BITS`. A reader takes
+/// message. libhdf5 calls this value `H5D_FARRAY_MAX_DBLK_PAGE_NELMTS_BITS`. A reader takes
 /// the page size from the header.
 pub(crate) const FIXED_ARRAY_PAGE_BITS: u8 = 10;
 

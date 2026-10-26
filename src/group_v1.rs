@@ -313,7 +313,7 @@ const CACHED_GROUP: u32 = 1;
 
 /// The symbol table entry cache type of a symbolic link. Its object header address is the
 /// undefined address and its scratch pad holds the local heap offset of the link's value, so the
-/// entry identifies no object header in this file. The C library calls this cache type
+/// entry identifies no object header in this file. libhdf5 calls this cache type
 /// `H5G_CACHED_SLINK`.
 ///
 /// The cache types are defined in "Symbol Table Entry" of the [format specification, version

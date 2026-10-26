@@ -170,7 +170,7 @@ struct Capture {
     samples: Vec<ComplexI16>,
 }
 
-/// The C library resolves the compound and its component class independently
+/// libhdf5 resolves the compound and its component class independently
 /// of anything this crate believes, so it is the check that the `int16`
 /// complex layout is the one MATLAB will see: two 2-byte signed members at
 /// offsets 0 and 2, and four bytes per sample rather than eight.

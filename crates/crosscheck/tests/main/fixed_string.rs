@@ -6,7 +6,7 @@
 //! run of element bytes padded to it, and a round trip through this crate alone
 //! cannot tell a correct pair from a pair that is merely self-consistent: a
 //! writer that padded to the wrong width and a reader that divided by the same
-//! wrong width would agree with each other and with nothing else. The C library
+//! wrong width would agree with each other and with nothing else. libhdf5
 //! divides by the width the *message* declares, so it is the side that can tell.
 //!
 //! It is also the authority on the datatype itself. `H5T_CSET_ASCII` and
@@ -185,7 +185,7 @@ fn the_c_library_opens_an_all_empty_fixed_string_dataset() {
     );
 }
 
-/// The C library must be able to *extend* one too, since a declared width exists
+/// libhdf5 must be able to *extend* one too, since a declared width exists
 /// so that later values fit: it appends through its own writer and this crate
 /// reads every element back, so the two agree on the stride after a resize as
 /// well as before one.

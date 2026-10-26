@@ -157,7 +157,7 @@ fn c_written_v3_file_edited_in_place() {
 
 #[test]
 fn c_multichunk_group_header_is_collapsed_and_edited() {
-    // The C library lays a group header out across multiple chunks once it holds
+    // libhdf5 lays a group header out across multiple chunks once it holds
     // enough messages; several root attributes reliably force that. The editor
     // must collapse the continuation chunks into one header on rewrite, preserve
     // the existing messages (the attributes), and apply the edit.
@@ -2003,7 +2003,7 @@ fn editing_a_group_is_refused_when_the_links_cannot_be_walked() {
 /// A dataset the reference library created and never wrote is copied as the
 /// storage it has — none — rather than refused (issue #336).
 ///
-/// The C library does not allocate a contiguous dataset's data until something
+/// libhdf5 does not allocate a contiguous dataset's data until something
 /// is written to it, so one created and never written stores no data block at
 /// all and its layout message carries the undefined address. Reading it answers
 /// the fill value for every element (#284), which is exactly what makes a copy

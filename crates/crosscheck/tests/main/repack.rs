@@ -20,7 +20,7 @@ fn c_file_repacked_then_read_by_c_library() {
     let src = dir.path().join("c_src.h5");
     let dst = dir.path().join("repacked.h5");
 
-    // The C library writes alpha (f64), doomed (i32, to be dropped), and a group
+    // libhdf5 writes alpha (f64), doomed (i32, to be dropped), and a group
     // grp/beta (i32), using the 1.10+ format.
     {
         let file = hdf5::File::create(&src).unwrap();
@@ -147,7 +147,7 @@ fn repack_roundtrips_c_vlen_string_dataset() {
     );
 }
 
-/// The C library fills a collection and allocates another, so a large enough
+/// libhdf5 fills a collection and allocates another, so a large enough
 /// variable-length dataset it writes already spans several of them. Repack
 /// re-stages that data through fresh collections of its own, which is only
 /// faithful if both the read and the write sides carry each element's
@@ -256,7 +256,7 @@ fn repack_roundtrips_c_vlen_sequence_dataset() {
     let src = dir.path().join("c_vlen_seq.h5");
     let dst = dir.path().join("vlen_seq_repacked.h5");
 
-    // The C library writes a non-string VL dataset (`H5T_VLEN { i32 }`),
+    // libhdf5 writes a non-string VL dataset (`H5T_VLEN { i32 }`),
     // including an empty sequence.
     let seqs: Vec<Vec<i32>> = vec![vec![1, 2, 3], vec![], vec![-7, 42, 0, 99], vec![5]];
     {
@@ -305,7 +305,7 @@ fn repack_roundtrips_c_object_reference_dataset() {
     let src = dir.path().join("c_refs.h5");
     let dst = dir.path().join("refs_repacked.h5");
 
-    // The C library writes two targets plus a dataset of object references to
+    // libhdf5 writes two targets plus a dataset of object references to
     // them (one in the root, one in a subgroup).
     {
         let file = hdf5::File::create(&src).unwrap();
@@ -418,7 +418,7 @@ fn repack_refuses_reference_to_dropped_object() {
 
 /// A chunked VL-string dataset the C library wrote repacks into an equally
 /// chunked one, with its heap references rebuilt against the new file's
-/// collections (issue #109). The C library reading the *output* is the check
+/// collections (issue #109). libhdf5 reading the *output* is the check
 /// that those rebuilt addresses are real.
 #[test]
 fn repack_roundtrips_chunked_vlen_string_dataset() {
@@ -749,7 +749,7 @@ fn c_deflate_dataset_repacked_verbatim_read_by_both() {
 
 #[test]
 fn c_sparse_chunked_lossless_repacked_falls_back() {
-    // The C library writes only the first chunks of a chunked dataset, leaving the
+    // libhdf5 writes only the first chunks of a chunked dataset, leaving the
     // tail unallocated (a sparse chunk grid). The verbatim path needs a dense
     // grid, so repack falls back to the read-raw + re-encode path. With a lossless
     // pipeline (deflate) that fallback is faithful: the written values survive and
@@ -881,7 +881,7 @@ fn c_sparse_chunked_scale_offset_repacks_with_its_fill_value() {
 
 #[test]
 fn c_sparse_chunked_lossy_repack_refused() {
-    // The C library writes only the first chunks of a chunked dataset compressed
+    // libhdf5 writes only the first chunks of a chunked dataset compressed
     // with float D-scale scale-offset (a lossy filter), leaving the tail
     // unallocated (a sparse grid). The verbatim path needs a dense grid, so repack
     // would fall back to the read-raw + re-encode path — but re-encoding a lossy
@@ -927,7 +927,7 @@ fn c_sparse_chunked_lossy_repack_refused() {
 /// to re-stage the payloads through the destination's own heap and rewrite the
 /// embedded references, exactly as it does for a top-level VL dataset.
 ///
-/// The C library is the load-bearing reader here: this crate's own reader
+/// libhdf5 is the independent reader here: this crate's own reader
 /// resolves the heap lazily and reads `read_raw` bytes without validating the
 /// embedded addresses, so a self-round-trip alone would not catch a stale one.
 #[test]
@@ -1723,7 +1723,7 @@ fn repack_preserves_c_written_unallocated_storage_in_every_layout() {
         );
         assert_eq!(
             ds.attrs().unwrap().get("units"),
-            // The C library wrote it as a 4-byte signed integer, and it keeps
+            // libhdf5 wrote it as a 4-byte signed integer, and it keeps
             // that width through the repack and back out of the reader (#350).
             Some(&hdf5_pure::AttrValue::I32(42)),
             "[{layout}] the attribute survived the new path"

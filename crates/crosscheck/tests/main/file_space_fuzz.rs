@@ -21,7 +21,7 @@
 //!
 //! 3. **Subthreshold deletion.** Under [`FileSpaceStrategy::FsmAggr`], checks that an isolated
 //!    deleted extent below the threshold is absent from reusable and persisted free sections.
-//!    Checks session-reusable and persisted sections and persistence configuration. The C library
+//!    Checks session-reusable and persisted sections and persistence configuration. libhdf5
 //!    reads surviving values and reports matching free-space totals.
 //!
 //! A failing case is shrunk to its minimal reproducer and recorded under
@@ -75,7 +75,7 @@ fn expected_c_strategy(strategy: FileSpaceStrategy, persist: bool, threshold: u6
             persist,
             threshold,
         },
-        // The C library reports AGGR under its `PageAggregation` name and does not
+        // libhdf5 reports AGGR under its `PageAggregation` name and does not
         // surface persist/threshold for it or for NONE.
         FileSpaceStrategy::Aggr => CStrategy::PageAggregation,
         FileSpaceStrategy::None => CStrategy::None,
@@ -199,7 +199,7 @@ proptest! {
             ours.persisted_free_sections().unwrap().unwrap().free_sections().free_bytes()
         };
 
-        // The C library recovers the paged strategy, reads every row, and its
+        // libhdf5 recovers the paged strategy, reads every row, and its
         // free-space total equals the sum of the managers we rewrote at close.
         let f = hdf5::File::open(&path).unwrap();
         prop_assert_eq!(

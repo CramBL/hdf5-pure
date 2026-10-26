@@ -132,7 +132,7 @@ pub(crate) enum WriteBuffering {
     ///
     /// Installing this mode is not the whole feature: the engine raises the
     /// superblock's write-access flag for the life of such a session, so those
-    /// files are refused rather than read. The C library ships its page buffer
+    /// files are rejected. libhdf5 ships its page buffer
     /// without one; this mode is not offered without it (issue #308).
     ///
     /// A completed commit's bytes may still be in this process's memory when it

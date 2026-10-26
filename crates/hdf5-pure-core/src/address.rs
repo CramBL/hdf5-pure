@@ -62,7 +62,7 @@ pub enum DecodedStoredAddress {
 /// the userblock size for a file with a userblock. For a relocated image, the reader uses the
 /// physical signature position as the effective base when interpreting [`StoredAddress`] values.
 ///
-/// The C library sets the size of the userblock with `H5Pset_userblock`.
+/// libhdf5 sets the size of the userblock with `H5Pset_userblock`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BaseAddress(u64);
 

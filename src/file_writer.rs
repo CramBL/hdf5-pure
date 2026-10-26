@@ -26,8 +26,6 @@ use hdf5_pure_format::__private::ATTRIBUTE_HEAP_MAX_HEAP_SPACE;
 use hdf5_pure_format::__private::ATTRIBUTE_HEAP_START_ROOT_ROWS;
 use hdf5_pure_format::__private::ATTRIBUTE_HEAP_STARTING_BLOCK_SIZE;
 use hdf5_pure_format::__private::ATTRIBUTE_HEAP_TABLE_WIDTH;
-use hdf5_pure_format::__private::AttributeHeapPlan;
-use hdf5_pure_format::__private::AttributeHeapPlanError;
 use hdf5_pure_format::__private::AttributeRecord;
 use hdf5_pure_format::__private::BTREE_V2_ATTRIBUTE_CREATION_ORDER;
 use hdf5_pure_format::__private::BTREE_V2_ATTRIBUTE_NAME;
@@ -40,6 +38,8 @@ use hdf5_pure_format::__private::FractalHeapHeader;
 use hdf5_pure_format::__private::FreeSection;
 use hdf5_pure_format::__private::HugeObjectRecord;
 use hdf5_pure_format::__private::LayoutVersion;
+use hdf5_pure_format::__private::ManagedHeapPlan;
+use hdf5_pure_format::__private::ManagedHeapPlanError;
 use hdf5_pure_format::__private::SECTION_CLASS_LARGE;
 use hdf5_pure_format::__private::SECTION_CLASS_SMALL;
 use hdf5_pure_space::__private::AllocationClass;
@@ -523,24 +523,11 @@ impl DenseAttrCreationOrder {
     }
 }
 
-/// Whether [`build_dense_attrs`] can faithfully represent `attrs`.
+/// Checks that [`build_dense_attrs`] can represent the attribute fields and managed heap.
 ///
-/// The one bound the emitter still has to honour is the heap's own address
-/// space: its offsets are [`DENSE_ATTR_MAX_HEAP_SIZE_BITS`] wide, so the managed
-/// blocks cannot span more than that between them. Nothing else is bounded any
-/// more. The attribute and huge-object counts are not, since both indexes are
-/// multi-node v2 B-trees that grow a level rather than overflow a leaf; an
-/// individual attribute is not, since past [`DENSE_ATTR_MAX_MANAGED_OBJECT`] the
-/// emitter changes representation rather than refusing; and the managed total is
-/// not, since the blocks holding it are a doubling table rather than one block
-/// sized to the whole set.
-///
-/// Huge storage lifts the limit on an attribute's data and not on the 2-byte size fields of its
-/// name, datatype, and dataspace, so the check serializes each attribute with
-/// [`AttributeMessage::serialize_v3`], which rejects a field too long for its size field.
-///
-/// Callers that cannot fall back to a larger layout must refuse rather than
-/// mis-encode (see [`build_dense_attrs`]).
+/// Serializes the fields with [`AttributeMessage::serialize_v3`] and plans the managed blocks
+/// with [`ManagedHeapPlan::attributes`]. Attributes larger than [`DENSE_ATTR_MAX_MANAGED_OBJECT`]
+/// use huge-object storage.
 ///
 /// # Errors
 ///
@@ -548,7 +535,8 @@ impl DenseAttrCreationOrder {
 /// is longer than its 2-byte size field can hold, [`FormatError::DenseAttributeHeapTooLarge`] if
 /// the managed attributes need more space than the heap can address, and
 /// [`FormatError::ValueTooLargeForPlatform`] if the size of the blocks that hold them does not fit
-/// a `usize`.
+/// a `usize`. Returns [`FormatError::Internal`] if the fixed attribute-heap geometry or the
+/// selected managed-object sizes violate the planner's invariants.
 pub(crate) fn dense_attrs_check(attrs: &[AttributeMessage]) -> Result<(), FormatError> {
     let mut managed = Vec::new();
     for a in attrs {
@@ -564,15 +552,20 @@ pub(crate) fn dense_attrs_check(attrs: &[AttributeMessage]) -> Result<(), Format
     // apart. Reaching either refusal takes about a terabyte of attributes on one
     // object, which is why nothing exercises them end to end; the boundary each
     // draws is tested where it is computed.
-    match AttributeHeapPlan::new(&managed, OFFSET_WIDTH) {
+    match ManagedHeapPlan::attributes(&managed, OFFSET_WIDTH) {
         Ok(_) => Ok(()),
-        Err(AttributeHeapPlanError::HeapSpace) => Err(FormatError::DenseAttributeHeapTooLarge {
+        Err(ManagedHeapPlanError::HeapSpace) => Err(FormatError::DenseAttributeHeapTooLarge {
             limit: ATTRIBUTE_HEAP_MAX_HEAP_SPACE,
         }),
-        Err(AttributeHeapPlanError::Host { bytes }) => Err(FormatError::ValueTooLargeForPlatform {
+        Err(ManagedHeapPlanError::Host { bytes }) => Err(FormatError::ValueTooLargeForPlatform {
             value: bytes,
             target: "usize",
         }),
+        Err(error @ (ManagedHeapPlanError::Geometry | ManagedHeapPlanError::ObjectSize { .. })) => {
+            Err(FormatError::Internal(format!(
+                "dense attribute managed heap planning failed: {error:?}"
+            )))
+        }
     }
 }
 
@@ -593,7 +586,7 @@ pub(crate) struct DenseAttrPlan {
     huge_id_of: Vec<Option<u64>>,
     huge_count: usize,
     huge_total: u64,
-    managed_plan: AttributeHeapPlan,
+    managed_plan: ManagedHeapPlan,
     name_plan: BTreeV2Plan,
     corder_plan: Option<BTreeV2Plan>,
     huge_plan: Option<BTreeV2Plan>,
@@ -683,7 +676,7 @@ pub(crate) fn dense_attrs_plan(
         .filter(|(_, id)| id.is_none())
         .map(|(s, _)| s.len() as u64)
         .collect();
-    let managed_plan = AttributeHeapPlan::new(&managed_sizes, OFFSET_WIDTH)
+    let managed_plan = ManagedHeapPlan::attributes(&managed_sizes, OFFSET_WIDTH)
         .expect("dense_attrs_check, which every caller must run first, plans the same layout");
 
     // Every v2 B-tree header this emitter writes has the same fixed layout, so
@@ -844,7 +837,10 @@ impl DenseAttrPlan {
     /// # Errors
     ///
     /// Returns [`FormatError::Internal`] if the heap ID of an attribute does not
-    /// fit the 8-byte heap IDs of the heap.
+    /// fit the 8-byte heap IDs of the heap. Returns [`FormatError::OffsetOverflow`] if a managed
+    /// block's address or region end overflows `u64`, [`FormatError::AddressTooLarge`] if it
+    /// exceeds the encoded address width, and [`FormatError::DefinedAddressIsUndefined`] if a
+    /// required managed-heap address equals the width's undefined value.
     pub(crate) fn build(&self, heap_address: StoredAddress) -> Result<DenseAttrBlob, FormatError> {
         let max_heap_size: u16 = DENSE_ATTR_MAX_HEAP_SIZE_BITS;
         let block_offset_bytes = DENSE_ATTR_BLOCK_OFFSET_BYTES; // 5
@@ -929,7 +925,7 @@ impl DenseAttrPlan {
             max_direct_block_size: ATTRIBUTE_HEAP_MAX_DIRECT_BLOCK_SIZE,
             max_heap_size,
             start_root_rows: ATTRIBUTE_HEAP_START_ROOT_ROWS,
-            root_block_address: managed_plan.root_address(managed_addr),
+            root_block_address: managed_plan.root_address(managed_addr)?,
             // Zero when the root is a direct block, which is how a reader decides
             // which of the two the address above points at.
             current_rows_in_root_indirect_block: managed_plan.root_rows(),
@@ -963,7 +959,7 @@ impl DenseAttrPlan {
             }
         }
 
-        let managed_blocks = managed_plan.serialize(&managed, managed_addr, frhp_addr);
+        let managed_blocks = managed_plan.serialize(&managed, managed_addr, frhp_addr)?;
         debug_assert_eq!(managed_blocks.len() as u64, managed_plan.region_size());
 
         // Build B-tree v2 type 8 records (17 bytes each), in the order the plan

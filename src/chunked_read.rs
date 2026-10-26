@@ -551,7 +551,7 @@ fn collect_chunk_info_from_source_inner<S: Source + ?Sized>(
 /// chunk grid starts `n` chunk sizes past `data_address`. The index is defined in "The Implicit
 /// Index" of the [format specification, version 4.0][spec], which counts the chunks along each
 /// dimension from
-/// the current extent. The C library counts them from the maximum extent, in
+/// the current extent. libhdf5 counts them from the maximum extent, in
 /// `H5D__none_idx_get_addr` (`H5Dnone.c`, HDF5 2.2.0).
 ///
 /// # Errors

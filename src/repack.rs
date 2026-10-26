@@ -1878,7 +1878,7 @@ fn resolve_reference_address(
 
 /// Byte width of the object references this repack resolves.
 ///
-/// The C library sizes an object reference at `H5R_OBJ_REF_BUF_SIZE`,
+/// libhdf5 sizes an object reference at `H5R_OBJ_REF_BUF_SIZE`,
 /// `sizeof(haddr_t)` (`H5Rpublic.h`, HDF5 2.2.0), so the element is eight bytes
 /// whatever address width the file declares, and [`datatype::embedded_reference_slots`]
 /// locates no other form: an undefined reference has all eight of those bytes

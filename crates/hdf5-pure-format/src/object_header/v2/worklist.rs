@@ -12,7 +12,7 @@ use crate::object_header::v2::ObjectHeaderContinuation;
 /// [`discover`](Self::discover) receives them, so the blocks a continuation block refers to come
 /// after every block found before them.
 ///
-/// The C library reads the blocks in the same order. `H5O__add_cont_msg` appends each continuation
+/// libhdf5 reads the blocks in the same order. `H5O__add_cont_msg` appends each continuation
 /// message the library decodes to one list (`H5Ocache.c`), and `H5O_protect` reads the blocks from
 /// the front of that list as the list grows by the messages of each block it reads (`H5Oint.c`,
 /// HDF5 2.2.0).

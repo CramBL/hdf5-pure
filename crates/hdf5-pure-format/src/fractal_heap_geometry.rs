@@ -20,6 +20,9 @@ pub struct FractalHeapGeometry {
     direct_rows: usize,
     max_root_rows: u16,
     first_row_bits: u32,
+    starting_block_size: u64,
+    max_direct_block_size: u64,
+    max_heap_size: u16,
     row_block_sizes: Vec<u64>,
     row_offsets: Vec<u64>,
 }
@@ -124,9 +127,27 @@ impl FractalHeapGeometry {
             direct_rows,
             max_root_rows,
             first_row_bits,
+            starting_block_size,
+            max_direct_block_size,
+            max_heap_size,
             row_block_sizes,
             row_offsets,
         })
+    }
+
+    /// Returns the size in bytes of blocks in the first two doubling-table rows.
+    pub const fn starting_block_size(&self) -> u64 {
+        self.starting_block_size
+    }
+
+    /// Returns the largest direct-block size permitted by the block-size limits.
+    pub const fn max_direct_block_size(&self) -> u64 {
+        self.max_direct_block_size
+    }
+
+    /// Returns the bit count of the managed heap address space.
+    pub const fn max_heap_size(&self) -> u16 {
+        self.max_heap_size
     }
 
     /// Returns the number of child slots in each row.

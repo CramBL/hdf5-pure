@@ -4,7 +4,7 @@ use crate::FormatError;
 
 /// The policy for when to write the fill value to dataset storage.
 ///
-/// The fill value write time is stored in a dataset's fill value message. The C library calls
+/// The fill value write time is stored in a dataset's fill value message. libhdf5 calls
 /// this setting `H5D_fill_time_t` and sets it with `H5Pset_fill_time`.
 ///
 /// The policy is defined in "The Data Storage - Fill Value Message" of the [format specification,
@@ -28,15 +28,15 @@ use crate::FormatError;
 pub enum FillTime {
     /// Always writes the fill value when storage space is allocated.
     ///
-    /// The C library calls this value `H5D_FILL_TIME_ALLOC`.
+    /// libhdf5 calls this value `H5D_FILL_TIME_ALLOC`.
     Alloc = 0,
     /// Never writes the fill value to storage.
     ///
-    /// The C library calls this value `H5D_FILL_TIME_NEVER`.
+    /// libhdf5 calls this value `H5D_FILL_TIME_NEVER`.
     Never = 1,
     /// Writes the fill value when storage space is allocated only if the caller defines a fill value.
     ///
-    /// The C library calls this value `H5D_FILL_TIME_IFSET`.
+    /// libhdf5 calls this value `H5D_FILL_TIME_IFSET`.
     #[default]
     IfSet = 2,
 }

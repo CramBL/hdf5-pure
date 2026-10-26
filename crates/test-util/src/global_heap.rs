@@ -142,7 +142,7 @@ pub const VERSION_OFFSET: usize = SIGNATURE.len();
 /// The offset of the collection size in a collection header.
 pub const SIZE_OFFSET: usize = VERSION_OFFSET + 1 + COLLECTION_RESERVED;
 
-// The C library pads the collection header and each object header to 16 bytes at every length
+// libhdf5 pads the collection header and each object header to 16 bytes at every length
 // width, in `H5HG_SIZEOF_HDR` and `H5HG_SIZEOF_OBJHDR` (`H5HGpkg.h`, HDF5 1.8.23 to 2.2.0).
 const HEADER: usize = 16;
 
@@ -163,7 +163,7 @@ const FREE_SPACE_INDEX: u16 = 0;
 /// The minimum collection size in bytes, defined in "Global Heap" of the [format specification,
 /// version 4.0][spec].
 ///
-/// The C library calls it `H5HG_MINSIZE` (`H5HGpkg.h`, HDF5 2.2.0).
+/// libhdf5 calls it `H5HG_MINSIZE` (`H5HGpkg.h`, HDF5 2.2.0).
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_globalheap
 pub const MIN_COLLECTION_SIZE: usize = 4096;

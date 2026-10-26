@@ -61,7 +61,7 @@ fn c_creates_writer_appends_both_read() {
 #[test]
 #[cfg(target_endian = "little")]
 fn c_incompressible_kept_chunks_untouched() {
-    // The C library stores incompressible chunks uncompressed with a nonzero
+    // libhdf5 stores incompressible chunks uncompressed with a nonzero
     // per-chunk filter mask. In-place appends never touch the kept chunk elements,
     // so their masks must survive verbatim and C must still read them.
     let dir = tempfile::tempdir().unwrap();
@@ -82,7 +82,7 @@ fn c_incompressible_kept_chunks_untouched() {
 
 #[test]
 fn c_empty_unallocated_index_is_refused() {
-    // The C library defers allocating an empty resizable dataset's
+    // libhdf5 defers allocating an empty resizable dataset's
     // Extensible-Array index until the first chunk is written, so there is no
     // index block for in-place growth. `File::open_rw` + `Dataset::append` refuses it cleanly; the
     // batch path (`Dataset::append_staged`) materializes the index instead.

@@ -372,7 +372,7 @@ fn a_cross_file_copy_refuses_a_committed_attribute() {
 /// takes its geometry from a type the dataset does not have. A typed append then
 /// fails with a misleading complaint that the element type does not match, and
 /// [`Dataset::append_raw`], which has no type to compare against, would stride
-/// through the data one byte per element. The C library writes this shape for
+/// through the data one byte per element. libhdf5 writes this shape for
 /// `maxshape=(None,)` on a latest-format file.
 #[test]
 fn an_in_place_append_refuses_a_committed_element_type() {
@@ -478,7 +478,7 @@ fn repack_reproduces_a_committed_datatype() {
 
     hdf5_pure::repack(&src, &dst, &RepackOptions::new()).expect("repack a committed datatype");
 
-    // The C library's verdict on the output, taken before this crate's, because
+    // libhdf5's verdict on the output, taken before this crate's, because
     // it is the one that cannot be satisfied by agreeing with the writer.
     {
         let file = hdf5::File::open(&dst).expect("C library opens the repacked file");

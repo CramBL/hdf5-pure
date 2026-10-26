@@ -34,7 +34,7 @@ A type's documentation is complete on its own, and a module's is a high-level su
 /// - the child and sibling addresses in B-tree nodes
 /// - the chunk addresses in a chunk index
 ///
-/// The C library calls this value `H5F_SIZEOF_ADDR` and sets it with `H5Pset_sizes`.
+/// libhdf5 calls this value `H5F_SIZEOF_ADDR` and sets it with `H5Pset_sizes`.
 pub(crate) enum OffsetWidth {
 ```
 
@@ -160,7 +160,7 @@ Cite the source of a version-dependent field width or of a quirk libhdf5 writes.
 
 ```rust
 // Version 3: bits 2-3 of the flags byte. 0x26 is Late alloc, Never, and Defined,
-// and 0x2a the same with IfSet. The C library writes Defined for
+// and 0x2a the same with IfSet. libhdf5 writes Defined for
 // `H5D_FILL_TIME_NEVER` whenever a fill value is set (`H5Ofill.c`, HDF5 2.1.0).
 ```
 
@@ -175,7 +175,7 @@ Never link a page of this repository from a doc comment. Rustdoc is published on
 The anchors of the libhdf5 API reference change with every rebuild, and no versioned tree of it is published. Cite libhdf5 in a sentence of its own, with the function or the C library as the subject.
 
 ```rust
-/// The C library calls this value `H5F_SIZEOF_ADDR` and sets it with `H5Pset_sizes`.
+/// libhdf5 calls this value `H5F_SIZEOF_ADDR` and sets it with `H5Pset_sizes`.
 ```
 
 ```rust
@@ -186,7 +186,7 @@ The anchors of the libhdf5 API reference change with every rebuild, and no versi
 ### Add the source file and the release where the behavior comes from the implementation
 
 ```rust
-// The C library writes Defined for `H5D_FILL_TIME_NEVER` whenever a fill value is set
+// libhdf5 writes Defined for `H5D_FILL_TIME_NEVER` whenever a fill value is set
 // (`H5Ofill.c`, HDF5 2.1.0).
 ```
 

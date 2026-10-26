@@ -8,7 +8,7 @@ use test_util_hdf5::file;
 
 #[test]
 fn a_null_dataspace_attribute_in_a_padded_header_record_reads_back_holding_nothing() {
-    // The C library writes version 1 headers with 8-byte record padding under `libver_earliest`.
+    // libhdf5 writes version 1 headers with 8-byte record padding under `libver_earliest`.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("null-earliest.h5");
     {
