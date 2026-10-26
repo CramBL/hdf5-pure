@@ -7,7 +7,6 @@
 //! object.
 
 use alloc::collections::BTreeMap;
-use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
@@ -22,12 +21,12 @@ use crate::error::FormatError;
 ///
 /// The graph holds each object once, however many links target it, and a link targets an object
 /// by its [`ObjectIndex`]. The root has index 0.
-pub(crate) struct ObjectGraph<T> {
+pub(crate) struct ObjectGraph<T, L> {
     // `discover` expands the objects in admission order, so `objects[i]` is `ObjectIndex(i)`.
-    objects: Vec<GraphObject<T>>,
+    objects: Vec<GraphObject<T, L>>,
 }
 
-impl<T> ObjectGraph<T> {
+impl<T, L> ObjectGraph<T, L> {
     /// Discovers the objects reachable from `root`, calling `expand` once for each.
     ///
     /// `expand` returns the value of an object and the hard links it holds. The walk expands the
@@ -43,7 +42,7 @@ impl<T> ObjectGraph<T> {
     pub(crate) fn discover<E>(
         budget: TraversalBudget,
         root: ObjectId,
-        mut expand: impl FnMut(ObjectId) -> Result<Expansion<T>, E>,
+        mut expand: impl FnMut(ObjectId) -> Result<Expansion<T, L>, E>,
     ) -> Result<Self, TraversalError<E>> {
         let mut worklist = Worklist::new(budget.objects);
         worklist.admit(root)?;
@@ -59,19 +58,12 @@ impl<T> ObjectGraph<T> {
                 })?;
             let links = links
                 .into_iter()
-                .map(
-                    |HardLink {
-                         name,
-                         creation_order,
-                         target,
-                     }| {
-                        Ok(HardLink {
-                            name,
-                            creation_order,
-                            target: worklist.admit(target)?,
-                        })
-                    },
-                )
+                .map(|HardLink { label, target }| {
+                    Ok(HardLink {
+                        label,
+                        target: worklist.admit(target)?,
+                    })
+                })
                 .collect::<Result<_, TraversalError<E>>>()?;
             worklist.expanded.push(GraphObject { value, links });
         }
@@ -86,7 +78,7 @@ impl<T> ObjectGraph<T> {
     /// # Errors
     ///
     /// Returns the graph unchanged if a link targets the root or a second link targets an object.
-    pub(crate) fn into_tree(self) -> Result<ObjectTree<T>, Self> {
+    pub(crate) fn into_tree(self) -> Result<ObjectTree<T, L>, Self> {
         let Some(order) = self.tree_post_order() else {
             return Err(self);
         };
@@ -145,39 +137,39 @@ impl<T> ObjectGraph<T> {
 ///
 /// The descendants of the root are in post order, each after the objects its links target, and a
 /// link targets a descendant by its index in that order.
-pub(crate) struct ObjectTree<T> {
-    descendants: Vec<GraphObject<T>>,
-    root: GraphObject<T>,
+pub(crate) struct ObjectTree<T, L> {
+    descendants: Vec<GraphObject<T, L>>,
+    root: GraphObject<T, L>,
 }
 
-impl<T> ObjectTree<T> {
+impl<T, L> ObjectTree<T, L> {
     /// Returns the descendants of the root in post order, and the root.
-    pub(crate) fn into_parts(self) -> (Vec<GraphObject<T>>, GraphObject<T>) {
+    pub(crate) fn into_parts(self) -> (Vec<GraphObject<T, L>>, GraphObject<T, L>) {
         (self.descendants, self.root)
     }
 }
 
 /// An object of an [`ObjectGraph`] or an [`ObjectTree`] and the hard links it holds.
-pub(crate) struct GraphObject<T> {
+pub(crate) struct GraphObject<T, L> {
     /// The value the expansion of the object returned.
     pub(crate) value: T,
     /// The links of the object, in the order the expansion returned them.
-    pub(crate) links: Vec<HardLink<ObjectIndex>>,
+    pub(crate) links: Vec<HardLink<L, ObjectIndex>>,
 }
 
 /// The value of an object and the hard links it holds, as the `expand` callback of
 /// [`ObjectGraph::discover`] returns them.
-pub(crate) struct Expansion<T> {
+pub(crate) struct Expansion<T, L> {
     pub(crate) value: T,
-    pub(crate) links: Vec<HardLink<ObjectId>>,
+    pub(crate) links: Vec<HardLink<L, ObjectId>>,
 }
 
-/// A hard link of a group, which targets an object by `Target`.
+/// A hard link of a group, which has a label of type `L` and targets an object by `Target`.
 #[derive(Debug)]
-pub(crate) struct HardLink<Target> {
-    pub(crate) name: String,
-    /// The creation index of the link, or `None` if its Link message has none.
-    pub(crate) creation_order: Option<u64>,
+pub(crate) struct HardLink<L, Target> {
+    /// The label the `expand` callback of [`ObjectGraph::discover`] returns for the link, such as
+    /// its name.
+    pub(crate) label: L,
     pub(crate) target: Target,
 }
 
@@ -278,17 +270,17 @@ impl fmt::Display for TraversalLimit {
 
 /// The objects a discovery has reached, in the order it reached them, and the expansions of the
 /// first of them.
-struct Worklist<T> {
+struct Worklist<T, L> {
     /// The index of each object the walk has reached.
     indices: BTreeMap<ObjectId, ObjectIndex>,
     /// The objects the walk has reached, at their index.
     admitted: Vec<ObjectId>,
     /// The expansions of the objects of `admitted` the walk has expanded, in the same order.
-    expanded: Vec<GraphObject<T>>,
+    expanded: Vec<GraphObject<T, L>>,
     object_limit: usize,
 }
 
-impl<T> Worklist<T> {
+impl<T, L> Worklist<T, L> {
     fn new(object_limit: usize) -> Self {
         Self {
             indices: BTreeMap::new(),
@@ -417,7 +409,7 @@ mod tests {
 
     #[test]
     fn an_expansion_error_stops_the_traversal() {
-        let err = ObjectGraph::<()>::discover(UNLIMITED, object(1), |_| Err("unreadable"))
+        let err = ObjectGraph::<(), String>::discover(UNLIMITED, object(1), |_| Err("unreadable"))
             .map(|_| ())
             .unwrap_err();
         assert!(
@@ -464,11 +456,14 @@ mod tests {
     fn discover(
         edges: &[(u64, Vec<u64>)],
         budget: TraversalBudget,
-    ) -> Result<ObjectGraph<ObjectId>, TraversalError<Infallible>> {
+    ) -> Result<ObjectGraph<ObjectId, String>, TraversalError<Infallible>> {
         ObjectGraph::discover(budget, object(edges[0].0), |id| expand(edges, id))
     }
 
-    fn expand(edges: &[(u64, Vec<u64>)], id: ObjectId) -> Result<Expansion<ObjectId>, Infallible> {
+    fn expand(
+        edges: &[(u64, Vec<u64>)],
+        id: ObjectId,
+    ) -> Result<Expansion<ObjectId, String>, Infallible> {
         let (_, targets) = edges
             .iter()
             .find(|(address, _)| *address == id.header_address().get())
@@ -479,17 +474,16 @@ mod tests {
         })
     }
 
-    fn summary(object: &GraphObject<ObjectId>) -> (u64, Vec<usize>) {
+    fn summary(object: &GraphObject<ObjectId, String>) -> (u64, Vec<usize>) {
         (
             object.value.header_address().get(),
             object.links.iter().map(|link| link.target.get()).collect(),
         )
     }
 
-    fn link(target: u64) -> HardLink<ObjectId> {
+    fn link(target: u64) -> HardLink<String, ObjectId> {
         HardLink {
-            name: format!("{target}"),
-            creation_order: None,
+            label: format!("{target}"),
             target: object(target),
         }
     }
