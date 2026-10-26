@@ -2237,20 +2237,151 @@ impl ScatterDestination<'_> {
     fn copy(&mut self, offset: usize, source: &[u8]) -> Result<(), FormatError> {
         let end = add_offset(offset, source.len())?;
         match self {
-            Self::Initialized(bytes) => bytes
-                .get_mut(offset..end)
-                .ok_or_else(|| FormatError::Internal("scatter exceeds output extent".into()))?
-                .copy_from_slice(source),
+            Self::Initialized(bytes) => u8::copy_from_bytes(
+                bytes
+                    .get_mut(offset..end)
+                    .ok_or_else(|| FormatError::Internal("scatter exceeds output extent".into()))?,
+                source,
+            ),
             Self::Spare(bytes) => {
                 let destination = bytes
                     .get_mut(offset..end)
                     .ok_or_else(|| FormatError::Internal("scatter exceeds output extent".into()))?;
-                for (destination, &source) in destination.iter_mut().zip(source) {
-                    destination.write(source);
-                }
+                MaybeUninit::<u8>::copy_from_bytes(destination, source);
             }
         }
         Ok(())
+    }
+
+    fn copy_rows(&mut self, source: &[u8], rows: &ScatterRows) -> Result<(), FormatError> {
+        match self {
+            Self::Initialized(bytes) => rows.copy_to(source, bytes),
+            Self::Spare(bytes) => rows.copy_to(source, bytes),
+        }
+    }
+}
+
+/// Copy geometry for equally sized rows with independent source and destination byte strides.
+///
+/// Both strides are nonzero, and each is at least the row byte count. The complete source and
+/// destination spans are checked before any row is copied.
+struct ScatterRows {
+    source_stride: NonZeroUsize,
+    destination_stride: NonZeroUsize,
+    row_bytes: usize,
+    count: usize,
+    destination_offset: usize,
+}
+
+impl ScatterRows {
+    /// Constructs row geometry whose rows fit within both strides.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if either stride is zero or less than `row_bytes`.
+    fn new(
+        source_stride: usize,
+        destination_stride: usize,
+        row_bytes: usize,
+        count: usize,
+        destination_offset: usize,
+    ) -> Result<Self, FormatError> {
+        if row_bytes > source_stride || row_bytes > destination_stride {
+            return Err(FormatError::Internal(
+                "scatter row exceeds its stride".into(),
+            ));
+        }
+        Ok(Self {
+            source_stride: NonZeroUsize::new(source_stride)
+                .ok_or_else(|| FormatError::Internal("scatter source stride is zero".into()))?,
+            destination_stride: NonZeroUsize::new(destination_stride).ok_or_else(|| {
+                FormatError::Internal("scatter destination stride is zero".into())
+            })?,
+            row_bytes,
+            count,
+            destination_offset,
+        })
+    }
+
+    /// Copies each row after checking the complete source and destination spans.
+    ///
+    /// Returns without writing if the row count or byte count is zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if span arithmetic overflows, and
+    /// [`FormatError::Internal`] if a span exceeds its buffer.
+    fn copy_to<Byte: ScatterByte>(
+        &self,
+        source: &[u8],
+        destination: &mut [Byte],
+    ) -> Result<(), FormatError> {
+        let &Self {
+            source_stride,
+            destination_stride,
+            row_bytes,
+            count,
+            destination_offset,
+        } = self;
+        if count == 0 || row_bytes == 0 {
+            return Ok(());
+        }
+        let source_end = add_offset(multiply_offset(count - 1, source_stride.get())?, row_bytes)?;
+        let destination_end = add_offset(
+            destination_offset,
+            add_offset(
+                multiply_offset(count - 1, destination_stride.get())?,
+                row_bytes,
+            )?,
+        )?;
+        let source = source
+            .get(..source_end)
+            .ok_or_else(|| FormatError::Internal("scatter exceeds decoded chunk extent".into()))?;
+        let destination = destination
+            .get_mut(destination_offset..destination_end)
+            .ok_or_else(|| FormatError::Internal("scatter exceeds output extent".into()))?;
+        for (source, destination) in source
+            .chunks(source_stride.get())
+            .zip(destination.chunks_mut(destination_stride.get()))
+        {
+            let source = source
+                .get(..row_bytes)
+                .ok_or_else(|| FormatError::Internal("scatter source row is short".into()))?;
+            let destination = destination
+                .get_mut(..row_bytes)
+                .ok_or_else(|| FormatError::Internal("scatter destination row is short".into()))?;
+            Byte::copy_from_bytes(destination, source);
+        }
+        Ok(())
+    }
+}
+
+/// A byte destination that can be initialized from a byte slice.
+///
+/// Implemented for [`u8`] and [`MaybeUninit<u8>`] so both output states use the same row geometry.
+trait ScatterByte: Sized {
+    /// Copies `source` into every element of an equal-length `destination`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the slice lengths differ.
+    fn copy_from_bytes(destination: &mut [Self], source: &[u8]);
+}
+
+impl ScatterByte for u8 {
+    #[inline]
+    fn copy_from_bytes(destination: &mut [Self], source: &[u8]) {
+        destination.copy_from_slice(source);
+    }
+}
+
+impl ScatterByte for MaybeUninit<u8> {
+    #[inline]
+    fn copy_from_bytes(destination: &mut [Self], source: &[u8]) {
+        assert_eq!(destination.len(), source.len());
+        for (destination, &source) in destination.iter_mut().zip(source) {
+            destination.write(source);
+        }
     }
 }
 
@@ -2418,19 +2549,16 @@ fn place_chunk(
         );
     }
     if inner == 1 {
-        for row in 0..count(0) {
-            copy_scatter_run(
-                chunk_data,
-                &mut output,
-                multiply_offset(multiply_offset(row, chunk_strides[0])?, elem_size.get())?,
-                multiply_offset(
-                    add_offset(base, multiply_offset(row, ds_strides[0])?)?,
-                    elem_size.get(),
-                )?,
+        return output.copy_rows(
+            chunk_data,
+            &ScatterRows::new(
+                multiply_offset(chunk_strides[0], elem_size.get())?,
+                multiply_offset(ds_strides[0], elem_size.get())?,
                 length,
-            )?;
-        }
-        return Ok(());
+                count(0),
+                multiply_offset(base, elem_size.get())?,
+            )?,
+        );
     }
     coord.fill(0);
     loop {
@@ -2471,6 +2599,7 @@ fn place_chunk(
     }
 }
 
+#[inline(always)]
 fn copy_scatter_run(
     source: &[u8],
     destination: &mut ScatterDestination<'_>,
@@ -2488,21 +2617,23 @@ fn copy_scatter_run(
 }
 
 fn add_offset(offset: usize, length: usize) -> Result<usize, FormatError> {
-    offset
-        .checked_add(length)
-        .ok_or(FormatError::OffsetOverflow {
+    match offset.checked_add(length) {
+        Some(value) => Ok(value),
+        None => Err(FormatError::OffsetOverflow {
             offset: offset as u64,
             length: length as u64,
-        })
+        }),
+    }
 }
 
 fn multiply_offset(offset: usize, length: usize) -> Result<usize, FormatError> {
-    offset
-        .checked_mul(length)
-        .ok_or(FormatError::OffsetOverflow {
+    match offset.checked_mul(length) {
+        Some(value) => Ok(value),
+        None => Err(FormatError::OffsetOverflow {
             offset: offset as u64,
             length: length as u64,
-        })
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -3013,6 +3144,31 @@ mod tests {
             FormatError::Internal("scatter exceeds output extent".into())
         );
         assert_eq!(bytes.len(), 0);
+    }
+
+    #[rstest]
+    #[case::short_source(6, 9, FormatError::Internal("scatter exceeds decoded chunk extent".into()))]
+    #[case::short_destination(7, 8, FormatError::Internal("scatter exceeds output extent".into()))]
+    fn dense_assembly_rows_reject_short_spans_before_writing(
+        #[case] source_len: usize,
+        #[case] destination_len: usize,
+        #[case] expected: FormatError,
+        #[values(false, true)] spare: bool,
+    ) {
+        let rows = ScatterRows::new(4, 5, 3, 2, 1).unwrap();
+        let source = vec![1; source_len];
+        if spare {
+            let mut destination = Vec::<u8>::with_capacity(destination_len);
+            let mut output =
+                ScatterDestination::Spare(&mut destination.spare_capacity_mut()[..destination_len]);
+            assert_eq!(output.copy_rows(&source, &rows).unwrap_err(), expected);
+            assert_eq!(destination.len(), 0);
+        } else {
+            let mut destination = vec![7; destination_len];
+            let mut output = ScatterDestination::Initialized(&mut destination);
+            assert_eq!(output.copy_rows(&source, &rows).unwrap_err(), expected);
+            assert_eq!(destination, vec![7; destination_len]);
+        }
     }
 
     fn shuffle_pipeline() -> FilterPipeline {
