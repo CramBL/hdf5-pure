@@ -14,6 +14,10 @@ use core::fmt;
 
 #[cfg(feature = "std")]
 use crate::message_type::MessageType;
+#[cfg(feature = "std")]
+use crate::object_graph::TraversalError;
+#[cfg(feature = "std")]
+use crate::object_graph::TraversalLimit;
 
 pub use hdf5_pure_core::FormatError;
 pub use hdf5_pure_core::OBJECT_HEADER_MESSAGE_MAX;
@@ -249,6 +253,17 @@ pub enum Error {
     /// A SWMR operation (e.g. [`crate::File::refresh`]) was requested on a file
     /// that was not opened for SWMR reading via `File::open_swmr`.
     SwmrUnsupported,
+    /// An object graph holds more objects or hard links than a traversal of it reads.
+    ///
+    /// [`crate::File::copy_from`], and the [`crate::File::commit`] that applies a
+    /// [`crate::File::copy`], return this for a source that reaches more objects or hard links
+    /// than a copy reads.
+    TraversalLimitExceeded {
+        /// The count the graph exceeds.
+        limit: TraversalLimit,
+        /// The most objects or hard links the traversal reads.
+        maximum: usize,
+    },
 }
 
 #[cfg(feature = "std")]
@@ -339,6 +354,10 @@ impl fmt::Display for Error {
             }
             Error::FileLocked(reason) => write!(f, "file is locked: {reason}"),
             Error::FileMarkedInUse(reason) => write!(f, "file is marked in use: {reason}"),
+            Error::TraversalLimitExceeded { limit, maximum } => write!(
+                f,
+                "the object graph holds more than {maximum} {limit}, the most a traversal reads"
+            ),
             Error::CommitPartiallyApplied { refusal, restore } => write!(
                 f,
                 "a commit refused ({refusal}) could not restore a value it had overwritten \
@@ -375,6 +394,18 @@ impl From<ResolveError> for Error {
             ResolveError::NotAGroup(path) => Error::NotAGroup(path),
             ResolveError::Format(e) => Error::Format(e),
             ResolveError::NotFound(path) => Error::Format(FormatError::PathNotFound(path)),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl From<TraversalError<Error>> for Error {
+    fn from(e: TraversalError<Error>) -> Self {
+        match e {
+            TraversalError::Expand(e) => e,
+            TraversalError::LimitExceeded { limit, maximum } => {
+                Error::TraversalLimitExceeded { limit, maximum }
+            }
         }
     }
 }

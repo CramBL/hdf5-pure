@@ -464,7 +464,6 @@ impl WriteEngine {
                 &self.image(),
                 AccessMode::ReadWrite,
                 src_addr,
-                0,
                 false,
                 base,
                 self.context.widths(),

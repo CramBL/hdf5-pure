@@ -41,6 +41,7 @@ use crate::edit::attributes::DenseAttrSet;
 use crate::edit::copy;
 use crate::edit::copy::CopyLink;
 use crate::edit::copy::CopyNode;
+use crate::edit::copy::CopyReader;
 use crate::edit::copy::CopyTree;
 use crate::edit::copy::CopyTreeBuilder;
 use crate::edit::copy::ObjModel;
@@ -56,6 +57,8 @@ use crate::file_writer::OFFSET_WIDTH;
 use crate::link_message::LinkMessage;
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
+use crate::object_graph::TraversalBudget;
+use crate::object_graph::TraversalLimit;
 use crate::object_path::ObjectPath;
 use crate::object_path::ObjectPathBuf;
 use crate::source::BytesSource;
@@ -563,6 +566,55 @@ fn a_copy_nested_past_the_native_stack_is_screened_written_and_dropped() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[rstest]
+#[case::objects(TraversalBudget::new(3, 3), TraversalLimit::Objects, 3)]
+#[case::links(TraversalBudget::new(4, 2), TraversalLimit::Links, 2)]
+fn a_copy_past_its_traversal_budget_is_rejected(
+    #[case] budget: TraversalBudget,
+    #[case] expected_limit: TraversalLimit,
+    #[case] expected_maximum: usize,
+) {
+    // Each case allows one fewer of one of the two counts.
+    let (bytes, addr) = group_of_three_datasets();
+    let Err(err) = copy_reader(&BytesSource::new(bytes.as_slice())).read(budget, addr) else {
+        panic!("expected the copy to be rejected");
+    };
+    let Error::TraversalLimitExceeded { limit, maximum } = err else {
+        panic!("expected TraversalLimitExceeded, got {err:?}");
+    };
+    assert_eq!((limit, maximum), (expected_limit, expected_maximum));
+}
+
+#[test]
+fn a_copy_within_its_traversal_budget_is_read_in_full() {
+    let (bytes, addr) = group_of_three_datasets();
+    let tree = copy_reader(&BytesSource::new(bytes.as_slice()))
+        .read(TraversalBudget::new(4, 3), addr)
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("budget_copy.h5");
+    FileBuilder::new().write(&path).unwrap();
+    let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+    let addr = engine.write_copy_subtree(&tree).unwrap();
+    let ObjModel::Group { children, .. } = WriteEngine::read_object(
+        engine.image(),
+        AccessMode::ReadWrite,
+        addr,
+        engine.addresses(),
+    )
+    .unwrap() else {
+        panic!("expected a group at {addr}");
+    };
+    assert_eq!(
+        children
+            .iter()
+            .map(|(link_name, _, _)| link_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a", "b", "c"]
+    );
 }
 
 #[test]
@@ -1429,6 +1481,35 @@ fn reference_attr(name: &str, address: u64) -> crate::attribute::AttributeMessag
         "the value is the address"
     );
     attr
+}
+
+/// Returns a file with a group `g` of three datasets, four objects and three hard links, and the
+/// address of the header of `g`.
+fn group_of_three_datasets() -> (Vec<u8>, u64) {
+    let mut builder = FileBuilder::new();
+    let mut group = builder.create_group("g");
+    for link_name in ["a", "b", "c"] {
+        group.create_dataset(link_name).with_i32_data(&[1]);
+    }
+    builder.add_group(group.finish());
+    let bytes = builder.finish().unwrap();
+    let addr = crate::reader::File::from_bytes(bytes.clone())
+        .unwrap()
+        .group("g")
+        .unwrap()
+        .header_address()
+        .unwrap();
+    (bytes, addr)
+}
+
+fn copy_reader<'a>(src: &'a BytesSource<&'a [u8]>) -> CopyReader<'a, BytesSource<&'a [u8]>> {
+    CopyReader {
+        src,
+        access_mode: AccessMode::ReadWrite,
+        cross_file: true,
+        base: AddressContext::from_effective_base(BaseAddress::ZERO),
+        widths: crate::file_writer::WIDTHS,
+    }
 }
 
 fn verbatim_copy(region: OhRegion, dense_attrs: DenseAttrSet) -> CopyTree {

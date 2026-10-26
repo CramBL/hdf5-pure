@@ -12,11 +12,18 @@
 //! compact-link format on rewrite, the superblock's root symbol-table entry is
 //! repointed, and the result is read back correctly by the C library.
 
+use std::path::Path;
+
 use hdf5::file::LibraryVersion;
+use hdf5_pure::AttrValue;
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::Error;
+use hdf5_pure::File;
+use hdf5_pure::FileBuilder;
+use hdf5_pure::MaxExtent;
+use hdf5_pure::ScaleOffset;
 use hdf5_pure::SuperblockVersion;
-use hdf5_pure::{AttrValue, File, FileBuilder, MaxExtent, ScaleOffset};
 
 use rstest::rstest;
 use test_util_hdf5::numeric::ByteOrder;
@@ -2362,3 +2369,234 @@ fn copied_chunked_geometry_preserves_stored_bytes_and_maximum_dimensions(
     assert_eq!(source.chunk(), Some(vec![2, 4]));
     assert_eq!(source.space().unwrap().maxdims(), [maximum, Some(8)]);
 }
+
+#[rstest]
+#[case::self_linked(RepeatedObjectGraph::SelfLinked)]
+#[case::ancestor_cycle(RepeatedObjectGraph::AncestorCycle)]
+#[case::shared_subgroup(RepeatedObjectGraph::SharedSubgroup)]
+#[case::shared_dataset(RepeatedObjectGraph::SharedDataset)]
+fn copy_rejects_a_source_that_reaches_an_object_twice_at_commit(
+    #[case] graph: RepeatedObjectGraph,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("graph.h5");
+    graph.write(&path);
+    let before = std::fs::read(&path).unwrap();
+    {
+        let session = File::open_rw(&path).unwrap();
+        session.copy("g", "g_copy").unwrap();
+        let err = session.commit().unwrap_err();
+        let Error::EditUnsupported(reason) = err else {
+            panic!("expected EditUnsupported, got {err:?}");
+        };
+        assert_eq!(reason, REPEATED_OBJECT);
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[rstest]
+#[case::self_linked(RepeatedObjectGraph::SelfLinked)]
+#[case::ancestor_cycle(RepeatedObjectGraph::AncestorCycle)]
+#[case::shared_subgroup(RepeatedObjectGraph::SharedSubgroup)]
+#[case::shared_dataset(RepeatedObjectGraph::SharedDataset)]
+fn copy_from_rejects_a_source_that_reaches_an_object_twice_before_staging(
+    #[case] graph: RepeatedObjectGraph,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let src_path = dir.path().join("graph.h5");
+    let dst_path = dir.path().join("destination.h5");
+    graph.write(&src_path);
+    file::libhdf5_create_v110(&dst_path).close().unwrap();
+    let before = std::fs::read(&dst_path).unwrap();
+    {
+        let source = File::open(&src_path).unwrap();
+        let session = File::open_rw(&dst_path).unwrap();
+        let err = session.copy_from(&source, "g", "g").unwrap_err();
+        let Error::EditUnsupported(reason) = err else {
+            panic!("expected EditUnsupported, got {err:?}");
+        };
+        assert_eq!(reason, REPEATED_OBJECT);
+        assert!(!session.has_staged_edits());
+        session.commit().unwrap();
+    }
+    assert_eq!(std::fs::read(&dst_path).unwrap(), before);
+}
+
+#[rstest]
+fn a_copied_tree_is_read_by_the_c_library(
+    #[values(TreeGraph::AliasOutsideSource, TreeGraph::DeepChain, TreeGraph::Wide)]
+    graph: TreeGraph,
+    #[values(CopyCall::Copy, CopyCall::CopyFrom)] call: CopyCall,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let src_path = dir.path().join("graph.h5");
+    graph.write(&src_path);
+    let dst_path = match call {
+        CopyCall::Copy => {
+            let session = File::open_rw(&src_path).unwrap();
+            session.copy("g", "g_copy").unwrap();
+            session.commit().unwrap();
+            src_path
+        }
+        CopyCall::CopyFrom => {
+            let dst_path = dir.path().join("destination.h5");
+            file::libhdf5_create_v110(&dst_path).close().unwrap();
+            let source = File::open(&src_path).unwrap();
+            let session = File::open_rw(&dst_path).unwrap();
+            session.copy_from(&source, "g", "g_copy").unwrap();
+            session.commit().unwrap();
+            dst_path
+        }
+    };
+    let c = hdf5::File::open(&dst_path).unwrap();
+    graph.assert_read_by_c_library(&c.group("g_copy").unwrap());
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CopyCall {
+    Copy,
+    CopyFrom,
+}
+
+/// A copy source at `g` that reaches one object through two hard links.
+#[derive(Clone, Copy, Debug)]
+enum RepeatedObjectGraph {
+    AncestorCycle,
+    SelfLinked,
+    SharedDataset,
+    SharedSubgroup,
+}
+
+impl RepeatedObjectGraph {
+    fn write(self, path: &Path) {
+        let (file, g) = create_source_group(path);
+        match self {
+            Self::AncestorCycle => {
+                g.create_group("child").unwrap();
+                file.link_hard("g", "g/child/back").unwrap();
+            }
+            Self::SelfLinked => file.link_hard("g", "g/self").unwrap(),
+            Self::SharedDataset => {
+                write_i32(&g, "d1", &[1, 2, 3]);
+                file.link_hard("g/d1", "g/d2").unwrap();
+            }
+            Self::SharedSubgroup => {
+                write_i32(
+                    &g.create_group("a").unwrap().create_group("sub").unwrap(),
+                    "d",
+                    &[4],
+                );
+                g.create_group("b").unwrap();
+                file.link_hard("g/a/sub", "g/b/sub").unwrap();
+            }
+        }
+        file.close().unwrap();
+    }
+}
+
+/// A copy source at `g` whose own hard links target each of its objects once.
+#[derive(Clone, Copy, Debug)]
+enum TreeGraph {
+    /// A dataset of the source with a second hard link outside it.
+    AliasOutsideSource,
+    /// [`DEEP_CHAIN`] nested groups with a dataset in the innermost one.
+    DeepChain,
+    /// [`WIDE_FAN_OUT`] groups of [`WIDE_FAN_OUT`] groups of [`WIDE_FAN_OUT`] datasets each.
+    Wide,
+}
+
+impl TreeGraph {
+    fn write(self, path: &Path) {
+        let (file, g) = create_source_group(path);
+        match self {
+            Self::AliasOutsideSource => {
+                write_i32(&g, "d", &[5]);
+                file.link_hard("g/d", "latest").unwrap();
+            }
+            Self::DeepChain => {
+                let leaf = (0..DEEP_CHAIN).fold(g, |group, _| group.create_group("g").unwrap());
+                write_i32(&leaf, "leaf", &[7]);
+            }
+            Self::Wide => {
+                for outer in 0..WIDE_FAN_OUT {
+                    let outer_group = g.create_group(&outer.to_string()).unwrap();
+                    for inner in 0..WIDE_FAN_OUT {
+                        let inner_group = outer_group.create_group(&inner.to_string()).unwrap();
+                        for leaf in 0..WIDE_FAN_OUT {
+                            write_i32(
+                                &inner_group,
+                                &leaf.to_string(),
+                                &[wide_value(outer, inner, leaf)],
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        file.close().unwrap();
+    }
+
+    fn assert_read_by_c_library(self, copy: &hdf5::Group) {
+        match self {
+            Self::AliasOutsideSource => {
+                assert_eq!(copy.member_names().unwrap(), vec!["d"]);
+                assert_eq!(
+                    copy.dataset("d").unwrap().read_raw::<i32>().unwrap(),
+                    vec![5]
+                );
+            }
+            Self::DeepChain => {
+                let leaf = (0..DEEP_CHAIN).fold(copy.clone(), |group, _| {
+                    assert_eq!(group.member_names().unwrap(), vec!["g"]);
+                    group.group("g").unwrap()
+                });
+                assert_eq!(leaf.member_names().unwrap(), vec!["leaf"]);
+                assert_eq!(
+                    leaf.dataset("leaf").unwrap().read_raw::<i32>().unwrap(),
+                    vec![7]
+                );
+            }
+            Self::Wide => {
+                for outer in 0..WIDE_FAN_OUT {
+                    for inner in 0..WIDE_FAN_OUT {
+                        for leaf in 0..WIDE_FAN_OUT {
+                            let path = format!("{outer}/{inner}/{leaf}");
+                            assert_eq!(
+                                copy.dataset(&path).unwrap().read_raw::<i32>().unwrap(),
+                                vec![wide_value(outer, inner, leaf)],
+                                "{path}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn create_source_group(path: &Path) -> (hdf5::File, hdf5::Group) {
+    let file = file::libhdf5_create_v110(path);
+    let g = file.create_group("g").unwrap();
+    (file, g)
+}
+
+fn write_i32(group: &hdf5::Group, name: &str, values: &[i32]) {
+    group
+        .new_dataset::<i32>()
+        .shape((values.len(),))
+        .create(name)
+        .unwrap()
+        .write(values)
+        .unwrap();
+}
+
+fn wide_value(outer: i32, inner: i32, leaf: i32) -> i32 {
+    (outer * WIDE_FAN_OUT + inner) * WIDE_FAN_OUT + leaf
+}
+
+const REPEATED_OBJECT: &str = "a copy source reaches one object through more than one hard link (an \
+     alias or a cycle), which a copy cannot reproduce yet";
+
+const DEEP_CHAIN: usize = 10_000;
+
+const WIDE_FAN_OUT: i32 = 8;

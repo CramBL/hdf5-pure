@@ -1,5 +1,6 @@
 //! Object-tree copies, source reads, and reference screening for staged edits.
 
+use hdf5_pure_core::__private::PhysicalAddress;
 use hdf5_pure_format::__private::ChunkedGeometry;
 use hdf5_pure_space::__private::AllocationClass;
 
@@ -19,6 +20,13 @@ use crate::file_writer::{LENGTH_WIDTH, OFFSET_WIDTH};
 use crate::link_message::{LinkMessage, LinkTarget};
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
+use crate::object_graph::Expansion;
+use crate::object_graph::GraphObject;
+use crate::object_graph::HardLink;
+use crate::object_graph::ObjectGraph;
+use crate::object_graph::ObjectId;
+use crate::object_graph::ObjectTree;
+use crate::object_graph::TraversalBudget;
 use crate::object_path::ObjectPathBuf;
 use crate::shared_message::SharedResolver;
 use crate::source::{BaseOffsetSource, BytesSource, Source};
@@ -35,7 +43,8 @@ impl WriteEngine {
     /// Stages a deep copy of a committed object for the next [`commit`](Self::commit).
     ///
     /// The source is read during the commit. The destination must be available, and the
-    /// source subtree must use storage the editor can reproduce.
+    /// source subtree must use storage the editor can reproduce and reach each object through
+    /// one hard link.
     ///
     /// # Errors
     ///
@@ -100,7 +109,6 @@ impl WriteEngine {
             &BytesSource::new(src_data),
             source.access_mode(),
             src_addr,
-            0,
             true,
             source.addresses(),
             source.widths(),
@@ -264,7 +272,8 @@ impl WriteEngine {
                         dense_attrs,
                     })
                 }
-                // Read stored chunks during subtree traversal and rebuild their index on write.
+                // Read stored chunks once the source is accepted as a tree, and rebuild their
+                // index on write.
                 2 => Ok(ObjModel::DatasetChunked {
                     region: kept,
                     dense_attrs,
@@ -295,27 +304,26 @@ impl WriteEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::EditUnsupported`] if nesting exceeds [`MAX_COPY_DEPTH`] or the editor
-    /// cannot reproduce the source storage. Propagates metadata and payload read or parse errors.
+    /// Returns [`Error::EditUnsupported`] if the source reaches one object through more than one
+    /// hard link or the editor cannot reproduce the source storage, and
+    /// [`Error::TraversalLimitExceeded`] if the source holds more objects or hard links than a
+    /// copy reads. Propagates metadata and payload read or parse errors.
     pub(super) fn read_copy_subtree<S: Source + ?Sized>(
         src: &S,
         access_mode: AccessMode,
         addr: u64,
-        depth: u32,
         cross_file: bool,
         base: AddressContext,
         widths: FormatWidths,
     ) -> Result<CopyTree, Error> {
-        let mut reader = CopyReader {
+        CopyReader {
             src,
             access_mode,
             cross_file,
             base,
             widths,
-            nodes: CopyTreeBuilder::default(),
-        };
-        let root = reader.read(addr, depth)?;
-        Ok(reader.nodes.finish(root))
+        }
+        .read(COPY_BUDGET, addr)
     }
 
     /// Writes an owned copy subtree and returns its root object-header address.
@@ -748,188 +756,368 @@ pub(super) struct CopyLink {
 }
 
 /// Reads a source subtree into the nodes of a [`CopyTree`].
-struct CopyReader<'a, S: Source + ?Sized> {
-    src: &'a S,
-    access_mode: AccessMode,
+pub(super) struct CopyReader<'a, S: Source + ?Sized> {
+    pub(super) src: &'a S,
+    pub(super) access_mode: AccessMode,
     /// Whether `src` is another file, whose references the reader rejects.
-    cross_file: bool,
+    pub(super) cross_file: bool,
     /// The address context of `src`.
-    base: AddressContext,
-    widths: FormatWidths,
-    /// The nodes below the root the reader has read.
-    nodes: CopyTreeBuilder,
+    pub(super) base: AddressContext,
+    pub(super) widths: FormatWidths,
 }
 
 impl<S: Source + ?Sized> CopyReader<'_, S> {
-    /// Reads the object at `addr` and returns its node, after storing the nodes of its subtree
-    /// in `self.nodes`.
+    /// Reads the object at `addr` and the objects it reaches into a [`CopyTree`].
     ///
-    /// The reader recurses once per group level, and the caller passes the number of levels above
-    /// `addr` as `depth`.
+    /// The reader discovers the headers of the objects within `budget` first, and reads the
+    /// payloads of the datasets only if the objects form a tree.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::EditUnsupported`] if `depth` reaches [`MAX_COPY_DEPTH`] or the editor
-    /// cannot reproduce the source storage. Propagates metadata and payload read or parse errors.
-    fn read(&mut self, addr: u64, depth: u32) -> Result<CopyNode, Error> {
+    /// Returns [`Error::EditUnsupported`] if the source reaches one object through more than one
+    /// hard link or the editor cannot reproduce the source storage, and
+    /// [`Error::TraversalLimitExceeded`] if the source holds more objects or hard links than
+    /// `budget` allows. Propagates metadata and payload read or parse errors.
+    pub(super) fn read(&self, budget: TraversalBudget, addr: u64) -> Result<CopyTree, Error> {
+        self.build_copy_tree(self.discover(budget, addr)?)
+    }
+
+    /// Discovers the objects the object at `addr` reaches and returns them as an [`ObjectTree`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] with [`COPY_REPEATED_OBJECT`] if the objects do not form
+    /// a tree, and [`Error::TraversalLimitExceeded`] if they exceed `budget`. Returns the errors
+    /// [`expand`](Self::expand) returns.
+    fn discover(
+        &self,
+        budget: TraversalBudget,
+        addr: u64,
+    ) -> Result<ObjectTree<CopySource>, Error> {
+        let root = ObjectId::new(PhysicalAddress::new(addr));
+        ObjectGraph::discover(budget, root, |id| self.expand(id))?
+            .into_tree()
+            .or(Err(Error::EditUnsupported(COPY_REPEATED_OBJECT)))
+    }
+
+    /// Reads the payloads of the datasets of `tree` into a [`CopyTree`] of one node per object,
+    /// in the order of its descendants with the root last.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors [`node`](Self::node) returns.
+    fn build_copy_tree(&self, tree: ObjectTree<CopySource>) -> Result<CopyTree, Error> {
+        let (descendants, root) = tree.into_parts();
+        let mut nodes = CopyTreeBuilder::default();
+        let mut ids = Vec::with_capacity(descendants.len());
+        for object in descendants {
+            let node = self.node(object, &ids)?;
+            ids.push(nodes.push(node));
+        }
+        Ok(nodes.finish(self.node(root, &ids)?))
+    }
+
+    /// Reads the header and the dense attributes of the object `id` identifies, and the hard
+    /// links it holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if a cross-file copy reads an object with references
+    /// into the source file, and [`Error::Format`] if a link's address overflows. Returns the
+    /// errors [`WriteEngine::read_object`] returns.
+    fn expand(&self, id: ObjectId) -> Result<Expansion<CopySource>, Error> {
         let Self {
             src,
             access_mode,
             cross_file,
             base,
-            widths,
             ..
         } = *self;
-        if depth >= MAX_COPY_DEPTH {
-            return Err(Error::EditUnsupported(
-                "copy source nests too deeply (possible hard-link cycle)",
-            ));
+        let (source, children) = CopySource::split(WriteEngine::read_object(
+            src,
+            access_mode,
+            id.header_address().get(),
+            base,
+        )?);
+        if cross_file {
+            let (region, dense_attrs) = source.header();
+            reject_foreign_addresses(region)?;
+            reject_foreign_dense_attrs(&dense_attrs.attrs)?;
         }
-        Ok(
-            match WriteEngine::read_object(src, access_mode, addr, base)? {
-                ObjModel::DatasetVerbatim {
+        let links = children
+            .into_iter()
+            .map(|(name, creation_order, target)| {
+                Ok(HardLink {
+                    name,
+                    creation_order,
+                    target: ObjectId::resolve(base, target)?,
+                })
+            })
+            .collect::<Result<_, FormatError>>()?;
+        Ok(Expansion {
+            value: source,
+            links,
+        })
+    }
+
+    /// Builds the [`CopyNode`] of `object`, reading the data of a contiguous dataset and the
+    /// stored chunks of a chunked one.
+    ///
+    /// The caller passes in `ids` the identifier of each node built before `object`, at the
+    /// [`ObjectIndex`](crate::object_graph::ObjectIndex) of its object.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if the editor cannot reproduce the storage of a dataset
+    /// or the storage extends past the source, and [`Error::Format`] if a link of `object` targets
+    /// an object that is not in `ids`. Propagates payload read and parse errors.
+    fn node(&self, object: GraphObject<CopySource>, ids: &[CopyNodeId]) -> Result<CopyNode, Error> {
+        let Self {
+            src, base, widths, ..
+        } = *self;
+        let GraphObject { value, links } = object;
+        Ok(match value {
+            CopySource::DatasetVerbatim {
+                region,
+                dense_attrs,
+            } => CopyNode::DatasetVerbatim {
+                region,
+                dense_attrs,
+            },
+            CopySource::DatasetContiguous {
+                region,
+                addr_off,
+                data_addr,
+                data_size,
+                dense_attrs,
+            } => {
+                // Preserve an undefined data address without allocating a data block.
+                let data = if data_addr.is_undefined(OFFSET_WIDTH) {
+                    None
+                } else {
+                    let start = base.absolute(data_addr)?;
+                    start
+                        .checked_add(data_size)
+                        .filter(|&e| e <= src.len())
+                        .ok_or(Error::EditUnsupported("dataset data is out of bounds"))?;
+                    let len = data_size.to_usize()?;
+                    Some(src.read_exact_at(start, len)?)
+                };
+                CopyNode::DatasetContiguous {
+                    region,
+                    addr_off,
+                    data,
+                    dense_attrs,
+                }
+            }
+            CopySource::DatasetChunked {
+                region,
+                dense_attrs,
+            } => {
+                let ChunkedHeaderParts {
+                    dt,
+                    ds,
+                    layout,
+                    pipeline_message,
+                } = parse_chunked_header(&region, widths)?;
+                let DataLayout::Chunked { index, flags, .. } = layout else {
+                    return Err(Error::EditUnsupported("dataset is not chunked"));
+                };
+                if !index.enumerable() {
+                    return Err(Error::EditUnsupported(
+                        "a chunked dataset with a version-2 B-tree chunk index cannot be \
+                         copied in place yet",
+                    ));
+                }
+                let geometry = ChunkedGeometry::new(&dt, &ds, &layout)?;
+
+                let dview = BaseOffsetSource {
+                    inner: src,
+                    base: base.effective_base(),
+                };
+
+                let infos = chunked_read::enumerate_chunks_from_source(
+                    &dview,
+                    &layout,
+                    &ds,
+                    crate::file_writer::WIDTHS,
+                )?;
+                let grid = chunked_read::plan_dense_grid(infos, &ds.dimensions, geometry.spatial)
+                    .ok_or(Error::EditUnsupported(
+                        "a chunked dataset with unallocated (sparse) chunks cannot be copied in place yet",
+                    ))?;
+                if grid.grid_order.is_empty() {
+                    return Err(Error::EditUnsupported(
+                        "an empty chunked dataset cannot be copied in place yet",
+                    ));
+                }
+
+                let mut meta = Vec::with_capacity(grid.grid_order.len());
+                let mut chunk_bytes = Vec::with_capacity(grid.grid_order.len());
+                for ci in &grid.grid_order {
+                    let len = ci.chunk_size.to_usize()?;
+                    ci.address
+                        .get()
+                        .checked_add(len as u64)
+                        .filter(|&e| e <= dview.len())
+                        .ok_or(Error::EditUnsupported("chunk data is out of bounds"))?;
+                    chunk_bytes.push(dview.read_exact_at(ci.address.get(), len)?);
+                    meta.push(ChunkMeta {
+                        compressed_size: ci.chunk_size.get(),
+                        filter_mask: ci.filter_mask,
+                    });
+                }
+
+                let geometry = ChunkGeometry::new(&ds, geometry);
+                CopyNode::DatasetChunked {
+                    region,
+                    geometry,
+                    flags,
+                    pipeline_message,
+                    meta,
+                    chunk_bytes,
+                    dense_attrs,
+                }
+            }
+            CopySource::Group {
+                non_link_region,
+                dense_attrs,
+            } => CopyNode::Group {
+                non_link_region,
+                links: links
+                    .into_iter()
+                    .map(
+                        |HardLink {
+                             name,
+                             creation_order,
+                             target,
+                         }| {
+                            let target = ids.get(target.get()).copied().ok_or_else(|| {
+                                FormatError::Internal(
+                                    "a copied group links an object that is not yet read".into(),
+                                )
+                            })?;
+                            Ok(CopyLink {
+                                name,
+                                creation_order,
+                                target,
+                            })
+                        },
+                    )
+                    .collect::<Result<_, Error>>()?,
+                dense_attrs,
+            },
+        })
+    }
+}
+
+/// A source object's retained header records and storage locations, without its hard links.
+///
+/// [`CopyReader::expand`] splits it from an [`ObjModel`], and [`CopyReader::node`] reads its
+/// payload into a [`CopyNode`].
+enum CopySource {
+    /// A chunked dataset whose stored chunks [`CopyReader::node`] reads.
+    DatasetChunked {
+        region: OhRegion,
+        dense_attrs: DenseAttrSet,
+    },
+    /// A contiguous dataset with its source data address and size.
+    DatasetContiguous {
+        region: OhRegion,
+        /// The data address field's byte offset within `region`.
+        addr_off: usize,
+        data_addr: StoredAddress,
+        data_size: u64,
+        dense_attrs: DenseAttrSet,
+    },
+    /// A compact dataset with its element bytes retained in the header region.
+    DatasetVerbatim {
+        region: OhRegion,
+        dense_attrs: DenseAttrSet,
+    },
+    /// A group without its Link messages.
+    Group {
+        non_link_region: OhRegion,
+        dense_attrs: DenseAttrSet,
+    },
+}
+
+impl CopySource {
+    /// Splits `model` into the source object and the hard links of a group, each as its name,
+    /// its creation index, and the stored address of its target.
+    fn split(model: ObjModel) -> (Self, Vec<(String, Option<u64>, StoredAddress)>) {
+        match model {
+            ObjModel::DatasetVerbatim {
+                region,
+                dense_attrs,
+            } => (
+                Self::DatasetVerbatim {
                     region,
                     dense_attrs,
-                } => {
-                    if cross_file {
-                        reject_foreign_addresses(&region)?;
-                        reject_foreign_dense_attrs(&dense_attrs.attrs)?;
-                    }
-                    CopyNode::DatasetVerbatim {
-                        region,
-                        dense_attrs,
-                    }
-                }
-                ObjModel::DatasetContiguous {
+                },
+                Vec::new(),
+            ),
+            ObjModel::DatasetContiguous {
+                region,
+                addr_off,
+                data_addr,
+                data_size,
+                dense_attrs,
+            } => (
+                Self::DatasetContiguous {
                     region,
                     addr_off,
                     data_addr,
                     data_size,
                     dense_attrs,
-                } => {
-                    if cross_file {
-                        reject_foreign_addresses(&region)?;
-                        reject_foreign_dense_attrs(&dense_attrs.attrs)?;
-                    }
-                    // Preserve an undefined data address without allocating a data block.
-                    let data = if data_addr.is_undefined(OFFSET_WIDTH) {
-                        None
-                    } else {
-                        let start = base.absolute(data_addr)?;
-                        start
-                            .checked_add(data_size)
-                            .filter(|&e| e <= src.len())
-                            .ok_or(Error::EditUnsupported("dataset data is out of bounds"))?;
-                        let len = data_size.to_usize()?;
-                        Some(src.read_exact_at(start, len)?)
-                    };
-                    CopyNode::DatasetContiguous {
-                        region,
-                        addr_off,
-                        data,
-                        dense_attrs,
-                    }
-                }
-                ObjModel::DatasetChunked {
+                },
+                Vec::new(),
+            ),
+            ObjModel::DatasetChunked {
+                region,
+                dense_attrs,
+            } => (
+                Self::DatasetChunked {
                     region,
                     dense_attrs,
-                } => {
-                    if cross_file {
-                        reject_foreign_addresses(&region)?;
-                        reject_foreign_dense_attrs(&dense_attrs.attrs)?;
-                    }
-                    let ChunkedHeaderParts {
-                        dt,
-                        ds,
-                        layout,
-                        pipeline_message,
-                    } = parse_chunked_header(&region, widths)?;
-                    let DataLayout::Chunked { index, flags, .. } = layout else {
-                        return Err(Error::EditUnsupported("dataset is not chunked"));
-                    };
-                    if !index.enumerable() {
-                        return Err(Error::EditUnsupported(
-                            "a chunked dataset with a version-2 B-tree chunk index cannot be \
-                         copied in place yet",
-                        ));
-                    }
-                    let geometry = ChunkedGeometry::new(&dt, &ds, &layout)?;
-
-                    let dview = BaseOffsetSource {
-                        inner: src,
-                        base: base.effective_base(),
-                    };
-
-                    let infos = chunked_read::enumerate_chunks_from_source(
-                        &dview,
-                        &layout,
-                        &ds,
-                        crate::file_writer::WIDTHS,
-                    )?;
-                    let grid = chunked_read::plan_dense_grid(infos, &ds.dimensions, geometry.spatial).ok_or(
-                    Error::EditUnsupported(
-                        "a chunked dataset with unallocated (sparse) chunks cannot be copied in place yet",
-                    ),
-                )?;
-                    if grid.grid_order.is_empty() {
-                        return Err(Error::EditUnsupported(
-                            "an empty chunked dataset cannot be copied in place yet",
-                        ));
-                    }
-
-                    let mut meta = Vec::with_capacity(grid.grid_order.len());
-                    let mut chunk_bytes = Vec::with_capacity(grid.grid_order.len());
-                    for ci in &grid.grid_order {
-                        let len = ci.chunk_size.to_usize()?;
-                        ci.address
-                            .get()
-                            .checked_add(len as u64)
-                            .filter(|&e| e <= dview.len())
-                            .ok_or(Error::EditUnsupported("chunk data is out of bounds"))?;
-                        chunk_bytes.push(dview.read_exact_at(ci.address.get(), len)?);
-                        meta.push(ChunkMeta {
-                            compressed_size: ci.chunk_size.get(),
-                            filter_mask: ci.filter_mask,
-                        });
-                    }
-
-                    let geometry = ChunkGeometry::new(&ds, geometry);
-                    CopyNode::DatasetChunked {
-                        region,
-                        geometry,
-                        flags,
-                        pipeline_message,
-                        meta,
-                        chunk_bytes,
-                        dense_attrs,
-                    }
-                }
-                ObjModel::Group {
+                },
+                Vec::new(),
+            ),
+            ObjModel::Group {
+                non_link_region,
+                children,
+                dense_attrs,
+            } => (
+                Self::Group {
                     non_link_region,
-                    children,
                     dense_attrs,
-                } => {
-                    if cross_file {
-                        reject_foreign_addresses(&non_link_region)?;
-                        reject_foreign_dense_attrs(&dense_attrs.attrs)?;
-                    }
-                    let mut links = Vec::with_capacity(children.len());
-                    for (name, creation_order, child) in children {
-                        let child = self.read(base.absolute(child)?, depth + 1)?;
-                        links.push(CopyLink {
-                            name,
-                            creation_order,
-                            target: self.nodes.push(child),
-                        });
-                    }
-                    CopyNode::Group {
-                        non_link_region,
-                        links,
-                        dense_attrs,
-                    }
-                }
-            },
-        )
+                },
+                children,
+            ),
+        }
+    }
+
+    /// Returns the retained header records and the dense attributes.
+    fn header(&self) -> (&OhRegion, &DenseAttrSet) {
+        match self {
+            Self::DatasetChunked {
+                region,
+                dense_attrs,
+            }
+            | Self::DatasetContiguous {
+                region,
+                dense_attrs,
+                ..
+            }
+            | Self::DatasetVerbatim {
+                region,
+                dense_attrs,
+            }
+            | Self::Group {
+                non_link_region: region,
+                dense_attrs,
+            } => (region, dense_attrs),
+        }
     }
 }
 
@@ -1143,3 +1331,8 @@ impl ChunkProvider for SliceChunkProvider<'_> {
 
 /// The subtree traversal limit, including possible hard-link cycles.
 pub(super) const MAX_COPY_DEPTH: u32 = 1000;
+
+const COPY_BUDGET: TraversalBudget = TraversalBudget::new(1 << 24, 1 << 24);
+
+pub(super) const COPY_REPEATED_OBJECT: &str = "a copy source reaches one object through more than one hard link (an alias or a \
+     cycle), which a copy cannot reproduce yet";
