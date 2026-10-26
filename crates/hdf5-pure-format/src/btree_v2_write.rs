@@ -1,10 +1,7 @@
-//! The version 2 B-tree writer: [`BTreeV2Plan`] lays out a tree over records in their sort order,
-//! and serializes it.
+//! Layout and serialization of version 2 B-trees over sorted records.
 //!
-//! The plan builds the tree from the leaves up in one pass. Every node is `node_size` bytes, so a
-//! node begins its index times the node size past the first. The tree keeps the properties the C
-//! library keeps as it inserts records one at a time: every leaf is at one depth, and no node is
-//! over its capacity.
+//! [`BTreeV2Plan`] places leaves at one depth and bounds each node's record count by its capacity.
+//! A caller chooses the representation of an empty tree through the plan's constructor.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -16,7 +13,7 @@ use crate::bytes;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 
-/// The node size in bytes the C library gives the name index of an object's dense attributes and
+/// The node size in bytes libhdf5 gives the name index of an object's dense attributes and
 /// the huge-object index of a fractal heap.
 ///
 /// `H5A_NAME_BT2_NODE_SIZE` in `H5Adense.c` and `H5HF_HUGE_BT2_NODE_SIZE` in `H5HFhuge.c` (HDF5
@@ -30,6 +27,15 @@ const SPLIT_PERCENT: u8 = 100;
 /// The merge percentage of the header, 40 in `H5A_NAME_BT2_MERGE_PERC` and
 /// `H5HF_HUGE_BT2_MERGE_PERC` (HDF5 2.2.0).
 const MERGE_PERCENT: u8 = 40;
+
+/// The encoding of direct record counts in version 2 B-tree child pointers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BTreeV2WriteDialect {
+    /// Uses one width, derived from leaf capacity, for direct record counts at every depth.
+    ///
+    /// libhdf5 computes this width in `H5B2__hdr_init` in `H5B2hdr.c` (HDF5 2.2.0).
+    Libhdf5Global,
+}
 
 /// One node of a planned tree, before any address is known.
 struct PlannedNode {
@@ -117,8 +123,7 @@ impl BTreeV2Plan {
 
         let mut nodes = Vec::new();
         if record_count == 0 {
-            // The one place an empty node is right: a tree with no records is
-            // still a header pointing at a root, and the root is a bare leaf.
+            // This constructor represents an empty tree with one empty leaf.
             nodes.push(PlannedNode {
                 depth: 0,
                 records: Vec::new(),
@@ -141,6 +146,45 @@ impl BTreeV2Plan {
         })
     }
 
+    /// Lays out a tree with libhdf5's representation of an empty tree.
+    ///
+    /// Uses the geometry and return conditions of [`Self::new`]. For zero records, serializes
+    /// an undefined root address and no nodes, as defined in "Version 2 B-trees" of the
+    /// [format specification, version 4.0][spec].
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+    pub fn new_with_undefined_empty_root(
+        dialect: BTreeV2WriteDialect,
+        tree_type: u8,
+        record_count: usize,
+        record_size: u16,
+        node_size: u32,
+        offset_width: OffsetWidth,
+    ) -> Option<Self> {
+        // H5B2__hdr_init in H5B2hdr.c, HDF5 2.2.0, derives one direct-count width
+        // from leaf capacity. An empty tree has an undefined root and no nodes.
+        let mut plan = match dialect {
+            BTreeV2WriteDialect::Libhdf5Global => Self::new(
+                tree_type,
+                record_count,
+                record_size,
+                node_size,
+                offset_width,
+            ),
+        }?;
+        if record_count == 0 {
+            plan.nodes.clear();
+        }
+        Some(plan)
+    }
+
+    /// Returns the total node size in bytes, or `None` if it exceeds [`u64::MAX`].
+    pub fn checked_nodes_size(&self) -> Option<u64> {
+        u64::try_from(self.nodes.len())
+            .ok()?
+            .checked_mul(u64::from(self.node_size))
+    }
+
     /// Returns the size in bytes of all the nodes of the tree together.
     pub fn nodes_size(&self) -> u64 {
         self.nodes.len() as u64 * self.node_size as u64
@@ -149,7 +193,9 @@ impl BTreeV2Plan {
     /// Serializes the tree, with its nodes from `nodes_address` on.
     ///
     /// `records` holds the records back to back in their sort order, `record_count * record_size`
-    /// bytes. The header points to the root, the last of the nodes.
+    /// bytes. For a tree with nodes, the header points to the root, the last node. For an empty
+    /// tree planned with [`Self::new_with_undefined_empty_root`], the root address is undefined and
+    /// `nodes_address` is unused.
     ///
     /// # Panics
     ///
@@ -211,7 +257,7 @@ impl BTreeV2Plan {
             debug_assert_eq!(address_of(i).get() - nodes_address.get(), start as u64);
         }
 
-        let root = self.nodes.last().expect("a plan always has a root");
+        let root = self.nodes.last();
         let mut header = Vec::with_capacity(crate::btree_v2::btree_v2_header_size(
             offset_width,
             length_width,
@@ -226,12 +272,15 @@ impl BTreeV2Plan {
         header.push(MERGE_PERCENT);
         bytes::write_offset(
             &mut header,
-            address_of(self.nodes.len() - 1).get(),
+            root.map_or(StoredAddress::undefined(offset_width), |_| {
+                address_of(self.nodes.len() - 1)
+            })
+            .get(),
             offset_width,
         );
         // `new` rejects a geometry whose leaf capacity exceeds `u16::MAX`, and no node holds more
         // records than a leaf.
-        let root_nrec = u16::try_from(root.records.len())
+        let root_nrec = u16::try_from(root.map_or(0, |root| root.records.len()))
             .expect("`BTreeV2Plan::new` bounds every node's record count by `u16::MAX`");
         header.extend_from_slice(&root_nrec.to_le_bytes());
         bytes::write_length(&mut header, self.total_records, length_width);
@@ -341,9 +390,89 @@ mod tests {
     use crate::btree_v2;
     use crate::btree_v2::BTreeV2Header;
     use crate::btree_v2::BTreeV2Record;
+    use crate::dense_link_write::NAME_RECORD_LEN;
 
     const OFFSET_WIDTH: OffsetWidth = OffsetWidth::Eight;
     const LENGTH_WIDTH: LengthWidth = LengthWidth::Eight;
+
+    #[test]
+    fn empty_tree_constructors_use_distinct_root_representations() {
+        let legacy = BTreeV2Plan::new(
+            btree_v2::BTREE_V2_LINK_NAME,
+            0,
+            NAME_RECORD_LEN,
+            BTREE_V2_NODE_SIZE,
+            OFFSET_WIDTH,
+        )
+        .unwrap();
+        let canonical = BTreeV2Plan::new_with_undefined_empty_root(
+            BTreeV2WriteDialect::Libhdf5Global,
+            btree_v2::BTREE_V2_LINK_NAME,
+            0,
+            NAME_RECORD_LEN,
+            BTREE_V2_NODE_SIZE,
+            OFFSET_WIDTH,
+        )
+        .unwrap();
+        let legacy = legacy.serialize(&[], StoredAddress::new(1024), OFFSET_WIDTH, LENGTH_WIDTH);
+        let canonical = canonical.serialize(
+            &[],
+            StoredAddress::undefined(OFFSET_WIDTH),
+            OFFSET_WIDTH,
+            LENGTH_WIDTH,
+        );
+        let legacy_header = BTreeV2Header::parse(&legacy.header, 0, 8, 8).unwrap();
+        let canonical_header = BTreeV2Header::parse(&canonical.header, 0, 8, 8).unwrap();
+        assert_eq!(legacy_header.root_node_address, StoredAddress::new(1024));
+        assert_eq!(legacy.nodes.len(), BTREE_V2_NODE_SIZE as usize);
+        assert_eq!(
+            canonical_header.root_node_address,
+            StoredAddress::undefined(OFFSET_WIDTH)
+        );
+        assert_eq!(canonical.nodes, Vec::<u8>::new());
+        assert_eq!(canonical_header.depth, 0);
+        assert_eq!(canonical_header.num_records_in_root, 0);
+        assert_eq!(canonical_header.total_records, 0);
+    }
+
+    #[test]
+    fn internal_child_record_counts_use_the_leaf_capacity_width() {
+        let plan = BTreeV2Plan::new_with_undefined_empty_root(
+            BTreeV2WriteDialect::Libhdf5Global,
+            btree_v2::BTREE_V2_LINK_NAME,
+            100_000,
+            NAME_RECORD_LEN,
+            4096,
+            OFFSET_WIDTH,
+        )
+        .unwrap();
+        assert!(plan.depth >= 2);
+        assert!(plan.info.max_nrec(0) > u64::from(u8::MAX));
+        assert!(plan.info.max_nrec(1) <= u64::from(u8::MAX));
+        assert_eq!(plan.info.max_nrec_size(), 2);
+        let records = vec![0; 100_000 * usize::from(NAME_RECORD_LEN)];
+        let nodes_address =
+            StoredAddress::new(btree_v2::btree_v2_header_size(OFFSET_WIDTH, LENGTH_WIDTH) as u64);
+        let image = plan.serialize(&records, nodes_address, OFFSET_WIDTH, LENGTH_WIDTH);
+        let bytes = [image.header, image.nodes].concat();
+        let header = BTreeV2Header::parse(&bytes, 0, 8, 8).unwrap();
+        let layout = btree_v2::BTreeV2Layout::new(&header, OFFSET_WIDTH).unwrap();
+        let mut pending = vec![layout.root().unwrap()];
+        let mut count = 0;
+        while let Some(node) = pending.pop() {
+            let view = layout
+                .parse(
+                    &bytes[usize::try_from(node.address().get()).unwrap()..],
+                    node,
+                )
+                .unwrap();
+            count += view.record_count();
+            for index in 0..=view.record_count() {
+                pending.extend(view.child(index).unwrap());
+            }
+        }
+        assert_eq!(count, 100_000);
+    }
 
     #[test]
     fn no_node_exceeds_its_capacity_or_sits_empty() {

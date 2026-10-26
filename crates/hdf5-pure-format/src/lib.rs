@@ -33,6 +33,7 @@ mod convert;
 mod data_layout;
 mod dataspace;
 mod datatype;
+mod dense_link_write;
 mod error;
 mod extensible_array;
 mod file_space_info;
