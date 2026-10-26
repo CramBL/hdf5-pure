@@ -550,7 +550,10 @@ The barrier at the end is a different thing, and it is the reason this policy is
 
 The arithmetic makes this a cheap promise to keep: one barrier per session, against the five per append batch and two or three per commit that [`OnClose`](crate::SyncPolicy::OnClose) removes. A thousand-append session goes from about five thousand `fsync`s to one.
 
-A file left flagged by a SWMR writer is the sharpest case. That flag is cleared at teardown, and a lost clear means every later open is rejected with [`Error::FileMarkedInUse`](crate::Error::FileMarkedInUse) until [`File::clear_swmr_flag`](crate::File::clear_swmr_flag) runs, a failure that costs availability, on a write the caller never sees.
+Clearing the SWMR-write flags requires a barrier at teardown. If the clear is lost, plain
+opens return [`Error::FileMarkedInUse`](crate::Error::FileMarkedInUse) until
+[`File::clear_status_flags`](crate::File::clear_status_flags) clears the flags after the writer
+has stopped. SWMR readers can follow the flagged file.
 
 The whole-file paths are outside all of this: [`FileBuilder::write`](crate::FileBuilder::write) and [`repack`](crate::repack()) never `fsync` under either policy, since each writes a file and hands it over, with no editing session to hold.
 
@@ -636,7 +639,9 @@ Gathered writes go out in address order, and every publish point sits below the 
 
 The last two are silent: every checksum verifies and a reader has no signal. This is what a write-back page buffer *is*, and `H5Pset_page_buffer_size` reorders the same way, with the same silence on crash consistency. The guarantee being switched off is one this crate adds on top of HDF5, and not one an HDF5 user arrives expecting.
 
-So a page-buffered session **marks the file for its lifetime**: superblock status-flag bit 0, `H5F_SUPER_WRITE_ACCESS`, the byte libhdf5 raises for any writer and this crate otherwise raises only for a SWMR one. It is written and `fsync`ed at open, republished by every commit, and cleared on a clean [`close`](crate::File::close) or drop. A session that dies with pages in memory leaves it standing, and a file carrying it is rejected by this crate, by `H5Fopen` and by h5py alike, with [`Error::FileMarkedInUse`](crate::Error::FileMarkedInUse). The silent wrong result becomes an error. [`File::clear_swmr_flag`](crate::File::clear_swmr_flag) (the `h5clear -s` equivalent) is how to look at such a file anyway, knowing what it may hold.
+So a page-buffered session **marks the file for its lifetime**: superblock status-flag bit 0, `H5F_SUPER_WRITE_ACCESS`, the byte libhdf5 raises for any writer and this crate otherwise raises only for a SWMR one. It is written and `fsync`ed at open, republished by every commit, and cleared on a clean [`close`](crate::File::close) or drop. A session that dies with pages in memory leaves it standing, and a file carrying it is rejected by this crate, by `H5Fopen` and by h5py alike, with [`Error::FileMarkedInUse`](crate::Error::FileMarkedInUse). The silent wrong result becomes an error. After the writer has stopped, [`File::clear_status_flags`](crate::File::clear_status_flags)
+permits inspection without guaranteeing data integrity. It is equivalent to `h5clear --status`
+(`h5clear -s`), and leaves metadata cache images and the file size unchanged.
 
 A reader has a snapshot while the session is still running. The mark is bit 0 alone, which no SWMR reader can follow, so [`FileAccessProperties::with_write_mark_policy(WriteMarkPolicy::AllowSnapshot)`](crate::FileAccessProperties::with_write_mark_policy) reads the file as it stands through any `*_with_options` open, on the caller's assertion that the writer has flushed, with [`File::sync`](crate::File::sync) or a clean close. It admits nothing else: a SWMR pair still belongs to [`File::open_swmr`](crate::File::open_swmr), and no reader's opt-in lets a second writer in.
 

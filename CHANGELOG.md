@@ -32,6 +32,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** `File::clear_swmr_flag` is renamed to `File::clear_status_flags`, with documented recovery limits for interrupted writers ([#911](https://github.com/CramBL/hdf5-pure/pull/911)).
 - **Breaking:** `File::space_accounting` and its public tuple-based report type are removed in favor of typed session inspection, which includes allocator-held reservations ([#903](https://github.com/CramBL/hdf5-pure/pull/903)).
 - **Breaking:** The split file-space setters and getters on `FileCreateProperties` and file-space builder setters are removed in favor of one settings value ([#898](https://github.com/CramBL/hdf5-pure/pull/898)).
 - **Breaking:** `File::file_space_info` replaces optional borrowed inspection with fallible owned inspection, and the strategy-only getter is removed. Malformed file-space metadata returns an error while absent metadata remains distinct ([#894](https://github.com/CramBL/hdf5-pure/pull/894)).

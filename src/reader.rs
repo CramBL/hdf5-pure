@@ -4,7 +4,6 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::num::{NonZeroU64, NonZeroUsize};
-#[cfg(any(test, feature = "__page-publication-crosscheck"))]
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
@@ -295,7 +294,7 @@ impl Source for SourceView<'_> {
 /// | `H5Fopen(RDWR)`, bounded memory | [`File::open_rw_with_options`](crate::File::open_rw_with_options) + [`MemoryStrategy::Bounded`] | **Genuine (read-write, bounded)** | [`File::open_rw`](crate::File::open_rw) picks the bounded backing itself. Stating `Bounded` makes it strict: a file the bounded engine cannot edit is rejected, and never mirrored. |
 /// | no C counterpart | [`with_memory_strategy`](Self::with_memory_strategy), [`MemoryStrategy`] | **Behavioral** | How much memory a read-write open may spend holding the file, overriding the dispatch above. `Bounded` rejects a file with a pre-v2 superblock, a userblock, or non-persistent PAGE allocation. `Auto`, which is what [`File::open_rw`](crate::File::open_rw) uses unset, falls back to the mirror, and `Mirrored` always mirrors. Non-persistent PAGE files support mirrored staged edits with the restrictions documented by [`File::open_rw`](crate::File::open_rw). [`File::edit_backing`](crate::File::edit_backing) reports which backend an open resolved to, as an [`EditBacking`] (`Bounded` or `Mirrored`), a separate type because `Auto` is a preference between the two and never an outcome. The C library has no analogue: `H5Fopen` picks its own caching with no caller-visible memory contract. |
 /// | `H5F_ACC_SWMR_READ` / `H5F_ACC_SWMR_WRITE` | [`File::open_swmr`](crate::File::open_swmr) / [`open_swmr_writer`](crate::File::open_swmr_writer) (`*_with_options`) | **Genuine** | No OS lock. The writer raises the superblock SWMR-write flag (a v3 superblock is required, as in the C library) and appends alone. It always mirrors, so it accepts `MemoryStrategy::Auto` and `Mirrored` and rejects an explicit `Bounded`. |
-/// | superblock status flags (`h5clear -s`) | checked by [`File::open`](crate::File::open), [`open_streaming`](crate::File::open_streaming), [`from_source`](crate::File::from_source), [`open_rw`](crate::File::open_rw), [`open_swmr`](crate::File::open_swmr) and [`open_swmr_writer`](crate::File::open_swmr_writer), and cleared by [`File::clear_swmr_flag`](crate::File::clear_swmr_flag) | **Genuine** | A file the byte marks as held by a writer is rejected with [`Error::FileMarkedInUse`], as `H5Fopen` rejects it. [`File::open_swmr`](crate::File::open_swmr) follows such a file, and rejects a half-set mark alone. Version-3 superblocks only, which is where the C library checks. [`File::from_bytes`](crate::File::from_bytes) does not consult the byte, and neither, therefore, does [`mat::from_file`](crate::mat::from_file), so a caller holding the bytes can still read a flagged file, at the cost of a copy of it. |
+/// | superblock status flags (`h5clear --status`) | checked by [`File::open`](crate::File::open), [`open_streaming`](crate::File::open_streaming), [`from_source`](crate::File::from_source), [`open_rw`](crate::File::open_rw), [`open_swmr`](crate::File::open_swmr) and [`open_swmr_writer`](crate::File::open_swmr_writer), and cleared by [`File::clear_status_flags`](crate::File::clear_status_flags) | **Genuine** | A file the byte marks as held by a writer is rejected with [`Error::FileMarkedInUse`], as `H5Fopen` rejects it. [`File::open_swmr`](crate::File::open_swmr) follows such a file, and rejects a half-set mark alone. Version-3 superblocks only, which is where the C library checks. [`File::from_bytes`](crate::File::from_bytes) does not consult the byte, and neither, therefore, does [`mat::from_file`](crate::mat::from_file), so a caller holding the bytes can still read a flagged file, at the cost of a copy of it. |
 /// | no C counterpart | [`with_write_mark_policy`](Self::with_write_mark_policy), [`WriteMarkPolicy`] | **Behavioral** | Whether a read-only open proceeds past a file marked open for write by a non-SWMR writer, bit 0 alone, which is what a page-buffered session raises and what no SWMR reader can follow, so such a file is otherwise readable only by copying it through [`File::from_bytes`](crate::File::from_bytes). `AllowSnapshot` reads it as it stands, on the caller's assertion that the writer has flushed ([`File::sync`](crate::File::sync), or a clean close), which the byte cannot record and this crate therefore cannot check. It admits nothing else: a SWMR pair belongs to [`File::open_swmr`](crate::File::open_swmr), and [`File::open_rw`](crate::File::open_rw) and [`File::open_swmr_writer`](crate::File::open_swmr_writer) are rejected whatever it says. The default `Refuse` is what `H5Fopen` does, and `H5Fopen` offers no override at all: `h5clear` is its one way through, and it edits the file. |
 /// | `H5Pset_file_locking` + `HDF5_USE_FILE_LOCKING` | [`with_locking`](Self::with_locking), [`FileLocking`] | **Genuine** | Exclusive advisory lock on both read-write paths, mirror and bounded, taken non-blocking, so a lock another process holds is [`Error::FileLocked`]. The environment-variable override recognizes the same values as the C library. Readers and the SWMR writer run without a lock by design and ignore the setting. |
 /// | `H5Fget_libver_bounds` (read) | [`File::libver_bound`](crate::File::libver_bound) | **Read-only** | Reports the low library-version bound the superblock version implies. |
@@ -556,12 +555,9 @@ impl FileAccessProperties {
     /// library raises for *any* writer. A session that dies with pages in memory
     /// leaves that byte standing, and a file carrying it is refused by this
     /// crate, by `H5Fopen` and by h5py alike, with
-    /// [`Error::FileMarkedInUse`]. The silent
-    /// wrong answer becomes a refusal, and
-    /// [`File::clear_swmr_flag`](crate::File::clear_swmr_flag) — the `h5clear -s`
-    /// equivalent — is how to look at such a file anyway, knowing what it may
-    /// hold. A completed commit's bytes may also still be in this process's
-    /// memory when it returns.
+    /// [`Error::FileMarkedInUse`]. After the writer has stopped,
+    /// [`File::clear_status_flags`] permits inspection without guaranteeing data integrity.
+    /// A completed commit's bytes may also be in this process's memory when it returns.
     ///
     /// # Refusals
     ///
@@ -696,8 +692,8 @@ impl FileAccessProperties {
     /// A file left marked by a writer that *crashed* is a different question,
     /// and this is not the answer to it: it reads such a file as willingly as a
     /// flushed one, and leaves the mark standing for the next reader to meet.
-    /// [`File::clear_swmr_flag`] — the `h5clear -s` equivalent — is the recovery
-    /// there, and it records the decision by clearing the byte.
+    /// [`File::clear_status_flags`] clears the mark after the writer has stopped, without
+    /// guaranteeing data integrity.
     ///
     /// The C library offers no counterpart: `H5Fopen` refuses the byte with no
     /// override, and `h5clear` is its only way through. This is the narrower one,
@@ -2693,7 +2689,7 @@ impl File {
     /// Returns [`Error::FileMarkedInUse`] if the version-3 superblock's status flags mark
     /// the file as open for writing. `H5Fopen` makes the same check. The flag marks a live writer
     /// or one that exited without closing the file.
-    /// [`clear_swmr_flag`](Self::clear_swmr_flag) clears a stale flag,
+    /// [`clear_status_flags`](Self::clear_status_flags) clears a stale flag,
     /// [`open_swmr`](Self::open_swmr) follows a live SWMR writer, and
     /// [`from_bytes`](Self::from_bytes) reads the bytes its caller already holds without the check,
     /// which is the way to read a flagged file on a read-only mount.
@@ -2777,7 +2773,7 @@ impl File {
     /// A file marked as held by a writer is rejected here as it is by
     /// [`open_streaming`](Self::open_streaming); with no path to report, the
     /// error names the source instead. Recovering such a file in place needs a
-    /// path, through [`File::clear_swmr_flag`], so a caller that has none is
+    /// path, through [`File::clear_status_flags`], so a caller that has none is
     /// left with [`File::from_bytes`](Self::from_bytes) and the whole file in
     /// memory.
     ///
@@ -2941,7 +2937,7 @@ impl File {
     /// [`Error::FileMarkedInUse`]. The second
     /// covers what the first cannot — a SWMR writer takes no lock, and a writer
     /// that exited without closing the file leaves the flag behind; recover a
-    /// stale one with [`clear_swmr_flag`](Self::clear_swmr_flag).
+    /// stale one with [`clear_status_flags`](Self::clear_status_flags).
     ///
     /// # Memory
     ///
@@ -3061,7 +3057,7 @@ impl File {
     /// [`Error::SwmrStagedUnsupported`].
     /// [`close`](Self::close) clears the SWMR-write flag; a writer that exits
     /// without a clean close leaves it set — recover with
-    /// [`clear_swmr_flag`](Self::clear_swmr_flag). While the flag stands, this
+    /// [`clear_status_flags`](Self::clear_status_flags). While the flag stands, this
     /// open is refused with
     /// [`Error::FileMarkedInUse`], which is what keeps a second writer off a
     /// file SWMR gives only one (no OS lock is held to do it).
@@ -3102,27 +3098,32 @@ impl File {
         })
     }
 
-    /// Clear a stale status flag left in `path` by a writer that exited without a
-    /// clean [`close`](Self::close) — the `h5clear -s` equivalent, for recovering
-    /// a file that both this crate and libhdf5 otherwise reject
-    /// to open ([`Error::FileMarkedInUse`]). A no-op if the flag is already
-    /// clear.
+    /// Clears superblock status flags left by an interrupted writer.
     ///
-    /// It takes the exclusive OS lock first, so it cannot clear the flag out
-    /// from under a *live* [`open_rw`](Self::open_rw) writer. A live SWMR writer
-    /// holds no lock, so make sure it is really gone: clearing the flag under
-    /// one leaves its readers with no record that it is publishing.
+    /// Clears the flags used by ordinary and SWMR writers, including the crash mark of a
+    /// page-buffered session ([`FileAccessProperties::with_page_buffer_size`]). This is equivalent
+    /// to `h5clear --status` (`h5clear -s`). The other `h5clear` operations, such as removing a
+    /// metadata cache image or changing the file size, are outside its scope. The superblock
+    /// checksum is updated with the flags. A file whose flags are already clear is unchanged,
+    /// as is a version 0 or 1 superblock.
     ///
-    /// It also clears the crash mark a page-buffered session raises
-    /// ([`FileAccessProperties::with_page_buffer_size`]), and there the warning is
-    /// sharper. That mark stands for pages that were still in memory, so a file
-    /// still carrying it was left by a writer that did not finish: clearing it
-    /// hands back a file whose datasets may read clean and return fill values or
-    /// a deleted object's bytes, with every checksum verifying. Clear it to
-    /// salvage what is there, not to resume trusting it. `h5clear` makes the same
-    /// trade for the same reason.
-    pub fn clear_swmr_flag<P: AsRef<std::path::Path>>(path: P) -> Result<(), Error> {
-        crate::file_lock::clear_swmr_flag_at(path.as_ref())
+    /// Use this method only after the writer has stopped. With locking enabled, it attempts to
+    /// acquire an exclusive OS lock. A live SWMR writer runs without a lock and cannot be excluded
+    /// by that check.
+    ///
+    /// Clearing the flags permits opening a file left marked by an interrupted writer. It does
+    /// not repair corruption, validate data integrity, or guarantee that writing can safely
+    /// continue. An interrupted page-buffer flush can leave silently incorrect data even when
+    /// every checksum verifies, including fill values or bytes from a deleted object.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FileLocked`] if another handle holds a conflicting lock and locking is
+    /// enabled. Returns [`Error::Io`] if the file cannot be opened for reading and writing, or if
+    /// locking, reading, writing, or synchronizing fails. Returns [`Error::Format`] if the
+    /// superblock cannot be parsed or serialized.
+    pub fn clear_status_flags(path: impl AsRef<Path>) -> Result<(), Error> {
+        crate::file_lock::clear_status_flags_at(path.as_ref())
     }
 
     /// Create a new, empty HDF5 file at `path` and open it for reading and
@@ -10695,9 +10696,8 @@ mod tests {
     ///
     /// Every refusal also asserts the file is left byte-identical. Each one
     /// fires with a read-write session already open, and the version-3 one fires
-    /// from the same function that raises the mark — so a refusal ordered after
-    /// the raise would leave a file marked in use by a session that never
-    /// existed, which is a file nothing can open until `clear_swmr_flag`.
+    /// from the same function that raises the mark. An error after raising the mark would
+    /// require `clear_status_flags` even though the session failed to open.
     #[test]
     fn a_page_buffer_is_rejected_where_it_cannot_be_honored() {
         let dir = tempfile::tempdir().unwrap();

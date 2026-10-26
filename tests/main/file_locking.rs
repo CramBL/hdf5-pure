@@ -89,3 +89,25 @@ fn swmr_writer_does_not_lock_so_a_reader_can_follow_it() {
 
     drop(writer);
 }
+
+#[test]
+fn clear_status_flags_rejects_a_locked_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("locked.h5");
+    write_starter(&path);
+    let before = std::fs::read(&path).unwrap();
+    let writer = File::open_rw(&path).unwrap();
+    let err = File::clear_status_flags(&path).unwrap_err();
+    let Error::FileLocked(message) = err else {
+        panic!("expected FileLocked, got {err:?}");
+    };
+    assert!(
+        message.starts_with(&format!("{}: ", path.display())),
+        "{message}"
+    );
+    assert!(message.contains("File::clear_status_flags"), "{message}");
+    writer.close().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    File::clear_status_flags(&path).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}

@@ -11,6 +11,14 @@ license.workspace = true
 repository.workspace = true
 build = "build.rs"
 
+# Writes fixtures for tests of interrupted writers.
+[[bin]]
+name = "interrupted-writer"
+path = "tests/fixtures/interrupted_writer.rs"
+test = false
+bench = false
+required-features = ["__hdf5-1.10"]
+
 [features]
 serde = ["hdf5-pure/serde"]
 ndarray = ["hdf5-pure/ndarray"]
@@ -49,7 +57,7 @@ hdf5 = { workspace = true, optional = true }
 # that reports the address is a deprecated symbol from 1.12 on.
 hdf5-sys = { workspace = true, optional = true }
 
-# The `hdf5` feature turns both dependencies on for the tests, the package's only targets.
+# Crosscheck targets use both bindings behind the `hdf5` feature.
 [package.metadata.cargo-shear]
 ignored = ["hdf5", "hdf5-sys"]
 

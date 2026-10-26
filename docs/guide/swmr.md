@@ -122,11 +122,19 @@ Each [`refresh()`](crate::File::refresh) re-reads the entire file from disk (`O(
 
 While a [`File::open_swmr_writer`](crate::File::open_swmr_writer) is open, the file's superblock carries an active-SWMR-writer flag (matching libhdf5 and h5py) so concurrent readers may open it accordingly. [`close()`](crate::File::close) or dropping the writer clears it. If a writer process exits without a clean close, the file is left flagged.
 
-That flag is durable under every [`SyncPolicy`](crate::SyncPolicy): clearing it is one of the writes [`close`](crate::File::close) and `drop` force a barrier for, since a lost clear would leave every subsequent open failing until [`File::clear_swmr_flag`](crate::File::clear_swmr_flag) ran. It is what every other open consults: while it stands, [`File::open`](crate::File::open), [`File::open_streaming`](crate::File::open_streaming), [`File::from_source`](crate::File::from_source), [`File::open_rw`](crate::File::open_rw) and a second [`File::open_swmr_writer`](crate::File::open_swmr_writer) all fail with [`Error::FileMarkedInUse`](crate::Error::FileMarkedInUse), exactly as `H5Fopen` fails with *"file is already open for write"*. [`File::open_swmr`](crate::File::open_swmr) is the one open that follows the flag, and that pairing is what the flag is for. [`File::from_bytes`](crate::File::from_bytes) does not consult it, since its caller already holds a snapshot of the bytes.
+Clearing that flag is durable under every [`SyncPolicy`](crate::SyncPolicy).
+[`File::close`](crate::File::close) and `drop` synchronize it even when other writes defer their
+barriers. While the flags are set, plain reads, editing opens, and a second SWMR writer return
+[`Error::FileMarkedInUse`](crate::Error::FileMarkedInUse). [`File::open_swmr`](crate::File::open_swmr)
+follows the flagged file. [`File::from_bytes`](crate::File::from_bytes) skips this check because
+its caller supplies a snapshot of the bytes.
 
 A page-buffered writer raises bit 0 of the same byte *without* the SWMR bit, and no SWMR reader can follow half a pair. That mark has a reader of its own: [`FileAccessProperties::with_write_mark_policy(WriteMarkPolicy::AllowSnapshot)`](crate::FileAccessProperties::with_write_mark_policy), which admits a snapshot read of it and never of a SWMR pair. See [Reading files](crate::_guide::reading).
 
-The flag cannot distinguish a live writer from a crashed one, so recover a file you know has no writer with the h5clear equivalent:
+[`File::clear_status_flags`](crate::File::clear_status_flags) clears status flags left by an
+interrupted ordinary or SWMR writer, including a page-buffered session. It is equivalent to
+`h5clear --status` (`h5clear -s`). It leaves metadata cache images and the file size unchanged.
+Use it only after the writer has stopped:
 
 ```rust
 # let dir = tempfile::tempdir()?;
@@ -142,12 +150,18 @@ The flag cannot distinguish a live writer from a crashed one, so recover a file 
 # use hdf5_pure::MaxExtent;
 use hdf5_pure::File;
 
-File::clear_swmr_flag(&path)?;
+File::clear_status_flags(&path)?;
 # assert_eq!(File::open(&path)?.dataset("log")?.shape()?, vec![3]);
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
-[`clear_swmr_flag`](crate::File::clear_swmr_flag) is safe to call on a file whose flag is already clear. It takes the exclusive OS lock first, so it cannot clear the flag out from under a live [`File::open_rw`](crate::File::open_rw) writer. A SWMR writer runs without that lock, so check that one is really gone before clearing.
+Clearing flags does not repair corruption, validate data integrity, or guarantee that writing
+can safely continue. An interrupted page-buffer flush can leave silently incorrect data even
+when every checksum verifies, including fill values or bytes from a deleted object.
+
+With locking enabled, the method attempts to acquire an exclusive OS lock. A live SWMR writer
+runs without a lock, so the caller must ensure that the writer has stopped. A file whose flags
+are already clear is unchanged.
 
 The check applies to version-3 superblocks, which is where the C library applies it and the only version this crate's SWMR writer accepts.
 

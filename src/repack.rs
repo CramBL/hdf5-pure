@@ -317,8 +317,8 @@ impl RepackOptions {
 /// `src` is opened for streaming reads, so a file whose superblock marks it as
 /// held by a writer is rejected with [`Error::FileMarkedInUse`], since repacking
 /// a file a writer is still growing would capture a torn view. Clear a flag a
-/// crashed writer left with [`File::clear_swmr_flag`](crate::File::clear_swmr_flag)
-/// first, as `h5repack` needs `h5clear`.
+/// stopped writer left with [`File::clear_status_flags`](crate::File::clear_status_flags)
+/// before repacking. Clearing the flags does not guarantee data integrity.
 ///
 /// The source's object headers are parsed read-only by default, so a message of a
 /// type this crate cannot name that only a decoder with write access must

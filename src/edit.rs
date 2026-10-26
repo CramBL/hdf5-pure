@@ -1527,11 +1527,9 @@ impl WriteEngine {
     ///   buffer's held writes may be partly on the platter while a mark still in
     ///   the page cache is not. One `fsync` per session buys it.
     ///
-    /// A failure rolls the byte back, best-effort. The alternative is a file
-    /// marked in use by a session that never opened, which nothing can read until
-    /// [`File::clear_swmr_flag`](crate::File::clear_swmr_flag) — a steep price
-    /// for an open that failed. Best-effort because the rollback writes through
-    /// the same handle that just failed; it is a chance, not a guarantee.
+    /// On failure, attempts to restore and synchronize the clear flags through the same handle.
+    /// If that fails, opening the file can require
+    /// [`File::clear_status_flags`](crate::File::clear_status_flags) despite the failed session.
     fn raise_crash_mark(&mut self) -> Result<(), Error> {
         let raised = self
             .set_consistency_flags(SuperblockStatusFlags::write_marked())

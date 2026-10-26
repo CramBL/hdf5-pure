@@ -3,7 +3,12 @@
 //! `File::close`, the SWMR-write flag is cleared and libhdf5
 //! reads the streamed appends back exactly.
 
+use std::env::{self, VarError};
+use std::io::{BufRead, BufReader};
+use std::process::{Command, Stdio};
+
 use hdf5::file::LibraryVersion;
+use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::SuperblockStatus;
 use hdf5_pure::SuperblockStatusFlags;
@@ -86,13 +91,6 @@ fn a_superblock_reports_the_flags_the_c_library_wrote(
     );
 }
 
-/// Both libraries read the same superblock status-flags byte the same way
-/// (issue #245). On a file a crashed SWMR writer left flagged, a plain open is
-/// refused by each and a SWMR read is accepted by each; after `clear_swmr_flag`
-/// — the `h5clear -s` equivalent — every open works again on both sides.
-///
-/// This is the divergence the issue reported: hdf5-pure used to open, and edit
-/// in place, a file `H5Fopen` refuses.
 #[test]
 fn both_libraries_refuse_a_file_a_crashed_swmr_writer_left_flagged() {
     let dir = tempfile::tempdir().unwrap();
@@ -110,7 +108,7 @@ fn both_libraries_refuse_a_file_a_crashed_swmr_writer_left_flagged() {
         "the C library refused it for some other reason: {c_err}"
     );
     assert!(
-        matches!(File::open(&path), Err(hdf5_pure::Error::FileMarkedInUse(_))),
+        matches!(File::open(&path), Err(Error::FileMarkedInUse(_))),
         "this crate must refuse what the C library refuses"
     );
 
@@ -121,10 +119,95 @@ fn both_libraries_refuse_a_file_a_crashed_swmr_writer_left_flagged() {
         .unwrap();
     File::open_swmr(&path).expect("this crate attaches a SWMR reader too");
 
-    File::clear_swmr_flag(&path).unwrap();
+    File::clear_status_flags(&path).unwrap();
     hdf5::File::open(&path)
         .expect("clearing the flag recovers the file for the C library")
         .close()
         .unwrap();
     File::open(&path).expect("and for this crate");
+}
+
+#[rstest]
+#[case::ordinary_writer(false, SuperblockStatusFlags::write_marked())]
+#[case::swmr_writer(true, SuperblockStatusFlags::swmr_write_marked())]
+fn clear_status_flags_clears_marks_from_libhdf5_writers(
+    #[case] swmr: bool,
+    #[case] flags: SuperblockStatusFlags,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("interrupted.h5");
+    let mut child = writer_command()
+        .arg(&path)
+        .arg(if swmr { "swmr" } else { "ordinary" })
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut output = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut output)
+        .unwrap();
+    let status = child.try_wait().unwrap().unwrap_or_else(|| {
+        child.kill().unwrap();
+        child.wait().unwrap()
+    });
+    assert_eq!(
+        output, "HDF5_PURE_WRITER_READY\n",
+        "writer status: {status}"
+    );
+    assert_eq!(
+        File::from_bytes(std::fs::read(&path).unwrap())
+            .unwrap()
+            .superblock()
+            .consistency_flags(),
+        flags,
+    );
+    let err = File::open(&path).unwrap_err();
+    let Error::FileMarkedInUse(message) = err else {
+        panic!("expected FileMarkedInUse, got {err:?}");
+    };
+    assert!(
+        message.starts_with(&format!("{}: ", path.display())),
+        "{message}"
+    );
+    assert!(
+        message.contains(&format!("status flags {:#04x}", flags.bits())),
+        "{message}"
+    );
+    assert!(message.contains("File::clear_status_flags"), "{message}");
+    File::clear_status_flags(&path).unwrap();
+    let file = File::open(&path).unwrap();
+    assert_eq!(
+        file.superblock().consistency_flags(),
+        SuperblockStatusFlags::new()
+    );
+    assert_eq!(
+        file.dataset("d").unwrap().read_i32().unwrap(),
+        vec![1, 2, 3, 4]
+    );
+    assert_eq!(dataset::read_libhdf5::<i32>(&path, "d"), vec![1, 2, 3, 4]);
+    let cleared = std::fs::read(&path).unwrap();
+    File::clear_status_flags(&path).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), cleared);
+}
+
+/// Builds a fixture command with the optional runner from `CROSS_TARGET_RUNNER`.
+///
+/// # Panics
+///
+/// Panics if `CROSS_TARGET_RUNNER` contains a value that is not Unicode.
+fn writer_command() -> Command {
+    let binary = env!("CARGO_BIN_EXE_interrupted-writer");
+    let runner = match env::var("CROSS_TARGET_RUNNER") {
+        Ok(runner) => runner,
+        Err(VarError::NotPresent) => return Command::new(binary),
+        Err(err) => panic!("invalid cross runner: {err}"),
+    };
+    let mut args = runner.split_whitespace();
+    let Some(program) = args.next() else {
+        return Command::new(binary);
+    };
+    let mut command = Command::new(program);
+    command.args(args).arg(binary);
+    command
 }
