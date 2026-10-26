@@ -166,6 +166,15 @@ pub enum FormatError {
         /// The heap address space, in bytes.
         limit: u64,
     },
+    /// An encoded link exceeds the managed-object size limit for dense link storage.
+    DenseLinkObjectTooLarge {
+        /// The encoded link size in bytes.
+        size: u64,
+        /// The maximum managed-object size in bytes.
+        limit: u64,
+    },
+    /// A group's dense link heap or indexes exceed their supported size.
+    DenseLinkStorageTooLarge,
     /// A compound datatype contains the same field name more than once.
     DuplicateCompoundField(String),
     /// A global heap collection holds two objects at the same index.
@@ -175,6 +184,8 @@ pub enum FormatError {
         /// The index of the second object.
         index: u16,
     },
+    /// A group contains the same link name more than once.
+    DuplicateLinkName(String),
     /// A compound datatype contains no fields.
     EmptyCompoundType,
     /// An enumeration datatype was built over a base type that is not an
@@ -2120,6 +2131,16 @@ impl fmt::Display for FormatError {
                      attribute heap"
                 )
             }
+            Self::DenseLinkObjectTooLarge { size, limit } => {
+                write!(
+                    f,
+                    "a {size}-byte link exceeds the {limit}-byte dense link object limit"
+                )
+            }
+            Self::DenseLinkStorageTooLarge => {
+                write!(f, "group links exceed the dense storage address space")
+            }
+            Self::DuplicateLinkName(name) => write!(f, "duplicate link name {name:?}"),
             Self::ZeroFixedStringWidth => {
                 write!(
                     f,

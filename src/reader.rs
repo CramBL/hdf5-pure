@@ -10556,23 +10556,11 @@ mod tests {
         (by_name, iterated)
     }
 
-    /// Opening members by name re-walks the group's link structure once per
-    /// member; iterating handles walks it once. Bytes is the metric that
-    /// separates them: a group this size keeps its links inline in the object
-    /// header, so that header grows with the member count and re-reading it per
-    /// member is quadratic, while the *number* of reads stays linear either way
-    /// and would show almost nothing.
-    ///
-    /// Asserted as how the cost scales rather than as one fixture's byte count,
-    /// since a fixed number would pass just as well on a walk that stayed
-    /// quadratic with a smaller constant.
     #[test]
     fn iterating_members_enumerates_the_group_once() {
         let (_, iterated_16) = member_walk_bytes(16);
         let (by_name_64, iterated_64) = member_walk_bytes(64);
 
-        // The rule this test exists for, and the only assertion here that is
-        // about `iter_datasets` itself.
         assert!(
             iterated_64 <= 5 * iterated_16,
             "one enumeration plus one header per member is linear, so four times \
@@ -10580,10 +10568,6 @@ mod tests {
              {iterated_64}"
         );
 
-        // Contrast, not a property of this code: it holds because `Group::dataset`
-        // re-enumerates. If a future change makes that route cheap enough to turn
-        // this red, nothing here has regressed — confirm the scaling assertion
-        // above still holds and then drop this one.
         assert!(
             iterated_64 < by_name_64,
             "at 64 members the one-enumeration walk should still be the cheaper: \

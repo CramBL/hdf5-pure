@@ -26,6 +26,7 @@ mod dataset_create_properties;
 mod decoded_chunk_size;
 mod dense_attr_limits;
 mod dense_attr_vlen;
+mod dense_links;
 mod edit_append_inplace;
 mod edit_dataset_attr;
 mod edit_file_space_strategy;

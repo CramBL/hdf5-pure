@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `FileBuilder::finish` and related output methods write dense link storage for root and nested groups with more than eight links, with encoded link messages limited to 4096 bytes ([#925](https://github.com/CramBL/hdf5-pure/pull/925)).
 - `Error::TraversalLimitExceeded` reports an object graph with more objects or hard links than a copy reads ([#922](https://github.com/CramBL/hdf5-pure/pull/922)).
 - `AppendOptions` permits explicitly re-encoding a filtered lossy partial tail through immediate, staged, and buffered appends. Each rewrite can introduce additional quantization error in previously published tail values ([#916](https://github.com/CramBL/hdf5-pure/pull/916)).
 - `FileSpaceSettings` groups file-space configuration in a portable value, with normalized settings for strategies without free-space managers ([#894](https://github.com/CramBL/hdf5-pure/pull/894)).

@@ -1,7 +1,4 @@
-//! HDF5 file creation (write pipeline).
-//!
-//! Produces valid HDF5 files with v3 superblock, v2 object headers,
-//! link messages, contiguous datasets, inline and dense attributes.
+//! HDF5 file creation with compact or dense group links and attributes.
 
 use core::num::NonZeroUsize;
 
@@ -32,14 +29,20 @@ use hdf5_pure_format::__private::BTREE_V2_ATTRIBUTE_NAME;
 use hdf5_pure_format::__private::BTREE_V2_HUGE_OBJECT;
 use hdf5_pure_format::__private::BTREE_V2_NODE_SIZE;
 use hdf5_pure_format::__private::BTreeV2Plan;
+use hdf5_pure_format::__private::DenseLinkImage;
+use hdf5_pure_format::__private::DenseLinkPlan;
+use hdf5_pure_format::__private::DenseLinkPlanError;
 use hdf5_pure_format::__private::FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED;
 use hdf5_pure_format::__private::FractalHeapFiltering;
 use hdf5_pure_format::__private::FractalHeapHeader;
 use hdf5_pure_format::__private::FreeSection;
+use hdf5_pure_format::__private::GroupLinkStorage;
 use hdf5_pure_format::__private::HugeObjectRecord;
 use hdf5_pure_format::__private::LayoutVersion;
+use hdf5_pure_format::__private::LinkStorageError;
 use hdf5_pure_format::__private::ManagedHeapPlan;
 use hdf5_pure_format::__private::ManagedHeapPlanError;
+use hdf5_pure_format::__private::OwnedLink;
 use hdf5_pure_format::__private::SECTION_CLASS_LARGE;
 use hdf5_pure_format::__private::SECTION_CLASS_SMALL;
 use hdf5_pure_space::__private::AllocationClass;
@@ -295,15 +298,29 @@ pub(crate) fn build_committed_datatype_oh(
     w.serialize()
 }
 
+/// Builds a version 2 group header with compact or dense link storage.
+///
+/// Writes `links` into the header when `link_info` is [`None`]. Otherwise, writes
+/// `link_info` and omits the inline links. Writes `attr_info` in place of compact attributes
+/// when supplied.
+///
+/// # Errors
+///
+/// Returns [`FormatError::AttributeFieldTooLong`] if a compact attribute field exceeds its
+/// encoding, or [`FormatError::ObjectHeaderMessageTooLarge`] if a message exceeds the
+/// object-header message size limit.
 pub(crate) fn build_group_oh(
     links: &[LinkMessage],
     attrs: &[AttributeMessage],
     attr_info: Option<&[u8]>,
+    link_info: Option<&LinkInfoMessage>,
 ) -> Result<Vec<u8>, FormatError> {
     let mut w = ObjectHeaderWriter::new();
     w.add_message(
         MessageType::LINK_INFO,
-        COMPACT_LINK_INFO.serialize(OFFSET_WIDTH),
+        link_info
+            .unwrap_or(&COMPACT_LINK_INFO)
+            .serialize(OFFSET_WIDTH),
     );
     // A new-style group (one with a Link Info message) must also carry a Group
     // Info message, or the HDF5 C library refuses to insert links into it:
@@ -312,12 +329,106 @@ pub(crate) fn build_group_oh(
     // the C library. The minimal body (version 0, no optional fields) leaves the
     // C library to use its defaults (max compact = 8, min dense = 6).
     w.add_message(MessageType::GROUP_INFO, vec![0, 0]);
-    for link in links {
-        w.add_message(MessageType::LINK, link.serialize(OFFSET_WIDTH));
+    if link_info.is_none() {
+        for link in links {
+            w.add_message(MessageType::LINK, link.serialize(OFFSET_WIDTH));
+        }
     }
     add_attributes(&mut w, attrs, attr_info)?;
     w.serialize()
 }
+
+/// Serializes dense links at the reserved address and checks the reserved length.
+///
+/// # Errors
+///
+/// Returns [`FormatError::Internal`] if the links require compact storage or the serialized
+/// length differs from the reservation. Propagates errors from [`dense_links_plan`] and
+/// [`DenseLinkPlan::serialize`].
+fn dense_links_image(
+    links: &[LinkMessage],
+    (address, reserved): (StoredAddress, usize),
+) -> Result<DenseLinkImage, FormatError> {
+    let plan = dense_links_plan(links)?
+        .ok_or_else(|| FormatError::Internal("a reserved dense group has compact links".into()))?;
+    let image = plan.serialize(address).map_err(dense_link_error)?;
+    if image.bytes.len() != reserved {
+        return Err(FormatError::Internal(
+            "dense group link emission differs from its reserved length".into(),
+        ));
+    }
+    Ok(image)
+}
+
+/// Plans a group's dense link storage when its link count exceeds [`MAX_COMPACT_LINKS`].
+///
+/// Returns [`None`] for compact storage. Plans a managed fractal heap and a name index
+/// without creation-order tracking.
+///
+/// # Errors
+///
+/// Returns [`FormatError::DenseLinkObjectTooLarge`] if an encoded link exceeds the
+/// managed-object size limit, [`FormatError::DenseLinkStorageTooLarge`] if the heap or
+/// indexes exceed their supported size, or [`FormatError::DuplicateLinkName`] if link names
+/// repeat. Propagates errors from link parsing and heap planning.
+fn dense_links_plan(links: &[LinkMessage]) -> Result<Option<DenseLinkPlan>, FormatError> {
+    if links.len() <= MAX_COMPACT_LINKS {
+        return Ok(None);
+    }
+    let links = links
+        .iter()
+        .map(|link| OwnedLink::parse(&link.serialize(OFFSET_WIDTH), OFFSET_WIDTH))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(link_storage_error)?;
+    let storage = GroupLinkStorage::new(&COMPACT_LINK_INFO, links, OFFSET_WIDTH)
+        .map_err(link_storage_error)?;
+    DenseLinkPlan::new(storage, LENGTH_WIDTH)
+        .map(Some)
+        .map_err(dense_link_error)
+}
+
+fn dense_link_error(error: DenseLinkPlanError) -> FormatError {
+    match error {
+        DenseLinkPlanError::Format(error) => error,
+        DenseLinkPlanError::Link(error) => link_storage_error(error),
+        DenseLinkPlanError::Heap(ManagedHeapPlanError::ObjectSize { size, maximum }) => {
+            FormatError::DenseLinkObjectTooLarge {
+                size,
+                limit: maximum,
+            }
+        }
+        DenseLinkPlanError::Heap(ManagedHeapPlanError::Host { bytes }) => {
+            FormatError::ValueTooLargeForPlatform {
+                value: bytes,
+                target: "usize",
+            }
+        }
+        DenseLinkPlanError::Heap(ManagedHeapPlanError::HeapSpace)
+        | DenseLinkPlanError::IndexGeometry
+        | DenseLinkPlanError::LengthOverflow => FormatError::DenseLinkStorageTooLarge,
+        DenseLinkPlanError::Heap(ManagedHeapPlanError::Geometry) => {
+            FormatError::Internal("the group link heap geometry is invalid".into())
+        }
+    }
+}
+
+fn link_storage_error(error: LinkStorageError) -> FormatError {
+    match error {
+        LinkStorageError::Format(error) => error,
+        LinkStorageError::DuplicateName(name) => {
+            FormatError::DuplicateLinkName(String::from_utf8_lossy(&name).into_owned())
+        }
+        LinkStorageError::InvalidName(name) => {
+            FormatError::InvalidLinkName(String::from_utf8_lossy(&name).into_owned())
+        }
+        error => FormatError::Internal(format!(
+            "generated group link metadata is invalid: {error:?}"
+        )),
+    }
+}
+
+// `H5G_CRT_GINFO_MAX_COMPACT` in `H5Gprivate.h`, HDF5 2.2.0, is the default compact link limit.
+const MAX_COMPACT_LINKS: usize = 8;
 
 /// Add an object's attribute storage to its header: either the Attribute Info
 /// message naming a dense (fractal-heap) attribute store, or the inline
@@ -1122,7 +1233,11 @@ pub(crate) const UNDEF_ADDRESS: StoredAddress = StoredAddress::undefined(OffsetW
 
 // ---- FileWriter ----
 
-/// The main file creation API.
+/// An in-memory builder for an HDF5 file.
+///
+/// Stores up to eight links per group in the object header. For larger groups, including
+/// the root group, writes a fractal heap and a name index. Limits encoded dense link messages
+/// to 4096 bytes and omits creation-order tracking.
 pub struct FileWriter {
     root_datasets: Vec<DatasetBuilder>,
     root_attrs: AttributeSpecs,
@@ -2752,9 +2867,22 @@ impl FileWriter {
         };
         let mut group_oh_sizes: Vec<usize> = Vec::with_capacity(groups.len());
         let mut group_dense_lens: Vec<Option<usize>> = Vec::with_capacity(groups.len());
+        let mut group_link_lens = Vec::with_capacity(groups.len());
         for (gi, g) in groups.iter().enumerate() {
             let dummy_links =
                 dummy_tables.links(&g.ds_indices, &g.committed_indices, &g.sub_group_indices);
+            let link_plan = dense_links_plan(&dummy_links)?;
+            let link_info = link_plan
+                .as_ref()
+                .map(|plan| plan.link_info(DUMMY_DENSE_BASE))
+                .transpose()
+                .map_err(dense_link_error)?;
+            group_link_lens.push(
+                link_plan
+                    .as_ref()
+                    .map(|plan| plan.serialized_len().to_usize())
+                    .transpose()?,
+            );
             let (oh, dense_len) = if group_dense[gi] {
                 // The plan answers both questions this pass asks — how long the
                 // heap will be, and what its Attribute Info message costs the
@@ -2766,11 +2894,15 @@ impl FileWriter {
                         &dummy_links,
                         &g.attrs,
                         Some(&plan.attr_info_message(DUMMY_DENSE_BASE)),
+                        link_info.as_ref(),
                     )?,
                     Some(plan.blob_len().to_usize()?),
                 )
             } else {
-                (build_group_oh(&dummy_links, &g.attrs, None)?, None)
+                (
+                    build_group_oh(&dummy_links, &g.attrs, None, link_info.as_ref())?,
+                    None,
+                )
             };
             group_oh_sizes.push(oh.len());
             group_dense_lens.push(dense_len);
@@ -2781,6 +2913,16 @@ impl FileWriter {
             &root_committed_indices,
             &root_group_indices,
         );
+        let root_link_plan = dense_links_plan(&root_dummy_links)?;
+        let root_link_info = root_link_plan
+            .as_ref()
+            .map(|plan| plan.link_info(DUMMY_DENSE_BASE))
+            .transpose()
+            .map_err(dense_link_error)?;
+        let root_link_len = root_link_plan
+            .as_ref()
+            .map(|plan| plan.serialized_len().to_usize())
+            .transpose()?;
         let (root_oh_size, root_dense_len) = if root_dense {
             let plan = dense_attrs_plan(&root_attrs, DenseAttrCreationOrder::Untracked)?;
             (
@@ -2788,16 +2930,25 @@ impl FileWriter {
                     &root_dummy_links,
                     &root_attrs,
                     Some(&plan.attr_info_message(DUMMY_DENSE_BASE)),
+                    root_link_info.as_ref(),
                 )?
                 .len(),
                 Some(plan.blob_len().to_usize()?),
             )
         } else {
             (
-                build_group_oh(&root_dummy_links, &root_attrs, None)?.len(),
+                build_group_oh(
+                    &root_dummy_links,
+                    &root_attrs,
+                    None,
+                    root_link_info.as_ref(),
+                )?
+                .len(),
                 None,
             )
         };
+
+        drop(root_link_plan);
 
         // Pass 1: compute dataset object-header sizes from a dummy layout. No
         // data bytes are materialized here — the object-header size depends only
@@ -2912,6 +3063,8 @@ impl FileWriter {
         };
 
         let root_dense_span = reserve(&mut allocation, root_dense_len)?;
+        let root_link_span = reserve(&mut allocation, root_link_len)?;
+        let mut group_link_spans = Vec::with_capacity(groups.len());
 
         let mut group_dense_spans: Vec<Option<(StoredAddress, usize)>> =
             Vec::with_capacity(groups.len());
@@ -2920,6 +3073,7 @@ impl FileWriter {
             |mut addrs, (gi, &sz)| {
                 let addr = allocation.reserve(sz as u64, AllocationClass::Metadata)?;
                 group_dense_spans.push(reserve(&mut allocation, group_dense_lens[gi])?);
+                group_link_spans.push(reserve(&mut allocation, group_link_lens[gi])?);
                 addrs.push(addr);
                 Ok::<_, FormatError>(addrs)
             },
@@ -3134,6 +3288,44 @@ impl FileWriter {
             }
             Ok(oh_bytes)
         }
+
+        let tables = LinkTables {
+            all_ds: &all_ds,
+            committed: &committed,
+            groups: &groups,
+            ds_addrs: &ds_oh_addrs2,
+            committed_addrs: &committed_addrs,
+            group_addrs: &group_addrs2,
+        };
+        let root_link_image = root_link_span
+            .map(|span| {
+                dense_links_image(
+                    &tables.links(
+                        &root_ds_indices,
+                        &root_committed_indices,
+                        &root_group_indices,
+                    ),
+                    span,
+                )
+            })
+            .transpose()?;
+        let group_link_images = groups
+            .iter()
+            .zip(&group_link_spans)
+            .map(|(group, &span)| {
+                span.map(|span| {
+                    dense_links_image(
+                        &tables.links(
+                            &group.ds_indices,
+                            &group.committed_indices,
+                            &group.sub_group_indices,
+                        ),
+                        span,
+                    )
+                })
+                .transpose()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         // ---- Paged file-space layout + emission ----
         // Lay the metadata (object headers, dense blobs, global heaps, the
@@ -3507,11 +3699,19 @@ impl FileWriter {
                 root_dense_blob
                     .as_ref()
                     .map(|b| b.attr_info_message.as_slice()),
+                root_link_image.as_ref().map(|image| &image.info),
             )?;
-            debug_assert_eq!(root_oh.len(), root_oh_size);
+            if root_oh.len() != root_oh_size {
+                return Err(FormatError::Internal(
+                    "the root group header differs from its reserved length".into(),
+                ));
+            }
             sink.put(&root_oh)?;
             if let Some(ref blob) = root_dense_blob {
                 sink.put(&blob.blob)?;
+            }
+            if let Some(image) = &root_link_image {
+                sink.put(&image.bytes)?;
             }
             // Group OHs + dense blobs.
             for (gi, g) in groups.iter().enumerate() {
@@ -3522,11 +3722,19 @@ impl FileWriter {
                     group_dense_blobs[gi]
                         .as_ref()
                         .map(|b| b.attr_info_message.as_slice()),
+                    group_link_images[gi].as_ref().map(|image| &image.info),
                 )?;
-                debug_assert_eq!(oh.len(), group_oh_sizes[gi]);
+                if oh.len() != group_oh_sizes[gi] {
+                    return Err(FormatError::Internal(
+                        "a group header differs from its reserved length".into(),
+                    ));
+                }
                 sink.put(&oh)?;
                 if let Some(ref blob) = group_dense_blobs[gi] {
                     sink.put(&blob.blob)?;
+                }
+                if let Some(image) = &group_link_images[gi] {
+                    sink.put(&image.bytes)?;
                 }
             }
             // Committed datatype OHs, at the addresses their references name.
@@ -3869,8 +4077,13 @@ impl FileWriter {
             root_dense_blob
                 .as_ref()
                 .map(|b| b.attr_info_message.as_slice()),
+            root_link_image.as_ref().map(|image| &image.info),
         )?;
-        debug_assert_eq!(root_oh.len(), root_oh_size);
+        if root_oh.len() != root_oh_size {
+            return Err(FormatError::Internal(
+                "the root group header differs from its reserved length".into(),
+            ));
+        }
         let mut root_header = core::iter::once(Reservation::new(
             base,
             root_group_addr,
@@ -3915,6 +4128,22 @@ impl FileWriter {
                     span.0,
                     blob.blob.len() as u64,
                     FileData::Bytes(&blob.blob),
+                )
+            });
+        let mut link_blobs = root_link_span
+            .iter()
+            .chain(group_link_spans.iter().flatten())
+            .zip(
+                root_link_image
+                    .iter()
+                    .chain(group_link_images.iter().flatten()),
+            )
+            .map(|(span, image)| {
+                Reservation::new(
+                    base,
+                    span.0,
+                    image.bytes.len().to_u64(),
+                    FileData::Bytes(&image.bytes),
                 )
             });
         let mut dataset_regions = ds_layouts
@@ -3999,13 +4228,14 @@ impl FileWriter {
                 Reservation::new(base, address, bytes.len() as u64, FileData::Bytes(bytes))
             });
         let sources: [&mut dyn Iterator<Item = Result<Reservation<FileData<'_>>, FormatError>>;
-            10] = [
+            11] = [
             &mut early_collections,
             &mut root_header,
             &mut group_headers,
             &mut committed_headers,
             &mut dataset_headers,
             &mut dense_blobs,
+            &mut link_blobs,
             &mut dataset_regions,
             &mut late_collections,
             &mut extension,
@@ -4022,7 +4252,13 @@ impl FileWriter {
                     group_dense_blobs[gi]
                         .as_ref()
                         .map(|b| b.attr_info_message.as_slice()),
+                    group_link_images[gi].as_ref().map(|image| &image.info),
                 )?;
+                if oh.len() != group_oh_sizes[gi] {
+                    return Err(FormatError::Internal(
+                        "a group header differs from its reserved length".into(),
+                    ));
+                }
                 sink.put(&oh)
             }
             FileData::Dataset(i) => ds_layouts[i].data.emit(sink, &all_ds[i].storage),
@@ -4036,6 +4272,8 @@ impl FileWriter {
                 + usize::from(dense_spans.root.is_some())
                 + dense_spans.groups.iter().flatten().count()
                 + dense_spans.datasets.iter().flatten().count()
+                + usize::from(root_link_span.is_some())
+                + group_link_spans.iter().flatten().count()
                 + ds_layouts
                     .iter()
                     .filter(|layout| layout.data.len() != 0)
@@ -4313,6 +4551,7 @@ pub(crate) const MAX_DATASET_RANK: u8 = 32;
 
 #[cfg(test)]
 mod tests {
+    use hdf5_pure_format::__private::BTreeV2Header;
     use rstest::rstest;
 
     use super::*;
@@ -5266,68 +5505,187 @@ mod tests {
         assert!(hdr.modification_time.is_none());
     }
 
-    // The other half of the fixed shape: every group is "new style" (a Link
-    // Info + Group Info message pair) with links stored inline, regardless of
-    // child count — hdf5-pure never converts a group to dense (fractal-heap)
-    // link storage on write (see issue #131 and the tracked gap in #102).
-    #[test]
-    fn group_links_stay_compact_regardless_of_child_count() {
-        let mut fw = FileWriter::new();
-        let mut gb = fw.create_group("grp");
-        for i in 0..20 {
-            gb.create_dataset(&format!("d{i}"))
-                .with_f64_data(&[i as f64]);
-        }
-        fw.add_group(gb.finish());
-        let bytes = fw.finish().unwrap();
+    #[rstest]
+    #[case::empty(0)]
+    #[case::below_threshold(MAX_COMPACT_LINKS - 1)]
+    #[case::at_threshold(MAX_COMPACT_LINKS)]
+    #[case::above_threshold(MAX_COMPACT_LINKS + 1)]
+    #[case::multiple_blocks(100)]
+    #[case::multiple_levels(2_000)]
+    fn group_link_representation_matches_child_count(
+        #[case] count: usize,
+        #[values(false, true)] nested: bool,
+        #[values(
+            None,
+            Some(FileSpaceStrategy::None),
+            Some(FileSpaceStrategy::Aggr),
+            Some(FileSpaceStrategy::FsmAggr),
+            Some(FileSpaceStrategy::Page)
+        )]
+        strategy: Option<FileSpaceStrategy>,
+        #[values(0, 4_096)] userblock: u64,
+    ) {
+        let bytes = link_writer(count, nested, strategy, userblock)
+            .finish()
+            .unwrap();
         let sb = crate::superblock::read(bytes.as_slice())
             .unwrap()
             .superblock;
-        let addr = group_v2::resolve_path_any(
+        assert_eq!(sb.eof_address, bytes.len().to_u64());
+        let path = if nested { "parent/group" } else { "/" };
+        let address = group_v2::resolve_path_any(
             &bytes,
             AccessMode::ReadOnly,
             &sb,
             WIDTHS,
             AddressContext::from_effective_base(sb.base_address),
-            &ObjectPath::parse("grp"),
+            &ObjectPath::parse(path),
         )
         .unwrap();
-        let hdr = ObjectHeader::parse_with_widths(
+        let header = ObjectHeader::parse_with_widths(
             &bytes,
             AccessMode::ReadOnly,
-            addr as usize,
-            FormatWidths {
-                offsets: sb.offset_size,
-                lengths: sb.length_size,
-            },
+            address.to_usize().unwrap(),
+            WIDTHS,
         )
         .unwrap();
-
-        let link_info_msg = hdr
-            .messages
-            .iter()
-            .find(|m| m.msg_type == MessageType::LINK_INFO)
-            .unwrap();
-        let link_info =
-            LinkInfoMessage::parse_with_offset_width(&link_info_msg.data, sb.offset_size).unwrap();
-        assert!(
-            link_info.fractal_heap_address.is_none(),
-            "no dense link storage is ever used"
+        let info = LinkInfoMessage::parse_with_offset_width(
+            &header
+                .messages
+                .iter()
+                .find(|message| message.msg_type == MessageType::LINK_INFO)
+                .unwrap()
+                .data,
+            OFFSET_WIDTH,
+        )
+        .unwrap();
+        let dense = count > MAX_COMPACT_LINKS;
+        assert_eq!(info.fractal_heap_address.is_some(), dense);
+        assert_eq!(info.btree_name_index_address.is_some(), dense);
+        assert_eq!(info.max_creation_order, None);
+        assert_eq!(info.btree_creation_order_address, None);
+        assert_eq!(
+            header
+                .messages
+                .iter()
+                .filter(|message| message.msg_type == MessageType::LINK)
+                .count(),
+            if dense { 0 } else { count }
         );
-
-        let group_info_msg = hdr
-            .messages
-            .iter()
-            .find(|m| m.msg_type == MessageType::GROUP_INFO)
+        assert_eq!(
+            header
+                .messages
+                .iter()
+                .find(|message| message.msg_type == MessageType::GROUP_INFO)
+                .unwrap()
+                .data,
+            DEFAULT_GROUP_INFO
+        );
+        if count >= 100 {
+            let heap = FractalHeapHeader::parse(
+                &bytes,
+                (info.fractal_heap_address.unwrap().get() + userblock)
+                    .to_usize()
+                    .unwrap(),
+                OFFSET_SIZE,
+                LENGTH_SIZE,
+            )
             .unwrap();
-        assert_eq!(group_info_msg.data, vec![0, 0]);
+            assert!(heap.current_rows_in_root_indirect_block > 0);
+            assert_eq!(heap.managed_objects_count, count.to_u64());
+        }
+        if count == 2_000 {
+            let index = BTreeV2Header::parse_with_widths(
+                &bytes,
+                (info.btree_name_index_address.unwrap().get() + userblock)
+                    .to_usize()
+                    .unwrap(),
+                WIDTHS,
+            )
+            .unwrap();
+            assert!(index.depth >= 2, "{index:?}");
+        }
+        let file = File::from_bytes(bytes).unwrap();
+        for index in 0..count {
+            let child = format!("{path}/data_{index:04}_λ");
+            assert_eq!(
+                file.dataset(&child).unwrap().read_i32().unwrap(),
+                [i32::try_from(index).unwrap(), 17]
+            );
+        }
+    }
 
-        let link_count = hdr
-            .messages
+    #[rstest]
+    #[case::root(false)]
+    #[case::nested(true)]
+    fn dense_link_addresses_exceed_four_gibibytes(#[case] nested: bool) {
+        let mut writer = link_writer(9, nested, Some(FileSpaceStrategy::Page), 0);
+        writer.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page).with_page_size(FileSpacePageSize::MAX),
+        );
+        for name in ["first", "second", "third"] {
+            writer.set_root_attr(name, AttrValue::VarLenString(name.into()));
+        }
+        let mut sink = SparseSink {
+            position: 0,
+            chunks: Vec::new(),
+        };
+        writer.finish_to_sink(&mut sink).unwrap();
+        let superblock = crate::superblock::read(sink.chunks[0].1.as_slice())
+            .unwrap()
+            .superblock;
+        assert_eq!(superblock.root_group_address.get(), 1u64 << 32);
+        assert_eq!(superblock.eof_address, sink.position);
+        let (_, bytes) = sink
+            .chunks
             .iter()
-            .filter(|m| m.msg_type == MessageType::LINK)
-            .count();
-        assert_eq!(link_count, 20);
+            .find(|(_, bytes)| bytes.starts_with(FRACTAL_HEAP_SIGNATURE))
+            .unwrap();
+        let heap = FractalHeapHeader::parse_bytes(bytes, OFFSET_WIDTH, LENGTH_WIDTH).unwrap();
+        assert!(heap.root_block_address.get() > u64::from(u32::MAX));
+        assert_eq!(heap.managed_objects_count, 9);
+        assert!(
+            sink.chunks
+                .iter()
+                .filter(|(position, _)| *position >= 1u64 << 32)
+                .all(|(position, bytes)| position + bytes.len().to_u64() <= sink.position)
+        );
+    }
+
+    fn link_writer(
+        count: usize,
+        nested: bool,
+        strategy: Option<FileSpaceStrategy>,
+        userblock: u64,
+    ) -> FileWriter {
+        let mut writer = FileWriter::new();
+        if let Some(strategy) = strategy {
+            writer.with_file_space_settings(FileSpaceSettings::new(strategy).with_persistence(
+                matches!(
+                    strategy,
+                    FileSpaceStrategy::FsmAggr | FileSpaceStrategy::Page
+                ),
+            ));
+        }
+        if userblock != 0 {
+            writer.with_userblock(UserblockSize::try_from(userblock).unwrap());
+        }
+        let mut group = writer.create_group("group");
+        for index in 0..count {
+            let link_name = format!("data_{index:04}_λ");
+            let data = [i32::try_from(index).unwrap(), 17];
+            if nested {
+                group.create_dataset(&link_name).with_i32_data(&data);
+            } else {
+                writer.create_dataset(&link_name).with_i32_data(&data);
+            }
+        }
+        if nested {
+            let mut parent = writer.create_group("parent");
+            parent.add_group(group.finish());
+            writer.add_group(parent.finish());
+        }
+        writer
     }
 
     #[test]
@@ -6692,6 +7050,11 @@ mod tests {
     const ATTRIBUTE_NAME_CHARACTER_SET_OFFSET: usize = 8;
     const ASCII_NAME_CHARACTER_SET: u8 = 0;
     const UTF8_NAME_CHARACTER_SET: u8 = 1;
+    // Section `subsec_fmt4_infra_fractalheap`, version 4.0, defines the heap header signature.
+    const FRACTAL_HEAP_SIGNATURE: &[u8] = b"FRHP";
+    // Section `subsubsec_fmt4_dataobject_hdr_msg_groupinfo`, version 4.0, defines version zero
+    // and flags zero for Group Info messages with default phase-change and entry settings.
+    const DEFAULT_GROUP_INFO: [u8; 2] = [0, 0];
     const GLOBAL_HEAP_COLLECTION_SIGNATURE: &[u8] = b"GCOL";
     const OBJECT_HEADER_V2_SIGNATURE: &[u8] = b"OHDR";
 }

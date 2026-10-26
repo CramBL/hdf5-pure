@@ -42,17 +42,20 @@ pub fn fragmented_session(path: &Path, strategy: FileSpaceStrategy, holes: usize
         .expect("the fixture object count fits usize");
     let mut builder = FileBuilder::new();
     builder.with_file_space_settings(FileSpaceSettings::new(strategy).with_persistence(true));
-    for index in 0..objects {
-        builder
-            .create_dataset(&format!("data_{index:05}"))
-            .with_i32_data(&[7; 256]);
-    }
     builder.write(path).unwrap();
     let file = File::open_rw_with_options(
         path,
         FileAccessProperties::new().with_sync_policy(SyncPolicy::OnClose),
     )
     .unwrap();
+    for index in 0..objects {
+        file.root()
+            .create_dataset(&format!("data_{index:05}"), |builder| {
+                builder.with_i32_data(&[7; 256]);
+            })
+            .unwrap();
+    }
+    file.commit().unwrap();
     for index in (0..holes * 2).step_by(2) {
         file.root().delete(&format!("data_{index:05}")).unwrap();
     }
