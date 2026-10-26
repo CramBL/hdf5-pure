@@ -1,6 +1,7 @@
 //! Object header rebuilding, attributes, links, and reference screening.
 
 use std::collections::BTreeMap;
+use std::thread;
 
 use hdf5_pure_format::__private::AttributePhaseChange;
 use hdf5_pure_format::__private::MessageRecordLayout;
@@ -21,6 +22,7 @@ use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
+use crate::attribute::AttributeMessage;
 use crate::attribute_info::AttributeInfoMessage;
 use crate::checksum;
 use crate::data_layout::COMPACT_DATA_OFFSET;
@@ -31,11 +33,17 @@ use crate::edit::InvalidatedAddresses;
 use crate::edit::LinkCreationOrder;
 use crate::edit::Node;
 use crate::edit::OhRegion;
+use crate::edit::REFERENCE_INTO_RECLAIMED_SPACE;
 use crate::edit::SHARED_MESSAGE_INDEX_NAMES_A_MOVED_OBJECT;
 use crate::edit::UNDEF;
 use crate::edit::WriteEngine;
 use crate::edit::attributes::DenseAttrSet;
-use crate::edit::copy::{self, CopyTree};
+use crate::edit::copy;
+use crate::edit::copy::CopyLink;
+use crate::edit::copy::CopyNode;
+use crate::edit::copy::CopyTree;
+use crate::edit::copy::CopyTreeBuilder;
+use crate::edit::copy::ObjModel;
 use crate::edit::group::GROUP_INFO_BODY;
 use crate::error::Error;
 use crate::error::FormatError;
@@ -55,6 +63,7 @@ use crate::superblock::LocatedSuperblock;
 use crate::type_builders::AttrValue;
 use crate::type_builders::ObjectRefTarget;
 use crate::width::OffsetWidth;
+use crate::writer::FileBuilder;
 
 #[test]
 fn a_continuation_to_the_undefined_address_fails_the_chunk_walk() {
@@ -129,10 +138,7 @@ fn a_copied_compact_reference_dataset_is_screened() {
         base: AddressContext::from_effective_base(BaseAddress::ZERO),
     };
     for (address, refused) in [(248u64, true), (318, true), (319, false)] {
-        let tree = CopyTree::DatasetVerbatim {
-            region: compact_reference_region(address),
-            dense_attrs: DenseAttrSet::default(),
-        };
+        let tree = verbatim_copy(compact_reference_region(address), DenseAttrSet::default());
         let got = copy::screen_copied_references(
             &tree,
             AddressContext::from_effective_base(BaseAddress::ZERO),
@@ -142,15 +148,15 @@ fn a_copied_compact_reference_dataset_is_screened() {
         );
         assert_eq!(got.is_err(), refused, "compact element {address}: {got:?}");
     }
-    let no_layout = CopyTree::DatasetVerbatim {
-        region: plain_region(message_record(
+    let no_layout = verbatim_copy(
+        plain_region(message_record(
             MessageType::DATATYPE,
             &hdf5_pure_format::__private::serialize_datatype(
                 &crate::type_builders::make_object_reference_type(),
             ),
         )),
-        dense_attrs: DenseAttrSet::default(),
-    };
+        DenseAttrSet::default(),
+    );
     let err = copy::screen_copied_references(
         &no_layout,
         AddressContext::from_effective_base(BaseAddress::ZERO),
@@ -181,10 +187,7 @@ fn a_copy_whose_committed_datatype_cannot_be_read_reports_the_read_failure() {
         ),
     );
     bytes[3] = MessageFlags::SHARED.get();
-    let tree = CopyTree::DatasetVerbatim {
-        region: plain_region(bytes),
-        dense_attrs: DenseAttrSet::default(),
-    };
+    let tree = verbatim_copy(plain_region(bytes), DenseAttrSet::default());
 
     let err = copy::screen_copied_references(
         &tree,
@@ -465,17 +468,14 @@ fn a_copied_reference_attribute_is_screened_in_both_storages() {
     };
     for (address, refused) in [(248u64, true), (318, true), (319, false), (247, false)] {
         let attr = reference_attr("target", address);
-        let dense = CopyTree::DatasetVerbatim {
-            region: OhRegion::default(),
-            dense_attrs: DenseAttrSet {
+        let dense = verbatim_copy(
+            OhRegion::default(),
+            DenseAttrSet {
                 attrs: vec![attr.clone()],
                 creation: DenseAttrCreationOrder::Untracked,
             },
-        };
-        let inline = CopyTree::DatasetVerbatim {
-            region: inline_attr_region(&attr),
-            dense_attrs: DenseAttrSet::default(),
-        };
+        );
+        let inline = verbatim_copy(inline_attr_region(&attr), DenseAttrSet::default());
         for (storage, tree) in [("dense", &dense), ("inline", &inline)] {
             let got = copy::screen_copied_references(
                 tree,
@@ -491,6 +491,78 @@ fn a_copied_reference_attribute_is_screened_in_both_storages() {
             );
         }
     }
+}
+
+#[test]
+fn a_copy_nested_past_the_native_stack_is_screened_written_and_dropped() {
+    thread::Builder::new()
+        .stack_size(SMALL_STACK)
+        .spawn(|| {
+            let attr = reference_attr("target", REMOVED_ADDRESS);
+            let tree = nested_groups(DEEP_NESTING, attr.clone());
+            assert!(tree.has_dense_attributes());
+
+            let invalidated = InvalidatedAddresses {
+                removed: vec![(REMOVED_ADDRESS, 1)],
+                moved: Vec::new(),
+                base: AddressContext::from_effective_base(BaseAddress::ZERO),
+            };
+            let err = copy::screen_copied_references(
+                &tree,
+                AddressContext::from_effective_base(BaseAddress::ZERO),
+                crate::file_writer::WIDTHS,
+                &invalidated,
+                &BytesSource::new(Vec::new()),
+            )
+            .unwrap_err();
+            let Error::EditUnsupported(reason) = err else {
+                panic!("expected EditUnsupported, got {err:?}");
+            };
+            assert_eq!(reason, REFERENCE_INTO_RECLAIMED_SPACE);
+
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("nested_copy.h5");
+            FileBuilder::new().write(&path).unwrap();
+            let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+            let mut addr = engine.write_copy_subtree(&tree).unwrap();
+            drop(tree);
+
+            let base = engine.addresses();
+            for _ in 0..DEEP_NESTING {
+                let object =
+                    WriteEngine::read_object(engine.image(), AccessMode::ReadWrite, addr, base)
+                        .unwrap();
+                let ObjModel::Group {
+                    children,
+                    dense_attrs,
+                    ..
+                } = object
+                else {
+                    panic!("expected a group at {addr}");
+                };
+                assert!(dense_attrs.is_empty());
+                let [(link_name, creation_order, child)] = children.as_slice() else {
+                    panic!("expected one link at {addr}, got {children:?}");
+                };
+                assert_eq!((link_name.as_str(), *creation_order), ("g", None));
+                addr = base.absolute(*child).unwrap();
+            }
+            let leaf = WriteEngine::read_object(engine.image(), AccessMode::ReadWrite, addr, base)
+                .unwrap();
+            let ObjModel::Group {
+                children,
+                dense_attrs,
+                ..
+            } = leaf
+            else {
+                panic!("expected a group at {addr}");
+            };
+            assert!(children.is_empty(), "{children:?}");
+            assert_eq!(dense_attrs.attrs, vec![attr]);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]
@@ -1359,6 +1431,35 @@ fn reference_attr(name: &str, address: u64) -> crate::attribute::AttributeMessag
     attr
 }
 
+fn verbatim_copy(region: OhRegion, dense_attrs: DenseAttrSet) -> CopyTree {
+    CopyTreeBuilder::default().finish(CopyNode::DatasetVerbatim {
+        region,
+        dense_attrs,
+    })
+}
+
+fn nested_groups(depth: usize, leaf_attr: AttributeMessage) -> CopyTree {
+    let mut nodes = CopyTreeBuilder::default();
+    let leaf = CopyNode::Group {
+        non_link_region: edit::group::fresh_group_region(),
+        links: Vec::new(),
+        dense_attrs: DenseAttrSet {
+            attrs: vec![leaf_attr],
+            creation: DenseAttrCreationOrder::Untracked,
+        },
+    };
+    let root = (0..depth).fold(leaf, |child, _| CopyNode::Group {
+        non_link_region: edit::group::fresh_group_region(),
+        links: vec![CopyLink {
+            name: "g".into(),
+            creation_order: None,
+            target: nodes.push(child),
+        }],
+        dense_attrs: DenseAttrSet::default(),
+    });
+    nodes.finish(root)
+}
+
 fn message_record(msg_type: MessageType, body: &[u8]) -> Vec<u8> {
     MessageRecordLayout::PLAIN.record(msg_type, body)
 }
@@ -1627,3 +1728,6 @@ fn compact_layout_record(record_layout: MessageRecordLayout, inline: &[u8]) -> V
 }
 
 const UNKNOWN_MESSAGE_TYPE: MessageType = MessageType::from_u16(0x00C8);
+const DEEP_NESTING: usize = 100_000;
+const REMOVED_ADDRESS: u64 = 248;
+const SMALL_STACK: usize = 256 * 1024;
