@@ -774,6 +774,7 @@ mod tests {
         }
 
         fn read_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
+            self.reads.borrow_mut().push((offset, bytes.len()));
             BytesSource::new(self.bytes).read_at(offset, bytes)
         }
 
@@ -888,12 +889,15 @@ mod tests {
     }
 
     #[rstest]
-    #[case::tiny(vec![TINY_ID_FIRST_BYTE | 2, b'a', b'b', b'c', 0, 0, 0, 0], false)]
-    #[case::filtered_tiny(vec![TINY_ID_FIRST_BYTE | 2, b'a', b'b', b'c', 0, 0, 0, 0], true)]
-    #[case::inline_huge(vec![HUGE_ID_FIRST_BYTE, 0x20, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0], false)]
+    #[case::tiny(vec![TINY_ID_FIRST_BYTE | 2, b'a', b'b', b'c', 0, 0, 0, 0], false, b"abc")]
+    #[case::eighteen_byte_tiny([vec![TINY_ID_FIRST_BYTE | 2, b'a', b'b', b'c'], vec![0; 14]].concat(), false, b"abc")]
+    #[case::filtered_tiny(vec![TINY_ID_FIRST_BYTE | 2, b'a', b'b', b'c', 0, 0, 0, 0], true, b"abc")]
+    #[case::inline_huge(vec![HUGE_ID_FIRST_BYTE, 0x20, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0], false, b"abc")]
+    #[case::issue_485([vec![0x20, 0x03, 0xAA, 0xBB, 0xCC, 0xDD], vec![0; 12]].concat(), false, &[0x03])]
     fn a_parsed_inline_id_resolves_its_object(
         #[case] bytes: Vec<u8>,
         #[case] filtered: bool,
+        #[case] expected: &[u8],
         #[values(false, true)] streaming: bool,
     ) {
         let mut header = FractalHeapHeader::parse(
@@ -929,13 +933,20 @@ mod tests {
             AccessMode::ReadOnly,
             FORMAT_WIDTHS,
         );
+        let source = HeaderSource {
+            bytes: &image,
+            reads: RefCell::new(Vec::new()),
+        };
         let object = if streaming {
-            reader.read_from_source(&BytesSource::new(image), id)
+            reader.read_from_source(&source, id)
         } else {
             reader.read(&image, id)
         }
         .unwrap();
-        assert_eq!(object, b"abc");
+        assert_eq!(object, expected);
+        if matches!(id.kind(), FractalHeapIdKind::Tiny { .. }) {
+            assert_eq!(*source.reads.borrow(), Vec::<(u64, usize)>::new());
+        }
     }
 
     #[test]

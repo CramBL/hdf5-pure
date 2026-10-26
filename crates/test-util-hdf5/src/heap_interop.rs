@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+use hdf5::plist::file_create::{Sizeof, SizeofInfo};
+use hdf5::plist::link_create::CharEncoding;
 use hdf5_pure::File;
 
 /// Checks dataset values through buffered, streaming, and C-library reads.
@@ -56,4 +58,48 @@ pub fn assert_edit_round_trip(path: &Path) {
     file.close().unwrap();
     let file = File::open(path).unwrap();
     assert_eq!(file.dataset("c_probe").unwrap().read_i32().unwrap(), [23]);
+}
+
+/// Writes a dense group with tiny-object links and returns its sorted member names.
+///
+/// Creates `g/a` through `g/p` in `path`, with each child's zero-based position in its `value`
+/// attribute. The file uses 2-byte addresses and 8-byte lengths.
+///
+/// # Panics
+///
+/// Panics if a file operation fails or the member names differ from `a` through `p`.
+pub fn write_tiny_link_group(path: &Path) -> Vec<String> {
+    let expected: Vec<_> = (b'a'..=b'p')
+        .map(|name| char::from(name).to_string())
+        .collect();
+    let file = hdf5::File::with_options()
+        .with_fapl(|properties| properties.libver_latest())
+        .with_fcpl(|properties| {
+            properties.sizes(SizeofInfo {
+                sizeof_addr: Sizeof::Bytes2,
+                sizeof_size: Sizeof::Bytes8,
+            })
+        })
+        .create(path)
+        .unwrap();
+    let group = file.create_group("g").unwrap();
+    for (value, name) in expected.iter().enumerate() {
+        group
+            .create_group_builder()
+            .char_encoding(CharEncoding::Ascii)
+            .create(name.as_str())
+            .unwrap()
+            .new_attr::<i32>()
+            .shape(())
+            .create("value")
+            .unwrap()
+            .write_scalar(&i32::try_from(value).unwrap())
+            .unwrap();
+    }
+    let mut reference_names = group.member_names().unwrap();
+    reference_names.sort();
+    assert_eq!(reference_names, expected);
+    drop(group);
+    file.close().unwrap();
+    reference_names
 }

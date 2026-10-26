@@ -1186,7 +1186,7 @@ impl FractalHeapIdLayout {
         Self {
             encoded_len,
             managed: ManagedHeapIdLayout::new(header),
-            tiny_extended: header.heap_id_length.saturating_sub(1) > TINY_LEN_SHORT,
+            tiny_extended: header.heap_id_length > TINY_SHORT_ID_MAX_LEN,
             huge,
         }
     }
@@ -1196,7 +1196,8 @@ impl FractalHeapIdLayout {
     /// Reads the managed object's heap offset and length, the huge object's location, or the
     /// tiny object's bytes. For a tiny object, the caller receives a slice borrowed from `bytes`.
     /// The parser reads the type independently of the version bits. Managed offset and length
-    /// fields are byte-aligned, and trailing padding is ignored.
+    /// fields are byte-aligned, and trailing padding is ignored. Tiny-object bytes begin at
+    /// offset 1 for fixed IDs of at most 18 bytes, and at offset 2 for longer IDs.
     ///
     /// # Errors
     ///
@@ -1455,8 +1456,13 @@ const HEAP_ID_TYPE_HUGE: u8 = 1;
 /// The type of the heap ID of a tiny object, from the same section as [`FRACTAL_HEAP_SIGNATURE`].
 const HEAP_ID_TYPE_TINY: u8 = 2;
 
-// `H5HF__tiny_init` in `H5HFtiny.c`, HDF5 2.2.0, uses the short form for up to 16 payload bytes.
-const TINY_LEN_SHORT: u16 = 16;
+/// The largest fixed heap ID length in bytes that uses the short tiny-object length form.
+///
+/// Short-form objects contain at most 16 bytes, as defined in "Fractal Heap" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
+const TINY_SHORT_ID_MAX_LEN: u16 = 18;
 
 // The low four bits hold the length less one in the normal form and its high four bits in the
 // extended form ("Fractal Heap", specification 4.0).
@@ -2215,26 +2221,54 @@ mod tests {
     }
 
     #[rstest]
-    #[case::short(7, vec![0x23], b"abcd".as_slice())]
-    #[case::extended(20, vec![0x20, 0x04], b"hello".as_slice())]
-    #[case::longest_short(17, vec![0x24], b"world".as_slice())]
+    #[case::short(7, vec![0x23, b'a', b'b', b'c', b'd'], b"abcd".as_slice(), 1)]
+    #[case::seventeen(17, vec![0x24, b'w', b'o', b'r', b'l', b'd'], b"world".as_slice(), 1)]
+    #[case::eighteen(18, vec![0x20, 0x03, 0xAA, 0xBB, 0xCC, 0xDD], &[0x03], 1)]
+    #[case::full_short(18, [vec![0x2F], (0..16).collect()].concat(), &(0..16).collect::<Vec<_>>(), 1)]
+    #[case::nineteen(19, vec![0x20, 0x04, b'h', b'e', b'l', b'l', b'o'], b"hello".as_slice(), 2)]
+    #[case::extended(20, vec![0x20, 0x04, b'h', b'e', b'l', b'l', b'o'], b"hello".as_slice(), 2)]
     fn a_tiny_id_parses_its_short_or_extended_length(
         #[case] declared: u16,
         #[case] mut bytes: Vec<u8>,
         #[case] object: &[u8],
+        #[case] payload_offset: usize,
     ) {
         let header = FractalHeapHeader {
             heap_id_length: declared,
             ..attribute_heap_header()
         };
-        bytes.extend_from_slice(object);
+        bytes.resize(usize::from(declared), 0);
+        let view = FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
+            .parse(&bytes)
+            .unwrap();
+        let FractalHeapIdKind::Tiny { bytes: payload } = view.kind() else {
+            panic!("expected a tiny ID, got {:?}", view.kind());
+        };
+        assert_eq!(payload, object);
+        assert_eq!(payload.as_ptr(), bytes[payload_offset..].as_ptr());
+    }
+
+    #[rstest]
+    #[case::extended(19, vec![0x20, 17], 20)]
+    #[case::extended_high_bits(19, vec![0x21, 0], 259)]
+    fn a_tiny_id_rejects_an_object_longer_than_its_bytes(
+        #[case] declared: u16,
+        #[case] mut bytes: Vec<u8>,
+        #[case] expected: usize,
+    ) {
+        let header = FractalHeapHeader {
+            heap_id_length: declared,
+            ..attribute_heap_header()
+        };
         bytes.resize(usize::from(declared), 0);
         assert_eq!(
             FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
                 .parse(&bytes)
-                .unwrap()
-                .kind(),
-            FractalHeapIdKind::Tiny { bytes: object }
+                .unwrap_err(),
+            FormatError::UnexpectedEof {
+                expected,
+                available: usize::from(declared),
+            }
         );
     }
 
