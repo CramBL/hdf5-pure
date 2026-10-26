@@ -5803,18 +5803,45 @@ impl Dataset {
         })
     }
 
-    /// A [`BufferedAppender`] over this dataset: appended elements are held in
-    /// memory and written a whole chunk at a time, so a caller appending less
-    /// than a chunk per call writes to the file once per chunk instead of once
-    /// per call, and a filtered dataset is never left mid-chunk for the next
-    /// write to re-encode.
+    /// Creates a buffered appender with [`AppendOptions::new`].
     ///
-    /// Every eligibility rule [`append`](Self::append) applies is applied here,
-    /// so an ineligible dataset is reported now rather than on the first write.
-    /// Buffered elements are not in the file until the appender flushes; see
-    /// [`BufferedAppender`] for the full bargain.
+    /// Elements stay in memory until an automatic write or an explicit flush. The default
+    /// rejects an existing filtered lossy partial tail and partial flushes that would leave
+    /// one. [`buffered_appender_with_options`](Self::buffered_appender_with_options) permits
+    /// explicitly allowing lossy-tail re-encoding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ReadOnly`] if the file is read-only. Other errors are described by
+    /// [`buffered_appender_with_options`](Self::buffered_appender_with_options).
     pub fn buffered_appender(&mut self) -> Result<BufferedAppender<'_>, Error> {
-        BufferedAppender::new(self)
+        self.buffered_appender_with_options(AppendOptions::new())
+    }
+
+    /// Creates a buffered appender whose writes use `options` for its lifetime.
+    ///
+    /// The file and dataset requirements match [`append`](Self::append), and SWMR sessions
+    /// are rejected. [`LossyTailReencoding::Allow`](crate::LossyTailReencoding::Allow) permits
+    /// growing filtered lossy partial tails and repeated partial flushes. Rewrites can add
+    /// quantization error to previously published tail values, with the interruption behavior
+    /// described by [`append_with_options`](Self::append_with_options).
+    ///
+    /// The policy applies to automatic writes, [`flush`](BufferedAppender::flush),
+    /// [`finish`](BufferedAppender::finish), and drop. It is not stored in the file or applied
+    /// to other append calls, including calls made after reopening the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ReadOnly`] if the file is read-only, [`Error::SwmrAppendUnsupported`]
+    /// if it is a SWMR session, or [`Error::AppendInPlaceUnsupported`] if the file or dataset
+    /// is unsupported or a filtered lossy partial tail requires re-encoding without permission.
+    /// Returns [`Error::EditUnsupported`] if another appender conflicts with this one.
+    /// Propagates file-state and metadata errors.
+    pub fn buffered_appender_with_options(
+        &mut self,
+        options: AppendOptions,
+    ) -> Result<BufferedAppender<'_>, Error> {
+        BufferedAppender::new(self, options)
     }
 
     /// Register a live `BufferedAppender` on this dataset with the session, so a

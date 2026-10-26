@@ -26,8 +26,9 @@
 //! records, before and after libhdf5 writes past the appended values.
 //!
 //! With explicit permission to re-encode a filtered lossy tail, both libraries read the
-//! values produced by repeated appends, including after reopening either library's file.
-//! Both libraries report the same chunk records.
+//! values produced by repeated immediate, staged, and buffered appends, including after
+//! reopening either library's file. Buffered writes cover partial flushes, automatic writes,
+//! finish, and drop. Both libraries report the same chunk records.
 //!
 //! A staged overwrite through hdf5-pure, to a dataset either library created
 //! with the flag or without it, stores each partial edge chunk unfiltered under
@@ -60,6 +61,7 @@ use hdf5::types::VarLenArray;
 #[cfg(target_endian = "little")]
 use hdf5::types::VarLenUnicode;
 use hdf5_pure::AppendOptions;
+use hdf5_pure::BufferedAppender;
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::DatasetCreateProperties;
 use hdf5_pure::DeflateLevel;
@@ -520,6 +522,79 @@ fn filtered_lossy_tails_reencode_with_explicit_permission(
     assert_eq!((chunks[0].filter_mask(), chunks[1].filter_mask()), (0, 0));
 }
 
+#[rstest]
+fn buffered_filtered_lossy_tails_reencode_with_explicit_permission(
+    #[values(Creator::Libhdf5, Creator::Pure)] creator: Creator,
+    #[values(false, true)] raw: bool,
+    #[values(false, true)] finish: bool,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("buffered_reencoded_lossy_tail.h5");
+    let reference = dir
+        .path()
+        .join("buffered_reencoded_lossy_tail_reference.h5");
+    let filters = [dataset::Filter::ScaleOffset(ScaleOffset::FloatDScale(1))];
+    let initial = Unlimited::new("d", &[1.46, 1.56], 4).filters(&filters);
+    match creator {
+        Creator::Libhdf5 => initial
+            .clone()
+            .stored_as(little_endian_f64())
+            .libhdf5_create(&path),
+        Creator::Pure => initial.pure_create(&path),
+    }
+    initial
+        .stored_as(little_endian_f64())
+        .libhdf5_create(&reference);
+    {
+        let file = File::open_rw(&path).unwrap();
+        let mut dataset = file.dataset("d").unwrap();
+        let mut appender = dataset
+            .buffered_appender_with_options(
+                AppendOptions::new().with_lossy_tail_reencoding(LossyTailReencoding::Allow),
+            )
+            .unwrap();
+        append_buffered_lossy_tail(&mut appender, &[-0.26], raw);
+        appender.flush().unwrap();
+        append_c_lossy_tail(&reference, &[-0.26]);
+        append_buffered_lossy_tail(&mut appender, &[2.0, 3.46], raw);
+        appender.flush().unwrap();
+        append_c_lossy_tail(&reference, &[2.0, 3.46]);
+        append_buffered_lossy_tail(&mut appender, &[3.56], raw);
+        if finish {
+            appender.finish().unwrap();
+        } else {
+            drop(appender);
+        }
+        append_c_lossy_tail(&reference, &[3.56]);
+    }
+    let expected = dataset::read_libhdf5::<f64>(&reference, "d");
+    assert_eq!(expected, [1.44, 1.54, -0.26, 2.04, 3.46, 3.56]);
+    assert_eq!(dataset::read_libhdf5::<f64>(&path, "d"), expected);
+    assert_eq!(dataset::read_pure::<f64>(&path, "d"), expected);
+    let chunks = array_index::libhdf5_chunks(&path, 0);
+    assert_eq!(
+        array_index::pure_chunks(&File::open(&path).unwrap()),
+        chunks
+    );
+    assert_eq!(chunks.len(), 2);
+    assert_eq!((chunks[0].filter_mask(), chunks[1].filter_mask()), (0, 0));
+}
+
+fn append_buffered_lossy_tail(appender: &mut BufferedAppender<'_>, values: &[f64], raw: bool) {
+    if raw {
+        appender
+            .append_raw(
+                &values
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+    } else {
+        appender.append(values).unwrap();
+    }
+}
+
 fn reencode_lossy_tail(path: &Path, reference: &Path, values: &[f64], staged: bool) {
     {
         let file = File::open_rw(path).unwrap();
@@ -536,18 +611,20 @@ fn reencode_lossy_tail(path: &Path, reference: &Path, values: &[f64], staged: bo
             dataset.append_with_options(options, values).unwrap();
         }
     }
-    {
-        let file = hdf5::File::open_rw(reference).unwrap();
-        let dataset = file.dataset("d").unwrap();
-        let old_len = dataset.size();
-        dataset.resize([old_len + values.len()]).unwrap();
-        dataset
-            .write_slice(values, old_len..old_len + values.len())
-            .unwrap();
-    }
+    append_c_lossy_tail(reference, values);
     let expected = dataset::read_libhdf5::<f64>(reference, "d");
     assert_eq!(dataset::read_libhdf5::<f64>(path, "d"), expected);
     assert_eq!(dataset::read_pure::<f64>(path, "d"), expected);
+}
+
+fn append_c_lossy_tail(path: &Path, values: &[f64]) {
+    let file = hdf5::File::open_rw(path).unwrap();
+    let dataset = file.dataset("d").unwrap();
+    let old_len = dataset.size();
+    dataset.resize([old_len + values.len()]).unwrap();
+    dataset
+        .write_slice(values, old_len..old_len + values.len())
+        .unwrap();
 }
 
 fn little_endian_f64() -> CDatatype {
