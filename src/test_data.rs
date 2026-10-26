@@ -3,7 +3,7 @@
 //! libhdf5 is a dependency of the crosscheck package alone, so
 //! a unit test that needs a C-written input reads a committed one under
 //! `tests/data/c/`, written by `crates/crosscheck/tests/main/c_test_data.rs`. In the
-//! other direction `src/repack.rs` commits a file it writes through a
+//! other direction `src/repack/mod.rs` commits a file it writes through a
 //! crate-private seam under `tests/data/pure/`, for that package to read with
 //! the C library. `just test-data` rewrites both.
 
