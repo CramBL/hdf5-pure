@@ -1,5 +1,5 @@
-//! Benchmarks of chunked reads through the Fixed Array, Extensible Array, and version 1 B-tree
-//! chunk indexes, with what each read allocates.
+//! Benchmarks of chunked reads through the Fixed Array, Extensible Array, version 1 B-tree, and
+//! Implicit chunk indexes, with what each read allocates.
 //!
 //! Each fixture is a square `f64` dataset of 64 or 128 chunks to a side, opened twice with no
 //! decompressed chunk retained: once with the parsed chunk index retained between reads and once
@@ -50,6 +50,9 @@ fn main() {
         }),
         CHUNKS_PER_SIDE.map(|chunks_per_side| {
             Fixture::new(ChunkIndex::BTreeV1, chunks_per_side, btree_v1_image)
+        }),
+        CHUNKS_PER_SIDE.map(|chunks_per_side| {
+            Fixture::new(ChunkIndex::Implicit, chunks_per_side, implicit_image)
         }),
     ]
     .into_iter()
@@ -324,14 +327,7 @@ fn file_builder_image(values: &[f64], extent: u64, max_rows: MaxExtent) -> Vec<u
 /// stored in the row-major order of their origins.
 fn btree_v1_image(values: &[f64], extent: u64) -> Vec<u8> {
     let mut image = Image::starting_with(&[0; SUPERBLOCK_SPACE]);
-    let origins: Vec<_> = (0..extent)
-        .step_by(CHUNK_SIDE as usize)
-        .flat_map(|row| {
-            (0..extent)
-                .step_by(CHUNK_SIDE as usize)
-                .map(move |column| [row, column])
-        })
-        .collect();
+    let origins = chunk_origins(extent);
     let chunk_bytes = u32::try_from(CHUNK_SIDE * CHUNK_SIDE).unwrap() * ELEMENT_SIZE;
     let addresses: Vec<_> = origins
         .iter()
@@ -344,6 +340,45 @@ fn btree_v1_image(values: &[f64], extent: u64) -> Vec<u8> {
         .collect();
     let index = append_chunk_btree(&mut image, &keys, &addresses);
     let chunk_dims = [u32::try_from(CHUNK_SIDE).unwrap(); 2];
+    build_dataset(
+        image,
+        extent,
+        &data_layout::chunked(index, &chunk_dims, ELEMENT_SIZE),
+    )
+}
+
+/// Assembles a file whose dataset indexes its chunks with an Implicit index, with the chunks
+/// stored one after another in the row-major order of their origins.
+fn implicit_image(values: &[f64], extent: u64) -> Vec<u8> {
+    let mut image = Image::starting_with(&[0; SUPERBLOCK_SPACE]);
+    let data_address = image.as_bytes().len() as u64;
+    for origin in chunk_origins(extent) {
+        image.append(&chunk_payload(values, extent, origin));
+    }
+    let chunk_dims = [u32::try_from(CHUNK_SIDE).unwrap(); 2];
+    build_dataset(
+        image,
+        extent,
+        &data_layout::implicit(data_address, &chunk_dims, ELEMENT_SIZE),
+    )
+}
+
+/// Returns the coordinates of the first element of each chunk of an `extent` by `extent`
+/// dataset, in row-major order.
+fn chunk_origins(extent: u64) -> Vec<[u64; 2]> {
+    (0..extent)
+        .step_by(CHUNK_SIDE as usize)
+        .flat_map(|row| {
+            (0..extent)
+                .step_by(CHUNK_SIDE as usize)
+                .map(move |column| [row, column])
+        })
+        .collect()
+}
+
+/// Finishes `image` as a file whose root group links an `extent` by `extent` dataset of `f64` as
+/// [`DATASET`], with `layout` as its data layout message.
+fn build_dataset(image: Image, extent: u64, layout: &[u8]) -> Vec<u8> {
     image.build_with_dataset(
         DATASET,
         [
@@ -358,10 +393,7 @@ fn btree_v1_image(values: &[f64], extent: u64) -> Vec<u8> {
                 ),
             ),
             Message::new(MessageType::DATATYPE, &datatype::f64_le()),
-            Message::new(
-                MessageType::DATA_LAYOUT,
-                &data_layout::chunked(index, &chunk_dims, ELEMENT_SIZE),
-            ),
+            Message::new(MessageType::DATA_LAYOUT, layout),
         ],
     )
 }
@@ -476,6 +508,6 @@ const ENTRIES_PER_NODE: usize = 64;
 /// The size of an `f64` element in bytes.
 const ELEMENT_SIZE: u32 = 8;
 
-/// The number of zero bytes the version 1 B-tree fixture reserves at offset 0 for the superblock
-/// that [`Image::build_with_dataset`] writes.
+/// The number of zero bytes the version 1 B-tree and Implicit fixtures reserve at offset 0 for the
+/// superblock that [`Image::build_with_dataset`] writes.
 const SUPERBLOCK_SPACE: usize = 64;

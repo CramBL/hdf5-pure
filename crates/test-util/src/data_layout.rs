@@ -36,6 +36,30 @@ pub fn chunked(index_address: u64, chunk_dims: &[u32], element_size: u32) -> Vec
     layout
 }
 
+/// Returns a version 4 chunked layout message for chunks of `chunk_dims` elements of
+/// `element_size` bytes, indexed by an Implicit index whose array of chunks starts at
+/// `data_address`.
+///
+/// The index is defined in "The Implicit Index" of the [format specification, version
+/// 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_implicit
+pub fn implicit(data_address: u64, chunk_dims: &[u32], element_size: u32) -> Vec<u8> {
+    let mut layout = vec![
+        VERSION_FOUR,
+        CHUNKED_CLASS,
+        NO_CHUNKED_FLAGS,
+        (chunk_dims.len() + 1) as u8,
+        DIMENSION_SIZE_LEN,
+    ];
+    for dim in chunk_dims.iter().chain([&element_size]) {
+        layout.extend_from_slice(&dim.to_le_bytes());
+    }
+    layout.push(IMPLICIT_INDEX);
+    layout.extend_from_slice(&data_address.to_le_bytes());
+    layout
+}
+
 /// Returns the version and layout class of a version 4 virtual layout message, without the
 /// global heap address and index that follow them.
 pub fn virtual_storage() -> Vec<u8> {
@@ -57,3 +81,26 @@ const COMPACT_CLASS: u8 = 0;
 const CONTIGUOUS_CLASS: u8 = 1;
 const CHUNKED_CLASS: u8 = 2;
 const VIRTUAL_CLASS: u8 = 3;
+
+/// The "Flags" byte of a chunked layout with neither `DONT_FILTER_PARTIAL_BOUND_CHUNKS` nor
+/// `SINGLE_INDEX_WITH_FILTER` set.
+///
+/// Defined in "The Data Layout Message" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
+const NO_CHUNKED_FLAGS: u8 = 0;
+
+/// The four-byte width this writer selects for each chunk dimension, encoded in the
+/// "Dimension Size Encoded Length" byte.
+///
+/// Defined in "The Data Layout Message" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
+const DIMENSION_SIZE_LEN: u8 = 4;
+
+/// The "Chunk Indexing Type" byte of an Implicit index.
+///
+/// Defined in "The Data Layout Message" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
+const IMPLICIT_INDEX: u8 = 2;
