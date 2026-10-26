@@ -92,9 +92,9 @@ impl WriteEngine {
     /// # Errors
     ///
     /// Returns [`Error::EditUnsupported`] if `path` is the root or overlaps a live buffered
-    /// appender, or if `builder` specifies chunking, a [`PartialEdgeFiltering`] policy, attributes,
-    /// fill settings, or unresolved reference targets. Returns the preparation error if
-    /// [`flatten_dataset`] cannot prepare `builder`.
+    /// appender, or if `builder` specifies unallocated storage, chunking, a
+    /// [`PartialEdgeFiltering`] policy, attributes, fill settings, or unresolved reference targets.
+    /// Returns the preparation error if [`flatten_dataset`] cannot prepare `builder`.
     pub(crate) fn stage_dataset_write(
         &mut self,
         path: &ObjectPathBuf,
@@ -189,7 +189,7 @@ impl WriteEngine {
                 &DatatypeLocation::Inline,
                 &fd.ds,
                 data_addr,
-                fd.raw.len() as u64,
+                fd.extent,
                 &fd.attrs,
                 attr_info.as_deref(),
                 fd.fill_time.unwrap_or_default(),
@@ -969,7 +969,7 @@ impl WriteEngine {
             &fd.chunk_options,
             fd.maxshape.as_deref(),
             fill,
-            StorageAllocation::Allocated,
+            fd.allocation,
         )?;
         let (_addr, (layout_message, pipeline_message)) = self.place_relocatable(
             chunked_write::chunked_data_len(&set)?,
@@ -1083,14 +1083,17 @@ impl WriteEngine {
 
     /// Adds elements to the prepared bytes and leading dimension of a staged creation.
     ///
-    /// Chunked storage and an unlimited dimension are not required. With the `provenance`
-    /// feature, digest attributes are recomputed from the extended bytes.
+    /// Chunked storage and an unlimited dimension are not required. A nonempty append to an
+    /// unallocated declaration first allocates an element buffer and fills the existing elements
+    /// according to its fill settings. With the `provenance` feature, digest attributes are
+    /// recomputed from the extended bytes.
     ///
     /// # Errors
     ///
     /// Returns [`Error::AppendUnsupported`] for mixed or mismatched element types, unresolved
     /// per-element references, a scalar or zero-byte row, an incomplete row, arithmetic
-    /// overflow, or a leading dimension beyond its declared maximum.
+    /// overflow, or a leading dimension beyond its declared maximum. Returns [`Error::Format`]
+    /// if the existing logical byte length exceeds [`usize::MAX`] when materializing fill values.
     ///
     /// # Panics
     ///
@@ -1160,7 +1163,24 @@ impl WriteEngine {
                 "appending would grow the staged dataset past its maximum shape",
             ));
         }
+        let extent = fd
+            .extent
+            .checked_add(bytes.len() as u64)
+            .ok_or(Error::AppendUnsupported(
+                "staged dataset byte size overflows",
+            ))?;
+        if fd.allocation == StorageAllocation::Unallocated && !bytes.is_empty() {
+            let elem_size = crate::datatype::element_size_usize(&fd.dt)?;
+            fd.raw = FillPattern::new(
+                fd.fill_time.unwrap_or_default(),
+                fd.fill.as_deref(),
+                elem_size,
+            )
+            .buffer(fd.extent.to_usize()?)?;
+            fd.allocation = StorageAllocation::Allocated;
+        }
         fd.raw.extend_from_slice(bytes);
+        fd.extent = extent;
         fd.ds.dimensions[0] = grown;
         #[cfg(feature = "provenance")]
         fd.rebuild_provenance();
@@ -1176,10 +1196,15 @@ impl WriteEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::EditUnsupported`] for chunk or maximum-shape options, a
-    /// [`PartialEdgeFiltering`] policy, attributes, fill settings, or unresolved object-reference
+    /// Returns [`Error::EditUnsupported`] for unallocated storage, chunk or maximum-shape options,
+    /// a [`PartialEdgeFiltering`] policy, attributes, fill settings, or unresolved object-reference
     /// targets.
     pub(super) fn refuse_unsupported_overwrite(fd: &FlatDataset) -> Result<(), Error> {
+        if fd.allocation == StorageAllocation::Unallocated {
+            return Err(Error::EditUnsupported(
+                "write_dataset requires element data, not unallocated storage",
+            ));
+        }
         if fd.chunk_options.is_chunked() || fd.maxshape.is_some() {
             return Err(Error::EditUnsupported(
                 "write_dataset overwrites values only; it cannot make a dataset \
@@ -1396,7 +1421,12 @@ pub(super) struct FlatDataset {
     pub(super) name: LinkNameBuf,
     pub(super) dt: crate::datatype::Datatype,
     pub(super) ds: Dataspace,
+    /// Prepared element bytes, empty for an unallocated declaration.
     pub(super) raw: Vec<u8>,
+    /// Whether element storage is supplied or remains unallocated.
+    allocation: StorageAllocation,
+    /// The logical byte length of all elements, including unwritten values.
+    extent: u64,
     pub(super) attrs: Vec<crate::attribute::AttributeMessage>,
     /// Storage options used by the shared chunk writer.
     pub(super) chunk_options: ChunkOptions,
@@ -1448,84 +1478,121 @@ struct StagedProvenance {
 /// Prepares a dataset builder for storage in the pending edit set.
 ///
 /// Variable-length collections and object-reference targets remain unresolved until commit
-/// application. The `provenance` feature computes digest attributes over the prepared values.
+/// application. Unallocated declarations have an empty element buffer and a logical byte length
+/// derived from their shape and datatype. The `provenance` feature computes digest attributes over
+/// the prepared values.
 ///
 /// # Errors
 ///
 /// Returns [`Error::EditUnsupported`] for missing values or metadata, incompatible shape or storage
-/// options, committed datatypes, unsupported filters, or a link name too large to encode. Returns
-/// attribute-preparation, datatype-size, filter-pipeline, and fill-value errors.
+/// options, committed datatypes, unsupported filters, or a link name too large to encode.
+///
+/// Returns [`Error::Format`] with [`FormatError::ConflictingDatasetStorage`] if an unallocated
+/// declaration also supplies element data or a provider, [`FormatError::DatasetRankUnsupported`]
+/// if the rank exceeds the writer's limit, [`FormatError::DatasetDimensionUnlimited`] if a current
+/// dimension is unlimited, or [`FormatError::DatasetSizeOverflow`] if the logical byte length
+/// overflows. With the `provenance` feature, returns [`FormatError::DatasetProvenanceRequiresData`]
+/// if a nonempty unallocated declaration requests element checksums.
+///
+/// Returns attribute-preparation, datatype-size, chunk-geometry, filter-pipeline, and fill-value
+/// errors.
 pub(super) fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<FlatDataset, Error> {
-    let dt = db
-        .datatype
-        .ok_or(Error::EditUnsupported("dataset has no datatype/data"))?;
-    let shape = db
-        .shape
-        .ok_or(Error::EditUnsupported("dataset has no shape"))?;
+    let DatasetBuilder {
+        name: _,
+        datatype,
+        shape,
+        maxshape,
+        data,
+        attrs: attribute_specs,
+        chunk_options,
+        raw_chunks,
+        produced,
+        reference_targets,
+        vl_string_staging,
+        fill,
+        fill_time,
+        allocation,
+        committed_datatype_path,
+        #[cfg(feature = "provenance")]
+        provenance,
+    } = db;
+    let dt = datatype.ok_or(Error::EditUnsupported("dataset has no datatype/data"))?;
+    let shape = shape.ok_or(Error::EditUnsupported("dataset has no shape"))?;
     let is_empty = shape.contains(&0);
-    let chunked = db.chunk_options.is_chunked() || db.maxshape.is_some();
-    if db.allocation == StorageAllocation::Unallocated {
-        return Err(Error::EditUnsupported(
-            "a dataset with unallocated storage cannot be added to an existing file in place",
-        ));
+    let chunked = chunk_options.is_chunked() || maxshape.is_some();
+    let unallocated = allocation == StorageAllocation::Unallocated;
+    let data = data.transpose().map_err(|error| *error)?;
+    if unallocated && (data.is_some() || raw_chunks.is_some() || produced.is_some()) {
+        return Err(FormatError::ConflictingDatasetStorage.into());
     }
-    if db.vl_string_staging.is_some() && chunked {
+    if vl_string_staging.is_some() && chunked {
         return Err(Error::EditUnsupported(
             "chunked or extensible variable-length-string datasets cannot be added in place yet",
         ));
     }
-    if db.reference_targets.is_some() && chunked {
+    if reference_targets.is_some() && chunked {
         return Err(Error::EditUnsupported(
             "chunked or extensible object-reference datasets cannot be added in place yet",
         ));
     }
-    let raw = if is_empty {
-        db.data
-            .transpose()
-            .map_err(|error| *error)?
-            .unwrap_or_default()
+    let raw = if unallocated || is_empty {
+        data.unwrap_or_default()
     } else {
-        db.data
-            .transpose()
-            .map_err(|error| *error)?
-            .ok_or(Error::EditUnsupported("dataset has no data"))?
+        data.ok_or(Error::EditUnsupported("dataset has no data"))?
     };
 
     let elem_size = crate::datatype::element_size_usize(&dt)?;
 
     let elem = elem_size.get() as u64;
-    let expected = shape
+    let rank = match u8::try_from(shape.len()) {
+        Ok(rank) if rank <= file_writer::MAX_DATASET_RANK => rank,
+        _ => {
+            return Err(FormatError::DatasetRankUnsupported {
+                rank: shape.len(),
+                maximum: file_writer::MAX_DATASET_RANK,
+            }
+            .into());
+        }
+    };
+    if let Some(dimension) = shape
         .iter()
-        .try_fold(1u64, |acc, &d| acc.checked_mul(d))
-        .and_then(|n| n.checked_mul(elem));
-    match expected {
-        Some(expected) if raw.len() as u64 == expected => {}
-        Some(_) => {
-            return Err(Error::EditUnsupported(
-                "dataset data length does not match its shape",
-            ));
-        }
-        None => {
-            return Err(Error::EditUnsupported(
-                "dataset shape is too large to address on this platform",
-            ));
-        }
+        .position(|&size| size == file_writer::UNLIMITED_DIMENSION)
+    {
+        return Err(FormatError::DatasetDimensionUnlimited { dimension }.into());
+    }
+    let extent = if is_empty {
+        0
+    } else {
+        shape.iter().try_fold(elem, |size, &dimension| {
+            size.checked_mul(dimension)
+                .ok_or(FormatError::DatasetSizeOverflow { size, dimension })
+        })?
+    };
+    if !unallocated && raw.len() as u64 != extent {
+        return Err(Error::EditUnsupported(
+            "dataset data length does not match its shape",
+        ));
+    }
+    #[cfg(feature = "provenance")]
+    if unallocated && extent != 0 && provenance.is_some() {
+        return Err(FormatError::DatasetProvenanceRequiresData.into());
     }
 
     if chunked {
-        Extent::new(&shape, db.maxshape.as_deref())
-            .and_then(|extent| db.chunk_options.validate_geometry(extent))
+        Extent::new(&shape, maxshape.as_deref())
+            .and_then(|extent| chunk_options.validate_geometry(extent))
             .map_err(Error::EditUnsupported)?;
-        db.chunk_options
+        chunk_options
             .refuse_unavailable_filters()
             .map_err(Error::EditUnsupported)?;
-        let chunk_dims = db.chunk_options.resolve_chunk_dims(&shape);
+        let chunk_dims = chunk_options.resolve_chunk_dims(&shape);
         let ctx = ChunkContext::from_datatype(&chunk_dims, &dt)?;
-        db.chunk_options.build_pipeline(
+        crate::chunked_read::bounded_chunk_len(&chunk_dims, elem_size)?;
+        chunk_options.build_pipeline(
             &ctx,
             FillPattern::new(
-                db.fill_time.unwrap_or_default(),
-                db.fill.as_deref(),
+                fill_time.unwrap_or_default(),
+                fill.as_deref(),
                 ctx.element_size.narrow::<NonZeroUsize>()?,
             ),
         )?;
@@ -1545,26 +1612,23 @@ pub(super) fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<F
         } else {
             DataspaceType::Simple
         },
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "dataspace dimensionality is encoded in one byte"
-        )]
-        rank: shape.len() as u8,
+        rank,
         dimensions: shape,
-        max_dimensions: db.maxshape.clone(),
+        max_dimensions: maxshape.clone(),
     };
-    let mut attrs: Vec<crate::attribute::AttributeMessage> = Vec::with_capacity(db.attrs.len());
-    for (n, v) in &db.attrs {
+    let mut attrs: Vec<crate::attribute::AttributeMessage> =
+        Vec::with_capacity(attribute_specs.len());
+    for (n, v) in &attribute_specs {
         attrs.push(v.to_message(n)?);
     }
     let mut vl_attrs: Vec<(usize, Vec<Vec<u8>>)> = Vec::new();
-    for (i, (_, v)) in db.attrs.iter().enumerate() {
+    for (i, (_, v)) in attribute_specs.iter().enumerate() {
         if let Some(strings) = v.var_len_strings() {
             vl_attrs.push((i, type_builders::build_global_heap_collections(strings)));
         }
     }
     #[cfg(feature = "provenance")]
-    let provenance = db.provenance.as_ref().map(|prov| {
+    let provenance = provenance.as_ref().map(|prov| {
         let inputs = crate::provenance::Provenance {
             creator: prov.creator.clone(),
             timestamp: prov.timestamp.clone(),
@@ -1582,8 +1646,7 @@ pub(super) fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<F
         crate::file_writer::dense_attrs_check(&attrs).map_err(Error::Format)?;
     }
 
-    if db.committed_datatype_path.is_some()
-        || attrs.iter().any(|a| a.datatype_location.is_committed())
+    if committed_datatype_path.is_some() || attrs.iter().any(|a| a.datatype_location.is_committed())
     {
         return Err(Error::EditUnsupported(
             "a dataset or attribute naming a committed (shared) datatype cannot be added in \
@@ -1591,7 +1654,7 @@ pub(super) fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<F
         ));
     }
 
-    if let Some(fill) = &db.fill {
+    if let Some(fill) = &fill {
         let expected = elem.to_usize()?;
         if fill.len() != expected {
             return Err(Error::Format(FormatError::FillValueSizeMismatch {
@@ -1606,15 +1669,17 @@ pub(super) fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<F
         dt,
         ds,
         raw,
+        allocation,
+        extent,
         attrs,
-        chunk_options: db.chunk_options,
-        maxshape: db.maxshape,
+        chunk_options,
+        maxshape,
         vl_attrs,
         attrs_are_dense,
-        vl_string_staging: db.vl_string_staging,
-        reference_targets: db.reference_targets,
-        fill: db.fill,
-        fill_time: db.fill_time,
+        vl_string_staging,
+        reference_targets,
+        fill,
+        fill_time,
         #[cfg(feature = "provenance")]
         provenance,
     })

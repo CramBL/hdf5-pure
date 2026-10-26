@@ -44,7 +44,7 @@ fn overwriting_the_root_group_is_rejected_at_staging() {
 }
 
 #[test]
-fn staging_unallocated_storage_into_an_existing_file_is_rejected() {
+fn staging_unallocated_storage_into_an_existing_file_preserves_the_schema() {
     use crate::writer::FileBuilder;
 
     let dir = tempfile::tempdir().unwrap();
@@ -57,14 +57,16 @@ fn staging_unallocated_storage_into_an_existing_file_is_rejected() {
     let mut db = crate::type_builders::DatasetBuilder::new("sparse");
     db.with_unallocated_storage(type_builders::make_i32_type(), &[1000]);
     db.with_chunks(&[100]);
-    let err = s
-        .stage_created_dataset(&ObjectPathBuf::parse("/sparse"), db)
-        .unwrap_err();
-    assert!(
-        matches!(&err, Error::EditUnsupported(m) if m.contains("unallocated storage")),
-        "unexpected error: {err:?}"
-    );
-    assert!(!s.has_staged_edits());
+    s.stage_created_dataset(&ObjectPathBuf::parse("/sparse"), db)
+        .unwrap();
+    let meta = s
+        .staged_dataset_meta(&ObjectPathBuf::parse("/sparse"))
+        .unwrap();
+    assert_eq!(meta.datatype, type_builders::make_i32_type());
+    assert_eq!(meta.dimensions, [1000]);
+    assert_eq!(meta.maxshape, None);
+    assert!(meta.chunked);
+    assert!(s.has_staged_edits());
 }
 
 #[test]
