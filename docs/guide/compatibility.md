@@ -19,7 +19,7 @@ The tables cover file-format compatibility and HDF5 behavior. Features not liste
 |---|:---:|:---:|:---:|---|
 | Version 1 symbol table | ✅ | ⬆️ | ✅ | Modified groups use compact link storage. |
 | Compact link storage | ✅ | ✅ | ✅ | |
-| Dense link storage | ✅ | ❌ | ❌ | Deletion may leave heap storage allocated. |
+| Dense link storage | ✅ | 🟡 | ❌ | File creation writes groups with more than eight links densely. Encoded links are limited to 4096 bytes. Deletion may leave heap storage allocated. |
 | Link creation-order tracking | ✅ | ❌ | 🟡 | New links can be added while compact storage remains valid. |
 
 ### Attributes

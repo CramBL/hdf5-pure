@@ -3292,15 +3292,19 @@ fn a_multi_chunk_staged_append_fills_chunk_sized_holes() {
             settings
         });
         Unlimited::new("d", &(0..CHUNK as i32).collect::<Vec<i32>>(), CHUNK as u64).add_to(&mut b);
-        for i in 0..APPENDED {
-            for role in ["scratch", "spacer"] {
-                b.create_dataset(&format!("{role}{i}"))
-                    .with_i32_data(&(0..72).collect::<Vec<i32>>());
-            }
-        }
         b.write(&path).unwrap();
 
         let f = open_rw_on_close(&path);
+        for i in 0..APPENDED {
+            for role in ["scratch", "spacer"] {
+                f.root()
+                    .create_dataset(&format!("{role}{i}"), |builder| {
+                        builder.with_i32_data(&(0..72).collect::<Vec<i32>>());
+                    })
+                    .unwrap();
+            }
+        }
+        f.commit().unwrap();
         for i in 0..APPENDED {
             f.root().delete(&format!("scratch{i}")).unwrap();
         }
