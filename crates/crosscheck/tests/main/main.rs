@@ -71,6 +71,7 @@ mod hdf5_release_feature;
 mod layout_introspection;
 mod libver_matrix;
 mod libver_output;
+mod link_storage;
 mod mat_streaming;
 mod matio_crosscheck;
 mod ndarray_roundtrip;

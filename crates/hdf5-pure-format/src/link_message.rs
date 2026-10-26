@@ -43,29 +43,32 @@ pub struct LinkMessage {
     pub charset: CharacterSet,
 }
 
-/// Everything a Link message declares before its target data, with the name
-/// left where it lies in the message bytes.
+/// The borrowed name, target offset, and optional fields of a version 1 Link message.
 ///
-/// Splitting the parse here is what lets a lookup by name read a group's links
-/// without allocating for the ones it rejects: [`LinkMessage::parse`] owns the
-/// name because its caller keeps it, while
-/// [`hard_link_address_if_named`](LinkMessage::hard_link_address_if_named)
-/// compares the borrowed bytes and stops.
-struct LinkPrefix<'a> {
+/// The prefix is defined in "The Link Message" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_link
+pub(crate) struct LinkPrefix<'a> {
     /// The link name as stored, undecoded.
-    name: &'a [u8],
+    pub(crate) name: &'a [u8],
     /// 0 for a hard link, 1 soft, 64 external.
-    link_type_code: u8,
-    creation_order: Option<u64>,
-    charset: CharacterSet,
+    pub(crate) link_type_code: u8,
+    pub(crate) creation_order: Option<u64>,
+    pub(crate) charset: CharacterSet,
     /// Offset of the target data that follows the name.
-    target_pos: usize,
+    pub(crate) target_pos: usize,
 }
 
 impl<'a> LinkPrefix<'a> {
-    /// Parses a Link message up to its target data, which begins at
-    /// [`target_pos`](Self::target_pos).
-    fn parse(data: &'a [u8]) -> Result<Self, FormatError> {
+    /// Parses the fields through the link name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidLinkVersion`] for a version other than 1,
+    /// [`FormatError::InvalidCharacterSet`] for an unknown character-set code,
+    /// [`FormatError::ValueTooLargeForPlatform`] if the name length exceeds [`usize::MAX`],
+    /// and [`FormatError::UnexpectedEof`] for a truncated prefix.
+    pub(crate) fn parse(data: &'a [u8]) -> Result<Self, FormatError> {
         bytes::ensure_len(data, 0, 2)?;
 
         let version = data[0];
@@ -491,13 +494,13 @@ fn push_link_information_length(buf: &mut Vec<u8>, len: usize) {
 /// specification, version 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_link
-const HARD_LINK: u8 = 0;
+pub(crate) const HARD_LINK: u8 = 0;
 
 /// The link type of a soft link, from the same table as [`HARD_LINK`].
-const SOFT_LINK: u8 = 1;
+pub(crate) const SOFT_LINK: u8 = 1;
 
 /// The link type of an external link, from the same table as [`HARD_LINK`].
-const EXTERNAL_LINK: u8 = 64;
+pub(crate) const EXTERNAL_LINK: u8 = 64;
 
 #[cfg(test)]
 mod tests {

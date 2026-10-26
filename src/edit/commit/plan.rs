@@ -787,6 +787,15 @@ impl WriteEngine {
             references,
         })
     }
+    /// Checks link-name conflicts, compact-storage limits, and creation-counter capacity.
+    ///
+    /// Every affected group's policy is checked before object placement, including attribute-only
+    /// edits. Additions are counted together to check the full counter increment.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] for duplicate link names, unsupported creation-order
+    /// policies, counter exhaustion, or additions beyond a tracked group's compact threshold.
     fn check_group_additions(
         &self,
         nodes: &BTreeMap<ObjectPathBuf, Node>,
@@ -804,6 +813,7 @@ impl WriteEngine {
                         .filter(|child| matches!(child, ChildLink::Insert { .. }))
                         .count()
                 });
+            let mut order = group::LinkCreationOrder::for_region(&node.prepared.region)?;
             if added > 0 {
                 let kept = node
                     .existing_links
@@ -811,6 +821,9 @@ impl WriteEngine {
                     .filter(|name| !node.prepared.deletes.iter().any(|d| d.as_str() == *name))
                     .count();
                 group::reject_dense_link_creation_order(&node.prepared.region, kept + added)?;
+                for _ in 0..added {
+                    order.take()?;
+                }
             }
         }
 

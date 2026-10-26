@@ -1,5 +1,6 @@
 //! Compact-link group inspection and rewriting for staged edits.
 
+use hdf5_pure_format::__private::LinkCreationPolicy;
 use hdf5_pure_format::__private::MessageRecordLayout;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
 
@@ -293,8 +294,8 @@ pub(super) fn patch_link_target(
 /// in the object-header prefix. An untracked group has no counter. `H5G_obj_insert` assigns
 /// the recorded maximum and then increments it (`H5Gobj.c`, HDF5 2.2.0).
 pub(super) struct LinkCreationOrder {
-    /// The next index to assign, or `None` for an untracked group.
-    next: Option<u64>,
+    /// The tracking and indexing policy with a checked next-index counter.
+    policy: LinkCreationPolicy,
     /// Whether an index has been assigned and the counter needs writing.
     assigned: bool,
 }
@@ -304,11 +305,18 @@ impl LinkCreationOrder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::EditUnsupported`] if a message body extends past the region.
+    /// Returns [`Error::EditUnsupported`] if a message body extends past the region, indexing is
+    /// enabled without tracking, or the counter exceeds [`i64::MAX`].
     pub(super) fn for_region(region: &OhRegion) -> Result<Self, Error> {
-        let next = find_link_info(region)?.and_then(|(_, _, info)| info.max_creation_order);
+        let policy = find_link_info(region)?
+            .map(|(_, _, info)| LinkCreationPolicy::from_info(&info))
+            .transpose()
+            .map_err(|_error| {
+                Error::EditUnsupported("a group's link creation-order policy cannot be reproduced")
+            })?
+            .unwrap_or(LinkCreationPolicy::Untracked);
         Ok(Self {
-            next,
+            policy,
             assigned: false,
         })
     }
@@ -319,16 +327,17 @@ impl LinkCreationOrder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::EditUnsupported`] if the counter cannot be incremented.
+    /// Returns [`Error::EditUnsupported`] if the counter is [`i64::MAX`]. An error leaves the
+    /// assignment state unchanged.
     pub(super) fn take(&mut self) -> Result<Option<u64>, Error> {
-        let Some(index) = self.next else {
-            return Ok(None);
-        };
-        self.next = Some(index.checked_add(1).ok_or(Error::EditUnsupported(
-            "a group has assigned every link creation index its link-info message can record",
-        ))?);
-        self.assigned = true;
-        Ok(Some(index))
+        let Self { policy, assigned } = self;
+        let index = policy.take().map_err(|_error| {
+            Error::EditUnsupported(
+                "a group has assigned every link creation index its link-info message can record",
+            )
+        })?;
+        *assigned |= index.is_some();
+        Ok(index)
     }
 
     /// Writes the incremented counter into the group's Link Info message.
@@ -344,7 +353,7 @@ impl LinkCreationOrder {
         if !self.assigned {
             return Ok(());
         }
-        let Some(next) = self.next else {
+        let Some(next) = self.policy.next_index() else {
             return Ok(());
         };
         let (_, body, _) = find_link_info(region)?.ok_or(Error::EditUnsupported(
