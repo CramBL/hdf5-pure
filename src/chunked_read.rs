@@ -1388,13 +1388,7 @@ pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
             collect_chunk_info_from_source(source, addr, ndims, widths.offsets)
         }
         ChunkIndexLayout::SingleChunk { filtered, .. } => {
-            let chunk_byte_size: u64 = spatial_dims.iter().try_fold(elem_size, |acc, dim| {
-                acc.checked_mul(*dim).ok_or_else(|| {
-                    FormatError::ChunkedReadError(
-                        "chunk logical byte size exceeds the addressable range".into(),
-                    )
-                })
-            })?;
+            let chunk_byte_size = chunk_grid::chunk_byte_size(spatial_dims, elem_size)?;
             let (chunk_size, filter_mask) = match filtered {
                 Some(filtered) => (filtered.filtered_size, filtered.filter_mask),
                 None => (chunk_byte_size, 0),
@@ -2113,13 +2107,7 @@ fn collect_chunks_for_layout(
             collect_chunk_info(file_data, addr, ndims, widths.offsets)?
         }
         ChunkIndexLayout::SingleChunk { filtered, .. } => {
-            let chunk_byte_size: u64 = spatial_dims.iter().try_fold(elem_size, |acc, dim| {
-                acc.checked_mul(*dim).ok_or_else(|| {
-                    FormatError::ChunkedReadError(
-                        "chunk logical byte size exceeds the addressable range".into(),
-                    )
-                })
-            })?;
+            let chunk_byte_size = chunk_grid::chunk_byte_size(spatial_dims, elem_size)?;
             let (chunk_size, filter_mask) = match filtered {
                 Some(filtered) => (filtered.filtered_size, filtered.filter_mask),
                 None => (chunk_byte_size, 0),
