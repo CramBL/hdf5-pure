@@ -427,6 +427,11 @@ name = "ndarray_io"
 required-features = ["ndarray"]
 
 [[bench]]
+name = "filtered_chunks"
+harness = false
+required-features = ["std"]
+
+[[bench]]
 name = "hot_paths"
 harness = false
 
