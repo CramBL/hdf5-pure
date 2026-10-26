@@ -885,7 +885,7 @@ pub(crate) fn read_chunked_region_from_source(
     };
 
     let elem_size = crate::datatype::element_size_usize(datatype)?;
-    let (rank, chunk_dims, _) = chunked_dims(chunk_dimensions, dataspace)?;
+    let (_, chunk_dims, _) = chunked_dims(chunk_dimensions, dataspace)?;
     bounded_chunk_len(chunk_dims, elem_size)?;
 
     let total_bytes = region.byte_len();
@@ -918,7 +918,8 @@ pub(crate) fn read_chunked_region_from_source(
                 elem_size.get() as u64,
                 widths,
             )?,
-            rank,
+            chunk_dims_u64,
+            &dataspace.dimensions,
         )
     })?;
     let window_chunks: Vec<_> = parsed_index
@@ -1189,6 +1190,8 @@ fn row_major_strides(dims: &[usize]) -> Result<Vec<usize>, FormatError> {
 /// Reads a whole chunked dataset from a [`Source`] with index and decoded-chunk caching.
 ///
 /// Dataset dimensions are converted to host-sized indexes only for a nonempty output.
+/// For a nonempty dataset, the reader consults the fill pattern only if dense chunk coverage
+/// is unproven.
 ///
 /// # Errors
 ///
@@ -1244,12 +1247,20 @@ pub fn read_chunked_data_cached_from_source<S: Source + ?Sized>(
                 elem_size.get() as u64,
                 widths,
             )?,
-            rank,
+            chunk_dims_u64,
+            &dataspace.dimensions,
         )
     })?;
 
     // Uncovered bytes are unallocated storage; see `assemble_chunks`.
-    let mut output = fill.buffer(total_bytes)?;
+    let mut output = if parsed_index
+        .dense_coverage(chunk_dims_u64, &dataspace.dimensions)
+        .is_some()
+    {
+        vec![0; total_bytes]
+    } else {
+        fill.buffer(total_bytes)?
+    };
 
     let mut ds_strides = vec![1usize; rank];
     for i in (0..rank.saturating_sub(1)).rev() {
@@ -1625,6 +1636,88 @@ pub(crate) fn visit_decoded_chunks_from_source(
     Ok(())
 }
 
+/// A proof that allocated chunks cover every logical chunk-grid slot exactly once.
+///
+/// Chunk coordinates are aligned and lie within the dataset extent. Their contributions,
+/// clipped at dataset edges, cover every element exactly once. The chunk and dataset element
+/// counts fit [`u64`], and the grid slot count fits [`usize`]. A caller validates decoded chunk
+/// sizes separately.
+#[derive(Debug)]
+pub(crate) struct DenseCoverage {
+    chunk_dims: Vec<u64>,
+    ds_dims: Vec<u64>,
+}
+
+impl DenseCoverage {
+    /// Proves coverage of `index` for `chunk_dims` and the dataset extent `ds_dims`.
+    ///
+    /// Returns `None` if the dimensions or chunk coordinates do not establish dense coverage,
+    /// or if an element count or grid size overflows. Borrows the chunk descriptors during the
+    /// proof and retains the dimensions for subsequent geometry comparisons.
+    pub(crate) fn new(
+        index: &ParsedChunkIndex,
+        chunk_dims: &[u64],
+        ds_dims: &[u64],
+    ) -> Option<Self> {
+        if chunk_dims.len() != ds_dims.len() || chunk_dims.is_empty() {
+            return None;
+        }
+        let mut slots = 1u64;
+        let mut chunk_elements = 1u64;
+        let mut elements = 1u64;
+        for (&chunk, &extent) in chunk_dims.iter().zip(ds_dims) {
+            if chunk == 0 {
+                return None;
+            }
+            chunk_elements = chunk_elements.checked_mul(chunk)?;
+            elements = elements.checked_mul(extent)?;
+            slots = slots.checked_mul(extent.div_ceil(chunk))?;
+        }
+        let slots = usize::try_from(slots).ok()?;
+        if index.chunks().len() != slots {
+            return None;
+        }
+        let mut seen = vec![0u64; slots.div_ceil(u64::BITS as usize)];
+        let mut covered = 0u64;
+        for chunk in index.chunks() {
+            if chunk.coord.len() != ds_dims.len() {
+                return None;
+            }
+            let mut slot = 0u64;
+            let mut contribution = 1u64;
+            for ((&offset, &chunk), &extent) in chunk.coord.iter().zip(chunk_dims).zip(ds_dims) {
+                if !offset.is_multiple_of(chunk) || offset >= extent {
+                    return None;
+                }
+                slot = slot
+                    .checked_mul(extent.div_ceil(chunk))?
+                    .checked_add(offset / chunk)?;
+                contribution = contribution.checked_mul(chunk.min(extent - offset))?;
+            }
+            let slot = usize::try_from(slot).ok()?;
+            let word = seen.get_mut(slot / u64::BITS as usize)?;
+            let bit = 1u64 << (slot % u64::BITS as usize);
+            if *word & bit != 0 {
+                return None;
+            }
+            *word |= bit;
+            covered = covered.checked_add(contribution)?;
+        }
+        if covered != elements {
+            return None;
+        }
+        Some(Self {
+            chunk_dims: chunk_dims.to_vec(),
+            ds_dims: ds_dims.to_vec(),
+        })
+    }
+
+    /// Returns `true` if both dimension slices equal those used to prove coverage.
+    pub(crate) fn matches(&self, chunk_dims: &[u64], ds_dims: &[u64]) -> bool {
+        self.chunk_dims == chunk_dims && self.ds_dims == ds_dims
+    }
+}
+
 /// A chunked dataset's chunks mapped onto a dense logical grid: every grid slot
 /// filled exactly once, ordered row-major (last dimension fastest) so the order
 /// matches [`split_into_chunks`](crate::chunked_write::split_into_chunks) and the
@@ -1922,6 +2015,8 @@ fn assemble_chunks(
 /// Reads a whole chunked dataset from a file buffer with index and decoded-chunk caching.
 ///
 /// Dataset dimensions are converted to host-sized indexes only for a nonempty output.
+/// For a nonempty dataset, the reader consults the fill pattern only if dense chunk coverage
+/// is unproven.
 ///
 /// # Errors
 ///
@@ -1979,13 +2074,21 @@ pub fn read_chunked_data_cached(
                 elem_width.get().to_u64(),
                 widths,
             )?,
-            rank,
+            chunk_dims_u64,
+            &dataspace.dimensions,
         )
     })?;
 
     // Assemble output
     // Uncovered bytes are unallocated storage; see `assemble_chunks`.
-    let mut output = fill.buffer(total_bytes)?;
+    let mut output = if parsed_index
+        .dense_coverage(chunk_dims_u64, &dataspace.dimensions)
+        .is_some()
+    {
+        vec![0; total_bytes]
+    } else {
+        fill.buffer(total_bytes)?
+    };
 
     let mut ds_strides = vec![1usize; rank];
     for i in (0..rank.saturating_sub(1)).rev() {
@@ -2430,6 +2533,95 @@ mod tests {
         })
         .unwrap();
         assert_eq!(visits, 1);
+    }
+
+    #[rstest]
+    #[case::dense_zero(false, false, 0)]
+    #[case::dense_nonzero(false, false, 7)]
+    #[case::dense_unknown(false, true, 0)]
+    #[case::sparse_nonzero(true, false, 7)]
+    #[case::sparse_unknown(true, true, 0)]
+    fn cached_whole_reads_consult_fill_only_for_uncovered_storage(
+        #[case] sparse: bool,
+        #[case] unknown: bool,
+        #[case] fill_value: i32,
+        #[values(false, true)] from_source: bool,
+    ) {
+        let mut file_data = vec![0; 0x2000];
+        let mut chunks = Vec::new();
+        for (i, offsets) in [[0, 0], [0, 3], [2, 0], [2, 3]].into_iter().enumerate() {
+            if sparse && offsets == [0, 3] {
+                continue;
+            }
+            let address = 0x1000 + i * 32;
+            let bytes: Vec<_> = (0..2)
+                .flat_map(|row| {
+                    (0..3).flat_map(move |col| {
+                        ((offsets[0] + row) * 5i32 + offsets[1] + col).to_le_bytes()
+                    })
+                })
+                .collect();
+            file_data[address..address + bytes.len()].copy_from_slice(&bytes);
+            chunks.push(ChunkInfo {
+                chunk_size: StoredChunkSize::btree_v1(24),
+                filter_mask: 0,
+                offsets: vec![offsets[0] as u64, offsets[1] as u64, 0],
+                address: StoredAddress::new(address as u64),
+            });
+        }
+        let btree = build_chunk_btree_leaf(&chunks, 3, WIDTHS);
+        file_data[0x100..0x100 + btree.len()].copy_from_slice(&btree);
+        let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::NONE,
+            chunk_dimensions: vec![2, 3, 4],
+            index: ChunkIndexLayout::BTreeV1 {
+                address: Some(StoredAddress::new(0x100)),
+            },
+        };
+        let dataspace = Dataspace {
+            space_type: crate::dataspace::DataspaceType::Simple,
+            rank: 2,
+            dimensions: vec![3, 5],
+            max_dimensions: None,
+        };
+        let datatype = crate::type_builders::make_i32_type();
+        let fill_bytes = fill_value.to_le_bytes();
+        let fill = if unknown {
+            FillPattern::UNKNOWN
+        } else {
+            FillPattern::new(FillTime::IfSet, Some(&fill_bytes), convert::nz(4))
+        };
+        let spec = RawReadSpec::parse(&layout, &dataspace, &datatype, None, fill).unwrap();
+        let cache = ChunkCache::new();
+        let read = || {
+            if from_source {
+                read_chunked_data_cached_from_source(
+                    &crate::source::BytesSource::new(&file_data),
+                    spec,
+                    FORMAT_WIDTHS,
+                    &cache,
+                )
+            } else {
+                read_chunked_data_cached(&file_data, spec, FORMAT_WIDTHS, &cache)
+            }
+        };
+        if sparse && unknown {
+            assert_eq!(read().unwrap_err(), FormatError::UnreadableFillValue);
+            assert_eq!(read().unwrap_err(), FormatError::UnreadableFillValue);
+            return;
+        }
+        let expected: Vec<_> = (0..15i32)
+            .flat_map(|value| {
+                if sparse && value < 10 && value % 5 >= 3 {
+                    fill_value.to_le_bytes()
+                } else {
+                    value.to_le_bytes()
+                }
+            })
+            .collect();
+        assert_eq!(read().unwrap(), expected);
+        assert_eq!(read().unwrap(), expected);
+        assert_eq!(cache.stats().hits(), if sparse { 3 } else { 4 });
     }
 
     fn shuffle_pipeline() -> FilterPipeline {

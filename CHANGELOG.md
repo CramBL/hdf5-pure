@@ -58,6 +58,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Performance
 
+- `Dataset::read_raw` and related cached whole reads skip fill-pattern tiling for dense chunked datasets, including those with unreadable fill metadata. Sparse reads retain fill initialization.
 - `Dataset::read_raw` and related reads of a chunked dataset list its chunks from the retained chunk index without an allocation per chunk, and load an implicit chunk index without a list of its chunk positions beside it ([#902](https://github.com/CramBL/hdf5-pure/pull/902)).
 - `File::dataset` and related lookups use the dense-group name index to avoid traversing every link ([#900](https://github.com/CramBL/hdf5-pure/pull/900)).
 
