@@ -1329,10 +1329,9 @@ impl ChunkProvider for SliceChunkProvider<'_> {
     }
 }
 
-/// The subtree traversal limit, including possible hard-link cycles.
-pub(super) const MAX_COPY_DEPTH: u32 = 1000;
-
+/// The most objects and the most hard links a copy reads from its source.
 const COPY_BUDGET: TraversalBudget = TraversalBudget::new(1 << 24, 1 << 24);
 
+/// The reason [`Error::EditUnsupported`] gives for a copy source whose objects do not form a tree.
 pub(super) const COPY_REPEATED_OBJECT: &str = "a copy source reaches one object through more than one hard link (an alias or a \
      cycle), which a copy cannot reproduce yet";

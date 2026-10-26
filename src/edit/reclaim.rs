@@ -37,7 +37,7 @@ use crate::object_header::ObjectHeader;
 use crate::source::{BaseOffsetSource, Source, SourceMetadata};
 
 use super::GlobalHeapLiveness;
-use super::copy::{MAX_COPY_DEPTH, ObjModel};
+use super::copy::ObjModel;
 use super::{MAX_LINK_GRAPH_NODES, OhRegion, SpaceOwnership, WriteEngine};
 
 /// The spans `(address, length)` of the global heap collections that the objects a commit deletes
@@ -494,7 +494,7 @@ impl WriteEngine {
     /// reclaimed without the other. The walk excludes the global heap collections the objects
     /// refer to, since objects can share a collection, and the commit frees those it leaves
     /// unreferenced through [`unreferenced_collection_spans`](Self::unreferenced_collection_spans).
-    /// The walk stops at [`MAX_COPY_DEPTH`] against a hard-link cycle.
+    /// The walk stops at [`MAX_LINK_WALK_DEPTH`] against a hard-link cycle.
     ///
     /// `incoming` holds the file-wide hard-link count of each object header address, from
     /// [`count_incoming_hard_links`](Self::count_incoming_hard_links). An object is reclaimed, and
@@ -518,7 +518,7 @@ impl WriteEngine {
         // or descended into.
         let base = self.context.addresses();
         let file_len = self.image().len();
-        if depth >= MAX_COPY_DEPTH {
+        if depth >= MAX_LINK_WALK_DEPTH {
             return;
         }
         // Reclaim only when this delete removes the object's last hard link. A
@@ -1088,7 +1088,7 @@ impl WriteEngine {
     /// `visit` receives the absolute address of an object header, the parsed header, and a
     /// callback that adds a child object to the walk by the absolute address of its header. The
     /// walk is incomplete if `visit` returns `false` for an object, or if the walk skips an object
-    /// [`MAX_COPY_DEPTH`] links from a root or after visiting [`MAX_LINK_GRAPH_NODES`] objects.
+    /// [`MAX_LINK_WALK_DEPTH`] links from a root or after visiting [`MAX_LINK_GRAPH_NODES`] objects.
     ///
     /// # Errors
     ///
@@ -1105,7 +1105,7 @@ impl WriteEngine {
             if visited.contains(&addr) {
                 continue;
             }
-            if depth >= MAX_COPY_DEPTH || visited.len() >= MAX_LINK_GRAPH_NODES as usize {
+            if depth >= MAX_LINK_WALK_DEPTH || visited.len() >= MAX_LINK_GRAPH_NODES as usize {
                 complete = false;
                 continue;
             }
@@ -1590,6 +1590,9 @@ pub(super) fn meta_spans(spans: Vec<(u64, u64)>) -> impl Iterator<Item = (u64, u
 }
 
 const OWNED_HEADER_VERSION: u8 = 2;
+
+/// The depth, in hard links from a root, at which a reclaim walk stops descending.
+const MAX_LINK_WALK_DEPTH: u32 = 1000;
 
 #[cfg(test)]
 mod tests {
