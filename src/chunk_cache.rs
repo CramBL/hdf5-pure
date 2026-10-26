@@ -843,7 +843,8 @@ mod tests {
                 offsets: vec![0, 0],
                 address: StoredAddress::new(0x1000),
             }],
-            1,
+            &[10],
+            &[10],
         )
     }
 

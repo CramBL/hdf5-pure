@@ -7,6 +7,7 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use crate::chunked_read::ChunkInfo;
+use crate::chunked_read::DenseCoverage;
 use crate::error::FormatError;
 
 /// The chunks a dataset's chunk index lists, in ascending order of address.
@@ -24,15 +25,24 @@ use crate::error::FormatError;
 pub(crate) struct ParsedChunkIndex {
     chunks: Vec<ChunkInfo>,
     rank: usize,
+    coverage: Option<DenseCoverage>,
 }
 
 impl ParsedChunkIndex {
-    /// Sorts `chunks` by address into an index whose coordinates have `rank` dimensions.
+    /// Sorts `chunks` by address and retains dense coverage where it can be proven.
+    ///
+    /// The coordinate rank is `ds_dims.len()`. The retained proof applies to the supplied chunk
+    /// dimensions and dataset extent.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::Internal`] if a chunk has fewer than `rank` offsets.
-    pub(crate) fn new(mut chunks: Vec<ChunkInfo>, rank: usize) -> Result<Self, FormatError> {
+    /// Returns [`FormatError::Internal`] if a chunk has fewer than `ds_dims.len()` offsets.
+    pub(crate) fn new(
+        mut chunks: Vec<ChunkInfo>,
+        chunk_dims: &[u64],
+        ds_dims: &[u64],
+    ) -> Result<Self, FormatError> {
+        let rank = ds_dims.len();
         if let Some(chunk) = chunks.iter().find(|chunk| chunk.offsets.len() < rank) {
             return Err(FormatError::Internal(format!(
                 "a chunk index of rank {rank} lists a chunk at offsets {:?}",
@@ -40,12 +50,32 @@ impl ParsedChunkIndex {
             )));
         }
         chunks.sort_unstable_by_key(|chunk| chunk.address);
-        Ok(Self { chunks, rank })
+        let mut index = Self {
+            chunks,
+            rank,
+            coverage: None,
+        };
+        index.coverage = DenseCoverage::new(&index, chunk_dims, ds_dims);
+        Ok(index)
+    }
+
+    /// Returns the retained proof if both dimension slices match its geometry.
+    ///
+    /// Returns `None` if density was unproven or the dimensions differ. Borrows the proof
+    /// without allocating or revisiting the chunk descriptors.
+    pub(crate) fn dense_coverage(
+        &self,
+        chunk_dims: &[u64],
+        ds_dims: &[u64],
+    ) -> Option<&DenseCoverage> {
+        self.coverage
+            .as_ref()
+            .filter(|coverage| coverage.matches(chunk_dims, ds_dims))
     }
 
     /// Returns an iterator over the chunks in ascending order of address, each with its
     /// coordinate.
-    pub(crate) fn chunks(&self) -> impl Iterator<Item = IndexedChunk<'_>> {
+    pub(crate) fn chunks(&self) -> impl ExactSizeIterator<Item = IndexedChunk<'_>> {
         self.chunks.iter().map(|info| IndexedChunk {
             info,
             // `new` rejects a chunk with fewer than `rank` offsets.
@@ -92,7 +122,7 @@ mod tests {
             .zip(0u64..)
             .map(|(&address, row)| chunk(&[row * 4, 0], address))
             .collect();
-        let index = ParsedChunkIndex::new(chunks, 2).unwrap();
+        let index = ParsedChunkIndex::new(chunks, &[4, 1], &[12, 1]).unwrap();
 
         let listed: Vec<_> = index
             .chunks()
@@ -109,7 +139,7 @@ mod tests {
         #[case] offsets: &[u64],
         #[case] coord: &[u64],
     ) {
-        let index = ParsedChunkIndex::new(vec![chunk(offsets, 0x1000)], 2).unwrap();
+        let index = ParsedChunkIndex::new(vec![chunk(offsets, 0x1000)], &[4, 8], &[8, 16]).unwrap();
 
         let chunks: Vec<_> = index.chunks().collect();
 
@@ -120,12 +150,71 @@ mod tests {
 
     #[test]
     fn a_chunk_with_fewer_offsets_than_the_rank_is_rejected() {
-        let err = ParsedChunkIndex::new(vec![chunk(&[4, 8], 0x1000), chunk(&[4], 0x2000)], 2)
-            .unwrap_err();
+        let err = ParsedChunkIndex::new(
+            vec![chunk(&[4, 8], 0x1000), chunk(&[4], 0x2000)],
+            &[4, 8],
+            &[8, 16],
+        )
+        .unwrap_err();
 
         assert_eq!(
             err,
             FormatError::Internal("a chunk index of rank 2 lists a chunk at offsets [4]".into())
+        );
+    }
+
+    #[rstest]
+    #[case::dense(&[2][..], &[6][..], &[&[4][..], &[0][..], &[2][..]], true)]
+    #[case::edge(&[2][..], &[5][..], &[&[4][..], &[0][..], &[2][..]], true)]
+    #[case::edges_in_two_dimensions(&[2, 3][..], &[3, 5][..], &[&[2, 3][..], &[0, 0][..], &[0, 3][..], &[2, 0][..]], true)]
+    #[case::edges_in_three_dimensions(&[2, 3, 4][..], &[1, 2, 5][..], &[&[0, 0, 4][..], &[0, 0, 0][..]], true)]
+    #[case::version_1_key(&[2][..], &[4][..], &[&[0, 0][..], &[2, 0][..]], true)]
+    #[case::interior_hole(&[2][..], &[6][..], &[&[0][..], &[4][..]], false)]
+    #[case::duplicate(&[2][..], &[6][..], &[&[0][..], &[0][..], &[4][..]], false)]
+    #[case::misaligned(&[2][..], &[6][..], &[&[0][..], &[3][..], &[4][..]], false)]
+    #[case::out_of_range(&[2][..], &[6][..], &[&[0][..], &[2][..], &[6][..]], false)]
+    #[case::past_partial_edge(&[2][..], &[5][..], &[&[0][..], &[2][..], &[6][..]], false)]
+    #[case::zero_chunk(&[0][..], &[6][..], &[][..], false)]
+    #[case::rank_mismatch(&[2, 2][..], &[4][..], &[&[0][..], &[2][..]], false)]
+    #[case::empty_extent(&[2][..], &[0][..], &[][..], true)]
+    #[case::chunk_product_overflow(&[u64::MAX, 2][..], &[1, 1][..], &[&[0, 0][..]], false)]
+    #[case::extent_product_overflow(&[u64::MAX, 2][..], &[u64::MAX, 2][..], &[&[0, 0][..]], false)]
+    #[case::grid_product_overflow(&[1, 1][..], &[u64::MAX, 2][..], &[][..], false)]
+    fn dense_coverage_requires_every_aligned_grid_slot_once(
+        #[case] chunk_dims: &[u64],
+        #[case] ds_dims: &[u64],
+        #[case] offsets: &[&[u64]],
+        #[case] dense: bool,
+    ) {
+        let chunks = offsets
+            .iter()
+            .enumerate()
+            .map(|(i, offsets)| chunk(offsets, 0x1000 + i as u64 * 16))
+            .collect();
+        let index = ParsedChunkIndex::new(chunks, chunk_dims, ds_dims).unwrap();
+
+        assert_eq!(index.dense_coverage(chunk_dims, ds_dims).is_some(), dense);
+    }
+
+    #[rstest]
+    #[case::changed_chunks(&[1], &[4])]
+    #[case::changed_extent(&[2], &[3])]
+    #[case::changed_rank(&[2, 1], &[4, 1])]
+    fn dense_coverage_is_associated_with_its_geometry(
+        #[case] chunk_dims: &[u64],
+        #[case] ds_dims: &[u64],
+    ) {
+        let index =
+            ParsedChunkIndex::new(vec![chunk(&[2], 0x1000), chunk(&[0], 0x2000)], &[2], &[4])
+                .unwrap();
+        let first = index.dense_coverage(&[2], &[4]).unwrap();
+        let second = index.dense_coverage(&[2], &[4]).unwrap();
+
+        assert!(core::ptr::eq(first, second));
+        assert!(index.dense_coverage(chunk_dims, ds_dims).is_none());
+        assert_eq!(
+            index.chunks().map(|chunk| chunk.coord).collect::<Vec<_>>(),
+            [&[2][..], &[0][..]],
         );
     }
 }
