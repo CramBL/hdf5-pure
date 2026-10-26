@@ -9,7 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - `FileBuilder::finish` and related output methods write dense link storage for root and nested groups with more than eight links, with encoded link messages limited to 4096 bytes ([#925](https://github.com/CramBL/hdf5-pure/pull/925)).
-- `Error::TraversalLimitExceeded` reports an object graph with more objects or hard links than a copy reads ([#922](https://github.com/CramBL/hdf5-pure/pull/922)).
+- `Error::TraversalLimitExceeded` reports an object graph with more objects or hard links than a copy or a repack reads ([#922](https://github.com/CramBL/hdf5-pure/pull/922), [#926](https://github.com/CramBL/hdf5-pure/pull/926)).
 - `AppendOptions` permits explicitly re-encoding a filtered lossy partial tail through immediate, staged, and buffered appends. Each rewrite can introduce additional quantization error in previously published tail values ([#916](https://github.com/CramBL/hdf5-pure/pull/916)).
 - `FileSpaceSettings` groups file-space configuration in a portable value, with normalized settings for strategies without free-space managers ([#894](https://github.com/CramBL/hdf5-pure/pull/894)).
 - `File::reusable_space_stats` reads a writable session's logical size and reusable free bytes without allocations after platform mutex initialization. The reusable total includes append reserves and unused aggregates and does not guarantee that a particular write fits.
@@ -22,7 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `FileBuilder::create_group_with` and nested group creation attach groups after a successful callback ([#837](https://github.com/CramBL/hdf5-pure/pull/837)).
 - `Dataset::read_raw_region` and related typed reads select unit-stride regions across every dimension ([#836](https://github.com/CramBL/hdf5-pure/pull/836)).
 - `File::open_rw` supports mirrored staged edits of non-persistent PAGE files with supported attribute storage and no object references. Old storage is not reused ([#793](https://github.com/CramBL/hdf5-pure/pull/793), [#800](https://github.com/CramBL/hdf5-pure/pull/800)).
-- `repack_into` and the path-based counterpart repack an open file into a writer or a new file ([#772](https://github.com/CramBL/hdf5-pure/pull/772)).
+- `repack_into` and the path-based counterpart repack an open file into a writer or a new file. A file with staged edits is rejected ([#772](https://github.com/CramBL/hdf5-pure/pull/772)).
 - `Group::groups` and related link and attribute reads support filtered fractal heaps, excluding huge objects ([#776](https://github.com/CramBL/hdf5-pure/pull/776)).
 - `File::open_rw` reclaims dead dense link and attribute storage, including deleted group subtrees. Unsupported heaps remain allocated ([#720](https://github.com/CramBL/hdf5-pure/pull/720), [#721](https://github.com/CramBL/hdf5-pure/pull/721), [#734](https://github.com/CramBL/hdf5-pure/pull/734), [#758](https://github.com/CramBL/hdf5-pure/pull/758), [#776](https://github.com/CramBL/hdf5-pure/pull/776)).
 - `Group::delete` reclaims global-heap collections proved unreferenced by surviving objects ([#779](https://github.com/CramBL/hdf5-pure/pull/779)).
@@ -69,6 +69,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Fixed `Group::groups` and related reads misinterpreting tiny objects in 18-byte fractal-heap IDs ([#924](https://github.com/CramBL/hdf5-pure/pull/924)).
 - Fixed `File::commit` overflowing tracked group link creation counters or changing file bytes before rejecting an exhausted counter. Unsupported counters in rebuilt groups are rejected during planning ([#920](https://github.com/CramBL/hdf5-pure/pull/920)).
 - Fixed `File::copy` and related copies overflowing the stack on a hard-link cycle, rejecting a source nested 1000 groups deep, and copying an object reached through two hard links as two objects. A source that reaches one object through more than one hard link is rejected ([#922](https://github.com/CramBL/hdf5-pure/pull/922)).
+- Fixed `repack` and related repacks overflowing the stack on a hard-link cycle, writing an object reached through two hard links as two objects, leaving out an object that is not a group, a dataset, or a committed datatype, rejecting a drop path under a dropped group, and rejecting a committed datatype in a file with a userblock. A source that reaches one object through more than one hard link is rejected, unless the drop paths remove the extra links ([#926](https://github.com/CramBL/hdf5-pure/pull/926)).
 - Fixed `Group::groups` and related reads misinterpreting managed heap IDs with non-byte-aligned offsets or trailing padding ([#917](https://github.com/CramBL/hdf5-pure/pull/917)).
 - Fixed `File::persisted_free_sections` counting a persisted manager more than once when multiple slots record its header address.
 - Fixed `FileBuilder::finish` and related dataset creation writing chunks of 4 GiB or more ([#892](https://github.com/CramBL/hdf5-pure/pull/892)).

@@ -37,6 +37,7 @@ use test_util_hdf5::file;
 /// rather than repeating a literal the fixture could drift away from.
 const ATTR_VALUE: i32 = 7;
 const DATASET_VALUES: [i32; 3] = [10, 20, 30];
+const USERBLOCK_SIZE: u64 = 512;
 
 /// The i32 type every fixture commits, as this crate decodes it. Committing does
 /// not change the encoding — only where it is stored — so the answer a resolved
@@ -519,6 +520,37 @@ fn repack_reproduces_a_committed_datatype() {
     assert_eq!(
         out.root().attrs().unwrap().get("shared_attr"),
         Some(&AttrValue::I32Array(vec![ATTR_VALUE]))
+    );
+}
+
+#[test]
+#[cfg(target_endian = "little")]
+fn repack_reproduces_a_committed_datatype_in_a_file_with_a_userblock() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("committed.h5");
+    let dst = dir.path().join("repacked.h5");
+    fill_committed_fixture(
+        &hdf5::File::with_options()
+            .with_fapl(|p| p.libver_bounds(LibraryVersion::V18, LibraryVersion::latest()))
+            .with_fcpl(|p| p.userblock(USERBLOCK_SIZE))
+            .create(&src)
+            .unwrap(),
+        EVERYTHING,
+    );
+
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
+
+    let file = hdf5::File::open(&dst).unwrap();
+    assert!(dataset_type_is_committed(&file, "typed"));
+    assert!(attr_type_is_committed(&file, "", "shared_attr"));
+    assert!(attr_type_is_committed(&file, "data", "shared_attr"));
+    assert_eq!(
+        file.dataset("typed")
+            .unwrap()
+            .read_1d::<i32>()
+            .unwrap()
+            .to_vec(),
+        DATASET_VALUES.to_vec()
     );
 }
 

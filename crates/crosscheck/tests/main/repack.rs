@@ -4,6 +4,11 @@
 //! and the result is read back by both readers. Also proves the fail-loud
 //! contract on a real variable-length string dataset the C library produces.
 
+use std::path::Path;
+
+use hdf5::ObjectReference;
+use hdf5::ObjectReference1;
+use hdf5::ReferencedObject;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::FilterId;
 use hdf5_pure::VariableLengthType;
@@ -13,6 +18,9 @@ use hdf5_pure::{
 use rstest::rstest;
 
 use test_util_hdf5::{absence, file, fixtures};
+
+use crate::hard_link_graphs::RepeatedObjectGraph;
+use crate::hard_link_graphs::TreeGraph;
 
 #[test]
 fn c_file_repacked_then_read_by_c_library() {
@@ -2218,3 +2226,189 @@ fn every_spelling_of_a_drop_path_drops_one_object_the_c_library_wrote(#[case] sp
     );
     absence::assert_libhdf5_absent(&c.dataset("grp/doomed").unwrap_err(), "doomed");
 }
+
+#[rstest]
+fn a_repack_rejects_a_surviving_alias_or_cycle_before_it_writes(
+    #[values(
+        RepeatedObjectGraph::AncestorCycle,
+        RepeatedObjectGraph::SelfLinked,
+        RepeatedObjectGraph::SharedDataset,
+        RepeatedObjectGraph::SharedSubgroup
+    )]
+    graph: RepeatedObjectGraph,
+    #[values(RepackCall::Repack, RepackCall::RepackInto, RepackCall::RepackToPath)]
+    call: RepackCall,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("graph.h5");
+    graph.write(&src);
+
+    let err = call.rejected(&src, &dir.path().join("repacked.h5"), &RepackOptions::new());
+
+    let Error::RepackUnsupported(reason) = err else {
+        panic!("expected RepackUnsupported, got {err:?}");
+    };
+    assert_eq!(reason, REPEATED_OBJECT);
+}
+
+#[rstest]
+#[case::closing_link_of_a_self_link(
+    RepeatedObjectGraph::SelfLinked,
+    "g/self",
+    vec![("/", vec!["g"]), ("g", vec![])],
+    None
+)]
+#[case::self_link_spelled_through_the_cycle(
+    RepeatedObjectGraph::SelfLinked,
+    "g/self/self",
+    vec![("/", vec!["g"]), ("g", vec![])],
+    None
+)]
+#[case::closing_link_of_an_ancestor_cycle(
+    RepeatedObjectGraph::AncestorCycle,
+    "g/child/back",
+    vec![("/", vec!["g"]), ("g", vec!["child"]), ("g/child", vec![])],
+    None
+)]
+#[case::first_link_to_a_shared_dataset(
+    RepeatedObjectGraph::SharedDataset,
+    "g/d1",
+    vec![("/", vec!["g"]), ("g", vec!["d2"])],
+    Some(("g/d2", vec![1, 2, 3]))
+)]
+#[case::second_link_to_a_shared_dataset(
+    RepeatedObjectGraph::SharedDataset,
+    "g/d2",
+    vec![("/", vec!["g"]), ("g", vec!["d1"])],
+    Some(("g/d1", vec![1, 2, 3]))
+)]
+#[case::first_link_to_a_shared_subgroup(
+    RepeatedObjectGraph::SharedSubgroup,
+    "g/a/sub",
+    vec![("/", vec!["g"]), ("g", vec!["a", "b"]), ("g/a", vec![]), ("g/b", vec!["sub"]), ("g/b/sub", vec!["d"])],
+    Some(("g/b/sub/d", vec![4]))
+)]
+#[case::second_link_to_a_shared_subgroup(
+    RepeatedObjectGraph::SharedSubgroup,
+    "g/b/sub",
+    vec![("/", vec!["g"]), ("g", vec!["a", "b"]), ("g/a", vec!["sub"]), ("g/b", vec![]), ("g/a/sub", vec!["d"])],
+    Some(("g/a/sub/d", vec![4]))
+)]
+fn a_repack_that_drops_the_repeated_link_writes_a_tree_the_c_library_reads(
+    #[case] graph: RepeatedObjectGraph,
+    #[case] dropped: &str,
+    #[case] members: Vec<(&str, Vec<&str>)>,
+    #[case] dataset: Option<(&str, Vec<i32>)>,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("graph.h5");
+    let dst = dir.path().join("repacked.h5");
+    graph.write(&src);
+
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new().drop_path(dropped)).unwrap();
+
+    let c = hdf5::File::open(&dst).unwrap();
+    for (group, expected) in members {
+        assert_eq!(
+            c.group(group).unwrap().member_names().unwrap(),
+            expected,
+            "{group}"
+        );
+    }
+    if let Some((path, values)) = dataset {
+        assert_eq!(c.dataset(path).unwrap().read_raw::<i32>().unwrap(), values);
+    }
+}
+
+#[test]
+fn an_object_reference_through_a_dropped_alias_resolves_to_the_surviving_link() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("aliased_reference.h5");
+    let dst = dir.path().join("repacked.h5");
+    {
+        let file = file::libhdf5_create_v110(&src);
+        file.create_group("g")
+            .unwrap()
+            .new_dataset::<i32>()
+            .shape((3,))
+            .create("d1")
+            .unwrap()
+            .write(&[1i32, 2, 3])
+            .unwrap();
+        file.link_hard("g/d1", "g/d2").unwrap();
+        file.new_dataset::<ObjectReference1>()
+            .shape((2,))
+            .create("refs")
+            .unwrap()
+            .write(&[
+                ObjectReference1::create(&file, "g/d1").unwrap(),
+                ObjectReference1::create(&file, "g").unwrap(),
+            ])
+            .unwrap();
+        file.close().unwrap();
+    }
+
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new().drop_path("g/d1")).unwrap();
+
+    let c = hdf5::File::open(&dst).unwrap();
+    let refs = c
+        .dataset("refs")
+        .unwrap()
+        .read_raw::<ObjectReference1>()
+        .unwrap();
+    let ReferencedObject::Dataset(dataset) = refs[0].dereference(&c).unwrap() else {
+        panic!("expected the first reference to read a dataset");
+    };
+    assert_eq!(dataset.name(), "/g/d2");
+    assert_eq!(dataset.read_raw::<i32>().unwrap(), vec![1, 2, 3]);
+    let ReferencedObject::Group(group) = refs[1].dereference(&c).unwrap() else {
+        panic!("expected the second reference to read a group");
+    };
+    assert_eq!(group.name(), "/g");
+    assert_eq!(group.member_names().unwrap(), vec!["d2"]);
+}
+
+#[test]
+fn the_c_library_reads_every_dataset_of_a_repacked_wide_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("wide.h5");
+    let dst = dir.path().join("repacked.h5");
+    TreeGraph::Wide.write(&src);
+
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
+
+    let c = hdf5::File::open(&dst).unwrap();
+    TreeGraph::Wide.assert_read_by_c_library(&c.group("g").unwrap());
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RepackCall {
+    Repack,
+    RepackInto,
+    RepackToPath,
+}
+
+impl RepackCall {
+    fn rejected(self, src: &Path, dst: &Path, options: &RepackOptions) -> Error {
+        let err = match self {
+            Self::Repack => hdf5_pure::repack(src, dst, options).unwrap_err(),
+            Self::RepackInto => {
+                let mut bytes = WRITER_CONTENT.to_vec();
+                let err = hdf5_pure::repack_into(&File::open(src).unwrap(), &mut bytes, options)
+                    .unwrap_err();
+                assert_eq!(bytes, WRITER_CONTENT);
+                err
+            }
+            Self::RepackToPath => {
+                hdf5_pure::repack_to_path(&File::open(src).unwrap(), dst, options).unwrap_err()
+            }
+        };
+        assert!(!dst.exists(), "a failed repack created {dst:?}");
+        err
+    }
+}
+
+const REPEATED_OBJECT: &str = "the repacked file would hold more than one hard link to one object \
+     (an alias or a cycle), which a repack cannot reproduce yet";
+
+const WRITER_CONTENT: &[u8] = b"held by the caller";

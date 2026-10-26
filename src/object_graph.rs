@@ -2,13 +2,16 @@
 //!
 //! A file may link one object from several groups, and a group from inside its own subtree.
 //! [`ObjectGraph::discover`] expands each object once, keyed by the address of its object header,
-//! and stops at a [`TraversalBudget`] of objects and hard links. [`ObjectGraph::into_tree`]
+//! and stops at a [`TraversalBudget`] of objects and hard links. [`ObjectGraph::remove_links`]
+//! removes links and then the objects the root does not reach, and [`ObjectGraph::into_tree`]
 //! accepts the graph as a tree only if no link targets the root and no two links target one
 //! object.
 
 use alloc::collections::BTreeMap;
+use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::borrow::Borrow;
 use core::fmt;
 
 use hdf5_pure_core::__private::PhysicalAddress;
@@ -22,7 +25,9 @@ use crate::error::FormatError;
 /// The graph holds each object once, however many links target it, and a link targets an object
 /// by its [`ObjectIndex`]. The root has index 0.
 pub(crate) struct ObjectGraph<T, L> {
-    // `discover` expands the objects in admission order, so `objects[i]` is `ObjectIndex(i)`.
+    // `objects[i]` is `ObjectIndex(i)`, the root is `objects[0]`, and every link targets an index
+    // into `objects`. `discover` expands the objects in admission order, root first, and
+    // `remove_unreached` keeps the root first and renumbers the targets of the objects it keeps.
     objects: Vec<GraphObject<T, L>>,
 }
 
@@ -72,6 +77,62 @@ impl<T, L> ObjectGraph<T, L> {
         })
     }
 
+    /// Removes `links`, then the objects the root does not reach.
+    ///
+    /// Returns the objects it removes by their index before the removal, and their links target the
+    /// indices from before the removal. The order of the objects that stay is unchanged, and their
+    /// links target the new indices.
+    pub(crate) fn remove_links(
+        &mut self,
+        links: &BTreeSet<LinkIndex>,
+    ) -> BTreeMap<ObjectIndex, GraphObject<T, L>> {
+        if links.is_empty() {
+            return BTreeMap::new();
+        }
+        for (index, object) in self.objects.iter_mut().enumerate() {
+            object.links = core::mem::take(&mut object.links)
+                .into_iter()
+                .enumerate()
+                .filter(|&(position, _)| {
+                    !links.contains(&LinkIndex {
+                        object: ObjectIndex(index),
+                        position,
+                    })
+                })
+                .map(|(_, link)| link)
+                .collect();
+        }
+        self.remove_unreached()
+    }
+
+    /// Follows one link per label from the root, and returns the last link and the object it
+    /// targets.
+    ///
+    /// For each label, follows the first link with that label of the current object, so a path may
+    /// go around a cycle. Returns `None` if `labels` is empty or a
+    /// label matches no link of its object.
+    pub(crate) fn find_link<'a, Q>(
+        &self,
+        labels: impl IntoIterator<Item = &'a Q>,
+    ) -> Option<(LinkIndex, ObjectIndex)>
+    where
+        L: Borrow<Q>,
+        Q: Eq + ?Sized + 'a,
+    {
+        let mut found = None;
+        let mut object = ObjectIndex::ROOT;
+        for label in labels {
+            let (position, link) = self.objects[object.get()]
+                .links
+                .iter()
+                .enumerate()
+                .find(|(_, link)| link.label.borrow() == label)?;
+            found = Some((LinkIndex { object, position }, link.target));
+            object = link.target;
+        }
+        found
+    }
+
     /// Converts the graph into an [`ObjectTree`] if each object other than the root is the target
     /// of one link and the root of none.
     ///
@@ -104,6 +165,53 @@ impl<T, L> ObjectGraph<T, L> {
         // and the post order puts the root last.
         let root = descendants.pop().expect("an object graph holds its root");
         Ok(ObjectTree { descendants, root })
+    }
+
+    /// Removes the objects the root does not reach, and returns them by their index before the
+    /// removal.
+    fn remove_unreached(&mut self) -> BTreeMap<ObjectIndex, GraphObject<T, L>> {
+        let reached = self.reached();
+        let renumbered: Vec<_> = reached
+            .iter()
+            .scan(0, |next, &reached| {
+                let index = *next;
+                *next += usize::from(reached);
+                Some(ObjectIndex(index))
+            })
+            .collect();
+        let mut unreached = BTreeMap::new();
+        let len = self.objects.len();
+        for (index, (mut object, reached)) in
+            core::mem::replace(&mut self.objects, Vec::with_capacity(len))
+                .into_iter()
+                .zip(reached)
+                .enumerate()
+        {
+            if !reached {
+                unreached.insert(ObjectIndex(index), object);
+                continue;
+            }
+            for link in &mut object.links {
+                link.target = renumbered[link.target.get()];
+            }
+            self.objects.push(object);
+        }
+        unreached
+    }
+
+    /// Returns whether the root reaches each object, at its index.
+    fn reached(&self) -> Vec<bool> {
+        let mut reached = vec![false; self.objects.len()];
+        reached[ObjectIndex::ROOT.get()] = true;
+        let mut stack = vec![ObjectIndex::ROOT];
+        while let Some(index) = stack.pop() {
+            for link in &self.objects[index.get()].links {
+                if !core::mem::replace(&mut reached[link.target.get()], true) {
+                    stack.push(link.target);
+                }
+            }
+        }
+        reached
     }
 
     /// Returns the objects in post order, each after the subtrees of its links in link order, or
@@ -203,7 +311,7 @@ impl ObjectId {
 }
 
 /// The position of an object in an [`ObjectGraph`], or among the descendants of an [`ObjectTree`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct ObjectIndex(usize);
 
 impl ObjectIndex {
@@ -213,6 +321,14 @@ impl ObjectIndex {
     pub(crate) const fn get(self) -> usize {
         self.0
     }
+}
+
+/// The position of a link in an [`ObjectGraph`]: the object that holds the link, and the position
+/// of the link among the links of that object.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct LinkIndex {
+    object: ObjectIndex,
+    position: usize,
 }
 
 /// The numbers of objects and of hard links past which the discovery of an [`ObjectGraph`] stops.
@@ -248,7 +364,8 @@ pub(crate) enum TraversalError<E> {
 /// A copy, made by [`File::copy_from`](crate::File::copy_from) or by the
 /// [`File::commit`](crate::File::commit) that applies a [`File::copy`](crate::File::copy), reads
 /// the objects its source reaches through hard links, up to a limit on the objects and another on
-/// the hard links.
+/// the hard links. A repack, such as [`repack`](crate::repack()), reads the objects of its source
+/// the same way.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TraversalLimit {
@@ -330,8 +447,10 @@ mod tests {
     use super::Expansion;
     use super::GraphObject;
     use super::HardLink;
+    use super::LinkIndex;
     use super::ObjectGraph;
     use super::ObjectId;
+    use super::ObjectIndex;
     use super::TraversalBudget;
     use super::TraversalError;
     use super::TraversalLimit;
@@ -377,6 +496,101 @@ mod tests {
             panic!("expected the graph back, got a tree");
         };
         assert_eq!(graph.objects.len(), edges.len());
+    }
+
+    #[rstest]
+    #[case::first_link(vec!["2"], Some(((0, 0), 1)))]
+    #[case::second_link(vec!["3"], Some(((0, 1), 2)))]
+    #[case::nested_link(vec!["2", "4"], Some(((1, 0), 3)))]
+    #[case::missing_label(vec!["5"], None)]
+    #[case::label_of_another_group(vec!["2", "3"], None)]
+    #[case::empty_path(vec![], None)]
+    fn find_link_follows_one_link_per_label_from_the_root(
+        #[case] labels: Vec<&str>,
+        #[case] expected: Option<((usize, usize), usize)>,
+    ) {
+        let edges = vec![(1, vec![2, 3]), (2, vec![4]), (3, vec![]), (4, vec![])];
+        let graph = discover(&edges, UNLIMITED).unwrap();
+        assert_eq!(
+            graph.find_link(labels),
+            expected.map(|(link, target)| (link_index(link), ObjectIndex(target)))
+        );
+    }
+
+    #[test]
+    fn find_link_follows_a_cycle() {
+        let graph = discover(&[(1, vec![2]), (2, vec![1])], UNLIMITED).unwrap();
+        assert_eq!(
+            graph.find_link(["2", "1", "2", "1"]),
+            Some((link_index((1, 0)), ObjectIndex(0)))
+        );
+    }
+
+    #[rstest]
+    #[case::no_link_removed(vec![(1, vec![2]), (2, vec![])], vec![], vec![], vec![(2, vec![])], (1, vec![0]))]
+    #[case::self_link(vec![(1, vec![1])], vec![(0, 0)], vec![], vec![], (1, vec![]))]
+    #[case::ancestor_cycle(
+        vec![(1, vec![2]), (2, vec![1])],
+        vec![(1, 0)],
+        vec![],
+        vec![(2, vec![])],
+        (1, vec![0]),
+    )]
+    #[case::shared_object(
+        vec![(1, vec![2, 3]), (2, vec![4]), (3, vec![4]), (4, vec![])],
+        vec![(2, 0)],
+        vec![],
+        vec![(4, vec![]), (2, vec![0]), (3, vec![])],
+        (1, vec![1, 2]),
+    )]
+    #[case::subtree(
+        vec![(1, vec![2, 3]), (2, vec![4]), (3, vec![]), (4, vec![])],
+        vec![(0, 0)],
+        vec![(1, 2, vec![3]), (3, 4, vec![])],
+        vec![(3, vec![])],
+        (1, vec![0]),
+    )]
+    #[case::alias_of_a_subtree_object(
+        vec![(1, vec![2, 4]), (2, vec![4]), (4, vec![])],
+        vec![(0, 0)],
+        vec![(1, 2, vec![2])],
+        vec![(4, vec![])],
+        (1, vec![0]),
+    )]
+    fn remove_links_returns_the_unreached_objects_and_renumbers_the_rest(
+        #[case] edges: Vec<(u64, Vec<u64>)>,
+        #[case] links: Vec<(usize, usize)>,
+        #[case] unreached: Vec<(usize, u64, Vec<usize>)>,
+        #[case] descendants: Vec<(u64, Vec<usize>)>,
+        #[case] root: (u64, Vec<usize>),
+    ) {
+        let mut graph = discover(&edges, UNLIMITED).unwrap();
+        let links = links.into_iter().map(link_index).collect();
+        assert_eq!(
+            graph
+                .remove_links(&links)
+                .into_iter()
+                .map(|(index, object)| (
+                    index.get(),
+                    object.value.header_address().get(),
+                    object
+                        .links
+                        .iter()
+                        .map(|link| link.target.get())
+                        .collect::<Vec<_>>(),
+                ))
+                .collect::<Vec<_>>(),
+            unreached
+        );
+        let Ok(tree) = graph.into_tree() else {
+            panic!("expected a tree, got the graph back");
+        };
+        let (tree_descendants, tree_root) = tree.into_parts();
+        assert_eq!(
+            tree_descendants.iter().map(summary).collect::<Vec<_>>(),
+            descendants
+        );
+        assert_eq!(summary(&tree_root), root);
     }
 
     #[test]
@@ -479,6 +693,13 @@ mod tests {
             object.value.header_address().get(),
             object.links.iter().map(|link| link.target.get()).collect(),
         )
+    }
+
+    fn link_index((object, position): (usize, usize)) -> LinkIndex {
+        LinkIndex {
+            object: ObjectIndex(object),
+            position,
+        }
     }
 
     fn link(target: u64) -> HardLink<String, ObjectId> {

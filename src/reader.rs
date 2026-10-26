@@ -8,6 +8,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
+use hdf5_pure_core::__private::PhysicalAddress;
+
 #[cfg(test)]
 use crate::FileSpacePageSize;
 use crate::FileSpaceSettings;
@@ -2054,6 +2056,19 @@ impl FileInner {
         LibVer::from_superblock_version(self.superblock.version())
     }
 
+    /// Parses the datatype of the Datatype message in `header`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::MissingMessage`] if `header` has no Datatype message, and [`Error::Format`]
+    /// if the message does not parse.
+    fn header_datatype(&self, header: &ObjectHeader) -> Result<Datatype, Error> {
+        let message = find_message(header, MessageType::DATATYPE)?;
+        let (datatype, _) =
+            hdf5_pure_format::__private::parse_datatype(&self.message_body(message)?)?;
+        Ok(datatype)
+    }
+
     fn parse_header(&self, address: u64) -> Result<ObjectHeader, FormatError> {
         let access = self.access_mode();
         match &self.backend {
@@ -2318,8 +2333,9 @@ impl FileInner {
         Ok(Cow::Owned(resolved))
     }
 
-    /// The object-header address a *shared* header message names, or `None` when
-    /// the record carries its own content or names the shared-message heap.
+    /// Returns the object-header address a *shared* header message refers to, as the message
+    /// stores it, or `None` if the message stores its content inline or refers to the
+    /// shared-message heap.
     ///
     /// [`Self::message_body`] answers what the message says; this answers which
     /// object says it. A rewrite needs both: the content to reproduce the type,
@@ -2331,13 +2347,13 @@ impl FileInner {
     pub(crate) fn shared_target_address(
         &self,
         msg: &crate::object_header::HeaderMessage,
-    ) -> Result<Option<u64>, Error> {
+    ) -> Result<Option<StoredAddress>, Error> {
         if !msg.flags.is_shared() {
             return Ok(None);
         }
         let reference = shared_message::parse_shared_ref_with_widths(&msg.data, self.widths)?;
         match reference.location {
-            shared_message::SharedLocation::ObjectHeader(addr) => Ok(Some(addr.get())),
+            shared_message::SharedLocation::ObjectHeader(addr) => Ok(Some(addr)),
             shared_message::SharedLocation::SohmHeap(_) => Ok(None),
         }
     }
@@ -4022,6 +4038,69 @@ impl File {
     pub(crate) fn addresses(&self) -> AddressContext {
         self.inner.addresses()
     }
+
+    /// Returns the class of the object whose header is at `header`, and the hard links of the
+    /// object if it is a group.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the object header does not parse, or if the object is a group
+    /// whose link storage does not parse.
+    pub(crate) fn hard_links_at(
+        &self,
+        header: PhysicalAddress,
+    ) -> Result<(ObjectClass, Vec<GroupEntry>), Error> {
+        let header = self.inner.parse_header(header.get())?;
+        let class = ObjectClass::of(&header);
+        let links = match class {
+            ObjectClass::Group => self.inner.group_children(&header)?,
+            ObjectClass::Dataset | ObjectClass::NamedDatatype | ObjectClass::Unknown => Vec::new(),
+        };
+        Ok((class, links))
+    }
+
+    /// Returns a handle to the group whose object header is at `header`, which `path` identifies
+    /// from the root group.
+    pub(crate) fn group_at(&self, header: PhysicalAddress, path: ObjectPathBuf) -> Group {
+        let at = self.inner.revisions().at(header.get());
+        Group::new(Arc::clone(&self.inner), at, Some(path))
+    }
+
+    /// Returns a handle to the dataset whose object header is at `header`, which `path`
+    /// identifies from the root group.
+    ///
+    /// The handle has the chunk cache of the file's access properties.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the object header does not parse.
+    pub(crate) fn dataset_at(
+        &self,
+        header: PhysicalAddress,
+        path: ObjectPathBuf,
+    ) -> Result<Dataset, Error> {
+        let at = self.inner.revisions().at(header.get());
+        let chunk_cache = DatasetAccessProperties::new()
+            .resolved_chunk_cache(self.inner.access_properties.chunk_cache);
+        Ok(Dataset::new(
+            Arc::clone(&self.inner),
+            at,
+            self.inner.parse_header(header.get())?,
+            chunk_cache,
+            Some(path),
+        ))
+    }
+
+    /// Returns the datatype of the committed datatype whose object header is at `header`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the object header or its Datatype message does not parse, and
+    /// [`Error::MissingMessage`] if the header has no Datatype message.
+    pub(crate) fn named_datatype_at(&self, header: PhysicalAddress) -> Result<Datatype, Error> {
+        self.inner
+            .header_datatype(&self.inner.parse_header(header.get())?)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4479,7 +4558,8 @@ impl Group {
     /// [`Error::NotANamedDatatype`] if `path` identifies an object of another kind, as `H5Topen`
     /// rejects one.
     pub fn named_datatype(&self, path: &str) -> Result<Datatype, Error> {
-        Ok(self.named_datatype_at(path)?.0)
+        self.file
+            .header_datatype(&self.named_datatype_header(path)?)
     }
 
     /// Returns how many things reference the committed (`H5Tcommit`) datatype `path` names:
@@ -4500,7 +4580,7 @@ impl Group {
     /// [`FormatError::UnexpectedEof`] for an Object Reference Count message too short to hold its
     /// count.
     pub fn named_datatype_references(&self, path: &str) -> Result<u32, Error> {
-        let (_, hdr) = self.named_datatype_header(path)?;
+        let hdr = self.named_datatype_header(path)?;
         if let Some(count) = hdr.reference_count {
             return Ok(count);
         }
@@ -4518,35 +4598,21 @@ impl Group {
         Ok(u32::from_le_bytes([body[1], body[2], body[3], body[4]]))
     }
 
-    /// Returns the object header of the committed datatype `path` identifies, and its
-    /// address.
+    /// Returns the object header of the committed datatype `path` identifies.
     ///
     /// The one place the by-name datatype lookups classify what they reached, so
     /// that an object this rejects cannot be one
     /// [`named_datatypes`](Self::named_datatypes) would list. Reached the way
     /// [`group`](Self::group) and [`dataset`](Self::dataset) reach theirs, which
     /// looks each component up by name.
-    fn named_datatype_header(&self, path: &str) -> Result<(u64, ObjectHeader), Error> {
+    fn named_datatype_header(&self, path: &str) -> Result<ObjectHeader, Error> {
         let relative = ObjectPath::parse(path);
         let address = self.resolve_path(&relative)?;
         let hdr = self.file.parse_header(address)?;
         if !is_named_datatype(&hdr) {
             return Err(Error::NotANamedDatatype(self.root_relative(&relative)));
         }
-        Ok((address, hdr))
-    }
-
-    /// Returns the datatype the committed object `path` identifies holds, and the address of the
-    /// object header holding it.
-    ///
-    /// The address is the identity every user of the type shares: two datasets
-    /// naming the same address name one type, and reproducing that requires
-    /// matching them up by address rather than by what the type decodes to.
-    pub(crate) fn named_datatype_at(&self, path: &str) -> Result<(Datatype, u64), Error> {
-        let (address, hdr) = self.named_datatype_header(path)?;
-        let msg = find_message(&hdr, MessageType::DATATYPE)?;
-        let (dt, _) = hdf5_pure_format::__private::parse_datatype(&self.file.message_body(msg)?)?;
-        Ok((dt, address))
+        Ok(hdr)
     }
 
     /// List the names of subgroups in this group.
@@ -5642,8 +5708,8 @@ impl Dataset {
         fresh
     }
 
-    /// Address of this dataset's object header (base-adjusted, file-absolute).
-    /// Used to resolve object references that point at this dataset.
+    /// Returns the address of this dataset's object header, absolute in the file.
+    #[cfg(test)]
     pub(crate) fn header_address(&self) -> Result<u64, Error> {
         Ok(self.resolved()?.at.address)
     }
@@ -7083,14 +7149,15 @@ the same commit to replace it",
         Ok(dt)
     }
 
-    /// The object-header address of this dataset's committed (shared) element
-    /// type, or `None` when the type is written in the dataset's own header.
+    /// Returns the object-header address of this dataset's committed element type, as its
+    /// Datatype message stores it, or `None` if the type is stored inline or in the
+    /// shared-message heap.
     ///
     /// [`datatype`](Self::datatype) resolves it either way, so this is for
     /// callers that must *reproduce* the dataset: writing the resolved type back
     /// inline loses the link every C-library reader reports by name, and the
     /// address is what says which committed object to name instead.
-    pub(crate) fn committed_datatype_address(&self) -> Result<Option<u64>, Error> {
+    pub(crate) fn committed_datatype_address(&self) -> Result<Option<StoredAddress>, Error> {
         let state = self.resolved()?;
         let msg = find_message(&state.header, MessageType::DATATYPE)?;
         self.file.shared_target_address(msg)
@@ -7805,6 +7872,32 @@ fn find_message(
 
 fn has_message(header: &ObjectHeader, msg_type: MessageType) -> bool {
     header.messages.iter().any(|m| m.msg_type == msg_type)
+}
+
+/// The class of an object, read from the messages of its object header.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ObjectClass {
+    Dataset,
+    Group,
+    NamedDatatype,
+    /// An object of none of the other classes.
+    Unknown,
+}
+
+impl ObjectClass {
+    // `H5O__obj_class_real` in `H5Oint.c`, HDF5 2.2.0, tests for a group, then a dataset, then a
+    // datatype.
+    fn of(header: &ObjectHeader) -> Self {
+        if group_v2::is_group(header) {
+            Self::Group
+        } else if has_message(header, MessageType::DATA_LAYOUT) {
+            Self::Dataset
+        } else if is_named_datatype(header) {
+            Self::NamedDatatype
+        } else {
+            Self::Unknown
+        }
+    }
 }
 
 /// Whether an object header describes a committed (`H5Tcommit`) datatype: it
