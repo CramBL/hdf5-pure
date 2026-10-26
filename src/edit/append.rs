@@ -216,7 +216,8 @@ impl WriteEngine {
             lossy_filters: st
                 .pipeline
                 .as_ref()
-                .is_some_and(|p| !super::pipeline_lossless(p)),
+                .is_some_and(|p| !super::pipeline_lossless(p))
+                && !st.loc.flags.partial_edge_chunks_stored_raw(),
             full_batch_elems: self.batch_elems(st.loc.chunk_bytes, chunk_elems),
         })
     }
@@ -495,7 +496,8 @@ impl WriteEngine {
     /// # Errors
     ///
     /// Returns [`Error::AppendUnsupported`] if the committed dataset is rank one, its
-    /// pipeline is lossy, and its length is not a multiple of the chunk length.
+    /// pipeline is lossy, its partial chunks are filtered, and its length is not a multiple of
+    /// the chunk length.
     pub(super) fn refuse_lossy_partial_tail(
         &self,
         path: &ObjectPathBuf,
@@ -566,6 +568,10 @@ impl WriteEngine {
         let Ok(dl) = DataLayout::parse_with_widths(&region[lb..le], self.context.widths()) else {
             return false;
         };
+        if matches!(&dl, DataLayout::Chunked { flags, .. } if flags.partial_edge_chunks_stored_raw())
+        {
+            return false;
+        }
         if disk_ds.dimensions.len() != 1 {
             return false;
         }

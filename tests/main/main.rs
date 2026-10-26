@@ -83,6 +83,7 @@ mod owned_swmr;
 mod paged_mutation;
 mod paged_staged_commit;
 mod paged_write;
+mod partial_lossy_append;
 mod partial_read;
 mod proptest_roundtrip;
 mod provenance_verify;

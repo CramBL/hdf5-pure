@@ -440,10 +440,9 @@ impl WriteEngine {
     /// # Errors
     ///
     /// Returns [`Error::AppendUnsupported`] for incompatible values, unsupported geometry or
-    /// filters,
-    /// a sparse chunk grid, a lossy partial trailing chunk, inconsistent filter metadata, or
-    /// dimension
-    /// overflow. Returns metadata, chunk-decoding, and encoding errors.
+    /// filters, a sparse chunk grid, a partial tail stored under lossy filters, inconsistent
+    /// filter metadata, or dimension overflow. Returns metadata, chunk-decoding, and encoding
+    /// errors.
     pub(super) fn prepare_append<S: Source + ?Sized>(
         src: &S,
         addr: u64,
@@ -625,6 +624,7 @@ impl WriteEngine {
         let has_partial = current_dim0 % chunk_elems != 0;
 
         if has_partial
+            && !flags.partial_edge_chunks_stored_raw()
             && let Some(pl) = &pipeline
             && !super::pipeline_lossless(pl)
         {

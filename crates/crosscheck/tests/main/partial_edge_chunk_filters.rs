@@ -19,9 +19,10 @@
 //!
 //! An append through hdf5-pure, to a dataset either library created with the
 //! flag or without it, stores each chunk it writes filtered or raw. An in-place
-//! append also stores a chunk with every filter skipped where a reader at the
-//! extent before the append and a reader at the extent after it decode the
-//! chunk differently. Both libraries read the values and report the same chunk
+//! append with a lossless pipeline stores a chunk with every filter skipped where readers
+//! at the old and new extents decode it differently. Under a lossy pipeline, an exempt
+//! partial tail stays raw until complete, then is filtered after extent publication.
+//! Both libraries read the values and report the same chunk
 //! records, before and after libhdf5 writes past the appended values.
 //!
 //! A staged overwrite through hdf5-pure, to a dataset either library created
@@ -44,6 +45,7 @@ use std::cmp::Ordering;
 use std::ops::Range;
 use std::path::Path;
 
+use hdf5::Datatype as CDatatype;
 use hdf5::Extent;
 use hdf5::Hyperslab;
 use hdf5::SliceOrIndex;
@@ -63,12 +65,15 @@ use hdf5_pure::MaxExtent;
 use hdf5_pure::MessageType;
 use hdf5_pure::PartialEdgeFiltering;
 use hdf5_pure::RepackOptions;
+use hdf5_pure::ScaleOffset;
 use hdf5_pure_format::__private::AccessMode;
 use hdf5_pure_format::__private::ChunkedLayoutFlags;
 use hdf5_pure_format::__private::DONT_FILTER_PARTIAL_BOUND_CHUNKS;
 use hdf5_pure_format::__private::DataLayout;
 use hdf5_pure_format::__private::ObjectHeader;
 use hdf5_pure_format::__private::SINGLE_INDEX_WITH_FILTER;
+use hdf5_sys::h5t;
+use hdf5_sys::h5t::H5T_order_t;
 use ndarray::ArrayD;
 use ndarray::IxDyn;
 use ndarray::Slice;
@@ -397,6 +402,99 @@ fn chunk_offsets_and_masks(path: &Path) -> Vec<(Vec<u64>, u32)> {
         .iter()
         .map(|chunk| (chunk.offset().to_vec(), chunk.filter_mask()))
         .collect()
+}
+
+#[rstest]
+#[case::empty(&[])]
+#[case::partial(&[1.46])]
+fn lossy_unfiltered_tails_append_and_filter_on_completion(
+    #[case] values: &[f64],
+    #[values(Creator::Libhdf5, Creator::Pure)] creator: Creator,
+    #[values(false, true)] staged: bool,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lossy_raw_tail.h5");
+    let reference = dir.path().join("lossy_raw_tail_reference.h5");
+    let filters = [dataset::Filter::ScaleOffset(ScaleOffset::FloatDScale(1))];
+    let datatype = CDatatype::from_type::<f64>().unwrap();
+    hdf5::sync::sync(|| {
+        // SAFETY: The lock serializes access and `datatype` owns a live floating-point type.
+        let status = unsafe { h5t::H5Tset_order(datatype.id(), H5T_order_t::H5T_ORDER_LE) };
+        assert_eq!(status, 0);
+    });
+    let initial = Unlimited::new("d", values, 4)
+        .filters(&filters)
+        .partial_edge_chunks_unfiltered();
+    match creator {
+        Creator::Libhdf5 => initial
+            .clone()
+            .stored_as(datatype.clone())
+            .libhdf5_create(&path),
+        Creator::Pure => initial.pure_create(&path),
+    }
+    initial.stored_as(datatype).libhdf5_create(&reference);
+
+    if values.is_empty() {
+        append_lossy_tail(
+            &path,
+            &[1.46],
+            staged || matches!(creator, Creator::Libhdf5),
+        );
+    }
+    append_lossy_tail(&path, &[1.56], staged);
+    let raw = [1.46, 1.56];
+    assert_eq!(dataset::read_libhdf5::<f64>(&path, "d"), raw);
+    assert_eq!(dataset::read_pure::<f64>(&path, "d"), raw);
+    let chunks = array_index::libhdf5_chunks(&path, 0);
+    assert_eq!(chunks.len(), 1);
+    assert_eq!((chunks[0].size(), chunks[0].filter_mask()), (32, 0));
+
+    append_lossy_tail(&path, &[1.0, 2.0, 3.46], staged);
+    {
+        let file = hdf5::File::open_rw(&reference).unwrap();
+        let ds = file.dataset("d").unwrap();
+        ds.resize([5]).unwrap();
+        ds.write(&[1.46, 1.56, 1.0, 2.0, 3.46]).unwrap();
+        drop(ds);
+        file.close().unwrap();
+    }
+    let expected = dataset::read_libhdf5::<f64>(&reference, "d");
+    assert_eq!(expected, [1.5, 1.6, 1.0, 2.0, 3.46]);
+    assert_eq!(dataset::read_libhdf5::<f64>(&path, "d"), expected);
+    assert_eq!(dataset::read_pure::<f64>(&path, "d"), expected);
+    let chunks = array_index::libhdf5_chunks(&path, 0);
+    assert_eq!(
+        array_index::pure_chunks(&File::open(&path).unwrap()),
+        chunks
+    );
+    assert_eq!(chunks.len(), 2);
+    assert_eq!((chunks[0].filter_mask(), chunks[1].filter_mask()), (0, 0));
+    assert_ne!(chunks[0].size(), 32);
+    assert_eq!(chunks[1].size(), 32);
+
+    append_lossy_tail(&path, &[3.56], staged);
+    assert_eq!(
+        dataset::read_libhdf5::<f64>(&path, "d"),
+        [1.5, 1.6, 1.0, 2.0, 3.46, 3.56]
+    );
+    assert_eq!(
+        dataset::read_pure::<f64>(&path, "d"),
+        [1.5, 1.6, 1.0, 2.0, 3.46, 3.56]
+    );
+}
+
+fn append_lossy_tail(path: &Path, values: &[f64], staged: bool) {
+    let file = File::open_rw(path).unwrap();
+    let mut ds = file.dataset("d").unwrap();
+    if staged {
+        ds.append_staged(|builder| {
+            builder.append_f64(values);
+        })
+        .unwrap();
+        file.commit().unwrap();
+    } else {
+        ds.append(values).unwrap();
+    }
 }
 
 fn layout_flags(path: &Path) -> ChunkedLayoutFlags {
