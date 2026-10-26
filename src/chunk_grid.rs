@@ -254,18 +254,17 @@ impl ChunkGrid {
                 "chunk coordinates do not match the grid's rank".into(),
             ));
         }
-        let mut slot: u64 = 0;
-        for (i, d) in self.down.iter().enumerate() {
-            slot = coords[dim_at(i, self.rotated)]
-                .checked_mul(*d)
-                .and_then(|term| slot.checked_add(term))
-                .ok_or_else(|| {
-                    FormatError::ChunkedReadError(
-                        "chunk coordinates exceed the numbering the maximum shape allows".into(),
-                    )
-                })?;
-        }
-        Ok(slot)
+        self.slot_terms(coords)
+            .try_fold(0u64, |slot, (coord, down)| {
+                coord
+                    .checked_mul(down)
+                    .and_then(|term| slot.checked_add(term))
+            })
+            .ok_or_else(|| {
+                FormatError::ChunkedReadError(
+                    "chunk coordinates exceed the numbering the maximum shape allows".into(),
+                )
+            })
     }
 
     /// The logical offsets of the chunk stored at element `slot`, or `None` when
@@ -288,12 +287,21 @@ impl ChunkGrid {
             .then_some(offsets))
     }
 
-    /// Returns the slots the current dataspace reaches.
+    /// Returns an iterator over the slots of the chunks in the current extent.
     ///
-    /// The slot numbers come from the maximum chunk grid, while the returned
-    /// offsets cover only chunks whose first element lies in the current
-    /// dataspace.
-    pub(crate) fn slots_in_extent(&self) -> Result<Vec<ChunkGridSlot>, FormatError> {
+    /// Each [`ChunkGridSlot`] holds a slot number in the maximum chunk grid and the element
+    /// offsets of its chunk. The iterator visits the chunks in row-major order of their chunk
+    /// coordinates in dataset order, so under [`GridOrder::UnlimitedFirst`] the slot numbers it
+    /// returns are not always ascending.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ChunkedReadError`] if the number of chunks in the current extent
+    /// does not fit in a `u64`, if the current extent has a chunk and a dimension the numbering
+    /// multiplies across has no chunks in the maximum shape, or if the slot number of the last
+    /// chunk does not fit in a `u64`. Returns [`FormatError::ValueTooLargeForPlatform`] if the
+    /// number of chunks is above `usize::MAX`.
+    pub(crate) fn slots_in_extent(&self) -> Result<SlotsInExtent<'_>, FormatError> {
         let counts = self.current_counts();
         let num_chunks = counts.iter().try_fold(1u64, |acc, count| {
             acc.checked_mul(*count).ok_or_else(|| {
@@ -302,25 +310,22 @@ impl ChunkGrid {
                 )
             })
         })?;
-        if num_chunks == 0 {
-            return Ok(Vec::new());
-        }
-        self.check_numberable()?;
-
-        let mut slots = Vec::with_capacity(num_chunks.to_usize()?);
-        let mut coords = vec![0u64; counts.len()];
-        for dense in 0..num_chunks {
-            let mut remaining = dense;
-            for d in (0..counts.len()).rev() {
-                coords[d] = remaining % counts[d];
-                remaining /= counts[d];
-            }
-            slots.push(ChunkGridSlot {
-                slot: self.slot_of(&coords)?,
-                offsets: self.offsets_of(&coords)?,
-            });
-        }
-        Ok(slots)
+        let remaining = if num_chunks == 0 {
+            0
+        } else {
+            let remaining = num_chunks.to_usize()?;
+            // No count is zero, and every multiplier is non-negative, so the last chunk has the
+            // largest slot.
+            let last: Vec<u64> = counts.iter().map(|count| count - 1).collect();
+            self.slot_of(&last)?;
+            remaining
+        };
+        Ok(SlotsInExtent {
+            grid: self,
+            coords: vec![0; counts.len()],
+            counts,
+            remaining,
+        })
     }
 
     /// Returns the logical byte size of one chunk.
@@ -341,16 +346,26 @@ impl ChunkGrid {
         Ok(())
     }
 
+    /// Pairs each slot-number multiplier with the coordinate in `coords` of the dimension it
+    /// multiplies, in rotated order.
+    ///
+    /// The slot number is the sum of the products of the pairs.
+    fn slot_terms<'a>(&'a self, coords: &'a [u64]) -> impl Iterator<Item = (u64, u64)> + 'a {
+        // `new` builds one multiplier per dimension and rotates a dimension index, so `dim_at`
+        // maps each position below the rank to a dimension below it, and both callers pass one
+        // coordinate per dimension.
+        self.down
+            .iter()
+            .enumerate()
+            .map(|(i, &down)| (coords[dim_at(i, self.rotated)], down))
+    }
+
     fn current_counts(&self) -> Vec<u64> {
         self.dims
             .iter()
             .zip(&self.chunk_dims)
             .map(|(dim, chunk_dim)| dim.div_ceil(*chunk_dim))
             .collect()
-    }
-
-    fn offsets_of(&self, coords: &[u64]) -> Result<Vec<u64>, FormatError> {
-        offsets_from_scaled(&self.chunk_dims, coords)
     }
 
     /// The logical offsets — the first element's coordinate in each dimension,
@@ -374,6 +389,59 @@ impl ChunkGrid {
     }
 }
 
+/// An iterator over the slots of the chunks in a grid's current extent.
+///
+/// This `struct` is created by [`ChunkGrid::slots_in_extent`]. See its documentation for more.
+#[derive(Clone, Debug)]
+pub(crate) struct SlotsInExtent<'a> {
+    grid: &'a ChunkGrid,
+    /// The number of chunks along each dimension of the current extent, in dataset order.
+    counts: Vec<u64>,
+    /// The chunk coordinates of the next chunk, in dataset order.
+    coords: Vec<u64>,
+    /// The number of chunks the iterator has yet to return.
+    remaining: usize,
+}
+
+impl Iterator for SlotsInExtent<'_> {
+    type Item = ChunkGridSlot;
+
+    fn next(&mut self) -> Option<ChunkGridSlot> {
+        self.remaining = self.remaining.checked_sub(1)?;
+        let Self {
+            grid,
+            counts,
+            coords,
+            ..
+        } = self;
+        // `slots_in_extent` numbers the last chunk, whose slot is the largest, so the sum fits.
+        let slot = grid
+            .slot_terms(coords)
+            .map(|(coord, down)| coord * down)
+            .sum();
+        // A chunk in the extent starts below the dimension, so its offset fits.
+        let offsets = coords
+            .iter()
+            .zip(&grid.chunk_dims)
+            .map(|(coord, chunk_dim)| coord * chunk_dim)
+            .collect();
+        for (coord, count) in coords.iter_mut().zip(counts.iter()).rev() {
+            *coord += 1;
+            if *coord < *count {
+                break;
+            }
+            *coord = 0;
+        }
+        Some(ChunkGridSlot { slot, offsets })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl ExactSizeIterator for SlotsInExtent<'_> {}
+
 /// Which dataset dimension sits at rotated position `i`.
 ///
 /// The rotation is the reference library's `H5VM_swizzle_coords`: dimension `u`
@@ -393,6 +461,8 @@ fn dim_at(i: usize, rotated: Option<usize>) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     /// The plain case: no maximum shape, so the grid is the dataset's own and
@@ -655,5 +725,94 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{err}").contains("can be numbered"), "{err}");
+    }
+
+    #[rstest]
+    #[case::dense(
+        &[2, 2],
+        &[4, 4],
+        None,
+        GridOrder::RowMajor,
+        vec![(0, vec![0, 0]), (1, vec![0, 2]), (2, vec![2, 0]), (3, vec![2, 2])],
+    )]
+    #[case::partial_edge_chunks(
+        &[2, 2],
+        &[3, 5],
+        None,
+        GridOrder::RowMajor,
+        vec![
+            (0, vec![0, 0]),
+            (1, vec![0, 2]),
+            (2, vec![0, 4]),
+            (3, vec![2, 0]),
+            (4, vec![2, 2]),
+            (5, vec![2, 4]),
+        ],
+    )]
+    #[case::wider_maximum_shape(
+        &[2, 2],
+        &[3, 3],
+        Some(vec![MaxExtent::Fixed(3), MaxExtent::Fixed(8)]),
+        GridOrder::RowMajor,
+        vec![(0, vec![0, 0]), (1, vec![0, 2]), (4, vec![2, 0]), (5, vec![2, 2])],
+    )]
+    #[case::rotated_unlimited_dimension(
+        &[2, 2],
+        &[3, 3],
+        Some(vec![MaxExtent::Fixed(3), MaxExtent::Unlimited]),
+        GridOrder::UnlimitedFirst,
+        vec![(0, vec![0, 0]), (2, vec![0, 2]), (1, vec![2, 0]), (3, vec![2, 2])],
+    )]
+    #[case::scalar(&[], &[], None, GridOrder::RowMajor, vec![(0, vec![])])]
+    #[case::zero_elements(&[2, 8], &[4, 0], None, GridOrder::RowMajor, vec![])]
+    fn the_slots_in_extent_run_row_major_over_the_current_grid(
+        #[case] chunk_dims: &[u64],
+        #[case] dims: &[u64],
+        #[case] max_dims: Option<Vec<MaxExtent>>,
+        #[case] order: GridOrder,
+        #[case] expected: Vec<(u64, Vec<u64>)>,
+    ) {
+        let grid = ChunkGrid::new(chunk_dims, dims, max_dims.as_deref(), order).unwrap();
+
+        let slots = grid.slots_in_extent().unwrap();
+
+        assert_eq!(slots.len(), expected.len());
+        let slots: Vec<_> = slots
+            .map(|ChunkGridSlot { slot, offsets }| (slot, offsets))
+            .collect();
+        assert_eq!(slots, expected);
+    }
+
+    #[rstest]
+    #[case::unnumberable(
+        &[2, 2],
+        &[3, 4],
+        &[MaxExtent::Fixed(3), MaxExtent::Fixed(0)],
+        "this chunked dataset has a dimension of no chunks at all, so its chunk index numbers \
+         nothing; a slot in it cannot be resolved",
+    )]
+    #[case::slot_past_the_numbering(
+        &[1, 1],
+        &[3, 1],
+        &[MaxExtent::Fixed(1), MaxExtent::Fixed(u64::MAX)],
+        "chunk coordinates exceed the numbering the maximum shape allows",
+    )]
+    #[case::chunk_count_past_u64(
+        &[1, 1],
+        &[u64::MAX, u64::MAX],
+        &[MaxExtent::Fixed(1), MaxExtent::Fixed(1)],
+        "current shape describes more chunks than can be enumerated",
+    )]
+    fn the_slots_in_extent_of_a_grid_that_cannot_number_them_are_rejected(
+        #[case] chunk_dims: &[u64],
+        #[case] dims: &[u64],
+        #[case] max_dims: &[MaxExtent],
+        #[case] message: &str,
+    ) {
+        let grid = ChunkGrid::new(chunk_dims, dims, Some(max_dims), GridOrder::RowMajor).unwrap();
+
+        let err = grid.slots_in_extent().unwrap_err();
+
+        assert_eq!(err, FormatError::ChunkedReadError(message.into()));
     }
 }

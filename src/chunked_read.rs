@@ -25,7 +25,10 @@ use hdf5_pure_space::__private::Extent;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::chunk_cache::{CachePass, ChunkCache};
-use crate::chunk_grid::{self, ChunkGrid, GridOrder};
+use crate::chunk_grid;
+use crate::chunk_grid::ChunkGrid;
+use crate::chunk_grid::ChunkGridSlot;
+use crate::chunk_grid::GridOrder;
 use crate::chunk_span::ChunkSpanReader;
 use crate::convert::Narrow;
 #[cfg(any(feature = "std", test))]
@@ -541,38 +544,50 @@ fn collect_chunk_info_from_source_inner<S: Source + ?Sized>(
     Ok(all_chunks)
 }
 
-/// Generate ChunkInfo entries for an implicit index (v4 index type 2).
+/// Returns one [`ChunkInfo`] per chunk in the current extent of `grid`, under an Implicit index
+/// whose array of chunks starts at `data_address`.
 ///
-/// Chunks are stored contiguously starting at `data_address`. No stored index;
-/// addresses are computed from the chunk position.
+/// An Implicit index is an array of chunks in slot order: the chunk at slot `n` of the maximum
+/// chunk grid starts `n` chunk sizes past `data_address`. The index is defined in "The Implicit
+/// Index" of the [format specification, version 4.0][spec], which counts the chunks along each
+/// dimension from
+/// the current extent. The C library counts them from the maximum extent, in
+/// `H5D__none_idx_get_addr` (`H5Dnone.c`, HDF5 2.2.0).
+///
+/// # Errors
+///
+/// Returns [`FormatError::ChunkedReadError`] if the byte size of a chunk, the offset of a chunk in
+/// the array, or the address of a chunk does not fit in a `u64`, and propagates the errors of
+/// [`ChunkGrid::slots_in_extent`].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_implicit
 fn generate_implicit_chunks(
     data_address: StoredAddress,
     grid: &ChunkGrid,
     element_size: u64,
 ) -> Result<Vec<ChunkInfo>, FormatError> {
     let chunk_byte_size = grid.chunk_byte_size(element_size)?;
-
-    grid.slots_in_extent()?
-        .into_iter()
-        .map(|entry| {
-            let byte_offset = entry.slot.checked_mul(chunk_byte_size).ok_or_else(|| {
-                FormatError::ChunkedReadError(
-                    "implicit chunk slot resolves past the addressable data block".into(),
-                )
-            })?;
-            let address = data_address.get().checked_add(byte_offset).ok_or_else(|| {
-                FormatError::ChunkedReadError(
-                    "implicit chunk address resolves past the addressable file".into(),
-                )
-            })?;
-            Ok(ChunkInfo {
-                chunk_size: StoredChunkSize::v4(chunk_byte_size),
-                filter_mask: 0,
-                offsets: entry.offsets,
-                address: StoredAddress::new(address),
-            })
-        })
-        .collect()
+    let slots = grid.slots_in_extent()?;
+    let mut chunks = Vec::with_capacity(slots.len());
+    for ChunkGridSlot { slot, offsets } in slots {
+        let byte_offset = slot.checked_mul(chunk_byte_size).ok_or_else(|| {
+            FormatError::ChunkedReadError(
+                "implicit chunk slot resolves past the addressable data block".into(),
+            )
+        })?;
+        let address = data_address.get().checked_add(byte_offset).ok_or_else(|| {
+            FormatError::ChunkedReadError(
+                "implicit chunk address resolves past the addressable file".into(),
+            )
+        })?;
+        chunks.push(ChunkInfo {
+            chunk_size: StoredChunkSize::v4(chunk_byte_size),
+            filter_mask: 0,
+            offsets,
+            address: StoredAddress::new(address),
+        });
+    }
+    Ok(chunks)
 }
 
 /// Returns the data rank and borrows the chunk and dataset dimensions.
@@ -4505,10 +4520,11 @@ mod tests {
             GridIndex::ExtensibleArray => GridOrder::UnlimitedFirst,
             GridIndex::BTreeV1 | GridIndex::FixedArray | GridIndex::Implicit => GridOrder::RowMajor,
         };
-        let slots = index_grid(&dataspace, &GRID_CHUNK, order)
+        let slots: Vec<_> = index_grid(&dataspace, &GRID_CHUNK, order)
             .unwrap()
             .slots_in_extent()
-            .unwrap();
+            .unwrap()
+            .collect();
         let address = |position: usize| match kind {
             GridIndex::Implicit => GRID_DATA + position as u64 * GRID_CHUNK_BYTES,
             GridIndex::BTreeV1 | GridIndex::ExtensibleArray | GridIndex::FixedArray => {
@@ -4645,6 +4661,86 @@ mod tests {
         assert_eq!(buffered.stats().index_loaded(), index_cache);
         assert_eq!(streaming.stats().index_loaded(), index_cache);
         assert_eq!(windowed.stats().index_loaded(), index_cache);
+    }
+
+    #[rstest]
+    fn both_collectors_list_the_chunks_of_the_grid_in_index_order(
+        #[values(
+            GridIndex::BTreeV1,
+            GridIndex::ExtensibleArray,
+            GridIndex::FixedArray,
+            GridIndex::Implicit
+        )]
+        kind: GridIndex,
+    ) {
+        let (file, layout, dataspace) = indexed_grid_file(kind);
+        let DataLayout::Chunked {
+            chunk_dimensions,
+            index,
+            ..
+        } = &layout
+        else {
+            panic!("the grid dataset is chunked, not {layout:?}");
+        };
+        // `indexed_grid_file` stores the chunks in the reverse of index order, except under the
+        // Implicit index.
+        let origins = [
+            [0, 0],
+            [0, 2],
+            [0, 4],
+            [2, 0],
+            [2, 2],
+            [2, 4],
+            [4, 0],
+            [4, 2],
+            [4, 4],
+        ];
+        let expected: Vec<_> = origins
+            .iter()
+            .zip(0u64..)
+            .map(|(origin, position)| match kind {
+                GridIndex::BTreeV1 => ChunkInfo {
+                    chunk_size: StoredChunkSize::btree_v1(GRID_CHUNK_BYTES as u32),
+                    filter_mask: 0,
+                    offsets: origin.iter().copied().chain([0]).collect(),
+                    address: StoredAddress::new(GRID_DATA + (8 - position) * GRID_CHUNK_BYTES),
+                },
+                GridIndex::ExtensibleArray | GridIndex::FixedArray => ChunkInfo {
+                    chunk_size: StoredChunkSize::v4(GRID_CHUNK_BYTES),
+                    filter_mask: 0,
+                    offsets: origin.to_vec(),
+                    address: StoredAddress::new(GRID_DATA + (8 - position) * GRID_CHUNK_BYTES),
+                },
+                GridIndex::Implicit => ChunkInfo {
+                    chunk_size: StoredChunkSize::v4(GRID_CHUNK_BYTES),
+                    filter_mask: 0,
+                    offsets: origin.to_vec(),
+                    address: StoredAddress::new(GRID_DATA + position * GRID_CHUNK_BYTES),
+                },
+            })
+            .collect();
+
+        let buffered = collect_chunks_for_layout(
+            &file,
+            *index,
+            chunk_dimensions,
+            &dataspace,
+            4,
+            FORMAT_WIDTHS,
+        )
+        .unwrap();
+        let streamed = collect_chunks_for_layout_from_source(
+            &BytesSource::new(&file),
+            *index,
+            chunk_dimensions,
+            &dataspace,
+            4,
+            FORMAT_WIDTHS,
+        )
+        .unwrap();
+
+        assert_eq!(buffered, expected);
+        assert_eq!(streamed, expected);
     }
 
     #[rstest]
