@@ -20,6 +20,7 @@ use crate::link_message::{LinkMessage, LinkTarget};
 use crate::message_flags::MessageFlags;
 use crate::message_type::MessageType;
 use crate::object_path::ObjectPathBuf;
+use crate::shared_message::SharedResolver;
 use crate::source::{BaseOffsetSource, BytesSource, Source};
 use crate::width::FormatWidths;
 
@@ -305,168 +306,23 @@ impl WriteEngine {
         base: AddressContext,
         widths: FormatWidths,
     ) -> Result<CopyTree, Error> {
-        if depth >= MAX_COPY_DEPTH {
-            return Err(Error::EditUnsupported(
-                "copy source nests too deeply (possible hard-link cycle)",
-            ));
-        }
-        match Self::read_object(src, access_mode, addr, base)? {
-            ObjModel::DatasetVerbatim {
-                region,
-                dense_attrs,
-            } => {
-                if cross_file {
-                    reject_foreign_addresses(&region)?;
-                    reject_foreign_dense_attrs(&dense_attrs.attrs)?;
-                }
-                Ok(CopyTree::DatasetVerbatim {
-                    region,
-                    dense_attrs,
-                })
-            }
-            ObjModel::DatasetContiguous {
-                region,
-                addr_off,
-                data_addr,
-                data_size,
-                dense_attrs,
-            } => {
-                if cross_file {
-                    reject_foreign_addresses(&region)?;
-                    reject_foreign_dense_attrs(&dense_attrs.attrs)?;
-                }
-                // Preserve an undefined data address without allocating a data block.
-                let data = if data_addr.is_undefined(OFFSET_WIDTH) {
-                    None
-                } else {
-                    let start = base.absolute(data_addr)?;
-                    start
-                        .checked_add(data_size)
-                        .filter(|&e| e <= src.len())
-                        .ok_or(Error::EditUnsupported("dataset data is out of bounds"))?;
-                    let len = data_size.to_usize()?;
-                    Some(src.read_exact_at(start, len)?)
-                };
-                Ok(CopyTree::DatasetContiguous {
-                    region,
-                    addr_off,
-                    data,
-                    dense_attrs,
-                })
-            }
-            ObjModel::DatasetChunked {
-                region,
-                dense_attrs,
-            } => {
-                if cross_file {
-                    reject_foreign_addresses(&region)?;
-                    reject_foreign_dense_attrs(&dense_attrs.attrs)?;
-                }
-                let ChunkedHeaderParts {
-                    dt,
-                    ds,
-                    layout,
-                    pipeline_message,
-                } = parse_chunked_header(&region, widths)?;
-                let DataLayout::Chunked { index, flags, .. } = layout else {
-                    return Err(Error::EditUnsupported("dataset is not chunked"));
-                };
-                if !index.enumerable() {
-                    return Err(Error::EditUnsupported(
-                        "a chunked dataset with a version-2 B-tree chunk index cannot be \
-                         copied in place yet",
-                    ));
-                }
-                let geometry = ChunkedGeometry::new(&dt, &ds, &layout)?;
-
-                let dview = BaseOffsetSource {
-                    inner: src,
-                    base: base.effective_base(),
-                };
-
-                let infos = chunked_read::enumerate_chunks_from_source(
-                    &dview,
-                    &layout,
-                    &ds,
-                    crate::file_writer::WIDTHS,
-                )?;
-                let grid = chunked_read::plan_dense_grid(infos, &ds.dimensions, geometry.spatial).ok_or(
-                    Error::EditUnsupported(
-                        "a chunked dataset with unallocated (sparse) chunks cannot be copied in place yet",
-                    ),
-                )?;
-                if grid.grid_order.is_empty() {
-                    return Err(Error::EditUnsupported(
-                        "an empty chunked dataset cannot be copied in place yet",
-                    ));
-                }
-
-                let mut meta = Vec::with_capacity(grid.grid_order.len());
-                let mut chunk_bytes = Vec::with_capacity(grid.grid_order.len());
-                for ci in &grid.grid_order {
-                    let len = ci.chunk_size.to_usize()?;
-                    ci.address
-                        .get()
-                        .checked_add(len as u64)
-                        .filter(|&e| e <= dview.len())
-                        .ok_or(Error::EditUnsupported("chunk data is out of bounds"))?;
-                    chunk_bytes.push(dview.read_exact_at(ci.address.get(), len)?);
-                    meta.push(ChunkMeta {
-                        compressed_size: ci.chunk_size.get(),
-                        filter_mask: ci.filter_mask,
-                    });
-                }
-
-                let geometry = ChunkGeometry::new(&ds, geometry);
-                Ok(CopyTree::DatasetChunked {
-                    region,
-                    geometry,
-                    flags,
-                    pipeline_message,
-                    meta,
-                    chunk_bytes,
-                    dense_attrs,
-                })
-            }
-            ObjModel::Group {
-                non_link_region,
-                children,
-                dense_attrs,
-            } => {
-                if cross_file {
-                    reject_foreign_addresses(&non_link_region)?;
-                    reject_foreign_dense_attrs(&dense_attrs.attrs)?;
-                }
-                let mut copied_children = Vec::with_capacity(children.len());
-                for (name, creation_order, child) in children {
-                    let child = base.absolute(child)?;
-                    copied_children.push((
-                        name,
-                        creation_order,
-                        Self::read_copy_subtree(
-                            src,
-                            access_mode,
-                            child,
-                            depth + 1,
-                            cross_file,
-                            base,
-                            widths,
-                        )?,
-                    ));
-                }
-                Ok(CopyTree::Group {
-                    non_link_region,
-                    children: copied_children,
-                    dense_attrs,
-                })
-            }
-        }
+        let mut reader = CopyReader {
+            src,
+            access_mode,
+            cross_file,
+            base,
+            widths,
+            nodes: CopyTreeBuilder::default(),
+        };
+        let root = reader.read(addr, depth)?;
+        Ok(reader.nodes.finish(root))
     }
 
     /// Writes an owned copy subtree and returns its root object-header address.
     ///
-    /// Writes children before their parent links and encodes addresses relative to the
-    /// destination file's base. Preserves unallocated contiguous storage.
+    /// Writes the descendants in the order the tree stores them and the root last, so each group
+    /// is written after the objects its links target. Encodes addresses relative to the
+    /// destination file's base and preserves unallocated contiguous storage.
     ///
     /// # Errors
     ///
@@ -474,10 +330,28 @@ impl WriteEngine {
     /// if header encoding, attribute encoding, or allocation geometry is invalid, and [`Error::Io`]
     /// if writing the copy fails. Propagates errors from [`Self::write_chunked_relocatable`] for
     /// chunked copies.
-    pub(super) fn write_copy_subtree(&mut self, node: &CopyTree) -> Result<u64, Error> {
+    pub(super) fn write_copy_subtree(&mut self, tree: &CopyTree) -> Result<u64, Error> {
+        let mut written = Vec::with_capacity(tree.descendants.len());
+        for node in &tree.descendants {
+            let addr = self.write_copy_node(&written, node)?;
+            written.push(addr);
+        }
+        self.write_copy_node(&written, &tree.root)
+    }
+
+    /// Writes one node of a copy and returns its object-header address.
+    ///
+    /// The caller passes in `written` the address of each descendant written before `node`, at the
+    /// index of its [`CopyNodeId`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if a link of `node` targets a descendant that is not in
+    /// `written`. Returns the other errors [`Self::write_copy_subtree`] documents.
+    fn write_copy_node(&mut self, written: &[u64], node: &CopyNode) -> Result<u64, Error> {
         let base = self.context.addresses();
         match node {
-            CopyTree::DatasetVerbatim {
+            CopyNode::DatasetVerbatim {
                 region,
                 dense_attrs,
             } => {
@@ -486,7 +360,7 @@ impl WriteEngine {
                 let oh = super::object_header::build_v2_object_header(&region)?;
                 self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
             }
-            CopyTree::DatasetContiguous {
+            CopyNode::DatasetContiguous {
                 region,
                 addr_off,
                 data,
@@ -507,7 +381,7 @@ impl WriteEngine {
                 let oh = super::object_header::build_v2_object_header(&region)?;
                 self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
             }
-            CopyTree::DatasetChunked {
+            CopyNode::DatasetChunked {
                 region,
                 geometry,
                 flags,
@@ -526,15 +400,24 @@ impl WriteEngine {
                 },
                 dense_attrs.clone(),
             ),
-            CopyTree::Group {
+            CopyNode::Group {
                 non_link_region,
-                children,
+                links,
                 dense_attrs,
             } => {
                 let mut region = non_link_region.clone();
-                for (name, creation_order, child) in children {
-                    let new_child = self.write_copy_subtree(child)?;
-                    region.push_link(name, base.relative(new_child)?, *creation_order);
+                for CopyLink {
+                    name,
+                    creation_order,
+                    target,
+                } in links
+                {
+                    let child = written.get(target.index()).copied().ok_or_else(|| {
+                        FormatError::Internal(
+                            "a copied group links an object that is not yet written".into(),
+                        )
+                    })?;
+                    region.push_link(name, base.relative(child)?, *creation_order);
                 }
                 self.append_dense_attrs(&mut region, dense_attrs.clone())?;
                 let oh = super::object_header::build_v2_object_header(&region)?;
@@ -579,9 +462,98 @@ pub(super) enum ObjModel {
 
 /// An owned subtree prepared by [`WriteEngine::read_copy_subtree`].
 ///
-/// Contains the header records, element bytes, dense attributes, and child subtrees needed by
-/// [`WriteEngine::write_copy_subtree`]. The source buffer can be released after preparation.
-pub(super) enum CopyTree {
+/// Holds the header records, element bytes, and dense attributes of every object in the subtree,
+/// which [`WriteEngine::write_copy_subtree`] writes. The source buffer can be released after
+/// preparation.
+///
+/// The objects below the root are [`CopyNode`]s in one list, and a group's links target them by
+/// [`CopyNodeId`], so a tree of any depth is checked, written, and dropped in constant stack
+/// space.
+pub(super) struct CopyTree {
+    /// Every node below the root, each after the nodes its links target.
+    descendants: Vec<CopyNode>,
+    root: CopyNode,
+}
+
+impl CopyTree {
+    /// Returns whether any object of the copy has dense attribute storage.
+    pub(super) fn has_dense_attributes(&self) -> bool {
+        core::iter::once(&self.root)
+            .chain(&self.descendants)
+            .any(|node| !node.dense_attrs().is_empty())
+    }
+
+    /// Returns the nodes depth first, each group before its targets and the targets in link
+    /// order.
+    fn preorder(&self) -> impl Iterator<Item = &CopyNode> {
+        let mut stack = vec![&self.root];
+        core::iter::from_fn(move || {
+            let node = stack.pop()?;
+            stack.extend(node.links().iter().rev().map(|link| self.node(link.target)));
+            Some(node)
+        })
+    }
+
+    fn node(&self, id: CopyNodeId) -> &CopyNode {
+        // `CopyTreeBuilder` asserts that each link targets a node it stored before, every
+        // identifier is the index `push` stored a node at, and the builder never removes a node.
+        &self.descendants[id.index()]
+    }
+}
+
+/// Collects the nodes below the root of a [`CopyTree`].
+#[derive(Default)]
+pub(super) struct CopyTreeBuilder {
+    nodes: Vec<CopyNode>,
+}
+
+impl CopyTreeBuilder {
+    /// Stores `node` below the root and returns its identifier.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a link of `node` targets a node this builder does not store.
+    pub(super) fn push(&mut self, node: CopyNode) -> CopyNodeId {
+        self.assert_links_stored(&node);
+        self.nodes.push(node);
+        CopyNodeId(self.nodes.len() - 1)
+    }
+
+    /// Returns the tree with `root` above the stored nodes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a link of `root` targets a node this builder does not store.
+    pub(super) fn finish(self, root: CopyNode) -> CopyTree {
+        self.assert_links_stored(&root);
+        CopyTree {
+            descendants: self.nodes,
+            root,
+        }
+    }
+
+    fn assert_links_stored(&self, node: &CopyNode) {
+        assert!(
+            node.links()
+                .iter()
+                .all(|link| link.target.index() < self.nodes.len()),
+            "a copied group links an object the builder does not hold yet"
+        );
+    }
+}
+
+/// The index of a node among the descendants of a [`CopyTree`].
+#[derive(Clone, Copy, Debug)]
+pub(super) struct CopyNodeId(usize);
+
+impl CopyNodeId {
+    fn index(self) -> usize {
+        self.0
+    }
+}
+
+/// An object of a [`CopyTree`], with the header records and data the writer needs to copy it.
+pub(super) enum CopyNode {
     /// Stored chunks with checked geometry and their verbatim filter-pipeline message.
     ///
     /// The copy writer rebuilds the index and layout while preserving payload bytes, sizes, and
@@ -609,32 +581,355 @@ pub(super) enum CopyTree {
         region: OhRegion,
         dense_attrs: DenseAttrSet,
     },
-    /// A group with owned children to write before reconstructing its hard links.
+    /// A group whose hard links target other nodes of the tree.
     Group {
         non_link_region: OhRegion,
-        /// Each link's name, optional creation index, and prepared child subtree.
-        children: Vec<(String, Option<u64>, CopyTree)>,
+        links: Vec<CopyLink>,
         dense_attrs: DenseAttrSet,
     },
 }
 
-impl CopyTree {
-    pub(super) fn has_dense_attributes(&self) -> bool {
+impl CopyNode {
+    /// Returns the header records the copy keeps, without Link messages or the Attribute Info and
+    /// Attribute messages of dense attribute storage.
+    fn region(&self) -> &OhRegion {
         match self {
-            Self::DatasetVerbatim { dense_attrs, .. }
-            | Self::DatasetContiguous { dense_attrs, .. }
-            | Self::DatasetChunked { dense_attrs, .. } => !dense_attrs.is_empty(),
-            Self::Group {
-                children,
-                dense_attrs,
+            Self::DatasetChunked { region, .. }
+            | Self::DatasetContiguous { region, .. }
+            | Self::DatasetVerbatim { region, .. }
+            | Self::Group {
+                non_link_region: region,
                 ..
-            } => {
-                !dense_attrs.is_empty()
-                    || children
-                        .iter()
-                        .any(|(_, _, child)| child.has_dense_attributes())
-            }
+            } => region,
         }
+    }
+
+    fn dense_attrs(&self) -> &DenseAttrSet {
+        match self {
+            Self::DatasetChunked { dense_attrs, .. }
+            | Self::DatasetContiguous { dense_attrs, .. }
+            | Self::DatasetVerbatim { dense_attrs, .. }
+            | Self::Group { dense_attrs, .. } => dense_attrs,
+        }
+    }
+
+    /// Returns the hard links of a group, or an empty slice for a dataset.
+    fn links(&self) -> &[CopyLink] {
+        match self {
+            Self::DatasetChunked { .. }
+            | Self::DatasetContiguous { .. }
+            | Self::DatasetVerbatim { .. } => &[],
+            Self::Group { links, .. } => links,
+        }
+    }
+
+    /// Checks the references of this node against the addresses the commit invalidates.
+    ///
+    /// [`screen_copied_references`] calls this for every node of a tree.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors [`screen_copied_references`] documents.
+    fn screen_references(
+        &self,
+        resolver: &impl SharedResolver,
+        widths: FormatWidths,
+        invalidated: &InvalidatedAddresses,
+    ) -> Result<(), Error> {
+        for attr in &self.dense_attrs().attrs {
+            super::screen_resolved_references(&attr.datatype, &attr.raw_data, invalidated)?;
+        }
+
+        // Read the element datatype, compact data, and inline attributes in one record traversal.
+        let region = self.region();
+        let mut element_dt: Option<Datatype> = None;
+        let mut compact: Option<Vec<u8>> = None;
+        let mut p = 0;
+        while let Some((msg_type, body, body_end)) = region.next_message(p)? {
+            // The parsed record has a complete prefix, including the flags byte.
+            let shared = MessageFlags::new(region[p + 3]).is_shared();
+            match msg_type {
+                MessageType::DATATYPE => {
+                    // Resolve a committed datatype before parsing its encoding.
+                    let committed;
+                    let encoded = if shared {
+                        committed = resolver
+                            .resolve(&region[body..body_end], MessageType::DATATYPE)
+                            .map_err(|source| Error::CopyScreenUnreadable {
+                                message: MessageType::DATATYPE,
+                                source,
+                            })?;
+                        &committed[..]
+                    } else {
+                        &region[body..body_end]
+                    };
+                    let (dt, _) = hdf5_pure_format::__private::parse_datatype(encoded)?;
+                    element_dt = Some(dt);
+                }
+                MessageType::DATA_LAYOUT => {
+                    if let Ok(DataLayout::Compact { data }) =
+                        DataLayout::parse_with_widths(&region[body..body_end], widths)
+                    {
+                        compact = Some(data);
+                    }
+                }
+                MessageType::ATTRIBUTE => {
+                    // Shared attribute records require resolving the whole message before screening.
+                    if shared {
+                        return Err(Error::EditUnsupported(
+                            "a copy in this commit carries a shared (SOHM) attribute message, whose \
+                             elements cannot be screened against the same commit's deletions; use \
+                             separate commits",
+                        ));
+                    }
+                    // Resolve the attribute's shared datatype and dataspace fields before screening.
+                    let attr =
+                        crate::attribute::AttributeMessage::parse_resolving_with_length_width(
+                            &region[body..body_end],
+                            widths.lengths,
+                            resolver,
+                        )
+                        .map_err(|source| Error::CopyScreenUnreadable {
+                            message: MessageType::ATTRIBUTE,
+                            source,
+                        })?;
+                    super::screen_resolved_references(&attr.datatype, &attr.raw_data, invalidated)?;
+                }
+                _ => {}
+            }
+            p = body_end;
+        }
+
+        match self {
+            // A declared reference requires readable compact element bytes.
+            Self::DatasetVerbatim { .. } => match (&element_dt, &compact) {
+                (Some(dt), Some(data)) => {
+                    super::screen_resolved_references(dt, data, invalidated)?;
+                }
+                (Some(dt), None) if datatype::datatype_holds_object_address(dt) => {
+                    return Err(Error::EditUnsupported(
+                        "a compact object-reference dataset's elements could not be read to screen \
+                         them against this commit's deletions; use separate commits",
+                    ));
+                }
+                _ => {}
+            },
+            Self::DatasetContiguous { data, .. } => {
+                // Skip unallocated storage before rejecting unsupported reference encodings.
+                if let (Some(dt), Some(data)) = (&element_dt, data) {
+                    super::screen_resolved_references(dt, data, invalidated)?;
+                }
+            }
+            // Stored chunks are copied without decoding their element values.
+            Self::DatasetChunked { .. } => {
+                if element_dt
+                    .as_ref()
+                    .is_some_and(datatype::datatype_holds_object_address)
+                {
+                    return Err(Error::EditUnsupported(
+                        "a chunked object-reference dataset cannot be copied in a commit that also \
+                         deletes objects: its addresses live inside chunks this path does not \
+                         decode; use separate commits",
+                    ));
+                }
+            }
+            Self::Group { .. } => {}
+        }
+        Ok(())
+    }
+}
+
+/// A hard link of a copied group and the node it targets.
+pub(super) struct CopyLink {
+    pub(super) name: String,
+    /// The link's creation index, or `None` if the source Link message has none.
+    pub(super) creation_order: Option<u64>,
+    pub(super) target: CopyNodeId,
+}
+
+/// Reads a source subtree into the nodes of a [`CopyTree`].
+struct CopyReader<'a, S: Source + ?Sized> {
+    src: &'a S,
+    access_mode: AccessMode,
+    /// Whether `src` is another file, whose references the reader rejects.
+    cross_file: bool,
+    /// The address context of `src`.
+    base: AddressContext,
+    widths: FormatWidths,
+    /// The nodes below the root the reader has read.
+    nodes: CopyTreeBuilder,
+}
+
+impl<S: Source + ?Sized> CopyReader<'_, S> {
+    /// Reads the object at `addr` and returns its node, after storing the nodes of its subtree
+    /// in `self.nodes`.
+    ///
+    /// The reader recurses once per group level, and the caller passes the number of levels above
+    /// `addr` as `depth`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if `depth` reaches [`MAX_COPY_DEPTH`] or the editor
+    /// cannot reproduce the source storage. Propagates metadata and payload read or parse errors.
+    fn read(&mut self, addr: u64, depth: u32) -> Result<CopyNode, Error> {
+        let Self {
+            src,
+            access_mode,
+            cross_file,
+            base,
+            widths,
+            ..
+        } = *self;
+        if depth >= MAX_COPY_DEPTH {
+            return Err(Error::EditUnsupported(
+                "copy source nests too deeply (possible hard-link cycle)",
+            ));
+        }
+        Ok(
+            match WriteEngine::read_object(src, access_mode, addr, base)? {
+                ObjModel::DatasetVerbatim {
+                    region,
+                    dense_attrs,
+                } => {
+                    if cross_file {
+                        reject_foreign_addresses(&region)?;
+                        reject_foreign_dense_attrs(&dense_attrs.attrs)?;
+                    }
+                    CopyNode::DatasetVerbatim {
+                        region,
+                        dense_attrs,
+                    }
+                }
+                ObjModel::DatasetContiguous {
+                    region,
+                    addr_off,
+                    data_addr,
+                    data_size,
+                    dense_attrs,
+                } => {
+                    if cross_file {
+                        reject_foreign_addresses(&region)?;
+                        reject_foreign_dense_attrs(&dense_attrs.attrs)?;
+                    }
+                    // Preserve an undefined data address without allocating a data block.
+                    let data = if data_addr.is_undefined(OFFSET_WIDTH) {
+                        None
+                    } else {
+                        let start = base.absolute(data_addr)?;
+                        start
+                            .checked_add(data_size)
+                            .filter(|&e| e <= src.len())
+                            .ok_or(Error::EditUnsupported("dataset data is out of bounds"))?;
+                        let len = data_size.to_usize()?;
+                        Some(src.read_exact_at(start, len)?)
+                    };
+                    CopyNode::DatasetContiguous {
+                        region,
+                        addr_off,
+                        data,
+                        dense_attrs,
+                    }
+                }
+                ObjModel::DatasetChunked {
+                    region,
+                    dense_attrs,
+                } => {
+                    if cross_file {
+                        reject_foreign_addresses(&region)?;
+                        reject_foreign_dense_attrs(&dense_attrs.attrs)?;
+                    }
+                    let ChunkedHeaderParts {
+                        dt,
+                        ds,
+                        layout,
+                        pipeline_message,
+                    } = parse_chunked_header(&region, widths)?;
+                    let DataLayout::Chunked { index, flags, .. } = layout else {
+                        return Err(Error::EditUnsupported("dataset is not chunked"));
+                    };
+                    if !index.enumerable() {
+                        return Err(Error::EditUnsupported(
+                            "a chunked dataset with a version-2 B-tree chunk index cannot be \
+                         copied in place yet",
+                        ));
+                    }
+                    let geometry = ChunkedGeometry::new(&dt, &ds, &layout)?;
+
+                    let dview = BaseOffsetSource {
+                        inner: src,
+                        base: base.effective_base(),
+                    };
+
+                    let infos = chunked_read::enumerate_chunks_from_source(
+                        &dview,
+                        &layout,
+                        &ds,
+                        crate::file_writer::WIDTHS,
+                    )?;
+                    let grid = chunked_read::plan_dense_grid(infos, &ds.dimensions, geometry.spatial).ok_or(
+                    Error::EditUnsupported(
+                        "a chunked dataset with unallocated (sparse) chunks cannot be copied in place yet",
+                    ),
+                )?;
+                    if grid.grid_order.is_empty() {
+                        return Err(Error::EditUnsupported(
+                            "an empty chunked dataset cannot be copied in place yet",
+                        ));
+                    }
+
+                    let mut meta = Vec::with_capacity(grid.grid_order.len());
+                    let mut chunk_bytes = Vec::with_capacity(grid.grid_order.len());
+                    for ci in &grid.grid_order {
+                        let len = ci.chunk_size.to_usize()?;
+                        ci.address
+                            .get()
+                            .checked_add(len as u64)
+                            .filter(|&e| e <= dview.len())
+                            .ok_or(Error::EditUnsupported("chunk data is out of bounds"))?;
+                        chunk_bytes.push(dview.read_exact_at(ci.address.get(), len)?);
+                        meta.push(ChunkMeta {
+                            compressed_size: ci.chunk_size.get(),
+                            filter_mask: ci.filter_mask,
+                        });
+                    }
+
+                    let geometry = ChunkGeometry::new(&ds, geometry);
+                    CopyNode::DatasetChunked {
+                        region,
+                        geometry,
+                        flags,
+                        pipeline_message,
+                        meta,
+                        chunk_bytes,
+                        dense_attrs,
+                    }
+                }
+                ObjModel::Group {
+                    non_link_region,
+                    children,
+                    dense_attrs,
+                } => {
+                    if cross_file {
+                        reject_foreign_addresses(&non_link_region)?;
+                        reject_foreign_dense_attrs(&dense_attrs.attrs)?;
+                    }
+                    let mut links = Vec::with_capacity(children.len());
+                    for (name, creation_order, child) in children {
+                        let child = self.read(base.absolute(child)?, depth + 1)?;
+                        links.push(CopyLink {
+                            name,
+                            creation_order,
+                            target: self.nodes.push(child),
+                        });
+                    }
+                    CopyNode::Group {
+                        non_link_region,
+                        links,
+                        dense_attrs,
+                    }
+                }
+            },
+        )
     }
 }
 
@@ -819,7 +1114,6 @@ pub(super) fn screen_copied_references(
     if invalidated.is_empty() {
         return Ok(());
     }
-    use crate::shared_message::SharedResolver as _;
     // The resolver supports committed object headers without a shared-message table.
     let resolver = crate::shared_message::SourceResolver::new(
         src,
@@ -828,127 +1122,8 @@ pub(super) fn screen_copied_references(
         widths,
         None,
     );
-    let (region, dense_attrs) = match tree {
-        CopyTree::DatasetVerbatim {
-            region,
-            dense_attrs,
-        }
-        | CopyTree::DatasetContiguous {
-            region,
-            dense_attrs,
-            ..
-        }
-        | CopyTree::DatasetChunked {
-            region,
-            dense_attrs,
-            ..
-        }
-        | CopyTree::Group {
-            non_link_region: region,
-            dense_attrs,
-            ..
-        } => (region, dense_attrs),
-    };
-    for attr in &dense_attrs.attrs {
-        super::screen_resolved_references(&attr.datatype, &attr.raw_data, invalidated)?;
-    }
-
-    // Read the element datatype, compact data, and inline attributes in one record traversal.
-    let mut element_dt: Option<Datatype> = None;
-    let mut compact: Option<Vec<u8>> = None;
-    let mut p = 0;
-    while let Some((msg_type, body, body_end)) = region.next_message(p)? {
-        // The parsed record has a complete prefix, including the flags byte.
-        let shared = MessageFlags::new(region[p + 3]).is_shared();
-        match msg_type {
-            MessageType::DATATYPE => {
-                // Resolve a committed datatype before parsing its encoding.
-                let committed;
-                let encoded = if shared {
-                    committed = resolver
-                        .resolve(&region[body..body_end], MessageType::DATATYPE)
-                        .map_err(|source| Error::CopyScreenUnreadable {
-                            message: MessageType::DATATYPE,
-                            source,
-                        })?;
-                    &committed[..]
-                } else {
-                    &region[body..body_end]
-                };
-                let (dt, _) = hdf5_pure_format::__private::parse_datatype(encoded)?;
-                element_dt = Some(dt);
-            }
-            MessageType::DATA_LAYOUT => {
-                if let Ok(DataLayout::Compact { data }) =
-                    DataLayout::parse_with_widths(&region[body..body_end], widths)
-                {
-                    compact = Some(data);
-                }
-            }
-            MessageType::ATTRIBUTE => {
-                // Shared attribute records require resolving the whole message before screening.
-                if shared {
-                    return Err(Error::EditUnsupported(
-                        "a copy in this commit carries a shared (SOHM) attribute message, whose \
-                         elements cannot be screened against the same commit's deletions; use \
-                         separate commits",
-                    ));
-                }
-                // Resolve the attribute's shared datatype and dataspace fields before screening.
-                let attr = crate::attribute::AttributeMessage::parse_resolving_with_length_width(
-                    &region[body..body_end],
-                    widths.lengths,
-                    &resolver,
-                )
-                .map_err(|source| Error::CopyScreenUnreadable {
-                    message: MessageType::ATTRIBUTE,
-                    source,
-                })?;
-                super::screen_resolved_references(&attr.datatype, &attr.raw_data, invalidated)?;
-            }
-            _ => {}
-        }
-        p = body_end;
-    }
-
-    match tree {
-        // A declared reference requires readable compact element bytes.
-        CopyTree::DatasetVerbatim { .. } => match (&element_dt, &compact) {
-            (Some(dt), Some(data)) => super::screen_resolved_references(dt, data, invalidated)?,
-            (Some(dt), None) if datatype::datatype_holds_object_address(dt) => {
-                return Err(Error::EditUnsupported(
-                    "a compact object-reference dataset's elements could not be read to screen \
-                     them against this commit's deletions; use separate commits",
-                ));
-            }
-            _ => {}
-        },
-        CopyTree::DatasetContiguous { data, .. } => {
-            // Skip unallocated storage before rejecting unsupported reference encodings.
-            if let (Some(dt), Some(data)) = (&element_dt, data) {
-                super::screen_resolved_references(dt, data, invalidated)?;
-            }
-        }
-        // Stored chunks are copied without decoding their element values.
-        CopyTree::DatasetChunked { .. } => {
-            if element_dt
-                .as_ref()
-                .is_some_and(datatype::datatype_holds_object_address)
-            {
-                return Err(Error::EditUnsupported(
-                    "a chunked object-reference dataset cannot be copied in a commit that also \
-                     deletes objects: its addresses live inside chunks this path does not \
-                     decode; use separate commits",
-                ));
-            }
-        }
-        CopyTree::Group { children, .. } => {
-            for (_, _, child) in children {
-                screen_copied_references(child, addresses, widths, invalidated, src)?;
-            }
-        }
-    }
-    Ok(())
+    tree.preorder()
+        .try_for_each(|node| node.screen_references(&resolver, widths, invalidated))
 }
 
 /// Provides stored chunk bytes from an owned copy in dense row-major order.
