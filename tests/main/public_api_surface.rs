@@ -32,6 +32,7 @@ use hdf5_pure::SuperblockStatus;
 use hdf5_pure::SuperblockStatusFlag;
 use hdf5_pure::SuperblockStatusFlags;
 use hdf5_pure::SuperblockVersion;
+use hdf5_pure::TraversalLimit;
 use hdf5_pure::UserblockSize;
 use hdf5_pure::VariableLengthStringType;
 use hdf5_pure::VariableLengthType;
@@ -164,6 +165,25 @@ fn a_header_message_type_can_be_named_where_an_error_hands_one_over() {
     );
 
     assert_eq!(missing_message_id(&Error::SwmrUnsupported), None);
+}
+
+#[rstest]
+#[case::links(
+    TraversalLimit::Links,
+    "the object graph holds more than 2 hard links, the most a traversal reads"
+)]
+#[case::objects(
+    TraversalLimit::Objects,
+    "the object graph holds more than 2 objects, the most a traversal reads"
+)]
+fn an_exceeded_traversal_limit_displays_its_count_and_maximum(
+    #[case] limit: TraversalLimit,
+    #[case] display: &str,
+) {
+    assert_eq!(
+        Error::TraversalLimitExceeded { limit, maximum: 2 }.to_string(),
+        display
+    );
 }
 
 #[rstest::rstest]

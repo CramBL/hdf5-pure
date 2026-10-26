@@ -484,6 +484,7 @@ pub(crate) mod link_info;
 pub(crate) mod link_message;
 pub(crate) mod message_flags;
 pub(crate) mod message_type;
+pub(crate) mod object_graph;
 pub(crate) mod object_header;
 pub(crate) mod object_header_writer;
 pub(crate) mod object_path;
@@ -551,6 +552,8 @@ pub use error::Error;
 #[doc(inline)]
 pub use hdf5_pure_core::FormatError;
 pub use hdf5_pure_core::OBJECT_HEADER_MESSAGE_MAX;
+#[cfg(feature = "std")]
+pub use object_graph::TraversalLimit;
 
 #[cfg(feature = "std")]
 #[doc(inline)]

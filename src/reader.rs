@@ -3264,8 +3264,14 @@ impl File {
     /// data this crate does not read, and is refused with
     /// [`Error::EditUnsupported`]. Copying it would leave its elements behind.
     ///
-    /// Requires a read-write file ([`File::open_rw`]); a read-only file returns
-    /// [`Error::ReadOnly`].
+    /// Requires a read-write file ([`File::open_rw`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ReadOnly`] if this file is read-only. The [`commit`](Self::commit) that
+    /// applies the copy returns [`Error::EditUnsupported`] if the source reaches one object through
+    /// more than one hard link, as an alias or a cycle does, and [`Error::TraversalLimitExceeded`]
+    /// if it reaches more objects or hard links than a copy reads.
     pub fn copy(&self, src: &str, dst: &str) -> Result<(), Error> {
         self.with_mirror_session(Change::Relocating, |session| {
             session.copy(&ObjectPathBuf::parse(src), &ObjectPathBuf::parse(dst))
@@ -3284,8 +3290,14 @@ impl File {
     /// call — and so a source this cannot reproduce, external storage included,
     /// is refused by this call. Refusals that concern the *destination* — `dst`
     /// already exists, or its parent group does not — still come from `commit`.
-    /// Requires a read-write destination ([`File::open_rw`]); a read-only
-    /// one returns [`Error::ReadOnly`].
+    /// Requires a read-write destination ([`File::open_rw`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if the source reaches one object through more than one
+    /// hard link, as an alias or a cycle does, [`Error::TraversalLimitExceeded`] if it reaches
+    /// more objects or hard links than a copy reads, and [`Error::ReadOnly`] if this file is
+    /// read-only.
     pub fn copy_from(&self, source: &File, src: &str, dst: &str) -> Result<(), Error> {
         self.with_mirror_session(Change::Relocating, |session| {
             session.copy_from(
