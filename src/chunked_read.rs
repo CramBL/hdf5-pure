@@ -1382,22 +1382,19 @@ pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
     let Some(addr) = index.address() else {
         return Ok(Vec::new());
     };
-    let spatial_dims = || chunk_dimensions[..rank].to_vec();
+    let spatial_dims = &chunk_dimensions[..rank];
     match index {
         ChunkIndexLayout::BTreeV1 { .. } => {
             collect_chunk_info_from_source(source, addr, ndims, widths.offsets)
         }
         ChunkIndexLayout::SingleChunk { filtered, .. } => {
-            let chunk_byte_size: u64 =
-                chunk_dimensions[..rank]
-                    .iter()
-                    .try_fold(elem_size, |acc, dim| {
-                        acc.checked_mul(*dim).ok_or_else(|| {
-                            FormatError::ChunkedReadError(
-                                "chunk logical byte size exceeds the addressable range".into(),
-                            )
-                        })
-                    })?;
+            let chunk_byte_size: u64 = spatial_dims.iter().try_fold(elem_size, |acc, dim| {
+                acc.checked_mul(*dim).ok_or_else(|| {
+                    FormatError::ChunkedReadError(
+                        "chunk logical byte size exceeds the addressable range".into(),
+                    )
+                })
+            })?;
             let (chunk_size, filter_mask) = match filtered {
                 Some(filtered) => (filtered.filtered_size, filtered.filter_mask),
                 None => (chunk_byte_size, 0),
@@ -1411,11 +1408,11 @@ pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
         }
         ChunkIndexLayout::Implicit { .. } => Ok(generate_implicit_chunks(
             addr,
-            &index_grid(dataspace, &spatial_dims(), GridOrder::RowMajor)?,
+            &index_grid(dataspace, spatial_dims, GridOrder::RowMajor)?,
             elem_size,
         )?),
         ChunkIndexLayout::FixedArray { .. } => {
-            let grid = index_grid(dataspace, &spatial_dims(), GridOrder::RowMajor)?;
+            let grid = index_grid(dataspace, spatial_dims, GridOrder::RowMajor)?;
             let mut chunks = Vec::new();
             fixed_array::read_chunks(
                 source,
@@ -1430,7 +1427,7 @@ pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
             Ok(chunks)
         }
         ChunkIndexLayout::ExtensibleArray { .. } => {
-            let grid = index_grid(dataspace, &spatial_dims(), GridOrder::UnlimitedFirst)?;
+            let grid = index_grid(dataspace, spatial_dims, GridOrder::UnlimitedFirst)?;
             let mut chunks = Vec::new();
             extensible_array::read_chunks(
                 source,
@@ -1447,7 +1444,7 @@ pub(crate) fn collect_chunks_for_layout_from_source<S: Source + ?Sized>(
         ChunkIndexLayout::BTreeV2 { .. } => collect_btree_v2_chunks_from_source(
             source,
             addr,
-            &chunk_dimensions[..rank],
+            spatial_dims,
             dataspace,
             elem_size,
             widths,
@@ -2110,22 +2107,19 @@ fn collect_chunks_for_layout(
     let Some(addr) = index.address() else {
         return Ok(Vec::new());
     };
-    let spatial_dims = || chunk_dimensions[..rank].to_vec();
+    let spatial_dims = &chunk_dimensions[..rank];
     Ok(match index {
         ChunkIndexLayout::BTreeV1 { .. } => {
             collect_chunk_info(file_data, addr, ndims, widths.offsets)?
         }
         ChunkIndexLayout::SingleChunk { filtered, .. } => {
-            let chunk_byte_size: u64 =
-                chunk_dimensions[..rank]
-                    .iter()
-                    .try_fold(elem_size, |acc, dim| {
-                        acc.checked_mul(*dim).ok_or_else(|| {
-                            FormatError::ChunkedReadError(
-                                "chunk logical byte size exceeds the addressable range".into(),
-                            )
-                        })
-                    })?;
+            let chunk_byte_size: u64 = spatial_dims.iter().try_fold(elem_size, |acc, dim| {
+                acc.checked_mul(*dim).ok_or_else(|| {
+                    FormatError::ChunkedReadError(
+                        "chunk logical byte size exceeds the addressable range".into(),
+                    )
+                })
+            })?;
             let (chunk_size, filter_mask) = match filtered {
                 Some(filtered) => (filtered.filtered_size, filtered.filter_mask),
                 None => (chunk_byte_size, 0),
@@ -2139,11 +2133,11 @@ fn collect_chunks_for_layout(
         }
         ChunkIndexLayout::Implicit { .. } => generate_implicit_chunks(
             addr,
-            &index_grid(dataspace, &spatial_dims(), GridOrder::RowMajor)?,
+            &index_grid(dataspace, spatial_dims, GridOrder::RowMajor)?,
             elem_size,
         )?,
         ChunkIndexLayout::FixedArray { .. } => {
-            let grid = index_grid(dataspace, &spatial_dims(), GridOrder::RowMajor)?;
+            let grid = index_grid(dataspace, spatial_dims, GridOrder::RowMajor)?;
             let mut chunks = Vec::new();
             fixed_array::read_chunks(
                 file_data,
@@ -2158,7 +2152,7 @@ fn collect_chunks_for_layout(
             chunks
         }
         ChunkIndexLayout::ExtensibleArray { .. } => {
-            let grid = index_grid(dataspace, &spatial_dims(), GridOrder::UnlimitedFirst)?;
+            let grid = index_grid(dataspace, spatial_dims, GridOrder::UnlimitedFirst)?;
             let mut chunks = Vec::new();
             extensible_array::read_chunks(
                 file_data,
@@ -2175,7 +2169,7 @@ fn collect_chunks_for_layout(
         ChunkIndexLayout::BTreeV2 { .. } => collect_btree_v2_chunks_from_source(
             &crate::source::BytesSource::new(file_data),
             addr,
-            &chunk_dimensions[..rank],
+            spatial_dims,
             dataspace,
             elem_size,
             widths,
