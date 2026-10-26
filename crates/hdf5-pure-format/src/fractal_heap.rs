@@ -415,34 +415,21 @@ impl FractalHeapHeader {
 
     /// Returns the heap ID of the managed object of `length` bytes at heap offset `heap_offset`.
     ///
-    /// After its first byte, the ID stores the offset in [`max_heap_size`](Self::max_heap_size)
-    /// bits and then the length, as [`FractalHeapIdLayout::parse`] reads them.
+    /// After its first byte, the ID stores the offset and length in separate little-endian byte
+    /// fields. The offset width is [`max_heap_size`](Self::max_heap_size) rounded up to whole
+    /// bytes. The length width is derived from the direct-block offset width and
+    /// [`max_managed_object_size`](Self::max_managed_object_size), as `H5HF_hdr_finish_init_phase1`
+    /// in `H5HFhdr.c` computes it (HDF5 1.10.11). Trailing ID padding is zeroed.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::Internal`] if `max_heap_size` is not a multiple of 8, or if
-    /// `heap_offset` or `length` does not fit the ID. The C library stores the offset in whole
-    /// bytes (`H5HF_MAN_ID_ENCODE` in `H5HFpkg.h`, HDF5 2.2.0), and
-    /// [`FractalHeapIdLayout::parse`] reads it as `max_heap_size` packed bits.
+    /// Returns [`FormatError::InvalidFractalHeapGeometry`] if the header cannot describe the
+    /// managed-ID fields. Returns [`FormatError::Internal`] if `heap_offset` requires more bits
+    /// than [`max_heap_size`](Self::max_heap_size) or `length` does not fit its encoded field.
     pub fn encode_managed_id(&self, heap_offset: u64, length: u64) -> Result<Vec<u8>, FormatError> {
-        if self.max_heap_size % 8 != 0 {
-            return Err(FormatError::Internal(format!(
-                "a managed heap ID was encoded for a heap of {}-bit offsets, which fill no whole \
-                 number of bytes",
-                self.max_heap_size
-            )));
-        }
-        let offset_bits = u32::from(self.max_heap_size);
-        if !fits_bits(heap_offset, offset_bits) {
-            return Err(FormatError::Internal(format!(
-                "heap offset {heap_offset} does not fit the heap's {offset_bits}-bit offsets"
-            )));
-        }
-        let packed = length
-            .checked_shl(offset_bits)
-            .filter(|&shifted| shifted >> offset_bits == length)
-            .map(|shifted| shifted | heap_offset);
-        self.encode_id(FractalHeapIdType::Managed, packed, "managed object length")
+        ManagedHeapIdLayout::new(self)
+            .ok_or(FormatError::InvalidFractalHeapGeometry)?
+            .encode(heap_offset, length)
     }
 
     /// Returns the heap ID of the huge object whose key in the huge-object B-tree is `huge_id`.
@@ -1178,9 +1165,7 @@ impl FractalHeapHeaderFrame {
 #[derive(Clone, Debug)]
 pub struct FractalHeapIdLayout {
     encoded_len: usize,
-    offset_bits: u32,
-    offset_mask: u64,
-    length_mask: u64,
+    managed: Option<ManagedHeapIdLayout>,
     tiny_extended: bool,
     huge: HugeIdLayout,
 }
@@ -1189,8 +1174,6 @@ impl FractalHeapIdLayout {
     /// Derives the heap ID decoding parameters from `header` and the file's field widths.
     pub fn new(header: &FractalHeapHeader, offsets: OffsetWidth, lengths: LengthWidth) -> Self {
         let encoded_len = usize::from(header.heap_id_length);
-        let offset_bits = u32::from(header.max_heap_size);
-        let payload_bits = u32::from(header.heap_id_length.saturating_sub(1)) * 8;
         let huge = if header.filtering.is_filtered() {
             HugeIdLayout::Filtered
         } else if header.huge_ids_direct_with_widths(FormatWidths { offsets, lengths }) {
@@ -1202,9 +1185,7 @@ impl FractalHeapIdLayout {
         };
         Self {
             encoded_len,
-            offset_bits,
-            offset_mask: Self::mask(offset_bits),
-            length_mask: Self::mask(payload_bits.saturating_sub(offset_bits)),
+            managed: ManagedHeapIdLayout::new(header),
             tiny_extended: header.heap_id_length.saturating_sub(1) > TINY_LEN_SHORT,
             huge,
         }
@@ -1214,7 +1195,8 @@ impl FractalHeapIdLayout {
     ///
     /// Reads the managed object's heap offset and length, the huge object's location, or the
     /// tiny object's bytes. For a tiny object, the caller receives a slice borrowed from `bytes`.
-    /// The parser reads the type independently of the version bits.
+    /// The parser reads the type independently of the version bits. Managed offset and length
+    /// fields are byte-aligned, and trailing padding is ignored.
     ///
     /// # Errors
     ///
@@ -1222,6 +1204,9 @@ impl FractalHeapIdLayout {
     /// from [`encoded_len`](Self::encoded_len), [`FormatError::InvalidHeapIdType`] if its type
     /// bits hold 3, and [`FormatError::UnexpectedEof`] if the declared ID length is zero or a tiny
     /// object's declared length exceeds the available bytes.
+    ///
+    /// Returns [`FormatError::InvalidFractalHeapGeometry`] for a managed ID if its header cannot
+    /// describe the required fields, or its offset requires more bits than the heap permits.
     ///
     /// Returns [`FormatError::UnsupportedFilteredHeapObject`] for a huge ID in a filtered
     /// heap, and [`FormatError::HugeObjectNotFound`] for an indexed huge ID in a heap without
@@ -1240,7 +1225,10 @@ impl FractalHeapIdLayout {
         })?;
         Ok(FractalHeapIdView {
             kind: match kind {
-                FractalHeapIdType::Managed => self.parse_managed(payload),
+                FractalHeapIdType::Managed => self
+                    .managed
+                    .ok_or(FormatError::InvalidFractalHeapGeometry)?
+                    .parse(payload)?,
                 FractalHeapIdType::Huge => FractalHeapIdKind::Huge(self.parse_huge(payload)?),
                 FractalHeapIdType::Tiny => FractalHeapIdKind::Tiny {
                     bytes: self.parse_tiny(first, bytes)?,
@@ -1252,14 +1240,6 @@ impl FractalHeapIdLayout {
     /// Returns the exact ID length in bytes declared by the heap header.
     pub const fn encoded_len(&self) -> usize {
         self.encoded_len
-    }
-
-    fn parse_managed(&self, payload: &[u8]) -> FractalHeapIdKind<'static> {
-        let combined = read_var_le(payload);
-        FractalHeapIdKind::Managed {
-            heap_offset: combined & self.offset_mask,
-            object_length: combined.checked_shr(self.offset_bits).unwrap_or(0) & self.length_mask,
-        }
     }
 
     fn parse_huge(&self, payload: &[u8]) -> Result<HugeObjectReference, FormatError> {
@@ -1299,9 +1279,93 @@ impl FractalHeapIdLayout {
                 available: bytes.len(),
             })
     }
+}
 
-    fn mask(bits: u32) -> u64 {
-        1u64.checked_shl(bits).map_or(u64::MAX, |limit| limit - 1)
+/// The encoded byte widths and offset bit count of a managed heap ID.
+///
+/// The length field follows the whole-byte offset field. The C library computes these widths in
+/// `H5HF_hdr_finish_init_phase1` in `H5HFhdr.c` (HDF5 1.10.11).
+#[derive(Clone, Copy, Debug)]
+struct ManagedHeapIdLayout {
+    encoded_len: usize,
+    offset_bits: u32,
+    offset_bytes: usize,
+    length_bytes: usize,
+}
+
+impl ManagedHeapIdLayout {
+    fn new(header: &FractalHeapHeader) -> Option<Self> {
+        if !(1..=64).contains(&header.max_heap_size)
+            || !header.max_direct_block_size.is_power_of_two()
+            || header.max_managed_object_size == 0
+        {
+            return None;
+        }
+        let offset_bits = header.max_heap_size;
+        let offset_bytes = usize::from(offset_bits).div_ceil(8);
+        // H5HF_hdr_finish_init_phase1 in H5HFhdr.c, HDF5 1.10.11, bounds the
+        // length field by both the direct-block offset width and managed-object limit.
+        let direct_bits = header.max_direct_block_size.trailing_zeros();
+        let managed_bits = u32::BITS - header.max_managed_object_size.leading_zeros();
+        let length_bytes =
+            usize::try_from(direct_bits.div_ceil(8).min(managed_bits.div_ceil(8))).ok()?;
+        let encoded_len = usize::from(header.heap_id_length);
+        if length_bytes == 0
+            || encoded_len < offset_bytes.checked_add(length_bytes)?.checked_add(1)?
+        {
+            return None;
+        }
+        Some(Self {
+            encoded_len,
+            offset_bits: u32::from(offset_bits),
+            offset_bytes,
+            length_bytes,
+        })
+    }
+
+    fn encode(&self, heap_offset: u64, length: u64) -> Result<Vec<u8>, FormatError> {
+        if !fits_bits(heap_offset, self.offset_bits) {
+            return Err(FormatError::Internal(format!(
+                "heap offset {heap_offset} does not fit the heap's {}-bit offsets",
+                self.offset_bits
+            )));
+        }
+        let length_bytes = self.length_bytes;
+        if length_bytes < 8
+            && !fits_bits(
+                length,
+                u32::try_from(length_bytes * 8)
+                    .map_err(|_conversion_error| FormatError::InvalidFractalHeapGeometry)?,
+            )
+        {
+            return Err(FormatError::Internal(format!(
+                "a managed object length does not fit a {}-byte heap ID",
+                self.encoded_len
+            )));
+        }
+        let mut bytes = Vec::with_capacity(self.encoded_len);
+        bytes.push(FractalHeapIdType::Managed.first_byte());
+        bytes.extend(
+            heap_offset
+                .to_le_bytes()
+                .into_iter()
+                .take(self.offset_bytes),
+        );
+        bytes.extend(length.to_le_bytes().into_iter().take(length_bytes));
+        bytes.resize(self.encoded_len, 0);
+        Ok(bytes)
+    }
+
+    fn parse(&self, payload: &[u8]) -> Result<FractalHeapIdKind<'static>, FormatError> {
+        let mut fields = bytes::Fields::new(payload, 0);
+        let heap_offset = fields.uint(self.offset_bytes)?;
+        if !fits_bits(heap_offset, self.offset_bits) {
+            return Err(FormatError::InvalidFractalHeapGeometry);
+        }
+        Ok(FractalHeapIdKind::Managed {
+            heap_offset,
+            object_length: fields.uint(self.length_bytes)?,
+        })
     }
 }
 
@@ -1927,29 +1991,90 @@ mod tests {
     }
 
     #[rstest]
-    #[case::zero_offset_bits(0, 0, 0x1234)]
-    #[case::whole_integer_offset(64, 0x1234, 0)]
-    #[case::offset_above_integer(65, 0x1234, 0)]
-    fn managed_fields_decode_at_integer_width_boundaries(
-        #[case] bits: u16,
-        #[case] offset: u64,
-        #[case] length: u64,
-    ) {
+    #[case::zero_bits(0, 9)]
+    #[case::offset_above_integer(65, 11)]
+    #[case::missing_length(64, 9)]
+    fn invalid_managed_id_geometry_is_rejected(#[case] bits: u16, #[case] id_length: u16) {
         let header = FractalHeapHeader {
-            heap_id_length: 9,
+            heap_id_length: id_length,
             max_heap_size: bits,
             ..attribute_heap_header()
         };
-        let bytes = [0, 0x34, 0x12, 0, 0, 0, 0, 0, 0];
         assert_eq!(
             FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
-                .parse(&bytes)
+                .parse(&vec![0; usize::from(id_length)]),
+            Err(FormatError::InvalidFractalHeapGeometry)
+        );
+        assert_eq!(
+            header.encode_managed_id(0, 1),
+            Err(FormatError::InvalidFractalHeapGeometry)
+        );
+    }
+
+    #[rstest]
+    #[case::group(32, 7, 0x1234_5678, 0x9ABC, vec![0, 0x78, 0x56, 0x34, 0x12, 0xBC, 0x9A])]
+    #[case::unaligned(33, 8, 0x1_2345_6789, 0xABCD, vec![0, 0x89, 0x67, 0x45, 0x23, 1, 0xCD, 0xAB])]
+    #[case::wide_offset(64, 11, u64::MAX, 0xAB, vec![0, 255, 255, 255, 255, 255, 255, 255, 255, 0xAB, 0])]
+    #[case::padded(8, 12, 0xAB, 0xCDEF, vec![0, 0xAB, 0xEF, 0xCD, 0, 0, 0, 0, 0, 0, 0, 0])]
+    fn managed_id_fields_are_byte_aligned_and_independent(
+        #[case] bits: u16,
+        #[case] id_length: u16,
+        #[case] heap_offset: u64,
+        #[case] object_length: u64,
+        #[case] expected: Vec<u8>,
+    ) {
+        let header = FractalHeapHeader {
+            heap_id_length: id_length,
+            max_heap_size: bits,
+            ..attribute_heap_header()
+        };
+        assert_eq!(
+            header.encode_managed_id(heap_offset, object_length),
+            Ok(expected.clone())
+        );
+        assert_eq!(
+            FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
+                .parse(&expected)
                 .unwrap()
                 .kind(),
             FractalHeapIdKind::Managed {
-                heap_offset: offset,
-                object_length: length
+                heap_offset,
+                object_length
             }
+        );
+    }
+
+    #[test]
+    fn managed_id_padding_is_not_part_of_the_length() {
+        let header = FractalHeapHeader {
+            heap_id_length: 10,
+            ..attribute_heap_header()
+        };
+        let id = [0, 42, 0, 0, 0, 0, 13, 0, 0xAA, 0xBB];
+        assert_eq!(
+            FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
+                .parse(&id)
+                .unwrap()
+                .kind(),
+            FractalHeapIdKind::Managed {
+                heap_offset: 42,
+                object_length: 13
+            }
+        );
+    }
+
+    #[rstest]
+    #[case::unused_offset_bits(33, vec![0, 0, 0, 0, 0, 2, 1, 0])]
+
+    fn managed_ids_reject_nonzero_unused_offset_bits(#[case] bits: u16, #[case] bytes: Vec<u8>) {
+        let header = FractalHeapHeader {
+            heap_id_length: u16::try_from(bytes.len()).unwrap(),
+            max_heap_size: bits,
+            ..attribute_heap_header()
+        };
+        assert_eq!(
+            FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight).parse(&bytes),
+            Err(FormatError::InvalidFractalHeapGeometry)
         );
     }
 
@@ -2318,22 +2443,6 @@ mod tests {
     }
 
     #[test]
-    fn a_managed_id_of_a_heap_whose_offset_bits_are_not_a_multiple_of_8_is_an_error() {
-        let header = FractalHeapHeader {
-            max_heap_size: 33,
-            ..attribute_heap_header()
-        };
-        assert_eq!(
-            header.encode_managed_id(0, 1),
-            Err(FormatError::Internal(
-                "a managed heap ID was encoded for a heap of 33-bit offsets, which fill no whole \
-                 number of bytes"
-                    .into()
-            ))
-        );
-    }
-
-    #[test]
     fn an_encoded_huge_id_decodes_to_its_key() {
         let header = attribute_heap_header();
         let id = header
@@ -2450,6 +2559,7 @@ mod tests {
         FractalHeapHeader {
             heap_id_length: 8,
             max_heap_size: 40,
+            max_managed_object_size: 65_535,
             btree_huge_objects_address: StoredAddress::new(0x800),
             ..dtable_header(1024, 65536, 4)
         }
