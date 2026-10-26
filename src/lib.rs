@@ -16,14 +16,14 @@
 //!   library, h5py, and MATLAB, and vice versa. Interop is verified by crosscheck
 //!   tests against fixtures produced by those tools. See the
 //!   [compatibility guide](crate::_guide::compatibility) for feature-level support.
-//! - **Faithful or nothing.** Every operation that cannot reproduce data exactly
-//!   fails with a named error. See [Fidelity](#fidelity-faithful-or-nothing) below.
+//! - **Faithful or nothing.** Operations preserve data unless lossy encoding is explicitly
+//!   requested, or return a named error. See [Fidelity](#fidelity-faithful-or-nothing) below.
 //!
 //! # Fidelity: faithful or nothing
 //!
-//! Editing ([`File::open_rw`]) and repacking ([`repack`](fn@repack))
-//! each reject what they cannot reproduce exactly. A `File::open_rw` session that cannot reproduce
-//! an object faithfully fails with [`Error::EditUnsupported`]. `repack` fails with
+//! A [`File::open_rw`] session rejects unsupported objects with [`Error::EditUnsupported`].
+//! An append that explicitly permits lossy re-encoding through [`AppendOptions`] may change
+//! previously published tail values. [`repack`](fn@repack) rejects unsupported objects with
 //! [`Error::RepackUnsupported`], which identifies the object, before it writes a byte to the
 //! destination.
 //!
@@ -620,7 +620,9 @@ pub use writer::FileBuilder;
 pub use appender::BufferedAppender;
 
 #[cfg(feature = "std")]
-pub use edit::{AppendBuilder, EditBacking, MemoryStrategy, SyncPolicy};
+pub use edit::{
+    AppendBuilder, AppendOptions, EditBacking, LossyTailReencoding, MemoryStrategy, SyncPolicy,
+};
 
 #[cfg(feature = "std")]
 pub use repack::{RepackOptions, repack, repack_into, repack_to_path};

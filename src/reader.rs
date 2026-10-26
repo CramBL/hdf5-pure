@@ -26,6 +26,7 @@ use crate::address::StoredAddressExt;
 use crate::chunked_read::ChunkDecoding;
 use crate::edit::AppendBuilder;
 use crate::edit::AppendGeometry;
+use crate::edit::AppendOptions;
 use crate::edit::AppendTarget;
 use crate::edit::EditBacking;
 use crate::edit::MemoryStrategy;
@@ -5655,7 +5656,8 @@ impl Dataset {
     /// chunk occupied are left for [`repack`](crate::repack()).
     ///
     /// A partial tail stored under lossy filters (ZFP or float D-scale scale-offset) cannot
-    /// grow, because re-encoding it could change committed values. Under
+    /// grow through this call, because re-encoding it could change committed values. Use
+    /// [`append_with_options`](Self::append_with_options) to permit such a rewrite. Under
     /// [`PartialEdgeFiltering::Skip`](crate::PartialEdgeFiltering::Skip), partial tails stay
     /// unfiltered and can grow. With a lossy pipeline, the writer filters a tail when it
     /// becomes complete, after publishing the new extent. An interruption between those
@@ -5705,16 +5707,74 @@ impl Dataset {
     /// [`Error::SwmrAppendUnsupported`] for filtered or unaligned SWMR appends. Propagates
     /// metadata, allocation, encoding, and I/O errors.
     pub fn append<T: H5Element>(&mut self, data: &[T]) -> Result<(), Error> {
+        self.append_with_options(AppendOptions::new(), data)
+    }
+
+    /// Appends `data` in place using the policy in `options`.
+    ///
+    /// The file, dataset, and datatype requirements match [`append`](Self::append).
+    /// [`LossyTailReencoding::Allow`](crate::LossyTailReencoding::Allow) permits growing a
+    /// partial tail stored under lossy filters, with the additional quantization error
+    /// described by [`LossyTailReencoding`](crate::LossyTailReencoding).
+    ///
+    /// During such a rewrite, the writer publishes the replacement chunk's index record
+    /// before the new extent. An interrupted append can therefore leave re-quantized tail
+    /// values visible at the old length. Both extents remain readable, but the old values
+    /// are not preserved atomically with the length. Other append restrictions apply,
+    /// including the rejection of filtered SWMR appends.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ReadOnly`] if the file is read-only, or
+    /// [`Error::AppendInPlaceUnsupported`] if the dataset or input is unsupported, lossy-tail
+    /// re-encoding is forbidden, or the append conflicts with staged edits. Returns
+    /// [`Error::SwmrAppendUnsupported`] for filtered or unaligned SWMR appends. Propagates
+    /// metadata, allocation, encoding, and I/O errors.
+    pub fn append_with_options<T: H5Element>(
+        &mut self,
+        options: AppendOptions,
+        data: &[T],
+    ) -> Result<(), Error> {
         let g = self.append_geometry()?;
-        self.append_batches(g, data.len() as u64, |b, r| {
+        self.append_batches(g, options, data.len() as u64, |b, r| {
             b.append(&data[r]);
         })
     }
 
-    /// Append raw little-endian element bytes to this dataset in place. Prefer
-    /// [`append`](Self::append) when the element type is known; see it for the
-    /// file-mode and eligibility rules.
+    /// Appends raw little-endian element bytes in place.
+    ///
+    /// Uses [`AppendOptions::new`]. Prefer [`append`](Self::append) when the element type is
+    /// known. See [`append_raw_with_options`](Self::append_raw_with_options) for the byte
+    /// requirements and errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ReadOnly`] if the file is read-only. Other errors are described by
+    /// [`append_raw_with_options`](Self::append_raw_with_options).
     pub fn append_raw(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        self.append_raw_with_options(AppendOptions::new(), bytes)
+    }
+
+    /// Appends raw little-endian element bytes using the policy in `options`.
+    ///
+    /// The byte length must be a multiple of the dataset's element size. Numeric fields must
+    /// be little-endian, except one-byte integers, whose byte order is immaterial.
+    /// Variable-length and reference datatypes are unsupported. The file requirements,
+    /// lossy-tail policy, and interruption behavior match
+    /// [`append_with_options`](Self::append_with_options).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ReadOnly`] if the file is read-only, or
+    /// [`Error::AppendInPlaceUnsupported`] if the bytes, datatype, or dataset are unsupported,
+    /// lossy-tail re-encoding is forbidden, or the append conflicts with staged edits. Returns
+    /// [`Error::SwmrAppendUnsupported`] for filtered or unaligned SWMR appends. Propagates
+    /// metadata, allocation, encoding, and I/O errors.
+    pub fn append_raw_with_options(
+        &mut self,
+        options: AppendOptions,
+        bytes: &[u8],
+    ) -> Result<(), Error> {
         let g = self.append_geometry()?;
         let es = g.element_size;
         // Whole-element length is checked before any batch applies, so the
@@ -5726,7 +5786,7 @@ impl Dataset {
             ));
         }
         let total = (bytes.len() / es) as u64;
-        self.append_batches(g, total, |b, r| {
+        self.append_batches(g, options, total, |b, r| {
             b.append_raw(&bytes[r.start * es.get()..r.end * es.get()]);
         })
     }
@@ -5822,8 +5882,7 @@ impl Dataset {
     /// whole-chunk batches under the session's byte budget — and `fill` builds
     /// each batch's bytes on demand, so a bounded session's peak memory holds
     /// one batch rather than the whole call. A session that keeps the whole file
-    /// resident reports one unbounded batch, so the call stays a single
-    /// crash-atomic apply there.
+    /// resident uses one unbounded batch.
     ///
     /// Every predictable refusal (wrong datatype, ineligible dataset) is raised
     /// before the first batch is applied. The cached header and chunk cache are
@@ -5833,21 +5892,27 @@ impl Dataset {
     /// leaves every later batch starting on a boundary.
     fn append_batches(
         &mut self,
-        g: AppendGeometry,
+        AppendGeometry {
+            chunk_elems,
+            element_size: _,
+            current_dim: mut dim,
+            lossy_filters: _,
+            full_batch_elems,
+        }: AppendGeometry,
+        options: AppendOptions,
         total_elems: u64,
         fill: impl Fn(&mut AppendBuilder, std::ops::Range<usize>),
     ) -> Result<(), Error> {
         // Worked out once for the whole call: every batch names the same
         // dataset, and an in-place append does not move it.
         let target = self.append_target()?;
-        let mut dim = g.current_dim;
         let mut done = 0u64;
         loop {
             // An empty append still runs one (empty) engine call, so datatype
             // validation happens whether or not there are elements.
-            let to_boundary = (g.chunk_elems - dim % g.chunk_elems) % g.chunk_elems;
-            let take = (total_elems - done).min(to_boundary.saturating_add(g.full_batch_elems));
-            let mut b = AppendBuilder::new();
+            let to_boundary = (chunk_elems - dim % chunk_elems) % chunk_elems;
+            let take = (total_elems - done).min(to_boundary.saturating_add(full_batch_elems));
+            let mut b = AppendBuilder::with_options(options);
             fill(&mut b, done.to_usize()?..(done + take).to_usize()?);
             self.file.with_engine_mut(Change::InPlace, |engine| {
                 engine.append_inplace_gathered(target, &b, 4)
@@ -5954,7 +6019,8 @@ impl Dataset {
     /// Extensible-Array only), this rebuilds the chunk index on commit and so
     /// also grows datasets whose Extensible-Array index is not yet allocated.
     /// An append that grows a partial tail stored under lossy filters (ZFP or float D-scale
-    /// scale-offset) is rejected before any changes are staged. Under
+    /// scale-offset) is rejected before any changes are staged. Use
+    /// [`append_staged_with_options`](Self::append_staged_with_options) to permit it. Under
     /// [`PartialEdgeFiltering::Skip`](crate::PartialEdgeFiltering::Skip), partial tails stay
     /// unfiltered and can grow. With a lossy pipeline, the writer filters a tail when complete.
     /// Configure the appended elements through `build` on the
@@ -5975,6 +6041,29 @@ impl Dataset {
     /// if growing the partial tail would re-encode lossy values. Propagates errors from
     /// resolving the dataset or checking for conflicting staged edits.
     pub fn append_staged(&mut self, build: impl FnOnce(&mut AppendBuilder)) -> Result<(), Error> {
+        self.append_staged_with_options(AppendOptions::new(), build)
+    }
+
+    /// Stages an append with the policy in `options` for publication by [`File::commit`].
+    ///
+    /// The dataset requirements and builder semantics match
+    /// [`append_staged`](Self::append_staged). The commit uses the supplied policy, including
+    /// permission to re-encode a partial tail stored under lossy filters. Such a rewrite can
+    /// change previously published values as described by
+    /// [`LossyTailReencoding`](crate::LossyTailReencoding). Complete chunks preceding the
+    /// tail retain their storage. The supplied policy does not affect later append calls.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ReadOnly`] if the file is read-only, or [`Error::AppendUnsupported`]
+    /// if growing the partial tail requires lossy re-encoding that `options` rejects.
+    /// Propagates errors from resolving the dataset or checking for conflicting staged edits.
+    /// [`File::commit`] reports unsupported dataset geometry, datatypes, or filter pipelines.
+    pub fn append_staged_with_options(
+        &mut self,
+        options: AppendOptions,
+        build: impl FnOnce(&mut AppendBuilder),
+    ) -> Result<(), Error> {
         // A dataset *this handle* names and this session has not written has no
         // bytes to grow, so the elements are folded into the pending creation
         // instead (see the note above). `check_staged_edit` refuses that dataset,
@@ -5990,7 +6079,7 @@ impl Dataset {
         } else {
             self.check_staged_edit()?;
         }
-        let mut builder = AppendBuilder::new();
+        let mut builder = AppendBuilder::with_options(options);
         build(&mut builder);
         self.with_session_mut(|session, path| {
             if pending {
