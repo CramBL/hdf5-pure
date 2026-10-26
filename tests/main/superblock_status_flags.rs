@@ -157,7 +157,7 @@ fn clearing_the_flag_restores_every_open() {
 /// `File::from_bytes` does not check the flag: the caller already holds a
 /// snapshot, there is no live file to coordinate over, and it is the way out for
 /// a flagged file on a read-only mount. `clear_status_flags` requires write access.
-/// The C library checks the flag under its in-memory driver.
+/// libhdf5 checks the flag under its in-memory driver.
 #[test]
 fn from_bytes_reads_a_flagged_file() {
     let dir = tempfile::tempdir().unwrap();

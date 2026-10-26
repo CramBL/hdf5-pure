@@ -95,7 +95,7 @@ fn bounded_persist_finalize_reads_back_in_c() {
     let expected: Vec<i32> = (0..30).collect();
     assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
 
-    // The C library reads the data, recovers the persisting strategy, and its
+    // libhdf5 reads the data, recovers the persisting strategy, and its
     // free-space query parses the managers the finalize wrote.
     let f = hdf5::File::open(&path).unwrap();
     assert_eq!(f.dataset("d").unwrap().read_raw::<i32>().unwrap(), expected);

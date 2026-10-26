@@ -50,7 +50,7 @@ fn c_library_reads_a_filtered_partial_last_chunk_written_in_place() {
         "the C library disagreed"
     );
 
-    // The C library's own view of the shape, not just the values it hands back:
+    // libhdf5's own view of the shape, not just the values it hands back:
     // a padding-as-data misread would show up as a longer dataset.
     let f = hdf5::File::open(&path).unwrap();
     assert_eq!(f.dataset("d").unwrap().shape(), vec![13]);
@@ -96,7 +96,7 @@ fn c_library_reads_a_buffered_append_onto_its_own_dataset() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_written.h5");
 
-    // The C library writes the file; this crate appends to it. The latest-format
+    // libhdf5 writes the file. This crate appends to it. The latest-format
     // bounds are what make the index an Extensible Array rather than a version-1
     // B-tree, which is the index the in-place path grows.
     Unlimited::new("d", &(0..24).collect::<Vec<i32>>(), 8)

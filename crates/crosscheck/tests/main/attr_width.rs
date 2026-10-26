@@ -5,7 +5,7 @@
 //! `AttrValue` used to carry integers only at 64 bits and floats only at 64,
 //! so an attribute written from a value was eight bytes wide whatever the
 //! caller asked for, and one read back arrived as `I64`/`U64`/`F64` whatever
-//! the file held. The C library preserves `H5T_NATIVE_INT16`, `H5T_NATIVE_FLOAT`
+//! the file held. libhdf5 preserves `H5T_NATIVE_INT16`, `H5T_NATIVE_FLOAT`
 //! and their siblings, and it wrote most of the files this crate is pointed at,
 //! so it is the authority on both halves: what a width means on disk, and what
 //! the files in the wild carry.
@@ -17,7 +17,7 @@
 //!
 //! The string half is the same claim about a different field: a fixed-width
 //! string attribute declares a `STRSIZE`, and a value's own length is only one
-//! of the widths it can be stored at. The C library's `H5T_C_S1` plus
+//! of the widths it can be stored at. libhdf5's `H5T_C_S1` plus
 //! `H5Tset_size(N)` is the slot this crate had no way to write before issue
 //! #359, and the one it now has to read back without losing the N.
 
@@ -140,7 +140,7 @@ fn array_widths() -> Vec<(&'static str, AttrValue, TypeDescriptor)> {
     ]
 }
 
-/// The C library reports each attribute this crate wrote at the width the value
+/// libhdf5 reports each attribute this crate wrote at the width the value
 /// named, and reads its value back.
 ///
 /// The datatype is the claim under test: a value written eight bytes wide reads
@@ -270,7 +270,7 @@ fn every_width_the_c_library_writes_reads_back_as_itself() {
     );
 }
 
-/// The C library reports the `STRSIZE` this crate declared, and reads the value
+/// libhdf5 reports the `STRSIZE` this crate declared, and reads the value
 /// out of the slot.
 ///
 /// The width is the claim: a padded slot and a slot sized to its content read

@@ -1,4 +1,4 @@
-//! The C library and this crate reject the same object header: one with a message of an unknown
+//! libhdf5 and this crate reject the same object header: one with a message of an unknown
 //! type, flagged as a message every decoder must understand.
 //!
 //! The test gives the [`fixture`]'s retyped message bit 7 of the "Header Message #n Flags" field

@@ -33,7 +33,7 @@ fn c_library_adds_objects_to_our_file() {
     b.add_group(grp.finish());
     b.write(&path).unwrap();
 
-    // The C library opens it read-write and inserts links into both the root
+    // libhdf5 opens it read-write and inserts links into both the root
     // group and the hdf5-pure-created subgroup, then creates a fresh subgroup.
     {
         let f = hdf5::File::open_rw(&path).unwrap();
@@ -97,7 +97,7 @@ fn c_library_writes_after_an_in_place_edit() {
         s.commit().unwrap();
     }
 
-    // The C library adds objects to both the rewritten root and the
+    // libhdf5 adds objects to both the rewritten root and the
     // open_rw-created subgroup.
     {
         let f = hdf5::File::open_rw(&path).unwrap();
@@ -157,7 +157,7 @@ fn c_library_converts_our_large_group_to_dense() {
     b.add_group(g.finish());
     b.write(&path).unwrap();
 
-    // The C library inserts links 9..16, crossing into dense storage.
+    // libhdf5 inserts links 9..16, crossing into dense storage.
     {
         let f = hdf5::File::open_rw(&path).unwrap();
         for i in 8..16 {

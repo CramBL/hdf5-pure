@@ -41,7 +41,7 @@
 //!
 //! A repack that re-encodes a sparse or an unallocated dataset, or restages the
 //! variable-length elements of a dataset, stores the layout flags of the source
-//! and each partial edge chunk under the flag unfiltered. The C library reads the
+//! and each partial edge chunk under the flag unfiltered. libhdf5 reads the
 //! values, and where the repack restages the elements, it stores the chunk
 //! offsets, the filter masks, and the raw chunk sizes of the dataset libhdf5
 //! creates with the same elements.

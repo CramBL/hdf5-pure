@@ -3,7 +3,7 @@ use crate::FormatError;
 /// A Deflate compression level in `0..=9`.
 ///
 /// Numeric conversions from [`u8`] or [`u32`] return [`FormatError::InvalidDeflateLevel`] for
-/// values above `9`. The C library sets this level with `H5Pset_deflate`.
+/// values above `9`. libhdf5 sets this level with `H5Pset_deflate`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeflateLevel {
     /// Compression level `0`, with zlib framing and no compression.

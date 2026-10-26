@@ -375,7 +375,7 @@ fn a_variable_length_attribute_survives_a_dense_rebuild() {
         "the heap-resident variable-length attribute survived a second rebuild",
     );
 
-    // The C library's view of the heap-resident attribute. This crate encodes a
+    // libhdf5's view of the heap-resident attribute. This crate encodes a
     // `VarLenAsciiCharArray` as a variable-length sequence of one-character ASCII
     // strings, which is the type named here; what the read proves is that the
     // element references the rebuild patched resolve to the right heap bytes.

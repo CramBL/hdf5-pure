@@ -871,7 +871,7 @@ fn push_uint_le(buf: &mut Vec<u8>, value: u64, width: usize) {
 /// the same sections.
 ///
 /// Below 8-byte lengths the header stores a maximum section size of all ones less two, and the
-/// section list stores each section size at the length width. The C library allocates as many
+/// section list stores each section size at the length width. libhdf5 allocates as many
 /// bins as the base 2 logarithm of the maximum section size, rounded down, and files a section of
 /// `size` bytes in bin `log2(size)`, so it has a bin only for a section smaller than the largest
 /// power of two at or below the maximum section size.
@@ -1083,7 +1083,7 @@ pub fn section_info_capacity(
 /// checksum, and `header_addr` is the address the file stores for `header`, relative to the base
 /// address. Reads `header.total_sections()` sections and ignores unused bytes between the last
 /// section and the checksum. With the `checksum` feature, verifies the entire used list before
-/// its final four bytes, including unused bytes. The C library skips the unused bytes when reading
+/// its final four bytes, including unused bytes. libhdf5 skips the unused bytes when reading
 /// (`H5FS__cache_sinfo_deserialize` in `H5FScache.c`, HDF5 1.12.3) and registers 3 section classes
 /// for the file client (`H5MF.c`, HDF5 2.2.0).
 ///

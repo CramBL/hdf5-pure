@@ -21,7 +21,7 @@ use crate::error::FormatError;
 /// - the child and sibling addresses in B-tree nodes
 /// - the chunk addresses in a chunk index
 ///
-/// The C library calls this value `H5F_SIZEOF_ADDR` and sets it with `H5Pset_sizes`.
+/// libhdf5 calls this value `H5F_SIZEOF_ADDR` and sets it with `H5Pset_sizes`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OffsetWidth {
     /// Two bytes per address.
@@ -71,7 +71,7 @@ impl TryFrom<u8> for OffsetWidth {
 /// - the collection size of a global heap
 /// - the space and object counts in a fractal heap header
 ///
-/// The C library calls this value `H5F_SIZEOF_SIZE` and sets it with `H5Pset_sizes`.
+/// libhdf5 calls this value `H5F_SIZEOF_SIZE` and sets it with `H5Pset_sizes`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LengthWidth {
     /// Two bytes per length.

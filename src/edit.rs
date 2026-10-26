@@ -1766,7 +1766,7 @@ impl WriteEngine {
     /// file's own file-space page size when it is paged and
     /// [`DEFAULT_GATHER_PAGE`] when it is not, which is what
     /// [`gather_page_size`](Self::gather_page_size) answers. A buffer that
-    /// cannot hold one page flushes on every page it touches. The C library
+    /// cannot hold one page flushes on every page it touches. libhdf5
     /// reaches the same conclusion and acts on it *silently*, rounding the budget
     /// up at `H5Fopen`, which is the one part of its behavior not worth copying.
     ///

@@ -542,7 +542,7 @@ impl<'a> ExtensibleArrayDataBlockRef<'a> {
     /// Parses the data block in `region`, and returns its elements or, in a paged block, its
     /// pages.
     ///
-    /// The C library stores another block offset in a data block whose address the index block
+    /// libhdf5 stores another block offset in a data block whose address the index block
     /// holds, and the parser accepts that offset as well as the block's position.
     ///
     /// # Errors
@@ -1341,7 +1341,7 @@ impl ExtensibleArrayHeader {
 /// The maximum element bit count is in `1..=64`, and the page exponent is in `0..=63` and at
 /// most that count. The page element count is a nonzero power of two representable by a [`u64`].
 /// The block-offset width is the maximum element bit count rounded up to whole bytes.
-/// The C library computes the block-offset width with `H5EA_SIZEOF_OFFSET_BITS` (`H5EApkg.h`,
+/// libhdf5 computes the block-offset width with `H5EA_SIZEOF_OFFSET_BITS` (`H5EApkg.h`,
 /// HDF5 2.2.0).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExtensibleArrayBitGeometry {
@@ -1712,7 +1712,7 @@ impl SlotOccupancy<'_> {
     /// Returns whether any of the `count` slots from `start` holds a chunk, and so whether the
     /// block over them is allocated.
     ///
-    /// The C library allocates a data block when it writes the first chunk into it (`H5EA.c`,
+    /// libhdf5 allocates a data block when it writes the first chunk into it (`H5EA.c`,
     /// HDF5 2.2.0), so an index grows with its chunks and not with the maximum shape.
     fn any_occupied(&self, start: u64, count: u64) -> bool {
         match self {

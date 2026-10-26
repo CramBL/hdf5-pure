@@ -393,13 +393,13 @@ impl SohmTable {
 pub enum SohmLocation {
     /// The message is in the fractal heap of the index.
     Heap {
-        /// The number of times the file uses the message. The C library removes the message and its
+        /// The number of times the file uses the message. libhdf5 removes the message and its
         /// record when the count reaches 0.
         reference_count: u32,
         /// The heap ID of the message, as a shared message reference holds it.
         heap_id: [u8; FHEAP_ID_LEN],
     },
-    /// The message is in the object header of the one object that uses it. The C library moves
+    /// The message is in the object header of the one object that uses it. libhdf5 moves
     /// the message to the heap when a second object uses it.
     ObjectHeader {
         /// The message type ID.

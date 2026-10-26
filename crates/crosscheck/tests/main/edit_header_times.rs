@@ -54,7 +54,7 @@ fn write_fixture(path: &Path) {
         .set_gcpl(&gcpl_with_phase_change())
         .create("g")
         .expect("create group");
-    // The wrapper's dataset builder turns time tracking off. The C library's
+    // The wrapper's dataset builder turns time tracking off. libhdf5's
     // default is on, and that default is what this fixture is about.
     let dataset = file
         .new_dataset::<i32>()

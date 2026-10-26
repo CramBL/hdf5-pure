@@ -9,7 +9,7 @@ use crate::FormatError;
 /// [`FileSpaceStrategy::Aggr`] and [`FileSpaceStrategy::None`] have no free-space managers,
 /// so their persistence flag is always `false` and their threshold is always 1.
 ///
-/// The C library configures these properties with `H5Pset_file_space_strategy` and
+/// libhdf5 configures these properties with `H5Pset_file_space_strategy` and
 /// `H5Pset_file_space_page_size`. [`FileSpaceInfo`] provides the raw on-disk message fields.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FileSpaceSettings {
@@ -157,7 +157,7 @@ pub struct FileSpaceInfo {
 /// The field is defined in "The File Space Info Message" of the [format specification, version
 /// 4.0][spec].
 ///
-/// The C library sets this value with `H5Pset_file_space_page_size`, which rejects a page size
+/// libhdf5 sets this value with `H5Pset_file_space_page_size`, which rejects a page size
 /// outside the same range (`H5Pfcpl.c`, HDF5 2.2.0).
 ///
 /// # Examples
@@ -187,17 +187,17 @@ impl FileSpacePageSize {
 
     /// The smallest page size, 512 bytes.
     ///
-    /// The C library calls this value `H5F_FILE_SPACE_PAGE_SIZE_MIN`.
+    /// libhdf5 calls this value `H5F_FILE_SPACE_PAGE_SIZE_MIN`.
     pub const MIN: Self = Self(512);
 
     /// The largest page size, 1 GiB.
     ///
-    /// The C library calls this value `H5F_FILE_SPACE_PAGE_SIZE_MAX`.
+    /// libhdf5 calls this value `H5F_FILE_SPACE_PAGE_SIZE_MAX`.
     pub const MAX: Self = Self(1 << 30);
 
     /// The default page size, 4096 bytes.
     ///
-    /// The C library calls this value `H5F_FILE_SPACE_PAGE_SIZE_DEF`.
+    /// libhdf5 calls this value `H5F_FILE_SPACE_PAGE_SIZE_DEF`.
     pub const DEFAULT: Self = Self(4096);
 }
 

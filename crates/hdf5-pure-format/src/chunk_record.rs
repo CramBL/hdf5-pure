@@ -185,7 +185,7 @@ impl ChunkElementEncoding {
 /// `chunk_bytes` is the product of the chunk dimensions and the element size. The chunk size
 /// field of a filtered element is one byte wider than the fewest bytes that hold `chunk_bytes`,
 /// and at most 8 bytes wide, the width the specification gives for a dataset with a version 4
-/// layout message. The C library computes the width in `H5D_FARRAY_FILT_COMPUTE_CHUNK_SIZE_LEN`
+/// layout message. libhdf5 computes the width in `H5D_FARRAY_FILT_COMPUTE_CHUNK_SIZE_LEN`
 /// (`H5Dfarray.c`, HDF5 2.2.0).
 ///
 /// The width depends on `chunk_bytes` alone and not on the stored sizes, so an index of no

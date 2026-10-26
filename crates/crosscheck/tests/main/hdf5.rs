@@ -759,7 +759,7 @@ fn crosscheck_compound_f64_pairs() {
         .with_compound_data(ct, raw, 3);
     builder.write(&path).unwrap();
 
-    // The C library should be able to open the file and see the dataset
+    // libhdf5 should be able to open the file and see the dataset
     let file = hdf5::File::open(&path).unwrap();
     let ds = file.dataset("complex").unwrap();
     assert_eq!(ds.shape(), vec![3]);

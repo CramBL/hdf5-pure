@@ -25,7 +25,7 @@
 
 use hdf5_pure::{AttrValue, File, FileBuilder};
 
-/// The C library's declared attribute count for `obj`, and the names it finds by
+/// libhdf5's declared attribute count for `obj`, and the names it finds by
 /// iterating. A file this crate writes correctly makes these agree; the defect
 /// this module guards is exactly their disagreement.
 fn declared_and_iterated(obj: &hdf5::Location) -> (usize, Vec<String>) {

@@ -368,7 +368,7 @@ fn the_1_10_format_this_crate_writes_is_rejected_before_1_10() {
     }
 }
 
-/// The C library's version of the plain fixture, plus a reference dataset and
+/// libhdf5's version of the plain fixture, plus a reference dataset and
 /// a compound dataset, which this crate's whole-file writer covers through
 /// `.mat` output instead.
 fn c_write(path: &Path, low: LibraryVersion, high: LibraryVersion) {

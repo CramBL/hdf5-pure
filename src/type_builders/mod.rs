@@ -1007,7 +1007,7 @@ fn vlen_string_array_attr(
 /// The collection boundaries match [`build_global_heap_collections`]. The writer replaces the
 /// placeholder addresses after placing those collections.
 ///
-/// The C library writes the count in `H5T__vlen_disk_write` (`H5Tvlen.c`, HDF5 1.14.6)
+/// libhdf5 writes the count in `H5T__vlen_disk_write` (`H5Tvlen.c`, HDF5 1.14.6)
 /// and the heap address and object index in `H5VL__native_blob_put`
 /// (`H5VLnative_blob.c`, HDF5 1.14.6).
 ///
@@ -1219,7 +1219,7 @@ pub(crate) fn stage_vl_payloads<'a>(
 
 /// Converts a variable-length element count to its four-byte representation.
 ///
-/// The C library encodes this count in `H5T__vlen_disk_write` (`H5Tvlen.c`, HDF5 1.14.6).
+/// libhdf5 encodes this count in `H5T__vlen_disk_write` (`H5Tvlen.c`, HDF5 1.14.6).
 ///
 /// # Errors
 ///
@@ -2431,7 +2431,7 @@ impl DatasetBuilder {
     /// in version 3 of "The Data Storage - Fill Value Message" of the [format
     /// specification, version 4.0][spec].
     ///
-    /// The C library sets this property with `H5Pset_fill_time`.
+    /// libhdf5 sets this property with `H5Pset_fill_time`.
     ///
     /// # Examples
     ///

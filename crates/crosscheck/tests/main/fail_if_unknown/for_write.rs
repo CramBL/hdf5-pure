@@ -1,4 +1,4 @@
-//! The C library and this crate read the same object header, and reject it under write access:
+//! libhdf5 and this crate read the same object header, and reject it under write access:
 //! one with a message of an unknown type, flagged as a message a decoder with write access must
 //! understand.
 //!

@@ -129,7 +129,7 @@ fn real_mat_edited_then_read_by_c_library() {
         s.commit().unwrap();
     }
 
-    // The C library opens the edited real .mat file and reads both the added
+    // libhdf5 opens the edited real .mat file and reads both the added
     // dataset and an untouched original — proving every address survived the edit
     // relative to the 512-byte MATLAB userblock.
     let c = hdf5::File::open(&path).unwrap();
@@ -153,7 +153,7 @@ fn real_mat_edited_then_read_by_c_library() {
 fn userblock_chunked_add_and_overwrite_read_by_c_library() {
     // Adding a chunked/filtered dataset and overwriting an existing one on a
     // userblock file both write chunk-index and chunk-data addresses relative to
-    // the base. The C library reading the result back is the external proof that
+    // the base. libhdf5 reading the result back is the external proof that
     // every such address was stored correctly.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pure_ub_chunk.h5");
@@ -212,7 +212,7 @@ fn userblock_chunked_add_and_overwrite_read_by_c_library() {
 #[test]
 fn userblock_chunked_reclaimed_space_reused_read_by_c_library() {
     // A relocating chunked overwrite frees the old chunk storage; a later commit
-    // in the same session reuses it. The C library reading every dataset back
+    // in the same session reuses it. libhdf5 reading every dataset back
     // confirms the reclaim freed only dead bytes (a base-address mistake in the
     // span enumerators would have corrupted a live region the reuse then wrote).
     let dir = tempfile::tempdir().unwrap();
@@ -372,7 +372,7 @@ fn userblock_compact_overwrite_read_by_c_library() {
 #[test]
 fn userblock_delete_then_reuse_read_by_c_library() {
     // Deleting objects from a userblock file reclaims their storage base-relative;
-    // a later add reuses a freed hole. The C library reading every survivor back
+    // a later add reuses a freed hole. libhdf5 reading every survivor back
     // confirms the reclaim freed only dead bytes — a base mistake in the subtree
     // walk would have freed a live region the reuse then overwrote, corrupting it.
     let dir = tempfile::tempdir().unwrap();
@@ -437,7 +437,7 @@ fn userblock_delete_then_reuse_read_by_c_library() {
 #[test]
 fn userblock_copy_read_by_c_library() {
     // Copying objects within a userblock file writes fresh data, chunk storage, and
-    // link addresses, all base-relative. The C library reading every copy back is
+    // link addresses, all base-relative. libhdf5 reading every copy back is
     // the external proof those addresses were stored correctly (a base mistake
     // would dangle the copy's data/index pointer and error or read garbage).
     let dir = tempfile::tempdir().unwrap();

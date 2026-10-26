@@ -161,7 +161,7 @@ impl DatasetCreateProperties {
     /// the message for every chunked dataset, and HDF5 1.10.0 and later read it. A dataset
     /// without this property has [`PartialEdgeFiltering::Apply`].
     ///
-    /// The C library sets this policy with `H5Pset_chunk_opts` and
+    /// libhdf5 sets this policy with `H5Pset_chunk_opts` and
     /// `H5D_CHUNK_DONT_FILTER_PARTIAL_CHUNKS`.
     ///
     /// A dataset under [`PartialEdgeFiltering::Skip`] has to be stored chunked, by chunk

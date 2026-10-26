@@ -33,7 +33,7 @@ fn write_external_fixture(path: &std::path::Path, payload: &str) {
 /// `repack` refuses an externally stored dataset rather than reproducing it
 /// without its data.
 ///
-/// The C library reads 1..=16 from the source. Every byte of that lives outside
+/// libhdf5 reads 1..=16 from the source. Every byte of that lives outside
 /// the file, so a rewrite has nothing to copy; the only honest answer is to
 /// refuse. Before this was checked, `repack` returned `Ok` and the destination
 /// answered the fill value for every element — the failure mode a

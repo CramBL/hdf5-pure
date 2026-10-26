@@ -85,7 +85,7 @@ fn the_c_library_refuses_a_file_a_crashed_page_buffered_session_left_marked() {
 /// cache whose per-kind reservations count pages the paged allocator segregates.
 /// This crate's is a write gatherer that merges within a page-sized window, and
 /// an unpaged file gets the format's default 4 KiB one — so the requirement was
-/// inherited rather than needed (issue #357). The C library is what says the
+/// unnecessary (issue #357). libhdf5 is what says the
 /// result is a real HDF5 file either way: the crate reading back its own bytes
 /// would not distinguish a correct merge from a consistently wrong one.
 #[test]
@@ -134,7 +134,7 @@ fn the_c_library_reads_a_file_written_through_a_page_buffer() {
                 threshold: 1,
             }
         } else {
-            // The C library's own default: managers and aggregators, unpaged and
+            // libhdf5's own default: managers and aggregators, unpaged and
             // not persisting.
             CStrategy::FreeSpaceManager {
                 paged: false,

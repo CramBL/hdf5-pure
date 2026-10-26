@@ -264,7 +264,7 @@ impl<'a> Extent<'a> {
 }
 
 // The maximum dimension size a dataspace message stores for a dimension that grows
-// without bound, the format's "unlimited size". The C library defines `H5S_UNLIMITED` as
+// without bound, the format's "unlimited size". libhdf5 defines `H5S_UNLIMITED` as
 // `HSIZE_UNDEF`, which is `UINT64_MAX` (`H5Spublic.h` and `H5public.h`, HDF5 2.2.0). A
 // message written with a narrower "Size of Lengths" cannot hold it: `H5O__sdspace_decode`
 // zero-extends the field it reads (`H5F_DECODE_LENGTH` in `H5Osdspace.c`, HDF5 2.2.0), so
