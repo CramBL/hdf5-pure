@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `Error::TraversalLimitExceeded` reports an object graph with more objects or hard links than a copy reads ([#922](https://github.com/CramBL/hdf5-pure/pull/922)).
 - `AppendOptions` permits explicitly re-encoding a filtered lossy partial tail through immediate, staged, and buffered appends. Each rewrite can introduce additional quantization error in previously published tail values ([#916](https://github.com/CramBL/hdf5-pure/pull/916)).
 - `FileSpaceSettings` groups file-space configuration in a portable value, with normalized settings for strategies without free-space managers ([#894](https://github.com/CramBL/hdf5-pure/pull/894)).
 - `File::reusable_space_stats` reads a writable session's logical size and reusable free bytes without allocations after platform mutex initialization. The reusable total includes append reserves and unused aggregates and does not guarantee that a particular write fits.
@@ -65,6 +66,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - Fixed `File::commit` overflowing tracked group link creation counters or changing file bytes before rejecting an exhausted counter. Unsupported counters in rebuilt groups are rejected during planning ([#920](https://github.com/CramBL/hdf5-pure/pull/920)).
+- Fixed `File::copy` and related copies overflowing the stack on a hard-link cycle, rejecting a source nested 1000 groups deep, and copying an object reached through two hard links as two objects. A source that reaches one object through more than one hard link is rejected ([#922](https://github.com/CramBL/hdf5-pure/pull/922)).
 - Fixed `Group::groups` and related reads misinterpreting managed heap IDs with non-byte-aligned offsets or trailing padding ([#917](https://github.com/CramBL/hdf5-pure/pull/917)).
 - Fixed `File::persisted_free_sections` counting a persisted manager more than once when multiple slots record its header address.
 - Fixed `FileBuilder::finish` and related dataset creation writing chunks of 4 GiB or more ([#892](https://github.com/CramBL/hdf5-pure/pull/892)).
