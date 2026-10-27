@@ -178,9 +178,9 @@ impl FreeSpaceManagerHeaderFrame {
     ///
     /// Returns [`FormatError::UnexpectedEof`] if `data` is shorter than the header,
     /// [`FormatError::ChecksumMismatch`] if the checksum differs with the `checksum` feature
-    /// enabled, or [`FormatError::InvalidFreeSpaceManager`] if the signature or version is
-    /// invalid, the address space is outside 1 to 64 bits, or the used section-list length
-    /// exceeds its allocated length.
+    /// enabled, [`FormatError::UnsupportedVersion`] if the version is not 0, or
+    /// [`FormatError::InvalidFreeSpaceManager`] if the signature is invalid, the address space
+    /// is outside 1 to 64 bits, or the used section-list length exceeds its allocated length.
     pub fn parse(
         widths @ FormatWidths { offsets, lengths }: FormatWidths,
         data: &[u8],
@@ -203,9 +203,7 @@ impl FreeSpaceManagerHeaderFrame {
         checksum::verify_trailing(block)?;
         let version = fields.u8()?;
         if version != FSHD_VERSION {
-            return Err(FormatError::InvalidFreeSpaceManager(format!(
-                "the header version is {version}, not {FSHD_VERSION}"
-            )));
+            return Err(FormatError::UnsupportedVersion(version));
         }
         let client_id = fields.u8()?;
         let total_space = fields.length(lengths)?;
@@ -564,8 +562,9 @@ impl FreeSpaceManagerSectionListRef {
     ///
     /// Returns [`FormatError::InsufficientRegion`] if `region` does not contain
     /// [`parse_range`](Self::parse_range), [`FormatError::ChecksumMismatch`] if the checksum
-    /// differs with the `checksum` feature enabled, or [`FormatError::InvalidFreeSpaceManager`]
-    /// if the signature, version, or header address is invalid.
+    /// differs with the `checksum` feature enabled, [`FormatError::UnsupportedVersion`] if
+    /// the version is not 0, or [`FormatError::InvalidFreeSpaceManager`] if the signature or
+    /// header address is invalid.
     pub fn parse<'a>(
         &self,
         region: FileRegion<'a>,
@@ -693,9 +692,10 @@ impl FreeSpaceManagerHeader {
     ///
     /// Returns [`FormatError::UnexpectedEof`] if `data` is shorter than the header,
     /// [`FormatError::ChecksumMismatch`] if the checksum does not match and the `checksum` feature
-    /// is enabled, and [`FormatError::InvalidFreeSpaceManager`] if the signature is not `FSHD`, the
-    /// version is not 0, the client ID is not 1, the serialized section count differs from the
-    /// section count, the "Number of Un-Serialized Sections" field is not 0, the header counts more
+    /// is enabled, [`FormatError::UnsupportedVersion`] if the version is not 0, and
+    /// [`FormatError::InvalidFreeSpaceManager`] if the signature is not `FSHD`, the client ID
+    /// is not 1, the serialized section count differs from the section count, the "Number of
+    /// Un-Serialized Sections" field is not 0, the header counts more
     /// section classes than the 3 the C library registers for the file client (`H5MF.c`, HDF5
     /// 2.2.0), the address space is 0 bits or wider than 64 bits, the used length exceeds the
     /// allocated length, an empty manager records nonzero free bytes, or a header of one or
@@ -1092,9 +1092,10 @@ pub fn section_info_capacity(
 /// Returns [`FormatError::UnexpectedEof`] if `data` is shorter than `header.section_list_used()` or
 /// the section list is shorter than its prefix and its checksum, [`FormatError::ChecksumMismatch`]
 /// if the checksum does not match and the `checksum` feature is enabled,
-/// [`FormatError::InvalidFreeSpaceManager`] if the signature is not `FSSE`, the version is not 0,
-/// the header address is not `header_addr`, a field runs into the checksum, a set holds 0 sections
-/// or sections of 0 bytes, the class of a section is not one of the 3 classes the C library
+/// [`FormatError::UnsupportedVersion`] if the version is not 0,
+/// [`FormatError::InvalidFreeSpaceManager`] if the signature is not `FSSE`, the header address
+/// is not `header_addr`, a field runs into the checksum, a set holds 0 sections or sections
+/// of 0 bytes, the class of a section is not one of the 3 classes the C library
 /// registers for the file client, the sets hold more sections than `header.total_sections()`, or
 /// the sizes of the sections do not sum to `header.total_space()`, and
 /// [`FormatError::ValueTooLargeForPlatform`] if `header.section_list_used()` or the section count
@@ -1331,8 +1332,8 @@ fn header_len(FormatWidths { offsets, lengths }: FormatWidths) -> usize {
 ///
 /// Returns [`FormatError::UnexpectedEof`] if `list` is shorter than the prefix and checksum,
 /// [`FormatError::ChecksumMismatch`] if the checksum differs with the `checksum` feature
-/// enabled, or [`FormatError::InvalidFreeSpaceManager`] if the signature, version, or header address
-/// is invalid.
+/// enabled, [`FormatError::UnsupportedVersion`] if the version is not 0, or
+/// [`FormatError::InvalidFreeSpaceManager`] if the signature or header address is invalid.
 fn parse_section_list_prefix(
     offsets: OffsetWidth,
     list: &[u8],
@@ -1357,9 +1358,7 @@ fn parse_section_list_prefix(
     checksum::verify_trailing(list)?;
     let version = fields.u8()?;
     if version != FSSE_VERSION {
-        return Err(FormatError::InvalidFreeSpaceManager(format!(
-            "the section list version is {version}, not {FSSE_VERSION}"
-        )));
+        return Err(FormatError::UnsupportedVersion(version));
     }
     let owner_addr = match crate::width::decode_stored_address(offsets, list, fields.pos())? {
         DecodedStoredAddress::Defined(addr) => addr,
@@ -1883,7 +1882,6 @@ mod tests {
 
     #[rstest]
     #[case::signature(0, vec![b'X'], "the section list signature is b\"XSSE\", not b\"FSSE\"")]
-    #[case::version(4, vec![1], "the section list version is 1, not 0")]
     #[case::backlink(5, 736u64.to_le_bytes().to_vec(), "the section list belongs to the header at 736, not to the header at 619")]
     #[case::undefined_backlink(5, u64::MAX.to_le_bytes().to_vec(), "the section list belongs to the header at 18446744073709551615, not to the header at 619")]
     fn section_list_region_rejects_invalid_framing(
@@ -2508,7 +2506,6 @@ mod tests {
     }
 
     #[rstest]
-    #[case::version(4, &[1], "the section list version is 1, not 0")]
     #[case::a_section_list_of_another_header(
         5,
         &736u64.to_le_bytes(),
@@ -2548,6 +2545,51 @@ mod tests {
             parse_section_info(widths(8, 8), &fsse, StoredAddress::new(619), &header),
             Err(FormatError::InvalidFreeSpaceManager(reason.to_owned()))
         );
+    }
+
+    #[rstest]
+    #[case::header(true)]
+    #[case::section_list(false)]
+    fn unsupported_manager_versions_report_the_version(#[case] header: bool) {
+        let mut bytes = if header {
+            free_space::single_section_header()
+        } else {
+            free_space::single_section_info()
+        };
+        bytes[4] = 1;
+        let length = bytes.len();
+        test_util::checksum::restamp(&mut bytes, 0, length);
+        if header {
+            let reference =
+                FreeSpaceManagerHeaderRef::new(widths(8, 8), PhysicalAddress::new(619)).unwrap();
+            assert_eq!(
+                reference.parse_checked(region(619, &bytes)).unwrap_err(),
+                FormatError::UnsupportedVersion(1)
+            );
+            assert_eq!(
+                FreeSpaceManagerHeader::parse(widths(8, 8), &bytes).unwrap_err(),
+                FormatError::UnsupportedVersion(1)
+            );
+        } else {
+            let frame = single_frame();
+            let reference = frame
+                .section_list_ref(StoredAddress::new(619), PhysicalAddress::new(701))
+                .unwrap();
+            assert_eq!(
+                reference.parse_checked(region(701, &bytes)).unwrap_err(),
+                FormatError::UnsupportedVersion(1)
+            );
+            assert_eq!(
+                parse_section_info(
+                    widths(8, 8),
+                    &bytes,
+                    StoredAddress::new(619),
+                    &frame.file_header().unwrap()
+                )
+                .unwrap_err(),
+                FormatError::UnsupportedVersion(1)
+            );
+        }
     }
 
     #[test]
@@ -2617,7 +2659,6 @@ mod tests {
     }
 
     #[rstest]
-    #[case::version(vec![(4, vec![1])], "the header version is 1, not 0")]
     #[case::fractal_heap_client(
         vec![(5, vec![0])],
         "the client ID is 0, not 1, the ID of the file client"

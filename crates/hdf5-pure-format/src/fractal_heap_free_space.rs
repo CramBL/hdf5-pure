@@ -1442,11 +1442,15 @@ mod tests {
             .parse(FileRegion::new(reference.parse_range(), &list).unwrap())
             .unwrap_err();
         let expected = match at {
-            0 => "the section list signature is b\"XSSE\", not b\"FSSE\"".into(),
-            4 => "the section list version is 1, not 0".into(),
-            _ => "the section list belongs to the header at 33, not to the header at 32".into(),
+            0 => FormatError::InvalidFreeSpaceManager(
+                "the section list signature is b\"XSSE\", not b\"FSSE\"".into(),
+            ),
+            4 => FormatError::UnsupportedVersion(1),
+            _ => FormatError::InvalidFreeSpaceManager(
+                "the section list belongs to the header at 33, not to the header at 32".into(),
+            ),
         };
-        assert_eq!(err, FormatError::InvalidFreeSpaceManager(expected));
+        assert_eq!(err, expected);
     }
 
     #[cfg(feature = "checksum")]
