@@ -69,8 +69,8 @@ fn corrupt(reason: &'static str) -> Error {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidLzfStream`] if a token is truncated, a match refers
-/// to bytes before the output, or decoding exceeds `max_output`.
+/// Returns [`Error::InvalidLzfStream`] if a token is truncated or a match refers to bytes before
+/// the output. Returns [`Error::LzfSizeExceeded`] if decoding exceeds `max_output`.
 pub fn decompress(input: &[u8], max_output: Option<usize>) -> Result<Vec<u8>, Error> {
     let cap = max_output.unwrap_or(usize::MAX);
     let mut out = Vec::with_capacity(crate::decode_reservation(
@@ -90,7 +90,10 @@ pub fn decompress(input: &[u8], max_output: Option<usize>) -> Result<Vec<u8>, Er
                 .get(ip..ip + len)
                 .ok_or_else(|| corrupt("truncated literal run"))?;
             if out.len() + len > cap {
-                return Err(corrupt("output exceeds expected chunk size"));
+                return Err(Error::LzfSizeExceeded {
+                    limit: cap,
+                    required: out.len() + len,
+                });
             }
             out.extend_from_slice(literals);
             ip += len;
@@ -118,7 +121,10 @@ pub fn decompress(input: &[u8], max_output: Option<usize>) -> Result<Vec<u8>, Er
                 return Err(corrupt("match reaches before start of output"));
             }
             if out.len() + len > cap {
-                return Err(corrupt("output exceeds expected chunk size"));
+                return Err(Error::LzfSizeExceeded {
+                    limit: cap,
+                    required: out.len() + len,
+                });
             }
             let start = out.len() - distance;
             if distance >= len {
@@ -296,7 +302,10 @@ mod tests {
         // Output larger than cap.
         assert_eq!(
             decompress(&[4, b'a', b'b', b'c', b'd', b'e'], Some(3)).unwrap_err(),
-            Error::InvalidLzfStream("output exceeds expected chunk size")
+            Error::LzfSizeExceeded {
+                limit: 3,
+                required: 5
+            }
         );
     }
 
