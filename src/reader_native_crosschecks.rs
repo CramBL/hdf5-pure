@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use rstest::rstest;
 use test_util::publication as publication_bytes;
+use test_util::temp;
 use test_util_hdf5::page_publication;
 use test_util_hdf5::page_publication::PublicationStrategy;
 use test_util_hdf5::paged;
@@ -31,8 +32,7 @@ fn typed_sweeps_read_reference_chunks_without_retaining_indexes(
     #[case] unknown: bool,
     #[values(false, true)] streaming: bool,
 ) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("sweep.h5");
+    let path = temp::temp_path("sweep.h5");
     let rows = 180_005;
     let expected = test_util_hdf5::numeric::write_chunked_sweep(&path, rows, sparse);
     let options = FileAccessProperties::new().with_chunk_cache(ChunkCacheConfig::disabled());

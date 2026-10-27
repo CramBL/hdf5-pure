@@ -30,13 +30,13 @@ use hdf5_sys::h5t::H5T_pad_t;
 /// # Examples
 ///
 /// ```
+/// use test_util::temp;
 /// use test_util_hdf5::numeric;
 ///
-/// let dir = tempfile::tempdir()?;
-/// let values = numeric::write_chunked_sweep(&dir.path().join("chunks.h5"), 261, true);
+/// let path = temp::temp_path("chunks.h5");
+/// let values = numeric::write_chunked_sweep(&path, 261, true);
 /// assert_eq!(&values[..6], &[0, 1, 2, 3, 4, 5]);
 /// assert_eq!(&values[133 * 3..], vec![0; 128 * 3]);
-/// # Ok::<(), std::io::Error>(())
 /// ```
 pub fn write_chunked_sweep(path: &Path, rows: usize, sparse: bool) -> Vec<i32> {
     let values: Vec<i32> = (0..rows * 3)
