@@ -967,17 +967,43 @@ impl FileImage for MirrorImage {
     }
 }
 
-/// Read exactly `buf.len()` bytes at `offset` from a shared file handle,
-/// bounds-checked against `len` (mirroring `ReadSeekSource`). Uses the
-/// `Read`/`Seek` impls on `&fs::File`, so it can serve a `&self` read: callers
-/// serialize access through the session's engine lock, and the shared cursor is
-/// never raced.
+/// Reads a physical range and converts I/O failures to format errors.
+///
+/// The caller serializes access to the shared file cursor.
+///
+/// # Errors
+///
+/// Returns [`FormatError::Source`] for a seek or read failure,
+/// [`FormatError::UnexpectedSourceEof`] if the end of the range exceeds `len`, or
+/// [`FormatError::OffsetOverflow`] if its end overflows.
 pub(crate) fn read_at_handle(
     handle: &fs::File,
     len: u64,
     offset: u64,
     buf: &mut [u8],
 ) -> Result<(), FormatError> {
+    read_at_handle_io(handle, len, offset, buf).map_err(|error| match error {
+        Error::Format(error) => error,
+        Error::Io(error) => FormatError::Source(std::format!("{error}")),
+        error => FormatError::Internal(std::format!("unexpected handle read error: {error}")),
+    })
+}
+
+/// Reads an exact physical range while retaining seek and read errors.
+///
+/// The caller serializes access to the shared file cursor.
+///
+/// # Errors
+///
+/// Returns [`Error::Io`] for a seek or read failure, including a short read within the recorded
+/// source length. Returns [`Error::Format`] with [`FormatError::UnexpectedSourceEof`] if the
+/// end of the range exceeds `len`, or [`FormatError::OffsetOverflow`] if its end overflows.
+pub(crate) fn read_at_handle_io(
+    handle: &fs::File,
+    len: u64,
+    offset: u64,
+    buf: &mut [u8],
+) -> Result<(), Error> {
     let end = offset
         .checked_add(buf.len() as u64)
         .ok_or(FormatError::OffsetOverflow {
@@ -988,13 +1014,12 @@ pub(crate) fn read_at_handle(
         return Err(FormatError::UnexpectedSourceEof {
             expected: end,
             available: len,
-        });
+        }
+        .into());
     }
     let mut h = handle;
-    h.seek(SeekFrom::Start(offset))
-        .map_err(|e| FormatError::Source(std::format!("{e}")))?;
-    h.read_exact(buf)
-        .map_err(|e| FormatError::Source(std::format!("{e}")))?;
+    h.seek(SeekFrom::Start(offset))?;
+    h.read_exact(buf)?;
     Ok(())
 }
 
@@ -1504,6 +1529,40 @@ impl FileImage for SourceOnlyImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[rstest::rstest]
+    #[case::actual_short_read(4, 4)]
+    #[case::known_short_source(0, 4)]
+    fn handle_acquisition_distinguishes_source_bounds_and_io(
+        #[case] recorded_length: u64,
+        #[case] read_length: usize,
+    ) {
+        use std::error::Error as StdError;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source.h5");
+        fs::write(&path, []).unwrap();
+        let handle = fs::File::open(path).unwrap();
+        let error =
+            read_at_handle_io(&handle, recorded_length, 0, &mut vec![0; read_length]).unwrap_err();
+        if recorded_length == 0 {
+            let Error::Format(FormatError::UnexpectedSourceEof {
+                expected,
+                available,
+            }) = error
+            else {
+                panic!("{error:?}");
+            };
+            assert_eq!((expected, available), (4, 0));
+        } else {
+            let cause = error
+                .source()
+                .unwrap()
+                .downcast_ref::<std::io::Error>()
+                .unwrap();
+            assert_eq!(cause.kind(), std::io::ErrorKind::UnexpectedEof);
+        }
+    }
 
     /// The two backings [`FileImage`] exists to make interchangeable. Every case
     /// below runs against both, because a primitive that holds for one and not

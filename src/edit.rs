@@ -2488,7 +2488,7 @@ impl WriteEngine {
     ///
     /// Returns [`FormatError::OffsetOverflow`] if resolving a stored address, computing a section
     /// end, or summing section lengths overflows. Returns [`FormatError::InvalidFreeSpaceManager`]
-    /// if a section length is zero.
+    /// if a section length is zero, or [`Error::OverlappingFreeSections`] if sections overlap.
     ///
     /// # Examples
     ///
@@ -2514,7 +2514,7 @@ impl WriteEngine {
         rustdoc::private_doc_tests,
         reason = "rustdoc's test mode collects a private item, so this example is compiled and run by `cargo test --doc`"
     )]
-    pub(crate) fn reusable_free_sections(&self) -> Result<FreeSections, FormatError> {
+    pub(crate) fn reusable_free_sections(&self) -> Result<FreeSections, Error> {
         FreeSections::new(
             self.reusable_ranges()
                 .map(|range| {
@@ -2527,6 +2527,7 @@ impl WriteEngine {
                 })
                 .collect::<Result<Vec<_>, FormatError>>()?,
         )
+        .map_err(Error::from)
     }
 
     /// Returns physical reusable ranges, including allocator-held reservations.

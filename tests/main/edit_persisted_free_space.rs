@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use hdf5_pure::AttrValue;
+use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileBuilder;
@@ -10,8 +11,10 @@ use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FreeSectionCoordinates;
 use hdf5_pure::MemoryStrategy;
+use hdf5_pure::StoredAddress;
 use hdf5_pure::UserblockSize;
-use hdf5_pure_core::__private::StoredAddressExt;
+use hdf5_pure_core::__private::{BaseAddressExt, StoredAddressExt};
+use hdf5_pure_format::__private as format;
 use rstest::rstest;
 use test_util::free_space;
 use test_util::range;
@@ -20,6 +23,81 @@ use test_util::userblock::Userblock;
 use test_util_hdf5::file_space;
 use test_util_hdf5::paged;
 use test_util_hdf5::storage;
+
+#[rstest]
+#[case::overlap(16)]
+#[case::duplicate(0)]
+fn persisted_inspection_reports_overlapping_extents(
+    #[case] displacement: u64,
+    #[values(false, true)] streaming: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("overlapping-sections.h5");
+    file_space::write_persisted_interior_hole(&path);
+    let file = File::open(&path).unwrap();
+    let report = file.persisted_free_sections().unwrap().unwrap();
+    let header_address = report.managers()[0].address();
+    let hole = report
+        .free_sections()
+        .sections()
+        .iter()
+        .max_by_key(|section| section.length())
+        .unwrap();
+    assert!(hole.length().get() >= 1024);
+    let previous_address = hole.address() + 256;
+    let address = previous_address + displacement;
+    let list_address = StoredAddress::new(hole.address());
+    let superblock = file.superblock();
+    let widths = format::FormatWidths {
+        offsets: superblock.offset_size,
+        lengths: superblock.length_size,
+    };
+    let header_at =
+        usize::try_from(superblock.base_address.absolute(header_address).unwrap()).unwrap();
+    let list_at = usize::try_from(superblock.base_address.absolute(list_address).unwrap()).unwrap();
+    let (header, list) = format::serialize_free_space_manager(
+        widths,
+        &[
+            format::FreeSection {
+                addr: StoredAddress::new(previous_address),
+                size: 32,
+            },
+            format::FreeSection {
+                addr: StoredAddress::new(address),
+                size: 32,
+            },
+        ],
+        header_address,
+        list_address,
+        format::SECTION_CLASS_SIMPLE,
+    )
+    .unwrap();
+    drop(file);
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[header_at..header_at + header.len()].copy_from_slice(&header);
+    bytes[list_at..list_at + list.len()].copy_from_slice(&list);
+    std::fs::write(&path, bytes).unwrap();
+    let file = if streaming {
+        File::open_streaming(&path)
+    } else {
+        File::open(&path)
+    }
+    .unwrap();
+    let error = file.persisted_free_sections().unwrap_err();
+    let Error::OverlappingFreeSections {
+        address: actual_address,
+        length,
+        previous_address: actual_previous,
+        previous_length,
+    } = error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(
+        (actual_address, length, actual_previous, previous_length),
+        (address, 32, previous_address, 32)
+    );
+}
 
 #[rstest]
 #[case::bounded(MemoryStrategy::Bounded, 0)]
