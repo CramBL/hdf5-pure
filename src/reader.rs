@@ -73,7 +73,7 @@ use crate::libver::LibVer;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
 use crate::object_path::{LinkName, LinkNameBuf, ObjectPath, ObjectPathBuf};
-#[cfg(any(test, feature = "__page-publication-crosscheck"))]
+#[cfg(test)]
 use crate::page_publication_failure::PagePublicationFailure;
 use crate::read_region::{ReadRegion, RegionRequest};
 use crate::read_spec::{RawReadSpec, RawReadStorage};
@@ -3020,7 +3020,7 @@ impl File {
     ///
     /// Returns [`Error::EditUnsupported`] unless the file uses non-persistent PAGE allocation.
     /// Returns the opening or configuration error if the session cannot be created.
-    #[cfg(any(test, feature = "__page-publication-crosscheck"))]
+    #[cfg(test)]
     pub(crate) fn open_page_publication_failure(
         path: &Path,
         failure: PagePublicationFailure,
@@ -3040,7 +3040,7 @@ impl File {
     /// # Errors
     ///
     /// Returns [`Error::ReadOnly`] if the file has no editing session, or the snapshot read error.
-    #[cfg(any(test, feature = "__page-publication-crosscheck"))]
+    #[cfg(test)]
     pub(crate) fn page_publication_snapshot(&self) -> Result<Vec<u8>, Error> {
         self.with_mirror_session(Change::Nothing, |session| {
             session.page_publication_snapshot()
