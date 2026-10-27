@@ -3,7 +3,7 @@
 use core::num::NonZeroU64;
 use std::path::Path;
 
-use hdf5_pure_format::__private::FractalHeapHeader;
+use hdf5_pure_format::__private::{BTreeV2Layout, FractalHeapHeader, HugeObjectRecordContext};
 use hdf5_pure_space::__private::AGGREGATE_BLOCK_SIZE;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::Extent as FreeExtent;
@@ -15,6 +15,7 @@ use hdf5_pure_space::__private::PageType;
 use hdf5_pure_space::__private::PagedSections;
 use hdf5_pure_space::__private::SessionSpace;
 use rstest::rstest;
+use test_util::btree_v2;
 use test_util::fractal_heap;
 use test_util::widths::Widths;
 
@@ -442,6 +443,129 @@ fn deleting_the_owner_of_a_filtered_attribute_heap_reclaims_its_storage(
         reader.dataset("keep").unwrap().read_i32().unwrap(),
         (0..1024).collect::<Vec<_>>()
     );
+}
+
+#[cfg(feature = "deflate")]
+#[rstest]
+fn deleting_a_filtered_heap_with_huge_objects_reclaims_its_encoded_allocations(
+    #[values(0, 512)] userblock: u64,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("filtered_huge_reclaim.h5");
+    write_dense_attribute_owner(&path, 2, FileSpaceStrategy::FsmAggr);
+    prepend_userblock(&path, userblock);
+    let object = ObjectPathBuf::parse("/g");
+    let heap_address = {
+        let session = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+        let DenseAttributeOwner { addr, .. } = dense_attribute_owner(&session, &object);
+        attribute_heap_address(&session, addr)
+    };
+    let mut bytes = std::fs::read(&path).unwrap();
+    filter_attribute_heap(&mut bytes, userblock, heap_address, true);
+    let header = FractalHeapHeader::parse(
+        &bytes,
+        heap_address.to_usize().unwrap(),
+        OFFSET_SIZE,
+        LENGTH_SIZE,
+    )
+    .unwrap();
+    let widths = crate::file_writer::WIDTHS;
+    let tree_at = (header.btree_huge_objects_address.get() + userblock)
+        .to_usize()
+        .unwrap();
+    let tree = crate::btree_v2::BTreeV2Header::parse_with_widths(&bytes, tree_at, widths).unwrap();
+    assert_eq!(tree.depth, 0);
+    let layout = BTreeV2Layout::new(&tree, widths.offsets).unwrap();
+    let root = layout.root().unwrap();
+    let node_at = (root.address().get() + userblock).to_usize().unwrap();
+    let node = layout.parse(&bytes[node_at..], root).unwrap();
+    let records: Vec<_> = (0..node.record_count())
+        .map(|index| {
+            let record = crate::btree_v2::BTreeV2Record {
+                data: node.record(index).unwrap().to_vec(),
+            };
+            record.huge_object(widths.offsets, widths.lengths).unwrap()
+        })
+        .collect();
+    let pipeline = crate::test_data::deflate_pipeline();
+    let records: Vec<_> = records
+        .into_iter()
+        .map(|record| {
+            let at = (record.address.get() + userblock).to_usize().unwrap();
+            let decoded = &bytes[at..at + record.length.to_usize().unwrap()];
+            let encoded = crate::test_data::encode_block(decoded, &pipeline);
+            assert!(encoded.len().to_u64() < record.length);
+            bytes[at..at + encoded.len()].copy_from_slice(&encoded);
+            let mut filtered = record.address.get().to_le_bytes().to_vec();
+            filtered.extend_from_slice(&encoded.len().to_u64().to_le_bytes());
+            filtered.extend_from_slice(&0u32.to_le_bytes());
+            filtered.extend_from_slice(&record.length.to_le_bytes());
+            filtered.extend_from_slice(&record.id.to_le_bytes());
+            filtered
+        })
+        .collect();
+    let context = HugeObjectRecordContext::new(&header, widths).unwrap();
+    let encoded_tree = btree_v2::Header::new(
+        context.tree_type(),
+        context.record_size(),
+        tree.root_node_address.get(),
+        tree.num_records_in_root,
+    )
+    .node_size(tree.node_size)
+    .build(Widths::EIGHT);
+    bytes[tree_at..tree_at + encoded_tree.len()].copy_from_slice(&encoded_tree);
+    let encoded_node = btree_v2::leaf(context.tree_type(), &records);
+    assert!(encoded_node.len() <= tree.node_size as usize);
+    bytes[node_at..node_at + encoded_node.len()].copy_from_slice(&encoded_node);
+    let heap = crate::fractal_heap_storage::collect_fractal_heap_storage_from_source(
+        &crate::source::BaseOffsetSource {
+            inner: &BytesSource::new(&bytes),
+            base: BaseAddress::new(userblock),
+        },
+        AddressContext::from_effective_base(BaseAddress::new(userblock)),
+        StoredAddress::new(heap_address - userblock),
+        widths,
+    )
+    .unwrap();
+    assert_eq!(
+        heap.allocations()
+            .iter()
+            .filter(|(_, kind)| *kind == FractalHeapAllocation::HugeObject)
+            .count(),
+        2
+    );
+    std::fs::write(&path, bytes).unwrap();
+    let reader = crate::reader::File::open(&path).unwrap();
+    let attrs = reader.group("g").unwrap().attrs().unwrap();
+    assert_eq!(attrs.len(), 14);
+    assert_eq!(
+        attrs.get("huge0"),
+        Some(&AttrValue::AsciiString("y".repeat(70_000)))
+    );
+    drop(reader);
+    let mut session = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+    let DenseAttributeOwner { storage, .. } = dense_attribute_owner(&session, &object);
+    assert_ownership_covers_storage(&session, &storage, false);
+    session.delete(&object).unwrap();
+    session.commit().unwrap();
+    assert!(session.space_ownership().unwrap().analysis_complete);
+    for (extent, _) in heap.allocations() {
+        assert!(
+            reusable_covers(&session, extent.start(), extent.len()),
+            "{extent:?}"
+        );
+    }
+    drop(session);
+    let reader = crate::reader::File::open(&path).unwrap();
+    assert_eq!(
+        reader.dataset("keep").unwrap().read_i32().unwrap(),
+        (0..1024).collect::<Vec<_>>()
+    );
+    let error = reader.group("g").unwrap_err();
+    let Error::Format(FormatError::PathNotFound(missing)) = error else {
+        panic!("expected PathNotFound, got {error:?}")
+    };
+    assert_eq!(missing, "g");
 }
 
 #[test]

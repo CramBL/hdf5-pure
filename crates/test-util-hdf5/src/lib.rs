@@ -22,6 +22,8 @@ pub mod file_space;
 pub mod file_space_oracle;
 pub mod fixed_string;
 pub mod fixtures;
+#[cfg(feature = "__hdf5-bundled")]
+pub mod fractal_heap;
 mod free_sections;
 pub mod free_space_churn;
 pub mod free_space_endurance;
@@ -93,5 +95,45 @@ macro_rules! hdf5_1_10_tests {
 #[cfg(not(feature = "__hdf5-1.10"))]
 #[macro_export]
 macro_rules! hdf5_1_10_tests {
+    ($($item:item)*) => {};
+}
+
+/// Includes the supplied items when the helper's `__hdf5-bundled` feature is enabled.
+///
+/// The invoking crate can use this macro without defining a matching feature of its own.
+///
+/// # Examples
+///
+/// ```test_harness
+/// test_util_hdf5::hdf5_bundled_tests! {
+///     #[test]
+///     fn bundled_library_has_the_expected_version() {
+///         assert_eq!(hdf5::library_version(), (2, 2, 0));
+///     }
+/// }
+/// ```
+#[cfg(feature = "__hdf5-bundled")]
+#[macro_export]
+macro_rules! hdf5_bundled_tests {
+    ($($item:item)*) => { $($item)* };
+}
+
+/// Includes the supplied items when the helper's `__hdf5-bundled` feature is enabled.
+///
+/// The invoking crate can use this macro without defining a matching feature of its own.
+///
+/// # Examples
+///
+/// ```test_harness
+/// test_util_hdf5::hdf5_bundled_tests! {
+///     #[test]
+///     fn bundled_library_has_the_expected_version() {
+///         assert_eq!(hdf5::library_version(), (2, 2, 0));
+///     }
+/// }
+/// ```
+#[cfg(not(feature = "__hdf5-bundled"))]
+#[macro_export]
+macro_rules! hdf5_bundled_tests {
     ($($item:item)*) => {};
 }

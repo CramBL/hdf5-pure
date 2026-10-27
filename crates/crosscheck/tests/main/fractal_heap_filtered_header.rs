@@ -251,6 +251,90 @@ fn a_c_written_filtered_huge_object_has_a_type_two_record(#[values(false, true)]
     expected.sort();
     assert_eq!(names, expected);
     file.close().unwrap();
+    let session = File::open_rw(&path).unwrap();
+    session.root().delete("g").unwrap();
+    session.commit().unwrap();
+    session.close().unwrap();
+    let c_file = CFile::open(&path).unwrap();
+    assert_eq!(c_file.member_names().unwrap(), Vec::<String>::new());
+    c_file.close().unwrap();
+}
+
+#[rstest]
+#[cfg(feature = "__hdf5-bundled")]
+#[case::indirect(false)]
+#[case::direct(true)]
+fn c_written_filtered_huge_fixtures_expose_both_record_representations(#[case] direct: bool) {
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("filtered_huge.h5");
+    test_util_hdf5::fractal_heap::write_filtered_huge(&path, direct);
+    let c_file = CFile::open(&path).unwrap();
+    let c_id = c_file.dataset("heap_id").unwrap().read_raw::<u8>().unwrap();
+    let c_address = c_file
+        .dataset("heap_address")
+        .unwrap()
+        .read_scalar::<u64>()
+        .unwrap();
+    c_file.close().unwrap();
+    let file = File::open(&path).unwrap();
+    assert_eq!(file.dataset("heap_id").unwrap().read_u8().unwrap(), c_id);
+    assert_eq!(
+        file.dataset("heap_address").unwrap().read_u64().unwrap(),
+        [c_address]
+    );
+    file.close().unwrap();
+    let image = fs::read(&path).unwrap();
+    let heap = FractalHeapHeader::parse(&image, usize::try_from(c_address).unwrap(), 8, 8).unwrap();
+    assert_eq!(heap.huge_objects_count, 1);
+    assert_eq!(heap.huge_objects_size, 12_000);
+    assert_eq!(heap.root_block_address.get(), u64::MAX);
+    let widths = FormatWidths {
+        offsets: OffsetWidth::Eight,
+        lengths: LengthWidth::Eight,
+    };
+    assert_eq!(heap.huge_ids_direct_with_widths(widths), direct);
+    let objects = FractalHeapHugeObjectLayout::new(
+        &heap,
+        widths,
+        BaseAddress::ZERO,
+        HugeIndirectKeyEncoding::Libhdf5,
+    )
+    .unwrap();
+    let region = FileRegion::new(
+        FileRange::new(PhysicalAddress::new(0), image.len() as u64).unwrap(),
+        &image,
+    )
+    .unwrap();
+    let tracker = objects.parse_tracker(region).unwrap();
+    let tree = BTreeV2Layout::new(tracker.header(), widths.offsets).unwrap();
+    let root = tree.root().unwrap();
+    let view = tree
+        .parse(
+            &image[usize::try_from(root.address().get()).unwrap()..],
+            root,
+        )
+        .unwrap();
+    let record = tracker.parse_record(view.record(0).unwrap()).unwrap();
+    let reference = match objects.parse_id(&c_id).unwrap() {
+        FractalHeapHugeObjectId::Direct(reference) => {
+            assert!(direct);
+            assert_eq!(record.key(), None);
+            reference
+        }
+        FractalHeapHugeObjectId::Indirect(lookup) => {
+            assert!(!direct);
+            assert_eq!(record.key(), Some(lookup.key().value()));
+            objects.resolve(&lookup, &record).unwrap()
+        }
+    };
+    assert_eq!(reference.range(), record.reference().range());
+    assert!(reference.range().length() < 12_000);
+    assert_eq!(reference.decoded_size(), 12_000);
+    assert_eq!(reference.filters().unwrap().mask, 0);
+    assert_eq!(
+        reference.parse(region).unwrap().len() as u64,
+        reference.range().length()
+    );
 }
 
 // "Fractal Heap", format specification version 4.0, defines the header signature.
