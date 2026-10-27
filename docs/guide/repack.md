@@ -1,4 +1,6 @@
-[`repack`](crate::repack()) rewrites a whole HDF5 file into a fresh, compact copy, optionally dropping objects on the way. It is the guaranteed shrink where in-place editing cannot give one: deleting an object cannot always return its bytes to the operating system.
+[`repack`](crate::repack()) rewrites an HDF5 file into a fresh copy, optionally dropping objects.
+The writer allocates surviving objects under the output policy. In-place deletion can leave unused
+space between live objects, which the operating system cannot reclaim by truncation.
 
 This page is backed by [`examples/repack.rs`](https://github.com/CramBL/hdf5-pure/blob/main/examples/repack.rs). Run it with:
 
@@ -10,7 +12,9 @@ $ cargo run --example repack
 
 Deleting an object inside a [`File::open_rw`](crate::File::open_rw) session, which [Editing files](crate::_guide::editing) covers, reuses the freed space *within that session*, and the file is truncated when the freed bytes happen to reach the very end. But a single delete-then-close cannot shrink a file whose freed region sits in the middle: an HDF5 file is a single address space, and a hole in the middle cannot be removed by truncating the tail. This is the same reason the HDF5 C library ships a separate `h5repack` tool.
 
-[`repack`](crate::repack()) solves this by reading every surviving object and rewriting the whole file from scratch through [`FileBuilder`](crate::FileBuilder), so the result has no dead space and is strictly smaller when objects are dropped.
+[`repack`](crate::repack()) reads every surviving object and rewrites the file through
+[`FileBuilder`](crate::FileBuilder). The writer allocates the output under the selected file-space
+settings, so the output size also depends on its allocation policy.
 
 ## Basic usage
 
@@ -64,6 +68,46 @@ Leading and trailing slashes in a drop path are ignored, so `"grp/old"` and `"/g
 
 **Every drop path must exist.** A drop path that matches no object in the source fails the repack, since a no-op drop is treated as a mistake. The error is reported as [`Error::RepackUnsupported`](crate::Error::RepackUnsupported), and no output file is written.
 
+## File-space management
+
+By default, a repack preserves the source's recorded effective
+[`FileSpaceSettings`](crate::FileSpaceSettings), including persistence, threshold, and page size.
+If the source has no recorded settings, the writer uses its default. Persistent free-space
+metadata is rebuilt for the destination layout.
+
+[`RepackOptions::with_file_space_settings`](crate::RepackOptions::with_file_space_settings)
+selects an output policy. Selecting [`FileSpaceStrategy::None`](crate::FileSpaceStrategy::None)
+omits free-space managers. The output remains writable.
+
+```rust
+# let dir = tempfile::tempdir()?;
+# let input = dir.path().join("input.h5");
+# let compact = dir.path().join("compact.h5");
+# let mut builder = hdf5_pure::FileBuilder::new();
+# builder.with_file_space_settings(
+#     hdf5_pure::FileSpaceSettings::new(hdf5_pure::FileSpaceStrategy::Page)
+#         .with_persistence(true),
+# );
+# builder.create_dataset("values").with_i32_data(&[1, 2, 3]);
+# builder.write(&input)?;
+use hdf5_pure::{File, FileSpaceSettings, FileSpaceStrategy, RepackOptions, repack};
+
+let settings = FileSpaceSettings::new(FileSpaceStrategy::None);
+let options = RepackOptions::new().with_file_space_settings(settings);
+repack(&input, &compact, &options)?;
+
+let file = File::open(&compact)?;
+assert_eq!(file.file_space_settings()?, Some(settings));
+assert!(file.file_space_info()?.unwrap().manager_addrs.is_empty());
+assert_eq!(file.dataset("values")?.read_i32()?, [1, 2, 3]);
+# Ok::<(), hdf5_pure::Error>(())
+```
+
+The writer applies the file-creation validation before writing destination bytes. A repack returns
+[`FormatError::LibverTooOldForContent`](crate::FormatError::LibverTooOldForContent) if the selected
+policy requires a format newer than the explicit
+[`RepackOptions::with_libver_bounds`](crate::RepackOptions::with_libver_bounds).
+
 ## The fidelity guarantee
 
 [`repack`](crate::repack()) never silently degrades data it understands. Every surviving object is reproduced faithfully: datatype, shape, max-shape, chunking, filters, element data, and attributes. Otherwise, the operation fails with [`Error::RepackUnsupported`](crate::Error::RepackUnsupported), which states the object and the reason. An object it cannot reproduce faithfully is rejected.
@@ -83,10 +127,11 @@ Fidelity checks and drop-path validation run before output bytes are written. Da
 | Filters | eligible fully allocated chunked datasets preserve any filter pipeline verbatim. Re-encoded paths support deflate, shuffle, Fletcher32, LZF, and lossless integer scale-offset |
 | Structure | group hierarchy up to 128 levels deep |
 | Attributes | every datatype above, carried across with the source's own encoding (width, charset, string padding, and rank included) on datasets, groups, and root |
-| File-space strategy | the source's strategy, page size, and threshold (carried forward as non-persistent) |
+| File-space settings | the source's effective strategy, persistence, threshold, and page size, unless overridden |
 
-Repacking preserves the source's recorded strategy, page size, and threshold and disables
-persistence. See [File-space management](crate::_guide::file_space) for the configuration details.
+Changing the allocation policy preserves chunk dimensions and filters. For datasets eligible for
+verbatim copying, repack preserves encoded chunk bytes and per-chunk filter masks. See
+[File-space management](crate::_guide::file_space) for the configuration details.
 
 Attributes keep their own encoding. An attribute is copied as the source encoded it, not as [`AttrValue`](crate::AttrValue) renders it. That matters because [`AttrValue`](crate::AttrValue) is a deliberately lossy convenience view: it has no byte order, no sub-width precision, no string padding rule, and no rank above one, so an attribute rebuilt from one would come back in this crate's own layout and flattened. Only an attribute whose element bytes hold a *location*, variable-length data or a reference, cannot be copied as-is. A variable-length string keeps its datatype and dataspace while its strings are written into the new file's heap, and a reference attribute is rejected. See [Attributes](crate::_guide::groups_attributes#attributes) for what a *read* still normalizes.
 
@@ -110,7 +155,7 @@ These are reported as [`Error::RepackUnsupported`](crate::Error::RepackUnsupport
 | a lossy filter on a path that requires re-encoding | re-encoding is not guaranteed idempotent. Fully allocated chunked datasets preserve it verbatim |
 | SZIP or an unknown filter on a path that requires re-encoding | this crate cannot encode it. Fully allocated chunked datasets preserve it verbatim |
 | an attribute whose datatype is or contains a reference | its stored address is not rewritten, and no [`AttrValue`](crate::AttrValue) can re-encode it |
-| file-space settings that do not parse | the source strategy cannot be reproduced faithfully |
+| file-space settings that do not parse, without an output override | the source strategy cannot be reproduced faithfully |
 | an object with more than one path, through an alias or a cycle, unless the drop paths leave one | a repack writes each object at one path |
 | a link to an object that is not a group, a dataset, or a committed datatype | a repack writes only those three classes |
 | an open source with staged edits ([`File::has_staged_edits`](crate::File::has_staged_edits)) | a repack reads only what the file has committed |
@@ -158,8 +203,11 @@ assert_eq!(missing, "runs");
 | | [`File::open_rw`](crate::File::open_rw) delete | [`repack`](crate::repack()) |
 | --- | --- | --- |
 | Reclaims space mid-session | Yes (reused for later writes) | n/a |
-| Shrinks a closed file | Only if freed bytes reach the end | Always |
+| Shrinks a closed file | Only if freed bytes reach the end | Rebuilds allocations under the output policy |
 | Spans a reopen | No | Yes (writes a new file) |
 | Output | edits the same file | a fresh file at `dst` |
 
-For incremental edits where add/delete churn stays bounded, prefer a [`File::open_rw`](crate::File::open_rw) session, which [Editing files](crate::_guide::editing) covers. For guaranteed compaction across a reopen, or to drop objects and reclaim their space unconditionally, use [`repack`](crate::repack()).
+For incremental edits where add/delete churn stays bounded, prefer a
+[`File::open_rw`](crate::File::open_rw) session, which
+[Editing files](crate::_guide::editing) covers. Use [`repack`](crate::repack()) to rebuild surviving
+objects under a selected allocation policy.

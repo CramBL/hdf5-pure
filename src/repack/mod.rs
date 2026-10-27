@@ -5,8 +5,8 @@
 //! space only within a session and cannot return a single deleted-and-closed
 //! file's bytes to the OS. Repack is the complementary answer — the same one the
 //! HDF5 C ecosystem ships as `h5repack`: it reads every surviving object and
-//! rewrites the whole file from scratch through [`FileBuilder`], so the result
-//! has no dead space and is strictly smaller when objects are dropped.
+//! rewrites the whole file through [`FileBuilder`]. The writer allocates the
+//! surviving objects under the destination file-space settings.
 //!
 //! # Fidelity contract
 //!
@@ -62,9 +62,9 @@
 //!   encoding the source gave them rather than rebuilt from an [`AttrValue`],
 //!   which is a decoded view and cannot express a byte order, a sub-width
 //!   precision, a variable-length string, or a rank above one.
-//! - The source file's file-space management strategy (with its page size and
-//!   threshold), carried into the compact output as non-persistent — a repacked
-//!   file has no free space to persist.
+//! - The source file's effective file-space settings, including persistence, unless
+//!   [`RepackOptions::with_file_space_settings`] selects an output policy. The writer
+//!   rebuilds persistent free-space metadata for the destination layout.
 //!
 //! The verbatim chunk copy never decodes, so it eliminates the
 //! decompress→recompress round-trip and the per-dataset decompression blowup,
@@ -118,6 +118,7 @@ use std::sync::Arc;
 use std::vec;
 
 use crate::DeflateLevel;
+use crate::FileSpaceSettings;
 #[cfg(test)]
 use crate::VariableLengthStringType;
 #[cfg(test)]
@@ -177,6 +178,8 @@ pub struct RepackOptions {
     /// [`with_libver_bounds`](Self::with_libver_bounds). `None` carries the
     /// source's own format forward.
     libver_bounds: Option<(LibVer, LibVer)>,
+    /// The destination allocation policy, or `None` to use the source's recorded settings.
+    file_space_settings: Option<FileSpaceSettings>,
     /// Whether the source's object headers are parsed as a writer parses them, from
     /// [`reject_unknown_messages_only_a_writer_must_understand`](Self::reject_unknown_messages_only_a_writer_must_understand).
     /// See [`source_access_mode`](Self::source_access_mode) for the mode it selects.
@@ -247,6 +250,39 @@ impl RepackOptions {
         self.libver_bounds
     }
 
+    /// Selects the allocation policy for the destination file.
+    ///
+    /// By default, a repack preserves the source's recorded effective settings, including
+    /// persistence. If the source has no recorded settings, the writer uses the
+    /// [`FileBuilder`] default. The writer rebuilds free-space metadata for the destination
+    /// layout under the selected policy.
+    ///
+    /// The writer applies the same validation as [`FileBuilder::with_file_space_settings`]
+    /// before writing destination bytes. A repack returns
+    /// [`FormatError::LibverTooOldForContent`] if the selected policy requires a format newer
+    /// than the explicit [`with_libver_bounds`](Self::with_libver_bounds).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure::{FileSpaceSettings, FileSpaceStrategy, RepackOptions};
+    ///
+    /// let settings = FileSpaceSettings::new(FileSpaceStrategy::None);
+    /// let options = RepackOptions::new().with_file_space_settings(settings);
+    /// assert_eq!(options.file_space_settings(), Some(settings));
+    /// ```
+    pub fn with_file_space_settings(mut self, settings: FileSpaceSettings) -> Self {
+        self.file_space_settings = Some(settings);
+        self
+    }
+
+    /// Returns the destination allocation override, or `None` to preserve the source settings.
+    ///
+    /// With `None`, the writer uses its default when the source has no recorded settings.
+    pub fn file_space_settings(&self) -> Option<FileSpaceSettings> {
+        self.file_space_settings
+    }
+
     /// Rejects a source holding an object header message of a type this crate cannot
     /// name that only a decoder with write access must understand.
     ///
@@ -311,7 +347,10 @@ impl RepackOptions {
 ///
 /// Reads every object of `src` not excluded by [`RepackOptions::drop_path`] and
 /// writes them into a fresh, compact file at `dst`. On success `dst` is a normal
-/// HDF5 file holding exactly the surviving objects with no dead space.
+/// HDF5 file holding the surviving objects, allocated under the destination file-space settings.
+///
+/// Preserves the source's recorded effective file-space settings by default, including
+/// persistence. [`RepackOptions::with_file_space_settings`] selects a different output policy.
 ///
 /// The fidelity checks run first: every object is validated while the output is
 /// staged, so an [`Error::RepackUnsupported`] (an object that cannot be
@@ -444,22 +483,26 @@ fn check_source_access_mode(source: &File, options: &RepackOptions) -> Result<()
 /// # Errors
 ///
 /// Returns [`Error::RepackUnsupported`] if `options` drops the root group, if the File Space Info
-/// of `source` does not parse, or if an object of `source` cannot be reproduced faithfully.
+/// of `source` does not parse and no output override is set, or if an object of `source` cannot
+/// be reproduced faithfully.
 /// Returns the errors of [`SourceObjects::discover`].
 fn stage(
     source: &File,
     options: &RepackOptions,
     budget: TraversalBudget,
 ) -> Result<FileBuilder, Error> {
+    let RepackOptions {
+        drop,
+        libver_bounds,
+        file_space_settings,
+        reject_unknown_messages_only_a_writer_must_understand: _,
+    } = options;
     // Shared so each streamed dataset's chunk provider can pull from the same handle
     // during the write without an extra open.
     let file = Arc::new(source.clone());
 
-    let drop: BTreeSet<ObjectPathBuf> = options
-        .drop
-        .iter()
-        .map(|path| ObjectPathBuf::parse(path))
-        .collect();
+    let drop: BTreeSet<ObjectPathBuf> =
+        drop.iter().map(|path| ObjectPathBuf::parse(path)).collect();
     // The root group's path ends with no link, so there is none to leave out of the output.
     if drop.iter().any(ObjectPathBuf::is_empty) {
         return Err(Error::RepackUnsupported(String::from(
@@ -468,16 +511,17 @@ fn stage(
     }
 
     let mut builder = FileBuilder::new();
-    // Repacking preserves the source's recorded strategy, threshold, and page size, with persistence
-    // disabled.
-    let settings = file.file_space_settings().map_err(|err| match err {
-        Error::Format(err) => Error::RepackUnsupported(format!(
-            "the File Space Info of the source cannot be read: {err}"
-        )),
-        err => err,
-    })?;
+    let settings = match *file_space_settings {
+        Some(settings) => Some(settings),
+        None => file.file_space_settings().map_err(|err| match err {
+            Error::Format(err) => Error::RepackUnsupported(format!(
+                "the File Space Info of the source cannot be read: {err}"
+            )),
+            err => err,
+        })?,
+    };
     if let Some(settings) = settings {
-        builder.with_file_space_settings(settings.with_persistence(false));
+        builder.with_file_space_settings(settings);
     }
     let objects = SourceObjects::discover(&file, &drop, budget)?;
     populate(&mut builder, &file, &objects)?;
@@ -509,7 +553,7 @@ fn stage(
     // close as the output gets. `Earliest` as the low bound rather than the
     // source's own version, since `high` is what selects the format and a floor
     // equal to it would leave nothing satisfiable.
-    let (low, high) = match options.libver_bounds {
+    let (low, high) = match *libver_bounds {
         Some(explicit) => explicit,
         None if builder.needs_latest_format() => (LibVer::Earliest, LibVer::WRITER_DEFAULT),
         None => (
