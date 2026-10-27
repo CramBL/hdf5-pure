@@ -68,3 +68,23 @@ shapes and root paths. This bridge is temporary: after publishing the first
 release containing `hdf5-pure-core`, the release maintainer removes it as
 described in `RELEASES.md`. The checker rejects the bridge once the published
 `hdf5-pure` baseline advances.
+
+## Test helpers
+
+`test-util` is independent of the implementation crates. It holds byte builders, malformed inputs,
+fixture paths, temporary paths, and allocation measurement. Its byte builders provide independent
+inputs for parser and layout tests.
+
+`test-util-hdf5` depends on `test-util` and the implementation crates. It holds fixtures built through
+the facade and helpers for comparing the facade with reference libraries. The native dependencies
+are optional: `hdf5` enables libhdf5 support, and `__matio` enables libmatio support. Release capability
+features gate helpers that need newer HDF5 APIs.
+
+The facade's tests and `crates/crosscheck` both use these helper packages. Cargo feature unification
+can enable native helpers for facade unit tests in an interoperability run. The crosscheck package
+is therefore one entry point for native tests, alongside owner-local `native_crosschecks` modules.
+The helper capability macro gates those modules without adding native features to the facade's
+public API. Helpers that need private production access stay in owner-local test-only support
+modules.
+
+[TESTING.md](TESTING.md) defines test ownership, independent evidence, and suite selection.
