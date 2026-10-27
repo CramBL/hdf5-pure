@@ -1,75 +1,27 @@
-//! The exact allocation figures for one write-then-read cycle, recorded rather
-//! than chosen (issue #228).
+//! Exact allocation figures for chunked creation, reading, and appending.
 //!
-//! `tests/allocation_bounds.rs` states the rules — a windowed read allocates on
-//! the order of its window, a chunked read costs a constant per chunk — and those
-//! run everywhere. This file is the other half: the numbers themselves, committed
-//! under `tests/baselines/` so a change to them arrives in a pull request as a
-//! line a reviewer reads rather than as nothing at all. A 5% creep passes every
-//! rule in this suite and shows up here.
+//! This executable has one ignored test and a process-wide allocator. The measured workload
+//! includes creating its HDF5 file. Allocation scaling rules run separately in
+//! `tests/allocation_bounds.rs`.
 //!
-//! # Why this is behind a feature, one platform, and one feature set
+//! Exact figures depend on the target, toolchain, and feature set. CI runs this test on Ubuntu
+//! x86_64 with the repository's pinned Rust toolchain. The test requires the exact default feature
+//! set. The feature list in its `cfg` attribute is maintained by hand and must include each added
+//! feature.
 //!
-//! An exact allocation count is a property of a target, a toolchain *and* a
-//! feature set, not of this crate alone: a `Vec` growth policy, an `OsString` on
-//! one platform and a `String` on another, or a new `std` release all move it
-//! without anything here changing. The feature set is not hypothetical —
-//! `--all-features` measured 416 bytes above the default set on the same machine,
-//! in the same commit. So the figures are recorded where they can be checked (see
-//! the `heap-baseline` job in `.github/workflows/soundness.yml`) and the default suite
-//! runs the rules instead. Widening this to a second platform is a matter of
-//! measuring it there, not of loosening anything.
-//!
-//! Hence the cfg below, which names the default set from both sides: the three
-//! default features must be on and every other one off. That is the set the
-//! figures were recorded under and the set a dependent's build most resembles.
-//! Under `--all-features` — the pre-push gate — it compiles to nothing rather
-//! than failing against numbers from another configuration.
-//!
-//! **The list is maintained by hand and nothing will tell you when it is stale.**
-//! A feature added to the crate and not added here simply widens the set this
-//! accepts, silently, because `--all-features` turns on `fast-deflate` and so
-//! compiles this out whatever else is added. There is no version of this cfg that
-//! self-corrects; adding a feature to the crate means adding it here.
-//!
-//! # When it fails
-//!
-//! Read the named figures: some path started allocating more, and the message
-//! says which figure and by how much.
-//!
-//! The comparison is one-sided — heapscope reports only figures that *grew* — so
-//! a number that went **down** never fails and never appears. That is worth
-//! knowing because it is how the gate goes slack: an improvement leaves the file
-//! recording the worse old number, and the difference becomes headroom a later
-//! regression can spend for free. Re-record after an improvement too; nothing
-//! will remind you.
-//!
-//! Re-record with:
+//! Run `just soundness::heap-baseline` to compare recorded figures. Record new figures with:
 //!
 //! ```sh
-//! HEAPSCOPE_UPDATE_BASELINE=1 cargo test --features __heap-baseline --test allocation_baseline
+//! just soundness::heap-baseline-record
 //! ```
 //!
-//! and commit the diff with the change that caused it.
-//!
-//! # What is measured
-//!
-//! The whole process, which is why this binary holds exactly one `#[test]`: the
-//! profiler is process-wide, and `HeapStats` cannot be built from a
-//! `heapscope::Region`'s figures (it is `#[non_exhaustive]`), so a baseline is a
-//! reading of the run rather than of a phase inside it. The consequence worth
-//! knowing is that the fixture below is part of the measurement: changing what it
-//! writes changes the numbers legitimately. The upside is that the write path is
-//! pinned here too, and it allocates more than the read does.
+//! Record new figures after allocation reductions too, so later increases are compared with the
+//! reduced counts.
 #![cfg(all(
-    feature = "__heap-baseline",
-    // The default set, required to be present: `--no-default-features` with
-    // `__heap-baseline` alone would otherwise check a different build's figures
-    // against this file.
+    // Require the feature set used to record the allocation baseline.
     feature = "std",
     feature = "checksum",
     feature = "deflate",
-    // And required to be the whole of it.
     not(any(
         feature = "fast-deflate",
         feature = "provenance",
@@ -85,12 +37,9 @@ use hdf5_pure::{File, FileBuilder, MaxExtent};
 #[global_allocator]
 static ALLOC: heapscope::Alloc = heapscope::Alloc::system();
 
-/// Write an 8 MiB chunked dataset, read it back whole, and append sixteen chunks
-/// to an unlimited one beside it: 2,048 chunks through the writer's chunk
-/// assembly and the reader's coalescing span planner, where all but a constant
-/// of the allocations in either path live, and then the in-place append path,
-/// whose cost is a constant per call that no scaling rule can pin.
+/// Writes and reads an 8 MiB dataset, then appends sixteen chunks to an unlimited dataset.
 #[test]
+#[ignore = "Measures exact allocation counts in the pinned default-feature environment"]
 fn writing_and_reading_a_chunked_dataset_matches_its_recorded_figures() {
     // The fixture's location is built *before* the profiler starts, so nothing
     // it costs is in the baseline. A temporary directory's path length follows

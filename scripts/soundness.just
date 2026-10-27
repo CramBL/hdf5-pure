@@ -23,11 +23,13 @@ miri $MIRIFLAGS="-Zmiri-strict-provenance": miri-toolchain
 miri-toolchain:
     if [ -z "${MIRI_SYSROOT:-}" ]; then rustup toolchain install --no-self-update --profile minimal {{ NIGHTLY }} --component miri,rust-src; fi
 
+# Check exact allocation figures in the default feature configuration.
 heap-baseline:
-    cargo nextest run --locked --features __heap-baseline --test allocation_baseline
+    cargo nextest run --locked -p hdf5-pure --test allocation_baseline --run-ignored only --no-tests fail
 
+# Record exact allocation figures in the default feature configuration.
 heap-baseline-record:
-    HEAPSCOPE_UPDATE_BASELINE=1 cargo test --features __heap-baseline --test allocation_baseline
+    HEAPSCOPE_UPDATE_BASELINE=1 cargo nextest run --locked -p hdf5-pure --test allocation_baseline --run-ignored only --no-tests fail
 
 heap-profile:
     cargo run --release --example heap_profile
