@@ -26,26 +26,28 @@
 //! in one and not the other names the format rather than the reader. See
 //! `tests/data/c/1.8/NOTICE.md`.
 
+use std::path::Path;
+
 use hdf5_pure::{AttrValue, File};
 use test_util::superblock;
 
-const V1: &str = "tests/data/c/1.8/v1_superblock.h5";
-const V2: &str = "tests/data/c/1.8/v2_superblock.h5";
+const V1: &str = "c/1.8/v1_superblock.h5";
+const V2: &str = "c/1.8/v2_superblock.h5";
 
 /// The values the fixtures hold, read back through the public API.
-fn assert_contents(path: &str) {
-    let f = File::open(path).unwrap_or_else(|e| panic!("{path}: {e:?}"));
+fn assert_contents(path: &Path) {
+    let f = File::open(path).unwrap_or_else(|e| panic!("{path:?}: {e:?}"));
 
     // Contiguous dataset with an attribute.
     assert_eq!(
         f.dataset("values").unwrap().read_f64().unwrap(),
         vec![1.5, 2.5, 3.5, 4.5],
-        "{path}: /values"
+        "{path:?}: /values"
     );
     assert_eq!(
         f.dataset("values").unwrap().attrs().unwrap().get("units"),
         Some(&AttrValue::AsciiString("m/s".into())),
-        "{path}: /values units"
+        "{path:?}: /values units"
     );
 
     // Chunked and deflated, indexed by a version 1 B-tree in both files —
@@ -54,7 +56,7 @@ fn assert_contents(path: &str) {
     assert_eq!(
         f.dataset("chunked").unwrap().read_i32().unwrap(),
         expected,
-        "{path}: /chunked"
+        "{path:?}: /chunked"
     );
 
     // A group, its attribute, and a dataset inside it. The two files differ here
@@ -64,19 +66,19 @@ fn assert_contents(path: &str) {
     assert_eq!(
         f.group("grp").unwrap().attrs().unwrap().get("tag"),
         Some(&AttrValue::AsciiString("group".into())),
-        "{path}: /grp tag"
+        "{path:?}: /grp tag"
     );
     assert_eq!(
         f.dataset("grp/inner").unwrap().read_f64().unwrap(),
         vec![1.5, 2.5, 3.5, 4.5],
-        "{path}: /grp/inner"
+        "{path:?}: /grp/inner"
     );
 
     // A root-group attribute.
     assert_eq!(
         f.root().attrs().unwrap().get("root_attr"),
         Some(&AttrValue::AsciiString("r".into())),
-        "{path}: / root_attr"
+        "{path:?}: / root_attr"
     );
 }
 
@@ -84,12 +86,12 @@ fn assert_contents(path: &str) {
 fn reads_a_c_written_version_1_superblock() {
     // Guarded before the content checks: a fixture that stopped being a version
     // 1 superblock should say so, rather than surfacing as a content failure.
-    assert_eq!(superblock::version(V1), 1);
-    assert_contents(V1);
+    assert_eq!(superblock::version(test_util::data(V1)), 1);
+    assert_contents(&test_util::data(V1));
 }
 
 #[test]
 fn reads_a_c_written_version_2_superblock() {
-    assert_eq!(superblock::version(V2), 2);
-    assert_contents(V2);
+    assert_eq!(superblock::version(test_util::data(V2)), 2);
+    assert_contents(&test_util::data(V2));
 }

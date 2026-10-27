@@ -400,9 +400,8 @@ fn userblock_add_reference_dataset_roundtrip() {
 #[test]
 fn real_mat_add_dataset_preserves_userblock_and_data() {
     // Copy the fixture so the test never mutates the checked-in file.
-    let src = std::path::Path::new("tests/data/matlab/test_string_v73.mat");
-    let path = temp::temp_path("hdf5_pure_ub_real_mat.mat");
-    std::fs::copy(src, &path).unwrap();
+    let path = temp::temp_path("test_string_v73.mat");
+    test_util::copy_data("matlab/test_string_v73.mat", path.parent().unwrap());
 
     let userblock = Userblock::read(&path, UB);
     assert_eq!(

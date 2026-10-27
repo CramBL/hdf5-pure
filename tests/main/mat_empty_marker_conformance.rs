@@ -44,7 +44,7 @@ fn empty_markers(file: &File) -> Vec<(String, Vec<String>, Vec<u64>)> {
 
 fn all_matlab_empty_markers() -> Vec<(String, Vec<String>, Vec<u64>)> {
     let mut all = Vec::new();
-    let dir = std::path::Path::new("tests/data/matlab");
+    let dir = test_util::data("matlab");
     for entry in std::fs::read_dir(dir).expect("the real-MATLAB fixture directory") {
         let path = entry.unwrap().path();
         if path.extension().and_then(|e| e.to_str()) != Some("mat") {
@@ -205,7 +205,8 @@ fn an_unset_struct_array_field_reads_as_empty() {
         s: Vec<Element>,
     }
 
-    let doc: Doc = mat::from_file("tests/data/matlab/test_struct_unset_field_v73.mat").unwrap();
+    let doc: Doc =
+        mat::from_file(test_util::data("matlab/test_struct_unset_field_v73.mat")).unwrap();
 
     let x: Vec<Vec<f64>> = doc.s.into_iter().map(|element| element.x).collect();
     assert_eq!(x, [vec![], vec![1.0]]);

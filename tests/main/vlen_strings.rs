@@ -2,7 +2,7 @@ use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::{Error, File, FormatError, VlenStringReadOptions};
 
-const FIXTURE: &str = "tests/data/unattributed/vl_strings.h5";
+const FIXTURE: &str = "unattributed/vl_strings.h5";
 
 fn expected_names() -> Vec<String> {
     ["Alice", "Bob", "Charlie"]
@@ -13,7 +13,7 @@ fn expected_names() -> Vec<String> {
 
 #[test]
 fn buffered_vlen_dataset_read_and_size() {
-    let file = File::open(FIXTURE).unwrap();
+    let file = File::open(test_util::data(FIXTURE)).unwrap();
     let dataset = file.dataset("names").unwrap();
 
     assert_eq!(dataset.vlen_string_payload_size().unwrap(), 15);
@@ -32,7 +32,7 @@ fn buffered_vlen_dataset_read_and_size() {
 
 #[test]
 fn vlen_element_limit_is_checked_before_payload_read() {
-    let file = File::open(FIXTURE).unwrap();
+    let file = File::open(test_util::data(FIXTURE)).unwrap();
     let dataset = file.dataset("names").unwrap();
     let error = dataset
         .read_vlen_strings(VlenStringReadOptions::new().with_max_elements(2))
@@ -49,7 +49,7 @@ fn vlen_element_limit_is_checked_before_payload_read() {
 
 #[test]
 fn vlen_payload_limit_reports_required_bytes() {
-    let file = File::open(FIXTURE).unwrap();
+    let file = File::open(test_util::data(FIXTURE)).unwrap();
     let dataset = file.dataset("names").unwrap();
     let error = dataset
         .read_vlen_strings(VlenStringReadOptions::new().with_max_payload_bytes(14))
@@ -66,7 +66,7 @@ fn vlen_payload_limit_reports_required_bytes() {
 
 #[test]
 fn vlen_visitor_delivers_strings_in_order() {
-    let file = File::open(FIXTURE).unwrap();
+    let file = File::open(test_util::data(FIXTURE)).unwrap();
     let dataset = file.dataset("names").unwrap();
     let mut names = Vec::new();
 
@@ -82,12 +82,12 @@ fn vlen_visitor_delivers_strings_in_order() {
 
 #[test]
 fn vlen_specific_apis_reject_non_vlen_datasets() {
-    let file = File::open(FIXTURE).unwrap();
+    let file = File::open(test_util::data(FIXTURE)).unwrap();
     let dataset = file.dataset("names").unwrap();
     let datatype = dataset.datatype().unwrap();
     assert!(matches!(datatype, hdf5_pure::Datatype::VariableLength(_)));
 
-    let numeric = File::open("tests/data/unattributed/simple_dataset.h5").unwrap();
+    let numeric = File::open(test_util::data("unattributed/simple_dataset.h5")).unwrap();
     let numeric_dataset = numeric.dataset("data").unwrap();
     assert!(matches!(
         numeric_dataset.vlen_string_payload_size(),
@@ -133,8 +133,7 @@ fn vlen_dataset_spans_multiple_heap_collections() {
 /// patches the references in a separate pass, so it needs its own coverage.
 #[test]
 fn paged_vlen_dataset_spans_multiple_heap_collections() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("paged.h5");
+    let path = test_util::temp::temp_path("paged.h5");
     let values = labels(SPLIT_COUNT);
     let refs: Vec<&str> = values.iter().map(String::as_str).collect();
     let mut builder = hdf5_pure::FileBuilder::new();
@@ -154,8 +153,7 @@ fn paged_vlen_dataset_spans_multiple_heap_collections() {
 /// (they need not land contiguously), so it needs its own coverage.
 #[test]
 fn edit_session_vlen_dataset_spans_multiple_heap_collections() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("edit.h5");
+    let path = test_util::temp::temp_path("edit.h5");
     let mut builder = hdf5_pure::FileBuilder::new();
     builder.create_dataset("d").with_f64_data(&[1.0]);
     builder.write(&path).unwrap();
@@ -205,8 +203,7 @@ fn repack_preserves_multi_collection_vlen_dataset() {
 /// two heaps are independent, which is what this pins.
 #[test]
 fn a_vlen_attribute_past_the_compact_message_size_is_stored_in_a_heap() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("ga.h5");
+    let path = test_util::temp::temp_path("ga.h5");
     let mut builder = hdf5_pure::FileBuilder::new();
     builder.create_dataset("d").with_f64_data(&[1.0]);
     builder.write(&path).unwrap();

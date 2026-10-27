@@ -223,15 +223,15 @@ fn repacks_v1_symbol_table_source_with_attributes() {
     // streaming backend, so this drives v1 group traversal and compact attribute
     // reads end to end through the repack entry point (issues #82 / #27).
     let dst = temp::temp_path("hdf5_pure_repack_v1_attrs_dst.h5");
-    let src = "tests/data/unattributed/attrs.h5";
+    let src = test_util::data("unattributed/attrs.h5");
 
-    let source = hdf5_pure::File::open(src).unwrap();
+    let source = hdf5_pure::File::open(&src).unwrap();
     let src_data = source.dataset("data").unwrap().read_f64().unwrap();
     let src_data_attrs = source.dataset("data").unwrap().attrs().unwrap();
     let src_root_attrs = source.root().attrs().unwrap();
     assert!(!src_data_attrs.is_empty() && !src_root_attrs.is_empty());
 
-    hdf5_pure::repack(src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let f = hdf5_pure::File::open(&dst).unwrap();
     assert_eq!(f.dataset("data").unwrap().read_f64().unwrap(), src_data);
@@ -245,9 +245,9 @@ fn repacks_v1_nested_symbol_table_groups() {
     // it exercises the streaming v1 B-tree/local-heap/SNOD traversal across
     // multiple groups and preserves the full subtree.
     let dst = temp::temp_path("hdf5_pure_repack_v1_groups_dst.h5");
-    let src = "tests/data/unattributed/two_groups.h5";
+    let src = test_util::data("unattributed/two_groups.h5");
 
-    hdf5_pure::repack(src, &dst, &RepackOptions::new()).unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let f = hdf5_pure::File::open(&dst).unwrap();
     let mut groups = f.root().groups().unwrap();
@@ -1092,7 +1092,7 @@ fn upgrades_only_where_the_source_format_cannot_hold_the_content() {
     // Contiguous content under a version 0 superblock: floored at the oldest
     // format this crate writes, and no further.
     hdf5_pure::repack(
-        "tests/data/unattributed/simple_dataset.h5",
+        test_util::data("unattributed/simple_dataset.h5"),
         &dst,
         &RepackOptions::new(),
     )
@@ -1105,14 +1105,14 @@ fn upgrades_only_where_the_source_format_cannot_hold_the_content() {
 
     // Chunked content under a version 0 superblock: upgraded rather than
     // refused, because there is no chunk index the older format can carry.
-    let expected = hdf5_pure::File::open("tests/data/unattributed/chunked_deflate.h5")
+    let expected = hdf5_pure::File::open(test_util::data("unattributed/chunked_deflate.h5"))
         .unwrap()
         .dataset("data")
         .unwrap()
         .read_f64()
         .unwrap();
     hdf5_pure::repack(
-        "tests/data/unattributed/chunked_deflate.h5",
+        test_util::data("unattributed/chunked_deflate.h5"),
         &dst,
         &RepackOptions::new(),
     )

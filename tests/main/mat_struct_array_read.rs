@@ -12,8 +12,8 @@ use serde::Deserialize;
 use serde::de::IgnoredAny;
 use test_util_hdf5::mat_file;
 
-const FIXTURE: &str = "tests/data/h5py/mat/struct_array_v73.mat";
-const MISMATCHED_FIXTURE: &str = "tests/data/h5py/mat/struct_array_mismatched_v73.mat";
+const FIXTURE: &str = "h5py/mat/struct_array_v73.mat";
+const MISMATCHED_FIXTURE: &str = "h5py/mat/struct_array_mismatched_v73.mat";
 
 #[derive(Deserialize, Debug, PartialEq)]
 #[allow(non_snake_case)]
@@ -56,7 +56,7 @@ fn row_struct_array_reads_as_vec() {
     struct File {
         row: Vec<Data>,
     }
-    let row = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>).row;
+    let row = mat_file::decode_fixture(test_util::data(FIXTURE), mat::from_bytes::<File>).row;
     let expected: Vec<Data> = (1..=6).map(expected_data).collect();
     assert_eq!(row, expected);
 }
@@ -69,7 +69,7 @@ fn col_struct_array_reads_as_vec() {
     struct File {
         col: Vec<Data>,
     }
-    let col = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>).col;
+    let col = mat_file::decode_fixture(test_util::data(FIXTURE), mat::from_bytes::<File>).col;
     let expected: Vec<Data> = (1..=6).map(expected_data).collect();
     assert_eq!(col, expected);
 }
@@ -82,7 +82,7 @@ fn grid_struct_array_reads_as_rows() {
     struct File {
         grid: Vec<Vec<GridElem>>,
     }
-    let grid = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>).grid;
+    let grid = mat_file::decode_fixture(test_util::data(FIXTURE), mat::from_bytes::<File>).grid;
     assert_eq!(grid.len(), 2);
     assert_eq!(
         grid[0],
@@ -128,7 +128,7 @@ fn nested_scalar_struct_in_array_decodes() {
     struct File {
         nested: Vec<Nested>,
     }
-    let nested = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>).nested;
+    let nested = mat_file::decode_fixture(test_util::data(FIXTURE), mat::from_bytes::<File>).nested;
     assert_eq!(
         nested,
         vec![
@@ -148,7 +148,7 @@ fn nested_scalar_struct_in_array_decodes() {
 /// dimensions is rejected. Read anyway, the transpose would pair the wrong elements.
 #[test]
 fn a_struct_array_field_of_other_dimensions_is_rejected() {
-    let bytes = mat_file::read_fixture(MISMATCHED_FIXTURE);
+    let bytes = mat_file::read_fixture(test_util::data(MISMATCHED_FIXTURE));
     let err = mat::from_bytes::<IgnoredAny>(&bytes).unwrap_err();
     let mat::MatError::StructArrayFieldShape {
         field,
@@ -172,7 +172,7 @@ fn scalar_struct_is_not_treated_as_array() {
         scalar: Data,
     }
     assert_eq!(
-        mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>).scalar,
+        mat_file::decode_fixture(test_util::data(FIXTURE), mat::from_bytes::<File>).scalar,
         expected_data(1)
     );
 }
@@ -186,7 +186,7 @@ fn struct_array_into_single_struct_errors() {
         #[allow(dead_code)]
         row: Data,
     }
-    let bytes = mat_file::read_fixture(FIXTURE);
+    let bytes = mat_file::read_fixture(test_util::data(FIXTURE));
     let err = mat::from_bytes::<File>(&bytes).unwrap_err();
     let msg = err.to_string();
     assert!(

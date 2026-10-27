@@ -10,7 +10,6 @@
 #![cfg(all(test, feature = "zfp", feature = "std"))]
 
 use std::fs;
-use std::path::PathBuf;
 
 use hdf5_pure_filter::__private::ZfpElementType;
 use serde::Deserialize;
@@ -47,12 +46,8 @@ struct Fixture {
     notes: String,
 }
 
-fn fixture_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/h5py/zfp")
-}
-
 fn load_manifest() -> Manifest {
-    let path = fixture_dir().join("manifest.json");
+    let path = test_util::data("h5py/zfp/manifest.json");
     let text = fs::read_to_string(&path).unwrap_or_else(|e| {
         panic!(
             "read {}: {e}\n(run regen.py to produce fixtures)",
@@ -63,7 +58,7 @@ fn load_manifest() -> Manifest {
 }
 
 fn read_bin(name: &str) -> Vec<u8> {
-    let path = fixture_dir().join(name);
+    let path = test_util::data("h5py/zfp").join(name);
     fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
