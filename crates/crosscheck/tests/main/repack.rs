@@ -2458,6 +2458,23 @@ fn a_repack_of_a_chain_past_the_depth_bound_reports_the_limit_before_it_writes(
 }
 
 #[test]
+fn a_repack_that_drops_a_deep_chain_writes_the_rest_for_the_c_library() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("deep.h5");
+    let dst = dir.path().join("repacked.h5");
+    TreeGraph::DeepChain.write(&src);
+
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new().drop_path("g/g")).unwrap();
+
+    let c = hdf5::File::open(&dst).unwrap();
+    assert_eq!(c.member_names().unwrap(), vec!["g"]);
+    assert_eq!(
+        c.group("g").unwrap().member_names().unwrap(),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
 fn the_c_library_reads_a_repacked_chain_at_the_depth_bound() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("chain.h5");

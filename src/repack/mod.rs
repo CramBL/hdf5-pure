@@ -2155,6 +2155,39 @@ mod tests {
         );
     }
 
+    #[rstest]
+    #[case::the_chain("g")]
+    #[case::inside_the_chain("g/g")]
+    #[case::the_target("g/g/g/leaf")]
+    fn a_reference_into_a_dropped_chain_reports_the_path_of_its_target(#[case] dropped: &str) {
+        let chain = (1..3).fold(leaf_group().finish(), |inner, _| {
+            let mut group = GroupBuilder::new("g");
+            group.add_group(inner);
+            group.finish()
+        });
+        let mut builder = FileBuilder::new();
+        builder.add_group(chain);
+        builder
+            .create_dataset("refs")
+            .with_path_references(&["g/g/g/leaf"]);
+        let source = File::from_bytes(builder.finish().unwrap()).unwrap();
+
+        let err = repack_into(
+            &source,
+            Vec::new(),
+            &RepackOptions::new().drop_path(dropped),
+        )
+        .unwrap_err();
+
+        let Error::RepackUnsupported(reason) = err else {
+            panic!("expected RepackUnsupported, got {err:?}");
+        };
+        assert_eq!(
+            reason,
+            "dataset refs: object reference to dropped object \"g/g/g/leaf\" cannot be repacked"
+        );
+    }
+
     fn chain_source(depth: usize) -> File {
         chain_source_with(depth, GroupBuilder::new("g"))
     }
