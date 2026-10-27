@@ -8,8 +8,7 @@ use hdf5_pure_core::__private::DecodedStoredAddress;
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
     BTreeV2Header, BTreeV2NodeInfo, BTreeV2Record, FormatWidths, FractalHeapFiltering,
-    FractalHeapHeader, FreeSpaceManagerHeaderFrame, HugeObjectRecordContext,
-    HugeObjectTrackerRecord, LengthWidth, OffsetWidth,
+    FractalHeapHeader, FreeSpaceManagerHeaderFrame, LengthWidth, OffsetWidth,
 };
 use test_util::btree_v2;
 use test_util::checksum;
@@ -20,6 +19,8 @@ use test_util::fractal_heap;
 /// Addresses are relative to the file base, and the input bytes begin at that base. The fixtures
 /// use eight-byte addresses and lengths. Filtered direct blocks and huge payloads use their
 /// encoded lengths, and manager section lists include their full allocated capacity.
+/// The fixture reader decodes huge-object payload records independently of the production
+/// huge-record decoder.
 pub struct Heap<'a> {
     /// The caller's parsed heap header.
     pub header: &'a FractalHeapHeader,
@@ -318,16 +319,7 @@ impl<'a> Heap<'a> {
         }
         let tree =
             BTreeV2Header::parse(bytes, usize::try_from(address.get()).unwrap(), 8, 8).unwrap();
-        let decoder = HugeObjectRecordContext::new(
-            self.header,
-            FormatWidths {
-                offsets: OffsetWidth::Eight,
-                lengths: LengthWidth::Eight,
-            },
-        )
-        .unwrap()
-        .resolve(&tree)
-        .unwrap();
+        let layout = HugeRecordLayout::new(self.header, &tree);
         self.push(
             bytes,
             address.get(),
@@ -362,30 +354,7 @@ impl<'a> Heap<'a> {
         assert_eq!(tree.total_records, self.header.huge_objects_count);
         let mut total = 0u64;
         for record in records {
-            let (address, length, decoded_size) = match decoder.parse(&record.data).unwrap() {
-                HugeObjectTrackerRecord::Indirect(record) => {
-                    (record.address.get(), record.length, record.length)
-                }
-                HugeObjectTrackerRecord::Direct(record) => {
-                    (record.address.get(), record.length, record.length)
-                }
-                HugeObjectTrackerRecord::FilteredIndirect(record) => {
-                    let location = record.location();
-                    (
-                        location.address().get(),
-                        location.encoded_size(),
-                        location.decoded_size(),
-                    )
-                }
-                HugeObjectTrackerRecord::FilteredDirect(record) => {
-                    let location = record.location();
-                    (
-                        location.address().get(),
-                        location.encoded_size(),
-                        location.decoded_size(),
-                    )
-                }
-            };
+            let (address, length, decoded_size) = layout.read(&record.data);
             self.allocations.push(Allocation::new(
                 bytes,
                 address,
@@ -468,6 +437,92 @@ impl<'a> Heap<'a> {
                 });
             }
         }
+    }
+}
+
+/// The four huge-object record layouts of version 2 B-trees.
+///
+/// Their field order is defined in "Version 2 B-trees" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+#[derive(Clone, Copy)]
+enum HugeRecordLayout {
+    Direct,
+    FilteredDirect { allowed_mask: u32 },
+    FilteredIndirect { allowed_mask: u32 },
+    Indirect,
+}
+
+impl HugeRecordLayout {
+    fn new(heap: &FractalHeapHeader, tree: &BTreeV2Header) -> Self {
+        let layout = match &heap.filtering {
+            FractalHeapFiltering::Unfiltered => {
+                if heap.heap_id_length >= HUGE_DIRECT_ID_LEN {
+                    Self::Direct
+                } else {
+                    Self::Indirect
+                }
+            }
+            FractalHeapFiltering::Filtered { pipeline, .. } => {
+                let count = pipeline.filters.len();
+                assert!(count <= u32::BITS as usize);
+                let allowed_mask = u32::try_from((1_u64 << count) - 1).unwrap();
+                if heap.heap_id_length >= HUGE_FILTERED_DIRECT_ID_LEN {
+                    Self::FilteredDirect { allowed_mask }
+                } else {
+                    Self::FilteredIndirect { allowed_mask }
+                }
+            }
+        };
+        let (tree_type, record_size) = match layout {
+            Self::Direct => (format::BTREE_V2_HUGE_OBJECT_DIRECT, HUGE_RECORD_LEN),
+            Self::FilteredDirect { .. } => (
+                format::BTREE_V2_FILTERED_HUGE_OBJECT_DIRECT,
+                HUGE_FILTERED_RECORD_LEN,
+            ),
+            Self::FilteredIndirect { .. } => (
+                format::BTREE_V2_FILTERED_HUGE_OBJECT,
+                HUGE_FILTERED_RECORD_LEN + 8,
+            ),
+            Self::Indirect => (format::BTREE_V2_HUGE_OBJECT, HUGE_RECORD_LEN + 8),
+        };
+        assert_eq!(tree.tree_type, tree_type);
+        assert_eq!(tree.record_size, record_size);
+        layout
+    }
+
+    /// Returns the payload address, encoded size, and decoded size from one huge-object record.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a payload field is truncated, the address is undefined, either size is zero, or the
+    /// filter mask or sizes violate the fixture's assertions.
+    fn read(self, bytes: &[u8]) -> (u64, u64, u64) {
+        let mut cursor = 0;
+        let address = read_integer(bytes, &mut cursor, 8);
+        let encoded = read_integer(bytes, &mut cursor, 8);
+        assert_ne!(address, u64::MAX);
+        assert_ne!(encoded, 0);
+        let decoded = match self {
+            Self::Direct | Self::Indirect => encoded,
+            Self::FilteredDirect { allowed_mask } | Self::FilteredIndirect { allowed_mask } => {
+                let mask = u32::try_from(read_integer(
+                    bytes,
+                    &mut cursor,
+                    usize::try_from(FILTER_MASK_LEN).unwrap(),
+                ))
+                .unwrap();
+                let decoded = read_integer(bytes, &mut cursor, 8);
+                assert_eq!(mask & !allowed_mask, 0);
+                assert_ne!(decoded, 0);
+                if mask == allowed_mask {
+                    assert_eq!(encoded, decoded);
+                }
+                decoded
+            }
+        };
+        (address, encoded, decoded)
     }
 }
 
@@ -588,6 +643,33 @@ fn read_integer(bytes: &[u8], cursor: &mut usize, width: usize) -> u64 {
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
 const FILTER_MASK_LEN: u64 = 4;
+
+/// The byte length of an unfiltered direct huge-object index record for eight-byte widths.
+///
+/// Defined in "Version 2 B-trees" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+const HUGE_RECORD_LEN: u16 = 16;
+/// The byte length of a filtered direct huge-object index record for eight-byte widths.
+///
+/// Defined in "Version 2 B-trees" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+const HUGE_FILTERED_RECORD_LEN: u16 = HUGE_RECORD_LEN + FILTER_MASK_LEN as u16 + 8;
+/// The minimum ID length for direct unfiltered huge objects with eight-byte widths.
+///
+/// The version/type byte precedes the payload fields in "Fractal Heap" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
+const HUGE_DIRECT_ID_LEN: u16 = 1 + HUGE_RECORD_LEN;
+/// The minimum ID length for direct filtered huge objects with eight-byte widths.
+///
+/// The version/type byte precedes the payload fields in "Fractal Heap" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
+const HUGE_FILTERED_DIRECT_ID_LEN: u16 = 1 + HUGE_FILTERED_RECORD_LEN;
 
 /// The on-disk node version in "Version 2 B-trees" of the [format specification, version 4.0][spec].
 ///

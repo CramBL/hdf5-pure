@@ -21,10 +21,10 @@ use hdf5::File;
 /// # Examples
 ///
 /// ```
+/// use test_util::temp;
 /// use test_util_hdf5::fractal_heap;
 ///
-/// # let directory = tempfile::tempdir()?;
-/// let path = directory.path().join("heap.h5");
+/// let path = temp::temp_path("heap.h5");
 /// fractal_heap::write_filtered_huge(&path, true);
 /// let file = hdf5::File::open(&path)?;
 /// assert_eq!(file.dataset("heap_id")?.shape(), [29]);
