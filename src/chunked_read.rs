@@ -42,8 +42,10 @@ use crate::fill_value::FillPattern;
 use crate::filter_pipeline::FilterPipeline;
 use crate::filters::{self, ChunkContext, FilterScratch};
 use crate::fixed_array;
+use crate::parsed_chunk_index::ClippedAxis;
 use crate::parsed_chunk_index::IndexedChunk;
 use crate::parsed_chunk_index::ParsedChunkIndex;
+use crate::parsed_chunk_index::SelectedChunk;
 use crate::read_region::{ReadRegion, RowRegion};
 use crate::read_spec::{RawReadSpec, RawReadStorage};
 use crate::source;
@@ -811,8 +813,9 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
 
 /// Reads intersecting chunks into the region's packed row-major result.
 ///
-/// Coordinates are intersected at file width before conversion to buffer indices. Parsed indexes
-/// and decoded chunks are retained according to the cache configuration.
+/// Uses [`ParsedChunkIndex::select`] to plan intersections at file width before conversion to
+/// buffer indices. Parsed indexes and decoded chunks are retained according to the cache
+/// configuration.
 ///
 /// # Errors
 ///
@@ -886,24 +889,22 @@ pub(crate) fn read_chunked_region_from_source(
             &dataspace.dimensions,
         )
     })?;
-    let window_chunks: Vec<_> = parsed_index
-        .chunks()
-        .filter(|chunk| region.overlaps(chunk.coord, chunk_dims_u64))
-        .collect();
+    let selection = parsed_index.select(region)?;
 
     let ctx = ChunkContext::from_datatype(chunk_dims_u64, datatype)?;
 
-    // Coalesce over the window's own chunks. A plan built over the dataset's
-    // whole chunk list would put the rows on either side of the window inside a
-    // span and read them for nothing — an eight-row window measured 32 KB where
-    // it needed 64 bytes.
-    let mut spans = plan_chunk_spans(cache, window_chunks.iter().copied());
+    // Coalesce over selected chunks to bound spans by the region's payloads.
+    let mut spans = plan_chunk_spans(cache, selection.chunks().map(|selected| selected.chunk));
 
     // One decoder for the whole window; see `FilterScratch`.
     let mut scratch = FilterScratch::new();
 
-    for IndexedChunk { info: chunk, coord } in window_chunks {
-        let mut selected = placement.for_chunk(region, chunk, elem_size)?;
+    for SelectedChunk {
+        chunk: IndexedChunk { info: chunk, coord },
+        intersection,
+    } in selection.chunks()
+    {
+        let mut selected = placement.for_chunk(region, chunk, intersection, elem_size)?;
         let mut copy = |output: &mut [u8], bytes: &[u8]| selected.copy_to(output, bytes, elem_size);
 
         let hit = cache.with_decompressed(pass, coord, |bytes| copy(&mut output, bytes));
@@ -941,6 +942,7 @@ impl RegionCopy<'_> {
         &mut self,
         region: &ReadRegion<'_>,
         chunk: &ChunkInfo,
+        intersection: &[ClippedAxis],
         element_size: NonZeroUsize,
     ) -> Result<RegionChunk<'_>, FormatError> {
         match self {
@@ -953,15 +955,20 @@ impl RegionCopy<'_> {
                     .and_then(|_| chunk.offsets.first())
                     .copied()
                     .unwrap_or(0);
-                let start = rows.start().max(offset);
-                let end = rows.end().min(offset.saturating_add(*edge));
+                let (start, end) = intersection
+                    .first()
+                    .map_or((rows.start(), rows.end().min(*edge)), |axis| {
+                        (axis.start(), axis.end())
+                    });
                 Ok(RegionChunk::Band {
                     destination: (start - rows.start()).to_usize()? * rows.row_bytes(),
                     source: (start - offset).to_usize()? * rows.row_bytes(),
                     length: (end - start).to_usize()? * rows.row_bytes(),
                 })
             }
-            Self::Scatter(geometry) => geometry.for_chunk(region, chunk, element_size),
+            Self::Scatter(geometry) => {
+                geometry.for_chunk(region, chunk, intersection, element_size)
+            }
         }
     }
 }
@@ -1010,6 +1017,7 @@ impl RegionScatter {
         &mut self,
         region: &ReadRegion<'_>,
         chunk: &ChunkInfo,
+        clipped: &[ClippedAxis],
         element_size: NonZeroUsize,
     ) -> Result<RegionChunk<'_>, FormatError> {
         let Self {
@@ -1023,15 +1031,16 @@ impl RegionScatter {
         let (offsets, scratch) = intersection.split_at_mut(rank);
         let (dimensions, _) = scratch.split_at_mut(rank);
         let mut advance = 0u64;
-        for (dimension_index, (((axis, &offset), &dimension), &stride)) in region
+        for (dimension_index, ((((axis, &offset), _), &stride), clipped)) in region
             .axes()
             .zip(&chunk.offsets)
             .zip(chunk_dimensions)
             .zip(chunk_strides)
+            .zip(clipped)
             .enumerate()
         {
-            let start = axis.start().max(offset);
-            let end = axis.end().min(offset.saturating_add(dimension as u64));
+            let start = clipped.start();
+            let end = clipped.end();
             offsets[dimension_index] = (start - axis.start()).to_usize()?;
             dimensions[dimension_index] = (end - start).to_usize()?;
             let skip = (start - offset)
