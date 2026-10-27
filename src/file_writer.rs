@@ -73,6 +73,7 @@ use crate::error::{FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::file_allocation::FileAllocation;
 use crate::file_create_properties::FileCreateProperties;
 use crate::file_emission::Emission;
+use crate::file_emission::EmissionError;
 use crate::file_emission::Reservation;
 use crate::file_space_info;
 use crate::file_space_info::DEFAULT_THRESHOLD;
@@ -1356,12 +1357,13 @@ impl FileWriter {
         sink: &mut S,
         ub: usize,
         content: &[u8],
-    ) -> Result<(), FormatError> {
+    ) -> Result<(), EmissionError<S::Error>> {
         if ub == 0 {
             return Ok(());
         }
-        sink.put(content)?;
+        sink.put(content).map_err(EmissionError::Sink)?;
         sink.put_zeros(ub - content.len())
+            .map_err(EmissionError::Sink)
     }
 
     /// Sets the complete file-space configuration for the emitted File Space Info message.
@@ -1510,16 +1512,25 @@ impl FileWriter {
 
     pub fn finish(self) -> Result<Vec<u8>, FormatError> {
         let mut buf = Vec::new();
-        self.finish_to_sink(&mut buf)?;
+        self.finish_to_sink(&mut buf)
+            .map_err(EmissionError::into_format)?;
         Ok(buf)
     }
 
-    /// Assemble the file and write it to `sink` in ascending-address order.
-    /// Backs both the buffered [`finish`](Self::finish) (a `Vec<u8>` sink) and
-    /// the streaming `FileBuilder::finish_to` (an `io::Write` sink), so the two
-    /// produce byte-identical files. A streamed dataset's chunk bytes are pulled
-    /// from its provider one chunk at a time here, never all held at once.
-    pub(crate) fn finish_to_sink<S: ByteSink>(self, sink: &mut S) -> Result<(), FormatError> {
+    /// Assembles the file and writes it to `sink` in ascending-address order.
+    ///
+    /// Buffered and streaming sinks receive byte-identical files. The writer reads a streamed
+    /// dataset's chunk bytes from its provider one chunk at a time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EmissionError::Format`] if planning or serialization fails, including capacity
+    /// errors from [`ByteSink::reserve`]. Returns [`EmissionError::Sink`] with the original output
+    /// error if a write fails. Either kind of failure can leave partially written output.
+    pub(crate) fn finish_to_sink<S: ByteSink>(
+        self,
+        sink: &mut S,
+    ) -> Result<(), EmissionError<S::Error>> {
         let libver = self.resolve_libver()?;
         let file_space = self.file_space_settings;
         let reuse_threshold = match file_space {
@@ -1543,7 +1554,8 @@ impl FileWriter {
                 content: "a file-space setting",
                 needs: LibVer::V110.name(),
                 writing: libver.name(),
-            });
+            }
+            .into());
         }
 
         // Checked before any layout work: content that overruns its region would
@@ -1553,7 +1565,8 @@ impl FileWriter {
             return Err(FormatError::UserblockContentTooLarge {
                 content: self.userblock_content.len() as u64,
                 userblock: self.userblock_size.get(),
-            });
+            }
+            .into());
         }
 
         // Genuine paged allocation: page-align every allocation and, when
@@ -1570,7 +1583,8 @@ impl FileWriter {
                     return Err(FormatError::UserblockNotPageAligned(
                         self.userblock_size.get(),
                         page_size.get(),
-                    ));
+                    )
+                    .into());
                 }
                 Some((page_size, settings.persist(), settings.threshold()))
             }
@@ -1762,19 +1776,20 @@ impl FileWriter {
             ///
             /// # Errors
             ///
-            /// Returns [`FormatError::Internal`] if a streamed or produced region is paired
-            /// with prepared storage of another kind. Propagates provider, serialization, and
-            /// sink errors.
-            fn emit(
+            /// Returns [`EmissionError::Format`] with [`FormatError::Internal`] if a streamed
+            /// or produced region is paired with prepared storage of another kind. Propagates
+            /// provider and serialization errors as [`EmissionError::Format`] and sink errors as
+            /// [`EmissionError::Sink`].
+            fn emit<S: ByteSink>(
                 &self,
-                sink: &mut impl ByteSink,
+                sink: &mut S,
                 storage: &PreparedStorage,
-            ) -> Result<(), FormatError> {
+            ) -> Result<(), EmissionError<S::Error>> {
                 match self {
                     DsData::Encoded { chunks, plan } => {
                         chunked_write::emit_chunked_data(sink, chunks, plan)
                     }
-                    DsData::InMemory(bytes) => sink.put(bytes),
+                    DsData::InMemory(bytes) => sink.put(bytes).map_err(EmissionError::Sink),
                     DsData::Streamed(plan) => {
                         let provider = storage
                             .chunks()
@@ -1842,7 +1857,7 @@ impl FileWriter {
             provider: &dyn ChunkProvider,
             total_bytes: u64,
             block_bytes: u64,
-        ) -> Result<(), FormatError> {
+        ) -> Result<(), EmissionError<Sk::Error>> {
             // A zero-length block would never advance the cursor, and the loop
             // below would ask for block 0 forever. Callers construct the payload
             // from a checked block size, so this is a construction invariant —
@@ -1851,7 +1866,8 @@ impl FileWriter {
             if block_bytes == 0 && total_bytes > 0 {
                 return Err(FormatError::SerializationError(
                     "a produced dataset declared a zero-length block".into(),
-                ));
+                )
+                .into());
             }
             // One buffer for the whole region, reused across blocks.
             let mut block = Vec::new();
@@ -1864,9 +1880,10 @@ impl FileWriter {
                 if block.len() as u64 != expected {
                     return Err(FormatError::SerializationError(
                         "a produced dataset's block does not match its planned size".into(),
-                    ));
+                    )
+                    .into());
                 }
-                sink.put(&block)?;
+                sink.put(&block).map_err(EmissionError::Sink)?;
                 written += expected;
                 index += 1;
             }
@@ -2598,7 +2615,8 @@ impl FileWriter {
                 content: "a chunked, filtered, or resizable dataset",
                 needs: LibVer::V110.name(),
                 writing: libver.name(),
-            });
+            }
+            .into());
         }
 
         // Reserve chunked datasets' global heaps before encoding their references into chunks.
@@ -3657,7 +3675,8 @@ impl FileWriter {
                 checksum: None,
             }
             .build();
-            sink.put(&hdf5_pure_format::__private::serialize_superblock(&sb)?)?;
+            sink.put(&hdf5_pure_format::__private::serialize_superblock(&sb)?)
+                .map_err(EmissionError::Sink)?;
 
             let collections = vl_root
                 .iter()
@@ -3673,11 +3692,13 @@ impl FileWriter {
                 .flatten();
             for (address, collection) in paged_collection_addresses.iter().zip(collections) {
                 let physical = base.absolute(StoredAddress::new(*address))?;
-                sink.put_zeros((physical - sink.position()).to_usize()?)?;
-                sink.put(collection)?;
+                sink.put_zeros((physical - sink.position()).to_usize()?)
+                    .map_err(EmissionError::Sink)?;
+                sink.put(collection).map_err(EmissionError::Sink)?;
             }
             let root_physical = base.absolute(root_group_addr)?;
-            sink.put_zeros((root_physical - sink.position()).to_usize()?)?;
+            sink.put_zeros((root_physical - sink.position()).to_usize()?)
+                .map_err(EmissionError::Sink)?;
 
             // Root group OH + dense blob.
             let tables = LinkTables {
@@ -3704,14 +3725,15 @@ impl FileWriter {
             if root_oh.len() != root_oh_size {
                 return Err(FormatError::Internal(
                     "the root group header differs from its reserved length".into(),
-                ));
+                )
+                .into());
             }
-            sink.put(&root_oh)?;
+            sink.put(&root_oh).map_err(EmissionError::Sink)?;
             if let Some(ref blob) = root_dense_blob {
-                sink.put(&blob.blob)?;
+                sink.put(&blob.blob).map_err(EmissionError::Sink)?;
             }
             if let Some(image) = &root_link_image {
-                sink.put(&image.bytes)?;
+                sink.put(&image.bytes).map_err(EmissionError::Sink)?;
             }
             // Group OHs + dense blobs.
             for (gi, g) in groups.iter().enumerate() {
@@ -3727,42 +3749,44 @@ impl FileWriter {
                 if oh.len() != group_oh_sizes[gi] {
                     return Err(FormatError::Internal(
                         "a group header differs from its reserved length".into(),
-                    ));
+                    )
+                    .into());
                 }
-                sink.put(&oh)?;
+                sink.put(&oh).map_err(EmissionError::Sink)?;
                 if let Some(ref blob) = group_dense_blobs[gi] {
-                    sink.put(&blob.blob)?;
+                    sink.put(&blob.blob).map_err(EmissionError::Sink)?;
                 }
                 if let Some(image) = &group_link_images[gi] {
-                    sink.put(&image.bytes)?;
+                    sink.put(&image.bytes).map_err(EmissionError::Sink)?;
                 }
             }
             // Committed datatype OHs, at the addresses their references name.
             for oh in &committed_oh {
-                sink.put(oh)?;
+                sink.put(oh).map_err(EmissionError::Sink)?;
             }
             // Dataset OHs + dense blobs.
             for (i, oh) in ds_oh_bytes.iter().enumerate() {
-                sink.put(oh)?;
+                sink.put(oh).map_err(EmissionError::Sink)?;
                 if let Some(ref dense) = ds_dense_blobs[i] {
-                    sink.put(&dense.blob)?;
+                    sink.put(&dense.blob).map_err(EmissionError::Sink)?;
                 }
             }
             debug_assert_eq!(sink.position(), base.get() + ext_addr);
-            sink.put(&real_ext_oh)?;
+            sink.put(&real_ext_oh).map_err(EmissionError::Sink)?;
             // Free-space-manager blocks (SUPER, DRAW, generic-large), ascending.
             for blocks in [&super_blocks, &draw_blocks, &large_blocks]
                 .into_iter()
                 .flatten()
             {
-                sink.put(&blocks.0)?;
-                sink.put(&blocks.1)?;
+                sink.put(&blocks.0).map_err(EmissionError::Sink)?;
+                sink.put(&blocks.1).map_err(EmissionError::Sink)?;
             }
             debug_assert_eq!(sink.position(), base.get() + meta_end);
 
             // Raw data region: metadata page tail, then small data, DRAW tail,
             // large runs (with their fragments), padded to the page-aligned EOA.
-            sink.put_zeros((raw_start - meta_end).to_usize()?)?;
+            sink.put_zeros((raw_start - meta_end).to_usize()?)
+                .map_err(EmissionError::Sink)?;
             for &i in &small_indices {
                 let at = base.absolute(ds_layouts[i].data_addr)?;
                 debug_assert_eq!(sink.position(), at);
@@ -3772,19 +3796,23 @@ impl FileWriter {
                 sink.put_zeros(
                     (free_space_manager::align_up(small_raw_end, page_size) - small_raw_end)
                         .to_usize()?,
-                )?;
+                )
+                .map_err(EmissionError::Sink)?;
             }
             for &i in &large_indices {
                 let gap = base.absolute(ds_layouts[i].data_addr)? - sink.position();
-                sink.put_zeros(gap.to_usize()?)?;
+                sink.put_zeros(gap.to_usize()?)
+                    .map_err(EmissionError::Sink)?;
                 ds_layouts[i].data.emit(sink, &all_ds[i].storage)?;
                 let end_rel = base.relative(sink.position())?.get();
                 sink.put_zeros(
                     (free_space_manager::align_up(end_rel, page_size) - end_rel).to_usize()?,
-                )?;
+                )
+                .map_err(EmissionError::Sink)?;
             }
             let final_pad = eof_addr2 - sink.position();
-            sink.put_zeros(final_pad.to_usize()?)?;
+            sink.put_zeros(final_pad.to_usize()?)
+                .map_err(EmissionError::Sink)?;
             debug_assert_eq!(sink.position(), eof_addr2);
             return Ok(());
         }
@@ -3797,7 +3825,8 @@ impl FileWriter {
                 if built.data.len() != ds_data_lens[i] {
                     return Err(FormatError::Internal(
                         "chunk data differs from its allocation".into(),
-                    ));
+                    )
+                    .into());
                 }
                 ds_layouts.push(DsLayout {
                     data: built.data,
@@ -3882,7 +3911,7 @@ impl FileWriter {
                     // bytes in memory. Report it: heap addresses patched into
                     // another buffer would corrupt the file in silence.
                     let Some(bytes) = ds_layouts[i].data.in_memory_mut() else {
-                        return Err(vl_element_bytes_absent(d.name.as_str()));
+                        return Err(vl_element_bytes_absent(d.name.as_str()).into());
                     };
                     let addrs = place_collections(
                         &staging.collections,
@@ -3968,7 +3997,8 @@ impl FileWriter {
             checksum: None,
         }
         .build();
-        sink.put(&hdf5_pure_format::__private::serialize_superblock(&sb)?)?;
+        sink.put(&hdf5_pure_format::__private::serialize_superblock(&sb)?)
+            .map_err(EmissionError::Sink)?;
 
         /// Identifies borrowed bytes or a deferred dataset or group serialization.
         enum FileData<'a> {
@@ -4082,7 +4112,8 @@ impl FileWriter {
         if root_oh.len() != root_oh_size {
             return Err(FormatError::Internal(
                 "the root group header differs from its reserved length".into(),
-            ));
+            )
+            .into());
         }
         let mut root_header = core::iter::once(Reservation::new(
             base,
@@ -4206,7 +4237,8 @@ impl FileWriter {
             _ => {
                 return Err(FormatError::Internal(
                     "a superblock extension has no output reservation".into(),
-                ));
+                )
+                .into());
             }
         }
         .into_iter();
@@ -4242,7 +4274,7 @@ impl FileWriter {
             &mut manager_blocks,
         ];
         let emit = |sink: &mut S, emission| match emission {
-            FileData::Bytes(bytes) => sink.put(bytes),
+            FileData::Bytes(bytes) => sink.put(bytes).map_err(EmissionError::Sink),
             FileData::Group(gi) => {
                 let g = &groups[gi];
                 let links = tables.links(&g.ds_indices, &g.committed_indices, &g.sub_group_indices);
@@ -4257,9 +4289,10 @@ impl FileWriter {
                 if oh.len() != group_oh_sizes[gi] {
                     return Err(FormatError::Internal(
                         "a group header differs from its reserved length".into(),
-                    ));
+                    )
+                    .into());
                 }
-                sink.put(&oh)
+                sink.put(&oh).map_err(EmissionError::Sink)
             }
             FileData::Dataset(i) => ds_layouts[i].data.emit(sink, &all_ds[i].storage),
         };
@@ -4610,7 +4643,7 @@ mod tests {
         }
         writer.add_group(group.finish());
         let mut bytes = b"previous bytes".to_vec();
-        let error = writer.finish_to_sink(&mut bytes).unwrap_err();
+        let error = writer.finish_to_sink(&mut bytes).unwrap_err().into_format();
         let expected = match encoded_size {
             Some(size) => FormatError::AttributeFieldTooLong {
                 name: name.into(),
@@ -5130,6 +5163,8 @@ mod tests {
     }
 
     impl ByteSink for SparseSink {
+        type Error = FormatError;
+
         fn put(&mut self, bytes: &[u8]) -> Result<(), FormatError> {
             self.chunks.push((self.position, bytes.to_vec()));
             self.position += bytes.len() as u64;

@@ -9,6 +9,7 @@ use crate::FileSpacePageSize;
 use crate::FileSpaceSettings;
 use crate::UserblockSize;
 use crate::chunked_write::ByteSink;
+use crate::file_emission::EmissionError;
 use crate::file_writer::FileWriter as FormatWriter;
 use crate::type_builders::{
     AttrValue, DatasetBuilder as FormatDatasetBuilder, FinishedGroup,
@@ -400,7 +401,7 @@ impl FileBuilder {
         Ok(self.writer.finish()?)
     }
 
-    /// Serialize the file directly to a [`Write`] sink, without first buffering
+    /// Serializes the file directly to a [`Write`] sink, without first buffering
     /// the whole file in memory.
     ///
     /// Produces byte-for-byte the same file as [`finish`](Self::finish), but a
@@ -418,7 +419,12 @@ impl FileBuilder {
     /// non-seekable sink there is nothing to roll back, so a caller needing
     /// all-or-nothing should write to a temporary path and rename on success.
     ///
-    /// # Example
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] with the original write or flush error if output fails, or
+    /// [`Error::Format`] if the settings or data cannot be serialized.
+    ///
+    /// # Examples
     ///
     /// ```
     /// use hdf5_pure::FileBuilder;
@@ -435,14 +441,12 @@ impl FileBuilder {
     /// ```
     pub fn finish_to<W: Write>(self, w: W) -> Result<(), Error> {
         let mut sink = WriteSink::new(std::io::BufWriter::new(w));
-        if let Err(fe) = self.writer.finish_to_sink(&mut sink) {
-            // If the failure came from the sink's I/O, surface the real
-            // `io::Error`; otherwise it is a genuine format error.
-            return match sink.err.take() {
-                Some(io_err) => Err(Error::Io(io_err)),
-                None => Err(Error::Format(fe)),
-            };
-        }
+        self.writer
+            .finish_to_sink(&mut sink)
+            .map_err(|error| match error {
+                EmissionError::Format(error) => Error::Format(error),
+                EmissionError::Sink(error) => Error::Io(error),
+            })?;
         sink.into_inner().flush().map_err(Error::Io)
     }
 
@@ -493,23 +497,18 @@ impl Write for LazyFile {
     }
 }
 
-/// Adapts a [`std::io::Write`] to the writer's [`ByteSink`] so a file can be
-/// assembled straight onto the sink. Because `ByteSink` is `no_std` and cannot
-/// carry a `std::io::Error`, an I/O failure is stashed here and the surrounding
-/// [`FileBuilder::finish_to`] turns it back into [`Error::Io`].
+/// Tracks the output position of a [`Write`] sink during file assembly.
+///
+/// Returns the original [`std::io::Error`] from failed writes. [`FileBuilder::finish_to`] converts
+/// the sink failure to [`Error::Io`].
 struct WriteSink<W: Write> {
     inner: W,
     written: u64,
-    err: Option<std::io::Error>,
 }
 
 impl<W: Write> WriteSink<W> {
     fn new(inner: W) -> Self {
-        Self {
-            inner,
-            written: 0,
-            err: None,
-        }
+        Self { inner, written: 0 }
     }
 
     fn into_inner(self) -> W {
@@ -518,24 +517,15 @@ impl<W: Write> WriteSink<W> {
 }
 
 impl<W: Write> ByteSink for WriteSink<W> {
-    fn put(&mut self, bytes: &[u8]) -> Result<(), FormatError> {
-        match self.inner.write_all(bytes) {
-            Ok(()) => {
-                self.written += bytes.len() as u64;
-                Ok(())
-            }
-            Err(e) => {
-                self.err = Some(e);
-                // A placeholder format error; `finish_to` replaces it with the
-                // stashed `io::Error` above, so its message is never surfaced.
-                Err(FormatError::SerializationError(
-                    "streaming output write failed".into(),
-                ))
-            }
-        }
+    type Error = std::io::Error;
+
+    fn put(&mut self, bytes: &[u8]) -> Result<(), Self::Error> {
+        self.inner.write_all(bytes)?;
+        self.written += bytes.len() as u64;
+        Ok(())
     }
 
-    fn put_zeros(&mut self, n: usize) -> Result<(), FormatError> {
+    fn put_zeros(&mut self, n: usize) -> Result<(), Self::Error> {
         // Emit padding in bounded blocks so a large userblock never allocates a
         // matching buffer.
         const ZEROS: [u8; 4096] = [0u8; 4096];
@@ -561,6 +551,8 @@ impl Default for FileBuilder {
 
 #[cfg(test)]
 mod streaming_tests {
+    use std::error::Error as StdError;
+    use std::fmt;
     use std::io;
     use std::sync::{Arc, Mutex};
 
@@ -939,6 +931,105 @@ mod streaming_tests {
             panic!("expected Io, got {error:?}");
         };
         assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[rstest::rstest]
+    #[case::internal_emission(0, false, false)]
+    #[case::internal_partial_write(4_096, false, false)]
+    #[case::public_emission(0, false, true)]
+    #[case::public_partial_write(4_096, false, true)]
+    #[case::public_flush(usize::MAX, true, true)]
+    fn streaming_results_preserve_io_causes(
+        #[case] remaining: usize,
+        #[case] fail_flush: bool,
+        #[case] public: bool,
+        #[values(false, true)] raw_os_error: bool,
+    ) {
+        let cause = if raw_os_error {
+            io::Error::from_raw_os_error(123)
+        } else {
+            io::Error::new(io::ErrorKind::StorageFull, OutputCause(73))
+        };
+        let output = FailingOutput {
+            remaining,
+            fail_flush,
+            error: Some(cause),
+        };
+        let mut builder = FileBuilder::new();
+        builder
+            .create_dataset("data")
+            .with_u8_data(&vec![17; 32_768]);
+        let error = if public {
+            let error = builder.finish_to(output).unwrap_err();
+            let Error::Io(error) = error else {
+                panic!("expected Io, got {error:?}");
+            };
+            error
+        } else {
+            let error = builder
+                .writer
+                .finish_to_sink(&mut WriteSink::new(output))
+                .unwrap_err();
+            let EmissionError::Sink(error) = error else {
+                panic!("expected Sink, got {error:?}");
+            };
+            error
+        };
+        if raw_os_error {
+            assert_eq!(error.raw_os_error(), Some(123));
+        } else {
+            assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+            assert_eq!(
+                error
+                    .get_ref()
+                    .unwrap()
+                    .downcast_ref::<OutputCause>()
+                    .unwrap()
+                    .0,
+                73
+            );
+        }
+    }
+
+    #[derive(Debug)]
+    struct OutputCause(u32);
+
+    impl fmt::Display for OutputCause {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "output failure {}", self.0)
+        }
+    }
+
+    impl StdError for OutputCause {}
+
+    struct FailingOutput {
+        remaining: usize,
+        fail_flush: bool,
+        error: Option<io::Error>,
+    }
+
+    impl Write for FailingOutput {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(self
+                    .error
+                    .take()
+                    .unwrap_or_else(|| io::ErrorKind::StorageFull.into()));
+            }
+            let written = bytes.len().min(self.remaining);
+            self.remaining -= written;
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            if self.fail_flush {
+                return Err(self
+                    .error
+                    .take()
+                    .unwrap_or_else(|| io::ErrorKind::StorageFull.into()));
+            }
+            Ok(())
+        }
     }
 
     #[derive(Default)]
