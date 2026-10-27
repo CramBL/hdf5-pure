@@ -7,9 +7,13 @@ use hdf5_pure::DatasetCreateProperties;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::Error;
 use hdf5_pure::File;
+use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
+use hdf5_pure::FormatError;
+use hdf5_pure::MemoryStrategy;
 use hdf5_pure::PartialEdgeFiltering;
+use hdf5_pure::PersistedFreeSpacePolicy;
 use hdf5_pure::UserblockSize;
 #[cfg(feature = "zfp")]
 use hdf5_pure::ZfpRate;
@@ -555,8 +559,10 @@ fn roundtrips_opaque_and_bitfield_datatypes() {
     assert_eq!(flags.read_raw().unwrap(), bitfield_raw);
 }
 
-#[test]
-fn repack_rejects_a_source_whose_file_space_info_message_does_not_parse() {
+#[rstest]
+fn repack_reads_source_file_space_settings_only_without_an_override(
+    #[values(false, true)] override_settings: bool,
+) {
     let dir = tempfile::tempdir().unwrap();
     let (src, dst) = (dir.path().join("src.h5"), dir.path().join("dst.h5"));
     let mut b = FileBuilder::new();
@@ -582,6 +588,23 @@ fn repack_rejects_a_source_whose_file_space_info_message_does_not_parse() {
         ),
     );
 
+    if override_settings {
+        let settings = FileSpaceSettings::new(FileSpaceStrategy::None);
+        hdf5_pure::repack(
+            &src,
+            &dst,
+            &RepackOptions::new().with_file_space_settings(settings),
+        )
+        .unwrap();
+        let output = File::open(&dst).unwrap();
+        assert_eq!(output.file_space_settings().unwrap(), Some(settings));
+        assert_eq!(
+            output.dataset("keep").unwrap().read_i32().unwrap(),
+            [1, 2, 3]
+        );
+        return;
+    }
+
     let err = hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap_err();
     let Error::RepackUnsupported(reason) = &err else {
         panic!("expected RepackUnsupported, got {err:?}");
@@ -603,12 +626,13 @@ fn repack_rejects_a_source_whose_file_space_info_message_does_not_parse() {
 #[case::persistent_page(FileSpaceStrategy::Page, true)]
 #[case::aggr(FileSpaceStrategy::Aggr, true)]
 #[case::none(FileSpaceStrategy::None, true)]
-fn preserves_file_space_settings_without_persistence(
+fn preserves_effective_file_space_settings(
     #[case] strategy: FileSpaceStrategy,
     #[case] persist: bool,
 ) {
-    let src = temp::temp_path("hdf5_pure_repack_fss_src.h5");
-    let dst = temp::temp_path("hdf5_pure_repack_fss_dst.h5");
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.h5");
+    let dst = dir.path().join("dst.h5");
     let mut b = FileBuilder::new();
     b.create_dataset("keep").with_i32_data(&[1, 2, 3]);
     b.create_dataset("drop_me").with_f64_data(&vec![0.0; 1000]);
@@ -622,15 +646,158 @@ fn preserves_file_space_settings_without_persistence(
     hdf5_pure::repack(&src, &dst, &RepackOptions::new().drop_path("drop_me")).unwrap();
 
     let f = hdf5_pure::File::open(&dst).unwrap();
-    assert_eq!(
-        f.file_space_settings().unwrap(),
-        Some(settings.with_persistence(false))
-    );
+    assert_eq!(f.file_space_settings().unwrap(), Some(settings));
     assert_eq!(
         f.dataset("keep").unwrap().read_i32().unwrap(),
         vec![1, 2, 3]
     );
-    assert!(f.dataset("drop_me").is_err());
+    assert_eq!(f.root().datasets().unwrap(), ["keep"]);
+}
+
+#[test]
+fn file_space_override_replaces_the_previous_option() {
+    let settings = FileSpaceSettings::new(FileSpaceStrategy::None);
+    assert_eq!(RepackOptions::new().file_space_settings(), None);
+    let options = RepackOptions::new()
+        .with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::Page))
+        .with_file_space_settings(settings);
+    assert_eq!(options.file_space_settings(), Some(settings));
+}
+
+#[rstest]
+#[case::absent(None, None)]
+#[case::absent_overridden(None, Some(FileSpaceSettings::new(FileSpaceStrategy::None)))]
+#[case::page_to_none(Some(FileSpaceSettings::new(FileSpaceStrategy::Page)), Some(FileSpaceSettings::new(FileSpaceStrategy::None).with_persistence(true).with_threshold(0)))]
+#[case::page_to_aggr(Some(FileSpaceSettings::new(FileSpaceStrategy::Page)), Some(FileSpaceSettings::new(FileSpaceStrategy::Aggr).with_persistence(true).with_threshold(0)))]
+#[case::page_to_fsm(Some(FileSpaceSettings::new(FileSpaceStrategy::Page)), Some(FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true).with_threshold(0)))]
+#[case::fsm_to_page(Some(FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)), Some(FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true).with_threshold(0)))]
+fn output_settings_follow_the_override_then_source_then_builder_default(
+    #[case] source_settings: Option<FileSpaceSettings>,
+    #[case] override_settings: Option<FileSpaceSettings>,
+) {
+    let mut builder = FileBuilder::new();
+    if let Some(settings) = source_settings {
+        builder.with_file_space_settings(settings);
+    }
+    builder.create_dataset("d").with_i32_data(&[1, 2, 3]);
+    let source = File::from_bytes(builder.finish().unwrap()).unwrap();
+    let mut options = RepackOptions::new();
+    if let Some(settings) = override_settings {
+        options = options.with_file_space_settings(settings);
+    }
+    let mut bytes = Vec::new();
+    hdf5_pure::repack_into(&source, &mut bytes, &options).unwrap();
+    let output = File::from_bytes(bytes).unwrap();
+    assert_eq!(
+        output.file_space_settings().unwrap(),
+        override_settings.or(source_settings)
+    );
+    assert_eq!(output.dataset("d").unwrap().read_i32().unwrap(), [1, 2, 3]);
+    if override_settings.is_some_and(|settings| {
+        matches!(
+            settings.strategy(),
+            FileSpaceStrategy::Aggr | FileSpaceStrategy::None
+        )
+    }) {
+        assert!(
+            output
+                .file_space_info()
+                .unwrap()
+                .unwrap()
+                .manager_addrs
+                .is_empty()
+        );
+        assert_eq!(output.persisted_free_sections().unwrap(), None);
+    }
+}
+
+#[rstest]
+#[case::preserved(None)]
+#[case::new_page_size(Some(8192))]
+fn persistent_page_output_supports_strict_bounded_editing(#[case] page_size: Option<u64>) {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.h5");
+    let dst = dir.path().join("dst.h5");
+    let source_settings = FileSpaceSettings::new(FileSpaceStrategy::Page)
+        .with_persistence(true)
+        .with_threshold(0)
+        .with_page_size(FileSpacePageSize::try_from(16_384).unwrap());
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_settings(source_settings);
+    builder.create_dataset("keep").with_i32_data(&[1, 2, 3]);
+    builder
+        .create_dataset("drop_me")
+        .with_i32_data(&vec![9; 10_000]);
+    builder.write(&src).unwrap();
+    let expected = page_size.map_or(source_settings, |size| {
+        source_settings.with_page_size(FileSpacePageSize::try_from(size).unwrap())
+    });
+    let mut options = RepackOptions::new().drop_path("drop_me");
+    if page_size.is_some() {
+        options = options.with_file_space_settings(expected);
+    }
+    hdf5_pure::repack(&src, &dst, &options).unwrap();
+    let file = File::open_rw_with_options(
+        &dst,
+        FileAccessProperties::new()
+            .with_memory_strategy(MemoryStrategy::Bounded)
+            .with_persisted_free_space_policy(PersistedFreeSpacePolicy::Strict),
+    )
+    .unwrap();
+    assert_eq!(file.file_space_settings().unwrap(), Some(expected));
+    file.root()
+        .create_dataset("added", |dataset| {
+            dataset.with_i32_data(&[4, 5, 6]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    file.close().unwrap();
+    let file = File::open(&dst).unwrap();
+    assert_eq!(file.root().datasets().unwrap(), ["keep", "added"]);
+    assert_eq!(file.dataset("keep").unwrap().read_i32().unwrap(), [1, 2, 3]);
+    assert_eq!(
+        file.dataset("added").unwrap().read_i32().unwrap(),
+        [4, 5, 6]
+    );
+}
+
+#[rstest]
+#[case::fsm(FileSpaceStrategy::FsmAggr)]
+#[case::page(FileSpaceStrategy::Page)]
+#[case::aggr(FileSpaceStrategy::Aggr)]
+#[case::none(FileSpaceStrategy::None)]
+fn incompatible_file_space_bounds_fail_before_output(
+    #[case] strategy: FileSpaceStrategy,
+    #[values(false, true)] into_writer: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("destination.h5");
+    let mut builder = FileBuilder::new();
+    builder.create_dataset("d").with_i32_data(&[1, 2, 3]);
+    let source = File::from_bytes(builder.finish().unwrap()).unwrap();
+    let options = RepackOptions::new()
+        .with_file_space_settings(FileSpaceSettings::new(strategy))
+        .with_libver_bounds(LibVer::Earliest, LibVer::V18);
+    let mut bytes = Vec::new();
+    let error = if into_writer {
+        hdf5_pure::repack_into(&source, &mut bytes, &options).unwrap_err()
+    } else {
+        hdf5_pure::repack_to_path(&source, &path, &options).unwrap_err()
+    };
+    assert!(bytes.is_empty());
+    assert!(!path.exists());
+    let Error::Format(FormatError::LibverTooOldForContent {
+        content,
+        needs,
+        writing,
+    }) = error
+    else {
+        panic!("expected LibverTooOldForContent, got {error:?}");
+    };
+    assert_eq!(
+        (content, needs, writing),
+        ("a file-space setting", "v1.10", "v1.8")
+    );
 }
 
 #[test]

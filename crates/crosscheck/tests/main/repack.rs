@@ -9,8 +9,15 @@ use std::path::Path;
 use hdf5::ObjectReference;
 use hdf5::ObjectReference1;
 use hdf5::ReferencedObject;
+use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::FileAccessProperties;
+use hdf5_pure::FileSpacePageSize;
+use hdf5_pure::FileSpaceSettings;
+use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FilterId;
+use hdf5_pure::MemoryStrategy;
+use hdf5_pure::PersistedFreeSpacePolicy;
 use hdf5_pure::TraversalLimit;
 use hdf5_pure::VariableLengthType;
 use hdf5_pure::{
@@ -18,6 +25,7 @@ use hdf5_pure::{
 };
 use rstest::rstest;
 
+use test_util_hdf5::chunk_filter;
 use test_util_hdf5::{absence, file, fixtures};
 
 use crate::hard_link_graphs::RepeatedObjectGraph;
@@ -64,6 +72,220 @@ fn c_file_repacked_then_read_by_c_library() {
     absence::assert_libhdf5_absent(&c.dataset("doomed").unwrap_err(), "doomed");
 }
 
+#[rstest]
+#[case::preserved(None)]
+#[case::none(Some(FileSpaceStrategy::None))]
+#[case::aggr(Some(FileSpaceStrategy::Aggr))]
+#[case::fsm(Some(FileSpaceStrategy::FsmAggr))]
+#[case::page(Some(FileSpaceStrategy::Page))]
+fn repack_rebuilds_a_native_persistent_page_files_allocation_policy(
+    #[case] strategy: Option<FileSpaceStrategy>,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let src = directory.path().join("native.h5");
+    let dst = directory.path().join("repacked.h5");
+    let values: Vec<i32> = (0..4096).map(|index| index % 13).collect();
+    {
+        let native = hdf5::FileBuilder::new()
+            .with_fapl(|properties| properties.libver_v110())
+            .with_fcpl(|properties| {
+                properties
+                    .file_space_strategy(CStrategy::FreeSpaceManager {
+                        paged: true,
+                        persist: true,
+                        threshold: 0,
+                    })
+                    .file_space_page_size(16_384)
+            })
+            .create(&src)
+            .unwrap();
+        native
+            .new_dataset_builder()
+            .with_data(&vec![99i32; 20_000])
+            .create("drop_me")
+            .unwrap();
+        native
+            .new_dataset::<i32>()
+            .shape([values.len()])
+            .chunk([512])
+            .shuffle()
+            .deflate(6)
+            .create("values")
+            .unwrap()
+            .write_raw(&values)
+            .unwrap();
+        native.unlink("drop_me").unwrap();
+        native.close().unwrap();
+    }
+    let source_settings = FileSpaceSettings::new(FileSpaceStrategy::Page)
+        .with_persistence(true)
+        .with_threshold(0)
+        .with_page_size(FileSpacePageSize::try_from(16_384).unwrap());
+    let expected = strategy.map_or(source_settings, |strategy| {
+        FileSpaceSettings::new(strategy)
+            .with_persistence(true)
+            .with_threshold(0)
+            .with_page_size(FileSpacePageSize::try_from(8192).unwrap())
+    });
+    let source = File::open_streaming(&src).unwrap();
+    assert_eq!(source.file_space_settings().unwrap(), Some(source_settings));
+    let source_info = source.file_space_info().unwrap().unwrap();
+    assert!(
+        !source
+            .persisted_free_sections()
+            .unwrap()
+            .unwrap()
+            .managers()
+            .is_empty()
+    );
+    let source_dataset = source.dataset("values").unwrap();
+    let pipeline = source_dataset.filter_pipeline().unwrap();
+    let encoded = encoded_chunks(&src, "values");
+    assert_eq!(encoded.len(), 8);
+    assert!(encoded.iter().all(|(_, mask, _)| *mask == 0));
+    drop(source_dataset);
+    drop(source);
+    let mut options = RepackOptions::new();
+    if strategy.is_some() {
+        options = options.with_file_space_settings(expected);
+    }
+    hdf5_pure::repack(&src, &dst, &options).unwrap();
+    let output = File::open_streaming(&dst).unwrap();
+    assert_eq!(output.file_space_settings().unwrap(), Some(expected));
+    let output_info = output.file_space_info().unwrap().unwrap();
+    let dataset = output.dataset("values").unwrap();
+    assert_eq!(dataset.read_i32().unwrap(), values);
+    assert_eq!(dataset.chunk_shape().unwrap(), Some(vec![512]));
+    assert_eq!(dataset.filter_pipeline().unwrap(), pipeline);
+    assert_eq!(encoded_chunks(&dst, "values"), encoded);
+    if expected.persist() {
+        let free = output.persisted_free_sections().unwrap().unwrap();
+        assert!(!free.managers().is_empty());
+        assert_ne!(output_info.manager_addrs, source_info.manager_addrs);
+        assert_ne!(output_info.eoa_pre_fsm, source_info.eoa_pre_fsm);
+    } else {
+        assert!(output_info.manager_addrs.is_empty());
+        assert_eq!(output.persisted_free_sections().unwrap(), None);
+        if expected.strategy() == FileSpaceStrategy::None {
+            assert!(std::fs::metadata(&dst).unwrap().len() < expected.page_size().get());
+            assert!(
+                dataset
+                    .chunks()
+                    .unwrap()
+                    .iter()
+                    .any(|chunk| { chunk.address % expected.page_size().get() != 0 })
+            );
+        }
+    }
+    drop(dataset);
+    drop(output);
+    {
+        let native = hdf5::File::open(&dst).unwrap();
+        let properties = native.create_plist().unwrap();
+        let native_strategy = match expected.strategy() {
+            FileSpaceStrategy::FsmAggr | FileSpaceStrategy::Page => CStrategy::FreeSpaceManager {
+                paged: expected.strategy() == FileSpaceStrategy::Page,
+                persist: expected.persist(),
+                threshold: expected.threshold(),
+            },
+            FileSpaceStrategy::Aggr => CStrategy::PageAggregation,
+            FileSpaceStrategy::None => CStrategy::None,
+        };
+        assert_eq!(
+            properties.get_file_space_strategy().unwrap(),
+            native_strategy
+        );
+        assert_eq!(
+            properties.get_file_space_page_size().unwrap(),
+            expected.page_size().get()
+        );
+        assert_eq!(
+            native.dataset("values").unwrap().read_raw::<i32>().unwrap(),
+            values
+        );
+        drop(properties);
+        native.close().unwrap();
+    }
+    let output = File::open_rw_with_options(
+        &dst,
+        FileAccessProperties::new()
+            .with_memory_strategy(MemoryStrategy::Bounded)
+            .with_persisted_free_space_policy(PersistedFreeSpacePolicy::Strict),
+    )
+    .unwrap();
+    output
+        .root()
+        .create_dataset("added", |dataset| {
+            dataset.with_i32_data(&[4, 5, 6]);
+        })
+        .unwrap();
+    output.commit().unwrap();
+    output.close().unwrap();
+    let native = hdf5::File::open(&dst).unwrap();
+    assert_eq!(
+        native.dataset("values").unwrap().read_raw::<i32>().unwrap(),
+        values
+    );
+    assert_eq!(
+        native.dataset("added").unwrap().read_raw::<i32>().unwrap(),
+        [4, 5, 6]
+    );
+}
+
+#[rstest]
+#[case::page(FileSpaceStrategy::Page)]
+#[case::none(FileSpaceStrategy::None)]
+fn repack_policy_overrides_preserve_native_encoded_chunks_with_skipped_filters(
+    #[case] strategy: FileSpaceStrategy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let src = directory.path().join("masked.h5");
+    let dst = directory.path().join("repacked.h5");
+    let chunks = [[1, 2, 3, 4], [5, 6, 7, 8]];
+    chunk_filter::write_masked_chunks(&src, 0x8000_0002, &chunks);
+    let original = encoded_chunks(&src, "d");
+    assert_eq!(original.len(), 2);
+    assert!(original.iter().all(|(_, mask, _)| *mask == 0x8000_0002));
+    let options = RepackOptions::new()
+        .with_file_space_settings(FileSpaceSettings::new(strategy).with_persistence(true));
+    hdf5_pure::repack(&src, &dst, &options).unwrap();
+    assert_eq!(encoded_chunks(&dst, "d"), original);
+    let source = File::open(&src).unwrap();
+    let output = File::open(&dst).unwrap();
+    let source_dataset = source.dataset("d").unwrap();
+    let dataset = output.dataset("d").unwrap();
+    assert_eq!(dataset.chunk_shape().unwrap(), Some(vec![4]));
+    assert_eq!(
+        dataset.filter_pipeline().unwrap(),
+        source_dataset.filter_pipeline().unwrap()
+    );
+    assert_eq!(dataset.read_i32().unwrap(), chunks.concat());
+    drop(dataset);
+    drop(output);
+    let native = hdf5::File::open(&dst).unwrap();
+    assert_eq!(
+        native.dataset("d").unwrap().read_raw::<i32>().unwrap(),
+        chunks.concat()
+    );
+}
+
+fn encoded_chunks(path: &Path, dataset_path: &str) -> Vec<(Vec<u64>, u32, Vec<u8>)> {
+    let bytes = std::fs::read(path).unwrap();
+    let file = File::open_streaming(path).unwrap();
+    let dataset = file.dataset(dataset_path).unwrap();
+    let mut chunks = dataset.chunks().unwrap();
+    chunks.sort_by(|left, right| left.offset.cmp(&right.offset));
+    chunks
+        .into_iter()
+        .map(|chunk| {
+            let start = usize::try_from(chunk.address).unwrap();
+            let length = usize::try_from(chunk.storage_size).unwrap();
+            let mask = chunk.filter_mask().raw_bits();
+            (chunk.offset, mask, bytes[start..start + length].to_vec())
+        })
+        .collect()
+}
+
 #[test]
 fn c_reads_repacked_scale_offset() {
     // hdf5-pure writes an integer dataset compressed with lossless scale-offset,
@@ -96,8 +318,11 @@ fn c_reads_repacked_scale_offset() {
     assert_eq!(c.dataset("vals").unwrap().read_raw::<i32>().unwrap(), data);
 }
 
-#[test]
-fn repack_roundtrips_c_vlen_string_dataset() {
+#[rstest]
+#[case::preserved(None)]
+#[case::page(Some(FileSpaceStrategy::Page))]
+#[case::none(Some(FileSpaceStrategy::None))]
+fn repack_roundtrips_c_vlen_string_dataset(#[case] strategy: Option<FileSpaceStrategy>) {
     use hdf5::types::VarLenUnicode;
     use std::str::FromStr;
 
@@ -122,7 +347,11 @@ fn repack_roundtrips_c_vlen_string_dataset() {
     }
 
     // A VL-string dataset the C library wrote must now round-trip faithfully.
-    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
+    let options = strategy.map_or_else(RepackOptions::new, |strategy| {
+        RepackOptions::new()
+            .with_file_space_settings(FileSpaceSettings::new(strategy).with_persistence(true))
+    });
+    hdf5_pure::repack(&src, &dst, &options).unwrap();
 
     // hdf5-pure reads the repacked values back, in order, including the empty
     // and non-ASCII elements.
@@ -306,8 +535,11 @@ fn repack_roundtrips_c_vlen_sequence_dataset() {
     assert_eq!(got, seqs);
 }
 
-#[test]
-fn repack_roundtrips_c_object_reference_dataset() {
+#[rstest]
+#[case::preserved(None)]
+#[case::page(Some(FileSpaceStrategy::Page))]
+#[case::none(Some(FileSpaceStrategy::None))]
+fn repack_roundtrips_c_object_reference_dataset(#[case] strategy: Option<FileSpaceStrategy>) {
     use hdf5::{ObjectReference, ObjectReference1, ReferencedObject};
 
     let dir = tempfile::tempdir().unwrap();
@@ -346,7 +578,11 @@ fn repack_roundtrips_c_object_reference_dataset() {
         file.close().unwrap();
     }
 
-    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
+    let options = strategy.map_or_else(RepackOptions::new, |strategy| {
+        RepackOptions::new()
+            .with_file_space_settings(FileSpaceSettings::new(strategy).with_persistence(true))
+    });
+    hdf5_pure::repack(&src, &dst, &options).unwrap();
 
     // hdf5-pure sees the repacked datatype as an object reference (not converted).
     let f = File::open(&dst).unwrap();

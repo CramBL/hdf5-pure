@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - `Dataset::into_buffered_appender` creates an owned buffered appender that can be stored without a lifetime parameter and retains the editing session after the original file handle is dropped. Explicit file closure makes further appender writes fail ([#945](https://github.com/CramBL/hdf5-pure/pull/945)).
+- `RepackOptions::with_file_space_settings` selects the output allocation policy while preserving eligible encoded chunks verbatim ([#946](https://github.com/CramBL/hdf5-pure/pull/946)).
 - `FileAccessProperties::with_persisted_free_space_policy` enables strict writable opening that rejects invalid persisted free-space metadata before changing the file. Tolerant recovery remains the default ([#941](https://github.com/CramBL/hdf5-pure/pull/941)).
 - `FileBuilder::finish` and related output methods write dense link storage for root and nested groups with more than eight links. In-place editing preserves link creation order and indexing across changes between compact and dense storage at the group's phase-change thresholds, with encoded dense Link messages limited to 4096 bytes ([#925](https://github.com/CramBL/hdf5-pure/pull/925), [#931](https://github.com/CramBL/hdf5-pure/pull/931), [#935](https://github.com/CramBL/hdf5-pure/pull/935)).
 - `Error::TraversalLimitExceeded` reports an object graph with more objects or hard links than a copy or a repack reads, or with groups nested deeper than a repack writes ([#922](https://github.com/CramBL/hdf5-pure/pull/922), [#926](https://github.com/CramBL/hdf5-pure/pull/926), [#928](https://github.com/CramBL/hdf5-pure/pull/928)).
@@ -73,6 +74,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - Fixed `BufferedAppender` accepting input or completing empty flushes after file closure. Pending bytes remain available for recovery ([#945](https://github.com/CramBL/hdf5-pure/pull/945)).
+- Fixed `repack` disabling file-space persistence in the output ([#946](https://github.com/CramBL/hdf5-pure/pull/946)).
 - Fixed `Dataset::read_f64` and related chunked reads rejecting completely covered selections with unreadable fill metadata. Readable fill is required when complete coverage is unproven ([#943](https://github.com/CramBL/hdf5-pure/pull/943)).
 - Fixed `Group::create_dataset` rejecting deflate compression when `fast-deflate` was enabled with default features disabled ([#941](https://github.com/CramBL/hdf5-pure/pull/941)).
 - Fixed `Dataset::fill_value` decoding eight-bit targets as raw bytes and accepting multi-element payloads. Numeric element conversions honor the source datatype, including on empty input ([#940](https://github.com/CramBL/hdf5-pure/pull/940)).
