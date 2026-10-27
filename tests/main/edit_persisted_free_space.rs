@@ -626,7 +626,7 @@ fn strict_persisted_open_accepts_absent_or_empty_persistence(#[values(false, tru
 #[case::duplicate(0)]
 fn persisted_inspection_reports_overlapping_extents(
     #[case] displacement: u64,
-    #[values(false, true)] streaming: bool,
+    #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
 ) {
     let path = temp::temp_path("overlapping-sections.h5");
     file_space::write_persisted_interior_hole(&path);
@@ -651,33 +651,17 @@ fn persisted_inspection_reports_overlapping_extents(
     let header_at =
         usize::try_from(superblock.base_address.absolute(header_address).unwrap()).unwrap();
     let list_at = usize::try_from(superblock.base_address.absolute(list_address).unwrap()).unwrap();
-    let (header, list) = format::serialize_free_space_manager(
-        widths,
-        &[
-            format::FreeSection {
-                addr: StoredAddress::new(previous_address),
-                size: 32,
-            },
-            format::FreeSection {
-                addr: StoredAddress::new(address),
-                size: 32,
-            },
-        ],
-        header_address,
-        list_address,
-        format::SECTION_CLASS_SIMPLE,
-    )
-    .unwrap();
+    assert_eq!((widths.offsets.get(), widths.lengths.get()), (8, 8));
+    let (header, list) = free_space::raw_manager_eight(
+        header_address.get(),
+        list_address.get(),
+        &[(previous_address, 32), (address, 32)],
+    );
     drop(file);
     let mut bytes = std::fs::read(&path).unwrap();
     bytes[header_at..header_at + header.len()].copy_from_slice(&header);
     bytes[list_at..list_at + list.len()].copy_from_slice(&list);
     std::fs::write(&path, bytes).unwrap();
-    let backend = if streaming {
-        ReadBackend::Streaming
-    } else {
-        ReadBackend::Buffered
-    };
     let file = backend.open(&path).unwrap();
     let error = file.persisted_free_sections().unwrap_err();
     let Error::OverlappingFreeSections {
