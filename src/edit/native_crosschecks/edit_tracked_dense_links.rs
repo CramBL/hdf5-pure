@@ -1,12 +1,12 @@
-#![cfg(feature = "__hdf5-1.10")]
+//! Tracked group-link crosschecks against libhdf5.
 
 use std::path::Path;
 
-use hdf5_pure::__private;
-use hdf5_pure::AttrValue;
-use hdf5_pure::CharacterSet;
-use hdf5_pure::Error;
-use hdf5_pure::MessageType;
+use crate::__private;
+use crate::AttrValue;
+use crate::CharacterSet;
+use crate::Error;
+use crate::MessageType;
 use hdf5_pure_format::__private::BTREE_V2_LINK_CREATION_ORDER;
 use hdf5_pure_format::__private::BTreeV2Header;
 use hdf5_pure_format::__private::GroupLinkStorage;

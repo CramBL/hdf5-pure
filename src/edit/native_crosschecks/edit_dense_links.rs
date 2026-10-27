@@ -1,7 +1,5 @@
-#![cfg(feature = "__hdf5-1.10")]
-
-use hdf5_pure::__private;
-use hdf5_pure::CharacterSet;
+use crate::__private;
+use crate::CharacterSet;
 use hdf5_pure_format::__private::BTreeV2Header;
 use hdf5_pure_format::__private::FractalHeapHeader;
 use hdf5_pure_format::__private::GroupLinkStorage;
@@ -62,7 +60,7 @@ fn dense_link_mutation_preserves_multilevel_indexes_collisions_and_symbolic_targ
     group.delete("link_0000").unwrap();
     group.create_group("added_λ").unwrap();
     group
-        .set_attr("changed", hdf5_pure::AttrValue::I64(17))
+        .set_attr("changed", crate::AttrValue::I64(17))
         .unwrap();
     file.commit().unwrap();
     drop(group);
@@ -118,7 +116,7 @@ fn editing_a_descendant_relocates_targets_through_dense_ancestors(
     file.group("child").unwrap().create_group("nested").unwrap();
     file.dataset("child/link_0005")
         .unwrap()
-        .set_attr("new", hdf5_pure::AttrValue::I64(99))
+        .set_attr("new", crate::AttrValue::I64(99))
         .unwrap();
     file.copy("child/link_0006", "child/copied").unwrap();
     file.commit().unwrap();
@@ -139,9 +137,7 @@ fn dense_link_and_attribute_storage_remain_independent(
     let group = file.group("g").unwrap();
     group.create_group("added").unwrap();
     if edit_attributes {
-        group
-            .set_attr("attr_0", hdf5_pure::AttrValue::I64(99))
-            .unwrap();
+        group.set_attr("attr_0", crate::AttrValue::I64(99)).unwrap();
     }
     file.commit().unwrap();
     drop(group);
@@ -164,7 +160,7 @@ fn unsupported_dense_conversion_rejects_the_batch_before_writing(
     assert!(
         matches!(
             error,
-            hdf5_pure::Error::EditUnsupported(
+            crate::Error::EditUnsupported(
                 "a group's resulting links cannot be encoded in dense storage"
             )
         ),
@@ -198,13 +194,13 @@ fn dense_mutation_retains_single_hard_link_relocation_constraints(
     if dataset {
         file.dataset("g/link_0000")
             .unwrap()
-            .set_attr("new", hdf5_pure::AttrValue::I64(1))
+            .set_attr("new", crate::AttrValue::I64(1))
             .unwrap();
     } else {
         file.group("g").unwrap().create_group("added").unwrap();
     }
     let error = file.commit().unwrap_err();
-    let hdf5_pure::Error::EditUnsupported(reason) = error else {
+    let crate::Error::EditUnsupported(reason) = error else {
         panic!("expected EditUnsupported, got {error:?}")
     };
     assert_eq!(
