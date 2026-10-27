@@ -48,6 +48,7 @@ mod edit_global_heap_reclaim;
 mod edit_header_times;
 mod edit_reference_repointing;
 mod edit_second_layout;
+mod edit_tracked_dense_links;
 mod edit_userblock;
 mod empty_chunked;
 mod enum_attr;

@@ -724,37 +724,6 @@ fn a_tracked_group_that_gains_no_link_keeps_its_maximum_byte_for_byte() {
 }
 
 #[test]
-fn max_compact_links_reads_the_declared_threshold_or_the_library_default() {
-    assert_eq!(
-        edit::group::max_compact_links(&edit::group::fresh_group_region()).unwrap(),
-        8
-    );
-    let mut gi = vec![0u8, 0x01];
-    gi.extend_from_slice(&4u16.to_le_bytes()); // max compact
-    gi.extend_from_slice(&2u16.to_le_bytes()); // min dense
-    let mut region = OhRegion::empty(ObjectHeaderPrefix::PLAIN);
-    region.push(MessageType::GROUP_INFO, &gi);
-    assert_eq!(edit::group::max_compact_links(&region).unwrap(), 4);
-}
-
-#[test]
-fn a_tracked_group_is_rejected_only_where_the_addition_would_go_dense() {
-    let region = link_tracked_region(7, false, &["a", "b", "c", "d", "e", "f", "g"]);
-    edit::group::reject_dense_link_creation_order(&region, 8)
-        .expect("eight links still store compactly");
-    let err = edit::group::reject_dense_link_creation_order(&region, 9).unwrap_err();
-    assert!(
-        matches!(&err, Error::EditUnsupported(m) if m.contains("link creation order")
-            && m.contains("dense")),
-        "got: {err}",
-    );
-    let mut untracked = edit::group::fresh_group_region();
-    untracked.push_link("a", StoredAddress::new(0x100), None);
-    edit::group::reject_dense_link_creation_order(&untracked, 99)
-        .expect("an untracked group has no creation order to lose");
-}
-
-#[test]
 fn ensure_group_info_is_idempotent() {
     let mut region = edit::group::fresh_group_region();
     let before = region.clone();

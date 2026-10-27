@@ -1,5 +1,7 @@
-//! Helpers for C-library fixtures that track creation order.
+//! libhdf5 fixtures that track creation order.
 
+#[cfg(feature = "__hdf5-1.10")]
+use std::ffi::CString;
 use std::path::Path;
 
 use hdf5::file::LibraryVersion;
@@ -112,4 +114,92 @@ pub fn group_properties(indexing: Indexing, links: bool) -> GroupCreate {
 /// Returns deterministic attribute names for creation-order fixtures.
 pub fn names(count: usize) -> Vec<String> {
     (0..count).map(|i| format!("a{i:02}")).collect()
+}
+
+/// Writes a file with a link-tracked group and numbered datasets.
+///
+/// Applies `indexing` and `thresholds` to the root and to `group_path`. The thresholds are the
+/// maximum compact and minimum dense link counts. Creates `count` datasets through
+/// [`crate::dense_links::populate_edit_group`]. The file has a 512-byte userblock and persistent
+/// free-space management. The caller owns `path` and removes the file after use.
+///
+/// # Panics
+///
+/// Panics if `path` is not valid UTF-8 or contains a null byte, an index does not fit in [`i32`],
+/// or libhdf5 cannot configure, create, write, or close the fixture.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn write_link_fixture(
+    path: &Path,
+    group_path: &str,
+    count: usize,
+    indexing: Indexing,
+    thresholds: (u32, u32),
+) {
+    let mut builder = File::with_options();
+    builder.with_fapl(|properties| {
+        properties.libver_bounds(LibraryVersion::V110, LibraryVersion::latest())
+    });
+    builder.with_fcpl(|properties| {
+        properties
+            .link_creation_order(indexing.link_order())
+            .userblock(512)
+            .file_space_strategy(FileSpaceStrategy::FreeSpaceManager {
+                paged: false,
+                persist: true,
+                threshold: 1,
+            })
+    });
+    let properties = builder.fcpl().finish().unwrap();
+    hdf5::sync::sync(|| {
+        assert_eq!(
+            // SAFETY: The library lock serializes access, and `properties` owns the live list.
+            unsafe {
+                hdf5_sys::h5p::H5Pset_link_phase_change(properties.id(), thresholds.0, thresholds.1)
+            },
+            0
+        );
+    });
+    let access = builder.fapl().finish().unwrap();
+    let filename = CString::new(path.to_str().unwrap()).unwrap();
+    let file = hdf5::sync::sync(|| {
+        // SAFETY: The lock serializes access, all input handles remain live, and `from_id`
+        // takes ownership of the new file handle.
+        unsafe {
+            hdf5::from_id::<File>(hdf5_sys::h5f::H5Fcreate(
+                filename.as_ptr(),
+                hdf5_sys::h5f::H5F_ACC_TRUNC,
+                properties.id(),
+                access.id(),
+            ))
+            .unwrap()
+        }
+    });
+    let group = if group_path == "/" {
+        file.group("/").unwrap()
+    } else {
+        let properties = GroupCreate::build()
+            .link_creation_order(indexing.link_order())
+            .finish()
+            .unwrap();
+        hdf5::sync::sync(|| {
+            assert_eq!(
+                // SAFETY: The lock serializes access, and `properties` owns the live list.
+                unsafe {
+                    hdf5_sys::h5p::H5Pset_link_phase_change(
+                        properties.id(),
+                        thresholds.0,
+                        thresholds.1,
+                    )
+                },
+                0
+            );
+        });
+        file.create_group_builder()
+            .set_gcpl(&properties)
+            .create(group_path)
+            .unwrap()
+    };
+    crate::dense_links::populate_edit_group(&group, count);
+    drop(group);
+    file.close().unwrap();
 }
