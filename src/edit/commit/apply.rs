@@ -106,6 +106,7 @@ impl WriteEngine {
         for key in &order {
             let PreparedGroup {
                 mut region,
+                dense_links,
                 replaces: _,
                 deletes,
                 copies,
@@ -196,6 +197,7 @@ impl WriteEngine {
             link_order.record(&mut region)?;
 
             self.place_edited_attrs(&mut region, attrs)?;
+            self.place_group_links(&mut region, dense_links)?;
 
             let oh = object_header::build_v2_object_header(&region)?;
             let addr = self.alloc_or_append_typed(&oh, AllocationClass::Metadata)?;
@@ -232,7 +234,8 @@ impl WriteEngine {
     ///
     /// # Errors
     ///
-    /// Returns the address-conversion error if an object-header span cannot be classified.
+    /// Returns an address-conversion error if an object-header span cannot be classified, or
+    /// [`Error::EditUnsupported`] if a Link Info record extends past the gathered region.
     fn prepare_reclamation(
         &self,
         groups: &BTreeMap<ObjectPathBuf, Node>,
@@ -247,12 +250,19 @@ impl WriteEngine {
             };
             let a = replaced.address();
             if let Ok(spans) = self.oh_chunk_spans(a) {
-                if matches!(replaced, ReplacedHeader::DenseAttributes(_))
-                    && let Ok(region) =
-                        Self::gather_oh_messages(&self.image(), a, self.context.addresses())
-                    && let Some(storage) = self.dense_attribute_storage_spans(&region, &spans)
-                {
-                    to_free.extend(storage);
+                if let Ok(region) = Self::gather_oh_messages(&self.image(), a, base) {
+                    let attributes = self.dense_attribute_storage_spans(&region, &spans);
+                    if let Some((_, _, info)) = group::find_link_info(&region)?
+                        && let Some(storage) =
+                            self.dense_group_storage_spans(&spans, attributes.as_deref(), &info)
+                    {
+                        to_free.extend(storage);
+                    }
+                    if matches!(replaced, ReplacedHeader::DenseAttributes(_))
+                        && let Some(storage) = attributes
+                    {
+                        to_free.extend(storage);
+                    }
                 }
                 to_free.extend(self.object_header_free_spans(&spans)?);
             }

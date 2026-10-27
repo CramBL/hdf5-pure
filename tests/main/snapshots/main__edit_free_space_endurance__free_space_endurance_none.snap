@@ -13,8 +13,8 @@ creation settings
   threshold (bytes) : 1
 
 file
-  physical size     : 4835076 bytes
-  logical EOF       : 4835076 bytes
+  physical size     : 5645851 bytes
+  logical EOF       : 5645851 bytes
   top-level groups  : 16
 
 reusable space (writable session)

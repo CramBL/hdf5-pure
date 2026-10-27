@@ -1,5 +1,7 @@
 //! Dense group-link fixtures and observations through libhdf5.
 
+#[cfg(feature = "__hdf5-1.10")]
+use std::ffi::CString;
 use std::path::Path;
 
 use hdf5::File;
@@ -429,6 +431,120 @@ pub fn write_huge_inspection_fixture(path: &Path) {
     }
     drop(group);
     file.close().unwrap();
+}
+
+/// Writes an untracked group with numbered datasets for in-place editing tests.
+///
+/// Creates `count` datasets in `group_path` through [`populate_edit_group`]. Applies
+/// `thresholds` as the maximum compact and minimum dense link counts when supplied,
+/// including for the root group. The caller owns `path` and removes the file after use.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot configure, create, write, or close the fixture, or an index
+/// does not fit in [`i32`].
+#[cfg(feature = "__hdf5-1.10")]
+pub fn write_edit_fixture(
+    path: &Path,
+    group_path: &str,
+    count: usize,
+    thresholds: Option<(u32, u32)>,
+) {
+    if group_path == "/"
+        && let Some(thresholds) = thresholds
+    {
+        write_edit_root_fixture(path, count, thresholds);
+        return;
+    }
+    let reference = hdf5::FileBuilder::new()
+        .with_fapl(|properties| {
+            properties.libver_bounds(LibraryVersion::V18, LibraryVersion::latest())
+        })
+        .create(path)
+        .unwrap();
+    let group = if group_path == "/" {
+        reference.group("/").unwrap()
+    } else {
+        let properties = GroupCreate::build().finish().unwrap();
+        if let Some((max_compact, min_dense)) = thresholds {
+            hdf5::sync::sync(|| {
+                assert_eq!(
+                    // SAFETY: The library lock serializes access and `properties` owns the live list.
+                    unsafe {
+                        hdf5_sys::h5p::H5Pset_link_phase_change(
+                            properties.id(),
+                            max_compact,
+                            min_dense,
+                        )
+                    },
+                    0
+                );
+            });
+        }
+        reference
+            .create_group_builder()
+            .set_gcpl(&properties)
+            .create(group_path)
+            .unwrap()
+    };
+    populate_edit_group(&group, count);
+    drop(group);
+    reference.close().unwrap();
+}
+
+#[cfg(feature = "__hdf5-1.10")]
+fn write_edit_root_fixture(path: &Path, count: usize, thresholds: (u32, u32)) {
+    let mut builder = hdf5::FileBuilder::new();
+    builder.with_fapl(|properties| {
+        properties.libver_bounds(LibraryVersion::V18, LibraryVersion::latest())
+    });
+    let properties = builder.fcpl().finish().unwrap();
+    hdf5::sync::sync(|| {
+        assert_eq!(
+            // SAFETY: The library lock serializes access and `properties` owns the live list.
+            unsafe {
+                hdf5_sys::h5p::H5Pset_link_phase_change(properties.id(), thresholds.0, thresholds.1)
+            },
+            0
+        );
+    });
+    let access = builder.fapl().finish().unwrap();
+    let filename = CString::new(path.to_str().unwrap()).unwrap();
+    let reference = hdf5::sync::sync(|| {
+        // SAFETY: The library lock serializes access. The filename and property lists remain
+        // live during creation, and `from_id` takes ownership of the newly created file handle.
+        unsafe {
+            hdf5::from_id::<File>(hdf5_sys::h5f::H5Fcreate(
+                filename.as_ptr(),
+                hdf5_sys::h5f::H5F_ACC_TRUNC,
+                properties.id(),
+                access.id(),
+            ))
+            .unwrap()
+        }
+    });
+    populate_edit_group(&reference, count);
+    reference.close().unwrap();
+}
+
+/// Writes `count` datasets named `link_0000`, `link_0001`, and so on in `group`.
+///
+/// Each dataset contains its index as an [`i32`] followed by 42.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot create or write a dataset, or an index does not fit in [`i32`].
+#[cfg(feature = "__hdf5-1.10")]
+pub fn populate_edit_group(group: &Group, count: usize) {
+    for index in 0..count {
+        group
+            .new_dataset::<i32>()
+            .shape(2)
+            .create(format!("link_{index:04}").as_str())
+            .unwrap()
+            .write(&[i32::try_from(index).unwrap(), 42])
+            .unwrap();
+    }
 }
 
 // `H5G_CRT_GINFO_MAX_COMPACT` in `H5Gprivate.h`, HDF5 2.2.0, is the default compact link limit.

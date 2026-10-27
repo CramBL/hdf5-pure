@@ -21,6 +21,7 @@ use crate::edit::{self, OhRegion};
 use crate::edit::{MAX_LINK_GRAPH_NODES, UNDEF, WriteEngine};
 use crate::edit::{REFERENCE_INTO_RECLAIMED_SPACE, REFERENCE_TO_A_MOVED_OBJECT};
 use crate::error::Error;
+use crate::error::FormatError;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::source::{BaseOffsetSource, Source};
 use crate::type_builders::ObjectRefTarget;
@@ -91,6 +92,8 @@ pub(super) struct PreparedTree {
 #[derive(Default)]
 pub(super) struct PreparedGroup {
     pub(super) region: OhRegion,
+    /// Whether placement writes a heap and name index for the final link set.
+    pub(super) dense_links: bool,
     pub(super) replaces: Option<ReplacedHeader>,
     pub(super) deletes: Vec<LinkNameBuf>,
     pub(super) copies: Vec<(LinkNameBuf, CopyTree)>,
@@ -201,7 +204,7 @@ impl WriteEngine {
             references,
         } = self.prepare_tree_references(
             staged,
-            &nodes,
+            &mut nodes,
             &add_targets,
             &write_targets,
             &mut deleted_addrs,
@@ -619,7 +622,9 @@ impl WriteEngine {
                         }
                     }
                 }
-                let (region, link_names) = self.inspect_group(addr)?.into_compact()?;
+                let inspected = self.inspect_group(addr)?;
+                node.prepared.dense_links = inspected.links.info().fractal_heap_address.is_some();
+                let (region, link_names) = inspected.into_compact()?;
                 superseded_addrs.push((key.clone(), addr));
                 node.prepared.region = region;
                 node.prepared.replaces = Some(ReplacedHeader::Header(addr));
@@ -677,7 +682,7 @@ impl WriteEngine {
     fn prepare_tree_references(
         &mut self,
         staged: &StagedEdits,
-        nodes: &BTreeMap<ObjectPathBuf, Node>,
+        nodes: &mut BTreeMap<ObjectPathBuf, Node>,
         add_targets: &[ObjectPathBuf],
         write_targets: &[ObjectPathBuf],
         deleted_addrs: &mut Vec<u64>,
@@ -786,18 +791,21 @@ impl WriteEngine {
             references,
         })
     }
-    /// Checks link-name conflicts, compact-storage limits, and creation-counter capacity.
+    /// Checks link additions and selects storage for each final link set.
     ///
     /// Every affected group's policy is checked before object placement, including attribute-only
-    /// edits. Additions are counted together to check the full counter increment.
+    /// edits. Additions are counted together to check the full counter increment, and storage
+    /// selection includes every staged addition and deletion.
     ///
     /// # Errors
     ///
     /// Returns [`Error::EditUnsupported`] for duplicate link names, unsupported creation-order
-    /// policies, counter exhaustion, or additions beyond a tracked group's compact threshold.
+    /// policies, counter exhaustion, additions beyond a tracked group's compact threshold, or
+    /// a final link set that cannot be encoded. Returns parsing and source-read errors from
+    /// group inspection.
     fn check_group_additions(
         &self,
-        nodes: &BTreeMap<ObjectPathBuf, Node>,
+        nodes: &mut BTreeMap<ObjectPathBuf, Node>,
         keys: &[ObjectPathBuf],
         children: &BTreeMap<ObjectPathBuf, Vec<ChildLink>>,
         datasets_by_group: &BTreeMap<&ObjectPathBuf, Vec<&FlatDataset>>,
@@ -827,7 +835,9 @@ impl WriteEngine {
         }
 
         for key in keys {
-            let node = &nodes[key];
+            let node = nodes
+                .get_mut(key)
+                .ok_or_else(|| FormatError::Internal("a prepared group is absent".into()))?;
             let mut adding: Vec<&str> = Vec::new();
             for fd in datasets_by_group.get(key).into_iter().flatten() {
                 adding.push(fd.name.as_str());
@@ -852,6 +862,17 @@ impl WriteEngine {
                     ));
                 }
             }
+            let mut result = node.prepared.region.clone();
+            for name in &node.prepared.deletes {
+                result = group::remove_link_from_region(&result, name.as_str())?;
+            }
+            let mut order = group::LinkCreationOrder::for_region(&result)?;
+            for name in adding {
+                result.push_link(name, StoredAddress::new(0), order.take()?);
+            }
+            order.record(&mut result)?;
+            node.prepared.dense_links =
+                self.plan_group_links(&result, node.prepared.dense_links)?;
         }
 
         Ok(())

@@ -371,7 +371,7 @@ pub(super) fn phase_change(bytes: &[u8]) -> Result<GroupPhaseChange, Error> {
     })
 }
 
-fn storage_error(error: LinkStorageError) -> Error {
+pub(super) fn storage_error(error: LinkStorageError) -> Error {
     match error {
         LinkStorageError::Format(error) => error.into(),
         LinkStorageError::CreationOrderCounterRange { .. }

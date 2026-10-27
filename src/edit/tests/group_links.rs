@@ -253,7 +253,7 @@ fn compact_inspection_rejects_inconsistent_metadata(
 }
 
 #[test]
-fn bounded_dense_preflight_rejects_mutation_before_writing() {
+fn bounded_dense_mutation_preserves_existing_children() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dense.h5");
     let mut builder = FileBuilder::new();
@@ -263,7 +263,6 @@ fn bounded_dense_preflight_rejects_mutation_before_writing() {
             .unwrap();
     }
     builder.write(&path).unwrap();
-    let original = std::fs::read(&path).unwrap();
     let mut engine = super::common::open_bounded_session(&path);
     let address = engine
         .addresses()
@@ -273,22 +272,30 @@ fn bounded_dense_preflight_rejects_mutation_before_writing() {
     let info = engine.inspect_group(address).unwrap();
     assert_eq!(info.links.links().len(), 12);
     engine.create_group(&ObjectPathBuf::parse("added")).unwrap();
-    let error = engine.commit().unwrap_err();
-    assert!(
-        matches!(
-            error,
-            Error::EditUnsupported(
-                "a target group uses dense (fractal-heap) link storage (not supported in place yet)"
-            )
-        ),
-        "{error:?}"
-    );
-    assert_eq!(
-        engine.image().read_metadata_at(0, original.len()).unwrap(),
-        original
-    );
+    engine.commit().unwrap();
+    let address = engine
+        .addresses()
+        .resolve(engine.superblock().root_group_address)
+        .unwrap()
+        .get();
+    let info = engine.inspect_group(address).unwrap();
+    assert!(info.links.info().fractal_heap_address.is_some());
+    let mut names = info
+        .links
+        .links()
+        .iter()
+        .map(|link| link.name().to_vec())
+        .collect::<Vec<_>>();
+    names.sort();
+    let mut expected = (0..12)
+        .map(|index| format!("group_{index}").into_bytes())
+        .collect::<Vec<_>>();
+    expected.push(b"added".to_vec());
+    expected.sort();
+    assert_eq!(names, expected);
     drop(engine);
-    assert_eq!(std::fs::read(&path).unwrap(), original);
+    let file = File::open(&path).unwrap();
+    assert_eq!(file.root().groups().unwrap().len(), 13);
 }
 
 #[test]
@@ -508,4 +515,120 @@ fn find_message(region: &OhRegion, wanted: MessageType) -> (usize, usize, usize)
         pos = end;
     }
     panic!("missing message: {wanted:?}");
+}
+
+#[rstest]
+fn replaced_dense_metadata_is_reclaimed_after_publication(#[values(false, true)] bounded: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reclaim.h5");
+    let mut builder = FileBuilder::new();
+    for index in 0..12 {
+        builder
+            .create_group_with(&format!("group_{index}"), |_| Ok(()))
+            .unwrap();
+    }
+    builder.create_dataset("payload").with_i32_data(&[7; 4096]);
+    builder.with_file_space_settings(
+        crate::FileSpaceSettings::new(crate::FileSpaceStrategy::FsmAggr)
+            .with_persistence(true)
+            .with_threshold(0),
+    );
+    builder.write(&path).unwrap();
+    let mut engine = if bounded {
+        super::common::open_bounded_session(&path)
+    } else {
+        crate::edit::WriteEngine::open_with_locking(&path, crate::file_lock::FileLocking::Enabled)
+            .unwrap()
+    };
+    let old_root = engine
+        .addresses()
+        .resolve(engine.superblock().root_group_address)
+        .unwrap()
+        .get();
+    let old = engine.inspect_group(old_root).unwrap();
+    let header = engine.oh_chunk_spans(old_root).unwrap();
+    let storage = engine
+        .dense_group_storage_spans(&header, None, &old.links.info())
+        .unwrap();
+    assert!(!storage.is_empty());
+    engine.create_group(&ObjectPathBuf::parse("added")).unwrap();
+    engine.commit().unwrap();
+    for &(start, length, _) in &storage {
+        assert!(
+            engine
+                .space
+                .reusable_sections()
+                .any(|extent| extent.start() <= start && extent.end() >= start + length),
+            "missing span {start}..{}",
+            start + length
+        );
+    }
+    let first_len = engine.image().len();
+    for _ in 0..6 {
+        engine.delete(&ObjectPathBuf::parse("added")).unwrap();
+        engine.commit().unwrap();
+        engine.create_group(&ObjectPathBuf::parse("added")).unwrap();
+        engine.commit().unwrap();
+    }
+    assert!(engine.image().len() < first_len + 32 * 1024);
+    drop(engine);
+    let file = File::open(&path).unwrap();
+    assert_eq!(file.root().groups().unwrap().len(), 13);
+    assert_eq!(
+        file.dataset("payload").unwrap().read_i32().unwrap(),
+        [7; 4096]
+    );
+    drop(file);
+    dir.close().unwrap();
+}
+
+#[rstest]
+fn dense_metadata_write_failure_preserves_the_published_tree(
+    #[values(false, true)] bounded: bool,
+    #[values(0, 17)] prefix: usize,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rollback.h5");
+    let mut builder = FileBuilder::new();
+    for index in 0..12 {
+        builder
+            .create_group_with(&format!("group_{index}"), |_| Ok(()))
+            .unwrap();
+    }
+    builder.write(&path).unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let mut engine = if bounded {
+        super::common::open_bounded_session(&path)
+    } else {
+        crate::edit::WriteEngine::open_with_locking(&path, crate::file_lock::FileLocking::Enabled)
+            .unwrap()
+    };
+    engine
+        .set_write_buffering(crate::image::WriteBuffering::Unbuffered)
+        .unwrap();
+    let root = engine.superblock().root_group_address;
+    let free = engine.reusable_free_sections().unwrap();
+    engine.create_group(&ObjectPathBuf::parse("added")).unwrap();
+    test_util::disk_log::fail_write_after(1, prefix);
+    let error = engine.commit().unwrap_err();
+    let Error::Io(error) = error else {
+        panic!("expected an injected I/O error, got {error:?}")
+    };
+    assert_eq!(error.to_string(), "injected disk write failure");
+    assert_eq!(engine.superblock().root_group_address, root);
+    assert_eq!(engine.reusable_free_sections().unwrap(), free);
+    drop(engine);
+    let bytes = std::fs::read(&path).unwrap();
+    let start = usize::try_from(root.get()).unwrap();
+    assert_eq!(&bytes[start..original.len()], &original[start..]);
+    let file = File::open(&path).unwrap();
+    let mut names = file.root().groups().unwrap();
+    names.sort();
+    let mut expected = (0..12)
+        .map(|index| format!("group_{index}"))
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(names, expected);
+    drop(file);
+    dir.close().unwrap();
 }

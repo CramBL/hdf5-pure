@@ -89,13 +89,13 @@
 //!   (symbol-table) file is edited by converting each group on the edited path
 //!   to the latest format and repointing the superblock's root symbol-table
 //!   entry.
-//! - A version 2/3 group on an edited path stores its links compactly (not in a
-//!   dense fractal heap); headers split across continuation chunks (as the
-//!   reference C library often writes) are collapsed into a single chunk when
-//!   rewritten. A version 1 group is converted to a compact-link v2 header,
-//!   carrying its links and attributes over (other group messages — symbol
-//!   table, modification time — are dropped); an attribute it cannot reproduce
-//!   is refused.
+//! - A group on an edited path may store untracked links compactly or densely in an unfiltered
+//!   managed fractal heap. Dense links are limited to 4096-byte encoded messages and seven-byte
+//!   heap IDs. Link names must be valid UTF-8. The editor selects compact or dense storage from the
+//!   final link count and the group's phase-change thresholds. It preserves link targets and name
+//!   encodings across transitions. Continuation chunks are collapsed when a header is rewritten.
+//!   A version 1 group is converted to a version 2 header with its links and attributes. Other
+//!   group messages are omitted, and attributes the conversion cannot reproduce are rejected.
 //! - An object that tracks **attribute creation order** (`track_order=True`,
 //!   and everything netCDF-4 writes) is edited like any other: its 6-byte
 //!   message records are walked and re-emitted, a new attribute takes the
@@ -103,9 +103,8 @@
 //!   deletion leaves a gap rather than renumbering. A group that tracks **link**
 //!   creation order works the same way: a link added to it takes the next index
 //!   from the running maximum its Link Info message records, and a deletion
-//!   leaves a gap there too. Only an addition that would send such a group's
-//!   links *dense* is refused, since the creation-order B-tree that indexes them
-//!   is not written here.
+//!   leaves a gap there too. Editing a tracked dense group or adding links beyond a tracked
+//!   group's compact threshold is rejected.
 //! - Added datasets may be contiguous *or* chunked, with any filter the
 //!   whole-file writer supports (deflate, shuffle, fletcher32, scale-offset,
 //!   LZF, ZFP), and may declare extensible (maximum, optionally unlimited)

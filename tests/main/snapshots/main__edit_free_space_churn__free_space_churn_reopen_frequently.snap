@@ -28,63 +28,63 @@ lifecycle
   reopens        : 19
 
 high water
-  physical file : 30748307
-  logical file  : 30748307
-  pressure      : 30485363
-  reusable free : 5851894
+  physical file : 30754782
+  logical file  : 30754782
+  pressure      : 30492819
+  reusable free : 5852717
 
 reuse
-  epoch writes growing physical file   : 29
-  epoch writes without physical growth : 62
-  post-churn writes without growth      : 62
+  epoch writes growing physical file   : 31
+  epoch writes without physical growth : 60
+  post-churn writes without growth      : 60
 
 deletion waves
   wave  after-epoch  live-before  deleted  live-after  physical  logical  reusable pressure
-     1           26           27        5          22  30314383  30314383   5558440  24755943
-     2           31           27        5          22  30748307  30748307   5851218  24897089
-     3           35           26        4          22  30748307  30748307   5850219  24898088
-     4           39           26        4          22  30748307  30748307   5850068  24898239
-     5           43           26        4          22  30748307  30748307   5851176  24897131
-     6           47           26        4          22  30748307  30748307   5851894  24896413
-     7           51           26        4          22  30748307  30748307   5851416  24896891
-     8           55           26        4          22  30319296  30319296   5421327  24897969
-     9           59           26        4          22  30319296  30319296   5419115  24900181
-    10           63           26        4          22  30319296  30319296   5417513  24901783
-    11           67           26        4          22  30319296  30319296   5415903  24903393
-    12           71           26        4          22  30319296  30319296   5414875  24904421
-    13           75           26        4          22  30319296  30319296   5413797  24905499
-    14           79           26        4          22  30319296  30319296   5413410  24905886
-    15           83           26        4          22  29624504  29624504   4718602  24905902
-    16           87           26        4          22  30060534  30060534   5154509  24906025
+     1           26           27        5          22  30320858  30320858   5558278  24762580
+     2           31           27        5          22  30754782  30754782   5851987  24902795
+     3           35           26        4          22  30754782  30754782   5851015  24903767
+     4           39           26        4          22  30754782  30754782   5850945  24903837
+     5           43           26        4          22  30754782  30754782   5852044  24902738
+     6           47           26        4          22  30754782  30754782   5852717  24902065
+     7           51           26        4          22  30754782  30754782   5852239  24902543
+     8           55           26        4          22  29178188  29178188   4274513  24903675
+     9           59           26        4          22  29735990  29735990   4830094  24905896
+    10           63           26        4          22  29735990  29735990   4828510  24907480
+    11           67           26        4          22  29735990  29735990   4826981  24909009
+    12           71           26        4          22  29735990  29735990   4825890  24910100
+    13           75           26        4          22  29735990  29735990   4824785  24911205
+    14           79           26        4          22  29898161  29898161   4986488  24911673
+    15           83           26        4          22  30060852  30060852   5149190  24911662
+    16           87           26        4          22  30060852  30060852   5149085  24911767
 
 reopen checkpoints
   #  reason          after-epoch  physical  persisted-free  recovered-free
-  1  initial-fill              7   9006584            3162            3162
-  2  initial-fill             15  18019421            4933            4933
-  3  initial-fill             23  27032261            4939            4939
-  4  deletion-wave            26  30314383         5558440         5558440
-  5  deletion-wave            31  30748307         5851218         5851218
-  6  deletion-wave            35  30748307         5850219         5850219
-  7  deletion-wave            39  30748307         5850068         5850068
-  8  deletion-wave            43  30748307         5851176         5851176
-  9  deletion-wave            47  30748307         5851894         5851894
-  10  deletion-wave            51  30748307         5851416         5851416
-  11  deletion-wave            55  30319296         5421327         5421327
-  12  deletion-wave            59  30319296         5419115         5419115
-  13  deletion-wave            63  30319296         5417513         5417513
-  14  deletion-wave            67  30319296         5415903         5415903
-  15  deletion-wave            71  30319296         5414875         5414875
-  16  deletion-wave            75  30319296         5413797         5413797
-  17  deletion-wave            79  30319296         5413410         5413410
-  18  deletion-wave            83  29624504         4718602         4718602
-  19  deletion-wave            87  30060534         5154509         5154509
+  1  initial-fill              7   9010515            4273            4273
+  2  initial-fill             15  18023019            4102            4102
+  3  initial-fill             23  27038570            4690            4690
+  4  deletion-wave            26  30320858         5558260         5558260
+  5  deletion-wave            31  30754782         5851987         5851987
+  6  deletion-wave            35  30754782         5851015         5851015
+  7  deletion-wave            39  30754782         5850945         5850945
+  8  deletion-wave            43  30754782         5852044         5852044
+  9  deletion-wave            47  30754782         5852717         5852717
+  10  deletion-wave            51  30754782         5852239         5852239
+  11  deletion-wave            55  29178188         4274513         4274513
+  12  deletion-wave            59  29735990         4830094         4830094
+  13  deletion-wave            63  29735990         4828510         4828510
+  14  deletion-wave            67  29735990         4826981         4826981
+  15  deletion-wave            71  29735990         4825890         4825890
+  16  deletion-wave            75  29735990         4824785         4824785
+  17  deletion-wave            79  29898161         4986488         4986488
+  18  deletion-wave            83  30060852         5149190         5149190
+  19  deletion-wave            87  30060852         5149085         5149085
 
 final
-  physical file size         : 30060534
-  logical size               : 30060534
-  reusable free              : 1872957
-  reusable free regions      : 71
-  pressure                   : 28187577
+  physical file size         : 30060852
+  logical size               : 30060852
+  reusable free              : 1866725
+  reusable free regions      : 69
+  pressure                   : 28194127
   live epochs                : 25
 
 coverage
@@ -115,7 +115,7 @@ coverage
     incompressible                   : 25
 
 persisted space after writer close
-  physical file size : 30060534
-  logical EOF        : 30060534
-  free bytes         : 1872957
-  sections           : 71
+  physical file size : 30060852
+  logical EOF        : 30060852
+  free bytes         : 1866725
+  sections           : 69
