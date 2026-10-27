@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use test_util::temp;
 
-use crate::edit::{GlobalHeapLiveness, SpaceOwnership};
+use crate::edit::GlobalHeapLiveness;
 use crate::error::Error;
 use crate::reader::{Backend, File};
 use crate::{AttrValue, FileBuilder};
@@ -48,23 +48,6 @@ fn deleting_a_subtree_removes_its_three_reachable_collections() {
     let after = liveness(&file).unwrap();
     assert!(after.analysis_complete);
     assert_eq!(after.referenced_collections, BTreeSet::new());
-}
-
-/// Analyzes committed storage through the file's editing session.
-///
-/// # Errors
-///
-/// Returns [`Error::ReadOnly`] if the file has no editing session, or the error from
-/// [`WriteEngine::space_ownership`](crate::edit::WriteEngine::space_ownership).
-///
-/// # Panics
-///
-/// Panics if the editing-session mutex is poisoned.
-pub(crate) fn ownership(file: &File) -> Result<SpaceOwnership, Error> {
-    let Backend::Edit(engine) = &file.inner.backend else {
-        return Err(Error::ReadOnly);
-    };
-    engine.lock().unwrap().space_ownership()
 }
 
 /// Analyzes global heap references through the file's editing session.

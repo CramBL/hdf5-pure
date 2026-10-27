@@ -29,17 +29,15 @@ use crate::AttrValue;
 use crate::Error;
 use crate::File;
 use crate::FileBuilder;
-use crate::FileLocking;
 use crate::FileSpaceSettings;
 use crate::FileSpaceStrategy;
 use crate::FormatError;
 use crate::Layout;
-use crate::PersistedFreeSpacePolicy;
 use crate::StoredAddress;
 use crate::UserblockSize;
 use crate::address::StoredAddressExt;
-use crate::edit::{MemoryStrategy, SpaceOwnership, WriteEngine};
-use crate::source::MetadataCacheConfig;
+use crate::edit::SpaceOwnership;
+use crate::edit::test_util as edit_test_util;
 
 #[rstest]
 #[case::plain(0, &[])]
@@ -56,7 +54,7 @@ fn a_contiguous_i32_dataset_has_complete_ownership(
     builder.with_userblock(UserblockSize::try_from(userblock).unwrap());
     builder.create_dataset("d").with_i32_data(&[1, 2, 3]);
     builder.write(&path).unwrap();
-    let engine = open_engine(&path);
+    let engine = edit_test_util::open_engine(&path);
     let ownership: SpaceOwnership = engine.space_ownership().unwrap();
     assert!(ownership.analysis_complete);
     assert!(ownership.unclassified_space.is_empty());
@@ -86,7 +84,7 @@ fn default_creation_leaves_only_unused_metadata_spare_unclassified(
     let reader = File::open(&path).unwrap();
     assert_eq!(reader.dataset("d").unwrap().read_i32().unwrap(), [1, 2, 3]);
     reader.close().unwrap();
-    let engine = open_engine(&path);
+    let engine = edit_test_util::open_engine(&path);
     let ownership = engine.space_ownership().unwrap();
     let metadata_end = ownership
         .live_metadata_space
@@ -153,7 +151,7 @@ fn variable_length_collections_are_live_raw_space(
         expected.push((data.start, data.end - data.start));
     }
     expected.sort_unstable();
-    let engine = open_engine(&path);
+    let engine = edit_test_util::open_engine(&path);
 
     engine.space_ownership().unwrap().assert_exact();
     let mut live_raw_space = engine.space_ownership().unwrap().live_raw_space;
@@ -176,7 +174,7 @@ fn a_malformed_live_collection_is_an_error() {
     };
     bytes[collection as usize + global_heap::VERSION_OFFSET] = 2;
     std::fs::write(&path, bytes).unwrap();
-    let engine = open_engine(&path);
+    let engine = edit_test_util::open_engine(&path);
 
     let error = engine.space_ownership().unwrap_err();
     assert!(
@@ -209,7 +207,7 @@ fn unaccounted_reachable_metadata_is_incomplete_even_without_unclassified_bytes(
 ) {
     let path = temp::temp_path("unknown_ownership.h5");
     std::fs::write(&path, ownership_chain(2, &leaf)).unwrap();
-    let engine = open_engine(&path);
+    let engine = edit_test_util::open_engine(&path);
     let ownership = engine.space_ownership().unwrap();
     assert!(!ownership.analysis_complete);
     assert!(ownership.unclassified_space.is_empty());
@@ -233,7 +231,7 @@ fn ownership_is_complete_only_below_the_traversal_depth_limit(
 ) {
     let path = temp::temp_path("depth_ownership.h5");
     std::fs::write(&path, ownership_chain(depth, &[])).unwrap();
-    let engine = open_engine(&path);
+    let engine = edit_test_util::open_engine(&path);
     let ownership = engine.space_ownership().unwrap();
     assert_eq!(ownership.analysis_complete, complete);
     assert_eq!(ownership.unclassified_space.is_empty(), complete);
@@ -270,7 +268,7 @@ fn reachable_metadata_failures_are_returned(
         ),
     )
     .unwrap();
-    let engine = open_engine(&path);
+    let engine = edit_test_util::open_engine(&path);
     let error = engine.space_ownership().unwrap_err();
     let Error::Format(error) = error else {
         panic!("expected format error, got {error:?}")
@@ -297,7 +295,7 @@ fn invalid_owned_extents_report_their_geometry(#[case] address: u64, #[case] len
     );
     let logical_size = bytes.len() as u64;
     std::fs::write(&path, bytes).unwrap();
-    let engine = open_engine(&path);
+    let engine = edit_test_util::open_engine(&path);
     let error = engine.space_ownership().unwrap_err();
     let Error::InvalidSpaceOwnershipExtent {
         address: actual_address,
@@ -356,7 +354,7 @@ fn inconsistent_heap_ownership_is_returned_as_a_typed_error() {
             .build(),
     );
     std::fs::write(&path, image.build()).unwrap();
-    let engine = open_engine(&path);
+    let engine = edit_test_util::open_engine(&path);
     let error = engine.space_ownership().unwrap_err();
     let Error::InvalidFractalHeapStorage { address } = error else {
         panic!("expected InvalidFractalHeapStorage, got {error:?}")
@@ -383,7 +381,7 @@ fn a_version_one_header_has_incomplete_ownership() {
             .build(),
     );
     std::fs::write(&path, image.build()).unwrap();
-    let engine = open_engine(&path);
+    let engine = edit_test_util::open_engine(&path);
     let ownership = engine.space_ownership().unwrap();
     assert!(!ownership.analysis_complete);
     assert!(!ownership.unclassified_space.is_empty());
@@ -404,7 +402,7 @@ fn incomplete_coverage_still_returns_later_parser_errors(#[case] unsupported: Me
         ],
     );
     std::fs::write(&path, bytes).unwrap();
-    let engine = open_engine(&path);
+    let engine = edit_test_util::open_engine(&path);
     let error = engine.space_ownership().unwrap_err();
     assert!(
         matches!(
@@ -414,85 +412,6 @@ fn incomplete_coverage_still_returns_later_parser_errors(#[case] unsupported: Me
         "{error:?}"
     );
     drop(engine);
-}
-
-impl SpaceOwnership {
-    /// Asserts complete classification of every byte in the file.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the analysis is incomplete, any byte is unclassified, the physical and logical
-    /// file lengths differ, or the extents do not partition the file into nonempty ranges.
-    pub(crate) fn assert_exact(&self) {
-        self.assert_classified(&[]);
-    }
-
-    /// Asserts that the ownership categories partition the file with the expected unclassified
-    /// extents.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the analysis is incomplete, the unclassified extents differ, the physical and
-    /// logical file lengths differ, or the extents do not partition the file into nonempty ranges.
-    pub(crate) fn assert_classified(&self, expected_unclassified: &[(u64, u64)]) {
-        let Self {
-            physical_size,
-            logical_size,
-            userblock_space,
-            live_raw_space,
-            live_metadata_space,
-            free_space_manager_space,
-            reusable_free_space,
-            unclassified_space,
-            analysis_complete,
-            trailing_slack_space,
-        } = self;
-        assert!(*analysis_complete, "ownership analysis must be complete");
-        assert_eq!(unclassified_space, expected_unclassified);
-        assert_eq!(trailing_slack_space, &[]);
-        assert_eq!(physical_size, logical_size);
-        let mut extents = userblock_space
-            .iter()
-            .chain(live_raw_space)
-            .chain(live_metadata_space)
-            .chain(free_space_manager_space)
-            .chain(reusable_free_space)
-            .chain(unclassified_space)
-            .chain(trailing_slack_space)
-            .copied()
-            .collect::<Vec<_>>();
-        extents.sort_unstable();
-        let mut end = 0;
-        for (start, len) in extents {
-            assert!(len > 0, "empty ownership extent at {start}");
-            assert_eq!(start, end, "ownership partition has a gap or overlap");
-            end = start.checked_add(len).unwrap();
-            assert!(
-                end <= *physical_size,
-                "ownership extent exceeds physical EOF"
-            );
-        }
-        assert_eq!(
-            end, *physical_size,
-            "ownership partition must cover the file"
-        );
-    }
-}
-
-/// Opens a writable fixture with metadata caching disabled.
-///
-/// # Panics
-///
-/// Panics if the fixture cannot be opened for editing.
-pub(super) fn open_engine(path: &Path) -> WriteEngine {
-    WriteEngine::open_rw_with_strategy(
-        path,
-        MetadataCacheConfig::disabled(),
-        FileLocking::Enabled,
-        MemoryStrategy::Auto,
-        PersistedFreeSpacePolicy::Tolerant,
-    )
-    .unwrap()
 }
 
 fn contiguous_extent(path: &Path, dataset: &str) -> Range<u64> {

@@ -381,6 +381,8 @@ mod reclaim;
 mod root_reclamation;
 mod staging;
 mod tail_recycling;
+#[cfg(test)]
+mod test_util;
 
 pub use self::append::{AppendBuilder, AppendOptions, LossyTailReencoding};
 pub(crate) use self::append::{AppendGeometry, AppendTarget, LocatedState};

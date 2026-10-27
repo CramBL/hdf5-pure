@@ -94,6 +94,10 @@ use crate::vl_data::{self, VlElement, VlenStringReadOptions};
 use crate::width::FormatWidths;
 
 #[cfg(test)]
+#[path = "reader_test_util.rs"]
+pub(crate) mod test_util;
+
+#[cfg(test)]
 test_util_hdf5::hdf5_1_10_tests! {
     #[path = "reader_native_crosschecks.rs"]
     mod native_crosschecks;
@@ -8098,12 +8102,13 @@ const SWMR_SUPERBLOCK_VERSION: SuperblockVersion = SuperblockVersion::Three;
 
 #[cfg(test)]
 #[path = "storage_tests/mod.rs"]
-pub(crate) mod storage_tests;
+mod storage_tests;
 
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::AtomicUsize;
 
+    use ::test_util;
     use rstest::rstest;
     use test_util::disk_log::{self, DiskOp};
     use test_util::file_space_info;

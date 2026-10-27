@@ -5,6 +5,7 @@ pub(super) use test_util_hdf5::file_space::{
 };
 
 use crate::edit::SpaceOwnership;
+use crate::reader::test_util as reader_test_util;
 use crate::reader::{File, Layout};
 
 /// Returns the allocated contiguous payload range of the dataset at `path`.
@@ -63,7 +64,7 @@ pub(super) fn assert_exact_space_ownership(file: &File) -> SpaceOwnership {
 ///
 /// Panics if analysis fails or [`SpaceOwnership::assert_classified`] fails.
 pub(super) fn assert_space_ownership(file: &File, expected: &[(u64, u64)]) -> SpaceOwnership {
-    let owned = super::ownership(file).unwrap();
+    let owned = reader_test_util::ownership(file).unwrap();
     owned.assert_classified(expected);
     owned
 }
