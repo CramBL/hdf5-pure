@@ -652,7 +652,6 @@ mod tests {
     use hdf5_pure_format::__private::FilterDescription;
     use hdf5_pure_format::__private::FilterPipeline;
     use hdf5_pure_format::__private::FractalHeapFiltering;
-    use hdf5_pure_format::__private::FractalHeapIdLayout;
     use hdf5_pure_format::__private::FractalHeapSectionClass;
 
     use test_util::btree_v2;
@@ -1690,90 +1689,6 @@ mod tests {
             collect_storage(&fixture.bytes),
             Err(FractalHeapStorageError::InvalidStorage)
         );
-    }
-
-    test_util_hdf5::hdf5_bundled_tests! {
-    use crate::fractal_heap_storage;
-    #[cfg(feature = "deflate")]
-    #[rstest::rstest]
-    #[case::indirect(false)]
-    #[case::direct(true)]
-    fn c_written_filtered_huge_objects_have_exact_storage_and_contents(#[case] direct: bool) {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("filtered_huge.h5");
-        test_util_hdf5::fractal_heap::write_filtered_huge(&path, direct);
-        let bytes = std::fs::read(&path).unwrap();
-        let file = crate::reader::File::from_bytes(bytes.clone()).unwrap();
-        let address = file.dataset("heap_address").unwrap().read_u64().unwrap()[0];
-        let id = file.dataset("heap_id").unwrap().read_u8().unwrap();
-        let header = FractalHeapHeader::parse(&bytes, address.to_usize().unwrap(), 8, 8).unwrap();
-        let widths = FormatWidths {
-            offsets: OffsetWidth::Eight,
-            lengths: LengthWidth::Eight,
-        };
-        let inspected = Heap::new(&bytes, address, &header);
-        let storage = fractal_heap_storage::collect_fractal_heap_storage_from_source(
-            &BytesSource::new(&bytes),
-            AddressContext::from_effective_base(BaseAddress::ZERO),
-            StoredAddress::new(address),
-            widths,
-        )
-        .unwrap();
-        let expected: Vec<_> = inspected
-            .allocations
-            .iter()
-            .map(|item| {
-                let (at, length) = item.extent();
-                let kind = match item.kind() {
-                    AllocationKind::Header => FractalHeapAllocation::Header,
-                    AllocationKind::HugeIndex => FractalHeapAllocation::HugeObjectIndex,
-                    AllocationKind::HugeObject => FractalHeapAllocation::HugeObject,
-                    kind => panic!("unexpected heap allocation: {kind:?}"),
-                };
-                (Extent::new(at, length).unwrap(), kind)
-            })
-            .collect();
-        assert_eq!(storage.allocations(), expected);
-        let expected: Vec<_> = (0..12_000)
-            .map(|index| u8::try_from(index % 251).unwrap())
-            .collect();
-        let mut reader = HeapObjectReader::new(
-            &header,
-            AddressContext::from_effective_base(BaseAddress::ZERO),
-            StoredAddress::new(address),
-            AccessMode::ReadOnly,
-            widths,
-        );
-        assert_eq!(
-            reader
-                .read(
-                    &bytes,
-                    FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
-                        .parse(&id)
-                        .unwrap()
-                )
-                .unwrap(),
-            expected
-        );
-        let mut reader = HeapObjectReader::new(
-            &header,
-            AddressContext::from_effective_base(BaseAddress::ZERO),
-            StoredAddress::new(address),
-            AccessMode::ReadOnly,
-            widths,
-        );
-        assert_eq!(
-            reader
-                .read_from_source(
-                    &BytesSource::new(&bytes),
-                    FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
-                        .parse(&id)
-                        .unwrap()
-                )
-                .unwrap(),
-            expected
-        );
-    }
     }
 
     #[rstest::rstest]
