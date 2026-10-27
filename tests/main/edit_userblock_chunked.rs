@@ -158,9 +158,8 @@ fn real_mat_add_chunked_dataset_preserves_userblock() {
     // Adding a chunked/deflate dataset to a real MATLAB v7.3 file: its chunk
     // index and chunk data addresses are written relative to the 512-byte MATLAB
     // userblock, and the added value plus an untouched original both read back.
-    let src = std::path::Path::new("tests/data/matlab/test_string_v73.mat");
-    let path = temp::temp_path("hdf5_pure_ub_real_mat_chunk.mat");
-    std::fs::copy(src, &path).unwrap();
+    let path = temp::temp_path("test_string_v73.mat");
+    test_util::copy_data("matlab/test_string_v73.mat", path.parent().unwrap());
     let original_userblock = std::fs::read(&path).unwrap()[..UB].to_vec();
     assert_eq!(&original_userblock[..10], b"MATLAB 7.3");
 

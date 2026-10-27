@@ -12,8 +12,7 @@ use test_util_hdf5::dataset::Unlimited;
 
 #[test]
 fn open_streaming_matches_buffered() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("streaming.h5");
+    let path = test_util::temp::temp_path("streaming.h5");
 
     let contig: Vec<f64> = (0..100).map(|i| i as f64 * 1.5).collect();
     let fixed_chunked: Vec<i32> = (0..1000).collect();
@@ -100,8 +99,7 @@ fn open_streaming_matches_buffered() {
 
 #[test]
 fn open_streaming_with_access_properties_reads_chunked_data() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("streaming_options.h5");
+    let path = test_util::temp::temp_path("streaming_options.h5");
     let data: Vec<i32> = (0..256).map(|i| i * 2).collect();
 
     {
@@ -142,8 +140,7 @@ fn write_many_datasets(path: &std::path::Path, count: usize) {
 /// (issue #353).
 #[test]
 fn metadata_cache_stats_report_what_the_budget_bought() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("mdc_stats.h5");
+    let path = test_util::temp::temp_path("mdc_stats.h5");
     const DATASETS: usize = 32;
     write_many_datasets(&path, DATASETS);
 
@@ -218,8 +215,7 @@ fn metadata_cache_stats_report_what_the_budget_bought() {
 /// set says so, in the one figure that means "raising this would help".
 #[test]
 fn a_budget_too_small_for_the_file_reports_evictions() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("mdc_tight.h5");
+    let path = test_util::temp::temp_path("mdc_tight.h5");
     const DATASETS: usize = 32;
     write_many_datasets(&path, DATASETS);
 
@@ -330,7 +326,7 @@ fn streaming_matches_buffered_groups_and_attributes_across_fixtures() {
     ];
 
     for (fixture, expected_attrs) in cases {
-        let path = format!("tests/data/unattributed/{fixture}");
+        let path = test_util::data("unattributed").join(fixture);
         let buffered = File::open(&path).unwrap();
         let streaming = File::open_streaming(&path).unwrap();
         let counted = assert_group_parity(&buffered, &streaming, "");
@@ -383,8 +379,7 @@ fn from_source_matches_streaming_and_reads_on_demand() {
         }
     }
 
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("from_source.h5");
+    let path = test_util::temp::temp_path("from_source.h5");
 
     // Rows enough that one window is a small share of the file: the read below
     // asks for 64 of 8,000, each row 32 columns of f64.
@@ -485,8 +480,7 @@ fn a_source_that_returns_a_short_buffer_is_refused() {
         }
     }
 
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("short_reads.h5");
+    let path = test_util::temp::temp_path("short_reads.h5");
     {
         let mut b = FileBuilder::new();
         b.create_dataset("values")

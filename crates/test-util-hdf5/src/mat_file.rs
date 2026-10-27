@@ -12,10 +12,11 @@ use hdf5_pure::{AttrValue, DatasetBuilder, File, FileBuilder};
 ///
 /// Panics if the fixture cannot be read or `decode` rejects it.
 #[track_caller]
-pub fn decode_fixture<T, E>(path: &str, decode: impl FnOnce(&[u8]) -> Result<T, E>) -> T
+pub fn decode_fixture<T, E>(path: impl AsRef<Path>, decode: impl FnOnce(&[u8]) -> Result<T, E>) -> T
 where
     E: std::fmt::Display,
 {
+    let path = path.as_ref();
     let bytes = read_fixture(path);
     decode(&bytes).unwrap_or_else(|e| panic!("decode {path:?}: {e}"))
 }
@@ -26,7 +27,8 @@ where
 ///
 /// Panics if the fixture cannot be read.
 #[track_caller]
-pub fn read_fixture(path: &str) -> Vec<u8> {
+pub fn read_fixture(path: impl AsRef<Path>) -> Vec<u8> {
+    let path = path.as_ref();
     std::fs::read(path).unwrap_or_else(|e| panic!("read {path:?}: {e}"))
 }
 

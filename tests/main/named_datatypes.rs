@@ -8,6 +8,6 @@ use hdf5_pure::File;
 /// library wrote this type with one link and two dataset uses.
 #[test]
 fn the_reference_count_of_a_version_1_header_is_read_from_its_prefix() {
-    let file = File::open("tests/data/c/committed_datatype_v1.h5").unwrap();
+    let file = File::open(test_util::data("c/committed_datatype_v1.h5")).unwrap();
     assert_eq!(file.root().named_datatype_references("mytype").unwrap(), 3);
 }

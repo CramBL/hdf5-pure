@@ -7,7 +7,7 @@ use hdf5_pure::mat::{self, MatColumn, MatTable, MatTimetable};
 use serde::Deserialize;
 use test_util_hdf5::mat_file;
 
-const FIXTURE: &str = "tests/data/matlab/test_tables_v73.mat";
+const FIXTURE: &str = "matlab/test_tables_v73.mat";
 
 #[test]
 fn mattable_shape_names_and_numeric_columns() {
@@ -15,7 +15,8 @@ fn mattable_shape_names_and_numeric_columns() {
     struct File {
         table_numeric: MatTable,
     }
-    let t = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>).table_numeric;
+    let t =
+        mat_file::decode_fixture(test_util::data(FIXTURE), mat::from_bytes::<File>).table_numeric;
     assert_eq!(t.num_rows(), 3);
     assert_eq!(t.num_variables(), 2);
     assert_eq!(t.variable_names().collect::<Vec<_>>(), ["Var1", "Var2"]);
@@ -32,7 +33,7 @@ fn mattable_text_datetime_duration_columns() {
         table_strings: MatTable,
         table_time: MatTable,
     }
-    let f = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>);
+    let f = mat_file::decode_fixture(test_util::data(FIXTURE), mat::from_bytes::<File>);
 
     assert_eq!(
         f.table_strings
@@ -75,7 +76,8 @@ fn mattable_row_names_are_exposed() {
     struct File {
         table_row_names: MatTable,
     }
-    let t = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>).table_row_names;
+    let t =
+        mat_file::decode_fixture(test_util::data(FIXTURE), mat::from_bytes::<File>).table_row_names;
     assert_eq!(t.row_names(), ["R1", "R2", "R3"]);
     assert_eq!(t.variable_names().collect::<Vec<_>>(), ["Col1", "Col2"]);
     assert_eq!(t.column("Col1").unwrap().as_f64().unwrap(), [1.0, 2.0, 3.0]);
@@ -88,7 +90,8 @@ fn mattable_multicolumn_variable_keeps_shape() {
     struct File {
         table_multi_col_data: MatTable,
     }
-    let t = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>).table_multi_col_data;
+    let t = mat_file::decode_fixture(test_util::data(FIXTURE), mat::from_bytes::<File>)
+        .table_multi_col_data;
     let m = t.column("multicoldata").unwrap().as_matrix().unwrap();
     assert_eq!(m.rows(), 3);
     assert_eq!(m.cols(), 2);
@@ -101,7 +104,8 @@ fn mattable_struct_column_is_other() {
     struct File {
         table_with_objects: MatTable,
     }
-    let t = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>).table_with_objects;
+    let t = mat_file::decode_fixture(test_util::data(FIXTURE), mat::from_bytes::<File>)
+        .table_with_objects;
     assert_eq!(t.column("C").unwrap().kind(), "other");
 }
 
@@ -111,7 +115,8 @@ fn mattimetable_datetime_rowtimes() {
     struct File {
         timetable_datetime: MatTimetable,
     }
-    let tt = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>).timetable_datetime;
+    let tt = mat_file::decode_fixture(test_util::data(FIXTURE), mat::from_bytes::<File>)
+        .timetable_datetime;
     assert_eq!(tt.num_rows(), 3);
     assert_eq!(tt.variable_names().collect::<Vec<_>>(), ["data1"]);
     assert_eq!(
@@ -153,7 +158,7 @@ fn table_meta_key_does_not_leak_into_plain_targets() {
     struct File {
         table_numeric: Strict,
     }
-    let f = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>);
+    let f = mat_file::decode_fixture(test_util::data(FIXTURE), mat::from_bytes::<File>);
     assert_eq!(f.table_numeric.var1, vec![1.1, 2.2, 3.3]);
     assert_eq!(f.table_numeric.var2, vec![4.4, 5.5, 6.6]);
 
@@ -161,7 +166,7 @@ fn table_meta_key_does_not_leak_into_plain_targets() {
     struct MapFile {
         table_numeric: BTreeMap<String, Vec<f64>>,
     }
-    let m = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<MapFile>);
+    let m = mat_file::decode_fixture(test_util::data(FIXTURE), mat::from_bytes::<MapFile>);
     assert_eq!(m.table_numeric.keys().collect::<Vec<_>>(), ["Var1", "Var2"]);
     assert_eq!(m.table_numeric["Var2"], vec![4.4, 5.5, 6.6]);
 }
@@ -172,7 +177,8 @@ fn mattimetable_duration_rowtimes() {
     struct File {
         timetable_duration: MatTimetable,
     }
-    let tt = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>).timetable_duration;
+    let tt = mat_file::decode_fixture(test_util::data(FIXTURE), mat::from_bytes::<File>)
+        .timetable_duration;
     match tt.row_times() {
         Some(MatColumn::Duration(d)) => {
             assert_eq!(d.millis, vec![10_000.0, 20_000.0, 30_000.0]);

@@ -15,7 +15,7 @@ use test_util::fuzz;
 #[case::buffered(false)]
 #[case::source(true)]
 fn shared_message_heap_ids_have_the_reference_length(#[case] streaming: bool) {
-    let bytes = std::fs::read("tests/data/fuzz/sohm_heap_id_length.h5").unwrap();
+    let bytes = std::fs::read(test_util::data("fuzz/sohm_heap_id_length.h5")).unwrap();
     let file = if streaming {
         File::from_source(ReadSeekSource::new(Cursor::new(bytes)).unwrap()).unwrap()
     } else {

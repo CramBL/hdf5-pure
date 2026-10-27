@@ -71,7 +71,7 @@ fn lzf_incompressible_roundtrip() {
     // filter's skip, so an incompressible chunk is stored compressed (slightly
     // grown), not raw — it must still decode. The bytes are the u8_noise
     // fixture, the same stream h5py's optional filter refused to compress.
-    let vals = std::fs::read(fixture("u8_noise.raw.bin")).unwrap();
+    let vals = std::fs::read(test_util::data("h5py/lzf/u8_noise.raw.bin")).unwrap();
     let mut builder = FileBuilder::new();
     builder
         .create_dataset("v")
@@ -182,12 +182,6 @@ fn overwrite_lzf_dataset_in_place() {
     assert_eq!(file.dataset("v").unwrap().read_i32().unwrap(), after);
 }
 
-fn fixture(name: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/data/h5py/lzf")
-        .join(name)
-}
-
 /// Build `pure_written.h5`: the LZF file *this crate* emits, committed so that
 /// `regen.py`'s read-back phase can hand it to a real h5py.
 ///
@@ -207,7 +201,7 @@ fn build_pure_written() -> Vec<u8> {
     let ramp: Vec<i32> = (0..1024).collect();
     let waves: Vec<f64> = (0..512).map(|i| f64::from(i).sqrt()).collect();
     let edge: Vec<i64> = (0..1000).map(|i| i * 7 - 500).collect();
-    let noise = std::fs::read(fixture("u8_noise.raw.bin")).unwrap();
+    let noise = std::fs::read(test_util::data("h5py/lzf/u8_noise.raw.bin")).unwrap();
 
     let mut b = FileBuilder::new();
     b.create_dataset("plain_i32")
@@ -239,7 +233,7 @@ fn build_pure_written() -> Vec<u8> {
 /// new bytes rather than last release's.
 #[test]
 fn pure_written_fixture_is_current() {
-    let committed = std::fs::read(fixture("pure_written.h5")).unwrap();
+    let committed = std::fs::read(test_util::data("h5py/lzf/pure_written.h5")).unwrap();
     assert_eq!(
         build_pure_written(),
         committed,
@@ -269,7 +263,7 @@ fn pure_written_fixture_reads_back() {
         edge
     );
 
-    let noise = std::fs::read(fixture("u8_noise.raw.bin")).unwrap();
+    let noise = std::fs::read(test_util::data("h5py/lzf/u8_noise.raw.bin")).unwrap();
     assert_eq!(
         file.dataset("incompressible_u8")
             .unwrap()
@@ -284,10 +278,10 @@ fn pure_written_fixture_reads_back() {
 /// only way to exercise the mask-skip path on an LZF pipeline.
 #[test]
 fn reads_h5py_lzf_masked_chunk() {
-    let file = File::open(fixture("u8_noise.h5")).unwrap();
+    let file = File::open(test_util::data("h5py/lzf/u8_noise.h5")).unwrap();
     let ds = file.dataset("v").unwrap();
     assert_eq!(ds.filters().unwrap(), vec![FilterId::Lzf]);
-    let expected = std::fs::read(fixture("u8_noise.raw.bin")).unwrap();
+    let expected = std::fs::read(test_util::data("h5py/lzf/u8_noise.raw.bin")).unwrap();
     assert_eq!(ds.read_u8().unwrap(), expected);
     let chunks = ds.chunks().unwrap();
     assert_eq!(chunks.len(), 1);
@@ -301,13 +295,13 @@ fn reads_h5py_lzf_masked_chunk() {
 /// A shuffle+lzf chain exactly as h5py writes it.
 #[test]
 fn reads_h5py_shuffle_lzf() {
-    let file = File::open(fixture("f64_shuffle_lzf.h5")).unwrap();
+    let file = File::open(test_util::data("h5py/lzf/f64_shuffle_lzf.h5")).unwrap();
     let ds = file.dataset("v").unwrap();
     assert_eq!(
         ds.filters().unwrap(),
         vec![FilterId::Shuffle, FilterId::Lzf]
     );
-    let raw = std::fs::read(fixture("f64_shuffle_lzf.raw.bin")).unwrap();
+    let raw = std::fs::read(test_util::data("h5py/lzf/f64_shuffle_lzf.raw.bin")).unwrap();
     let expected: Vec<f64> = raw
         .as_chunks::<8>()
         .0
@@ -320,9 +314,9 @@ fn reads_h5py_shuffle_lzf() {
 /// A multi-chunk h5py LZF dataset (with a partial edge chunk) reads through.
 #[test]
 fn reads_h5py_lzf_multichunk() {
-    let file = File::open(fixture("i64_multichunk.h5")).unwrap();
+    let file = File::open(test_util::data("h5py/lzf/i64_multichunk.h5")).unwrap();
     let ds = file.dataset("v").unwrap();
-    let raw = std::fs::read(fixture("i64_multichunk.raw.bin")).unwrap();
+    let raw = std::fs::read(test_util::data("h5py/lzf/i64_multichunk.raw.bin")).unwrap();
     let expected: Vec<i64> = raw
         .as_chunks::<8>()
         .0

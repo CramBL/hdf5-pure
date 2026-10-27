@@ -8,7 +8,7 @@ use hdf5_pure::mat::{self, MatEnum};
 use serde::Deserialize;
 use test_util_hdf5::mat_file;
 
-const FIXTURE: &str = "tests/data/matlab/test_enum_v73.mat";
+const FIXTURE: &str = "matlab/test_enum_v73.mat";
 
 #[test]
 fn enum_scalar_decodes_to_member_name() {
@@ -16,7 +16,7 @@ fn enum_scalar_decodes_to_member_name() {
     struct File {
         enum_scalar: MatEnum,
     }
-    let e = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>).enum_scalar;
+    let e = mat_file::decode_fixture(test_util::data(FIXTURE), mat::from_bytes::<File>).enum_scalar;
     assert_eq!(e.class_name, "TestClasses.EnumClass");
     assert_eq!(e.names, ["enum1"]);
     assert_eq!(e.len(), 1);
@@ -31,7 +31,7 @@ fn enum_with_integer_base_class() {
     struct File {
         enum_uint32: MatEnum,
     }
-    let e = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>).enum_uint32;
+    let e = mat_file::decode_fixture(test_util::data(FIXTURE), mat::from_bytes::<File>).enum_uint32;
     assert_eq!(e.class_name, "TestClasses.EnumClassWithBase");
     assert_eq!(e.names, ["enum1"]);
 }
@@ -45,7 +45,7 @@ fn enum_array_member_names_are_row_major() {
     struct File {
         enum_array: MatEnum,
     }
-    let e = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>).enum_array;
+    let e = mat_file::decode_fixture(test_util::data(FIXTURE), mat::from_bytes::<File>).enum_array;
     assert_eq!(e.class_name, "TestClasses.EnumClass");
     assert_eq!(
         e.names,
@@ -75,7 +75,7 @@ fn enum_nested_in_object_cell_and_struct() {
     struct File {
         enum_nested: Nested,
     }
-    let n = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>).enum_nested;
+    let n = mat_file::decode_fixture(test_util::data(FIXTURE), mat::from_bytes::<File>).enum_nested;
     assert_eq!(n.a.names, ["enum1"]);
     assert_eq!(n.a.class_name, "TestClasses.EnumClass");
 
@@ -101,7 +101,7 @@ fn enum_deserializes_into_a_plain_struct() {
     struct File {
         enum_scalar: Plain,
     }
-    let p = mat_file::decode_fixture(FIXTURE, mat::from_bytes::<File>).enum_scalar;
+    let p = mat_file::decode_fixture(test_util::data(FIXTURE), mat::from_bytes::<File>).enum_scalar;
     assert_eq!(p.class_name, "TestClasses.EnumClass");
     assert_eq!(p.names, ["enum1"]);
 }
