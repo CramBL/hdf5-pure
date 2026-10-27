@@ -26,6 +26,8 @@ use crate::dataset::Unlimited;
 #[cfg(feature = "__hdf5-1.10")]
 use crate::file_space_oracle::OracleError;
 
+pub mod persisted;
+
 /// Creates a writable session after committing deletions of `holes` alternating datasets.
 ///
 /// Creates `2 * holes + 1` datasets and deletes every other one, leaving a final survivor.
