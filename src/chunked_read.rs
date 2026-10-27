@@ -42,10 +42,12 @@ use crate::fill_value::FillPattern;
 use crate::filter_pipeline::FilterPipeline;
 use crate::filters::{self, ChunkContext, FilterScratch};
 use crate::fixed_array;
+use crate::parsed_chunk_index::ChunkSelection;
 use crate::parsed_chunk_index::ClippedAxis;
 use crate::parsed_chunk_index::IndexedChunk;
 use crate::parsed_chunk_index::ParsedChunkIndex;
 use crate::parsed_chunk_index::SelectedChunk;
+use crate::parsed_chunk_index::SelectionCoverage;
 use crate::read_region::{ReadRegion, RowRegion};
 use crate::read_spec::{RawReadSpec, RawReadStorage};
 use crate::source;
@@ -816,6 +818,9 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
 /// Uses [`ParsedChunkIndex::select`] to plan intersections at file width before conversion to
 /// buffer indices. Parsed indexes and decoded chunks are retained according to the cache
 /// configuration.
+/// Consults fill only for a nonempty selection whose complete coverage is unproven. For proven
+/// coverage, initializes output from complete decoded chunks and returns it after every selected
+/// contribution has been placed.
 ///
 /// # Errors
 ///
@@ -824,8 +829,8 @@ pub(crate) fn read_chunked_rows_from_source<S: Source + ?Sized>(
 /// exceeds the allocation limit. Returns [`FormatError::ValueTooLargeForPlatform`] if a buffer
 /// index exceeds [`usize::MAX`], and [`FormatError::OffsetOverflow`] if byte arithmetic overflows.
 /// Returns [`FormatError::DataSizeMismatch`] if a present chunk decodes to a byte length other
-/// than its full logical size, and errors from reading the fill value, chunk index, filters,
-/// or payloads.
+/// than its full logical size, [`FormatError::UnreadableFillValue`] if fill is required and
+/// unreadable, and errors from reading the chunk index, filters, or payloads.
 pub(crate) fn read_chunked_region_from_source(
     source: &(impl Source + ?Sized),
     region: &ReadRegion<'_>,
@@ -855,26 +860,13 @@ pub(crate) fn read_chunked_region_from_source(
     let (_, chunk_dims, _) = chunked_dims(chunk_dimensions, dataspace)?;
     bounded_chunk_len(chunk_dims, elem_size)?;
 
-    let total_bytes = region.byte_len();
-    let mut output = fill.buffer(total_bytes)?;
-    if region.is_empty() || index.address().is_none() {
-        return Ok(output);
+    if region.is_empty() {
+        return Ok(Vec::new());
+    }
+    if index.address().is_none() {
+        return fill.buffer(region.byte_len());
     }
     let chunk_dims_u64 = chunk_dims;
-    let mut placement = match region.row_band() {
-        Some(rows)
-            if chunk_dims_u64
-                .iter()
-                .skip(1)
-                .eq(dataspace.dimensions.iter().skip(1)) =>
-        {
-            RegionCopy::Band {
-                rows,
-                edge: chunk_dims_u64.first().copied().unwrap_or(1),
-            }
-        }
-        _ => RegionCopy::Scatter(RegionScatter::new(region, chunk_dims_u64, elem_size)?),
-    };
     let parsed_index = cache.parsed_index_or_load(|| {
         ParsedChunkIndex::new(
             collect_chunks_for_layout_from_source(
@@ -890,24 +882,26 @@ pub(crate) fn read_chunked_region_from_source(
         )
     })?;
     let selection = parsed_index.select(region)?;
+    let mut assembly = SelectedAssembly::new(selection)?;
 
     let ctx = ChunkContext::from_datatype(chunk_dims_u64, datatype)?;
 
     // Coalesce over selected chunks to bound spans by the region's payloads.
-    let mut spans = plan_chunk_spans(cache, selection.chunks().map(|selected| selected.chunk));
+    let mut spans = plan_chunk_spans(
+        cache,
+        assembly.selection.chunks().map(|selected| selected.chunk),
+    );
 
     // One decoder for the whole window; see `FilterScratch`.
     let mut scratch = FilterScratch::new();
 
-    for SelectedChunk {
-        chunk: IndexedChunk { info: chunk, coord },
-        intersection,
-    } in selection.chunks()
-    {
-        let mut selected = placement.for_chunk(region, chunk, intersection, elem_size)?;
-        let mut copy = |output: &mut [u8], bytes: &[u8]| selected.copy_to(output, bytes, elem_size);
-
-        let hit = cache.with_decompressed(pass, coord, |bytes| copy(&mut output, bytes));
+    let count = assembly.selection.chunks().len();
+    for position in 0..count {
+        let IndexedChunk { info: chunk, coord } = assembly
+            .selection
+            .chunk(position)
+            .ok_or_else(|| FormatError::Internal("selected chunk is absent".into()))?;
+        let hit = cache.with_decompressed(pass, coord, |bytes| assembly.place(bytes));
         if let Some(copied) = hit {
             copied?;
             continue;
@@ -921,14 +915,153 @@ pub(crate) fn read_chunked_region_from_source(
         let filtering =
             ChunkFiltering::for_chunk(flags, chunk_dims_u64, &dataspace.dimensions, chunk);
         let dec = decode_chunk(&mut scratch, stored, pipeline, ctx, filtering)?;
-        copy(&mut output, &dec)?;
+        assembly.place(&dec)?;
         match dec {
             Cow::Owned(bytes) => cache.put_decompressed(pass, coord, bytes), // move
             Cow::Borrowed(bytes) => cache.put_decompressed_slice(pass, coord, bytes),
         }
     }
 
-    Ok(output)
+    assembly.finish()
+}
+
+/// Output for a chunk selection, completed in descriptor order.
+///
+/// Dense storage remains at length zero until every selected contribution is initialized.
+/// The region, chunk geometry, and coverage are borrowed from the selection for allocation and
+/// placement.
+struct SelectedAssembly<'a, 'spec> {
+    selection: ChunkSelection<'a, 'spec>,
+    placed: usize,
+    output: AssemblyBuffer,
+    geometry: RegionCopy<'a>,
+    element_size: NonZeroUsize,
+    chunk_bytes: usize,
+}
+
+impl<'a, 'spec> SelectedAssembly<'a, 'spec> {
+    /// Allocates output and placement geometry for the bound selection.
+    ///
+    /// Consults fill only for [`SelectionCoverage::PotentiallyUncovered`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnreadableFillValue`] if complete coverage is unproven and fill is
+    /// unreadable, [`FormatError::InvalidChunkGeometry`] if a decoded chunk exceeds the allocation
+    /// limit, [`FormatError::ValueTooLargeForPlatform`] if a dimension or byte count exceeds
+    /// [`usize::MAX`], and [`FormatError::OffsetOverflow`] if stride arithmetic overflows. Returns
+    /// errors from reading the datatype's element size.
+    fn new(selection: ChunkSelection<'a, 'spec>) -> Result<Self, FormatError> {
+        let region = selection.region();
+        let element_size = crate::datatype::element_size_usize(region.spec().datatype())?;
+        let chunk_dims = selection.chunk_dims();
+        let chunk_bytes = bounded_chunk_len(chunk_dims, element_size)?;
+        let length = region.byte_len();
+        let output = match selection.coverage() {
+            SelectionCoverage::Empty => AssemblyBuffer::Fill(Vec::new()),
+            SelectionCoverage::Complete => AssemblyBuffer::Dense {
+                bytes: Vec::with_capacity(length),
+                length,
+            },
+            SelectionCoverage::PotentiallyUncovered => {
+                AssemblyBuffer::Fill(region.spec().fill().buffer(length)?)
+            }
+        };
+        let geometry = match region.row_band() {
+            Some(rows)
+                if chunk_dims.iter().skip(1).eq(region
+                    .spec()
+                    .dataspace()
+                    .dimensions
+                    .iter()
+                    .skip(1)) =>
+            {
+                RegionCopy::Band {
+                    rows,
+                    edge: chunk_dims.first().copied().unwrap_or(1),
+                }
+            }
+            _ => RegionCopy::Scatter(RegionScatter::new(region, chunk_dims, element_size)?),
+        };
+        Ok(Self {
+            selection,
+            placed: 0,
+            output,
+            geometry,
+            element_size,
+            chunk_bytes,
+        })
+    }
+
+    /// Writes the next selected descriptor's complete clipped contribution from `bytes`.
+    ///
+    /// Advances the completed descriptor count only after successful placement.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::DataSizeMismatch`] if the length of `bytes` differs from the full
+    /// logical chunk size, and [`FormatError::Internal`] if every selected descriptor has been
+    /// placed or a contribution exceeds its buffer. Returns [`FormatError::OffsetOverflow`] or
+    /// [`FormatError::ValueTooLargeForPlatform`] if a byte offset exceeds its range.
+    fn place(&mut self, bytes: &[u8]) -> Result<(), FormatError> {
+        let Self {
+            selection,
+            placed,
+            output,
+            geometry,
+            element_size,
+            chunk_bytes,
+        } = self;
+        if bytes.len() != *chunk_bytes {
+            return Err(FormatError::DataSizeMismatch {
+                expected: *chunk_bytes,
+                actual: bytes.len(),
+            });
+        }
+        let SelectedChunk {
+            chunk,
+            intersection,
+        } = selection.chunks().nth(*placed).ok_or_else(|| {
+            FormatError::Internal("output assembly has no remaining chunk".into())
+        })?;
+        geometry
+            .for_chunk(selection.region(), chunk.info, intersection, *element_size)?
+            .copy_to(output.destination(), bytes, *element_size)?;
+        *placed += 1;
+        Ok(())
+    }
+
+    /// Returns initialized output after every selected descriptor has been placed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if any selected contribution remains unplaced.
+    fn finish(self) -> Result<Vec<u8>, FormatError> {
+        let Self {
+            selection,
+            placed,
+            output,
+            geometry: _,
+            element_size: _,
+            chunk_bytes: _,
+        } = self;
+        if placed != selection.chunks().len() {
+            return Err(FormatError::Internal(
+                "output assembly has chunks remaining".into(),
+            ));
+        }
+        Ok(match output {
+            AssemblyBuffer::Dense { mut bytes, length } => {
+                // SAFETY: The bound selection proves its immutable contributions partition this output.
+                // Every contribution advances only after all its clipped bytes have been initialized.
+                unsafe {
+                    bytes.set_len(length);
+                }
+                bytes
+            }
+            AssemblyBuffer::Fill(bytes) => bytes,
+        })
+    }
 }
 
 /// Placement geometry shared across the selected chunks.
@@ -1099,7 +1232,7 @@ enum RegionChunk<'a> {
 impl RegionChunk<'_> {
     fn copy_to(
         &mut self,
-        output: &mut [u8],
+        mut output: ScatterDestination<'_>,
         bytes: &[u8],
         element_size: NonZeroUsize,
     ) -> Result<(), FormatError> {
@@ -1109,8 +1242,13 @@ impl RegionChunk<'_> {
                 source,
                 length,
             } => {
-                row_band_copy(output, *destination, bytes, *source, *length, element_size);
-                Ok(())
+                let end = add_offset(*source, *length)?;
+                output.copy(
+                    *destination,
+                    bytes.get(*source..end).ok_or_else(|| {
+                        FormatError::Internal("scatter exceeds decoded chunk extent".into())
+                    })?,
+                )
             }
             Self::Scatter { source, geometry } => {
                 let RegionScatter {
@@ -1125,7 +1263,7 @@ impl RegionChunk<'_> {
                 let (dimensions, coord) = scratch.split_at_mut(rank);
                 place_chunk(
                     bytes.get(*source..).unwrap_or(&[]),
-                    ScatterDestination::Initialized(output),
+                    output,
                     offsets,
                     dimensions,
                     output_dimensions,
@@ -1136,26 +1274,6 @@ impl RegionChunk<'_> {
                 )
             }
         }
-    }
-}
-
-/// Copies the available whole elements of a chunk's row band into the output window.
-///
-/// Clips `band` to the bytes present in the chunk and output buffer.
-fn row_band_copy(
-    output: &mut [u8],
-    dst: usize,
-    chunk: &[u8],
-    src: usize,
-    band: usize,
-    elem_size: NonZeroUsize,
-) {
-    let mut len = band
-        .min(chunk.len().saturating_sub(src))
-        .min(output.len().saturating_sub(dst));
-    len -= len % elem_size;
-    if len > 0 {
-        output[dst..dst + len].copy_from_slice(&chunk[src..src + len]);
     }
 }
 
@@ -2209,8 +2327,8 @@ impl<'a> WholeAssembly<'a> {
 
 /// Output storage whose dense variant remains at length zero during assembly.
 ///
-/// Writes to dense storage use its [`MaybeUninit`] spare capacity. [`WholeAssembly::finish`]
-/// sets the length only after complete placement under the coverage proof.
+/// Writes to dense storage use its [`MaybeUninit`] spare capacity. The length is set after
+/// complete placement by [`WholeAssembly::finish`] or [`SelectedAssembly::finish`].
 enum AssemblyBuffer {
     Dense { bytes: Vec<u8>, length: usize },
     Fill(Vec<u8>),
@@ -2863,7 +2981,7 @@ mod tests {
         let spec =
             RawReadSpec::parse(&layout, &dataspace, &datatype, pipeline.as_ref(), fill).unwrap();
         let cache = ChunkCache::new();
-        let read = || whole_read(&file_data, spec, &cache, reader);
+        let read = || read_chunked_fixture(&file_data, spec, &cache, reader);
         if sparse && unknown {
             assert_eq!(read().unwrap_err(), FormatError::UnreadableFillValue);
             assert_eq!(read().unwrap_err(), FormatError::UnreadableFillValue);
@@ -2893,7 +3011,118 @@ mod tests {
     }
 
     #[cfg(feature = "std")]
-    fn whole_read(
+    #[rstest]
+    #[case::dense_subset(false, true, &[1, 1], &[2, 3], Some(&[6, 7, 8, 11, 12, 13][..]))]
+    #[case::sparse_covered_subset(true, true, &[1, 1], &[1, 2], Some(&[6, 7][..]))]
+    #[case::clipped_edge(true, true, &[2, 3], &[1, 2], Some(&[13, 14][..]))]
+    #[case::sparse_unknown(true, true, &[1, 2], &[2, 3], None)]
+    #[case::sparse_defined(true, false, &[1, 2], &[2, 3], Some(&[7, 17, 17, 12, 13, 14][..]))]
+    #[case::empty(true, true, &[1, 1], &[0, 2], Some(&[][..]))]
+    fn selected_reads_consult_fill_only_for_uncovered_storage(
+        #[case] sparse: bool,
+        #[case] unknown: bool,
+        #[case] start: &[u64],
+        #[case] count: &[u64],
+        #[case] expected: Option<&[i32]>,
+        #[values(false, true)] streaming: bool,
+        #[values(false, true)] filtered: bool,
+        #[values(false, true)] cached: bool,
+    ) {
+        let mut file_data = vec![0; 0x2000];
+        let mut chunks = Vec::new();
+        for (i, offsets) in [[0, 0], [0, 3], [2, 0], [2, 3]].into_iter().enumerate() {
+            if sparse && offsets == [0, 3] {
+                continue;
+            }
+            let address = 0x1000 + i * 32;
+            let bytes: Vec<_> = (0..2)
+                .flat_map(|row| {
+                    (0..3).flat_map(move |col| {
+                        ((offsets[0] + row) * 5i32 + offsets[1] + col).to_le_bytes()
+                    })
+                })
+                .collect();
+            let mask = if i % 2 == 0 { 0 } else { FIRST_FILTER_MASK };
+            let bytes = if filtered && mask == 0 {
+                filters::compress_chunk(
+                    &bytes,
+                    &shuffle_pipeline(),
+                    ChunkContext::basic(&[2, 3], 4),
+                )
+                .unwrap()
+            } else {
+                bytes
+            };
+            file_data[address..address + bytes.len()].copy_from_slice(&bytes);
+            chunks.push(ChunkInfo {
+                chunk_size: StoredChunkSize::btree_v1(24),
+                filter_mask: mask,
+                offsets: vec![offsets[0] as u64, offsets[1] as u64, 0],
+                address: StoredAddress::new(address as u64),
+            });
+        }
+        let btree = build_chunk_btree_leaf(&chunks, 3, WIDTHS);
+        file_data[0x100..0x100 + btree.len()].copy_from_slice(&btree);
+        let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::NONE,
+            chunk_dimensions: vec![2, 3, 4],
+            index: ChunkIndexLayout::BTreeV1 {
+                address: Some(StoredAddress::new(0x100)),
+            },
+        };
+        let dataspace = Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: 2,
+            dimensions: vec![3, 5],
+            max_dimensions: None,
+        };
+        let datatype = crate::type_builders::make_i32_type();
+        let fill_bytes = 17i32.to_le_bytes();
+        let fill = if unknown {
+            FillPattern::UNKNOWN
+        } else {
+            FillPattern::new(FillTime::IfSet, Some(&fill_bytes), convert::nz(4))
+        };
+        let pipeline = filtered.then(shuffle_pipeline);
+        let spec =
+            RawReadSpec::parse(&layout, &dataspace, &datatype, pipeline.as_ref(), fill).unwrap();
+        let region = ReadRegion::parse(spec, start, count).unwrap();
+        let source: Box<dyn Source + '_> = if streaming {
+            Box::new(ReadSeekSource::new(Cursor::new(&file_data)).unwrap())
+        } else {
+            Box::new(BytesSource::new(&file_data))
+        };
+        let cache = ChunkCache::with_config(if cached {
+            crate::ChunkCacheConfig::new()
+        } else {
+            crate::ChunkCacheConfig::disabled()
+        });
+        let read = || {
+            read_chunked_region_from_source(
+                source.as_ref(),
+                &region,
+                FORMAT_WIDTHS,
+                &cache,
+                CachePass::LRU,
+            )
+        };
+        let expected = expected
+            .map(|values| {
+                values
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes())
+                    .collect::<Vec<_>>()
+            })
+            .ok_or(FormatError::UnreadableFillValue);
+        assert_eq!(read(), expected);
+        assert_eq!(read(), expected);
+        if !cached {
+            assert!(!cache.stats().index_loaded());
+        }
+    }
+
+    #[cfg(feature = "std")]
+    fn read_chunked_fixture(
         bytes: &[u8],
         spec: RawReadSpec<'_>,
         cache: &ChunkCache,
@@ -2919,14 +3148,34 @@ mod tests {
                 spec,
                 FORMAT_WIDTHS,
             ),
+            5 | 6 => {
+                let region = ReadRegion::rows(spec, 1, 2)?;
+                if reader == 5 {
+                    read_chunked_region_from_source(
+                        &BytesSource::new(bytes),
+                        &region,
+                        FORMAT_WIDTHS,
+                        cache,
+                        CachePass::LRU,
+                    )
+                } else {
+                    read_chunked_region_from_source(
+                        &ReadSeekSource::new(Cursor::new(bytes)).unwrap(),
+                        &region,
+                        FORMAT_WIDTHS,
+                        cache,
+                        CachePass::LRU,
+                    )
+                }
+            }
             _ => Err(FormatError::Internal(format!("unknown reader {reader}"))),
         }
     }
 
     #[cfg(feature = "std")]
     #[rstest]
-    fn whole_dense_reads_reject_malformed_later_chunks(
-        #[values(0, 1, 2, 3, 4)] reader: u8,
+    fn chunked_reads_reject_malformed_later_chunks(
+        #[values(0, 1, 2, 3, 4, 5, 6)] reader: u8,
         #[values(4, 12)] length: usize,
         #[values(false, true)] cached: bool,
     ) {
@@ -2967,7 +3216,7 @@ mod tests {
             cache.put_decompressed(CachePass::LRU, &[2], vec![1; length]);
         }
         assert_eq!(
-            whole_read(&bytes, spec, &cache, reader).unwrap_err(),
+            read_chunked_fixture(&bytes, spec, &cache, reader).unwrap_err(),
             FormatError::DataSizeMismatch {
                 expected: 8,
                 actual: length
@@ -2979,10 +3228,10 @@ mod tests {
     #[rstest]
     #[case::io(false, FormatError::UnexpectedSourceEof { expected: 528, available: 524 })]
     #[case::decoding(true, FormatError::UnsupportedFilter(999))]
-    fn whole_dense_reads_abandon_io_and_decode_errors(
+    fn chunked_reads_abandon_io_and_decode_errors(
         #[case] decoding: bool,
         #[case] expected: FormatError,
-        #[values(0, 1, 2, 3, 4)] reader: u8,
+        #[values(0, 1, 2, 3, 4, 5, 6)] reader: u8,
     ) {
         let chunks = [
             ChunkInfo {
@@ -3032,7 +3281,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            whole_read(&bytes, spec, &ChunkCache::new(), reader).unwrap_err(),
+            read_chunked_fixture(&bytes, spec, &ChunkCache::new(), reader).unwrap_err(),
             expected
         );
     }
@@ -3068,6 +3317,210 @@ mod tests {
                 i32::try_from(linear).unwrap().to_le_bytes()
             })
             .collect()
+    }
+
+    #[rstest]
+    #[case::band(&[2, 5], &[3, 5], &[1, 0], &[2, 5])]
+    #[case::scatter(&[2, 3], &[3, 5], &[1, 1], &[2, 3])]
+    #[case::overhang(&[2, 7], &[3, 5], &[1, 1], &[2, 4])]
+    #[case::volume(&[2, 3, 2], &[3, 5, 3], &[1, 1, 1], &[2, 4, 2])]
+    #[case::four_dimensions(&[2, 2, 2, 2], &[3, 3, 3, 3], &[1, 0, 1, 0], &[2, 3, 2, 3])]
+    fn dense_assembly_selected_writes_every_clipped_element(
+        #[case] chunk_dims: &[u64],
+        #[case] ds_dims: &[u64],
+        #[case] start: &[u64],
+        #[case] count: &[u64],
+    ) {
+        let index = assembly_index(chunk_dims, ds_dims);
+        let layout = DataLayout::Contiguous {
+            address: None,
+            size: 0,
+        };
+        let dataspace = Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: u8::try_from(ds_dims.len()).unwrap(),
+            dimensions: ds_dims.to_vec(),
+            max_dimensions: None,
+        };
+        let datatype = crate::type_builders::make_i32_type();
+        let spec =
+            RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::UNKNOWN).unwrap();
+        let region = ReadRegion::parse(spec, start, count).unwrap();
+        let selection = index.select(&region).unwrap();
+        let mut assembly = SelectedAssembly::new(selection).unwrap();
+        let AssemblyBuffer::Dense { bytes, length } = &assembly.output else {
+            panic!("expected dense assembly");
+        };
+        assert_eq!(bytes.len(), 0);
+        assert_eq!(*length, region.byte_len());
+        let selection = index.select(&region).unwrap();
+        for selected in selection.chunks() {
+            assembly
+                .place(&assembly_payload(selected.chunk.info, chunk_dims, ds_dims))
+                .unwrap();
+        }
+        let whole: Vec<_> = (0..i32::try_from(ds_dims.iter().product::<u64>()).unwrap())
+            .flat_map(i32::to_le_bytes)
+            .collect();
+        let mut expected = Vec::new();
+        region
+            .visit_runs(|offset, length| {
+                let offset = usize::try_from(offset).unwrap();
+                expected.extend_from_slice(&whole[offset..offset + length]);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(assembly.finish().unwrap(), expected);
+    }
+
+    #[rstest]
+    #[case::unplaced(0, None)]
+    #[case::partly_placed(1, None)]
+    #[case::short(1, Some(4))]
+    #[case::oversized(1, Some(12))]
+    fn dense_assembly_selected_rejects_incomplete_contributions(
+        #[case] completed: usize,
+        #[case] malformed: Option<usize>,
+    ) {
+        let index = assembly_index(&[2], &[4]);
+        let layout = DataLayout::Contiguous {
+            address: None,
+            size: 0,
+        };
+        let dataspace = Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: 1,
+            dimensions: vec![4],
+            max_dimensions: None,
+        };
+        let datatype = crate::type_builders::make_i32_type();
+        let spec =
+            RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::UNKNOWN).unwrap();
+        let region = ReadRegion::rows(spec, 1, 2).unwrap();
+        let mut assembly = SelectedAssembly::new(index.select(&region).unwrap()).unwrap();
+        for _ in 0..completed {
+            assembly.place(&[1; 8]).unwrap();
+        }
+        if let Some(length) = malformed {
+            assert_eq!(
+                assembly.place(&vec![2; length]).unwrap_err(),
+                FormatError::DataSizeMismatch {
+                    expected: 8,
+                    actual: length
+                }
+            );
+        }
+        assert_eq!(
+            assembly.finish().unwrap_err(),
+            FormatError::Internal("output assembly has chunks remaining".into())
+        );
+    }
+
+    #[rstest]
+    #[case::duplicate(&[0, 0], &[21, 22], &[21, 22, 0, 0])]
+    #[case::misaligned(&[1], &[11, 12], &[0, 11, 12, 0])]
+    fn selected_assembly_keeps_conservative_fill_for_unusual_descriptors(
+        #[case] offsets: &[u64],
+        #[case] expected_selected: &[i32],
+        #[case] expected_whole: &[i32],
+    ) {
+        let chunks = offsets
+            .iter()
+            .enumerate()
+            .map(|(i, &offset)| ChunkInfo {
+                offsets: vec![offset],
+                chunk_size: StoredChunkSize::v4(8),
+                filter_mask: 0,
+                address: StoredAddress::new(0x1000 + i as u64 * 16),
+            })
+            .collect();
+        let index = ParsedChunkIndex::new(chunks, &[2], &[4]).unwrap();
+        let layout = DataLayout::Contiguous {
+            address: None,
+            size: 0,
+        };
+        let dataspace = Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: 1,
+            dimensions: vec![4],
+            max_dimensions: None,
+        };
+        let datatype = crate::type_builders::make_i32_type();
+        let spec =
+            RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::UNKNOWN).unwrap();
+        let region = ReadRegion::rows(spec, offsets[0], 2).unwrap();
+        let Err(error) = SelectedAssembly::new(index.select(&region).unwrap()) else {
+            panic!("expected unreadable fill");
+        };
+        assert_eq!(error, FormatError::UnreadableFillValue);
+        let spec =
+            RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::ZERO).unwrap();
+        let region = ReadRegion::rows(spec, offsets[0], 2).unwrap();
+        let mut selected = SelectedAssembly::new(index.select(&region).unwrap()).unwrap();
+        let mut whole =
+            WholeAssembly::new(&index, &[2], &[4], convert::nz(4), FillPattern::ZERO).unwrap();
+        for (i, _) in index.descriptors().iter().enumerate() {
+            let payload: Vec<_> = [11 + i as i32 * 10, 12 + i as i32 * 10]
+                .into_iter()
+                .flat_map(i32::to_le_bytes)
+                .collect();
+            selected.place(&payload).unwrap();
+            whole.place(&payload).unwrap();
+        }
+        assert_eq!(
+            whole.finish().unwrap(),
+            expected_whole
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            selected.finish().unwrap(),
+            expected_selected
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[rstest]
+    fn selected_empty_reads_skip_fill_and_chunk_index(#[values(false, true)] allocated: bool) {
+        let layout = DataLayout::Chunked {
+            flags: ChunkedLayoutFlags::NONE,
+            chunk_dimensions: vec![2, 4],
+            index: ChunkIndexLayout::BTreeV1 {
+                address: allocated.then_some(StoredAddress::new(0)),
+            },
+        };
+        let dataspace = Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: 1,
+            dimensions: vec![4],
+            max_dimensions: None,
+        };
+        let datatype = crate::type_builders::make_i32_type();
+        let spec =
+            RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::UNKNOWN).unwrap();
+        let region = ReadRegion::rows(spec, 1, 0).unwrap();
+        assert_eq!(
+            read_chunked_region_from_source(
+                &BytesSource::new(&[]),
+                &region,
+                FORMAT_WIDTHS,
+                &ChunkCache::new(),
+                CachePass::LRU
+            )
+            .unwrap(),
+            Vec::<u8>::new()
+        );
+        let index = assembly_index(&[2], &[4]);
+        assert_eq!(
+            SelectedAssembly::new(index.select(&region).unwrap())
+                .unwrap()
+                .finish()
+                .unwrap(),
+            Vec::<u8>::new()
+        );
     }
 
     #[rstest]
@@ -5629,15 +6082,6 @@ mod tests {
         );
     }
 
-    /// An index with no address, as a late-allocated dataset that was never
-    /// written has, reads as fill for a non-empty window, matching the
-    /// whole-dataset reader element for element, and as the empty buffer for a
-    /// zero-row one.
-    ///
-    /// The two reach the fill by different routes: the window returns the buffer
-    /// it built up front, and the whole read builds one in
-    /// [`RawReadSpec::unallocated_buffer`]. The test compares the two reads
-    /// against each other, with no literal on either side.
     #[test]
     fn windowed_rows_unallocated_index_matches_whole_read() {
         let layout = DataLayout::Chunked {

@@ -69,6 +69,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `Dataset::read_f64` and related chunked reads rejecting completely covered selections with unreadable fill metadata. Readable fill is required when complete coverage is unproven.
 - Fixed `Dataset::fill_value` decoding eight-bit targets as raw bytes and accepting multi-element payloads. Numeric element conversions honor the source datatype, including on empty input ([#940](https://github.com/CramBL/hdf5-pure/pull/940)).
 - Fixed `File::commit` deleting distinct compact links whose encoded names decode to the same UTF-8 replacement character. Groups with invalid UTF-8 link names are rejected before writing ([#927](https://github.com/CramBL/hdf5-pure/pull/927)).
 - Fixed `Group::groups` and related reads misinterpreting tiny objects in 18-byte fractal-heap IDs ([#924](https://github.com/CramBL/hdf5-pure/pull/924)).

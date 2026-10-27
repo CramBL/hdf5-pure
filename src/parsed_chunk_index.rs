@@ -81,10 +81,10 @@ impl ParsedChunkIndex {
     ///
     /// Returns [`FormatError::Internal`] if the dataset extent differs from the index's extent,
     /// the chunk rank differs from the dataset rank, or any chunk dimension is zero.
-    pub(crate) fn select<'a>(
+    pub(crate) fn select<'a, 'spec>(
         &'a self,
-        region: &ReadRegion<'_>,
-    ) -> Result<ChunkSelection<'a>, FormatError> {
+        region: &'a ReadRegion<'spec>,
+    ) -> Result<ChunkSelection<'a, 'spec>, FormatError> {
         let Self {
             chunks,
             rank,
@@ -104,6 +104,7 @@ impl ParsedChunkIndex {
         if region.is_empty() {
             return Ok(ChunkSelection {
                 index: self,
+                region,
                 selected: Vec::new(),
                 intersections: Vec::new(),
                 coverage: SelectionCoverage::Empty,
@@ -136,6 +137,7 @@ impl ParsedChunkIndex {
             };
         Ok(ChunkSelection {
             index: self,
+            region,
             selected,
             intersections,
             coverage,
@@ -252,19 +254,49 @@ impl ParsedChunkIndex {
 /// Descriptor ordinals, clipped intersections, and coverage for a region of one parsed index.
 ///
 /// Constructed by [`ParsedChunkIndex::select`]. Selected ordinals are in ascending descriptor
-/// order, and each intersection has one [`ClippedAxis`] per dataset dimension.
-pub(crate) struct ChunkSelection<'a> {
+/// order, and each intersection has one [`ClippedAxis`] per dataset dimension. Borrows the region
+/// used to establish these intersections and coverage.
+pub(crate) struct ChunkSelection<'a, 'spec> {
     index: &'a ParsedChunkIndex,
+    region: &'a ReadRegion<'spec>,
     selected: Vec<usize>,
     intersections: Vec<ClippedAxis>,
     coverage: SelectionCoverage,
 }
 
-impl ChunkSelection<'_> {
+impl<'a, 'spec> ChunkSelection<'a, 'spec> {
+    /// Borrows the descriptor at `position` in the address-ordered selection.
+    ///
+    /// Returns `None` if `position` is past the selected descriptors.
+    pub(crate) fn chunk(&self, position: usize) -> Option<IndexedChunk<'a>> {
+        let &ordinal = self.selected.get(position)?;
+        let info = &self.index.chunks[ordinal];
+        Some(IndexedChunk {
+            info,
+            coord: &info.offsets[..self.index.rank],
+        })
+    }
+
+    /// Borrows the region used to establish the selected contributions.
+    pub(crate) fn region(&self) -> &'a ReadRegion<'spec> {
+        self.region
+    }
+
+    /// Borrows the chunk dimensions used to establish coverage and intersections.
+    pub(crate) fn chunk_dims(&self) -> &'a [u64] {
+        &self.index.chunk_dims
+    }
+
+    /// Returns the coverage established for this region and index.
+    pub(crate) fn coverage(&self) -> &SelectionCoverage {
+        &self.coverage
+    }
+
     /// Borrows the selected descriptors and their intersections in ascending address order.
     pub(crate) fn chunks(&self) -> impl ExactSizeIterator<Item = SelectedChunk<'_>> {
         let Self {
             index,
+            region: _,
             selected,
             intersections,
             coverage,
@@ -292,7 +324,7 @@ impl ChunkSelection<'_> {
 
 /// The coverage established from a region and its selected chunk descriptors.
 #[derive(Debug, PartialEq)]
-enum SelectionCoverage {
+pub(crate) enum SelectionCoverage {
     /// Every selected element has exactly one contribution.
     Complete,
     /// The region has no elements.
