@@ -3,6 +3,7 @@ use std::path::Path;
 use hdf5_pure_format::__private as format;
 use hdf5_pure_space::__private::Extent;
 use rstest::rstest;
+use test_util_hdf5::storage;
 
 use crate::DecodedStoredAddress;
 use crate::Error;
@@ -17,13 +18,9 @@ use crate::MemoryStrategy;
 use crate::PersistedFreeSpacePolicy;
 use crate::StoredAddress;
 use crate::Superblock;
-use crate::address::AddressContext;
-use crate::address::BaseAddress;
-use crate::address::BaseAddressExt;
 use crate::address::StoredAddressExt;
 use crate::edit::WriteEngine;
 use crate::file_lock::FileLocking;
-use crate::source::BytesSource;
 use crate::source::MetadataCacheConfig;
 
 #[rstest]
@@ -54,9 +51,9 @@ fn strict_persisted_corruption_has_context_and_preserves_the_file(
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("corrupt.h5");
-    let mut fixture = Fixture::new(&path, FileSpaceStrategy::Page, 16);
-    fixture.manager(0, &[(SECTION, 32)]);
-    let mut slot = 0;
+    let mut fixture = PersistedImage::new(&path, PersistedStrategy::Page, 16);
+    fixture.manager(ManagerSlot::Metadata, &[(SECTION, 32)]);
+    let mut slot = ManagerSlot::Metadata;
     let mut section = None;
     let mut list = Some(StoredAddress::new(HEADER + HEADER_LEN));
     let expected = match damage {
@@ -68,7 +65,7 @@ fn strict_persisted_corruption_has_context_and_preserves_the_file(
             .into()
         }
         Damage::Overflow => {
-            fixture.manager(0, &[(u64::MAX - 15, 32)]);
+            fixture.manager(ManagerSlot::Metadata, &[(u64::MAX - 15, 32)]);
             section = Some((StoredAddress::new(u64::MAX - 15), 32));
             FormatError::OffsetOverflow {
                 offset: u64::MAX - 15,
@@ -77,11 +74,15 @@ fn strict_persisted_corruption_has_context_and_preserves_the_file(
             .into()
         }
         Damage::PastEof | Damage::TrailingSlack | Damage::LaterUnknown => {
-            slot = if damage == Damage::LaterUnknown { 7 } else { 0 };
+            slot = if damage == Damage::LaterUnknown {
+                ManagerSlot::Unknown
+            } else {
+                ManagerSlot::Metadata
+            };
             fixture.manager(slot, &[(EOF - 16, 32)]);
             section = Some((StoredAddress::new(EOF - 16), 32));
             list = Some(StoredAddress::new(
-                HEADER + u64::try_from(slot).unwrap() * STRIDE + HEADER_LEN,
+                HEADER + u64::try_from(slot.index()).unwrap() * STRIDE + HEADER_LEN,
             ));
             if damage == Damage::TrailingSlack {
                 fixture.bytes.resize(usize::try_from(EOF + 64).unwrap(), 0);
@@ -93,8 +94,9 @@ fn strict_persisted_corruption_has_context_and_preserves_the_file(
             .into()
         }
         Damage::DuplicateManager => {
-            slot = 7;
-            fixture.info.manager_addrs[slot] = fixture.info.manager_addrs[0];
+            slot = ManagerSlot::Unknown;
+            fixture.info.manager_addrs[slot.index()] =
+                fixture.info.manager_addrs[ManagerSlot::Metadata.index()];
             list = None;
             FormatError::InvalidFreeSpaceManager(format!(
                 "the free-space manager at stored address {HEADER} is recorded in slots 0 and 7"
@@ -102,10 +104,10 @@ fn strict_persisted_corruption_has_context_and_preserves_the_file(
             .into()
         }
         Damage::AllocationOverlap => {
-            fixture.manager(7, &[(SECTION + 64, 32)]);
+            fixture.manager(ManagerSlot::Unknown, &[(SECTION + 64, 32)]);
             fixture.bytes[HEADER_AT + 70..HEADER_AT + 78]
                 .copy_from_slice(&(7 * STRIDE).to_le_bytes());
-            slot = 7;
+            slot = ManagerSlot::Unknown;
             list = None;
             FormatError::InvalidFreeSpaceManager(format!(
                 "the manager allocation at {}, {HEADER_LEN} bytes long, overlaps the manager allocation at {}, {} bytes long",
@@ -120,11 +122,11 @@ fn strict_persisted_corruption_has_context_and_preserves_the_file(
                     16
                 };
             if damage == Damage::CrossOverlap {
-                slot = 7;
+                slot = ManagerSlot::Unknown;
                 fixture.manager(slot, &[(address, 32)]);
                 list = Some(StoredAddress::new(HEADER + 7 * STRIDE + HEADER_LEN));
             } else {
-                fixture.manager(0, &[(SECTION, 32), (address, 32)]);
+                fixture.manager(ManagerSlot::Metadata, &[(SECTION, 32), (address, 32)]);
             }
             section = Some((StoredAddress::new(address), 32));
             Error::OverlappingFreeSections {
@@ -203,7 +205,7 @@ fn strict_persisted_corruption_has_context_and_preserves_the_file(
     let expected_header = if damage == Damage::DuplicateManager {
         HEADER
     } else {
-        HEADER + u64::try_from(slot).unwrap() * STRIDE
+        HEADER + u64::try_from(slot.index()).unwrap() * STRIDE
     };
     assert_eq!(
         (
@@ -212,7 +214,12 @@ fn strict_persisted_corruption_has_context_and_preserves_the_file(
             section_list_address,
             actual_section
         ),
-        (slot, StoredAddress::new(expected_header), list, section)
+        (
+            slot.index(),
+            StoredAddress::new(expected_header),
+            list,
+            section
+        )
     );
     match expected {
         Error::Format(expected) => {
@@ -259,9 +266,9 @@ fn strict_persisted_corruption_has_context_and_preserves_the_file(
 fn strict_persisted_later_failure_precedes_allocator_construction() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("later-manager.h5");
-    let mut fixture = Fixture::new(&path, FileSpaceStrategy::Page, 16);
-    fixture.manager(0, &[(SECTION, 32)]);
-    fixture.manager(7, &[(EOF - 16, 32)]);
+    let mut fixture = PersistedImage::new(&path, PersistedStrategy::Page, 16);
+    fixture.manager(ManagerSlot::Metadata, &[(SECTION, 32)]);
+    fixture.manager(ManagerSlot::Unknown, &[(EOF - 16, 32)]);
     let bytes = fixture.write(&path);
     let built = std::cell::Cell::new(false);
     let Err(error) = WriteEngine::open_imaged_with_policy(
@@ -314,14 +321,14 @@ fn strict_persisted_later_failure_precedes_allocator_construction() {
 fn strict_persisted_adjacent_sections_are_admitted(#[case] separate: bool) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("adjacent.h5");
-    let mut fixture = Fixture::new(&path, FileSpaceStrategy::FsmAggr, 128);
+    let mut fixture = PersistedImage::new(&path, PersistedStrategy::FsmAggr, 128);
     if separate {
-        fixture.manager(0, &[(SECTION, 32)]);
-        fixture.manager(7, &[(SECTION + 32, 32)]);
+        fixture.manager(ManagerSlot::Metadata, &[(SECTION, 32)]);
+        fixture.manager(ManagerSlot::Unknown, &[(SECTION + 32, 32)]);
     } else {
-        fixture.manager(0, &[(SECTION, 32), (SECTION + 32, 32)]);
+        fixture.manager(ManagerSlot::Metadata, &[(SECTION, 32), (SECTION + 32, 32)]);
     }
-    fixture.manager(5, &[]);
+    fixture.manager(ManagerSlot::LocalHeap, &[]);
     let bytes = fixture.write(&path);
     let engine = strict_engine(&path);
     assert_eq!(
@@ -337,33 +344,49 @@ fn strict_persisted_adjacent_sections_are_admitted(#[case] separate: bool) {
 }
 
 #[rstest]
-#[case::metadata(0, SECTION + 16, 8, true, false, false)]
-#[case::raw(2, SECTION + 16, 8, false, true, false)]
-#[case::generic_page(6, SECTION, 4096, false, true, false)]
-#[case::generic_fragment(6, SECTION + 16, 8, false, false, true)]
-#[case::unknown(7, SECTION + 16, 8, false, false, true)]
+#[case::metadata(ManagerSlot::Metadata, SECTION + 16, 8, Admission::Metadata)]
+#[case::raw(ManagerSlot::Raw, SECTION + 16, 8, Admission::Raw)]
+#[case::generic_page(ManagerSlot::Generic, SECTION, 4096, Admission::Raw)]
+#[case::generic_fragment(ManagerSlot::Generic, SECTION + 16, 8, Admission::Unclassified)]
+#[case::unknown(ManagerSlot::Unknown, SECTION + 16, 8, Admission::Unclassified)]
 fn strict_persisted_page_roles_preserve_admission(
-    #[case] slot: usize,
+    #[case] slot: ManagerSlot,
     #[case] address: u64,
     #[case] length: u64,
-    #[case] metadata: bool,
-    #[case] raw: bool,
-    #[case] unclassified: bool,
+    #[case] admission: Admission,
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("page-role.h5");
-    let mut fixture = Fixture::new(&path, FileSpaceStrategy::Page, 128);
+    let mut fixture = PersistedImage::new(&path, PersistedStrategy::Page, 128);
     fixture.manager(slot, &[(address, length)]);
-    fixture.manager(5, &[]);
+    fixture.manager(ManagerSlot::LocalHeap, &[]);
     let bytes = fixture.write(&path);
     let engine = strict_engine(&path);
     let pages = engine.space.paged_sections().unwrap();
     let extent = [Extent::new(address, length).unwrap()];
-    assert_eq!(pages.metadata(), if metadata { &extent[..] } else { &[] });
-    assert_eq!(pages.raw(), if raw { &extent[..] } else { &[] });
+    assert_eq!(
+        pages.metadata(),
+        if matches!(admission, Admission::Metadata) {
+            &extent[..]
+        } else {
+            &[]
+        }
+    );
+    assert_eq!(
+        pages.raw(),
+        if matches!(admission, Admission::Raw) {
+            &extent[..]
+        } else {
+            &[]
+        }
+    );
     assert_eq!(
         pages.unclassified(),
-        if unclassified { &extent[..] } else { &[] }
+        if matches!(admission, Admission::Unclassified) {
+            &extent[..]
+        } else {
+            &[]
+        }
     );
     assert_eq!(engine.persist.as_ref().unwrap().old_blocks.len(), 5);
     drop(engine);
@@ -400,38 +423,81 @@ enum Damage {
     Zero,
 }
 
-struct Fixture {
-    bytes: Vec<u8>,
-    info: FileSpaceInfo,
+#[derive(Clone, Copy, Debug)]
+pub enum ManagerSlot {
+    Metadata,
+    Raw,
+    LocalHeap,
+    Generic,
+    Unknown,
+}
+
+impl ManagerSlot {
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Metadata => 0,
+            Self::Raw => 2,
+            Self::LocalHeap => 5,
+            Self::Generic => 6,
+            Self::Unknown => 7,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum PersistedStrategy {
+    FsmAggr,
+    Page,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Admission {
+    Metadata,
+    Raw,
+    Unclassified,
+}
+
+pub struct PersistedImage {
+    pub bytes: Vec<u8>,
+    pub info: FileSpaceInfo,
     original_info: Vec<u8>,
     superblock: Superblock,
     extension: (usize, usize),
 }
 
-impl Fixture {
-    fn new(path: &Path, strategy: FileSpaceStrategy, threshold: u64) -> Self {
+impl PersistedImage {
+    pub fn new(path: &Path, strategy: PersistedStrategy, threshold: u64) -> Self {
         let mut builder = FileBuilder::new();
         builder.with_file_space_settings(
-            FileSpaceSettings::new(strategy)
-                .with_persistence(true)
-                .with_threshold(threshold),
+            FileSpaceSettings::new(match strategy {
+                PersistedStrategy::FsmAggr => FileSpaceStrategy::FsmAggr,
+                PersistedStrategy::Page => FileSpaceStrategy::Page,
+            })
+            .with_persistence(true)
+            .with_threshold(threshold),
         );
         builder.write(path).unwrap();
         let file = File::open(path).unwrap();
         let mut info = file.file_space_info().unwrap().unwrap();
         let mut superblock = file.superblock().clone();
-        drop(file);
         let mut bytes = std::fs::read(path).unwrap();
-        let original_info =
-            format::serialize_file_space_info_v1(crate::file_writer::WIDTHS, &info).unwrap();
-        let chunks = crate::edit::object_header::read_oh_chunks(
-            &BytesSource::new(&bytes),
+        assert_eq!(
+            (superblock.offset_size.get(), superblock.length_size.get()),
+            (8, 8)
+        );
+        let widths = format::FormatWidths {
+            offsets: superblock.offset_size,
+            lengths: superblock.length_size,
+        };
+        let original_info = format::serialize_file_space_info_v1(widths, &info).unwrap();
+        let chunks = storage::header_extents(
+            file.superblock(),
+            &bytes,
             superblock.superblock_extension_address.unwrap().get(),
-            AddressContext::from_effective_base(BaseAddress::ZERO),
-        )
-        .unwrap();
+        );
         assert_eq!(chunks.len(), 1);
-        let (at, length) = chunks[0].span;
+        let (at, length) = chunks[0];
+        drop(file);
         info.manager_addrs.fill(DecodedStoredAddress::Undefined);
         superblock.eof_address = EOF;
         bytes.resize(usize::try_from(EOF).unwrap(), 0);
@@ -447,29 +513,18 @@ impl Fixture {
         }
     }
 
-    fn manager(&mut self, slot: usize, sections: &[(u64, u64)]) {
-        let address = HEADER + u64::try_from(slot).unwrap() * STRIDE;
-        let (header, list) = format::serialize_free_space_manager(
-            crate::file_writer::WIDTHS,
-            &sections
-                .iter()
-                .map(|&(addr, size)| format::FreeSection {
-                    addr: StoredAddress::new(addr),
-                    size,
-                })
-                .collect::<Vec<_>>(),
-            StoredAddress::new(address),
-            StoredAddress::new(address + HEADER_LEN),
-            format::SECTION_CLASS_SIMPLE,
-        )
-        .unwrap();
+    pub fn manager(&mut self, slot: ManagerSlot, sections: &[(u64, u64)]) {
+        let address = HEADER + u64::try_from(slot.index()).unwrap() * STRIDE;
+        let (header, list) =
+            test_util::free_space::raw_manager_eight(address, address + HEADER_LEN, sections);
         let at = usize::try_from(address).unwrap();
         self.bytes[at..at + header.len()].copy_from_slice(&header);
         self.bytes[at + header.len()..at + header.len() + list.len()].copy_from_slice(&list);
-        self.info.manager_addrs[slot] = DecodedStoredAddress::Defined(StoredAddress::new(address));
+        self.info.manager_addrs[slot.index()] =
+            DecodedStoredAddress::Defined(StoredAddress::new(address));
     }
 
-    fn write(self, path: &Path) -> Vec<u8> {
+    pub fn write(self, path: &Path) -> Vec<u8> {
         let Self {
             mut bytes,
             info,
@@ -477,8 +532,11 @@ impl Fixture {
             superblock,
             extension: (at, length),
         } = self;
-        let payload =
-            format::serialize_file_space_info_v1(crate::file_writer::WIDTHS, &info).unwrap();
+        let widths = format::FormatWidths {
+            offsets: superblock.offset_size,
+            lengths: superblock.length_size,
+        };
+        let payload = format::serialize_file_space_info_v1(widths, &info).unwrap();
         let offset = bytes[at..at + length]
             .windows(original_info.len())
             .position(|window| window == original_info)
@@ -494,10 +552,10 @@ impl Fixture {
     }
 }
 
-const EOF: u64 = 65_536;
-const HEADER: u64 = 8192;
-const HEADER_AT: usize = 8192;
-const HEADER_LEN: u64 = 82;
-const LIST: usize = HEADER_AT + 82;
-const SECTION: u64 = 16_384;
-const STRIDE: u64 = 256;
+pub const EOF: u64 = 65_536;
+pub const HEADER: u64 = 8192;
+pub const HEADER_AT: usize = 8192;
+pub const HEADER_LEN: u64 = 82;
+pub const LIST: usize = HEADER_AT + 82;
+pub const SECTION: u64 = 16_384;
+pub const STRIDE: u64 = 256;

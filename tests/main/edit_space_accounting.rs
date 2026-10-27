@@ -252,7 +252,7 @@ fn a_relocating_overwrite_reclaims_the_old_header_with_its_storage() {
     let bytes = std::fs::read(&path).unwrap();
     let reader = File::open(&path).unwrap();
     let header = storage::root_object_address(&reader, &bytes, "d");
-    let mut original = storage::header_extents(&reader, &bytes, header);
+    let mut original = storage::header_extents(reader.superblock(), &bytes, header);
     original.extend(
         file_space::raw_extents(&reader, "d")
             .iter()

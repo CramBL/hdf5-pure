@@ -90,6 +90,73 @@ pub fn oversized_section_list() -> Vec<u8> {
     )
 }
 
+/// Returns a checksummed manager header and section list with 8-byte addresses and lengths.
+///
+/// Sections are `(stored_address, length)` pairs, grouped by length in the section list. The
+/// fixed header fields and section-list prefix are copied from [`single_section_header`] and
+/// [`single_section_info`]. Section extents may be invalid.
+///
+/// # Panics
+///
+/// Panics if the section count exceeds [`u8::MAX`] or their lengths sum to more than [`u64::MAX`].
+///
+/// # Examples
+///
+/// ```
+/// use test_util::free_space;
+///
+/// assert_eq!(
+///     free_space::raw_manager_eight(619, 701, &[(2848, 1600)]),
+///     (free_space::single_section_header(), free_space::single_section_info()),
+/// );
+/// ```
+pub fn raw_manager_eight(
+    header_address: u64,
+    list_address: u64,
+    sections: &[(u64, u64)],
+) -> (Vec<u8>, Vec<u8>) {
+    use std::collections::BTreeMap;
+
+    /// The file client's simple section class, `H5MF_FSPACE_SECT_SIMPLE` in `H5MFpkg.h`,
+    /// HDF5 2.2.0.
+    const SECTION_CLASS_SIMPLE: u8 = 0;
+
+    let count = u8::try_from(sections.len()).unwrap();
+    let mut sets: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+    for &(address, length) in sections {
+        sets.entry(length).or_default().push(address);
+    }
+    let mut list = single_section_info()[..13].to_vec();
+    list[5..13].copy_from_slice(&header_address.to_le_bytes());
+    for (length, addresses) in sets {
+        list.push(u8::try_from(addresses.len()).unwrap());
+        list.extend_from_slice(&length.to_le_bytes());
+        for address in addresses {
+            list.extend_from_slice(&address.to_le_bytes());
+            list.push(SECTION_CLASS_SIMPLE);
+        }
+    }
+    crate::checksum::append(&mut list);
+    let mut header = single_section_header();
+    let total = sections
+        .iter()
+        .try_fold(0u64, |total, &(_, length)| total.checked_add(length))
+        .unwrap();
+    for (at, value) in [
+        (6, total),
+        (14, u64::from(count)),
+        (22, u64::from(count)),
+        (54, list_address),
+        (62, u64::try_from(list.len()).unwrap()),
+        (70, u64::try_from(list.len()).unwrap()),
+    ] {
+        crate::bytes::set_slice_at(&mut header, at, &value.to_le_bytes());
+    }
+    let length = header.len();
+    crate::checksum::restamp(&mut header, 0, length);
+    (header, list)
+}
+
 /// Parses `digits` as hexadecimal, two digits per byte.
 fn hex(digits: &str) -> Vec<u8> {
     (0..digits.len())

@@ -469,7 +469,7 @@ fn paged_manager_capacity_survives_reference_library_mutation(
         let mut allocated = storage::file_metadata_extents(&file, &bytes);
         for name in ["keep", "ceiling", "added"] {
             allocated.extend(storage::header_extents(
-                &file,
+                file.superblock(),
                 &bytes,
                 storage::root_object_address(&file, &bytes, name),
             ));
@@ -588,7 +588,7 @@ fn reclaimed_page_header_continuations_remain_compatible_with_c_mutation(
         _ => "target",
     };
     let address = storage::root_object_address(&file, &original, owner);
-    let continuations = storage::header_extents(&file, &original, address)
+    let continuations = storage::header_extents(file.superblock(), &original, address)
         .into_iter()
         .filter(|&(at, len)| {
             len >= page
