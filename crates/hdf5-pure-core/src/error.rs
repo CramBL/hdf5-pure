@@ -148,6 +148,13 @@ pub enum FormatError {
         /// The dimension whose multiplication would overflow.
         dimension: u64,
     },
+    /// Supplied decoded bytes have a different length from the expected payload size.
+    DecodedSizeMismatch {
+        /// The expected decoded length in bytes.
+        expected: u64,
+        /// The supplied decoded length in bytes.
+        actual: u64,
+    },
     /// A defined address equals the undefined sentinel value for an address field of `offset_size` bytes.
     DefinedAddressIsUndefined {
         /// The defined address that matches the sentinel value.
@@ -1142,6 +1149,8 @@ pub enum FormatError {
     },
     /// Variable-length data error.
     VlDataError(String),
+    /// A reference belongs to an independently constructed layout.
+    WrongLayout,
     /// A caller passed zero as the declared width of a fixed-width string.
     /// HDF5 string datatypes require a positive width. Explicitly sized dataset
     /// and attribute strings can report this error. A width derived from empty
@@ -1159,6 +1168,10 @@ pub const OBJECT_HEADER_MESSAGE_MAX: usize = u16::MAX as usize;
 impl fmt::Display for FormatError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::WrongLayout => write!(f, "reference belongs to another layout"),
+            Self::DecodedSizeMismatch { expected, actual } => {
+                write!(f, "decoded payload has {actual} bytes, expected {expected}")
+            }
             Self::InvalidZfpBitBudget { rate_bits, rank } => write!(
                 f,
                 "ZFP rate {} gives zero bits per {rank}D block",
