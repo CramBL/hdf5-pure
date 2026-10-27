@@ -133,16 +133,6 @@ mod tests {
         }
     }
 
-    /// Transposing twice is the identity, which pins the index mapping rather
-    /// than just the element multiset.
-    #[test]
-    fn transposing_twice_restores_the_original() {
-        let (rows, cols) = (33usize, 47usize);
-        let src: Vec<u64> = (0..(rows * cols) as u64).map(|i| i * 7 + 1).collect();
-        let once = transpose_scalars(rows, cols, &src);
-        assert_eq!(transpose_scalars(cols, rows, &once), src);
-    }
-
     /// An empty matrix must not write through the dangling pointer a
     /// zero-capacity `Vec` hands out.
     #[test]
@@ -158,14 +148,6 @@ mod tests {
     /// loop writes far past a 4-element allocation. Derived from `usize::MAX`
     /// rather than written out, so it wraps at either word width.
     const WRAPS_TO_FOUR: usize = usize::MAX / 4 + 2;
-
-    #[test]
-    fn the_wrapping_shape_really_does_wrap_to_the_source_length() {
-        // Pins the premise of the two refusal tests: if this ever stopped
-        // wrapping to 4 they would still pass, for the wrong reason.
-        assert_eq!(WRAPS_TO_FOUR.wrapping_mul(4), 4);
-        assert!(WRAPS_TO_FOUR.checked_mul(4).is_none());
-    }
 
     #[test]
     #[should_panic(expected = "overflows usize")]

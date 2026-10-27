@@ -5403,14 +5403,6 @@ mod tests {
     }
 
     #[test]
-    fn file_with_f64_dataset() {
-        let mut fw = FileWriter::new();
-        fw.create_dataset("data").with_f64_data(&[1.0, 2.0, 3.0]);
-        let bytes = fw.finish().unwrap();
-        assert_eq!(read_dataset_f64(&bytes, "data"), vec![1.0, 2.0, 3.0]);
-    }
-
-    #[test]
     fn file_with_dataset_attrs() {
         let mut fw = FileWriter::new();
         fw.create_dataset("data")

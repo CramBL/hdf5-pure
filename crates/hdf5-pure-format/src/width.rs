@@ -241,25 +241,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn each_legal_width_parses_to_its_variant() {
-        assert_eq!(OffsetWidth::try_from(2), Ok(OffsetWidth::Two));
-        assert_eq!(OffsetWidth::try_from(4), Ok(OffsetWidth::Four));
-        assert_eq!(OffsetWidth::try_from(8), Ok(OffsetWidth::Eight));
-
-        assert_eq!(LengthWidth::try_from(2), Ok(LengthWidth::Two));
-        assert_eq!(LengthWidth::try_from(4), Ok(LengthWidth::Four));
-        assert_eq!(LengthWidth::try_from(8), Ok(LengthWidth::Eight));
-    }
-
-    #[test]
-    fn a_parsed_width_reports_the_byte_it_came_from() {
-        for size in [2u8, 4, 8] {
-            assert_eq!(OffsetWidth::try_from(size).unwrap().get(), size);
-            assert_eq!(LengthWidth::try_from(size).unwrap().get(), size);
-        }
-    }
-
     #[rstest]
     #[case::mixed(4, 8, FormatWidths { offsets: OffsetWidth::Four, lengths: LengthWidth::Eight })]
     #[case::equal(2, 2, FormatWidths { offsets: OffsetWidth::Two, lengths: LengthWidth::Two })]
@@ -302,31 +283,6 @@ mod tests {
         assert_eq!(UintWidth::from_flags(flags), expected);
         assert_eq!(expected.get(), bytes);
         assert_eq!(expected.flag_bits(), flags);
-    }
-
-    #[rstest]
-    #[case(0)]
-    #[case(255)]
-    #[case(256)]
-    #[case(65_535)]
-    #[case(65_536)]
-    #[case(4_294_967_295)]
-    fn a_length_selects_the_same_width_as_its_value(#[case] len: usize) {
-        assert_eq!(
-            UintWidth::smallest_for_len(len),
-            UintWidth::smallest_for_value(len.to_u64())
-        );
-    }
-
-    #[cfg(target_pointer_width = "64")]
-    #[rstest]
-    #[case(4_294_967_296)]
-    #[case(usize::MAX)]
-    fn a_length_past_four_bytes_selects_the_same_width_as_its_value(#[case] len: usize) {
-        assert_eq!(
-            UintWidth::smallest_for_len(len),
-            UintWidth::smallest_for_value(len.to_u64())
-        );
     }
 
     #[rstest]

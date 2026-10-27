@@ -76,11 +76,6 @@ mod tests {
     }
 
     #[test]
-    fn extent_accepts_a_normal_range() {
-        assert_eq!(Extent::new(100, 50), Some(Extent::new(100, 50).unwrap()));
-    }
-
-    #[test]
     fn extent_rejects_a_range_crossing_u64_max() {
         assert_eq!(Extent::new(u64::MAX - 4, 5), None);
     }

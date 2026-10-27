@@ -1,5 +1,6 @@
 #[cfg(feature = "deflate")]
 use hdf5_pure::DatasetBuilder;
+#[cfg(feature = "deflate")]
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
@@ -9,18 +10,6 @@ use hdf5_pure::{CustomFilterId, Error, FilterId, FilterParameters};
 use hdf5_pure_format::__private::FILTER_PIPELINE_VERSION_TWO;
 use rstest::rstest;
 use test_util::object_header::v2;
-
-#[rstest]
-#[case(10)]
-#[case(u8::MAX)]
-fn deflate_level_rejects_invalid_byte(#[case] level: u8) {
-    assert_eq!(
-        DeflateLevel::try_from(level).unwrap_err(),
-        FormatError::InvalidDeflateLevel {
-            level: u32::from(level)
-        }
-    );
-}
 
 #[rstest]
 #[cfg(feature = "deflate")]

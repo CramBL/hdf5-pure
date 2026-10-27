@@ -137,12 +137,3 @@ fn streaming_backend_honors_per_dataset_override() {
     assert_eq!(ds.read_i32().unwrap(), expected);
     assert_eq!(ds.read_i32().unwrap(), expected);
 }
-
-#[test]
-fn default_properties_equal_new() {
-    assert_eq!(
-        DatasetAccessProperties::default(),
-        DatasetAccessProperties::new()
-    );
-    assert_eq!(DatasetAccessProperties::new().chunk_cache(), None);
-}

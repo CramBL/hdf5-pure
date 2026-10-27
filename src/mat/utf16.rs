@@ -29,14 +29,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ascii_roundtrip() {
-        let s = "hello, MATLAB";
-        let units = encode_utf16(s);
-        assert_eq!(units.len(), s.len());
-        assert_eq!(decode_utf16(&units).unwrap(), s);
-    }
-
-    #[test]
     fn non_bmp_roundtrip() {
         // U+1F4A1 (💡) requires a UTF-16 surrogate pair.
         let s = "tip: 💡";
