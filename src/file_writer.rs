@@ -600,30 +600,6 @@ pub(crate) enum DenseAttrCreationOrder {
 }
 
 impl DenseAttrCreationOrder {
-    /// The creation index to record for attribute `i` in the name index. An
-    /// untracked object has none to record; the position it has always written
-    /// there is kept, since a reader that has no creation order to compare
-    /// against cannot tell the two apart and existing files carry it.
-    fn index_of(&self, i: u32) -> u32 {
-        match self {
-            Self::Untracked => i,
-            Self::Tracked { indices, .. } => u32::from(indices[i as usize]),
-        }
-    }
-
-    /// The Attribute Info message's recorded maximum, where there is one.
-    fn max(&self) -> Option<u16> {
-        match self {
-            Self::Untracked => None,
-            Self::Tracked { max, .. } => Some(*max),
-        }
-    }
-
-    /// Whether a creation-order B-tree is part of this storage.
-    fn indexed(&self) -> bool {
-        matches!(self, Self::Tracked { indexed: true, .. })
-    }
-
     /// The creation index recorded for attribute `i`, or `None` where the
     /// object does not track the order — or, for a tracked set, where `i` is
     /// past the attributes this describes.
@@ -691,8 +667,8 @@ pub(crate) fn dense_attrs_check(attrs: &[AttributeMessage]) -> Result<(), Format
 /// ([`DenseAttrPlan::blob_len`]), and take that length from the very computation
 /// the emission then works from rather than from a whole throwaway build.
 pub(crate) struct DenseAttrPlan {
-    /// Each attribute's version 3 message bytes, in the caller's order.
-    serialized: Vec<Vec<u8>>,
+    /// Each attribute's version 3 message bytes and creation index, in the caller's order.
+    attributes: Vec<PreparedDenseAttribute>,
     /// Huge-object ID for each attribute whose bytes go outside the managed
     /// blocks; `None` for a managed one.
     huge_id_of: Vec<Option<u64>>,
@@ -707,8 +683,10 @@ pub(crate) struct DenseAttrPlan {
     /// Attribute indices in the order the creation-order index is searched.
     /// Empty unless that index is emitted.
     corder_order: Vec<u32>,
-    /// What this set records about attribute creation order.
-    creation: DenseAttrCreationOrder,
+    /// The next creation index, or `None` when creation order is untracked.
+    next_index: Option<u16>,
+    /// Whether the creation-order B-tree is emitted.
+    indexed: bool,
     /// Where each part of the blob starts, relative to the heap's own address.
     managed_off: u64,
     btree_off: u64,
@@ -736,27 +714,22 @@ pub(crate) struct DenseAttrPlan {
 ///
 /// Returns [`FormatError::AttributeFieldTooLong`] if an attribute's name, datatype, or dataspace
 /// is longer than its 2-byte size field can hold.
+/// Returns [`FormatError::DuplicateAttributeName`] if names repeat,
+/// [`FormatError::DuplicateAttributeCreationIndex`] if tracked indexes repeat, or
+/// [`FormatError::InvalidAttributeCreationCounter`] if a tracked index is at or above the
+/// next creation index. Returns [`FormatError::Internal`] if the counts of attributes and
+/// tracked indexes differ. Propagates errors from conversion of attribute positions.
 pub(crate) fn dense_attrs_plan(
     attrs: &[AttributeMessage],
     creation: DenseAttrCreationOrder,
 ) -> Result<DenseAttrPlan, FormatError> {
-    debug_assert!(
-        match &creation {
-            DenseAttrCreationOrder::Untracked => true,
-            DenseAttrCreationOrder::Tracked { indices, .. } => indices.len() == attrs.len(),
-        },
-        "a tracked set needs one creation index per attribute"
-    );
-    // Dense attrs use v3 attribute messages (adds character set encoding byte).
-    let serialized: Vec<Vec<u8>> = attrs
-        .iter()
-        .map(|a| a.serialize_v3(OFFSET_WIDTH, LENGTH_SIZE))
-        .collect::<Result<_, _>>()?;
-
-    let name_hashes: Vec<u32> = attrs
-        .iter()
-        .map(|a| crate::checksum::jenkins_lookup3(a.name.as_bytes()))
-        .collect();
+    let PreparedDenseAttrs {
+        attributes,
+        order,
+        corder_order,
+        next_index,
+        indexed,
+    } = PreparedDenseAttrs::new(attrs, creation)?;
 
     // Huge object IDs are assigned in attribute order, starting at 1 — the
     // reference C library's `H5HF__huge_insert` pre-increments, so 0 is never a
@@ -766,27 +739,27 @@ pub(crate) fn dense_attrs_plan(
     // widened only where it goes into one of the header's 8-byte fields.
     let mut huge_id_of: Vec<Option<u64>> = vec![None; attrs.len()];
     let mut huge_count: usize = 0;
-    for (slot, bytes) in huge_id_of.iter_mut().zip(&serialized) {
-        if bytes.len() > DENSE_ATTR_MAX_MANAGED_OBJECT {
+    for (slot, attribute) in huge_id_of.iter_mut().zip(&attributes) {
+        if attribute.bytes.len() > DENSE_ATTR_MAX_MANAGED_OBJECT {
             huge_count += 1;
             *slot = Some(huge_count as u64);
         }
     }
-    let huge_total: u64 = serialized
+    let huge_total: u64 = attributes
         .iter()
         .zip(&huge_id_of)
         .filter(|(_, id)| id.is_some())
-        .map(|(s, _)| s.len() as u64)
+        .map(|(s, _)| s.bytes.len() as u64)
         .sum();
 
     // Only managed objects occupy the doubling table, so only they are planned
     // into it. `managed_sizes` holds their sizes in attribute order, and the
     // plan's object indices are indices into that order.
-    let managed_sizes: Vec<u64> = serialized
+    let managed_sizes: Vec<u64> = attributes
         .iter()
         .zip(&huge_id_of)
         .filter(|(_, id)| id.is_none())
-        .map(|(s, _)| s.len() as u64)
+        .map(|(s, _)| s.bytes.len() as u64)
         .collect();
     let managed_plan = ManagedHeapPlan::attributes(&managed_sizes, OFFSET_WIDTH)
         .expect("dense_attrs_check, which every caller must run first, plans the same layout");
@@ -812,7 +785,7 @@ pub(crate) fn dense_attrs_plan(
         OFFSET_WIDTH,
     )
     .expect("a 512-byte node holds 29 name records, enough to plan any count");
-    let corder_plan = creation.indexed().then(|| {
+    let corder_plan = indexed.then(|| {
         BTreeV2Plan::new(
             BTREE_V2_ATTRIBUTE_CREATION_ORDER,
             attrs.len(),
@@ -858,41 +831,8 @@ pub(crate) fn dense_attrs_plan(
         huge_bthd_off
     };
 
-    // Records are ordered the way the index is searched: by name hash, and by
-    // the name itself where two names hash alike. The tie-break has to be the
-    // name because that is what libhdf5 compares on a hash
-    // collision — `H5A__dense_fh_name_cmp` does `strcmp` against the name pulled
-    // back out of the heap — and a binary search ordered any other way walks
-    // away from a colliding record. Rust's `str` ordering is byte-wise over
-    // unsigned bytes, which is what `strcmp` specifies, so the two agree for
-    // non-ASCII names as well.
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "i is an attribute index bounded by the attribute count, far below u32::MAX"
-    )]
-    let mut order: Vec<(u32, u32)> = (0..attrs.len())
-        .map(|i| (name_hashes[i], i as u32))
-        .collect();
-    order.sort_unstable_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then_with(|| attrs[a.1 as usize].name.cmp(&attrs[b.1 as usize].name))
-    });
-
-    // The creation-order index is searched on the creation index alone, which
-    // is unique per attribute, so nothing needs a tie-break here.
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "i is an attribute index bounded by the attribute count, far below u32::MAX"
-    )]
-    let mut corder_order: Vec<u32> = if corder_plan.is_some() {
-        (0..attrs.len() as u32).collect()
-    } else {
-        Vec::new()
-    };
-    corder_order.sort_unstable_by_key(|&i| creation.index_of(i));
-
     Ok(DenseAttrPlan {
-        serialized,
+        attributes,
         huge_id_of,
         huge_count,
         huge_total,
@@ -902,7 +842,8 @@ pub(crate) fn dense_attrs_plan(
         huge_plan,
         order,
         corder_order,
-        creation,
+        next_index,
+        indexed,
         managed_off,
         btree_off,
         name_nodes_off,
@@ -933,13 +874,12 @@ impl DenseAttrPlan {
     /// `heap_address`.
     fn attribute_info(&self, heap_address: StoredAddress) -> AttributeInfoMessage {
         AttributeInfoMessage {
-            max_creation_index: self.creation.max(),
-            indexes_creation_order: self.creation.indexed(),
+            max_creation_index: self.next_index,
+            indexes_creation_order: self.indexed,
             fractal_heap_address: Some(heap_address),
             btree_name_index_address: Some(heap_address.offset(self.btree_off)),
             btree_creation_order_address: self
-                .creation
-                .indexed()
+                .indexed
                 .then(|| heap_address.offset(self.corder_bthd_off)),
         }
     }
@@ -959,7 +899,7 @@ impl DenseAttrPlan {
         let heap_id_length = DENSE_ATTR_HEAP_ID_LENGTH;
 
         let Self {
-            serialized,
+            attributes,
             huge_id_of,
             huge_count,
             huge_total,
@@ -969,7 +909,6 @@ impl DenseAttrPlan {
             huge_plan,
             order,
             corder_order,
-            creation,
             ..
         } = self;
         let huge_count = *huge_count;
@@ -1027,7 +966,7 @@ impl DenseAttrPlan {
             direct_block_allocation_iterator_offset: managed_plan.allocation_iterator(),
             // Managed and huge objects are counted separately, and an attribute is
             // in exactly one of the two.
-            managed_objects_count: (serialized.len() - huge_count) as u64,
+            managed_objects_count: (attributes.len() - huge_count) as u64,
             huge_objects_size: *huge_total,
             huge_objects_count: huge_count as u64,
             tiny_objects_size: 0,
@@ -1047,26 +986,26 @@ impl DenseAttrPlan {
         // Heap IDs. A managed object's carries the offset the plan gave it; a huge
         // object's carries a B-tree key instead, since its bytes sit outside the
         // managed blocks entirely.
-        let mut heap_ids: Vec<Vec<u8>> = Vec::with_capacity(serialized.len());
+        let mut heap_ids: Vec<Vec<u8>> = Vec::with_capacity(attributes.len());
         // (huge object ID, address, length) for the huge-objects B-tree, in ID order.
         let mut huge_records: Vec<(u64, StoredAddress, u64)> = Vec::with_capacity(huge_count);
         // The managed objects' bytes in attribute order, which is the order the
         // plan assigned their heap offsets in.
-        let mut managed: Vec<&[u8]> = Vec::with_capacity(serialized.len() - huge_count);
+        let mut managed: Vec<&[u8]> = Vec::with_capacity(attributes.len() - huge_count);
         let mut next_huge_addr = huge_data_addr;
-        for (s, huge_id) in serialized.iter().zip(huge_id_of) {
+        for (s, huge_id) in attributes.iter().zip(huge_id_of) {
             match huge_id {
                 Some(id) => {
-                    huge_records.push((*id, next_huge_addr, s.len() as u64));
-                    next_huge_addr = next_huge_addr.offset(s.len() as u64);
+                    huge_records.push((*id, next_huge_addr, s.bytes.len() as u64));
+                    next_huge_addr = next_huge_addr.offset(s.bytes.len() as u64);
                     heap_ids.push(header.encode_huge_id(*id, OFFSET_WIDTH, LENGTH_WIDTH)?);
                 }
                 None => {
                     heap_ids.push(header.encode_managed_id(
                         managed_plan.heap_offset(managed.len()),
-                        s.len() as u64,
+                        s.bytes.len() as u64,
                     )?);
-                    managed.push(s.as_slice());
+                    managed.push(s.bytes.as_slice());
                 }
             }
         }
@@ -1077,12 +1016,12 @@ impl DenseAttrPlan {
         // Build B-tree v2 type 8 records (17 bytes each), in the order the plan
         // sorted them into — the order the index is searched in.
         let mut name_records =
-            Vec::with_capacity(serialized.len() * usize::from(DENSE_ATTR_BTREE_RECORD));
+            Vec::with_capacity(attributes.len() * usize::from(DENSE_ATTR_BTREE_RECORD));
         for &(hash, i) in order {
             AttributeRecord {
                 heap_id: &heap_ids[i as usize],
                 flags: MessageFlags::NONE,
-                creation_order: creation.index_of(i),
+                creation_order: attributes[i as usize].creation_index,
             }
             .encode_name_record(&mut name_records, hash);
         }
@@ -1107,7 +1046,7 @@ impl DenseAttrPlan {
                 AttributeRecord {
                     heap_id: &heap_ids[i as usize],
                     flags: MessageFlags::NONE,
-                    creation_order: creation.index_of(i),
+                    creation_order: attributes[i as usize].creation_index,
                 }
                 .encode_creation_order_record(&mut corder_records);
             }
@@ -1142,9 +1081,9 @@ impl DenseAttrPlan {
             blob.extend_from_slice(&huge_tree.header);
             blob.extend_from_slice(&huge_tree.nodes);
             debug_assert_eq!(blob.len() as u64, self.huge_data_off);
-            for (s, huge_id) in serialized.iter().zip(huge_id_of) {
+            for (s, huge_id) in attributes.iter().zip(huge_id_of) {
                 if huge_id.is_some() {
-                    blob.extend_from_slice(s);
+                    blob.extend_from_slice(&s.bytes);
                 }
             }
         }
@@ -1181,13 +1120,128 @@ const DUMMY_DENSE_BASE: StoredAddress = StoredAddress::ZERO;
 /// # Errors
 ///
 /// Returns [`FormatError::AttributeFieldTooLong`] if an attribute's name, datatype, or dataspace
-/// is longer than its 2-byte size field can hold.
+/// is longer than its 2-byte size field can hold. Propagates errors from [`dense_attrs_plan`]
+/// and [`DenseAttrPlan::build`].
 pub(crate) fn build_dense_attrs(
     attrs: &[AttributeMessage],
     creation: DenseAttrCreationOrder,
     heap_address: StoredAddress,
 ) -> Result<DenseAttrBlob, FormatError> {
     dense_attrs_plan(attrs, creation)?.build(heap_address)
+}
+
+/// Encoded attributes with unique names and creation indexes.
+///
+/// Tracked indexes are below the stored counter. Gaps and the counter are preserved
+/// independently of the live attributes.
+#[derive(Debug)]
+struct PreparedDenseAttrs {
+    attributes: Vec<PreparedDenseAttribute>,
+    /// `(name hash, attribute index)` pairs sorted by hash and then by name.
+    order: Vec<(u32, u32)>,
+    /// Attribute indexes sorted by creation index for the optional creation-order B-tree.
+    corder_order: Vec<u32>,
+    next_index: Option<u16>,
+    indexed: bool,
+}
+
+impl PreparedDenseAttrs {
+    /// Encodes attributes and pairs each message with its creation index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the counts of attributes and tracked indexes differ.
+    /// Returns the metadata errors documented by [`dense_attrs_plan`] for repeated names or
+    /// indexes and inconsistent counters. Propagates attribute encoding and position conversion
+    /// errors.
+    fn new(
+        attrs: &[AttributeMessage],
+        creation: DenseAttrCreationOrder,
+    ) -> Result<Self, FormatError> {
+        let (indices, next_index, indexed) = match creation {
+            DenseAttrCreationOrder::Untracked => (None, None, false),
+            DenseAttrCreationOrder::Tracked {
+                indices,
+                max,
+                indexed,
+            } => {
+                if indices.len() != attrs.len() {
+                    return Err(FormatError::Internal(
+                        "a tracked attribute set needs one creation index per attribute".into(),
+                    ));
+                }
+                (Some(indices), Some(max), indexed)
+            }
+        };
+        let mut attributes = Vec::with_capacity(attrs.len());
+        let mut order = Vec::with_capacity(attrs.len());
+        for (i, attribute) in attrs.iter().enumerate() {
+            let position = i.narrow::<u32>()?;
+            let creation_index = match &indices {
+                Some(indices) => {
+                    let index = indices[i];
+                    if let Some(next) = next_index {
+                        if index >= next {
+                            return Err(FormatError::InvalidAttributeCreationCounter {
+                                index,
+                                next,
+                            });
+                        }
+                    }
+                    u32::from(index)
+                }
+                None => position,
+            };
+            attributes.push(PreparedDenseAttribute {
+                bytes: attribute.serialize_v3(OFFSET_WIDTH, LENGTH_SIZE)?,
+                creation_index,
+            });
+            order.push((
+                crate::checksum::jenkins_lookup3(attribute.name.as_bytes()),
+                position,
+            ));
+        }
+        order.sort_unstable_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| attrs[a.1 as usize].name.cmp(&attrs[b.1 as usize].name))
+        });
+        for pair in order.windows(2) {
+            let left = &attrs[pair[0].1 as usize].name;
+            let right = &attrs[pair[1].1 as usize].name;
+            if left == right {
+                return Err(FormatError::DuplicateAttributeName(left.clone()));
+            }
+        }
+        let mut corder_order = if next_index.is_some() {
+            (0..attrs.len().narrow::<u32>()?).collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        corder_order.sort_unstable_by_key(|&i| attributes[i as usize].creation_index);
+        for pair in corder_order.windows(2) {
+            let left = attributes[pair[0] as usize].creation_index;
+            let right = attributes[pair[1] as usize].creation_index;
+            if left == right {
+                return Err(FormatError::DuplicateAttributeCreationIndex(left));
+            }
+        }
+        Ok(Self {
+            attributes,
+            order,
+            corder_order: if indexed { corder_order } else { Vec::new() },
+            next_index,
+            indexed,
+        })
+    }
+}
+
+/// A version 3 attribute message paired with its creation index.
+///
+/// For untracked attributes, the creation index is the position in the caller's set.
+#[derive(Debug)]
+struct PreparedDenseAttribute {
+    bytes: Vec<u8>,
+    creation_index: u32,
 }
 
 /// Bytes libhdf5 uses to encode a limit of `value`
@@ -6124,6 +6178,135 @@ mod tests {
     /// not its own inverse, so an index taken from an attribute's *position*
     /// disagrees with it in both directions. Attribute `i` was created `SCRAMBLE[i]`th.
     const SCRAMBLE: [u16; 6] = [3, 1, 4, 0, 2, 5];
+
+    #[rstest]
+    #[case::missing_index(vec![1], 9, false,
+        FormatError::Internal("a tracked attribute set needs one creation index per attribute".into()))]
+    #[case::extra_index(vec![1, 2, 3], 9, true,
+        FormatError::Internal("a tracked attribute set needs one creation index per attribute".into()))]
+    #[case::duplicate_index(vec![3, 3], 9, true,
+        FormatError::DuplicateAttributeCreationIndex(3))]
+    #[case::duplicate_unindexed(vec![3, 3], 9, false,
+        FormatError::DuplicateAttributeCreationIndex(3))]
+    #[case::counter_equals_index(vec![1, 3], 3, true,
+        FormatError::InvalidAttributeCreationCounter { index: 3, next: 3 })]
+    #[case::counter_below_index(vec![1, 3], 2, false,
+        FormatError::InvalidAttributeCreationCounter { index: 3, next: 2 })]
+    fn dense_attribute_preparation_rejects_incoherent_creation_metadata(
+        #[case] indices: Vec<u16>,
+        #[case] max: u16,
+        #[case] indexed: bool,
+        #[case] expected: FormatError,
+    ) {
+        let attrs = [
+            type_builders::build_attr_message("a", &AttrValue::I64(1)).unwrap(),
+            type_builders::build_attr_message("b", &AttrValue::I64(2)).unwrap(),
+        ];
+        assert_eq!(
+            PreparedDenseAttrs::new(
+                &attrs,
+                DenseAttrCreationOrder::Tracked {
+                    indices,
+                    max,
+                    indexed
+                }
+            )
+            .unwrap_err(),
+            expected,
+        );
+    }
+
+    #[rstest]
+    #[case::tracked_and_indexed(true)]
+    #[case::tracked_without_index(false)]
+    fn dense_attribute_preparation_preserves_index_gaps_and_counter(#[case] indexed: bool) {
+        let attrs = [
+            type_builders::build_attr_message("a", &AttrValue::I64(1)).unwrap(),
+            type_builders::build_attr_message("b", &AttrValue::I64(2)).unwrap(),
+        ];
+        let prepared = PreparedDenseAttrs::new(
+            &attrs,
+            DenseAttrCreationOrder::Tracked {
+                indices: vec![7, 2],
+                max: u16::MAX,
+                indexed,
+            },
+        )
+        .unwrap();
+        assert_eq!(prepared.next_index, Some(u16::MAX));
+        assert_eq!(prepared.indexed, indexed);
+        assert_eq!(
+            prepared
+                .attributes
+                .iter()
+                .map(|a| a.creation_index)
+                .collect::<Vec<_>>(),
+            vec![7, 2]
+        );
+        assert_eq!(
+            prepared
+                .attributes
+                .iter()
+                .map(|a| a.bytes.clone())
+                .collect::<Vec<_>>(),
+            attrs
+                .iter()
+                .map(|a| a.serialize_v3(OFFSET_WIDTH, LENGTH_SIZE).unwrap())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            prepared.corder_order,
+            if indexed { vec![1, 0] } else { vec![] }
+        );
+    }
+
+    #[test]
+    fn dense_attribute_preparation_preserves_untracked_positions() {
+        let attrs = [
+            type_builders::build_attr_message("b", &AttrValue::I64(1)).unwrap(),
+            type_builders::build_attr_message("a", &AttrValue::I64(2)).unwrap(),
+        ];
+        let prepared = PreparedDenseAttrs::new(&attrs, DenseAttrCreationOrder::Untracked).unwrap();
+        assert_eq!(prepared.next_index, None);
+        assert!(!prepared.indexed);
+        assert!(prepared.corder_order.is_empty());
+        assert_eq!(
+            prepared
+                .attributes
+                .iter()
+                .map(|a| a.creation_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn dense_attribute_preparation_rejects_duplicate_names() {
+        let attrs = [
+            type_builders::build_attr_message("duplicate", &AttrValue::I64(1)).unwrap(),
+            type_builders::build_attr_message("duplicate", &AttrValue::I64(2)).unwrap(),
+        ];
+        assert_eq!(
+            PreparedDenseAttrs::new(&attrs, DenseAttrCreationOrder::Untracked).unwrap_err(),
+            FormatError::DuplicateAttributeName("duplicate".into())
+        );
+    }
+
+    #[rstest]
+    #[case::untracked(DenseAttrCreationOrder::Untracked, None, false)]
+    #[case::tracked(DenseAttrCreationOrder::Tracked { indices: vec![], max: 17, indexed: true }, Some(17), true)]
+    fn dense_attribute_preparation_preserves_empty_set_metadata(
+        #[case] creation: DenseAttrCreationOrder,
+        #[case] next: Option<u16>,
+        #[case] indexed: bool,
+    ) {
+        let prepared = PreparedDenseAttrs::new(&[], creation).unwrap();
+        assert!(prepared.attributes.is_empty());
+        assert!(prepared.order.is_empty());
+        assert!(prepared.corder_order.is_empty());
+        assert_eq!(prepared.next_index, next);
+        assert_eq!(prepared.indexed, indexed);
+    }
 
     /// A dense set whose creation order is [`SCRAMBLE`] rather than the order
     /// the attributes are handed over in, so nothing that reads the index

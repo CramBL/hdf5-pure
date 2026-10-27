@@ -196,6 +196,10 @@ pub enum FormatError {
     },
     /// A group's dense link heap or indexes exceed their supported size.
     DenseLinkStorageTooLarge,
+    /// An attribute set contains the same creation index more than once.
+    DuplicateAttributeCreationIndex(u32),
+    /// An attribute set contains the same name more than once.
+    DuplicateAttributeName(String),
     /// A compound datatype contains the same field name more than once.
     DuplicateCompoundField(String),
     /// A global heap collection holds two objects at the same index.
@@ -323,6 +327,13 @@ pub enum FormatError {
     ///
     /// The string describes the condition.
     Internal(String),
+    /// An attribute's creation index is at or above the counter for the next index.
+    InvalidAttributeCreationCounter {
+        /// The attribute's creation index.
+        index: u16,
+        /// The counter for the next creation index.
+        next: u16,
+    },
     /// An attribute message's flags byte set a bit the format does not define.
     /// Only bit 0 (shared datatype) and bit 1 (shared dataspace) exist, so any
     /// other bit means the message is not what it claims to be.
@@ -2195,6 +2206,16 @@ impl fmt::Display for FormatError {
             }
             Self::DenseLinkStorageTooLarge => {
                 write!(f, "group links exceed the dense storage address space")
+            }
+            Self::DuplicateAttributeCreationIndex(index) => {
+                write!(f, "duplicate attribute creation index {index}")
+            }
+            Self::DuplicateAttributeName(name) => write!(f, "duplicate attribute name {name:?}"),
+            Self::InvalidAttributeCreationCounter { index, next } => {
+                write!(
+                    f,
+                    "attribute creation index {index} is not below the next index {next}"
+                )
             }
             Self::DuplicateLinkName(name) => write!(f, "duplicate link name {name:?}"),
             Self::ZeroFixedStringWidth => {

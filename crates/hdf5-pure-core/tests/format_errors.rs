@@ -33,3 +33,17 @@ fn huge_object_diagnostics_preserve_their_fields(
 ) {
     assert_eq!(error.to_string(), expected);
 }
+
+#[rstest::rstest]
+#[case::duplicate_creation_index(
+    FormatError::DuplicateAttributeCreationIndex(17),
+    "duplicate attribute creation index 17"
+)]
+#[case::duplicate_name(FormatError::DuplicateAttributeName("a\nb".into()), "duplicate attribute name \"a\\nb\"")]
+#[case::creation_counter(FormatError::InvalidAttributeCreationCounter { index: 7, next: 3 }, "attribute creation index 7 is not below the next index 3")]
+fn attribute_creation_diagnostics_preserve_their_fields(
+    #[case] error: FormatError,
+    #[case] expected: &str,
+) {
+    assert_eq!(error.to_string(), expected);
+}
