@@ -314,6 +314,7 @@ use crate::filter_pipeline::FilterPipeline;
 use crate::free_sections::FreeSection;
 use crate::free_sections::FreeSectionCoordinates;
 use crate::free_sections::FreeSections;
+use crate::free_sections::PersistedManagerSet;
 use crate::free_sections::ReusableSpaceStats;
 use crate::free_space_manager;
 use crate::free_space_manager::PersistedSections;
@@ -324,7 +325,7 @@ use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPathBuf;
 #[cfg(test)]
 use crate::page_publication_failure::{PagePublicationFailure, PublicationFailureImage};
-use crate::reader::FileAccessProperties;
+use crate::reader::{FileAccessProperties, PersistedFreeSpacePolicy};
 use crate::source::SourceMetadata;
 use crate::source::{BaseOffsetSource, MetadataCacheConfig, Source};
 use crate::superblock;
@@ -1221,6 +1222,56 @@ struct PersistState {
     old_blocks: Vec<FreeExtent>,
 }
 
+/// Parsed persistent managers and extension allocation ranges for allocator installation.
+struct PersistedRecovery {
+    managers: PersistedManagerSet,
+    extension: Vec<(u64, u64)>,
+}
+
+impl PersistedRecovery {
+    /// Reads the complete manager set and its physical extension allocation ranges.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::PersistedFreeSpace`] for a manager read or parse failure,
+    /// [`Error::Io`] for an extension read failure, or [`Error::Format`] for invalid extension
+    /// metadata, address arithmetic, or a source shorter than the logical end of file.
+    fn read(
+        source: &crate::image::BorrowedHandle<'_>,
+        context: &FileContext,
+        extension: u64,
+        info: &FileSpaceInfo,
+    ) -> Result<Self, Error> {
+        let addresses = context.addresses();
+        let stored_eof = addresses.relative(context.superblock().eof_address)?;
+        let managers = PersistedManagerSet::read(
+            &source.manager_source(),
+            context.widths(),
+            addresses.effective_base(),
+            stored_eof.get(),
+            info,
+        )?;
+        let extension = source
+            .finish(self::object_header::read_oh_chunks(
+                source, extension, addresses,
+            ))?
+            .into_iter()
+            .map(|chunk| chunk.span)
+            .collect();
+        if context.superblock().eof_address > source.len() {
+            return Err(FormatError::TruncatedFile {
+                expected_eof: context.superblock().eof_address,
+                actual_len: source.len(),
+            }
+            .into());
+        }
+        Ok(Self {
+            managers,
+            extension,
+        })
+    }
+}
+
 /// The byte classification of file storage identified by the editor.
 ///
 /// Extents are absolute `(offset, length)` pairs. The editor reads reachable storage with
@@ -1396,34 +1447,31 @@ impl WriteEngine {
         Ok(session)
     }
 
-    /// Open an existing file for read-write editing under `strategy`: the one
-    /// place that picks between the bounded backing (a [`HandleImage`] keeping no
-    /// whole-file mirror, so resident memory is the metadata-cache budget plus
-    /// whatever is being parsed) and the whole-file mirror. Backs
-    /// [`File::open_rw`](crate::File::open_rw), which selects between them by
-    /// the strategy it is given.
+    /// Opens a writable session under the selected backing and persisted-manager policies.
     ///
-    /// The eligibility rules are checked here rather than deferred, because a
-    /// caller who asked for bounded memory cannot be silently given the mirror
-    /// instead. Under [`MemoryStrategy::Bounded`] a file the bounded engine
-    /// cannot edit is refused up front; [`MemoryStrategy::Auto`] opts in to
-    /// falling back to the mirror instead (issue #198, steps 3 and 4).
+    /// Falls back to a mirror only for [`bounded_only_limitation`]. Metadata and acquisition
+    /// errors are returned directly. Preserves the persisted-manager policy when reopening
+    /// the file through a mirror under [`MemoryStrategy::Auto`].
     ///
-    /// Falls back only for [`bounded_only_limitation`]. [`open_imaged`](Self::open_imaged)
-    /// rejects unsupported address widths and file layouts for both backings. A non-persistent
-    /// PAGE file requires the mirror for staged edits in fresh pages.
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] for unsupported address widths or layouts, including
+    /// a backing that cannot satisfy [`MemoryStrategy::Bounded`]. Other failures are the errors
+    /// of [`open_imaged_with_policy`](Self::open_imaged_with_policy).
     pub(crate) fn open_rw_with_strategy(
         path: &Path,
         cache: MetadataCacheConfig,
         locking: FileLocking,
         strategy: MemoryStrategy,
+        policy: PersistedFreeSpacePolicy,
     ) -> Result<Self, Error> {
         if strategy == MemoryStrategy::Mirrored {
-            return Self::open_with_locking(path, locking);
+            return Self::open_inner_with_policy(path, Some(locking), policy);
         }
-        let mut session = Self::open_imaged(path, Some(locking), |handle, len| {
-            Ok(Box::new(HandleImage::new(handle, len, cache)))
-        })?;
+        let mut session =
+            Self::open_imaged_with_policy(path, Some(locking), policy, |handle, len| {
+                Ok(Box::new(HandleImage::new(handle, len, cache)))
+            })?;
         session.batched_appends = true;
         session.bounded = true;
         if let Some(reason) = bounded_only_limitation(&session) {
@@ -1438,7 +1486,7 @@ impl WriteEngine {
             // Another writer can take the lock in that window; the reopen then
             // reports `Error::FileLocked`, which is the truthful answer.
             drop(session);
-            return Self::open_with_locking(path, locking);
+            return Self::open_inner_with_policy(path, Some(locking), policy);
         }
         Ok(session)
     }
@@ -1583,6 +1631,28 @@ impl WriteEngine {
         })
     }
 
+    /// Opens a mirrored session with the selected persisted-manager policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns the acquisition and parsing errors of
+    /// [`open_imaged_with_policy`](Self::open_imaged_with_policy).
+    fn open_inner_with_policy(
+        path: &Path,
+        lock: Option<FileLocking>,
+        policy: PersistedFreeSpacePolicy,
+    ) -> Result<Self, Error> {
+        if policy == PersistedFreeSpacePolicy::Tolerant {
+            return match lock {
+                Some(locking) => Self::open_with_locking(path, locking),
+                None => Self::open_inner(path, None),
+            };
+        }
+        Self::open_imaged_with_policy(path, lock, policy, |handle, _len| {
+            Ok(Box::new(Self::read_mirror(handle)?))
+        })
+    }
+
     /// Read `handle` whole into a [`MirrorImage`]. The one place the engine
     /// still assumes it can hold the file, kept behind a named constructor so
     /// the mirrorless opens visibly do not call it.
@@ -1598,26 +1668,42 @@ impl WriteEngine {
         Ok(MirrorImage::new(handle, data))
     }
 
-    /// Shared open path over any backing: acquire the handle (and, when asked,
-    /// the exclusive lock), parse and validate the superblock through a borrowed
-    /// view of the handle, and only then let `build` decide how the bytes are
-    /// held.
+    /// Opens a session with tolerant persisted free-space recovery.
     ///
-    /// Every check of the superblock and of the File Space Info page size comes before `build`,
-    /// because `build` may read the whole file, and a check after it would have the editor read a
-    /// 20 GB flagged file into memory only to reject it. The reads of the superblock and its
-    /// extension are a few bounded windows.
+    /// Calls the image constructor with the handle and physical file length after parsing
+    /// the superblock and File Space Info.
     ///
-    /// `build` receives the file's length as well as the handle because a
-    /// mirrorless image has to be told its end-of-file — it has no buffer whose
-    /// length implies it.
+    /// # Errors
     ///
-    /// Nothing below this point reads the file as a slice, which is what lets
-    /// one engine open a whole-file mirror, a mirrorless handle, and (in tests)
-    /// a mirror that withholds its slice.
+    /// Returns the acquisition and parsing errors of
+    /// [`open_imaged_with_policy`](Self::open_imaged_with_policy).
     fn open_imaged(
         path: &Path,
         lock: Option<FileLocking>,
+        build: impl FnOnce(fs::File, u64) -> Result<Box<dyn FileImage>, Error>,
+    ) -> Result<Self, Error> {
+        Self::open_imaged_with_policy(path, lock, PersistedFreeSpacePolicy::Tolerant, build)
+    }
+
+    /// Parses opening metadata before constructing the editing image.
+    ///
+    /// Under [`PersistedFreeSpacePolicy::Strict`], reads the complete persisted manager set and
+    /// extension allocation ranges before calling `build`. Strict metadata parsing failures occur
+    /// before allocator installation or page buffering. Calls `build` with the handle and
+    /// physical file length.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] for opening failures, and for superblock or extension read failures
+    /// under the strict policy. Returns [`Error::FileLocked`] for a lock conflict,
+    /// [`Error::FileMarkedInUse`] for writer status
+    /// flags, or [`Error::PersistedFreeSpace`] for a strict manager read or parse failure.
+    /// Returns [`Error::Format`] for invalid opening metadata or address arithmetic.
+    /// Other failures are the errors of `build` and backing configuration.
+    fn open_imaged_with_policy(
+        path: &Path,
+        lock: Option<FileLocking>,
+        policy: PersistedFreeSpacePolicy,
         build: impl FnOnce(fs::File, u64) -> Result<Box<dyn FileImage>, Error>,
     ) -> Result<Self, Error> {
         let handle = fs::OpenOptions::new()
@@ -1637,7 +1723,10 @@ impl WriteEngine {
         // handle; it leaves the handle's cursor wherever its last read ended,
         // which is why the mirror positions the handle before reading it whole.
         let probe = crate::image::BorrowedHandle::new(&handle, len);
-        let located = superblock::read(&probe)?;
+        let located = match policy {
+            PersistedFreeSpacePolicy::Strict => probe.finish(superblock::read(&probe)),
+            PersistedFreeSpacePolicy::Tolerant => superblock::read(&probe).map_err(Error::from),
+        }?;
         file_lock::check_status_flags(
             &located.superblock,
             file_lock::OpenIntent::Write,
@@ -1650,7 +1739,25 @@ impl WriteEngine {
 
         // `H5Fopen` rejects a page size outside 512 bytes to 1 GiB as well (`H5Ofsinfo.c` and
         // `H5Fsuper.c`, HDF5 2.2.0).
-        let file_space_info = Self::extension_fsinfo(&probe, &context)?;
+        let file_space_info = match policy {
+            PersistedFreeSpacePolicy::Strict => {
+                probe.finish(Self::extension_fsinfo(&probe, &context))
+            }
+            PersistedFreeSpacePolicy::Tolerant => {
+                Self::extension_fsinfo(&probe, &context).map_err(Error::from)
+            }
+        }?;
+        let recovered = if policy == PersistedFreeSpacePolicy::Strict {
+            file_space_info
+                .as_ref()
+                .filter(|(_, info)| info.persist)
+                .map(|(extension, info)| {
+                    PersistedRecovery::read(&probe, &context, *extension, info)
+                })
+                .transpose()?
+        } else {
+            None
+        };
         let fresh_page_boundary = if let Some((_, info)) = &file_space_info
             && info.strategy == FileSpaceStrategy::Page
             && !info.persist
@@ -1728,7 +1835,7 @@ impl WriteEngine {
         };
         // If the file persists its free space, seed the free list from the
         // on-disk managers and arm persistence for future commits.
-        session.load_persisted_free_space(file_space_info);
+        session.load_persisted_free_space(file_space_info, recovered)?;
         if session.fresh_page_boundary.is_some() {
             session.space_ownership()?;
         }
@@ -1892,22 +1999,27 @@ impl WriteEngine {
         })
     }
 
-    /// Constructs the session's reusable-space strategy from the file's File Space Info, seeds it
-    /// from persisted managers where supported, and records the manager and superblock-extension
-    /// blocks that the next persisting commit frees.
+    /// Configures reusable space and records allocations for persistent-manager rewrites.
     ///
-    /// A file without a File Space Info message keeps the default `FSM_AGGR` strategy installed by
-    /// [`open_imaged`](Self::open_imaged), with separate metadata and raw aggregates. Explicit
-    /// [`FileSpaceStrategy::Aggr`] and [`FileSpaceStrategy::FsmAggr`] also use these aggregates.
-    /// Reads persisted manager sections only when the recorded strategy has free-space managers
-    /// and persistence is enabled. Adds eligible sections to the free lists at their stored
-    /// addresses. A non-persistent PAGE session starts with empty free lists.
-    fn load_persisted_free_space(&mut self, file_space_info: Option<(u64, FileSpaceInfo)>) {
+    /// Installs checked recovery when supplied. Otherwise, reads managers tolerantly, omitting
+    /// manager parse failures and invalid extents from reusable space. A nonpersistent PAGE session
+    /// starts with empty free lists. Files without File Space Info use the default `FSM_AGGR`
+    /// strategy with separate metadata and raw aggregates.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] with [`FormatError::Internal`] if checked recovery cannot be
+    /// represented as allocator extents.
+    fn load_persisted_free_space(
+        &mut self,
+        file_space_info: Option<(u64, FileSpaceInfo)>,
+        recovered: Option<PersistedRecovery>,
+    ) -> Result<(), Error> {
         let Some((ext_addr, info)) = file_space_info else {
             if let Ok(eoa) = self.end_of_allocation() {
                 self.aggregation = Some(AggregateSpace::new(eoa.get()));
             }
-            return;
+            return Ok(());
         };
         self.space =
             SessionSpace::from_strategy(Some(info.strategy), info.threshold, info.page_size);
@@ -1918,11 +2030,14 @@ impl WriteEngine {
         }
         let paged = self.space.is_paged();
         if !info.persist || !self.space.is_enabled() {
-            return;
+            return Ok(());
+        }
+        if let Some(recovered) = recovered {
+            return self.install_persisted_free_space(info, recovered);
         }
         let widths = self.context.widths();
         let Ok(eoa) = self.end_of_allocation() else {
-            return;
+            return Ok(());
         };
         let managers: Vec<(
             Option<ManagerKind>,
@@ -2026,6 +2141,74 @@ impl WriteEngine {
             page_size: info.page_size,
             old_blocks,
         });
+        Ok(())
+    }
+
+    /// Installs eligible sections and reclamation ranges from completed recovery.
+    ///
+    /// Retains metadata allocations even for manager roles the allocator does not admit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] with [`FormatError::Internal`] if a checked section or metadata
+    /// allocation cannot be represented as an allocator extent.
+    fn install_persisted_free_space(
+        &mut self,
+        info: FileSpaceInfo,
+        recovered: PersistedRecovery,
+    ) -> Result<(), Error> {
+        let PersistedRecovery {
+            managers,
+            extension,
+        } = recovered;
+        let (report, allocations) = managers.into_parts();
+        let old_blocks = extension
+            .into_iter()
+            .chain(
+                allocations
+                    .into_iter()
+                    .map(|range| (range.start().get(), range.length())),
+            )
+            .map(|(at, length)| {
+                self.stored_extent(at, length).ok_or_else(|| {
+                    FormatError::Internal(
+                        "a checked metadata allocation has no stored extent".into(),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut tagged = report
+            .managers()
+            .iter()
+            .flat_map(|manager| {
+                manager.free_sections().sections().iter().map(|section| {
+                    FreeExtent::new(section.address(), section.length().get())
+                        .map(|extent| {
+                            (
+                                free_space_manager::manager_kind(info.strategy, manager.slot()),
+                                extent,
+                            )
+                        })
+                        .ok_or_else(|| {
+                            FormatError::Internal(
+                                "a checked free section has no allocator extent".into(),
+                            )
+                        })
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        tagged.sort_unstable_by_key(|(_, extent)| extent.start());
+        for (kind, extent) in tagged {
+            self.space.seed_persisted(kind, extent);
+        }
+        self.space.finish_seed();
+        self.persist = Some(PersistState {
+            strategy: info.strategy,
+            threshold: info.threshold,
+            page_size: info.page_size,
+            old_blocks,
+        });
+        Ok(())
     }
 
     /// Returns the extent of the free-space manager header at the stored address `addr`, in stored

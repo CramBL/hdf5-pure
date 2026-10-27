@@ -464,6 +464,7 @@ mod tests {
     use crate::FileSpaceStrategy;
     use crate::MaxExtent;
     use crate::MemoryStrategy;
+    use crate::PersistedFreeSpacePolicy;
     use crate::UserblockSize;
     use crate::error::Error;
     use crate::error::FormatError;
@@ -540,6 +541,7 @@ mod tests {
             MetadataCacheConfig::default(),
             FileLocking::Enabled,
             backing,
+            PersistedFreeSpacePolicy::Tolerant,
         )
         .unwrap();
         let mut dataset = DatasetBuilder::new("");

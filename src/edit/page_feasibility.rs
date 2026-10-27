@@ -19,6 +19,7 @@ use test_util::publication;
 use test_util_hdf5::userblock;
 
 use crate::FileSpaceSettings;
+use crate::PersistedFreeSpacePolicy;
 use crate::UserblockSize;
 use crate::access_mode::AccessMode;
 use crate::address::{
@@ -307,6 +308,7 @@ fn staged_commits_preserve_preexisting_bytes_outside_the_superblock(
         MetadataCacheConfig::default(),
         FileLocking::Enabled,
         MemoryStrategy::Auto,
+        PersistedFreeSpacePolicy::Tolerant,
     )
     .unwrap();
     engine.set_sync_policy(sync);

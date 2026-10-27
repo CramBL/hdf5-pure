@@ -17,6 +17,7 @@ use crate::FormatError;
 use crate::FreeSectionCoordinates;
 use crate::MaxExtent;
 use crate::MemoryStrategy;
+use crate::PersistedFreeSpacePolicy;
 use crate::SyncPolicy;
 use crate::UserblockSize;
 use crate::address::AddressContext;
@@ -345,6 +346,7 @@ fn open_engine(path: &Path, backing: MemoryStrategy) -> WriteEngine {
         MetadataCacheConfig::default(),
         FileLocking::Enabled,
         backing,
+        PersistedFreeSpacePolicy::Tolerant,
     )
     .unwrap()
 }

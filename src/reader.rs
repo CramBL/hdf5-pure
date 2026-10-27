@@ -262,6 +262,26 @@ impl Source for SourceView<'_> {
     }
 }
 
+/// The policy for recovering persisted free space during writable opening.
+///
+/// Configure this through [`FileAccessProperties::with_persisted_free_space_policy`]. The
+/// default is [`Tolerant`](Self::Tolerant). Read-only opening ignores this policy.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PersistedFreeSpacePolicy {
+    /// Rejects persisted managers whose metadata cannot be read or parsed.
+    ///
+    /// Parses every defined manager before recovering reusable sections. Header and section-list
+    /// checksums are verified regardless of the `checksum` feature. Overlapping free sections,
+    /// overlapping manager allocations, and extents beyond the logical end of file are rejected.
+    Strict,
+    /// Continues opening when persisted managers cannot be read or parsed.
+    ///
+    /// A manager parse failure prevents recovery of reusable sections. Invalid section extents
+    /// are skipped.
+    #[default]
+    Tolerant,
+}
+
 /// File-access properties applied when opening an HDF5 file.
 ///
 /// This is the `hdf5-pure` analogue of an HDF5 **file access property list**
@@ -270,11 +290,8 @@ impl Source for SourceView<'_> {
 /// `H5Fopen`. Every `*_with_options` constructor on [`File`] accepts it, so a
 /// read path and a read-write path can share one configuration.
 ///
-/// The `Properties` suffix means the type stands in for one whole HDF5 property
-/// list, so every setting on it has a C counterpart to look up. It is a stand-in
-/// and not a port: a plain `Copy` value, with no handle to create or close, no
-/// runtime property registry, and no setter that can fail. `fapl` and each
-/// `H5Pset_*` it models are doc aliases, so a search for either lands here.
+/// The `Properties` suffix means this type represents a file access property list. It is a
+/// [`Copy`] value with no handle to create or close, runtime property registry, or fallible setter.
 ///
 /// - The metadata cache (`H5Pset_mdc_config`) applies to the streaming and
 ///   bounded backends; an in-memory open already holds the whole file in one
@@ -288,6 +305,9 @@ impl Source for SourceView<'_> {
 ///   counterpart: `H5Fopen` refuses a file marked open for write with no
 ///   override, where [`with_write_mark_policy`](Self::with_write_mark_policy)
 ///   can admit a snapshot read of one.
+///
+/// The persisted-free-space policy applies to writable opening. Configure it through
+/// [`with_persisted_free_space_policy`](Self::with_persisted_free_space_policy).
 ///
 /// # Supported properties
 ///
@@ -395,10 +415,13 @@ pub struct FileAccessProperties {
     sync_policy: SyncPolicy,
     page_buffer_size: usize,
     write_mark_policy: WriteMarkPolicy,
+    persisted_free_space_policy: PersistedFreeSpacePolicy,
 }
 
 impl FileAccessProperties {
-    /// A value carrying the crate's default access behavior.
+    /// Creates properties with the crate's default access behavior.
+    ///
+    /// Persisted free-space recovery defaults to [`PersistedFreeSpacePolicy::Tolerant`].
     pub const fn new() -> Self {
         Self {
             metadata_cache: MetadataCacheConfig::disabled(),
@@ -409,6 +432,7 @@ impl FileAccessProperties {
             sync_policy: SyncPolicy::Always,
             page_buffer_size: 0,
             write_mark_policy: WriteMarkPolicy::Refuse,
+            persisted_free_space_policy: PersistedFreeSpacePolicy::Tolerant,
         }
     }
 
@@ -714,6 +738,41 @@ impl FileAccessProperties {
         self
     }
 
+    /// Sets how writable opening handles persisted free-space metadata.
+    ///
+    /// Defaults to [`PersistedFreeSpacePolicy::Tolerant`]. With
+    /// [`PersistedFreeSpacePolicy::Strict`], a metadata parsing failure leaves the file's bytes,
+    /// length, and status flags unchanged, including when a page buffer is configured through
+    /// [`with_page_buffer_size`](Self::with_page_buffer_size).
+    ///
+    /// Read-only opening ignores this setting. The selected policy is available through
+    /// [`File::access_properties`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure::{File, FileAccessProperties, PersistedFreeSpacePolicy};
+    ///
+    /// # let directory = tempfile::tempdir()?;
+    /// # let path = directory.path().join("strict-open.h5");
+    /// # hdf5_pure::FileBuilder::new().write(&path)?;
+    /// let properties = FileAccessProperties::new()
+    ///     .with_persisted_free_space_policy(PersistedFreeSpacePolicy::Strict);
+    /// let file = File::open_rw_with_options(&path, properties)?;
+    /// assert_eq!(
+    ///     file.access_properties().persisted_free_space_policy(),
+    ///     PersistedFreeSpacePolicy::Strict,
+    /// );
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
+    pub const fn with_persisted_free_space_policy(
+        mut self,
+        policy: PersistedFreeSpacePolicy,
+    ) -> Self {
+        self.persisted_free_space_policy = policy;
+        self
+    }
+
     /// Return the configured streaming metadata cache.
     pub const fn metadata_cache(&self) -> MetadataCacheConfig {
         self.metadata_cache
@@ -762,6 +821,11 @@ impl FileAccessProperties {
     /// Return the configured write-mark policy.
     pub const fn write_mark_policy(&self) -> WriteMarkPolicy {
         self.write_mark_policy
+    }
+
+    /// Returns the configured policy for persisted free-space recovery during writable opening.
+    pub const fn persisted_free_space_policy(&self) -> PersistedFreeSpacePolicy {
+        self.persisted_free_space_policy
     }
 }
 
@@ -1221,6 +1285,7 @@ impl FileInner {
             properties.metadata_cache,
             properties.locking,
             properties.memory_strategy.unwrap_or(default),
+            properties.persisted_free_space_policy,
         )?;
         Self::from_rw_session(session, properties)
     }
@@ -2977,8 +3042,7 @@ impl File {
         Self::open_rw_with_options(path, FileAccessProperties::new())
     }
 
-    /// Open an existing file for reading and in-place editing with explicit
-    /// access properties — see [`open_rw`](Self::open_rw).
+    /// Opens an existing file for reading and in-place editing with explicit access properties.
     ///
     /// The properties carry the locking policy (the `H5Pset_file_locking` analogue,
     /// [`FileAccessProperties::with_locking`]), the memory strategy
@@ -2988,6 +3052,15 @@ impl File {
     /// the bounded backing, and the file-wide chunk-cache default applied to
     /// datasets opened from this file. Because one [`FileAccessProperties`] value
     /// serves every open, the same configuration can be shared with a read path.
+    ///
+    /// [`FileAccessProperties::with_persisted_free_space_policy`] controls recovery of persisted
+    /// free space. Strict parsing completes before allocator installation or page buffering.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::PersistedFreeSpace`] for a manager read or parse failure under
+    /// [`PersistedFreeSpacePolicy::Strict`]. The error includes the decoded manager context and
+    /// its cause. Other failures are the errors of [`open_rw`](Self::open_rw).
     pub fn open_rw_with_options<P: AsRef<std::path::Path>>(
         path: P,
         properties: FileAccessProperties,

@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use hdf5_pure::AttrValue;
+use hdf5_pure::EditBacking;
 use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FileAccessProperties;
@@ -11,7 +12,9 @@ use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FreeSectionCoordinates;
 use hdf5_pure::MemoryStrategy;
+use hdf5_pure::PersistedFreeSpacePolicy;
 use hdf5_pure::StoredAddress;
+use hdf5_pure::SyncPolicy;
 use hdf5_pure::UserblockSize;
 use hdf5_pure_core::__private::{BaseAddressExt, StoredAddressExt};
 use hdf5_pure_format::__private as format;
@@ -23,6 +26,273 @@ use test_util::userblock::Userblock;
 use test_util_hdf5::file_space;
 use test_util_hdf5::paged;
 use test_util_hdf5::storage;
+
+#[rstest]
+#[case::bounded(MemoryStrategy::Bounded, 0, EditBacking::Bounded)]
+#[case::mirrored(MemoryStrategy::Mirrored, 0, EditBacking::Mirrored)]
+#[case::auto(MemoryStrategy::Auto, 0, EditBacking::Bounded)]
+#[case::mirrored_userblock(MemoryStrategy::Mirrored, PAGE, EditBacking::Mirrored)]
+#[case::auto_userblock(MemoryStrategy::Auto, PAGE, EditBacking::Mirrored)]
+fn strict_persisted_open_preserves_reuse_and_policy(
+    #[case] memory: MemoryStrategy,
+    #[case] userblock: u64,
+    #[case] backing: EditBacking,
+    #[values(Strategy::FsmAggr, Strategy::Page)] strategy: Strategy,
+    #[values(false, true)] buffered: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("strict.h5");
+    let tolerant_path = directory.path().join("tolerant.h5");
+    let stamped = write_fixture(&path, strategy, userblock);
+    let hole = file_space::contiguous_extent(&File::open(&path).unwrap(), "b");
+    assert_eq!(hole.end - hole.start, HOLE_BYTES);
+    let first = File::open_rw(&path).unwrap();
+    first.root().delete("b").unwrap();
+    first.commit().unwrap();
+    first.close().unwrap();
+    let persisted = File::open(&path)
+        .unwrap()
+        .persisted_free_sections()
+        .unwrap()
+        .unwrap();
+    let expected = persisted
+        .free_sections()
+        .sections()
+        .iter()
+        .filter(|section| {
+            section.address() + userblock >= hole.start
+                && section.end_address() + userblock <= hole.end
+                && section.length().get() >= 1200
+        })
+        .map(|section| section.address() + userblock)
+        .min()
+        .unwrap();
+    std::fs::copy(&path, &tolerant_path).unwrap();
+    let properties = FileAccessProperties::new()
+        .with_memory_strategy(memory)
+        .with_sync_policy(SyncPolicy::OnClose)
+        .with_page_buffer_size(if buffered { 1 << 20 } else { 0 });
+    let tolerant = File::open_rw_with_options(&tolerant_path, properties).unwrap();
+    let strict = File::open_rw_with_options(
+        &path,
+        properties.with_persisted_free_space_policy(PersistedFreeSpacePolicy::Strict),
+    )
+    .unwrap();
+    assert_eq!(
+        strict.access_properties().persisted_free_space_policy(),
+        PersistedFreeSpacePolicy::Strict
+    );
+    assert_eq!(
+        tolerant.access_properties().persisted_free_space_policy(),
+        PersistedFreeSpacePolicy::Tolerant
+    );
+    assert_eq!(
+        strict.reusable_free_sections().unwrap(),
+        tolerant.reusable_free_sections().unwrap()
+    );
+    assert_eq!(strict.edit_backing(), Some(backing));
+    assert_eq!(strict.edit_backing(), tolerant.edit_backing());
+    strict
+        .root()
+        .create_dataset("d", |builder| {
+            builder.with_i32_data(&[9; 300]);
+        })
+        .unwrap();
+    tolerant
+        .root()
+        .create_dataset("d", |builder| {
+            builder.with_i32_data(&[9; 300]);
+        })
+        .unwrap();
+    strict.commit().unwrap();
+    tolerant.commit().unwrap();
+    assert_eq!(
+        file_space::contiguous_extent(&strict, "d"),
+        file_space::contiguous_extent(&tolerant, "d")
+    );
+    assert_eq!(
+        file_space::contiguous_extent(&strict, "d"),
+        expected..expected + 1200
+    );
+    assert_eq!(strict.file_size(), tolerant.file_size());
+    strict.close().unwrap();
+    tolerant.close().unwrap();
+    let file = File::open(&path).unwrap();
+    assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), [9; 300]);
+    assert_eq!(file.dataset("a").unwrap().read_i32().unwrap(), [1; 100]);
+    stamped.assert_unchanged(&path);
+}
+
+#[rstest]
+#[case::bounded(MemoryStrategy::Bounded, 0)]
+#[case::mirrored(MemoryStrategy::Mirrored, 0)]
+#[case::auto(MemoryStrategy::Auto, 0)]
+#[case::mirrored_userblock(MemoryStrategy::Mirrored, PAGE)]
+#[case::auto_userblock(MemoryStrategy::Auto, PAGE)]
+fn strict_persisted_open_rejects_invalid_checksums_without_writes(
+    #[case] memory: MemoryStrategy,
+    #[case] userblock: u64,
+    #[values(Strategy::FsmAggr, Strategy::Page)] strategy: Strategy,
+    #[values(false, true)] header: bool,
+    #[values(false, true)] buffered: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("invalid-manager.h5");
+    write_fixture(&path, strategy, userblock);
+    let first = File::open_rw(&path).unwrap();
+    first.root().delete("b").unwrap();
+    first.commit().unwrap();
+    first.close().unwrap();
+    let reader = File::open(&path).unwrap();
+    let report = reader.persisted_free_sections().unwrap().unwrap();
+    let manager = &report.managers()[0];
+    let slot = manager.slot();
+    let header_address = manager.address();
+    let flags = reader.superblock().consistency_flags();
+    let header_at = usize::try_from(
+        reader
+            .superblock()
+            .base_address
+            .absolute(header_address)
+            .unwrap(),
+    )
+    .unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    let widths = format::FormatWidths::from_sizes(8, 8).unwrap();
+    let decoded = format::FreeSpaceManagerHeader::parse(widths, &bytes[header_at..]).unwrap();
+    let list_address = decoded.section_list_addr();
+    let list_at = usize::try_from(
+        reader
+            .superblock()
+            .base_address
+            .absolute(list_address)
+            .unwrap(),
+    )
+    .unwrap();
+    drop(reader);
+    let checksum_at = if header {
+        header_at + usize::try_from(format::free_space_manager_header_len(widths)).unwrap() - 4
+    } else {
+        list_at + usize::try_from(decoded.section_list_used()).unwrap() - 4
+    };
+    let checksum = u32::from_le_bytes(bytes[checksum_at..checksum_at + 4].try_into().unwrap());
+    bytes[checksum_at] ^= 1;
+    std::fs::write(&path, &bytes).unwrap();
+    let properties = FileAccessProperties::new()
+        .with_memory_strategy(memory)
+        .with_persisted_free_space_policy(PersistedFreeSpacePolicy::Strict)
+        .with_sync_policy(SyncPolicy::OnClose)
+        .with_page_buffer_size(if buffered { 1 << 20 } else { 0 });
+    let error = File::open_rw_with_options(&path, properties).unwrap_err();
+    let Error::PersistedFreeSpace {
+        manager_slot,
+        header_address: actual_header,
+        section_list_address,
+        section,
+        source,
+    } = error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(
+        (manager_slot, actual_header, section_list_address, section),
+        (
+            slot,
+            header_address,
+            (!header).then_some(list_address),
+            None
+        )
+    );
+    let Error::Format(hdf5_pure::FormatError::ChecksumMismatch { expected, computed }) = *source
+    else {
+        panic!("{source:?}");
+    };
+    assert_eq!((expected, computed), (checksum ^ 1, checksum));
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len(),
+        u64::try_from(bytes.len()).unwrap()
+    );
+    assert_eq!(
+        File::open(&path).unwrap().superblock().consistency_flags(),
+        flags
+    );
+}
+
+#[rstest]
+fn strict_persisted_open_rejects_a_truncated_logical_file(
+    #[values(
+        MemoryStrategy::Bounded,
+        MemoryStrategy::Mirrored,
+        MemoryStrategy::Auto
+    )]
+    memory: MemoryStrategy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("missing-tail.h5");
+    file_space::write_persisted_interior_hole(&path);
+    let reader = File::open(&path).unwrap();
+    let mut superblock = reader.superblock().clone();
+    drop(reader);
+    let mut bytes = std::fs::read(&path).unwrap();
+    let actual_len = u64::try_from(bytes.len()).unwrap();
+    superblock.eof_address = actual_len + 64;
+    let encoded = format::serialize_superblock(&superblock).unwrap();
+    bytes[..encoded.len()].copy_from_slice(&encoded);
+    std::fs::write(&path, &bytes).unwrap();
+    let error = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new()
+            .with_memory_strategy(memory)
+            .with_persisted_free_space_policy(PersistedFreeSpacePolicy::Strict),
+    )
+    .unwrap_err();
+    let Error::Format(hdf5_pure::FormatError::TruncatedFile {
+        expected_eof,
+        actual_len: observed,
+    }) = error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!((expected_eof, observed), (actual_len + 64, actual_len));
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}
+
+#[rstest]
+fn strict_persisted_open_accepts_absent_or_empty_persistence(#[values(false, true)] persist: bool) {
+    assert_eq!(
+        FileAccessProperties::new().persisted_free_space_policy(),
+        PersistedFreeSpacePolicy::Tolerant
+    );
+    assert_eq!(
+        FileAccessProperties::default().persisted_free_space_policy(),
+        PersistedFreeSpacePolicy::Tolerant
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("empty.h5");
+    let mut builder = FileBuilder::new();
+    if persist {
+        builder.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+        );
+    }
+    builder.write(&path).unwrap();
+    let file = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new()
+            .with_persisted_free_space_policy(PersistedFreeSpacePolicy::Strict),
+    )
+    .unwrap();
+    assert_eq!(
+        file.access_properties().persisted_free_space_policy(),
+        PersistedFreeSpacePolicy::Strict
+    );
+    assert_eq!(
+        file.reusable_space_stats().unwrap().reusable_free_bytes(),
+        0
+    );
+    file.close().unwrap();
+}
 
 #[rstest]
 #[case::overlap(16)]

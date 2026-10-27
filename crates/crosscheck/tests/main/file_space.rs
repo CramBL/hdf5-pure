@@ -29,8 +29,10 @@ use hdf5_pure::FreeSections;
 use hdf5_pure::FreeSpaceManagerRole;
 use hdf5_pure::Layout;
 use hdf5_pure::MaxExtent;
+use hdf5_pure::MemoryStrategy;
 use hdf5_pure::MessageType;
 use hdf5_pure::PersistedFreeSections;
+use hdf5_pure::PersistedFreeSpacePolicy;
 use hdf5_pure::SyncPolicy;
 use hdf5_pure::UserblockSize;
 use hdf5_pure_core::__private::BaseAddressExt;
@@ -2142,6 +2144,89 @@ fn libhdf5_truncates_the_maximum_section_size_and_writes_section_sizes_as_wide_a
             &[SECTION_CLASS_SIMPLE],
         ]
         .concat()
+    );
+}
+
+#[rstest]
+#[case::bounded(MemoryStrategy::Bounded, 0)]
+#[case::mirrored(MemoryStrategy::Mirrored, 0)]
+#[case::auto(MemoryStrategy::Auto, 0)]
+#[case::mirrored_userblock(MemoryStrategy::Mirrored, 4096)]
+#[case::auto_userblock(MemoryStrategy::Auto, 4096)]
+fn strict_persisted_open_recovers_libhdf5_managers(
+    #[case] memory: MemoryStrategy,
+    #[case] userblock: u64,
+    #[values(false, true)] paged: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("strict.h5");
+    let tolerant_path = directory.path().join("tolerant.h5");
+    let native = hdf5::FileBuilder::new()
+        .with_fapl(|properties| properties.libver_v110())
+        .with_fcpl(|properties| {
+            properties
+                .userblock(userblock)
+                .file_space_strategy(CStrategy::FreeSpaceManager {
+                    paged,
+                    persist: true,
+                    threshold: 1,
+                })
+        })
+        .create(&path)
+        .unwrap();
+    native
+        .new_dataset_builder()
+        .with_data(&[1i32; 100])
+        .create("a")
+        .unwrap();
+    native
+        .new_dataset_builder()
+        .with_data(&[2i32; 400])
+        .create("b")
+        .unwrap();
+    native
+        .new_dataset_builder()
+        .with_data(&[3i32; 100])
+        .create("c")
+        .unwrap();
+    let hole = native.dataset("b").unwrap().offset().unwrap();
+    native.unlink("b").unwrap();
+    native.close().unwrap();
+    std::fs::copy(&path, &tolerant_path).unwrap();
+    let properties = FileAccessProperties::new().with_memory_strategy(memory);
+    let tolerant = File::open_rw_with_options(&tolerant_path, properties).unwrap();
+    let strict = File::open_rw_with_options(
+        &path,
+        properties.with_persisted_free_space_policy(PersistedFreeSpacePolicy::Strict),
+    )
+    .unwrap();
+    let reusable = strict.reusable_free_sections().unwrap();
+    assert_eq!(reusable, tolerant.reusable_free_sections().unwrap());
+    assert_eq!(
+        test_util_hdf5::covered_free_bytes!(
+            &reusable,
+            &(hole..hole + 1600),
+            FreeSectionCoordinates::Absolute
+        ),
+        1600
+    );
+    strict
+        .root()
+        .create_dataset("d", |builder| {
+            builder.with_i32_data(&[9; 300]);
+        })
+        .unwrap();
+    strict.commit().unwrap();
+    strict.close().unwrap();
+    tolerant.close().unwrap();
+    let native = hdf5::File::open(&path).unwrap();
+    assert_eq!(
+        native.dataset("d").unwrap().read_raw::<i32>().unwrap(),
+        [9; 300]
+    );
+    assert_eq!(
+        native.dataset("a").unwrap().read_raw::<i32>().unwrap(),
+        [1; 100]
     );
 }
 
