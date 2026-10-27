@@ -16,6 +16,63 @@ use hdf5_sys::h5t::H5T_class_t;
 use hdf5_sys::h5t::H5T_order_t;
 use hdf5_sys::h5t::H5T_pad_t;
 
+/// Writes a filtered dataset named `values` and returns the reference library's decoded values.
+///
+/// Creates a `[rows, 3]` dataset with `[128, 2]` chunks, shuffle, deflate, and Fletcher32.
+/// Writes consecutive integers from zero, leaving the final 128 rows unwritten if `sparse` is
+/// `true`. Closes the file before returning.
+///
+/// # Panics
+///
+/// Panics if `rows` is less than 128, the element count overflows, an element index exceeds
+/// [`i32::MAX`], or creating, writing, reading, checking, or closing the fixture fails.
+///
+/// # Examples
+///
+/// ```
+/// use test_util_hdf5::numeric;
+///
+/// let dir = tempfile::tempdir()?;
+/// let values = numeric::write_chunked_sweep(&dir.path().join("chunks.h5"), 261, true);
+/// assert_eq!(&values[..6], &[0, 1, 2, 3, 4, 5]);
+/// assert_eq!(&values[133 * 3..], vec![0; 128 * 3]);
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn write_chunked_sweep(path: &Path, rows: usize, sparse: bool) -> Vec<i32> {
+    let values: Vec<i32> = (0..rows * 3)
+        .map(|value| i32::try_from(value).unwrap())
+        .collect();
+    let file = crate::file::libhdf5_create_v18(path);
+    let dataset = file
+        .new_dataset::<i32>()
+        .shape((rows, 3))
+        .chunk((128, 2))
+        .shuffle()
+        .deflate(4)
+        .fletcher32()
+        .create("values")
+        .unwrap();
+    if sparse {
+        let written = rows - 128;
+        let view = ndarray::ArrayView2::from_shape((written, 3), &values[..written * 3]).unwrap();
+        dataset.write_slice(view, (0..written, ..)).unwrap();
+    } else {
+        dataset.write_raw(&values).unwrap();
+    }
+    assert_eq!(dataset.shape(), [rows, 3]);
+    assert_eq!(dataset.chunk(), Some(vec![128, 2]));
+    let expected = dataset.read_raw::<i32>().unwrap();
+    assert_eq!(&expected[..(rows - 128) * 3], &values[..(rows - 128) * 3]);
+    if sparse {
+        assert_eq!(&expected[(rows - 128) * 3..], vec![0; 128 * 3]);
+    } else {
+        assert_eq!(expected, values);
+    }
+    drop(dataset);
+    file.close().unwrap();
+    expected
+}
+
 /// Writes `count` elements to a dataset named `values`, using the stored datatype in memory.
 ///
 /// # Panics

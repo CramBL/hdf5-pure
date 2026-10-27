@@ -11,6 +11,10 @@ use crate::error::FormatError;
 use crate::read_region::ReadRegion;
 use crate::read_region::RegionAxis;
 
+#[cfg(all(test, feature = "std"))]
+#[path = "parsed_chunk_index_test_support.rs"]
+pub(crate) mod test_support;
+
 /// The chunks a dataset's chunk index lists, in ascending order of address.
 ///
 /// A `ParsedChunkIndex` holds each chunk once, as the [`ChunkInfo`] the walk of the chunk index
@@ -56,6 +60,8 @@ impl ParsedChunkIndex {
                 chunk.offsets
             )));
         }
+        #[cfg(all(test, feature = "std"))]
+        test_support::constructed();
         chunks.sort_unstable_by_key(|chunk| chunk.address);
         let mut logical: Vec<_> = (0..chunks.len()).collect();
         logical.sort_unstable_by_key(|&ordinal| chunks[ordinal].offsets.first().copied());
@@ -115,7 +121,11 @@ impl ParsedChunkIndex {
             .candidates(&axes)
             .iter()
             .copied()
-            .filter(|&ordinal| region.overlaps(&chunks[ordinal].offsets, chunk_dims))
+            .filter(|&ordinal| {
+                #[cfg(all(test, feature = "std"))]
+                test_support::candidate();
+                region.overlaps(&chunks[ordinal].offsets, chunk_dims)
+            })
             .collect();
         selected.sort_unstable();
         let mut intersections = Vec::new();

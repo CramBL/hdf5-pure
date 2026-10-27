@@ -26,6 +26,7 @@ use crate::address::OpenedImageContext;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::chunked_read::ChunkDecoding;
+use crate::chunked_read::ChunkRead;
 use crate::edit::AppendBuilder;
 use crate::edit::AppendGeometry;
 use crate::edit::AppendOptions;
@@ -2494,25 +2495,6 @@ impl FileInner {
                 },
             ),
         }
-    }
-
-    /// Reads complete rows after clamping the request to the leading dimension.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::OffsetOverflow`] if byte strides overflow, and
-    /// [`FormatError::ValueTooLargeForPlatform`] if the result exceeds the platform's buffer limit.
-    /// Returns errors from reading the datatype, layout, or storage.
-    fn read_dataset_raw_rows(
-        &self,
-        spec: RawReadSpec<'_>,
-        cache: &ChunkCache,
-        pass: CachePass,
-        start_row: u64,
-        num_rows: u64,
-    ) -> Result<Vec<u8>, FormatError> {
-        let region = ReadRegion::rows(spec, start_row, num_rows)?;
-        self.read_dataset_region(&region, cache, pass)
     }
 
     fn read_dataset_region(
@@ -6703,6 +6685,8 @@ the same commit to replace it",
     /// Reserves the output for the dataset after reading the first window. The reader keeps
     /// one window of stored bytes beside the output. Datasets that fit in one window are read
     /// whole. The reader checks numeric datatype eligibility even for an empty dataset.
+    /// For chunked storage, reuses one parsed index across the windows even when index caching
+    /// is disabled.
     ///
     /// # Errors
     ///
@@ -6758,29 +6742,40 @@ the same commit to replace it",
         // cache ends up holding what a whole read would have left it — the
         // chunks reached first. See [`CachePass`].
         let pass = self.chunk_cache.begin_pass();
-        let decoder = {
-            let raw = self
-                .file
-                .read_dataset_raw_rows(spec, &self.chunk_cache, pass, 0, rows)?;
-            // The reader returns errors from reading the first window before reserving output from
-            // file dimensions. It uses `try_reserve` to return allocation errors if that capacity
-            // is unavailable.
-            out.try_reserve(values)
-                .map_err(|source| FormatError::AllocationFailed { values, source })?;
-            let decoder = NumericDecoder::<T>::parse(&dt)?;
-            decoder.append(&raw, &mut out)?;
-            decoder
-        };
-        let mut start = rows;
-        while start < n0 {
-            let count = rows.min(n0 - start);
-            let raw =
-                self.file
-                    .read_dataset_raw_rows(spec, &self.chunk_cache, pass, start, count)?;
-            decoder.append(&raw, &mut out)?;
-            start += count;
-        }
-        Ok(out)
+        self.file.with_source(|source| {
+            let source = BaseOffsetSource {
+                inner: source,
+                base: self.file.addresses().effective_base(),
+            };
+            let mut chunks = matches!(spec.storage(), RawReadStorage::Chunked { .. })
+                .then(|| ChunkRead::new(spec, self.file.widths, &self.chunk_cache, pass));
+            let mut read_rows = |start, count| match &mut chunks {
+                Some(chunks) => chunks.read_rows(&source, start, count),
+                None => {
+                    let region = ReadRegion::rows(spec, start, count)?;
+                    read_region_framed(&source, &region, self.file.widths, &self.chunk_cache, pass)
+                }
+            };
+            let decoder = {
+                let raw = read_rows(0, rows)?;
+                // The reader returns errors from reading the first window before reserving output from
+                // file dimensions. It uses `try_reserve` to return allocation errors if that capacity
+                // is unavailable.
+                out.try_reserve(values)
+                    .map_err(|source| FormatError::AllocationFailed { values, source })?;
+                let decoder = NumericDecoder::<T>::parse(&dt)?;
+                decoder.append(&raw, &mut out)?;
+                decoder
+            };
+            let mut start = rows;
+            while start < n0 {
+                let count = rows.min(n0 - start);
+                let raw = read_rows(start, count)?;
+                decoder.append(&raw, &mut out)?;
+                start += count;
+            }
+            Ok(out)
+        })
     }
 
     /// Read all data as `f64` values.
@@ -9668,6 +9663,78 @@ mod tests {
     #[test]
     fn both_read_paths_agree_with_a_userblock() {
         assert_both_read_paths_agree(&both_paths_file_bytes(Some(512)), "512-byte userblock");
+    }
+
+    #[rstest]
+    #[case::no_retention(ChunkCacheConfig::disabled())]
+    #[case::index_only(ChunkCacheConfig::disabled().with_index_cache(true))]
+    #[case::payload_only(ChunkCacheConfig::new().with_index_cache(false))]
+    #[case::all_retained(ChunkCacheConfig::new())]
+    fn typed_sweeps_reuse_one_index_without_changing_retention(#[case] config: ChunkCacheConfig) {
+        use crate::parsed_chunk_index::test_support;
+
+        let n = 3 * 131_072 + 5;
+        let edge = 128;
+        let (bytes, expected) = chunked_f64_file(n, edge);
+        let file = File::from_bytes_with_options(
+            bytes,
+            FileAccessProperties::new().with_chunk_cache(config),
+        )
+        .unwrap();
+        let dataset = file.dataset("d").unwrap();
+        let layout = dataset.read_layout().unwrap();
+        let dataspace = dataset.dataspace().unwrap();
+        let rows = typed_window_rows(&layout, &dataspace, NonZeroUsize::new(8).unwrap())
+            .unwrap()
+            .get();
+        assert!(rows < n as u64);
+        let descriptors = n.div_ceil(edge as usize);
+        test_support::reset();
+        assert_eq!(dataset.read_f64().unwrap(), expected);
+        assert_eq!(test_support::counts(), (1, descriptors));
+        let stats = dataset.chunk_cache_stats();
+        assert_eq!(stats.index_loaded(), config.index_cache_enabled());
+        assert_eq!(stats.cached_chunks() != 0, config.max_slots() != 0);
+        test_support::reset();
+        assert_eq!(dataset.read_f64().unwrap(), expected);
+        assert_eq!(
+            test_support::counts(),
+            (usize::from(!config.index_cache_enabled()), descriptors)
+        );
+        assert_eq!(
+            dataset.chunk_cache_stats().index_loaded(),
+            config.index_cache_enabled()
+        );
+    }
+
+    #[rstest]
+    #[case::buffered(None)]
+    #[case::mirrored(Some(MemoryStrategy::Mirrored))]
+    #[case::bounded(Some(MemoryStrategy::Bounded))]
+    fn typed_sweeps_preserve_backend_address_framing(#[case] strategy: Option<MemoryStrategy>) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sweep.h5");
+        let n = 131_077;
+        let expected: Vec<f64> = (0..n).map(f64::from).collect();
+        let mut builder = FileBuilder::new();
+        builder
+            .create_dataset("d")
+            .with_f64_data(&expected)
+            .with_shape(&[n as u64])
+            .with_chunks(&[128]);
+        if strategy != Some(MemoryStrategy::Bounded) {
+            builder.with_userblock(UserblockSize::try_from(512).unwrap());
+        }
+        builder.write(&path).unwrap();
+        let options = FileAccessProperties::new().with_chunk_cache(ChunkCacheConfig::disabled());
+        let file = match strategy {
+            Some(strategy) => {
+                File::open_rw_with_options(&path, options.with_memory_strategy(strategy)).unwrap()
+            }
+            None => File::open_with_options(&path, options).unwrap(),
+        };
+        assert_eq!(file.dataset("d").unwrap().read_f64().unwrap(), expected);
+        file.close().unwrap();
     }
 
     /// One 256-element i32 dataset, chunked into 32-element chunks, in memory.

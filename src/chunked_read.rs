@@ -8,6 +8,8 @@ use alloc::{borrow::Cow, format, vec, vec::Vec};
 #[cfg(feature = "std")]
 use std::borrow::Cow;
 
+use alloc::sync::Arc;
+
 use core::mem::MaybeUninit;
 use core::num::{NonZeroU64, NonZeroUsize};
 
@@ -838,91 +840,174 @@ pub(crate) fn read_chunked_region_from_source(
     cache: &ChunkCache,
     pass: CachePass,
 ) -> Result<Vec<u8>, FormatError> {
-    let spec = region.spec();
-    let (dataspace, datatype, pipeline, fill) = (
-        spec.dataspace(),
-        spec.datatype(),
-        spec.pipeline(),
-        spec.fill(),
-    );
-    let RawReadStorage::Chunked {
-        flags,
-        chunk_dimensions,
-        index,
-    } = spec.storage()
-    else {
-        return Err(FormatError::ChunkedReadError(
-            "expected chunked layout".into(),
-        ));
-    };
+    ChunkRead::new(region.spec(), widths, cache, pass).read_region(source, region)
+}
 
-    let elem_size = crate::datatype::element_size_usize(datatype)?;
-    let (_, chunk_dims, _) = chunked_dims(chunk_dimensions, dataspace)?;
-    bounded_chunk_len(chunk_dims, elem_size)?;
+/// A chunked dataset reader with one parsed index shared across its row windows.
+///
+/// Loads the index on the first nonempty read of allocated storage and retains it until this
+/// reader is dropped. The index remains in [`ChunkCache`] after this reader is dropped only
+/// when index caching is enabled. The caller must use the same source, framed at the file's
+/// effective base address, for every read.
+pub(crate) struct ChunkRead<'spec, 'cache> {
+    spec: RawReadSpec<'spec>,
+    widths: FormatWidths,
+    cache: &'cache ChunkCache,
+    pass: CachePass,
+    parsed_index: Option<Arc<ParsedChunkIndex>>,
+}
 
-    if region.is_empty() {
-        return Ok(Vec::new());
-    }
-    if index.address().is_none() {
-        return fill.buffer(region.byte_len());
-    }
-    let chunk_dims_u64 = chunk_dims;
-    let parsed_index = cache.parsed_index_or_load(|| {
-        ParsedChunkIndex::new(
-            collect_chunks_for_layout_from_source(
-                source,
-                index,
-                chunk_dimensions,
-                dataspace,
-                elem_size.get() as u64,
-                widths,
-            )?,
-            chunk_dims_u64,
-            &dataspace.dimensions,
-        )
-    })?;
-    let selection = parsed_index.select(region)?;
-    let mut assembly = SelectedAssembly::new(selection)?;
-
-    let ctx = ChunkContext::from_datatype(chunk_dims_u64, datatype)?;
-
-    // Coalesce over selected chunks to bound spans by the region's payloads.
-    let mut spans = plan_chunk_spans(
-        cache,
-        assembly.selection.chunks().map(|selected| selected.chunk),
-    );
-
-    // One decoder for the whole window; see `FilterScratch`.
-    let mut scratch = FilterScratch::new();
-
-    let count = assembly.selection.chunks().len();
-    for position in 0..count {
-        let IndexedChunk { info: chunk, coord } = assembly
-            .selection
-            .chunk(position)
-            .ok_or_else(|| FormatError::Internal("selected chunk is absent".into()))?;
-        let hit = cache.with_decompressed(pass, coord, |bytes| assembly.place(bytes));
-        if let Some(copied) = hit {
-            copied?;
-            continue;
+impl<'spec, 'cache> ChunkRead<'spec, 'cache> {
+    /// Creates a reader without loading the chunk index.
+    pub(crate) fn new(
+        spec: RawReadSpec<'spec>,
+        widths: FormatWidths,
+        cache: &'cache ChunkCache,
+        pass: CachePass,
+    ) -> Self {
+        Self {
+            spec,
+            widths,
+            cache,
+            pass,
+            parsed_index: None,
         }
+    }
 
-        let len = chunk.chunk_size.to_usize()?;
-        let stored = match spans.as_mut() {
-            Some(sp) => Cow::Borrowed(sp.chunk_bytes(source, chunk.address, len)?),
-            None => Cow::Owned(source.read_exact_at(chunk.address.get(), len)?),
+    /// Reads complete rows after clamping the request to the leading dimension.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if byte strides overflow, and
+    /// [`FormatError::ValueTooLargeForPlatform`] if the result exceeds the platform's buffer
+    /// limit. Returns errors from selecting rows with [`ReadRegion::rows`] or reading them with
+    /// [`Self::read_region`].
+    pub(crate) fn read_rows(
+        &mut self,
+        source: &(impl Source + ?Sized),
+        start: u64,
+        count: u64,
+    ) -> Result<Vec<u8>, FormatError> {
+        let region = ReadRegion::rows(self.spec, start, count)?;
+        self.read_region(source, &region)
+    }
+
+    /// Reads a region using this reader's parsed chunk index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ChunkedReadError`] if the storage is not chunked or the chunk rank
+    /// differs from the dataspace rank, and [`FormatError::InvalidChunkGeometry`] if a decoded
+    /// chunk exceeds the allocation limit. Returns [`FormatError::ValueTooLargeForPlatform`] if
+    /// a buffer index exceeds [`usize::MAX`], and [`FormatError::OffsetOverflow`] if byte
+    /// arithmetic overflows. Returns [`FormatError::DataSizeMismatch`] if a present chunk
+    /// decodes to a byte length other than its full logical size,
+    /// [`FormatError::UnreadableFillValue`] if fill is required and unreadable, and errors from
+    /// reading the datatype, chunk index, filters, or payloads, or planning the selection.
+    fn read_region(
+        &mut self,
+        source: &(impl Source + ?Sized),
+        region: &ReadRegion<'_>,
+    ) -> Result<Vec<u8>, FormatError> {
+        let Self {
+            spec,
+            widths,
+            cache,
+            pass,
+            parsed_index,
+        } = self;
+        let spec = *spec;
+        let widths = *widths;
+        let cache = *cache;
+        let pass = *pass;
+        let (dataspace, datatype, pipeline, fill) = (
+            spec.dataspace(),
+            spec.datatype(),
+            spec.pipeline(),
+            spec.fill(),
+        );
+        let RawReadStorage::Chunked {
+            flags,
+            chunk_dimensions,
+            index,
+        } = spec.storage()
+        else {
+            return Err(FormatError::ChunkedReadError(
+                "expected chunked layout".into(),
+            ));
         };
-        let filtering =
-            ChunkFiltering::for_chunk(flags, chunk_dims_u64, &dataspace.dimensions, chunk);
-        let dec = decode_chunk(&mut scratch, stored, pipeline, ctx, filtering)?;
-        assembly.place(&dec)?;
-        match dec {
-            Cow::Owned(bytes) => cache.put_decompressed(pass, coord, bytes), // move
-            Cow::Borrowed(bytes) => cache.put_decompressed_slice(pass, coord, bytes),
-        }
-    }
 
-    assembly.finish()
+        let elem_size = crate::datatype::element_size_usize(datatype)?;
+        let (_, chunk_dims, _) = chunked_dims(chunk_dimensions, dataspace)?;
+        bounded_chunk_len(chunk_dims, elem_size)?;
+
+        if region.is_empty() {
+            return Ok(Vec::new());
+        }
+        if index.address().is_none() {
+            return fill.buffer(region.byte_len());
+        }
+        let chunk_dims_u64 = chunk_dims;
+        let parsed_index = match parsed_index {
+            Some(parsed) => parsed,
+            None => parsed_index.insert(cache.parsed_index_or_load(|| {
+                ParsedChunkIndex::new(
+                    collect_chunks_for_layout_from_source(
+                        source,
+                        index,
+                        chunk_dimensions,
+                        dataspace,
+                        elem_size.get() as u64,
+                        widths,
+                    )?,
+                    chunk_dims_u64,
+                    &dataspace.dimensions,
+                )
+            })?),
+        };
+        let selection = parsed_index.select(region)?;
+        let mut assembly = SelectedAssembly::new(selection)?;
+
+        let ctx = ChunkContext::from_datatype(chunk_dims_u64, datatype)?;
+
+        // Coalesce over selected chunks to bound spans by the region's payloads.
+        let mut spans = plan_chunk_spans(
+            cache,
+            assembly.selection.chunks().map(|selected| selected.chunk),
+        );
+
+        // One decoder for the whole window. See `FilterScratch`.
+        let mut scratch = FilterScratch::new();
+
+        let count = assembly.selection.chunks().len();
+        for position in 0..count {
+            let IndexedChunk { info: chunk, coord } = assembly
+                .selection
+                .chunk(position)
+                .ok_or_else(|| FormatError::Internal("selected chunk is absent".into()))?;
+            let hit = cache.with_decompressed(pass, coord, |bytes| assembly.place(bytes));
+            if let Some(copied) = hit {
+                copied?;
+                continue;
+            }
+
+            let len = chunk.chunk_size.to_usize()?;
+            let stored = match spans.as_mut() {
+                Some(sp) => Cow::Borrowed(sp.chunk_bytes(source, chunk.address, len)?),
+                None => Cow::Owned(source.read_exact_at(chunk.address.get(), len)?),
+            };
+            let filtering =
+                ChunkFiltering::for_chunk(flags, chunk_dims_u64, &dataspace.dimensions, chunk);
+            let dec = decode_chunk(&mut scratch, stored, pipeline, ctx, filtering)?;
+            assembly.place(&dec)?;
+            match dec {
+                Cow::Owned(bytes) => cache.put_decompressed(pass, coord, bytes), // move
+                Cow::Borrowed(bytes) => cache.put_decompressed_slice(pass, coord, bytes),
+            }
+        }
+
+        assembly.finish()
+    }
 }
 
 /// Output for a chunk selection, completed in descriptor order.
