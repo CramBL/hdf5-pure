@@ -2625,10 +2625,17 @@ fn a_libhdf5_manager_with_an_invalid_field_is_reported_and_seeds_no_free_space(
         .unwrap()
         .persisted_free_sections()
         .unwrap_err();
-    let Error::Format(FormatError::InvalidFreeSpaceManager(message)) = &err else {
-        panic!("expected InvalidFreeSpaceManager, got {err:?}");
-    };
-    assert_eq!(message, reason);
+    if at == 4 {
+        assert!(
+            matches!(err, Error::Format(FormatError::UnsupportedVersion(1))),
+            "{err:?}"
+        );
+    } else {
+        let Error::Format(FormatError::InvalidFreeSpaceManager(message)) = &err else {
+            panic!("expected InvalidFreeSpaceManager, got {err:?}");
+        };
+        assert_eq!(message, reason);
+    }
     assert_eq!(reusable_free_space(&path), Vec::new());
 }
 
