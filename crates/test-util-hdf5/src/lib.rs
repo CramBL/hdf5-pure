@@ -37,6 +37,8 @@ pub mod lock;
 pub mod mat_file;
 #[cfg(feature = "hdf5")]
 pub mod numeric;
+#[cfg(feature = "__hdf5-1.10")]
+pub mod page_publication;
 pub mod paged;
 pub mod reader;
 #[cfg(feature = "hdf5")]

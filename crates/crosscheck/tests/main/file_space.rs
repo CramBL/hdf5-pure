@@ -63,6 +63,8 @@ use test_util_hdf5::absence;
 use test_util_hdf5::dataset::Unlimited;
 use test_util_hdf5::file_space;
 use test_util_hdf5::file_space_oracle::FreeSpaceOracleCheckpoint;
+use test_util_hdf5::page_publication;
+use test_util_hdf5::page_publication::PublicationStrategy;
 use test_util_hdf5::paged;
 use test_util_hdf5::session;
 use test_util_hdf5::storage;
@@ -1071,20 +1073,14 @@ fn nonpersistent_page_publication_errors_preserve_c_created_objects(
 }
 
 #[rstest]
-#[case::persistent_page(FileSpaceStrategy::Page, true)]
-#[case::fsm_aggr(FileSpaceStrategy::FsmAggr, false)]
-#[case::aggr(FileSpaceStrategy::Aggr, false)]
-#[case::none(FileSpaceStrategy::None, false)]
-fn publication_failure_hook_rejects_other_strategies(
-    #[case] strategy: FileSpaceStrategy,
-    #[case] persist: bool,
-) {
+#[case::persistent_page(PublicationStrategy::PersistentPage)]
+#[case::fsm_aggr(PublicationStrategy::FsmAggr)]
+#[case::aggr(PublicationStrategy::Aggr)]
+#[case::none(PublicationStrategy::None)]
+fn publication_failure_hook_rejects_other_strategies(#[case] strategy: PublicationStrategy) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("unsupported.h5");
-    let mut builder = FileBuilder::new();
-    builder.with_file_space_settings(FileSpaceSettings::new(strategy).with_persistence(persist));
-    builder.create_dataset("keep").with_u8_data(&[7; 64]);
-    builder.write(&path).unwrap();
+    page_publication::write_unsupported_origin(&path, strategy);
     let before = std::fs::read(&path).unwrap();
     let Err(error) = publication::open_page_publication_failure(
         &path,
@@ -1190,69 +1186,14 @@ fn assert_preserved_page_bytes(before: &[u8], after: &[u8]) {
 
 /// Checks values through the C library, mutates a dataset, and verifies the result.
 fn assert_recovered_page_with_c(path: &Path) {
-    let file = hdf5::File::open_rw(path).unwrap();
-    let mut paths = file.member_names().unwrap();
-    paths.sort_unstable();
-    assert_eq!(paths, ["added", "group", "keep", "replace", "second"]);
-    for (path, value) in [("keep", 7), ("replace", 17), ("added", 9), ("second", 11)] {
-        assert_eq!(
-            file.dataset(path).unwrap().read_raw::<u8>().unwrap(),
-            [value; 64]
-        );
-    }
-    assert_eq!(
-        file.fcpl().unwrap().get_file_space_strategy().unwrap(),
-        CStrategy::FreeSpaceManager {
-            paged: true,
-            persist: false,
-            threshold: 1
-        }
-    );
-    assert_eq!(
-        file.fcpl().unwrap().get_file_space_page_size().unwrap(),
-        4096
-    );
-    file.dataset("second")
-        .unwrap()
-        .write_raw(&[29_u8; 64])
-        .unwrap();
-    file.close().unwrap();
+    page_publication::assert_recovered_and_mutate(path);
     assert_page_recovery_state(&File::open(path).unwrap(), &[("second", 29)]);
 }
 
 /// Writes matching datasets and a group attribute through either writer.
 fn write_nonpersistent_page_origin(path: &Path, page_size: u64, userblock: u64, c_origin: bool) {
     if c_origin {
-        let file = hdf5::FileBuilder::new()
-            .with_fapl(|fapl| fapl.libver_v110())
-            .with_fcpl(|fcpl| {
-                fcpl.userblock(userblock)
-                    .file_space_strategy(CStrategy::FreeSpaceManager {
-                        paged: true,
-                        persist: false,
-                        threshold: 1,
-                    })
-                    .file_space_page_size(page_size)
-            })
-            .create(path)
-            .unwrap();
-        for (name, value) in [("keep", 7), ("replace", 3), ("remove", 5)] {
-            file.new_dataset::<u8>()
-                .shape(64)
-                .create(name)
-                .unwrap()
-                .write_raw(&[value; 64])
-                .unwrap();
-        }
-        let group = file.create_group("group").unwrap();
-        group
-            .new_attr::<i32>()
-            .create("attribute")
-            .unwrap()
-            .write_scalar(&9)
-            .unwrap();
-        drop(group);
-        file.close().unwrap();
+        page_publication::write_origin(path, page_size, userblock);
     } else {
         let mut builder = FileBuilder::new();
         builder
