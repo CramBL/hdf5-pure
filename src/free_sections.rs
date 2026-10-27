@@ -1304,20 +1304,22 @@ mod tests {
 
     #[cfg(feature = "std")]
     #[rstest]
-    #[case::header(64, false)]
-    #[case::section_list(146, false)]
-    #[case::section_extent(0, true)]
-    fn acquisition_preserves_causes_and_manager_context(
-        #[case] fail_at: u64,
-        #[case] invalid_extent: bool,
-    ) {
+    #[case::header(AcquisitionFailure::Header)]
+    #[case::section_list(AcquisitionFailure::SectionList)]
+    #[case::section_extent(AcquisitionFailure::Extent)]
+    fn acquisition_preserves_causes_and_manager_context(#[case] failure: AcquisitionFailure) {
         use std::error::Error as StdError;
         use std::io;
 
         use crate::error::Error;
 
         let widths = FormatWidths::from_sizes(8, 8).unwrap();
-        let (bytes, info) = manager_file(widths, 0, if invalid_extent { 1000 } else { 256 }, 32);
+        let (fail_at, address) = match failure {
+            AcquisitionFailure::Header => (Some(64), 256),
+            AcquisitionFailure::SectionList => (Some(146), 256),
+            AcquisitionFailure::Extent => (None, 1000),
+        };
+        let (bytes, info) = manager_file(widths, 0, address, 32);
         let error = PersistedManagerSet::read(
             &Acquisition { bytes, fail_at },
             widths,
@@ -1339,9 +1341,9 @@ mod tests {
         assert_eq!((*manager_slot, header_address.get()), (0, 64));
         assert_eq!(
             *section_list_address,
-            (fail_at != 64).then_some(StoredAddress::new(146))
+            (fail_at != Some(64)).then_some(StoredAddress::new(146))
         );
-        if invalid_extent {
+        if matches!(failure, AcquisitionFailure::Extent) {
             assert_eq!(*section, Some((StoredAddress::new(1000), 32)));
             let Error::Format(FormatError::InvalidFreeSpaceManager(reason)) = &**source else {
                 panic!("{source:?}");
@@ -1365,9 +1367,16 @@ mod tests {
     }
 
     #[cfg(feature = "std")]
+    enum AcquisitionFailure {
+        Extent,
+        Header,
+        SectionList,
+    }
+
+    #[cfg(feature = "std")]
     struct Acquisition {
         bytes: Vec<u8>,
-        fail_at: u64,
+        fail_at: Option<u64>,
     }
     #[cfg(feature = "std")]
     impl PersistedManagerSource for Acquisition {
@@ -1376,7 +1385,7 @@ mod tests {
             self.bytes.len() as u64
         }
         fn read(&self, range: FileRange) -> Result<Vec<u8>, Self::Error> {
-            if range.start().get() == self.fail_at {
+            if Some(range.start().get()) == self.fail_at {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
                     "manager read denied",
@@ -1452,7 +1461,7 @@ mod tests {
         let error = PersistedManagerSet::read(
             &Acquisition {
                 bytes,
-                fail_at: u64::MAX,
+                fail_at: None,
             },
             widths,
             BaseAddress::ZERO,
@@ -1502,17 +1511,25 @@ mod tests {
     ) -> (Vec<u8>, FileSpaceInfo) {
         let header_address = StoredAddress::new(64);
         let list_address = StoredAddress::new(64 + format::free_space_manager_header_len(widths));
-        let (header, list) = format::serialize_free_space_manager(
-            widths,
-            &[StoredSection {
-                addr: StoredAddress::new(address),
-                size: length,
-            }],
-            header_address,
-            list_address,
-            format::SECTION_CLASS_SIMPLE,
-        )
-        .unwrap();
+        let (header, list) = if widths.offsets.get() == 8 && widths.lengths.get() == 8 {
+            test_util::free_space::raw_manager_eight(
+                header_address.get(),
+                list_address.get(),
+                &[(address, length)],
+            )
+        } else {
+            format::serialize_free_space_manager(
+                widths,
+                &[StoredSection {
+                    addr: StoredAddress::new(address),
+                    size: length,
+                }],
+                header_address,
+                list_address,
+                format::SECTION_CLASS_SIMPLE,
+            )
+            .unwrap()
+        };
         let mut bytes = vec![0; usize::try_from(base + 1024).unwrap()];
         let at = usize::try_from(base + 64).unwrap();
         bytes[at..at + header.len()].copy_from_slice(&header);

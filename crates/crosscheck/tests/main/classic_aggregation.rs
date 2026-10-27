@@ -837,7 +837,7 @@ fn assert_classic_fixture_partition(file: &File, bytes: &[u8], datasets: &[&str]
     let mut extents = storage::file_metadata_extents(file, bytes);
     for name in datasets {
         let address = storage::root_object_address(file, bytes, name);
-        extents.extend(storage::header_extents(file, bytes, address));
+        extents.extend(storage::header_extents(file.superblock(), bytes, address));
         extents.extend(
             file_space::raw_extents(file, name)
                 .iter()

@@ -837,7 +837,7 @@ fn released_regions(path: &Path) -> Vec<(u64, u64)> {
     let base = file.superblock().base_address.get();
     let extension = file.superblock().superblock_extension_address.unwrap();
     released.extend(
-        storage::header_extents(&file, &raw, base + extension.get())
+        storage::header_extents(file.superblock(), &raw, base + extension.get())
             .into_iter()
             .map(|(at, len)| (at - base, len)),
     );

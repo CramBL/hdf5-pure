@@ -25,6 +25,7 @@ use test_util::temp;
 use test_util::userblock::Userblock;
 use test_util_hdf5::file_space;
 use test_util_hdf5::paged;
+use test_util_hdf5::reader::ReadBackend;
 use test_util_hdf5::storage;
 
 #[cfg(not(feature = "checksum"))]
@@ -434,12 +435,12 @@ fn persisted_inspection_reports_overlapping_extents(
     bytes[header_at..header_at + header.len()].copy_from_slice(&header);
     bytes[list_at..list_at + list.len()].copy_from_slice(&list);
     std::fs::write(&path, bytes).unwrap();
-    let file = if streaming {
-        File::open_streaming(&path)
+    let backend = if streaming {
+        ReadBackend::Streaming
     } else {
-        File::open(&path)
-    }
-    .unwrap();
+        ReadBackend::Buffered
+    };
+    let file = backend.open(&path).unwrap();
     let error = file.persisted_free_sections().unwrap_err();
     let Error::OverlappingFreeSections {
         address: actual_address,
@@ -607,7 +608,7 @@ fn every_commit_keeps_the_userblock_and_writes_stored_manager_addresses(
         let mut allocated = storage::file_metadata_extents(&file, &bytes);
         for dataset in file.root().datasets().unwrap() {
             let address = storage::root_object_address(&file, &bytes, &dataset);
-            allocated.extend(storage::header_extents(&file, &bytes, address));
+            allocated.extend(storage::header_extents(file.superblock(), &bytes, address));
             allocated.extend(
                 file_space::raw_extents(&file, &dataset)
                     .iter()

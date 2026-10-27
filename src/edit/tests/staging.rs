@@ -108,9 +108,12 @@ fn staged_queries_report_only_explicit_creations() {
 }
 
 #[rstest]
-#[case::shuffle(FilterId::Shuffle)]
-#[case::deflate(FilterId::Deflate)]
-fn staged_dataset_metadata_respects_filter_availability(#[case] filter: FilterId) {
+#[case::shuffle(MetadataFilter::Shuffle, FilterId::Shuffle)]
+#[case::deflate(MetadataFilter::Deflate, FilterId::Deflate)]
+fn staged_dataset_metadata_respects_filter_availability(
+    #[case] filter: MetadataFilter,
+    #[case] expected: FilterId,
+) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("q.h5");
     let mut e = open_session(&path);
@@ -119,12 +122,13 @@ fn staged_dataset_metadata_respects_filter_availability(#[case] filter: FilterId
         .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[2]);
     match filter {
-        FilterId::Shuffle => col.with_shuffle(),
-        FilterId::Deflate => col.with_deflate(DeflateLevel::Four),
-        other => panic!("unexpected filter {other:?}"),
+        MetadataFilter::Deflate => col.with_deflate(DeflateLevel::Four),
+        MetadataFilter::Shuffle => col.with_shuffle(),
     };
     let staged = e.stage_created_dataset(&ObjectPathBuf::parse("col"), col);
-    if filter == FilterId::Deflate && !cfg!(any(feature = "deflate", feature = "fast-deflate")) {
+    if matches!(filter, MetadataFilter::Deflate)
+        && !cfg!(any(feature = "deflate", feature = "fast-deflate"))
+    {
         let error = staged.unwrap_err();
         let Error::EditUnsupported(reason) = error else {
             panic!("{error:?}");
@@ -145,7 +149,7 @@ fn staged_dataset_metadata_respects_filter_availability(#[case] filter: FilterId
         assert_eq!(meta.maxshape, Some(vec![MaxExtent::Unlimited]));
         assert_eq!(meta.datatype.type_size(), 4);
         assert!(meta.chunked);
-        assert_eq!(meta.filters, vec![(filter, false)]);
+        assert_eq!(meta.filters, vec![(expected, false)]);
     }
     e.stage_created_dataset(&ObjectPathBuf::parse("plain"), i32_dataset(&[5]))
         .unwrap();
@@ -166,7 +170,9 @@ fn staged_dataset_metadata_respects_filter_availability(#[case] filter: FilterId
     drop(e);
     let file = crate::File::open(&path).unwrap();
     assert_eq!(file.dataset("plain").unwrap().read_i32().unwrap(), [5]);
-    if filter != FilterId::Deflate || cfg!(any(feature = "deflate", feature = "fast-deflate")) {
+    if !matches!(filter, MetadataFilter::Deflate)
+        || cfg!(any(feature = "deflate", feature = "fast-deflate"))
+    {
         assert_eq!(
             file.dataset("col").unwrap().read_i32().unwrap(),
             [1, 2, 3, 4]
@@ -670,4 +676,10 @@ fn child_names(e: &WriteEngine, parent: &str) -> Vec<(String, StagedKind)> {
         .into_iter()
         .map(|c| (c.name, c.kind))
         .collect()
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MetadataFilter {
+    Deflate,
+    Shuffle,
 }

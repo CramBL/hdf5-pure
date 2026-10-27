@@ -2001,6 +2001,10 @@ mod tests {
         // including the Jenkins checksums the C library verifies on read.
         let fshd_fixture = free_space::single_section_header();
         let fsse_fixture = free_space::single_section_info();
+        assert_eq!(
+            free_space::raw_manager_eight(619, 701, &[(2848, 1600)]),
+            (fshd_fixture.clone(), fsse_fixture.clone())
+        );
         let (fshd, fsse) = serialize_free_space_manager(
             widths(8, 8),
             &[section(2848, 1600)],
@@ -2024,6 +2028,10 @@ mod tests {
         // emitted as two ascending size-groups.
         let fshd_fixture = free_space::two_section_header();
         let fsse_fixture = free_space::two_section_info();
+        assert_eq!(
+            free_space::raw_manager_eight(736, 818, &[(1155, 893), (871, 16)]),
+            (fshd_fixture.clone(), fsse_fixture.clone())
+        );
         let (fshd, fsse) = serialize_free_space_manager(
             widths(8, 8),
             &[section(1155, 893), section(871, 16)],

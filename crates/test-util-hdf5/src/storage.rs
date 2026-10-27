@@ -1,7 +1,7 @@
 //! Serialized storage extents and free-space assertions for controlled fixtures.
 //!
-//! Offsets are absolute byte positions. Each byte slice contains the image of the file passed
-//! alongside it.
+//! Offsets are absolute byte positions. Each byte slice contains a complete file image,
+//! including any userblock.
 
 use std::collections::BTreeSet;
 
@@ -10,6 +10,7 @@ use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FreeSectionCoordinates;
 use hdf5_pure::MessageType;
+use hdf5_pure::Superblock;
 use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::AccessMode;
@@ -38,7 +39,7 @@ pub fn file_metadata_extents(file: &File, bytes: &[u8]) -> Vec<(u64, u64)> {
         u64::try_from(format::serialize_superblock(sb).unwrap().len()).unwrap(),
     ));
     extents.extend(header_extents(
-        file,
+        sb,
         bytes,
         sb.base_address.absolute(sb.root_group_address).unwrap(),
     ));
@@ -46,7 +47,7 @@ pub fn file_metadata_extents(file: &File, bytes: &[u8]) -> Vec<(u64, u64)> {
         && !extension.is_undefined(sb.offset_size)
     {
         extents.extend(header_extents(
-            file,
+            sb,
             bytes,
             sb.base_address.absolute(extension).unwrap(),
         ));
@@ -95,6 +96,8 @@ pub fn manager_extents(file: &File, bytes: &[u8]) -> Vec<(u64, u64)> {
 
 /// Returns the sorted allocations of a version 2 object header and its continuation blocks.
 ///
+/// Uses the widths and base address in `superblock`.
+///
 /// The first allocation includes the checksum following chunk 0, as defined in "Version 2 Data
 /// Object Header Prefix" of the [format specification, version 4.0][spec].
 ///
@@ -104,8 +107,7 @@ pub fn manager_extents(file: &File, bytes: &[u8]) -> Vec<(u64, u64)> {
 /// or an address or size cannot be represented.
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_prefix_two
-pub fn header_extents(file: &File, bytes: &[u8], address: u64) -> Vec<(u64, u64)> {
-    let superblock = file.superblock();
+pub fn header_extents(superblock: &Superblock, bytes: &[u8], address: u64) -> Vec<(u64, u64)> {
     let widths = format::FormatWidths {
         offsets: superblock.offset_size,
         lengths: superblock.length_size,

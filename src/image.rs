@@ -1702,14 +1702,10 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::header(0, 1024, None)]
-    #[case::section_list(146, 1024, Some(146))]
-    #[case::unused_capacity(181, 181, Some(146))]
-    fn completed_manager_acquisition_preserves_context_and_io(
-        #[case] actual_len: usize,
-        #[case] recorded_len: u64,
-        #[case] list: Option<u64>,
-    ) {
+    #[case::header(ManagerRead::Header)]
+    #[case::section_list(ManagerRead::SectionList)]
+    #[case::unused_capacity(ManagerRead::Allocation)]
+    fn completed_manager_acquisition_preserves_context_and_io(#[case] read: ManagerRead) {
         use std::error::Error as StdError;
 
         use hdf5_pure_core::__private::FileSpaceInfoFields;
@@ -1725,18 +1721,14 @@ mod tests {
         use crate::free_sections::PersistedManagerSet;
 
         let widths = format::FormatWidths::from_sizes(8, 8).unwrap();
-        let (mut header, sections) = format::serialize_free_space_manager(
-            widths,
-            &[format::FreeSection {
-                addr: StoredAddress::new(256),
-                size: 32,
-            }],
-            StoredAddress::new(64),
-            StoredAddress::new(146),
-            format::SECTION_CLASS_SIMPLE,
-        )
-        .unwrap();
-        if recorded_len == 181 {
+        let (actual_len, recorded_len, list) = match read {
+            ManagerRead::Header => (0, 1024, None),
+            ManagerRead::SectionList => (146, 1024, Some(146)),
+            ManagerRead::Allocation => (181, 181, Some(146)),
+        };
+        let (mut header, sections) =
+            test_util::free_space::raw_manager_eight(64, 146, &[(256, 32)]);
+        if matches!(read, ManagerRead::Allocation) {
             header[70..78].copy_from_slice(&128u64.to_le_bytes());
             test_util::checksum::restamp(&mut header, 0, 82);
         }
@@ -1791,7 +1783,7 @@ mod tests {
                 None
             )
         );
-        if recorded_len == 181 {
+        if matches!(read, ManagerRead::Allocation) {
             let Error::Format(FormatError::UnexpectedSourceEof {
                 expected,
                 available,
@@ -1810,6 +1802,12 @@ mod tests {
                 .unwrap();
             assert_eq!(io.kind(), std::io::ErrorKind::UnexpectedEof);
         }
+    }
+
+    enum ManagerRead {
+        Allocation,
+        Header,
+        SectionList,
     }
 
     /// The two backings [`FileImage`] exists to make interchangeable. Every case
