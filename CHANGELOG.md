@@ -61,7 +61,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Performance
 
-- `Dataset::read_f64` and related chunked reads use a logical chunk lookup for row windows and regions, retaining physical-address order for payload reads. Selections spanning the leading dimension can inspect every descriptor.
+- `Dataset::read_f64` and related chunked reads reuse a logical chunk lookup across row windows even with index retention disabled, and use it for region reads. Payload reads retain physical-address order, and selections spanning the leading dimension can inspect every descriptor ([#943](https://github.com/CramBL/hdf5-pure/pull/943)).
 - Numeric dataset reads and writes, typed appends, and numeric attribute arrays use bulk byte copies when their primitive representation matches the host. `Dataset::read_f64` and related reads retain scalar decoding for conversions, opposite byte orders, and nonstandard layouts ([#936](https://github.com/CramBL/hdf5-pure/pull/936)).
 - `Dataset::read_raw` and related whole reads skip output initialization for dense chunked datasets, including those with unreadable fill metadata. Nonempty sparse reads retain fill initialization ([#921](https://github.com/CramBL/hdf5-pure/pull/921)).
 - `Dataset::read_raw` and related reads of a chunked dataset list its chunks from the retained chunk index without an allocation per chunk, and load an implicit chunk index without a list of its chunk positions beside it ([#902](https://github.com/CramBL/hdf5-pure/pull/902)).
@@ -69,7 +69,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- Fixed `Dataset::read_f64` and related chunked reads rejecting completely covered selections with unreadable fill metadata. Readable fill is required when complete coverage is unproven.
+- Fixed `Dataset::read_f64` and related chunked reads rejecting completely covered selections with unreadable fill metadata. Readable fill is required when complete coverage is unproven ([#943](https://github.com/CramBL/hdf5-pure/pull/943)).
 - Fixed `Dataset::fill_value` decoding eight-bit targets as raw bytes and accepting multi-element payloads. Numeric element conversions honor the source datatype, including on empty input ([#940](https://github.com/CramBL/hdf5-pure/pull/940)).
 - Fixed `File::commit` deleting distinct compact links whose encoded names decode to the same UTF-8 replacement character. Groups with invalid UTF-8 link names are rejected before writing ([#927](https://github.com/CramBL/hdf5-pure/pull/927)).
 - Fixed `Group::groups` and related reads misinterpreting tiny objects in 18-byte fractal-heap IDs ([#924](https://github.com/CramBL/hdf5-pure/pull/924)).

@@ -1,6 +1,7 @@
-//! PAGE publication recovery crosschecks against libhdf5.
+//! Dataset read and PAGE publication recovery crosschecks against libhdf5.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use rstest::rstest;
 use test_util::publication as publication_bytes;
@@ -13,8 +14,64 @@ use crate::Error;
 use crate::File;
 use crate::FileAccessProperties;
 use crate::FileSpaceStrategy;
+use crate::FormatError;
 use crate::SyncPolicy;
+use crate::chunk_cache::ChunkCacheConfig;
+use crate::message_type::MessageType;
 use crate::page_publication_failure::PagePublicationFailure;
+use crate::parsed_chunk_index::test_support;
+
+#[rstest]
+#[case::dense(false, false)]
+#[case::dense_unknown(false, true)]
+#[case::sparse(true, false)]
+#[case::sparse_unknown(true, true)]
+fn typed_sweeps_read_reference_chunks_without_retaining_indexes(
+    #[case] sparse: bool,
+    #[case] unknown: bool,
+    #[values(false, true)] streaming: bool,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sweep.h5");
+    let rows = 180_005;
+    let expected = test_util_hdf5::numeric::write_chunked_sweep(&path, rows, sparse);
+    let options = FileAccessProperties::new().with_chunk_cache(ChunkCacheConfig::disabled());
+    let file = if streaming {
+        File::open_streaming_with_options(&path, options).unwrap()
+    } else {
+        File::open_with_options(&path, options).unwrap()
+    };
+    let dataset = file.dataset("values").unwrap();
+    assert_eq!(dataset.shape().unwrap(), [rows as u64, 3]);
+    let descriptors = dataset.chunks().unwrap().len();
+    assert!(descriptors > 0);
+    if unknown {
+        let mut state = dataset.state.write().unwrap();
+        let state = Arc::get_mut(state.as_mut().unwrap()).unwrap();
+        let fill = state
+            .header
+            .messages
+            .iter_mut()
+            .find(|message| message.msg_type == MessageType::FILL_VALUE)
+            .unwrap();
+        fill.data = vec![u8::MAX];
+    }
+    test_support::reset();
+    if sparse && unknown {
+        let error = dataset.read_i32().unwrap_err();
+        assert!(
+            matches!(error, Error::Format(FormatError::UnreadableFillValue)),
+            "{error:?}"
+        );
+    } else {
+        assert_eq!(dataset.read_i32().unwrap(), expected);
+    }
+    assert_eq!(test_support::counts(), (1, descriptors));
+    assert!(!dataset.chunk_cache_stats().index_loaded());
+    assert_eq!(dataset.chunk_cache_stats().cached_chunks(), 0);
+    drop(dataset);
+    file.close().unwrap();
+}
 
 #[rstest]
 #[case::published(PagePublicationFailure::AfterPublish)]
