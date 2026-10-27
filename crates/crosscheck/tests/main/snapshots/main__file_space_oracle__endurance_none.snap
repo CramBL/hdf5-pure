@@ -15,9 +15,9 @@ file-space properties
 
 file sizes (absolute bytes)
   measurement                           bytes
-  hdf5-pure stored EOF                 365736
-  libhdf5 H5Fget_filesize              365736
-  physical file                        365736
+  hdf5-pure stored EOF                 417151
+  libhdf5 H5Fget_filesize              417151
+  physical file                        417151
 
 free-space sections (stored addresses, byte lengths)
   index |        hdf5-pure         |         libhdf5          | match
@@ -49,9 +49,9 @@ file-space properties
 
 file sizes (absolute bytes)
   measurement                           bytes
-  hdf5-pure stored EOF                 663692
-  libhdf5 H5Fget_filesize              663692
-  physical file                        663692
+  hdf5-pure stored EOF                 765731
+  libhdf5 H5Fget_filesize              765731
+  physical file                        765731
 
 free-space sections (stored addresses, byte lengths)
   index |        hdf5-pure         |         libhdf5          | match
@@ -83,9 +83,9 @@ file-space properties
 
 file sizes (absolute bytes)
   measurement                           bytes
-  hdf5-pure stored EOF                 961648
-  libhdf5 H5Fget_filesize              961648
-  physical file                        961648
+  hdf5-pure stored EOF                1114311
+  libhdf5 H5Fget_filesize             1114311
+  physical file                       1114311
 
 free-space sections (stored addresses, byte lengths)
   index |        hdf5-pure         |         libhdf5          | match
@@ -117,9 +117,9 @@ file-space properties
 
 file sizes (absolute bytes)
   measurement                           bytes
-  hdf5-pure stored EOF                1259604
-  libhdf5 H5Fget_filesize             1259604
-  physical file                       1259604
+  hdf5-pure stored EOF                1462891
+  libhdf5 H5Fget_filesize             1462891
+  physical file                       1462891
 
 free-space sections (stored addresses, byte lengths)
   index |        hdf5-pure         |         libhdf5          | match
@@ -151,9 +151,9 @@ file-space properties
 
 file sizes (absolute bytes)
   measurement                           bytes
-  hdf5-pure stored EOF                1557560
-  libhdf5 H5Fget_filesize             1557560
-  physical file                       1557560
+  hdf5-pure stored EOF                1811471
+  libhdf5 H5Fget_filesize             1811471
+  physical file                       1811471
 
 free-space sections (stored addresses, byte lengths)
   index |        hdf5-pure         |         libhdf5          | match
@@ -185,9 +185,9 @@ file-space properties
 
 file sizes (absolute bytes)
   measurement                           bytes
-  hdf5-pure stored EOF                1855516
-  libhdf5 H5Fget_filesize             1855516
-  physical file                       1855516
+  hdf5-pure stored EOF                2160051
+  libhdf5 H5Fget_filesize             2160051
+  physical file                       2160051
 
 free-space sections (stored addresses, byte lengths)
   index |        hdf5-pure         |         libhdf5          | match
@@ -219,9 +219,9 @@ file-space properties
 
 file sizes (absolute bytes)
   measurement                           bytes
-  hdf5-pure stored EOF                2153472
-  libhdf5 H5Fget_filesize             2153472
-  physical file                       2153472
+  hdf5-pure stored EOF                2508631
+  libhdf5 H5Fget_filesize             2508631
+  physical file                       2508631
 
 free-space sections (stored addresses, byte lengths)
   index |        hdf5-pure         |         libhdf5          | match
@@ -253,9 +253,9 @@ file-space properties
 
 file sizes (absolute bytes)
   measurement                           bytes
-  hdf5-pure stored EOF                2451428
-  libhdf5 H5Fget_filesize             2451428
-  physical file                       2451428
+  hdf5-pure stored EOF                2857211
+  libhdf5 H5Fget_filesize             2857211
+  physical file                       2857211
 
 free-space sections (stored addresses, byte lengths)
   index |        hdf5-pure         |         libhdf5          | match
@@ -287,9 +287,9 @@ file-space properties
 
 file sizes (absolute bytes)
   measurement                           bytes
-  hdf5-pure stored EOF                2749384
-  libhdf5 H5Fget_filesize             2749384
-  physical file                       2749384
+  hdf5-pure stored EOF                3205791
+  libhdf5 H5Fget_filesize             3205791
+  physical file                       3205791
 
 free-space sections (stored addresses, byte lengths)
   index |        hdf5-pure         |         libhdf5          | match
@@ -321,9 +321,9 @@ file-space properties
 
 file sizes (absolute bytes)
   measurement                           bytes
-  hdf5-pure stored EOF                3047340
-  libhdf5 H5Fget_filesize             3047340
-  physical file                       3047340
+  hdf5-pure stored EOF                3554371
+  libhdf5 H5Fget_filesize             3554371
+  physical file                       3554371
 
 free-space sections (stored addresses, byte lengths)
   index |        hdf5-pure         |         libhdf5          | match
@@ -355,9 +355,9 @@ file-space properties
 
 file sizes (absolute bytes)
   measurement                           bytes
-  hdf5-pure stored EOF                3345296
-  libhdf5 H5Fget_filesize             3345296
-  physical file                       3345296
+  hdf5-pure stored EOF                3902951
+  libhdf5 H5Fget_filesize             3902951
+  physical file                       3902951
 
 free-space sections (stored addresses, byte lengths)
   index |        hdf5-pure         |         libhdf5          | match
@@ -389,9 +389,9 @@ file-space properties
 
 file sizes (absolute bytes)
   measurement                           bytes
-  hdf5-pure stored EOF                3643252
-  libhdf5 H5Fget_filesize             3643252
-  physical file                       3643252
+  hdf5-pure stored EOF                4251531
+  libhdf5 H5Fget_filesize             4251531
+  physical file                       4251531
 
 free-space sections (stored addresses, byte lengths)
   index |        hdf5-pure         |         libhdf5          | match
@@ -423,9 +423,9 @@ file-space properties
 
 file sizes (absolute bytes)
   measurement                           bytes
-  hdf5-pure stored EOF                3941208
-  libhdf5 H5Fget_filesize             3941208
-  physical file                       3941208
+  hdf5-pure stored EOF                4600111
+  libhdf5 H5Fget_filesize             4600111
+  physical file                       4600111
 
 free-space sections (stored addresses, byte lengths)
   index |        hdf5-pure         |         libhdf5          | match
@@ -457,9 +457,9 @@ file-space properties
 
 file sizes (absolute bytes)
   measurement                           bytes
-  hdf5-pure stored EOF                4239164
-  libhdf5 H5Fget_filesize             4239164
-  physical file                       4239164
+  hdf5-pure stored EOF                4948691
+  libhdf5 H5Fget_filesize             4948691
+  physical file                       4948691
 
 free-space sections (stored addresses, byte lengths)
   index |        hdf5-pure         |         libhdf5          | match
@@ -491,9 +491,9 @@ file-space properties
 
 file sizes (absolute bytes)
   measurement                           bytes
-  hdf5-pure stored EOF                4537120
-  libhdf5 H5Fget_filesize             4537120
-  physical file                       4537120
+  hdf5-pure stored EOF                5297271
+  libhdf5 H5Fget_filesize             5297271
+  physical file                       5297271
 
 free-space sections (stored addresses, byte lengths)
   index |        hdf5-pure         |         libhdf5          | match
@@ -525,9 +525,9 @@ file-space properties
 
 file sizes (absolute bytes)
   measurement                           bytes
-  hdf5-pure stored EOF                4835076
-  libhdf5 H5Fget_filesize             4835076
-  physical file                       4835076
+  hdf5-pure stored EOF                5645851
+  libhdf5 H5Fget_filesize             5645851
+  physical file                       5645851
 
 free-space sections (stored addresses, byte lengths)
   index |        hdf5-pure         |         libhdf5          | match
@@ -559,9 +559,9 @@ file-space properties
 
 file sizes (absolute bytes)
   measurement                           bytes
-  hdf5-pure stored EOF                4835076
-  libhdf5 H5Fget_filesize             4835076
-  physical file                       4835076
+  hdf5-pure stored EOF                5645851
+  libhdf5 H5Fget_filesize             5645851
+  physical file                       5645851
 
 free-space sections (stored addresses, byte lengths)
   index |        hdf5-pure         |         libhdf5          | match

@@ -19,9 +19,9 @@ file
   top-level groups  : 16
 
 reusable space (writable session)
-  bytes             : 253002
-  sections          : 63
+  bytes             : 252517
+  sections          : 41
 
 persisted space (last close)
-  bytes             : 253002
-  sections          : 118
+  bytes             : 252517
+  sections          : 96

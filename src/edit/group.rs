@@ -1,9 +1,13 @@
-//! Group-link inspection and compact-link rewriting for staged edits.
+//! Group-link inspection, storage selection, and placement for staged edits.
 
+use hdf5_pure_format::__private::DenseLinkPlan;
+use hdf5_pure_format::__private::DenseLinkPlanError;
 use hdf5_pure_format::__private::GroupLinkStorage;
 use hdf5_pure_format::__private::LinkCreationPolicy;
 use hdf5_pure_format::__private::MessageRecordLayout;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
+
+use hdf5_pure_space::__private::AllocationClass;
 
 use crate::access_mode::AccessMode;
 use crate::address::StoredAddress;
@@ -18,6 +22,7 @@ use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
 use crate::source::SourceMetadata;
 use crate::symbol_table::SymbolTableMessage;
+use crate::width::LengthWidth;
 
 use super::WriteEngine;
 use super::group_links;
@@ -153,15 +158,21 @@ pub(super) struct GroupInfo {
 }
 
 impl GroupInfo {
-    /// Returns the message region and UTF-8 link names for compact-link editing.
+    /// Returns inline Link records and UTF-8 names for staged editing.
+    ///
+    /// Expands untracked dense links into the region and clears their storage addresses.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::EditUnsupported`] if the group uses dense link storage or a link
-    /// name is not valid UTF-8.
+    /// Returns [`Error::EditUnsupported`] if dense links track creation order or a link name is
+    /// not valid UTF-8. Returns a serialization error if a link cannot be encoded.
     pub(super) fn into_compact(self) -> Result<(OhRegion, Vec<String>), Error> {
-        let Self { region, links } = self;
-        if links.info().fractal_heap_address.is_some() {
+        let Self {
+            mut region,
+            mut links,
+        } = self;
+        let dense = links.info().fractal_heap_address.is_some();
+        if dense && links.creation_order() != LinkCreationPolicy::Untracked {
             return Err(Error::EditUnsupported(
                 "a target group uses dense (fractal-heap) link storage (not supported in place yet)",
             ));
@@ -177,7 +188,118 @@ impl GroupInfo {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        if dense {
+            links.use_compact_storage();
+            region.replace_link_info(&links.info())?;
+            for link in links.links() {
+                region.push(
+                    MessageType::LINK,
+                    &link
+                        .serialize(OFFSET_WIDTH)
+                        .map_err(group_links::storage_error)?,
+                );
+            }
+        }
         Ok((region, names))
+    }
+}
+
+impl WriteEngine {
+    /// Selects link storage from the final count and checks dense encoding before placement.
+    ///
+    /// Reads phase-change thresholds from Group Info, using the defaults when omitted.
+    /// Uses the minimum dense count if `was_dense` is `true` and the maximum compact count
+    /// otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if link metadata, thresholds, or the selected dense
+    /// representation cannot be reproduced. Returns parsing and source-read errors from inspection.
+    pub(super) fn plan_group_links(
+        &self,
+        region: &OhRegion,
+        was_dense: bool,
+    ) -> Result<bool, Error> {
+        let links = group_links::inspect(
+            self.image(),
+            self.context.addresses(),
+            self.context.widths(),
+            region,
+        )?;
+        let mut pos = 0;
+        let mut thresholds = group_links::phase_change(&GROUP_INFO_BODY)?;
+        while let Some((kind, body, end)) = region.next_message(pos)? {
+            if kind == MessageType::GROUP_INFO {
+                thresholds = group_links::phase_change(&region[body..end])?;
+                break;
+            }
+            pos = end;
+        }
+        let count = links.links().len();
+        let dense = if was_dense {
+            count >= usize::from(thresholds.min_dense())
+        } else {
+            count > usize::from(thresholds.max_compact())
+        };
+        if dense {
+            dense_link_plan(links, self.context.widths().lengths)?;
+        }
+        Ok(dense)
+    }
+
+    /// Places dense link metadata and replaces inline Link records with its addresses.
+    ///
+    /// Preserves the region when `dense` is `false`. The caller passes the storage decision
+    /// from [`Self::plan_group_links`] after resolving hard-link targets.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if link storage cannot be reproduced or Link Info is
+    /// absent. Returns inspection, serialization, allocation, and write errors during placement.
+    pub(super) fn place_group_links(
+        &mut self,
+        region: &mut OhRegion,
+        dense: bool,
+    ) -> Result<(), Error> {
+        if !dense {
+            return Ok(());
+        }
+        let storage = group_links::inspect(
+            self.image(),
+            self.context.addresses(),
+            self.context.widths(),
+            region,
+        )?;
+        let plan = dense_link_plan(storage, self.context.widths().lengths)?;
+        let (_, info) =
+            self.place_relocatable(plan.serialized_len(), AllocationClass::Metadata, |base| {
+                let image = plan.serialize(base).map_err(dense_link_error)?;
+                Ok((image.bytes, image.info))
+            })?;
+        let mut bytes = Vec::new();
+        let mut pos = 0;
+        while let Some((kind, _, end)) = region.next_message(pos)? {
+            if kind != MessageType::LINK {
+                bytes.extend_from_slice(&region[pos..end]);
+            }
+            pos = end;
+        }
+        *region = region.with_bytes(bytes);
+        region.replace_link_info(&info)
+    }
+}
+
+fn dense_link_plan(
+    storage: GroupLinkStorage,
+    length_width: LengthWidth,
+) -> Result<DenseLinkPlan, Error> {
+    DenseLinkPlan::new(storage, length_width).map_err(dense_link_error)
+}
+
+fn dense_link_error(error: DenseLinkPlanError) -> Error {
+    match error {
+        DenseLinkPlanError::Format(error) => error.into(),
+        _ => Error::EditUnsupported("a group's resulting links cannot be encoded in dense storage"),
     }
 }
 
@@ -492,5 +614,15 @@ impl OhRegion {
     ) {
         let record = encode_link_message(self.layout(), name, addr, creation_order);
         self.push_bytes(&record);
+    }
+
+    fn replace_link_info(&mut self, info: &LinkInfoMessage) -> Result<(), Error> {
+        let splice = self
+            .splice_first(MessageType::LINK_INFO)?
+            .ok_or(Error::EditUnsupported(
+                "a target group's object header has no link-info message",
+            ))?;
+        *self = self.with_bytes(splice.replace_body(&info.serialize(OFFSET_WIDTH))?);
+        Ok(())
     }
 }
