@@ -7998,6 +7998,107 @@ mod tests {
     use crate::message_flags::MessageFlags;
     use crate::{DatatypeByteOrder, FileBuilder};
 
+    #[test]
+    fn page_publication_failure_preserves_dataset_order_after_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("publication.h5");
+        let mut builder = FileBuilder::new();
+        builder.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::Page));
+        builder.create_dataset("keep").with_u8_data(&[7; 64]);
+        builder.write(&path).unwrap();
+        let file = File::open_page_publication_failure(
+            &path,
+            PagePublicationFailure::AfterPublish,
+            SyncPolicy::OnClose,
+            true,
+        )
+        .unwrap();
+        file.root()
+            .create_dataset("added", |dataset| {
+                dataset.with_u8_data(&[9; 64]);
+            })
+            .unwrap();
+        let error = file.commit().unwrap_err();
+        let Error::Io(error) = error else {
+            panic!("expected injected publication failure, got {error:?}");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert_eq!(error.to_string(), "injected PAGE publication failure");
+        assert_eq!(file.dataset("added").unwrap().read_u8().unwrap(), [9; 64]);
+        file.root()
+            .create_dataset("second", |dataset| {
+                dataset.with_u8_data(&[13; 64]);
+            })
+            .unwrap();
+        file.commit().unwrap();
+        drop(file);
+        let reopened = File::open(&path).unwrap();
+        assert_eq!(
+            reopened.root().datasets().unwrap(),
+            ["keep", "added", "second"]
+        );
+        assert_eq!(
+            reopened.dataset("keep").unwrap().read_u8().unwrap(),
+            [7; 64]
+        );
+        assert_eq!(
+            reopened.dataset("added").unwrap().read_u8().unwrap(),
+            [9; 64]
+        );
+        assert_eq!(
+            reopened.dataset("second").unwrap().read_u8().unwrap(),
+            [13; 64]
+        );
+        drop(reopened);
+        directory.close().unwrap();
+    }
+
+    #[test]
+    fn page_publication_snapshot_preserves_buffered_and_issued_states() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snapshot.h5");
+        let mut builder = FileBuilder::new();
+        builder.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::Page));
+        builder.create_dataset("keep").with_u8_data(&[7; 64]);
+        builder.write(&path).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let file = File::open_page_publication_failure(
+            &path,
+            PagePublicationFailure::AfterDrain,
+            SyncPolicy::OnClose,
+            true,
+        )
+        .unwrap();
+        file.root()
+            .create_dataset("added", |dataset| {
+                dataset.with_u8_data(&[9; 64]);
+            })
+            .unwrap();
+        assert_eq!(file.page_publication_snapshot().unwrap(), original);
+        let error = file.commit().unwrap_err();
+        let Error::Io(error) = error else {
+            panic!("expected injected publication failure, got {error:?}");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert_eq!(error.to_string(), "injected PAGE publication failure");
+        let published = file.page_publication_snapshot().unwrap();
+        let snapshot = File::from_bytes(published.clone()).unwrap();
+        assert_eq!(snapshot.root().datasets().unwrap(), ["keep", "added"]);
+        assert_eq!(
+            snapshot.dataset("keep").unwrap().read_u8().unwrap(),
+            [7; 64]
+        );
+        assert_eq!(
+            snapshot.dataset("added").unwrap().read_u8().unwrap(),
+            [9; 64]
+        );
+        assert_eq!(file.page_publication_snapshot().unwrap(), published);
+        drop(file);
+        assert_eq!(std::fs::read(&path).unwrap(), published);
+        drop(snapshot);
+        directory.close().unwrap();
+    }
+
     #[rstest]
     #[case::plain(0)]
     #[case::userblock(4_096)]
