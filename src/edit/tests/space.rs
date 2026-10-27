@@ -79,8 +79,7 @@ use crate::writer::FileBuilder;
 
 #[test]
 fn strict_persisted_recovery_retains_complete_metadata_allocations() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("manager-capacity.h5");
+    let path = test_util::temp::temp_path("manager-capacity.h5");
     test_util_hdf5::file_space::write_persisted_interior_hole(&path);
     let file = crate::File::open(&path).unwrap();
     let report = file.persisted_free_sections().unwrap().unwrap();
@@ -141,8 +140,7 @@ fn strict_persisted_recovery_retains_complete_metadata_allocations() {
 
 #[test]
 fn strict_persisted_failure_precedes_image_construction() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("manager-failure.h5");
+    let path = test_util::temp::temp_path("manager-failure.h5");
     test_util_hdf5::file_space::write_persisted_interior_hole(&path);
     let mut bytes = std::fs::read(&path).unwrap();
     let at = test_util::bytes::find_signature(&bytes, test_util::free_space::SIGNATURE).unwrap();

@@ -65,8 +65,7 @@ pub enum PersistedStrategy {
 ///     ManagerSlot, PersistedImage, PersistedStrategy, SECTION,
 /// };
 ///
-/// # let directory = tempfile::tempdir()?;
-/// # let path = directory.path().join("persisted.h5");
+/// # let path = test_util::temp::temp_path("persisted.h5");
 /// let mut image = PersistedImage::new(&path, PersistedStrategy::Page, 1);
 /// image.manager(ManagerSlot::Metadata, &[(SECTION, 32)]);
 /// let bytes = image.write(&path);

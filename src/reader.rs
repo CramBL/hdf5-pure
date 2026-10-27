@@ -757,8 +757,7 @@ impl FileAccessProperties {
     /// ```
     /// use hdf5_pure::{File, FileAccessProperties, PersistedFreeSpacePolicy};
     ///
-    /// # let directory = tempfile::tempdir()?;
-    /// # let path = directory.path().join("strict-open.h5");
+    /// # let path = test_util::temp::temp_path("strict-open.h5");
     /// # hdf5_pure::FileBuilder::new().write(&path)?;
     /// let properties = FileAccessProperties::new()
     ///     .with_persisted_free_space_policy(PersistedFreeSpacePolicy::Strict);
