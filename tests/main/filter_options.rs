@@ -65,18 +65,51 @@ fn deflate_preserves_typed_level(
 }
 
 #[rstest]
-#[case(2, 1, vec![], FormatError::InvalidFilterParameterCount { filter_id: 1, expected: 1, actual: 0 })]
-#[case(2, 1, vec![10], FormatError::InvalidDeflateLevel { level: 10 })]
-#[case(2, 2, vec![0], FormatError::InvalidShuffleElementSize { size: 0 })]
-#[case(2, 0, vec![4], FormatError::InvalidFilterId { id: 0 })]
-#[case(99, 2, vec![4], FormatError::InvalidFilterPipelineVersion(99))]
+#[case::chunks(FilterAccessor::Chunks)]
+#[case::filters(FilterAccessor::Filters)]
+#[case::pipeline(FilterAccessor::Pipeline)]
 fn filter_accessors_report_malformed_metadata(
-    #[case] version: u8,
-    #[case] id: u16,
-    #[case] values: Vec<u32>,
-    #[case] expected: FormatError,
-    #[values(0, 1, 2)] accessor: u8,
+    #[case] accessor: FilterAccessor,
+    #[values(
+        MalformedFilter::MissingDeflateParameter,
+        MalformedFilter::InvalidDeflateLevel,
+        MalformedFilter::ZeroShuffleSize,
+        MalformedFilter::ReservedId,
+        MalformedFilter::UnknownVersion
+    )]
+    malformed: MalformedFilter,
 ) {
+    let (version, id, values, expected) = match malformed {
+        MalformedFilter::InvalidDeflateLevel => (
+            2,
+            1,
+            vec![10],
+            FormatError::InvalidDeflateLevel { level: 10 },
+        ),
+        MalformedFilter::MissingDeflateParameter => (
+            2,
+            1,
+            vec![],
+            FormatError::InvalidFilterParameterCount {
+                filter_id: 1,
+                expected: 1,
+                actual: 0,
+            },
+        ),
+        MalformedFilter::ReservedId => (2, 0, vec![4], FormatError::InvalidFilterId { id: 0 }),
+        MalformedFilter::UnknownVersion => (
+            99,
+            2,
+            vec![4],
+            FormatError::InvalidFilterPipelineVersion(99),
+        ),
+        MalformedFilter::ZeroShuffleSize => (
+            2,
+            2,
+            vec![0],
+            FormatError::InvalidShuffleElementSize { size: 0 },
+        ),
+    };
     let mut builder = FileBuilder::new();
     builder
         .create_dataset("data")
@@ -98,9 +131,9 @@ fn filter_accessors_report_malformed_metadata(
     replace_pipeline(&mut bytes, &body);
     let dataset = File::from_bytes(bytes).unwrap().dataset("data").unwrap();
     let error = match accessor {
-        0 => dataset.filter_pipeline().map(|_| ()).unwrap_err(),
-        1 => dataset.filters().map(|_| ()).unwrap_err(),
-        _ => dataset.chunks().map(|_| ()).unwrap_err(),
+        FilterAccessor::Chunks => dataset.chunks().unwrap_err(),
+        FilterAccessor::Filters => dataset.filters().unwrap_err(),
+        FilterAccessor::Pipeline => dataset.filter_pipeline().unwrap_err(),
     };
     let Error::Format(actual) = error else {
         panic!("expected format error, got {error:?}")
@@ -188,6 +221,22 @@ fn staged_filter_parameters_are_pending_until_commit() {
     assert_eq!(parsed[1].client_data(), [6]);
     assert!(!parsed[0].is_optional);
     assert!(!parsed[1].is_optional);
+}
+
+#[derive(Clone, Copy)]
+enum FilterAccessor {
+    Chunks,
+    Filters,
+    Pipeline,
+}
+
+#[derive(Clone, Copy)]
+enum MalformedFilter {
+    InvalidDeflateLevel,
+    MissingDeflateParameter,
+    ReservedId,
+    UnknownVersion,
+    ZeroShuffleSize,
 }
 
 fn replace_pipeline(bytes: &mut [u8], body: &[u8]) {
