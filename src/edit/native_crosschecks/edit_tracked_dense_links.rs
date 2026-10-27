@@ -2,11 +2,6 @@
 
 use std::path::Path;
 
-use crate::__private;
-use crate::AttrValue;
-use crate::CharacterSet;
-use crate::Error;
-use crate::MessageType;
 use hdf5_pure_format::__private::BTREE_V2_LINK_CREATION_ORDER;
 use hdf5_pure_format::__private::BTreeV2Header;
 use hdf5_pure_format::__private::GroupLinkStorage;
@@ -18,6 +13,12 @@ use rstest::rstest;
 use test_util_hdf5::creation_order;
 use test_util_hdf5::creation_order::Indexing;
 use test_util_hdf5::dense_links::GroupOrder;
+
+use crate::AttrValue;
+use crate::CharacterSet;
+use crate::Error;
+use crate::MessageType;
+use crate::edit::group_inspection;
 
 #[rstest]
 #[case::compact_boundary(8, 0, 1, (8, 6), true)]
@@ -42,7 +43,7 @@ fn tracked_storage_transitions_preserve_indexes_and_the_next_counter(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("transition.h5");
     creation_order::write_link_fixture(&path, group_path, count, indexing, thresholds);
-    let file = __private::open_group_inspection(&path, source_only).unwrap();
+    let file = group_inspection::open_group_inspection(&path, source_only).unwrap();
     let group = file.group(group_path).unwrap();
     for index in 0..removed {
         group.delete(&format!("link_{index:04}")).unwrap();
@@ -83,7 +84,7 @@ fn tracked_creation_indexes_keep_deletion_gaps_across_repeated_transitions(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("gaps.h5");
     creation_order::write_link_fixture(&path, "/", 9, indexing, (8, 6));
-    let file = __private::open_group_inspection(&path, source_only).unwrap();
+    let file = group_inspection::open_group_inspection(&path, source_only).unwrap();
     for index in 1..6 {
         file.root().delete(&format!("link_{index:04}")).unwrap();
     }
@@ -94,7 +95,7 @@ fn tracked_creation_indexes_keep_deletion_gaps_across_repeated_transitions(
         .map(|index| (format!("link_{index:04}"), index))
         .collect::<Vec<_>>();
     assert_group(&path, "/", &expected, 9, indexing, false, source_only);
-    let file = __private::open_group_inspection(&path, source_only).unwrap();
+    let file = group_inspection::open_group_inspection(&path, source_only).unwrap();
     file.root().delete("link_0008").unwrap();
     file.commit().unwrap();
     for index in 0..5 {
@@ -107,7 +108,7 @@ fn tracked_creation_indexes_keep_deletion_gaps_across_repeated_transitions(
     expected.pop();
     expected.extend((0..5).map(|index| (format!("added_{index:04}"), 9 + index)));
     assert_group(&path, "/", &expected, 14, indexing, false, source_only);
-    let file = __private::open_group_inspection(&path, source_only).unwrap();
+    let file = group_inspection::open_group_inspection(&path, source_only).unwrap();
     file.root().create_group("last").unwrap();
     file.commit().unwrap();
     drop(file);
@@ -127,7 +128,7 @@ fn tracked_dense_additions_and_replacements_assign_monotonic_indexes(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("additions.h5");
     creation_order::write_link_fixture(&path, "/", 9, indexing, (8, 6));
-    let file = __private::open_group_inspection(&path, source_only).unwrap();
+    let file = group_inspection::open_group_inspection(&path, source_only).unwrap();
     file.root().delete("link_0000").unwrap();
     file.root()
         .create_dataset("link_0000", |dataset| {
@@ -165,17 +166,17 @@ fn tracked_dense_ancestors_preserve_indexes_when_a_dataset_header_moves(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ancestors.h5");
     creation_order::write_link_ancestor_fixture(&path, indexing);
-    let before_root = __private::inspect_group_links(&path, "/", source_only).unwrap();
-    let before_child = __private::inspect_group_links(&path, "/child", source_only).unwrap();
-    let file = __private::open_group_inspection(&path, source_only).unwrap();
+    let before_root = group_inspection::inspect_group_links(&path, "/", source_only).unwrap();
+    let before_child = group_inspection::inspect_group_links(&path, "/child", source_only).unwrap();
+    let file = group_inspection::open_group_inspection(&path, source_only).unwrap();
     file.dataset("child/link_0003")
         .unwrap()
         .set_attr("added", AttrValue::I64(99))
         .unwrap();
     file.commit().unwrap();
     drop(file);
-    let root = __private::inspect_group_links(&path, "/", source_only).unwrap();
-    let child = __private::inspect_group_links(&path, "/child", source_only).unwrap();
+    let root = group_inspection::inspect_group_links(&path, "/", source_only).unwrap();
+    let child = group_inspection::inspect_group_links(&path, "/child", source_only).unwrap();
     assert_ne!(
         root.object_header_address,
         before_root.object_header_address
@@ -197,21 +198,14 @@ fn tracked_multilevel_indexes_preserve_symbolic_links_and_creation_order(
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("multilevel.h5");
-    let policy = if indexing == Indexing::Yes {
-        "indexed"
+    let order = if indexing == Indexing::Yes {
+        GroupOrder::Indexed
     } else {
-        "tracked"
+        GroupOrder::Tracked
     };
-    test_util_hdf5::dense_links::write_inspection_fixture(
-        &path,
-        if indexing == Indexing::Yes {
-            GroupOrder::Indexed
-        } else {
-            GroupOrder::Tracked
-        },
-    );
-    let group_path = format!("dense_{policy}");
-    let before = __private::inspect_group_links(&path, &group_path, source_only).unwrap();
+    test_util_hdf5::dense_links::write_inspection_fixture(&path, order);
+    let group_path = format!("dense_{}", order.label());
+    let before = group_inspection::inspect_group_links(&path, &group_path, source_only).unwrap();
     let mut expected = before
         .links
         .links()
@@ -220,14 +214,14 @@ fn tracked_multilevel_indexes_preserve_symbolic_links_and_creation_order(
         .cloned()
         .collect::<Vec<_>>();
     let next = before.links.info().max_creation_order.unwrap();
-    let file = __private::open_group_inspection(&path, source_only).unwrap();
+    let file = group_inspection::open_group_inspection(&path, source_only).unwrap();
     let group = file.group(&group_path).unwrap();
     group.delete("hard").unwrap();
     group.create_group("added").unwrap();
     file.commit().unwrap();
     drop(group);
     drop(file);
-    let after = __private::inspect_group_links(&path, &group_path, source_only).unwrap();
+    let after = group_inspection::inspect_group_links(&path, &group_path, source_only).unwrap();
     let added = after
         .links
         .links()
@@ -317,7 +311,7 @@ fn exhausted_dense_creation_counters_reject_the_batch_before_writing(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("exhausted.h5");
     creation_order::write_link_fixture(&path, "/", 12, indexing, (8, 6));
-    let inspection = __private::inspect_group_links(&path, "/", source_only).unwrap();
+    let inspection = group_inspection::inspect_group_links(&path, "/", source_only).unwrap();
     let mut bytes = std::fs::read(&path).unwrap();
     let root = 512 + usize::try_from(inspection.object_header_address.get()).unwrap();
     let prefix = ObjectHeaderPrefix::parse(&bytes[root..]).unwrap();
@@ -345,7 +339,7 @@ fn exhausted_dense_creation_counters_reject_the_batch_before_writing(
     assert!(replaced);
     test_util::checksum::restamp(&mut bytes, root, end + test_util::checksum::CHECKSUM - root);
     std::fs::write(&path, &bytes).unwrap();
-    let file = __private::open_group_inspection(&path, source_only).unwrap();
+    let file = group_inspection::open_group_inspection(&path, source_only).unwrap();
     file.root().delete("link_0000").unwrap();
     file.root().create_group("added").unwrap();
     let error = file.commit().unwrap_err();
@@ -358,8 +352,8 @@ fn exhausted_dense_creation_counters_reject_the_batch_before_writing(
         ),
         "{error:?}"
     );
-    assert_eq!(__private::group_inspection_snapshot(&file).unwrap(), bytes);
-    assert_eq!(__private::page_publication_snapshot(&file).unwrap(), bytes);
+    assert_eq!(file.group_inspection_snapshot().unwrap(), bytes);
+    assert_eq!(file.page_publication_snapshot().unwrap(), bytes);
     drop(file);
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
     dir.close().unwrap();
@@ -389,7 +383,7 @@ fn assert_group(
     dense: bool,
     source_only: bool,
 ) {
-    let inspection = __private::inspect_group_links(path, group_path, source_only).unwrap();
+    let inspection = group_inspection::inspect_group_links(path, group_path, source_only).unwrap();
     assert_eq!(indexes(&inspection.links), expected);
     let info = inspection.links.info();
     assert_eq!(info.max_creation_order, Some(next));

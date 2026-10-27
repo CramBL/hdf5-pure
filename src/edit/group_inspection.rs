@@ -16,13 +16,13 @@ use crate::message_type::MessageType;
 use crate::object_path::ObjectPath;
 
 /// A group's stored address, link metadata, and Group Info message body.
-pub struct GroupLinkInspection {
+pub(super) struct GroupLinkInspection {
     /// The address used by hard links to this group.
-    pub object_header_address: StoredAddress,
+    pub(super) object_header_address: StoredAddress,
     /// Links with their encoded names, targets, and creation indexes.
-    pub links: GroupLinkStorage,
+    pub(super) links: GroupLinkStorage,
     /// The Group Info message body, including any stored phase-change thresholds.
-    pub group_info: Vec<u8>,
+    pub(super) group_info: Vec<u8>,
 }
 
 /// Opens a file and reads a group's links and storage metadata for crosschecks.
@@ -37,7 +37,7 @@ pub struct GroupLinkInspection {
 /// be reproduced by the editor. Returns opening, path-resolution, parsing, and source-read
 /// errors from the editor. Returns [`FormatError::Internal`] if the inspected group has no
 /// Group Info message.
-pub fn inspect_group_links(
+pub(super) fn inspect_group_links(
     path: &Path,
     group_path: &str,
     source_only: bool,
@@ -79,21 +79,10 @@ pub fn inspect_group_links(
 ///
 /// Returns [`Error::Io`] if `path` cannot be opened for reading and writing. Returns locking,
 /// format, and configuration errors from the editor.
-pub fn open_group_inspection(path: &Path, source_only: bool) -> Result<File, Error> {
+pub(super) fn open_group_inspection(path: &Path, source_only: bool) -> Result<File, Error> {
     if source_only {
         File::open_rw_source_only(path)
     } else {
         File::open_rw(path)
     }
-}
-
-/// Reads the editing session's complete image, including buffered changes.
-///
-/// # Errors
-///
-/// Returns [`Error::ReadOnly`] if `file` has no editing session, [`Error::FileClosed`] if it is
-/// closed, or [`Error::Format`] if the image length exceeds [`usize::MAX`] or the source read
-/// fails.
-pub fn group_inspection_snapshot(file: &File) -> Result<Vec<u8>, Error> {
-    file.group_inspection_snapshot()
 }

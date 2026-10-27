@@ -10,14 +10,6 @@ use crate::File;
 #[cfg(feature = "__page-publication-crosscheck")]
 use crate::SyncPolicy;
 
-#[cfg(feature = "__group-link-inspection-crosscheck")]
-pub use crate::edit::group_inspection::GroupLinkInspection;
-#[cfg(feature = "__group-link-inspection-crosscheck")]
-pub use crate::edit::group_inspection::group_inspection_snapshot;
-#[cfg(feature = "__group-link-inspection-crosscheck")]
-pub use crate::edit::group_inspection::inspect_group_links;
-#[cfg(feature = "__group-link-inspection-crosscheck")]
-pub use crate::edit::group_inspection::open_group_inspection;
 #[cfg(feature = "__page-publication-crosscheck")]
 pub use crate::page_publication_failure::PagePublicationFailure;
 

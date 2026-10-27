@@ -1440,17 +1440,17 @@ impl FileImage for TornWriteImage {
 /// A whole-file mirror for reads through [`Source`].
 ///
 /// The reader uses [`Source::read_at`] for every read.
-#[cfg(any(test, feature = "__group-link-inspection-crosscheck"))]
+#[cfg(test)]
 pub(crate) struct SourceOnlyImage(MirrorImage);
 
-#[cfg(any(test, feature = "__group-link-inspection-crosscheck"))]
+#[cfg(test)]
 impl SourceOnlyImage {
     pub(crate) fn new(inner: MirrorImage) -> Self {
         Self(inner)
     }
 }
 
-#[cfg(any(test, feature = "__group-link-inspection-crosscheck"))]
+#[cfg(test)]
 impl Source for SourceOnlyImage {
     fn len(&self) -> u64 {
         self.0.len()
@@ -1461,7 +1461,7 @@ impl Source for SourceOnlyImage {
     }
 }
 
-#[cfg(any(test, feature = "__group-link-inspection-crosscheck"))]
+#[cfg(test)]
 impl FileImage for SourceOnlyImage {
     fn read_disk_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
         self.0.read_disk_at(offset, bytes)

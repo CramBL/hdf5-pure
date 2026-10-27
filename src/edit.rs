@@ -359,10 +359,9 @@ mod global_heap_liveness;
 #[cfg(test)]
 mod global_heap_liveness_tests;
 mod group;
-#[cfg(feature = "__group-link-inspection-crosscheck")]
-pub(crate) mod group_inspection;
 #[cfg(test)]
 test_util_hdf5::hdf5_1_10_tests! {
+    mod group_inspection;
     mod native_crosschecks;
 }
 mod group_links;
@@ -1315,7 +1314,7 @@ impl WriteEngine {
     ///
     /// Returns [`Error::Io`] if `path` cannot be opened for reading and writing. Returns the
     /// locking and format errors of [`Self::open_with_locking`].
-    #[cfg(any(test, feature = "__group-link-inspection-crosscheck"))]
+    #[cfg(test)]
     pub(crate) fn open_source_only(path: &Path) -> Result<Self, Error> {
         Self::open_imaged(path, Some(FileLocking::Enabled), |handle, _len| {
             Ok(Box::new(crate::image::SourceOnlyImage::new(
