@@ -17,7 +17,8 @@ use crate::chunk_cache::ChunkCache;
 use crate::chunked_read;
 #[cfg(test)]
 use crate::data_layout::DataLayout;
-use crate::data_read::primitive::{FromEndianBytes, H5Conversion, NumericReadTarget};
+pub(crate) use crate::data_read::primitive::NumericReadTarget;
+use crate::data_read::primitive::{FromEndianBytes, H5Conversion};
 #[cfg(test)]
 use crate::dataspace::Dataspace;
 use crate::datatype::Datatype;
@@ -180,7 +181,8 @@ pub fn read_as_f64(raw: &[u8], datatype: &Datatype) -> Result<Vec<f64>, FormatEr
 ///
 /// On error `out` holds an unspecified prefix of this call's values: every
 /// caller abandons the buffer
-pub fn read_as_f64_into(
+#[cfg(test)]
+fn read_as_f64_into(
     src: &[u8],
     datatype: &Datatype,
     dst: &mut Vec<f64>,
@@ -205,15 +207,18 @@ pub fn read_as_u16(src: &[u8], datatype: &Datatype) -> Result<Vec<u16>, FormatEr
     NumericDecoder::parse(datatype)?.decode(src)
 }
 
-pub fn read_as_u64_into(src: &[u8], dt: &Datatype, dst: &mut Vec<u64>) -> Result<(), FormatError> {
+#[cfg(test)]
+fn read_as_u64_into(src: &[u8], dt: &Datatype, dst: &mut Vec<u64>) -> Result<(), FormatError> {
     read_numeric_into(src, dt, dst)
 }
 
-pub fn read_as_u32_into(src: &[u8], dt: &Datatype, dst: &mut Vec<u32>) -> Result<(), FormatError> {
+#[cfg(test)]
+fn read_as_u32_into(src: &[u8], dt: &Datatype, dst: &mut Vec<u32>) -> Result<(), FormatError> {
     read_numeric_into(src, dt, dst)
 }
 
-pub fn read_as_u16_into(src: &[u8], dt: &Datatype, dst: &mut Vec<u16>) -> Result<(), FormatError> {
+#[cfg(test)]
+fn read_as_u16_into(src: &[u8], dt: &Datatype, dst: &mut Vec<u16>) -> Result<(), FormatError> {
     read_numeric_into(src, dt, dst)
 }
 
@@ -221,7 +226,8 @@ pub fn read_as_u8(src: &[u8], datatype: &Datatype) -> Result<Vec<u8>, FormatErro
     NumericDecoder::parse(datatype)?.decode(src)
 }
 
-pub fn read_as_u8_into(src: &[u8], dt: &Datatype, dst: &mut Vec<u8>) -> Result<(), FormatError> {
+#[cfg(test)]
+fn read_as_u8_into(src: &[u8], dt: &Datatype, dst: &mut Vec<u8>) -> Result<(), FormatError> {
     read_numeric_into(src, dt, dst)
 }
 
@@ -235,7 +241,8 @@ pub fn read_as_f32(src: &[u8], datatype: &Datatype) -> Result<Vec<f32>, FormatEr
 ///
 /// On error `out` holds an unspecified prefix of this call's values: every
 /// caller abandons the buffer
-pub fn read_as_f32_into(
+#[cfg(test)]
+fn read_as_f32_into(
     src: &[u8],
     datatype: &Datatype,
     dst: &mut Vec<f32>,
@@ -263,7 +270,8 @@ pub fn read_as_i8(src: &[u8], datatype: &Datatype) -> Result<Vec<i8>, FormatErro
     NumericDecoder::parse(datatype)?.decode(src)
 }
 
-pub fn read_as_i64_into(src: &[u8], dt: &Datatype, dst: &mut Vec<i64>) -> Result<(), FormatError> {
+#[cfg(test)]
+fn read_as_i64_into(src: &[u8], dt: &Datatype, dst: &mut Vec<i64>) -> Result<(), FormatError> {
     read_numeric_into(src, dt, dst)
 }
 
@@ -272,7 +280,8 @@ pub fn read_as_i64_into(src: &[u8], dt: &Datatype, dst: &mut Vec<i64>) -> Result
 ///
 /// On error `dst` holds an unspecified prefix of this call's values: every
 /// caller abandons the buffer
-pub fn read_as_i32_into(src: &[u8], dt: &Datatype, dst: &mut Vec<i32>) -> Result<(), FormatError> {
+#[cfg(test)]
+fn read_as_i32_into(src: &[u8], dt: &Datatype, dst: &mut Vec<i32>) -> Result<(), FormatError> {
     read_numeric_into(src, dt, dst)
 }
 
@@ -281,11 +290,13 @@ pub fn read_as_i32_into(src: &[u8], dt: &Datatype, dst: &mut Vec<i32>) -> Result
 ///
 /// On error `dst` holds an unspecified prefix of this call's values: every
 /// caller abandons the buffer
-pub fn read_as_i16_into(src: &[u8], dt: &Datatype, dst: &mut Vec<i16>) -> Result<(), FormatError> {
+#[cfg(test)]
+fn read_as_i16_into(src: &[u8], dt: &Datatype, dst: &mut Vec<i16>) -> Result<(), FormatError> {
     read_numeric_into(src, dt, dst)
 }
 
-pub fn read_as_i8_into(src: &[u8], dt: &Datatype, dst: &mut Vec<i8>) -> Result<(), FormatError> {
+#[cfg(test)]
+fn read_as_i8_into(src: &[u8], dt: &Datatype, dst: &mut Vec<i8>) -> Result<(), FormatError> {
     read_numeric_into(src, dt, dst)
 }
 
@@ -343,6 +354,7 @@ pub fn read_as_strings(src: &[u8], datatype: &Datatype) -> Result<Vec<String>, F
 /// not IEEE 754 binary32 or binary64 with the matching element size.
 /// Returns [`FormatError::UnsupportedVaxByteOrder`] if the byte order is VAX.
 /// Returns [`FormatError::DataSizeMismatch`] if the input ends within an element.
+#[cfg(test)]
 fn read_numeric_into<T: NumericReadTarget>(
     src: &[u8],
     datatype: &Datatype,

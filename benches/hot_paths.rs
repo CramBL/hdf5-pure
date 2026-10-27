@@ -2,8 +2,8 @@
 //!
 //! Primitive groups measure decoding without dataset I/O, encoding without file serialization,
 //! and buffered appends below a chunk boundary. Decode controls measure allocation and byte-copy
-//! costs. Dataset groups include layout assembly and filters. Inputs and fixtures are prepared
-//! outside measured work.
+//! costs. The scalar fill group includes metadata parsing and numeric conversion. Dataset groups
+//! include layout assembly and filters. Inputs and fixtures are prepared outside measured work.
 //!
 //! Run with:
 //!
@@ -126,6 +126,30 @@ fn bench_primitive_decode(c: &mut Criterion) {
     });
     group.bench_function("allocate_4MiB", |bench| {
         bench.iter(|| std::hint::black_box(Vec::<i32>::with_capacity(std::hint::black_box(count))))
+    });
+    group.finish();
+}
+
+fn bench_scalar_fill(c: &mut Criterion) {
+    let bytes = build(|builder| {
+        builder
+            .create_dataset("integer")
+            .with_i32_data(&[0])
+            .with_fill_value(42i32);
+        builder
+            .create_dataset("float")
+            .with_f64_data(&[0.0])
+            .with_fill_value(42.5f64);
+    });
+    let file = File::from_bytes(bytes).unwrap();
+    let integer = file.dataset("integer").unwrap();
+    let float = file.dataset("float").unwrap();
+    let mut group = c.benchmark_group("numeric_scalar_fill");
+    group.bench_function("i32", |bench| {
+        bench.iter(|| std::hint::black_box(integer.fill_value::<i32>().unwrap()))
+    });
+    group.bench_function("f64_as_i32", |bench| {
+        bench.iter(|| std::hint::black_box(float.fill_value::<i32>().unwrap()))
     });
     group.finish();
 }
@@ -453,6 +477,7 @@ criterion_group!(
     benches,
     bench_contiguous_decode,
     bench_primitive_decode,
+    bench_scalar_fill,
     bench_primitive_encode,
     bench_primitive_append,
     bench_chunked_assembly,

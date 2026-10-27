@@ -52,6 +52,7 @@ use crate::compound::CompoundType;
 use crate::convert::Narrow;
 use crate::data_layout::DataLayout;
 use crate::data_read;
+use crate::data_read::{NumericDecoder, NumericReadTarget};
 use crate::dataspace::{Dataspace, MaxExtent};
 use crate::datatype::{Datatype, ReferenceType};
 use crate::error::{Error, FormatError};
@@ -6697,30 +6698,24 @@ the same commit to replace it",
         Ok(msg.into_value())
     }
 
-    /// Read the whole dataset with `decode`, sweeping it a row window at a time.
+    /// Reads numeric values in row windows with one parsed source encoding.
     ///
-    /// A typed whole-dataset read used to be [`read_raw`](Self::read_raw)
-    /// followed by a decode of the entire buffer, which held the stored bytes
-    /// and the decoded values at the same time and so peaked at twice the
-    /// dataset — a caller reading a 4 GiB array needed 8 GiB (issue #289).
-    /// Decoding a window at a time leaves one window of stored bytes beside the
-    /// output instead of a whole second copy of it, and the bytes are identical
-    /// either way: a window returns exactly the rows [`read_raw`](Self::read_raw)
-    /// would have put there.
+    /// Reserves the output for the dataset after reading the first window. The reader keeps
+    /// one window of stored bytes beside the output. Datasets that fit in one window are read
+    /// whole. The reader checks numeric datatype eligibility even for an empty dataset.
     ///
-    /// The output buffer is reserved once, at the size the whole dataset decodes
-    /// to, so no window reallocates it — a growth step would put a second copy of
-    /// the output alongside the first and give back what the windowing saved.
+    /// # Errors
     ///
-    /// A dataset that fits in one window — including one with no rows at all — is
-    /// read whole. The empty case still runs `decode`, because a decoder is also
-    /// what reports a datatype it cannot read, and a zero-element string dataset
-    /// must go on failing a numeric read rather than answering with an empty
-    /// vector.
-    fn read_whole_typed<T, F>(&self, decode: F) -> Result<Vec<T>, Error>
-    where
-        F: Fn(&[u8], &Datatype, &mut Vec<T>) -> Result<(), FormatError>,
-    {
+    /// Returns [`Error::Format`] if the numeric encoding is unsupported or the input contains
+    /// an incomplete element. Returns [`FormatError::AllocationFailed`] through [`Error::Format`]
+    /// if reserving the output for a windowed read fails. Propagates errors from reading the
+    /// dataset metadata and stored bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if decoding a single-window dataset requires more than [`isize::MAX`] bytes
+    /// of output capacity.
+    fn read_whole_typed<T: NumericReadTarget>(&self) -> Result<Vec<T>, Error> {
         let dt = self.datatype()?;
         let ds = self.dataspace()?;
         let dl = self.read_layout()?;
@@ -6748,10 +6743,10 @@ the same commit to replace it",
         let n0 = ds.dimensions.first().copied().unwrap_or(1);
         let rows = typed_window_rows(&dl, &ds, elem_size)?.get();
         if n0 <= rows || decoded_width != dt.type_size() {
-            // No reservation here: `decode` sizes the output from the bytes it
+            // No reservation here: the decoder sizes the output from the bytes it
             // was handed, which is exact.
             let raw = self.file.read_dataset_raw(spec, &self.chunk_cache)?;
-            decode(&raw, &dt, &mut out)?;
+            NumericDecoder::<T>::parse(&dt)?.append(&raw, &mut out)?;
             return Ok(out);
         }
 
@@ -6763,23 +6758,26 @@ the same commit to replace it",
         // cache ends up holding what a whole read would have left it — the
         // chunks reached first. See [`CachePass`].
         let pass = self.chunk_cache.begin_pass();
-        let mut start = 0;
+        let decoder = {
+            let raw = self
+                .file
+                .read_dataset_raw_rows(spec, &self.chunk_cache, pass, 0, rows)?;
+            // The reader returns errors from reading the first window before reserving output from
+            // file dimensions. It uses `try_reserve` to return allocation errors if that capacity
+            // is unavailable.
+            out.try_reserve(values)
+                .map_err(|source| FormatError::AllocationFailed { values, source })?;
+            let decoder = NumericDecoder::<T>::parse(&dt)?;
+            decoder.append(&raw, &mut out)?;
+            decoder
+        };
+        let mut start = rows;
         while start < n0 {
             let count = rows.min(n0 - start);
             let raw =
                 self.file
                     .read_dataset_raw_rows(spec, &self.chunk_cache, pass, start, count)?;
-            if start == 0 {
-                // Reserved once, and only after a window has come back. This size
-                // comes from the file: sizing an allocation from it before
-                // reading anything lets a dataspace claiming a terabyte ask for a
-                // terabyte over a file that cannot serve one row. `try_reserve`
-                // for the same reason — a file-derived capacity that cannot be
-                // had is an answer this reader owes its caller, not a panic.
-                out.try_reserve(values)
-                    .map_err(|source| FormatError::AllocationFailed { values, source })?;
-            }
-            decode(&raw, &dt, &mut out)?;
+            decoder.append(&raw, &mut out)?;
             start += count;
         }
         Ok(out)
@@ -6796,52 +6794,52 @@ the same commit to replace it",
     /// dataset stored as a narrower or wider type is converted, so pick the
     /// reader that matches the stored type for a lossless read.
     pub fn read_f64(&self) -> Result<Vec<f64>, Error> {
-        self.read_whole_typed(data_read::read_as_f64_into)
+        self.read_whole_typed()
     }
 
     /// Read all data as `f32` values.
     pub fn read_f32(&self) -> Result<Vec<f32>, Error> {
-        self.read_whole_typed(data_read::read_as_f32_into)
+        self.read_whole_typed()
     }
 
     /// Read all data as `i32` values.
     pub fn read_i32(&self) -> Result<Vec<i32>, Error> {
-        self.read_whole_typed(data_read::read_as_i32_into)
+        self.read_whole_typed()
     }
 
     /// Read all data as `i64` values.
     pub fn read_i64(&self) -> Result<Vec<i64>, Error> {
-        self.read_whole_typed(data_read::read_as_i64_into)
+        self.read_whole_typed()
     }
 
     /// Read all data as `u64` values.
     pub fn read_u64(&self) -> Result<Vec<u64>, Error> {
-        self.read_whole_typed(data_read::read_as_u64_into)
+        self.read_whole_typed()
     }
 
     /// Read all data as `u8` values.
     pub fn read_u8(&self) -> Result<Vec<u8>, Error> {
-        self.read_whole_typed(data_read::read_as_u8_into)
+        self.read_whole_typed()
     }
 
     /// Read all data as `i8` values.
     pub fn read_i8(&self) -> Result<Vec<i8>, Error> {
-        self.read_whole_typed(data_read::read_as_i8_into)
+        self.read_whole_typed()
     }
 
     /// Read all data as `i16` values.
     pub fn read_i16(&self) -> Result<Vec<i16>, Error> {
-        self.read_whole_typed(data_read::read_as_i16_into)
+        self.read_whole_typed()
     }
 
     /// Read all data as `u16` values.
     pub fn read_u16(&self) -> Result<Vec<u16>, Error> {
-        self.read_whole_typed(data_read::read_as_u16_into)
+        self.read_whole_typed()
     }
 
     /// Read all data as `u32` values.
     pub fn read_u32(&self) -> Result<Vec<u32>, Error> {
-        self.read_whole_typed(data_read::read_as_u32_into)
+        self.read_whole_typed()
     }
 
     /// Read all data as `String` values.
