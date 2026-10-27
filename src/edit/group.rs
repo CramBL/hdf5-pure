@@ -1,5 +1,6 @@
-//! Compact-link group inspection and rewriting for staged edits.
+//! Group-link inspection and compact-link rewriting for staged edits.
 
+use hdf5_pure_format::__private::GroupLinkStorage;
 use hdf5_pure_format::__private::LinkCreationPolicy;
 use hdf5_pure_format::__private::MessageRecordLayout;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
@@ -19,6 +20,7 @@ use crate::source::SourceMetadata;
 use crate::symbol_table::SymbolTableMessage;
 
 use super::WriteEngine;
+use super::group_links;
 use super::object_header::{self, OhRegion};
 
 impl WriteEngine {
@@ -81,11 +83,9 @@ impl WriteEngine {
         )?;
 
         let mut region = fresh_group_region();
-        let mut link_names = Vec::with_capacity(entries.len());
         for e in &entries {
             // The new compact region does not track link creation order.
             region.push_link(&e.name, e.object_header_address, None);
-            link_names.push(e.name.clone());
         }
         for m in &oh.messages {
             if m.msg_type == MessageType::ATTRIBUTE {
@@ -113,75 +113,72 @@ impl WriteEngine {
                 region.push(MessageType::ATTRIBUTE, &m.data);
             }
         }
-        Ok(GroupInfo { region, link_names })
+        let links = group_links::inspect(self.image(), base, self.context.widths(), &region)?;
+        Ok(GroupInfo { region, links })
     }
-    /// Reads a compact-link group's message region and existing link names.
+    /// Reads a group's message region and compact or dense links.
     ///
     /// Converts a symbol-table group through [`Self::reconstruct_v1_group`]. For a version 2
-    /// header, collects continuation chunks and appends a Group Info message if one is absent.
+    /// header, retains encoded names and targets, collects continuation chunks, and appends a
+    /// Group Info message if one is absent.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::EditUnsupported`] if the object is a dataset, the Link Info message
-    /// names dense storage, or a version 2 header has no Link Info message. Returns errors from
-    /// [`Self::gather_oh_messages`], [`Self::reconstruct_v1_group`], and [`ensure_group_info`].
+    /// Returns [`Error::EditUnsupported`] if the object is a dataset, link metadata is
+    /// inconsistent or unsupported, or a version 2 header has no Link Info message. Dense
+    /// storage is limited to unfiltered managed objects with seven-byte heap IDs and encoded
+    /// links of at most 4096 bytes. Returns parsing and source-read errors from the object
+    /// header, heap, and index readers.
     pub(super) fn inspect_group(&self, addr: u64) -> Result<GroupInfo, Error> {
         let sig = self.image().read_metadata_at(addr, 4);
         if sig.as_deref() != Ok(&b"OHDR"[..]) {
             return self.reconstruct_v1_group(addr);
         }
         let mut region = Self::gather_oh_messages(&self.image(), addr, self.context.addresses())?;
-        let mut p = 0;
-        let mut has_link_info = false;
-        let mut link_names = Vec::new();
-        while let Some((msg_type, body, body_end)) = region.next_message(p)? {
-            match msg_type {
-                MessageType::LINK_INFO => {
-                    has_link_info = true;
-                    // Keep the heap address read within this message body.
-                    let mut q = body + 2;
-                    if body_end - body >= 2 && region[body + 1] & 0x01 != 0 {
-                        q += 8;
-                    }
-                    if q + 8 <= body_end {
-                        let heap_addr = u64::from_le_bytes(region[q..q + 8].try_into().unwrap());
-                        if heap_addr != u64::MAX {
-                            return Err(Error::EditUnsupported(
-                                "a target group uses dense (fractal-heap) link storage (not supported in place yet)",
-                            ));
-                        }
-                    }
-                }
-                MessageType::LINK => {
-                    if let Ok(link) =
-                        LinkMessage::parse_with_offset_width(&region[body..body_end], OFFSET_WIDTH)
-                    {
-                        link_names.push(link.name);
-                    }
-                }
-                MessageType::DATA_LAYOUT => {
-                    return Err(Error::EditUnsupported(
-                        "a target path names a dataset, not a group",
-                    ));
-                }
-                _ => {}
-            }
-            p = body_end;
-        }
-        if !has_link_info {
-            return Err(Error::EditUnsupported(
-                "a target group's object header has no link-info message",
-            ));
-        }
+        let links = group_links::inspect(
+            self.image(),
+            self.context.addresses(),
+            self.context.widths(),
+            &region,
+        )?;
         ensure_group_info(&mut region)?;
-        Ok(GroupInfo { region, link_names })
+        Ok(GroupInfo { region, links })
     }
 }
 
-/// A group's message region and existing link names.
+/// A group's message region and links with their encoded names, targets, and creation order.
 pub(super) struct GroupInfo {
     pub(super) region: OhRegion,
-    pub(super) link_names: Vec<String>,
+    pub(super) links: GroupLinkStorage,
+}
+
+impl GroupInfo {
+    /// Returns the message region and UTF-8 link names for compact-link editing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if the group uses dense link storage or a link
+    /// name is not valid UTF-8.
+    pub(super) fn into_compact(self) -> Result<(OhRegion, Vec<String>), Error> {
+        let Self { region, links } = self;
+        if links.info().fractal_heap_address.is_some() {
+            return Err(Error::EditUnsupported(
+                "a target group uses dense (fractal-heap) link storage (not supported in place yet)",
+            ));
+        }
+        let names = links
+            .links()
+            .iter()
+            .map(|link| {
+                String::from_utf8(link.name().to_vec()).map_err(|_error| {
+                    Error::EditUnsupported(
+                        "a group's link name cannot be represented by the editor's UTF-8 paths",
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((region, names))
+    }
 }
 
 /// The version 0 Group Info body with both sets of optional fields omitted.
@@ -395,30 +392,25 @@ pub(super) fn find_link_info(
 
 /// Returns the maximum compact link count from the Group Info message.
 ///
-/// Uses 8 if the message is absent, omits the threshold, or is too short to store it. The
-/// threshold in a version 0 Group Info message is defined in "The Group Info Message" of the
+/// Uses 8 if the message is absent or omits the threshold. The threshold in a version 0
+/// Group Info message is defined in "The Group Info Message" of the
 /// [format specification, version 4.0][spec].
 ///
 /// # Errors
 ///
-/// Returns [`Error::EditUnsupported`] if a message body extends past the region.
+/// Returns [`Error::EditUnsupported`] if a message body extends past the region, or the
+/// Group Info message has an unsupported encoding or inconsistent thresholds.
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_groupinfo
 pub(super) fn max_compact_links(region: &OhRegion) -> Result<u16, Error> {
-    /// The `H5G_CRT_GINFO_MAX_COMPACT` default (`H5Gprivate.h`, HDF5 2.2.0).
-    const DEFAULT_MAX_COMPACT: u16 = 8;
     let mut p = 0;
     while let Some((msg_type, body, body_end)) = region.next_message(p)? {
         if msg_type == MessageType::GROUP_INFO {
-            let stores_phase_change = body_end - body >= 2 && region[body + 1] & 0x01 != 0;
-            if stores_phase_change && body + 4 <= body_end {
-                return Ok(u16::from_le_bytes([region[body + 2], region[body + 3]]));
-            }
-            return Ok(DEFAULT_MAX_COMPACT);
+            return Ok(group_links::phase_change(&region[body..body_end])?.max_compact());
         }
         p = body_end;
     }
-    Ok(DEFAULT_MAX_COMPACT)
+    Ok(group_links::phase_change(&GROUP_INFO_BODY)?.max_compact())
 }
 
 /// Rejects additions that exceed a tracked group's compact link threshold.

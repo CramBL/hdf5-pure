@@ -619,11 +619,11 @@ impl WriteEngine {
                         }
                     }
                 }
-                let info = self.inspect_group(addr)?;
+                let (region, link_names) = self.inspect_group(addr)?.into_compact()?;
                 superseded_addrs.push((key.clone(), addr));
-                node.prepared.region = info.region;
+                node.prepared.region = region;
                 node.prepared.replaces = Some(ReplacedHeader::Header(addr));
-                node.existing_links = info.link_names;
+                node.existing_links = link_names;
             }
         }
 

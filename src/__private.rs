@@ -1,11 +1,24 @@
-//! Internal hooks for PAGE publication crosschecks.
+//! Internal hooks for group inspection and PAGE publication crosschecks.
 
+#[cfg(feature = "__page-publication-crosscheck")]
 use std::path::Path;
 
+#[cfg(feature = "__page-publication-crosscheck")]
 use crate::Error;
+#[cfg(feature = "__page-publication-crosscheck")]
 use crate::File;
+#[cfg(feature = "__page-publication-crosscheck")]
 use crate::SyncPolicy;
 
+#[cfg(feature = "__group-link-inspection-crosscheck")]
+pub use crate::edit::group_inspection::GroupLinkInspection;
+#[cfg(feature = "__group-link-inspection-crosscheck")]
+pub use crate::edit::group_inspection::group_inspection_snapshot;
+#[cfg(feature = "__group-link-inspection-crosscheck")]
+pub use crate::edit::group_inspection::inspect_group_links;
+#[cfg(feature = "__group-link-inspection-crosscheck")]
+pub use crate::edit::group_inspection::open_group_inspection;
+#[cfg(feature = "__page-publication-crosscheck")]
 pub use crate::page_publication_failure::PagePublicationFailure;
 
 /// Opens a mirrored non-persistent PAGE file with one injected publication error.
@@ -57,6 +70,7 @@ pub use crate::page_publication_failure::PagePublicationFailure;
 ///
 /// Returns [`Error::EditUnsupported`] if the file uses another strategy or enables PAGE
 /// persistence. Returns the opening or configuration error if the editor cannot open the file.
+#[cfg(feature = "__page-publication-crosscheck")]
 pub fn open_page_publication_failure(
     path: &Path,
     failure: PagePublicationFailure,
@@ -111,6 +125,7 @@ pub fn open_page_publication_failure(
 ///
 /// Returns [`Error::ReadOnly`] if `file` has no editing session. Returns the read or conversion
 /// error if the editor cannot read the complete image length through the disk handle.
+#[cfg(feature = "__page-publication-crosscheck")]
 pub fn page_publication_snapshot(file: &File) -> Result<Vec<u8>, Error> {
     file.page_publication_snapshot()
 }

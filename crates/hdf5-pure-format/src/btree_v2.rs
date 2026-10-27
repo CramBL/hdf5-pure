@@ -291,6 +291,11 @@ impl BTreeV2Node {
     pub fn address(self) -> StoredAddress {
         self.address
     }
+
+    /// Returns the record count for this node and all its descendants.
+    pub fn total_records(self) -> u64 {
+        self.total_records.get()
+    }
 }
 
 /// The borrowed records and child-pointer bytes of a validated version 2 B-tree node.

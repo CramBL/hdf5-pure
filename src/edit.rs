@@ -360,6 +360,9 @@ mod global_heap_liveness;
 #[cfg(test)]
 mod global_heap_liveness_tests;
 mod group;
+#[cfg(feature = "__group-link-inspection-crosscheck")]
+pub(crate) mod group_inspection;
+mod group_links;
 pub(crate) mod object_header;
 #[cfg(test)]
 mod ownership_tests;
@@ -1301,14 +1304,15 @@ impl WriteEngine {
         Ok(session)
     }
 
-    /// Open exactly as [`open_with_locking`](Self::open_with_locking) does, but
-    /// behind an image that withholds its whole-file slice, so every read takes
-    /// the [`Source`] path rather than the slice fast path.
+    /// Opens a complete file mirror with reads through [`Source`].
     ///
-    /// Distinct from [`open_rw_with_strategy`](Self::open_rw_with_strategy), which withholds the
-    /// slice *and* the residency: this one still mirrors the file, so a test can
-    /// compare the two read forms on a file the bounded open would refuse.
-    #[cfg(test)]
+    /// Requests [`FileLocking::Enabled`] and retains the complete file in memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if `path` cannot be opened for reading and writing. Returns the
+    /// locking and format errors of [`Self::open_with_locking`].
+    #[cfg(any(test, feature = "__group-link-inspection-crosscheck"))]
     pub(crate) fn open_source_only(path: &Path) -> Result<Self, Error> {
         Self::open_imaged(path, Some(FileLocking::Enabled), |handle, _len| {
             Ok(Box::new(crate::image::SourceOnlyImage::new(
