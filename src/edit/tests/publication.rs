@@ -6,6 +6,7 @@ use rstest::rstest;
 use super::common;
 use crate::DeflateLevel;
 use crate::FileSpaceSettings;
+use crate::PersistedFreeSpacePolicy;
 use crate::SuperblockStatusFlags;
 use crate::SuperblockVersion;
 use crate::UserblockSize;
@@ -54,6 +55,7 @@ fn failed_flag_publication_preserves_the_confirmed_context(
         MetadataCacheConfig::disabled(),
         FileLocking::Enabled,
         backing,
+        PersistedFreeSpacePolicy::Tolerant,
     )
     .unwrap();
     if !gathered {
@@ -161,6 +163,7 @@ fn publication_encodes_the_physical_root_once(
         MetadataCacheConfig::disabled(),
         FileLocking::Enabled,
         backing,
+        PersistedFreeSpacePolicy::Tolerant,
     )
     .unwrap();
     assert_eq!(engine.context.superblock().version(), version);
@@ -226,6 +229,7 @@ fn context_tracks_root_publication_and_ordered_append(
         MetadataCacheConfig::disabled(),
         FileLocking::Enabled,
         backing,
+        PersistedFreeSpacePolicy::Tolerant,
     )
     .unwrap();
     engine.set_sync_policy(sync);

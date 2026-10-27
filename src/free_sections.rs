@@ -264,6 +264,15 @@ impl PersistedManagerSet {
         })
     }
 
+    /// Returns the base-relative report and complete physical manager allocations.
+    pub(crate) fn into_parts(self) -> (PersistedFreeSections, Vec<FileRange>) {
+        let Self {
+            report,
+            allocations,
+        } = self;
+        (report, allocations)
+    }
+
     fn into_report(self) -> PersistedFreeSections {
         let Self {
             report,

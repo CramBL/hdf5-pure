@@ -5,6 +5,7 @@ use std::path::Path;
 use rstest::rstest;
 
 use crate::DeflateLevel;
+use crate::PersistedFreeSpacePolicy;
 use crate::access_mode::AccessMode;
 use crate::dataspace::MaxExtent;
 use crate::edit::AppendBuilder;
@@ -278,6 +279,7 @@ fn deleting_an_ancestor_alone_preserves_committed_child_visibility() {
         crate::source::MetadataCacheConfig::disabled(),
         FileLocking::Enabled,
         MemoryStrategy::Mirrored,
+        PersistedFreeSpacePolicy::Tolerant,
     )
     .unwrap();
     e.delete(&ObjectPathBuf::parse("g")).unwrap();
@@ -313,6 +315,7 @@ fn recreating_a_deleted_group_makes_staged_children_visible() {
         crate::source::MetadataCacheConfig::disabled(),
         FileLocking::Enabled,
         MemoryStrategy::Mirrored,
+        PersistedFreeSpacePolicy::Tolerant,
     )
     .unwrap();
     e.delete(&ObjectPathBuf::parse("g")).unwrap();
@@ -615,6 +618,7 @@ fn open_session(path: &Path) -> WriteEngine {
         crate::source::MetadataCacheConfig::disabled(),
         FileLocking::Enabled,
         MemoryStrategy::Mirrored,
+        PersistedFreeSpacePolicy::Tolerant,
     )
     .unwrap()
 }

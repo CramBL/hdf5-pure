@@ -578,8 +578,8 @@ pub use superblock::Superblock;
 
 #[cfg(feature = "std")]
 pub use reader::{
-    Dataset, DatasetAccessProperties, File, FileAccessProperties, Group, Object, StagedGroup,
-    is_hdf5, is_hdf5_bytes,
+    Dataset, DatasetAccessProperties, File, FileAccessProperties, Group, Object,
+    PersistedFreeSpacePolicy, StagedGroup, is_hdf5, is_hdf5_bytes,
 };
 
 #[cfg(feature = "std")]

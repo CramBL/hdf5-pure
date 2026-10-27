@@ -57,6 +57,7 @@
 //! built [`Unbuffered`](WriteBuffering::Unbuffered) until an entry point says
 //! otherwise, so a path that forgets to configure it is slow rather than wrong.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -64,8 +65,11 @@ use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(test)]
 use test_util::disk_log;
 
+use hdf5_pure_core::__private::FileRange;
+
 use crate::convert::Narrow;
 use crate::error::{Error, FormatError};
+use crate::free_sections::{self, PersistedManagerContext};
 use crate::source::{
     BytesSource, MetadataCacheConfig, MetadataCacheStats, MetadataReadCache, Source,
 };
@@ -1023,23 +1027,49 @@ pub(crate) fn read_at_handle_io(
     Ok(())
 }
 
-/// A [`Source`] over a *borrowed* open handle, for the reads an open has to make
-/// before it decides which image will own that handle.
+/// A borrowed file source for parsing before an editing image is built.
 ///
-/// It exists so a read-write open can locate and validate the superblock — a few
-/// bounded windows — before building an image that might read the whole file.
-/// Refusing after that build costs `O(file size)` on a file that is then
-/// rejected. It moves the handle's shared cursor, as everything using
-/// [`read_at_handle`] does, so a caller that later reads sequentially from the
-/// same handle must position it itself ([`MirrorImage`] does).
+/// Reads through the shared file cursor. Call [`finish`](Self::finish) after a fallible
+/// traversal to recover any captured I/O error. The caller must reposition the handle before
+/// subsequent sequential reads.
 pub(crate) struct BorrowedHandle<'a> {
     handle: &'a fs::File,
     len: u64,
+    io_error: RefCell<Option<std::io::Error>>,
 }
 
 impl<'a> BorrowedHandle<'a> {
     pub(crate) fn new(handle: &'a fs::File, len: u64) -> Self {
-        Self { handle, len }
+        Self {
+            handle,
+            len,
+            io_error: RefCell::new(None),
+        }
+    }
+
+    /// Returns a manager source that retains I/O errors and decoded manager context.
+    pub(crate) fn manager_source(&self) -> PersistedHandle<'_> {
+        let Self {
+            handle,
+            len,
+            io_error: _,
+        } = *self;
+        PersistedHandle::new(handle, len)
+    }
+
+    /// Converts a traversal failure while restoring a captured I/O error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] for a failed traversal if an I/O error was captured. Otherwise,
+    /// converts the traversal's error.
+    pub(crate) fn finish<T>(&self, result: Result<T, impl Into<Error>>) -> Result<T, Error> {
+        result.map_err(|error| {
+            self.io_error
+                .borrow_mut()
+                .take()
+                .map_or_else(|| error.into(), Error::Io)
+        })
     }
 }
 
@@ -1049,7 +1079,70 @@ impl Source for BorrowedHandle<'_> {
     }
 
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError> {
-        read_at_handle(self.handle, self.len, offset, buf)
+        let Self {
+            handle,
+            len,
+            io_error,
+        } = self;
+        read_at_handle_io(handle, *len, offset, buf).map_err(|error| match error {
+            Error::Format(error) => error,
+            Error::Io(error) => {
+                let message = error.to_string();
+                *io_error.borrow_mut() = Some(error);
+                FormatError::Source(message)
+            }
+            error => FormatError::Internal(format!("unexpected handle read error: {error}")),
+        })
+    }
+}
+
+/// A borrowed physical manager source that preserves I/O causes.
+pub(crate) struct PersistedHandle<'a> {
+    handle: &'a fs::File,
+    len: u64,
+}
+
+impl<'a> PersistedHandle<'a> {
+    pub(crate) fn new(handle: &'a fs::File, len: u64) -> Self {
+        Self { handle, len }
+    }
+}
+
+impl free_sections::PersistedManagerSource for PersistedHandle<'_> {
+    type Error = Error;
+
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    fn read(&self, range: FileRange) -> Result<Vec<u8>, Error> {
+        let Self { handle, len } = *self;
+        if range.end().get() > len {
+            return Err(FormatError::UnexpectedSourceEof {
+                expected: range.end().get(),
+                available: len,
+            }
+            .into());
+        }
+        let mut bytes = vec![0; range.length().to_usize()?];
+        read_at_handle_io(handle, len, range.start().get(), &mut bytes)?;
+        Ok(bytes)
+    }
+
+    fn contextual_error(context: PersistedManagerContext, error: Error) -> Error {
+        let PersistedManagerContext {
+            slot,
+            header_address,
+            section_list_address,
+            section,
+        } = context;
+        Error::PersistedFreeSpace {
+            manager_slot: slot,
+            header_address,
+            section_list_address,
+            section,
+            source: Box::new(error),
+        }
     }
 }
 
@@ -1545,6 +1638,50 @@ mod tests {
         let handle = fs::File::open(path).unwrap();
         let error =
             read_at_handle_io(&handle, recorded_length, 0, &mut vec![0; read_length]).unwrap_err();
+        if recorded_length == 0 {
+            let Error::Format(FormatError::UnexpectedSourceEof {
+                expected,
+                available,
+            }) = error
+            else {
+                panic!("{error:?}");
+            };
+            assert_eq!((expected, available), (4, 0));
+        } else {
+            let cause = error
+                .source()
+                .unwrap()
+                .downcast_ref::<std::io::Error>()
+                .unwrap();
+            assert_eq!(cause.kind(), std::io::ErrorKind::UnexpectedEof);
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::probe(true)]
+    #[case::manager(false)]
+    fn opening_sources_preserve_read_failures(
+        #[case] probe: bool,
+        #[values(0, 4)] recorded_length: u64,
+    ) {
+        use std::error::Error as StdError;
+
+        use hdf5_pure_core::__private::PhysicalAddress;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("truncated.h5");
+        fs::write(&path, []).unwrap();
+        let handle = fs::File::open(path).unwrap();
+        let source = BorrowedHandle::new(&handle, recorded_length);
+        let error = if probe {
+            source.finish(source.read_exact_at(0, 4))
+        } else {
+            free_sections::PersistedManagerSource::read(
+                &source.manager_source(),
+                FileRange::new(PhysicalAddress::new(0), 4).unwrap(),
+            )
+        }
+        .unwrap_err();
         if recorded_length == 0 {
             let Error::Format(FormatError::UnexpectedSourceEof {
                 expected,

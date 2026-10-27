@@ -3,7 +3,10 @@
 use core::num::NonZeroU64;
 use std::path::Path;
 
-use hdf5_pure_format::__private::{BTreeV2Layout, FractalHeapHeader, HugeObjectRecordContext};
+use hdf5_pure_format::__private as format;
+use hdf5_pure_format::__private::{
+    BTreeV2Layout, FractalHeapHeader, FreeSpaceManagerHeader, HugeObjectRecordContext,
+};
 use hdf5_pure_space::__private::AGGREGATE_BLOCK_SIZE;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::Extent as FreeExtent;
@@ -22,6 +25,8 @@ use test_util::widths::Widths;
 use super::common;
 use crate::FileSpaceSettings;
 use crate::FreeSectionCoordinates;
+use crate::MemoryStrategy;
+use crate::PersistedFreeSpacePolicy;
 use crate::UserblockSize;
 use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
@@ -64,12 +69,112 @@ use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPath;
 use crate::object_path::ObjectPathBuf;
 use crate::source::BytesSource;
+use crate::source::MetadataCacheConfig;
 use crate::source::SourceMetadata;
 use crate::type_builders::AttrValue;
 use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
 use crate::writer::FileBuilder;
+
+#[test]
+fn strict_persisted_recovery_retains_complete_metadata_allocations() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("manager-capacity.h5");
+    test_util_hdf5::file_space::write_persisted_interior_hole(&path);
+    let file = crate::File::open(&path).unwrap();
+    let report = file.persisted_free_sections().unwrap().unwrap();
+    let address = report.managers()[0].address();
+    let mut superblock = file.superblock().clone();
+    let widths = FormatWidths::from_sizes(8, 8).unwrap();
+    let header_length = usize::try_from(format::free_space_manager_header_len(widths)).unwrap();
+    let header_at = usize::try_from(address.get()).unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    let header = FreeSpaceManagerHeader::parse(widths, &bytes[header_at..]).unwrap();
+    let list_at = header.section_list_addr().get();
+    let capacity = header.section_list_used() + 128;
+    let extension = superblock.superblock_extension_address.unwrap().get();
+    superblock.eof_address = superblock.eof_address.max(list_at + capacity);
+    drop(file);
+    bytes.resize(usize::try_from(superblock.eof_address).unwrap(), 0);
+    bytes[header_at + header_length - 12..header_at + header_length - 4]
+        .copy_from_slice(&capacity.to_le_bytes());
+    test_util::checksum::restamp(&mut bytes, header_at, header_length);
+    let encoded = format::serialize_superblock(&superblock).unwrap();
+    bytes[..encoded.len()].copy_from_slice(&encoded);
+    std::fs::write(&path, &bytes).unwrap();
+    let mut expected: Vec<_> = edit::object_header::read_oh_chunks(
+        &BytesSource::new(&bytes),
+        extension,
+        AddressContext::from_effective_base(BaseAddress::ZERO),
+    )
+    .unwrap()
+    .into_iter()
+    .map(|chunk| chunk.span)
+    .collect();
+    expected.extend([
+        (address.get(), u64::try_from(header_length).unwrap()),
+        (list_at, capacity),
+    ]);
+    expected.sort_unstable();
+    let engine = WriteEngine::open_rw_with_strategy(
+        &path,
+        MetadataCacheConfig::disabled(),
+        FileLocking::Enabled,
+        MemoryStrategy::Bounded,
+        PersistedFreeSpacePolicy::Strict,
+    )
+    .unwrap();
+    let mut actual: Vec<_> = engine
+        .persist
+        .as_ref()
+        .unwrap()
+        .old_blocks
+        .iter()
+        .map(|extent| (extent.start(), extent.len()))
+        .collect();
+    actual.sort_unstable();
+    assert_eq!(actual, expected);
+    drop(engine);
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}
+
+#[test]
+fn strict_persisted_failure_precedes_image_construction() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("manager-failure.h5");
+    test_util_hdf5::file_space::write_persisted_interior_hole(&path);
+    let mut bytes = std::fs::read(&path).unwrap();
+    let at = test_util::bytes::find_signature(&bytes, test_util::free_space::SIGNATURE).unwrap();
+    let length = usize::try_from(format::free_space_manager_header_len(
+        FormatWidths::from_sizes(8, 8).unwrap(),
+    ))
+    .unwrap();
+    let checksum = u32::from_le_bytes(bytes[at + length - 4..at + length].try_into().unwrap());
+    bytes[at + length - 4] ^= 1;
+    std::fs::write(&path, &bytes).unwrap();
+    let built = std::cell::Cell::new(false);
+    let Err(error) = WriteEngine::open_imaged_with_policy(
+        &path,
+        Some(FileLocking::Enabled),
+        PersistedFreeSpacePolicy::Strict,
+        |handle, _| {
+            built.set(true);
+            Ok(Box::new(WriteEngine::read_mirror(handle)?))
+        },
+    ) else {
+        panic!("expected a manager checksum error");
+    };
+    let Error::PersistedFreeSpace { source, .. } = error else {
+        panic!("{error:?}");
+    };
+    let Error::Format(crate::FormatError::ChecksumMismatch { expected, computed }) = *source else {
+        panic!("{source:?}");
+    };
+    assert_eq!((expected, computed), (checksum ^ 1, checksum));
+    assert!(!built.get());
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}
 
 #[rstest]
 #[case::flat(FileSpaceStrategy::FsmAggr)]
@@ -2092,7 +2197,7 @@ fn prepend_userblock(path: &Path, len: u64) {
         .superblock;
     superblock.base_address = BaseAddress::new(len);
     superblock.eof_address += len;
-    let rewritten = hdf5_pure_format::__private::serialize_superblock(&superblock).unwrap();
+    let rewritten = format::serialize_superblock(&superblock).unwrap();
     let prefix = usize::try_from(len).unwrap();
     let mut bytes = vec![0; prefix];
     bytes.extend_from_slice(&original);
@@ -2177,7 +2282,7 @@ fn write_rejected_heap_owner(
             vec![FractalHeapStorageError::Format(
                 FormatError::UnexpectedSourceEof {
                     expected: bytes.len().to_u64()
-                        + hdf5_pure_format::__private::free_space_manager_header_len(
+                        + format::free_space_manager_header_len(
                             FormatWidths::from_sizes(OFFSET_SIZE, LENGTH_SIZE).unwrap(),
                         ),
                     available: bytes.len().to_u64(),

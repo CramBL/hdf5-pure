@@ -13,6 +13,7 @@ use crate::FileSpaceSettings;
 use crate::FileSpaceStrategy;
 use crate::MaxExtent;
 use crate::MemoryStrategy;
+use crate::PersistedFreeSpacePolicy;
 use crate::chunk_index_inplace::alloc_probe;
 use crate::edit::AppendTarget;
 use crate::edit::WriteEngine;
@@ -348,6 +349,7 @@ fn open_engine(path: &Path, backing: MemoryStrategy) -> WriteEngine {
         MetadataCacheConfig::default(),
         FileLocking::Enabled,
         backing,
+        PersistedFreeSpacePolicy::Tolerant,
     )
     .unwrap()
 }

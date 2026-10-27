@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use crate::FileSpaceSettings;
+use crate::PersistedFreeSpacePolicy;
 use crate::access_mode::AccessMode;
 use crate::dataspace::MaxExtent;
 use crate::edit::MemoryStrategy;
@@ -31,6 +32,7 @@ pub(super) fn open_bounded_session(path: &Path) -> WriteEngine {
         crate::source::MetadataCacheConfig::disabled(),
         FileLocking::Enabled,
         MemoryStrategy::Bounded,
+        PersistedFreeSpacePolicy::Tolerant,
     )
     .unwrap()
 }

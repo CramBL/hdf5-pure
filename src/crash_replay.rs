@@ -124,6 +124,7 @@ use std::path::Path;
 use test_util::disk_log::{self, DiskOp};
 
 use crate::FileSpaceSettings;
+use crate::PersistedFreeSpacePolicy;
 use crate::chunk_index_inplace::alloc_probe;
 use crate::dataspace::MaxExtent;
 use crate::edit::{AppendBuilder, AppendTarget, MemoryStrategy, SyncPolicy, WriteEngine};
@@ -1299,6 +1300,7 @@ fn committing_survives_a_crash_at_every_write() {
                         MetadataCacheConfig::new(64 * 1024),
                         FileLocking::Enabled,
                         MemoryStrategy::Bounded,
+                        PersistedFreeSpacePolicy::Tolerant,
                     )
                     .unwrap()
                 } else {
