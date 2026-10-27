@@ -37,8 +37,7 @@ test_util_hdf5::hdf5_bundled_tests! {
     #[case::indirect(false)]
     #[case::direct(true)]
     fn c_written_filtered_huge_objects_have_exact_storage_and_contents(#[case] direct: bool) {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("filtered_huge.h5");
+        let path = test_util::temp::temp_path("filtered_huge.h5");
         test_util_hdf5::fractal_heap::write_filtered_huge(&path, direct);
         let bytes = std::fs::read(&path).unwrap();
         let file = crate::reader::File::from_bytes(bytes.clone()).unwrap();

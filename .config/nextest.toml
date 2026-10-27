@@ -63,7 +63,7 @@ fail-fast = false
 [profile.interop]
 default-filter = '''
 package(hdf5-pure-crosscheck) |
-(package(hdf5-pure) & (test(/^edit::native_crosschecks::/) | test(/^reader::native_crosschecks::/)))
+(package(hdf5-pure) & (test(/^edit::native_crosschecks::/) | test(/^reader::native_crosschecks::/) | test(/^fractal_heap_storage::native_crosschecks::/)))
 '''
 fail-fast = false
 
@@ -88,7 +88,7 @@ package(hdf5-pure-crosscheck) & (
     test(/^file_space_fuzz::/) |
     test(/^file_space_oracle::/) |
     test(/^page_buffer::/)
-) | (package(hdf5-pure) & test(/^reader::native_crosschecks::/))
+) | (package(hdf5-pure) & (test(/^reader::native_crosschecks::/) | test(/^fractal_heap_storage::native_crosschecks::/)))
 '''
 test-group = "file-space"
 

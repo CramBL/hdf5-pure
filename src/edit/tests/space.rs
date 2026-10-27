@@ -450,8 +450,7 @@ fn deleting_the_owner_of_a_filtered_attribute_heap_reclaims_its_storage(
 fn deleting_a_filtered_heap_with_huge_objects_reclaims_its_encoded_allocations(
     #[values(0, 512)] userblock: u64,
 ) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("filtered_huge_reclaim.h5");
+    let path = test_util::temp::temp_path("filtered_huge_reclaim.h5");
     write_dense_attribute_owner(&path, 2, FileSpaceStrategy::FsmAggr);
     prepend_userblock(&path, userblock);
     let object = ObjectPathBuf::parse("/g");

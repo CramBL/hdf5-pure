@@ -21,6 +21,7 @@ use hdf5_pure_format::__private::{FractalHeapHeaderLocator, LengthWidth, OffsetW
 use rstest::rstest;
 use tempfile::TempDir;
 use test_util_hdf5::group_filter;
+use test_util_hdf5::reader::ReadBackend;
 
 #[rstest]
 #[case::earliest(LibraryVersion::V18)]
@@ -116,9 +117,10 @@ fn a_c_written_filtered_link_heap_is_parsed_and_its_links_are_listed(
 }
 
 #[rstest]
-fn a_c_written_filtered_huge_object_has_a_type_two_record(#[values(false, true)] streaming: bool) {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("filtered_huge.h5");
+fn a_c_written_filtered_huge_object_has_a_type_two_record(
+    #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
+) {
+    let path = test_util::temp::temp_path("filtered_huge.h5");
     let gcpl = GroupCreate::build()
         .obj_track_times(false)
         .finish()
@@ -239,11 +241,7 @@ fn a_c_written_filtered_huge_object_has_a_type_two_record(#[values(false, true)]
         reference.parse(region).unwrap().len() as u64,
         record.location().encoded_size()
     );
-    let file = if streaming {
-        File::open_streaming(&path).unwrap()
-    } else {
-        File::open(&path).unwrap()
-    };
+    let file = backend.open(&path).unwrap();
     let mut names = file.group("g").unwrap().groups().unwrap();
     let mut expected: Vec<_> = (0..12).map(|index| format!("small_{index:02}")).collect();
     expected.push(huge_name);
@@ -265,8 +263,7 @@ fn a_c_written_filtered_huge_object_has_a_type_two_record(#[values(false, true)]
 #[case::indirect(false)]
 #[case::direct(true)]
 fn c_written_filtered_huge_fixtures_expose_both_record_representations(#[case] direct: bool) {
-    let directory = TempDir::new().unwrap();
-    let path = directory.path().join("filtered_huge.h5");
+    let path = test_util::temp::temp_path("filtered_huge.h5");
     test_util_hdf5::fractal_heap::write_filtered_huge(&path, direct);
     let c_file = CFile::open(&path).unwrap();
     let c_id = c_file.dataset("heap_id").unwrap().read_raw::<u8>().unwrap();

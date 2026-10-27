@@ -37,7 +37,7 @@ test-hdf5-all FEATURES="serde,ndarray,provenance" PROFILE="test":
     done
     unset HDF5_DIR
     INSTA_UPDATE=no {{ quote(just_executable()) }} interop::test-bundled \
-        --cargo-profile {{ quote(PROFILE) }} file_space reader::native_crosschecks
+        --cargo-profile {{ quote(PROFILE) }} file_space reader::native_crosschecks fractal_heap_storage::native_crosschecks
 
 # Run cross tests on libhdf5 `VERSION` with `FEATURES` and `ARGS`. Built under tmp/hdf5 on first use.
 test-hdf5 VERSION FEATURES="serde,ndarray,provenance" *ARGS: (hdf5-build VERSION)
