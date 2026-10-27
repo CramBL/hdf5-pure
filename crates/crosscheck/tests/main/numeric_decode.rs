@@ -5,12 +5,40 @@ use hdf5_pure::{
     Datatype, DatatypeByteOrder, Error, File, FloatingPointLayout, FormatError,
     MantissaNormalization,
 };
-use hdf5_pure::{FileBuilder, LibVer};
+use hdf5_pure::{EnumTypeBuilder, FileBuilder, LibVer};
 use hdf5_pure::{FixedPointType, FloatingPointType};
 use hdf5_sys::h5t::{self, H5T_norm_t, H5T_order_t};
 use rstest::rstest;
 use test_util_hdf5::numeric;
 use test_util_hdf5::numeric::ByteOrder;
+
+#[test]
+fn c_reads_i32_enum_extrema() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("enum.h5");
+    let datatype = EnumTypeBuilder::i32_based()
+        .value("min", i32::MIN)
+        .value("zero", 0)
+        .value("max", i32::MAX)
+        .build()
+        .unwrap();
+    let values = [i32::MIN, 0, i32::MAX];
+    let mut builder = FileBuilder::new();
+    builder.with_libver_bounds(LibVer::Earliest, LibVer::V18);
+    builder
+        .create_dataset("values")
+        .with_enum_i32_data(datatype, &values);
+    builder.write(&path).unwrap();
+    let reference = hdf5::File::open(&path).unwrap();
+    assert_eq!(
+        reference
+            .dataset("values")
+            .unwrap()
+            .read_raw::<i32>()
+            .unwrap(),
+        values
+    );
+}
 
 #[rstest]
 fn reads_c_standard_i32(#[values(false, true)] big_endian: bool) {

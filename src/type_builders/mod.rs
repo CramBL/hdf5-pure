@@ -33,6 +33,7 @@ use crate::error::FormatError;
 use crate::object_path::LinkName;
 use crate::object_path::LinkNameBuf;
 use crate::object_path::ObjectPathBuf;
+use crate::primitive_bytes::PrimitiveBytes;
 use crate::scaleoffset::ScaleOffset;
 use crate::shared_message::DatatypeLocation;
 use crate::width::LengthWidth;
@@ -784,24 +785,16 @@ fn numeric_scalar_attr(name: &str, datatype: Datatype, raw_data: &[u8]) -> Attri
     }
 }
 
-/// A one-dimensional numeric attribute, its elements laid out little-endian at
-/// the width `datatype` declares.
+/// Encodes numeric values as a one-dimensional little-endian attribute.
 ///
-/// `to_le_bytes` is the element's own encoder — `i16::to_le_bytes` and friends —
-/// so the bytes written can only be as wide as the type they came from. Each
-/// call pairs that encoder with the datatype constructor of the same width,
-/// which is what makes the width a message declares and the width its bytes
-/// occupy the same number.
-fn numeric_array_attr<T: Copy, const N: usize>(
+/// The caller supplies the datatype corresponding to `T`.
+fn numeric_array_attr<T: PrimitiveBytes>(
     name: &str,
     datatype: Datatype,
     values: &[T],
-    to_le_bytes: fn(T) -> [u8; N],
 ) -> AttributeMessage {
-    let mut raw_data = Vec::with_capacity(values.len() * N);
-    for &v in values {
-        raw_data.extend_from_slice(&to_le_bytes(v));
-    }
+    let mut raw_data = Vec::with_capacity(core::mem::size_of_val(values));
+    T::append_le(values, &mut raw_data);
     AttributeMessage {
         name: name.to_string(),
         datatype,
@@ -881,25 +874,25 @@ pub(crate) fn build_attr_message(
 ) -> Result<AttributeMessage, FormatError> {
     Ok(match value {
         AttrValue::F32(v) => numeric_scalar_attr(name, make_f32_type(), &v.to_le_bytes()),
-        AttrValue::F32Array(a) => numeric_array_attr(name, make_f32_type(), a, f32::to_le_bytes),
+        AttrValue::F32Array(a) => numeric_array_attr(name, make_f32_type(), a),
         AttrValue::F64(v) => numeric_scalar_attr(name, make_f64_type(), &v.to_le_bytes()),
-        AttrValue::F64Array(a) => numeric_array_attr(name, make_f64_type(), a, f64::to_le_bytes),
+        AttrValue::F64Array(a) => numeric_array_attr(name, make_f64_type(), a),
         AttrValue::I8(v) => numeric_scalar_attr(name, make_i8_type(), &v.to_le_bytes()),
-        AttrValue::I8Array(a) => numeric_array_attr(name, make_i8_type(), a, i8::to_le_bytes),
+        AttrValue::I8Array(a) => numeric_array_attr(name, make_i8_type(), a),
         AttrValue::I16(v) => numeric_scalar_attr(name, make_i16_type(), &v.to_le_bytes()),
-        AttrValue::I16Array(a) => numeric_array_attr(name, make_i16_type(), a, i16::to_le_bytes),
+        AttrValue::I16Array(a) => numeric_array_attr(name, make_i16_type(), a),
         AttrValue::I32(v) => numeric_scalar_attr(name, make_i32_type(), &v.to_le_bytes()),
-        AttrValue::I32Array(a) => numeric_array_attr(name, make_i32_type(), a, i32::to_le_bytes),
+        AttrValue::I32Array(a) => numeric_array_attr(name, make_i32_type(), a),
         AttrValue::I64(v) => numeric_scalar_attr(name, make_i64_type(), &v.to_le_bytes()),
-        AttrValue::I64Array(a) => numeric_array_attr(name, make_i64_type(), a, i64::to_le_bytes),
+        AttrValue::I64Array(a) => numeric_array_attr(name, make_i64_type(), a),
         AttrValue::U8(v) => numeric_scalar_attr(name, make_u8_type(), &v.to_le_bytes()),
-        AttrValue::U8Array(a) => numeric_array_attr(name, make_u8_type(), a, u8::to_le_bytes),
+        AttrValue::U8Array(a) => numeric_array_attr(name, make_u8_type(), a),
         AttrValue::U16(v) => numeric_scalar_attr(name, make_u16_type(), &v.to_le_bytes()),
-        AttrValue::U16Array(a) => numeric_array_attr(name, make_u16_type(), a, u16::to_le_bytes),
+        AttrValue::U16Array(a) => numeric_array_attr(name, make_u16_type(), a),
         AttrValue::U32(v) => numeric_scalar_attr(name, make_u32_type(), &v.to_le_bytes()),
-        AttrValue::U32Array(a) => numeric_array_attr(name, make_u32_type(), a, u32::to_le_bytes),
+        AttrValue::U32Array(a) => numeric_array_attr(name, make_u32_type(), a),
         AttrValue::U64(v) => numeric_scalar_attr(name, make_u64_type(), &v.to_le_bytes()),
-        AttrValue::U64Array(a) => numeric_array_attr(name, make_u64_type(), a, u64::to_le_bytes),
+        AttrValue::U64Array(a) => numeric_array_attr(name, make_u64_type(), a),
         AttrValue::String(s) => fixed_string_scalar_attr(name, s, None, CharacterSet::Utf8),
         AttrValue::StringSized { value, width } => {
             fixed_string_scalar_attr(name, value, Some(*width), CharacterSet::Utf8)
@@ -2466,11 +2459,9 @@ impl DatasetBuilder {
 
     pub fn with_f64_data(&mut self, data: &[f64]) -> &mut Self {
         self.datatype = Some(make_f64_type());
-        let mut b = Vec::with_capacity(data.len() * 8);
-        for &v in data {
-            b.extend_from_slice(&v.to_le_bytes());
-        }
-        self.set_element_bytes(b);
+        let mut bytes = Vec::with_capacity(core::mem::size_of_val(data));
+        f64::append_le(data, &mut bytes);
+        self.set_element_bytes(bytes);
         if self.shape.is_none() {
             self.shape = Some(vec![data.len() as u64]);
         }
@@ -2479,11 +2470,9 @@ impl DatasetBuilder {
 
     pub fn with_f32_data(&mut self, data: &[f32]) -> &mut Self {
         self.datatype = Some(make_f32_type());
-        let mut b = Vec::with_capacity(data.len() * 4);
-        for &v in data {
-            b.extend_from_slice(&v.to_le_bytes());
-        }
-        self.set_element_bytes(b);
+        let mut bytes = Vec::with_capacity(core::mem::size_of_val(data));
+        f32::append_le(data, &mut bytes);
+        self.set_element_bytes(bytes);
         if self.shape.is_none() {
             self.shape = Some(vec![data.len() as u64]);
         }
@@ -2492,11 +2481,9 @@ impl DatasetBuilder {
 
     pub fn with_i32_data(&mut self, data: &[i32]) -> &mut Self {
         self.datatype = Some(make_i32_type());
-        let mut b = Vec::with_capacity(data.len() * 4);
-        for &v in data {
-            b.extend_from_slice(&v.to_le_bytes());
-        }
-        self.set_element_bytes(b);
+        let mut bytes = Vec::with_capacity(core::mem::size_of_val(data));
+        i32::append_le(data, &mut bytes);
+        self.set_element_bytes(bytes);
         if self.shape.is_none() {
             self.shape = Some(vec![data.len() as u64]);
         }
@@ -2505,11 +2492,9 @@ impl DatasetBuilder {
 
     pub fn with_i64_data(&mut self, data: &[i64]) -> &mut Self {
         self.datatype = Some(make_i64_type());
-        let mut b = Vec::with_capacity(data.len() * 8);
-        for &v in data {
-            b.extend_from_slice(&v.to_le_bytes());
-        }
-        self.set_element_bytes(b);
+        let mut bytes = Vec::with_capacity(core::mem::size_of_val(data));
+        i64::append_le(data, &mut bytes);
+        self.set_element_bytes(bytes);
         if self.shape.is_none() {
             self.shape = Some(vec![data.len() as u64]);
         }
@@ -2518,7 +2503,9 @@ impl DatasetBuilder {
 
     pub fn with_u8_data(&mut self, data: &[u8]) -> &mut Self {
         self.datatype = Some(make_u8_type());
-        self.set_element_bytes(data.to_vec());
+        let mut bytes = Vec::with_capacity(core::mem::size_of_val(data));
+        u8::append_le(data, &mut bytes);
+        self.set_element_bytes(bytes);
         if self.shape.is_none() {
             self.shape = Some(vec![data.len() as u64]);
         }
@@ -2527,11 +2514,9 @@ impl DatasetBuilder {
 
     pub fn with_i8_data(&mut self, data: &[i8]) -> &mut Self {
         self.datatype = Some(make_i8_type());
-        let mut b = Vec::with_capacity(data.len());
-        for &v in data {
-            b.push(v as u8);
-        }
-        self.set_element_bytes(b);
+        let mut bytes = Vec::with_capacity(core::mem::size_of_val(data));
+        i8::append_le(data, &mut bytes);
+        self.set_element_bytes(bytes);
         if self.shape.is_none() {
             self.shape = Some(vec![data.len() as u64]);
         }
@@ -2540,11 +2525,9 @@ impl DatasetBuilder {
 
     pub fn with_i16_data(&mut self, data: &[i16]) -> &mut Self {
         self.datatype = Some(make_i16_type());
-        let mut b = Vec::with_capacity(data.len() * 2);
-        for &v in data {
-            b.extend_from_slice(&v.to_le_bytes());
-        }
-        self.set_element_bytes(b);
+        let mut bytes = Vec::with_capacity(core::mem::size_of_val(data));
+        i16::append_le(data, &mut bytes);
+        self.set_element_bytes(bytes);
         if self.shape.is_none() {
             self.shape = Some(vec![data.len() as u64]);
         }
@@ -2553,11 +2536,9 @@ impl DatasetBuilder {
 
     pub fn with_u16_data(&mut self, data: &[u16]) -> &mut Self {
         self.datatype = Some(make_u16_type());
-        let mut b = Vec::with_capacity(data.len() * 2);
-        for &v in data {
-            b.extend_from_slice(&v.to_le_bytes());
-        }
-        self.set_element_bytes(b);
+        let mut bytes = Vec::with_capacity(core::mem::size_of_val(data));
+        u16::append_le(data, &mut bytes);
+        self.set_element_bytes(bytes);
         if self.shape.is_none() {
             self.shape = Some(vec![data.len() as u64]);
         }
@@ -2566,11 +2547,9 @@ impl DatasetBuilder {
 
     pub fn with_u32_data(&mut self, data: &[u32]) -> &mut Self {
         self.datatype = Some(make_u32_type());
-        let mut b = Vec::with_capacity(data.len() * 4);
-        for &v in data {
-            b.extend_from_slice(&v.to_le_bytes());
-        }
-        self.set_element_bytes(b);
+        let mut bytes = Vec::with_capacity(core::mem::size_of_val(data));
+        u32::append_le(data, &mut bytes);
+        self.set_element_bytes(bytes);
         if self.shape.is_none() {
             self.shape = Some(vec![data.len() as u64]);
         }
@@ -2579,11 +2558,9 @@ impl DatasetBuilder {
 
     pub fn with_u64_data(&mut self, data: &[u64]) -> &mut Self {
         self.datatype = Some(make_u64_type());
-        let mut b = Vec::with_capacity(data.len() * 8);
-        for &v in data {
-            b.extend_from_slice(&v.to_le_bytes());
-        }
-        self.set_element_bytes(b);
+        let mut bytes = Vec::with_capacity(core::mem::size_of_val(data));
+        u64::append_le(data, &mut bytes);
+        self.set_element_bytes(bytes);
         if self.shape.is_none() {
             self.shape = Some(vec![data.len() as u64]);
         }
@@ -2967,9 +2944,7 @@ impl DatasetBuilder {
     pub fn with_enum_i32_data(&mut self, datatype: Datatype, values: &[i32]) -> &mut Self {
         self.datatype = Some(datatype);
         let mut raw = Vec::with_capacity(values.len() * 4);
-        for &v in values {
-            raw.extend_from_slice(&v.to_le_bytes());
-        }
+        i32::append_le(values, &mut raw);
         self.set_element_bytes(raw);
         if self.shape.is_none() {
             self.shape = Some(vec![values.len() as u64]);
