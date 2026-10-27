@@ -3,6 +3,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 
+use core::marker::PhantomData;
 use core::num::NonZeroUsize;
 
 use hdf5_pure_core::__private::FileRange;
@@ -169,9 +170,7 @@ pub(crate) fn effective_numeric(dt: &Datatype) -> &Datatype {
 
 /// Convert raw bytes to `f64` values.
 pub fn read_as_f64(raw: &[u8], datatype: &Datatype) -> Result<Vec<f64>, FormatError> {
-    let mut out = Vec::new();
-    read_as_f64_into(raw, datatype, &mut out)?;
-    Ok(out)
+    NumericDecoder::parse(datatype)?.decode(raw)
 }
 
 /// Decode `src` and **append** the values to `dst`, the appending form of
@@ -189,25 +188,19 @@ pub fn read_as_f64_into(
 
 /// Convert raw bytes to `u64` values.
 pub fn read_as_u64(src: &[u8], datatype: &Datatype) -> Result<Vec<u64>, FormatError> {
-    let mut dst = Vec::new();
-    read_as_u64_into(src, datatype, &mut dst)?;
-    Ok(dst)
+    NumericDecoder::parse(datatype)?.decode(src)
 }
 
 /// Convert raw bytes to `u32` values (counterpart of [`read_as_u64`] for the
 /// narrower element type, used by [`crate::Dataset::read_u32`]).
 pub fn read_as_u32(src: &[u8], datatype: &Datatype) -> Result<Vec<u32>, FormatError> {
-    let mut dst = Vec::new();
-    read_as_u32_into(src, datatype, &mut dst)?;
-    Ok(dst)
+    NumericDecoder::parse(datatype)?.decode(src)
 }
 
 /// Convert raw bytes to `u16` values (counterpart of [`read_as_u64`] for the
 /// narrower element type, used by [`crate::Dataset::read_u16`]).
 pub fn read_as_u16(src: &[u8], datatype: &Datatype) -> Result<Vec<u16>, FormatError> {
-    let mut dst = Vec::new();
-    read_as_u16_into(src, datatype, &mut dst)?;
-    Ok(dst)
+    NumericDecoder::parse(datatype)?.decode(src)
 }
 
 pub fn read_as_u64_into(src: &[u8], dt: &Datatype, dst: &mut Vec<u64>) -> Result<(), FormatError> {
@@ -223,9 +216,7 @@ pub fn read_as_u16_into(src: &[u8], dt: &Datatype, dst: &mut Vec<u16>) -> Result
 }
 
 pub fn read_as_u8(src: &[u8], datatype: &Datatype) -> Result<Vec<u8>, FormatError> {
-    let mut dst = Vec::new();
-    read_as_u8_into(src, datatype, &mut dst)?;
-    Ok(dst)
+    NumericDecoder::parse(datatype)?.decode(src)
 }
 
 pub fn read_as_u8_into(src: &[u8], dt: &Datatype, dst: &mut Vec<u8>) -> Result<(), FormatError> {
@@ -234,9 +225,7 @@ pub fn read_as_u8_into(src: &[u8], dt: &Datatype, dst: &mut Vec<u8>) -> Result<(
 
 /// Convert raw bytes to `f32` values.
 pub fn read_as_f32(src: &[u8], datatype: &Datatype) -> Result<Vec<f32>, FormatError> {
-    let mut dst = Vec::new();
-    read_as_f32_into(src, datatype, &mut dst)?;
-    Ok(dst)
+    NumericDecoder::parse(datatype)?.decode(src)
 }
 
 /// Decode `raw` and **append** the values to `out`, the appending form of
@@ -254,30 +243,22 @@ pub fn read_as_f32_into(
 
 /// Convert raw bytes to `i64` values.
 pub fn read_as_i64(raw: &[u8], datatype: &Datatype) -> Result<Vec<i64>, FormatError> {
-    let mut out = Vec::new();
-    read_as_i64_into(raw, datatype, &mut out)?;
-    Ok(out)
+    NumericDecoder::parse(datatype)?.decode(raw)
 }
 
 /// Convert raw bytes to `i32` values.
 pub fn read_as_i32(src: &[u8], datatype: &Datatype) -> Result<Vec<i32>, FormatError> {
-    let mut dst = Vec::new();
-    read_as_i32_into(src, datatype, &mut dst)?;
-    Ok(dst)
+    NumericDecoder::parse(datatype)?.decode(src)
 }
 
 /// Convert raw bytes to `i16` values (counterpart of [`read_as_i32`] for the
 /// narrower element type, used by [`crate::Dataset::read_i16`]).
 pub fn read_as_i16(src: &[u8], datatype: &Datatype) -> Result<Vec<i16>, FormatError> {
-    let mut out = Vec::new();
-    read_as_i16_into(src, datatype, &mut out)?;
-    Ok(out)
+    NumericDecoder::parse(datatype)?.decode(src)
 }
 
 pub fn read_as_i8(src: &[u8], datatype: &Datatype) -> Result<Vec<i8>, FormatError> {
-    let mut out = Vec::new();
-    read_as_i8_into(src, datatype, &mut out)?;
-    Ok(out)
+    NumericDecoder::parse(datatype)?.decode(src)
 }
 
 pub fn read_as_i64_into(src: &[u8], dt: &Datatype, dst: &mut Vec<i64>) -> Result<(), FormatError> {
@@ -365,46 +346,102 @@ fn read_numeric_into<T: NumericReadTarget>(
     datatype: &Datatype,
     dst: &mut Vec<T>,
 ) -> Result<(), FormatError> {
-    let plan = NumericDecodePlan::try_from(datatype)?;
-    let element_size = plan.element_size();
-    if !src.len().is_multiple_of(element_size) {
-        return Err(FormatError::DataSizeMismatch {
-            expected: src.len() - src.len() % element_size,
-            actual: src.len(),
-        });
+    NumericDecoder::parse(datatype)?.append(src, dst)
+}
+
+/// A supported numeric source encoding paired with its destination type.
+///
+/// The caller can decode several buffers with the same parsed source encoding.
+pub(crate) struct NumericDecoder<T> {
+    plan: NumericDecodePlan,
+    target: PhantomData<fn() -> T>,
+}
+
+impl<T: NumericReadTarget> NumericDecoder<T> {
+    /// Parses the source encoding and element width for conversion to `T`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::TypeMismatch`] if the datatype or its enumeration base is not numeric.
+    /// Returns [`FormatError::EnumBaseSizeMismatch`] if an enumeration's size differs from its base.
+    /// Returns [`FormatError::NumericElementTooWide`] if the element size exceeds eight bytes, or
+    /// [`FormatError::ValueTooLargeForPlatform`] if it exceeds the target's [`usize`] range.
+    /// Returns [`FormatError::UnsupportedFloatingPointLayout`] if the floating-point encoding is
+    /// not IEEE 754 binary32 or binary64 with the matching element size.
+    /// Returns [`FormatError::UnsupportedVaxByteOrder`] if the byte order is VAX.
+    pub(crate) fn parse(datatype: &Datatype) -> Result<Self, FormatError> {
+        Ok(Self {
+            plan: NumericDecodePlan::try_from(datatype)?,
+            target: PhantomData,
+        })
     }
-    match plan.encoding() {
-        NumericEncoding::FixedPoint(layout) => {
-            dst.reserve(src.len() / element_size);
-            if layout.signed() {
-                let conversion = T::I64Conversion::default();
-                dst.extend(
-                    src.chunks_exact(element_size)
-                        .map(|bytes| conversion.convert(layout.read_signed(bytes))),
-                );
-            } else {
-                let conversion = T::U64Conversion::default();
-                dst.extend(
-                    src.chunks_exact(element_size)
-                        .map(|bytes| conversion.convert(layout.read_unsigned(bytes))),
-                );
-            }
-            Ok(())
+
+    /// Converts whole source elements into a new vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::DataSizeMismatch`] if `src` contains an incomplete element.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the new capacity exceeds [`isize::MAX`] bytes.
+    pub(crate) fn decode(&self, src: &[u8]) -> Result<Vec<T>, FormatError> {
+        let mut dst = Vec::new();
+        self.append(src, &mut dst)?;
+        Ok(dst)
+    }
+
+    /// Appends converted source elements, preserving the existing values in `dst`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::DataSizeMismatch`] if `src` contains an incomplete element.
+    /// On error, `dst` is unchanged.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the new capacity exceeds [`isize::MAX`] bytes.
+    pub(crate) fn append(&self, src: &[u8], dst: &mut Vec<T>) -> Result<(), FormatError> {
+        let element_size = self.plan.element_size();
+        if !src.len().is_multiple_of(element_size) {
+            return Err(FormatError::DataSizeMismatch {
+                expected: src.len() - src.len() % element_size,
+                actual: src.len(),
+            });
         }
-        NumericEncoding::Float32(order) => primitive::decode_fixed_width_into::<4, f32, T, _>(
-            src,
-            order,
-            T::F32Conversion::default(),
-            dst,
-        ),
-        NumericEncoding::Float64(order) => primitive::decode_fixed_width_into::<8, f64, T, _>(
-            src,
-            order,
-            T::F64Conversion::default(),
-            dst,
-        ),
-        NumericEncoding::StandardFixedPoint { signed, layout } => {
-            primitive::decode_standard_fixed_point_into(src, signed, layout, dst)
+        match self.plan.encoding() {
+            NumericEncoding::FixedPoint(layout) => {
+                dst.reserve(src.len() / element_size);
+                if layout.signed() {
+                    let conversion = T::I64Conversion::default();
+                    dst.extend(
+                        src.chunks_exact(element_size)
+                            .map(|bytes| conversion.convert(layout.read_signed(bytes))),
+                    );
+                } else {
+                    let conversion = T::U64Conversion::default();
+                    dst.extend(
+                        src.chunks_exact(element_size)
+                            .map(|bytes| conversion.convert(layout.read_unsigned(bytes))),
+                    );
+                }
+                Ok(())
+            }
+            NumericEncoding::Float32(order) => primitive::decode_fixed_width_into::<4, f32, T, _>(
+                src,
+                order,
+                T::F32Conversion::default(),
+                dst,
+            ),
+            NumericEncoding::Float64(order) => primitive::decode_fixed_width_into::<8, f64, T, _>(
+                src,
+                order,
+                T::F64Conversion::default(),
+                dst,
+            ),
+            NumericEncoding::StandardFixedPoint { signed, layout } => {
+                primitive::decode_standard_fixed_point_into(src, signed, layout, dst)
+            }
         }
     }
 }
