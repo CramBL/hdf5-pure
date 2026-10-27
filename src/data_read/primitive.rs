@@ -1,3 +1,7 @@
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
+use crate::primitive_bytes::PrimitiveBytes;
 use crate::{
     FormatError,
     datatype::{
@@ -5,17 +9,20 @@ use crate::{
         layout::{StandardNumericLayout, StandardWidth},
     },
 };
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
 
-/// Decode standard fixed-width scalars and append their converted values.
+/// Appends standard fixed-width numeric values after conversion.
 ///
-/// `S` describes the scalar representation reconstructed from the bytes.
-/// `T` is the caller's requested scalar type.
-/// `C` describes the selected HDF5 conversion path.
+/// Copies native-endian bytes for [`NoOpConversion`] and decodes each element for other
+/// conversions or byte orders. `S` is the stored primitive type, and `T` is the destination type.
 ///
-/// TODO: A soft conversion can be represented by a different concrete `C`
-/// which carries whatever datatype metadata its algorithm needs.
+/// # Errors
+///
+/// Returns [`FormatError::DataSizeMismatch`] if `src` contains an incomplete element.
+/// On error, `dst` is unchanged.
+///
+/// # Panics
+///
+/// Panics if the new capacity exceeds [`isize::MAX`] bytes.
 pub(crate) fn decode_fixed_width_into<const W: usize, S, T, C>(
     src: &[u8],
     order: FixedWidthByteOrder,
@@ -33,6 +40,15 @@ where
             expected: src.len() - remainder.len(),
             actual: src.len(),
         });
+    }
+
+    let native_order = if cfg!(target_endian = "little") {
+        FixedWidthByteOrder::LittleEndian
+    } else {
+        FixedWidthByteOrder::BigEndian
+    };
+    if order == native_order && conversion.append_native(src, dst)? {
+        return Ok(());
     }
 
     dst.reserve(chunks.len());
@@ -333,24 +349,48 @@ pub(crate) enum ConversionKind {
     Soft,
 }
 
-/// Converts one already-decoded scalar into another.
+/// Converts numeric values from `S` to `T`.
 pub(crate) trait H5Conversion<S, T> {
     #[allow(dead_code, reason = "for when we support soft conversions")]
     const KIND: ConversionKind;
 
     fn convert(&self, value: S) -> T;
+
+    /// Appends native-endian values when this conversion supports a byte copy.
+    ///
+    /// Returns `Ok(true)` after appending the values, or `Ok(false)` with `dst` unchanged
+    /// when scalar conversion is required.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::DataSizeMismatch`] if the byte-copy implementation receives
+    /// an incomplete element.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a byte copy requires a new capacity exceeding [`isize::MAX`] bytes.
+    fn append_native(&self, _src: &[u8], _dst: &mut Vec<T>) -> Result<bool, FormatError> {
+        Ok(false)
+    }
 }
 
-/// Identity/no-op conversion.
+/// Preserves each primitive value and its native byte representation.
+///
+/// Implements [`H5Conversion`] only when the source and destination types are identical.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct NoOpConversion;
 
-impl<T> H5Conversion<T, T> for NoOpConversion {
+impl<T: PrimitiveBytes> H5Conversion<T, T> for NoOpConversion {
     const KIND: ConversionKind = ConversionKind::NoOp;
 
     #[inline]
     fn convert(&self, value: T) -> T {
         value
+    }
+
+    fn append_native(&self, src: &[u8], dst: &mut Vec<T>) -> Result<bool, FormatError> {
+        T::append_native(src, dst)?;
+        Ok(true)
     }
 }
 
@@ -503,3 +543,173 @@ impl_hard_cast!(f64 => f32);
 impl_hard_cast!(u8  => i16, i32, i64);
 impl_hard_cast!(u16 => i32, i64);
 impl_hard_cast!(u32 => i64);
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec;
+    use alloc::vec::Vec;
+    use core::mem;
+
+    use rstest::rstest;
+
+    use super::{ConversionKind, FromEndianBytes, H5Conversion, NoOpConversion};
+    use crate::FormatError;
+    use crate::datatype::byte_order::FixedWidthByteOrder;
+    use crate::primitive_bytes::PrimitiveBytes;
+
+    macro_rules! exact_decode_test {
+        ($name:ident, $ty:ty, $samples:expr) => {
+            #[rstest]
+            #[case::empty(0)]
+            #[case::single(1)]
+            #[case::large(257)]
+            fn $name(
+                #[case] count: usize,
+                #[values(false, true)] big_endian: bool,
+                #[values(false, true)] spare_capacity: bool,
+            ) {
+                let samples: &[$ty] = &$samples;
+                let values: Vec<_> = samples.iter().copied().cycle().take(count).collect();
+                let raw: Vec<_> = values
+                    .iter()
+                    .flat_map(|value| {
+                        if big_endian {
+                            value.to_be_bytes()
+                        } else {
+                            value.to_le_bytes()
+                        }
+                    })
+                    .collect();
+                let mut dst = vec![samples[0]].into_boxed_slice().into_vec();
+                if spare_capacity {
+                    dst.reserve(count);
+                }
+                let order = if big_endian {
+                    FixedWidthByteOrder::BigEndian
+                } else {
+                    FixedWidthByteOrder::LittleEndian
+                };
+                super::decode_fixed_width_into::<{ mem::size_of::<$ty>() }, $ty, $ty, _>(
+                    &raw,
+                    order,
+                    NoOpConversion,
+                    &mut dst,
+                )
+                .unwrap();
+                let expected: Vec<_> = core::iter::once(samples[0])
+                    .chain(values)
+                    .flat_map(<$ty>::to_ne_bytes)
+                    .collect();
+                assert_eq!(
+                    dst.into_iter()
+                        .flat_map(<$ty>::to_ne_bytes)
+                        .collect::<Vec<_>>(),
+                    expected,
+                );
+            }
+        };
+    }
+
+    exact_decode_test!(exact_i8, i8, [i8::MIN, 0, i8::MAX]);
+    exact_decode_test!(exact_i16, i16, [i16::MIN, 0, i16::MAX]);
+    exact_decode_test!(exact_i32, i32, [i32::MIN, 0, i32::MAX]);
+    exact_decode_test!(exact_i64, i64, [i64::MIN, 0, i64::MAX]);
+    exact_decode_test!(exact_u8, u8, [0, 1, u8::MAX]);
+    exact_decode_test!(exact_u16, u16, [0, 1, u16::MAX]);
+    exact_decode_test!(exact_u32, u32, [0, 1, u32::MAX]);
+    exact_decode_test!(exact_u64, u64, [0, 1, u64::MAX]);
+    exact_decode_test!(
+        exact_f32,
+        f32,
+        [
+            0.0,
+            -0.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::from_bits(1),
+            f32::from_bits(0x7FC0_1234),
+            f32::from_bits(0x7F80_1234),
+            f32::from_bits(0xFFC0_5678),
+        ]
+    );
+    exact_decode_test!(
+        exact_f64,
+        f64,
+        [
+            0.0,
+            -0.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::from_bits(1),
+            f64::from_bits(0x7FF8_0000_0000_1234),
+            f64::from_bits(0x7FF0_0000_0000_1234),
+            f64::from_bits(0xFFF8_0000_0000_5678),
+        ]
+    );
+
+    #[rstest]
+    #[case::i16(incomplete::<2, i16>)]
+    #[case::i32(incomplete::<4, i32>)]
+    #[case::i64(incomplete::<8, i64>)]
+    #[case::u16(incomplete::<2, u16>)]
+    #[case::u32(incomplete::<4, u32>)]
+    #[case::u64(incomplete::<8, u64>)]
+    #[case::f32(incomplete::<4, f32>)]
+    #[case::f64(incomplete::<8, f64>)]
+    fn rejects_incomplete_elements(
+        #[case] decode: fn(FixedWidthByteOrder),
+        #[values(FixedWidthByteOrder::LittleEndian, FixedWidthByteOrder::BigEndian)]
+        order: FixedWidthByteOrder,
+    ) {
+        decode(order);
+    }
+
+    fn incomplete<const W: usize, T>(order: FixedWidthByteOrder)
+    where
+        T: FromEndianBytes<W> + PrimitiveBytes + core::fmt::Debug + PartialEq,
+    {
+        let raw = vec![0; W + 1];
+        let initial = T::from_le_slice(&[0; W]);
+        let mut dst = vec![initial];
+        let error =
+            super::decode_fixed_width_into::<W, T, T, _>(&raw, order, NoOpConversion, &mut dst)
+                .unwrap_err();
+        assert_eq!(
+            error,
+            FormatError::DataSizeMismatch {
+                expected: W,
+                actual: W + 1
+            }
+        );
+        assert_eq!(dst, [initial]);
+        assert_eq!(T::append_native(&raw, &mut dst).unwrap_err(), error);
+        assert_eq!(dst, [initial]);
+    }
+
+    #[test]
+    fn converts_distinct_types_with_noop_discriminant() {
+        struct DifferentTypes;
+
+        impl H5Conversion<i32, u32> for DifferentTypes {
+            const KIND: ConversionKind = ConversionKind::NoOp;
+
+            fn convert(&self, _value: i32) -> u32 {
+                7
+            }
+        }
+
+        let mut dst = vec![5];
+        super::decode_fixed_width_into::<4, i32, u32, _>(
+            &(-1i32).to_ne_bytes(),
+            if cfg!(target_endian = "little") {
+                FixedWidthByteOrder::LittleEndian
+            } else {
+                FixedWidthByteOrder::BigEndian
+            },
+            DifferentTypes,
+            &mut dst,
+        )
+        .unwrap();
+        assert_eq!(dst, [5, 7]);
+    }
+}
