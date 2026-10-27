@@ -37,7 +37,12 @@ pub(super) struct SourceObjects {
     /// [`ObjectTree`](crate::object_graph::ObjectTree).
     descendants: Vec<GraphObject<SourceObject, String>>,
     root: GraphObject<SourceObject, String>,
-    placements: BTreeMap<ObjectId, Placement>,
+    /// The path in the output of each object the repack keeps, the root group included.
+    kept: BTreeMap<ObjectId, ObjectPathBuf>,
+    /// The objects the drop paths remove, each with the last step of its first path under a drop
+    /// path, or `None` if every such path passes a link whose name is not a component of an object
+    /// path.
+    dropped: BTreeMap<ObjectId, Option<LastStep>>,
 }
 
 impl SourceObjects {
@@ -80,27 +85,23 @@ impl SourceObjects {
         if root.value.class != ObjectClass::Group {
             return Err(Error::NotAGroup(ObjectPathBuf::root().to_string()));
         }
-        let mut dropped_paths = dropped_paths(&removed, &drops);
-        let mut placements: BTreeMap<_, _> = removed
+        let mut last_steps = dropped_last_steps(&removed, &drops);
+        let dropped = removed
             .into_values()
-            .map(|object| {
-                let path = dropped_paths.remove(&object.value.id);
-                (object.value.id, Placement::Dropped(path))
-            })
+            .map(|object| (object.value.id, last_steps.remove(&object.value.id)))
             .collect();
-        let kept_paths = kept_paths(&root, &descendants)?;
-        placements.extend(
-            descendants
-                .iter()
-                .map(|object| object.value.id)
-                .zip(kept_paths.into_iter().map(Placement::Kept)),
-        );
-        placements.insert(root.value.id, Placement::Kept(ObjectPathBuf::root()));
+        let mut kept: BTreeMap<_, _> = descendants
+            .iter()
+            .map(|object| object.value.id)
+            .zip(kept_paths(&root, &descendants)?)
+            .collect();
+        kept.insert(root.value.id, ObjectPathBuf::root());
         Ok(Self {
             addresses: file.addresses(),
             descendants,
             root,
-            placements,
+            kept,
+            dropped,
         })
     }
 
@@ -129,7 +130,7 @@ impl SourceObjects {
                         "a repacked group links an object outside its tree".into(),
                     )
                 })?;
-                let Some(Placement::Kept(path)) = self.placements.get(&object.value.id) else {
+                let Some(path) = self.kept.get(&object.value.id) else {
                     return Err(FormatError::Internal(
                         "a repacked group links an object the repack does not keep".into(),
                     )
@@ -150,11 +151,59 @@ impl SourceObjects {
     /// # Errors
     ///
     /// Returns [`Error::Format`] if `header` and the base address of the source sum past
-    /// [`u64::MAX`].
-    pub(super) fn placement(&self, header: StoredAddress) -> Result<Option<&Placement>, Error> {
-        Ok(self
-            .placements
-            .get(&ObjectId::resolve(self.addresses, header)?))
+    /// [`u64::MAX`], and [`Error::Format`] with [`FormatError::Internal`] if a dropped object on
+    /// the path to the object has no last step.
+    pub(super) fn placement(&self, header: StoredAddress) -> Result<Option<Placement<'_>>, Error> {
+        let id = ObjectId::resolve(self.addresses, header)?;
+        if let Some(path) = self.kept.get(&id) {
+            return Ok(Some(Placement::Kept(path)));
+        }
+        let Some(last_step) = self.dropped.get(&id) else {
+            return Ok(None);
+        };
+        Ok(Some(Placement::Dropped(
+            last_step
+                .as_ref()
+                .map(|last_step| self.dropped_path(last_step))
+                .transpose()?,
+        )))
+    }
+
+    /// Returns the path under a drop path that ends with `step`, from the last steps of the dropped
+    /// objects on the way back to the drop path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] with [`FormatError::Internal`] if a dropped object on the way has
+    /// no last step.
+    fn dropped_path<'a>(&'a self, mut step: &'a LastStep) -> Result<ObjectPathBuf, Error> {
+        let mut link_names = Vec::new();
+        // `dropped_last_steps` records the last step of a parent before those of the objects its
+        // links target, so the walk ends at a `LastStep::Drop`.
+        loop {
+            match step {
+                LastStep::Drop(path) => {
+                    return Ok(path
+                        .components()
+                        .iter()
+                        .cloned()
+                        .chain(link_names.into_iter().rev().cloned())
+                        .collect());
+                }
+                LastStep::Link { parent, link_name } => {
+                    link_names.push(link_name);
+                    step = self
+                        .dropped
+                        .get(parent)
+                        .and_then(Option::as_ref)
+                        .ok_or_else(|| {
+                            FormatError::Internal(
+                                "a dropped object's parent has no last step".into(),
+                            )
+                        })?;
+                }
+            }
+        }
     }
 }
 
@@ -174,12 +223,23 @@ pub(super) struct Child<'a> {
 }
 
 /// Whether a repack keeps an object of its source, and at which path.
-pub(super) enum Placement {
+pub(super) enum Placement<'a> {
     /// An object the drop paths remove, with its path under a drop path, or `None` if every such
     /// path passes a link whose name is not a component of an object path.
     Dropped(Option<ObjectPathBuf>),
     /// An object the output holds at this path.
-    Kept(ObjectPathBuf),
+    Kept(&'a ObjectPathBuf),
+}
+
+/// The last step of the first path under a drop path to a dropped object.
+enum LastStep {
+    /// The object is the target of the link this drop path names.
+    Drop(ObjectPathBuf),
+    /// The object is the target of the link `link_name` of the dropped object `parent`.
+    Link {
+        parent: ObjectId,
+        link_name: LinkNameBuf,
+    },
 }
 
 /// Discovers the objects the root group of `file` reaches through hard links, with the class of
@@ -238,31 +298,39 @@ fn find_drops<'a>(
 }
 
 /// Walks breadth-first from the targets of `drops` through the objects of `removed`, and returns
-/// the first path under a drop path it finds to each.
-fn dropped_paths(
+/// the last step of the first path under a drop path it finds to each.
+fn dropped_last_steps(
     removed: &BTreeMap<ObjectIndex, GraphObject<SourceObject, String>>,
     drops: &[(LinkIndex, ObjectIndex, &ObjectPathBuf)],
-) -> BTreeMap<ObjectId, ObjectPathBuf> {
+) -> BTreeMap<ObjectId, LastStep> {
     // `removed` and the targets of `drops` hold the indices from before the removal, which the
     // links of the removed objects target.
-    let mut paths = BTreeMap::new();
+    let mut last_steps = BTreeMap::new();
     let mut pending: VecDeque<_> = drops
         .iter()
-        .map(|&(_, target, path)| (target, path.clone()))
+        .map(|&(_, target, path)| (target, LastStep::Drop(path.clone())))
         .collect();
-    while let Some((index, path)) = pending.pop_front() {
+    while let Some((index, last_step)) = pending.pop_front() {
         let Some(object) = removed.get(&index) else {
             continue;
         };
-        if paths.contains_key(&object.value.id) {
+        if last_steps.contains_key(&object.value.id) {
             continue;
         }
         pending.extend(object.links.iter().filter_map(|link| {
-            LinkNameBuf::new(&link.label).map(|link_name| (link.target, path.join(&link_name)))
+            LinkNameBuf::new(&link.label).map(|link_name| {
+                (
+                    link.target,
+                    LastStep::Link {
+                        parent: object.value.id,
+                        link_name,
+                    },
+                )
+            })
         }));
-        paths.insert(object.value.id, path);
+        last_steps.insert(object.value.id, last_step);
     }
-    paths
+    last_steps
 }
 
 /// Returns the path in the output of each object of `descendants`, at its index.

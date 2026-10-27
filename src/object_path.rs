@@ -294,6 +294,15 @@ impl ObjectPathBuf {
     }
 }
 
+/// Builds the path whose components are the link names in iteration order.
+impl FromIterator<LinkNameBuf> for ObjectPathBuf {
+    fn from_iter<I: IntoIterator<Item = LinkNameBuf>>(components: I) -> Self {
+        Self {
+            components: components.into_iter().collect(),
+        }
+    }
+}
+
 /// Writes the components separated by `/`, the root-relative form a [`crate::Group`] handle
 /// stores, and the empty string for the root group.
 impl fmt::Display for ObjectPathBuf {
