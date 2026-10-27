@@ -15,9 +15,9 @@ use rstest::rstest;
 use test_util::checksum;
 use test_util_hdf5::reader::ReadBackend;
 
-use crate::array_index;
-use crate::array_index::Chunk;
-use crate::array_index::Writes;
+use crate::test_util::array_index;
+use crate::test_util::array_index::Chunk;
+use crate::test_util::array_index::Writes;
 
 /// A rank 1 dataset of `len` one-element chunks along an unlimited dimension, deflated or not, with
 /// all its elements written or those of the ranges in `sparse`.

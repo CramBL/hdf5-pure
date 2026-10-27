@@ -15,8 +15,8 @@ use test_util::bytes;
 use test_util::checksum;
 use test_util_hdf5::reader::ReadBackend;
 
-use crate::array_index;
-use crate::array_index::Writes;
+use crate::test_util::array_index;
+use crate::test_util::array_index::Writes;
 
 #[derive(Clone, Copy, Debug)]
 struct Fixture {

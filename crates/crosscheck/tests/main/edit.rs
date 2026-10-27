@@ -27,8 +27,8 @@ use rstest::rstest;
 use test_util_hdf5::numeric::ByteOrder;
 use test_util_hdf5::{absence, file, fixtures};
 
-use crate::hard_link_graphs::RepeatedObjectGraph;
-use crate::hard_link_graphs::TreeGraph;
+use crate::test_util::hard_link_graphs::RepeatedObjectGraph;
+use crate::test_util::hard_link_graphs::TreeGraph;
 
 /// Stage an add, an add-into-a-group, a delete, and a copy — the full op set.
 fn stage_edits(session: &File) {

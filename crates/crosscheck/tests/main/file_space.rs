@@ -61,12 +61,14 @@ use test_util::widths::Widths;
 use test_util_hdf5::absence;
 use test_util_hdf5::dataset::Unlimited;
 use test_util_hdf5::file_space;
-use test_util_hdf5::file_space_oracle::FreeSpaceOracleCheckpoint;
+use test_util_hdf5::file_space_oracle::{self, FreeSpaceOracleCheckpoint};
 use test_util_hdf5::page_publication;
 use test_util_hdf5::paged;
 use test_util_hdf5::session;
 use test_util_hdf5::storage;
 use test_util_hdf5::userblock;
+
+use crate::test_util::file_space as oracle_test_util;
 
 #[rstest]
 #[case::large_threshold(4_096, false, false, false)]
@@ -2328,7 +2330,7 @@ fn the_free_sections_libhdf5_persists_are_read_at_the_widths_of_its_file(
         } else {
             ""
         };
-        super::file_space_oracle::checkpoint(
+        oracle_test_util::checkpoint(
             &path,
             &format!("widths-{driver:?}-{sizeof_addr:?}-{sizeof_size:?}{width_suffix}"),
             "persisted",
@@ -2547,7 +2549,7 @@ fn libhdf5_reads_a_section_list_whose_allocation_the_test_enlarges(#[case] userb
     // Enumeration of this enlarged list reaches `H5FS__sinfo_unlock`'s used/allocated-length
     // assertion (`H5FSsection.c`, HDF5 2.2.0). A fresh `H5Fget_info2` query uses allocated capacity.
     assert_eq!(
-        super::file_space_oracle::assert_manager_metadata_bytes(&path),
+        file_space_oracle::assert_manager_metadata_bytes(&path),
         free.manager_metadata_bytes() + 16,
     );
     let file = hdf5::File::open(&path).unwrap();
@@ -3226,7 +3228,7 @@ fn assert_version_0_free_space_reads_as_libhdf5_reads_it(
     // when their length width is smaller than eight bytes.
     if sizeof_size == Sizeof::Bytes8 {
         drop(f);
-        super::file_space_oracle::checkpoint(
+        oracle_test_util::checkpoint(
             &path,
             &format!("version-0-{sizeof_addr:?}-{sizeof_size:?}-base-{userblock}"),
             "persisted",
@@ -4602,11 +4604,7 @@ fn c_library_reads_our_file_after_a_release_shortened_it() {
              {peak}, now {len})"
         );
 
-        super::file_space_oracle::checkpoint(
-            &path,
-            &format!("tail-truncation-{label}"),
-            "rust-close",
-        );
+        oracle_test_util::checkpoint(&path, &format!("tail-truncation-{label}"), "rust-close");
         let ours = File::open(&path).unwrap();
         assert_eq!(ours.file_size(), len, "{label}: superblock EOF matches");
         let free_ours = ours.persisted_free_sections().unwrap().unwrap();
@@ -4743,7 +4741,7 @@ fn c_library_reads_our_file_after_an_append_reused_free_space() {
             );
         }
 
-        super::file_space_oracle::checkpoint(&path, &format!("append-reuse-{label}"), "rust-close");
+        oracle_test_util::checkpoint(&path, &format!("append-reuse-{label}"), "rust-close");
         let ours = File::open(&path).unwrap();
         assert_eq!(ours.dataset("log2").unwrap().read_i32().unwrap(), payload);
         let total_ours: u64 = ours
@@ -4958,12 +4956,12 @@ fn a_sub_threshold_extent_is_tracked_only_beside_a_tracked_extent_as_libhdf5_tra
             ours_total
         )
     );
-    super::file_space_oracle::checkpoint(
+    oracle_test_util::checkpoint(
         &ours,
         &format!("fsm-subthreshold-{persist}-{}", deletions.join("-")),
         "rust-close",
     );
-    super::file_space_oracle::checkpoint(
+    oracle_test_util::checkpoint(
         &theirs,
         &format!("fsm-subthreshold-{persist}-{}", deletions.join("-")),
         "c-close",
@@ -5099,8 +5097,8 @@ fn a_paged_returned_extent_is_tracked_as_libhdf5_tracks_it(
         "page-threshold-{threshold}-{measured}-{}",
         deletions.join("-")
     );
-    super::file_space_oracle::checkpoint(&ours, &case, "rust-close");
-    super::file_space_oracle::checkpoint(&theirs, &case, "c-close");
+    oracle_test_util::checkpoint(&ours, &case, "rust-close");
+    oracle_test_util::checkpoint(&theirs, &case, "c-close");
 }
 
 #[test]

@@ -15,19 +15,15 @@ use hdf5::{MajorErrorCode, MinorErrorCode};
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FreeSpaceManagerRole;
 use hdf5_pure::{File, FileBuilder, FileSpacePageSize, FileSpaceStrategy, UserblockSize};
-use hdf5_pure_core::__private::BaseAddressExt;
-use hdf5_pure_format::__private::FormatWidths;
-use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use hdf5_sys::h5f;
-use hdf5_sys::h5f::H5F_info2_t;
 use rstest::rstest;
 use test_util_hdf5::file_space;
-use test_util_hdf5::file_space_oracle::{
-    self, ExtentError, FreeSpaceOracleCheckpoint, OracleError, SectionMap,
-};
+use test_util_hdf5::file_space_oracle::{self, ExtentError, OracleError, SectionMap};
 use test_util_hdf5::free_space_churn::{self, Base, Lifecycle, Strategy};
 use test_util_hdf5::free_space_endurance;
 use test_util_hdf5::session;
+
+use crate::test_util::file_space as oracle_test_util;
 
 #[rstest]
 #[case::fsm(FileSpaceStrategy::FsmAggr)]
@@ -74,7 +70,7 @@ fn c_created_sections_have_supported_manager_attribution(
         .unwrap()
         .unwrap();
     assert!(report.free_sections().section_count() > 0);
-    assert!(assert_manager_metadata_bytes(&path) > 0);
+    assert!(file_space_oracle::assert_manager_metadata_bytes(&path) > 0);
     if strategy == FileSpaceStrategy::Page {
         let roles = report
             .managers()
@@ -137,7 +133,10 @@ fn c_created_files_without_datasets_preserve_persistence_configuration(
     } else {
         0
     };
-    assert_eq!(assert_manager_metadata_bytes(&path), expected);
+    assert_eq!(
+        file_space_oracle::assert_manager_metadata_bytes(&path),
+        expected
+    );
 }
 
 #[rstest]
@@ -169,7 +168,10 @@ fn rust_created_files_without_datasets_have_expected_manager_metadata(
     } else {
         0
     };
-    assert_eq!(assert_manager_metadata_bytes(&path), expected);
+    assert_eq!(
+        file_space_oracle::assert_manager_metadata_bytes(&path),
+        expected
+    );
 }
 
 #[rstest]
@@ -185,7 +187,7 @@ fn endurance_checkpoints_match_libhdf5(#[case] strategy: FileSpaceStrategy) {
     let mut steps = Vec::new();
     free_space_endurance::run_endurance_observed(strategy, |path, step| {
         steps.push(step.to_owned());
-        let observation = observe(path, &case, step);
+        let observation = file_space_oracle::observe(path, &case, step);
         if strategy == FileSpaceStrategy::None {
             assert!(observation.rust.sections().is_empty(), "{case}/{step}");
         }
@@ -199,7 +201,7 @@ fn endurance_checkpoints_match_libhdf5(#[case] strategy: FileSpaceStrategy) {
             .chain(std::iter::once("final-close".to_owned()))
             .collect::<Vec<_>>()
     );
-    snapshot(
+    oracle_test_util::snapshot(
         &format!("endurance_{strategy:?}").to_ascii_lowercase(),
         &observations,
     );
@@ -219,11 +221,11 @@ fn churn_checkpoints_match_libhdf5(
     let case = format!("churn/{lifecycle:?}/{strategy:?}/{base:?}");
     let mut observations = String::new();
     free_space_churn::run_churn_observed(lifecycle, strategy, base, |path, step| {
-        let observation = observe(path, &case, step);
+        let observation = file_space_oracle::observe(path, &case, step);
         observations.push_str(&observation.render());
         observations.push('\n');
     });
-    snapshot(
+    oracle_test_util::snapshot(
         &format!("churn_{lifecycle:?}_{strategy:?}_{base:?}").to_ascii_lowercase(),
         &observations,
     );
@@ -360,7 +362,7 @@ fn edits_by_both_libraries_preserve_matching_free_sections(
         reader.dataset("c").unwrap().read_i32().unwrap(),
         vec![3; 100]
     );
-    snapshot(
+    oracle_test_util::snapshot(
         &format!("round_trip_{strategy:?}_{persist}_{threshold}_{base}_{c_origin}")
             .to_ascii_lowercase(),
         &observations,
@@ -395,7 +397,7 @@ fn records_stored_eof_separately_from_trailing_bytes(
     let logical = reader.superblock().eof_address;
     assert_eq!(reader.superblock().base_address.get(), base);
     reader.close().unwrap();
-    assert!(assert_manager_metadata_bytes(&path) > 0);
+    assert!(file_space_oracle::assert_manager_metadata_bytes(&path) > 0);
     file_space::assert_eof_matches_physical_size(&path);
     let slack = [0xA5; 257];
     {
@@ -415,7 +417,7 @@ fn records_stored_eof_separately_from_trailing_bytes(
         ),
     );
     let case = format!("stored-eof/{strategy:?}/base={base}");
-    let observation = observe(&path, &case, "trailing-bytes");
+    let observation = file_space_oracle::observe(&path, &case, "trailing-bytes");
     assert_eq!(
         (
             observation.rust_logical_size,
@@ -435,7 +437,7 @@ fn records_stored_eof_separately_from_trailing_bytes(
         reader.dataset("c").unwrap().read_i32().unwrap(),
         vec![3; 100]
     );
-    snapshot(
+    oracle_test_util::snapshot(
         &format!("stored_eof_{strategy:?}_{base}").to_ascii_lowercase(),
         &observation.render(),
     );
@@ -532,119 +534,11 @@ fn rejects_c_api_error() {
     assert!(source.contains_minor(MinorErrorCode::BadType), "{source:?}");
 }
 
-/// Asserts exact section-map equality and snapshots the paired report with the bundled build.
-///
-/// # Panics
-///
-/// Panics if observation fails, section maps or C totals differ, or a bundled snapshot differs.
-pub(super) fn checkpoint(path: &Path, case: &str, step: &str) {
-    let observation = observe(path, case, step);
-    snapshot(
-        &format!("{case}_{step}").replace('/', "_"),
-        &observation.render(),
-    );
-}
-
-/// Asserts persisted manager allocation sizes against file headers and a fresh C handle.
-///
-/// Returns the independently calculated on-disk total. Opens `path` read-only in each library
-/// and checks that the file bytes remain unchanged.
-///
-/// The version 0 `FSHD` header has 18 fixed bytes, one address, and seven lengths, as defined
-/// in "Free-space Index" of the [format specification, version 4.0][spec].
-///
-/// # Panics
-///
-/// Panics if file inspection fails, either library's count differs from the allocation sizes,
-/// or the file bytes change during inspection.
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_freespaceindex
-pub(super) fn assert_manager_metadata_bytes(path: &Path) -> u64 {
-    let bytes = fs::read(path).unwrap();
-    let reader = File::open(path).unwrap();
-    let report = reader.persisted_free_sections().unwrap();
-    let widths = FormatWidths {
-        offsets: reader.superblock().offset_size,
-        lengths: reader.superblock().length_size,
-    };
-    let base = reader.superblock().base_address;
-    let header_bytes = 18 + u64::from(widths.offsets.get()) + 7 * u64::from(widths.lengths.get());
-    let expected = report.as_ref().map_or(0, |report| {
-        let expected = report
-            .managers()
-            .iter()
-            .map(|manager| {
-                let address = usize::try_from(base.absolute(manager.address()).unwrap()).unwrap();
-                let header = FreeSpaceManagerHeader::parse(widths, &bytes[address..]).unwrap();
-                let allocated = if header.section_list_addr().is_undefined(widths.offsets) {
-                    0
-                } else {
-                    header.section_list_allocated()
-                };
-                assert_eq!(
-                    manager.metadata_bytes(),
-                    header_bytes + allocated,
-                    "{path:?}"
-                );
-                header_bytes + allocated
-            })
-            .sum::<u64>();
-        assert_eq!(report.manager_metadata_bytes(), expected, "{path:?}");
-        expected
-    });
-    reader.close().unwrap();
-    let file = hdf5::File::open(path).unwrap();
-    // `H5MF_get_freespace` opens and closes managers started for its query (`H5MF.c`, HDF5 1.14.6).
-    // `H5FS_size` uses allocated bytes with the section list unloaded (`H5FS.c`, HDF5 1.14.6).
-    assert_eq!(
-        c_manager_metadata_bytes(&file).unwrap(),
-        expected,
-        "fresh handle; {path:?}"
-    );
-    file.close().unwrap();
-    assert_eq!(
-        fs::read(path).unwrap(),
-        bytes,
-        "metadata inspection; {path:?}"
-    );
-    expected
-}
-
-fn c_manager_metadata_bytes(file: &hdf5::File) -> hdf5::Result<u64> {
-    hdf5::sync::sync(|| {
-        let mut info = H5F_info2_t::default();
-        // SAFETY: The library lock serializes access. The file owns a valid identifier, and info
-        // is writable storage of the type `H5Fget_info2` requires for the duration of the call.
-        hdf5::h5check(unsafe { h5f::H5Fget_info2(file.id(), &mut info) })?;
-        Ok(info.free.meta_size)
-    })
-}
-
-fn observe(path: &Path, case: &str, step: &str) -> FreeSpaceOracleCheckpoint {
-    file_space_oracle::assert_persisted_sections(path);
-    let observation = FreeSpaceOracleCheckpoint::observe(path, case, step)
-        .unwrap_or_else(|error| panic!("{case}/{step}: {error:?}"));
-    observation.assert_equal();
-    observation
-}
-
 fn append_checkpoint(out: &mut String, path: &Path, case: &str, step: &str, persist: bool) {
-    let observation = observe(path, case, step);
+    let observation = file_space_oracle::observe(path, case, step);
     if !persist {
         assert!(observation.rust.sections().is_empty(), "{case}/{step}");
     }
     out.push_str(&observation.render());
     out.push('\n');
-}
-
-fn snapshot(name: &str, report: &str) {
-    #[cfg(feature = "__hdf5-bundled")]
-    insta::with_settings!({
-        snapshot_path => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/main/snapshots"),
-        prepend_module_to_snapshot => false,
-    }, {
-        insta::assert_snapshot!(format!("main__file_space_oracle__{name}"), report);
-    });
-    #[cfg(not(feature = "__hdf5-bundled"))]
-    let _ = (name, report);
 }

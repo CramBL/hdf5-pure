@@ -13,7 +13,7 @@ use hdf5_pure::SuperblockVersion;
 use rstest::rstest;
 use test_util_hdf5::symbol_table;
 
-use crate::c_object;
+use crate::test_util::c_object;
 
 #[derive(Clone, Copy, Debug)]
 struct Creation {

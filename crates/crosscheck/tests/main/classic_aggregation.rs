@@ -26,7 +26,7 @@ use test_util_hdf5::aggregation::Workload;
 use test_util_hdf5::file_space;
 use test_util_hdf5::storage;
 
-use crate::c_object;
+use crate::test_util::c_object;
 
 #[rstest]
 #[case::tracked(1, true)]
