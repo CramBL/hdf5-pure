@@ -710,3 +710,138 @@ fn assert_raw_tail(dataset: &Dataset, expected: &[f64]) {
         (32, 0)
     );
 }
+
+#[rstest]
+#[case::scale_offset(Filter::ScaleOffset)]
+#[cfg_attr(feature = "zfp", case::zfp(Filter::Zfp))]
+fn owned_default_lossy_flush_is_recoverable_until_terminal_completion(#[case] filter: Filter) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("owned_default_tail.h5");
+    filter.create(&path, PartialEdgeFiltering::Apply, &[1.5, 2.5, 1.0, 2.0]);
+    let file = File::open_rw(&path).unwrap();
+    let mut appender = file.dataset("d").unwrap().into_buffered_appender().unwrap();
+    appender.append(&[3.5_f64]).unwrap();
+    let error = appender.flush().unwrap_err();
+    let Error::AppendInPlaceUnsupported(reason) = error else {
+        panic!("expected lossy partial-flush rejection, got {error:?}");
+    };
+    assert_eq!(
+        reason,
+        "this dataset's filter pipeline is lossy, and flushing these elements would \
+             leave its length short of a chunk boundary — a later write would then have \
+             to re-encode already-committed values; buffer until the elements complete \
+             a chunk, or end the appender with BufferedAppender::finish, which writes \
+             the partial tail"
+    );
+    assert_eq!(appender.unwritten(), 3.5_f64.to_le_bytes());
+    assert_eq!(appender.buffered_elements(), 1);
+    assert_eq!(
+        file.dataset("d").unwrap().read_f64().unwrap(),
+        [1.5, 2.5, 1.0, 2.0]
+    );
+    appender.append::<f64>(&[]).unwrap();
+    appender.finish().unwrap();
+    assert_eq!(
+        file.dataset("d").unwrap().read_f64().unwrap(),
+        [1.5, 2.5, 1.0, 2.0, 3.5]
+    );
+    assert_buffered_lossy_rejection(
+        file.dataset("d")
+            .unwrap()
+            .into_buffered_appender()
+            .unwrap_err(),
+    );
+    assert_buffered_lossy_rejection(
+        file.dataset("d")
+            .unwrap()
+            .into_buffered_appender_with_options(AppendOptions::new())
+            .unwrap_err(),
+    );
+    drop(file);
+}
+
+#[rstest]
+#[case::scale_offset(Filter::ScaleOffset)]
+#[cfg_attr(feature = "zfp", case::zfp(Filter::Zfp))]
+fn owned_lossy_options_apply_to_split_input_flushes_and_automatic_writes(#[case] filter: Filter) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("owned_lossy_options.h5");
+    filter.create(&path, PartialEdgeFiltering::Apply, &[1.5]);
+    let file = File::open_rw(&path).unwrap();
+    let mut appender = file
+        .dataset("d")
+        .unwrap()
+        .into_buffered_appender_with_options(
+            AppendOptions::new().with_lossy_tail_reencoding(LossyTailReencoding::Allow),
+        )
+        .unwrap();
+    let bytes = 2.5_f64.to_le_bytes();
+    appender.append_raw(&bytes[..5]).unwrap();
+    let error = appender.flush().unwrap_err();
+    let Error::AppendInPlaceUnsupported(reason) = error else {
+        panic!("expected incomplete-element rejection, got {error:?}");
+    };
+    assert_eq!(
+        reason,
+        "the buffered byte length is not a whole number of elements; append the rest of \
+         the trailing element before flushing"
+    );
+    assert_eq!(appender.unwritten(), &bytes[..5]);
+    appender.append_raw(&bytes[5..]).unwrap();
+    appender.flush().unwrap();
+    assert_eq!(file.dataset("d").unwrap().read_f64().unwrap(), [1.5, 2.5]);
+    appender.append(&[1.0_f64, 2.0, 3.5, 4.5]).unwrap();
+    assert_eq!(file.dataset("d").unwrap().shape().unwrap(), [4]);
+    assert_eq!(
+        file.dataset("d").unwrap().read_f64().unwrap(),
+        [1.5, 2.5, 1.0, 2.0]
+    );
+    assert_eq!(
+        appender.unwritten(),
+        [3.5_f64, 4.5]
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>()
+    );
+    appender.flush().unwrap();
+    appender.append(&[5.5_f64]).unwrap();
+    appender.finish().unwrap();
+    assert_eq!(
+        file.dataset("d").unwrap().read_f64().unwrap(),
+        [1.5, 2.5, 1.0, 2.0, 3.5, 4.5, 5.5]
+    );
+    drop(file);
+}
+
+#[test]
+fn an_owned_appender_preserves_unfiltered_partial_edges_until_complete() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("owned_skipped_edges.h5");
+    Filter::ScaleOffset.create(&path, PartialEdgeFiltering::Skip, &[]);
+    let file = File::open_rw(&path).unwrap();
+    let mut appender = file.dataset("d").unwrap().into_buffered_appender().unwrap();
+    appender.append(&[1.46_f64]).unwrap();
+    appender.flush().unwrap();
+    assert_raw_tail(&file.dataset("d").unwrap(), &[1.46]);
+    appender.append(&[1.56_f64]).unwrap();
+    appender.flush().unwrap();
+    assert_raw_tail(&file.dataset("d").unwrap(), &[1.46, 1.56]);
+    appender.append(&[1.0_f64, 2.0, 3.46, 3.56]).unwrap();
+    let observer = file.dataset("d").unwrap();
+    assert_eq!(observer.shape().unwrap(), [4]);
+    assert_eq!(observer.read_f64().unwrap(), [1.5, 1.6, 1.0, 2.0]);
+    assert_eq!(observer.chunks().unwrap()[0].filter_mask().raw_bits(), 0);
+    appender.finish().unwrap();
+    let chunks = observer.chunks().unwrap();
+    assert_eq!(chunks.len(), 2);
+    assert_eq!(
+        (chunks[1].storage_size, chunks[1].filter_mask().raw_bits()),
+        (32, 0)
+    );
+    assert_eq!(
+        observer.read_f64().unwrap(),
+        [1.5, 1.6, 1.0, 2.0, 3.46, 3.56]
+    );
+    drop(observer);
+    drop(file);
+}

@@ -616,7 +616,7 @@ pub use types::DType;
 pub use writer::FileBuilder;
 
 #[cfg(feature = "std")]
-pub use appender::BufferedAppender;
+pub use appender::{BufferedAppender, OwnedBufferedAppender};
 
 #[cfg(feature = "std")]
 pub use edit::{

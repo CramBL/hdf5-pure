@@ -122,3 +122,33 @@ fn c_library_reads_a_buffered_append_onto_its_own_dataset() {
         "the C library disagreed"
     );
 }
+
+#[test]
+#[cfg(target_endian = "little")]
+fn c_library_reads_an_owned_buffered_completion_of_its_dataset() {
+    let _c = lock::libhdf5_guard();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("owned_buffered.h5");
+    Unlimited::new("d", &[0i32, 1], 4)
+        .filters(SHUFFLE_DEFLATE)
+        .libhdf5_create(&path);
+    let file = File::open_rw(&path).unwrap();
+    let mut appender = file.dataset("d").unwrap().into_buffered_appender().unwrap();
+    drop(file);
+    appender.append(&[2i32, 3, 4, 5, 6]).unwrap();
+    assert_eq!(appender.buffered_elements(), 3);
+    assert_eq!(
+        appender.unwritten(),
+        [4i32, 5, 6]
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>()
+    );
+    appender.finish().unwrap();
+    let file = hdf5::File::open(&path).unwrap();
+    let dataset = file.dataset("d").unwrap();
+    assert_eq!(dataset.shape(), [7]);
+    assert_eq!(dataset.read_raw::<i32>().unwrap(), [0, 1, 2, 3, 4, 5, 6]);
+    drop(dataset);
+    file.close().unwrap();
+}
