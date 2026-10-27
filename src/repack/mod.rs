@@ -115,6 +115,7 @@ use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
+use std::vec;
 
 use crate::DeflateLevel;
 #[cfg(test)]
@@ -153,8 +154,7 @@ use crate::scaleoffset::{self, ScaleOffset};
 use crate::shared_message::DatatypeLocation;
 use crate::source::Source;
 use crate::type_builders::{
-    AttrValue, DatasetBuilder, FinishedGroup, GroupBuilder, ObjectRefPatch, ObjectRefTarget,
-    VlStringElement,
+    AttrValue, DatasetBuilder, GroupBuilder, ObjectRefPatch, ObjectRefTarget, VlStringElement,
 };
 use crate::vl_data::{self, EmbeddedVlSlot, VlByteObject, VlenStringReadOptions};
 use crate::width::OffsetWidth;
@@ -479,13 +479,7 @@ fn stage(
         builder.with_file_space_settings(settings.with_persistence(false));
     }
     let objects = SourceObjects::discover(&file, &drop, budget)?;
-    populate(
-        &mut builder,
-        &file,
-        &objects,
-        objects.root(),
-        &ObjectPathBuf::root(),
-    )?;
+    populate(&mut builder, &file, &objects)?;
 
     // Choose the output format now that the content is staged.
     //
@@ -528,10 +522,9 @@ fn stage(
 
 /// A destination that group contents can be added to. Implemented for both the
 /// top-level [`FileBuilder`] (the root group) and [`GroupBuilder`] (subgroups)
-/// so one recursive walk handles every level.
+/// so [`populate_group`] stages the contents of every group.
 trait GroupSink: AttrSink {
     fn sink_dataset(&mut self, name: &str) -> &mut DatasetBuilder;
-    fn sink_add_group(&mut self, group: FinishedGroup);
     fn sink_commit_datatype(&mut self, name: &str, datatype: Datatype);
 }
 
@@ -629,9 +622,6 @@ impl GroupSink for FileBuilder {
     fn sink_dataset(&mut self, name: &str) -> &mut DatasetBuilder {
         self.create_dataset(name)
     }
-    fn sink_add_group(&mut self, group: FinishedGroup) {
-        self.add_group(group);
-    }
     fn sink_commit_datatype(&mut self, name: &str, datatype: Datatype) {
         self.commit_datatype(name, datatype);
     }
@@ -641,30 +631,81 @@ impl GroupSink for GroupBuilder {
     fn sink_dataset(&mut self, name: &str) -> &mut DatasetBuilder {
         self.create_dataset(name)
     }
-    fn sink_add_group(&mut self, group: FinishedGroup) {
-        self.add_group(group);
-    }
     fn sink_commit_datatype(&mut self, name: &str, datatype: Datatype) {
         self.commit_datatype(name, datatype);
     }
 }
 
-/// Copies the attributes, committed datatypes, datasets, and subgroups of the group `object` into
-/// `sink`, recursively. `path` identifies `object` from the root group, and has no components for
-/// the root group itself.
+/// Stages the root group of `objects` in `builder`, with every group under it.
+///
+/// Walks the groups depth-first on a stack of the open groups, without recursion, and adds each
+/// group to its parent once its subgroups are added to it.
+///
+/// # Errors
+///
+/// Returns the errors of [`populate_group`].
+fn populate(
+    builder: &mut FileBuilder,
+    file: &Arc<File>,
+    objects: &SourceObjects,
+) -> Result<(), Error> {
+    let mut root_subgroups = populate_group(
+        builder,
+        file,
+        objects,
+        objects.root(),
+        &ObjectPathBuf::root(),
+    )?;
+    let mut open: Vec<OpenGroup<'_>> = Vec::new();
+    loop {
+        let subgroups = open
+            .last_mut()
+            .map_or(&mut root_subgroups, |group| &mut group.subgroups);
+        if let Some(child) = subgroups.next() {
+            let mut group = GroupBuilder::new(child.link_name);
+            let subgroups = populate_group(&mut group, file, objects, child.object, child.path)?;
+            open.push(OpenGroup { group, subgroups });
+            continue;
+        }
+        let Some(OpenGroup { group, .. }) = open.pop() else {
+            return Ok(());
+        };
+        let finished = group.finish();
+        match open.last_mut() {
+            Some(parent) => parent.group.add_group(finished),
+            None => builder.add_group(finished),
+        }
+    }
+}
+
+/// A group [`populate`] has staged the contents of, and the subgroups it has yet to stage.
+struct OpenGroup<'a> {
+    group: GroupBuilder,
+    /// The subgroups not yet staged, sorted by link name.
+    subgroups: vec::IntoIter<Child<'a>>,
+}
+
+/// Stages the attributes, committed datatypes, and datasets of the group `object` in `sink`, and
+/// returns the subgroups of `object` sorted by link name.
+///
+/// `path` identifies `object` from the root group, and has no components for the root group
+/// itself.
 ///
 /// # Errors
 ///
 /// Returns [`Error::RepackUnsupported`] if a link of `object` targets an object that is neither a
-/// group, a dataset, nor a committed datatype, or if an object under `object` cannot be reproduced
-/// faithfully.
-fn populate<S: GroupSink>(
-    sink: &mut S,
+/// group, a dataset, nor a committed datatype, or if an attribute, a committed datatype, or a
+/// dataset of `object` cannot be reproduced faithfully. Returns [`Error::Format`] with
+/// [`FormatError::Internal`] if a link of `object` targets an object that is not in the tree or
+/// that the repack does not keep. Propagates the errors of reading the attributes, committed
+/// datatypes, and datasets of `object`.
+fn populate_group<'a>(
+    sink: &mut impl GroupSink,
     file: &Arc<File>,
-    objects: &SourceObjects,
-    object: &GraphObject<SourceObject, String>,
+    objects: &'a SourceObjects,
+    object: &'a GraphObject<SourceObject, String>,
     path: &ObjectPathBuf,
-) -> Result<(), Error> {
+) -> Result<vec::IntoIter<Child<'a>>, Error> {
     // Attributes, copied verbatim where their bytes travel and re-encoded where
     // they do not; refused rather than dropped if neither is possible.
     let group = file.group_at(object.value.id.header_address(), path.clone());
@@ -714,13 +755,8 @@ fn populate<S: GroupSink>(
         )?;
     }
 
-    // Subgroups, sorted by name; built depth-first into a FinishedGroup.
-    for child in children_of_class(&children, ObjectClass::Group) {
-        let mut gb = GroupBuilder::new(child.link_name);
-        populate(&mut gb, file, objects, child.object, child.path)?;
-        sink.sink_add_group(gb.finish());
-    }
-    Ok(())
+    children.retain(|child| child.object.value.class == ObjectClass::Group);
+    Ok(children.into_iter())
 }
 
 fn children_of_class<'a>(

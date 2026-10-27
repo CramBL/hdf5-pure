@@ -2368,6 +2368,64 @@ fn an_object_reference_through_a_dropped_alias_resolves_to_the_surviving_link() 
     assert_eq!(group.member_names().unwrap(), vec!["d2"]);
 }
 
+#[rstest]
+#[case::root("/", Some("g"))]
+#[case::group("g", Some("h"))]
+#[case::nested_group("g/h", None)]
+fn the_c_library_reads_the_dense_groups_of_a_repack(
+    #[case] group_path: &str,
+    #[case] subgroup: Option<&str>,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("dense.h5");
+    let dst = dir.path().join("repacked.h5");
+    {
+        let file = file::libhdf5_create_v110(&src);
+        let g = file.create_group("g").unwrap();
+        let h = g.create_group("h").unwrap();
+        for group in [file.as_group().unwrap(), g, h] {
+            for value in 0..DENSE_LINKS {
+                group
+                    .new_dataset::<i32>()
+                    .shape((1,))
+                    .create(format!("d{value:02}").as_str())
+                    .unwrap()
+                    .write(&[value])
+                    .unwrap();
+            }
+        }
+        file.close().unwrap();
+    }
+
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
+
+    let c = hdf5::File::open(&dst).unwrap();
+    let group = c.group(group_path).unwrap();
+    assert_eq!(
+        group.info().unwrap().storage_type,
+        hdf5::GroupStorageType::Dense
+    );
+    let mut names = group.member_names().unwrap();
+    names.sort();
+    assert_eq!(
+        names,
+        (0..DENSE_LINKS)
+            .map(|value| format!("d{value:02}"))
+            .chain(subgroup.map(String::from))
+            .collect::<Vec<_>>()
+    );
+    for value in 0..DENSE_LINKS {
+        assert_eq!(
+            group
+                .dataset(&format!("d{value:02}"))
+                .unwrap()
+                .read_raw::<i32>()
+                .unwrap(),
+            vec![value]
+        );
+    }
+}
+
 #[test]
 fn the_c_library_reads_every_dataset_of_a_repacked_wide_tree() {
     let dir = tempfile::tempdir().unwrap();
@@ -2410,5 +2468,8 @@ impl RepackCall {
 
 const REPEATED_OBJECT: &str = "the repacked file would hold more than one hard link to one object \
      (an alias or a cycle), which a repack cannot reproduce yet";
+
+// More than the 8 links a group holds in compact storage by default.
+const DENSE_LINKS: i32 = 20;
 
 const WRITER_CONTENT: &[u8] = b"held by the caller";
