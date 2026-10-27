@@ -196,6 +196,19 @@ fn existing_error_signatures_and_shapes_compile() {
     FormatError::MissingFractalHeapBlock { heap_offset: 4_294_967_536, object_length: 64 },
     "no allocated fractal heap block contains object at heap offset 4294967536 with length 64"
 )]
+#[case::decoded_size_limit(
+    FormatError::DecodedSizeLimitExceeded {
+        expected_decoded_size: 4_294_967_600,
+        filter_id: hdf5_pure_filter::__private::FILTER_DEFLATE,
+        output_limit: 4_294_967_604,
+        minimum_output_size: 4_294_967_605,
+    },
+    "filter 1 output needs at least 4294967605 bytes, above limit 4294967604 for a payload expected to decode to 4294967600 bytes"
+)]
+#[case::resource_limit(
+    FormatError::ResourceLimit { limit: 4_294_967_600, required: 4_294_967_616 },
+    "resource requires 4294967616, above limit 4294967600"
+)]
 fn source_and_heap_diagnostics_preserve_full_width_positions(
     #[case] error: FormatError,
     #[case] expected: &str,

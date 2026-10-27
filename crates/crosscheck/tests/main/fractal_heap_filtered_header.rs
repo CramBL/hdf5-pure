@@ -115,8 +115,8 @@ fn a_c_written_filtered_link_heap_is_parsed_and_its_links_are_listed(
     assert_eq!(streaming, expected_names);
 }
 
-#[test]
-fn a_c_written_filtered_huge_object_has_a_type_two_record() {
+#[rstest]
+fn a_c_written_filtered_huge_object_has_a_type_two_record(#[values(false, true)] streaming: bool) {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("filtered_huge.h5");
     let gcpl = GroupCreate::build()
@@ -134,13 +134,10 @@ fn a_c_written_filtered_huge_object_has_a_type_two_record() {
         .create("g")
         .unwrap();
     for index in 0..12 {
-        group
-            .link_soft("/unresolved", &format!("small_{index:02}"))
-            .unwrap();
+        group.create_group(&format!("small_{index:02}")).unwrap();
     }
-    group
-        .link_soft(&format!("/{}", "x".repeat(12_000)), "huge")
-        .unwrap();
+    let huge_name = "x".repeat(12_000);
+    group.create_group(&huge_name).unwrap();
     drop(group);
     file.close().unwrap();
     let image = fs::read(&path).unwrap();
@@ -242,6 +239,18 @@ fn a_c_written_filtered_huge_object_has_a_type_two_record() {
         reference.parse(region).unwrap().len() as u64,
         record.location().encoded_size()
     );
+    let file = if streaming {
+        File::open_streaming(&path).unwrap()
+    } else {
+        File::open(&path).unwrap()
+    };
+    let mut names = file.group("g").unwrap().groups().unwrap();
+    let mut expected: Vec<_> = (0..12).map(|index| format!("small_{index:02}")).collect();
+    expected.push(huge_name);
+    names.sort();
+    expected.sort();
+    assert_eq!(names, expected);
+    file.close().unwrap();
 }
 
 // "Fractal Heap", format specification version 4.0, defines the header signature.

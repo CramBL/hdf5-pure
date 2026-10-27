@@ -106,21 +106,21 @@ impl<'a> ChunkContext<'a> {
 ///
 /// # Errors
 ///
-/// Returns [`FormatError::UnsupportedFilter`] if an active filter has no decoder.
-/// Malformed filter data produces a filter-specific [`FormatError`].
-pub fn decompress_chunk(
+/// Returns [`Error::UnsupportedFilter`](hdf5_pure_filter::__private::Error::UnsupportedFilter)
+/// if an active filter has no decoder. Malformed filter data and output beyond a decoder's size
+/// bound produce a filter-specific [`Error`](hdf5_pure_filter::__private::Error).
+pub(crate) fn decompress_chunk(
     compressed: &[u8],
     pipeline: &FilterPipeline,
     ctx: ChunkContext<'_>,
     filter_mask: u32,
-) -> Result<Vec<u8>, FormatError> {
+) -> Result<Vec<u8>, hdf5_pure_filter::__private::Error> {
     hdf5_pure_filter::__private::decompress_chunk(
         compressed,
         &filter_pipeline::FilterStepsRef::new(pipeline),
         ctx.filter_context(),
         filter_mask,
     )
-    .map_err(FormatError::from)
 }
 
 /// Reverses the active filters on a stored chunk using reusable scratch state.
@@ -212,6 +212,19 @@ mod tests {
         );
         let ctx = ChunkContext::from_datatype(&[4], &ordinary).unwrap();
         assert_eq!(ctx.element_size.get(), 4);
+    }
+
+    #[rstest::rstest]
+    #[case::deflate(hdf5_pure_filter::__private::Error::DeflateSizeExceeded { limit: 16, required: 17 }, "deflate: output exceeds expected chunk size of 16 bytes (possible decompression bomb)")]
+    #[case::lzf(hdf5_pure_filter::__private::Error::LzfSizeExceeded { limit: 16, required: 17 }, "lzf: output exceeds expected chunk size")]
+    fn output_size_limits_preserve_legacy_filter_errors(
+        #[case] error: hdf5_pure_filter::__private::Error,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(
+            FormatError::from(error),
+            FormatError::FilterError(expected.into())
+        );
     }
 
     #[test]
