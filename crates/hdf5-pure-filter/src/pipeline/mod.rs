@@ -291,9 +291,9 @@ impl FilterScratch {
 
 /// Reverses the active filters on one stored chunk.
 ///
-/// Filters are reversed in pipeline order. Bit `i` of `filter_mask` skips the filter at
-/// index `i` in forward order. The decoded length is checked when the full chunk's nonzero
-/// byte count can be calculated in `u64` and fits in `usize`.
+/// The decoder applies filters in reverse pipeline order. Bit `i` of `filter_mask` skips the
+/// filter at index `i` in forward order. The decoded length is checked when the full chunk's
+/// nonzero byte count can be calculated in `u64` and fits in `usize`.
 ///
 /// # Errors
 ///
@@ -301,6 +301,8 @@ impl FilterScratch {
 /// Returns [`Error::DataSizeMismatch`] if a representable, nonzero full chunk size differs from
 /// the decoded length.
 /// Returns [`Error::Pipeline`] if the pipeline contains more than 32 filters.
+/// Returns [`Error::DeflateSizeExceeded`] or [`Error::LzfSizeExceeded`] if a decoder exceeds
+/// the output bound derived from the chunk size and the preceding filters.
 /// A decoder may return another [`Error`] for malformed input or invalid parameters.
 pub fn decompress_chunk(
     compressed: &[u8],
@@ -328,6 +330,8 @@ pub fn decompress_chunk(
 /// Returns [`Error::DataSizeMismatch`] if a representable, nonzero full chunk size differs from
 /// the decoded length.
 /// Returns [`Error::Pipeline`] if the pipeline contains more than 32 filters.
+/// Returns [`Error::DeflateSizeExceeded`] or [`Error::LzfSizeExceeded`] if a decoder exceeds
+/// the output bound derived from the chunk size and the preceding filters.
 /// A decoder may return another [`Error`] for malformed input or invalid parameters.
 pub fn decompress_chunk_with(
     scratch: &mut FilterScratch,
@@ -535,11 +539,9 @@ fn deflate_decompress(
 ) -> Result<Vec<u8>, Error> {
     use flate2::{FlushDecompress, Status};
 
-    let bomb = || {
-        deflate_corrupt(&format!(
-            "output exceeds expected chunk size of {} bytes (possible decompression bomb)",
-            max_output.unwrap_or(0)
-        ))
+    let bomb = || Error::DeflateSizeExceeded {
+        limit: max_output.unwrap_or(usize::MAX),
+        required: max_output.unwrap_or(usize::MAX).saturating_add(1),
     };
     let truncated = || deflate_corrupt("stream ended before the chunk was complete");
 
@@ -1285,9 +1287,10 @@ mod tests {
             deflate_decompress(&mut FilterScratch::new(), &compressed, Some(1024)).unwrap_err();
         assert_eq!(
             err,
-            Error::FilterError(
-                "deflate: output exceeds expected chunk size of 1024 bytes (possible decompression bomb)".into()
-            )
+            Error::DeflateSizeExceeded {
+                limit: 1024,
+                required: 1025
+            }
         );
         assert_eq!(
             deflate_decompress(&mut FilterScratch::new(), &compressed, None)
@@ -1385,9 +1388,10 @@ mod tests {
         let err = deflate_decompress(&mut scratch, &good, Some(16)).unwrap_err();
         assert_eq!(
             err,
-            Error::FilterError(
-                "deflate: output exceeds expected chunk size of 16 bytes (possible decompression bomb)".into()
-            )
+            Error::DeflateSizeExceeded {
+                limit: 16,
+                required: 17
+            }
         );
         assert_eq!(
             deflate_decompress(&mut scratch, &good, Some(2048)).unwrap(),

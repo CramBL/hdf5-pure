@@ -14,6 +14,13 @@ pub enum Error {
         /// Number of bytes returned by the filter pipeline.
         actual: usize,
     },
+    /// Reports Deflate output beyond the caller's size limit.
+    DeflateSizeExceeded {
+        /// The decoder's output limit in bytes.
+        limit: usize,
+        /// A lower bound on the decoded stream length in bytes.
+        required: usize,
+    },
     /// Reports malformed Deflate or Shuffle input, or a filter operation that failed.
     FilterError(alloc::string::String),
     /// Reports a Fletcher32 checksum that differs from the stored checksum.
@@ -28,8 +35,15 @@ pub enum Error {
         /// The encoded compression level.
         level: u32,
     },
-    /// Reports malformed LZF input or output beyond the caller's size limit.
+    /// Reports a malformed LZF token or back-reference.
     InvalidLzfStream(&'static str),
+    /// Reports LZF output beyond the caller's size limit.
+    LzfSizeExceeded {
+        /// The decoder's output limit in bytes.
+        limit: usize,
+        /// The output length through the first token that exceeds the limit.
+        required: usize,
+    },
     /// Reports a pipeline whose filter count exceeds the mask's 32 positions.
     Pipeline(FormatError),
     /// Reports invalid scale-offset parameters or input bytes.
@@ -87,6 +101,11 @@ impl fmt::Display for Error {
             Self::DataSizeMismatch { expected, actual } => {
                 write!(f, "data size mismatch: expected {expected}, got {actual}")
             }
+            Self::DeflateSizeExceeded { limit, .. } => write!(
+                f,
+                "deflate: output exceeds expected chunk size of {limit} bytes (possible decompression bomb)"
+            ),
+            Self::LzfSizeExceeded { .. } => f.write_str("lzf: output exceeds expected chunk size"),
             Self::FilterError(reason) => write!(f, "filter error: {reason}"),
             Self::Fletcher32Mismatch { expected, computed } => write!(
                 f,
@@ -137,6 +156,12 @@ impl std::error::Error for Error {}
 impl From<Error> for FormatError {
     fn from(error: Error) -> Self {
         match error {
+            Error::DeflateSizeExceeded { limit, .. } => Self::FilterError(format!(
+                "deflate: output exceeds expected chunk size of {limit} bytes (possible decompression bomb)"
+            )),
+            Error::LzfSizeExceeded { .. } => {
+                Self::FilterError("lzf: output exceeds expected chunk size".into())
+            }
             Error::Pipeline(error) => error,
             Error::InvalidDeflateLevel { level } => Self::InvalidDeflateLevel { level },
             Error::InvalidLzfStream(reason) => Self::FilterError(format!("lzf: {reason}")),
