@@ -5,19 +5,19 @@ set working-directory := ".."
 
 default: miri heap-baseline
 
-# Check MAT buffers, single-threaded cache synchronization, and dense output assembly with Miri.
+# Check MAT buffers, cache synchronization, dense assembly, and primitive byte operations with Miri.
 miri $MIRIFLAGS="-Zmiri-strict-provenance": miri-toolchain
     # Miri artifacts contain compiler-specific metadata. Store them under the pinned nightly so
     # artifacts from another Miri toolchain cannot share this target directory. cargo-miri adds its
     # own `miri` subdirectory below this path.
-    CARGO_TARGET_DIR="target/{{ NIGHTLY }}" cargo +{{ NIGHTLY }} miri test --locked -p hdf5-pure --no-default-features --features std,serde --lib mat::complex
-    CARGO_TARGET_DIR="target/{{ NIGHTLY }}" cargo +{{ NIGHTLY }} miri test --locked -p hdf5-pure --no-default-features --features std,serde --lib mat::transpose
-    CARGO_TARGET_DIR="target/{{ NIGHTLY }}" cargo +{{ NIGHTLY }} miri test --locked -p hdf5-pure --no-default-features --features std --lib nosync
-    CARGO_TARGET_DIR="target/{{ NIGHTLY }}" cargo +{{ NIGHTLY }} miri test --locked -p hdf5-pure --no-default-features --features std --lib chunked_read::tests::dense_assembly
-    # Check exact primitive copies into initialized vectors and their spare capacity.
-    CARGO_TARGET_DIR="target/{{ NIGHTLY }}" cargo +{{ NIGHTLY }} miri test --locked -p hdf5-pure --no-default-features --features std --lib data_read::primitive::tests
-    # Check primitive encoding and its dataset, attribute, and append callers.
-    CARGO_TARGET_DIR="target/{{ NIGHTLY }}" cargo +{{ NIGHTLY }} miri test --locked -p hdf5-pure --no-default-features --features std --lib primitive_bytes::tests
+    CARGO_TARGET_DIR="target/{{ NIGHTLY }}" cargo +{{ NIGHTLY }} miri test --locked \
+        -p hdf5-pure --no-default-features --features std,serde --lib -- \
+        mat::complex mat::transpose
+    # Check primitive copies into initialized vectors and their spare capacity, and primitive encoding
+    # through dataset, attribute, and append callers.
+    CARGO_TARGET_DIR="target/{{ NIGHTLY }}" cargo +{{ NIGHTLY }} miri test --locked \
+        -p hdf5-pure --no-default-features --features std --lib -- \
+        nosync chunked_read::tests::dense_assembly data_read::primitive::tests primitive_bytes::tests
 
 # Install the pinned nightly with Miri and the standard library sources it builds.
 miri-toolchain:
