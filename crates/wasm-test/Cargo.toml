@@ -10,7 +10,7 @@ license.workspace = true
 repository.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
-hdf5-pure.workspace = true
+hdf5-pure = { workspace = true, default-features = true }
 wasm-bindgen-test = "0.3"
 
 [lints]
