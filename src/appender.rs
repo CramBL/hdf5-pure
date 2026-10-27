@@ -1,8 +1,8 @@
 //! Chunk buffers for immediate dataset appends.
 //!
-//! [`BufferedAppender`] borrows a dataset and buffers elements until an automatic write or
-//! explicit flush. Writes use the immediate append path and its [`SyncPolicy`](crate::SyncPolicy)
-//! barriers.
+//! [`BufferedAppender`] borrows a dataset, and [`OwnedBufferedAppender`] owns one. Both buffer
+//! elements until an automatic write or explicit flush. Writes use the immediate append path
+//! and its [`SyncPolicy`](crate::SyncPolicy) barriers.
 
 use core::num::{NonZeroU64, NonZeroUsize};
 
@@ -20,7 +20,8 @@ use crate::reader::Dataset;
 ///
 /// The appender borrows the [`Dataset`] for its lifetime. A second handle from the same
 /// [`File`](crate::File) can read the written prefix. Before each write, the appender reads
-/// the dataset's current length from the session.
+/// the dataset's current length from the session. For an appender that owns its dataset, see
+/// [`OwnedBufferedAppender`].
 ///
 /// # Buffering and recovery
 ///
@@ -225,6 +226,230 @@ impl Drop for BufferedAppender<'_> {
 impl std::fmt::Debug for BufferedAppender<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.state.debug(f, "BufferedAppender")
+    }
+}
+
+/// Owns a dataset and buffers appended elements until complete chunks can be written.
+///
+/// Created by [`Dataset::into_buffered_appender`] or
+/// [`Dataset::into_buffered_appender_with_options`]. The dataset must be chunked, rank one,
+/// unlimited along axis 0, and Extensible-Array indexed. Construction rejects SWMR sessions.
+///
+/// The owned dataset retains the editing session after the original [`File`](crate::File)
+/// is dropped. The appender can be stored in a struct without a lifetime parameter. For an
+/// appender that borrows a dataset, see [`BufferedAppender`]. Before each write, the appender
+/// reads the dataset's current length from the session.
+///
+/// # Buffering and recovery
+///
+/// Automatic writes end at a chunk boundary and leave the remaining bytes buffered.
+/// [`append_raw`](Self::append_raw) can buffer a partial element across calls. An explicit
+/// [`flush`](Self::flush) requires complete elements and writes partial trailing chunks.
+/// [`finish`](Self::finish) flushes and consumes the appender, including on error.
+/// [`discard`](Self::discard) consumes it and returns the pending bytes without writing them.
+/// Both terminal methods release the session claim and drop the owned dataset.
+///
+/// If appending fails before the write path, only the bytes submitted by that call are rejected.
+/// If a write fails, the appender is poisoned, including when no elements were written.
+/// Further writes are rejected. [`unwritten`](Self::unwritten) and [`discard`](Self::discard)
+/// provide the bytes after the written prefix for recovery. If [`flush`](Self::flush) rejects
+/// an incomplete element or a forbidden partial lossy tail, it preserves the buffer and
+/// permits another call.
+///
+/// Dropping attempts a terminal flush unless a write has failed or a terminal operation has
+/// consumed the appender. Errors during drop are ignored. Use [`finish`](Self::finish) to
+/// receive a flush error, or [`flush`](Self::flush)
+/// to retain access to unwritten bytes. Buffered bytes are lost on a crash. Writes use the
+/// immediate append path and its [`SyncPolicy`](crate::SyncPolicy) barriers.
+///
+/// # Session state
+///
+/// The session rejects a second appender on the same dataset and staged edits to the
+/// dataset or an ancestor with [`Error::EditUnsupported`], for either ownership form.
+/// For datasets opened by path, unrelated staged edits and commits are allowed. Appender
+/// writes leave those edits pending, and unrelated commits preserve the buffer and claim.
+/// An appender over a dataset handle reached by object reference blocks all staged edits
+/// and other appenders in the session.
+///
+/// [`File::close`](crate::File::close) closes the shared session without flushing live
+/// appender buffers. After closure, appending, flushing, and finishing return
+/// [`Error::FileClosed`], including with empty input or an empty buffer. Rejected appends
+/// preserve previously buffered bytes, which remain accessible through
+/// [`unwritten`](Self::unwritten) and [`discard`](Self::discard).
+///
+/// # Filter policies
+///
+/// The captured [`AppendOptions`] apply to automatic writes, [`flush`](Self::flush),
+/// [`finish`](Self::finish), and drop. They are not stored in the file or applied to other
+/// append calls.
+///
+/// By default, construction rejects an existing filtered lossy partial tail, and
+/// [`flush`](Self::flush) rejects a write that would leave one. [`finish`](Self::finish) can
+/// write a partial tail because it consumes the appender. [`LossyTailReencoding::Allow`]
+/// permits growing filtered lossy partial tails and repeated partial flushes. Each rewrite
+/// can introduce additional quantization error in previously published tail values, with
+/// the interruption behavior described by [`Dataset::append_with_options`]. Under
+/// [`PartialEdgeFiltering::Skip`](crate::PartialEdgeFiltering::Skip), partial tails stay
+/// unfiltered until complete, including with a lossy pipeline.
+///
+/// # Examples
+///
+/// ```
+/// use hdf5_pure::{File, FileBuilder, MaxExtent, OwnedBufferedAppender};
+/// # fn main() -> Result<(), hdf5_pure::Error> {
+/// # let dir = tempfile::tempdir()?;
+/// # let path = dir.path().join("samples.h5");
+/// struct Samples {
+///     appender: OwnedBufferedAppender,
+/// }
+///
+/// let mut builder = FileBuilder::new();
+/// builder.create_dataset("samples")
+///     .with_i32_data(&[])
+///     .with_maxshape(&[MaxExtent::Unlimited])
+///     .with_chunks(&[4]);
+/// builder.write(&path)?;
+///
+/// let file = File::open_rw(&path)?;
+/// let mut samples = Samples {
+///     appender: file.dataset("samples")?.into_buffered_appender()?,
+/// };
+/// drop(file);
+/// samples.appender.append(&[0i32, 1, 2, 3, 4, 5])?;
+/// assert_eq!(samples.appender.buffered_elements(), 2);
+/// samples.appender.finish()?;
+///
+/// let file = File::open(&path)?;
+/// assert_eq!(file.dataset("samples")?.read_i32()?, [0, 1, 2, 3, 4, 5]);
+/// drop(file);
+/// # Ok(())
+/// # }
+/// ```
+pub struct OwnedBufferedAppender {
+    dataset: Dataset,
+    state: BufferState,
+}
+
+impl OwnedBufferedAppender {
+    /// Creates an appender that owns the dataset and captures `options` for every write.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors described by [`Dataset::into_buffered_appender_with_options`].
+    pub(crate) fn new(dataset: Dataset, options: AppendOptions) -> Result<Self, Error> {
+        Ok(Self {
+            state: BufferState::new(&dataset, options)?,
+            dataset,
+        })
+    }
+
+    /// Buffers scalar elements and writes complete chunks automatically.
+    ///
+    /// The element type must match the dataset's on-disk datatype exactly. A mismatch is
+    /// reported when this call or a later operation writes the buffered elements.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FileClosed`] if the file is closed, including for empty `data`, or
+    /// [`Error::AppendInPlaceUnsupported`] if a write has already failed. Propagates errors
+    /// from the immediate append. See [`OwnedBufferedAppender`] for recovery after an error.
+    pub fn append<T: H5Element>(&mut self, data: &[T]) -> Result<(), Error> {
+        self.state.append(&mut self.dataset, data)
+    }
+
+    /// Buffers little-endian element bytes and writes complete chunks automatically.
+    ///
+    /// Raw input can end within an element. Automatic writes use only the complete prefix,
+    /// and a later call can complete the trailing element. [`flush`](Self::flush) and
+    /// [`finish`](Self::finish) require the entire buffer to contain complete elements.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FileClosed`] if the file is closed, including for empty `bytes`, or
+    /// [`Error::AppendInPlaceUnsupported`] if a write has already failed. Propagates errors
+    /// from the immediate append. See [`OwnedBufferedAppender`] for recovery after an error.
+    pub fn append_raw(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        self.state.append_raw(&mut self.dataset, bytes)
+    }
+
+    /// Returns the number of complete elements buffered in memory.
+    ///
+    /// A partial trailing element from [`append_raw`](Self::append_raw) is excluded from the
+    /// count. Its bytes are included in [`unwritten`](Self::unwritten).
+    #[must_use]
+    pub fn buffered_elements(&self) -> u64 {
+        self.state.buffered_elements()
+    }
+
+    /// Returns the pending little-endian bytes in append order.
+    ///
+    /// After a write error, these are the bytes after the prefix written to the file. This
+    /// method remains usable after an error or file closure.
+    #[must_use]
+    pub fn unwritten(&self) -> &[u8] {
+        self.state.pending.raw()
+    }
+
+    /// Returns the chunk length along the appended axis.
+    #[must_use]
+    pub const fn chunk_elements(&self) -> u64 {
+        self.state.chunk_elems.get()
+    }
+
+    /// Writes every buffered element to the file, including a partial trailing chunk.
+    ///
+    /// A partial tail is rewritten by the next write. Under
+    /// [`PartialEdgeFiltering::Skip`](crate::PartialEdgeFiltering::Skip), it stays unfiltered
+    /// until complete, even with a lossy pipeline.
+    /// [`LossyTailReencoding::Allow`] permits repeated partial flushes of a filtered lossy
+    /// tail, with the quantization and interruption behavior described by
+    /// [`OwnedBufferedAppender`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FileClosed`] if the file is closed, including for an empty buffer.
+    /// Returns [`Error::AppendInPlaceUnsupported`] if a write has already failed, the buffer
+    /// ends within an element, or a write would leave a filtered lossy partial tail and
+    /// re-encoding is forbidden. Propagates errors from the immediate append.
+    pub fn flush(&mut self) -> Result<(), Error> {
+        self.state.flush(&mut self.dataset, FlushMode::Continue)
+    }
+
+    /// Returns the pending bytes and consumes the appender without writing them.
+    ///
+    /// Elements written by earlier calls remain in the file. This method remains usable after
+    /// an error or file closure.
+    pub fn discard(mut self) -> Vec<u8> {
+        self.state.discard()
+    }
+
+    /// Flushes every buffered element and consumes the appender.
+    ///
+    /// Prefer this to dropping, which performs the same flush but cannot report its error.
+    /// The appender is consumed even on error. Use [`flush`](Self::flush) to retain unwritten
+    /// elements for recovery through [`unwritten`](Self::unwritten).
+    ///
+    /// Writes a partial tail even under a lossy pipeline, since the appender is consumed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FileClosed`] if the file is closed, including for an empty buffer.
+    /// Returns [`Error::AppendInPlaceUnsupported`] if a write has already failed or the buffer
+    /// ends within an element. Propagates errors from the immediate append.
+    pub fn finish(mut self) -> Result<(), Error> {
+        self.state.finish(&mut self.dataset)
+    }
+}
+
+impl Drop for OwnedBufferedAppender {
+    fn drop(&mut self) {
+        self.state.teardown(&mut self.dataset);
+    }
+}
+
+impl std::fmt::Debug for OwnedBufferedAppender {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.state.debug(f, "OwnedBufferedAppender")
     }
 }
 
@@ -588,6 +813,45 @@ mod tests {
         drop(dataset);
         drop(file);
         assert_eq!(dataset::read_pure::<i32>(&path, "d"), [7]);
+    }
+
+    #[rstest]
+    #[case::before_any_elements(0)]
+    #[case::after_a_complete_chunk(4)]
+    fn owned_write_failure_preserves_the_unwritten_tail_without_retrying(#[case] landed: usize) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owned_failure.h5");
+        Unlimited::<i32>::new("d", &[], 4).pure_create(&path);
+        let file = File::open_rw(&path).unwrap();
+        let mut appender = file.dataset("d").unwrap().into_buffered_appender().unwrap();
+        let attempts = Rc::new(Cell::new(0));
+        appender.state.failure = Some(WriteFailure {
+            landed,
+            attempts: attempts.clone(),
+        });
+        let bytes: Vec<_> = (0..10i32).flat_map(i32::to_le_bytes).collect();
+        appender.append_raw(&bytes[..5]).unwrap();
+        let error = appender.append_raw(&bytes[5..]).unwrap_err();
+        let Error::Io(error) = error else {
+            panic!("expected injected write error, got {error:?}");
+        };
+        assert_eq!(error.kind(), ErrorKind::Other);
+        assert_eq!(error.to_string(), "injected appender write failure");
+        assert_eq!(appender.unwritten(), &bytes[landed * 4..]);
+        assert_poisoned(appender.flush().unwrap_err());
+        assert_eq!(appender.discard(), &bytes[landed * 4..]);
+        assert_eq!(attempts.get(), 1);
+        file.dataset("d")
+            .unwrap()
+            .into_buffered_appender()
+            .unwrap()
+            .finish()
+            .unwrap();
+        drop(file);
+        assert_eq!(
+            dataset::read_pure::<i32>(&path, "d"),
+            (0..landed as i32).collect::<Vec<_>>()
+        );
     }
 
     fn assert_poisoned(error: Error) {

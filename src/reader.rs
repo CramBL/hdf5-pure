@@ -46,7 +46,7 @@ use crate::type_builders::{DatasetBuilder, VL_REF_SIZE};
 use crate::FileSpaceStrategy;
 use crate::FillTime;
 use crate::SuperblockVersion;
-use crate::appender::BufferedAppender;
+use crate::appender::{BufferedAppender, OwnedBufferedAppender};
 use crate::attribute;
 use crate::chunk_cache::{CachePass, ChunkCache, ChunkCacheConfig, ChunkCacheStats};
 use crate::compound::CompoundType;
@@ -3483,7 +3483,7 @@ impl File {
     /// Synchronization is durable under every [`SyncPolicy`], including [`SyncPolicy::OnClose`].
     /// Writes retained after a failed operation are issued before synchronization. New staged
     /// edits remain pending for [`commit`](Self::commit). Elements held by a [`BufferedAppender`]
-    /// require its [`flush`](BufferedAppender::flush) first.
+    /// or an [`OwnedBufferedAppender`] require the appender's buffer to be flushed first.
     ///
     /// In a non-persistent PAGE session, synchronization also verifies and adopts any pending
     /// publication. The complete earlier batch may become visible even though its commit
@@ -6005,6 +6005,48 @@ impl Dataset {
         options: AppendOptions,
     ) -> Result<BufferedAppender<'_>, Error> {
         BufferedAppender::new(self, options)
+    }
+
+    /// Consumes the dataset and buffers appends with [`AppendOptions::new`].
+    ///
+    /// The owned dataset retains the editing session after the original [`File`] is dropped.
+    /// The default policy rejects an existing filtered lossy partial tail and partial flushes
+    /// that would leave one. See [`OwnedBufferedAppender`] for buffering and recovery.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors described by
+    /// [`into_buffered_appender_with_options`](Self::into_buffered_appender_with_options).
+    pub fn into_buffered_appender(self) -> Result<OwnedBufferedAppender, Error> {
+        self.into_buffered_appender_with_options(AppendOptions::new())
+    }
+
+    /// Consumes the dataset and buffers appends under a captured policy.
+    ///
+    /// The file and dataset requirements match
+    /// [`buffered_appender_with_options`](Self::buffered_appender_with_options).
+    /// The supplied [`AppendOptions`] apply to
+    /// automatic writes, [`flush`](OwnedBufferedAppender::flush),
+    /// [`finish`](OwnedBufferedAppender::finish), and drop. They are not stored in the file
+    /// or applied to other append calls. The owned dataset retains the editing session after
+    /// the original [`File`] is dropped. Explicitly closing the file closes that session.
+    ///
+    /// [`LossyTailReencoding::Allow`](crate::LossyTailReencoding::Allow) permits growing
+    /// filtered lossy partial tails and repeated partial flushes, with the quantization and
+    /// interruption behavior described by [`append_with_options`](Self::append_with_options).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ReadOnly`] if the file is read-only, [`Error::SwmrAppendUnsupported`]
+    /// if it is a SWMR session, or [`Error::AppendInPlaceUnsupported`] if the file or dataset
+    /// is unsupported or a filtered lossy partial tail requires re-encoding without permission.
+    /// Returns [`Error::EditUnsupported`] if another appender conflicts with this one.
+    /// Propagates file-state and metadata errors. The dataset is consumed even on error.
+    pub fn into_buffered_appender_with_options(
+        self,
+        options: AppendOptions,
+    ) -> Result<OwnedBufferedAppender, Error> {
+        OwnedBufferedAppender::new(self, options)
     }
 
     /// Applies the session's live mutation gate to appender operations.

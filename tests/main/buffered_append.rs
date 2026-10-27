@@ -9,7 +9,9 @@ use rstest::rstest;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileLocking;
-use hdf5_pure::{AttrValue, Error, File, FileBuilder, ScaleOffset};
+use hdf5_pure::{
+    AppendOptions, AttrValue, Error, File, FileBuilder, Object, OwnedBufferedAppender, ScaleOffset,
+};
 
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
 
@@ -959,4 +961,344 @@ fn closed_session_rejects_buffered_finish(#[case] prior: &[u8]) {
     assert!(matches!(error, Error::FileClosed), "{error:?}");
     drop(dataset);
     assert_eq!(dataset::read_pure::<i32>(&path, "d"), Vec::<i32>::new());
+}
+
+#[test]
+fn an_owned_appender_retains_the_session_without_a_lifetime_parameter() {
+    struct Log {
+        appender: OwnedBufferedAppender,
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("retained.h5");
+    Unlimited::<i32>::new("d", &[], 4)
+        .filters(SHUFFLE_DEFLATE)
+        .pure_create(&path);
+    let file = File::open_rw(&path).unwrap();
+    let mut log = Log {
+        appender: file.dataset("d").unwrap().into_buffered_appender().unwrap(),
+    };
+    drop(file);
+    log.appender.append(&[0i32, 1, 2, 3, 4, 5]).unwrap();
+    assert_eq!(log.appender.chunk_elements(), 4);
+    assert_eq!(log.appender.buffered_elements(), 2);
+    assert_eq!(log.appender.unwritten(), i32_bytes(&[4, 5]));
+    assert_eq!(
+        format!("{:?}", log.appender),
+        "OwnedBufferedAppender { chunk_elements: 4, buffered_elements: 2, lossy_filters: false, poisoned: false }"
+    );
+    log.appender.finish().unwrap();
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), [0, 1, 2, 3, 4, 5]);
+}
+
+#[test]
+fn owned_automatic_writes_end_at_chunk_boundaries_and_preserve_a_split_element() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("split_owned.h5");
+    Unlimited::<i32>::new("d", &[], 4).pure_create(&path);
+    let file = File::open_rw(&path).unwrap();
+    let mut appender = file
+        .dataset("d")
+        .unwrap()
+        .into_buffered_appender_with_options(AppendOptions::new())
+        .unwrap();
+    let bytes = i32_bytes(&[0, 1, 2, 3, 4, 5]);
+    appender.append_raw(&bytes[..19]).unwrap();
+    let observer = file.dataset("d").unwrap();
+    assert_eq!(observer.shape().unwrap(), [4]);
+    assert_eq!(observer.read_i32().unwrap(), [0, 1, 2, 3]);
+    assert_eq!(appender.unwritten(), &bytes[16..19]);
+    assert_eq!(appender.buffered_elements(), 0);
+    assert_append_rejection(
+        appender.flush().unwrap_err(),
+        "the buffered byte length is not a whole number of elements; append the rest of \
+         the trailing element before flushing",
+    );
+    assert_eq!(appender.unwritten(), &bytes[16..19]);
+    appender.append_raw(&bytes[19..]).unwrap();
+    assert_eq!(appender.unwritten(), &bytes[16..]);
+    appender.flush().unwrap();
+    assert_eq!(appender.unwritten(), Vec::<u8>::new());
+    assert_eq!(observer.read_i32().unwrap(), [0, 1, 2, 3, 4, 5]);
+    appender.finish().unwrap();
+    drop(observer);
+    drop(file);
+}
+
+#[rstest]
+#[case::owned_claim(true)]
+#[case::borrowed_claim(false)]
+fn mixed_ownership_conflicts_preserve_the_first_claim(#[case] owned_first: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mixed_claims.h5");
+    Unlimited::<i32>::new("d", &[], 4).pure_create(&path);
+    let file = File::open_rw(&path).unwrap();
+    let mut borrowed = file.dataset("d").unwrap();
+    if owned_first {
+        let mut first = file.dataset("d").unwrap().into_buffered_appender().unwrap();
+        assert_appender_conflict(borrowed.buffered_appender().unwrap_err());
+        assert_appender_conflict(
+            file.dataset("d")
+                .unwrap()
+                .into_buffered_appender()
+                .unwrap_err(),
+        );
+        first.append(&[0i32, 1]).unwrap();
+        first.finish().unwrap();
+    } else {
+        let mut first = borrowed.buffered_appender().unwrap();
+        assert_appender_conflict(
+            file.dataset("d")
+                .unwrap()
+                .into_buffered_appender()
+                .unwrap_err(),
+        );
+        assert_appender_conflict(
+            file.dataset("d")
+                .unwrap()
+                .into_buffered_appender()
+                .unwrap_err(),
+        );
+        first.append(&[0i32, 1]).unwrap();
+        first.finish().unwrap();
+    }
+    let mut replacement = file.dataset("d").unwrap().into_buffered_appender().unwrap();
+    replacement.append(&[2i32]).unwrap();
+    replacement.finish().unwrap();
+    assert_eq!(borrowed.read_i32().unwrap(), [0, 1, 2]);
+    drop(borrowed);
+    drop(file);
+}
+
+#[rstest]
+#[case::finish(OwnedTermination::Finish, &[0, 1, 2, 3, 4, 5])]
+#[case::discard(OwnedTermination::Discard, &[0, 1, 2, 3])]
+#[case::drop(OwnedTermination::Drop, &[0, 1, 2, 3, 4, 5])]
+#[case::failed_finish(OwnedTermination::IncompleteFinish, &[0, 1, 2, 3])]
+fn owned_terminal_operations_release_the_claim(
+    #[case] termination: OwnedTermination,
+    #[case] expected: &[i32],
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("owned_terminal.h5");
+    Unlimited::<i32>::new("d", &[], 4).pure_create(&path);
+    let file = File::open_rw(&path).unwrap();
+    let mut appender = file.dataset("d").unwrap().into_buffered_appender().unwrap();
+    appender.append(&[0i32, 1, 2, 3, 4, 5]).unwrap();
+    assert_eq!(appender.unwritten(), i32_bytes(&[4, 5]));
+    match termination {
+        OwnedTermination::Discard => assert_eq!(appender.discard(), i32_bytes(&[4, 5])),
+        OwnedTermination::Drop => drop(appender),
+        OwnedTermination::Finish => appender.finish().unwrap(),
+        OwnedTermination::IncompleteFinish => {
+            appender.append_raw(&[6]).unwrap();
+            assert_append_rejection(
+                appender.finish().unwrap_err(),
+                "the buffered byte length is not a whole number of elements; append the rest of \
+                 the trailing element before flushing",
+            );
+        }
+    }
+    let mut observer = file.dataset("d").unwrap();
+    observer.buffered_appender().unwrap().finish().unwrap();
+    assert_eq!(observer.read_i32().unwrap(), expected);
+    drop(observer);
+    drop(file);
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
+}
+
+#[test]
+fn an_owned_appender_retains_its_buffer_and_claim_across_an_unrelated_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("retained_commit.h5");
+    Unlimited::<i32>::new("d", &[], 4).pure_create(&path);
+    let file = File::open_rw(&path).unwrap();
+    let mut appender = file.dataset("d").unwrap().into_buffered_appender().unwrap();
+    appender.append(&[0i32, 1]).unwrap();
+    file.root()
+        .create_dataset("other", |builder| {
+            builder.with_i32_data(&[7, 8]);
+        })
+        .unwrap();
+    assert!(file.has_staged_edits());
+    file.commit().unwrap();
+    assert!(!file.has_staged_edits());
+    assert_eq!(appender.unwritten(), i32_bytes(&[0, 1]));
+    assert_eq!(file.dataset("other").unwrap().read_i32().unwrap(), [7, 8]);
+    assert_appender_conflict(
+        file.dataset("d")
+            .unwrap()
+            .into_buffered_appender()
+            .unwrap_err(),
+    );
+    assert_edit_claim(file.root().set_attr("tag", AttrValue::I32(1)).unwrap_err());
+    appender.append(&[2i32, 3, 4]).unwrap();
+    appender.finish().unwrap();
+    drop(file);
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), [0, 1, 2, 3, 4]);
+    assert_eq!(dataset::read_pure::<i32>(&path, "other"), [7, 8]);
+}
+
+#[test]
+fn owned_appender_writes_leave_unrelated_edits_staged() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("owned_staged.h5");
+    Unlimited::new("d", &[0i32, 1], 4)
+        .filters(SHUFFLE_DEFLATE)
+        .pure_create(&path);
+    let file = File::open_rw(&path).unwrap();
+    let mut appender = file.dataset("d").unwrap().into_buffered_appender().unwrap();
+    file.root()
+        .create_dataset("other", |builder| {
+            builder.with_i32_data(&[9]);
+        })
+        .unwrap();
+    appender.append(&[2i32, 3, 4, 5, 6]).unwrap();
+    appender.flush().unwrap();
+    appender.finish().unwrap();
+    assert!(file.has_staged_edits());
+    assert_eq!(
+        file.dataset("d").unwrap().read_i32().unwrap(),
+        [0, 1, 2, 3, 4, 5, 6]
+    );
+    file.commit().unwrap();
+    drop(file);
+    assert_eq!(dataset::read_pure::<i32>(&path, "other"), [9]);
+}
+
+#[test]
+fn an_owned_address_only_handle_preserves_session_restrictions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("owned_reference.h5");
+    let mut builder = FileBuilder::new();
+    Unlimited::<i32>::new("d", &[], 4).add_to(&mut builder);
+    Unlimited::<i32>::new("other", &[], 4).add_to(&mut builder);
+    builder.create_dataset("refs").with_path_references(&["d"]);
+    builder.write(&path).unwrap();
+    let file = File::open_rw(&path).unwrap();
+    let object = file
+        .dataset("refs")
+        .unwrap()
+        .dereference()
+        .unwrap()
+        .remove(0);
+    let Object::Dataset(dataset) = object else {
+        panic!("expected dataset reference, got {object:?}");
+    };
+    let mut appender = dataset.into_buffered_appender().unwrap();
+    appender.append(&[1i32, 2]).unwrap();
+    assert_edit_claim(
+        file.dataset("other")
+            .unwrap()
+            .set_attr("tag", AttrValue::I32(1))
+            .unwrap_err(),
+    );
+    assert_appender_conflict(
+        file.dataset("other")
+            .unwrap()
+            .into_buffered_appender()
+            .unwrap_err(),
+    );
+    let error = appender.flush().unwrap_err();
+    assert!(matches!(error, Error::StaleHandle), "{error:?}");
+    assert_eq!(appender.unwritten(), i32_bytes(&[1, 2]));
+    assert_eq!(appender.discard(), i32_bytes(&[1, 2]));
+    let mut replacement = file.dataset("d").unwrap().into_buffered_appender().unwrap();
+    replacement.append(&[1i32, 2]).unwrap();
+    replacement.finish().unwrap();
+    file.dataset("other")
+        .unwrap()
+        .set_attr("tag", AttrValue::I32(1))
+        .unwrap();
+    file.commit().unwrap();
+    drop(file);
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), [1, 2]);
+}
+
+#[rstest]
+#[case::empty(&[])]
+#[case::whole_element(&[1, 0, 0, 0])]
+#[case::split_element(&[1, 0])]
+fn closed_session_rejects_owned_operations_without_accepting_bytes(#[case] prior: &[u8]) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("owned_closed.h5");
+    Unlimited::<i32>::new("d", &[], 8).pure_create(&path);
+    let file = File::open_rw(&path).unwrap();
+    let mut appender = file.dataset("d").unwrap().into_buffered_appender().unwrap();
+    appender.append_raw(prior).unwrap();
+    file.close().unwrap();
+    let error = appender.append::<i32>(&[]).unwrap_err();
+    assert!(matches!(error, Error::FileClosed), "{error:?}");
+    let error = appender.append(&[2i32]).unwrap_err();
+    assert!(matches!(error, Error::FileClosed), "{error:?}");
+    let error = appender.append_raw(&[]).unwrap_err();
+    assert!(matches!(error, Error::FileClosed), "{error:?}");
+    let error = appender.append_raw(&[0]).unwrap_err();
+    assert!(matches!(error, Error::FileClosed), "{error:?}");
+    let error = appender.flush().unwrap_err();
+    assert!(matches!(error, Error::FileClosed), "{error:?}");
+    assert_eq!(appender.unwritten(), prior);
+    assert_eq!(appender.discard(), prior);
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), Vec::<i32>::new());
+}
+
+#[rstest]
+#[case::empty(&[])]
+#[case::sub_chunk(&[1, 0, 0, 0])]
+fn closed_session_rejects_owned_finish(#[case] prior: &[u8]) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("owned_closed_finish.h5");
+    Unlimited::<i32>::new("d", &[], 8).pure_create(&path);
+    let file = File::open_rw(&path).unwrap();
+    let mut appender = file.dataset("d").unwrap().into_buffered_appender().unwrap();
+    appender.append_raw(prior).unwrap();
+    file.close().unwrap();
+    let error = appender.finish().unwrap_err();
+    assert!(matches!(error, Error::FileClosed), "{error:?}");
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), Vec::<i32>::new());
+}
+
+#[derive(Clone, Copy, Debug)]
+enum OwnedTermination {
+    Discard,
+    Drop,
+    Finish,
+    IncompleteFinish,
+}
+
+fn i32_bytes(values: &[i32]) -> Vec<u8> {
+    values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect()
+}
+
+fn assert_appender_conflict(error: Error) {
+    let Error::EditUnsupported(reason) = error else {
+        panic!("expected appender conflict, got {error:?}");
+    };
+    assert_eq!(
+        reason,
+        "this dataset already has a live buffered appender; two of them would interleave \
+                 their buffers a chunk at a time"
+    );
+}
+
+fn assert_edit_claim(error: Error) {
+    let Error::EditUnsupported(reason) = error else {
+        panic!("expected live-appender edit rejection, got {error:?}");
+    };
+    assert_eq!(
+        reason,
+        "this dataset has a live buffered appender holding elements only its own flush \
+                 can write, and this edit would stop that flush; finish or discard the appender \
+                 first"
+    );
+}
+
+fn assert_append_rejection(error: Error, expected: &str) {
+    let Error::AppendInPlaceUnsupported(reason) = error else {
+        panic!("expected append rejection, got {error:?}");
+    };
+    assert_eq!(reason, expected);
 }
