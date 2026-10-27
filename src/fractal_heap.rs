@@ -781,6 +781,7 @@ impl<'h> HeapObjectReader<'h> {
 #[cfg(test)]
 mod tests {
     use core::cell::RefCell;
+    use hdf5_pure_core::__private::PipelineFilterMask;
     use hdf5_pure_format::__private::FilterDescription;
     use hdf5_pure_format::__private::FilterPipeline;
     use hdf5_pure_format::__private::FractalHeapFiltering;
@@ -789,6 +790,7 @@ mod tests {
     use rstest::rstest;
     use test_util::fractal_heap;
     use test_util::widths::Widths;
+    use test_util_hdf5::reader::ReadBackend;
 
     use crate::address::{BaseAddress, BaseAddressExt, OpenedImageContext};
     use crate::source::{BaseOffsetSource, BytesSource};
@@ -1594,13 +1596,12 @@ mod tests {
         #[case] pipeline: FilterPipeline,
         #[case] mask: u32,
         #[values(false, true)] direct: bool,
-        #[values(false, true)] streaming: bool,
+        #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
         #[values(0, 512)] base: u64,
     ) {
-        let heap = HugeHeap::new(direct, Some((pipeline, mask)), base);
+        let heap = HugeHeap::new(direct, Some(HugeFilters::new(pipeline, mask)), base);
         assert_eq!(
-            heap.read(streaming, HugeObjectReadLimits::UNLIMITED)
-                .unwrap(),
+            heap.read(backend, HugeObjectReadLimits::UNLIMITED).unwrap(),
             heap.decoded
         );
         let layout = FractalHeapHugeObjectLayout::new(
@@ -1638,13 +1639,12 @@ mod tests {
     #[rstest]
     fn unfiltered_huge_objects_keep_both_id_representations(
         #[values(false, true)] direct: bool,
-        #[values(false, true)] streaming: bool,
+        #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
         #[values(0, 512)] base: u64,
     ) {
         let heap = HugeHeap::new(direct, None, base);
         assert_eq!(
-            heap.read(streaming, HugeObjectReadLimits::UNLIMITED)
-                .unwrap(),
+            heap.read(backend, HugeObjectReadLimits::UNLIMITED).unwrap(),
             heap.decoded
         );
     }
@@ -1656,15 +1656,19 @@ mod tests {
         #[case] filter: FilterDescription,
         #[case] expected: u16,
         #[values(false, true)] direct: bool,
-        #[values(false, true)] streaming: bool,
+        #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
     ) {
-        let mut heap = HugeHeap::new(direct, Some((test_data::filter_pipeline(vec![]), 0)), 0);
+        let mut heap = HugeHeap::new(
+            direct,
+            Some(HugeFilters::new(test_data::filter_pipeline(vec![]), 0)),
+            0,
+        );
         let FractalHeapFiltering::Filtered { pipeline, .. } = &mut heap.header.filtering else {
             panic!("expected filtered heap")
         };
         *pipeline = test_data::filter_pipeline(vec![filter]);
         assert_eq!(
-            heap.read(streaming, HugeObjectReadLimits::UNLIMITED)
+            heap.read(backend, HugeObjectReadLimits::UNLIMITED)
                 .unwrap_err(),
             FormatError::UnsupportedFilter(expected)
         );
@@ -1680,7 +1684,7 @@ mod tests {
         #[case] delta: i64,
         #[values(false, true)] checksum_before_deflate: bool,
         #[values(false, true)] direct: bool,
-        #[values(false, true)] streaming: bool,
+        #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
     ) {
         let pipeline = if checksum_before_deflate {
             test_data::filter_pipeline(vec![
@@ -1690,7 +1694,7 @@ mod tests {
         } else {
             test_data::deflate_pipeline()
         };
-        let mut heap = HugeHeap::new(direct, Some((pipeline, 0)), 0);
+        let mut heap = HugeHeap::new(direct, Some(HugeFilters::new(pipeline, 0)), 0);
         let expected = heap
             .decoded
             .len()
@@ -1718,7 +1722,7 @@ mod tests {
             }
         };
         assert_eq!(
-            heap.read(streaming, HugeObjectReadLimits::UNLIMITED)
+            heap.read(backend, HugeObjectReadLimits::UNLIMITED)
                 .unwrap_err(),
             error
         );
@@ -1728,12 +1732,16 @@ mod tests {
     #[cfg(feature = "deflate")]
     fn filtered_huge_objects_reject_malformed_compressed_input(
         #[values(false, true)] direct: bool,
-        #[values(false, true)] streaming: bool,
+        #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
     ) {
-        let mut heap = HugeHeap::new(direct, Some((test_data::deflate_pipeline(), 0)), 0);
+        let mut heap = HugeHeap::new(
+            direct,
+            Some(HugeFilters::new(test_data::deflate_pipeline(), 0)),
+            0,
+        );
         heap.image[HUGE_PAYLOAD_AT as usize..].fill(b'x');
         let error = heap
-            .read(streaming, HugeObjectReadLimits::UNLIMITED)
+            .read(backend, HugeObjectReadLimits::UNLIMITED)
             .unwrap_err();
         let FormatError::FilterError(message) = error else {
             panic!("expected FilterError, got {error:?}")
@@ -1748,12 +1756,16 @@ mod tests {
     #[cfg(feature = "deflate")]
     fn huge_source_truncation_differs_from_a_missing_parser_region(
         #[values(false, true)] direct: bool,
-        #[values(false, true)] streaming: bool,
+        #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
     ) {
-        let mut heap = HugeHeap::new(direct, Some((test_data::deflate_pipeline(), 0)), 0);
+        let mut heap = HugeHeap::new(
+            direct,
+            Some(HugeFilters::new(test_data::deflate_pipeline(), 0)),
+            0,
+        );
         heap.image.pop();
         assert_eq!(
-            heap.read(streaming, HugeObjectReadLimits::UNLIMITED)
+            heap.read(backend, HugeObjectReadLimits::UNLIMITED)
                 .unwrap_err(),
             FormatError::UnexpectedSourceEof {
                 expected: HUGE_PAYLOAD_AT + heap.encoded_size,
@@ -1799,9 +1811,13 @@ mod tests {
         #[case] encoded_size: Option<u64>,
         #[case] decoded_size: Option<u64>,
         #[values(false, true)] direct: bool,
-        #[values(false, true)] streaming: bool,
+        #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
     ) {
-        let mut heap = HugeHeap::new(direct, Some((test_data::filter_pipeline(vec![]), 0)), 0);
+        let mut heap = HugeHeap::new(
+            direct,
+            Some(HugeFilters::new(test_data::filter_pipeline(vec![]), 0)),
+            0,
+        );
         let FractalHeapFiltering::Filtered { pipeline, .. } = &mut heap.header.filtering else {
             panic!("expected filtered heap")
         };
@@ -1826,7 +1842,7 @@ mod tests {
             reads: RefCell::new(Vec::new()),
         };
         let mut reader = heap.reader(limits);
-        let result = if streaming {
+        let result = if matches!(backend, ReadBackend::Source | ReadBackend::Streaming) {
             reader.read_from_source(&source, parse_id(&heap.header, &heap.id))
         } else {
             reader.read(&heap.image, parse_id(&heap.header, &heap.id))
@@ -1845,7 +1861,7 @@ mod tests {
                 },
                 target: "isize",
             }
-        } else if streaming {
+        } else if matches!(backend, ReadBackend::Source | ReadBackend::Streaming) {
             FormatError::Source("test payload range requested".into())
         } else if encoded_size.is_some() {
             FormatError::UnexpectedSourceEof {
@@ -1863,7 +1879,7 @@ mod tests {
             .any(|&(address, _)| address == HUGE_PAYLOAD_AT);
         assert_eq!(
             payload_read,
-            streaming
+            matches!(backend, ReadBackend::Source | ReadBackend::Streaming)
                 && budget.is_none()
                 && encoded <= isize::MAX as u64
                 && decoded <= isize::MAX as u64
@@ -1904,11 +1920,11 @@ mod tests {
     fn huge_index_budgets_stop_traversal(
         #[case] limits: HugeObjectReadLimits,
         #[case] required: u64,
-        #[values(false, true)] streaming: bool,
+        #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
     ) {
         let heap = HugeHeap::new(false, None, 0);
         assert_eq!(
-            heap.read(streaming, limits).unwrap_err(),
+            heap.read(backend, limits).unwrap_err(),
             FormatError::ResourceLimit { limit: 0, required }
         );
     }
@@ -1916,7 +1932,11 @@ mod tests {
     #[rstest]
     #[cfg(feature = "deflate")]
     fn huge_index_is_cached_and_payload_reads_use_encoded_extents(#[values(0, 512)] base: u64) {
-        let heap = HugeHeap::new(false, Some((test_data::deflate_pipeline(), 0)), base);
+        let heap = HugeHeap::new(
+            false,
+            Some(HugeFilters::new(test_data::deflate_pipeline(), 0)),
+            base,
+        );
         let source = HeaderSource {
             bytes: &heap.image,
             reads: RefCell::new(Vec::new()),
@@ -1965,7 +1985,7 @@ mod tests {
         #[case] key: u8,
         #[case] duplicate: bool,
         #[case] expected: FormatError,
-        #[values(false, true)] streaming: bool,
+        #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
     ) {
         let mut heap = HugeHeap::new(false, None, 0);
         heap.id[1] = key;
@@ -1973,7 +1993,7 @@ mod tests {
             heap.write_tracker(vec![heap.record.clone(), heap.record.clone()]);
         }
         assert_eq!(
-            heap.read(streaming, HugeObjectReadLimits::UNLIMITED)
+            heap.read(backend, HugeObjectReadLimits::UNLIMITED)
                 .unwrap_err(),
             expected
         );
@@ -1986,7 +2006,7 @@ mod tests {
     fn huge_index_checks_type_and_exact_record_size(
         #[case] tree_type: u8,
         #[case] size: u16,
-        #[values(false, true)] streaming: bool,
+        #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
     ) {
         let mut heap = HugeHeap::new(false, None, 0);
         let header =
@@ -1994,7 +2014,7 @@ mod tests {
         heap.image[HUGE_TRACKER_AT as usize..HUGE_TRACKER_AT as usize + header.len()]
             .copy_from_slice(&header);
         assert_eq!(
-            heap.read(streaming, HugeObjectReadLimits::UNLIMITED)
+            heap.read(backend, HugeObjectReadLimits::UNLIMITED)
                 .unwrap_err(),
             FormatError::UnexpectedHugeObjectBTree {
                 tree_type,
@@ -2006,7 +2026,9 @@ mod tests {
 
     #[rstest]
     #[cfg(feature = "checksum")]
-    fn huge_index_metadata_checksums_remain_required(#[values(false, true)] streaming: bool) {
+    fn huge_index_metadata_checksums_remain_required(
+        #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
+    ) {
         let mut heap = HugeHeap::new(false, None, 0);
         heap.image[HUGE_NODE_AT as usize + HUGE_NODE_PREFIX_LEN] ^= 1;
         let checksum_at = HUGE_NODE_AT as usize + HUGE_NODE_PREFIX_LEN + heap.record.len();
@@ -2014,7 +2036,7 @@ mod tests {
         let computed =
             crate::checksum::jenkins_lookup3(&heap.image[HUGE_NODE_AT as usize..checksum_at]);
         assert_eq!(
-            heap.read(streaming, HugeObjectReadLimits::UNLIMITED)
+            heap.read(backend, HugeObjectReadLimits::UNLIMITED)
                 .unwrap_err(),
             FormatError::ChecksumMismatch { expected, computed }
         );
@@ -2025,7 +2047,7 @@ mod tests {
     fn huge_index_cache_rejects_backend_changes(#[values(false, true)] filtered: bool) {
         let heap = HugeHeap::new(
             false,
-            filtered.then(|| (test_data::filter_pipeline(vec![]), 0)),
+            filtered.then(|| HugeFilters::new(test_data::filter_pipeline(vec![]), 0)),
             0,
         );
         let mut reader = heap.reader(HugeObjectReadLimits::UNLIMITED);
@@ -2060,7 +2082,7 @@ mod tests {
     fn huge_index_traversal_validates_internal_nodes(
         #[case] limits: HugeObjectReadLimits,
         #[case] cycle: bool,
-        #[values(false, true)] streaming: bool,
+        #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
     ) {
         use hdf5_pure_format::__private::BTREE_V2_HUGE_OBJECT;
         let mut heap = HugeHeap::new(false, None, 0);
@@ -2104,19 +2126,19 @@ mod tests {
         heap.image[640..640 + last.len()].copy_from_slice(&last);
         if cycle {
             assert_eq!(
-                heap.read(streaming, limits).unwrap_err(),
+                heap.read(backend, limits).unwrap_err(),
                 FormatError::InvalidBTreeV2Signature
             );
         } else if limits.index_nodes == 1 {
             assert_eq!(
-                heap.read(streaming, limits).unwrap_err(),
+                heap.read(backend, limits).unwrap_err(),
                 FormatError::ResourceLimit {
                     limit: 1,
                     required: 2
                 }
             );
         } else {
-            assert_eq!(heap.read(streaming, limits).unwrap(), heap.decoded);
+            assert_eq!(heap.read(backend, limits).unwrap(), heap.decoded);
         }
     }
 
@@ -2124,12 +2146,16 @@ mod tests {
     #[cfg(feature = "deflate")]
     fn huge_compressed_allocation_length_is_not_the_decoded_length(
         #[values(false, true)] direct: bool,
-        #[values(false, true)] streaming: bool,
+        #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
     ) {
-        let mut heap = HugeHeap::new(direct, Some((test_data::deflate_pipeline(), 0)), 0);
+        let mut heap = HugeHeap::new(
+            direct,
+            Some(HugeFilters::new(test_data::deflate_pipeline(), 0)),
+            0,
+        );
         heap.set_sizes(heap.encoded_size - 1, heap.decoded.len().to_u64());
         let error = heap
-            .read(streaming, HugeObjectReadLimits::UNLIMITED)
+            .read(backend, HugeObjectReadLimits::UNLIMITED)
             .unwrap_err();
         let FormatError::FilterError(message) = error else {
             panic!("expected FilterError, got {error:?}")
@@ -2149,7 +2175,7 @@ mod tests {
         #[case] delta: i64,
         #[case] minimum_output_size: Option<u64>,
         #[values(false, true)] direct: bool,
-        #[values(false, true)] streaming: bool,
+        #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
     ) {
         let pipeline = test_data::filter_pipeline(vec![FilterDescription {
             filter_id: crate::filter_pipeline::FILTER_LZF,
@@ -2157,7 +2183,7 @@ mod tests {
             flags: 0,
             client_data: vec![],
         }]);
-        let mut heap = HugeHeap::new(direct, Some((pipeline, 0)), 0);
+        let mut heap = HugeHeap::new(direct, Some(HugeFilters::new(pipeline, 0)), 0);
         heap.decoded = b"abcdefghijkl".to_vec();
         let encoded = [
             2, b'a', b'b', b'c', 2, b'd', b'e', b'f', 2, b'g', b'h', b'i', 2, b'j', b'k', b'l',
@@ -2173,7 +2199,7 @@ mod tests {
             .checked_add_signed(delta)
             .unwrap();
         heap.set_sizes(heap.encoded_size, expected);
-        let result = heap.read(streaming, HugeObjectReadLimits::UNLIMITED);
+        let result = heap.read(backend, HugeObjectReadLimits::UNLIMITED);
         if delta == 0 {
             assert_eq!(result.unwrap(), heap.decoded);
         } else {
@@ -2201,11 +2227,11 @@ mod tests {
         #[case] encoded_base: u64,
         #[case] signature: u64,
         #[values(false, true)] direct: bool,
-        #[values(false, true)] streaming: bool,
+        #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
     ) {
         let heap = HugeHeap::new(
             direct,
-            Some((test_data::filter_pipeline(vec![]), 0)),
+            Some(HugeFilters::new(test_data::filter_pipeline(vec![]), 0)),
             signature,
         );
         let addresses = OpenedImageContext::reconcile(
@@ -2222,7 +2248,7 @@ mod tests {
             AccessMode::ReadOnly,
             FORMAT_WIDTHS,
         );
-        let result = if streaming {
+        let result = if matches!(backend, ReadBackend::Source | ReadBackend::Streaming) {
             reader.read_from_source(
                 &BaseOffsetSource {
                     inner: &BytesSource::new(&heap.image),
@@ -2242,16 +2268,34 @@ mod tests {
     #[rstest]
     #[cfg(not(feature = "deflate"))]
     fn huge_deflate_objects_require_the_decoder_feature(#[values(false, true)] direct: bool) {
-        let mut heap = HugeHeap::new(direct, Some((test_data::filter_pipeline(vec![]), 0)), 0);
+        let mut heap = HugeHeap::new(
+            direct,
+            Some(HugeFilters::new(test_data::filter_pipeline(vec![]), 0)),
+            0,
+        );
         let FractalHeapFiltering::Filtered { pipeline, .. } = &mut heap.header.filtering else {
             panic!("expected filtered heap")
         };
         *pipeline = test_data::deflate_pipeline();
         assert_eq!(
-            heap.read(true, HugeObjectReadLimits::UNLIMITED)
+            heap.read(ReadBackend::Streaming, HugeObjectReadLimits::UNLIMITED)
                 .unwrap_err(),
             FormatError::UnsupportedFilter(crate::filter_pipeline::FILTER_DEFLATE)
         );
+    }
+
+    /// A fixture pipeline with a mask checked against its filter count.
+    struct HugeFilters {
+        pipeline: FilterPipeline,
+        mask: PipelineFilterMask,
+    }
+
+    impl HugeFilters {
+        fn new(pipeline: FilterPipeline, bits: u32) -> Self {
+            let mask = PipelineFilterMask::from_raw_bits(bits, pipeline.filters.len()).unwrap();
+            assert_eq!(mask.uninterpreted_bits(), 0);
+            Self { pipeline, mask }
+        }
     }
 
     struct HugeHeap {
@@ -2262,10 +2306,11 @@ mod tests {
         decoded: Vec<u8>,
         encoded_size: u64,
         base: u64,
+        tree_type: u8,
     }
 
     impl HugeHeap {
-        fn new(direct: bool, filters: Option<(FilterPipeline, u32)>, base: u64) -> Self {
+        fn new(direct: bool, filters: Option<HugeFilters>, base: u64) -> Self {
             let filtered = filters.is_some();
             let decoded = b"filtered huge object bytes".repeat(400);
             let mut header = FractalHeapHeader::parse_bytes(
@@ -2282,13 +2327,13 @@ mod tests {
             header.btree_huge_objects_address = StoredAddress::new(HUGE_TRACKER_AT);
             header.huge_objects_count = 1;
             header.huge_objects_size = decoded.len().to_u64();
-            let (encoded, mask) = if let Some((pipeline, mask)) = filters {
+            let (encoded, mask) = if let Some(HugeFilters { pipeline, mask }) = filters {
                 let active = test_data::filter_pipeline(
                     pipeline
                         .filters
                         .iter()
                         .enumerate()
-                        .filter(|(index, _)| mask & (1 << index) == 0)
+                        .filter(|(index, _)| !mask.is_skipped(*index).unwrap())
                         .map(|(_, filter)| filter.clone())
                         .collect(),
                 );
@@ -2298,7 +2343,7 @@ mod tests {
                     root_filter_mask: 0,
                     pipeline,
                 };
-                (encoded, mask)
+                (encoded, mask.recorded_mask().raw_bits())
             } else {
                 (decoded.clone(), 0)
             };
@@ -2326,26 +2371,29 @@ mod tests {
                 decoded,
                 encoded_size: encoded.len().to_u64(),
                 base,
+                tree_type: match (filtered, direct) {
+                    (false, false) => hdf5_pure_format::__private::BTREE_V2_HUGE_OBJECT,
+                    (true, false) => hdf5_pure_format::__private::BTREE_V2_FILTERED_HUGE_OBJECT,
+                    (false, true) => hdf5_pure_format::__private::BTREE_V2_HUGE_OBJECT_DIRECT,
+                    (true, true) => {
+                        hdf5_pure_format::__private::BTREE_V2_FILTERED_HUGE_OBJECT_DIRECT
+                    }
+                },
             };
             fixture.write_tracker(vec![fixture.record.clone()]);
             fixture
         }
 
         fn write_tracker(&mut self, records: Vec<Vec<u8>>) {
-            let context = hdf5_pure_format::__private::HugeObjectRecordContext::new(
-                &self.header,
-                FORMAT_WIDTHS,
-            )
-            .unwrap();
             let header = test_util::btree_v2::Header::new(
-                context.tree_type(),
-                context.record_size(),
+                self.tree_type,
+                u16::try_from(records[0].len()).unwrap(),
                 HUGE_NODE_AT,
                 records.len() as u16,
             )
             .node_size(256)
             .build(Widths::EIGHT);
-            let node = test_util::btree_v2::leaf(context.tree_type(), &records);
+            let node = test_util::btree_v2::leaf(self.tree_type, &records);
             let at = (self.base + HUGE_TRACKER_AT) as usize;
             self.image[at..at + header.len()].copy_from_slice(&header);
             let at = (self.base + HUGE_NODE_AT) as usize;
@@ -2374,10 +2422,10 @@ mod tests {
 
         fn read(
             &self,
-            streaming: bool,
+            backend: ReadBackend,
             limits: HugeObjectReadLimits,
         ) -> Result<Vec<u8>, FormatError> {
-            if streaming {
+            if matches!(backend, ReadBackend::Source | ReadBackend::Streaming) {
                 self.reader(limits).read_from_source(
                     &BaseOffsetSource {
                         inner: &BytesSource::new(&self.image),

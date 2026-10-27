@@ -52,6 +52,11 @@ use crate::source::{Source, SourceMetadata};
 #[cfg(test)]
 use crate::width::{LengthWidth, OffsetWidth};
 
+#[cfg(all(test, feature = "deflate"))]
+test_util_hdf5::hdf5_bundled_tests! {
+    mod native_crosschecks;
+}
+
 #[cfg(test)]
 const FORMAT_WIDTHS: FormatWidths = FormatWidths {
     offsets: OffsetWidth::Eight,
@@ -1935,10 +1940,13 @@ mod tests {
                 record
             })
             .to_vec();
-            let context = HugeObjectRecordContext::new(&header, FORMAT_WIDTHS).unwrap();
             let mut fixture = Self {
-                tree_type: context.tree_type(),
-                record_size: context.record_size(),
+                tree_type: if direct {
+                    hdf5_pure_format::__private::BTREE_V2_FILTERED_HUGE_OBJECT_DIRECT
+                } else {
+                    hdf5_pure_format::__private::BTREE_V2_FILTERED_HUGE_OBJECT
+                },
+                record_size: u16::try_from(records[0].len()).unwrap(),
                 tree_count: 3,
                 root_count: if internal { 1 } else { 3 },
                 header,

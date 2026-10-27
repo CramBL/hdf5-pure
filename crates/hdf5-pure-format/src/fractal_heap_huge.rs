@@ -683,7 +683,6 @@ mod tests {
     use test_util::widths::Widths;
 
     use crate::address::StoredAddress;
-    use crate::bytes;
     use crate::filter_pipeline::{FilterDescription, VERSION_TWO};
     use crate::width::{LengthWidth, OffsetWidth};
 
@@ -932,7 +931,7 @@ mod tests {
             FormatError::HugeObjectNotFound(261)
         );
         fixture.record.truncate(fixture.record.len() - 2);
-        bytes::write_length(&mut fixture.record, 261, LengthWidth::Two);
+        fixture.record.extend_from_slice(&261u16.to_le_bytes());
         let record = fixture.tracker().parse_record(&fixture.record).unwrap();
         assert_eq!(record.key(), Some(261));
         assert_eq!(
@@ -992,7 +991,7 @@ mod tests {
     ) {
         let source = Fixture::new(source_filtered, source_direct, 0, 512, EIGHT_WIDTHS);
         let target = Fixture::new(target_filtered, target_direct, 0, 512, EIGHT_WIDTHS);
-        let id = source.layout.context.ids.parse(&source.id).unwrap();
+        let id = source.ids().parse(&source.id).unwrap();
         let result = target.layout.resolve_id(id);
         if source_filtered == target_filtered && source_direct == target_direct {
             let resolved = result.unwrap();
@@ -1028,7 +1027,7 @@ mod tests {
                 lengths: LengthWidth::Two,
             },
         );
-        let id = source.layout.context.ids.parse(&source.id).unwrap();
+        let id = source.ids().parse(&source.id).unwrap();
         assert_eq!(target.layout.resolve_id(id).unwrap_err(), expected);
     }
 
@@ -1050,7 +1049,7 @@ mod tests {
         .unwrap();
         source.id[17..21].copy_from_slice(&mask.to_le_bytes());
         let target = Fixture::new(true, true, 0, 512, EIGHT_WIDTHS);
-        let id = source.layout.context.ids.parse(&source.id).unwrap();
+        let id = source.ids().parse(&source.id).unwrap();
         assert_eq!(
             target.layout.resolve_id(id).unwrap_err(),
             FormatError::InvalidFractalHeapGeometry
@@ -1070,7 +1069,7 @@ mod tests {
                 lengths: LengthWidth::Eight,
             },
         );
-        let id = source.layout.context.ids.parse(&source.id).unwrap();
+        let id = source.ids().parse(&source.id).unwrap();
         assert_eq!(
             target.layout.resolve_id(id).unwrap_err(),
             FormatError::InvalidFractalHeapGeometry
@@ -1169,10 +1168,30 @@ mod tests {
                 HugeIndirectKeyEncoding::Libhdf5,
             )
             .unwrap();
-            let context = HugeObjectRecordContext::new(&header, widths).unwrap();
+            let mut record = Vec::new();
+            record.extend_from_slice(&address.to_le_bytes()[..usize::from(widths.offsets.get())]);
+            record.extend_from_slice(&3u64.to_le_bytes()[..usize::from(widths.lengths.get())]);
+            if filtered {
+                record.extend_from_slice(&0u32.to_le_bytes());
+                record.extend_from_slice(&9u64.to_le_bytes()[..usize::from(widths.lengths.get())]);
+            }
+            let tree_type = match (filtered, direct) {
+                (false, false) => crate::btree_v2::BTREE_V2_HUGE_OBJECT,
+                (true, false) => crate::btree_v2::BTREE_V2_FILTERED_HUGE_OBJECT,
+                (false, true) => crate::btree_v2::BTREE_V2_HUGE_OBJECT_DIRECT,
+                (true, true) => crate::btree_v2::BTREE_V2_FILTERED_HUGE_OBJECT_DIRECT,
+            };
+            let mut id = vec![HUGE_ID_FIRST_BYTE];
+            if direct {
+                id.extend_from_slice(&record);
+            } else {
+                record.extend_from_slice(&5u64.to_le_bytes()[..usize::from(widths.lengths.get())]);
+                id.push(5);
+            }
+            id.resize(usize::from(header.heap_id_length), 0);
             let tracker = test_util::btree_v2::Header::new(
-                context.tree_type(),
-                context.record_size(),
+                tree_type,
+                u16::try_from(record.len()).unwrap(),
                 512,
                 1,
             )
@@ -1180,21 +1199,6 @@ mod tests {
                 usize::from(widths.offsets.get()),
                 usize::from(widths.lengths.get()),
             ));
-            let mut record = Vec::new();
-            bytes::write_offset(&mut record, address, widths.offsets);
-            bytes::write_length(&mut record, 3, widths.lengths);
-            if filtered {
-                record.extend_from_slice(&0u32.to_le_bytes());
-                bytes::write_length(&mut record, 9, widths.lengths);
-            }
-            let mut id = vec![HUGE_ID_FIRST_BYTE];
-            if direct {
-                id.extend_from_slice(&record);
-            } else {
-                bytes::write_length(&mut record, 5, widths.lengths);
-                id.push(5);
-            }
-            id.resize(usize::from(header.heap_id_length), 0);
             Self {
                 header,
                 widths,
@@ -1204,6 +1208,10 @@ mod tests {
                 tracker,
                 record,
             }
+        }
+
+        fn ids(&self) -> FractalHeapIdLayout {
+            FractalHeapIdLayout::new(&self.header, self.widths.offsets, self.widths.lengths)
         }
 
         fn tracker(&self) -> FractalHeapHugeObjectTracker {
