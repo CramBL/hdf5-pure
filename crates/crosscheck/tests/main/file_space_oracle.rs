@@ -639,7 +639,12 @@ fn append_checkpoint(out: &mut String, path: &Path, case: &str, step: &str, pers
 
 fn snapshot(name: &str, report: &str) {
     #[cfg(feature = "__hdf5-bundled")]
-    insta::assert_snapshot!(name, report);
+    insta::with_settings!({
+        snapshot_path => concat!(env!("CARGO_MANIFEST_DIR"), "/tests/main/snapshots"),
+        prepend_module_to_snapshot => false,
+    }, {
+        insta::assert_snapshot!(format!("main__file_space_oracle__{name}"), report);
+    });
     #[cfg(not(feature = "__hdf5-bundled"))]
     let _ = (name, report);
 }
