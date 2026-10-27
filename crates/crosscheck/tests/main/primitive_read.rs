@@ -2,6 +2,8 @@
 
 use hdf5::Datatype;
 use hdf5::dataset::Layout;
+use hdf5_pure::Error;
+use hdf5_pure::FormatError;
 use hdf5_sys::h5t;
 use rstest::rstest;
 use test_util_hdf5::file;
@@ -143,6 +145,114 @@ fn reads_i32_enumeration(
     assert_eq!(dataset.read_i32().unwrap(), values);
     assert_eq!(dataset.read_i32_rows(1, 2).unwrap(), values[1..]);
     assert_eq!(dataset.read_i32_region(&[1], &[2]).unwrap(), values[1..]);
+}
+
+#[rstest]
+#[case::fixed_point(Datatype::from_type::<i16>().unwrap(), false)]
+#[case::offset(Datatype::from_type::<i16>().unwrap(), true)]
+#[case::float32(Datatype::from_type::<f32>().unwrap(), false)]
+#[case::float64(Datatype::from_type::<f64>().unwrap(), false)]
+fn converts_fill_across_numeric_readers(
+    #[case] datatype: Datatype,
+    #[case] offset: bool,
+    #[values(false, true)] big_endian: bool,
+    #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("fill_windows.h5");
+    let count = 600_003;
+    let status = hdf5::sync::sync(|| {
+        // SAFETY: The library lock and live transient numeric datatype cover the calls.
+        // The optional twelve-bit range fits within the sixteen-bit integer representation.
+        unsafe {
+            if offset {
+                assert_eq!(h5t::H5Tset_precision(datatype.id(), 12), 0);
+                assert_eq!(h5t::H5Tset_offset(datatype.id(), 4), 0);
+            }
+            h5t::H5Tset_order(datatype.id(), numeric::byte_order(big_endian))
+        }
+    });
+    assert_eq!(status, 0);
+    {
+        let reference = file::libhdf5_create_v18(&path);
+        let dataset = reference
+            .new_dataset_builder()
+            .empty_as(&datatype)
+            .fill_value(42u16)
+            .shape([count])
+            .create("values")
+            .unwrap();
+        assert_eq!(dataset.read_raw::<u16>().unwrap(), vec![42; count]);
+    }
+    let file = backend.open(&path).unwrap();
+    let dataset = file.dataset("values").unwrap();
+    macro_rules! assert_conversion {
+        ($ty:ty, $whole:ident, $rows:ident, $region:ident, $expected:expr) => {
+            let expected: $ty = $expected;
+            assert_eq!(dataset.fill_value::<$ty>().unwrap(), Some(expected));
+            assert_eq!(dataset.$whole().unwrap(), vec![expected; count]);
+            assert_eq!(dataset.$rows(599_999, 4).unwrap(), [expected; 4]);
+            assert_eq!(dataset.$region(&[599_999], &[4]).unwrap(), [expected; 4]);
+        };
+    }
+    assert_conversion!(i8, read_i8, read_i8_rows, read_i8_region, 42);
+    assert_conversion!(i16, read_i16, read_i16_rows, read_i16_region, 42);
+    assert_conversion!(i32, read_i32, read_i32_rows, read_i32_region, 42);
+    assert_conversion!(i64, read_i64, read_i64_rows, read_i64_region, 42);
+    assert_conversion!(u8, read_u8, read_u8_rows, read_u8_region, 42);
+    assert_conversion!(u16, read_u16, read_u16_rows, read_u16_region, 42);
+    assert_conversion!(u32, read_u32, read_u32_rows, read_u32_region, 42);
+    assert_conversion!(u64, read_u64, read_u64_rows, read_u64_region, 42);
+    assert_conversion!(f32, read_f32, read_f32_rows, read_f32_region, 42.0);
+    assert_conversion!(f64, read_f64, read_f64_rows, read_f64_region, 42.0);
+}
+
+#[rstest]
+fn rejects_empty_nonnumeric_reads(
+    #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
+    #[values(
+        NumericSelection::Whole,
+        NumericSelection::Rows,
+        NumericSelection::Region
+    )]
+    selection: NumericSelection,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("empty.h5");
+    {
+        let reference = file::libhdf5_create_v18(&path);
+        reference
+            .new_dataset::<hdf5::types::FixedAscii<4>>()
+            .shape([0])
+            .create("values")
+            .unwrap();
+    }
+    let file = backend.open(&path).unwrap();
+    let dataset = file.dataset("values").unwrap();
+    macro_rules! assert_type_mismatch {
+        ($whole:ident, $rows:ident, $region:ident) => {
+            let error = match selection {
+                NumericSelection::Whole => dataset.$whole().unwrap_err(),
+                NumericSelection::Rows => dataset.$rows(0, 0).unwrap_err(),
+                NumericSelection::Region => dataset.$region(&[0], &[0]).unwrap_err(),
+            };
+            let Error::Format(FormatError::TypeMismatch { expected, actual }) = error else {
+                panic!("expected TypeMismatch, got {error:?}");
+            };
+            assert_eq!(expected, "numeric");
+            assert_eq!(actual, "String");
+        };
+    }
+    assert_type_mismatch!(read_i8, read_i8_rows, read_i8_region);
+    assert_type_mismatch!(read_u8, read_u8_rows, read_u8_region);
+    assert_type_mismatch!(read_f64, read_f64_rows, read_f64_region);
+}
+
+#[derive(Clone, Copy)]
+enum NumericSelection {
+    Region,
+    Rows,
+    Whole,
 }
 
 fn i32_enumeration() -> Datatype {

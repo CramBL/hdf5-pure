@@ -366,3 +366,29 @@ fn narrows_scalar_integer(#[case] value: i32, #[case] signed: i8, #[case] unsign
     let decoder = NumericDecoder::<u8>::parse(&datatype).unwrap();
     assert_eq!(decoder.scalar(&raw).unwrap().decode().unwrap(), unsigned);
 }
+
+#[rstest]
+fn converts_scalar_bit_ranges(
+    #[values(false, true)] enumeration: bool,
+    #[values(DatatypeByteOrder::LittleEndian, DatatypeByteOrder::BigEndian)]
+    order: DatatypeByteOrder,
+) {
+    let datatype = fixed(2, true, order, 4, 12);
+    let datatype = if enumeration {
+        Datatype::Enumeration {
+            size: 2,
+            base_type: Box::new(datatype),
+            members: Vec::new(),
+        }
+    } else {
+        datatype
+    };
+    let raw = match order {
+        DatatypeByteOrder::LittleEndian => 0x02A0u16.to_le_bytes(),
+        DatatypeByteOrder::BigEndian => 0x02A0u16.to_be_bytes(),
+        DatatypeByteOrder::Vax => panic!("fixture requires little-endian or big-endian order"),
+    };
+    let decoder = NumericDecoder::<u8>::parse(&datatype).unwrap();
+    assert_eq!(decoder.scalar(&raw).unwrap().decode().unwrap(), 42);
+    assert_eq!(decoder.decode(&raw).unwrap(), [42]);
+}

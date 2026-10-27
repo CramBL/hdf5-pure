@@ -17,6 +17,7 @@ use test_util_hdf5::numeric::ByteOrder;
 #[case::narrowing(300, u8::MAX, i8::MAX)]
 fn reads_c_scalar_fill(
     #[values(false, true)] big_endian: bool,
+    #[values(1, 600_003)] count: usize,
     #[case] value: u16,
     #[case] unsigned: u8,
     #[case] signed: i8,
@@ -35,21 +36,21 @@ fn reads_c_scalar_fill(
             .new_dataset_builder()
             .empty_as(&datatype)
             .fill_value(value)
-            .shape([1])
+            .shape([count])
             .create("values")
             .unwrap();
         assert_eq!(
             dataset.dcpl().unwrap().get_fill_value_as::<u16>().unwrap(),
             Some(value)
         );
-        assert_eq!(dataset.read_raw::<u16>().unwrap(), [value]);
+        assert_eq!(dataset.read_raw::<u16>().unwrap(), vec![value; count]);
     }
     let file = File::open(&path).unwrap();
     let dataset = file.dataset("values").unwrap();
     assert_eq!(dataset.fill_value::<u8>().unwrap(), Some(unsigned));
     assert_eq!(dataset.fill_value::<i8>().unwrap(), Some(signed));
-    assert_eq!(dataset.read_u8().unwrap(), [unsigned]);
-    assert_eq!(dataset.read_i8().unwrap(), [signed]);
+    assert_eq!(dataset.read_u8().unwrap(), vec![unsigned; count]);
+    assert_eq!(dataset.read_i8().unwrap(), vec![signed; count]);
     assert_eq!(dataset.read_u8_rows(0, 1).unwrap(), [unsigned]);
     assert_eq!(dataset.read_i8_region(&[0], &[1]).unwrap(), [signed]);
 }
