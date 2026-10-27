@@ -57,7 +57,7 @@
 //!   #293). A *resizable* destination keeps the eagerly built chunk index every
 //!   empty resizable dataset here gets, since an in-place append needs one to
 //!   exist; it stores no chunk either way.
-//! - Group hierarchy of arbitrary depth.
+//! - Group hierarchy up to 128 levels deep.
 //! - Attributes, on datasets, groups, and root, carried across with the
 //!   encoding the source gave them rather than rebuilt from an [`AttrValue`],
 //!   which is a decoded view and cannot express a byte order, a sub-width
@@ -347,7 +347,8 @@ impl RepackOptions {
 /// Returns [`Error::RepackUnsupported`] if an object of `src` cannot be reproduced faithfully, if
 /// a drop path matches no link, or if, after the drop paths, an object of `src` has more than one
 /// path, through an alias or a cycle, since a repack writes each object at one path. Returns
-/// [`Error::TraversalLimitExceeded`] if `src` reaches more than 16,777,216 objects or hard links.
+/// [`Error::TraversalLimitExceeded`] if `src` reaches more than 16,777,216 objects or hard links,
+/// or if, after the drop paths, `src` nests groups more than 128 levels deep.
 pub fn repack<P: AsRef<Path>, Q: AsRef<Path>>(
     src: P,
     dst: Q,
@@ -1998,6 +1999,8 @@ fn check_pipeline(
 
 #[cfg(test)]
 mod tests {
+    use std::thread;
+
     use rstest::rstest;
 
     use super::*;
@@ -2081,6 +2084,100 @@ mod tests {
             matches!(&err, Error::NotAGroup(path) if path.is_empty()),
             "{err:?}"
         );
+    }
+
+    #[rstest]
+    #[case::groups(GroupBuilder::new("g"), vec![])]
+    #[case::groups_and_a_leaf_dataset(leaf_group(), vec!["leaf"])]
+    fn a_chain_at_the_depth_bound_repacks_on_a_default_thread_stack(
+        #[case] innermost: GroupBuilder,
+        #[case] datasets: Vec<&str>,
+    ) {
+        let source = chain_source_with(objects::MAX_DEPTH, innermost);
+        let bytes = thread::Builder::new()
+            .stack_size(DEFAULT_THREAD_STACK)
+            .spawn(move || {
+                let mut bytes = Vec::new();
+                repack_into(&source, &mut bytes, &RepackOptions::new()).unwrap();
+                bytes
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+
+        let file = File::from_bytes(bytes).unwrap();
+        let deepest = file.group(&chain_path(objects::MAX_DEPTH)).unwrap();
+        assert_eq!(deepest.groups().unwrap(), Vec::<String>::new());
+        assert_eq!(deepest.datasets().unwrap(), datasets);
+    }
+
+    #[rstest]
+    #[case::groups(GroupBuilder::new("g"))]
+    #[case::groups_and_a_leaf_dataset(leaf_group())]
+    fn a_repack_rejects_a_chain_past_the_depth_bound_and_leaves_the_writer_unchanged(
+        #[case] innermost: GroupBuilder,
+    ) {
+        let mut bytes = WRITER_CONTENT.to_vec();
+        let err = repack_into(
+            &chain_source_with(objects::MAX_DEPTH + 1, innermost),
+            &mut bytes,
+            &RepackOptions::new(),
+        )
+        .unwrap_err();
+
+        let Error::TraversalLimitExceeded { limit, maximum } = err else {
+            panic!("expected TraversalLimitExceeded, got {err:?}");
+        };
+        assert_eq!(
+            (limit, maximum),
+            (TraversalLimit::Depth, objects::MAX_DEPTH)
+        );
+        assert_eq!(bytes, WRITER_CONTENT);
+    }
+
+    #[test]
+    fn a_drop_path_that_shortens_a_chain_brings_it_within_the_depth_bound() {
+        let mut bytes = Vec::new();
+        repack_into(
+            &chain_source(objects::MAX_DEPTH + 1),
+            &mut bytes,
+            &RepackOptions::new().drop_path(&chain_path(objects::MAX_DEPTH + 1)),
+        )
+        .unwrap();
+
+        let file = File::from_bytes(bytes).unwrap();
+        assert_eq!(
+            file.group(&chain_path(objects::MAX_DEPTH))
+                .unwrap()
+                .groups()
+                .unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    fn chain_source(depth: usize) -> File {
+        chain_source_with(depth, GroupBuilder::new("g"))
+    }
+
+    fn chain_path(depth: usize) -> String {
+        vec!["g"; depth].join("/")
+    }
+
+    fn chain_source_with(depth: usize, innermost: GroupBuilder) -> File {
+        let chain = (1..depth).fold(innermost.finish(), |inner, _| {
+            let mut group = GroupBuilder::new("g");
+            group.add_group(inner);
+            group.finish()
+        });
+        let mut builder = FileBuilder::new();
+        builder.add_group(chain);
+        File::from_bytes(builder.finish().unwrap()).unwrap()
+    }
+
+    fn leaf_group() -> GroupBuilder {
+        let mut group = GroupBuilder::new("g");
+        group.create_dataset("leaf").with_i32_data(&[1]);
+        group
     }
 
     // The root group, `g`, and the two datasets of `g`: four objects and three hard links.
@@ -2284,6 +2381,11 @@ mod tests {
     }
 
     const FILTER_PIPELINE_VERSION_TWO: u8 = 2;
+
+    // The stack `std::thread` gives a spawned thread on every Tier 1 platform.
+    const DEFAULT_THREAD_STACK: usize = 2 << 20;
+
+    const WRITER_CONTENT: &[u8] = b"held by the caller";
 }
 
 /// Repack must carry an attribute across *as it is encoded*, not as

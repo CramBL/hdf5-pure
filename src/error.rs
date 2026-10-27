@@ -253,16 +253,20 @@ pub enum Error {
     /// A SWMR operation (e.g. [`crate::File::refresh`]) was requested on a file
     /// that was not opened for SWMR reading via `File::open_swmr`.
     SwmrUnsupported,
-    /// An object graph holds more objects or hard links than a traversal of it reads.
+    /// An object graph holds more objects or hard links than a traversal of it reads, or nests
+    /// groups deeper than a repack writes.
     ///
     /// [`crate::File::copy_from`], and the [`crate::File::commit`] that applies a
     /// [`crate::File::copy`], return this for a source that reaches more objects or hard links
     /// than a copy reads. [`crate::repack()`], [`crate::repack_into`], and
-    /// [`crate::repack_to_path`] return it for a source that reaches more than a repack reads.
+    /// [`crate::repack_to_path`] return it for a source that reaches more than a repack reads, or
+    /// that nests groups deeper than a repack writes once the links the drop paths name are
+    /// removed.
     TraversalLimitExceeded {
         /// The count the graph exceeds.
         limit: TraversalLimit,
-        /// The most objects or hard links the traversal reads.
+        /// The most objects or hard links the traversal reads, or the most levels of nested
+        /// groups a repack writes.
         maximum: usize,
     },
 }
@@ -355,6 +359,14 @@ impl fmt::Display for Error {
             }
             Error::FileLocked(reason) => write!(f, "file is locked: {reason}"),
             Error::FileMarkedInUse(reason) => write!(f, "file is marked in use: {reason}"),
+            Error::TraversalLimitExceeded {
+                limit: TraversalLimit::Depth,
+                maximum,
+            } => write!(
+                f,
+                "the object graph nests groups more than {maximum} levels deep, the most a \
+                 repack writes"
+            ),
             Error::TraversalLimitExceeded { limit, maximum } => write!(
                 f,
                 "the object graph holds more than {maximum} {limit}, the most a traversal reads"

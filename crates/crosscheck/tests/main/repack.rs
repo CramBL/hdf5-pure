@@ -11,6 +11,7 @@ use hdf5::ObjectReference1;
 use hdf5::ReferencedObject;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::FilterId;
+use hdf5_pure::TraversalLimit;
 use hdf5_pure::VariableLengthType;
 use hdf5_pure::{
     Error, File, FillTime, FormatError, MaxExtent, RepackOptions, VlenStringReadOptions,
@@ -2439,6 +2440,46 @@ fn the_c_library_reads_every_dataset_of_a_repacked_wide_tree() {
     TreeGraph::Wide.assert_read_by_c_library(&c.group("g").unwrap());
 }
 
+#[rstest]
+fn a_repack_of_a_chain_past_the_depth_bound_reports_the_limit_before_it_writes(
+    #[values(RepackCall::Repack, RepackCall::RepackInto, RepackCall::RepackToPath)]
+    call: RepackCall,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("deep.h5");
+    TreeGraph::DeepChain.write(&src);
+
+    let err = call.rejected(&src, &dir.path().join("repacked.h5"), &RepackOptions::new());
+
+    let Error::TraversalLimitExceeded { limit, maximum } = err else {
+        panic!("expected TraversalLimitExceeded, got {err:?}");
+    };
+    assert_eq!((limit, maximum), (TraversalLimit::Depth, MAX_REPACK_DEPTH));
+}
+
+#[test]
+fn the_c_library_reads_a_repacked_chain_at_the_depth_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("chain.h5");
+    let dst = dir.path().join("repacked.h5");
+    {
+        let file = file::libhdf5_create_v110(&src);
+        (0..MAX_REPACK_DEPTH).fold(file.as_group().unwrap(), |group, _| {
+            group.create_group("g").unwrap()
+        });
+        file.close().unwrap();
+    }
+
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
+
+    let c = hdf5::File::open(&dst).unwrap();
+    let deepest = (0..MAX_REPACK_DEPTH).fold(c.as_group().unwrap(), |group, _| {
+        assert_eq!(group.member_names().unwrap(), vec!["g"]);
+        group.group("g").unwrap()
+    });
+    assert_eq!(deepest.member_names().unwrap(), Vec::<String>::new());
+}
+
 #[derive(Clone, Copy, Debug)]
 enum RepackCall {
     Repack,
@@ -2473,3 +2514,5 @@ const REPEATED_OBJECT: &str = "the repacked file would hold more than one hard l
 const DENSE_LINKS: i32 = 20;
 
 const WRITER_CONTENT: &[u8] = b"held by the caller";
+
+const MAX_REPACK_DEPTH: usize = 128;
