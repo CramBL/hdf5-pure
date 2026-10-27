@@ -13,7 +13,7 @@ use crate::FileSpacePageSize;
 use crate::FileSpaceSettings;
 use crate::FormatError;
 use crate::UserblockSize;
-use crate::edit::ownership_tests;
+use crate::edit::test_util as edit_test_util;
 use crate::edit::{TailPlacement, WriteEngine};
 use crate::image::WriteBuffering;
 use crate::object_path::ObjectPathBuf;
@@ -363,7 +363,7 @@ fn manager_metadata_failures_preserve_ownership_and_reopen_the_issued_state(
         engine.commit().unwrap();
     }
     drop(engine);
-    let engine = ownership_tests::open_engine(&path);
+    let engine = edit_test_util::open_engine(&path);
     assert!(engine.space_ownership().unwrap().analysis_complete);
     drop(engine);
     let file = File::open_rw(&path).unwrap();

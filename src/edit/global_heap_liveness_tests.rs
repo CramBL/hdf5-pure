@@ -28,7 +28,7 @@ use crate::UserblockSize;
 use crate::VariableLengthType;
 use crate::address::StoredAddressExt;
 use crate::edit::GlobalHeapLiveness;
-use crate::edit::ownership_tests;
+use crate::edit::test_util as edit_test_util;
 
 #[rstest]
 #[case::compact_attribute_of_strings(Form::CompactAttribute, global_heap_fixture::vlen_string())]
@@ -388,7 +388,7 @@ fn a_written_file_refers_to_every_collection_it_holds(
     let expected = complete(global_heap::collection_starts(
         &std::fs::read(&path).unwrap(),
     ));
-    let engine = ownership_tests::open_engine(&path);
+    let engine = edit_test_util::open_engine(&path);
 
     assert_eq!(engine.global_heap_liveness().unwrap(), expected);
     drop(engine);
@@ -479,7 +479,7 @@ impl Written {
 fn liveness(fixture: Fixture) -> GlobalHeapLiveness {
     let path = temp::temp_path("liveness_fixture.h5");
     fixture.write(&path);
-    ownership_tests::open_engine(&path)
+    edit_test_util::open_engine(&path)
         .global_heap_liveness()
         .unwrap()
 }

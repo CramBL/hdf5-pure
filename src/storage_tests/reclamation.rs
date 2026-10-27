@@ -9,6 +9,7 @@ use super::file_space;
 use crate::FileSpaceSettings;
 use crate::FreeSectionCoordinates;
 use crate::edit::SpaceOwnership;
+use crate::reader::test_util as reader_test_util;
 use crate::{
     AttrValue, DeflateLevel, Error, File, FileAccessProperties, FileBuilder, FileSpacePageSize,
     FileSpaceStrategy, FormatError, MaxExtent, SyncPolicy,
@@ -54,7 +55,9 @@ fn edited_storage_partitions_every_byte_across_close_and_reopen(
     }
     let survivor = file.clone();
     file.close().unwrap();
-    super::ownership(&survivor).unwrap().assert_exact();
+    reader_test_util::ownership(&survivor)
+        .unwrap()
+        .assert_exact();
     drop(survivor);
     let reopened = File::open_rw(&path).unwrap();
     file_space::assert_exact_space_ownership(&reopened);
@@ -93,7 +96,7 @@ fn isolated_deletion_classifies_exactly_the_bytes_admitted_by_the_threshold(
     let length = deleted.end - deleted.start;
     file.root().delete("hole").unwrap();
     file.commit().unwrap();
-    let owned = super::ownership(&file).unwrap();
+    let owned = reader_test_util::ownership(&file).unwrap();
     assert!(owned.analysis_complete);
     let accounted = [
         &owned.reusable_free_space,
@@ -132,7 +135,7 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
     for i in 0..3 {
         let (before, before_capacity) = {
             let file = File::open_rw(&path).unwrap();
-            let capacity: u64 = super::ownership(&file)
+            let capacity: u64 = reader_test_util::ownership(&file)
                 .unwrap()
                 .free_space_manager_space
                 .iter()
@@ -183,7 +186,7 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
             let after_total: u64 = f.reusable_space_stats().unwrap().reusable_free_bytes();
             assert_eq!(
                 after_total
-                    + super::ownership(&f)
+                    + reader_test_util::ownership(&f)
                         .unwrap()
                         .free_space_manager_space
                         .iter()
@@ -346,7 +349,7 @@ fn a_relocating_overwrite_reclaims_the_old_header_with_its_storage() {
     let original_end = std::fs::metadata(&path).unwrap().len();
 
     let session = File::open_rw(&path).unwrap();
-    let original = super::ownership(&session).unwrap();
+    let original = reader_test_util::ownership(&session).unwrap();
     assert!(original.analysis_complete);
     let incompressible: Vec<i32> = (0..64)
         .map(|i: i32| i.wrapping_mul(0x9E37_79B1u32 as i32))

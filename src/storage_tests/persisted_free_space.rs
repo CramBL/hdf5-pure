@@ -17,6 +17,7 @@ use crate::FileSpaceStrategy;
 use crate::FreeSectionCoordinates;
 use crate::UserblockSize;
 use crate::edit::SpaceOwnership;
+use crate::reader::test_util as reader_test_util;
 
 #[rstest]
 fn a_session_reuses_the_free_space_an_earlier_session_persisted(
@@ -38,7 +39,7 @@ fn a_session_reuses_the_free_space_an_earlier_session_persisted(
         .unwrap()
         .unwrap();
     let second = File::open_rw(&path).unwrap();
-    let ownership = super::ownership(&second).unwrap();
+    let ownership = reader_test_util::ownership(&second).unwrap();
     assert!(ownership.analysis_complete);
     let mut available_or_reused = ownership.reusable_free_space;
     available_or_reused.extend(ownership.live_metadata_space);
@@ -112,7 +113,7 @@ fn every_commit_keeps_the_userblock_and_writes_stored_manager_addresses(
         session.close().unwrap();
         let settled = File::open_rw(&path).unwrap();
         let reusable = settled.reusable_free_sections().unwrap();
-        let ownership = super::ownership(&settled).unwrap();
+        let ownership = reader_test_util::ownership(&settled).unwrap();
         settled.close().unwrap();
 
         stamped.assert_unchanged(&path);
@@ -243,7 +244,7 @@ fn a_reopened_paged_session_reuses_each_page_type_in_its_own_pages(
     );
 
     let second = File::open_rw(&path).unwrap();
-    let before = super::ownership(&second).unwrap();
+    let before = reader_test_util::ownership(&second).unwrap();
     second
         .root()
         .create_group_with("g", |group| {
@@ -257,7 +258,7 @@ fn a_reopened_paged_session_reuses_each_page_type_in_its_own_pages(
         })
         .unwrap();
     second.commit().unwrap();
-    let after = super::ownership(&second).unwrap();
+    let after = reader_test_util::ownership(&second).unwrap();
     assert_owned_pages_homogeneous(&second, PAGE);
     second.close().unwrap();
 
@@ -381,7 +382,7 @@ fn assert_owned_pages_homogeneous(file: &File, page_size: u64) {
         live_metadata_space,
         free_space_manager_space,
         ..
-    } = super::ownership(file).unwrap();
+    } = reader_test_util::ownership(file).unwrap();
     let base = file.superblock().base_address.get();
     let pages = |extents: &[(u64, u64)]| {
         extents

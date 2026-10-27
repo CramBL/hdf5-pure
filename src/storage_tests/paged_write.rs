@@ -6,6 +6,7 @@ use super::file_space;
 use crate::AttrValue;
 use crate::File;
 use crate::FreeSectionCoordinates;
+use crate::reader::test_util as reader_test_util;
 
 #[rstest]
 #[case::before_exact_fill(512, 0, 1, 17, 512)]
@@ -86,7 +87,7 @@ fn created_page_metadata_tail_is_owned(
     file.commit().unwrap();
     if exact_fill && threshold == 1 {
         assert!(
-            super::ownership(&file)
+            reader_test_util::ownership(&file)
                 .unwrap()
                 .live_metadata_space
                 .iter()

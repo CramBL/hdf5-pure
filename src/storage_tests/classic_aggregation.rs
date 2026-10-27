@@ -19,6 +19,7 @@ use crate::FreeSectionCoordinates;
 use crate::MemoryStrategy;
 use crate::UserblockSize;
 use crate::edit::SpaceOwnership;
+use crate::reader::test_util as reader_test_util;
 
 #[rstest]
 #[case::mirror(MemoryStrategy::Mirrored, 0)]
@@ -46,7 +47,7 @@ fn persistent_creation_recovers_settled_spare_and_reuses_it_after_reopen(
     assert_eq!(free.free_sections().section_count() > 0, has_manager);
     drop(file);
     let file = File::open_rw(&path).unwrap();
-    let before = super::ownership(&file).unwrap();
+    let before = reader_test_util::ownership(&file).unwrap();
     assert!(before.analysis_complete);
     assert_eq!(before.physical_size, before.logical_size);
     assert_eq!(before.trailing_slack_space, []);
@@ -71,7 +72,11 @@ fn persistent_creation_recovers_settled_spare_and_reuses_it_after_reopen(
             |section| section.address() <= extent.start && extent.end <= section.end_address()
         ));
     }
-    assert!(super::ownership(&file).unwrap().analysis_complete);
+    assert!(
+        reader_test_util::ownership(&file)
+            .unwrap()
+            .analysis_complete
+    );
     file.close().unwrap();
     let file = File::open_rw_with_options(&path, properties).unwrap();
     file.root()
@@ -88,7 +93,7 @@ fn persistent_creation_recovers_settled_spare_and_reuses_it_after_reopen(
     );
     assert_eq!(file.dataset("added").unwrap().read_i32().unwrap(), [23; 16]);
     assert_eq!(file.dataset("third").unwrap().read_i32().unwrap(), [29; 16]);
-    let after = super::ownership(&file).unwrap();
+    let after = reader_test_util::ownership(&file).unwrap();
     assert!(after.analysis_complete);
     assert_eq!(after.physical_size, after.logical_size);
     assert_eq!(after.trailing_slack_space, []);
@@ -114,7 +119,9 @@ fn hdf5_pure_writes_no_free_space_manager_under_aggr_or_none(
     for step in workload.steps {
         apply_step(*step, &file);
         assert_eq!(
-            super::ownership(&file).unwrap().free_space_manager_space,
+            reader_test_util::ownership(&file)
+                .unwrap()
+                .free_space_manager_space,
             [],
             "{step:?}"
         );
@@ -148,9 +155,9 @@ fn hdf5_pure_places_every_allocation_of_an_edit_under_none_at_or_past_the_end_of
     let file = create_file(&path, FileSpaceStrategy::None, false);
     let mut strings = Vec::new();
     for step in workload.steps {
-        let before = super::ownership(&file).unwrap();
+        let before = reader_test_util::ownership(&file).unwrap();
         apply_step(*step, &file);
-        let after = super::ownership(&file).unwrap();
+        let after = reader_test_util::ownership(&file).unwrap();
 
         let placed = live_extents(&after)
             .difference(&live_extents(&before))
@@ -211,7 +218,7 @@ fn hdf5_pure_places_a_workload_under_page_as_recorded(
             &mut report,
             index + 1,
             step,
-            super::ownership(&file).unwrap(),
+            reader_test_util::ownership(&file).unwrap(),
         );
     }
 
@@ -235,7 +242,7 @@ fn staged_aggr_allocations_reuse_session_windows(
     builder.write(&path).unwrap();
     let properties = FileAccessProperties::new().with_memory_strategy(backing);
     let mut file = File::open_rw_with_options(&path, properties).unwrap();
-    let original_end = super::ownership(&file).unwrap().logical_size;
+    let original_end = reader_test_util::ownership(&file).unwrap().logical_size;
     file.root()
         .create_dataset("first", |builder| {
             builder.with_i32_data(&[23; 16]);
@@ -243,7 +250,7 @@ fn staged_aggr_allocations_reuse_session_windows(
         .unwrap();
     file.commit().unwrap();
     let first = file_space::contiguous_extent(&file, "first");
-    let ownership = super::ownership(&file).unwrap();
+    let ownership = reader_test_util::ownership(&file).unwrap();
     assert!(ownership.analysis_complete);
     assert_eq!(ownership.physical_size, ownership.logical_size);
     assert_eq!(ownership.free_space_manager_space, []);
@@ -265,7 +272,7 @@ fn staged_aggr_allocations_reuse_session_windows(
         file = File::open_rw_with_options(&path, properties).unwrap();
         assert_eq!(file.reusable_free_sections().unwrap().section_count(), 0);
     }
-    let before_second = super::ownership(&file).unwrap().logical_size;
+    let before_second = reader_test_util::ownership(&file).unwrap().logical_size;
     file.root()
         .create_dataset("second", |builder| {
             builder.with_i32_data(&[29; 16]);
@@ -277,7 +284,10 @@ fn staged_aggr_allocations_reuse_session_windows(
         assert!(second.start >= before_second);
     } else {
         assert_eq!(second.start, first.end);
-        assert_eq!(super::ownership(&file).unwrap().logical_size, before_second);
+        assert_eq!(
+            reader_test_util::ownership(&file).unwrap().logical_size,
+            before_second
+        );
     }
     file.close().unwrap();
     let file = File::open(&path).unwrap();
