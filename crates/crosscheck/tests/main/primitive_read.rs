@@ -6,6 +6,7 @@ use hdf5_pure::Error;
 use hdf5_pure::FormatError;
 use hdf5_sys::h5t;
 use rstest::rstest;
+use test_util::temp;
 use test_util_hdf5::file;
 use test_util_hdf5::numeric;
 use test_util_hdf5::reader::ReadBackend;
@@ -158,8 +159,7 @@ fn converts_fill_across_numeric_readers(
     #[values(false, true)] big_endian: bool,
     #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
 ) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("fill_windows.h5");
+    let path = temp::temp_path("fill_windows.h5");
     let count = 600_003;
     let status = hdf5::sync::sync(|| {
         // SAFETY: The library lock and live transient numeric datatype cover the calls.
@@ -217,8 +217,7 @@ fn rejects_empty_nonnumeric_reads(
     )]
     selection: NumericSelection,
 ) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("empty.h5");
+    let path = temp::temp_path("empty.h5");
     {
         let reference = file::libhdf5_create_v18(&path);
         reference

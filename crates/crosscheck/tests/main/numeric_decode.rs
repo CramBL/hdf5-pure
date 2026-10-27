@@ -9,6 +9,7 @@ use hdf5_pure::{EnumTypeBuilder, FileBuilder, LibVer};
 use hdf5_pure::{FixedPointType, FloatingPointType};
 use hdf5_sys::h5t::{self, H5T_norm_t, H5T_order_t};
 use rstest::rstest;
+use test_util::temp;
 use test_util_hdf5::numeric;
 use test_util_hdf5::numeric::ByteOrder;
 
@@ -22,8 +23,7 @@ fn reads_c_scalar_fill(
     #[case] unsigned: u8,
     #[case] signed: i8,
 ) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("scalar_fill.h5");
+    let path = temp::temp_path("scalar_fill.h5");
     {
         let datatype = CDatatype::from_type::<u16>().unwrap();
         let status = hdf5::sync::sync(|| {
