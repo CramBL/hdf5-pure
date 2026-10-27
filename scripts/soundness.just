@@ -14,6 +14,8 @@ miri $MIRIFLAGS="-Zmiri-strict-provenance": miri-toolchain
     CARGO_TARGET_DIR="target/{{ NIGHTLY }}" cargo +{{ NIGHTLY }} miri test --locked -p hdf5-pure --no-default-features --features std,serde --lib mat::transpose
     CARGO_TARGET_DIR="target/{{ NIGHTLY }}" cargo +{{ NIGHTLY }} miri test --locked -p hdf5-pure --no-default-features --features std --lib nosync
     CARGO_TARGET_DIR="target/{{ NIGHTLY }}" cargo +{{ NIGHTLY }} miri test --locked -p hdf5-pure --no-default-features --features std --lib chunked_read::tests::dense_assembly
+    # Check exact primitive copies into initialized vectors and their spare capacity.
+    CARGO_TARGET_DIR="target/{{ NIGHTLY }}" cargo +{{ NIGHTLY }} miri test --locked -p hdf5-pure --no-default-features --features std --lib data_read::primitive::tests
 
 # Install the pinned nightly with Miri and the standard library sources it builds.
 miri-toolchain:

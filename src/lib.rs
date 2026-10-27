@@ -495,6 +495,7 @@ pub(crate) mod parsed_chunk_index;
 #[cfg(test)]
 pub(crate) mod placed_source;
 pub(crate) mod prepared_chunk;
+pub(crate) mod primitive_bytes;
 pub(crate) mod read_region;
 pub(crate) mod read_spec;
 pub(crate) mod scaleoffset;

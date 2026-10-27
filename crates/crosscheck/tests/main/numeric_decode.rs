@@ -10,6 +10,37 @@ use hdf5_pure::{FixedPointType, FloatingPointType};
 use hdf5_sys::h5t::{self, H5T_norm_t, H5T_order_t};
 use rstest::rstest;
 use test_util_hdf5::numeric;
+use test_util_hdf5::numeric::ByteOrder;
+
+#[rstest]
+fn reads_c_standard_i32(#[values(false, true)] big_endian: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("standard.h5");
+    let order = if big_endian {
+        ByteOrder::BigEndian
+    } else {
+        ByteOrder::LittleEndian
+    };
+    let datatype = order.i32_datatype();
+    let values = [i32::MIN, 0, i32::MAX];
+    let raw: Vec<_> = values
+        .iter()
+        .flat_map(|value| {
+            if big_endian {
+                value.to_be_bytes()
+            } else {
+                value.to_le_bytes()
+            }
+        })
+        .collect();
+    numeric::write_stored(&path, &datatype, &raw, values.len());
+    let reference = hdf5::File::open(&path).unwrap().dataset("values").unwrap();
+    assert_eq!(reference.read_raw::<i32>().unwrap(), values);
+    drop(reference);
+    let dataset = File::open(&path).unwrap().dataset("values").unwrap();
+    assert_eq!(dataset.read_i32().unwrap(), values);
+    assert_eq!(dataset.read_f64().unwrap(), values.map(f64::from));
+}
 
 #[rstest]
 fn reads_c_offset_integers(
