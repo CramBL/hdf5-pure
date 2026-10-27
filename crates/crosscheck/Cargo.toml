@@ -37,6 +37,7 @@ hdf5 = ["dep:hdf5", "dep:hdf5-sys", "test-util-hdf5/hdf5"]
     "hdf5",
     "test-util-hdf5/__hdf5-1.10",
     "hdf5-pure/__page-publication-crosscheck",
+    "hdf5-pure/__group-link-inspection-crosscheck",
 ]
 "__hdf5-1.12" = ["__hdf5-1.10", "hdf5-sys/deprecated", "test-util-hdf5/__hdf5-1.12"]
 "__hdf5-1.14" = ["__hdf5-1.12", "test-util-hdf5/__hdf5-1.14"]

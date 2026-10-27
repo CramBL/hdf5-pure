@@ -49,6 +49,7 @@ mod fractal_heap_geometry;
 mod fractal_heap_write;
 mod free_space_manager;
 mod global_heap;
+mod group_info;
 mod link_info;
 mod link_message;
 mod link_storage;

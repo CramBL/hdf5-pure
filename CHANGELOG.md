@@ -66,6 +66,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `File::commit` deleting distinct compact links whose encoded names decode to the same UTF-8 replacement character. Groups with invalid UTF-8 link names are rejected before writing ([#927](https://github.com/CramBL/hdf5-pure/pull/927)).
 - Fixed `Group::groups` and related reads misinterpreting tiny objects in 18-byte fractal-heap IDs ([#924](https://github.com/CramBL/hdf5-pure/pull/924)).
 - Fixed `File::commit` overflowing tracked group link creation counters or changing file bytes before rejecting an exhausted counter. Unsupported counters in rebuilt groups are rejected during planning ([#920](https://github.com/CramBL/hdf5-pure/pull/920)).
 - Fixed `File::copy` overflowing the stack on a hard-link cycle and copying an object reached through two hard links as two objects. Such a source is rejected ([#922](https://github.com/CramBL/hdf5-pure/pull/922)).

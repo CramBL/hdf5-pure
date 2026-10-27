@@ -3041,15 +3041,32 @@ impl File {
         })
     }
 
-    /// Open exactly as [`open_rw`](Self::open_rw) does, but behind an image that
-    /// withholds its whole-file slice, so every read takes the `Source` path
-    /// rather than the slice fast path.
+    /// Reads the editing session's complete image, including buffered changes.
     ///
-    /// Each read this file serves has two forms (see `with_engine`), and only
-    /// the slice form runs in production until a mirrorless backing lands
-    /// (issue #198). Opening the same file both ways and comparing is what
-    /// holds the other form to the same answers in the meantime.
-    #[cfg(test)]
+    /// # Errors
+    ///
+    /// Returns [`Error::ReadOnly`] if the file has no editing session, [`Error::FileClosed`]
+    /// if it is closed, or [`Error::Format`] if the image length exceeds [`usize::MAX`] or the
+    /// source read fails.
+    #[cfg(feature = "__group-link-inspection-crosscheck")]
+    pub(crate) fn group_inspection_snapshot(&self) -> Result<Vec<u8>, Error> {
+        self.with_mirror_session(Change::Nothing, |session| {
+            let image = session.image();
+            image
+                .read_metadata_at(0, image.len().to_usize()?)
+                .map_err(Error::from)
+        })
+    }
+
+    /// Opens a complete file mirror for editing through the source read interface.
+    ///
+    /// The reader uses [`Source::read_at`] for every read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if `path` cannot be opened for reading and writing. Returns the
+    /// locking, format, and configuration errors of [`Self::open_rw`].
+    #[cfg(any(test, feature = "__group-link-inspection-crosscheck"))]
     pub(crate) fn open_rw_source_only(path: &std::path::Path) -> Result<Self, Error> {
         Ok(File {
             inner: Arc::new(FileInner::from_rw_session(

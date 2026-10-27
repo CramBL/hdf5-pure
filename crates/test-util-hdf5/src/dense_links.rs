@@ -2,10 +2,16 @@
 
 use std::path::Path;
 
+use hdf5::File;
 use hdf5::Group;
 use hdf5::GroupStorageType;
 use hdf5::datatype::ByteOrder as CByteOrder;
 use hdf5::file::LibraryVersion;
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5::plist::GroupCreate;
+use hdf5::plist::group_create::LinkCreationOrder;
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5::plist::link_create::CharEncoding;
 use hdf5_pure::Datatype;
 use hdf5_pure::DatatypeByteOrder;
 use hdf5_pure::FileBuilder;
@@ -291,6 +297,138 @@ pub fn integer_type() -> Datatype {
     Datatype::FixedPoint(
         FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
     )
+}
+
+/// Checks the fixture group's storage, creation-order policy, and shared link targets.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot read the group or its links, or a fixture property differs from
+/// the expected value.
+pub fn assert_inspection_group(
+    file: &File,
+    group_path: &str,
+    count: u64,
+    storage: GroupStorageType,
+    order: LinkCreationOrder,
+) {
+    let group = file.group(group_path).unwrap();
+    let info = group.info().unwrap();
+    assert_eq!(info.nlinks, count);
+    assert_eq!(info.storage_type, storage);
+    assert_eq!(group.gcpl().unwrap().link_creation_order(), order);
+    assert_eq!(
+        group.group("hard").unwrap().name(),
+        format!("/{group_path}/hard")
+    );
+    assert_eq!(
+        group.group("soft").unwrap().name(),
+        format!("/{group_path}/soft")
+    );
+    assert_eq!(group.member_names().unwrap().len() as u64, count);
+    assert_eq!(group.loc_info_by_name("hard").unwrap().num_links, 7);
+}
+
+/// Writes compact, dense, and filtered group fixtures with libhdf5.
+///
+/// Appends `policy` to the compact and dense group names and configures link creation order
+/// with `order`. Each compact or dense group contains hard, soft, and external links, a UTF-8
+/// name, and a name-hash collision. The caller owns `path` and removes the file after use.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot create the file, configure or write its groups, or close it.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn write_inspection_fixture(path: &Path, policy: &str, order: LinkCreationOrder) {
+    let file = File::with_options()
+        .with_fapl(|properties| {
+            properties.libver_bounds(LibraryVersion::V18, LibraryVersion::latest())
+        })
+        .with_fcpl(|properties| properties.userblock(512))
+        .create(path)
+        .unwrap();
+    file.create_group("target").unwrap();
+    for (form, count) in [("compact", 6), ("dense", 2000)] {
+        let properties = GroupCreate::build()
+            .link_creation_order(order)
+            .finish()
+            .unwrap();
+        hdf5::sync::sync(|| {
+            assert_eq!(
+                // SAFETY: The library lock serializes access, and `properties` keeps the group
+                // creation property list live throughout the call.
+                unsafe { hdf5_sys::h5p::H5Pset_link_phase_change(properties.id(), 12, 4) },
+                0
+            );
+        });
+        let group = file
+            .create_group_builder()
+            .set_gcpl(&properties)
+            .create(format!("{form}_{policy}").as_str())
+            .unwrap();
+        group.link_soft("/target", "removed").unwrap();
+        group.link_hard("/target", "hard").unwrap();
+        group.link_soft("/target", "soft").unwrap();
+        group.link_external("外部.h5", "/目标", "external").unwrap();
+        group
+            .create_group_builder()
+            .char_encoding(CharEncoding::Utf8)
+            .create("utf8_λ")
+            .unwrap();
+        group.link_hard("/target", "k69209").unwrap();
+        group.link_hard("/target", "k155448").unwrap();
+        for index in 6..count {
+            group
+                .link_soft("/target", &format!("link_{index:04}"))
+                .unwrap();
+        }
+        group.unlink("removed").unwrap();
+    }
+    for index in 0..7 {
+        file.create_group(&format!("root_{index}")).unwrap();
+    }
+    let properties = GroupCreate::build().finish().unwrap();
+    assert_eq!(crate::group_filter::set_deflate(&properties, 6), 0);
+    let filtered = file
+        .create_group_builder()
+        .set_gcpl(&properties)
+        .create("filtered")
+        .unwrap();
+    for index in 0..16 {
+        filtered
+            .link_soft("/target", &format!("link_{index:04}"))
+            .unwrap();
+    }
+    drop(filtered);
+    file.close().unwrap();
+}
+
+/// Writes a group with links stored as huge fractal-heap objects.
+///
+/// The `g` group contains twelve datasets with link names longer than 5000 bytes.
+/// The caller owns `path` and removes the file after use.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot create, write, or close the fixture.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn write_huge_inspection_fixture(path: &Path) {
+    let file = File::with_options()
+        .with_fapl(|properties| properties.libver_latest())
+        .create(path)
+        .unwrap();
+    let group = file.create_group("g").unwrap();
+    for index in 0..12 {
+        group
+            .new_dataset::<i32>()
+            .shape(1)
+            .create(format!("data_{index}_{}", "x".repeat(5000)).as_str())
+            .unwrap()
+            .write(&[index])
+            .unwrap();
+    }
+    drop(group);
+    file.close().unwrap();
 }
 
 // `H5G_CRT_GINFO_MAX_COMPACT` in `H5Gprivate.h`, HDF5 2.2.0, is the default compact link limit.

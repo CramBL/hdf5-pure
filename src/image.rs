@@ -1437,26 +1437,20 @@ impl FileImage for TornWriteImage {
     }
 }
 
-/// A [`MirrorImage`] that withholds its slice, so every read routed through it
-/// takes the [`Source`] path instead of the whole-file fast path.
+/// A whole-file mirror for reads through [`Source`].
 ///
-/// This exists to make the mirrorless read paths reachable before a mirrorless
-/// backing does. Each read the engine serves has two forms — one walking a
-/// borrowed slice, one going through `Source` — and until the bounded read-write open
-/// runs on this engine (issue #198), only the first would ever execute. Opening
-/// a file through this image runs the same tests down the other form and lets
-/// them be compared, which is the only thing that keeps the two from drifting.
-#[cfg(test)]
+/// The reader uses [`Source::read_at`] for every read.
+#[cfg(any(test, feature = "__group-link-inspection-crosscheck"))]
 pub(crate) struct SourceOnlyImage(MirrorImage);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "__group-link-inspection-crosscheck"))]
 impl SourceOnlyImage {
     pub(crate) fn new(inner: MirrorImage) -> Self {
         Self(inner)
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "__group-link-inspection-crosscheck"))]
 impl Source for SourceOnlyImage {
     fn len(&self) -> u64 {
         self.0.len()
@@ -1467,7 +1461,7 @@ impl Source for SourceOnlyImage {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "__group-link-inspection-crosscheck"))]
 impl FileImage for SourceOnlyImage {
     fn read_disk_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
         self.0.read_disk_at(offset, bytes)
@@ -1497,6 +1491,7 @@ impl FileImage for SourceOnlyImage {
         self.0.ordering_barrier()
     }
 
+    #[cfg(test)]
     fn issued_write_order(&self) -> Vec<(u64, u64)> {
         self.0.issued_write_order()
     }
@@ -1504,8 +1499,6 @@ impl FileImage for SourceOnlyImage {
     fn set_write_buffering(&mut self, mode: WriteBuffering) -> Result<(), Error> {
         self.0.set_write_buffering(mode)
     }
-
-    // Deliberately inherits the `None` default: that is the whole point.
 }
 
 #[cfg(test)]
