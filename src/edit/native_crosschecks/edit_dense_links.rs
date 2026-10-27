@@ -1,11 +1,12 @@
-use crate::__private;
-use crate::CharacterSet;
 use hdf5_pure_format::__private::BTreeV2Header;
 use hdf5_pure_format::__private::FractalHeapHeader;
 use hdf5_pure_format::__private::GroupLinkStorage;
 use hdf5_pure_format::__private::OwnedLinkTarget;
 use rstest::rstest;
 use test_util_hdf5::dense_links;
+
+use crate::CharacterSet;
+use crate::edit::group_inspection;
 
 #[rstest]
 #[case::compact_boundary(8, 1, 0, None, true)]
@@ -29,7 +30,7 @@ fn dense_link_edits_select_storage_from_the_final_count(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("links.h5");
     dense_links::write_edit_fixture(&path, group_path, count, thresholds);
-    let file = __private::open_group_inspection(&path, source_only).unwrap();
+    let file = group_inspection::open_group_inspection(&path, source_only).unwrap();
     let group = file.group(group_path).unwrap();
     for index in 0..removed {
         group.delete(&format!("link_{index:04}")).unwrap();
@@ -54,8 +55,8 @@ fn dense_link_mutation_preserves_multilevel_indexes_collisions_and_symbolic_targ
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("large.h5");
     dense_links::write_collision_edit_fixture(&path, group_path);
-    let before = __private::inspect_group_links(&path, group_path, source_only).unwrap();
-    let file = __private::open_group_inspection(&path, source_only).unwrap();
+    let before = group_inspection::inspect_group_links(&path, group_path, source_only).unwrap();
+    let file = group_inspection::open_group_inspection(&path, source_only).unwrap();
     let group = file.group(group_path).unwrap();
     group.delete("link_0000").unwrap();
     group.create_group("added_λ").unwrap();
@@ -65,7 +66,7 @@ fn dense_link_mutation_preserves_multilevel_indexes_collisions_and_symbolic_targ
     file.commit().unwrap();
     drop(group);
     drop(file);
-    let after = __private::inspect_group_links(&path, group_path, source_only).unwrap();
+    let after = group_inspection::inspect_group_links(&path, group_path, source_only).unwrap();
     let mut expected = before
         .links
         .links()
@@ -112,7 +113,7 @@ fn editing_a_descendant_relocates_targets_through_dense_ancestors(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ancestors.h5");
     dense_links::write_descendant_edit_fixture(&path);
-    let file = __private::open_group_inspection(&path, source_only).unwrap();
+    let file = group_inspection::open_group_inspection(&path, source_only).unwrap();
     file.group("child").unwrap().create_group("nested").unwrap();
     file.dataset("child/link_0005")
         .unwrap()
@@ -133,7 +134,7 @@ fn dense_link_and_attribute_storage_remain_independent(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("attributes.h5");
     dense_links::write_attribute_edit_fixture(&path);
-    let file = __private::open_group_inspection(&path, source_only).unwrap();
+    let file = group_inspection::open_group_inspection(&path, source_only).unwrap();
     let group = file.group("g").unwrap();
     group.create_group("added").unwrap();
     if edit_attributes {
@@ -154,7 +155,7 @@ fn unsupported_dense_conversion_rejects_the_batch_before_writing(
     let path = dir.path().join("unsupported.h5");
     dense_links::write_edit_fixture(&path, "/", 8, None);
     let original = std::fs::read(&path).unwrap();
-    let file = __private::open_group_inspection(&path, source_only).unwrap();
+    let file = group_inspection::open_group_inspection(&path, source_only).unwrap();
     file.root().create_group(&"x".repeat(5000)).unwrap();
     let error = file.commit().unwrap_err();
     assert!(
@@ -166,14 +167,8 @@ fn unsupported_dense_conversion_rejects_the_batch_before_writing(
         ),
         "{error:?}"
     );
-    assert_eq!(
-        __private::group_inspection_snapshot(&file).unwrap(),
-        original
-    );
-    assert_eq!(
-        __private::page_publication_snapshot(&file).unwrap(),
-        original
-    );
+    assert_eq!(file.group_inspection_snapshot().unwrap(), original);
+    assert_eq!(file.page_publication_snapshot().unwrap(), original);
     drop(file);
     assert_eq!(std::fs::read(&path).unwrap(), original);
     dir.close().unwrap();
@@ -190,7 +185,7 @@ fn dense_mutation_retains_single_hard_link_relocation_constraints(
     let path = dir.path().join("alias.h5");
     dense_links::write_alias_edit_fixture(&path, dataset);
     let original = std::fs::read(&path).unwrap();
-    let file = __private::open_group_inspection(&path, source_only).unwrap();
+    let file = group_inspection::open_group_inspection(&path, source_only).unwrap();
     if dataset {
         file.dataset("g/link_0000")
             .unwrap()
@@ -211,10 +206,7 @@ fn dense_mutation_retains_single_hard_link_relocation_constraints(
             "editing a group relocates its object header; only supported when it has a single hard link"
         }
     );
-    assert_eq!(
-        __private::group_inspection_snapshot(&file).unwrap(),
-        original
-    );
+    assert_eq!(file.group_inspection_snapshot().unwrap(), original);
     drop(file);
     assert_eq!(std::fs::read(&path).unwrap(), original);
     dir.close().unwrap();
@@ -227,14 +219,14 @@ fn symbolic_targets_and_name_encoding_survive_both_storage_transitions(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("symbolic.h5");
     dense_links::write_symbolic_edit_fixture(&path);
-    let before = __private::inspect_group_links(&path, "/", source_only).unwrap();
-    let file = __private::open_group_inspection(&path, source_only).unwrap();
+    let before = group_inspection::inspect_group_links(&path, "/", source_only).unwrap();
+    let file = group_inspection::open_group_inspection(&path, source_only).unwrap();
     for index in 0..9 {
         file.root().delete(&format!("link_{index:04}")).unwrap();
     }
     file.commit().unwrap();
     drop(file);
-    let compact = __private::inspect_group_links(&path, "/", source_only).unwrap();
+    let compact = group_inspection::inspect_group_links(&path, "/", source_only).unwrap();
     assert!(compact.links.info().fractal_heap_address.is_none());
     assert_symbolic_targets_and_encoding(&compact.links);
     let mut expected = before
@@ -249,13 +241,13 @@ fn symbolic_targets_and_name_encoding_survive_both_storage_transitions(
     actual.sort_by(|a, b| a.name().cmp(b.name()));
     assert_eq!(actual, expected);
     dense_links::assert_compact_symbolic_edit(&path);
-    let file = __private::open_group_inspection(&path, source_only).unwrap();
+    let file = group_inspection::open_group_inspection(&path, source_only).unwrap();
     for index in 0..6 {
         file.root().create_group(&format!("added_{index}")).unwrap();
     }
     file.commit().unwrap();
     drop(file);
-    let dense = __private::inspect_group_links(&path, "/", source_only).unwrap();
+    let dense = group_inspection::inspect_group_links(&path, "/", source_only).unwrap();
     assert!(dense.links.info().fractal_heap_address.is_some());
     assert_symbolic_targets_and_encoding(&dense.links);
     let mut actual = dense
@@ -278,13 +270,13 @@ fn dense_root_mutation_resolves_stored_addresses_in_a_userblock_file(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("userblock.h5");
     dense_links::write_inspection_fixture(&path, dense_links::GroupOrder::Untracked);
-    let before = __private::inspect_group_links(&path, "/", source_only).unwrap();
+    let before = group_inspection::inspect_group_links(&path, "/", source_only).unwrap();
     assert!(before.links.info().fractal_heap_address.is_some());
-    let file = __private::open_group_inspection(&path, source_only).unwrap();
+    let file = group_inspection::open_group_inspection(&path, source_only).unwrap();
     file.root().create_group("added").unwrap();
     file.commit().unwrap();
     drop(file);
-    let after = __private::inspect_group_links(&path, "/", source_only).unwrap();
+    let after = group_inspection::inspect_group_links(&path, "/", source_only).unwrap();
     assert_eq!(after.links.links().len(), before.links.links().len() + 1);
     let mut actual = after
         .links

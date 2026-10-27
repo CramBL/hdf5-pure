@@ -3041,6 +3041,8 @@ impl File {
         })
     }
 
+    #[cfg(test)]
+    test_util_hdf5::hdf5_1_10_tests! {
     /// Reads the editing session's complete image, including buffered changes.
     ///
     /// # Errors
@@ -3048,7 +3050,6 @@ impl File {
     /// Returns [`Error::ReadOnly`] if the file has no editing session, [`Error::FileClosed`]
     /// if it is closed, or [`Error::Format`] if the image length exceeds [`usize::MAX`] or the
     /// source read fails.
-    #[cfg(feature = "__group-link-inspection-crosscheck")]
     pub(crate) fn group_inspection_snapshot(&self) -> Result<Vec<u8>, Error> {
         self.with_mirror_session(Change::Nothing, |session| {
             let image = session.image();
@@ -3056,6 +3057,8 @@ impl File {
                 .read_metadata_at(0, image.len().to_usize()?)
                 .map_err(Error::from)
         })
+    }
+
     }
 
     /// Opens a complete file mirror for editing through the source read interface.
@@ -3066,7 +3069,7 @@ impl File {
     ///
     /// Returns [`Error::Io`] if `path` cannot be opened for reading and writing. Returns the
     /// locking, format, and configuration errors of [`Self::open_rw`].
-    #[cfg(any(test, feature = "__group-link-inspection-crosscheck"))]
+    #[cfg(test)]
     pub(crate) fn open_rw_source_only(path: &std::path::Path) -> Result<Self, Error> {
         Ok(File {
             inner: Arc::new(FileInner::from_rw_session(

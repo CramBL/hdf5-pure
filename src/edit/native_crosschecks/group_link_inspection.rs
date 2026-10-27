@@ -1,14 +1,15 @@
 use std::collections::BTreeMap;
 
-use crate::__private;
-use crate::CharacterSet;
-use crate::Error;
 use hdf5_pure_format::__private::BTreeV2Header;
 use hdf5_pure_format::__private::FractalHeapHeader;
 use hdf5_pure_format::__private::GroupPhaseChange;
 use hdf5_pure_format::__private::OwnedLinkTarget;
 use rstest::rstest;
 use test_util_hdf5::dense_links::GroupOrder;
+
+use crate::CharacterSet;
+use crate::Error;
+use crate::edit::group_inspection;
 
 #[rstest]
 #[case::untracked(GroupOrder::Untracked, false, false)]
@@ -25,7 +26,7 @@ fn libhdf5_groups_retain_links_policy_and_thresholds(
     let path = dir.path().join("group.h5");
     test_util_hdf5::dense_links::write_inspection_fixture(&path, order);
     let group_path = format!("{}_{}", form.0, order.label());
-    let info = __private::inspect_group_links(&path, &group_path, source_only).unwrap();
+    let info = group_inspection::inspect_group_links(&path, &group_path, source_only).unwrap();
     assert_eq!(info.links.links().len(), form.1);
     let metadata = info.links.info();
     assert_eq!(
@@ -42,7 +43,7 @@ fn libhdf5_groups_retain_links_policy_and_thresholds(
         .collect::<BTreeMap<_, _>>();
     let expected_index = |index| tracked.then_some(index);
     let hard = links[b"hard".as_slice()];
-    let target = __private::inspect_group_links(&path, "target", source_only).unwrap();
+    let target = group_inspection::inspect_group_links(&path, "target", source_only).unwrap();
     assert_eq!(
         hard.target(),
         &OwnedLinkTarget::Hard {
@@ -115,12 +116,12 @@ fn dense_root_edits_preserve_untracked_and_tracked_group_policies(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("group.h5");
     test_util_hdf5::dense_links::write_inspection_fixture(&path, GroupOrder::Indexed);
-    let before = __private::inspect_group_links(&path, parent, source_only).unwrap();
-    let file = __private::open_group_inspection(&path, source_only).unwrap();
+    let before = group_inspection::inspect_group_links(&path, parent, source_only).unwrap();
+    let file = group_inspection::open_group_inspection(&path, source_only).unwrap();
     file.group(parent).unwrap().create_group("added").unwrap();
     file.commit().unwrap();
     drop(file);
-    let after = __private::inspect_group_links(&path, parent, source_only).unwrap();
+    let after = group_inspection::inspect_group_links(&path, parent, source_only).unwrap();
     assert_eq!(after.links.links().len(), before.links.links().len() + 1);
     assert_eq!(
         after.links.info().max_creation_order,
@@ -130,7 +131,10 @@ fn dense_root_edits_preserve_untracked_and_tracked_group_policies(
             .max_creation_order
             .map(|counter| counter + 1)
     );
-    assert_eq!(test_util_hdf5::dense_links::added_group_link_count(&path, parent), 0);
+    assert_eq!(
+        test_util_hdf5::dense_links::added_group_link_count(&path, parent),
+        0
+    );
     dir.close().unwrap();
 }
 
@@ -159,7 +163,7 @@ fn unsupported_heap_preflight_rejects_mutation_before_writing(
         test_util_hdf5::dense_links::write_inspection_fixture(&path, GroupOrder::Indexed);
     }
     let original = std::fs::read(&path).unwrap();
-    let error = __private::inspect_group_links(&path, group_path, source_only)
+    let error = group_inspection::inspect_group_links(&path, group_path, source_only)
         .err()
         .unwrap();
     assert!(
@@ -171,7 +175,7 @@ fn unsupported_heap_preflight_rejects_mutation_before_writing(
         ),
         "{error:?}"
     );
-    let file = __private::open_group_inspection(&path, source_only).unwrap();
+    let file = group_inspection::open_group_inspection(&path, source_only).unwrap();
     file.group(group_path)
         .unwrap()
         .create_group("added")
@@ -184,20 +188,13 @@ fn unsupported_heap_preflight_rejects_mutation_before_writing(
         ),
         "{error:?}"
     );
-    assert_eq!(
-        __private::group_inspection_snapshot(&file).unwrap(),
-        original
-    );
+    assert_eq!(file.group_inspection_snapshot().unwrap(), original);
     assert_eq!(
         std::fs::metadata(&path).unwrap().len(),
         u64::try_from(original.len()).unwrap()
     );
-    assert_eq!(
-        __private::page_publication_snapshot(&file).unwrap(),
-        original
-    );
+    assert_eq!(file.page_publication_snapshot().unwrap(), original);
     drop(file);
     assert_eq!(std::fs::read(&path).unwrap(), original);
     dir.close().unwrap();
 }
-
