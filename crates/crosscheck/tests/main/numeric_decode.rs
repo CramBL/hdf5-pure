@@ -2,7 +2,7 @@
 
 use hdf5::Datatype as CDatatype;
 use hdf5_pure::{
-    Datatype, DatatypeByteOrder, Error, File, FloatingPointLayout, FormatError,
+    Datatype, DatatypeByteOrder, Error, File, FloatingPointLayout, FormatError, H5Element,
     MantissaNormalization,
 };
 use hdf5_pure::{EnumTypeBuilder, FileBuilder, LibVer};
@@ -68,6 +68,14 @@ fn reads_c_standard_i32(#[values(false, true)] big_endian: bool) {
     let dataset = File::open(&path).unwrap().dataset("values").unwrap();
     assert_eq!(dataset.read_i32().unwrap(), values);
     assert_eq!(dataset.read_f64().unwrap(), values.map(f64::from));
+    let stored = dataset.datatype().unwrap();
+    assert_eq!(u8::convert_raw(&raw, &stored).unwrap(), [0, 0, u8::MAX]);
+    assert_eq!(
+        i8::convert_raw(&raw, &stored).unwrap(),
+        [i8::MIN, 0, i8::MAX]
+    );
+    assert_eq!(dataset.read_u8().unwrap(), [0, 0, u8::MAX]);
+    assert_eq!(dataset.read_i8().unwrap(), [i8::MIN, 0, i8::MAX]);
 }
 
 #[rstest]
@@ -132,6 +140,8 @@ fn reads_c_offset_integers(
     assert_eq!(dataset.read_i64().unwrap(), vec![11, 3]);
     assert_eq!(dataset.read_u64().unwrap(), vec![11, 3]);
     let stored = dataset.datatype().unwrap();
+    assert_eq!(u8::convert_raw(&[0xB0, 0x30], &stored).unwrap(), [11, 3]);
+    assert_eq!(i8::convert_raw(&[0xB0, 0x30], &stored).unwrap(), [11, 3]);
     let base = match &stored {
         Datatype::Enumeration { base_type, .. } => base_type.as_ref(),
         other => other,
@@ -189,6 +199,8 @@ fn reads_c_signed_bit_ranges(
     );
     assert_eq!(dataset.datatype().unwrap(), stored);
     assert_eq!(dataset.read_raw().unwrap(), raw);
+    assert_eq!(i8::convert_raw(&raw, &stored).unwrap(), [-5, 7]);
+    assert_eq!(u8::convert_raw(&raw, &stored).unwrap(), [0, 7]);
     assert_eq!(dataset.read_i64().unwrap(), vec![-5, 7]);
     assert_eq!(dataset.read_f64().unwrap(), vec![-5.0, 7.0]);
     let pure_path = dir.path().join("pure-signed-range.h5");
@@ -355,6 +367,10 @@ fn reads_only_supported_c_floats(
         assert_eq!(dataset.read_f64().unwrap(), vec![11.0, 3.0]);
         assert_eq!(dataset.read_f32().unwrap(), vec![11.0, 3.0]);
         assert_eq!(dataset.read_i64().unwrap(), vec![11, 3]);
+        let raw = dataset.read_raw().unwrap();
+        let stored = dataset.datatype().unwrap();
+        assert_eq!(u8::convert_raw(&raw, &stored).unwrap(), [11, 3]);
+        assert_eq!(i8::convert_raw(&raw, &stored).unwrap(), [11, 3]);
         return;
     }
     let expected = if matches!(encoding, FloatLayout::Vax) {

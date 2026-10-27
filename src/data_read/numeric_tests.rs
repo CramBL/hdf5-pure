@@ -6,8 +6,8 @@ use alloc::vec;
 use rstest::rstest;
 
 use super::*;
-use crate::MantissaNormalization;
 use crate::datatype::layout::FloatingPointLayout;
+use crate::{Error, H5Element, MantissaNormalization};
 use crate::{FixedPointType, FloatingPointType};
 
 macro_rules! assert_targets {
@@ -30,6 +30,10 @@ macro_rules! assert_appends {
         let mut values = vec![7 as $target];
         $read($raw, $datatype, &mut values).unwrap();
         assert_eq!(
+            <$target>::convert_raw($raw, $datatype).unwrap(),
+            vec![$first as $target, 3 as $target]
+        );
+        assert_eq!(
             values,
             vec![7 as $target, $first as $target, 3 as $target],
             stringify!($read)
@@ -48,6 +52,11 @@ macro_rules! assert_rejects {
             $datatype
         );
         assert_eq!(values, vec![7 as $target], stringify!($read));
+        let error = <$target>::convert_raw($raw, $datatype).unwrap_err();
+        let Error::Format(error) = error else {
+            panic!("expected numeric format error, got {error:?}");
+        };
+        assert_eq!(error, $error);
     }};
 }
 
@@ -249,6 +258,8 @@ fn sign_extends_supported_ranges(
         enumeration,
     );
     assert_eq!(read_as_i64(raw, &datatype).unwrap(), vec![-5, 7]);
+    assert_eq!(i8::convert_raw(raw, &datatype).unwrap(), [-5, 7]);
+    assert_eq!(u8::convert_raw(raw, &datatype).unwrap(), [0, 7]);
     assert_eq!(read_as_f64(raw, &datatype).unwrap(), vec![-5.0, 7.0]);
     assert_eq!(read_as_f32(raw, &datatype).unwrap(), vec![-5.0, 7.0]);
 }
@@ -293,5 +304,25 @@ fn decodes_ieee_binary32_with_each_padding_value(
     assert_eq!(
         super::read_as_f64(&1.5f32.to_le_bytes(), &datatype).unwrap(),
         [1.5],
+    );
+}
+
+#[rstest]
+#[case::empty(&[])]
+#[case::nonempty(b"text")]
+fn rejects_nonnumeric_element_conversion(#[case] raw: &[u8]) {
+    let datatype = Datatype::String {
+        size: 4,
+        padding: crate::StringPadding::NullPad,
+        charset: crate::CharacterSet::Ascii,
+    };
+    assert_targets!(
+        assert_rejects,
+        raw,
+        &datatype,
+        FormatError::TypeMismatch {
+            expected: "numeric",
+            actual: "String"
+        }
     );
 }

@@ -4,7 +4,10 @@
 //! These exercise the generic path on default features (no `ndarray`), so they
 //! also prove the trait is available independently of that feature.
 
-use hdf5_pure::{Dataset, Error, File, FileBuilder, H5Element};
+use hdf5_pure::{
+    Dataset, Datatype, DatatypeByteOrder, Error, File, FileBuilder, FixedPointType, H5Element,
+};
+use rstest::rstest;
 
 /// Round-trip a flat slice through the *generic* write/read entry points and
 /// assert the values come back unchanged. The function is itself generic over
@@ -131,4 +134,42 @@ fn store_group<T: H5Element>(g: &mut hdf5_pure::GroupBuilder, name: &str, values
 #[allow(dead_code)]
 fn signature_check(ds: &Dataset) -> Result<Vec<u8>, Error> {
     ds.read::<u8>()
+}
+
+#[rstest]
+#[case::unsigned_big_endian(false, DatatypeByteOrder::BigEndian, &[0, 42, 1, 0], &[42, 255], &[42, 127])]
+#[case::unsigned_little_endian(false, DatatypeByteOrder::LittleEndian, &[42, 0, 0, 1], &[42, 255], &[42, 127])]
+#[case::signed_big_endian(true, DatatypeByteOrder::BigEndian, &[255, 214, 0, 128], &[0, 128], &[-42, 127])]
+#[case::signed_little_endian(true, DatatypeByteOrder::LittleEndian, &[214, 255, 128, 0], &[0, 128], &[-42, 127])]
+#[case::empty(false, DatatypeByteOrder::BigEndian, &[], &[], &[])]
+fn converts_eight_bit_targets_like_numeric_reads(
+    #[case] signed: bool,
+    #[case] order: DatatypeByteOrder,
+    #[case] raw: &[u8],
+    #[case] unsigned: &[u8],
+    #[case] signed_values: &[i8],
+    #[values(false, true)] enumeration: bool,
+) {
+    let datatype = Datatype::FixedPoint(FixedPointType::new(2, order, signed, 0, 16).unwrap());
+    let datatype = if enumeration {
+        Datatype::Enumeration {
+            size: 2,
+            base_type: Box::new(datatype),
+            members: Vec::new(),
+        }
+    } else {
+        datatype
+    };
+    let mut builder = FileBuilder::new();
+    let count = u64::try_from(unsigned.len()).unwrap();
+    builder
+        .create_dataset("values")
+        .with_raw_data(datatype.clone(), raw.to_vec(), count)
+        .with_shape(&[count]);
+    let file = File::from_bytes(builder.finish().unwrap()).unwrap();
+    let dataset = file.dataset("values").unwrap();
+    assert_eq!(u8::convert_raw(raw, &datatype).unwrap(), unsigned);
+    assert_eq!(i8::convert_raw(raw, &datatype).unwrap(), signed_values);
+    assert_eq!(dataset.read_u8().unwrap(), unsigned);
+    assert_eq!(dataset.read_i8().unwrap(), signed_values);
 }
