@@ -361,6 +361,10 @@ mod global_heap_liveness_tests;
 mod group;
 #[cfg(feature = "__group-link-inspection-crosscheck")]
 pub(crate) mod group_inspection;
+#[cfg(test)]
+test_util_hdf5::hdf5_1_10_tests! {
+    mod native_crosschecks;
+}
 mod group_links;
 pub(crate) mod object_header;
 #[cfg(test)]
