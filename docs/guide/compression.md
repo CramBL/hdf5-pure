@@ -279,4 +279,4 @@ ID 32013, including `h5py` with `hdf5plugin` installed.
 
 ## `fast-deflate` backend
 
-The `fast-deflate` feature swaps the deflate backend in for the zlib-ng backend, which is faster on supported platforms while producing standard-compatible output. The deflate API ([`with_deflate`](crate::DatasetBuilder::with_deflate)) is the same under either backend. [Cargo features](crate#cargo-features) has the full feature matrix.
+The `fast-deflate` feature enables `deflate` and selects the native zlib-ng backend. With default features disabled, enable `std` alongside `fast-deflate` to use [`with_deflate`](crate::DatasetBuilder::with_deflate) through the high-level writer. [Cargo features](crate#cargo-features) has the full feature matrix.
