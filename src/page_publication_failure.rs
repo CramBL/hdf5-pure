@@ -1,10 +1,8 @@
 //! Failure injection and barrier recording for PAGE publication tests.
 
 use std::io::Error as IoError;
-#[cfg(test)]
 use std::sync::{Arc, Mutex};
 
-#[cfg(test)]
 use test_util::disk_log;
 
 use crate::Error;
@@ -16,37 +14,29 @@ use crate::source::Source;
 
 /// A failure phase for PAGE publication tests.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PagePublicationFailure {
+pub(crate) enum PagePublicationFailure {
     /// Reports an error after the publication barrier and any requested synchronization.
     AfterDrain,
     /// Reports an error after draining the superblock write, before the editor calls its
     /// publication barrier.
     AfterPublish,
     /// Appends half the buffer to the image before reporting an error.
-    #[cfg(test)]
     Append,
     /// Reports an error before draining the content writes.
-    #[cfg(test)]
     BeforeDrain,
     /// Reports an error before accepting the superblock write.
-    #[cfg(test)]
     BeforePublish,
     /// Reports an error during the content barrier after draining its writes.
-    #[cfg(test)]
     ContentSync,
     /// The number of disk writes to skip and the prefix length to write before reporting an error.
-    #[cfg(test)]
     DiskWrite(usize, usize),
     /// The superblock prefix length to write before reporting an error.
-    #[cfg(test)]
     PublicationWrite(usize),
     /// Reports errors at the publication barrier and each subsequent direct file read.
-    #[cfg(test)]
     PublishedRead,
     /// Reports an error after issuing the superblock write, before any requested synchronization.
     PublishedSync,
     /// Reports an error at every publication barrier, including recovery attempts.
-    #[cfg(test)]
     RepeatedPublishedSync,
 }
 
@@ -58,7 +48,6 @@ pub(crate) struct PublicationFailureImage {
     failure: PagePublicationFailure,
     published: bool,
     failed: bool,
-    #[cfg(test)]
     barriers: Option<Arc<Mutex<Vec<BarrierRecord>>>>,
 }
 
@@ -75,7 +64,6 @@ impl PublicationFailureImage {
             failure,
             published: false,
             failed: false,
-            #[cfg(test)]
             barriers: None,
         }
     }
@@ -83,7 +71,6 @@ impl PublicationFailureImage {
     /// Wraps a mirror and records the caller's barrier attempts.
     ///
     /// Reads use the source interface. Truncation and data-only synchronization return errors.
-    #[cfg(test)]
     pub(crate) fn with_barriers(
         inner: MirrorImage,
         publication_offset: u64,
@@ -101,7 +88,6 @@ impl PublicationFailureImage {
     ///
     /// Returns [`Error::Io`] at the selected phase, or an error from the mirror's barrier.
     fn barrier(&mut self, durable: bool) -> Result<(), Error> {
-        #[cfg(test)]
         let index = self.barriers.as_ref().map(|barriers| {
             let mut barriers = barriers.lock().unwrap();
             let index = barriers.len();
@@ -112,7 +98,6 @@ impl PublicationFailureImage {
             });
             index
         });
-        #[cfg(test)]
         if !self.failed
             && !self.published
             && matches!(self.failure, PagePublicationFailure::BeforeDrain)
@@ -123,7 +108,6 @@ impl PublicationFailureImage {
         if !self.failed && self.published && self.failure == PagePublicationFailure::PublishedSync {
             self.fail()?;
         }
-        #[cfg(test)]
         if (self.published && matches!(self.failure, PagePublicationFailure::RepeatedPublishedSync))
             || (!self.failed
                 && ((!self.published
@@ -136,7 +120,6 @@ impl PublicationFailureImage {
         if durable {
             self.inner.sync_all()?;
         }
-        #[cfg(test)]
         if let (Some(barriers), Some(index)) = (&self.barriers, index) {
             barriers.lock().unwrap()[index].completed = true;
         }
@@ -157,7 +140,6 @@ impl PublicationFailureImage {
 
 impl FileImage for PublicationFailureImage {
     fn read_disk_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
-        #[cfg(test)]
         if self.published && matches!(self.failure, PagePublicationFailure::PublishedRead) {
             return Err(FormatError::Source(
                 "injected PAGE publication read failure".into(),
@@ -167,7 +149,6 @@ impl FileImage for PublicationFailureImage {
     }
 
     fn append(&mut self, bytes: &[u8]) -> Result<u64, Error> {
-        #[cfg(test)]
         if !self.failed && matches!(self.failure, PagePublicationFailure::Append) {
             self.inner.append(&bytes[..bytes.len() / 2])?;
             self.fail()?;
@@ -176,7 +157,6 @@ impl FileImage for PublicationFailureImage {
     }
 
     fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), Error> {
-        #[cfg(test)]
         if !self.failed
             && offset == self.publication_offset
             && let PagePublicationFailure::PublicationWrite(prefix) = self.failure
@@ -184,7 +164,6 @@ impl FileImage for PublicationFailureImage {
             self.failed = true;
             disk_log::fail_write_after(0, prefix);
         }
-        #[cfg(test)]
         if !self.failed
             && offset == self.publication_offset
             && matches!(self.failure, PagePublicationFailure::BeforePublish)
@@ -203,7 +182,6 @@ impl FileImage for PublicationFailureImage {
     }
 
     fn truncate(&mut self, len: u64) -> Result<(), Error> {
-        #[cfg(test)]
         if self.barriers.is_some() {
             return Err(IoError::other("unexpected PAGE truncation").into());
         }
@@ -211,7 +189,6 @@ impl FileImage for PublicationFailureImage {
     }
 
     fn sync_data(&mut self) -> Result<(), Error> {
-        #[cfg(test)]
         if self.barriers.is_some() {
             return Err(IoError::other("unexpected data-only PAGE synchronization").into());
         }
@@ -226,7 +203,6 @@ impl FileImage for PublicationFailureImage {
         self.barrier(false)
     }
 
-    #[cfg(test)]
     fn issued_write_order(&self) -> Vec<(u64, u64)> {
         self.inner.issued_write_order()
     }
@@ -236,7 +212,6 @@ impl FileImage for PublicationFailureImage {
     }
 
     fn as_slice(&self) -> Option<&[u8]> {
-        #[cfg(test)]
         if self.barriers.is_some() {
             return None;
         }
@@ -254,7 +229,6 @@ impl Source for PublicationFailureImage {
     }
 }
 
-#[cfg(test)]
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct BarrierRecord {
     /// Whether the caller requested durable synchronization.

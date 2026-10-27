@@ -56,9 +56,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 [package.metadata.cargo-shear]
 ignored-paths = ["src/_guide/*.rs"]
 
-# The supporting packages: the tests that link libhdf5, so that
-# nothing else does, and the helpers the tests share. `fuzz` keeps its own
-# lockfile.
+# The published crates and shared test helpers. Interoperability tests link libhdf5 through
+# optional dependencies in the crosscheck and helper packages. `fuzz` keeps its own lockfile.
 [workspace]
 members = ["crates/*"]
 exclude = ["fuzz"]
@@ -382,18 +381,6 @@ serde = ["dep:serde", "std"]
 # helpers in `mat::complex` take the de-facto standard Rust complex type
 # directly.
 num-complex = ["dep:num-complex", "serde"]
-# TODO: Refactor into an `insta` snapshot based test
-#
-# check the exact allocation figures of `tests/allocation_baseline.rs`
-# against the numbers committed under `tests/baselines/`. Off by default because
-# those numbers are recorded on one platform: the scaling *rules* in
-# `tests/allocation_bounds.rs` hold everywhere and run in every configuration,
-# while an exact count is a property of one target and one toolchain.
-__heap-baseline = []
-# Enables internal group-inspection hooks for libhdf5 crosschecks.
-__group-link-inspection-crosscheck = ["std"]
-# Enables publication-failure injection for PAGE crosschecks.
-__page-publication-crosscheck = ["std"]
 
 [dependencies]
 hdf5-pure-core.workspace = true

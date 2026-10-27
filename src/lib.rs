@@ -432,13 +432,6 @@ extern crate alloc;
 #[cfg(doc)]
 pub mod _guide;
 
-#[cfg(any(
-    feature = "__page-publication-crosscheck",
-    feature = "__group-link-inspection-crosscheck"
-))]
-#[doc(hidden)]
-pub mod __private;
-
 pub(crate) mod access_mode;
 pub(crate) mod address;
 #[cfg(test)]
@@ -527,7 +520,7 @@ pub(crate) mod edit;
 pub(crate) mod file_lock;
 #[cfg(feature = "std")]
 pub(crate) mod image;
-#[cfg(all(feature = "std", any(test, feature = "__page-publication-crosscheck")))]
+#[cfg(all(test, feature = "std"))]
 pub(crate) mod page_publication_failure;
 #[cfg(feature = "std")]
 pub(crate) mod reader;

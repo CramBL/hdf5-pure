@@ -321,7 +321,7 @@ use crate::libver::LibVer;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPathBuf;
-#[cfg(any(test, feature = "__page-publication-crosscheck"))]
+#[cfg(test)]
 use crate::page_publication_failure::{PagePublicationFailure, PublicationFailureImage};
 use crate::reader::FileAccessProperties;
 use crate::source::SourceMetadata;
@@ -1278,7 +1278,7 @@ impl WriteEngine {
     ///
     /// Returns [`Error::EditUnsupported`] unless the file uses non-persistent PAGE allocation.
     /// Returns the opening or buffering error if the mirror cannot be configured.
-    #[cfg(any(test, feature = "__page-publication-crosscheck"))]
+    #[cfg(test)]
     pub(crate) fn open_page_publication_failure(
         path: &Path,
         failure: PagePublicationFailure,
@@ -2240,7 +2240,7 @@ impl WriteEngine {
     /// # Errors
     ///
     /// Returns the read or conversion error if the image cannot be read through the disk handle.
-    #[cfg(any(test, feature = "__page-publication-crosscheck"))]
+    #[cfg(test)]
     pub(crate) fn page_publication_snapshot(&self) -> Result<Vec<u8>, Error> {
         let mut bytes = vec![0; self.image.len().to_usize()?];
         self.image.read_disk_at(0, &mut bytes)?;
