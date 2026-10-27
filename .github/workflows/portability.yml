@@ -132,7 +132,16 @@ jobs:
           - {name: i686, family: i686, recipe: portability::test-32bit}
           - {name: s390x, family: s390x, recipe: portability::test-big-endian}
           - {name: i686-hdf5, family: i686, recipe: portability::test-32bit-hdf5}
-          - {name: s390x-hdf5, family: s390x, recipe: portability::test-big-endian-hdf5}
+          - name: s390x-hdf5 / free-space
+            family: s390x
+            recipe: portability::test-big-endian-hdf5
+            shard: free-space
+            cache: s390x-hdf5
+          - name: s390x-hdf5 / other
+            family: s390x
+            recipe: portability::test-big-endian-hdf5
+            shard: other
+            cache: s390x-hdf5
 
     steps:
       - name: Checkout
@@ -153,9 +162,9 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: portability-${{ matrix.name }}-${{ steps.image.outputs.identity }}
+          shared-key: portability-${{ matrix.cache || matrix.name }}-${{ steps.image.outputs.identity }}
           cache-targets: ${{ steps.image.outputs.candidate != 'true' }}
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.shard != 'free-space' }}
 
       - name: Install tools
         uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
@@ -165,6 +174,7 @@ jobs:
       - name: Tests
         env:
           RECIPE: ${{ matrix.recipe }}
+          QEMU_TEST_SHARD: ${{ matrix.shard || 'all' }}
           CI_CROSS_CANDIDATE: ${{ steps.image.outputs.candidate }}
         run: |
           unset HDF5_DIR
