@@ -6,15 +6,16 @@ use hdf5::File as CFile;
 use hdf5::plist::GroupCreate;
 use hdf5::plist::file_access::LibraryVersion;
 use hdf5_pure::File;
-use hdf5_pure_core::__private::{FileRange, FileRegion, PhysicalAddress};
+use hdf5_pure_core::__private::{BaseAddressExt, FileRange, FileRegion, PhysicalAddress};
+use hdf5_pure_core::BaseAddress;
 use hdf5_pure_format::__private::FilterDescription;
 use hdf5_pure_format::__private::FilterPipeline;
 use hdf5_pure_format::__private::FractalHeapFiltering;
 use hdf5_pure_format::__private::FractalHeapHeader;
 use hdf5_pure_format::__private::{
     BTREE_V2_LINK_NAME, BTreeV2Header, BTreeV2Layout, BTreeV2LinkNameIndex, FormatWidths,
-    FractalHeapIdKind, FractalHeapIdLayout, HugeObjectRecordContext, HugeObjectReference,
-    HugeObjectTrackerRecord,
+    FractalHeapHugeObjectId, FractalHeapHugeObjectLayout, FractalHeapIdKind, FractalHeapIdLayout,
+    HugeIndirectKeyEncoding, HugeObjectRecordContext, HugeObjectReference, HugeObjectTrackerRecord,
 };
 use hdf5_pure_format::__private::{FractalHeapHeaderLocator, LengthWidth, OffsetWidth};
 use rstest::rstest;
@@ -177,6 +178,20 @@ fn a_c_written_filtered_huge_object_has_a_type_two_record() {
     assert_eq!(record.location().decoded_size(), heap.huge_objects_size);
     assert!(record.location().encoded_size() < record.location().decoded_size());
     assert_eq!(record.location().filter_mask(), 0);
+    let objects = FractalHeapHugeObjectLayout::new(
+        &heap,
+        widths,
+        BaseAddress::ZERO,
+        HugeIndirectKeyEncoding::Libhdf5,
+    )
+    .unwrap();
+    let region = FileRegion::new(
+        FileRange::new(PhysicalAddress::new(0), image.len() as u64).unwrap(),
+        &image,
+    )
+    .unwrap();
+    let tracker = objects.parse_tracker(region).unwrap();
+    let payload_record = tracker.parse_record(view.record(0).unwrap()).unwrap();
     let name_index = image
         .windows(BTREE_SIGNATURE.len())
         .enumerate()
@@ -211,6 +226,22 @@ fn a_c_written_filtered_huge_object_has_a_type_two_record() {
         panic!("expected filtered indirect huge ID, got {parsed:?}")
     };
     assert_eq!(key.value(), record.id());
+    let FractalHeapHugeObjectId::Indirect(lookup) = objects.parse_id(huge_id).unwrap() else {
+        panic!("expected filtered indirect huge lookup")
+    };
+    assert_eq!(lookup.tracker_range(), objects.tracker_range());
+    let reference = objects.resolve(&lookup, &payload_record).unwrap();
+    assert_eq!(
+        reference.range().start().get(),
+        record.location().address().get()
+    );
+    assert_eq!(reference.range().length(), record.location().encoded_size());
+    assert_eq!(reference.decoded_size(), heap.huge_objects_size);
+    assert_eq!(reference.filters().unwrap().mask, 0);
+    assert_eq!(
+        reference.parse(region).unwrap().len() as u64,
+        record.location().encoded_size()
+    );
 }
 
 // "Fractal Heap", format specification version 4.0, defines the header signature.

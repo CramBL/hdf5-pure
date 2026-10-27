@@ -171,6 +171,15 @@ pub use crate::fractal_heap_block::FractalHeapIndirectBlockRef;
 pub use crate::fractal_heap_block::FractalHeapIndirectBlockView;
 pub use crate::fractal_heap_block::FractalHeapObjectRef;
 
+pub use crate::fractal_heap_huge::FractalHeapHugeObjectFilters;
+pub use crate::fractal_heap_huge::FractalHeapHugeObjectId;
+pub use crate::fractal_heap_huge::FractalHeapHugeObjectLayout;
+pub use crate::fractal_heap_huge::FractalHeapHugeObjectLookup;
+pub use crate::fractal_heap_huge::FractalHeapHugeObjectRecord;
+pub use crate::fractal_heap_huge::FractalHeapHugeObjectRef;
+pub use crate::fractal_heap_huge::FractalHeapHugeObjectTracker;
+pub use crate::fractal_heap_huge::FractalHeapHugeObjectView;
+
 pub use crate::fractal_heap_free_space::FractalHeapFreeSection;
 pub use crate::fractal_heap_free_space::FractalHeapFreeSpace;
 pub use crate::fractal_heap_free_space::FractalHeapFreeSpaceManager;

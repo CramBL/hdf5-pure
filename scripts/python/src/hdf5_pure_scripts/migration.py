@@ -204,6 +204,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
             "DatasetProvenanceRequiresData",
             "DatasetRankUnsupported",
             "DatasetSizeOverflow",
+            "DecodedSizeMismatch",
             "DefinedAddressIsUndefined",
             "DenseLinkObjectTooLarge",
             "DenseLinkStorageTooLarge",
@@ -295,6 +296,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
             "UnsupportedSerializedSectionClass",
             "UnsupportedVaxByteOrder",
             "ValueTooLargeForRepresentation",
+            "WrongLayout",
             "UnterminatedLocalHeapName",
         }
     }
