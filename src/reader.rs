@@ -3857,6 +3857,9 @@ impl File {
     /// # Errors
     ///
     /// Returns [`Error::FreeSectionInspectionUnsupported`] if this is a writable handle.
+    /// Returns [`Error::OverlappingFreeSections`] if free sections overlap within or across
+    /// managers, including duplicate extents. Header and section-list checksums are verified
+    /// regardless of the `checksum` feature.
     /// Returns [`Error::Format`] if File Space Info records the same manager header address in
     /// multiple slots, File Space Info or manager metadata is malformed or truncated,
     /// manager allocations overlap, an allocation or section exceeds the file allocation, or an

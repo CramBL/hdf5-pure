@@ -13,6 +13,10 @@ use std::string::String;
 use core::fmt;
 
 #[cfg(feature = "std")]
+use crate::address::StoredAddress;
+#[cfg(feature = "std")]
+use crate::free_sections::FreeSectionsError;
+#[cfg(feature = "std")]
 use crate::message_type::MessageType;
 #[cfg(feature = "std")]
 use crate::object_graph::TraversalError;
@@ -196,6 +200,37 @@ pub enum Error {
     /// [`crate::Dataset::append_staged`], which folds them into the pending
     /// creation.
     NotCommitted(String),
+    /// Two free sections overlap, including when their extents are identical.
+    ///
+    /// Addresses use the coordinate system of the inspected sections. Persisted sections use
+    /// base-relative addresses, and session-reusable sections use absolute physical offsets.
+    /// Adjacent sections with equal end and start addresses are permitted.
+    OverlappingFreeSections {
+        /// The start address of the overlapping section.
+        address: u64,
+        /// The length of the overlapping section in bytes.
+        length: u64,
+        /// The start address of the preceding section in address order.
+        previous_address: u64,
+        /// The length of the preceding section in bytes.
+        previous_length: u64,
+    },
+    /// A persisted manager could not be read or parsed.
+    ///
+    /// Manager and section addresses are relative to the HDF5 base address. The cause is
+    /// available through [`source`](std::error::Error::source).
+    PersistedFreeSpace {
+        /// The zero-based index in the File Space Info manager-address array.
+        manager_slot: usize,
+        /// The stored address of the manager header.
+        header_address: StoredAddress,
+        /// The stored section-list address, if it was decoded and is defined.
+        section_list_address: Option<StoredAddress>,
+        /// The stored start address and byte length of the offending section, if available.
+        section: Option<(StoredAddress, u64)>,
+        /// The acquisition or parsing failure.
+        source: Box<Error>,
+    },
     /// A write (e.g. [`crate::Dataset::append`]) was requested on a file opened
     /// read-only. Open it with [`crate::File::open_rw`] to modify it in place.
     ReadOnly,
@@ -319,6 +354,25 @@ impl fmt::Display for Error {
                 "this handle was reached by object reference and the file has changed since; \
                  it has no path to re-resolve, so dereference again"
             ),
+            Error::OverlappingFreeSections {
+                address,
+                length,
+                previous_address,
+                previous_length,
+            } => write!(
+                f,
+                "the free section at {address}, {length} bytes long, overlaps the free section at {previous_address}, {previous_length} bytes long"
+            ),
+            Error::PersistedFreeSpace {
+                manager_slot,
+                header_address,
+                source,
+                ..
+            } => write!(
+                f,
+                "persisted free-space manager in slot {manager_slot} at stored address {}: {source}",
+                header_address.get()
+            ),
             Error::NotCommitted(path) => write!(
                 f,
                 "\"{path}\" is staged and not written yet; File::commit publishes it"
@@ -387,6 +441,7 @@ impl std::error::Error for Error {
             Error::Io(e) => Some(e),
             Error::Format(e) => Some(e),
             Error::CopyScreenUnreadable { source, .. } => Some(source),
+            Error::PersistedFreeSpace { source, .. } => Some(&**source),
             Error::CommitPartiallyApplied { restore, .. } => Some(&**restore),
             _ => None,
         }
@@ -397,6 +452,26 @@ impl std::error::Error for Error {
 impl From<FormatError> for Error {
     fn from(e: FormatError) -> Self {
         Error::Format(e)
+    }
+}
+
+#[cfg(feature = "std")]
+impl From<FreeSectionsError> for Error {
+    fn from(error: FreeSectionsError) -> Self {
+        match error {
+            FreeSectionsError::Format(error) => Self::Format(error),
+            FreeSectionsError::Overlap {
+                address,
+                length,
+                previous_address,
+                previous_length,
+            } => Self::OverlappingFreeSections {
+                address,
+                length,
+                previous_address,
+                previous_length,
+            },
+        }
     }
 }
 
