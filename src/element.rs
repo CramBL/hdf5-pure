@@ -40,7 +40,7 @@
     reason = "rustdoc's test mode collects a private item, so this example is compiled and run by `cargo test --doc`"
 )]
 
-use crate::data_read;
+use crate::data_read::NumericDecoder;
 use crate::datatype::Datatype;
 use crate::edit::AppendBuilder;
 use crate::error::Error;
@@ -88,15 +88,37 @@ pub trait H5Element: sealed::Sealed + Copy {
     #[doc(hidden)]
     fn fill_bytes(self) -> Vec<u8>;
 
-    /// Decode `raw` — the bytes of one or more elements in the on-disk datatype
-    /// `dt` — into `Self` values, using the same conversion rules as the
-    /// corresponding typed read (e.g. [`Dataset::read_i32`]).
+    /// Converts stored numeric elements using the same rules as typed dataset reads.
+    ///
+    /// The reader decodes `raw` using the byte order, signedness, and precision of `dt`, then
+    /// converts each value to `Self`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if `dt` is not a supported numeric datatype or `raw` contains
+    /// an incomplete element. The reader parses `dt` even when `raw` is empty.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the new capacity exceeds [`isize::MAX`] bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure::{Datatype, DatatypeByteOrder, FixedPointType, H5Element};
+    ///
+    /// let datatype = Datatype::FixedPoint(
+    ///     FixedPointType::new(2, DatatypeByteOrder::BigEndian, false, 0, 16)?,
+    /// );
+    /// assert_eq!(u8::convert_raw(&[0, 42], &datatype)?, [42]);
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
     #[doc(hidden)]
     fn convert_raw(raw: &[u8], dt: &Datatype) -> Result<Vec<Self>, Error>;
 }
 
 macro_rules! impl_h5_element {
-    ($ty:ty, $read:ident, $write:ident, $append:ident, |$raw:ident, $dt:ident| $convert:expr) => {
+    ($ty:ty, $read:ident, $write:ident, $append:ident) => {
         impl sealed::Sealed for $ty {}
         impl H5Element for $ty {
             fn read_from(ds: &Dataset) -> Result<Vec<Self>, Error> {
@@ -111,51 +133,23 @@ macro_rules! impl_h5_element {
             fn fill_bytes(self) -> Vec<u8> {
                 self.to_le_bytes().to_vec()
             }
-            fn convert_raw($raw: &[u8], $dt: &Datatype) -> Result<Vec<Self>, Error> {
-                $convert
+            fn convert_raw(raw: &[u8], dt: &Datatype) -> Result<Vec<Self>, Error> {
+                Ok(NumericDecoder::parse(dt)?.decode(raw)?)
             }
         }
     };
 }
 
-// Each type's `convert_raw` mirrors its `read_*` method exactly, so a fill value
-// decodes through the same datatype/byte-order/coercion path as the data.
-impl_h5_element!(f32, read_f32, with_f32_data, append_f32, |raw, dt| Ok(
-    data_read::read_as_f32(raw, dt)?
-));
-impl_h5_element!(f64, read_f64, with_f64_data, append_f64, |raw, dt| Ok(
-    data_read::read_as_f64(raw, dt)?
-));
-impl_h5_element!(i8, read_i8, with_i8_data, append_i8, |raw, dt| {
-    let _ = dt;
-    #[expect(
-        clippy::cast_possible_wrap,
-        reason = "reinterprets each stored byte as the signed i8 requested, matching read_i8"
-    )]
-    Ok(raw.iter().map(|&b| b as i8).collect())
-});
-impl_h5_element!(i16, read_i16, with_i16_data, append_i16, |raw, dt| Ok(
-    data_read::read_as_i16(raw, dt)?
-));
-impl_h5_element!(i32, read_i32, with_i32_data, append_i32, |raw, dt| Ok(
-    data_read::read_as_i32(raw, dt)?
-));
-impl_h5_element!(i64, read_i64, with_i64_data, append_i64, |raw, dt| Ok(
-    data_read::read_as_i64(raw, dt)?
-));
-impl_h5_element!(u8, read_u8, with_u8_data, append_u8, |raw, dt| {
-    let _ = dt;
-    Ok(raw.to_vec())
-});
-impl_h5_element!(u16, read_u16, with_u16_data, append_u16, |raw, dt| Ok(
-    data_read::read_as_u16(raw, dt)?
-));
-impl_h5_element!(u32, read_u32, with_u32_data, append_u32, |raw, dt| Ok(
-    data_read::read_as_u32(raw, dt)?
-));
-impl_h5_element!(u64, read_u64, with_u64_data, append_u64, |raw, dt| Ok(
-    data_read::read_as_u64(raw, dt)?
-));
+impl_h5_element!(f32, read_f32, with_f32_data, append_f32);
+impl_h5_element!(f64, read_f64, with_f64_data, append_f64);
+impl_h5_element!(i8, read_i8, with_i8_data, append_i8);
+impl_h5_element!(i16, read_i16, with_i16_data, append_i16);
+impl_h5_element!(i32, read_i32, with_i32_data, append_i32);
+impl_h5_element!(i64, read_i64, with_i64_data, append_i64);
+impl_h5_element!(u8, read_u8, with_u8_data, append_u8);
+impl_h5_element!(u16, read_u16, with_u16_data, append_u16);
+impl_h5_element!(u32, read_u32, with_u32_data, append_u32);
+impl_h5_element!(u64, read_u64, with_u64_data, append_u64);
 
 impl DatasetBuilder {
     /// Set the dataset's data and datatype from a flat slice of any supported
