@@ -9,30 +9,23 @@ use alloc::vec::Vec;
 use core::num::NonZeroU32;
 
 use hdf5_pure_core::__private::{FileRange, FileRegion, PhysicalAddress};
-use hdf5_pure_format::__private::BTREE_V2_HUGE_OBJECT;
-use hdf5_pure_format::__private::FractalHeapBlock;
-use hdf5_pure_format::__private::FractalHeapBlockFilters;
-use hdf5_pure_format::__private::FractalHeapBlockLayout;
+use hdf5_pure_filter::__private::Error as FilterError;
 pub use hdf5_pure_format::__private::FractalHeapHeader;
-use hdf5_pure_format::__private::FractalHeapHeaderLocator;
-use hdf5_pure_format::__private::FractalHeapIdKind;
-use hdf5_pure_format::__private::FractalHeapIdView;
-use hdf5_pure_format::__private::HugeObjectRecord;
-use hdf5_pure_format::__private::HugeObjectReference;
+use hdf5_pure_format::__private::{
+    BTreeV2Layout, FractalHeapBlock, FractalHeapBlockFilters, FractalHeapBlockLayout,
+    FractalHeapHeaderLocator, FractalHeapHugeObjectId, FractalHeapHugeObjectLayout,
+    FractalHeapHugeObjectRef, FractalHeapIdKind, FractalHeapIdView, HugeIndirectKeyEncoding,
+};
 
 use crate::access_mode::AccessMode;
-use crate::address::AddressContext;
-use crate::address::StoredAddress;
-use crate::address::StoredAddressExt;
-use crate::btree_v2::{self, BTreeV2Header, BTreeV2Record};
+use crate::address::{AddressContext, StoredAddress, StoredAddressExt};
 use crate::convert::Narrow;
 use crate::error::FormatError;
-use crate::filter_pipeline::FILTER_SHUFFLE;
+use crate::filter_pipeline::{FILTER_SHUFFLE, FilterPipeline};
 use crate::filters;
 use crate::filters::ChunkContext;
 use crate::source;
 use crate::source::Source;
-use crate::source::SourceMetadata;
 use crate::width::FormatWidths;
 #[cfg(test)]
 use crate::width::{LengthWidth, OffsetWidth};
@@ -142,90 +135,83 @@ pub(crate) fn decode_direct_block(
     filters: FractalHeapBlockFilters<'_>,
     decoded_size: u64,
 ) -> Result<Vec<u8>, FormatError> {
+    decode_heap_payload(encoded, filters.pipeline, filters.mask, decoded_size)
+        .map_err(FormatError::from)
+}
+
+/// Reverses heap filters using a one-byte element context.
+///
+/// # Errors
+///
+/// Returns the errors of [`filters::decompress_chunk`], or [`FilterError::UnsupportedFilter`]
+/// for an active shuffle whose element width differs from one byte.
+fn decode_heap_payload(
+    encoded: &[u8],
+    pipeline: &FilterPipeline,
+    mask: u32,
+    decoded_size: u64,
+) -> Result<Vec<u8>, FilterError> {
     // `H5Z__filter_shuffle` in `H5Zshuffle.c`, HDF5 2.2.0, shuffles at the width in its first
     // client value. `filters::decompress_chunk` reverses a shuffle at the element size of its
     // context, one byte here, so an active shuffle filter of another width is rejected.
-    let wide_shuffle = filters
-        .pipeline
-        .filters
-        .iter()
-        .enumerate()
-        .any(|(index, filter)| {
-            let skipped = u32::try_from(index)
-                .ok()
-                .and_then(|bit| filters.mask.checked_shr(bit))
-                .is_some_and(|mask| mask & 1 == 1);
-            filter.filter_id == FILTER_SHUFFLE && !skipped && filter.client_data != [1]
-        });
+    let wide_shuffle = pipeline.filters.iter().enumerate().any(|(index, filter)| {
+        let skipped = u32::try_from(index)
+            .ok()
+            .and_then(|bit| mask.checked_shr(bit))
+            .is_some_and(|mask| mask & 1 == 1);
+        filter.filter_id == FILTER_SHUFFLE && !skipped && filter.client_data != [1]
+    });
     if wide_shuffle {
-        return Err(FormatError::UnsupportedFilter(FILTER_SHUFFLE));
+        return Err(FilterError::UnsupportedFilter(FILTER_SHUFFLE));
     }
     filters::decompress_chunk(
         encoded,
-        filters.pipeline,
+        pipeline,
         ChunkContext {
             chunk_dims: &[decoded_size],
             element_size: NonZeroU32::MIN,
             element_type: None,
             scale_offset_type: None,
         },
-        filters.mask,
+        mask,
     )
 }
 
-/// Copy `len` bytes at `addr` out of an in-memory file image, bounds-checked.
-fn slice_object(file_data: &[u8], addr: u64, len: usize) -> Result<Vec<u8>, FormatError> {
-    source::bytes_in(
-        file_data,
-        FileRange::new(PhysicalAddress::new(addr), len.to_u64())?,
-    )
-    .map(<[u8]>::to_vec)
-}
-
-/// Read `len` bytes at `addr` from a streaming source.
-fn read_object_at_source<S: Source + ?Sized>(
-    source: &S,
-    addr: u64,
-    len: usize,
-) -> Result<Vec<u8>, FormatError> {
-    source.read_metadata_at(addr, len)
-}
-
-/// Checks the B-tree header against the indexed, unfiltered huge-object record layout.
-///
-/// # Errors
-///
-/// Returns [`FormatError::UnexpectedHugeObjectBTree`] if the record type differs or the
-/// records are too short, and [`FormatError::InvalidOffsetSize`] or
-/// [`FormatError::InvalidLengthSize`] if a field width is not 2, 4, or 8.
-fn check_huge_object_btree(
-    header: &BTreeV2Header,
-    widths: FormatWidths,
-) -> Result<(), FormatError> {
-    let required = HugeObjectRecord::size(widths.offsets, widths.lengths);
-    if header.tree_type != BTREE_V2_HUGE_OBJECT || header.record_size < required {
-        return Err(FormatError::UnexpectedHugeObjectBTree {
-            tree_type: header.tree_type,
-            record_size: usize::from(header.record_size),
-            required: usize::from(required),
-        });
-    }
-    Ok(())
-}
-
-/// Every huge object a heap holds, decoded from its huge-objects v2 B-tree.
-///
-/// Resolving even one huge object costs the whole index: that B-tree is read by
-/// collecting its records rather than by descending to a key. So the records are
-/// decoded here once, and kept by the [`HeapObjectReader`] that asked for them.
-///
-/// Only the type-1 record layout appears here, which
-/// [`check_huge_object_btree`] establishes before any record reaches this.
+/// Cached numeric huge-object keys and their owned payload references.
 struct HugeObjectIndex {
-    /// `(id, address, length)`, ordered by id so a lookup is a binary search.
-    /// The B-tree already stores them in that order; sorting again costs one
-    /// pass and means correctness here does not rest on that.
-    entries: Vec<(u64, StoredAddress, u64)>,
+    entries: Vec<(u64, FractalHeapHugeObjectRef)>,
+}
+
+/// Caller-imposed payload and tracker limits for one huge-object read.
+#[derive(Clone, Copy)]
+pub(crate) struct HugeObjectReadLimits {
+    /// The maximum encoded payload length in bytes.
+    pub(crate) encoded_bytes: u64,
+    /// The maximum declared decoded payload length in bytes.
+    pub(crate) decoded_bytes: u64,
+    /// The maximum number of tracker records.
+    pub(crate) index_records: u64,
+    /// The maximum number of tracker nodes visited or pending traversal.
+    pub(crate) index_nodes: u64,
+    /// The maximum total length of tracker metadata reads in bytes.
+    pub(crate) metadata_bytes: u64,
+}
+
+impl HugeObjectReadLimits {
+    fn require(limit: u64, required: u64) -> Result<(), FormatError> {
+        if required > limit {
+            return Err(FormatError::ResourceLimit { limit, required });
+        }
+        Ok(())
+    }
+    /// The maximum representable count for each resource.
+    pub(crate) const UNLIMITED: Self = Self {
+        encoded_bytes: u64::MAX,
+        decoded_bytes: u64::MAX,
+        index_records: u64::MAX,
+        index_nodes: u64::MAX,
+        metadata_bytes: u64::MAX,
+    };
 }
 
 #[cfg(test)]
@@ -255,35 +241,93 @@ pub(crate) fn huge_index_decodes() -> usize {
 }
 
 impl HugeObjectIndex {
-    fn decode(records: &[BTreeV2Record], widths: FormatWidths) -> Result<Self, FormatError> {
+    fn decode<'bytes>(
+        read: &impl Fn(FileRange) -> Result<Cow<'bytes, [u8]>, FormatError>,
+        addresses: AddressContext,
+        layout: &FractalHeapHugeObjectLayout,
+        widths: FormatWidths,
+        limits: HugeObjectReadLimits,
+    ) -> Result<Self, FormatError> {
+        let range = layout.tracker_range();
+        HugeObjectReadLimits::require(limits.metadata_bytes, range.length())?;
+        let bytes = read(range)?;
+        let tracker = layout.parse_tracker(FileRegion::new(range, &bytes)?)?;
+        let header = tracker.header();
+        HugeObjectReadLimits::require(limits.index_records, header.total_records)?;
+        header.total_records.to_usize()?;
+        let nodes = BTreeV2Layout::new(header, widths.offsets)?;
+        let mut pending: Vec<_> = nodes.root().into_iter().collect();
+        let mut visited = BTreeSet::new();
+        let mut metadata_bytes = range.length();
+        let mut entries = Vec::new();
+        while let Some(node) = pending.pop() {
+            if !visited.insert(node.address()) {
+                return Err(FormatError::InvalidBTreeV2Signature);
+            }
+            HugeObjectReadLimits::require(limits.index_nodes, visited.len().to_u64())?;
+            let range = FileRange::new(
+                addresses.resolve(node.address())?,
+                nodes.encoded_len(node)?.to_u64(),
+            )?;
+            metadata_bytes =
+                metadata_bytes
+                    .checked_add(range.length())
+                    .ok_or(FormatError::ResourceLimit {
+                        limit: limits.metadata_bytes,
+                        required: u64::MAX,
+                    })?;
+            HugeObjectReadLimits::require(limits.metadata_bytes, metadata_bytes)?;
+            let bytes = read(range)?;
+            let view = nodes.parse(&bytes, node)?;
+            let count = entries
+                .len()
+                .to_u64()
+                .checked_add(view.record_count().to_u64())
+                .ok_or(FormatError::InvalidBTreeV2Signature)?;
+            HugeObjectReadLimits::require(limits.index_records, count)?;
+            if count > header.total_records {
+                return Err(FormatError::InvalidBTreeV2Signature);
+            }
+            for index in 0..view.record_count() {
+                let record = tracker.parse_record(view.record(index)?)?;
+                entries.push((
+                    record
+                        .key()
+                        .ok_or(FormatError::InvalidFractalHeapGeometry)?,
+                    record.reference().clone(),
+                ));
+            }
+            for index in 0..=view.record_count() {
+                if let Some(child) = view.child(index)? {
+                    HugeObjectReadLimits::require(
+                        limits.index_nodes,
+                        visited
+                            .len()
+                            .to_u64()
+                            .saturating_add(pending.len().to_u64())
+                            .saturating_add(1),
+                    )?;
+                    pending.push(child);
+                }
+            }
+        }
+        if entries.len().to_u64() != header.total_records {
+            return Err(FormatError::InvalidBTreeV2Signature);
+        }
+        entries.sort_unstable_by_key(|(key, _)| *key);
+        if entries.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(FormatError::InvalidFractalHeapGeometry);
+        }
         #[cfg(test)]
         HUGE_INDEX_DECODES.with(|count| count.set(count.get() + 1));
-
-        let mut entries = Vec::with_capacity(records.len());
-        for record in records {
-            let HugeObjectRecord {
-                address,
-                length,
-                id,
-            } = record.huge_object(widths.offsets, widths.lengths)?;
-            entries.push((id, address, length));
-        }
-        entries.sort_unstable();
         Ok(Self { entries })
     }
 
-    /// The `(address, length)` of the object with `huge_id`.
-    fn locate(&self, huge_id: u64) -> Result<(StoredAddress, u64), FormatError> {
-        match self
-            .entries
-            .binary_search_by_key(&huge_id, |&(id, _, _)| id)
-        {
-            Ok(i) => {
-                let (_, addr, len) = self.entries[i];
-                Ok((addr, len))
-            }
-            Err(_) => Err(FormatError::HugeObjectNotFound(huge_id)),
-        }
+    fn locate(&self, huge_id: u64) -> Result<FractalHeapHugeObjectRef, FormatError> {
+        self.entries
+            .binary_search_by_key(&huge_id, |(id, _)| *id)
+            .map(|index| self.entries[index].1.clone())
+            .map_err(|_index| FormatError::HugeObjectNotFound(huge_id))
     }
 }
 
@@ -304,6 +348,11 @@ impl HugeObjectIndex {
 /// object, then validates the block's prefix and the object bounds in the decoded bytes. It keeps
 /// the decoded block for the next lookup in that block, under the same requirements. With
 /// read-write access, it validates a checksummed block in full on its decoded bytes.
+///
+/// For a filtered huge object, the reader reads the complete encoded allocation, reverses the
+/// active filters, and checks the declared decoded size. Huge-object payloads are independent of
+/// managed blocks. For indirect huge objects, the reader checks tracker metadata checksums when
+/// checksum support is enabled.
 pub struct HeapObjectReader<'h> {
     header: &'h FractalHeapHeader,
     widths: FormatWidths,
@@ -319,6 +368,8 @@ pub struct HeapObjectReader<'h> {
     huge: Option<HugeObjectIndex>,
     /// Which backend the cached index was decoded from, once one has been.
     huge_backend: Option<Backend>,
+    huge_layout: Option<FractalHeapHugeObjectLayout>,
+    huge_limits: HugeObjectReadLimits,
 }
 
 /// Which of the two ways of reading a file an object came through. Recorded
@@ -346,6 +397,28 @@ impl<'h> HeapObjectReader<'h> {
         access_mode: AccessMode,
         widths: FormatWidths,
     ) -> Self {
+        Self::with_huge_limits(
+            header,
+            addresses,
+            owner,
+            access_mode,
+            widths,
+            HugeObjectReadLimits::UNLIMITED,
+        )
+    }
+
+    /// Creates a reader with caller-imposed huge-object payload and tracker limits.
+    ///
+    /// The file context and access requirements are those of [`new`](Self::new). The reader
+    /// checks payload sizes before reading their bytes and tracker limits during index traversal.
+    pub(crate) fn with_huge_limits(
+        header: &'h FractalHeapHeader,
+        addresses: AddressContext,
+        owner: StoredAddress,
+        access_mode: AccessMode,
+        widths: FormatWidths,
+        huge_limits: HugeObjectReadLimits,
+    ) -> Self {
         Self {
             header,
             widths,
@@ -357,26 +430,34 @@ impl<'h> HeapObjectReader<'h> {
             layout: FractalHeapBlockLayout::new(header, widths.offsets, widths.lengths, owner),
             huge: None,
             huge_backend: None,
+            huge_layout: None,
+            huge_limits,
         }
     }
 
     /// Reads the object identified by a parsed ID from a file image.
     ///
     /// Managed objects are read through the heap's doubling table. Indexed huge objects are
-    /// looked up in the cached huge-object index. Tiny-object bytes are copied from `id`.
+    /// looked up in the cached huge-object index. Filtered huge-object payloads are decoded
+    /// using the heap's pipeline and the object's skipped-filter mask. Tiny-object bytes are
+    /// copied from `id`.
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::UnsupportedFilteredHeapObject`] for a filtered huge object.
     /// Returns [`FormatError::HugeObjectNotFound`] if an indexed huge object is absent, and
     /// [`FormatError::MissingFractalHeapBlock`] if a managed object has no allocated block.
     /// Returns [`FormatError::InsufficientRegion`] if a managed object's required region extends
     /// past the image, and [`FormatError::UnexpectedSourceEof`] if a huge object's data extends
-    /// past the image. Returns the errors of decoding a filtered direct block, such as
-    /// [`FormatError::UnsupportedFilter`] if its pipeline has a filter without a decoder.
+    /// past the image. Returns filter-specific errors for a managed block or huge payload, such as
+    /// [`FormatError::UnsupportedFilter`] if an active filter in its pipeline has no decoder.
     /// Returns [`FormatError::ChunkedReadError`] if indirect-block traversal exceeds 64 levels,
-    /// [`FormatError::ValueTooLargeForPlatform`] if a value does not fit the platform's address
-    /// width, and [`FormatError::OffsetOverflow`] if a file offset overflows. Returns errors from
+    /// [`FormatError::ValueTooLargeForPlatform`] if a value exceeds [`usize::MAX`] or a filtered
+    /// huge payload's encoded or decoded size exceeds [`isize::MAX`], and
+    /// [`FormatError::OffsetOverflow`] if a file offset overflows.
+    /// Returns [`FormatError::ResourceLimit`] if a huge-object read or index traversal exceeds
+    /// its configured limits, [`FormatError::DecodedSizeMismatch`] if a huge object's decoded
+    /// length differs from its declared size, or [`FormatError::DecodedSizeLimitExceeded`] if a
+    /// huge-object decoder exceeds the output bound derived from that size. Returns errors from
     /// parsing heap blocks and huge-object index metadata.
     ///
     /// # Panics
@@ -393,7 +474,7 @@ impl<'h> HeapObjectReader<'h> {
                 heap_offset,
                 object_length,
             } => self.read_managed_object(file_data, heap_offset, object_length),
-            FractalHeapIdKind::Huge(reference) => self.read_huge(file_data, reference),
+            FractalHeapIdKind::Huge(_) => self.read_huge(file_data, id),
             FractalHeapIdKind::Tiny { bytes } => Ok(bytes.to_vec()),
         }
     }
@@ -419,101 +500,141 @@ impl<'h> HeapObjectReader<'h> {
                 heap_offset,
                 object_length,
             } => self.read_managed_object_from_source(source, heap_offset, object_length),
-            FractalHeapIdKind::Huge(reference) => self.read_huge_from_source(source, reference),
+            FractalHeapIdKind::Huge(_) => self.read_huge_from_source(source, id),
             FractalHeapIdKind::Tiny { bytes } => Ok(bytes.to_vec()),
         }
     }
 
-    /// The `(address, length)` of huge object `huge_id`, parsing the heap's
-    /// huge-object index out of `records` the first time one is asked for.
-    ///
-    /// What the index caches are file addresses, resolved against the image
-    /// `backend` names. Every caller reads a whole heap through one backend, so
-    /// a reader that saw both would be a caller that had changed which file it
-    /// meant mid-walk — addresses applied to the wrong image read the wrong
-    /// bytes and report no error, which is worth an assertion where the two meet.
-    fn locate_huge<F>(
-        &mut self,
-        huge_id: u64,
-        backend: Backend,
-        records: F,
-    ) -> Result<(StoredAddress, u64), FormatError>
-    where
-        F: FnOnce() -> Result<Vec<BTreeV2Record>, FormatError>,
-    {
-        if self.huge.is_none() {
-            self.huge = Some(HugeObjectIndex::decode(&records()?, self.widths)?);
-            self.huge_backend = Some(backend);
-        }
-        debug_assert_eq!(
-            self.huge_backend,
-            Some(backend),
-            "a heap's huge-object index holds addresses into the image it was decoded from",
-        );
-        self.huge
-            .as_ref()
-            .expect("filled immediately above")
-            .locate(huge_id)
-    }
-
-    /// Reads a huge object at its inline location or through the cached index.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors of [`read`](Self::read) for a huge object.
     fn read_huge(
         &mut self,
         file_data: &[u8],
-        reference: HugeObjectReference,
+        id: FractalHeapIdView<'_>,
     ) -> Result<Vec<u8>, FormatError> {
-        let (addr, len) = match reference {
-            HugeObjectReference::FilteredInline(_) | HugeObjectReference::FilteredIndexed(_) => {
-                return Err(FormatError::UnsupportedFilteredHeapObject);
-            }
-            HugeObjectReference::Inline { addr, len } => (addr, len),
-            HugeObjectReference::Indexed(huge_id) => {
-                let widths = self.widths;
-                let btree_addr = self.header.btree_huge_objects_address.get().to_usize()?;
-                self.locate_huge(huge_id.value(), Backend::Buffered, || {
-                    let header = BTreeV2Header::parse_with_widths(file_data, btree_addr, widths)?;
-                    check_huge_object_btree(&header, widths)?;
-                    btree_v2::collect_btree_v2_records(file_data, &header, widths.offsets)
-                })?
-            }
-        };
-        slice_object(file_data, addr.get(), len.to_usize()?)
+        let addresses = self.addresses;
+        self.read_huge_with(
+            |range| {
+                source::bytes_in(
+                    file_data,
+                    FileRange::new(
+                        PhysicalAddress::new(addresses.relative(range.start().get())?.get()),
+                        range.length(),
+                    )?,
+                )
+                .map(Cow::Borrowed)
+            },
+            Backend::Buffered,
+            id,
+        )
     }
 
-    /// Reads a huge object through a [`Source`] at its inline location or through the cached index.
-    ///
-    /// # Errors
-    ///
-    /// Returns the errors of [`read_from_source`](Self::read_from_source) for a huge object.
-    fn read_huge_from_source<S: Source + ?Sized>(
+    fn read_huge_from_source(
         &mut self,
-        source: &S,
-        reference: HugeObjectReference,
+        source: &(impl Source + ?Sized),
+        id: FractalHeapIdView<'_>,
     ) -> Result<Vec<u8>, FormatError> {
-        let (addr, len) = match reference {
-            HugeObjectReference::FilteredInline(_) | HugeObjectReference::FilteredIndexed(_) => {
-                return Err(FormatError::UnsupportedFilteredHeapObject);
-            }
-            HugeObjectReference::Inline { addr, len } => (addr, len),
-            HugeObjectReference::Indexed(huge_id) => {
-                let widths = self.widths;
-                let btree_addr = self.header.btree_huge_objects_address.get();
-                self.locate_huge(huge_id.value(), Backend::Streaming, || {
-                    let header = BTreeV2Header::parse_from_source_with_widths(
-                        &SourceMetadata(source),
-                        btree_addr,
-                        widths,
-                    )?;
-                    check_huge_object_btree(&header, widths)?;
-                    btree_v2::collect_btree_v2_records_from_source(source, &header, widths.offsets)
-                })?
+        let addresses = self.addresses;
+        self.read_huge_with(
+            |range| read_header_range(source, addresses, range).map(Cow::Owned),
+            Backend::Streaming,
+            id,
+        )
+    }
+
+    fn read_huge_with<'bytes>(
+        &mut self,
+        read: impl Fn(FileRange) -> Result<Cow<'bytes, [u8]>, FormatError>,
+        backend: Backend,
+        id: FractalHeapIdView<'_>,
+    ) -> Result<Vec<u8>, FormatError> {
+        if self.huge_layout.is_none() {
+            self.huge_layout = Some(FractalHeapHugeObjectLayout::new(
+                self.header,
+                self.widths,
+                self.addresses.effective_base(),
+                HugeIndirectKeyEncoding::Libhdf5,
+            )?);
+        }
+        let layout = self.huge_layout.as_ref().ok_or_else(|| {
+            FormatError::Internal("huge-object layout is initialized before use".into())
+        })?;
+        let reference = match layout.resolve_id(id)? {
+            FractalHeapHugeObjectId::Direct(reference) => reference,
+            FractalHeapHugeObjectId::Indirect(lookup) => {
+                if self.huge.is_none() {
+                    self.huge = Some(HugeObjectIndex::decode(
+                        &read,
+                        self.addresses,
+                        layout,
+                        self.widths,
+                        self.huge_limits,
+                    )?);
+                    self.huge_backend = Some(backend);
+                }
+                debug_assert_eq!(
+                    self.huge_backend,
+                    Some(backend),
+                    "a heap's huge-object index belongs to its reading backend"
+                );
+                self.huge
+                    .as_ref()
+                    .ok_or_else(|| {
+                        FormatError::Internal(
+                            "huge-object index is initialized before lookup".into(),
+                        )
+                    })?
+                    .locate(lookup.key().value())?
             }
         };
-        read_object_at_source(source, addr.get(), len.to_usize()?)
+        HugeObjectReadLimits::require(self.huge_limits.encoded_bytes, reference.range().length())?;
+        HugeObjectReadLimits::require(self.huge_limits.decoded_bytes, reference.decoded_size())?;
+        let filters = reference.filters();
+        if filters.is_some() {
+            for value in [reference.range().length(), reference.decoded_size()] {
+                isize::try_from(value).map_err(|_error| FormatError::ValueTooLargeForPlatform {
+                    value,
+                    target: "isize",
+                })?;
+            }
+        }
+        reference.range().length().to_usize()?;
+        reference.decoded_size().to_usize()?;
+        let encoded = read(reference.range())?;
+        let encoded_bytes = reference.parse(FileRegion::new(reference.range(), &encoded)?)?;
+        let decoded = if let Some(filters) = filters {
+            decode_heap_payload(
+                encoded_bytes,
+                filters.pipeline,
+                filters.mask,
+                reference.decoded_size(),
+            )
+            .map_err(|error| match error {
+                FilterError::DataSizeMismatch { actual, .. } => FormatError::DecodedSizeMismatch {
+                    expected: reference.decoded_size(),
+                    actual: actual.to_u64(),
+                },
+                FilterError::DeflateSizeExceeded { limit, required } => {
+                    FormatError::DecodedSizeLimitExceeded {
+                        expected_decoded_size: reference.decoded_size(),
+                        filter_id: crate::filter_pipeline::FILTER_DEFLATE,
+                        output_limit: limit.to_u64(),
+                        minimum_output_size: required.to_u64(),
+                    }
+                }
+                FilterError::LzfSizeExceeded { limit, required } => {
+                    FormatError::DecodedSizeLimitExceeded {
+                        expected_decoded_size: reference.decoded_size(),
+                        filter_id: crate::filter_pipeline::FILTER_LZF,
+                        output_limit: limit.to_u64(),
+                        minimum_output_size: required.to_u64(),
+                    }
+                }
+                other => FormatError::from(other),
+            })?
+        } else {
+            encoded.into_owned()
+        };
+        layout.associate_decoded(&reference, &decoded)?;
+        Ok(decoded)
     }
 
     fn read_managed_object(
@@ -1368,108 +1489,6 @@ mod tests {
         }
     }
 
-    /// Type-1 record: address(8) + length(8) + id(8), little-endian.
-    fn huge_record(addr: u64, len: u64, id: u64) -> BTreeV2Record {
-        let mut d = Vec::new();
-        d.extend_from_slice(&addr.to_le_bytes());
-        d.extend_from_slice(&len.to_le_bytes());
-        d.extend_from_slice(&id.to_le_bytes());
-        BTreeV2Record { data: d }
-    }
-
-    #[test]
-    fn huge_object_index_locates_by_id() {
-        let records = vec![
-            huge_record(0x1000, 5000, 1),
-            huge_record(0x2000, 6000, 2),
-            huge_record(0x3000, 7000, 5),
-        ];
-        let index = HugeObjectIndex::decode(&records, FORMAT_WIDTHS).unwrap();
-        assert_eq!(index.locate(2).unwrap(), (StoredAddress::new(0x2000), 6000));
-        assert_eq!(index.locate(5).unwrap(), (StoredAddress::new(0x3000), 7000));
-        assert_eq!(
-            index.locate(9),
-            Err(FormatError::HugeObjectNotFound(9)),
-            "an id no record carries is not found rather than mismatched"
-        );
-    }
-
-    /// The lookup is a binary search, so the index has to impose the ordering
-    /// itself rather than inherit whatever order the records arrived in.
-    #[test]
-    fn huge_object_index_orders_records_it_receives_out_of_order() {
-        let records = vec![
-            huge_record(0x3000, 7000, 5),
-            huge_record(0x1000, 5000, 1),
-            huge_record(0x2000, 6000, 2),
-        ];
-        let index = HugeObjectIndex::decode(&records, FORMAT_WIDTHS).unwrap();
-        for (id, want) in [
-            (1, (StoredAddress::new(0x1000), 5000)),
-            (2, (StoredAddress::new(0x2000), 6000)),
-            (5, (StoredAddress::new(0x3000), 7000)),
-        ] {
-            assert_eq!(index.locate(id).unwrap(), want);
-        }
-    }
-
-    /// A huge-objects B-tree that is not the type-1 layout is refused before its
-    /// records are read as that layout.
-    ///
-    /// Type 2 is the filtered counterpart, whose records are longer and put the
-    /// object ID somewhere else: decoding one as type 1 reads an ID out of the
-    /// filter mask and returns some other object, or none, without complaint.
-    #[test]
-    fn a_huge_object_btree_of_another_type_is_refused() {
-        let btree = |tree_type: u8, record_size: u16| BTreeV2Header {
-            tree_type,
-            node_size: 512,
-            record_size,
-            depth: 0,
-            root_node_address: StoredAddress::new(0x100),
-            num_records_in_root: 1,
-            total_records: 1,
-        };
-
-        assert_eq!(
-            check_huge_object_btree(&btree(2, 36), FORMAT_WIDTHS),
-            Err(FormatError::UnexpectedHugeObjectBTree {
-                tree_type: 2,
-                record_size: 36,
-                required: 24,
-            }),
-            "a filtered huge-object tree is long enough to pass a length check alone"
-        );
-        assert_eq!(
-            check_huge_object_btree(&btree(1, 16), FORMAT_WIDTHS),
-            Err(FormatError::UnexpectedHugeObjectBTree {
-                tree_type: 1,
-                record_size: 16,
-                required: 24,
-            }),
-            "records too short for the layout the type claims"
-        );
-        assert_eq!(
-            check_huge_object_btree(&btree(1, 24), FORMAT_WIDTHS),
-            Ok(())
-        );
-    }
-
-    /// A record too short for the type-1 layout is a heap this reader has
-    /// misread, not one object to skip past. The backstop behind
-    /// [`check_huge_object_btree`], which refuses such a tree by its declared
-    /// record size before any record reaches the decode.
-    #[test]
-    fn huge_object_index_refuses_a_truncated_record() {
-        let records = vec![BTreeV2Record {
-            data: vec![0u8; 20],
-        }];
-        assert!(matches!(
-            HugeObjectIndex::decode(&records, FORMAT_WIDTHS),
-            Err(FormatError::UnexpectedEof { .. })
-        ));
-    }
-
     /// One reader parses the heap's huge-object index once, however many huge
     /// objects are read through it, on both backends.
     ///
@@ -1561,6 +1580,855 @@ mod tests {
             );
         }
     }
+
+    #[rstest]
+    #[case::deflate(test_data::deflate_pipeline(), 0)]
+    #[case::checksum_then_deflate(test_data::filter_pipeline(vec![huge_fletcher(), test_data::deflate_pipeline().filters[0].clone()]), 0)]
+    #[case::deflate_then_checksum(test_data::filter_pipeline(vec![test_data::deflate_pipeline().filters[0].clone(), huge_fletcher()]), 0)]
+    #[case::skipped_unknown(test_data::filter_pipeline(vec![huge_unknown(), test_data::deflate_pipeline().filters[0].clone()]), 1)]
+    #[case::skipped_wide_shuffle(test_data::filter_pipeline(vec![test_data::shuffle(4), test_data::deflate_pipeline().filters[0].clone()]), 1)]
+    #[case::all_skipped(test_data::filter_pipeline(vec![huge_unknown(), test_data::shuffle(4)]), 3)]
+    #[case::empty(test_data::filter_pipeline(vec![]), 0)]
+    #[cfg(feature = "deflate")]
+    fn filtered_huge_objects_read_exact_decoded_bytes(
+        #[case] pipeline: FilterPipeline,
+        #[case] mask: u32,
+        #[values(false, true)] direct: bool,
+        #[values(false, true)] streaming: bool,
+        #[values(0, 512)] base: u64,
+    ) {
+        let heap = HugeHeap::new(direct, Some((pipeline, mask)), base);
+        assert_eq!(
+            heap.read(streaming, HugeObjectReadLimits::UNLIMITED)
+                .unwrap(),
+            heap.decoded
+        );
+        let layout = FractalHeapHugeObjectLayout::new(
+            &heap.header,
+            FORMAT_WIDTHS,
+            BaseAddress::new(base),
+            HugeIndirectKeyEncoding::Libhdf5,
+        )
+        .unwrap();
+        let reference = match layout.parse_id(&heap.id).unwrap() {
+            FractalHeapHugeObjectId::Direct(reference) => reference,
+            FractalHeapHugeObjectId::Indirect(lookup) => {
+                let tracker = layout.parse_tracker(heap.region()).unwrap();
+                let record = tracker.parse_record(&heap.record).unwrap();
+                layout.resolve(&lookup, &record).unwrap()
+            }
+        };
+        let filters = reference.filters().unwrap();
+        let bytes = decode_heap_payload(
+            reference.parse(heap.region()).unwrap(),
+            filters.pipeline,
+            filters.mask,
+            reference.decoded_size(),
+        )
+        .unwrap();
+        assert_eq!(
+            layout
+                .associate_decoded(&reference, &bytes)
+                .unwrap()
+                .bytes(),
+            heap.decoded
+        );
+    }
+
+    #[rstest]
+    fn unfiltered_huge_objects_keep_both_id_representations(
+        #[values(false, true)] direct: bool,
+        #[values(false, true)] streaming: bool,
+        #[values(0, 512)] base: u64,
+    ) {
+        let heap = HugeHeap::new(direct, None, base);
+        assert_eq!(
+            heap.read(streaming, HugeObjectReadLimits::UNLIMITED)
+                .unwrap(),
+            heap.decoded
+        );
+    }
+
+    #[rstest]
+    #[case::unknown(huge_unknown(), test_data::FILTER_BZIP2)]
+    #[case::wide_shuffle(test_data::shuffle(4), FILTER_SHUFFLE)]
+    fn filtered_huge_objects_reject_unsupported_active_filters(
+        #[case] filter: FilterDescription,
+        #[case] expected: u16,
+        #[values(false, true)] direct: bool,
+        #[values(false, true)] streaming: bool,
+    ) {
+        let mut heap = HugeHeap::new(direct, Some((test_data::filter_pipeline(vec![]), 0)), 0);
+        let FractalHeapFiltering::Filtered { pipeline, .. } = &mut heap.header.filtering else {
+            panic!("expected filtered heap")
+        };
+        *pipeline = test_data::filter_pipeline(vec![filter]);
+        assert_eq!(
+            heap.read(streaming, HugeObjectReadLimits::UNLIMITED)
+                .unwrap_err(),
+            FormatError::UnsupportedFilter(expected)
+        );
+    }
+
+    #[rstest]
+    #[case::short(-1)]
+    #[case::shorter(-2)]
+    #[case::much_shorter(-300)]
+    #[case::long(1)]
+    #[cfg(feature = "deflate")]
+    fn filtered_huge_objects_reject_incorrect_decoded_sizes(
+        #[case] delta: i64,
+        #[values(false, true)] checksum_before_deflate: bool,
+        #[values(false, true)] direct: bool,
+        #[values(false, true)] streaming: bool,
+    ) {
+        let pipeline = if checksum_before_deflate {
+            test_data::filter_pipeline(vec![
+                huge_fletcher(),
+                test_data::deflate_pipeline().filters[0].clone(),
+            ])
+        } else {
+            test_data::deflate_pipeline()
+        };
+        let mut heap = HugeHeap::new(direct, Some((pipeline, 0)), 0);
+        let expected = heap
+            .decoded
+            .len()
+            .to_u64()
+            .checked_add_signed(delta)
+            .unwrap();
+        heap.set_sizes(heap.encoded_size, expected);
+        let error = if delta < 0 {
+            let output_limit = expected
+                + if checksum_before_deflate {
+                    core::mem::size_of::<u32>().to_u64()
+                } else {
+                    0
+                };
+            FormatError::DecodedSizeLimitExceeded {
+                expected_decoded_size: expected,
+                filter_id: crate::filter_pipeline::FILTER_DEFLATE,
+                output_limit,
+                minimum_output_size: output_limit + 1,
+            }
+        } else {
+            FormatError::DecodedSizeMismatch {
+                expected,
+                actual: heap.decoded.len().to_u64(),
+            }
+        };
+        assert_eq!(
+            heap.read(streaming, HugeObjectReadLimits::UNLIMITED)
+                .unwrap_err(),
+            error
+        );
+    }
+
+    #[rstest]
+    #[cfg(feature = "deflate")]
+    fn filtered_huge_objects_reject_malformed_compressed_input(
+        #[values(false, true)] direct: bool,
+        #[values(false, true)] streaming: bool,
+    ) {
+        let mut heap = HugeHeap::new(direct, Some((test_data::deflate_pipeline(), 0)), 0);
+        heap.image[HUGE_PAYLOAD_AT as usize..].fill(b'x');
+        let error = heap
+            .read(streaming, HugeObjectReadLimits::UNLIMITED)
+            .unwrap_err();
+        let FormatError::FilterError(message) = error else {
+            panic!("expected FilterError, got {error:?}")
+        };
+        assert!(
+            test_data::DEFLATE_HEADER_ERRORS.contains(&message.as_str()),
+            "{message}"
+        );
+    }
+
+    #[rstest]
+    #[cfg(feature = "deflate")]
+    fn huge_source_truncation_differs_from_a_missing_parser_region(
+        #[values(false, true)] direct: bool,
+        #[values(false, true)] streaming: bool,
+    ) {
+        let mut heap = HugeHeap::new(direct, Some((test_data::deflate_pipeline(), 0)), 0);
+        heap.image.pop();
+        assert_eq!(
+            heap.read(streaming, HugeObjectReadLimits::UNLIMITED)
+                .unwrap_err(),
+            FormatError::UnexpectedSourceEof {
+                expected: HUGE_PAYLOAD_AT + heap.encoded_size,
+                available: heap.image.len().to_u64()
+            }
+        );
+        let layout = FractalHeapHugeObjectLayout::new(
+            &heap.header,
+            FORMAT_WIDTHS,
+            BaseAddress::ZERO,
+            HugeIndirectKeyEncoding::Libhdf5,
+        )
+        .unwrap();
+        let reference = match layout.parse_id(&heap.id).unwrap() {
+            FractalHeapHugeObjectId::Direct(reference) => reference,
+            FractalHeapHugeObjectId::Indirect(lookup) => {
+                let tracker = layout.parse_tracker(heap.region()).unwrap();
+                layout
+                    .resolve(&lookup, &tracker.parse_record(&heap.record).unwrap())
+                    .unwrap()
+            }
+        };
+        assert_eq!(
+            reference.parse(heap.region()).unwrap_err(),
+            FormatError::InsufficientRegion {
+                required_start: HUGE_PAYLOAD_AT,
+                required_length: heap.encoded_size,
+                provided_start: 0,
+                provided_length: heap.image.len().to_u64()
+            }
+        );
+    }
+
+    #[rstest]
+    #[case::encoded_budget(Some(false), None, None)]
+    #[case::decoded_budget(Some(true), None, None)]
+    #[case::encoded_host_max(None, Some(isize::MAX as u64), None)]
+    #[case::decoded_host_max(None, None, Some(isize::MAX as u64))]
+    #[case::encoded_host_overflow(None, Some(isize::MAX as u64 + 1), None)]
+    #[case::decoded_host_overflow(None, None, Some(isize::MAX as u64 + 1))]
+    fn huge_object_budgets_apply_before_payload_reads(
+        #[case] budget: Option<bool>,
+        #[case] encoded_size: Option<u64>,
+        #[case] decoded_size: Option<u64>,
+        #[values(false, true)] direct: bool,
+        #[values(false, true)] streaming: bool,
+    ) {
+        let mut heap = HugeHeap::new(direct, Some((test_data::filter_pipeline(vec![]), 0)), 0);
+        let FractalHeapFiltering::Filtered { pipeline, .. } = &mut heap.header.filtering else {
+            panic!("expected filtered heap")
+        };
+        *pipeline = test_data::filter_pipeline(vec![huge_unknown()]);
+        let encoded = encoded_size.unwrap_or(heap.encoded_size);
+        let decoded = decoded_size.unwrap_or(heap.decoded.len().to_u64());
+        heap.set_sizes(encoded, decoded);
+        heap.header.huge_objects_size = decoded;
+        let limits = match budget {
+            Some(false) => HugeObjectReadLimits {
+                encoded_bytes: 0,
+                ..HugeObjectReadLimits::UNLIMITED
+            },
+            Some(true) => HugeObjectReadLimits {
+                decoded_bytes: 0,
+                ..HugeObjectReadLimits::UNLIMITED
+            },
+            None => HugeObjectReadLimits::UNLIMITED,
+        };
+        let source = HugeExtentSource {
+            bytes: &heap.image,
+            reads: RefCell::new(Vec::new()),
+        };
+        let mut reader = heap.reader(limits);
+        let result = if streaming {
+            reader.read_from_source(&source, parse_id(&heap.header, &heap.id))
+        } else {
+            reader.read(&heap.image, parse_id(&heap.header, &heap.id))
+        };
+        let expected = if let Some(decoded_budget) = budget {
+            FormatError::ResourceLimit {
+                limit: 0,
+                required: if decoded_budget { decoded } else { encoded },
+            }
+        } else if encoded > isize::MAX as u64 || decoded > isize::MAX as u64 {
+            FormatError::ValueTooLargeForPlatform {
+                value: if encoded > isize::MAX as u64 {
+                    encoded
+                } else {
+                    decoded
+                },
+                target: "isize",
+            }
+        } else if streaming {
+            FormatError::Source("test payload range requested".into())
+        } else if encoded_size.is_some() {
+            FormatError::UnexpectedSourceEof {
+                expected: HUGE_PAYLOAD_AT + encoded,
+                available: heap.image.len().to_u64(),
+            }
+        } else {
+            FormatError::UnsupportedFilter(test_data::FILTER_BZIP2)
+        };
+        assert_eq!(result.unwrap_err(), expected);
+        let payload_read = source
+            .reads
+            .borrow()
+            .iter()
+            .any(|&(address, _)| address == HUGE_PAYLOAD_AT);
+        assert_eq!(
+            payload_read,
+            streaming
+                && budget.is_none()
+                && encoded <= isize::MAX as u64
+                && decoded <= isize::MAX as u64
+        );
+    }
+
+    struct HugeExtentSource<'a> {
+        bytes: &'a [u8],
+        reads: RefCell<Vec<(u64, usize)>>,
+    }
+
+    impl Source for HugeExtentSource<'_> {
+        fn len(&self) -> u64 {
+            u64::MAX
+        }
+
+        fn read_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
+            self.reads.borrow_mut().push((offset, bytes.len()));
+            if offset == HUGE_PAYLOAD_AT {
+                return Err(FormatError::Source("test payload range requested".into()));
+            }
+            BytesSource::new(self.bytes).read_at(offset, bytes)
+        }
+
+        fn read_metadata_at(&self, offset: u64, length: usize) -> Result<Vec<u8>, FormatError> {
+            self.reads.borrow_mut().push((offset, length));
+            if offset == HUGE_PAYLOAD_AT {
+                return Err(FormatError::Source("test payload range requested".into()));
+            }
+            BytesSource::new(self.bytes).read_metadata_at(offset, length)
+        }
+    }
+
+    #[rstest]
+    #[case::records(HugeObjectReadLimits { index_records: 0, ..HugeObjectReadLimits::UNLIMITED }, 1)]
+    #[case::nodes(HugeObjectReadLimits { index_nodes: 0, ..HugeObjectReadLimits::UNLIMITED }, 1)]
+    #[case::metadata(HugeObjectReadLimits { metadata_bytes: 0, ..HugeObjectReadLimits::UNLIMITED }, 38)]
+    fn huge_index_budgets_stop_traversal(
+        #[case] limits: HugeObjectReadLimits,
+        #[case] required: u64,
+        #[values(false, true)] streaming: bool,
+    ) {
+        let heap = HugeHeap::new(false, None, 0);
+        assert_eq!(
+            heap.read(streaming, limits).unwrap_err(),
+            FormatError::ResourceLimit { limit: 0, required }
+        );
+    }
+
+    #[rstest]
+    #[cfg(feature = "deflate")]
+    fn huge_index_is_cached_and_payload_reads_use_encoded_extents(#[values(0, 512)] base: u64) {
+        let heap = HugeHeap::new(false, Some((test_data::deflate_pipeline(), 0)), base);
+        let source = HeaderSource {
+            bytes: &heap.image,
+            reads: RefCell::new(Vec::new()),
+        };
+        let framed = BaseOffsetSource {
+            inner: &source,
+            base: BaseAddress::new(base),
+        };
+        let mut reader = heap.reader(HugeObjectReadLimits::UNLIMITED);
+        reset_huge_index_decodes();
+        assert_eq!(
+            reader
+                .read_from_source(&framed, parse_id(&heap.header, &heap.id))
+                .unwrap(),
+            heap.decoded
+        );
+        assert_eq!(
+            reader
+                .read_from_source(&framed, parse_id(&heap.header, &heap.id))
+                .unwrap(),
+            heap.decoded
+        );
+        assert_eq!(huge_index_decodes(), 1);
+        let reads = source.reads.borrow();
+        assert_eq!(
+            reads
+                .iter()
+                .filter(|&&(address, _)| address == base + HUGE_PAYLOAD_AT)
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![(base + HUGE_PAYLOAD_AT, heap.encoded_size as usize); 2]
+        );
+        assert_eq!(
+            reads
+                .iter()
+                .filter(|&&(address, _)| address == base + HUGE_TRACKER_AT)
+                .count(),
+            1
+        );
+    }
+
+    #[rstest]
+    #[case::missing(2, false, FormatError::HugeObjectNotFound(2))]
+    #[case::duplicate(1, true, FormatError::InvalidFractalHeapGeometry)]
+    fn huge_index_rejects_missing_and_duplicate_keys(
+        #[case] key: u8,
+        #[case] duplicate: bool,
+        #[case] expected: FormatError,
+        #[values(false, true)] streaming: bool,
+    ) {
+        let mut heap = HugeHeap::new(false, None, 0);
+        heap.id[1] = key;
+        if duplicate {
+            heap.write_tracker(vec![heap.record.clone(), heap.record.clone()]);
+        }
+        assert_eq!(
+            heap.read(streaming, HugeObjectReadLimits::UNLIMITED)
+                .unwrap_err(),
+            expected
+        );
+    }
+
+    #[rstest]
+    #[case::wrong_type(hdf5_pure_format::__private::BTREE_V2_FILTERED_HUGE_OBJECT, 36)]
+    #[case::short(hdf5_pure_format::__private::BTREE_V2_HUGE_OBJECT, 16)]
+    #[case::long(hdf5_pure_format::__private::BTREE_V2_HUGE_OBJECT, 25)]
+    fn huge_index_checks_type_and_exact_record_size(
+        #[case] tree_type: u8,
+        #[case] size: u16,
+        #[values(false, true)] streaming: bool,
+    ) {
+        let mut heap = HugeHeap::new(false, None, 0);
+        let header =
+            test_util::btree_v2::Header::new(tree_type, size, HUGE_NODE_AT, 1).build(Widths::EIGHT);
+        heap.image[HUGE_TRACKER_AT as usize..HUGE_TRACKER_AT as usize + header.len()]
+            .copy_from_slice(&header);
+        assert_eq!(
+            heap.read(streaming, HugeObjectReadLimits::UNLIMITED)
+                .unwrap_err(),
+            FormatError::UnexpectedHugeObjectBTree {
+                tree_type,
+                record_size: usize::from(size),
+                required: 24
+            }
+        );
+    }
+
+    #[rstest]
+    #[cfg(feature = "checksum")]
+    fn huge_index_metadata_checksums_remain_required(#[values(false, true)] streaming: bool) {
+        let mut heap = HugeHeap::new(false, None, 0);
+        heap.image[HUGE_NODE_AT as usize + HUGE_NODE_PREFIX_LEN] ^= 1;
+        let checksum_at = HUGE_NODE_AT as usize + HUGE_NODE_PREFIX_LEN + heap.record.len();
+        let expected = test_util::bytes::u32_at(&heap.image, checksum_at);
+        let computed =
+            crate::checksum::jenkins_lookup3(&heap.image[HUGE_NODE_AT as usize..checksum_at]);
+        assert_eq!(
+            heap.read(streaming, HugeObjectReadLimits::UNLIMITED)
+                .unwrap_err(),
+            FormatError::ChecksumMismatch { expected, computed }
+        );
+    }
+
+    #[rstest]
+    #[cfg(debug_assertions)]
+    fn huge_index_cache_rejects_backend_changes(#[values(false, true)] filtered: bool) {
+        let heap = HugeHeap::new(
+            false,
+            filtered.then(|| (test_data::filter_pipeline(vec![]), 0)),
+            0,
+        );
+        let mut reader = heap.reader(HugeObjectReadLimits::UNLIMITED);
+        assert_eq!(
+            reader
+                .read(&heap.image, parse_id(&heap.header, &heap.id))
+                .unwrap(),
+            heap.decoded
+        );
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            reader.read_from_source(
+                &BytesSource::new(&heap.image),
+                parse_id(&heap.header, &heap.id),
+            )
+        }));
+        let payload = panic.unwrap_err();
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap();
+        assert!(
+            message.contains("a heap's huge-object index belongs to its reading backend"),
+            "{message}"
+        );
+    }
+
+    #[rstest]
+    #[case::read(HugeObjectReadLimits::UNLIMITED, false)]
+    #[case::cycle(HugeObjectReadLimits::UNLIMITED, true)]
+    #[case::node_budget(HugeObjectReadLimits { index_nodes: 1, ..HugeObjectReadLimits::UNLIMITED }, false)]
+    fn huge_index_traversal_validates_internal_nodes(
+        #[case] limits: HugeObjectReadLimits,
+        #[case] cycle: bool,
+        #[values(false, true)] streaming: bool,
+    ) {
+        use hdf5_pure_format::__private::BTREE_V2_HUGE_OBJECT;
+        let mut heap = HugeHeap::new(false, None, 0);
+        let record = |key: u64| {
+            let mut bytes = heap.record.clone();
+            bytes[16..24].copy_from_slice(&key.to_le_bytes());
+            bytes
+        };
+        let header = test_util::btree_v2::Header::new(BTREE_V2_HUGE_OBJECT, 24, HUGE_NODE_AT, 1)
+            .node_size(256)
+            .depth(1)
+            .total_records(3)
+            .build(Widths::EIGHT);
+        let children = [
+            test_util::btree_v2::Child {
+                address: if cycle { HUGE_NODE_AT } else { 384 },
+                records: 1,
+                records_width: 1,
+                subtree: None,
+            },
+            test_util::btree_v2::Child {
+                address: 640,
+                records: 1,
+                records_width: 1,
+                subtree: None,
+            },
+        ];
+        let root = test_util::btree_v2::internal(
+            BTREE_V2_HUGE_OBJECT,
+            &[record(2)],
+            &children,
+            Widths::EIGHT,
+        );
+        let first = test_util::btree_v2::leaf(BTREE_V2_HUGE_OBJECT, &[record(1)]);
+        let last = test_util::btree_v2::leaf(BTREE_V2_HUGE_OBJECT, &[record(3)]);
+        heap.image[HUGE_TRACKER_AT as usize..HUGE_TRACKER_AT as usize + header.len()]
+            .copy_from_slice(&header);
+        heap.image[HUGE_NODE_AT as usize..HUGE_NODE_AT as usize + root.len()]
+            .copy_from_slice(&root);
+        heap.image[384..384 + first.len()].copy_from_slice(&first);
+        heap.image[640..640 + last.len()].copy_from_slice(&last);
+        if cycle {
+            assert_eq!(
+                heap.read(streaming, limits).unwrap_err(),
+                FormatError::InvalidBTreeV2Signature
+            );
+        } else if limits.index_nodes == 1 {
+            assert_eq!(
+                heap.read(streaming, limits).unwrap_err(),
+                FormatError::ResourceLimit {
+                    limit: 1,
+                    required: 2
+                }
+            );
+        } else {
+            assert_eq!(heap.read(streaming, limits).unwrap(), heap.decoded);
+        }
+    }
+
+    #[rstest]
+    #[cfg(feature = "deflate")]
+    fn huge_compressed_allocation_length_is_not_the_decoded_length(
+        #[values(false, true)] direct: bool,
+        #[values(false, true)] streaming: bool,
+    ) {
+        let mut heap = HugeHeap::new(direct, Some((test_data::deflate_pipeline(), 0)), 0);
+        heap.set_sizes(heap.encoded_size - 1, heap.decoded.len().to_u64());
+        let error = heap
+            .read(streaming, HugeObjectReadLimits::UNLIMITED)
+            .unwrap_err();
+        let FormatError::FilterError(message) = error else {
+            panic!("expected FilterError, got {error:?}")
+        };
+        assert_eq!(
+            message,
+            "deflate: stream ended before the chunk was complete"
+        );
+    }
+
+    #[rstest]
+    #[case::exact(0, None)]
+    #[case::short(-1, Some(12))]
+    #[case::further_tokens(-7, Some(6))]
+    #[case::long(1, None)]
+    fn lzf_huge_objects_keep_size_errors_typed(
+        #[case] delta: i64,
+        #[case] minimum_output_size: Option<u64>,
+        #[values(false, true)] direct: bool,
+        #[values(false, true)] streaming: bool,
+    ) {
+        let pipeline = test_data::filter_pipeline(vec![FilterDescription {
+            filter_id: crate::filter_pipeline::FILTER_LZF,
+            name: None,
+            flags: 0,
+            client_data: vec![],
+        }]);
+        let mut heap = HugeHeap::new(direct, Some((pipeline, 0)), 0);
+        heap.decoded = b"abcdefghijkl".to_vec();
+        let encoded = [
+            2, b'a', b'b', b'c', 2, b'd', b'e', b'f', 2, b'g', b'h', b'i', 2, b'j', b'k', b'l',
+        ];
+        heap.image.truncate(HUGE_PAYLOAD_AT as usize);
+        heap.image.extend_from_slice(&encoded);
+        heap.encoded_size = encoded.len().to_u64();
+        heap.header.huge_objects_size = heap.decoded.len().to_u64();
+        let expected = heap
+            .decoded
+            .len()
+            .to_u64()
+            .checked_add_signed(delta)
+            .unwrap();
+        heap.set_sizes(heap.encoded_size, expected);
+        let result = heap.read(streaming, HugeObjectReadLimits::UNLIMITED);
+        if delta == 0 {
+            assert_eq!(result.unwrap(), heap.decoded);
+        } else {
+            let error = if let Some(minimum_output_size) = minimum_output_size {
+                FormatError::DecodedSizeLimitExceeded {
+                    expected_decoded_size: expected,
+                    filter_id: crate::filter_pipeline::FILTER_LZF,
+                    output_limit: expected,
+                    minimum_output_size,
+                }
+            } else {
+                FormatError::DecodedSizeMismatch {
+                    expected,
+                    actual: heap.decoded.len().to_u64(),
+                }
+            };
+            assert_eq!(result.unwrap_err(), error);
+        }
+    }
+
+    #[rstest]
+    #[case::forward(512, 1024)]
+    #[case::backward(512, 0)]
+    fn huge_object_reads_use_relocated_physical_positions(
+        #[case] encoded_base: u64,
+        #[case] signature: u64,
+        #[values(false, true)] direct: bool,
+        #[values(false, true)] streaming: bool,
+    ) {
+        let heap = HugeHeap::new(
+            direct,
+            Some((test_data::filter_pipeline(vec![]), 0)),
+            signature,
+        );
+        let addresses = OpenedImageContext::reconcile(
+            BaseAddress::new(encoded_base),
+            encoded_base + heap.image.len().to_u64() - signature,
+            signature,
+        )
+        .unwrap()
+        .addresses();
+        let mut reader = HeapObjectReader::new(
+            &heap.header,
+            addresses,
+            StoredAddress::ZERO,
+            AccessMode::ReadOnly,
+            FORMAT_WIDTHS,
+        );
+        let result = if streaming {
+            reader.read_from_source(
+                &BaseOffsetSource {
+                    inner: &BytesSource::new(&heap.image),
+                    base: addresses.effective_base(),
+                },
+                parse_id(&heap.header, &heap.id),
+            )
+        } else {
+            reader.read(
+                &heap.image[signature as usize..],
+                parse_id(&heap.header, &heap.id),
+            )
+        };
+        assert_eq!(result.unwrap(), heap.decoded);
+    }
+
+    #[rstest]
+    #[cfg(not(feature = "deflate"))]
+    fn huge_deflate_objects_require_the_decoder_feature(#[values(false, true)] direct: bool) {
+        let mut heap = HugeHeap::new(direct, Some((test_data::filter_pipeline(vec![]), 0)), 0);
+        let FractalHeapFiltering::Filtered { pipeline, .. } = &mut heap.header.filtering else {
+            panic!("expected filtered heap")
+        };
+        *pipeline = test_data::deflate_pipeline();
+        assert_eq!(
+            heap.read(true, HugeObjectReadLimits::UNLIMITED)
+                .unwrap_err(),
+            FormatError::UnsupportedFilter(crate::filter_pipeline::FILTER_DEFLATE)
+        );
+    }
+
+    struct HugeHeap {
+        header: FractalHeapHeader,
+        image: Vec<u8>,
+        id: Vec<u8>,
+        record: Vec<u8>,
+        decoded: Vec<u8>,
+        encoded_size: u64,
+        base: u64,
+    }
+
+    impl HugeHeap {
+        fn new(direct: bool, filters: Option<(FilterPipeline, u32)>, base: u64) -> Self {
+            let filtered = filters.is_some();
+            let decoded = b"filtered huge object bytes".repeat(400);
+            let mut header = FractalHeapHeader::parse_bytes(
+                &fractal_heap::Header::new(u64::MAX).build(Widths::EIGHT),
+                OffsetWidth::Eight,
+                LengthWidth::Eight,
+            )
+            .unwrap();
+            header.heap_id_length = if direct {
+                if filtered { 29 } else { 17 }
+            } else {
+                8
+            };
+            header.btree_huge_objects_address = StoredAddress::new(HUGE_TRACKER_AT);
+            header.huge_objects_count = 1;
+            header.huge_objects_size = decoded.len().to_u64();
+            let (encoded, mask) = if let Some((pipeline, mask)) = filters {
+                let active = test_data::filter_pipeline(
+                    pipeline
+                        .filters
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| mask & (1 << index) == 0)
+                        .map(|(_, filter)| filter.clone())
+                        .collect(),
+                );
+                let encoded = test_data::encode_block(&decoded, &active);
+                header.filtering = FractalHeapFiltering::Filtered {
+                    root_direct_block_size: 0,
+                    root_filter_mask: 0,
+                    pipeline,
+                };
+                (encoded, mask)
+            } else {
+                (decoded.clone(), 0)
+            };
+            let mut record = Vec::new();
+            record.extend_from_slice(&HUGE_PAYLOAD_AT.to_le_bytes());
+            record.extend_from_slice(&encoded.len().to_u64().to_le_bytes());
+            if filtered {
+                record.extend_from_slice(&mask.to_le_bytes());
+                record.extend_from_slice(&decoded.len().to_u64().to_le_bytes());
+            }
+            let mut id = vec![HUGE_ID_FIRST_BYTE];
+            if direct {
+                id.extend_from_slice(&record);
+            } else {
+                id.extend_from_slice(&[1, 0, 0, 0, 0, 0, 0]);
+                record.extend_from_slice(&1u64.to_le_bytes());
+            }
+            let mut image = vec![0; (base + HUGE_PAYLOAD_AT) as usize];
+            image.extend_from_slice(&encoded);
+            let mut fixture = Self {
+                header,
+                image,
+                id,
+                record,
+                decoded,
+                encoded_size: encoded.len().to_u64(),
+                base,
+            };
+            fixture.write_tracker(vec![fixture.record.clone()]);
+            fixture
+        }
+
+        fn write_tracker(&mut self, records: Vec<Vec<u8>>) {
+            let context = hdf5_pure_format::__private::HugeObjectRecordContext::new(
+                &self.header,
+                FORMAT_WIDTHS,
+            )
+            .unwrap();
+            let header = test_util::btree_v2::Header::new(
+                context.tree_type(),
+                context.record_size(),
+                HUGE_NODE_AT,
+                records.len() as u16,
+            )
+            .node_size(256)
+            .build(Widths::EIGHT);
+            let node = test_util::btree_v2::leaf(context.tree_type(), &records);
+            let at = (self.base + HUGE_TRACKER_AT) as usize;
+            self.image[at..at + header.len()].copy_from_slice(&header);
+            let at = (self.base + HUGE_NODE_AT) as usize;
+            self.image[at..at + node.len()].copy_from_slice(&node);
+        }
+
+        fn set_sizes(&mut self, encoded: u64, decoded: u64) {
+            self.record[8..16].copy_from_slice(&encoded.to_le_bytes());
+            self.record[20..28].copy_from_slice(&decoded.to_le_bytes());
+            if self.header.huge_ids_direct_with_widths(FORMAT_WIDTHS) {
+                self.id[1..29].copy_from_slice(&self.record);
+            }
+            self.write_tracker(vec![self.record.clone()]);
+        }
+
+        fn reader(&self, limits: HugeObjectReadLimits) -> HeapObjectReader<'_> {
+            HeapObjectReader::with_huge_limits(
+                &self.header,
+                AddressContext::from_effective_base(BaseAddress::new(self.base)),
+                StoredAddress::ZERO,
+                AccessMode::ReadOnly,
+                FORMAT_WIDTHS,
+                limits,
+            )
+        }
+
+        fn read(
+            &self,
+            streaming: bool,
+            limits: HugeObjectReadLimits,
+        ) -> Result<Vec<u8>, FormatError> {
+            if streaming {
+                self.reader(limits).read_from_source(
+                    &BaseOffsetSource {
+                        inner: &BytesSource::new(&self.image),
+                        base: BaseAddress::new(self.base),
+                    },
+                    parse_id(&self.header, &self.id),
+                )
+            } else {
+                self.reader(limits).read(
+                    &self.image[self.base as usize..],
+                    parse_id(&self.header, &self.id),
+                )
+            }
+        }
+
+        fn region(&self) -> FileRegion<'_> {
+            FileRegion::new(
+                FileRange::new(PhysicalAddress::new(0), self.image.len().to_u64()).unwrap(),
+                &self.image,
+            )
+            .unwrap()
+        }
+    }
+
+    #[cfg(feature = "deflate")]
+    fn huge_fletcher() -> FilterDescription {
+        FilterDescription {
+            filter_id: crate::filter_pipeline::FILTER_FLETCHER32,
+            name: None,
+            flags: 0,
+            client_data: vec![],
+        }
+    }
+
+    fn huge_unknown() -> FilterDescription {
+        FilterDescription {
+            filter_id: test_data::FILTER_BZIP2,
+            name: None,
+            flags: 0,
+            client_data: vec![],
+        }
+    }
+
+    /// The signature, version, and type width of a version 2 B-tree node, from "Version 2 B-trees"
+    /// of the [format specification, version 4.0][spec].
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+    const HUGE_NODE_PREFIX_LEN: usize = 6;
+    const HUGE_TRACKER_AT: u64 = 64;
+    const HUGE_NODE_AT: u64 = 128;
+    const HUGE_PAYLOAD_AT: u64 = 1024;
 
     fn parse_id<'a>(header: &FractalHeapHeader, bytes: &'a [u8]) -> FractalHeapIdView<'a> {
         FractalHeapIdLayout::new(header, OffsetWidth::Eight, LengthWidth::Eight)

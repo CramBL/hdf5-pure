@@ -148,6 +148,20 @@ pub enum FormatError {
         /// The dimension whose multiplication would overflow.
         dimension: u64,
     },
+    /// A decoder's output exceeds the bound derived from the declared decoded payload size.
+    ///
+    /// The minimum describes this filter's output stream, which can include bytes removed by
+    /// subsequent decoding steps.
+    DecodedSizeLimitExceeded {
+        /// The payload's declared final decoded length in bytes.
+        expected_decoded_size: u64,
+        /// The identifier of the filter whose decoder exceeded its output bound.
+        filter_id: u16,
+        /// The bound on this filter's output stream in bytes.
+        output_limit: u64,
+        /// The observed lower bound on this filter's output length in bytes.
+        minimum_output_size: u64,
+    },
     /// Supplied decoded bytes have a different length from the expected payload size.
     DecodedSizeMismatch {
         /// The expected decoded length in bytes.
@@ -927,6 +941,13 @@ pub enum FormatError {
         /// Number of element counts supplied by the caller.
         count: usize,
     },
+    /// A read or traversal requires more resources than the caller permits.
+    ResourceLimit {
+        /// The caller's maximum count for the resource.
+        limit: u64,
+        /// The count required by the operation.
+        required: u64,
+    },
     /// Serialization error.
     SerializationError(String),
     /// The dataset's element count implied by its shape does not match the
@@ -1168,7 +1189,19 @@ pub const OBJECT_HEADER_MESSAGE_MAX: usize = u16::MAX as usize;
 impl fmt::Display for FormatError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ResourceLimit { limit, required } => {
+                write!(f, "resource requires {required}, above limit {limit}")
+            }
             Self::WrongLayout => write!(f, "reference belongs to another layout"),
+            Self::DecodedSizeLimitExceeded {
+                expected_decoded_size,
+                filter_id,
+                output_limit,
+                minimum_output_size,
+            } => write!(
+                f,
+                "filter {filter_id} output needs at least {minimum_output_size} bytes, above limit {output_limit} for a payload expected to decode to {expected_decoded_size} bytes"
+            ),
             Self::DecodedSizeMismatch { expected, actual } => {
                 write!(f, "decoded payload has {actual} bytes, expected {expected}")
             }
