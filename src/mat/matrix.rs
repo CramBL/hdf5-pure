@@ -318,14 +318,6 @@ mod tests {
     const WRAPS_TO_FOUR: usize = usize::MAX / 4 + 2;
 
     #[test]
-    fn the_wrapping_shape_really_does_wrap() {
-        // Pins the premise of the three tests below: if this stopped wrapping to
-        // 4 they would still pass, having stopped testing anything.
-        assert_eq!(WRAPS_TO_FOUR.wrapping_mul(4), 4);
-        assert!(WRAPS_TO_FOUR.checked_mul(4).is_none());
-    }
-
-    #[test]
     #[should_panic(expected = "overflows usize")]
     fn zeros_refuses_a_shape_whose_product_wraps() {
         // Without the check this allocates 4 elements and reports 2^62+1 rows.

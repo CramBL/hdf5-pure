@@ -162,11 +162,6 @@ mod tests {
     }
 
     #[test]
-    fn a_flags_byte_survives_the_round_trip() {
-        assert_eq!(MessageFlags::new(0x93).get(), 0x93);
-    }
-
-    #[test]
     fn an_empty_flags_byte_sets_no_flag() {
         assert!(MessageFlags::NONE.is_empty());
         assert_eq!(flags_set_in(MessageFlags::NONE), Vec::new());

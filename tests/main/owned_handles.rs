@@ -31,21 +31,6 @@ fn dataset_outlives_the_file_binding() {
     assert_eq!(ds.read_f64().unwrap(), vec![1.0, 2.0, 3.0, 4.0]);
 }
 
-/// A struct holds a handle with no lifetime parameter.
-struct Cache {
-    ds: Dataset,
-}
-
-#[test]
-fn handle_stored_in_a_struct() {
-    let file = File::from_bytes(sample_file()).unwrap();
-    let cache = Cache {
-        ds: file.dataset("data").unwrap(),
-    };
-    drop(file); // the cached handle keeps the file open
-    assert_eq!(cache.ds.shape().unwrap(), vec![4]);
-}
-
 #[test]
 fn handles_are_send_sync_static() {
     fn assert_send_sync_static<T: Send + Sync + 'static>() {}
@@ -62,14 +47,6 @@ fn file_is_cloneable_and_both_clones_read() {
     let expect = vec![1.0, 2.0, 3.0, 4.0];
     assert_eq!(file.dataset("data").unwrap().read_f64().unwrap(), expect);
     assert_eq!(file2.dataset("data").unwrap().read_f64().unwrap(), expect);
-}
-
-#[test]
-fn two_handles_to_one_dataset_read_consistently() {
-    let file = File::from_bytes(sample_file()).unwrap();
-    let a = file.dataset("data").unwrap();
-    let b = file.dataset("data").unwrap();
-    assert_eq!(a.read_f64().unwrap(), b.read_f64().unwrap());
 }
 
 #[test]

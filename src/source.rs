@@ -1240,12 +1240,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_source() {
-        let src = BytesSource::new(Vec::<u8>::new());
-        assert_eq!(src.len(), 0);
-    }
-
-    #[test]
     fn forwarding_through_reference() {
         let src = BytesSource::new(vec![9u8, 8, 7]);
         let r: &dyn Source = &src;

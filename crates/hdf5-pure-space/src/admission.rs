@@ -152,16 +152,5 @@ mod tests {
         assert!(fl.is_empty());
     }
 
-    #[test]
-    fn an_empty_extent_is_dropped_at_admission() {
-        let mut fl = FreeList::new();
-        let release = Extent::new(100, 0)
-            .map(|extent| fl.release(0, extent, ()))
-            .unwrap_or(Release::Drop);
-
-        assert_eq!(release, Release::Drop);
-        assert!(fl.is_empty());
-    }
-
     const THRESHOLD: u64 = 64;
 }

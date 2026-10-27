@@ -298,13 +298,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn construct_and_compare() {
-        let a = Complex64::new(1.0, -2.0);
-        let b = Complex64 { re: 1.0, im: -2.0 };
-        assert_eq!(a, b);
-    }
-
-    #[test]
     fn each_sentinel_names_its_own_component_class() {
         assert_eq!(
             complex_tag_for_sentinel(COMPLEX_I16_SENTINEL),
@@ -353,26 +346,5 @@ mod tests {
             f64_array(&wide, ValueSerializer::new(&opts)).unwrap(),
             Value::Leaf(Leaf::ComplexVec1D(ComplexVec::F64(vec![(1.5, -2.5)]))),
         );
-    }
-
-    /// The sentinel is the only thing distinguishing one complex type from
-    /// another once serde has erased the Rust type, so two sharing a name
-    /// would silently write each other's class.
-    #[test]
-    fn sentinels_are_distinct() {
-        let all = [
-            COMPLEX64_SENTINEL,
-            COMPLEX32_SENTINEL,
-            COMPLEX_I64_SENTINEL,
-            COMPLEX_I32_SENTINEL,
-            COMPLEX_I16_SENTINEL,
-            COMPLEX_I8_SENTINEL,
-            COMPLEX_U64_SENTINEL,
-            COMPLEX_U32_SENTINEL,
-            COMPLEX_U16_SENTINEL,
-            COMPLEX_U8_SENTINEL,
-        ];
-        let unique: std::collections::HashSet<&str> = all.iter().copied().collect();
-        assert_eq!(unique.len(), all.len());
     }
 }

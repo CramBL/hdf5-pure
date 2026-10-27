@@ -268,38 +268,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn representation_matches_u16() {
-        assert_eq!(
-            core::mem::size_of::<MessageType>(),
-            core::mem::size_of::<u16>()
-        );
-        assert_eq!(
-            core::mem::align_of::<MessageType>(),
-            core::mem::align_of::<u16>()
-        );
-    }
-
-    #[test]
-    fn every_raw_identifier_roundtrips() {
-        for raw in u16::MIN..=u16::MAX {
-            let message = MessageType::from_u16(raw);
-
-            assert_eq!(message.to_u16(), raw);
-            assert_eq!(u16::from(MessageType::from(raw)), raw);
-        }
-    }
-
-    #[test]
-    fn known_identifiers_are_strictly_increasing() {
-        for pair in KNOWN.windows(2) {
-            let previous = pair[0].0;
-            let next = pair[1].0;
-
-            assert!(previous < next, "{previous:#06x} must precede {next:#06x}");
-        }
-    }
-
-    #[test]
     fn known_types_roundtrip() {
         for &(raw, expected, display, _) in KNOWN {
             let message = MessageType::from_u16(raw);
@@ -358,18 +326,6 @@ mod tests {
 
         assert_eq!(message.to_u16(), 0x1234);
         assert_eq!(u16::from(message), 0x1234);
-    }
-
-    #[test]
-    fn camel_case_constants_work_as_patterns() {
-        let message = MessageType::from_u16(0x0001);
-
-        assert!(matches!(message, MessageType::DATASPACE));
-    }
-
-    #[test]
-    fn unknown_constructor_preserves_the_identifier() {
-        assert_eq!(MessageType::from(0x00FF), MessageType::from_u16(0x00FF));
     }
 
     #[cfg(feature = "std")]

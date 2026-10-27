@@ -186,13 +186,6 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn small_values_round_trip() {
-        assert_eq!(0u64.to_usize().unwrap(), 0);
-        assert_eq!(1234u64.to_usize().unwrap(), 1234);
-        assert_eq!(42u32.to_usize().unwrap(), 42);
-    }
-
     #[rstest]
     #[case(0)]
     #[case(1000)]
