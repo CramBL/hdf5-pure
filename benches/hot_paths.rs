@@ -1,10 +1,9 @@
-//! Microbenchmarks for the read and write hot paths.
+//! Benchmarks for numeric conversion, dataset I/O, and file-space operations.
 //!
-//! These exercise the code that dominates a real workload: decoding raw bytes
-//! into typed `Vec`s, assembling chunked datasets into a dense buffer, the
-//! shuffle filter, and building a file. They go through the public API
-//! (`FileBuilder` / `File`) so they stay valid across internal refactors and
-//! measure what a user actually pays for.
+//! Primitive groups measure decoding without dataset I/O, encoding without file serialization,
+//! and buffered appends below a chunk boundary. Decode controls measure allocation and byte-copy
+//! costs. Dataset groups include layout assembly and filters. Inputs and fixtures are prepared
+//! outside measured work.
 //!
 //! Run with:
 //!
@@ -12,9 +11,9 @@
 //! cargo bench --bench hot_paths
 //! ```
 //!
-//! Dataset groups use representative sizes. The reusable-space statistics group varies the
-//! number of free sections under flat and paged strategies, with fixture setup outside the
-//! timed loop. Compare times for the same workload and environment.
+//! Compare times for the same workload and environment.
+
+use std::time::{Duration, Instant};
 
 use criterion::BenchmarkId;
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -22,6 +21,7 @@ use hdf5_pure::DeflateLevel;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
+use hdf5_pure::H5Element;
 use hdf5_pure::{File, FileBuilder, MaxExtent};
 use test_util_hdf5::file_space;
 
@@ -73,6 +73,114 @@ fn bench_contiguous_decode(c: &mut Criterion) {
         b.iter(|| std::hint::black_box(i32_file.dataset("d").unwrap().read_f64().unwrap()))
     });
     g.finish();
+}
+
+fn bench_primitive_decode(c: &mut Criterion) {
+    let count = 1 << 20;
+    let mut builder = FileBuilder::new();
+    builder.create_dataset("i32").with_i32_data(&[0]);
+    builder.create_dataset("f64").with_f64_data(&[0.0]);
+    builder.create_dataset("u16").with_u16_data(&[0]);
+    let file = File::from_bytes(builder.finish().unwrap()).unwrap();
+    let i32_type = file.dataset("i32").unwrap().datatype().unwrap();
+    let f64_type = file.dataset("f64").unwrap().datatype().unwrap();
+    let u16_type = file.dataset("u16").unwrap().datatype().unwrap();
+    let i32_raw: Vec<_> = (0..count as i32).flat_map(i32::to_le_bytes).collect();
+    let f64_raw: Vec<_> = (0..count)
+        .flat_map(|value| (value as f64 * 0.5).to_le_bytes())
+        .collect();
+    let u16_raw: Vec<_> = (0..count)
+        .flat_map(|value| (value as u16).to_le_bytes())
+        .collect();
+    let mut group = c.benchmark_group("primitive_decode_1M");
+    group.bench_function("i32", |bench| {
+        bench.iter(|| {
+            std::hint::black_box(
+                i32::convert_raw(std::hint::black_box(&i32_raw), &i32_type).unwrap(),
+            )
+        })
+    });
+    group.bench_function("f64", |bench| {
+        bench.iter(|| {
+            std::hint::black_box(
+                f64::convert_raw(std::hint::black_box(&f64_raw), &f64_type).unwrap(),
+            )
+        })
+    });
+    group.bench_function("u16", |bench| {
+        bench.iter(|| {
+            std::hint::black_box(
+                u16::convert_raw(std::hint::black_box(&u16_raw), &u16_type).unwrap(),
+            )
+        })
+    });
+    group.bench_function("i32_as_f64", |bench| {
+        bench.iter(|| {
+            std::hint::black_box(
+                f64::convert_raw(std::hint::black_box(&i32_raw), &i32_type).unwrap(),
+            )
+        })
+    });
+    group.bench_function("copy_4MiB", |bench| {
+        bench.iter(|| std::hint::black_box(std::hint::black_box(&i32_raw).to_vec()))
+    });
+    group.bench_function("allocate_4MiB", |bench| {
+        bench.iter(|| std::hint::black_box(Vec::<i32>::with_capacity(std::hint::black_box(count))))
+    });
+    group.finish();
+}
+
+fn bench_primitive_encode(c: &mut Criterion) {
+    let count: usize = 1 << 20;
+    let integers: Vec<_> = (0..count as i32).collect();
+    let floats: Vec<_> = (0..count).map(|value| value as f64 * 0.5).collect();
+    let mut builder = FileBuilder::new();
+    let dataset = builder.create_dataset("values");
+    let mut group = c.benchmark_group("primitive_encode_1M");
+    group.bench_function("i32", |bench| {
+        bench.iter(|| {
+            dataset.with_i32_data(std::hint::black_box(&integers));
+            std::hint::black_box(&*dataset);
+        })
+    });
+    group.bench_function("f64", |bench| {
+        bench.iter(|| {
+            dataset.with_f64_data(std::hint::black_box(&floats));
+            std::hint::black_box(&*dataset);
+        })
+    });
+    group.finish();
+}
+
+fn bench_primitive_append(c: &mut Criterion) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("primitive-append.h5");
+    let mut builder = FileBuilder::new();
+    builder
+        .create_dataset("values")
+        .with_i32_data(&[])
+        .with_chunks(&[8_192])
+        .with_maxshape(&[MaxExtent::Unlimited]);
+    builder.write(&path).unwrap();
+    let file = File::open_rw(&path).unwrap();
+    let mut dataset = file.dataset("values").unwrap();
+    let values = [17i32; 16];
+    c.bench_function("primitive_append_256x16_i32", |bench| {
+        bench.iter_custom(|iterations| {
+            let mut elapsed = Duration::ZERO;
+            for _ in 0..iterations {
+                let mut appender = dataset.buffered_appender().unwrap();
+                appender.append(&values).unwrap();
+                let start = Instant::now();
+                for _ in 0..256 {
+                    appender.append(std::hint::black_box(&values)).unwrap();
+                }
+                elapsed += start.elapsed();
+                std::hint::black_box(appender.discard());
+            }
+            elapsed
+        })
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -344,6 +452,9 @@ fn bench_reusable_space_stats(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_contiguous_decode,
+    bench_primitive_decode,
+    bench_primitive_encode,
+    bench_primitive_append,
     bench_chunked_assembly,
     bench_write,
     bench_mat_roundtrip,

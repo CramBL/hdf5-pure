@@ -60,7 +60,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Performance
 
-- Numeric dataset reads and writes, typed appends, and numeric attribute arrays use bulk byte copies when their primitive representation matches the host. `Dataset::read_f64` and related reads retain scalar decoding for conversions, opposite byte orders, and nonstandard layouts.
+- Numeric dataset reads and writes, typed appends, and numeric attribute arrays use bulk byte copies when their primitive representation matches the host. `Dataset::read_f64` and related reads retain scalar decoding for conversions, opposite byte orders, and nonstandard layouts ([#936](https://github.com/CramBL/hdf5-pure/pull/936)).
 - `Dataset::read_raw` and related whole reads skip output initialization for dense chunked datasets, including those with unreadable fill metadata. Nonempty sparse reads retain fill initialization ([#921](https://github.com/CramBL/hdf5-pure/pull/921)).
 - `Dataset::read_raw` and related reads of a chunked dataset list its chunks from the retained chunk index without an allocation per chunk, and load an implicit chunk index without a list of its chunk positions beside it ([#902](https://github.com/CramBL/hdf5-pure/pull/902)).
 - `File::dataset` and related lookups use the dense-group name index to avoid traversing every link ([#900](https://github.com/CramBL/hdf5-pure/pull/900)).

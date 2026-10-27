@@ -90,6 +90,7 @@ mod owned_append;
 mod owned_swmr;
 mod page_buffer;
 mod partial_edge_chunk_filters;
+mod primitive_read;
 mod provenance;
 mod region_read;
 mod repack;
