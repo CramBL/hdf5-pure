@@ -28,8 +28,8 @@ use rstest::rstest;
 use test_util_hdf5::chunk_filter;
 use test_util_hdf5::{absence, file, fixtures};
 
-use crate::hard_link_graphs::RepeatedObjectGraph;
-use crate::hard_link_graphs::TreeGraph;
+use crate::test_util::hard_link_graphs::RepeatedObjectGraph;
+use crate::test_util::hard_link_graphs::TreeGraph;
 
 #[test]
 fn c_file_repacked_then_read_by_c_library() {

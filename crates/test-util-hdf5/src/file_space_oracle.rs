@@ -22,9 +22,102 @@ use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::DEFAULT_THRESHOLD;
 use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
+use hdf5_sys::h5f::H5F_info2_t;
 use hdf5_sys::{h5f, h5p};
 
 use crate::file_space;
+
+/// Asserts persisted manager allocation sizes against file headers and a fresh C handle.
+///
+/// Returns the independently calculated on-disk total. Opens `path` read-only in each library
+/// and checks that the file bytes remain unchanged.
+///
+/// The version 0 `FSHD` header has 18 fixed bytes, one address, and seven lengths, as defined
+/// in "Free-space Index" of the [format specification, version 4.0][spec].
+///
+/// # Panics
+///
+/// Panics if file inspection fails, either library's count differs from the allocation sizes,
+/// or the file bytes change during inspection.
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_freespaceindex
+pub fn assert_manager_metadata_bytes(path: &Path) -> u64 {
+    let bytes = fs::read(path).unwrap();
+    let reader = File::open(path).unwrap();
+    let report = reader.persisted_free_sections().unwrap();
+    let widths = FormatWidths {
+        offsets: reader.superblock().offset_size,
+        lengths: reader.superblock().length_size,
+    };
+    let base = reader.superblock().base_address;
+    let header_bytes = 18 + u64::from(widths.offsets.get()) + 7 * u64::from(widths.lengths.get());
+    let expected = report.as_ref().map_or(0, |report| {
+        let expected = report
+            .managers()
+            .iter()
+            .map(|manager| {
+                let address = usize::try_from(base.absolute(manager.address()).unwrap()).unwrap();
+                let header = FreeSpaceManagerHeader::parse(widths, &bytes[address..]).unwrap();
+                let allocated = if header.section_list_addr().is_undefined(widths.offsets) {
+                    0
+                } else {
+                    header.section_list_allocated()
+                };
+                assert_eq!(
+                    manager.metadata_bytes(),
+                    header_bytes + allocated,
+                    "{path:?}"
+                );
+                header_bytes + allocated
+            })
+            .sum::<u64>();
+        assert_eq!(report.manager_metadata_bytes(), expected, "{path:?}");
+        expected
+    });
+    reader.close().unwrap();
+    let file = hdf5::File::open(path).unwrap();
+    // `H5MF_get_freespace` opens and closes managers started for its query (`H5MF.c`, HDF5 1.14.6).
+    // `H5FS_size` uses allocated bytes with the section list unloaded (`H5FS.c`, HDF5 1.14.6).
+    assert_eq!(
+        c_manager_metadata_bytes(&file).unwrap(),
+        expected,
+        "fresh handle; {path:?}"
+    );
+    file.close().unwrap();
+    assert_eq!(
+        fs::read(path).unwrap(),
+        bytes,
+        "metadata inspection; {path:?}"
+    );
+    expected
+}
+
+fn c_manager_metadata_bytes(file: &hdf5::File) -> hdf5::Result<u64> {
+    hdf5::sync::sync(|| {
+        let mut info = H5F_info2_t::default();
+        // SAFETY: The library lock serializes access. The file owns a valid identifier, and info
+        // is writable storage of the type `H5Fget_info2` requires for the duration of the call.
+        hdf5::h5check(unsafe { h5f::H5Fget_info2(file.id(), &mut info) })?;
+        Ok(info.free.meta_size)
+    })
+}
+
+/// Checks persisted sections, creation properties, and file sizes through both libraries.
+///
+/// The caller must close all writing sessions before observation. `case` and `step` identify the
+/// workload and checkpoint in the returned report and diagnostics.
+///
+/// # Panics
+///
+/// Panics if either library reports an error, metadata is invalid, observations disagree, or
+/// the file bytes change during observation.
+pub fn observe(path: &Path, case: &str, step: &str) -> FreeSpaceOracleCheckpoint {
+    assert_persisted_sections(path);
+    let observation = FreeSpaceOracleCheckpoint::observe(path, case, step)
+        .unwrap_or_else(|error| panic!("{case}/{step}: {error:?}"));
+    observation.assert_equal();
+    observation
+}
 
 /// Checks supported persisted free-section inspection against libhdf5 for a closed file.
 ///

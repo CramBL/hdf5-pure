@@ -92,8 +92,8 @@ use test_util_hdf5::dataset_writer::DatasetWriter;
 use test_util_hdf5::file;
 use test_util_hdf5::numeric::ByteOrder;
 
-use crate::array_index;
-use crate::c_object;
+use crate::test_util::array_index;
+use crate::test_util::c_object;
 
 #[derive(Clone, Copy, Debug)]
 enum Filter {

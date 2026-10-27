@@ -1,3 +1,5 @@
+//! Native group fixtures with repeated hard links or tree-shaped object graphs.
+
 #![cfg(feature = "__hdf5-1.10")]
 
 use std::path::Path;

@@ -1,3 +1,5 @@
+//! Object-header addresses read through libhdf5.
+
 #![cfg(feature = "__hdf5-1.10")]
 
 use std::ffi::CString;
