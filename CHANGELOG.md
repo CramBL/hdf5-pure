@@ -68,8 +68,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- Fixed `H5Element::convert_raw` ignoring the source datatype for eight-bit targets, including when the input is empty.
-
+- Fixed `Dataset::fill_value` decoding eight-bit targets as raw bytes and accepting multi-element payloads. Numeric element conversions honor the source datatype, including on empty input.
 - Fixed `File::commit` deleting distinct compact links whose encoded names decode to the same UTF-8 replacement character. Groups with invalid UTF-8 link names are rejected before writing ([#927](https://github.com/CramBL/hdf5-pure/pull/927)).
 - Fixed `Group::groups` and related reads misinterpreting tiny objects in 18-byte fractal-heap IDs ([#924](https://github.com/CramBL/hdf5-pure/pull/924)).
 - Fixed `File::commit` overflowing tracked group link creation counters or changing file bytes before rejecting an exhausted counter. Unsupported counters in rebuilt groups are rejected during planning ([#920](https://github.com/CramBL/hdf5-pure/pull/920)).
