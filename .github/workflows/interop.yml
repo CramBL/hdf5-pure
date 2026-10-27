@@ -129,8 +129,6 @@ jobs:
       # Enables the value and content-hash crosschecks.
       CROSSCHECK_FEATURES: serde,ndarray,provenance
       HDF5_VERSION: ${{ matrix.version }}
-      NEXTEST_NO_TESTS: pass
-      NEXTEST_PROFILE: ci
 
     steps:
       - name: Checkout
@@ -248,7 +246,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.version == needs.releases.outputs.latest
         env:
           INSTA_UPDATE: "no"
-        run: just interop::test-bundled --test main file_space
+        run: just interop::test-bundled file_space reader::native_crosschecks
 
       # Clippy needs a libhdf5 to build against, so it runs here, once.
       - name: Lint the crosschecks

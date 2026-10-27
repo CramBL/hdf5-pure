@@ -59,6 +59,14 @@ slow-timeout = { period = "60s", terminate-after = 6 }
 # continues to later domains, so one matrix cell reports every failing subsystem.
 fail-fast = false
 
+# Select the external suite and facade reference-library unit tests.
+[profile.interop]
+default-filter = '''
+package(hdf5-pure-crosscheck) |
+(package(hdf5-pure) & (test(/^edit::native_crosschecks::/) | test(/^reader::native_crosschecks::/)))
+'''
+fail-fast = false
+
 [test-groups]
 # Semantic labels for the HDF5 crosschecks. They all retain nextest's normal
 # concurrency. CI selects them one at a time to make subsystem failures visible.
@@ -80,7 +88,7 @@ package(hdf5-pure-crosscheck) & (
     test(/^file_space_fuzz::/) |
     test(/^file_space_oracle::/) |
     test(/^page_buffer::/)
-)
+) | (package(hdf5-pure) & test(/^reader::native_crosschecks::/))
 '''
 test-group = "file-space"
 
@@ -145,7 +153,7 @@ package(hdf5-pure-crosscheck) & (
     test(/^edit_header_times::/) |
     test(/^edit_reference_repointing::/) |
     test(/^edit_userblock::/)
-)
+) | (package(hdf5-pure) & test(/^edit::native_crosschecks::/))
 '''
 test-group = "editing"
 
