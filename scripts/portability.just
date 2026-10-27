@@ -92,8 +92,18 @@ test-32bit-hdf5 FEATURES="serde,ndarray,provenance":
         --features "hdf5,__hdf5-bundled,{{ FEATURES }}"
 
 # The crosschecks against the C library, cross-compiled and linked for the
-# same big-endian target `test-big-endian` checks.
+# same big-endian target `test-big-endian` checks. `QEMU_TEST_SHARD` defaults to `all`.
+# `free-space` selects names containing `file_space`, and `other` excludes them.
 test-big-endian-hdf5 FEATURES="serde,ndarray,provenance":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    test_args=()
+    case "${QEMU_TEST_SHARD-all}" in
+        all) ;;
+        free-space) test_args=(-- file_space) ;;
+        other) test_args=(-- --skip file_space) ;;
+        *) printf 'Unknown QEMU_TEST_SHARD: %q\n' "$QEMU_TEST_SHARD" >&2; exit 1 ;;
+    esac
     cross test {{ CROSS_VERBOSE }} \
         --config 'build.rustc-wrapper=""' \
         --config 'target."s390x-unknown-linux-gnu".linker="s390x-linux-gnu-gcc"' \
@@ -102,15 +112,36 @@ test-big-endian-hdf5 FEATURES="serde,ndarray,provenance":
         --target s390x-unknown-linux-gnu \
         -p {{ CROSSCHECK }} \
         --no-default-features \
-        --features "hdf5,__hdf5-bundled,{{ FEATURES }}"
+        --features "hdf5,__hdf5-bundled,{{ FEATURES }}" \
+        "${test_args[@]}"
 
-
-    cross test {{ CROSS_VERBOSE }} \
-        --config 'build.rustc-wrapper=""' \
-        --config 'target."s390x-unknown-linux-gnu".linker="s390x-linux-gnu-gcc"' \
-        --config 'target."x86_64-unknown-linux-gnu".linker="cc"' \
-        --locked \
-        --target s390x-unknown-linux-gnu \
-        -p {{ CROSSCHECK }} -p hdf5-pure --lib native_crosschecks \
-        --no-default-features \
-        --features "hdf5,__hdf5-bundled,{{ FEATURES }}"
+    test_native() {
+        cross test {{ CROSS_VERBOSE }} \
+            --config 'build.rustc-wrapper=""' \
+            --config 'target."s390x-unknown-linux-gnu".linker="s390x-linux-gnu-gcc"' \
+            --config 'target."x86_64-unknown-linux-gnu".linker="cc"' \
+            --locked \
+            --target s390x-unknown-linux-gnu \
+            -p {{ CROSSCHECK }} -p hdf5-pure --lib \
+            --no-default-features \
+            --features "hdf5,__hdf5-bundled,{{ FEATURES }}" \
+            "$@"
+    }
+    case "${QEMU_TEST_SHARD-all}" in
+        all) test_native -- native_crosschecks ;;
+        other) test_native -- native_crosschecks --skip file_space ;;
+        free-space)
+            # The test harness combines positional filters with OR. List native crosschecks first
+            # to select only those whose names also contain `file_space`.
+            native_tests="$(test_native -- native_crosschecks --list)"
+            native_args=(-- --exact)
+            while IFS= read -r test; do
+                if [[ "$test" == *file_space*": test" ]]; then
+                    native_args+=("${test%: test}")
+                fi
+            done <<< "$native_tests"
+            if (( ${#native_args[@]} > 2 )); then
+                test_native "${native_args[@]}"
+            fi
+            ;;
+    esac
