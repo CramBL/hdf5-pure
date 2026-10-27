@@ -186,7 +186,7 @@ We prefer not to elide lifetimes when naming types that are generic over lifetim
 
 A module is a file. An inline module (`mod foo { .. }`) has two uses: `#[cfg(test)] mod tests` at the bottom of the file it tests, and a private module that seals a trait, so that the trait's bound cannot be implemented outside the crate. Everything else that would be an inline module is a file.
 
-Integration tests under `tests/` are one binary per entry file, so related test files are bundled: an entry file declares them (`tests/suite/main.rs` holding `mod append;` and `mod swmr;`) and cargo compiles one binary for the group.
+[TESTING.md](TESTING.md#where-tests-and-helpers-belong) defines test module ownership and integration-test bundling.
 
 ## Imports
 
@@ -229,6 +229,8 @@ All comments (doc comment or not) should be wrapped to 100 columns.
 
 ## Tests
 
+[TESTING.md](TESTING.md) defines test ownership, helpers, and coverage selection. The Rust style rules above apply to test code too.
+
 ### Assert the exact error
 
 A test of a failure asserts which failure. `is_err()` also passes on the failure the test rules out. Take the error out with `unwrap_err()` or a `let ... else`, and match the variant and its fields:
@@ -245,13 +247,11 @@ assert_eq!(reason, "chunk logical byte size exceeds the 4 GiB format limit");
 
 An error from the C library follows the same rule: the test asserts the major and minor codes the condition produces, `err.contains_major(MajorErrorCode::Symbol)` and `err.contains_minor(MinorErrorCode::NotFound)`, or the frames in order where the order matters. Where one code covers two conditions, the test asserts what separates them.
 
+Use `test_util_hdf5::absence::assert_libhdf5_absent` to distinguish a missing object from corrupt metadata.
+
 `hdf5::Error::Internal` is a failure in the binding. A test does not accept it in place of an error from the library.
 
 `assert!(r.is_ok())` is the same defect. A test unwraps the value and asserts on it, and asserts the whole value where that is feasible: `assert_eq!(names, vec!["a", "b"])` over `assert!(names.contains(&"a"))`.
-
-### Test helpers
-
-A helper that several test binaries share lives in `crates/test-util`. A helper that one binary uses lives in that binary. A helper that needs the C library lives behind an optional feature, so that nothing else links it by default.
 
 ## Misc
 
