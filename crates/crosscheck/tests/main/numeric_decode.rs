@@ -1,6 +1,7 @@
 #![cfg(feature = "hdf5")]
 
 use hdf5::Datatype as CDatatype;
+use hdf5::globals;
 use hdf5_pure::{
     Datatype, DatatypeByteOrder, Error, File, FloatingPointLayout, FormatError, H5Element,
     MantissaNormalization,
@@ -263,12 +264,12 @@ fn reads_c_signed_bit_ranges(
 }
 
 #[rstest]
-#[case(FloatLayout::Bias)]
-#[case(FloatLayout::LeadingOne)]
-#[case(FloatLayout::Sign)]
-#[case(FloatLayout::Standard)]
-#[case(FloatLayout::Unnormalized)]
-#[case(FloatLayout::Vax)]
+#[case::bias(FloatLayout::Bias)]
+#[case::leading_one(FloatLayout::LeadingOne)]
+#[case::sign(FloatLayout::Sign)]
+#[case::standard(FloatLayout::Standard)]
+#[case::unnormalized(FloatLayout::Unnormalized)]
+#[case::vax(FloatLayout::Vax)]
 fn reads_only_supported_c_floats(
     #[case] encoding: FloatLayout,
     #[values(false, true)] wide: bool,
@@ -276,12 +277,24 @@ fn reads_only_supported_c_floats(
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("float.h5");
-    let datatype = if wide {
-        CDatatype::from_type::<f64>()
+    let datatype = if matches!(encoding, FloatLayout::Vax) {
+        hdf5::sync::sync(|| {
+            let predefined = if wide {
+                *globals::H5T_VAX_F64
+            } else {
+                *globals::H5T_VAX_F32
+            };
+            // SAFETY: The lock serializes access and `predefined` is a live predefined float type.
+            let id = unsafe { h5t::H5Tcopy(predefined) };
+            assert!(id >= 0);
+            // SAFETY: The returned handle owns the newly copied datatype ID.
+            unsafe { hdf5::from_id::<CDatatype>(id) }.unwrap()
+        })
+    } else if wide {
+        CDatatype::from_type::<f64>().unwrap()
     } else {
-        CDatatype::from_type::<f32>()
-    }
-    .unwrap();
+        CDatatype::from_type::<f32>().unwrap()
+    };
     let layout = if wide {
         FloatingPointLayout::IEEE754_BINARY64
     } else {
@@ -337,7 +350,10 @@ fn reads_only_supported_c_floats(
                         0
                     );
                 }
-                FloatLayout::Standard | FloatLayout::Vax => {}
+                FloatLayout::Vax => {
+                    assert_eq!(h5t::H5Tset_ebias(datatype.id(), exponent_bias as usize), 0);
+                }
+                FloatLayout::Standard => {}
             }
         }
     });
