@@ -91,6 +91,12 @@ use crate::types::{self, AttrValue, DType};
 use crate::vl_data::{self, VlElement, VlenStringReadOptions};
 use crate::width::FormatWidths;
 
+#[cfg(test)]
+test_util_hdf5::hdf5_1_10_tests! {
+    #[path = "reader_native_crosschecks.rs"]
+    mod native_crosschecks;
+}
+
 // ---------------------------------------------------------------------------
 // File
 // ---------------------------------------------------------------------------
