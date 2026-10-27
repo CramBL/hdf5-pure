@@ -3,6 +3,8 @@
 #[cfg(not(feature = "std"))]
 use alloc::format;
 
+use core::convert::Infallible;
+
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::PhysicalAddress;
 
@@ -36,19 +38,20 @@ impl<'a, T, const N: usize> Emission<'a, T, N> {
     ///
     /// # Errors
     ///
-    /// Returns [`FormatError::Internal`] if a reservation precedes the sink's position, extends
-    /// past `eof`, or differs in length from the callback's output, or if output begins past
-    /// `eof`. Propagates errors from the sources, the callback, and the sink.
+    /// Returns [`EmissionError::Format`] with [`FormatError::Internal`] if a reservation precedes
+    /// the sink's position, extends past `eof`, or differs in length from the callback's output,
+    /// or if output begins past `eof`. Propagates source errors as [`EmissionError::Format`],
+    /// sink errors as [`EmissionError::Sink`], and callback errors unchanged.
     pub(crate) fn emit<S: ByteSink>(
         self,
         sink: &mut S,
         eof: u64,
-        mut emit: impl FnMut(&mut S, T) -> Result<(), FormatError>,
-    ) -> Result<(), FormatError> {
+        mut emit: impl FnMut(&mut S, T) -> Result<(), EmissionError<S::Error>>,
+    ) -> Result<(), EmissionError<S::Error>> {
         if sink.position() > eof {
-            return Err(FormatError::Internal(
-                "output begins beyond the end of the file".into(),
-            ));
+            return Err(
+                FormatError::Internal("output begins beyond the end of the file".into()).into(),
+            );
         }
         let Self { mut sources } = self;
         let mut heads: [Option<Reservation<T>>; N] = core::array::from_fn(|_| None);
@@ -63,14 +66,15 @@ impl<'a, T, const N: usize> Emission<'a, T, N> {
             .map(|(i, _)| i)
         {
             let Some(Reservation { range, value }) = heads[index].take() else {
-                return Err(FormatError::Internal(
-                    "the selected output source is empty".into(),
-                ));
+                return Err(
+                    FormatError::Internal("the selected output source is empty".into()).into(),
+                );
             };
             if range.start().get() < sink.position() || range.end().get() > eof {
                 return Err(FormatError::Internal(
                     "output reservations overlap or extend beyond the file".into(),
-                ));
+                )
+                .into());
             }
             Self::pad_to(sink, range.start().get())?;
             emit(sink, value)?;
@@ -79,19 +83,47 @@ impl<'a, T, const N: usize> Emission<'a, T, N> {
                     "output reservation ends at {}, but emission ends at {}",
                     range.end().get(),
                     sink.position(),
-                )));
+                ))
+                .into());
             }
             heads[index] = sources[index].next().transpose()?;
         }
         Self::pad_to(sink, eof)
     }
 
-    fn pad_to(sink: &mut impl ByteSink, end: u64) -> Result<(), FormatError> {
+    fn pad_to<S: ByteSink>(sink: &mut S, end: u64) -> Result<(), EmissionError<S::Error>> {
         while sink.position() < end {
             let length = (end - sink.position()).min(65_536).to_usize()?;
-            sink.put_zeros(length)?;
+            sink.put_zeros(length).map_err(EmissionError::Sink)?;
         }
         Ok(())
+    }
+}
+
+/// A failure during output planning, serialization, or sink operations.
+///
+/// Format failures include capacity errors from [`ByteSink::reserve`]. Sink failures hold the
+/// original error from [`ByteSink::put`] or [`ByteSink::put_zeros`].
+#[derive(Debug, PartialEq)]
+pub(crate) enum EmissionError<E> {
+    /// A planning or serialization failure.
+    Format(FormatError),
+    /// A failure to write output bytes or padding.
+    Sink(E),
+}
+
+impl EmissionError<Infallible> {
+    pub(crate) fn into_format(self) -> FormatError {
+        match self {
+            Self::Format(error) => error,
+            Self::Sink(error) => match error {},
+        }
+    }
+}
+
+impl<E> From<FormatError> for EmissionError<E> {
+    fn from(error: FormatError) -> Self {
+        Self::Format(error)
     }
 }
 
@@ -134,6 +166,7 @@ mod tests {
     use rstest::rstest;
 
     use super::Emission;
+    use super::EmissionError;
     use super::Reservation;
     use crate::address::BaseAddress;
     use crate::address::BaseAddressExt;
@@ -160,7 +193,9 @@ mod tests {
         ));
         let mut sink = vec![0xAB; base.get() as usize];
         Emission::new([&mut first, &mut second])
-            .emit(&mut sink, base.get() + 12, |sink, bytes| sink.put(bytes))
+            .emit(&mut sink, base.get() + 12, |sink, bytes| {
+                sink.put(bytes).map_err(EmissionError::Sink)
+            })
             .unwrap();
         let mut expected = vec![0xAB; base.get() as usize];
         expected.extend_from_slice(b"\0\0abc\0\0cd\0e\0");
@@ -199,11 +234,14 @@ mod tests {
         let error = Emission::new([&mut source])
             .emit(&mut sink, eof, |sink, length| {
                 sink.put_zeros(usize::try_from(length).unwrap())
+                    .map_err(EmissionError::Sink)
             })
             .unwrap_err();
         assert_eq!(
             error,
-            FormatError::Internal("output reservations overlap or extend beyond the file".into())
+            EmissionError::Format(FormatError::Internal(
+                "output reservations overlap or extend beyond the file".into()
+            ))
         );
         assert_eq!(sink.position, final_position);
     }
@@ -226,9 +264,7 @@ mod tests {
         ));
         let error = Emission::new([&mut source])
             .emit(&mut Vec::new(), u64::MAX, |_, ()| {
-                Err(FormatError::Internal(
-                    "unexpected output reservation".into(),
-                ))
+                Err(FormatError::Internal("unexpected output reservation".into()).into())
             })
             .unwrap_err();
         assert_eq!(
@@ -237,6 +273,7 @@ mod tests {
                 offset,
                 length: overflow_length
             }
+            .into()
         );
     }
 
@@ -251,13 +288,16 @@ mod tests {
             bytes,
         ));
         let error = Emission::new([&mut source])
-            .emit(&mut Vec::new(), 5, |sink, bytes| sink.put(bytes))
+            .emit(&mut Vec::new(), 5, |sink, bytes| {
+                sink.put(bytes).map_err(EmissionError::Sink)
+            })
             .unwrap_err();
         assert_eq!(
             error,
             FormatError::Internal(format!(
                 "output reservation ends at 5, but emission ends at {actual_end}"
             ))
+            .into()
         );
     }
 
@@ -272,7 +312,9 @@ mod tests {
         ));
         let mut sink = CountingSink::default();
         Emission::new([&mut source])
-            .emit(&mut sink, start + 515, |sink, bytes| sink.put(bytes))
+            .emit(&mut sink, start + 515, |sink, bytes| {
+                sink.put(bytes).map_err(EmissionError::Sink)
+            })
             .unwrap();
         assert_eq!(sink.position, start + 515);
         assert_eq!(sink.writes, [(start + 512, 1)]);
@@ -291,9 +333,7 @@ mod tests {
         };
         Emission::new([&mut source])
             .emit(&mut sink, eof, |_, ()| {
-                Err(FormatError::Internal(
-                    "unexpected output reservation".into(),
-                ))
+                Err(FormatError::Internal("unexpected output reservation".into()).into())
             })
             .unwrap();
         assert_eq!(sink.position, eof);
@@ -313,7 +353,9 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             error,
-            FormatError::Internal("output begins beyond the end of the file".into())
+            EmissionError::Format(FormatError::Internal(
+                "output begins beyond the end of the file".into()
+            ))
         );
     }
 
@@ -330,18 +372,24 @@ mod tests {
         let error = Emission::new([&mut source])
             .emit(&mut sink, 6, |_, index| {
                 calls.push(index);
-                Err(expected.clone())
+                Err(expected.clone().into())
             })
             .unwrap_err();
-        assert_eq!(error, expected);
+        assert_eq!(error, EmissionError::Format(expected));
         assert_eq!(calls, [1]);
         assert_eq!(sink.position, 3);
     }
 
     #[rstest]
-    #[case::padding(1, 0)]
-    #[case::payload(0, 1)]
-    fn sink_errors_stop_emission(#[case] start: u64, #[case] expected_calls: usize) {
+    #[case::padding(1, 0, 0, 0)]
+    #[case::payload(0, 0, 0, 1)]
+    #[case::trailing_padding(0, 1, 1, 1)]
+    fn sink_errors_stop_emission(
+        #[case] start: u64,
+        #[case] accepted: usize,
+        #[case] position: u64,
+        #[case] expected_calls: usize,
+    ) {
         let mut source = core::iter::once(Reservation::new(
             BaseAddress::new(0),
             StoredAddress::new(start),
@@ -350,28 +398,58 @@ mod tests {
         ));
         let mut calls = 0;
         let error = Emission::new([&mut source])
-            .emit(&mut FailingSink, start + 1, |sink, bytes| {
-                calls += 1;
-                sink.put(bytes)
-            })
+            .emit(
+                &mut FailingSink {
+                    accepted,
+                    position: 0,
+                },
+                start + 2,
+                |sink, bytes| {
+                    calls += 1;
+                    sink.put(bytes).map_err(EmissionError::Sink)
+                },
+            )
             .unwrap_err();
-        assert_eq!(error, FormatError::SerializationError("sink failed".into()));
+        assert_eq!(error, EmissionError::Sink(SinkFailure { position }));
         assert_eq!(calls, expected_calls);
     }
 
-    struct FailingSink;
+    #[derive(Debug, PartialEq)]
+    struct SinkFailure {
+        position: u64,
+    }
+
+    struct FailingSink {
+        accepted: usize,
+        position: u64,
+    }
+
+    impl FailingSink {
+        fn accept(&mut self, length: usize) -> Result<(), SinkFailure> {
+            if self.accepted == 0 {
+                return Err(SinkFailure {
+                    position: self.position,
+                });
+            }
+            self.accepted -= 1;
+            self.position += length as u64;
+            Ok(())
+        }
+    }
 
     impl ByteSink for FailingSink {
-        fn put(&mut self, _: &[u8]) -> Result<(), FormatError> {
-            Err(FormatError::SerializationError("sink failed".into()))
+        type Error = SinkFailure;
+
+        fn put(&mut self, bytes: &[u8]) -> Result<(), Self::Error> {
+            self.accept(bytes.len())
         }
 
-        fn put_zeros(&mut self, _: usize) -> Result<(), FormatError> {
-            Err(FormatError::SerializationError("sink failed".into()))
+        fn put_zeros(&mut self, length: usize) -> Result<(), Self::Error> {
+            self.accept(length)
         }
 
         fn position(&self) -> u64 {
-            0
+            self.position
         }
     }
 
@@ -383,6 +461,7 @@ mod tests {
     }
 
     impl ByteSink for CountingSink {
+        type Error = FormatError;
         fn put(&mut self, bytes: &[u8]) -> Result<(), FormatError> {
             self.writes.push((self.position, bytes.len()));
             self.position += bytes.len() as u64;

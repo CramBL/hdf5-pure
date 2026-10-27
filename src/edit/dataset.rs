@@ -30,6 +30,7 @@ use crate::data_layout::{ChunkIndexLayout, DataLayout};
 use crate::dataspace::{Dataspace, DataspaceType, Extent, MaxExtent};
 use crate::datatype::Datatype;
 use crate::error::{Error, FormatError, OBJECT_HEADER_MESSAGE_MAX};
+use crate::file_emission::EmissionError;
 use crate::file_writer::{self, LENGTH_SIZE, LENGTH_WIDTH, OFFSET_WIDTH};
 use crate::fill_value::FillPattern;
 use crate::fill_value::PaddingFill;
@@ -1074,7 +1075,8 @@ impl WriteEngine {
                 )?;
                 let mut buf =
                     Vec::with_capacity(usize::try_from(layout.plan.total_len).unwrap_or(0));
-                chunked_write::emit_chunked_data_verbatim(&mut buf, &layout.plan, chunks)?;
+                chunked_write::emit_chunked_data_verbatim(&mut buf, &layout.plan, chunks)
+                    .map_err(EmissionError::into_format)?;
                 Ok((buf, layout.layout_message))
             })?;
         let mut new_region = replace_layout_message(region, &layout_message)?;

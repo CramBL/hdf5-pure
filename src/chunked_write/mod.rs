@@ -10,6 +10,7 @@ use alloc::{format, vec, vec::Vec};
 /// whatever width the field is. A chunked layout message carrying it declares
 /// that the dataset has no storage allocated at all.
 const HADDR_UNDEF: u64 = u64::MAX;
+use core::convert::Infallible;
 use core::num::NonZeroUsize;
 
 use hdf5_pure_format::__private::ChunkIndexInfo;
@@ -32,6 +33,7 @@ use crate::data_layout::DONT_FILTER_PARTIAL_BOUND_CHUNKS;
 use crate::data_layout::DataLayout;
 use crate::dataspace::{Extent, MaxExtent};
 use crate::error::FormatError;
+use crate::file_emission::EmissionError;
 use crate::fill_value::FillPattern;
 use crate::filter_pipeline::{
     FILTER_DEFLATE, FILTER_FLETCHER32, FILTER_LZF, FILTER_SCALEOFFSET, FILTER_SHUFFLE,
@@ -1355,16 +1357,16 @@ pub(crate) fn plan_chunked_at(
 ///
 /// # Errors
 ///
-/// Returns the error from [`ByteSink::put`] if a write fails.
-pub(crate) fn emit_chunked_data(
-    sink: &mut impl ByteSink,
+/// Returns [`EmissionError::Sink`] with the error from [`ByteSink::put`] if a write fails.
+pub(crate) fn emit_chunked_data<S: ByteSink>(
+    sink: &mut S,
     set: &CompressedChunkSet,
     plan: &ChunkedPlan,
-) -> Result<(), FormatError> {
+) -> Result<(), EmissionError<S::Error>> {
     for chunk in &set.chunks {
-        sink.put(chunk.bytes())?;
+        sink.put(chunk.bytes()).map_err(EmissionError::Sink)?;
     }
-    sink.put(&plan.index)
+    sink.put(&plan.index).map_err(EmissionError::Sink)
 }
 
 /// Returns the length from `data_address` through the end of the chunk index.
@@ -1456,7 +1458,7 @@ pub(crate) fn assemble_chunked_at(
 ) -> Result<ChunkedDataResult, FormatError> {
     let plan = plan_chunked_at(set, data_address)?;
     let mut data_buf = Vec::with_capacity(plan.data_len.to_usize()?);
-    emit_chunked_data(&mut data_buf, set, &plan)?;
+    emit_chunked_data(&mut data_buf, set, &plan).map_err(EmissionError::into_format)?;
     Ok(ChunkedDataResult {
         data_bytes: data_buf,
         layout_message: plan.layout_message,
@@ -1527,17 +1529,27 @@ pub(crate) trait ChunkProvider: Send + Sync {
     fn chunk_bytes(&self, index: usize, out: &mut Vec<u8>) -> Result<(), FormatError>;
 }
 
-/// A minimal byte sink so the verbatim chunk emitter works against both an
-/// in-memory `Vec<u8>` (the buffered / `no_std` path) and a streaming
-/// `std::io::Write` (the out-of-core path), without pulling `std::io` into
-/// `no_std` builds.
+/// Sequential output for buffered and streaming file assembly.
+///
+/// Writes and padding return the sink's associated error. Capacity reservation returns a
+/// [`FormatError`] independently of the output error type. The buffered [`Vec<u8>`] implementation
+/// uses [`Infallible`] for writes and padding.
 pub(crate) trait ByteSink {
-    /// Append `bytes` to the output.
-    fn put(&mut self, bytes: &[u8]) -> Result<(), FormatError>;
-    /// Append `n` zero bytes.
-    fn put_zeros(&mut self, n: usize) -> Result<(), FormatError>;
-    /// Total bytes written so far (used to assert layout addresses on a
-    /// non-seekable sink).
+    /// The error from writing bytes or padding.
+    type Error;
+    /// Appends `bytes` to the output.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Self::Error`] if writing the bytes fails.
+    fn put(&mut self, bytes: &[u8]) -> Result<(), Self::Error>;
+    /// Appends `n` zero bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Self::Error`] if writing the padding fails.
+    fn put_zeros(&mut self, n: usize) -> Result<(), Self::Error>;
+    /// Returns the number of bytes written for comparison with planned layout addresses.
     fn position(&self) -> u64;
     /// Reserves capacity for additional output bytes when supported by the sink.
     ///
@@ -1557,11 +1569,13 @@ pub(crate) trait ByteSink {
 }
 
 impl ByteSink for Vec<u8> {
-    fn put(&mut self, bytes: &[u8]) -> Result<(), FormatError> {
+    type Error = Infallible;
+
+    fn put(&mut self, bytes: &[u8]) -> Result<(), Self::Error> {
         self.extend_from_slice(bytes);
         Ok(())
     }
-    fn put_zeros(&mut self, n: usize) -> Result<(), FormatError> {
+    fn put_zeros(&mut self, n: usize) -> Result<(), Self::Error> {
         self.resize(self.len() + n, 0u8);
         Ok(())
     }
@@ -1798,23 +1812,23 @@ fn check_chunks_fit_index(
     }
 }
 
-/// Stream a planned verbatim dataset's data region to `sink`, pulling each
-/// chunk's bytes from `provider` one at a time. The emitted bytes are identical
-/// to the concatenation [`plan_chunked_data_verbatim`] describes, so a streamed
-/// file and a buffered file are byte-for-byte equal.
+/// Writes a planned verbatim dataset's chunks and index in order.
 ///
-/// The chunk index is built here rather than by the planner, so a failure to
-/// build one now arrives mid-stream where it used to arrive at plan time. For a
-/// caller that buffers (the in-place editor fills a `Vec` inside its placement
-/// closure) that is invisible; for `FileBuilder::finish_to`, which writes
-/// straight through, it means the chunk bytes are already on the sink. The only
-/// such failure is a 32-bit `usize` overflow inside the Extensible Array
-/// builder, which needs more chunks than that address space can hold.
+/// Reads each chunk from `provider` into one reusable buffer. The output is byte-for-byte
+/// identical to the concatenation described by [`plan_chunked_data_verbatim`]. The writer builds
+/// the chunk index after writing the chunks, so a serialization failure can leave partial output.
+///
+/// # Errors
+///
+/// Returns [`EmissionError::Format`] with [`FormatError::ChunkedReadError`] if a provider returns
+/// a chunk of another length, or [`FormatError::SerializationError`] if the serialized index
+/// differs in length from its plan. Propagates provider and index errors as [`EmissionError::Format`]
+/// and sink errors as [`EmissionError::Sink`].
 pub(crate) fn emit_chunked_data_verbatim<S: ByteSink>(
     sink: &mut S,
     plan: &VerbatimPlan,
     provider: &dyn ChunkProvider,
-) -> Result<(), FormatError> {
+) -> Result<(), EmissionError<S::Error>> {
     // One buffer for the whole dataset: it grows to the largest chunk and is
     // reused, so the streaming path's allocation count does not scale with the
     // chunk count.
@@ -1827,9 +1841,10 @@ pub(crate) fn emit_chunked_data_verbatim<S: ByteSink>(
                 "verbatim chunk provider returned a chunk whose size differs from the \
                  planned size"
                     .into(),
-            ));
+            )
+            .into());
         }
-        sink.put(&chunk)?;
+        sink.put(&chunk).map_err(EmissionError::Sink)?;
     }
 
     // The index is built here, once, rather than by the planner: a caller may
@@ -1863,9 +1878,10 @@ pub(crate) fn emit_chunked_data_verbatim<S: ByteSink>(
                  length was computed from the plan",
                 bytes.len(),
                 index.len,
-            )));
+            ))
+            .into());
         }
-        sink.put(&bytes)?;
+        sink.put(&bytes).map_err(EmissionError::Sink)?;
     }
     Ok(())
 }
@@ -3613,7 +3629,9 @@ mod tests {
     }
 
     impl ByteSink for ChunkSlices {
-        fn put(&mut self, bytes: &[u8]) -> Result<(), FormatError> {
+        type Error = FormatError;
+
+        fn put(&mut self, bytes: &[u8]) -> Result<(), Self::Error> {
             self.slices.push((bytes.as_ptr(), bytes.len()));
             self.bytes.extend_from_slice(bytes);
             Ok(())
@@ -3662,7 +3680,10 @@ mod tests {
     #[case::first_chunk(0)]
     #[case::second_chunk(1)]
     #[case::index(2)]
-    fn direct_chunk_emission_stops_at_the_sink_error(#[case] fail_at: usize) {
+    fn chunk_emission_stops_at_the_sink_error(
+        #[case] fail_at: usize,
+        #[values(false, true)] verbatim: bool,
+    ) {
         let set = compress_chunks(
             &[0; 16],
             &[16],
@@ -3678,11 +3699,42 @@ mod tests {
             accepted: 0,
             fail_at,
         };
-        assert_eq!(
-            emit_chunked_data(&mut sink, &set, &plan).unwrap_err(),
-            FormatError::Internal("test sink failure".into())
-        );
+        let error = if verbatim {
+            let layout = plan_chunked_data_verbatim(
+                &core::array::from_fn::<_, 2, _>(|_| ChunkMeta {
+                    compressed_size: 8,
+                    filter_mask: 0,
+                }),
+                &[16],
+                &[8],
+                convert::nz(1),
+                ChunkedLayoutFlags::NONE,
+                None,
+                StoredAddress::new(64),
+                None,
+            )
+            .unwrap();
+            emit_chunked_data_verbatim(&mut sink, &layout.plan, &EightByteChunks).unwrap_err()
+        } else {
+            emit_chunked_data(&mut sink, &set, &plan).unwrap_err()
+        };
+        assert_eq!(error, EmissionError::Sink(ChunkSinkFailure::Write(fail_at)));
         assert_eq!(sink.accepted, fail_at);
+    }
+
+    struct EightByteChunks;
+
+    impl ChunkProvider for EightByteChunks {
+        fn chunk_bytes(&self, _: usize, out: &mut Vec<u8>) -> Result<(), FormatError> {
+            out.extend_from_slice(&[0; 8]);
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum ChunkSinkFailure {
+        Padding,
+        Write(usize),
     }
 
     struct FailingChunkSink {
@@ -3691,16 +3743,18 @@ mod tests {
     }
 
     impl ByteSink for FailingChunkSink {
-        fn put(&mut self, _: &[u8]) -> Result<(), FormatError> {
+        type Error = ChunkSinkFailure;
+
+        fn put(&mut self, _: &[u8]) -> Result<(), Self::Error> {
             if self.accepted == self.fail_at {
-                return Err(FormatError::Internal("test sink failure".into()));
+                return Err(ChunkSinkFailure::Write(self.fail_at));
             }
             self.accepted += 1;
             Ok(())
         }
 
-        fn put_zeros(&mut self, _: usize) -> Result<(), FormatError> {
-            Err(FormatError::Internal("unexpected chunk padding".into()))
+        fn put_zeros(&mut self, _: usize) -> Result<(), Self::Error> {
+            Err(ChunkSinkFailure::Padding)
         }
 
         fn position(&self) -> u64 {
