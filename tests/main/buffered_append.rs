@@ -4,6 +4,8 @@
 //! issue #393 every write it makes is the immediate in-place one, filtered or
 //! not, so the type buys write *frequency* and nothing else.
 
+use rstest::rstest;
+
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileLocking;
@@ -468,11 +470,6 @@ fn a_read_only_file_is_refused() {
     ));
 }
 
-/// A refused `append` buffers nothing. The refusal here comes from closing the
-/// session out from under the appender, which fails before the write touches
-/// the file. A caller who reads `Err` as "not appended" — the contract
-/// `Dataset::append` has — would otherwise append the same elements twice on a
-/// retry, so the call rolls its own bytes back out of the buffer.
 #[test]
 fn a_refused_append_buffers_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -487,7 +484,6 @@ fn a_refused_append_buffers_nothing() {
 
     session.close().unwrap();
 
-    // Six more crosses the chunk boundary, so this call attempts a write.
     app.append(&(3..9i32).collect::<Vec<_>>())
         .expect_err("a closed session cannot be appended to");
     assert_eq!(
@@ -916,4 +912,51 @@ fn dropping_a_lossy_appender_still_writes_its_partial_tail() {
         session.close().unwrap();
     }
     assert_eq!(dataset::read_pure::<f64>(&p, "d").len(), 6);
+}
+
+#[rstest]
+#[case::empty(&[])]
+#[case::whole_element(&[1, 0, 0, 0])]
+#[case::split_element(&[1, 0])]
+fn closed_session_rejects_buffered_operations_without_accepting_bytes(#[case] prior: &[u8]) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("closed.h5");
+    Unlimited::<i32>::new("d", &[], 8).pure_create(&path);
+    let file = File::open_rw(&path).unwrap();
+    let mut dataset = file.dataset("d").unwrap();
+    let mut appender = dataset.buffered_appender().unwrap();
+    appender.append_raw(prior).unwrap();
+    file.close().unwrap();
+    let error = appender.append::<i32>(&[]).unwrap_err();
+    assert!(matches!(error, Error::FileClosed), "{error:?}");
+    let error = appender.append(&[2i32]).unwrap_err();
+    assert!(matches!(error, Error::FileClosed), "{error:?}");
+    let error = appender.append_raw(&[]).unwrap_err();
+    assert!(matches!(error, Error::FileClosed), "{error:?}");
+    let error = appender.append_raw(&[0]).unwrap_err();
+    assert!(matches!(error, Error::FileClosed), "{error:?}");
+    let error = appender.flush().unwrap_err();
+    assert!(matches!(error, Error::FileClosed), "{error:?}");
+    assert_eq!(appender.unwritten(), prior);
+    assert_eq!(appender.discard(), prior);
+    drop(dataset);
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), Vec::<i32>::new());
+}
+
+#[rstest]
+#[case::empty(&[])]
+#[case::sub_chunk(&[1, 0, 0, 0])]
+fn closed_session_rejects_buffered_finish(#[case] prior: &[u8]) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("closed_finish.h5");
+    Unlimited::<i32>::new("d", &[], 8).pure_create(&path);
+    let file = File::open_rw(&path).unwrap();
+    let mut dataset = file.dataset("d").unwrap();
+    let mut appender = dataset.buffered_appender().unwrap();
+    appender.append_raw(prior).unwrap();
+    file.close().unwrap();
+    let error = appender.finish().unwrap_err();
+    assert!(matches!(error, Error::FileClosed), "{error:?}");
+    drop(dataset);
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), Vec::<i32>::new());
 }

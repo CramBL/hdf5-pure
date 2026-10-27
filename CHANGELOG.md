@@ -70,6 +70,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `BufferedAppender` accepting input or completing empty flushes after file closure. Pending bytes remain available for recovery.
 - Fixed `Dataset::read_f64` and related chunked reads rejecting completely covered selections with unreadable fill metadata. Readable fill is required when complete coverage is unproven ([#943](https://github.com/CramBL/hdf5-pure/pull/943)).
 - Fixed `Group::create_dataset` rejecting deflate compression when `fast-deflate` was enabled with default features disabled ([#941](https://github.com/CramBL/hdf5-pure/pull/941)).
 - Fixed `Dataset::fill_value` decoding eight-bit targets as raw bytes and accepting multi-element payloads. Numeric element conversions honor the source datatype, including on empty input ([#940](https://github.com/CramBL/hdf5-pure/pull/940)).

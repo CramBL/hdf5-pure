@@ -6007,6 +6007,15 @@ impl Dataset {
         BufferedAppender::new(self, options)
     }
 
+    /// Applies the session's live mutation gate to appender operations.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FileClosed`] if the appender's session is closed.
+    pub(crate) fn check_appender_mutable(&self) -> Result<(), Error> {
+        self.file.check_mutable(false)
+    }
+
     /// Register a live `BufferedAppender` on this dataset with the session, so a
     /// staged edit that would stop it from flushing is refused at the call that
     /// creates the conflict rather than in the appender's `Drop`.
