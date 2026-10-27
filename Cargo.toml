@@ -365,7 +365,7 @@ default = ["std", "checksum", "deflate"]
 std = ["hdf5-pure-core/std", "hdf5-pure-filter/std", "hdf5-pure-format/std"]
 checksum = ["hdf5-pure-format/checksum"]
 deflate = ["hdf5-pure-filter/deflate"]
-fast-deflate = ["hdf5-pure-filter/fast-deflate"]
+fast-deflate = ["deflate", "hdf5-pure-filter/fast-deflate"]
 provenance = ["dep:sha2"]
 # Pure-Rust ZFP fixed-rate compression filter (HDF5 filter ID 32013).
 # Supports f32/f64/i32/i64 datasets in 1D–4D.

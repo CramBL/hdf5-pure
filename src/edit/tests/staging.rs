@@ -107,26 +107,48 @@ fn staged_queries_report_only_explicit_creations() {
     );
 }
 
-#[test]
-fn staged_dataset_metadata_matches_its_builder() {
+#[rstest]
+#[case::shuffle(FilterId::Shuffle)]
+#[case::deflate(FilterId::Deflate)]
+fn staged_dataset_metadata_respects_filter_availability(#[case] filter: FilterId) {
     let dir = tempfile::tempdir().unwrap();
-    let mut e = open_session(&dir.path().join("q.h5"));
+    let path = dir.path().join("q.h5");
+    let mut e = open_session(&path);
     let mut col = DatasetBuilder::new("");
     col.with_i32_data(&[1, 2, 3, 4])
         .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[2])
-        .with_deflate(DeflateLevel::Four);
-    e.stage_created_dataset(&ObjectPathBuf::parse("col"), col)
-        .unwrap();
+        .with_chunks(&[2]);
+    match filter {
+        FilterId::Shuffle => col.with_shuffle(),
+        FilterId::Deflate => col.with_deflate(DeflateLevel::Four),
+        other => panic!("unexpected filter {other:?}"),
+    };
+    let staged = e.stage_created_dataset(&ObjectPathBuf::parse("col"), col);
+    if filter == FilterId::Deflate && !cfg!(any(feature = "deflate", feature = "fast-deflate")) {
+        let error = staged.unwrap_err();
+        let Error::EditUnsupported(reason) = error else {
+            panic!("{error:?}");
+        };
+        assert_eq!(
+            reason,
+            "deflate compression requires the `deflate` crate feature"
+        );
+        assert!(!e.has_staged_edits());
+        assert!(
+            e.staged_dataset_meta(&ObjectPathBuf::parse("col"))
+                .is_none()
+        );
+    } else {
+        staged.unwrap();
+        let meta = e.staged_dataset_meta(&ObjectPathBuf::parse("col")).unwrap();
+        assert_eq!(meta.dimensions, vec![4]);
+        assert_eq!(meta.maxshape, Some(vec![MaxExtent::Unlimited]));
+        assert_eq!(meta.datatype.type_size(), 4);
+        assert!(meta.chunked);
+        assert_eq!(meta.filters, vec![(filter, false)]);
+    }
     e.stage_created_dataset(&ObjectPathBuf::parse("plain"), i32_dataset(&[5]))
         .unwrap();
-
-    let meta = e.staged_dataset_meta(&ObjectPathBuf::parse("col")).unwrap();
-    assert_eq!(meta.dimensions, vec![4]);
-    assert_eq!(meta.maxshape, Some(vec![MaxExtent::Unlimited]));
-    assert_eq!(meta.datatype.type_size(), 4);
-    assert!(meta.chunked);
-    assert_eq!(meta.filters, vec![(FilterId::Deflate, false)]);
     let plain = e
         .staged_dataset_meta(&ObjectPathBuf::parse("plain"))
         .unwrap();
@@ -140,6 +162,16 @@ fn staged_dataset_metadata_matches_its_builder() {
         e.staged_dataset_meta(&ObjectPathBuf::parse("existing"))
             .is_none()
     );
+    e.commit().unwrap();
+    drop(e);
+    let file = crate::File::open(&path).unwrap();
+    assert_eq!(file.dataset("plain").unwrap().read_i32().unwrap(), [5]);
+    if filter != FilterId::Deflate || cfg!(any(feature = "deflate", feature = "fast-deflate")) {
+        assert_eq!(
+            file.dataset("col").unwrap().read_i32().unwrap(),
+            [1, 2, 3, 4]
+        );
+    }
 }
 
 #[test]
