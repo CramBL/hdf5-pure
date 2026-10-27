@@ -28,13 +28,14 @@ __matio = []
 hdf5 = { workspace = true, optional = true }
 # The C bindings used by fixture writers.
 hdf5-sys = { workspace = true, optional = true }
-hdf5-pure.workspace = true
+hdf5-pure = { workspace = true, features = ["std"] }
 hdf5-pure-core.workspace = true
 hdf5-pure-format.workspace = true
 ndarray = { workspace = true, optional = true }
 test-util.workspace = true
 
 [dev-dependencies]
+hdf5-pure = { workspace = true, features = ["deflate"] }
 tempfile.workspace = true
 
 [lints]
