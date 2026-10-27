@@ -2,10 +2,6 @@
 
 use std::path::Path;
 
-use hdf5::File as CFile;
-use hdf5::GroupStorageType;
-use hdf5::IndexType;
-use hdf5::IterationOrder;
 use hdf5_pure::__private;
 use hdf5_pure::AttrValue;
 use hdf5_pure::CharacterSet;
@@ -21,6 +17,7 @@ use hdf5_pure_format::__private::OwnedLinkTarget;
 use rstest::rstest;
 use test_util_hdf5::creation_order;
 use test_util_hdf5::creation_order::Indexing;
+use test_util_hdf5::dense_links::GroupOrder;
 
 #[rstest]
 #[case::compact_boundary(8, 0, 1, (8, 6), true)]
@@ -74,20 +71,7 @@ fn tracked_storage_transitions_preserve_indexes_and_the_next_counter(
         dense,
         source_only,
     );
-    let reference = CFile::open(&path).unwrap();
-    let group = reference.group(group_path).unwrap();
-    for index in removed..count {
-        assert_eq!(
-            group
-                .dataset(&format!("link_{index:04}"))
-                .unwrap()
-                .read_raw::<i32>()
-                .unwrap(),
-            [i32::try_from(index).unwrap(), 42]
-        );
-    }
-    drop(group);
-    reference.close().unwrap();
+    creation_order::assert_link_dataset_values(&path, group_path, removed, count);
     dir.close().unwrap();
 }
 
@@ -129,9 +113,7 @@ fn tracked_creation_indexes_keep_deletion_gaps_across_repeated_transitions(
     drop(file);
     expected.push(("last".into(), 14));
     assert_group(&path, "/", &expected, 15, indexing, true, source_only);
-    let reference = CFile::open_rw(&path).unwrap();
-    reference.create_group("from_libhdf5").unwrap();
-    reference.close().unwrap();
+    creation_order::add_reference_group(&path, "from_libhdf5");
     expected.push(("from_libhdf5".into(), 15));
     assert_group(&path, "/", &expected, 16, indexing, true, source_only);
     dir.close().unwrap();
@@ -171,24 +153,7 @@ fn tracked_dense_additions_and_replacements_assign_monotonic_indexes(
         ("added".into(), 12),
     ]);
     assert_group(&path, "/", &expected, 13, indexing, true, source_only);
-    let reference = CFile::open(&path).unwrap();
-    assert_eq!(
-        reference
-            .dataset("link_0000")
-            .unwrap()
-            .read_raw::<i32>()
-            .unwrap(),
-        [99]
-    );
-    assert_eq!(
-        reference
-            .dataset("copy")
-            .unwrap()
-            .read_raw::<i32>()
-            .unwrap(),
-        [1, 42]
-    );
-    reference.close().unwrap();
+    creation_order::assert_link_replacements(&path);
     dir.close().unwrap();
 }
 
@@ -199,18 +164,7 @@ fn tracked_dense_ancestors_preserve_indexes_when_a_dataset_header_moves(
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ancestors.h5");
-    creation_order::write_link_fixture(&path, "/", 12, indexing, (8, 6));
-    {
-        let reference = CFile::open_rw(&path).unwrap();
-        let group = reference
-            .create_group_builder()
-            .with_gcpl(|properties| properties.link_creation_order(indexing.link_order()))
-            .create("child")
-            .unwrap();
-        test_util_hdf5::dense_links::populate_edit_group(&group, 12);
-        drop(group);
-        reference.close().unwrap();
-    }
+    creation_order::write_link_ancestor_fixture(&path, indexing);
     let before_root = __private::inspect_group_links(&path, "/", source_only).unwrap();
     let before_child = __private::inspect_group_links(&path, "/child", source_only).unwrap();
     let file = __private::open_group_inspection(&path, source_only).unwrap();
@@ -232,15 +186,7 @@ fn tracked_dense_ancestors_preserve_indexes_when_a_dataset_header_moves(
     );
     assert_eq!(indexes(&root.links), indexes(&before_root.links));
     assert_eq!(indexes(&child.links), indexes(&before_child.links));
-    let reference = CFile::open(&path).unwrap();
-    let dataset = reference.dataset("child/link_0003").unwrap();
-    assert_eq!(dataset.read_raw::<i32>().unwrap(), [3, 42]);
-    assert_eq!(
-        dataset.attr("added").unwrap().read_scalar::<i64>().unwrap(),
-        99
-    );
-    drop(dataset);
-    reference.close().unwrap();
+    creation_order::assert_link_ancestor_dataset(&path);
     dir.close().unwrap();
 }
 
@@ -256,7 +202,14 @@ fn tracked_multilevel_indexes_preserve_symbolic_links_and_creation_order(
     } else {
         "tracked"
     };
-    test_util_hdf5::dense_links::write_inspection_fixture(&path, policy, indexing.link_order());
+    test_util_hdf5::dense_links::write_inspection_fixture(
+        &path,
+        if indexing == Indexing::Yes {
+            GroupOrder::Indexed
+        } else {
+            GroupOrder::Tracked
+        },
+    );
     let group_path = format!("dense_{policy}");
     let before = __private::inspect_group_links(&path, &group_path, source_only).unwrap();
     let mut expected = before
@@ -447,30 +400,5 @@ fn assert_group(
             .map(|address| address.is_some()),
         (indexing == Indexing::Yes).then_some(dense)
     );
-    let reference = CFile::open(path).unwrap();
-    let group = reference.group(group_path).unwrap();
-    let info = group.info().unwrap();
-    assert_eq!(info.max_corder, i64::try_from(next).unwrap());
-    assert_eq!(
-        info.storage_type,
-        if dense {
-            GroupStorageType::Dense
-        } else {
-            GroupStorageType::Compact
-        }
-    );
-    assert_eq!(
-        group.gcpl().unwrap().link_creation_order(),
-        indexing.link_order()
-    );
-    let links = group
-        .links(IndexType::CreationOrder, IterationOrder::Increasing)
-        .unwrap();
-    let actual = links
-        .into_iter()
-        .map(|(name, info)| (name, u64::try_from(info.creation_order.unwrap()).unwrap()))
-        .collect::<Vec<_>>();
-    assert_eq!(actual, expected);
-    drop(group);
-    reference.close().unwrap();
+    creation_order::assert_link_group(path, group_path, expected, next, indexing, dense);
 }

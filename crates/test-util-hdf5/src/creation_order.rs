@@ -4,6 +4,12 @@
 use std::ffi::CString;
 use std::path::Path;
 
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5::GroupStorageType;
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5::IndexType;
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5::IterationOrder;
 use hdf5::file::LibraryVersion;
 use hdf5::plist::file_create::FileSpaceStrategy;
 use hdf5::plist::group_create::{
@@ -202,4 +208,164 @@ pub fn write_link_fixture(
     crate::dense_links::populate_edit_group(&group, count);
     drop(group);
     file.close().unwrap();
+}
+
+/// Checks numbered dataset values through libhdf5.
+///
+/// Expects each `link_<index>` dataset for indexes in `removed..count` to contain
+/// `[index, 42]`, with the index zero-padded to at least four decimal digits.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot read or close the fixture, an index does not fit in [`i32`], or a
+/// dataset value differs from the expected value.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn assert_link_dataset_values(path: &Path, group_path: &str, removed: usize, count: usize) {
+    let reference = File::open(path).unwrap();
+    let group = reference.group(group_path).unwrap();
+    for index in removed..count {
+        assert_eq!(
+            group
+                .dataset(&format!("link_{index:04}"))
+                .unwrap()
+                .read_raw::<i32>()
+                .unwrap(),
+            [i32::try_from(index).unwrap(), 42]
+        );
+    }
+    drop(group);
+    reference.close().unwrap();
+}
+
+/// Creates a group through libhdf5 and closes the file.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot open the file, create the group, or close the file.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn add_reference_group(path: &Path, group_path: &str) {
+    let reference = File::open_rw(path).unwrap();
+    reference.create_group(group_path).unwrap();
+    reference.close().unwrap();
+}
+
+/// Checks replacement and copied dataset values through libhdf5.
+///
+/// Expects `link_0000` to contain `[99]` and `copy` to contain `[1, 42]`.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot read or close the fixture, or a dataset value differs from the
+/// expected value.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn assert_link_replacements(path: &Path) {
+    let reference = File::open(path).unwrap();
+    assert_eq!(
+        reference
+            .dataset("link_0000")
+            .unwrap()
+            .read_raw::<i32>()
+            .unwrap(),
+        [99]
+    );
+    assert_eq!(
+        reference
+            .dataset("copy")
+            .unwrap()
+            .read_raw::<i32>()
+            .unwrap(),
+        [1, 42]
+    );
+    reference.close().unwrap();
+}
+
+/// Writes dense root and child groups with tracked link creation order through libhdf5.
+///
+/// Each group contains twelve numbered datasets. Applies `indexing` to both groups.
+///
+/// # Panics
+///
+/// Panics if `path` is not valid UTF-8 or contains a null byte, or libhdf5 cannot create, write,
+/// or close the fixture.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn write_link_ancestor_fixture(path: &Path, indexing: Indexing) {
+    write_link_fixture(path, "/", 12, indexing, (8, 6));
+    {
+        let reference = File::open_rw(path).unwrap();
+        let group = reference
+            .create_group_builder()
+            .with_gcpl(|properties| properties.link_creation_order(indexing.link_order()))
+            .create("child")
+            .unwrap();
+        crate::dense_links::populate_edit_group(&group, 12);
+        drop(group);
+        reference.close().unwrap();
+    }
+}
+
+/// Checks a surviving child dataset and its added attribute through libhdf5.
+///
+/// Expects `child/link_0003` to contain `[3, 42]` and its scalar `added` attribute to contain 99.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot read or close the fixture, or an expected value differs.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn assert_link_ancestor_dataset(path: &Path) {
+    let reference = File::open(path).unwrap();
+    let dataset = reference.dataset("child/link_0003").unwrap();
+    assert_eq!(dataset.read_raw::<i32>().unwrap(), [3, 42]);
+    assert_eq!(
+        dataset.attr("added").unwrap().read_scalar::<i64>().unwrap(),
+        99
+    );
+    drop(dataset);
+    reference.close().unwrap();
+}
+
+/// Checks group storage and link creation-order metadata through libhdf5.
+///
+/// Compares link names and creation indexes in increasing creation order with `expected`.
+/// Checks the next creation index against `next` and the creation-order policy against `indexing`.
+/// Checks dense storage when `dense` is true and compact storage otherwise.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot read or close the fixture, a creation index does not fit in its
+/// integer type, or the metadata differs from the expected metadata.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn assert_link_group(
+    path: &Path,
+    group_path: &str,
+    expected: &[(String, u64)],
+    next: u64,
+    indexing: Indexing,
+    dense: bool,
+) {
+    let reference = File::open(path).unwrap();
+    let group = reference.group(group_path).unwrap();
+    let info = group.info().unwrap();
+    assert_eq!(info.max_corder, i64::try_from(next).unwrap());
+    assert_eq!(
+        info.storage_type,
+        if dense {
+            GroupStorageType::Dense
+        } else {
+            GroupStorageType::Compact
+        }
+    );
+    assert_eq!(
+        group.gcpl().unwrap().link_creation_order(),
+        indexing.link_order()
+    );
+    let links = group
+        .links(IndexType::CreationOrder, IterationOrder::Increasing)
+        .unwrap();
+    let actual = links
+        .into_iter()
+        .map(|(name, info)| (name, u64::try_from(info.creation_order.unwrap()).unwrap()))
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+    drop(group);
+    reference.close().unwrap();
 }

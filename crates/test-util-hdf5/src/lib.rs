@@ -49,3 +49,47 @@ pub mod space_ownership;
 pub mod storage;
 pub mod symbol_table;
 pub mod userblock;
+
+/// Includes the supplied items when the helper's HDF5 1.10 capability is enabled.
+///
+/// The helper's `__hdf5-1.10` feature is enabled for HDF5 1.10 or later. Items are omitted
+/// when it is disabled. The invoking crate can use this macro without defining an HDF5
+/// release feature of its own.
+///
+/// # Examples
+///
+/// ```test_harness
+/// test_util_hdf5::hdf5_1_10_tests! {
+///     #[test]
+///     fn tracked_group_fixture_has_expected_label() {
+///         assert_eq!(test_util_hdf5::dense_links::GroupOrder::Tracked.label(), "tracked");
+///     }
+/// }
+/// ```
+#[cfg(feature = "__hdf5-1.10")]
+#[macro_export]
+macro_rules! hdf5_1_10_tests {
+    ($($item:item)*) => { $($item)* };
+}
+
+/// Includes the supplied items when the helper's HDF5 1.10 capability is enabled.
+///
+/// The helper's `__hdf5-1.10` feature is enabled for HDF5 1.10 or later. Items are omitted
+/// when it is disabled. The invoking crate can use this macro without defining an HDF5
+/// release feature of its own.
+///
+/// # Examples
+///
+/// ```test_harness
+/// test_util_hdf5::hdf5_1_10_tests! {
+///     #[test]
+///     fn tracked_group_fixture_has_expected_label() {
+///         assert_eq!(test_util_hdf5::dense_links::GroupOrder::Tracked.label(), "tracked");
+///     }
+/// }
+/// ```
+#[cfg(not(feature = "__hdf5-1.10"))]
+#[macro_export]
+macro_rules! hdf5_1_10_tests {
+    ($($item:item)*) => {};
+}

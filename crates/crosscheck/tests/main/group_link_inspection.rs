@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 
 use hdf5::File as CFile;
 use hdf5::GroupStorageType;
-use hdf5::plist::group_create::LinkCreationOrder;
 use hdf5_pure::__private;
 use hdf5_pure::CharacterSet;
 use hdf5_pure::Error;
@@ -13,14 +12,14 @@ use hdf5_pure_format::__private::FractalHeapHeader;
 use hdf5_pure_format::__private::GroupPhaseChange;
 use hdf5_pure_format::__private::OwnedLinkTarget;
 use rstest::rstest;
+use test_util_hdf5::dense_links::GroupOrder;
 
 #[rstest]
-#[case::untracked("untracked", LinkCreationOrder::Untracked, false, false)]
-#[case::tracked("tracked", LinkCreationOrder::Tracked, true, false)]
-#[case::indexed("indexed", LinkCreationOrder::Indexed, true, true)]
+#[case::untracked(GroupOrder::Untracked, false, false)]
+#[case::tracked(GroupOrder::Tracked, true, false)]
+#[case::indexed(GroupOrder::Indexed, true, true)]
 fn libhdf5_groups_retain_links_policy_and_thresholds(
-    #[case] policy: &str,
-    #[case] order: LinkCreationOrder,
+    #[case] order: GroupOrder,
     #[case] tracked: bool,
     #[case] indexed: bool,
     #[values(("compact", 6), ("dense", 2000))] form: (&str, usize),
@@ -28,8 +27,8 @@ fn libhdf5_groups_retain_links_policy_and_thresholds(
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("group.h5");
-    test_util_hdf5::dense_links::write_inspection_fixture(&path, policy, order);
-    let group_path = format!("{}_{policy}", form.0);
+    test_util_hdf5::dense_links::write_inspection_fixture(&path, order);
+    let group_path = format!("{}_{}", form.0, order.label());
     let info = __private::inspect_group_links(&path, &group_path, source_only).unwrap();
     assert_eq!(info.links.links().len(), form.1);
     let metadata = info.links.info();
@@ -119,11 +118,7 @@ fn dense_root_edits_preserve_untracked_and_tracked_group_policies(
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("group.h5");
-    test_util_hdf5::dense_links::write_inspection_fixture(
-        &path,
-        "indexed",
-        LinkCreationOrder::Indexed,
-    );
+    test_util_hdf5::dense_links::write_inspection_fixture(&path, GroupOrder::Indexed);
     let before = __private::inspect_group_links(&path, parent, source_only).unwrap();
     let file = __private::open_group_inspection(&path, source_only).unwrap();
     file.group(parent).unwrap().create_group("added").unwrap();
@@ -139,11 +134,7 @@ fn dense_root_edits_preserve_untracked_and_tracked_group_policies(
             .max_creation_order
             .map(|counter| counter + 1)
     );
-    let reference = CFile::open(&path).unwrap();
-    let group = reference.group(&format!("/{parent}/added")).unwrap();
-    assert_eq!(group.info().unwrap().nlinks, 0);
-    drop(group);
-    reference.close().unwrap();
+    assert_eq!(test_util_hdf5::dense_links::added_group_link_count(&path, parent), 0);
     dir.close().unwrap();
 }
 
@@ -169,11 +160,7 @@ fn unsupported_heap_preflight_rejects_mutation_before_writing(
     if huge_objects {
         test_util_hdf5::dense_links::write_huge_inspection_fixture(&path);
     } else {
-        test_util_hdf5::dense_links::write_inspection_fixture(
-            &path,
-            "indexed",
-            LinkCreationOrder::Indexed,
-        );
+        test_util_hdf5::dense_links::write_inspection_fixture(&path, GroupOrder::Indexed);
     }
     let original = std::fs::read(&path).unwrap();
     let error = __private::inspect_group_links(&path, group_path, source_only)
@@ -219,31 +206,28 @@ fn unsupported_heap_preflight_rejects_mutation_before_writing(
 }
 
 #[rstest]
-#[case::untracked("untracked", LinkCreationOrder::Untracked)]
-#[case::tracked("tracked", LinkCreationOrder::Tracked)]
-#[case::indexed("indexed", LinkCreationOrder::Indexed)]
-fn generated_groups_have_expected_storage_policy_and_links(
-    #[case] policy: &str,
-    #[case] order: LinkCreationOrder,
-) {
+#[case::untracked(GroupOrder::Untracked)]
+#[case::tracked(GroupOrder::Tracked)]
+#[case::indexed(GroupOrder::Indexed)]
+fn generated_groups_have_expected_storage_policy_and_links(#[case] order: GroupOrder) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("group.h5");
-    test_util_hdf5::dense_links::write_inspection_fixture(&path, policy, order);
+    test_util_hdf5::dense_links::write_inspection_fixture(&path, order);
     let file = CFile::open(&path).unwrap();
     assert_eq!(file.info().unwrap().storage_type, GroupStorageType::Dense);
     test_util_hdf5::dense_links::assert_inspection_group(
         &file,
-        &format!("compact_{policy}"),
+        &format!("compact_{}", order.label()),
         6,
         GroupStorageType::Compact,
-        order,
+        order.creation_order(),
     );
     test_util_hdf5::dense_links::assert_inspection_group(
         &file,
-        &format!("dense_{policy}"),
+        &format!("dense_{}", order.label()),
         2000,
         GroupStorageType::Dense,
-        order,
+        order.creation_order(),
     );
     assert_eq!(
         file.group("filtered").unwrap().info().unwrap().storage_type,

@@ -29,6 +29,37 @@ pub enum Producer {
     Pure,
 }
 
+/// The creation-order policy and name suffix of a group fixture.
+#[derive(Clone, Copy, Debug)]
+pub enum GroupOrder {
+    /// Tracks creation order and stores a creation-order index.
+    Indexed,
+    /// Tracks creation order without storing a creation-order index.
+    Tracked,
+    /// Omits creation-order tracking.
+    Untracked,
+}
+
+impl GroupOrder {
+    /// Returns the suffix appended to compact and dense fixture group names.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Indexed => "indexed",
+            Self::Tracked => "tracked",
+            Self::Untracked => "untracked",
+        }
+    }
+
+    /// Returns the libhdf5 group creation setting for this policy.
+    pub fn creation_order(self) -> LinkCreationOrder {
+        match self {
+            Self::Indexed => LinkCreationOrder::Indexed,
+            Self::Tracked => LinkCreationOrder::Tracked,
+            Self::Untracked => LinkCreationOrder::Untracked,
+        }
+    }
+}
+
 /// A group's link count, storage form, and member names read through libhdf5.
 #[derive(Debug)]
 pub struct GroupObservation {
@@ -333,15 +364,16 @@ pub fn assert_inspection_group(
 
 /// Writes compact, dense, and filtered group fixtures with libhdf5.
 ///
-/// Appends `policy` to the compact and dense group names and configures link creation order
-/// with `order`. Each compact or dense group contains hard, soft, and external links, a UTF-8
-/// name, and a name-hash collision. The caller owns `path` and removes the file after use.
+/// Appends the label of `order` to compact and dense group names and configures their link
+/// creation order with the same policy. Each compact or dense group contains hard, soft, and
+/// external links, a UTF-8 name, and a name-hash collision. The caller owns `path` and removes
+/// the file after use.
 ///
 /// # Panics
 ///
 /// Panics if libhdf5 cannot create the file, configure or write its groups, or close it.
 #[cfg(feature = "__hdf5-1.10")]
-pub fn write_inspection_fixture(path: &Path, policy: &str, order: LinkCreationOrder) {
+pub fn write_inspection_fixture(path: &Path, order: GroupOrder) {
     let file = File::with_options()
         .with_fapl(|properties| {
             properties.libver_bounds(LibraryVersion::V18, LibraryVersion::latest())
@@ -352,7 +384,7 @@ pub fn write_inspection_fixture(path: &Path, policy: &str, order: LinkCreationOr
     file.create_group("target").unwrap();
     for (form, count) in [("compact", 6), ("dense", 2000)] {
         let properties = GroupCreate::build()
-            .link_creation_order(order)
+            .link_creation_order(order.creation_order())
             .finish()
             .unwrap();
         hdf5::sync::sync(|| {
@@ -366,7 +398,7 @@ pub fn write_inspection_fixture(path: &Path, policy: &str, order: LinkCreationOr
         let group = file
             .create_group_builder()
             .set_gcpl(&properties)
-            .create(format!("{form}_{policy}").as_str())
+            .create(format!("{form}_{}", order.label()).as_str())
             .unwrap();
         group.link_soft("/target", "removed").unwrap();
         group.link_hard("/target", "hard").unwrap();
@@ -403,6 +435,21 @@ pub fn write_inspection_fixture(path: &Path, policy: &str, order: LinkCreationOr
     }
     drop(filtered);
     file.close().unwrap();
+}
+
+/// Reads the link count of the `added` group beneath `parent` through libhdf5.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot open, inspect, or close the file or group.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn added_group_link_count(path: &Path, parent: &str) -> u64 {
+    let file = File::open(path).unwrap();
+    let group = file.group(&format!("/{parent}/added")).unwrap();
+    let count = group.info().unwrap().nlinks;
+    drop(group);
+    file.close().unwrap();
+    count
 }
 
 /// Writes a group with links stored as huge fractal-heap objects.
@@ -549,3 +596,354 @@ pub fn populate_edit_group(group: &Group, count: usize) {
 
 // `H5G_CRT_GINFO_MAX_COMPACT` in `H5Gprivate.h`, HDF5 2.2.0, is the default compact link limit.
 const MAX_COMPACT_LINKS: usize = 8;
+
+/// Checks the edited group's storage, member names, and surviving dataset values through libhdf5.
+///
+/// Expects numbered dataset names at indexes `removed..count` and `added_<index>` names at
+/// indexes `0..added`. Expects dense storage when `dense` is true and compact storage otherwise.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot read or close the fixture, a value differs from the expected value,
+/// or a dataset index does not fit in [`i32`].
+#[cfg(feature = "__hdf5-1.10")]
+pub fn assert_edit_group(
+    path: &Path,
+    group_path: &str,
+    count: usize,
+    added: usize,
+    removed: usize,
+    dense: bool,
+) {
+    let reference = File::open(path).unwrap();
+    let group = reference.group(group_path).unwrap();
+    assert_eq!(
+        group.info().unwrap().storage_type,
+        if dense {
+            GroupStorageType::Dense
+        } else {
+            GroupStorageType::Compact
+        }
+    );
+    let mut expected = (removed..count)
+        .map(|index| format!("link_{index:04}"))
+        .collect::<Vec<_>>();
+    expected.extend((0..added).map(|index| format!("added_{index}")));
+    expected.sort();
+    let mut actual = group.member_names().unwrap();
+    actual.sort();
+    assert_eq!(actual, expected);
+    for index in removed..count {
+        assert_eq!(
+            group
+                .dataset(&format!("link_{index:04}"))
+                .unwrap()
+                .read_raw::<i32>()
+                .unwrap(),
+            [i32::try_from(index).unwrap(), 42]
+        );
+    }
+    drop(group);
+    reference.close().unwrap();
+}
+
+/// Writes a dense group with hash-colliding names, symbolic links, and a UTF-8 group name.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot create, write, or close the fixture.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn write_collision_edit_fixture(path: &Path, group_path: &str) {
+    write_edit_fixture(path, group_path, 2000, None);
+    {
+        let reference = File::open_rw(path).unwrap();
+        let group = reference.group(group_path).unwrap();
+        group.link_soft("/absent_λ", "soft").unwrap();
+        group
+            .link_external("absent_λ.h5", "/目标", "external")
+            .unwrap();
+        group
+            .new_dataset::<i32>()
+            .shape(1)
+            .create("k69209")
+            .unwrap()
+            .write(&[7])
+            .unwrap();
+        group
+            .new_dataset::<i32>()
+            .shape(1)
+            .create("k155448")
+            .unwrap()
+            .write(&[9])
+            .unwrap();
+        group
+            .create_group_builder()
+            .char_encoding(CharEncoding::Utf8)
+            .create("原始_λ")
+            .unwrap();
+        drop(group);
+        reference.close().unwrap();
+    }
+}
+
+/// Checks the edited collision fixture's storage, link count, dataset values, and group attribute.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot read or close the fixture, or a value differs from the expected value.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn assert_collision_edit(path: &Path, group_path: &str) {
+    let reference = File::open(path).unwrap();
+    let group = reference.group(group_path).unwrap();
+    assert_eq!(group.info().unwrap().storage_type, GroupStorageType::Dense);
+    assert_eq!(group.info().unwrap().nlinks, 2005);
+    assert_eq!(
+        group.dataset("k69209").unwrap().read_raw::<i32>().unwrap(),
+        [7]
+    );
+    assert_eq!(
+        group.dataset("k155448").unwrap().read_raw::<i32>().unwrap(),
+        [9]
+    );
+    assert_eq!(
+        group
+            .dataset("link_1999")
+            .unwrap()
+            .read_raw::<i32>()
+            .unwrap(),
+        [1999, 42]
+    );
+    assert_eq!(
+        group.attr("changed").unwrap().read_scalar::<i64>().unwrap(),
+        17
+    );
+    drop(group);
+    reference.close().unwrap();
+}
+
+/// Writes dense root and child groups with numbered datasets for descendant edits.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot create, write, or close the fixture.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn write_descendant_edit_fixture(path: &Path) {
+    write_edit_fixture(path, "/", 12, None);
+    {
+        let reference = File::open_rw(path).unwrap();
+        let child = reference.create_group("child").unwrap();
+        populate_edit_group(&child, 12);
+        drop(child);
+        reference.close().unwrap();
+    }
+}
+
+/// Checks dense storage, surviving datasets, and edits in the `child` group through libhdf5.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot read or close the fixture, or a value differs from the expected value.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn assert_descendant_edit(path: &Path) {
+    let reference = File::open(path).unwrap();
+    assert_eq!(
+        reference.info().unwrap().storage_type,
+        GroupStorageType::Dense
+    );
+    let child = reference.group("child").unwrap();
+    assert_eq!(child.info().unwrap().storage_type, GroupStorageType::Dense);
+    assert_eq!(child.info().unwrap().nlinks, 14);
+    assert_eq!(
+        child
+            .dataset("link_0005")
+            .unwrap()
+            .read_raw::<i32>()
+            .unwrap(),
+        [5, 42]
+    );
+    assert_eq!(
+        child
+            .dataset("link_0005")
+            .unwrap()
+            .attr("new")
+            .unwrap()
+            .read_scalar::<i64>()
+            .unwrap(),
+        99
+    );
+    assert_eq!(
+        child.dataset("copied").unwrap().read_raw::<i32>().unwrap(),
+        [6, 42]
+    );
+    assert_eq!(child.group("nested").unwrap().info().unwrap().nlinks, 0);
+    assert_eq!(
+        reference
+            .dataset("link_0011")
+            .unwrap()
+            .read_raw::<i32>()
+            .unwrap(),
+        [11, 42]
+    );
+    drop(child);
+    reference.close().unwrap();
+}
+
+/// Writes the dense group `g` with numbered datasets and twelve scalar attributes.
+///
+/// Each attribute `attr_0` through `attr_11` contains its index as an [`i64`].
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot create, write, or close the fixture.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn write_attribute_edit_fixture(path: &Path) {
+    write_edit_fixture(path, "/g", 12, None);
+    {
+        let reference = File::open_rw(path).unwrap();
+        let group = reference.group("g").unwrap();
+        for index in 0..12i64 {
+            group
+                .new_attr::<i64>()
+                .create(format!("attr_{index}").as_str())
+                .unwrap()
+                .write_scalar(&index)
+                .unwrap();
+        }
+        drop(group);
+        reference.close().unwrap();
+    }
+}
+
+/// Checks the dense group's link count and scalar attributes after an edit through libhdf5.
+///
+/// Expects `attr_0` to contain 99 when `edit_attributes` is true. Each other attribute contains
+/// its original index.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot read or close the fixture, or a value differs from the expected value.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn assert_attribute_edit(path: &Path, edit_attributes: bool) {
+    let reference = File::open(path).unwrap();
+    let group = reference.group("g").unwrap();
+    assert_eq!(group.info().unwrap().storage_type, GroupStorageType::Dense);
+    assert_eq!(group.info().unwrap().nlinks, 13);
+    assert_eq!(group.attr_names().unwrap().len(), 12);
+    for index in 0..12i64 {
+        assert_eq!(
+            group
+                .attr(&format!("attr_{index}"))
+                .unwrap()
+                .read_scalar::<i64>()
+                .unwrap(),
+            if edit_attributes && index == 0 {
+                99
+            } else {
+                index
+            }
+        );
+    }
+    drop(group);
+    reference.close().unwrap();
+}
+
+/// Writes a dense group and a second hard link to the group or its first dataset.
+///
+/// The root link `alias` targets `/g/link_0000` when `dataset` is true and `/g` otherwise.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot create, write, or close the fixture.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn write_alias_edit_fixture(path: &Path, dataset: bool) {
+    write_edit_fixture(path, "/g", 12, None);
+    {
+        let reference = File::open_rw(path).unwrap();
+        reference
+            .link_hard(if dataset { "/g/link_0000" } else { "/g" }, "alias")
+            .unwrap();
+        reference.close().unwrap();
+    }
+}
+
+/// Writes nine root datasets, symbolic links, and a group with a UTF-8 name.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot create, write, or close the fixture.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn write_symbolic_edit_fixture(path: &Path) {
+    write_edit_fixture(path, "/", 9, None);
+    {
+        let reference = File::open_rw(path).unwrap();
+        reference.link_soft("/absent_λ", "soft").unwrap();
+        reference
+            .link_external("absent_λ.h5", "/目标", "external")
+            .unwrap();
+        reference
+            .create_group_builder()
+            .char_encoding(CharEncoding::Utf8)
+            .create("原始_λ")
+            .unwrap();
+        reference.close().unwrap();
+    }
+}
+
+/// Checks compact root storage and the surviving symbolic and UTF-8 names through libhdf5.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot read or close the fixture, or a value differs from the expected value.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn assert_compact_symbolic_edit(path: &Path) {
+    let reference = File::open(path).unwrap();
+    assert_eq!(
+        reference.info().unwrap().storage_type,
+        GroupStorageType::Compact
+    );
+    let mut names = reference.member_names().unwrap();
+    names.sort();
+    assert_eq!(names, ["external", "soft", "原始_λ"]);
+    reference.close().unwrap();
+}
+
+/// Checks dense root storage and a link count of nine through libhdf5.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot read or close the fixture, or a value differs from the expected value.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn assert_dense_symbolic_edit(path: &Path) {
+    let reference = File::open(path).unwrap();
+    assert_eq!(
+        reference.info().unwrap().storage_type,
+        GroupStorageType::Dense
+    );
+    assert_eq!(reference.info().unwrap().nlinks, 9);
+    reference.close().unwrap();
+}
+
+/// Checks dense root storage and the surviving and added groups in the userblock fixture.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot read or close the fixture, or a value differs from the expected value.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn assert_userblock_edit(path: &Path) {
+    let reference = File::open(path).unwrap();
+    assert_eq!(
+        reference.info().unwrap().storage_type,
+        GroupStorageType::Dense
+    );
+    assert_eq!(reference.group("added").unwrap().info().unwrap().nlinks, 0);
+    assert_eq!(
+        reference
+            .group("dense_untracked")
+            .unwrap()
+            .info()
+            .unwrap()
+            .nlinks,
+        2000
+    );
+    reference.close().unwrap();
+}
