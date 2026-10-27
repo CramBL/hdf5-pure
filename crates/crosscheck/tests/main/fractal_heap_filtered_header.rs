@@ -11,6 +11,11 @@ use hdf5_pure_format::__private::FilterDescription;
 use hdf5_pure_format::__private::FilterPipeline;
 use hdf5_pure_format::__private::FractalHeapFiltering;
 use hdf5_pure_format::__private::FractalHeapHeader;
+use hdf5_pure_format::__private::{
+    BTREE_V2_LINK_NAME, BTreeV2Header, BTreeV2Layout, BTreeV2LinkNameIndex, FormatWidths,
+    FractalHeapIdKind, FractalHeapIdLayout, HugeObjectRecordContext, HugeObjectReference,
+    HugeObjectTrackerRecord,
+};
 use hdf5_pure_format::__private::{FractalHeapHeaderLocator, LengthWidth, OffsetWidth};
 use rstest::rstest;
 use tempfile::TempDir;
@@ -109,6 +114,105 @@ fn a_c_written_filtered_link_heap_is_parsed_and_its_links_are_listed(
     assert_eq!(streaming, expected_names);
 }
 
+#[test]
+fn a_c_written_filtered_huge_object_has_a_type_two_record() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("filtered_huge.h5");
+    let gcpl = GroupCreate::build()
+        .obj_track_times(false)
+        .finish()
+        .unwrap();
+    assert_eq!(group_filter::set_deflate(&gcpl, 6), 0);
+    let file = CFile::with_options()
+        .with_fapl(|p| p.libver_bounds(LibraryVersion::V18, LibraryVersion::latest()))
+        .create(&path)
+        .unwrap();
+    let group = file
+        .create_group_builder()
+        .set_gcpl(&gcpl)
+        .create("g")
+        .unwrap();
+    for index in 0..12 {
+        group
+            .link_soft("/unresolved", &format!("small_{index:02}"))
+            .unwrap();
+    }
+    group
+        .link_soft(&format!("/{}", "x".repeat(12_000)), "huge")
+        .unwrap();
+    drop(group);
+    file.close().unwrap();
+    let image = fs::read(&path).unwrap();
+    let header_offset = test_util::fractal_heap::header_offsets(&image)[0];
+    let heap = FractalHeapHeader::parse(&image, header_offset, 8, 8).unwrap();
+    assert_eq!(heap.huge_objects_count, 1);
+    let widths = FormatWidths {
+        offsets: OffsetWidth::Eight,
+        lengths: LengthWidth::Eight,
+    };
+    let tree = BTreeV2Header::parse_with_widths(
+        &image,
+        usize::try_from(heap.btree_huge_objects_address.get()).unwrap(),
+        widths,
+    )
+    .unwrap();
+    let records = HugeObjectRecordContext::new(&heap, widths).unwrap();
+    assert_eq!(tree.tree_type, records.tree_type());
+    assert_eq!(tree.record_size, records.record_size());
+    let decoder = records.resolve(&tree).unwrap();
+    let layout = BTreeV2Layout::new(&tree, widths.offsets).unwrap();
+    let root = layout.root().unwrap();
+    let view = layout
+        .parse(
+            &image[usize::try_from(root.address().get()).unwrap()..],
+            root,
+        )
+        .unwrap();
+    let HugeObjectTrackerRecord::FilteredIndirect(record) =
+        decoder.parse(view.record(0).unwrap()).unwrap()
+    else {
+        panic!("expected filtered indirect huge record")
+    };
+    assert_eq!(record.id(), 1);
+    assert_eq!(record.location().decoded_size(), heap.huge_objects_size);
+    assert!(record.location().encoded_size() < record.location().decoded_size());
+    assert_eq!(record.location().filter_mask(), 0);
+    let name_index = image
+        .windows(BTREE_SIGNATURE.len())
+        .enumerate()
+        .find_map(|(offset, signature)| {
+            if signature != BTREE_SIGNATURE {
+                return None;
+            }
+            BTreeV2Header::parse_with_widths(&image, offset, widths)
+                .ok()
+                .filter(|header| header.tree_type == BTREE_V2_LINK_NAME)
+        })
+        .unwrap();
+    let names = BTreeV2Layout::new(&name_index, widths.offsets).unwrap();
+    let root = names.root().unwrap();
+    let view = names
+        .parse(
+            &image[usize::try_from(root.address().get()).unwrap()..],
+            root,
+        )
+        .unwrap();
+    let link_records =
+        BTreeV2LinkNameIndex::new(&name_index, widths.offsets, heap.heap_id_length).unwrap();
+    let huge_id = (0..view.record_count())
+        .map(|index| link_records.record(view.record(index).unwrap()).unwrap().1)
+        .find(|id| id.first() == Some(&HUGE_ID_FIRST_BYTE))
+        .unwrap();
+    let parsed = FractalHeapIdLayout::new(&heap, widths.offsets, widths.lengths)
+        .parse(huge_id)
+        .unwrap()
+        .kind();
+    let FractalHeapIdKind::Huge(HugeObjectReference::FilteredIndexed(key)) = parsed else {
+        panic!("expected filtered indirect huge ID, got {parsed:?}")
+    };
+    assert_eq!(key.value(), record.id());
+}
+
 // "Fractal Heap", format specification version 4.0, defines the header signature.
 const FRACTAL_HEAP_SIGNATURE: &[u8; 4] = b"FRHP";
 // "The Data Storage - Filter Pipeline Message", format specification version 4.0, defines the
@@ -116,3 +220,14 @@ const FRACTAL_HEAP_SIGNATURE: &[u8; 4] = b"FRHP";
 const PIPELINE_VERSION_TWO: u8 = 2;
 const FILTER_DEFLATE: u16 = 1;
 const FILTER_OPTIONAL: u16 = 0x0001;
+
+/// The version 2 B-tree header signature from "Version 2 B-trees" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+const BTREE_SIGNATURE: &[u8; 4] = b"BTHD";
+/// The version-0 huge-ID type byte from "Fractal Heap" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
+const HUGE_ID_FIRST_BYTE: u8 = 0x10;
