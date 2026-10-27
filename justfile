@@ -11,7 +11,7 @@ mod api "scripts/api.just"
 # Check for unused dependencies, typos, dead links, and bad GitHub actions usage
 mod hygiene "scripts/hygiene.just"
 mod fuzz "scripts/fuzz.just"
-# Test with libhdf5 and libmatio in the `hdf5-pure-crosscheck` crate
+# Test the facade and external interoperability suite with libhdf5 and libmatio
 mod interop "scripts/interop.just"
 mod release "scripts/release.just"
 # format, lint, test python scripts
@@ -58,10 +58,12 @@ doctest-each-feature *ARGS:
 
 fmt:
     cargo fmt --all
+    rustfmt --edition 2024 src/edit/group_inspection.rs src/edit/native_crosschecks.rs src/edit/native_crosschecks/*.rs src/reader_native_crosschecks.rs
 
 # Check Rust formatting
 fmt-check:
     cargo fmt --all -- --check
+    rustfmt --check --edition 2024 src/edit/group_inspection.rs src/edit/native_crosschecks.rs src/edit/native_crosschecks/*.rs src/reader_native_crosschecks.rs
 
 # Clippy over every workspace crate but the crosschecks, with the default features.
 clippy *ARGS:

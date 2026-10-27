@@ -1,6 +1,6 @@
 # The dated nightly scripts/nightly.txt pins for the checks that need nightly.
 NIGHTLY := trim(read(source_directory() / "nightly.txt"))
-# The package that links the C library, which only the interop recipes build.
+# The external interoperability test package.
 CROSSCHECK := "hdf5-pure-crosscheck"
 # Every workspace crate but the crosschecks, for the workspace-wide recipes.
 WORKSPACE := "--workspace --exclude " + CROSSCHECK
