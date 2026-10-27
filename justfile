@@ -40,12 +40,10 @@ test *ARGS:
 test-full *ARGS:
     cargo nextest run --locked {{ WORKSPACE }} {{ FULL_PUBLIC }} {{ ARGS }}
 
-# Test strict persisted-manager checksums without the checksum feature.
-test-persisted-without-checksum:
-    cargo nextest run --locked -p hdf5-pure --no-default-features --features std --test main strict_open_checks_persisted_checksums_without_the_checksum_feature
-
-# The facade's tests once per feature of its full-public profile, each beside the defaults.
+# The facade's tests with std and deflate without defaults, followed by
+# each full-public feature beside the defaults.
 test-each-feature *ARGS:
+    cargo hack -p hdf5-pure --features std,deflate nextest run --locked --no-default-features {{ ARGS }}
     cargo hack -p hdf5-pure --each-feature --include-features {{ FULL_PUBLIC_FEATURES }} --exclude-no-default-features --features default nextest run --locked {{ ARGS }}
 
 # The doctests of every workspace crate but the crosschecks, with `ARGS`.
@@ -56,8 +54,10 @@ doctest *ARGS:
 doctest-full *ARGS:
     cargo test --locked --doc {{ WORKSPACE }} {{ FULL_PUBLIC }} {{ ARGS }}
 
-# The facade's doctests once per feature of its full-public profile, each beside the defaults.
+# The facade's doctests with std and deflate without defaults, followed by
+# each full-public feature beside the defaults.
 doctest-each-feature *ARGS:
+    cargo hack -p hdf5-pure --features std,deflate test --locked --doc --no-default-features {{ ARGS }}
     cargo hack -p hdf5-pure --each-feature --include-features {{ FULL_PUBLIC_FEATURES }} --exclude-no-default-features --features default test --locked --doc {{ ARGS }}
 
 fmt:

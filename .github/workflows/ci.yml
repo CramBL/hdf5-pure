@@ -137,7 +137,7 @@ jobs:
       - name: Doctests
         run: just ${{ matrix.config.name == 'full' && 'doctest-full' || 'doctest' }}
 
-  # Tests each feature in `FULL_PUBLIC_FEATURES` beside the defaults.
+  # Tests std and deflate without defaults, then each full-public feature beside the defaults.
   feature-tests:
     name: feature tests / ubuntu-latest / ${{ matrix.shard }}
     runs-on: ubuntu-latest
@@ -201,12 +201,16 @@ jobs:
         with:
           tool: cargo-nextest@0.9.148,cargo-hack,just@1.59.0
 
-      - name: Tests and doctests, each optional feature alone
+      - name: Tests and doctests by feature
         shell: bash
         env:
           SHARD_INDEX: ${{ matrix.shard }}
           SHARD_COUNT: ${{ strategy.job-total }}
         run: |
+          if (( SHARD_INDEX == 0 )); then
+            cargo hack -p hdf5-pure --features std,deflate nextest run --locked --no-default-features
+            cargo hack -p hdf5-pure --features std,deflate test --locked --doc --no-default-features
+          fi
           features_text="$(just --evaluate FULL_PUBLIC_FEATURES)"
           IFS=',' read -r -a features <<< "$features_text"
           shard_features=()
