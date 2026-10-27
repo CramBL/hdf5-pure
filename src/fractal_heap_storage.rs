@@ -3,6 +3,8 @@
 //! The ownership walk is read-only and operates through [`Source`]. It uses the validated
 //! [`FractalHeapBlockLayout`] for managed-block references. Checksummed direct blocks require
 //! complete checksum validation before the walker records their ownership.
+//! For huge objects, the walker reads the tracker metadata and accounts for encoded payload
+//! extents. It compares the record count and summed decoded sizes with the heap header.
 
 use alloc::collections::BTreeSet;
 use alloc::vec;
@@ -10,8 +12,11 @@ use alloc::vec::Vec;
 
 use hdf5_pure_core::__private::DecodedStoredAddress;
 use hdf5_pure_core::__private::FileRegion;
+#[cfg(test)]
 use hdf5_pure_format::__private::BTREE_V2_HUGE_OBJECT;
+#[cfg(test)]
 use hdf5_pure_format::__private::BTREE_V2_HUGE_OBJECT_DIRECT;
+use hdf5_pure_format::__private::BTreeV2Layout;
 use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::FractalHeapBlock;
 use hdf5_pure_format::__private::FractalHeapBlockFilters;
@@ -23,8 +28,11 @@ use hdf5_pure_format::__private::FractalHeapHeader;
 use hdf5_pure_format::__private::FractalHeapLayout;
 use hdf5_pure_format::__private::FractalHeapLayoutError;
 use hdf5_pure_format::__private::FreeSpaceManagerHeaderRef;
-use hdf5_pure_format::__private::HugeObjectDirectRecord;
+#[cfg(test)]
 use hdf5_pure_format::__private::HugeObjectRecord;
+use hdf5_pure_format::__private::HugeObjectRecordContext;
+use hdf5_pure_format::__private::HugeObjectRecordDecoder;
+use hdf5_pure_format::__private::HugeObjectTrackerRecord;
 
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::Extent;
@@ -36,7 +44,6 @@ use crate::address::StoredAddressExt;
 #[cfg(test)]
 use crate::address::{BaseAddress, BaseAddressExt};
 use crate::btree_v2::BTreeV2Header;
-#[cfg(test)]
 use crate::convert::Narrow;
 use crate::error::FormatError;
 #[cfg(test)]
@@ -54,8 +61,6 @@ const FORMAT_WIDTHS: FormatWidths = FormatWidths {
 /// Describes a failure to prove complete ownership of a fractal heap's file storage.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum FractalHeapStorageError {
-    /// A filtered heap has a huge-object index, whose ownership the walker does not prove.
-    FilteredHugeObjects,
     /// A lower-level HDF5 parser or source read failed.
     Format(FormatError),
     /// The heap's ownership graph or structural metadata is inconsistent.
@@ -171,12 +176,14 @@ impl FractalHeapAllocation {
 /// Managed-space manager headers and section lists also require checksum validation, regardless
 /// of the `checksum` feature. The walker reads only the used section-list bytes and accounts for
 /// the complete allocation. Huge-object payload contents are omitted from the reads.
+/// The walker decodes huge-object tracker types 1 through 4 and records payload extents at their
+/// encoded lengths. It checks the header's huge-object size total against the sum of decoded
+/// lengths.
 ///
 /// # Errors
 ///
 /// Returns [`FractalHeapStorageError::UnsupportedFilter`] if a filtered direct block has an active
-/// filter this crate does not decode, and [`FractalHeapStorageError::FilteredHugeObjects`] if a
-/// filtered heap has a huge-object index. Returns [`FractalHeapStorageError::InvalidStorage`]
+/// filter this crate does not decode. Returns [`FractalHeapStorageError::InvalidStorage`]
 /// for duplicate blocks, contradictory allocation accounting, an unexpected huge-object index
 /// layout, or overlapping allocations. Returns [`FractalHeapStorageError::Layout`] for invalid
 /// layout calculations and [`FractalHeapStorageError::Format`] for parser or source errors,
@@ -434,6 +441,13 @@ fn collect_managed_fsm_storage(
     Ok(())
 }
 
+/// Records the huge-object tracker allocations and encoded payload extents.
+///
+/// # Errors
+///
+/// Returns [`FractalHeapStorageError::InvalidStorage`] if record counts or decoded-size totals
+/// disagree, numeric keys repeat, or the tracker encoding differs from the heap's parameters.
+/// Returns [`FractalHeapStorageError::Format`] for parser, source, or extent errors.
 fn collect_huge_storage<S: Source + ?Sized>(
     source: &S,
     heap: &FractalHeapHeader,
@@ -447,73 +461,165 @@ fn collect_huge_storage<S: Source + ?Sized>(
         }
         return Ok(());
     }
-    if heap.filtering.is_filtered() {
-        return Err(FractalHeapStorageError::FilteredHugeObjects);
-    }
-
     let header = BTreeV2Header::parse_from_source_with_widths(
         &SourceMetadata(source),
         tree_address.get(),
         widths,
     )?;
-    let direct = heap.huge_ids_direct_with_widths(widths);
-    let (expected_type, required_record_size) = if direct {
-        (
-            BTREE_V2_HUGE_OBJECT_DIRECT,
-            HugeObjectDirectRecord::size(widths.offsets, widths.lengths),
-        )
-    } else {
-        (
-            BTREE_V2_HUGE_OBJECT,
-            HugeObjectRecord::size(widths.offsets, widths.lengths),
-        )
-    };
-    if header.tree_type != expected_type || header.record_size != required_record_size {
+    let decoder = HugeObjectRecordContext::new(heap, widths)?
+        .resolve(&header)
+        .map_err(|_error| FractalHeapStorageError::InvalidStorage)?;
+
+    if header.total_records != heap.huge_objects_count {
         return Err(FractalHeapStorageError::InvalidStorage);
     }
-
-    let tree_extents =
-        crate::btree_v2::collect_btree_v2_storage_extents(source, tree_address, widths)?;
-    let records =
-        crate::btree_v2::collect_btree_v2_records_from_source(source, &header, widths.offsets)?;
-    if u64::try_from(records.len()).ok() != Some(heap.huge_objects_count)
-        || header.total_records != heap.huge_objects_count
-    {
-        return Err(FractalHeapStorageError::InvalidStorage);
+    let nodes = BTreeV2Layout::new(&header, widths.offsets)?;
+    allocations.push((
+        extent_in_source(
+            source,
+            tree_address.get(),
+            hdf5_pure_format::__private::btree_v2_header_size(widths.offsets, widths.lengths)
+                .to_u64(),
+        )?,
+        FractalHeapAllocation::HugeObjectIndex,
+    ));
+    HugeStorageWalk {
+        source,
+        decoder,
+        allocations,
+        keys: BTreeSet::new(),
+        payload_bytes: 0,
+        count: 0,
     }
+    .collect(&header, &nodes, heap.huge_objects_size)
+}
 
-    let mut payload_bytes = 0u64;
-    let mut payloads = Vec::with_capacity(records.len());
-    for record in records {
-        let (address, length) = if direct {
-            let record = record.huge_object_direct(widths.offsets, widths.lengths)?;
-            (record.address, record.length)
-        } else {
-            let record = record.huge_object(widths.offsets, widths.lengths)?;
-            (record.address, record.length)
-        };
-        if address.is_undefined(widths.offsets) {
+/// Accumulates huge-object allocations, numeric keys, and decoded-size totals.
+struct HugeStorageWalk<'a, 'e, S: Source + ?Sized> {
+    source: &'a S,
+    decoder: HugeObjectRecordDecoder,
+    allocations: &'e mut Vec<(Extent, FractalHeapAllocation)>,
+    keys: BTreeSet<u64>,
+    /// The sum of decoded object sizes from the tracker records.
+    payload_bytes: u64,
+    count: u64,
+}
+
+impl<S: Source + ?Sized> HugeStorageWalk<'_, '_, S> {
+    /// Collects complete index allocations and checks record and decoded-size totals.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FractalHeapStorageError::InvalidStorage`] if subtree counts or final totals
+    /// disagree, and the errors of [`record`](Self::record) or parsing a tracker node otherwise.
+    fn collect(
+        mut self,
+        header: &BTreeV2Header,
+        nodes: &BTreeV2Layout,
+        decoded_size: u64,
+    ) -> Result<(), FractalHeapStorageError> {
+        let mut pending: Vec<_> = nodes.root().into_iter().collect();
+        let mut visited = BTreeSet::new();
+        while let Some(node) = pending.pop() {
+            if !visited.insert(node.address()) {
+                return Err(FormatError::InvalidBTreeV2Signature.into());
+            }
+            let Self {
+                source,
+                decoder: _,
+                allocations,
+                keys: _,
+                payload_bytes: _,
+                count,
+            } = &mut self;
+            let allocation =
+                extent_in_source(*source, node.address().get(), u64::from(header.node_size))?;
+            let bytes =
+                source.read_metadata_at(allocation.start(), allocation.len().to_usize()?)?;
+            let view = nodes.parse(&bytes, node)?;
+            allocations.push((allocation, FractalHeapAllocation::HugeObjectIndex));
+            *count = count
+                .checked_add(view.record_count().to_u64())
+                .ok_or(FractalHeapStorageError::InvalidStorage)?;
+            for index in 0..view.record_count() {
+                self.record(view.record(index)?)?;
+            }
+            let mut total = view.record_count().to_u64();
+            for index in 0..=view.record_count() {
+                if let Some(child) = view.child(index)? {
+                    total = total
+                        .checked_add(child.total_records())
+                        .ok_or(FractalHeapStorageError::InvalidStorage)?;
+                    pending.push(child);
+                }
+            }
+            if total != node.total_records() {
+                return Err(FractalHeapStorageError::InvalidStorage);
+            }
+        }
+        if self.count != header.total_records || self.payload_bytes != decoded_size {
             return Err(FractalHeapStorageError::InvalidStorage);
         }
-        payload_bytes = payload_bytes
-            .checked_add(length)
-            .ok_or(FractalHeapStorageError::InvalidStorage)?;
-        payloads.push((
-            extent_in_source(source, address.get(), length)?,
-            FractalHeapAllocation::HugeObject,
-        ));
-    }
-    if payload_bytes != heap.huge_objects_size {
-        return Err(FractalHeapStorageError::InvalidStorage);
+        Ok(())
     }
 
-    allocations.extend(
-        tree_extents
-            .into_iter()
-            .map(|extent| (extent, FractalHeapAllocation::HugeObjectIndex)),
-    );
-    allocations.extend(payloads);
-    Ok(())
+    /// Records one encoded payload extent and adds its decoded size to the total.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FractalHeapStorageError::InvalidStorage`] if a numeric key repeats or the
+    /// decoded-size sum overflows. Returns [`FractalHeapStorageError::Format`] if parsing the
+    /// record or bounding its complete encoded allocation fails.
+    fn record(&mut self, bytes: &[u8]) -> Result<(), FractalHeapStorageError> {
+        let Self {
+            source,
+            decoder,
+            allocations,
+            keys,
+            payload_bytes,
+            count: _,
+        } = self;
+        let (key, address, encoded_size, decoded_size) = match decoder.parse(bytes)? {
+            HugeObjectTrackerRecord::Indirect(record) => (
+                Some(record.id),
+                record.address,
+                record.length,
+                record.length,
+            ),
+            HugeObjectTrackerRecord::FilteredIndirect(record) => {
+                let location = record.location();
+                (
+                    Some(record.id()),
+                    location.address(),
+                    location.encoded_size(),
+                    location.decoded_size(),
+                )
+            }
+            HugeObjectTrackerRecord::Direct(record) => {
+                (None, record.address, record.length, record.length)
+            }
+            HugeObjectTrackerRecord::FilteredDirect(record) => {
+                let location = record.location();
+                (
+                    None,
+                    location.address(),
+                    location.encoded_size(),
+                    location.decoded_size(),
+                )
+            }
+        };
+        if key.is_some_and(|key| !keys.insert(key)) {
+            return Err(FractalHeapStorageError::InvalidStorage);
+        }
+        *payload_bytes = payload_bytes
+            .checked_add(decoded_size)
+            .ok_or(FractalHeapStorageError::InvalidStorage)?;
+        allocations.push((
+            extent_in_source(*source, address.get(), encoded_size)?,
+            FractalHeapAllocation::HugeObject,
+        ));
+        Ok(())
+    }
 }
 
 /// Returns a checked non-empty extent after proving its whole range lies in `source`.
@@ -546,6 +652,7 @@ mod tests {
     use hdf5_pure_format::__private::FilterDescription;
     use hdf5_pure_format::__private::FilterPipeline;
     use hdf5_pure_format::__private::FractalHeapFiltering;
+    use hdf5_pure_format::__private::FractalHeapIdLayout;
     use hdf5_pure_format::__private::FractalHeapSectionClass;
 
     use test_util::btree_v2;
@@ -799,6 +906,7 @@ mod tests {
             self.bytes.len() as u64
         }
         fn read_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
+            self.reads.borrow_mut().push((offset, bytes.len()));
             BytesSource::new(self.bytes).read_at(offset, bytes)
         }
         fn read_metadata_at(&self, offset: u64, length: usize) -> Result<Vec<u8>, FormatError> {
@@ -1450,26 +1558,592 @@ mod tests {
         );
     }
 
-    #[test]
-    fn huge_objects_in_a_filtered_heap_are_an_unsupported_owner() {
-        let header = filtered_header(
-            FractalHeapHeader {
-                btree_huge_objects_address: StoredAddress::new(0x600),
-                huge_objects_count: 1,
-                huge_objects_size: 64,
-                ..storage_header()
+    #[rstest::rstest]
+    fn filtered_huge_ownership_uses_encoded_extents_without_reading_payloads(
+        #[values(false, true)] direct: bool,
+        #[values(false, true)] internal: bool,
+        #[values(false, true)] managed: bool,
+        #[values(0, 512)] base: usize,
+    ) {
+        let fixture = FilteredHugeStorage::new(direct, internal, managed);
+        let mut physical = vec![0; base];
+        physical.extend_from_slice(&fixture.bytes);
+        let source = PrefixSource {
+            bytes: &physical,
+            reads: RefCell::new(Vec::new()),
+        };
+        let addresses = AddressContext::from_effective_base(BaseAddress::new(base.to_u64()));
+        let storage = collect_fractal_heap_storage_from_source(
+            &BaseOffsetSource {
+                inner: &source,
+                base: addresses.effective_base(),
             },
-            0,
-            test_data::filter_pipeline(vec![]),
-        );
-        let mut file = vec![0; 0x800];
-        place_filtered_storage_header(&mut file, &header);
-
-        assert_eq!(
-            collect_storage(&file),
-            Err(FractalHeapStorageError::FilteredHugeObjects)
+            addresses,
+            StoredAddress::new(STORAGE_HEAP_AT),
+            FORMAT_WIDTHS,
+        )
+        .unwrap();
+        let header_len = fixture.header_bytes().len().to_u64();
+        let mut expected = vec![
+            allocation(STORAGE_HEAP_AT, header_len, FractalHeapAllocation::Header),
+            allocation(
+                FILTERED_HUGE_TREE,
+                __private::btree_v2_header_size(OffsetWidth::Eight, LengthWidth::Eight).to_u64(),
+                FractalHeapAllocation::HugeObjectIndex,
+            ),
+            allocation(
+                FILTERED_HUGE_ROOT,
+                FILTERED_HUGE_NODE_SIZE.to_u64(),
+                FractalHeapAllocation::HugeObjectIndex,
+            ),
+            allocation(0x1000, 17, FractalHeapAllocation::HugeObject),
+            allocation(0x1100, 19, FractalHeapAllocation::HugeObject),
+            allocation(0x1200, 23, FractalHeapAllocation::HugeObject),
+        ];
+        if internal {
+            expected.extend([
+                allocation(
+                    FILTERED_HUGE_LEFT,
+                    FILTERED_HUGE_NODE_SIZE.to_u64(),
+                    FractalHeapAllocation::HugeObjectIndex,
+                ),
+                allocation(
+                    FILTERED_HUGE_RIGHT,
+                    FILTERED_HUGE_NODE_SIZE.to_u64(),
+                    FractalHeapAllocation::HugeObjectIndex,
+                ),
+            ]);
+        }
+        if managed {
+            expected.push(allocation(
+                STORAGE_ROOT_AT,
+                128,
+                FractalHeapAllocation::DirectBlock,
+            ));
+        }
+        expected.sort_unstable_by_key(|&(extent, _)| extent);
+        assert_eq!(storage.allocations(), expected);
+        assert!(
+            source
+                .reads
+                .borrow()
+                .iter()
+                .all(|&(at, len)| at + len.to_u64() <= base.to_u64() + 0x1000)
         );
     }
+
+    #[rstest::rstest]
+    #[case::count(|fixture: &mut FilteredHugeStorage| fixture.header.huge_objects_count = 2)]
+    #[case::missing_tracker(|fixture: &mut FilteredHugeStorage| fixture.header.btree_huge_objects_address = StoredAddress::new(u64::MAX))]
+    #[case::encoded_accounting(|fixture: &mut FilteredHugeStorage| fixture.header.huge_objects_size = 17 + 19 + 23)]
+    #[case::decoded_accounting(|fixture: &mut FilteredHugeStorage| fixture.header.huge_objects_size += 1)]
+    #[case::duplicate_payload(|fixture: &mut FilteredHugeStorage| fixture.records[1][..FILTERED_HUGE_ENCODED_AT].copy_from_slice(&0x1000u64.to_le_bytes()))]
+    #[case::overlapping_payload(|fixture: &mut FilteredHugeStorage| fixture.records[1][..FILTERED_HUGE_ENCODED_AT].copy_from_slice(&0x1001u64.to_le_bytes()))]
+    #[case::metadata_overlap(|fixture: &mut FilteredHugeStorage| fixture.records[0][..FILTERED_HUGE_ENCODED_AT].copy_from_slice(&FILTERED_HUGE_ROOT.to_le_bytes()))]
+    #[case::decoded_total_overflow(|fixture: &mut FilteredHugeStorage| fixture.records[0][FILTERED_HUGE_DECODED_AT..FILTERED_HUGE_KEY_AT].copy_from_slice(&u64::MAX.to_le_bytes()))]
+    fn filtered_huge_ownership_rejects_inconsistent_accounting(
+        #[case] damage: fn(&mut FilteredHugeStorage),
+        #[values(false, true)] direct: bool,
+    ) {
+        let mut fixture = FilteredHugeStorage::new(direct, false, false);
+        damage(&mut fixture);
+        fixture.write();
+        assert_eq!(
+            collect_storage(&fixture.bytes),
+            Err(FractalHeapStorageError::InvalidStorage)
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::undefined(0, u64::MAX, FormatError::InvalidFractalHeapGeometry)]
+    #[case::encoded_zero(FILTERED_HUGE_ENCODED_AT, 0, FormatError::InvalidFractalHeapGeometry)]
+    #[case::decoded_zero(FILTERED_HUGE_DECODED_AT, 0, FormatError::InvalidFractalHeapGeometry)]
+    #[case::mask(FILTERED_HUGE_MASK_AT, 2, FormatError::InvalidFractalHeapGeometry)]
+    #[case::skipped_size(FILTERED_HUGE_MASK_AT, 1, FormatError::InvalidFractalHeapGeometry)]
+    #[case::overflow(0, u64::MAX - 1, FormatError::OffsetOverflow { offset: u64::MAX - 1, length: 17 })]
+    fn filtered_huge_ownership_rejects_invalid_record_fields(
+        #[case] at: usize,
+        #[case] value: u64,
+        #[case] expected: FormatError,
+        #[values(false, true)] direct: bool,
+    ) {
+        let mut fixture = FilteredHugeStorage::new(direct, false, false);
+        let width = if at == FILTERED_HUGE_MASK_AT {
+            core::mem::size_of::<u32>()
+        } else {
+            core::mem::size_of::<u64>()
+        };
+        fixture.records[0][at..at + width].copy_from_slice(&value.to_le_bytes()[..width]);
+        fixture.write();
+        assert_eq!(
+            collect_storage(&fixture.bytes),
+            Err(FractalHeapStorageError::Format(expected))
+        );
+    }
+
+    #[test]
+    fn filtered_huge_ownership_rejects_duplicate_numeric_keys() {
+        let mut fixture = FilteredHugeStorage::new(false, false, false);
+        fixture.records[1][FILTERED_HUGE_KEY_AT..].copy_from_slice(&1u64.to_le_bytes());
+        fixture.write();
+        assert_eq!(
+            collect_storage(&fixture.bytes),
+            Err(FractalHeapStorageError::InvalidStorage)
+        );
+    }
+
+    test_util_hdf5::hdf5_bundled_tests! {
+    use crate::fractal_heap_storage;
+    #[cfg(feature = "deflate")]
+    #[rstest::rstest]
+    #[case::indirect(false)]
+    #[case::direct(true)]
+    fn c_written_filtered_huge_objects_have_exact_storage_and_contents(#[case] direct: bool) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("filtered_huge.h5");
+        test_util_hdf5::fractal_heap::write_filtered_huge(&path, direct);
+        let bytes = std::fs::read(&path).unwrap();
+        let file = crate::reader::File::from_bytes(bytes.clone()).unwrap();
+        let address = file.dataset("heap_address").unwrap().read_u64().unwrap()[0];
+        let id = file.dataset("heap_id").unwrap().read_u8().unwrap();
+        let header = FractalHeapHeader::parse(&bytes, address.to_usize().unwrap(), 8, 8).unwrap();
+        let widths = FormatWidths {
+            offsets: OffsetWidth::Eight,
+            lengths: LengthWidth::Eight,
+        };
+        let inspected = Heap::new(&bytes, address, &header);
+        let storage = fractal_heap_storage::collect_fractal_heap_storage_from_source(
+            &BytesSource::new(&bytes),
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+            StoredAddress::new(address),
+            widths,
+        )
+        .unwrap();
+        let expected: Vec<_> = inspected
+            .allocations
+            .iter()
+            .map(|item| {
+                let (at, length) = item.extent();
+                let kind = match item.kind() {
+                    AllocationKind::Header => FractalHeapAllocation::Header,
+                    AllocationKind::HugeIndex => FractalHeapAllocation::HugeObjectIndex,
+                    AllocationKind::HugeObject => FractalHeapAllocation::HugeObject,
+                    kind => panic!("unexpected heap allocation: {kind:?}"),
+                };
+                (Extent::new(at, length).unwrap(), kind)
+            })
+            .collect();
+        assert_eq!(storage.allocations(), expected);
+        let expected: Vec<_> = (0..12_000)
+            .map(|index| u8::try_from(index % 251).unwrap())
+            .collect();
+        let mut reader = HeapObjectReader::new(
+            &header,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+            StoredAddress::new(address),
+            AccessMode::ReadOnly,
+            widths,
+        );
+        assert_eq!(
+            reader
+                .read(
+                    &bytes,
+                    FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
+                        .parse(&id)
+                        .unwrap()
+                )
+                .unwrap(),
+            expected
+        );
+        let mut reader = HeapObjectReader::new(
+            &header,
+            AddressContext::from_effective_base(BaseAddress::ZERO),
+            StoredAddress::new(address),
+            AccessMode::ReadOnly,
+            widths,
+        );
+        assert_eq!(
+            reader
+                .read_from_source(
+                    &BytesSource::new(&bytes),
+                    FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
+                        .parse(&id)
+                        .unwrap()
+                )
+                .unwrap(),
+            expected
+        );
+    }
+    }
+
+    #[rstest::rstest]
+    #[case::record_type(|fixture: &mut FilteredHugeStorage| fixture.tree_type = BTREE_V2_HUGE_OBJECT)]
+    #[case::size(|fixture: &mut FilteredHugeStorage| fixture.record_size += 1)]
+    #[case::tree_count(|fixture: &mut FilteredHugeStorage| fixture.tree_count += 1)]
+    fn filtered_huge_ownership_rejects_inconsistent_tracker_metadata(
+        #[case] damage: fn(&mut FilteredHugeStorage),
+        #[values(false, true)] direct: bool,
+    ) {
+        let mut fixture = FilteredHugeStorage::new(direct, false, false);
+        damage(&mut fixture);
+        fixture.write();
+        assert_eq!(
+            collect_storage(&fixture.bytes),
+            Err(FractalHeapStorageError::InvalidStorage)
+        );
+    }
+
+    #[rstest::rstest]
+    fn filtered_huge_ownership_rejects_inconsistent_leaf_counts(
+        #[values(false, true)] direct: bool,
+    ) {
+        let mut fixture = FilteredHugeStorage::new(direct, false, false);
+        fixture.root_count = 2;
+        fixture.write();
+        assert_eq!(
+            collect_storage(&fixture.bytes),
+            Err(FractalHeapStorageError::Format(
+                FormatError::InvalidBTreeV2Signature
+            ))
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::consistent(3, None)]
+    #[case::incorrect_sum(4, Some(FractalHeapStorageError::InvalidStorage))]
+    #[case::impossible_child(
+        2,
+        Some(FractalHeapStorageError::Format(FormatError::InvalidBTreeV2Signature))
+    )]
+    fn filtered_huge_ownership_validates_subtree_record_counts(
+        #[case] child_total: u64,
+        #[case] expected: Option<FractalHeapStorageError>,
+        #[values(false, true)] direct: bool,
+    ) {
+        let fixture = FilteredHugeStorage::two_levels(direct, child_total);
+        let result = collect_storage(&fixture.bytes);
+        if let Some(expected) = expected {
+            assert_eq!(result.unwrap_err(), expected);
+        } else {
+            let storage = result.unwrap();
+            assert_eq!(storage.allocations().len(), 16);
+            assert_eq!(
+                storage
+                    .allocations()
+                    .iter()
+                    .filter(|(_, kind)| *kind == FractalHeapAllocation::HugeObject)
+                    .count(),
+                7
+            );
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::payload(0x1200 + 22, 0x1200 + 23)]
+    #[case::node_padding(FILTERED_HUGE_ROOT + FILTERED_HUGE_NODE_SIZE as u64 - 1, FILTERED_HUGE_ROOT + FILTERED_HUGE_NODE_SIZE as u64)]
+    fn filtered_huge_ownership_requires_complete_allocations(
+        #[case] present: u64,
+        #[case] expected: u64,
+        #[values(false, true)] direct: bool,
+    ) {
+        let mut fixture = FilteredHugeStorage::new(direct, false, false);
+        fixture.bytes.truncate(present.to_usize().unwrap());
+        assert_eq!(
+            collect_storage(&fixture.bytes),
+            Err(FractalHeapStorageError::Format(
+                FormatError::UnexpectedSourceEof {
+                    expected,
+                    available: present
+                }
+            ))
+        );
+    }
+
+    struct FilteredHugeStorage {
+        header: FractalHeapHeader,
+        records: Vec<Vec<u8>>,
+        tree_type: u8,
+        record_size: u16,
+        tree_count: u64,
+        root_count: u16,
+        internal: bool,
+        bytes: Vec<u8>,
+    }
+
+    impl FilteredHugeStorage {
+        fn two_levels(direct: bool, child_total: u64) -> Self {
+            let mut fixture = Self::new(direct, true, false);
+            fixture.bytes.resize(0x3000, 0);
+            fixture.records = (0..7u64)
+                .map(|index| {
+                    let mut record = fixture.records[0].clone();
+                    record[..FILTERED_HUGE_ENCODED_AT]
+                        .copy_from_slice(&(0x1000 + index * 0x100).to_le_bytes());
+                    if !direct {
+                        record[FILTERED_HUGE_KEY_AT..].copy_from_slice(&(index + 1).to_le_bytes());
+                    }
+                    record
+                })
+                .collect();
+            fixture.header.huge_objects_count = 7;
+            fixture.header.huge_objects_size = 7000;
+            place_filtered_storage_header(&mut fixture.bytes, &fixture.header);
+            let header = btree_v2::Header::new(
+                fixture.tree_type,
+                fixture.record_size,
+                FILTERED_HUGE_ROOT,
+                1,
+            )
+            .node_size(u32::try_from(FILTERED_HUGE_NODE_SIZE).unwrap())
+            .depth(2)
+            .total_records(7)
+            .build(Widths::EIGHT);
+            place(&mut fixture.bytes, FILTERED_HUGE_TREE, &header);
+            let root = btree_v2::internal(
+                fixture.tree_type,
+                &[fixture.records[3].clone()],
+                &[
+                    btree_v2::Child {
+                        address: FILTERED_HUGE_LEFT,
+                        records: 1,
+                        records_width: 1,
+                        subtree: Some(btree_v2::Subtree {
+                            records: child_total,
+                            width: 1,
+                        }),
+                    },
+                    btree_v2::Child {
+                        address: FILTERED_HUGE_RIGHT,
+                        records: 1,
+                        records_width: 1,
+                        subtree: Some(btree_v2::Subtree {
+                            records: 3,
+                            width: 1,
+                        }),
+                    },
+                ],
+                Widths::EIGHT,
+            );
+            place_btree_node(
+                &mut fixture.bytes,
+                FILTERED_HUGE_ROOT,
+                &root,
+                FILTERED_HUGE_NODE_SIZE,
+            );
+            for (address, middle, left, right) in [
+                (FILTERED_HUGE_LEFT, 1, 0x2000, 0x2200),
+                (FILTERED_HUGE_RIGHT, 5, 0x2400, 0x2600),
+            ] {
+                let node = btree_v2::internal(
+                    fixture.tree_type,
+                    &[fixture.records[middle].clone()],
+                    &[
+                        btree_v2::Child {
+                            address: left,
+                            records: 1,
+                            records_width: 1,
+                            subtree: None,
+                        },
+                        btree_v2::Child {
+                            address: right,
+                            records: 1,
+                            records_width: 1,
+                            subtree: None,
+                        },
+                    ],
+                    Widths::EIGHT,
+                );
+                place_btree_node(&mut fixture.bytes, address, &node, FILTERED_HUGE_NODE_SIZE);
+                place_btree_node(
+                    &mut fixture.bytes,
+                    left,
+                    &btree_v2::leaf(fixture.tree_type, &[fixture.records[middle - 1].clone()]),
+                    FILTERED_HUGE_NODE_SIZE,
+                );
+                place_btree_node(
+                    &mut fixture.bytes,
+                    right,
+                    &btree_v2::leaf(fixture.tree_type, &[fixture.records[middle + 1].clone()]),
+                    FILTERED_HUGE_NODE_SIZE,
+                );
+            }
+            fixture
+        }
+
+        fn new(direct: bool, internal: bool, managed: bool) -> Self {
+            let mut header = filtered_header(
+                FractalHeapHeader {
+                    heap_id_length: if direct {
+                        FILTERED_HUGE_DIRECT_ID_LEN
+                    } else {
+                        7
+                    },
+                    btree_huge_objects_address: StoredAddress::new(FILTERED_HUGE_TREE),
+                    huge_objects_count: 3,
+                    huge_objects_size: 1000 + 2000 + 3000,
+                    ..storage_header()
+                },
+                if managed { 128 } else { 0 },
+                test_data::filter_pipeline(vec![FilterDescription {
+                    filter_id: test_data::FILTER_BZIP2,
+                    name: None,
+                    flags: 0,
+                    client_data: vec![],
+                }]),
+            );
+            if managed {
+                header.root_block_address = StoredAddress::new(STORAGE_ROOT_AT);
+                header.managed_space = 128;
+                header.allocated_managed_space = 128;
+                header.managed_objects_count = 1;
+                let FractalHeapFiltering::Filtered {
+                    root_filter_mask, ..
+                } = &mut header.filtering
+                else {
+                    panic!("expected filtered heap")
+                };
+                *root_filter_mask = 1;
+            }
+            let records = [
+                (0x1000u64, 17u64, 1000u64, 1u64),
+                (0x1100, 19, 2000, 2),
+                (0x1200, 23, 3000, 3),
+            ]
+            .map(|(address, encoded, decoded, key)| {
+                let mut record = address.to_le_bytes().to_vec();
+                record.extend_from_slice(&encoded.to_le_bytes());
+                record.extend_from_slice(&0u32.to_le_bytes());
+                record.extend_from_slice(&decoded.to_le_bytes());
+                if !direct {
+                    record.extend_from_slice(&key.to_le_bytes());
+                }
+                record
+            })
+            .to_vec();
+            let context = HugeObjectRecordContext::new(&header, FORMAT_WIDTHS).unwrap();
+            let mut fixture = Self {
+                tree_type: context.tree_type(),
+                record_size: context.record_size(),
+                tree_count: 3,
+                root_count: if internal { 1 } else { 3 },
+                header,
+                records,
+                internal,
+                bytes: vec![0; 0x1300],
+            };
+            fixture.write();
+            fixture
+        }
+
+        fn write(&mut self) {
+            place_filtered_storage_header(&mut self.bytes, &self.header);
+            place(
+                &mut self.bytes,
+                FILTERED_HUGE_TREE,
+                &btree_v2::Header::new(
+                    self.tree_type,
+                    self.record_size,
+                    FILTERED_HUGE_ROOT,
+                    self.root_count,
+                )
+                .node_size(u32::try_from(FILTERED_HUGE_NODE_SIZE).unwrap())
+                .depth(u16::from(self.internal))
+                .total_records(self.tree_count)
+                .build(Widths::EIGHT),
+            );
+            if self.internal {
+                let root = btree_v2::internal(
+                    self.tree_type,
+                    &[self.records[1].clone()],
+                    &[
+                        btree_v2::Child {
+                            address: FILTERED_HUGE_LEFT,
+                            records: 1,
+                            records_width: 1,
+                            subtree: None,
+                        },
+                        btree_v2::Child {
+                            address: FILTERED_HUGE_RIGHT,
+                            records: 1,
+                            records_width: 1,
+                            subtree: None,
+                        },
+                    ],
+                    Widths::EIGHT,
+                );
+                place_btree_node(
+                    &mut self.bytes,
+                    FILTERED_HUGE_ROOT,
+                    &root,
+                    FILTERED_HUGE_NODE_SIZE,
+                );
+                place_btree_node(
+                    &mut self.bytes,
+                    FILTERED_HUGE_LEFT,
+                    &btree_v2::leaf(self.tree_type, &[self.records[0].clone()]),
+                    FILTERED_HUGE_NODE_SIZE,
+                );
+                place_btree_node(
+                    &mut self.bytes,
+                    FILTERED_HUGE_RIGHT,
+                    &btree_v2::leaf(self.tree_type, &[self.records[2].clone()]),
+                    FILTERED_HUGE_NODE_SIZE,
+                );
+            } else {
+                place_btree_node(
+                    &mut self.bytes,
+                    FILTERED_HUGE_ROOT,
+                    &btree_v2::leaf(
+                        self.tree_type,
+                        &self.records[..usize::from(self.root_count)],
+                    ),
+                    FILTERED_HUGE_NODE_SIZE,
+                );
+            }
+            if !self
+                .header
+                .root_block_address
+                .is_undefined(OffsetWidth::Eight)
+            {
+                place(&mut self.bytes, STORAGE_ROOT_AT, &direct_block(0, 128));
+            }
+        }
+
+        fn header_bytes(&self) -> Vec<u8> {
+            let mut bytes = vec![0; 0x400];
+            let len = place_filtered_storage_header(&mut bytes, &self.header);
+            bytes[STORAGE_HEAP_AT.to_usize().unwrap()..(STORAGE_HEAP_AT + len).to_usize().unwrap()]
+                .to_vec()
+        }
+    }
+
+    /// The encoded-length offset in a filtered huge record with eight-byte addresses.
+    ///
+    /// The fields are defined in "Version 2 B-trees" of the
+    /// [format specification, version 4.0][spec].
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+    const FILTERED_HUGE_ENCODED_AT: usize = OffsetWidth::Eight.get() as usize;
+    /// The filter-mask offset at the widths used by [`FILTERED_HUGE_ENCODED_AT`].
+    const FILTERED_HUGE_MASK_AT: usize =
+        FILTERED_HUGE_ENCODED_AT + LengthWidth::Eight.get() as usize;
+    /// The decoded-size offset at the widths used by [`FILTERED_HUGE_ENCODED_AT`].
+    const FILTERED_HUGE_DECODED_AT: usize = FILTERED_HUGE_MASK_AT + core::mem::size_of::<u32>();
+    /// The numeric-key offset in an indirect record at these widths.
+    const FILTERED_HUGE_KEY_AT: usize =
+        FILTERED_HUGE_DECODED_AT + LengthWidth::Eight.get() as usize;
+    /// The direct filtered huge-ID length at these widths, including its initial ID byte.
+    ///
+    /// The ID is defined in "Fractal Heap" of the [format specification, version 4.0][spec].
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
+    const FILTERED_HUGE_DIRECT_ID_LEN: u16 = 1 + FILTERED_HUGE_KEY_AT as u16;
+
+    const FILTERED_HUGE_TREE: u64 = 0x600;
+    const FILTERED_HUGE_ROOT: u64 = 0x800;
+    const FILTERED_HUGE_LEFT: u64 = 0xa00;
+    const FILTERED_HUGE_RIGHT: u64 = 0xc00;
+    const FILTERED_HUGE_NODE_SIZE: usize = 256;
 
     #[test]
     fn a_filter_without_a_decoder_makes_the_heap_an_unsupported_owner() {

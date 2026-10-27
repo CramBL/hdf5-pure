@@ -221,11 +221,12 @@
 //! (chunk index plus chunk data) and whole group subtrees are reclaimed. Dense attribute and dense
 //! group version 2 B-tree indexes are reclaimed when their owning storage becomes dead. The editor
 //! also reclaims their fractal heaps where complete ownership is proven, including managed-space
-//! manager headers and complete allocated section lists. Logical sections within the heap are
-//! excluded from file-space reclamation. The editor reclaims a global heap collection that only
+//! manager headers, complete allocated section lists, and filtered huge-object allocations.
+//! Logical sections within the heap are excluded from file-space reclamation. The editor reclaims
+//! a global heap collection that only
 //! the objects a delete removes refer to, and keeps every collection when it cannot read each
 //! object that can refer to one. Storage whose allocations cannot be enumerated exhaustively, such
-//! as a filtered fractal heap with a filter this crate does not decode or with huge objects, is
+//! as a managed heap block with an active filter this crate does not decode, is
 //! left as dead bytes. This avoids freeing a region that may still be in use. Under-reclaiming only
 //! wastes space. Over-reclaiming could corrupt the file.
 //!

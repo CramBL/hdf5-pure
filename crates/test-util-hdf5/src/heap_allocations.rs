@@ -7,9 +7,9 @@ use hdf5_pure::File;
 use hdf5_pure_core::__private::DecodedStoredAddress;
 use hdf5_pure_format::__private as format;
 use hdf5_pure_format::__private::{
-    BTREE_V2_HUGE_OBJECT, BTREE_V2_HUGE_OBJECT_DIRECT, BTreeV2Header, BTreeV2NodeInfo,
-    BTreeV2Record, FormatWidths, FractalHeapFiltering, FractalHeapHeader,
-    FreeSpaceManagerHeaderFrame, LengthWidth, OffsetWidth,
+    BTreeV2Header, BTreeV2NodeInfo, BTreeV2Record, FormatWidths, FractalHeapFiltering,
+    FractalHeapHeader, FreeSpaceManagerHeaderFrame, HugeObjectRecordContext,
+    HugeObjectTrackerRecord, LengthWidth, OffsetWidth,
 };
 use test_util::btree_v2;
 use test_util::checksum;
@@ -18,8 +18,8 @@ use test_util::fractal_heap;
 /// A fixture's heap metadata and disjoint allocated ranges.
 ///
 /// Addresses are relative to the file base, and the input bytes begin at that base. The fixtures
-/// use eight-byte addresses and lengths. Filtered direct blocks retain their stored sizes, and
-/// manager section lists include their full allocated capacity.
+/// use eight-byte addresses and lengths. Filtered direct blocks and huge payloads use their
+/// encoded lengths, and manager section lists include their full allocated capacity.
 pub struct Heap<'a> {
     /// The caller's parsed heap header.
     pub header: &'a FractalHeapHeader,
@@ -37,8 +37,7 @@ impl<'a> Heap<'a> {
     /// # Panics
     ///
     /// Panics if a fixture allocation is empty, out of bounds, or overlaps another allocation,
-    /// or if the metadata fails the fixture's structural assertions. Filtered huge-object indexes
-    /// are unsupported and cause a panic.
+    /// or if the metadata fails the fixture's structural assertions.
     pub fn new(bytes: &[u8], address: u64, header: &'a FractalHeapHeader) -> Self {
         let at = usize::try_from(address).unwrap();
         let mut heap = Self {
@@ -317,16 +316,18 @@ impl<'a> Heap<'a> {
             assert_eq!(self.header.huge_objects_count, 0);
             return;
         }
-        assert_eq!(
-            self.header.filtering,
-            FractalHeapFiltering::Unfiltered,
-            "filtered huge-object indexes are unsupported fixtures"
-        );
         let tree =
             BTreeV2Header::parse(bytes, usize::try_from(address.get()).unwrap(), 8, 8).unwrap();
-        assert!(
-            tree.tree_type == BTREE_V2_HUGE_OBJECT || tree.tree_type == BTREE_V2_HUGE_OBJECT_DIRECT
-        );
+        let decoder = HugeObjectRecordContext::new(
+            self.header,
+            FormatWidths {
+                offsets: OffsetWidth::Eight,
+                lengths: LengthWidth::Eight,
+            },
+        )
+        .unwrap()
+        .resolve(&tree)
+        .unwrap();
         self.push(
             bytes,
             address.get(),
@@ -361,16 +362,29 @@ impl<'a> Heap<'a> {
         assert_eq!(tree.total_records, self.header.huge_objects_count);
         let mut total = 0u64;
         for record in records {
-            let (address, length) = if tree.tree_type == BTREE_V2_HUGE_OBJECT {
-                let record = record
-                    .huge_object(OffsetWidth::Eight, LengthWidth::Eight)
-                    .unwrap();
-                (record.address.get(), record.length)
-            } else {
-                let record = record
-                    .huge_object_direct(OffsetWidth::Eight, LengthWidth::Eight)
-                    .unwrap();
-                (record.address.get(), record.length)
+            let (address, length, decoded_size) = match decoder.parse(&record.data).unwrap() {
+                HugeObjectTrackerRecord::Indirect(record) => {
+                    (record.address.get(), record.length, record.length)
+                }
+                HugeObjectTrackerRecord::Direct(record) => {
+                    (record.address.get(), record.length, record.length)
+                }
+                HugeObjectTrackerRecord::FilteredIndirect(record) => {
+                    let location = record.location();
+                    (
+                        location.address().get(),
+                        location.encoded_size(),
+                        location.decoded_size(),
+                    )
+                }
+                HugeObjectTrackerRecord::FilteredDirect(record) => {
+                    let location = record.location();
+                    (
+                        location.address().get(),
+                        location.encoded_size(),
+                        location.decoded_size(),
+                    )
+                }
             };
             self.allocations.push(Allocation::new(
                 bytes,
@@ -378,7 +392,7 @@ impl<'a> Heap<'a> {
                 length,
                 AllocationKind::HugeObject,
             ));
-            total = total.checked_add(length).unwrap();
+            total = total.checked_add(decoded_size).unwrap();
         }
         assert_eq!(total, self.header.huge_objects_size);
     }

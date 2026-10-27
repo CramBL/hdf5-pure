@@ -379,8 +379,8 @@ impl WriteEngine {
     /// [`collect_fractal_heap_storage_from_source`](
     ///     fractal_heap_storage::collect_fractal_heap_storage_from_source
     /// )
-    /// cannot prove the heap's ownership, as for a filtered heap with a filter this crate does not
-    /// decode or with huge objects, or for invalid manager metadata.
+    /// cannot prove the heap's ownership, as for a managed block with an active filter this crate
+    /// does not decode, inconsistent huge-object accounting, or invalid manager metadata.
     fn fractal_heap_spans(
         &self,
         heap_address: StoredAddress,
@@ -1364,8 +1364,8 @@ impl WriteEngine {
 
     /// Appends every heap allocation, returning whether ownership is supported.
     ///
-    /// Returns `false` for a filtered heap with a filter this crate does not decode or with huge
-    /// objects.
+    /// Returns `false` for a managed block with an active filter this crate does not decode.
+    /// Huge-object ownership uses tracker metadata and complete encoded extents.
     ///
     /// # Errors
     ///
@@ -1386,10 +1386,7 @@ impl WriteEngine {
             self.widths(),
         ) {
             Ok(storage) => storage,
-            Err(
-                FractalHeapStorageError::FilteredHugeObjects
-                | FractalHeapStorageError::UnsupportedFilter(_),
-            ) => return Ok(false),
+            Err(FractalHeapStorageError::UnsupportedFilter(_)) => return Ok(false),
             Err(FractalHeapStorageError::Format(error)) => return Err(error.into()),
             Err(FractalHeapStorageError::Layout(_) | FractalHeapStorageError::InvalidStorage) => {
                 return Err(Error::InvalidFractalHeapStorage {
