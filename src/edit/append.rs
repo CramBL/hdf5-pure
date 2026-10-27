@@ -27,6 +27,7 @@ use crate::filter_pipeline::FilterPipeline;
 use crate::image::FileImage;
 use crate::message_type::MessageType;
 use crate::object_path::ObjectPathBuf;
+use crate::primitive_bytes::PrimitiveBytes;
 use crate::type_builders;
 use crate::width::FormatWidths;
 
@@ -206,10 +207,7 @@ macro_rules! append_typed {
                 #[doc = concat!("Appends `", stringify!($ty), "` values to the buffer.")]
                 pub fn $method(&mut self, data: &[$ty]) -> &mut Self {
                     self.set_dt($make());
-                    self.raw.reserve(data.len() * core::mem::size_of::<$ty>());
-                    for &v in data {
-                        self.raw.extend_from_slice(&v.to_le_bytes());
-                    }
+                    <$ty>::append_le(data, &mut self.raw);
                     self
                 }
             )*
