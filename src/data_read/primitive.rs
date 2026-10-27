@@ -1,14 +1,9 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+use crate::FormatError;
+use crate::datatype::byte_order::FixedWidthByteOrder;
 use crate::primitive_bytes::PrimitiveBytes;
-use crate::{
-    FormatError,
-    datatype::{
-        byte_order::FixedWidthByteOrder,
-        layout::{StandardNumericLayout, StandardWidth},
-    },
-};
 
 /// Appends standard fixed-width numeric values after conversion.
 ///
@@ -67,74 +62,6 @@ where
     }
 
     Ok(())
-}
-
-pub(crate) fn decode_standard_fixed_point_into<T>(
-    src: &[u8],
-    signed: bool,
-    StandardNumericLayout { width, order }: StandardNumericLayout,
-    dst: &mut Vec<T>,
-) -> Result<(), FormatError>
-where
-    T: NumericReadTarget,
-{
-    match (signed, width) {
-        (true, StandardWidth::OneByte) => decode_fixed_width_into::<1, i8, T, T::I8Conversion>(
-            src,
-            order,
-            T::I8Conversion::default(),
-            dst,
-        ),
-        (true, StandardWidth::TwoBytes) => decode_fixed_width_into::<2, i16, T, T::I16Conversion>(
-            src,
-            order,
-            T::I16Conversion::default(),
-            dst,
-        ),
-        (true, StandardWidth::FourBytes) => decode_fixed_width_into::<4, i32, T, T::I32Conversion>(
-            src,
-            order,
-            T::I32Conversion::default(),
-            dst,
-        ),
-        (true, StandardWidth::EightBytes) => {
-            decode_fixed_width_into::<8, i64, T, T::I64Conversion>(
-                src,
-                order,
-                T::I64Conversion::default(),
-                dst,
-            )
-        }
-
-        (false, StandardWidth::OneByte) => decode_fixed_width_into::<1, u8, T, T::U8Conversion>(
-            src,
-            order,
-            T::U8Conversion::default(),
-            dst,
-        ),
-        (false, StandardWidth::TwoBytes) => decode_fixed_width_into::<2, u16, T, T::U16Conversion>(
-            src,
-            order,
-            T::U16Conversion::default(),
-            dst,
-        ),
-        (false, StandardWidth::FourBytes) => {
-            decode_fixed_width_into::<4, u32, T, T::U32Conversion>(
-                src,
-                order,
-                T::U32Conversion::default(),
-                dst,
-            )
-        }
-        (false, StandardWidth::EightBytes) => {
-            decode_fixed_width_into::<8, u64, T, T::U64Conversion>(
-                src,
-                order,
-                T::U64Conversion::default(),
-                dst,
-            )
-        }
-    }
 }
 
 pub(crate) trait NumericReadTarget: Sized {

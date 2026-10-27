@@ -17,12 +17,14 @@ use crate::chunk_cache::ChunkCache;
 use crate::chunked_read;
 #[cfg(test)]
 use crate::data_layout::DataLayout;
-use crate::data_read::primitive::{H5Conversion, NumericReadTarget};
+use crate::data_read::primitive::{FromEndianBytes, H5Conversion, NumericReadTarget};
 #[cfg(test)]
 use crate::dataspace::Dataspace;
 use crate::datatype::Datatype;
 #[cfg(test)]
 use crate::datatype::byte_order::DatatypeByteOrder;
+use crate::datatype::byte_order::FixedWidthByteOrder;
+use crate::datatype::layout::StandardWidth;
 use crate::datatype::numeric::{NumericDecodePlan, NumericEncoding};
 use crate::error::FormatError;
 #[cfg(test)]
@@ -409,40 +411,113 @@ impl<T: NumericReadTarget> NumericDecoder<T> {
                 actual: src.len(),
             });
         }
+        self.convert(src, dst)
+    }
+
+    /// Selects the source primitive and its conversion for `output`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::DataSizeMismatch`] if `src` contains an incomplete fixed-width
+    /// element, or if its byte length differs from the source width for a scalar destination.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a vector destination's new capacity exceeds [`isize::MAX`] bytes.
+    fn convert<O: NumericOutput<T>>(&self, src: &[u8], output: O) -> Result<O::Value, FormatError> {
         match self.plan.encoding() {
-            NumericEncoding::FixedPoint(layout) => {
-                dst.reserve(src.len() / element_size);
-                if layout.signed() {
-                    let conversion = T::I64Conversion::default();
-                    dst.extend(
-                        src.chunks_exact(element_size)
-                            .map(|bytes| conversion.convert(layout.read_signed(bytes))),
-                    );
-                } else {
-                    let conversion = T::U64Conversion::default();
-                    dst.extend(
-                        src.chunks_exact(element_size)
-                            .map(|bytes| conversion.convert(layout.read_unsigned(bytes))),
-                    );
-                }
-                Ok(())
+            NumericEncoding::FixedPoint(layout) if layout.signed() => output.fixed_point(
+                src,
+                self.plan.element_size(),
+                |bytes| layout.read_signed(bytes),
+                T::I64Conversion::default(),
+            ),
+            NumericEncoding::FixedPoint(layout) => output.fixed_point(
+                src,
+                self.plan.element_size(),
+                |bytes| layout.read_unsigned(bytes),
+                T::U64Conversion::default(),
+            ),
+            NumericEncoding::Float32(order) => {
+                output.fixed_width::<4, f32, T::F32Conversion>(src, order)
             }
-            NumericEncoding::Float32(order) => primitive::decode_fixed_width_into::<4, f32, T, _>(
-                src,
-                order,
-                T::F32Conversion::default(),
-                dst,
-            ),
-            NumericEncoding::Float64(order) => primitive::decode_fixed_width_into::<8, f64, T, _>(
-                src,
-                order,
-                T::F64Conversion::default(),
-                dst,
-            ),
+            NumericEncoding::Float64(order) => {
+                output.fixed_width::<8, f64, T::F64Conversion>(src, order)
+            }
             NumericEncoding::StandardFixedPoint { signed, layout } => {
-                primitive::decode_standard_fixed_point_into(src, signed, layout, dst)
+                match (signed, layout.width) {
+                    (true, StandardWidth::OneByte) => {
+                        output.fixed_width::<1, i8, T::I8Conversion>(src, layout.order)
+                    }
+                    (true, StandardWidth::TwoBytes) => {
+                        output.fixed_width::<2, i16, T::I16Conversion>(src, layout.order)
+                    }
+                    (true, StandardWidth::FourBytes) => {
+                        output.fixed_width::<4, i32, T::I32Conversion>(src, layout.order)
+                    }
+                    (true, StandardWidth::EightBytes) => {
+                        output.fixed_width::<8, i64, T::I64Conversion>(src, layout.order)
+                    }
+                    (false, StandardWidth::OneByte) => {
+                        output.fixed_width::<1, u8, T::U8Conversion>(src, layout.order)
+                    }
+                    (false, StandardWidth::TwoBytes) => {
+                        output.fixed_width::<2, u16, T::U16Conversion>(src, layout.order)
+                    }
+                    (false, StandardWidth::FourBytes) => {
+                        output.fixed_width::<4, u32, T::U32Conversion>(src, layout.order)
+                    }
+                    (false, StandardWidth::EightBytes) => {
+                        output.fixed_width::<8, u64, T::U64Conversion>(src, layout.order)
+                    }
+                }
             }
         }
+    }
+}
+
+trait NumericOutput<T> {
+    type Value;
+
+    fn fixed_width<const W: usize, S: FromEndianBytes<W>, C: H5Conversion<S, T> + Default>(
+        self,
+        src: &[u8],
+        order: FixedWidthByteOrder,
+    ) -> Result<Self::Value, FormatError>;
+
+    fn fixed_point<S>(
+        self,
+        src: &[u8],
+        element_size: usize,
+        read: impl Fn(&[u8]) -> S,
+        conversion: impl H5Conversion<S, T>,
+    ) -> Result<Self::Value, FormatError>;
+}
+
+impl<T> NumericOutput<T> for &mut Vec<T> {
+    type Value = ();
+
+    fn fixed_width<const W: usize, S: FromEndianBytes<W>, C: H5Conversion<S, T> + Default>(
+        self,
+        src: &[u8],
+        order: FixedWidthByteOrder,
+    ) -> Result<(), FormatError> {
+        primitive::decode_fixed_width_into::<W, S, T, C>(src, order, C::default(), self)
+    }
+
+    fn fixed_point<S>(
+        self,
+        src: &[u8],
+        element_size: usize,
+        read: impl Fn(&[u8]) -> S,
+        conversion: impl H5Conversion<S, T>,
+    ) -> Result<(), FormatError> {
+        self.reserve(src.len() / element_size);
+        self.extend(
+            src.chunks_exact(element_size)
+                .map(|bytes| conversion.convert(read(bytes))),
+        );
+        Ok(())
     }
 }
 
