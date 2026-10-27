@@ -8113,6 +8113,7 @@ mod tests {
     use test_util::disk_log::{self, DiskOp};
     use test_util::file_space_info;
     use test_util::object_header;
+    use test_util::temp;
     use test_util::widths::Widths;
 
     use super::*;
@@ -9844,8 +9845,7 @@ mod tests {
     #[case::mirrored(Some(MemoryStrategy::Mirrored))]
     #[case::bounded(Some(MemoryStrategy::Bounded))]
     fn typed_sweeps_preserve_backend_address_framing(#[case] strategy: Option<MemoryStrategy>) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sweep.h5");
+        let path = temp::temp_path("sweep.h5");
         let n = 131_077;
         let expected: Vec<f64> = (0..n).map(f64::from).collect();
         let mut builder = FileBuilder::new();
