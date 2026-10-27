@@ -40,9 +40,9 @@ test *ARGS:
 test-full *ARGS:
     cargo nextest run --locked {{ WORKSPACE }} {{ FULL_PUBLIC }} {{ ARGS }}
 
-# Test strict persisted-manager checksums in an isolated workspace without the checksum feature.
+# Test strict persisted-manager checksums without the checksum feature.
 test-persisted-without-checksum:
-    cargo test --locked --manifest-path tests/checksum-disabled/Cargo.toml
+    cargo nextest run --locked -p hdf5-pure --no-default-features --features std --test main strict_open_checks_persisted_checksums_without_the_checksum_feature
 
 # The facade's tests once per feature of its full-public profile, each beside the defaults.
 test-each-feature *ARGS:
