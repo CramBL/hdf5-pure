@@ -165,7 +165,8 @@ impl WriteEngine {
         let dense_attrs = if dense {
             let stored = attributes::read_object_attrs(src, access_mode, addr, base)?;
             let set = attributes::dense_attr_set(&region, stored)?;
-            crate::file_writer::dense_attrs_check(&set.attrs).map_err(Error::Format)?;
+            crate::file_writer::dense_attribute_write::dense_attrs_check(&set.attrs)
+                .map_err(Error::Format)?;
             set
         } else {
             DenseAttrSet::default()

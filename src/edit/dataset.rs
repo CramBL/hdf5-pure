@@ -1647,7 +1647,8 @@ pub(super) fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<F
     });
     let attrs_are_dense = crate::file_writer::needs_dense_attrs(&attrs).map_err(Error::Format)?;
     if attrs_are_dense {
-        crate::file_writer::dense_attrs_check(&attrs).map_err(Error::Format)?;
+        crate::file_writer::dense_attribute_write::dense_attrs_check(&attrs)
+            .map_err(Error::Format)?;
     }
 
     if committed_datatype_path.is_some() || attrs.iter().any(|a| a.datatype_location.is_committed())

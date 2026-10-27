@@ -15,7 +15,9 @@ use alloc::collections::BTreeMap as HashMap;
 #[cfg(feature = "std")]
 use std::collections::HashMap;
 
+pub(crate) use crate::file_writer as dense_attribute_write;
 use hdf5_pure_core::__private::SuperblockFields;
+use hdf5_pure_format::__private as format_boundary;
 use hdf5_pure_format::__private::ATTRIBUTE_HEAP_BLOCK_OFFSET_BYTES;
 use hdf5_pure_format::__private::ATTRIBUTE_HEAP_MAX_DIRECT_BLOCK_SIZE;
 use hdf5_pure_format::__private::ATTRIBUTE_HEAP_MAX_HEAP_SIZE_BITS;
@@ -498,21 +500,6 @@ pub(crate) fn make_link(name: &str, addr: StoredAddress) -> LinkMessage {
     }
 }
 
-// ---- Dense attribute blob ----
-
-/// Pre-built dense attribute storage (fractal heap + B-tree v2 + attribute info message).
-pub(crate) struct DenseAttrBlob {
-    /// Serialized AttributeInfo message data (to embed in the object header).
-    pub(crate) attr_info_message: Vec<u8>,
-    /// The combined fractal heap header + direct block + B-tree v2 bytes.
-    pub(crate) blob: Vec<u8>,
-}
-
-/// Bits of heap offset the dense attribute heap declares (its "Maximum Heap
-/// Size"), and the byte width that implies for a block offset.
-const DENSE_ATTR_MAX_HEAP_SIZE_BITS: u16 = ATTRIBUTE_HEAP_MAX_HEAP_SIZE_BITS;
-const DENSE_ATTR_BLOCK_OFFSET_BYTES: usize = ATTRIBUTE_HEAP_BLOCK_OFFSET_BYTES;
-
 /// Returns `true` if `attrs` require dense storage.
 ///
 /// Selects dense storage when the attribute count exceeds [`DENSE_ATTR_THRESHOLD`] or a compact
@@ -535,6 +522,27 @@ pub(crate) fn needs_dense_attrs(attrs: &[AttributeMessage]) -> Result<bool, Form
     Ok(false)
 }
 
+/// The heap address pass 1 of a file build asks a [`DenseAttrPlan`] for its
+/// Attribute Info message at, before the heap's real address is known. The
+/// message's *length* is what that pass needs, and that does not depend on the
+/// address; pass 2 emits the real message at the address it reserves.
+const DUMMY_DENSE_BASE: StoredAddress = StoredAddress::ZERO;
+
+// ---- Dense attribute blob ----
+
+/// Pre-built dense attribute storage (fractal heap + B-tree v2 + attribute info message).
+pub struct DenseAttrBlob {
+    /// Serialized AttributeInfo message data (to embed in the object header).
+    pub attr_info_message: Vec<u8>,
+    /// The combined fractal heap header + direct block + B-tree v2 bytes.
+    pub blob: Vec<u8>,
+}
+
+/// Bits of heap offset the dense attribute heap declares (its "Maximum Heap
+/// Size"), and the byte width that implies for a block offset.
+const DENSE_ATTR_MAX_HEAP_SIZE_BITS: u16 = ATTRIBUTE_HEAP_MAX_HEAP_SIZE_BITS;
+const DENSE_ATTR_BLOCK_OFFSET_BYTES: usize = ATTRIBUTE_HEAP_BLOCK_OFFSET_BYTES;
+
 /// The largest attribute [`build_dense_attrs`] stores as a managed object: what
 /// is left of the heap's largest direct block once its header is accounted for.
 ///
@@ -555,8 +563,8 @@ pub(crate) fn needs_dense_attrs(attrs: &[AttributeMessage]) -> Result<bool, Form
 /// libhdf5 splits far earlier - it declares 4,096 for an
 /// attribute heap — but the threshold is the heap's own declaration, read back
 /// out of the header, so a higher one is equally readable.
-pub(crate) const DENSE_ATTR_MAX_MANAGED_OBJECT: usize =
-    hdf5_pure_format::__private::attribute_heap_max_managed_object(OFFSET_WIDTH);
+pub const DENSE_ATTR_MAX_MANAGED_OBJECT: usize =
+    format_boundary::attribute_heap_max_managed_object(DENSE_ATTR_OFFSET_WIDTH);
 
 /// The length of the heap IDs of the attribute heaps [`build_dense_attrs`] writes.
 const DENSE_ATTR_HEAP_ID_LENGTH: u16 = 8;
@@ -565,7 +573,8 @@ const DENSE_ATTR_HEAP_ID_LENGTH: u16 = 8;
 const DENSE_ATTR_BTREE_RECORD: u16 = AttributeRecord::name_record_size(DENSE_ATTR_HEAP_ID_LENGTH);
 
 /// One huge-objects B-tree v2 record as [`build_dense_attrs`] writes it.
-const DENSE_ATTR_HUGE_BTREE_RECORD: u16 = HugeObjectRecord::size(OFFSET_WIDTH, LENGTH_WIDTH);
+const DENSE_ATTR_HUGE_BTREE_RECORD: u16 =
+    HugeObjectRecord::size(DENSE_ATTR_OFFSET_WIDTH, DENSE_ATTR_LENGTH_WIDTH);
 
 /// One creation-order B-tree v2 record as [`build_dense_attrs`] writes it.
 const DENSE_ATTR_CORDER_BTREE_RECORD: u16 =
@@ -581,7 +590,7 @@ const DENSE_ATTR_CORDER_BTREE_RECORD: u16 =
 /// its position, and an object that *indexes* the order gets a second B-tree
 /// (type 9) over the same heap IDs, ordered by that index.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) enum DenseAttrCreationOrder {
+pub enum DenseAttrCreationOrder {
     /// Not tracked: what this crate's whole-file writer emits, and what an
     /// object edited in place keeps unless its header already tracked the order.
     #[default]
@@ -603,7 +612,7 @@ impl DenseAttrCreationOrder {
     /// The creation index recorded for attribute `i`, or `None` where the
     /// object does not track the order — or, for a tracked set, where `i` is
     /// past the attributes this describes.
-    pub(crate) fn index_at(&self, i: usize) -> Option<u16> {
+    pub fn index_at(&self, i: usize) -> Option<u16> {
         match self {
             Self::Untracked => None,
             Self::Tracked { indices, .. } => indices.get(i).copied(),
@@ -625,10 +634,12 @@ impl DenseAttrCreationOrder {
 /// [`FormatError::ValueTooLargeForPlatform`] if the size of the blocks that hold them does not fit
 /// a `usize`. Returns [`FormatError::Internal`] if the fixed attribute-heap geometry or the
 /// selected managed-object sizes violate the planner's invariants.
-pub(crate) fn dense_attrs_check(attrs: &[AttributeMessage]) -> Result<(), FormatError> {
+pub fn dense_attrs_check(attrs: &[AttributeMessage]) -> Result<(), FormatError> {
     let mut managed = Vec::new();
     for a in attrs {
-        let size = a.serialize_v3(OFFSET_WIDTH, LENGTH_SIZE)?.len();
+        let size = a
+            .serialize_v3(DENSE_ATTR_OFFSET_WIDTH, DENSE_ATTR_LENGTH_SIZE)?
+            .len();
         if size <= DENSE_ATTR_MAX_MANAGED_OBJECT {
             // A managed attribute's bytes go in the heap's direct blocks; a huge
             // one's sit outside them and are bounded only by the file.
@@ -640,21 +651,9 @@ pub(crate) fn dense_attrs_check(attrs: &[AttributeMessage]) -> Result<(), Format
     // apart. Reaching either refusal takes about a terabyte of attributes on one
     // object, which is why nothing exercises them end to end; the boundary each
     // draws is tested where it is computed.
-    match ManagedHeapPlan::attributes(&managed, OFFSET_WIDTH) {
-        Ok(_) => Ok(()),
-        Err(ManagedHeapPlanError::HeapSpace) => Err(FormatError::DenseAttributeHeapTooLarge {
-            limit: ATTRIBUTE_HEAP_MAX_HEAP_SPACE,
-        }),
-        Err(ManagedHeapPlanError::Host { bytes }) => Err(FormatError::ValueTooLargeForPlatform {
-            value: bytes,
-            target: "usize",
-        }),
-        Err(error @ (ManagedHeapPlanError::Geometry | ManagedHeapPlanError::ObjectSize { .. })) => {
-            Err(FormatError::Internal(format!(
-                "dense attribute managed heap planning failed: {error:?}"
-            )))
-        }
-    }
+    ManagedHeapPlan::attributes(&managed, DENSE_ATTR_OFFSET_WIDTH)
+        .map(|_| ())
+        .map_err(dense_attr_heap_error)
 }
 
 /// Everything about a set of attributes' dense storage that does not depend on
@@ -666,7 +665,7 @@ pub(crate) fn dense_attrs_check(attrs: &[AttributeMessage]) -> Result<(), Format
 /// what lets a caller reserve the span before the bytes exist
 /// ([`DenseAttrPlan::blob_len`]), and take that length from the very computation
 /// the emission then works from rather than from a whole throwaway build.
-pub(crate) struct DenseAttrPlan {
+pub struct DenseAttrPlan {
     /// Each attribute's version 3 message bytes and creation index, in the caller's order.
     attributes: Vec<PreparedDenseAttribute>,
     /// Huge-object ID for each attribute whose bytes go outside the managed
@@ -719,17 +718,17 @@ pub(crate) struct DenseAttrPlan {
 /// [`FormatError::InvalidAttributeCreationCounter`] if a tracked index is at or above the
 /// next creation index. Returns [`FormatError::Internal`] if the counts of attributes and
 /// tracked indexes differ. Propagates errors from conversion of attribute positions.
-pub(crate) fn dense_attrs_plan(
+pub fn dense_attrs_plan(
     attrs: &[AttributeMessage],
     creation: DenseAttrCreationOrder,
 ) -> Result<DenseAttrPlan, FormatError> {
-    let PreparedDenseAttrs {
+    let EncodedDenseAttrs {
         attributes,
         order,
         corder_order,
         next_index,
         indexed,
-    } = PreparedDenseAttrs::new(attrs, creation)?;
+    } = EncodedDenseAttrs::new(attrs, creation)?;
 
     // Huge object IDs are assigned in attribute order, starting at 1 — the
     // reference C library's `H5HF__huge_insert` pre-increments, so 0 is never a
@@ -761,15 +760,26 @@ pub(crate) fn dense_attrs_plan(
         .filter(|(_, id)| id.is_none())
         .map(|(s, _)| s.bytes.len() as u64)
         .collect();
-    let managed_plan = ManagedHeapPlan::attributes(&managed_sizes, OFFSET_WIDTH)
-        .expect("dense_attrs_check, which every caller must run first, plans the same layout");
+    let managed_plan = ManagedHeapPlan::attributes(&managed_sizes, DENSE_ATTR_OFFSET_WIDTH)
+        .map_err(dense_attr_heap_error)?;
 
     // Every v2 B-tree header this emitter writes has the same fixed layout, so
     // one size covers both the name index and the huge-objects index.
-    let bthd_size = hdf5_pure_format::__private::btree_v2_header_size(OFFSET_WIDTH, LENGTH_WIDTH);
+    let bthd_size =
+        format_boundary::btree_v2_header_size(DENSE_ATTR_OFFSET_WIDTH, DENSE_ATTR_LENGTH_WIDTH);
     debug_assert_eq!(
         bthd_size,
-        4 + 1 + 1 + 4 + 2 + 2 + 1 + 1 + OFFSET_SIZE as usize + 2 + LENGTH_SIZE as usize + 4
+        4 + 1
+            + 1
+            + 4
+            + 2
+            + 2
+            + 1
+            + 1
+            + DENSE_ATTR_OFFSET_SIZE as usize
+            + 2
+            + DENSE_ATTR_LENGTH_SIZE as usize
+            + 4
     );
 
     // Both indexes are planned before anything is placed, because their node
@@ -782,7 +792,7 @@ pub(crate) fn dense_attrs_plan(
         attrs.len(),
         DENSE_ATTR_BTREE_RECORD,
         BTREE_V2_NODE_SIZE,
-        OFFSET_WIDTH,
+        DENSE_ATTR_OFFSET_WIDTH,
     )
     .expect("a 512-byte node holds 29 name records, enough to plan any count");
     let corder_plan = indexed.then(|| {
@@ -791,7 +801,7 @@ pub(crate) fn dense_attrs_plan(
             attrs.len(),
             DENSE_ATTR_CORDER_BTREE_RECORD,
             BTREE_V2_NODE_SIZE,
-            OFFSET_WIDTH,
+            DENSE_ATTR_OFFSET_WIDTH,
         )
         .expect("a 512-byte node holds 38 creation-order records, enough to plan any count")
     });
@@ -801,7 +811,7 @@ pub(crate) fn dense_attrs_plan(
             huge_count,
             DENSE_ATTR_HUGE_BTREE_RECORD,
             BTREE_V2_NODE_SIZE,
-            OFFSET_WIDTH,
+            DENSE_ATTR_OFFSET_WIDTH,
         )
         .expect("a 512-byte node holds 20 huge records, enough to plan any count")
     });
@@ -810,7 +820,8 @@ pub(crate) fn dense_attrs_plan(
     // its length is the same wherever it lands: heap header, the managed blocks,
     // name index (header + nodes), then — only when there are huge objects — the
     // huge index (header + nodes) and the huge object bytes themselves.
-    let managed_off = FractalHeapHeader::serialized_size(OFFSET_WIDTH, LENGTH_WIDTH) as u64;
+    let managed_off =
+        FractalHeapHeader::serialized_size(DENSE_ATTR_OFFSET_WIDTH, DENSE_ATTR_LENGTH_WIDTH) as u64;
     let btree_off = managed_off + managed_plan.region_size();
     let name_nodes_off = btree_off + bthd_size as u64;
     let corder_bthd_off = name_nodes_off + name_plan.nodes_size();
@@ -859,15 +870,34 @@ pub(crate) fn dense_attrs_plan(
 impl DenseAttrPlan {
     /// Byte length of the blob [`DenseAttrPlan::build`] produces, at any heap
     /// address.
-    pub(crate) fn blob_len(&self) -> u64 {
+    pub fn blob_len(&self) -> u64 {
         self.total_len
     }
 
     /// The Attribute Info (0x0015) message naming this heap once it is placed at
     /// `heap_address`. Its length does not depend on the address, so an
     /// object-header sizing pass can take it from a provisional one.
-    pub(crate) fn attr_info_message(&self, heap_address: StoredAddress) -> Vec<u8> {
-        self.attribute_info(heap_address).serialize(OFFSET_WIDTH)
+    pub fn attr_info_message(&self, heap_address: StoredAddress) -> Result<Vec<u8>, FormatError> {
+        self.extent(heap_address)?;
+        Ok(self
+            .attribute_info(heap_address)
+            .serialize(DENSE_ATTR_OFFSET_WIDTH))
+    }
+
+    fn extent(&self, base: StoredAddress) -> Result<(), FormatError> {
+        if base.is_undefined(DENSE_ATTR_OFFSET_WIDTH) {
+            return Err(FormatError::DefinedAddressIsUndefined {
+                address: base.get(),
+                offset_size: DENSE_ATTR_OFFSET_SIZE,
+            });
+        }
+        base.get()
+            .checked_add(self.total_len)
+            .ok_or(FormatError::OffsetOverflow {
+                offset: base.get(),
+                length: self.total_len,
+            })?;
+        Ok(())
     }
 
     /// The Attribute Info message this storage is named by, once placed at
@@ -893,7 +923,8 @@ impl DenseAttrPlan {
     /// block's address or region end overflows `u64`, [`FormatError::AddressTooLarge`] if it
     /// exceeds the encoded address width, and [`FormatError::DefinedAddressIsUndefined`] if a
     /// required managed-heap address equals the width's undefined value.
-    pub(crate) fn build(&self, heap_address: StoredAddress) -> Result<DenseAttrBlob, FormatError> {
+    pub fn build(&self, heap_address: StoredAddress) -> Result<DenseAttrBlob, FormatError> {
+        self.extent(heap_address)?;
         let max_heap_size: u16 = DENSE_ATTR_MAX_HEAP_SIZE_BITS;
         let block_offset_bytes = DENSE_ATTR_BLOCK_OFFSET_BYTES; // 5
         let heap_id_length = DENSE_ATTR_HEAP_ID_LENGTH;
@@ -955,12 +986,12 @@ impl DenseAttrPlan {
             max_managed_object_size: max_managed,
             next_huge_object_id: huge_count as u64,
             btree_huge_objects_address: if huge_count == 0 {
-                UNDEF_ADDRESS
+                DENSE_ATTR_UNDEFINED
             } else {
                 huge_bthd_addr
             },
             free_space_in_managed_blocks: managed_plan.free_space(),
-            managed_block_free_space_manager_address: UNDEF_ADDRESS,
+            managed_block_free_space_manager_address: DENSE_ATTR_UNDEFINED,
             managed_space: managed_plan.managed_space(),
             allocated_managed_space: managed_plan.allocated_space(),
             direct_block_allocation_iterator_offset: managed_plan.allocation_iterator(),
@@ -981,7 +1012,7 @@ impl DenseAttrPlan {
             // which of the two the address above points at.
             current_rows_in_root_indirect_block: managed_plan.root_rows(),
         };
-        let frhp = header.serialize(OFFSET_WIDTH, LENGTH_WIDTH)?;
+        let frhp = header.serialize(DENSE_ATTR_OFFSET_WIDTH, DENSE_ATTR_LENGTH_WIDTH)?;
 
         // Heap IDs. A managed object's carries the offset the plan gave it; a huge
         // object's carries a B-tree key instead, since its bytes sit outside the
@@ -998,7 +1029,11 @@ impl DenseAttrPlan {
                 Some(id) => {
                     huge_records.push((*id, next_huge_addr, s.bytes.len() as u64));
                     next_huge_addr = next_huge_addr.offset(s.bytes.len() as u64);
-                    heap_ids.push(header.encode_huge_id(*id, OFFSET_WIDTH, LENGTH_WIDTH)?);
+                    heap_ids.push(header.encode_huge_id(
+                        *id,
+                        DENSE_ATTR_OFFSET_WIDTH,
+                        DENSE_ATTR_LENGTH_WIDTH,
+                    )?);
                 }
                 None => {
                     heap_ids.push(header.encode_managed_id(
@@ -1026,8 +1061,12 @@ impl DenseAttrPlan {
             .encode_name_record(&mut name_records, hash);
         }
 
-        let name_tree =
-            name_plan.serialize(&name_records, name_nodes_addr, OFFSET_WIDTH, LENGTH_WIDTH);
+        let name_tree = name_plan.serialize(
+            &name_records,
+            name_nodes_addr,
+            DENSE_ATTR_OFFSET_WIDTH,
+            DENSE_ATTR_LENGTH_WIDTH,
+        );
 
         let mut blob = Vec::with_capacity(self.total_len.to_usize().unwrap_or(0));
         blob.extend_from_slice(&frhp);
@@ -1053,8 +1092,8 @@ impl DenseAttrPlan {
             let corder_tree = corder_plan.serialize(
                 &corder_records,
                 corder_nodes_addr,
-                OFFSET_WIDTH,
-                LENGTH_WIDTH,
+                DENSE_ATTR_OFFSET_WIDTH,
+                DENSE_ATTR_LENGTH_WIDTH,
             );
             debug_assert_eq!(blob.len() as u64, self.corder_bthd_off);
             blob.extend_from_slice(&corder_tree.header);
@@ -1072,10 +1111,18 @@ impl DenseAttrPlan {
                     length: *len,
                     id: *id,
                 }
-                .encode(&mut huge_bytes, OFFSET_WIDTH, LENGTH_WIDTH);
+                .encode(
+                    &mut huge_bytes,
+                    DENSE_ATTR_OFFSET_WIDTH,
+                    DENSE_ATTR_LENGTH_WIDTH,
+                );
             }
-            let huge_tree =
-                huge_plan.serialize(&huge_bytes, huge_nodes_addr, OFFSET_WIDTH, LENGTH_WIDTH);
+            let huge_tree = huge_plan.serialize(
+                &huge_bytes,
+                huge_nodes_addr,
+                DENSE_ATTR_OFFSET_WIDTH,
+                DENSE_ATTR_LENGTH_WIDTH,
+            );
 
             debug_assert_eq!(blob.len() as u64, self.huge_bthd_off);
             blob.extend_from_slice(&huge_tree.header);
@@ -1092,24 +1139,18 @@ impl DenseAttrPlan {
         // checked against the bytes actually produced. A reservation that
         // disagreed with the emission would put the next object on top of this
         // one, so pin it where it is emitted as well as in a test.
-        debug_assert_eq!(
-            blob.len() as u64,
-            self.total_len,
-            "a dense attribute heap must fill the length its plan promised"
-        );
+        if blob.len() as u64 != self.total_len {
+            return Err(FormatError::Internal(
+                "a dense attribute heap does not fill its planned reservation".into(),
+            ));
+        }
 
         Ok(DenseAttrBlob {
-            attr_info_message: self.attr_info_message(frhp_addr),
+            attr_info_message: self.attr_info_message(frhp_addr)?,
             blob,
         })
     }
 }
-
-/// The heap address pass 1 of a file build asks a [`DenseAttrPlan`] for its
-/// Attribute Info message at, before the heap's real address is known. The
-/// message's *length* is what that pass needs, and that does not depend on the
-/// address; pass 2 emits the real message at the address it reserves.
-const DUMMY_DENSE_BASE: StoredAddress = StoredAddress::ZERO;
 
 /// Builds dense attribute storage for a set of attributes, at a known address.
 ///
@@ -1122,7 +1163,7 @@ const DUMMY_DENSE_BASE: StoredAddress = StoredAddress::ZERO;
 /// Returns [`FormatError::AttributeFieldTooLong`] if an attribute's name, datatype, or dataspace
 /// is longer than its 2-byte size field can hold. Propagates errors from [`dense_attrs_plan`]
 /// and [`DenseAttrPlan::build`].
-pub(crate) fn build_dense_attrs(
+pub fn build_dense_attrs(
     attrs: &[AttributeMessage],
     creation: DenseAttrCreationOrder,
     heap_address: StoredAddress,
@@ -1135,7 +1176,7 @@ pub(crate) fn build_dense_attrs(
 /// Tracked indexes are below the stored counter. Gaps and the counter are preserved
 /// independently of the live attributes.
 #[derive(Debug)]
-struct PreparedDenseAttrs {
+struct EncodedDenseAttrs {
     attributes: Vec<PreparedDenseAttribute>,
     /// `(name hash, attribute index)` pairs sorted by hash and then by name.
     order: Vec<(u32, u32)>,
@@ -1145,7 +1186,7 @@ struct PreparedDenseAttrs {
     indexed: bool,
 }
 
-impl PreparedDenseAttrs {
+impl EncodedDenseAttrs {
     /// Encodes attributes and pairs each message with its creation index.
     ///
     /// # Errors
@@ -1193,7 +1234,7 @@ impl PreparedDenseAttrs {
                 None => position,
             };
             attributes.push(PreparedDenseAttribute {
-                bytes: attribute.serialize_v3(OFFSET_WIDTH, LENGTH_SIZE)?,
+                bytes: attribute.serialize_v3(DENSE_ATTR_OFFSET_WIDTH, DENSE_ATTR_LENGTH_SIZE)?,
                 creation_index,
             });
             order.push((
@@ -1248,6 +1289,29 @@ struct PreparedDenseAttribute {
 /// (`H5VM_limit_enc_size`): the width of the smallest field that can hold it.
 fn encoded_size_width(value: u64) -> usize {
     (64 - value.leading_zeros() as usize).div_ceil(8).max(1)
+}
+
+const DENSE_ATTR_OFFSET_WIDTH: OffsetWidth = OffsetWidth::Eight;
+const DENSE_ATTR_LENGTH_WIDTH: LengthWidth = LengthWidth::Eight;
+const DENSE_ATTR_OFFSET_SIZE: u8 = DENSE_ATTR_OFFSET_WIDTH.get();
+const DENSE_ATTR_LENGTH_SIZE: u8 = DENSE_ATTR_LENGTH_WIDTH.get();
+const DENSE_ATTR_UNDEFINED: StoredAddress = StoredAddress::undefined(DENSE_ATTR_OFFSET_WIDTH);
+
+fn dense_attr_heap_error(error: ManagedHeapPlanError) -> FormatError {
+    match error {
+        ManagedHeapPlanError::HeapSpace => FormatError::DenseAttributeHeapTooLarge {
+            limit: ATTRIBUTE_HEAP_MAX_HEAP_SPACE,
+        },
+        ManagedHeapPlanError::Host { bytes } => FormatError::ValueTooLargeForPlatform {
+            value: bytes,
+            target: "usize",
+        },
+        ManagedHeapPlanError::Geometry | ManagedHeapPlanError::ObjectSize { .. } => {
+            FormatError::Internal(format!(
+                "dense attribute managed heap planning failed: {error:?}"
+            ))
+        }
+    }
 }
 
 /// The Attribute Info (0x0015) message a version 2 object header needs when its
@@ -2629,20 +2693,20 @@ impl FileWriter {
         // what it refuses, and the second is unbounded now that both indexes are
         // multi-level B-trees.
         if root_dense {
-            dense_attrs_check(&root_attrs)?;
+            dense_attribute_write::dense_attrs_check(&root_attrs)?;
         } else {
             check_compact_attrs(&root_attrs)?;
         }
         for (gi, g) in groups.iter().enumerate() {
             if group_dense[gi] {
-                dense_attrs_check(&g.attrs)?;
+                dense_attribute_write::dense_attrs_check(&g.attrs)?;
             } else {
                 check_compact_attrs(&g.attrs)?;
             }
         }
         for (i, d) in all_ds.iter().enumerate() {
             if ds_dense[i] {
-                dense_attrs_check(&d.attrs)?;
+                dense_attribute_write::dense_attrs_check(&d.attrs)?;
             } else {
                 check_compact_attrs(&d.attrs)?;
             }
@@ -2888,8 +2952,11 @@ impl FileWriter {
                     let Some((address, reserved)) = span else {
                         return Ok(None);
                     };
-                    let blob =
-                        build_dense_attrs(attrs, DenseAttrCreationOrder::Untracked, address)?;
+                    let blob = dense_attribute_write::build_dense_attrs(
+                        attrs,
+                        DenseAttrCreationOrder::Untracked,
+                        address,
+                    )?;
                     if blob.blob.len() != reserved {
                         return Err(FormatError::SerializationError(format!(
                             "a dense attribute heap built {} bytes into a span of {reserved} \
@@ -2960,12 +3027,15 @@ impl FileWriter {
                 // heap will be, and what its Attribute Info message costs the
                 // header — without emitting the heap, which pass 2 does once at
                 // the address reserved here.
-                let plan = dense_attrs_plan(&g.attrs, DenseAttrCreationOrder::Untracked)?;
+                let plan = dense_attribute_write::dense_attrs_plan(
+                    &g.attrs,
+                    DenseAttrCreationOrder::Untracked,
+                )?;
                 (
                     build_group_oh(
                         &dummy_links,
                         &g.attrs,
-                        Some(&plan.attr_info_message(DUMMY_DENSE_BASE)),
+                        Some(&plan.attr_info_message(DUMMY_DENSE_BASE)?),
                         link_info.as_ref(),
                     )?,
                     Some(plan.blob_len().to_usize()?),
@@ -2996,12 +3066,15 @@ impl FileWriter {
             .map(|plan| plan.serialized_len().to_usize())
             .transpose()?;
         let (root_oh_size, root_dense_len) = if root_dense {
-            let plan = dense_attrs_plan(&root_attrs, DenseAttrCreationOrder::Untracked)?;
+            let plan = dense_attribute_write::dense_attrs_plan(
+                &root_attrs,
+                DenseAttrCreationOrder::Untracked,
+            )?;
             (
                 build_group_oh(
                     &root_dummy_links,
                     &root_attrs,
-                    Some(&plan.attr_info_message(DUMMY_DENSE_BASE)),
+                    Some(&plan.attr_info_message(DUMMY_DENSE_BASE)?),
                     root_link_info.as_ref(),
                 )?
                 .len(),
@@ -3036,7 +3109,7 @@ impl FileWriter {
         let mut dummy_cursor = 0u64;
         for (i, d) in all_ds.iter().enumerate() {
             let dense_plan = if ds_dense[i] {
-                Some(dense_attrs_plan(
+                Some(dense_attribute_write::dense_attrs_plan(
                     &d.attrs,
                     DenseAttrCreationOrder::Untracked,
                 )?)
@@ -3045,7 +3118,8 @@ impl FileWriter {
             };
             let dense_attr_info = dense_plan
                 .as_ref()
-                .map(|plan| plan.attr_info_message(DUMMY_DENSE_BASE));
+                .map(|plan| plan.attr_info_message(DUMMY_DENSE_BASE))
+                .transpose()?;
             ds_dense_lens.push(
                 dense_plan
                     .as_ref()
@@ -5957,11 +6031,11 @@ mod tests {
             .map(|a| a.serialize_v3(OFFSET_WIDTH, LENGTH_SIZE).unwrap().len())
             .sum();
         assert!(total > 2_000_000, "expected a multi-megabyte set");
-        assert_eq!(dense_attrs_check(&many), Ok(()));
+        assert_eq!(dense_attribute_write::dense_attrs_check(&many), Ok(()));
 
         // One attribute at the managed-object limit is still fine.
         let at_limit = vec![dense_attr_of_size("edge", DENSE_ATTR_MAX_MANAGED_OBJECT)];
-        assert_eq!(dense_attrs_check(&at_limit), Ok(()));
+        assert_eq!(dense_attribute_write::dense_attrs_check(&at_limit), Ok(()));
 
         // One byte past it needs fractal-heap huge storage, which the emitter now
         // writes — so it is accepted, and the attribute is no longer in the
@@ -5970,10 +6044,10 @@ mod tests {
             "edge",
             DENSE_ATTR_MAX_MANAGED_OBJECT + 1,
         )];
-        assert_eq!(dense_attrs_check(&past), Ok(()));
+        assert_eq!(dense_attribute_write::dense_attrs_check(&past), Ok(()));
         assert_eq!(
             huge_object_count(
-                &build_dense_attrs(
+                &dense_attribute_write::build_dense_attrs(
                     &past,
                     DenseAttrCreationOrder::Untracked,
                     StoredAddress::new(0)
@@ -5985,7 +6059,7 @@ mod tests {
         );
         assert_eq!(
             huge_object_count(
-                &build_dense_attrs(
+                &dense_attribute_write::build_dense_attrs(
                     &at_limit,
                     DenseAttrCreationOrder::Untracked,
                     StoredAddress::new(0)
@@ -6070,8 +6144,14 @@ mod tests {
         shapes.push(("managed and huge mixed".to_string(), mixed));
 
         for (label, attrs) in shapes {
-            assert_eq!(dense_attrs_check(&attrs), Ok(()), "{label}");
-            let plan = dense_attrs_plan(&attrs, DenseAttrCreationOrder::Untracked).unwrap();
+            assert_eq!(
+                dense_attribute_write::dense_attrs_check(&attrs),
+                Ok(()),
+                "{label}"
+            );
+            let plan =
+                dense_attribute_write::dense_attrs_plan(&attrs, DenseAttrCreationOrder::Untracked)
+                    .unwrap();
             for base in [0u64, 0x1000, 0x8000_0000].map(StoredAddress::new) {
                 let built = plan.build(base).unwrap();
                 assert_eq!(
@@ -6092,7 +6172,7 @@ mod tests {
     /// that the index is a single leaf.
     fn name_index_order(attrs: &[AttributeMessage]) -> Vec<String> {
         const RECORD: usize = 8 + 1 + 4 + 4;
-        let blob = build_dense_attrs(
+        let blob = dense_attribute_write::build_dense_attrs(
             attrs,
             DenseAttrCreationOrder::Untracked,
             StoredAddress::new(0),
@@ -6198,12 +6278,9 @@ mod tests {
         #[case] indexed: bool,
         #[case] expected: FormatError,
     ) {
-        let attrs = [
-            type_builders::build_attr_message("a", &AttrValue::I64(1)).unwrap(),
-            type_builders::build_attr_message("b", &AttrValue::I64(2)).unwrap(),
-        ];
+        let attrs = [metadata_attribute("a", 1), metadata_attribute("b", 2)];
         assert_eq!(
-            PreparedDenseAttrs::new(
+            EncodedDenseAttrs::new(
                 &attrs,
                 DenseAttrCreationOrder::Tracked {
                     indices,
@@ -6220,11 +6297,8 @@ mod tests {
     #[case::tracked_and_indexed(true)]
     #[case::tracked_without_index(false)]
     fn dense_attribute_preparation_preserves_index_gaps_and_counter(#[case] indexed: bool) {
-        let attrs = [
-            type_builders::build_attr_message("a", &AttrValue::I64(1)).unwrap(),
-            type_builders::build_attr_message("b", &AttrValue::I64(2)).unwrap(),
-        ];
-        let prepared = PreparedDenseAttrs::new(
+        let attrs = [metadata_attribute("a", 1), metadata_attribute("b", 2)];
+        let prepared = EncodedDenseAttrs::new(
             &attrs,
             DenseAttrCreationOrder::Tracked {
                 indices: vec![7, 2],
@@ -6251,7 +6325,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             attrs
                 .iter()
-                .map(|a| a.serialize_v3(OFFSET_WIDTH, LENGTH_SIZE).unwrap())
+                .map(|a| a
+                    .serialize_v3(DENSE_ATTR_OFFSET_WIDTH, DENSE_ATTR_LENGTH_SIZE)
+                    .unwrap())
                 .collect::<Vec<_>>()
         );
         assert_eq!(
@@ -6262,11 +6338,8 @@ mod tests {
 
     #[test]
     fn dense_attribute_preparation_preserves_untracked_positions() {
-        let attrs = [
-            type_builders::build_attr_message("b", &AttrValue::I64(1)).unwrap(),
-            type_builders::build_attr_message("a", &AttrValue::I64(2)).unwrap(),
-        ];
-        let prepared = PreparedDenseAttrs::new(&attrs, DenseAttrCreationOrder::Untracked).unwrap();
+        let attrs = [metadata_attribute("b", 1), metadata_attribute("a", 2)];
+        let prepared = EncodedDenseAttrs::new(&attrs, DenseAttrCreationOrder::Untracked).unwrap();
         assert_eq!(prepared.next_index, None);
         assert!(!prepared.indexed);
         assert!(prepared.corder_order.is_empty());
@@ -6283,11 +6356,11 @@ mod tests {
     #[test]
     fn dense_attribute_preparation_rejects_duplicate_names() {
         let attrs = [
-            type_builders::build_attr_message("duplicate", &AttrValue::I64(1)).unwrap(),
-            type_builders::build_attr_message("duplicate", &AttrValue::I64(2)).unwrap(),
+            metadata_attribute("duplicate", 1),
+            metadata_attribute("duplicate", 2),
         ];
         assert_eq!(
-            PreparedDenseAttrs::new(&attrs, DenseAttrCreationOrder::Untracked).unwrap_err(),
+            EncodedDenseAttrs::new(&attrs, DenseAttrCreationOrder::Untracked).unwrap_err(),
             FormatError::DuplicateAttributeName("duplicate".into())
         );
     }
@@ -6300,7 +6373,7 @@ mod tests {
         #[case] next: Option<u16>,
         #[case] indexed: bool,
     ) {
-        let prepared = PreparedDenseAttrs::new(&[], creation).unwrap();
+        let prepared = EncodedDenseAttrs::new(&[], creation).unwrap();
         assert!(prepared.attributes.is_empty());
         assert!(prepared.order.is_empty());
         assert!(prepared.corder_order.is_empty());
@@ -6355,7 +6428,8 @@ mod tests {
         const COUNT: usize = SCRAMBLE.len();
         let (attrs, creation) = scrambled_creation_order();
         let heap_address = StoredAddress::new(0x4000);
-        let built = build_dense_attrs(&attrs, creation, heap_address).unwrap();
+        let built =
+            dense_attribute_write::build_dense_attrs(&attrs, creation, heap_address).unwrap();
 
         let info = crate::attribute_info::AttributeInfoMessage::parse(
             &built.attr_info_message,
@@ -6423,7 +6497,7 @@ mod tests {
     #[test]
     fn an_untracked_dense_set_emits_no_creation_order_btree() {
         let (attrs, _) = scrambled_creation_order();
-        let built = build_dense_attrs(
+        let built = dense_attribute_write::build_dense_attrs(
             &attrs,
             DenseAttrCreationOrder::Untracked,
             StoredAddress::new(0x4000),
@@ -6469,10 +6543,10 @@ mod tests {
     #[test]
     fn a_fixed_node_size_keeps_the_derived_count_width_at_one_byte() {
         for record_size in [DENSE_ATTR_BTREE_RECORD, DENSE_ATTR_HUGE_BTREE_RECORD] {
-            let (info, depth) = hdf5_pure_format::__private::BTreeV2NodeInfo::for_record_count(
+            let (info, depth) = format_boundary::BTreeV2NodeInfo::for_record_count(
                 BTREE_V2_NODE_SIZE,
                 record_size,
-                hdf5_pure_format::__private::OffsetWidth::Eight,
+                format_boundary::OffsetWidth::Eight,
                 0,
             )
             .expect("the emitted geometry is plannable");
@@ -6501,8 +6575,8 @@ mod tests {
             dense_attr_of_size("at", DENSE_ATTR_MAX_MANAGED_OBJECT),
             dense_attr_of_size("past", DENSE_ATTR_MAX_MANAGED_OBJECT + 1),
         ];
-        assert_eq!(dense_attrs_check(&mixed), Ok(()));
-        let blob = build_dense_attrs(
+        assert_eq!(dense_attribute_write::dense_attrs_check(&mixed), Ok(()));
+        let blob = dense_attribute_write::build_dense_attrs(
             &mixed,
             DenseAttrCreationOrder::Untracked,
             StoredAddress::new(0),
@@ -6546,7 +6620,7 @@ mod tests {
     #[test]
     fn the_root_grows_into_an_indirect_block_rather_than_a_bigger_direct_one() {
         let fits = vec![dense_attr_of_size("a", 400)];
-        let blob = build_dense_attrs(
+        let blob = dense_attribute_write::build_dense_attrs(
             &fits,
             DenseAttrCreationOrder::Untracked,
             StoredAddress::new(0),
@@ -6560,7 +6634,7 @@ mod tests {
         let spills: Vec<AttributeMessage> = (0..8)
             .map(|i| dense_attr_of_size(&format!("a{i}"), 400))
             .collect();
-        let blob = build_dense_attrs(
+        let blob = dense_attribute_write::build_dense_attrs(
             &spills,
             DenseAttrCreationOrder::Untracked,
             StoredAddress::new(0),
@@ -7267,4 +7341,55 @@ mod tests {
     const DEFAULT_GROUP_INFO: [u8; 2] = [0, 0];
     const GLOBAL_HEAP_COLLECTION_SIGNATURE: &[u8] = b"GCOL";
     const OBJECT_HEADER_V2_SIGNATURE: &[u8] = b"OHDR";
+    #[rstest]
+    #[case::undefined(u64::MAX, true)]
+    #[case::overflow(u64::MAX - 1, false)]
+    fn dense_attribute_plan_rejects_invalid_extent(#[case] base: u64, #[case] undefined: bool) {
+        let attrs = [metadata_attribute("a", 1)];
+        let plan = dense_attrs_plan(&attrs, DenseAttrCreationOrder::Untracked).unwrap();
+        let expected = if undefined {
+            FormatError::DefinedAddressIsUndefined {
+                address: base,
+                offset_size: DENSE_ATTR_OFFSET_SIZE,
+            }
+        } else {
+            FormatError::OffsetOverflow {
+                offset: base,
+                length: plan.blob_len(),
+            }
+        };
+        assert_eq!(
+            plan.attr_info_message(StoredAddress::new(base))
+                .unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            plan.build(StoredAddress::new(base)).err().unwrap(),
+            expected
+        );
+    }
+
+    fn metadata_attribute(name: &str, value: i64) -> AttributeMessage {
+        AttributeMessage {
+            name: name.into(),
+            datatype: Datatype::FixedPoint(
+                hdf5_pure_core::FixedPointType::new(
+                    8,
+                    hdf5_pure_core::DatatypeByteOrder::LittleEndian,
+                    true,
+                    0,
+                    64,
+                )
+                .unwrap(),
+            ),
+            dataspace: Dataspace {
+                space_type: DataspaceType::Scalar,
+                rank: 0,
+                dimensions: Vec::new(),
+                max_dimensions: None,
+            },
+            raw_data: value.to_le_bytes().to_vec(),
+            datatype_location: DatatypeLocation::Inline,
+        }
+    }
 }
