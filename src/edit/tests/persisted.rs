@@ -1,23 +1,19 @@
 use std::path::Path;
 
-use hdf5_pure_format::__private as format;
 use hdf5_pure_space::__private::Extent;
 use rstest::rstest;
-use test_util_hdf5::storage;
+use test_util_hdf5::file_space::persisted::{
+    EOF, HEADER, HEADER_AT, HEADER_LEN, LIST, ManagerSlot, PersistedImage, PersistedStrategy,
+    SECTION, STRIDE,
+};
 
-use crate::DecodedStoredAddress;
 use crate::Error;
 use crate::File;
 use crate::FileAccessProperties;
-use crate::FileBuilder;
-use crate::FileSpaceInfo;
-use crate::FileSpaceSettings;
-use crate::FileSpaceStrategy;
 use crate::FormatError;
 use crate::MemoryStrategy;
 use crate::PersistedFreeSpacePolicy;
 use crate::StoredAddress;
-use crate::Superblock;
 use crate::address::StoredAddressExt;
 use crate::edit::WriteEngine;
 use crate::file_lock::FileLocking;
@@ -424,138 +420,8 @@ enum Damage {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum ManagerSlot {
-    Metadata,
-    Raw,
-    LocalHeap,
-    Generic,
-    Unknown,
-}
-
-impl ManagerSlot {
-    pub const fn index(self) -> usize {
-        match self {
-            Self::Metadata => 0,
-            Self::Raw => 2,
-            Self::LocalHeap => 5,
-            Self::Generic => 6,
-            Self::Unknown => 7,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum PersistedStrategy {
-    FsmAggr,
-    Page,
-}
-
-#[derive(Clone, Copy, Debug)]
 enum Admission {
     Metadata,
     Raw,
     Unclassified,
 }
-
-pub struct PersistedImage {
-    pub bytes: Vec<u8>,
-    pub info: FileSpaceInfo,
-    original_info: Vec<u8>,
-    superblock: Superblock,
-    extension: (usize, usize),
-}
-
-impl PersistedImage {
-    pub fn new(path: &Path, strategy: PersistedStrategy, threshold: u64) -> Self {
-        let mut builder = FileBuilder::new();
-        builder.with_file_space_settings(
-            FileSpaceSettings::new(match strategy {
-                PersistedStrategy::FsmAggr => FileSpaceStrategy::FsmAggr,
-                PersistedStrategy::Page => FileSpaceStrategy::Page,
-            })
-            .with_persistence(true)
-            .with_threshold(threshold),
-        );
-        builder.write(path).unwrap();
-        let file = File::open(path).unwrap();
-        let mut info = file.file_space_info().unwrap().unwrap();
-        let mut superblock = file.superblock().clone();
-        let mut bytes = std::fs::read(path).unwrap();
-        assert_eq!(
-            (superblock.offset_size.get(), superblock.length_size.get()),
-            (8, 8)
-        );
-        let widths = format::FormatWidths {
-            offsets: superblock.offset_size,
-            lengths: superblock.length_size,
-        };
-        let original_info = format::serialize_file_space_info_v1(widths, &info).unwrap();
-        let chunks = storage::header_extents(
-            file.superblock(),
-            &bytes,
-            superblock.superblock_extension_address.unwrap().get(),
-        );
-        assert_eq!(chunks.len(), 1);
-        let (at, length) = chunks[0];
-        drop(file);
-        info.manager_addrs.fill(DecodedStoredAddress::Undefined);
-        superblock.eof_address = EOF;
-        bytes.resize(usize::try_from(EOF).unwrap(), 0);
-        Self {
-            bytes,
-            info,
-            original_info,
-            superblock,
-            extension: (
-                usize::try_from(at).unwrap(),
-                usize::try_from(length).unwrap(),
-            ),
-        }
-    }
-
-    pub fn manager(&mut self, slot: ManagerSlot, sections: &[(u64, u64)]) {
-        let address = HEADER + u64::try_from(slot.index()).unwrap() * STRIDE;
-        let (header, list) =
-            test_util::free_space::raw_manager_eight(address, address + HEADER_LEN, sections);
-        let at = usize::try_from(address).unwrap();
-        self.bytes[at..at + header.len()].copy_from_slice(&header);
-        self.bytes[at + header.len()..at + header.len() + list.len()].copy_from_slice(&list);
-        self.info.manager_addrs[slot.index()] =
-            DecodedStoredAddress::Defined(StoredAddress::new(address));
-    }
-
-    pub fn write(self, path: &Path) -> Vec<u8> {
-        let Self {
-            mut bytes,
-            info,
-            original_info,
-            superblock,
-            extension: (at, length),
-        } = self;
-        let widths = format::FormatWidths {
-            offsets: superblock.offset_size,
-            lengths: superblock.length_size,
-        };
-        let payload = format::serialize_file_space_info_v1(widths, &info).unwrap();
-        let offset = bytes[at..at + length]
-            .windows(original_info.len())
-            .position(|window| window == original_info)
-            .unwrap()
-            + at;
-        assert_eq!(payload.len(), original_info.len());
-        bytes[offset..offset + payload.len()].copy_from_slice(&payload);
-        test_util::checksum::restamp(&mut bytes, at, length);
-        let encoded = format::serialize_superblock(&superblock).unwrap();
-        bytes[..encoded.len()].copy_from_slice(&encoded);
-        std::fs::write(path, &bytes).unwrap();
-        bytes
-    }
-}
-
-pub const EOF: u64 = 65_536;
-pub const HEADER: u64 = 8192;
-pub const HEADER_AT: usize = 8192;
-pub const HEADER_LEN: u64 = 82;
-pub const LIST: usize = HEADER_AT + 82;
-pub const SECTION: u64 = 16_384;
-pub const STRIDE: u64 = 256;
