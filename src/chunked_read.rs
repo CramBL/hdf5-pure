@@ -2995,18 +2995,30 @@ mod tests {
 
     #[cfg(feature = "std")]
     #[rstest]
-    #[case::dense_zero(false, false, 0)]
-    #[case::dense_nonzero(false, false, 7)]
-    #[case::dense_unknown(false, true, 0)]
-    #[case::sparse_nonzero(true, false, 7)]
-    #[case::sparse_unknown(true, true, 0)]
+    #[case::cached_bytes(ReadMode::CachedBytes)]
+    #[case::cached_seek_source(ReadMode::CachedSeekSource)]
+    #[case::cached_source(ReadMode::CachedSource)]
+    #[case::seek_source(ReadMode::SeekSource)]
+    #[case::source(ReadMode::Source)]
     fn whole_reads_consult_fill_only_for_uncovered_storage(
-        #[case] sparse: bool,
-        #[case] unknown: bool,
-        #[case] fill_value: i32,
-        #[values(0, 1, 2, 3, 4)] reader: u8,
+        #[case] reader: ReadMode,
+        #[values(
+            StorageFill::DenseZero,
+            StorageFill::DenseNonzero,
+            StorageFill::DenseUnknown,
+            StorageFill::SparseNonzero,
+            StorageFill::SparseUnknown
+        )]
+        fill: StorageFill,
         #[values(false, true)] filtered: bool,
     ) {
+        let (sparse, unknown, fill_value): (bool, bool, i32) = match fill {
+            StorageFill::DenseNonzero => (false, false, 7),
+            StorageFill::DenseUnknown => (false, true, 0),
+            StorageFill::DenseZero => (false, false, 0),
+            StorageFill::SparseNonzero => (true, false, 7),
+            StorageFill::SparseUnknown => (true, true, 0),
+        };
         let mut file_data = vec![0; 0x2000];
         let mut chunks = Vec::new();
         for (i, offsets) in [[0, 0], [0, 3], [2, 0], [2, 3]].into_iter().enumerate() {
@@ -3066,7 +3078,7 @@ mod tests {
         let spec =
             RawReadSpec::parse(&layout, &dataspace, &datatype, pipeline.as_ref(), fill).unwrap();
         let cache = ChunkCache::new();
-        let read = || read_chunked_fixture(&file_data, spec, &cache, reader);
+        let read = || reader.read(&file_data, spec, &cache);
         if sparse && unknown {
             assert_eq!(read().unwrap_err(), FormatError::UnreadableFillValue);
             assert_eq!(read().unwrap_err(), FormatError::UnreadableFillValue);
@@ -3085,7 +3097,7 @@ mod tests {
         assert_eq!(read().unwrap(), expected);
         assert_eq!(
             cache.stats().hits(),
-            if reader == 2 || reader == 4 {
+            if matches!(reader, ReadMode::Source | ReadMode::SeekSource) {
                 0
             } else if sparse {
                 3
@@ -3207,43 +3219,56 @@ mod tests {
     }
 
     #[cfg(feature = "std")]
-    fn read_chunked_fixture(
-        bytes: &[u8],
-        spec: RawReadSpec<'_>,
-        cache: &ChunkCache,
-        reader: u8,
-    ) -> Result<Vec<u8>, FormatError> {
-        match reader {
-            0 => read_chunked_data_cached(bytes, spec, FORMAT_WIDTHS, cache),
-            1 => read_chunked_data_cached_from_source(
-                &BytesSource::new(bytes),
-                spec,
-                FORMAT_WIDTHS,
-                cache,
-            ),
-            2 => read_chunked_data_from_source(&BytesSource::new(bytes), spec, FORMAT_WIDTHS),
-            3 => read_chunked_data_cached_from_source(
-                &ReadSeekSource::new(Cursor::new(bytes)).unwrap(),
-                spec,
-                FORMAT_WIDTHS,
-                cache,
-            ),
-            4 => read_chunked_data_from_source(
-                &ReadSeekSource::new(Cursor::new(bytes)).unwrap(),
-                spec,
-                FORMAT_WIDTHS,
-            ),
-            5 | 6 => {
-                let region = ReadRegion::rows(spec, 1, 2)?;
-                if reader == 5 {
-                    read_chunked_region_from_source(
-                        &BytesSource::new(bytes),
-                        &region,
-                        FORMAT_WIDTHS,
-                        cache,
-                        CachePass::LRU,
-                    )
-                } else {
+    #[derive(Clone, Copy)]
+    enum StorageFill {
+        DenseNonzero,
+        DenseUnknown,
+        DenseZero,
+        SparseNonzero,
+        SparseUnknown,
+    }
+
+    #[cfg(feature = "std")]
+    #[derive(Clone, Copy)]
+    enum ReadMode {
+        CachedBytes,
+        CachedSeekSource,
+        CachedSource,
+        SeekSource,
+        SelectedSeekSource,
+        SelectedSource,
+        Source,
+    }
+
+    #[cfg(feature = "std")]
+    impl ReadMode {
+        fn read(
+            self,
+            bytes: &[u8],
+            spec: RawReadSpec<'_>,
+            cache: &ChunkCache,
+        ) -> Result<Vec<u8>, FormatError> {
+            match self {
+                Self::CachedBytes => read_chunked_data_cached(bytes, spec, FORMAT_WIDTHS, cache),
+                Self::CachedSeekSource => read_chunked_data_cached_from_source(
+                    &ReadSeekSource::new(Cursor::new(bytes)).unwrap(),
+                    spec,
+                    FORMAT_WIDTHS,
+                    cache,
+                ),
+                Self::CachedSource => read_chunked_data_cached_from_source(
+                    &BytesSource::new(bytes),
+                    spec,
+                    FORMAT_WIDTHS,
+                    cache,
+                ),
+                Self::SeekSource => read_chunked_data_from_source(
+                    &ReadSeekSource::new(Cursor::new(bytes)).unwrap(),
+                    spec,
+                    FORMAT_WIDTHS,
+                ),
+                Self::SelectedSeekSource => {
+                    let region = ReadRegion::rows(spec, 1, 2)?;
                     read_chunked_region_from_source(
                         &ReadSeekSource::new(Cursor::new(bytes)).unwrap(),
                         &region,
@@ -3252,15 +3277,34 @@ mod tests {
                         CachePass::LRU,
                     )
                 }
+                Self::SelectedSource => {
+                    let region = ReadRegion::rows(spec, 1, 2)?;
+                    read_chunked_region_from_source(
+                        &BytesSource::new(bytes),
+                        &region,
+                        FORMAT_WIDTHS,
+                        cache,
+                        CachePass::LRU,
+                    )
+                }
+                Self::Source => {
+                    read_chunked_data_from_source(&BytesSource::new(bytes), spec, FORMAT_WIDTHS)
+                }
             }
-            _ => Err(FormatError::Internal(format!("unknown reader {reader}"))),
         }
     }
 
     #[cfg(feature = "std")]
     #[rstest]
+    #[case::cached_bytes(ReadMode::CachedBytes)]
+    #[case::cached_seek_source(ReadMode::CachedSeekSource)]
+    #[case::cached_source(ReadMode::CachedSource)]
+    #[case::seek_source(ReadMode::SeekSource)]
+    #[case::selected_seek_source(ReadMode::SelectedSeekSource)]
+    #[case::selected_source(ReadMode::SelectedSource)]
+    #[case::source(ReadMode::Source)]
     fn chunked_reads_reject_malformed_later_chunks(
-        #[values(0, 1, 2, 3, 4, 5, 6)] reader: u8,
+        #[case] reader: ReadMode,
         #[values(4, 12)] length: usize,
         #[values(false, true)] cached: bool,
     ) {
@@ -3301,7 +3345,7 @@ mod tests {
             cache.put_decompressed(CachePass::LRU, &[2], vec![1; length]);
         }
         assert_eq!(
-            read_chunked_fixture(&bytes, spec, &cache, reader).unwrap_err(),
+            reader.read(&bytes, spec, &cache).unwrap_err(),
             FormatError::DataSizeMismatch {
                 expected: 8,
                 actual: length
@@ -3311,13 +3355,27 @@ mod tests {
 
     #[cfg(feature = "std")]
     #[rstest]
-    #[case::io(false, FormatError::UnexpectedSourceEof { expected: 528, available: 524 })]
-    #[case::decoding(true, FormatError::UnsupportedFilter(999))]
+    #[case::cached_bytes(ReadMode::CachedBytes)]
+    #[case::cached_seek_source(ReadMode::CachedSeekSource)]
+    #[case::cached_source(ReadMode::CachedSource)]
+    #[case::seek_source(ReadMode::SeekSource)]
+    #[case::selected_seek_source(ReadMode::SelectedSeekSource)]
+    #[case::selected_source(ReadMode::SelectedSource)]
+    #[case::source(ReadMode::Source)]
     fn chunked_reads_abandon_io_and_decode_errors(
-        #[case] decoding: bool,
-        #[case] expected: FormatError,
-        #[values(0, 1, 2, 3, 4, 5, 6)] reader: u8,
+        #[case] reader: ReadMode,
+        #[values(ReadFailure::Io, ReadFailure::Decoding)] failure: ReadFailure,
     ) {
+        let (decoding, expected) = match failure {
+            ReadFailure::Decoding => (true, FormatError::UnsupportedFilter(999)),
+            ReadFailure::Io => (
+                false,
+                FormatError::UnexpectedSourceEof {
+                    expected: 528,
+                    available: 524,
+                },
+            ),
+        };
         let chunks = [
             ChunkInfo {
                 offsets: vec![0, 0],
@@ -3366,9 +3424,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            read_chunked_fixture(&bytes, spec, &ChunkCache::new(), reader).unwrap_err(),
+            reader.read(&bytes, spec, &ChunkCache::new()).unwrap_err(),
             expected
         );
+    }
+
+    #[cfg(feature = "std")]
+    #[derive(Clone, Copy)]
+    enum ReadFailure {
+        Decoding,
+        Io,
     }
 
     fn assembly_index(chunk_dims: &[u64], ds_dims: &[u64]) -> ParsedChunkIndex {

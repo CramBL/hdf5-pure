@@ -20,7 +20,9 @@ use test_util::object_header::Message;
 use test_util::object_header::MessageType;
 use test_util::object_header::v2::Header;
 use test_util::superblock::v2::Superblock;
+use test_util::temp;
 use test_util::widths::Widths;
+use test_util_hdf5::reader::ReadBackend;
 
 #[test]
 fn a_present_short_chunk_returns_a_size_mismatch() {
@@ -33,24 +35,23 @@ fn a_present_short_chunk_returns_a_size_mismatch() {
 }
 
 #[rstest]
-#[case(vec![7; 4])]
-#[case(vec![7; 12])]
+#[case::bytes(Backend::File(ReadBackend::Bytes))]
+#[case::cursor(Backend::Cursor)]
+#[case::streaming(Backend::File(ReadBackend::Streaming))]
 fn malformed_chunks_are_rejected_before_cache_admission(
-    #[case] stored: Vec<u8>,
-    #[values(Backend::Buffered, Backend::Seek, Backend::Streaming)] backend: Backend,
+    #[values(vec![7; 4], vec![7; 12])] stored: Vec<u8>,
+    #[case] backend: Backend,
     #[values(Read::Whole, Read::Rows, Read::Region)] read: Read,
     #[values(false, true)] skipped: bool,
 ) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("chunk.h5");
+    let path = temp::temp_path("chunk.h5");
     let bytes = chunk_file(Some(&stored), 2, skipped, 17);
     std::fs::write(&path, &bytes).unwrap();
     let file = match backend {
-        Backend::Buffered => File::from_bytes(bytes).unwrap(),
-        Backend::Seek => {
+        Backend::Cursor => {
             File::from_source(ReadSeekSource::new(Cursor::new(bytes)).unwrap()).unwrap()
         }
-        Backend::Streaming => File::open_streaming(&path).unwrap(),
+        Backend::File(backend) => backend.open(&path).unwrap(),
     };
     let dataset = file.dataset("d").unwrap();
     assert_eq!(
@@ -124,9 +125,8 @@ fn complete_edge_chunks_and_absent_chunks_retain_their_values(
 
 #[derive(Clone, Copy)]
 enum Backend {
-    Buffered,
-    Seek,
-    Streaming,
+    Cursor,
+    File(ReadBackend),
 }
 
 #[derive(Clone, Copy)]
