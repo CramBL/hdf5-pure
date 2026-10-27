@@ -113,8 +113,8 @@ impl WriteEngine {
 
     /// Places a nonempty dense attribute set and adds its Attribute Info message to `region`.
     ///
-    /// The caller checks the set with [`crate::file_writer::dense_attrs_check`] before commit
-    /// application.
+    /// The caller checks the set before commit application with
+    /// [`dense_attrs_check`](crate::file_writer::dense_attribute_write::dense_attrs_check).
     ///
     /// # Errors
     ///
@@ -144,7 +144,7 @@ impl WriteEngine {
         attrs: &[crate::attribute::AttributeMessage],
         creation: DenseAttrCreationOrder,
     ) -> Result<Vec<u8>, Error> {
-        let plan = crate::file_writer::dense_attrs_plan(attrs, creation)?;
+        let plan = crate::file_writer::dense_attribute_write::dense_attrs_plan(attrs, creation)?;
         let (_addr, attr_info_message) =
             self.place_relocatable(plan.blob_len(), AllocationClass::Metadata, |stored_base| {
                 let blob = plan.build(stored_base)?;
@@ -514,7 +514,7 @@ pub(super) fn plan_attr_ops<S: Source + ?Sized>(
         }
     }
     // Check dense storage geometry before commit application.
-    crate::file_writer::dense_attrs_check(&attrs).map_err(Error::Format)?;
+    crate::file_writer::dense_attribute_write::dense_attrs_check(&attrs).map_err(Error::Format)?;
     Ok(AttrEdits {
         region,
         attrs: EditedAttrs::Dense(DenseAttrEdit {
