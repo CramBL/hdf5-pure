@@ -59,8 +59,7 @@ fn strict_persisted_corruption_has_context_and_preserves_the_file(
     memory: MemoryStrategy,
     #[values(false, true)] buffered: bool,
 ) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("corrupt.h5");
+    let path = temp::temp_path("corrupt.h5");
     let mut fixture = PersistedImage::new(&path, PersistedStrategy::Page, 16);
     fixture.manager(ManagerSlot::Metadata, &[(SECTION, 32)]);
     let mut slot = ManagerSlot::Metadata;
@@ -283,8 +282,7 @@ fn strict_open_checks_persisted_checksums_without_the_checksum_feature(
     )]
     memory: MemoryStrategy,
 ) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("checksums.h5");
+    let path = temp::temp_path("checksums.h5");
     let mut builder = FileBuilder::new();
     builder.with_file_space_settings(
         FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
@@ -468,8 +466,7 @@ fn strict_persisted_open_rejects_invalid_checksums_without_writes(
     #[values(false, true)] header: bool,
     #[values(false, true)] buffered: bool,
 ) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("invalid-manager.h5");
+    let path = temp::temp_path("invalid-manager.h5");
     write_fixture(&path, strategy, userblock);
     let first = File::open_rw(&path).unwrap();
     first.root().delete("b").unwrap();
@@ -560,8 +557,7 @@ fn strict_persisted_open_rejects_a_truncated_logical_file(
     )]
     memory: MemoryStrategy,
 ) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("missing-tail.h5");
+    let path = temp::temp_path("missing-tail.h5");
     file_space::write_persisted_interior_hole(&path);
     let reader = File::open(&path).unwrap();
     let mut superblock = reader.superblock().clone();
@@ -600,8 +596,7 @@ fn strict_persisted_open_accepts_absent_or_empty_persistence(#[values(false, tru
         FileAccessProperties::default().persisted_free_space_policy(),
         PersistedFreeSpacePolicy::Tolerant
     );
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("empty.h5");
+    let path = temp::temp_path("empty.h5");
     let mut builder = FileBuilder::new();
     if persist {
         builder.with_file_space_settings(
@@ -633,8 +628,7 @@ fn persisted_inspection_reports_overlapping_extents(
     #[case] displacement: u64,
     #[values(false, true)] streaming: bool,
 ) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("overlapping-sections.h5");
+    let path = temp::temp_path("overlapping-sections.h5");
     file_space::write_persisted_interior_hole(&path);
     let file = File::open(&path).unwrap();
     let report = file.persisted_free_sections().unwrap().unwrap();

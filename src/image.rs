@@ -1632,10 +1632,9 @@ mod tests {
     ) {
         use std::error::Error as StdError;
 
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("source.h5");
+        let path = test_util::temp::temp_path("source.h5");
         fs::write(&path, []).unwrap();
-        let handle = fs::File::open(path).unwrap();
+        let handle = fs::File::open(&path).unwrap();
         let error =
             read_at_handle_io(&handle, recorded_length, 0, &mut vec![0; read_length]).unwrap_err();
         if recorded_length == 0 {
@@ -1668,10 +1667,9 @@ mod tests {
 
         use hdf5_pure_core::__private::PhysicalAddress;
 
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("truncated.h5");
+        let path = test_util::temp::temp_path("truncated.h5");
         fs::write(&path, []).unwrap();
-        let handle = fs::File::open(path).unwrap();
+        let handle = fs::File::open(&path).unwrap();
         let source = BorrowedHandle::new(&handle, recorded_length);
         let error = if probe {
             source.finish(source.read_exact_at(0, 4))
@@ -1736,10 +1734,9 @@ mod tests {
         bytes[64..146].copy_from_slice(&header);
         bytes[146..181].copy_from_slice(&sections);
         bytes.truncate(actual_len);
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("acquisition.h5");
+        let path = test_util::temp::temp_path("acquisition.h5");
         fs::write(&path, bytes).unwrap();
-        let handle = fs::File::open(path).unwrap();
+        let handle = fs::File::open(&path).unwrap();
         let source = BorrowedHandle::new(&handle, recorded_len);
         let info = FileSpaceInfoFields {
             strategy: FileSpaceStrategy::FsmAggr,

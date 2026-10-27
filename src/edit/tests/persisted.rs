@@ -2,6 +2,7 @@ use std::path::Path;
 
 use hdf5_pure_space::__private::Extent;
 use rstest::rstest;
+use test_util::temp;
 use test_util_hdf5::file_space::persisted::{
     EOF, HEADER, HEADER_LEN, ManagerSlot, PersistedImage, PersistedStrategy, SECTION, STRIDE,
 };
@@ -18,8 +19,7 @@ use crate::source::MetadataCacheConfig;
 
 #[test]
 fn strict_persisted_later_failure_precedes_allocator_construction() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("later-manager.h5");
+    let path = temp::temp_path("later-manager.h5");
     let mut fixture = PersistedImage::new(&path, PersistedStrategy::Page, 16);
     fixture.manager(ManagerSlot::Metadata, &[(SECTION, 32)]);
     fixture.manager(ManagerSlot::Unknown, &[(EOF - 16, 32)]);
@@ -73,8 +73,7 @@ fn strict_persisted_later_failure_precedes_allocator_construction() {
 #[case::same_manager(false)]
 #[case::different_managers(true)]
 fn strict_persisted_adjacent_sections_are_admitted(#[case] separate: bool) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("adjacent.h5");
+    let path = temp::temp_path("adjacent.h5");
     let mut fixture = PersistedImage::new(&path, PersistedStrategy::FsmAggr, 128);
     if separate {
         fixture.manager(ManagerSlot::Metadata, &[(SECTION, 32)]);
@@ -94,7 +93,7 @@ fn strict_persisted_adjacent_sections_are_admitted(#[case] separate: bool) {
         if separate { 7 } else { 5 }
     );
     drop(engine);
-    assert_eq!(std::fs::read(path).unwrap(), bytes);
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
 }
 
 #[rstest]
@@ -109,8 +108,7 @@ fn strict_persisted_page_roles_preserve_admission(
     #[case] length: u64,
     #[case] admission: Admission,
 ) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("page-role.h5");
+    let path = temp::temp_path("page-role.h5");
     let mut fixture = PersistedImage::new(&path, PersistedStrategy::Page, 128);
     fixture.manager(slot, &[(address, length)]);
     fixture.manager(ManagerSlot::LocalHeap, &[]);
@@ -144,7 +142,7 @@ fn strict_persisted_page_roles_preserve_admission(
     );
     assert_eq!(engine.persist.as_ref().unwrap().old_blocks.len(), 5);
     drop(engine);
-    assert_eq!(std::fs::read(path).unwrap(), bytes);
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
 }
 
 fn strict_engine(path: &Path) -> WriteEngine {

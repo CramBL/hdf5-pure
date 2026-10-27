@@ -114,8 +114,7 @@ fn staged_dataset_metadata_respects_filter_availability(
     #[case] filter: MetadataFilter,
     #[case] expected: FilterId,
 ) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("q.h5");
+    let path = test_util::temp::temp_path("q.h5");
     let mut e = open_session(&path);
     let mut col = DatasetBuilder::new("");
     col.with_i32_data(&[1, 2, 3, 4])
