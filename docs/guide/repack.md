@@ -81,7 +81,7 @@ Fidelity checks and drop-path validation run before output bytes are written. Da
 | Layout | contiguous / compact or chunked |
 | Unallocated storage | a dataset created and never written stores nothing in the copy, though a read of it still returns the fill value |
 | Filters | eligible fully allocated chunked datasets preserve any filter pipeline verbatim. Re-encoded paths support deflate, shuffle, Fletcher32, LZF, and lossless integer scale-offset |
-| Structure | group hierarchy of arbitrary depth |
+| Structure | group hierarchy up to 128 levels deep |
 | Attributes | every datatype above, carried across with the source's own encoding (width, charset, string padding, and rank included) on datasets, groups, and root |
 | File-space strategy | the source's strategy, page size, and threshold (carried forward as non-persistent) |
 

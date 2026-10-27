@@ -255,6 +255,30 @@ impl<T, L> ObjectTree<T, L> {
     pub(crate) fn into_parts(self) -> (Vec<GraphObject<T, L>>, GraphObject<T, L>) {
         (self.descendants, self.root)
     }
+
+    /// Returns the number of links on the path from the root to the deepest descendant whose value
+    /// `counted` accepts, or 0 if `counted` accepts none.
+    pub(crate) fn depth(&self, counted: impl Fn(&T) -> bool) -> usize {
+        let mut depths = vec![0; self.descendants.len()];
+        for link in &self.root.links {
+            depths[link.target.get()] = 1;
+        }
+        // In post order each object comes after the objects its links target, so a walk from the
+        // last descendant sets the depth of each object before it reads it.
+        for (index, object) in self.descendants.iter().enumerate().rev() {
+            let depth = depths[index] + 1;
+            for link in &object.links {
+                depths[link.target.get()] = depth;
+            }
+        }
+        self.descendants
+            .iter()
+            .zip(depths)
+            .filter(|(object, _)| counted(&object.value))
+            .map(|(_, depth)| depth)
+            .max()
+            .unwrap_or(0)
+    }
 }
 
 /// An object of an [`ObjectGraph`] or an [`ObjectTree`] and the hard links it holds.
@@ -365,10 +389,12 @@ pub(crate) enum TraversalError<E> {
 /// [`File::commit`](crate::File::commit) that applies a [`File::copy`](crate::File::copy), reads
 /// the objects its source reaches through hard links, up to a limit on the objects and another on
 /// the hard links. A repack, such as [`repack`](crate::repack()), reads the objects of its source
-/// the same way.
+/// the same way, and also limits how deep it nests the groups it writes.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TraversalLimit {
+    /// The depth of the deepest group a repack writes, in links from the root group.
+    Depth,
     /// The number of hard links the traversal reads, each link counted.
     Links,
     /// The number of objects the traversal reads, each object counted once however many links
@@ -379,6 +405,7 @@ pub enum TraversalLimit {
 impl fmt::Display for TraversalLimit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::Depth => "levels of nested groups",
             Self::Links => "hard links",
             Self::Objects => "objects",
         })
@@ -468,6 +495,28 @@ mod tests {
             vec![(4, vec![]), (2, vec![0]), (3, vec![])],
         );
         assert_eq!(summary(&root), (1, vec![1, 2]));
+    }
+
+    #[rstest]
+    #[case::root_alone(vec![(1, vec![])], &[], 0)]
+    #[case::one_link(vec![(1, vec![2]), (2, vec![])], &[], 1)]
+    #[case::chain(vec![(1, vec![2]), (2, vec![3]), (3, vec![4]), (4, vec![])], &[], 3)]
+    #[case::deepest_branch_first(vec![(1, vec![2, 3]), (2, vec![4]), (3, vec![]), (4, vec![])], &[], 2)]
+    #[case::deepest_branch_last(vec![(1, vec![2, 3]), (2, vec![]), (3, vec![4]), (4, vec![])], &[], 2)]
+    #[case::deepest_object_uncounted(vec![(1, vec![2]), (2, vec![3]), (3, vec![4]), (4, vec![])], &[4], 2)]
+    #[case::every_descendant_uncounted(vec![(1, vec![2]), (2, vec![3]), (3, vec![])], &[2, 3], 0)]
+    fn the_depth_of_a_tree_counts_the_links_to_its_deepest_counted_object(
+        #[case] edges: Vec<(u64, Vec<u64>)>,
+        #[case] uncounted: &[u64],
+        #[case] depth: usize,
+    ) {
+        let Ok(tree) = discover(&edges, UNLIMITED).unwrap().into_tree() else {
+            panic!("expected a tree, got the graph back");
+        };
+        assert_eq!(
+            tree.depth(|id| !uncounted.contains(&id.header_address().get())),
+            depth
+        );
     }
 
     #[rstest]
@@ -652,6 +701,7 @@ mod tests {
                 let Ok(tree) = graph.into_tree() else {
                     panic!("expected a tree, got the graph back");
                 };
+                assert_eq!(tree.depth(|_| true), DEEP_CHAIN as usize - 1);
                 let (descendants, root) = tree.into_parts();
                 assert_eq!(descendants.len(), DEEP_CHAIN as usize - 1);
                 assert_eq!(descendants[0].value, object(DEEP_CHAIN - 1));

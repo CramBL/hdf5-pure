@@ -22,6 +22,7 @@ use crate::object_graph::ObjectGraph;
 use crate::object_graph::ObjectId;
 use crate::object_graph::ObjectIndex;
 use crate::object_graph::TraversalBudget;
+use crate::object_graph::TraversalLimit;
 use crate::object_path::LinkNameBuf;
 use crate::object_path::ObjectPathBuf;
 use crate::reader::File;
@@ -49,8 +50,9 @@ impl SourceObjects {
     /// no link, if a link that stays targets the root group or an object another link targets, or
     /// if a link that stays has a name that is not a component of an object path. Returns
     /// [`Error::TraversalLimitExceeded`] if `file` reaches more objects or hard links than
-    /// `budget` allows, and [`Error::NotAGroup`] if the root object is not a group. Propagates the
-    /// errors of reading the object headers and the links of the groups.
+    /// `budget` allows, or if the groups that stay nest more than [`MAX_DEPTH`] levels deep, and
+    /// [`Error::NotAGroup`] if the root object is not a group. Propagates the errors of reading
+    /// the object headers and the links of the groups.
     pub(super) fn discover(
         file: &File,
         drop: &BTreeSet<ObjectPathBuf>,
@@ -68,6 +70,12 @@ impl SourceObjects {
         let Ok(tree) = graph.into_tree() else {
             return Err(Error::RepackUnsupported(String::from(REPEATED_OBJECT)));
         };
+        if tree.depth(|object| object.class == ObjectClass::Group) > MAX_DEPTH {
+            return Err(Error::TraversalLimitExceeded {
+                limit: TraversalLimit::Depth,
+                maximum: MAX_DEPTH,
+            });
+        }
         let (descendants, root) = tree.into_parts();
         if root.value.class != ObjectClass::Group {
             return Err(Error::NotAGroup(ObjectPathBuf::root().to_string()));
@@ -314,3 +322,9 @@ fn missing_path() -> Error {
 /// links the drop paths name are removed.
 const REPEATED_OBJECT: &str = "the repacked file would hold more than one hard link to one object (an \
      alias or a cycle), which a repack cannot reproduce yet";
+
+/// The depth of the deepest group a repack writes, in links from the root group.
+///
+/// [`FileBuilder`](crate::FileBuilder) flattens and drops the nested groups of its output
+/// recursively, so the bound also limits the stack a repack uses.
+pub(super) const MAX_DEPTH: usize = 128;

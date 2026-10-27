@@ -168,6 +168,10 @@ fn a_header_message_type_can_be_named_where_an_error_hands_one_over() {
 }
 
 #[rstest]
+#[case::depth(
+    TraversalLimit::Depth,
+    "the object graph nests groups more than 2 levels deep, the most a repack writes"
+)]
 #[case::links(
     TraversalLimit::Links,
     "the object graph holds more than 2 hard links, the most a traversal reads"
@@ -184,6 +188,17 @@ fn an_exceeded_traversal_limit_displays_its_count_and_maximum(
         Error::TraversalLimitExceeded { limit, maximum: 2 }.to_string(),
         display
     );
+}
+
+#[rstest]
+#[case::depth(TraversalLimit::Depth, "levels of nested groups")]
+#[case::links(TraversalLimit::Links, "hard links")]
+#[case::objects(TraversalLimit::Objects, "objects")]
+fn a_traversal_limit_displays_the_count_it_bounds(
+    #[case] limit: TraversalLimit,
+    #[case] display: &str,
+) {
+    assert_eq!(limit.to_string(), display);
 }
 
 #[rstest::rstest]
