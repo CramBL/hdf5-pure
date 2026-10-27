@@ -207,21 +207,12 @@ jobs:
           SHARD_INDEX: ${{ matrix.shard }}
           SHARD_COUNT: ${{ strategy.job-total }}
         run: |
-          if (( SHARD_INDEX == 0 )); then
-            cargo hack -p hdf5-pure --features std,deflate nextest run --locked --no-default-features
-            cargo hack -p hdf5-pure --features std,deflate test --locked --doc --no-default-features
-          fi
-          features_text="$(just --evaluate FULL_PUBLIC_FEATURES)"
-          IFS=',' read -r -a features <<< "$features_text"
-          shard_features=()
-          for ((index = SHARD_INDEX; index < ${#features[@]}; index += SHARD_COUNT)); do
-            shard_features+=("${features[index]}")
+          configurations_text="$(just --evaluate FEATURE_TEST_CONFIGURATIONS)"
+          read -r -a configurations <<< "$configurations_text"
+          for ((index = SHARD_INDEX; index < ${#configurations[@]}; index += SHARD_COUNT)); do
+            cargo hack -p hdf5-pure --features "${configurations[index]}" nextest run --locked --no-default-features
+            cargo hack -p hdf5-pure --features "${configurations[index]}" test --locked --doc --no-default-features
           done
-          if (( ${#shard_features[@]} == 0 )); then
-            exit 0
-          fi
-          cargo hack -p hdf5-pure --each-feature --include-features "$(IFS=,; echo "${shard_features[*]}")" --exclude-no-default-features --features default nextest run --locked
-          cargo hack -p hdf5-pure --each-feature --include-features "$(IFS=,; echo "${shard_features[*]}")" --exclude-no-default-features --features default test --locked --doc
 
   lint:
     name: lint / ubuntu-latest

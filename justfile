@@ -43,8 +43,11 @@ test-full *ARGS:
 # The facade's tests with std and deflate without defaults, followed by
 # each full-public feature beside the defaults.
 test-each-feature *ARGS:
-    cargo hack -p hdf5-pure --features std,deflate nextest run --locked --no-default-features {{ ARGS }}
-    cargo hack -p hdf5-pure --each-feature --include-features {{ FULL_PUBLIC_FEATURES }} --exclude-no-default-features --features default nextest run --locked {{ ARGS }}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for features in {{ FEATURE_TEST_CONFIGURATIONS }}; do
+        cargo hack -p hdf5-pure --features "$features" nextest run --locked --no-default-features {{ ARGS }}
+    done
 
 # The doctests of every workspace crate but the crosschecks, with `ARGS`.
 doctest *ARGS:
@@ -57,8 +60,11 @@ doctest-full *ARGS:
 # The facade's doctests with std and deflate without defaults, followed by
 # each full-public feature beside the defaults.
 doctest-each-feature *ARGS:
-    cargo hack -p hdf5-pure --features std,deflate test --locked --doc --no-default-features {{ ARGS }}
-    cargo hack -p hdf5-pure --each-feature --include-features {{ FULL_PUBLIC_FEATURES }} --exclude-no-default-features --features default test --locked --doc {{ ARGS }}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for features in {{ FEATURE_TEST_CONFIGURATIONS }}; do
+        cargo hack -p hdf5-pure --features "$features" test --locked --doc --no-default-features {{ ARGS }}
+    done
 
 fmt:
     cargo fmt --all

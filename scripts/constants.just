@@ -14,5 +14,7 @@ PUBLIC_FEATURES := "std,checksum,deflate,fast-deflate,serde,ndarray,num-complex,
 NO_STD_PUBLIC_FEATURES := "checksum,provenance,zfp"
 # The facade's public features the full recipes enable beside its defaults.
 FULL_PUBLIC_FEATURES := "checksum,fast-deflate,ndarray,num-complex,provenance,serde,zfp"
+# The complete feature sets for local tests, doctests, and CI shards.
+FEATURE_TEST_CONFIGURATIONS := "std,deflate default," + replace(FULL_PUBLIC_FEATURES, ",", " default,")
 # The same features on the facade, as cargo arguments for a run over several packages.
 FULL_PUBLIC := "--features " + replace_regex(FULL_PUBLIC_FEATURES, '[^,]+', 'hdf5-pure/$0')
