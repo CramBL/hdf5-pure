@@ -1,4 +1,5 @@
 use core::ops::Range;
+use std::path::Path;
 
 use hdf5_pure_format::__private::BTreeV2Layout;
 use hdf5_pure_format::__private::DenseLinkPlan;
@@ -18,11 +19,13 @@ use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::btree_v2::BTreeV2Header;
 use crate::datatype::CharacterSet;
+use crate::edit::WriteEngine;
 use crate::edit::group;
 use crate::edit::group_links;
 use crate::edit::object_header::OhRegion;
 use crate::error::Error;
 use crate::error::FormatError;
+use crate::file_lock::FileLocking;
 use crate::link_message::LinkMessage;
 use crate::message_type::MessageType;
 use crate::object_path::ObjectPathBuf;
@@ -518,7 +521,10 @@ fn find_message(region: &OhRegion, wanted: MessageType) -> (usize, usize, usize)
 }
 
 #[rstest]
-fn replaced_dense_metadata_is_reclaimed_after_publication(#[values(false, true)] bounded: bool) {
+fn replaced_dense_metadata_is_reclaimed_after_publication(
+    #[values(false, true)] bounded: bool,
+    #[values(None, Some(false), Some(true))] indexing: Option<bool>,
+) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("reclaim.h5");
     let mut builder = FileBuilder::new();
@@ -534,6 +540,9 @@ fn replaced_dense_metadata_is_reclaimed_after_publication(#[values(false, true)]
             .with_threshold(0),
     );
     builder.write(&path).unwrap();
+    if let Some(indexed) = indexing {
+        track_dense_root(&path, indexed);
+    }
     let mut engine = if bounded {
         super::common::open_bounded_session(&path)
     } else {
@@ -586,6 +595,7 @@ fn replaced_dense_metadata_is_reclaimed_after_publication(#[values(false, true)]
 fn dense_metadata_write_failure_preserves_the_published_tree(
     #[values(false, true)] bounded: bool,
     #[values(0, 17)] prefix: usize,
+    #[values(None, Some(false), Some(true))] indexing: Option<bool>,
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("rollback.h5");
@@ -596,6 +606,9 @@ fn dense_metadata_write_failure_preserves_the_published_tree(
             .unwrap();
     }
     builder.write(&path).unwrap();
+    if let Some(indexed) = indexing {
+        track_dense_root(&path, indexed);
+    }
     let original = std::fs::read(&path).unwrap();
     let mut engine = if bounded {
         super::common::open_bounded_session(&path)
@@ -631,4 +644,61 @@ fn dense_metadata_write_failure_preserves_the_published_tree(
     assert_eq!(names, expected);
     drop(file);
     dir.close().unwrap();
+}
+
+fn track_dense_root(path: &Path, indexed: bool) {
+    let engine = WriteEngine::open_with_locking(path, FileLocking::Enabled).unwrap();
+    let mut superblock = engine.superblock().clone();
+    let root = engine
+        .addresses()
+        .resolve(superblock.root_group_address)
+        .unwrap()
+        .get();
+    let inspected = engine.inspect_group(root).unwrap();
+    drop(engine);
+    let links = inspected
+        .links
+        .links()
+        .iter()
+        .enumerate()
+        .map(|(index, link)| {
+            OwnedLink::new(
+                link.name().to_vec(),
+                link.charset(),
+                link.target().clone(),
+                Some(u64::try_from(index).unwrap()),
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let info = LinkInfoMessage {
+        max_creation_order: Some(u64::try_from(links.len()).unwrap()),
+        fractal_heap_address: None,
+        btree_name_index_address: None,
+        btree_creation_order_address: indexed.then_some(None),
+    };
+    let storage = GroupLinkStorage::new(&info, links, OffsetWidth::Eight).unwrap();
+    let mut bytes = std::fs::read(path).unwrap();
+    let plan = DenseLinkPlan::new(storage, LengthWidth::Eight).unwrap();
+    let image = plan
+        .serialize(StoredAddress::new(u64::try_from(bytes.len()).unwrap()))
+        .unwrap();
+    bytes.extend_from_slice(&image.bytes);
+    let region = inspected.region;
+    let splice = region
+        .splice_first(MessageType::LINK_INFO)
+        .unwrap()
+        .unwrap();
+    let region = region.with_bytes(
+        splice
+            .replace_body(&image.info.serialize(OffsetWidth::Eight))
+            .unwrap(),
+    );
+    let header = crate::edit::object_header::build_v2_object_header(&region).unwrap();
+    superblock.root_group_address = StoredAddress::new(u64::try_from(bytes.len()).unwrap());
+    bytes.extend_from_slice(&header);
+    superblock.eof_address = u64::try_from(bytes.len()).unwrap();
+    let header = hdf5_pure_format::__private::serialize_superblock(&superblock).unwrap();
+    bytes[..header.len()].copy_from_slice(&header);
+    std::fs::write(path, bytes).unwrap();
 }

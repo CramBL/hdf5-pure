@@ -113,7 +113,7 @@ fn libhdf5_groups_retain_links_policy_and_thresholds(
 #[case::root("")]
 #[case::dense_child("dense_indexed")]
 #[case::compact_child("compact_indexed")]
-fn dense_root_edits_support_untracked_and_compact_tracked_groups_and_reject_tracked_dense_groups(
+fn dense_root_edits_preserve_untracked_and_tracked_group_policies(
     #[case] parent: &str,
     #[values(false, true)] source_only: bool,
 ) {
@@ -124,56 +124,26 @@ fn dense_root_edits_support_untracked_and_compact_tracked_groups_and_reject_trac
         "indexed",
         LinkCreationOrder::Indexed,
     );
-    let original = std::fs::read(&path).unwrap();
     let before = __private::inspect_group_links(&path, parent, source_only).unwrap();
     let file = __private::open_group_inspection(&path, source_only).unwrap();
     file.group(parent).unwrap().create_group("added").unwrap();
-    let result = file.commit();
-    if parent != "dense_indexed" {
-        result.unwrap();
-        drop(file);
-        let after = __private::inspect_group_links(&path, parent, source_only).unwrap();
-        assert_eq!(after.links.links().len(), before.links.links().len() + 1);
-        assert_eq!(
-            after.links.info().max_creation_order,
-            before
-                .links
-                .info()
-                .max_creation_order
-                .map(|counter| counter + 1)
-        );
-        let reference = CFile::open(&path).unwrap();
-        let group = reference.group(&format!("/{parent}/added")).unwrap();
-        assert_eq!(group.info().unwrap().nlinks, 0);
-        drop(group);
-        reference.close().unwrap();
-        dir.close().unwrap();
-        return;
-    }
-    let error = result.unwrap_err();
-    assert!(
-        matches!(
-            error,
-            Error::EditUnsupported(
-                "a target group uses dense (fractal-heap) link storage (not supported in place yet)"
-            )
-        ),
-        "{error:?}"
-    );
-    assert_eq!(
-        __private::group_inspection_snapshot(&file).unwrap(),
-        original
-    );
-    assert_eq!(
-        std::fs::metadata(&path).unwrap().len(),
-        u64::try_from(original.len()).unwrap()
-    );
-    assert_eq!(
-        __private::page_publication_snapshot(&file).unwrap(),
-        original
-    );
+    file.commit().unwrap();
     drop(file);
-    assert_eq!(std::fs::read(&path).unwrap(), original);
+    let after = __private::inspect_group_links(&path, parent, source_only).unwrap();
+    assert_eq!(after.links.links().len(), before.links.links().len() + 1);
+    assert_eq!(
+        after.links.info().max_creation_order,
+        before
+            .links
+            .info()
+            .max_creation_order
+            .map(|counter| counter + 1)
+    );
+    let reference = CFile::open(&path).unwrap();
+    let group = reference.group(&format!("/{parent}/added")).unwrap();
+    assert_eq!(group.info().unwrap().nlinks, 0);
+    drop(group);
+    reference.close().unwrap();
     dir.close().unwrap();
 }
 

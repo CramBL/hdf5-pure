@@ -89,22 +89,22 @@
 //!   (symbol-table) file is edited by converting each group on the edited path
 //!   to the latest format and repointing the superblock's root symbol-table
 //!   entry.
-//! - A group on an edited path may store untracked links compactly or densely in an unfiltered
+//! - A group on an edited path may store links compactly or densely in an unfiltered
 //!   managed fractal heap. Dense links are limited to 4096-byte encoded messages and seven-byte
 //!   heap IDs. Link names must be valid UTF-8. The editor selects compact or dense storage from the
 //!   final link count and the group's phase-change thresholds. It preserves link targets and name
 //!   encodings across transitions. Continuation chunks are collapsed when a header is rewritten.
 //!   A version 1 group is converted to a version 2 header with its links and attributes. Other
 //!   group messages are omitted, and attributes the conversion cannot reproduce are rejected.
-//! - An object that tracks **attribute creation order** (`track_order=True`,
-//!   and everything netCDF-4 writes) is edited like any other: its 6-byte
+//! - An object that tracks **attribute creation order** is edited like any other: its 6-byte
 //!   message records are walked and re-emitted, a new attribute takes the
 //!   object's next creation index, an overwrite keeps the one it had, and a
 //!   deletion leaves a gap rather than renumbering. A group that tracks **link**
 //!   creation order works the same way: a link added to it takes the next index
 //!   from the running maximum its Link Info message records, and a deletion
-//!   leaves a gap there too. Editing a tracked dense group or adding links beyond a tracked
-//!   group's compact threshold is rejected.
+//!   leaves a gap there too. Storage transitions preserve the tracking and indexing policy,
+//!   per-link indexes, and counter. Dense groups have a creation-order index when their policy
+//!   enables indexing.
 //! - Added datasets may be contiguous *or* chunked, with any filter the
 //!   whole-file writer supports (deflate, shuffle, fletcher32, scale-offset,
 //!   LZF, ZFP), and may declare extensible (maximum, optionally unlimited)

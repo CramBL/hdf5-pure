@@ -160,23 +160,19 @@ pub(super) struct GroupInfo {
 impl GroupInfo {
     /// Returns inline Link records and UTF-8 names for staged editing.
     ///
-    /// Expands untracked dense links into the region and clears their storage addresses.
+    /// Expands dense links into the region and clears their storage addresses while preserving
+    /// the creation-order policy, counter, and per-link indexes.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::EditUnsupported`] if dense links track creation order or a link name is
-    /// not valid UTF-8. Returns a serialization error if a link cannot be encoded.
+    /// Returns [`Error::EditUnsupported`] if a link name is not valid UTF-8. Returns a
+    /// serialization error if a link cannot be encoded.
     pub(super) fn into_compact(self) -> Result<(OhRegion, Vec<String>), Error> {
         let Self {
             mut region,
             mut links,
         } = self;
         let dense = links.info().fractal_heap_address.is_some();
-        if dense && links.creation_order() != LinkCreationPolicy::Untracked {
-            return Err(Error::EditUnsupported(
-                "a target group uses dense (fractal-heap) link storage (not supported in place yet)",
-            ));
-        }
         let names = links
             .links()
             .iter()
@@ -510,54 +506,6 @@ pub(super) fn find_link_info(
         p = body_end;
     }
     Ok(None)
-}
-
-/// Returns the maximum compact link count from the Group Info message.
-///
-/// Uses 8 if the message is absent or omits the threshold. The threshold in a version 0
-/// Group Info message is defined in "The Group Info Message" of the
-/// [format specification, version 4.0][spec].
-///
-/// # Errors
-///
-/// Returns [`Error::EditUnsupported`] if a message body extends past the region, or the
-/// Group Info message has an unsupported encoding or inconsistent thresholds.
-///
-/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_groupinfo
-pub(super) fn max_compact_links(region: &OhRegion) -> Result<u16, Error> {
-    let mut p = 0;
-    while let Some((msg_type, body, body_end)) = region.next_message(p)? {
-        if msg_type == MessageType::GROUP_INFO {
-            return Ok(group_links::phase_change(&region[body..body_end])?.max_compact());
-        }
-        p = body_end;
-    }
-    Ok(group_links::phase_change(&GROUP_INFO_BODY)?.max_compact())
-}
-
-/// Rejects additions that exceed a tracked group's compact link threshold.
-///
-/// `links_after_commit` includes this commit's additions and deletions. The editor supports
-/// compact link creation order and cannot write dense link creation-order indexes.
-///
-/// # Errors
-///
-/// Returns [`Error::EditUnsupported`] if a message body extends past the region, or the group
-/// tracks creation order and `links_after_commit` exceeds [`max_compact_links`].
-pub(super) fn reject_dense_link_creation_order(
-    region: &OhRegion,
-    links_after_commit: usize,
-) -> Result<(), Error> {
-    let tracked =
-        find_link_info(region)?.is_some_and(|(_, _, info)| info.max_creation_order.is_some());
-    if tracked && links_after_commit > usize::from(max_compact_links(region)?) {
-        return Err(Error::EditUnsupported(
-            "a group on the edited path tracks link creation order, and the links this commit \
-             adds to it would take it past the compact storage its group-info message allows; \
-             dense (fractal-heap) link storage cannot be written in place yet",
-        ));
-    }
-    Ok(())
 }
 
 /// Copies the region without Link messages named `name`, preserving every other byte.

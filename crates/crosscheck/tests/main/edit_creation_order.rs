@@ -1,36 +1,21 @@
 #![cfg(feature = "__hdf5-1.10")]
-//! In-place edits of objects that track attribute creation order (issue #416).
+//! Creation-order preservation during in-place edits.
 //!
-//! `H5Pset_attr_creation_order` — h5py's `track_order=True`, and what netCDF-4
-//! sets on every object it writes — makes every object-header message record six
-//! bytes wide instead of four, carrying a creation index. `EditSession` used to
-//! refuse such an object outright.
-//!
-//! The fixtures have to come from libhdf5: nothing in this
-//! crate's whole-file writer emits creation order, so a fixture written here
-//! would only test the editor against itself. And the interesting assertion is
-//! not "the attributes are still there" — this crate's own reader ignores
-//! creation order entirely, and would say yes to a file whose indexes are
-//! nonsense. It is what the C library makes of the order afterwards:
-//! `H5Aiterate2` over `H5_INDEX_CRT_ORDER` (h5py's `track_order` iteration) and
-//! `H5Aget_info_by_name`'s `corder`, which name the exact index each attribute
-//! carries.
-//!
-//! The tail of the file covers the same ground for **link** creation order, the
-//! separate mechanism `H5Pset_link_creation_order` turns on: there the judges
-//! are `H5Literate2` over `H5_INDEX_CRT_ORDER`, `H5Lget_info2`'s `corder`, and
-//! `H5Gget_info`'s `max_corder`.
+//! Fixtures are created through libhdf5. Assertions compare creation indexes, counters, and
+//! iteration order through libhdf5 after attribute and link edits.
 
 use std::path::Path;
 
 use hdf5::file::LibraryVersion;
 use hdf5::{IndexType, IterationOrder, LinkInfo};
-use hdf5_pure::{AttrValue, Error, File};
+use hdf5_pure::AttrValue;
+use hdf5_pure::File;
 
 use test_util_hdf5::creation_order::{self, Indexing};
 
-/// A file whose group `/g` tracks *link* creation order, as netCDF-4 writes,
-/// holding one dataset per name in `links`, created in that order.
+/// Writes a group `/g` with indexed link creation order.
+///
+/// Creates one dataset per entry in `links`, in the supplied order.
 fn write_link_tracked(path: &Path, links: &[&str]) {
     let file = hdf5::File::with_options()
         .with_fapl(|p| p.libver_bounds(LibraryVersion::V18, LibraryVersion::latest()))
@@ -541,82 +526,58 @@ fn a_tracked_group_leaves_a_deletion_gap_and_adds_past_it() {
     );
 }
 
-/// A group at the compact-storage threshold its Group Info message declares
-/// cannot take another link: past it libhdf5 moves the links
-/// into a fractal heap indexed by a creation-order B-tree, which this crate does
-/// not write (issue #102). The refusal lands before any byte changes.
 #[test]
-fn a_tracked_group_at_its_compact_threshold_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    let p = dir.path().join("t.h5");
-    // Eight links is the C library's default maximum compact value, so the
-    // fixture is the largest tracked group that still stores its links in the
-    // object header.
-    let links: Vec<String> = (0..8).map(|i| format!("d{i}")).collect();
-    let refs: Vec<&str> = links.iter().map(String::as_str).collect();
-    write_link_tracked(&p, &refs);
-    assert_eq!(links_in_creation_order(&p).1, 8);
-    let before = std::fs::read(&p).unwrap();
-
-    // Scoped so the session — and the file lock it holds, which Windows
-    // enforces — is gone before the bytes are read back.
-    let err = {
-        let s = File::open_rw(&p).unwrap();
-        s.group("g")
-            .unwrap()
-            .create_dataset("extra", |d| {
-                d.with_i32_data(&[1, 2]);
-            })
-            .unwrap();
-        s.commit().unwrap_err()
-    };
-    assert!(
-        matches!(&err, Error::EditUnsupported(m)
-            if m.contains("link creation order") && m.contains("dense")),
-        "got: {err}",
-    );
-    assert_eq!(
-        std::fs::read(&p).unwrap(),
-        before,
-        "the refusal wrote bytes"
-    );
+fn a_tracked_group_at_its_compact_threshold_becomes_dense() {
+    assert_tracked_group_addition(8);
 }
 
-/// A tracked group whose links are *already* dense is refused for the same
-/// reason, and refused as it is read rather than as the addition is planned.
 #[test]
-fn a_dense_tracked_group_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    let p = dir.path().join("t.h5");
-    // One past the default maximum compact value, so the C library wrote the
-    // links into a fractal heap.
-    let links: Vec<String> = (0..9).map(|i| format!("d{i}")).collect();
-    let refs: Vec<&str> = links.iter().map(String::as_str).collect();
-    write_link_tracked(&p, &refs);
-    assert_eq!(links_in_creation_order(&p).1, 9);
-    let before = std::fs::read(&p).unwrap();
+fn a_dense_tracked_group_preserves_creation_order_when_extended() {
+    assert_tracked_group_addition(9);
+}
 
-    // Scoped so the session — and the file lock it holds, which Windows
-    // enforces — is gone before the bytes are read back.
-    let err = {
-        let s = File::open_rw(&p).unwrap();
-        s.group("g")
-            .unwrap()
-            .create_dataset("extra", |d| {
-                d.with_i32_data(&[1, 2]);
-            })
-            .unwrap();
-        s.commit().unwrap_err()
-    };
-    assert!(
-        matches!(&err, Error::EditUnsupported(m) if m.contains("dense")),
-        "got: {err}",
+fn assert_tracked_group_addition(count: usize) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("links.h5");
+    let names = (0..count)
+        .map(|index| format!("d{index}"))
+        .collect::<Vec<_>>();
+    let refs = names.iter().map(String::as_str).collect::<Vec<_>>();
+    write_link_tracked(&path, &refs);
+    let file = File::open_rw(&path).unwrap();
+    file.group("g")
+        .unwrap()
+        .create_dataset("extra", |dataset| {
+            dataset.with_i32_data(&[1, 2]);
+        })
+        .unwrap();
+    file.commit().unwrap();
+    drop(file);
+    let mut expected = names;
+    expected.push("extra".into());
+    assert_eq!(
+        links_in_creation_order(&path),
+        (expected.clone(), i64::try_from(count + 1).unwrap())
+    );
+    for (index, name) in expected.iter().enumerate() {
+        assert_eq!(
+            link_creation_index(&path, name),
+            i64::try_from(index).unwrap()
+        );
+    }
+    let reference = hdf5::File::open(&path).unwrap();
+    let group = reference.group("g").unwrap();
+    assert_eq!(
+        group.info().unwrap().storage_type,
+        hdf5::GroupStorageType::Dense
     );
     assert_eq!(
-        std::fs::read(&p).unwrap(),
-        before,
-        "the refusal wrote bytes"
+        group.dataset("extra").unwrap().read_raw::<i32>().unwrap(),
+        [1, 2]
     );
+    drop(group);
+    reference.close().unwrap();
+    dir.close().unwrap();
 }
 
 /// Copying a group that tracks link creation order reproduces that order: the
