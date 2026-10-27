@@ -9803,7 +9803,7 @@ mod tests {
     #[case::payload_only(ChunkCacheConfig::new().with_index_cache(false))]
     #[case::all_retained(ChunkCacheConfig::new())]
     fn typed_sweeps_reuse_one_index_without_changing_retention(#[case] config: ChunkCacheConfig) {
-        use crate::parsed_chunk_index::test_support;
+        use crate::parsed_chunk_index::test_util as chunk_index_test_util;
 
         let n = 3 * 131_072 + 5;
         let edge = 128;
@@ -9821,16 +9821,16 @@ mod tests {
             .get();
         assert!(rows < n as u64);
         let descriptors = n.div_ceil(edge as usize);
-        test_support::reset();
+        chunk_index_test_util::reset();
         assert_eq!(dataset.read_f64().unwrap(), expected);
-        assert_eq!(test_support::counts(), (1, descriptors));
+        assert_eq!(chunk_index_test_util::counts(), (1, descriptors));
         let stats = dataset.chunk_cache_stats();
         assert_eq!(stats.index_loaded(), config.index_cache_enabled());
         assert_eq!(stats.cached_chunks() != 0, config.max_slots() != 0);
-        test_support::reset();
+        chunk_index_test_util::reset();
         assert_eq!(dataset.read_f64().unwrap(), expected);
         assert_eq!(
-            test_support::counts(),
+            chunk_index_test_util::counts(),
             (usize::from(!config.index_cache_enabled()), descriptors)
         );
         assert_eq!(
