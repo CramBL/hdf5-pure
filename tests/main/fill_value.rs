@@ -7,10 +7,18 @@
 //! `File::open_rw`-created dataset is honored.
 
 use hdf5_pure::{
-    Dataset, Error, File, FileBuilder, FillTime, FormatError, H5Element, MaxExtent, RepackOptions,
+    Dataset, Datatype, DatatypeByteOrder, Error, File, FileBuilder, FillTime, FixedPointType,
+    FormatError, H5Element, MaxExtent, RepackOptions,
 };
+use hdf5_pure_format::__private as format;
 use rstest::rstest;
 
+use test_util::data_layout;
+use test_util::dataspace;
+use test_util::image::Image;
+use test_util::object_header::{Message, MessageType};
+use test_util::superblock::v2::Superblock;
+use test_util::widths::Widths;
 use test_util_hdf5::file_builder;
 
 #[test]
@@ -55,8 +63,6 @@ fn no_fill_value_reports_none() {
 
 #[test]
 fn fill_value_across_datatypes() {
-    // Cover the byte widths and both the special u8/i8 paths and the LE-decoded
-    // multi-byte paths.
     fn check<T: H5Element + PartialEq + std::fmt::Debug>(
         write: impl Fn(&mut hdf5_pure::DatasetBuilder),
         expect: T,
@@ -616,4 +622,85 @@ fn repack_preserves_fill_time_policies() {
     let default_ds = file.dataset("default_policy").unwrap();
     assert_eq!(default_ds.fill_time().unwrap(), FillTime::IfSet);
     assert_eq!(default_ds.fill_value::<i32>().unwrap(), None);
+}
+
+#[rstest]
+#[case::partial(&[0])]
+#[case::extra_partial(&[0, 42, 0])]
+#[case::two_elements(&[0, 42, 0, 43])]
+fn rejects_scalar_fill_size(#[case] raw: &[u8]) {
+    let datatype = Datatype::FixedPoint(
+        FixedPointType::new(2, DatatypeByteOrder::LittleEndian, false, 0, 16).unwrap(),
+    );
+    let fill = format::serialize_fill_value_message_v3(FillTime::IfSet, Some(raw)).unwrap();
+    let image = Image::starting_with(&vec![0; Superblock::new(Widths::EIGHT).build().len()]);
+    let bytes = image.build_with_dataset(
+        "d",
+        [
+            Message::new(MessageType::DATASPACE, &dataspace::scalar()),
+            Message::new(
+                MessageType::DATATYPE,
+                &format::serialize_datatype(&datatype),
+            ),
+            Message::new(MessageType::FILL_VALUE, &fill),
+            Message::new(
+                MessageType::DATA_LAYOUT,
+                &data_layout::compact(&42u16.to_le_bytes()),
+            ),
+        ],
+    );
+    let file = File::from_bytes(bytes).unwrap();
+    let error = file.dataset("d").unwrap().fill_value::<u8>().unwrap_err();
+    let Error::Format(error) = error else {
+        panic!("expected numeric format error, got {error:?}");
+    };
+    assert_eq!(
+        error,
+        FormatError::DataSizeMismatch {
+            expected: 2,
+            actual: raw.len()
+        }
+    );
+}
+
+#[rstest]
+#[case::negative_zero(0x8000_0000_0000_0000)]
+#[case::subnormal(1)]
+#[case::infinity(0x7ff0_0000_0000_0000)]
+#[case::nan_payload(0x7ff8_0000_1234_5678)]
+fn preserves_scalar_fill_bits(#[case] bits: u64) {
+    let value = f64::from_bits(bits);
+    let file = file_builder::build_and_open(|builder| {
+        builder
+            .create_dataset("d")
+            .with_f64_data(&[value])
+            .with_fill_value(value);
+    });
+    let dataset = file.dataset("d").unwrap();
+    assert_eq!(
+        dataset.fill_value::<f64>().unwrap().unwrap().to_bits(),
+        bits
+    );
+    assert_eq!(dataset.read_f64().unwrap()[0].to_bits(), bits);
+}
+
+#[rstest]
+#[case::negative_zero(0x8000_0000)]
+#[case::subnormal(1)]
+#[case::infinity(0x7f80_0000)]
+#[case::nan_payload(0x7fc0_1234)]
+fn preserves_scalar_f32_fill_bits(#[case] bits: u32) {
+    let value = f32::from_bits(bits);
+    let file = file_builder::build_and_open(|builder| {
+        builder
+            .create_dataset("d")
+            .with_f32_data(&[value])
+            .with_fill_value(value);
+    });
+    let dataset = file.dataset("d").unwrap();
+    assert_eq!(
+        dataset.fill_value::<f32>().unwrap().unwrap().to_bits(),
+        bits
+    );
+    assert_eq!(dataset.read_f32().unwrap()[0].to_bits(), bits);
 }

@@ -12,6 +12,48 @@ use rstest::rstest;
 use test_util_hdf5::numeric;
 use test_util_hdf5::numeric::ByteOrder;
 
+#[rstest]
+#[case::exact(42, 42, 42)]
+#[case::narrowing(300, u8::MAX, i8::MAX)]
+fn reads_c_scalar_fill(
+    #[values(false, true)] big_endian: bool,
+    #[case] value: u16,
+    #[case] unsigned: u8,
+    #[case] signed: i8,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("scalar_fill.h5");
+    {
+        let datatype = CDatatype::from_type::<u16>().unwrap();
+        let status = hdf5::sync::sync(|| {
+            // SAFETY: The library lock and live transient integer datatype cover the call.
+            unsafe { h5t::H5Tset_order(datatype.id(), numeric::byte_order(big_endian)) }
+        });
+        assert_eq!(status, 0);
+        let reference = hdf5::File::create(&path).unwrap();
+        let dataset = reference
+            .new_dataset_builder()
+            .empty_as(&datatype)
+            .fill_value(value)
+            .shape([1])
+            .create("values")
+            .unwrap();
+        assert_eq!(
+            dataset.dcpl().unwrap().get_fill_value_as::<u16>().unwrap(),
+            Some(value)
+        );
+        assert_eq!(dataset.read_raw::<u16>().unwrap(), [value]);
+    }
+    let file = File::open(&path).unwrap();
+    let dataset = file.dataset("values").unwrap();
+    assert_eq!(dataset.fill_value::<u8>().unwrap(), Some(unsigned));
+    assert_eq!(dataset.fill_value::<i8>().unwrap(), Some(signed));
+    assert_eq!(dataset.read_u8().unwrap(), [unsigned]);
+    assert_eq!(dataset.read_i8().unwrap(), [signed]);
+    assert_eq!(dataset.read_u8_rows(0, 1).unwrap(), [unsigned]);
+    assert_eq!(dataset.read_i8_region(&[0], &[1]).unwrap(), [signed]);
+}
+
 #[test]
 fn c_reads_i32_enum_extrema() {
     let dir = tempfile::tempdir().unwrap();

@@ -48,11 +48,21 @@ use crate::reader::Dataset;
 use crate::type_builders::DatasetBuilder;
 
 mod sealed {
+    use crate::{Datatype, Error};
+
     #[expect(
         unnameable_types,
         reason = "the supertrait that seals `H5Element` has no path outside the crate, so no other crate implements `H5Element`"
     )]
-    pub trait Sealed {}
+    pub trait Sealed: Sized {
+        /// Converts exactly one stored numeric element to `Self`.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`Error::Format`] if the datatype is unsupported or the source byte
+        /// length differs from its element width.
+        fn convert_scalar(raw: &[u8], datatype: &Datatype) -> Result<Self, Error>;
+    }
 }
 
 /// A Rust scalar type that can be stored as an HDF5 dataset element.
@@ -119,7 +129,11 @@ pub trait H5Element: sealed::Sealed + Copy {
 
 macro_rules! impl_h5_element {
     ($ty:ty, $read:ident, $write:ident, $append:ident) => {
-        impl sealed::Sealed for $ty {}
+        impl sealed::Sealed for $ty {
+            fn convert_scalar(raw: &[u8], datatype: &Datatype) -> Result<Self, Error> {
+                Ok(NumericDecoder::parse(datatype)?.scalar(raw)?.decode()?)
+            }
+        }
         impl H5Element for $ty {
             fn read_from(ds: &Dataset) -> Result<Vec<Self>, Error> {
                 ds.$read()
@@ -238,24 +252,22 @@ impl Dataset {
         T::read_from(self)
     }
 
-    /// Read the dataset's fill value as `Option<T>`.
+    /// Returns the dataset's user-defined fill value, converted to `T`.
     ///
-    /// Returns `Ok(Some(value))` when the dataset carries a user-defined fill
-    /// value (set via [`DatasetBuilder::with_fill_value`], or by another writer
-    /// such as libhdf5 or h5py), and `Ok(None)` when it does not
-    /// — the HDF5 library default, where unwritten elements read back as the
-    /// type's implicit zero.
-    ///
-    /// The stored bytes are decoded into `T` with the same rules as
-    /// [`read`](Self::read) and the typed `read_*` methods: `T` is the type you
-    /// want the value delivered as, not an assertion about the stored datatype,
-    /// so the conversion follows the datatype's byte order and can coerce between
-    /// scalar types. Pick `T` to match the dataset's datatype for an exact value.
+    /// Returns `Ok(None)` when no user-defined fill value is stored. The reader converts
+    /// a defined value using the same numeric rules as [`read`](Self::read), including the
+    /// source byte order and lossy conversions. Pick `T` to match the stored datatype for
+    /// an exact value.
     ///
     /// # Errors
     ///
-    /// Propagates a [`FormatError`](crate::FormatError) if the Fill Value message
-    /// is malformed (truncated, or an unrecognized version).
+    /// Returns [`Error::Format`] if the Fill Value message is malformed. Returns
+    /// [`Error::Format`] if a user-defined fill value is stored and the datatype is unsupported
+    /// for numeric reads. Returns
+    /// [`FormatError::DataSizeMismatch`](crate::FormatError::DataSizeMismatch) through
+    /// [`Error::Format`] if the payload length differs from the stored element width.
+    ///
+    /// # Examples
     ///
     /// ```
     /// use hdf5_pure::{File, FileBuilder};
@@ -266,6 +278,7 @@ impl Dataset {
     /// let file = File::from_bytes(fb.finish().unwrap()).unwrap();
     ///
     /// assert_eq!(file.dataset("with").unwrap().fill_value::<f64>().unwrap(), Some(9.5));
+    /// assert_eq!(file.dataset("with").unwrap().fill_value::<i32>().unwrap(), Some(9));
     /// assert_eq!(file.dataset("without").unwrap().fill_value::<f64>().unwrap(), None);
     /// ```
     pub fn fill_value<T: H5Element>(&self) -> Result<Option<T>, Error> {
@@ -273,6 +286,6 @@ impl Dataset {
             return Ok(None);
         };
         let dt = self.datatype()?;
-        Ok(T::convert_raw(&bytes, &dt)?.into_iter().next())
+        Ok(Some(T::convert_scalar(&bytes, &dt)?))
     }
 }

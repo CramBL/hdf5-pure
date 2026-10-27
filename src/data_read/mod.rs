@@ -378,6 +378,23 @@ impl<T: NumericReadTarget> NumericDecoder<T> {
         })
     }
 
+    /// Borrows exactly one source element for conversion to `T`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::DataSizeMismatch`] if the byte length of `src` differs from
+    /// the source element width.
+    pub(crate) fn scalar<'a>(&'a self, src: &'a [u8]) -> Result<NumericScalar<'a, T>, FormatError> {
+        let expected = self.plan.element_size();
+        if src.len() != expected {
+            return Err(FormatError::DataSizeMismatch {
+                expected,
+                actual: src.len(),
+            });
+        }
+        Ok(NumericScalar { decoder: self, src })
+    }
+
     /// Converts whole source elements into a new vector.
     ///
     /// # Errors
@@ -476,6 +493,26 @@ impl<T: NumericReadTarget> NumericDecoder<T> {
     }
 }
 
+/// One source element paired with its numeric decoder.
+///
+/// The source byte length equals the element width of the parsed [`NumericDecoder`].
+pub(crate) struct NumericScalar<'a, T> {
+    decoder: &'a NumericDecoder<T>,
+    src: &'a [u8],
+}
+
+impl<T: NumericReadTarget> NumericScalar<'_, T> {
+    /// Converts the source element to the decoder's destination type.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::DataSizeMismatch`] if a fixed-width conversion receives a
+    /// byte slice of a different width.
+    pub(crate) fn decode(self) -> Result<T, FormatError> {
+        self.decoder.convert(self.src, ScalarOutput)
+    }
+}
+
 trait NumericOutput<T> {
     type Value;
 
@@ -518,6 +555,39 @@ impl<T> NumericOutput<T> for &mut Vec<T> {
                 .map(|bytes| conversion.convert(read(bytes))),
         );
         Ok(())
+    }
+}
+
+struct ScalarOutput;
+
+impl<T> NumericOutput<T> for ScalarOutput {
+    type Value = T;
+
+    fn fixed_width<const W: usize, S: FromEndianBytes<W>, C: H5Conversion<S, T> + Default>(
+        self,
+        src: &[u8],
+        order: FixedWidthByteOrder,
+    ) -> Result<T, FormatError> {
+        let bytes = src
+            .try_into()
+            .map_err(|_error| FormatError::DataSizeMismatch {
+                expected: W,
+                actual: src.len(),
+            })?;
+        Ok(C::default().convert(match order {
+            FixedWidthByteOrder::LittleEndian => S::from_le_slice(bytes),
+            FixedWidthByteOrder::BigEndian => S::from_be_slice(bytes),
+        }))
+    }
+
+    fn fixed_point<S>(
+        self,
+        src: &[u8],
+        _element_size: usize,
+        read: impl Fn(&[u8]) -> S,
+        conversion: impl H5Conversion<S, T>,
+    ) -> Result<T, FormatError> {
+        Ok(conversion.convert(read(src)))
     }
 }
 

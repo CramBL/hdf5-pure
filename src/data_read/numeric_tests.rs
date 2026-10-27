@@ -29,6 +29,14 @@ macro_rules! assert_appends {
     ($read:ident, $target:ty, $raw:expr, $datatype:expr, $first:expr) => {{
         let mut values = vec![7 as $target];
         $read($raw, $datatype, &mut values).unwrap();
+        let decoder = NumericDecoder::<$target>::parse($datatype).unwrap();
+        let width = NumericDecodePlan::try_from($datatype)
+            .unwrap()
+            .element_size();
+        assert_eq!(
+            decoder.scalar(&$raw[..width]).unwrap().decode().unwrap(),
+            $first as $target,
+        );
         assert_eq!(
             <$target>::convert_raw($raw, $datatype).unwrap(),
             vec![$first as $target, 3 as $target]
@@ -325,4 +333,36 @@ fn rejects_nonnumeric_element_conversion(#[case] raw: &[u8]) {
             actual: "String"
         }
     );
+}
+
+#[rstest]
+#[case::empty(&[])]
+#[case::partial(&[0])]
+#[case::extra_partial(&[0, 42, 0])]
+#[case::two_elements(&[0, 42, 0, 43])]
+fn rejects_scalar_element_count(#[case] raw: &[u8]) {
+    let datatype = fixed(2, false, DatatypeByteOrder::BigEndian, 0, 16);
+    let decoder = NumericDecoder::<u8>::parse(&datatype).unwrap();
+    let Err(error) = decoder.scalar(raw) else {
+        panic!("expected scalar size error for {raw:?}");
+    };
+    assert_eq!(
+        error,
+        FormatError::DataSizeMismatch {
+            expected: 2,
+            actual: raw.len()
+        }
+    );
+}
+
+#[rstest]
+#[case::negative(-300, i8::MIN, 0)]
+#[case::positive(300, i8::MAX, u8::MAX)]
+fn narrows_scalar_integer(#[case] value: i32, #[case] signed: i8, #[case] unsigned: u8) {
+    let datatype = fixed(4, true, DatatypeByteOrder::BigEndian, 0, 32);
+    let raw = value.to_be_bytes();
+    let decoder = NumericDecoder::<i8>::parse(&datatype).unwrap();
+    assert_eq!(decoder.scalar(&raw).unwrap().decode().unwrap(), signed);
+    let decoder = NumericDecoder::<u8>::parse(&datatype).unwrap();
+    assert_eq!(decoder.scalar(&raw).unwrap().decode().unwrap(), unsigned);
 }
