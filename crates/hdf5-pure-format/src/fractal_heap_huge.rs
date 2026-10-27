@@ -17,7 +17,8 @@ use crate::error::FormatError;
 use crate::filter_pipeline::FilterPipeline;
 use crate::fractal_heap::{
     FilteredHugeObjectLocation, FractalHeapFiltering, FractalHeapHeader, FractalHeapIdKind,
-    FractalHeapIdLayout, HugeIndirectKey, HugeIndirectKeyEncoding, HugeObjectReference,
+    FractalHeapIdLayout, FractalHeapIdView, HugeIndirectKey, HugeIndirectKeyEncoding,
+    HugeObjectReference,
 };
 use crate::width::FormatWidths;
 
@@ -117,7 +118,83 @@ impl FractalHeapHugeObjectLayout {
     /// # Ok::<(), FormatError>(())
     /// ```
     pub fn parse_id(&self, bytes: &[u8]) -> Result<FractalHeapHugeObjectId, FormatError> {
-        Ok(match self.context.ids.parse(bytes)?.kind() {
+        self.resolve_id(self.context.ids.parse(bytes)?)
+    }
+
+    /// Resolves a parsed huge ID using this layout's widths, address base, and filter context.
+    ///
+    /// The parser checks the ID's direct or indirect representation and its filtered or
+    /// unfiltered form against the heap's parameters. Fields parsed under another context are
+    /// checked against this layout's numeric widths and filter pipeline before address resolution.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidFractalHeapGeometry`] if the ID has another representation,
+    /// a managed or tiny type, an undefined or oversized address, a zero length, or a filter mask
+    /// incompatible with this layout's pipeline. Also returns this error if all filters are
+    /// skipped and the encoded and decoded sizes differ.
+    ///
+    /// Returns [`FormatError::ValueTooLargeForRepresentation`] if a size or numeric key exceeds
+    /// this layout's length width, or [`FormatError::OffsetOverflow`] if the physical payload
+    /// range exceeds [`u64::MAX`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use hdf5_pure_core::BaseAddress;
+    /// # use hdf5_pure_core::__private::{BaseAddressExt, StoredAddressExt};
+    /// # use hdf5_pure_format::FormatError;
+    /// # use hdf5_pure_format::__private::{
+    /// #     FormatWidths, FractalHeapHeader, FractalHeapHugeObjectId, FractalHeapHugeObjectLayout,
+    /// #     FractalHeapIdLayout, HugeIndirectKeyEncoding, LengthWidth, OffsetWidth,
+    /// # };
+    /// # use test_util::{fractal_heap, widths::Widths};
+    /// # let encoded = fractal_heap::Header::new(u64::MAX).build(Widths::EIGHT);
+    /// # let mut header = FractalHeapHeader::parse_bytes(
+    /// #     &encoded, OffsetWidth::Eight, LengthWidth::Eight,
+    /// # )?;
+    /// # header.heap_id_length = 17;
+    /// # header.btree_huge_objects_address = hdf5_pure_core::StoredAddress::new(256);
+    /// # let widths = FormatWidths { offsets: OffsetWidth::Eight, lengths: LengthWidth::Eight };
+    /// # let objects = FractalHeapHugeObjectLayout::new(
+    /// #     &header, widths, BaseAddress::new(512), HugeIndirectKeyEncoding::Libhdf5,
+    /// # )?;
+    /// let ids = FractalHeapIdLayout::new(&header, widths.offsets, widths.lengths);
+    /// let bytes = [0x10, 0, 4, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0];
+    /// let id = ids.parse(&bytes)?;
+    /// let FractalHeapHugeObjectId::Direct(reference) = objects.resolve_id(id)? else {
+    ///     unreachable!();
+    /// };
+    /// assert_eq!(reference.range().start().get(), 1536);
+    /// assert_eq!(reference.range().length(), 3);
+    /// # Ok::<(), FormatError>(())
+    /// ```
+    pub fn resolve_id(
+        &self,
+        id: FractalHeapIdView<'_>,
+    ) -> Result<FractalHeapHugeObjectId, FormatError> {
+        let kind = id.kind();
+        let tree_type = self.context.records.tree_type();
+        let matches = matches!(
+            (tree_type, kind),
+            (
+                crate::btree_v2::BTREE_V2_HUGE_OBJECT,
+                FractalHeapIdKind::Huge(HugeObjectReference::Indexed(_))
+            ) | (
+                crate::btree_v2::BTREE_V2_FILTERED_HUGE_OBJECT,
+                FractalHeapIdKind::Huge(HugeObjectReference::FilteredIndexed(_))
+            ) | (
+                crate::btree_v2::BTREE_V2_HUGE_OBJECT_DIRECT,
+                FractalHeapIdKind::Huge(HugeObjectReference::Inline { .. })
+            ) | (
+                crate::btree_v2::BTREE_V2_FILTERED_HUGE_OBJECT_DIRECT,
+                FractalHeapIdKind::Huge(HugeObjectReference::FilteredInline(_))
+            )
+        );
+        if !matches {
+            return Err(FormatError::InvalidFractalHeapGeometry);
+        }
+        Ok(match kind {
             FractalHeapIdKind::Huge(HugeObjectReference::Inline { addr, len }) => {
                 FractalHeapHugeObjectId::Direct(self.reference(
                     addr,
@@ -126,14 +203,38 @@ impl FractalHeapHugeObjectLayout {
                 )?)
             }
             FractalHeapIdKind::Huge(HugeObjectReference::FilteredInline(location)) => {
+                let count = self
+                    .context
+                    .pipeline
+                    .as_ref()
+                    .ok_or(FormatError::InvalidFractalHeapGeometry)?
+                    .filters
+                    .len();
+                if count < u32::BITS as usize && location.filter_mask() >> count != 0 {
+                    return Err(FormatError::InvalidFractalHeapGeometry);
+                }
+                if location.filter_mask().count_ones() as usize == count
+                    && location.encoded_size() != location.decoded_size()
+                {
+                    return Err(FormatError::InvalidFractalHeapGeometry);
+                }
                 FractalHeapHugeObjectId::Direct(self.filtered_reference(location)?)
             }
             FractalHeapIdKind::Huge(
                 HugeObjectReference::Indexed(key) | HugeObjectReference::FilteredIndexed(key),
-            ) => FractalHeapHugeObjectId::Indirect(FractalHeapHugeObjectLookup {
-                context: Arc::clone(&self.context),
-                key,
-            }),
+            ) => {
+                let bits = u32::from(self.context.widths.lengths.get()) * 8;
+                if key.value().checked_shr(bits).is_some_and(|high| high != 0) {
+                    return Err(FormatError::ValueTooLargeForRepresentation {
+                        value: key.value(),
+                        target: "huge-object tracker key",
+                    });
+                }
+                FractalHeapHugeObjectId::Indirect(FractalHeapHugeObjectLookup {
+                    context: Arc::clone(&self.context),
+                    key,
+                })
+            }
             _ => return Err(FormatError::InvalidFractalHeapGeometry),
         })
     }
@@ -303,6 +404,17 @@ impl FractalHeapHugeObjectLayout {
         &self,
         location: FilteredHugeObjectLocation,
     ) -> Result<FractalHeapHugeObjectRef, FormatError> {
+        let bits = u32::from(self.context.widths.lengths.get()) * 8;
+        if location
+            .decoded_size()
+            .checked_shr(bits)
+            .is_some_and(|high| high != 0)
+        {
+            return Err(FormatError::ValueTooLargeForRepresentation {
+                value: location.decoded_size(),
+                target: "huge-object decoded size",
+            });
+        }
         self.reference(
             location.address(),
             location.encoded_size(),
@@ -316,6 +428,18 @@ impl FractalHeapHugeObjectLayout {
         length: u64,
         payload: HugeObjectPayload,
     ) -> Result<FractalHeapHugeObjectRef, FormatError> {
+        if address.get() >= StoredAddress::undefined(self.context.widths.offsets).get()
+            || length == 0
+        {
+            return Err(FormatError::InvalidFractalHeapGeometry);
+        }
+        let bits = u32::from(self.context.widths.lengths.get()) * 8;
+        if length.checked_shr(bits).is_some_and(|high| high != 0) {
+            return Err(FormatError::ValueTooLargeForRepresentation {
+                value: length,
+                target: "huge-object encoded size",
+            });
+        }
         Ok(FractalHeapHugeObjectRef {
             context: Arc::clone(&self.context),
             range: FileRange::new(
@@ -856,6 +980,140 @@ mod tests {
             )
             .unwrap_err(),
             FormatError::InvalidFractalHeapGeometry
+        );
+    }
+
+    #[rstest]
+    fn parsed_huge_ids_require_the_receiving_representation(
+        #[values(false, true)] source_filtered: bool,
+        #[values(false, true)] source_direct: bool,
+        #[values(false, true)] target_filtered: bool,
+        #[values(false, true)] target_direct: bool,
+    ) {
+        let source = Fixture::new(source_filtered, source_direct, 0, 512, EIGHT_WIDTHS);
+        let target = Fixture::new(target_filtered, target_direct, 0, 512, EIGHT_WIDTHS);
+        let id = source.layout.context.ids.parse(&source.id).unwrap();
+        let result = target.layout.resolve_id(id);
+        if source_filtered == target_filtered && source_direct == target_direct {
+            let resolved = result.unwrap();
+            match resolved {
+                FractalHeapHugeObjectId::Direct(reference) => {
+                    assert_eq!(reference.range().start().get(), 512)
+                }
+                FractalHeapHugeObjectId::Indirect(lookup) => assert_eq!(lookup.key().value(), 5),
+            }
+        } else {
+            assert_eq!(result.unwrap_err(), FormatError::InvalidFractalHeapGeometry);
+        }
+    }
+
+    #[rstest]
+    #[case::encoded(65_536, 9, FormatError::ValueTooLargeForRepresentation { value: 65_536, target: "huge-object encoded size" })]
+    #[case::decoded(3, 65_536, FormatError::ValueTooLargeForRepresentation { value: 65_536, target: "huge-object decoded size" })]
+    fn parsed_huge_ids_recheck_length_widths(
+        #[case] encoded: u64,
+        #[case] decoded: u64,
+        #[case] expected: FormatError,
+    ) {
+        let mut source = Fixture::new(true, true, 0, 512, EIGHT_WIDTHS);
+        source.id[9..17].copy_from_slice(&encoded.to_le_bytes());
+        source.id[21..29].copy_from_slice(&decoded.to_le_bytes());
+        let target = Fixture::new(
+            true,
+            true,
+            0,
+            512,
+            FormatWidths {
+                offsets: OffsetWidth::Eight,
+                lengths: LengthWidth::Two,
+            },
+        );
+        let id = source.layout.context.ids.parse(&source.id).unwrap();
+        assert_eq!(target.layout.resolve_id(id).unwrap_err(), expected);
+    }
+
+    #[rstest]
+    #[case::mask(2)]
+    #[case::skipped_sizes(1)]
+    fn parsed_huge_ids_recheck_the_receiving_pipeline(#[case] mask: u32) {
+        let mut source = Fixture::new(true, true, 0, 512, EIGHT_WIDTHS);
+        let FractalHeapFiltering::Filtered { pipeline, .. } = &mut source.header.filtering else {
+            panic!("expected filtered fixture")
+        };
+        pipeline.filters.push(pipeline.filters[0].clone());
+        source.layout = FractalHeapHugeObjectLayout::new(
+            &source.header,
+            EIGHT_WIDTHS,
+            BaseAddress::ZERO,
+            HugeIndirectKeyEncoding::Libhdf5,
+        )
+        .unwrap();
+        source.id[17..21].copy_from_slice(&mask.to_le_bytes());
+        let target = Fixture::new(true, true, 0, 512, EIGHT_WIDTHS);
+        let id = source.layout.context.ids.parse(&source.id).unwrap();
+        assert_eq!(
+            target.layout.resolve_id(id).unwrap_err(),
+            FormatError::InvalidFractalHeapGeometry
+        );
+    }
+
+    #[test]
+    fn parsed_huge_ids_recheck_address_widths() {
+        let source = Fixture::new(true, true, 0, u64::from(u16::MAX), EIGHT_WIDTHS);
+        let target = Fixture::new(
+            true,
+            true,
+            0,
+            512,
+            FormatWidths {
+                offsets: OffsetWidth::Two,
+                lengths: LengthWidth::Eight,
+            },
+        );
+        let id = source.layout.context.ids.parse(&source.id).unwrap();
+        assert_eq!(
+            target.layout.resolve_id(id).unwrap_err(),
+            FormatError::InvalidFractalHeapGeometry
+        );
+    }
+
+    #[rstest]
+    fn parsed_huge_ids_recheck_numeric_key_domains(
+        #[values(
+            HugeIndirectKeyEncoding::Libhdf5,
+            HugeIndirectKeyEncoding::PublishedSpec
+        )]
+        encoding: HugeIndirectKeyEncoding,
+    ) {
+        let mut source = Fixture::new(true, false, 0, 512, EIGHT_WIDTHS);
+        source.header.heap_id_length = 9;
+        let mut id = vec![HUGE_ID_FIRST_BYTE];
+        id.extend_from_slice(&65_536u64.to_le_bytes());
+        let ids = FractalHeapIdLayout::with_huge_key_encoding(
+            &source.header,
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+            encoding,
+        );
+        let target = Fixture::new(
+            true,
+            false,
+            0,
+            512,
+            FormatWidths {
+                offsets: OffsetWidth::Eight,
+                lengths: LengthWidth::Two,
+            },
+        );
+        assert_eq!(
+            target
+                .layout
+                .resolve_id(ids.parse(&id).unwrap())
+                .unwrap_err(),
+            FormatError::ValueTooLargeForRepresentation {
+                value: 65_536,
+                target: "huge-object tracker key"
+            }
         );
     }
 
