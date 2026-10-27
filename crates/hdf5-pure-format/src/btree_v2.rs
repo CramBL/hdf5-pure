@@ -6,11 +6,9 @@
 //! address and length fields use the superblock widths. [`BTreeV2NodeInfo`] computes the
 //! record-count widths that the internal-node child-pointer layout leaves variable.
 //!
-//! [`HugeObjectRecord`] and [`AttributeRecord`] are the records of the huge-object index of a
-//! fractal heap and of the attribute indexes, with their encoders. A reader parses a huge-object
-//! record with [`BTreeV2Record::huge_object`], and reads the heap ID and the creation order of the
-//! other records with the other methods of [`BTreeV2Record`]. [`BTreeV2ChunkRecordContext`]
-//! decodes dataset chunk-index client types 10 and 11 into [`BTreeV2ChunkRecord`] values.
+//! A reader selects a huge-object tracker encoding with [`HugeObjectRecordContext`] and decodes
+//! chunk-index client types 10 and 11 with [`BTreeV2ChunkRecordContext`]. A writer encodes
+//! attribute-index records with [`AttributeRecord`].
 //!
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 
@@ -31,6 +29,7 @@ use crate::chunk_record;
 use crate::convert::Narrow;
 use crate::data_layout::LayoutVersion;
 use crate::error::FormatError;
+use crate::fractal_heap::{FilteredHugeObjectLocation, FractalHeapFiltering, FractalHeapHeader};
 use crate::message_flags::MessageFlags;
 use crate::metadata_source::MetadataSource;
 use crate::width::{FormatWidths, LengthWidth, OffsetWidth};
@@ -894,6 +893,327 @@ impl HugeObjectRecord {
     }
 }
 
+/// A type-2 tracker record for an indirectly accessed, filtered huge object.
+///
+/// The record stores the encoded object's address and length, its filter mask and decoded size,
+/// and its numeric ID, in that order. Obtained from [`HugeObjectRecordDecoder::parse`].
+///
+/// The record is defined in "Version 2 B-trees" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FilteredHugeObjectRecord {
+    location: FilteredHugeObjectLocation,
+    id: u64,
+}
+
+impl FilteredHugeObjectRecord {
+    /// Returns the record length: one address, three lengths, and a four-byte filter mask.
+    pub const fn size(offsets: OffsetWidth, lengths: LengthWidth) -> u16 {
+        offsets.get() as u16 + 3 * lengths.get() as u16 + HUGE_OBJECT_FILTER_MASK_LEN
+    }
+
+    fn parse(
+        data: &[u8],
+        offsets: OffsetWidth,
+        lengths: LengthWidth,
+        filter_count: usize,
+    ) -> Result<Self, FormatError> {
+        let required = usize::from(Self::size(offsets, lengths));
+        if data.len() != required {
+            return Err(FormatError::UnexpectedHugeObjectBTree {
+                tree_type: BTREE_V2_FILTERED_HUGE_OBJECT,
+                record_size: data.len(),
+                required,
+            });
+        }
+        Ok(Self {
+            location: FilteredHugeObjectLocation::parse(data, offsets, lengths, filter_count)?,
+            id: bytes::read_length_width(data, required - usize::from(lengths.get()), lengths)?,
+        })
+    }
+
+    /// Returns the encoded payload's location and filter metadata.
+    pub const fn location(self) -> FilteredHugeObjectLocation {
+        self.location
+    }
+    /// Returns the numeric key for lookup from an indirect huge-object heap ID.
+    pub const fn id(self) -> u64 {
+        self.id
+    }
+}
+
+/// A type-4 tracker record for a directly accessed, filtered huge object.
+///
+/// The record stores the encoded object's address and length, its filter mask, and its decoded
+/// size, in that order. Obtained from [`HugeObjectRecordDecoder::parse`].
+///
+/// The record is defined in "Version 2 B-trees" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FilteredHugeObjectDirectRecord {
+    location: FilteredHugeObjectLocation,
+}
+
+impl FilteredHugeObjectDirectRecord {
+    /// Returns the record length: one address, two lengths, and a four-byte filter mask.
+    pub const fn size(offsets: OffsetWidth, lengths: LengthWidth) -> u16 {
+        offsets.get() as u16 + 2 * lengths.get() as u16 + HUGE_OBJECT_FILTER_MASK_LEN
+    }
+
+    fn parse(
+        data: &[u8],
+        offsets: OffsetWidth,
+        lengths: LengthWidth,
+        filter_count: usize,
+    ) -> Result<Self, FormatError> {
+        let required = usize::from(Self::size(offsets, lengths));
+        if data.len() != required {
+            return Err(FormatError::UnexpectedHugeObjectBTree {
+                tree_type: BTREE_V2_FILTERED_HUGE_OBJECT_DIRECT,
+                record_size: data.len(),
+                required,
+            });
+        }
+        Ok(Self {
+            location: FilteredHugeObjectLocation::parse(data, offsets, lengths, filter_count)?,
+        })
+    }
+
+    /// Returns the encoded payload's location and filter metadata.
+    pub const fn location(self) -> FilteredHugeObjectLocation {
+        self.location
+    }
+}
+
+/// The decoded fields of one huge-object tracker record, selected from the heap's parameters.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HugeObjectTrackerRecord {
+    /// A type-1 record for an unfiltered object located through a numeric key.
+    Indirect(HugeObjectRecord),
+    /// A type-2 record for a filtered object located through a numeric key.
+    FilteredIndirect(FilteredHugeObjectRecord),
+    /// A type-3 record for an unfiltered object whose location is stored in its heap ID.
+    Direct(HugeObjectDirectRecord),
+    /// A type-4 record for a filtered object whose location is stored in its heap ID.
+    FilteredDirect(FilteredHugeObjectDirectRecord),
+}
+
+/// The huge-object tracker encoding required by a fractal heap.
+///
+/// A reader derives the record type and exact size from the heap's filter state and ID capacity.
+/// [`resolve`](Self::resolve) checks the tracker header before the caller decodes record bytes
+/// with [`HugeObjectRecordDecoder::parse`]. The caller reads the metadata and traverses the tree.
+///
+/// # Examples
+///
+/// ```
+/// # use hdf5_pure_core::StoredAddress;
+/// # use hdf5_pure_core::__private::StoredAddressExt;
+/// # use hdf5_pure_format::__private::{
+/// #     BTreeV2Header, FilterPipeline, FILTER_PIPELINE_VERSION_TWO, FormatWidths,
+/// #     FractalHeapFiltering, FractalHeapHeader, HugeObjectRecordContext,
+/// #     HugeObjectTrackerRecord, LengthWidth, OffsetWidth,
+/// # };
+/// # use hdf5_pure_format::FormatError;
+/// # use test_util::{fractal_heap, widths::Widths};
+/// # let mut heap = FractalHeapHeader::parse_bytes(
+/// #     &fractal_heap::Header::new(256).build(Widths::EIGHT),
+/// #     OffsetWidth::Eight,
+/// #     LengthWidth::Eight,
+/// # )?;
+/// # heap.btree_huge_objects_address = StoredAddress::new(512);
+/// # heap.filtering = FractalHeapFiltering::Filtered {
+/// #     root_direct_block_size: 0,
+/// #     root_filter_mask: 0,
+/// #     pipeline: FilterPipeline { version: FILTER_PIPELINE_VERSION_TWO, filters: vec![] },
+/// # };
+/// # let widths = FormatWidths { offsets: OffsetWidth::Four, lengths: LengthWidth::Two };
+/// # let tracker = BTreeV2Header {
+/// #     tree_type: hdf5_pure_format::__private::BTREE_V2_FILTERED_HUGE_OBJECT,
+/// #     node_size: 512, record_size: 14, depth: 0,
+/// #     root_node_address: StoredAddress::new(1024), num_records_in_root: 1, total_records: 1,
+/// # };
+/// let context = HugeObjectRecordContext::new(&heap, widths)?;
+/// let decoder = context.resolve(&tracker)?;
+/// let encoded = [0, 16, 0, 0, 17, 0, 0, 0, 0, 0, 17, 0, 5, 0];
+/// let HugeObjectTrackerRecord::FilteredIndirect(record) = decoder.parse(&encoded)? else {
+///     unreachable!();
+/// };
+/// assert_eq!(record.id(), 5);
+/// assert_eq!(record.location().address(), StoredAddress::new(4096));
+/// assert_eq!(record.location().encoded_size(), 17);
+/// assert_eq!(record.location().decoded_size(), 17);
+/// # Ok::<(), FormatError>(())
+/// ```
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HugeObjectRecordContext {
+    widths: FormatWidths,
+    encoding: HugeObjectRecordEncoding,
+}
+
+impl HugeObjectRecordContext {
+    /// Selects a tracker encoding from the heap's filter state and ID capacity at `widths`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidFractalHeapGeometry`] if the tracker address is undefined
+    /// or exceeds the address width, or the heap's pipeline contains more than 32 filters.
+    pub fn new(header: &FractalHeapHeader, widths: FormatWidths) -> Result<Self, FormatError> {
+        if header.btree_huge_objects_address.get() >= StoredAddress::undefined(widths.offsets).get()
+        {
+            return Err(FormatError::InvalidFractalHeapGeometry);
+        }
+        let direct = header.huge_ids_direct_with_widths(widths);
+        let encoding = match &header.filtering {
+            FractalHeapFiltering::Unfiltered => {
+                if direct {
+                    HugeObjectRecordEncoding::Direct
+                } else {
+                    HugeObjectRecordEncoding::Indirect
+                }
+            }
+            FractalHeapFiltering::Filtered { pipeline, .. } => {
+                let filter_count = pipeline.filters.len();
+                if filter_count > u32::BITS as usize {
+                    return Err(FormatError::InvalidFractalHeapGeometry);
+                }
+                if direct {
+                    HugeObjectRecordEncoding::FilteredDirect { filter_count }
+                } else {
+                    HugeObjectRecordEncoding::FilteredIndirect { filter_count }
+                }
+            }
+        };
+        Ok(Self { widths, encoding })
+    }
+
+    /// Returns the required tracker type, from 1 through 4.
+    pub const fn tree_type(self) -> u8 {
+        match self.encoding {
+            HugeObjectRecordEncoding::Indirect => BTREE_V2_HUGE_OBJECT,
+            HugeObjectRecordEncoding::FilteredIndirect { .. } => BTREE_V2_FILTERED_HUGE_OBJECT,
+            HugeObjectRecordEncoding::Direct => BTREE_V2_HUGE_OBJECT_DIRECT,
+            HugeObjectRecordEncoding::FilteredDirect { .. } => BTREE_V2_FILTERED_HUGE_OBJECT_DIRECT,
+        }
+    }
+
+    /// Returns the exact encoded length of each tracker record in bytes.
+    pub const fn record_size(self) -> u16 {
+        let FormatWidths { offsets, lengths } = self.widths;
+        match self.encoding {
+            HugeObjectRecordEncoding::Indirect => HugeObjectRecord::size(offsets, lengths),
+            HugeObjectRecordEncoding::FilteredIndirect { .. } => {
+                FilteredHugeObjectRecord::size(offsets, lengths)
+            }
+            HugeObjectRecordEncoding::Direct => HugeObjectDirectRecord::size(offsets, lengths),
+            HugeObjectRecordEncoding::FilteredDirect { .. } => {
+                FilteredHugeObjectDirectRecord::size(offsets, lengths)
+            }
+        }
+    }
+
+    /// Checks the tracker header's type and exact record size before decoding its records.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedHugeObjectBTree`] if the type or size differs from this
+    /// context's encoding.
+    pub fn resolve(self, header: &BTreeV2Header) -> Result<HugeObjectRecordDecoder, FormatError> {
+        if header.tree_type != self.tree_type() || header.record_size != self.record_size() {
+            return Err(FormatError::UnexpectedHugeObjectBTree {
+                tree_type: header.tree_type,
+                record_size: usize::from(header.record_size),
+                required: usize::from(self.record_size()),
+            });
+        }
+        Ok(HugeObjectRecordDecoder { layout: self })
+    }
+}
+
+/// A huge-object tracker record decoder whose header type and record size have been checked.
+///
+/// Obtained from [`HugeObjectRecordContext::resolve`]. The caller supplies individual record
+/// bytes from the tracker for [`parse`](Self::parse).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HugeObjectRecordDecoder {
+    layout: HugeObjectRecordContext,
+}
+
+impl HugeObjectRecordDecoder {
+    /// Decodes exactly one record using the checked tracker encoding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedHugeObjectBTree`] if `data` has a different length from
+    /// the expected record size. Returns [`FormatError::InvalidFractalHeapGeometry`] if the
+    /// address is undefined, a required size is zero, the mask contains bits outside the
+    /// pipeline, or the sizes differ with all filters skipped. Returns
+    /// [`FormatError::OffsetOverflow`] if the encoded object's range end exceeds [`u64::MAX`].
+    pub fn parse(self, data: &[u8]) -> Result<HugeObjectTrackerRecord, FormatError> {
+        let Self { layout } = self;
+        if data.len() != usize::from(layout.record_size()) {
+            return Err(FormatError::UnexpectedHugeObjectBTree {
+                tree_type: layout.tree_type(),
+                record_size: data.len(),
+                required: usize::from(layout.record_size()),
+            });
+        }
+        let FormatWidths { offsets, lengths } = layout.widths;
+        Ok(match layout.encoding {
+            HugeObjectRecordEncoding::FilteredIndirect { filter_count } => {
+                HugeObjectTrackerRecord::FilteredIndirect(FilteredHugeObjectRecord::parse(
+                    data,
+                    offsets,
+                    lengths,
+                    filter_count,
+                )?)
+            }
+            HugeObjectRecordEncoding::FilteredDirect { filter_count } => {
+                HugeObjectTrackerRecord::FilteredDirect(FilteredHugeObjectDirectRecord::parse(
+                    data,
+                    offsets,
+                    lengths,
+                    filter_count,
+                )?)
+            }
+            HugeObjectRecordEncoding::Indirect | HugeObjectRecordEncoding::Direct => {
+                let mut fields = bytes::Fields::new(data, 0);
+                let address = fields.address(offsets)?;
+                let length = fields.length(lengths)?;
+                if address.get() >= StoredAddress::undefined(offsets).get() || length == 0 {
+                    return Err(FormatError::InvalidFractalHeapGeometry);
+                }
+                address
+                    .get()
+                    .checked_add(length)
+                    .ok_or(FormatError::OffsetOverflow {
+                        offset: address.get(),
+                        length,
+                    })?;
+                if layout.encoding == HugeObjectRecordEncoding::Indirect {
+                    HugeObjectTrackerRecord::Indirect(HugeObjectRecord {
+                        address,
+                        length,
+                        id: fields.length(lengths)?,
+                    })
+                } else {
+                    HugeObjectTrackerRecord::Direct(HugeObjectDirectRecord { address, length })
+                }
+            }
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HugeObjectRecordEncoding {
+    Indirect,
+    FilteredIndirect { filter_count: usize },
+    Direct,
+    FilteredDirect { filter_count: usize },
+}
+
 /// A record of a version 2 B-tree that indexes the attributes of an object in dense storage, type
 /// 8 in the name index and type 9 in the creation-order index.
 ///
@@ -1295,9 +1615,23 @@ pub fn parse_btree_v2_internal_child_pointers(
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
 pub const BTREE_V2_HUGE_OBJECT: u8 = 1;
 
+/// The type of a version 2 B-tree that indexes filtered huge objects accessed by numeric key.
+///
+/// The type is defined in the same table as [`BTREE_V2_HUGE_OBJECT`].
+pub const BTREE_V2_FILTERED_HUGE_OBJECT: u8 = 2;
+
 /// The type of a version 2 B-tree that indexes non-filtered huge objects whose heap IDs carry the
 /// object address and length directly.
 pub const BTREE_V2_HUGE_OBJECT_DIRECT: u8 = 3;
+
+/// The type of a version 2 B-tree that tracks filtered huge objects located by their heap IDs.
+///
+/// The type is defined in the same table as [`BTREE_V2_HUGE_OBJECT`].
+pub const BTREE_V2_FILTERED_HUGE_OBJECT_DIRECT: u8 = 4;
+
+/// The filter-mask width in type-2 and type-4 records, from the same section as
+/// [`BTREE_V2_HUGE_OBJECT`].
+const HUGE_OBJECT_FILTER_MASK_LEN: u16 = 4;
 
 /// The type of a version 2 B-tree that indexes the link names of a group, from the same table as
 /// [`BTREE_V2_HUGE_OBJECT`].
@@ -1616,6 +1950,191 @@ mod tests {
             panic!("expected checksum mismatch");
         };
         assert_eq!(error, FormatError::ChecksumMismatch { expected, computed });
+    }
+
+    #[rstest]
+    #[case::unfiltered_indirect(false, false, 0)]
+    #[case::filtered_indirect(true, false, 1)]
+    #[case::unfiltered_direct(false, true, 0)]
+    #[case::filtered_direct(true, true, 1)]
+    #[case::empty_pipeline_indirect(true, false, 0)]
+    #[case::empty_pipeline_direct(true, true, 0)]
+    fn huge_tracker_records_select_the_heap_encoding(
+        #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] offsets: OffsetWidth,
+        #[values(LengthWidth::Two, LengthWidth::Four, LengthWidth::Eight)] lengths: LengthWidth,
+        #[case] filtered: bool,
+        #[case] direct: bool,
+        #[case] filter_count: usize,
+    ) {
+        let mut header = FractalHeapHeader::parse_bytes(
+            &test_util::fractal_heap::Header::new(256).build(test_util::widths::Widths::EIGHT),
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+        )
+        .unwrap();
+        header.btree_huge_objects_address = StoredAddress::new(0x200);
+        header.heap_id_length = if direct { 29 } else { 3 };
+        let decoded_size = if filter_count == 0 { 17 } else { 1024 };
+        if filtered {
+            header.filtering = crate::fractal_heap::FractalHeapFiltering::Filtered {
+                root_direct_block_size: 0,
+                root_filter_mask: 0,
+                pipeline: crate::filter_pipeline::FilterPipeline {
+                    version: crate::filter_pipeline::VERSION_TWO,
+                    filters: vec![
+                        crate::filter_pipeline::FilterDescription {
+                            filter_id: FILTER_DEFLATE,
+                            name: None,
+                            flags: 0,
+                            client_data: vec![],
+                        };
+                        filter_count
+                    ],
+                },
+            };
+        }
+        let widths = FormatWidths { offsets, lengths };
+        let layout = HugeObjectRecordContext::new(&header, widths).unwrap();
+        let expected_type = match (filtered, direct) {
+            (false, false) => BTREE_V2_HUGE_OBJECT,
+            (true, false) => BTREE_V2_FILTERED_HUGE_OBJECT,
+            (false, true) => BTREE_V2_HUGE_OBJECT_DIRECT,
+            (true, true) => BTREE_V2_FILTERED_HUGE_OBJECT_DIRECT,
+        };
+        let mut data = Vec::new();
+        bytes::write_offset(&mut data, 0x1234, offsets);
+        bytes::write_length(&mut data, 17, lengths);
+        if filtered {
+            data.extend_from_slice(&0u32.to_le_bytes());
+            bytes::write_length(&mut data, decoded_size, lengths);
+        }
+        if !direct {
+            bytes::write_length(&mut data, 261, lengths);
+        }
+        let index = BTreeV2Header {
+            tree_type: expected_type,
+            node_size: 512,
+            record_size: u16::try_from(data.len()).unwrap(),
+            depth: 0,
+            root_node_address: StoredAddress::new(0x400),
+            num_records_in_root: 1,
+            total_records: 1,
+        };
+        assert_eq!(layout.tree_type(), expected_type);
+        assert_eq!(usize::from(layout.record_size()), data.len());
+        let record = layout.resolve(&index).unwrap().parse(&data).unwrap();
+        match record {
+            HugeObjectTrackerRecord::Indirect(record) => assert_eq!(
+                record,
+                HugeObjectRecord {
+                    address: StoredAddress::new(0x1234),
+                    length: 17,
+                    id: 261
+                }
+            ),
+            HugeObjectTrackerRecord::Direct(record) => assert_eq!(
+                record,
+                HugeObjectDirectRecord {
+                    address: StoredAddress::new(0x1234),
+                    length: 17
+                }
+            ),
+            HugeObjectTrackerRecord::FilteredIndirect(record) => {
+                assert_eq!(record.id(), 261);
+                assert_eq!(record.location().address(), StoredAddress::new(0x1234));
+                assert_eq!(record.location().encoded_size(), 17);
+                assert_eq!(record.location().filter_mask(), 0);
+                assert_eq!(record.location().decoded_size(), decoded_size);
+            }
+            HugeObjectTrackerRecord::FilteredDirect(record) => {
+                assert_eq!(record.location().address(), StoredAddress::new(0x1234));
+                assert_eq!(record.location().encoded_size(), 17);
+                assert_eq!(record.location().filter_mask(), 0);
+                assert_eq!(record.location().decoded_size(), decoded_size);
+            }
+        }
+    }
+
+    #[rstest]
+    #[case::indirect_wrong_type(false, 1, 36)]
+    #[case::indirect_short(false, 2, 35)]
+    #[case::indirect_long(false, 2, 37)]
+    #[case::direct_wrong_type(true, 3, 28)]
+    #[case::direct_short(true, 4, 27)]
+    #[case::direct_long(true, 4, 29)]
+    fn filtered_huge_record_contexts_reject_wrong_tracker_headers(
+        #[case] direct: bool,
+        #[case] tree_type: u8,
+        #[case] record_size: u16,
+    ) {
+        let layout = HugeObjectRecordContext {
+            widths: FormatWidths {
+                offsets: OffsetWidth::Eight,
+                lengths: LengthWidth::Eight,
+            },
+            encoding: if direct {
+                HugeObjectRecordEncoding::FilteredDirect { filter_count: 1 }
+            } else {
+                HugeObjectRecordEncoding::FilteredIndirect { filter_count: 1 }
+            },
+        };
+        let header = BTreeV2Header {
+            tree_type,
+            record_size,
+            node_size: 512,
+            depth: 0,
+            root_node_address: StoredAddress::new(0x400),
+            num_records_in_root: 1,
+            total_records: 1,
+        };
+        assert_eq!(
+            layout.resolve(&header).unwrap_err(),
+            FormatError::UnexpectedHugeObjectBTree {
+                tree_type,
+                record_size: usize::from(record_size),
+                required: if direct { 28 } else { 36 },
+            }
+        );
+    }
+
+    #[rstest]
+    #[case::indirect_short(false, 35)]
+    #[case::indirect_long(false, 37)]
+    #[case::direct_short(true, 27)]
+    #[case::direct_long(true, 29)]
+    fn filtered_huge_records_require_the_exact_record_bytes(
+        #[case] direct: bool,
+        #[case] length: usize,
+    ) {
+        let actual = if direct {
+            FilteredHugeObjectDirectRecord::parse(
+                &vec![0; length],
+                OffsetWidth::Eight,
+                LengthWidth::Eight,
+                1,
+            )
+            .unwrap_err()
+        } else {
+            FilteredHugeObjectRecord::parse(
+                &vec![0; length],
+                OffsetWidth::Eight,
+                LengthWidth::Eight,
+                1,
+            )
+            .unwrap_err()
+        };
+        assert_eq!(
+            actual,
+            FormatError::UnexpectedHugeObjectBTree {
+                tree_type: if direct {
+                    BTREE_V2_FILTERED_HUGE_OBJECT_DIRECT
+                } else {
+                    BTREE_V2_FILTERED_HUGE_OBJECT
+                },
+                record_size: length,
+                required: if direct { 28 } else { 36 },
+            }
+        );
     }
 
     #[test]
@@ -2035,4 +2554,9 @@ mod tests {
         };
         assert_eq!(record.link_heap_id(tree_type, 7), heap_id);
     }
+    /// The deflate filter identifier from "The Data Storage - Filter Pipeline Message" of the
+    /// [format specification, version 4.0][spec].
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_filter
+    const FILTER_DEFLATE: u16 = 1;
 }

@@ -536,6 +536,10 @@ pub enum FormatError {
     },
     /// A fractal heap's doubling table, block extent, or filter metadata is invalid.
     InvalidFractalHeapGeometry,
+    /// A filtered huge-object heap ID has reserved bits set in its first byte.
+    ///
+    /// Contains the set bits in positions 0 through 3.
+    InvalidFractalHeapIdFlags(u8),
     /// A supplied heap ID has a different length from the heap header's declared ID length.
     InvalidFractalHeapIdLength {
         /// The declared heap ID length in bytes.
@@ -994,17 +998,13 @@ pub enum FormatError {
         /// The available buffer length in bytes.
         available: usize,
     },
-    /// A fractal heap's huge-objects v2 B-tree is not the indirectly accessed,
-    /// non-filtered layout (record type 1) this reader decodes: either the tree
-    /// declares a different record type, or its records are too short to hold
-    /// that one. Reading its records as that layout would decode an object ID
-    /// out of another field's bytes.
+    /// A huge-object tracker has an unexpected B-tree type or record size.
     UnexpectedHugeObjectBTree {
         /// The record type the B-tree declares.
         tree_type: u8,
-        /// The record size the B-tree declares, in bytes.
+        /// The declared record size or supplied record length, in bytes.
         record_size: usize,
-        /// The bytes a type-1 record needs: address + length + object ID.
+        /// The expected encoded record length in bytes.
         required: usize,
     },
     /// A read or write requires bytes past the source's extent.
@@ -1053,6 +1053,10 @@ pub enum FormatError {
         /// The stored floating-point bit fields.
         layout: FloatingPointLayout,
     },
+    /// A filtered huge-object heap ID has a version other than 0.
+    ///
+    /// Contains the version read from bits 6 and 7 of its first byte.
+    UnsupportedFractalHeapIdVersion(u8),
     /// Unknown message type that is marked as must-understand.
     UnsupportedMessage(u16),
     /// A serialized free-space section class is unsupported for its manager client.
@@ -1653,6 +1657,9 @@ impl fmt::Display for FormatError {
             Self::InvalidFractalHeapGeometry => {
                 write!(f, "invalid fractal heap geometry")
             }
+            Self::InvalidFractalHeapIdFlags(flags) => {
+                write!(f, "reserved bits in fractal heap ID: {flags:#04x}")
+            }
             Self::InvalidFractalHeapIdLength { expected, actual } => {
                 write!(
                     f,
@@ -1678,9 +1685,12 @@ impl fmt::Display for FormatError {
             } => {
                 write!(
                     f,
-                    "fractal-heap huge-objects B-tree is not the expected record type 1: \
-                     type {tree_type}, records of {record_size} bytes (type 1 needs {required})"
+                    "fractal-heap huge-object B-tree has an unexpected type or record size: \
+                     type {tree_type}, records of {record_size} bytes (expected {required} bytes)"
                 )
+            }
+            Self::UnsupportedFractalHeapIdVersion(version) => {
+                write!(f, "unsupported fractal heap ID version: {version}")
             }
             Self::UnsupportedFilteredHeapObject => {
                 write!(f, "filtered fractal-heap objects are not supported")

@@ -1,6 +1,8 @@
 //! Parses and encodes fractal heap headers and heap IDs, derives doubling-table geometry, and
 //! locates children of indirect blocks.
 
+use core::num::NonZeroU64;
+
 use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -170,19 +172,14 @@ pub struct FractalHeapHeader {
     pub filtering: FractalHeapFiltering,
 }
 
-/// Reads the little-endian integer in the first 8 bytes of `payload`, or in all of it where it is
-/// shorter. A huge heap ID holds its key in the huge-object B-tree this way.
-fn read_var_le(payload: &[u8]) -> u64 {
-    let mut value = 0u64;
-    for (i, &b) in payload.iter().take(8).enumerate() {
-        value |= (b as u64) << (i * 8);
-    }
-    value
-}
-
 /// The location of a huge object, as its heap ID gives it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HugeObjectReference {
+    /// The heap ID holds this key, which the huge-object B-tree of the heap maps to the address
+    /// and the length of the object.
+    Indexed(HugeIndirectKey),
+    /// The heap ID holds a key in the heap's type-2 filtered huge-object tracker.
+    FilteredIndexed(HugeIndirectKey),
     /// The heap ID holds the address and the length of the object.
     Inline {
         /// The address of the object.
@@ -190,9 +187,123 @@ pub enum HugeObjectReference {
         /// The length of the object in bytes.
         len: u64,
     },
-    /// The heap ID holds this key, which the huge-object B-tree of the heap maps to the address
-    /// and the length of the object.
-    Indexed(u64),
+    /// The heap ID holds the filtered object's location, sizes, and filter mask.
+    FilteredInline(FilteredHugeObjectLocation),
+}
+
+/// The stored address, encoded and decoded sizes, and filter mask of a filtered huge object.
+///
+/// Both sizes are positive. The reader resolves the base-relative address before reading
+/// [`encoded_size`](Self::encoded_size) bytes, then reverses the active filters and checks the
+/// result against [`decoded_size`](Self::decoded_size).
+/// If every filter is skipped, the encoded and decoded sizes are equal.
+///
+/// Obtained from [`FractalHeapIdLayout::parse`] or
+/// [`HugeObjectRecordDecoder::parse`](crate::btree_v2::HugeObjectRecordDecoder::parse).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FilteredHugeObjectLocation {
+    address: StoredAddress,
+    encoded_size: NonZeroU64,
+    filter_mask: u32,
+    decoded_size: NonZeroU64,
+}
+
+impl FilteredHugeObjectLocation {
+    pub(crate) fn parse(
+        bytes: &[u8],
+        offsets: OffsetWidth,
+        lengths: LengthWidth,
+        filter_count: usize,
+    ) -> Result<Self, FormatError> {
+        let mut fields = bytes::Fields::new(bytes, 0);
+        let address = fields.address(offsets)?;
+        let encoded_size = fields.length(lengths)?;
+        let filter_mask = fields.u32()?;
+        let decoded_size = fields.length(lengths)?;
+        if address.get() >= StoredAddress::undefined(offsets).get()
+            || filter_count > u32::BITS as usize
+            || (filter_count < u32::BITS as usize && filter_mask >> filter_count != 0)
+        {
+            return Err(FormatError::InvalidFractalHeapGeometry);
+        }
+        let encoded_size =
+            NonZeroU64::new(encoded_size).ok_or(FormatError::InvalidFractalHeapGeometry)?;
+        let decoded_size =
+            NonZeroU64::new(decoded_size).ok_or(FormatError::InvalidFractalHeapGeometry)?;
+        address
+            .get()
+            .checked_add(encoded_size.get())
+            .ok_or(FormatError::OffsetOverflow {
+                offset: address.get(),
+                length: encoded_size.get(),
+            })?;
+        let skipped = filter_mask.count_ones() as usize == filter_count;
+        if skipped && encoded_size != decoded_size {
+            return Err(FormatError::InvalidFractalHeapGeometry);
+        }
+        Ok(Self {
+            address,
+            encoded_size,
+            filter_mask,
+            decoded_size,
+        })
+    }
+
+    /// Returns the base-relative address of the encoded payload.
+    pub const fn address(self) -> StoredAddress {
+        self.address
+    }
+    /// Returns the encoded physical allocation length in bytes.
+    pub const fn encoded_size(self) -> u64 {
+        self.encoded_size.get()
+    }
+    /// Returns the skipped filters as set bits at their pipeline indices.
+    pub const fn filter_mask(self) -> u32 {
+        self.filter_mask
+    }
+    /// Returns the expected payload length after reversing its active filters.
+    pub const fn decoded_size(self) -> u64 {
+        self.decoded_size.get()
+    }
+}
+
+/// The encoded width of a numeric key in an indirect huge-object heap ID.
+///
+/// The tracker record's key uses the file's length width in both dialects. Callers compare
+/// decoded numeric values when the heap ID and tracker record use different widths.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HugeIndirectKeyEncoding {
+    /// Uses the smaller of the heap ID payload length and eight bytes.
+    ///
+    /// `H5HF__huge_init` applies this rule in `H5HFhuge.c` (HDF5 2.2.0).
+    Libhdf5,
+    /// Uses the file's length width.
+    ///
+    /// The key is defined in "Fractal Heap" of the [format specification, version 4.0][spec].
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_infra_fractalheap
+    PublishedSpec,
+}
+
+/// A numeric huge-object tracker key decoded under an explicit width dialect.
+///
+/// The value fits the tracker's length-width field. Obtained from
+/// [`FractalHeapIdLayout::parse`] for an indirect huge-object heap ID.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HugeIndirectKey {
+    value: u64,
+    encoding: HugeIndirectKeyEncoding,
+}
+
+impl HugeIndirectKey {
+    /// Returns the numeric key for comparison with the tracker record's object ID.
+    pub const fn value(self) -> u64 {
+        self.value
+    }
+    /// Returns the width dialect used to decode the heap ID's key.
+    pub const fn encoding(self) -> HugeIndirectKeyEncoding {
+        self.encoding
+    }
 }
 
 impl FractalHeapHeader {
@@ -1171,17 +1282,75 @@ pub struct FractalHeapIdLayout {
 }
 
 impl FractalHeapIdLayout {
-    /// Derives the heap ID decoding parameters from `header` and the file's field widths.
+    /// Derives decoding parameters with the [`HugeIndirectKeyEncoding::Libhdf5`] key width.
+    ///
+    /// `offsets` and `lengths` are the file's address and length widths. See
+    /// [`with_huge_key_encoding`](Self::with_huge_key_encoding) to select another key dialect.
     pub fn new(header: &FractalHeapHeader, offsets: OffsetWidth, lengths: LengthWidth) -> Self {
+        Self::with_huge_key_encoding(header, offsets, lengths, HugeIndirectKeyEncoding::Libhdf5)
+    }
+
+    /// Derives decoding parameters with an explicit indirect huge-key width dialect.
+    ///
+    /// `offsets` and `lengths` are the file's address and length widths. The dialect applies to
+    /// filtered and unfiltered indirect IDs. Direct IDs store their object's location instead.
+    /// Invalid huge-object geometry is reported when [`parse`](Self::parse) reads a huge ID.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use hdf5_pure_core::StoredAddress;
+    /// # use hdf5_pure_core::__private::StoredAddressExt;
+    /// # use hdf5_pure_format::__private::{
+    /// #     FractalHeapHeader, FractalHeapIdKind, FractalHeapIdLayout, HugeIndirectKeyEncoding,
+    /// #     HugeObjectReference, LengthWidth, OffsetWidth,
+    /// # };
+    /// # use hdf5_pure_format::FormatError;
+    /// # use test_util::{fractal_heap, widths::Widths};
+    /// # let mut heap = FractalHeapHeader::parse_bytes(
+    /// #     &fractal_heap::Header::new(256).build(Widths::EIGHT),
+    /// #     OffsetWidth::Eight,
+    /// #     LengthWidth::Eight,
+    /// # )?;
+    /// # heap.btree_huge_objects_address = StoredAddress::new(512);
+    /// let ids = FractalHeapIdLayout::with_huge_key_encoding(
+    ///     &heap,
+    ///     OffsetWidth::Eight,
+    ///     LengthWidth::Two,
+    ///     HugeIndirectKeyEncoding::PublishedSpec,
+    /// );
+    /// let bytes = [0x10, 5, 1, 0, 0, 0, 0];
+    /// let FractalHeapIdKind::Huge(HugeObjectReference::Indexed(key)) = ids.parse(&bytes)?.kind()
+    /// else {
+    ///     unreachable!();
+    /// };
+    /// assert_eq!(key.value(), 261);
+    /// assert_eq!(key.encoding(), HugeIndirectKeyEncoding::PublishedSpec);
+    /// # Ok::<(), FormatError>(())
+    /// ```
+    pub fn with_huge_key_encoding(
+        header: &FractalHeapHeader,
+        offsets: OffsetWidth,
+        lengths: LengthWidth,
+        encoding: HugeIndirectKeyEncoding,
+    ) -> Self {
         let encoded_len = usize::from(header.heap_id_length);
-        let huge = if header.filtering.is_filtered() {
-            HugeIdLayout::Filtered
-        } else if header.huge_ids_direct_with_widths(FormatWidths { offsets, lengths }) {
-            HugeIdLayout::Inline { offsets, lengths }
-        } else {
-            HugeIdLayout::Indexed {
-                has_btree: !header.btree_huge_objects_address.is_undefined(offsets),
-            }
+        let huge = HugeIdLayout {
+            direct: header.huge_ids_direct_with_widths(FormatWidths { offsets, lengths }),
+            offsets,
+            lengths,
+            tracker: header.btree_huge_objects_address,
+            filter_count: match &header.filtering {
+                FractalHeapFiltering::Unfiltered => None,
+                FractalHeapFiltering::Filtered { pipeline, .. } => Some(pipeline.filters.len()),
+            },
+            encoding,
+            key_width: match encoding {
+                HugeIndirectKeyEncoding::PublishedSpec => usize::from(lengths.get()),
+                // H5HF__huge_init in H5HFhuge.c, HDF5 2.2.0, bounds the indirect key by
+                // the ID payload length and the eight-byte native huge ID.
+                HugeIndirectKeyEncoding::Libhdf5 => encoded_len.saturating_sub(1).min(8),
+            },
         };
         Self {
             encoded_len,
@@ -1195,7 +1364,7 @@ impl FractalHeapIdLayout {
     ///
     /// Reads the managed object's heap offset and length, the huge object's location, or the
     /// tiny object's bytes. For a tiny object, the caller receives a slice borrowed from `bytes`.
-    /// The parser reads the type independently of the version bits. Managed offset and length
+    /// Filtered huge IDs require version 0 and zero reserved bits. Managed offset and length
     /// fields are byte-aligned, and trailing padding is ignored. Tiny-object bytes begin at
     /// offset 1 for fixed IDs of at most 18 bytes, and at offset 2 for longer IDs.
     ///
@@ -1209,9 +1378,18 @@ impl FractalHeapIdLayout {
     /// Returns [`FormatError::InvalidFractalHeapGeometry`] for a managed ID if its header cannot
     /// describe the required fields, or its offset requires more bits than the heap permits.
     ///
-    /// Returns [`FormatError::UnsupportedFilteredHeapObject`] for a huge ID in a filtered
-    /// heap, and [`FormatError::HugeObjectNotFound`] for an indexed huge ID in a heap without
-    /// a huge-object B-tree.
+    /// Returns [`FormatError::InvalidFractalHeapGeometry`] for a huge ID if the tracker address
+    /// is undefined or exceeds the address width, a required size is zero, the filter count or
+    /// mask is invalid, or the encoded and decoded sizes differ with all filters skipped. Also
+    /// returns this error if an indirect key's field exceeds the declared ID payload.
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if a huge object's encoded range exceeds
+    /// [`u64::MAX`], and [`FormatError::ValueTooLargeForRepresentation`] if an indirect key
+    /// exceeds the tracker's numeric domain.
+    ///
+    /// Returns [`FormatError::UnsupportedFractalHeapIdVersion`] for a filtered huge ID with a
+    /// version other than 0, and [`FormatError::InvalidFractalHeapIdFlags`] if its reserved bits
+    /// are set.
     pub fn parse<'a>(&self, bytes: &'a [u8]) -> Result<FractalHeapIdView<'a>, FormatError> {
         if bytes.len() != self.encoded_len {
             return Err(FormatError::InvalidFractalHeapIdLength {
@@ -1230,7 +1408,9 @@ impl FractalHeapIdLayout {
                     .managed
                     .ok_or(FormatError::InvalidFractalHeapGeometry)?
                     .parse(payload)?,
-                FractalHeapIdType::Huge => FractalHeapIdKind::Huge(self.parse_huge(payload)?),
+                FractalHeapIdType::Huge => {
+                    FractalHeapIdKind::Huge(self.parse_huge(first, payload)?)
+                }
                 FractalHeapIdType::Tiny => FractalHeapIdKind::Tiny {
                     bytes: self.parse_tiny(first, bytes)?,
                 },
@@ -1243,18 +1423,72 @@ impl FractalHeapIdLayout {
         self.encoded_len
     }
 
-    fn parse_huge(&self, payload: &[u8]) -> Result<HugeObjectReference, FormatError> {
-        Ok(match self.huge {
-            HugeIdLayout::Filtered => return Err(FormatError::UnsupportedFilteredHeapObject),
-            HugeIdLayout::Inline { offsets, lengths } => HugeObjectReference::Inline {
-                addr: StoredAddress::new(bytes::read_offset_width(payload, 0, offsets)?),
-                len: bytes::read_length_width(payload, usize::from(offsets.get()), lengths)?,
-            },
-            HugeIdLayout::Indexed { has_btree } => {
-                let key = read_var_le(payload);
-                if !has_btree {
-                    return Err(FormatError::HugeObjectNotFound(key));
+    fn parse_huge(&self, first: u8, payload: &[u8]) -> Result<HugeObjectReference, FormatError> {
+        let HugeIdLayout {
+            direct,
+            offsets,
+            lengths,
+            tracker,
+            filter_count,
+            encoding,
+            key_width,
+        } = self.huge;
+        if filter_count.is_some() {
+            let version = first >> HEAP_ID_VERSION_SHIFT;
+            if version != HEAP_ID_VERSION {
+                return Err(FormatError::UnsupportedFractalHeapIdVersion(version));
+            }
+            let flags = first & HUGE_ID_RESERVED_MASK;
+            if flags != 0 {
+                return Err(FormatError::InvalidFractalHeapIdFlags(flags));
+            }
+        }
+        if tracker.get() >= StoredAddress::undefined(offsets).get() {
+            return Err(FormatError::InvalidFractalHeapGeometry);
+        }
+        Ok(if direct {
+            if let Some(filter_count) = filter_count {
+                HugeObjectReference::FilteredInline(FilteredHugeObjectLocation::parse(
+                    payload,
+                    offsets,
+                    lengths,
+                    filter_count,
+                )?)
+            } else {
+                let addr = StoredAddress::new(bytes::read_offset_width(payload, 0, offsets)?);
+                let len = bytes::read_length_width(payload, usize::from(offsets.get()), lengths)?;
+                if addr.get() >= StoredAddress::undefined(offsets).get() || len == 0 {
+                    return Err(FormatError::InvalidFractalHeapGeometry);
                 }
+                addr.get()
+                    .checked_add(len)
+                    .ok_or(FormatError::OffsetOverflow {
+                        offset: addr.get(),
+                        length: len,
+                    })?;
+                HugeObjectReference::Inline { addr, len }
+            }
+        } else {
+            if key_width == 0 || key_width > payload.len() {
+                return Err(FormatError::InvalidFractalHeapGeometry);
+            }
+            if filter_count.is_some_and(|count| count > u32::BITS as usize) {
+                return Err(FormatError::InvalidFractalHeapGeometry);
+            }
+            let key = bytes::Fields::new(payload, 0).uint(key_width)?;
+            if !crate::width::length_width_holds(lengths, key) {
+                return Err(FormatError::ValueTooLargeForRepresentation {
+                    value: key,
+                    target: "huge-object tracker key",
+                });
+            }
+            let key = HugeIndirectKey {
+                value: key,
+                encoding,
+            };
+            if filter_count.is_some() {
+                HugeObjectReference::FilteredIndexed(key)
+            } else {
                 HugeObjectReference::Indexed(key)
             }
         })
@@ -1406,15 +1640,14 @@ pub enum FractalHeapIdKind<'a> {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum HugeIdLayout {
-    Filtered,
-    Indexed {
-        has_btree: bool,
-    },
-    Inline {
-        offsets: OffsetWidth,
-        lengths: LengthWidth,
-    },
+struct HugeIdLayout {
+    direct: bool,
+    offsets: OffsetWidth,
+    lengths: LengthWidth,
+    tracker: StoredAddress,
+    filter_count: Option<usize>,
+    encoding: HugeIndirectKeyEncoding,
+    key_width: usize,
 }
 
 fn fits_bits(value: u64, bits: u32) -> bool {
@@ -1442,6 +1675,13 @@ pub const FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED: u8 = 0x02;
 /// The position of the type bits, bits 4 and 5, in the first byte of a heap ID, from the same
 /// section as [`FRACTAL_HEAP_SIGNATURE`].
 const HEAP_ID_TYPE_SHIFT: u8 = 4;
+
+/// The position of the heap-ID version bits, from the same section as [`FRACTAL_HEAP_SIGNATURE`].
+const HEAP_ID_VERSION_SHIFT: u8 = 6;
+/// The heap-ID version defined in the same section as [`FRACTAL_HEAP_SIGNATURE`].
+const HEAP_ID_VERSION: u8 = 0;
+/// The reserved low four bits of a huge ID, from the same section as [`FRACTAL_HEAP_SIGNATURE`].
+const HUGE_ID_RESERVED_MASK: u8 = 0x0F;
 
 /// The mask of the two type bits once shifted down by [`HEAP_ID_TYPE_SHIFT`].
 const HEAP_ID_TYPE_MASK: u8 = 0x03;
@@ -2103,13 +2343,15 @@ mod tests {
     }
 
     #[rstest]
-    #[case::filtered(true, FormatError::UnsupportedFilteredHeapObject)]
-    #[case::missing_tree(false, FormatError::HugeObjectNotFound(5))]
-    fn filtered_huge_ids_and_missing_huge_object_trees_are_errors(
+    #[case::filtered(true, FormatError::InvalidFractalHeapGeometry)]
+    #[case::missing_tree(false, FormatError::InvalidFractalHeapGeometry)]
+    fn huge_ids_require_a_defined_tracker(
         #[case] filtered: bool,
         #[case] error: FormatError,
+        #[values(8, 29)] heap_id_length: u16,
     ) {
         let header = FractalHeapHeader {
+            heap_id_length,
             filtering: if filtered {
                 filtered_heap()
             } else {
@@ -2118,11 +2360,297 @@ mod tests {
             btree_huge_objects_address: StoredAddress::new(u64::MAX),
             ..attribute_heap_header()
         };
+        let mut id = vec![0; usize::from(heap_id_length)];
+        id[..2].copy_from_slice(&[FractalHeapIdType::Huge.first_byte(), 5]);
         assert_eq!(
-            FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
-                .parse(&[0x10, 5, 0, 0, 0, 0, 0, 0]),
+            FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight).parse(&id),
             Err(error)
         );
+    }
+
+    #[rstest]
+    fn filtered_direct_huge_ids_decode_at_the_exact_capacity(
+        #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] offsets: OffsetWidth,
+        #[values(LengthWidth::Two, LengthWidth::Four, LengthWidth::Eight)] lengths: LengthWidth,
+        #[values(0, 3)] padding: u16,
+    ) {
+        let capacity = 1
+            + u16::from(offsets.get())
+            + 2 * u16::from(lengths.get())
+            + u16::try_from(FRACTAL_HEAP_FILTER_MASK_LEN).unwrap();
+        let header = FractalHeapHeader {
+            heap_id_length: capacity + padding,
+            filtering: filtered_heap(),
+            root_block_address: StoredAddress::undefined(offsets),
+            ..attribute_heap_header()
+        };
+        let mut id = vec![FractalHeapIdType::Huge.first_byte()];
+        id.extend(filtered_huge_location(
+            offsets, lengths, 0x1234, 17, 0, 1024,
+        ));
+        id.resize(usize::from(header.heap_id_length), 0);
+        let parsed = FractalHeapIdLayout::new(&header, offsets, lengths)
+            .parse(&id)
+            .unwrap()
+            .kind();
+        let FractalHeapIdKind::Huge(HugeObjectReference::FilteredInline(location)) = parsed else {
+            panic!("expected filtered direct huge ID, got {parsed:?}")
+        };
+        assert_eq!(location.address(), StoredAddress::new(0x1234));
+        assert_eq!(location.encoded_size(), 17);
+        assert_eq!(location.filter_mask(), 0);
+        assert_eq!(location.decoded_size(), 1024);
+        let indirect_header = FractalHeapHeader {
+            heap_id_length: capacity - 1,
+            ..header
+        };
+        let mut indirect_id = vec![0; usize::from(indirect_header.heap_id_length)];
+        indirect_id[..2].copy_from_slice(&[FractalHeapIdType::Huge.first_byte(), 5]);
+        let parsed = FractalHeapIdLayout::new(&indirect_header, offsets, lengths)
+            .parse(&indirect_id)
+            .unwrap()
+            .kind();
+        let FractalHeapIdKind::Huge(HugeObjectReference::FilteredIndexed(key)) = parsed else {
+            panic!("expected filtered indirect huge ID, got {parsed:?}")
+        };
+        assert_eq!(key.value(), 5);
+        assert_eq!(key.encoding(), HugeIndirectKeyEncoding::Libhdf5);
+    }
+
+    #[rstest]
+    fn filtered_indirect_huge_keys_retain_the_selected_dialect(
+        #[values(
+            HugeIndirectKeyEncoding::PublishedSpec,
+            HugeIndirectKeyEncoding::Libhdf5
+        )]
+        encoding: HugeIndirectKeyEncoding,
+        #[values(LengthWidth::Two, LengthWidth::Four, LengthWidth::Eight)] lengths: LengthWidth,
+    ) {
+        let header = FractalHeapHeader {
+            heap_id_length: 9,
+            filtering: filtered_heap(),
+            ..attribute_heap_header()
+        };
+        let id = [FractalHeapIdType::Huge.first_byte(), 5, 1, 0, 0, 0, 0, 0, 0];
+        let parsed = FractalHeapIdLayout::with_huge_key_encoding(
+            &header,
+            OffsetWidth::Eight,
+            lengths,
+            encoding,
+        )
+        .parse(&id)
+        .unwrap()
+        .kind();
+        let FractalHeapIdKind::Huge(HugeObjectReference::FilteredIndexed(key)) = parsed else {
+            panic!("expected filtered indirect huge ID, got {parsed:?}")
+        };
+        assert_eq!(key.value(), 261);
+        assert_eq!(key.encoding(), encoding);
+    }
+
+    #[test]
+    fn a_published_spec_huge_key_requires_its_full_length_field() {
+        let header = FractalHeapHeader {
+            heap_id_length: 3,
+            filtering: filtered_heap(),
+            ..attribute_heap_header()
+        };
+        assert_eq!(
+            FractalHeapIdLayout::with_huge_key_encoding(
+                &header,
+                OffsetWidth::Eight,
+                LengthWidth::Four,
+                HugeIndirectKeyEncoding::PublishedSpec,
+            )
+            .parse(&[FractalHeapIdType::Huge.first_byte(), 5, 0])
+            .unwrap_err(),
+            FormatError::InvalidFractalHeapGeometry
+        );
+    }
+
+    #[rstest]
+    #[case::spec(HugeIndirectKeyEncoding::PublishedSpec, Ok(5))]
+    #[case::libhdf5(HugeIndirectKeyEncoding::Libhdf5, Err(FormatError::ValueTooLargeForRepresentation { value: 0x1_0005, target: "huge-object tracker key" }))]
+    fn indirect_huge_keys_never_truncate_to_the_tracker_width(
+        #[case] encoding: HugeIndirectKeyEncoding,
+        #[case] expected: Result<u64, FormatError>,
+    ) {
+        let header = FractalHeapHeader {
+            filtering: filtered_heap(),
+            ..attribute_heap_header()
+        };
+        let parsed = FractalHeapIdLayout::with_huge_key_encoding(
+            &header,
+            OffsetWidth::Eight,
+            LengthWidth::Two,
+            encoding,
+        )
+        .parse(&[FractalHeapIdType::Huge.first_byte(), 5, 0, 1, 0, 0, 0, 0])
+        .map(|view| match view.kind() {
+            FractalHeapIdKind::Huge(HugeObjectReference::FilteredIndexed(key)) => key.value(),
+            other => panic!("expected filtered indirect huge ID, got {other:?}"),
+        });
+        assert_eq!(parsed, expected);
+    }
+
+    #[rstest]
+    #[case::undefined(u64::MAX, 17, 0, 1024, FormatError::InvalidFractalHeapGeometry)]
+    #[case::empty_encoded(0x1234, 0, 0, 1024, FormatError::InvalidFractalHeapGeometry)]
+    #[case::empty_decoded(0x1234, 17, 0, 0, FormatError::InvalidFractalHeapGeometry)]
+    #[case::invalid_mask(0x1234, 17, 2, 1024, FormatError::InvalidFractalHeapGeometry)]
+    #[case::skipped_sizes(0x1234, 17, 1, 1024, FormatError::InvalidFractalHeapGeometry)]
+    #[case::overflow(u64::MAX - 16, 17, 0, 1024, FormatError::OffsetOverflow { offset: u64::MAX - 16, length: 17 })]
+    fn filtered_direct_huge_ids_reject_invalid_locations(
+        #[case] address: u64,
+        #[case] encoded_size: u64,
+        #[case] mask: u32,
+        #[case] decoded_size: u64,
+        #[case] expected: FormatError,
+    ) {
+        let header = FractalHeapHeader {
+            heap_id_length: 29,
+            filtering: filtered_heap(),
+            ..attribute_heap_header()
+        };
+        let mut id = vec![FractalHeapIdType::Huge.first_byte()];
+        id.extend(filtered_huge_location(
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+            address,
+            encoded_size,
+            mask,
+            decoded_size,
+        ));
+        assert_eq!(
+            FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
+                .parse(&id)
+                .unwrap_err(),
+            expected
+        );
+    }
+
+    #[rstest]
+    fn filtered_huge_locations_reject_undefined_addresses_at_the_encoded_width(
+        #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] offsets: OffsetWidth,
+    ) {
+        let data = filtered_huge_location(
+            offsets,
+            LengthWidth::Eight,
+            StoredAddress::undefined(offsets).get(),
+            17,
+            0,
+            1024,
+        );
+        assert_eq!(
+            FilteredHugeObjectLocation::parse(&data, offsets, LengthWidth::Eight, 1).unwrap_err(),
+            FormatError::InvalidFractalHeapGeometry
+        );
+    }
+
+    #[rstest]
+    #[case::empty_pipeline(0, 0)]
+    #[case::one_filter(1, 1)]
+    #[case::thirty_two_filters(32, u32::MAX)]
+    fn filtered_huge_locations_accept_skipped_filters(
+        #[case] filter_count: usize,
+        #[case] mask: u32,
+    ) {
+        let data =
+            filtered_huge_location(OffsetWidth::Eight, LengthWidth::Eight, 0x1234, 17, mask, 17);
+        let location = FilteredHugeObjectLocation::parse(
+            &data,
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+            filter_count,
+        )
+        .unwrap();
+        assert_eq!(location.filter_mask(), mask);
+        assert_eq!(location.encoded_size(), location.decoded_size());
+    }
+
+    #[rstest]
+    fn filtered_huge_ids_accept_an_empty_pipeline(#[values(false, true)] direct: bool) {
+        let encoded = fractal_heap::Header::new(u64::MAX)
+            .filtering(0, 0, vec![PIPELINE_VERSION_TWO, 0])
+            .build(Widths::EIGHT);
+        let mut header =
+            FractalHeapHeader::parse_bytes(&encoded, OffsetWidth::Eight, LengthWidth::Eight)
+                .unwrap();
+        header.heap_id_length = if direct { 29 } else { 8 };
+        header.btree_huge_objects_address = StoredAddress::new(0x800);
+        let id = if direct {
+            let mut id = vec![FractalHeapIdType::Huge.first_byte()];
+            id.extend(filtered_huge_location(
+                OffsetWidth::Eight,
+                LengthWidth::Eight,
+                0x1234,
+                17,
+                0,
+                17,
+            ));
+            id
+        } else {
+            vec![FractalHeapIdType::Huge.first_byte(), 5, 0, 0, 0, 0, 0, 0]
+        };
+        let parsed = FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
+            .parse(&id)
+            .unwrap()
+            .kind();
+        match (direct, parsed) {
+            (true, FractalHeapIdKind::Huge(HugeObjectReference::FilteredInline(location))) => {
+                assert_eq!(location.address(), StoredAddress::new(0x1234));
+                assert_eq!(location.encoded_size(), 17);
+                assert_eq!(location.filter_mask(), 0);
+                assert_eq!(location.decoded_size(), 17);
+            }
+            (false, FractalHeapIdKind::Huge(HugeObjectReference::FilteredIndexed(key))) => {
+                assert_eq!(key.value(), 5)
+            }
+            other => panic!("unexpected huge-ID representation: {other:?}"),
+        }
+    }
+
+    #[rstest]
+    #[case::excessive_pipeline(usize::from(FILTER_COUNT_MAXIMUM) + 1)]
+    fn filtered_huge_ids_reject_impossible_pipeline_sizes(#[case] count: usize) {
+        let mut header = FractalHeapHeader {
+            filtering: filtered_heap(),
+            ..attribute_heap_header()
+        };
+        let FractalHeapFiltering::Filtered { pipeline, .. } = &mut header.filtering else {
+            panic!("expected filtered heap")
+        };
+        pipeline.filters.resize(
+            count,
+            FilterDescription {
+                filter_id: FILTER_DEFLATE,
+                name: None,
+                flags: 0,
+                client_data: vec![],
+            },
+        );
+        assert_eq!(
+            FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
+                .parse(&[FractalHeapIdType::Huge.first_byte(), 5, 0, 0, 0, 0, 0, 0])
+                .unwrap_err(),
+            FormatError::InvalidFractalHeapGeometry
+        );
+    }
+
+    fn filtered_huge_location(
+        offsets: OffsetWidth,
+        lengths: LengthWidth,
+        address: u64,
+        encoded_size: u64,
+        mask: u32,
+        decoded_size: u64,
+    ) -> Vec<u8> {
+        let mut data = Vec::new();
+        bytes::write_offset(&mut data, address, offsets);
+        bytes::write_length(&mut data, encoded_size, lengths);
+        data.extend_from_slice(&mask.to_le_bytes());
+        bytes::write_length(&mut data, decoded_size, lengths);
+        data
     }
 
     #[test]
@@ -2161,9 +2689,9 @@ mod tests {
 
     #[rstest]
     #[case::managed(0x00, FractalHeapIdKind::Managed { heap_offset: 0, object_length: 0 })]
-    #[case::huge(0x10, FractalHeapIdKind::Huge(HugeObjectReference::Indexed(0)))]
+    #[case::huge(0x10, FractalHeapIdKind::Huge(HugeObjectReference::Indexed(HugeIndirectKey { value: 0, encoding: HugeIndirectKeyEncoding::Libhdf5 })))]
     #[case::tiny(0x20, FractalHeapIdKind::Tiny { bytes: &[0] })]
-    #[case::version_bits(0xD0, FractalHeapIdKind::Huge(HugeObjectReference::Indexed(0)))]
+    #[case::version_bits(0xD0, FractalHeapIdKind::Huge(HugeObjectReference::Indexed(HugeIndirectKey { value: 0, encoding: HugeIndirectKeyEncoding::Libhdf5 })))]
     fn the_parser_reads_type_bits_independently_of_version_bits(
         #[case] first: u8,
         #[case] expected: FractalHeapIdKind<'_>,
@@ -2179,6 +2707,48 @@ mod tests {
             .parse(&bytes)
             .unwrap()
             .kind(),
+            expected
+        );
+    }
+
+    #[rstest]
+    #[case::reserved_bit(0x11, FormatError::InvalidFractalHeapIdFlags(0x01))]
+    #[case::reserved_nibble(0x1F, FormatError::InvalidFractalHeapIdFlags(0x0F))]
+    #[case::version_one(0x50, FormatError::UnsupportedFractalHeapIdVersion(1))]
+    #[case::version_two(0x90, FormatError::UnsupportedFractalHeapIdVersion(2))]
+    #[case::version_three(0xD0, FormatError::UnsupportedFractalHeapIdVersion(3))]
+    fn filtered_huge_ids_validate_version_and_reserved_bits(
+        #[case] first: u8,
+        #[case] expected: FormatError,
+        #[values(false, true)] direct: bool,
+    ) {
+        let header = FractalHeapHeader {
+            heap_id_length: if direct { 29 } else { 8 },
+            filtering: filtered_heap(),
+            ..attribute_heap_header()
+        };
+        let id = if direct {
+            let mut id = vec![first];
+            id.extend(filtered_huge_location(
+                OffsetWidth::Eight,
+                LengthWidth::Eight,
+                0x1234,
+                17,
+                0,
+                1024,
+            ));
+            id
+        } else {
+            vec![first, 5, 0, 0, 0, 0, 0, 0]
+        };
+        assert_eq!(
+            FractalHeapIdType::from_heap_id(&id).unwrap(),
+            FractalHeapIdType::Huge
+        );
+        assert_eq!(
+            FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
+                .parse(&id)
+                .unwrap_err(),
             expected
         );
     }
@@ -2280,6 +2850,7 @@ mod tests {
         };
         let wide = FractalHeapHeader {
             heap_id_length: 17,
+            btree_huge_objects_address: StoredAddress::new(0x800),
             ..dtable_header(512, 65536, 4)
         };
         let mut inline_huge = vec![0x10];
@@ -2290,7 +2861,12 @@ mod tests {
             FractalHeapIdLayout::new(&indexed, OffsetWidth::Eight, LengthWidth::Eight)
                 .parse(&[0x10, 5, 0, 0, 0, 0, 0])
                 .map(FractalHeapIdView::kind),
-            Ok(FractalHeapIdKind::Huge(HugeObjectReference::Indexed(5)))
+            Ok(FractalHeapIdKind::Huge(HugeObjectReference::Indexed(
+                HugeIndirectKey {
+                    value: 5,
+                    encoding: HugeIndirectKeyEncoding::Libhdf5
+                }
+            )))
         );
         assert_eq!(
             FractalHeapIdLayout::new(&wide, OffsetWidth::Eight, LengthWidth::Eight)
@@ -2487,7 +3063,12 @@ mod tests {
             FractalHeapIdLayout::new(&header, OffsetWidth::Eight, LengthWidth::Eight)
                 .parse(&id)
                 .map(FractalHeapIdView::kind),
-            Ok(FractalHeapIdKind::Huge(HugeObjectReference::Indexed(5)))
+            Ok(FractalHeapIdKind::Huge(HugeObjectReference::Indexed(
+                HugeIndirectKey {
+                    value: 5,
+                    encoding: HugeIndirectKeyEncoding::Libhdf5
+                }
+            )))
         );
     }
 

@@ -367,6 +367,7 @@ impl<'h> HeapObjectReader<'h> {
     ///
     /// # Errors
     ///
+    /// Returns [`FormatError::UnsupportedFilteredHeapObject`] for a filtered huge object.
     /// Returns [`FormatError::HugeObjectNotFound`] if an indexed huge object is absent, and
     /// [`FormatError::MissingFractalHeapBlock`] if a managed object has no allocated block.
     /// Returns [`FormatError::InsufficientRegion`] if a managed object's required region extends
@@ -466,11 +467,14 @@ impl<'h> HeapObjectReader<'h> {
         reference: HugeObjectReference,
     ) -> Result<Vec<u8>, FormatError> {
         let (addr, len) = match reference {
+            HugeObjectReference::FilteredInline(_) | HugeObjectReference::FilteredIndexed(_) => {
+                return Err(FormatError::UnsupportedFilteredHeapObject);
+            }
             HugeObjectReference::Inline { addr, len } => (addr, len),
             HugeObjectReference::Indexed(huge_id) => {
                 let widths = self.widths;
                 let btree_addr = self.header.btree_huge_objects_address.get().to_usize()?;
-                self.locate_huge(huge_id, Backend::Buffered, || {
+                self.locate_huge(huge_id.value(), Backend::Buffered, || {
                     let header = BTreeV2Header::parse_with_widths(file_data, btree_addr, widths)?;
                     check_huge_object_btree(&header, widths)?;
                     btree_v2::collect_btree_v2_records(file_data, &header, widths.offsets)
@@ -491,11 +495,14 @@ impl<'h> HeapObjectReader<'h> {
         reference: HugeObjectReference,
     ) -> Result<Vec<u8>, FormatError> {
         let (addr, len) = match reference {
+            HugeObjectReference::FilteredInline(_) | HugeObjectReference::FilteredIndexed(_) => {
+                return Err(FormatError::UnsupportedFilteredHeapObject);
+            }
             HugeObjectReference::Inline { addr, len } => (addr, len),
             HugeObjectReference::Indexed(huge_id) => {
                 let widths = self.widths;
                 let btree_addr = self.header.btree_huge_objects_address.get();
-                self.locate_huge(huge_id, Backend::Streaming, || {
+                self.locate_huge(huge_id.value(), Backend::Streaming, || {
                     let header = BTreeV2Header::parse_from_source_with_widths(
                         &SourceMetadata(source),
                         btree_addr,
@@ -908,6 +915,7 @@ mod tests {
         )
         .unwrap();
         header.heap_id_length = u16::try_from(bytes.len()).unwrap();
+        header.btree_huge_objects_address = StoredAddress::new(0x800);
         if filtered {
             header.filtering = FractalHeapFiltering::Filtered {
                 root_direct_block_size: 91,
