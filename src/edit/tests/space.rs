@@ -872,8 +872,11 @@ fn page_zero_classification_is_relative_to_the_base_address(#[values(0, 512)] us
     assert!(s.index_is_provably_raw(&data, &[(userblock + 512, 512)]));
 }
 
-#[test]
-fn paged_open_seeds_each_manager_by_slot() {
+#[rstest]
+fn paged_open_seeds_each_manager_by_slot(
+    #[values(PersistedFreeSpacePolicy::Tolerant, PersistedFreeSpacePolicy::Strict)]
+    policy: PersistedFreeSpacePolicy,
+) {
     use crate::writer::FileBuilder;
 
     let dir = tempfile::tempdir().unwrap();
@@ -897,7 +900,14 @@ fn paged_open_seeds_each_manager_by_slot() {
         .free_sections()
         .free_bytes();
 
-    let s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+    let s = WriteEngine::open_rw_with_strategy(
+        &path,
+        MetadataCacheConfig::disabled(),
+        FileLocking::Enabled,
+        MemoryStrategy::Bounded,
+        policy,
+    )
+    .unwrap();
     assert_eq!(
         s.space.page_size().expect("a paged file has a page size"),
         FileSpacePageSize::DEFAULT
@@ -1059,8 +1069,11 @@ fn padding_a_tail_page_of_unknown_type_records_nothing() {
     );
 }
 
-#[test]
-fn a_generic_large_section_is_only_reusable_as_whole_pages() {
+#[rstest]
+fn a_generic_large_section_is_only_reusable_as_whole_pages(
+    #[values(PersistedFreeSpacePolicy::Tolerant, PersistedFreeSpacePolicy::Strict)]
+    policy: PersistedFreeSpacePolicy,
+) {
     const PAGE: u64 = 512;
     let dir = tempfile::tempdir().unwrap();
     let path = test_util::copy_data("c/generic_large.h5", dir.path());
@@ -1096,7 +1109,14 @@ fn a_generic_large_section_is_only_reusable_as_whole_pages() {
         "the premise of this test: the C library files sub-page fragments in \
          its generic-large manager, but this file has none ({sections:?})"
     );
-    let s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+    let s = WriteEngine::open_rw_with_strategy(
+        &path,
+        MetadataCacheConfig::disabled(),
+        FileLocking::Enabled,
+        MemoryStrategy::Bounded,
+        policy,
+    )
+    .unwrap();
     let unclassified = s
         .space
         .paged_sections()

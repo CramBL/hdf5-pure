@@ -1701,6 +1701,117 @@ mod tests {
         }
     }
 
+    #[rstest::rstest]
+    #[case::header(0, 1024, None)]
+    #[case::section_list(146, 1024, Some(146))]
+    #[case::unused_capacity(181, 181, Some(146))]
+    fn completed_manager_acquisition_preserves_context_and_io(
+        #[case] actual_len: usize,
+        #[case] recorded_len: u64,
+        #[case] list: Option<u64>,
+    ) {
+        use std::error::Error as StdError;
+
+        use hdf5_pure_core::__private::FileSpaceInfoFields;
+        use hdf5_pure_format::__private as format;
+
+        use crate::BaseAddress;
+        use crate::DecodedStoredAddress;
+        use crate::FileSpacePageSize;
+        use crate::FileSpaceStrategy;
+        use crate::StoredAddress;
+        use crate::address::BaseAddressExt;
+        use crate::address::StoredAddressExt;
+        use crate::free_sections::PersistedManagerSet;
+
+        let widths = format::FormatWidths::from_sizes(8, 8).unwrap();
+        let (mut header, sections) = format::serialize_free_space_manager(
+            widths,
+            &[format::FreeSection {
+                addr: StoredAddress::new(256),
+                size: 32,
+            }],
+            StoredAddress::new(64),
+            StoredAddress::new(146),
+            format::SECTION_CLASS_SIMPLE,
+        )
+        .unwrap();
+        if recorded_len == 181 {
+            header[70..78].copy_from_slice(&128u64.to_le_bytes());
+            test_util::checksum::restamp(&mut header, 0, 82);
+        }
+        let mut bytes = vec![0; 181];
+        bytes[64..146].copy_from_slice(&header);
+        bytes[146..181].copy_from_slice(&sections);
+        bytes.truncate(actual_len);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("acquisition.h5");
+        fs::write(&path, bytes).unwrap();
+        let handle = fs::File::open(path).unwrap();
+        let source = BorrowedHandle::new(&handle, recorded_len);
+        let info = FileSpaceInfoFields {
+            strategy: FileSpaceStrategy::FsmAggr,
+            persist: true,
+            threshold: 1,
+            page_size: FileSpacePageSize::default(),
+            page_end_meta_threshold: 0,
+            eoa_pre_fsm: None,
+            manager_addrs: vec![DecodedStoredAddress::Defined(StoredAddress::new(64))],
+        }
+        .build();
+        let error = PersistedManagerSet::read(
+            &source.manager_source(),
+            widths,
+            BaseAddress::ZERO,
+            1024,
+            &info,
+        )
+        .unwrap_err();
+        let Error::PersistedFreeSpace {
+            manager_slot,
+            header_address,
+            section_list_address,
+            section,
+            source: cause,
+        } = &error
+        else {
+            panic!("{error:?}")
+        };
+        assert_eq!(
+            (
+                *manager_slot,
+                *header_address,
+                *section_list_address,
+                *section
+            ),
+            (
+                0,
+                StoredAddress::new(64),
+                list.map(StoredAddress::new),
+                None
+            )
+        );
+        if recorded_len == 181 {
+            let Error::Format(FormatError::UnexpectedSourceEof {
+                expected,
+                available,
+            }) = **cause
+            else {
+                panic!("{cause:?}")
+            };
+            assert_eq!((expected, available), (274, 181));
+        } else {
+            let io = error
+                .source()
+                .unwrap()
+                .source()
+                .unwrap()
+                .downcast_ref::<std::io::Error>()
+                .unwrap();
+            assert_eq!(io.kind(), std::io::ErrorKind::UnexpectedEof);
+        }
+    }
+
     /// The two backings [`FileImage`] exists to make interchangeable. Every case
     /// below runs against both, because a primitive that holds for one and not
     /// the other is exactly the divergence this seam would otherwise hide.
