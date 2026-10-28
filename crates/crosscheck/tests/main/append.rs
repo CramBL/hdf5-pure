@@ -9,6 +9,7 @@ use hdf5::datatype::ByteOrder as NativeByteOrder;
 use hdf5::file::LibraryVersion;
 use hdf5::plist::file_create::{FileSpaceStrategy as NativeStrategy, Sizeof, SizeofInfo};
 use hdf5_pure::FileBuilder;
+use hdf5_pure::FreeSpaceManagerRole;
 use hdf5_pure::UserblockSize;
 use hdf5_pure::{Chunk, Error, File, FileAccessProperties, MemoryStrategy, SyncPolicy};
 use hdf5_pure_format::__private::ExtensibleArrayHeader;
@@ -20,13 +21,16 @@ use test_util_hdf5::numeric::ByteOrder;
 use crate::test_util::array_index;
 
 #[rstest]
-#[case::flat_plain(false, false)]
-#[case::flat_filtered(false, true)]
-#[case::page_plain(true, false)]
-#[case::page_filtered(true, true)]
+#[case::flat_plain(false, false, false)]
+#[case::flat_filtered(false, true, false)]
+#[case::page_plain(true, false, false)]
+#[case::page_filtered(true, true, false)]
+#[case::page_plain_incompressible(true, false, true)]
+#[case::page_filtered_incompressible(true, true, true)]
 fn immediate_ownership_publication_matches_native_free_sections(
     #[case] paged: bool,
     #[case] filtered: bool,
+    #[case] incompressible: bool,
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("native-ownership.h5");
@@ -41,7 +45,11 @@ fn immediate_ownership_publication_matches_native_free_sections(
         })
         .create(&path)
         .unwrap();
-    let initial = vec![0; 8192];
+    let initial = if incompressible {
+        ownership_payload(0xc603_8f14)
+    } else {
+        vec![0; 8192]
+    };
     let builder = native
         .new_dataset::<u8>()
         .shape([Extent::resizable(initial.len())])
@@ -72,6 +80,23 @@ fn immediate_ownership_publication_matches_native_free_sections(
     native.unlink("scratch").unwrap();
     native.close().unwrap();
     test_util_hdf5::file_space_oracle::assert_persisted_sections(&path);
+    if incompressible && filtered {
+        let original = std::fs::read(&path).unwrap();
+        let pure = File::open(&path).unwrap();
+        let page = pure.file_space_info().unwrap().unwrap().page_size.get();
+        let report = pure.persisted_free_sections().unwrap().unwrap();
+        assert!(report.managers().iter().any(|manager| {
+            manager.role() == FreeSpaceManagerRole::PageLargeGeneric
+                && manager.free_sections().sections().iter().any(|section| {
+                    !section.address().is_multiple_of(page)
+                        && section.address().next_multiple_of(page) <= hole.0
+                        && hole.0 + hole.1 <= section.end_address() / page * page
+                })
+        }));
+        assert!(array_index::libhdf5_chunks(&path, 0)[0].size() > initial.len() as u64);
+        drop(pure);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
     for cycle in 0..3 {
         let file = File::open_rw_with_options(
             &path,
@@ -112,6 +137,15 @@ fn immediate_ownership_publication_matches_native_free_sections(
             latest.address() < hole.0 + hole.1 && hole.0 < latest.address() + latest.size(),
             "cycle {cycle}: chunk {latest:?} did not reuse the native hole {hole:?}"
         );
+        if incompressible {
+            assert!(
+                hole.0 <= latest.address() && latest.address() + latest.size() <= hole.0 + hole.1,
+                "cycle {cycle}: chunk {latest:?}, hole {hole:?}"
+            );
+            if cycle == 0 {
+                assert_eq!(latest.address(), hole.0, "chunk {latest:?}, hole {hole:?}");
+            }
+        }
         let free = pure.persisted_free_sections().unwrap().unwrap();
         for chunk in chunks {
             assert!(
