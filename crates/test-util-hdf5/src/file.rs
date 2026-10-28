@@ -1,8 +1,18 @@
-//! Files libhdf5 creates under a chosen low bound on the format version.
+//! Files opened or created with libhdf5.
 
 use std::path::Path;
 
 use hdf5::file::LibraryVersion;
+
+/// Opens an existing file for read-only native observations.
+///
+/// # Panics
+///
+/// Panics if libhdf5 cannot open `path`.
+#[track_caller]
+pub fn libhdf5_open(path: &Path) -> hdf5::File {
+    hdf5::File::open(path).unwrap_or_else(|error| panic!("open {path:?}: {error}"))
+}
 
 /// A file the C library creates in the 1.8 format or newer: version 2 object
 /// headers and link-message groups. HDF5 2.0 made that the default, and every
