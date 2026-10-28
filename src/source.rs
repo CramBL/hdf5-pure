@@ -1394,6 +1394,163 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[rstest]
+    #[case::one_mib(
+        1_048_576,
+        "shared_metadata_cold_one",
+        "shared_metadata_warm_one",
+        "shared_metadata_control_one"
+    )]
+    #[case::four_mib(
+        4_194_304,
+        "shared_metadata_cold_four",
+        "shared_metadata_warm_four",
+        "shared_metadata_control_four"
+    )]
+    fn shared_metadata_admission_and_hits_allocate_no_second_payload(
+        #[case] length: usize,
+        #[case] cold_region: &str,
+        #[case] warm_region: &str,
+        #[case] control_region: &str,
+    ) {
+        let expected = vec![23; length];
+        let source = MetadataCachingSource::new(
+            ReadSeekSource::new(io::Cursor::new(expected.clone())).unwrap(),
+            MetadataCacheConfig::new(length).with_max_entry_bytes(length),
+        );
+        let (copy, control) = test_util::allocation::measure(control_region, || {
+            std::hint::black_box(expected.clone())
+        });
+        assert_eq!(copy, expected);
+        assert!(control.blocks > 0, "{control}");
+        assert!(control.bytes >= length as u64, "{control}");
+        drop(copy);
+        let (cold, admission) = test_util::allocation::measure(cold_region, || {
+            source.read_metadata(0, length).unwrap()
+        });
+        assert_eq!(cold.as_ref(), expected);
+        assert!(admission.bytes >= length as u64, "{admission}");
+        assert!(admission.bytes < length as u64 + 16_384, "{admission}");
+        assert!(admission.peak_bytes < length as u64 + 16_384, "{admission}");
+        let ((first, second), warm) = test_util::allocation::measure(warm_region, || {
+            (
+                source.read_metadata(0, length).unwrap(),
+                source.read_metadata(0, length).unwrap(),
+            )
+        });
+        assert_eq!(first.as_ref(), expected);
+        assert_eq!(second.as_ref(), expected);
+        assert_eq!(first.as_ptr(), cold.as_ptr());
+        assert_eq!(second.as_ptr(), cold.as_ptr());
+        assert!(warm.bytes < 16_384, "{warm}");
+        assert!(warm.peak_bytes < 16_384, "{warm}");
+        let stats = source.metadata_cache_stats().unwrap();
+        assert_eq!(
+            (stats.hits(), stats.misses(), stats.entries(), stats.bytes()),
+            (2, 1, 1, length)
+        );
+        eprintln!("payload={length} admission={admission}; warm={warm}; control={control}");
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn evicted_metadata_owners_retain_their_bytes_without_retaining_cache_entries() {
+        let source = MetadataCachingSource::new(
+            ReadSeekSource::new(io::Cursor::new(b"abcdefgh".to_vec())).unwrap(),
+            MetadataCacheConfig::new(4),
+        );
+        let first = source.read_metadata(0, 4).unwrap().shared().unwrap();
+        let second = source.read_metadata(4, 4).unwrap().shared().unwrap();
+        assert_eq!(first.as_ref(), b"abcd");
+        assert_eq!(second.as_ref(), b"efgh");
+        assert_eq!((first.offset(), second.offset()), (0, 4));
+        let stats = source.metadata_cache_stats().unwrap();
+        assert_eq!(
+            (
+                stats.misses(),
+                stats.evictions(),
+                stats.entries(),
+                stats.bytes()
+            ),
+            (2, 1, 1, 4)
+        );
+        let reloaded = source.read_metadata(0, 4).unwrap().shared().unwrap();
+        assert_eq!(reloaded.as_ref(), first.as_ref());
+        assert_ne!(reloaded.as_ptr(), first.as_ptr());
+        assert_ne!(reloaded.as_ptr(), second.as_ptr());
+        let stats = source.metadata_cache_stats().unwrap();
+        assert_eq!(
+            (
+                stats.hits(),
+                stats.misses(),
+                stats.evictions(),
+                stats.bytes()
+            ),
+            (0, 3, 2, 4)
+        );
+        drop(source);
+        assert_eq!(first.as_ref(), b"abcd");
+        assert_eq!(second.as_ref(), b"efgh");
+        assert_eq!(reloaded.as_ref(), b"abcd");
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn cached_metadata_keeps_high_physical_origins_across_nested_frames() {
+        struct PositionedSource {
+            last_read: Cell<Option<u64>>,
+        }
+
+        impl Source for PositionedSource {
+            fn len(&self) -> u64 {
+                65_536
+            }
+
+            fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError> {
+                self.last_read.set(Some(offset));
+                buf.fill(37);
+                Ok(())
+            }
+
+            fn metadata_origin(&self) -> Result<u64, FormatError> {
+                Ok(0x1_0000_0000)
+            }
+        }
+
+        let source = MetadataCachingSource::new(
+            ValidatedSource::new(PositionedSource {
+                last_read: Cell::new(None),
+            }),
+            MetadataCacheConfig::new(32),
+        );
+        let outer = BaseOffsetSource {
+            inner: &source,
+            base: BaseAddress::new(512),
+        };
+        let inner = BaseOffsetSource {
+            inner: &outer,
+            base: BaseAddress::new(4096),
+        };
+        let range = FileRange::new(PhysicalAddress::new(17), 4).unwrap();
+        let first = inner.read_range(range).unwrap();
+        let second = inner.read_range(range).unwrap();
+        assert_eq!(first.as_ref(), &[37; 4]);
+        assert_eq!(second.as_ref(), first.as_ref());
+        assert_eq!(first.offset(), 0x1_0000_1211);
+        assert_eq!(second.offset(), first.offset());
+        assert_eq!(first.as_ptr(), second.as_ptr());
+        assert_eq!(source.inner.0.last_read.get(), Some(4625));
+        let region = first.region();
+        assert_eq!(region.range().start().get(), 0x1_0000_1211);
+        let legacy = legacy_framed_region(range, &first).unwrap();
+        assert_eq!(legacy.range(), range);
+        assert_eq!(legacy.bytes().as_ptr(), first.as_ptr());
+        drop(source.cache.try_lock().unwrap());
+        let stats = source.metadata_cache_stats().unwrap();
+        assert_eq!((stats.hits(), stats.misses(), stats.bytes()), (1, 1, 4));
+    }
+
     #[cfg(feature = "std")]
     #[rstest]
     #[case::exact_backing(4, 4, 1, 4)]

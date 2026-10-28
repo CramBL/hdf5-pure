@@ -2015,6 +2015,64 @@ mod tests {
         }
     }
 
+    #[rstest::rstest]
+    #[case::immediate(WriteBuffering::Unbuffered)]
+    #[case::gathered(GATHERED)]
+    fn shared_handle_metadata_owners_survive_writes_and_cache_invalidation(
+        #[case] buffering: WriteBuffering,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shared-metadata.bin");
+        std::fs::write(&path, b"abcdefgh").unwrap();
+        let handle = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let mut image = HandleImage::new(handle, 8, MetadataCacheConfig::new(8));
+        image.set_write_buffering(buffering).unwrap();
+        let before = image.read_metadata(0, 4).unwrap().shared().unwrap();
+        let untouched = image.read_metadata(4, 4).unwrap().shared().unwrap();
+        let warm = image.read_metadata(0, 4).unwrap();
+        assert_eq!(warm.as_ptr(), before.as_ptr());
+        assert_eq!(warm.as_ref(), b"abcd");
+        drop(warm);
+        image.write_at(1, b"ZZ").unwrap();
+        let after = image.read_metadata(0, 4).unwrap().shared().unwrap();
+        assert_eq!(after.as_ref(), b"aZZd");
+        assert_ne!(after.as_ptr(), before.as_ptr());
+        assert_eq!(before.as_ref(), b"abcd");
+        let still_cached = image.read_metadata(4, 4).unwrap();
+        assert_eq!(still_cached.as_ref(), b"efgh");
+        assert_eq!(still_cached.as_ptr(), untouched.as_ptr());
+        drop(still_cached);
+        let stats = image.metadata_cache_stats().unwrap();
+        assert_eq!(
+            (
+                stats.hits(),
+                stats.misses(),
+                stats.invalidations(),
+                stats.entries(),
+                stats.bytes(),
+            ),
+            (2, 3, 1, 2, 8)
+        );
+        image.truncate(4).unwrap();
+        image.append(b"WXYZ").unwrap();
+        let replaced = image.read_metadata(4, 4).unwrap().shared().unwrap();
+        assert_eq!(replaced.as_ref(), b"WXYZ");
+        assert_ne!(replaced.as_ptr(), untouched.as_ptr());
+        assert_eq!(untouched.as_ref(), b"efgh");
+        assert_eq!(image.metadata_cache_stats().unwrap().invalidations(), 2);
+        image.ordering_barrier().unwrap();
+        drop(image);
+        assert_eq!(std::fs::read(&path).unwrap(), b"aZZdWXYZ");
+        assert_eq!(before.as_ref(), b"abcd");
+        assert_eq!(after.as_ref(), b"aZZd");
+        assert_eq!(untouched.as_ref(), b"efgh");
+        assert_eq!(replaced.as_ref(), b"WXYZ");
+    }
+
     /// Truncate makes a range unreadable, a later append reuses those addresses,
     /// and a read cached before the truncate must not resurface.
     ///
