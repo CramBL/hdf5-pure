@@ -56,6 +56,7 @@ use super::LossyTailReencoding;
 use super::append;
 use super::attributes::{DenseAttrSet, EditedAttrs};
 use super::commit::plan::{OverwriteId, OverwritePayloads};
+use super::retirement::ChunkAllocation;
 use super::staging::{StagedKind, StagedOp};
 use crate::file_writer::DenseAttrCreationOrder;
 
@@ -646,8 +647,9 @@ impl WriteEngine {
 
         let ctx = ChunkContext::from_datatype(spatial, &disk_dt)?;
         let mut scratch = FilterScratch::new();
-        let (mut tail_raw, old_tail_extent) = if has_partial {
+        let (mut tail_raw, old_tail_allocation) = if has_partial {
             let partial = &grid_order[n_full];
+            let allocation = ChunkAllocation::capture(base, partial)?;
             let live = partial.read_live_elements(
                 &view,
                 &mut scratch,
@@ -656,8 +658,7 @@ impl WriteEngine {
                 ctx,
                 current_dim0,
             )?;
-            let extent = (base.absolute(partial.address)?, partial.chunk_size.get());
-            (live, Some(extent))
+            (live, Some(allocation))
         } else {
             (Vec::new(), None)
         };
@@ -705,7 +706,7 @@ impl WriteEngine {
             kept_chunks,
             new_chunks,
             old_addr: addr,
-            old_tail_extent,
+            old_tail_allocation,
         })
     }
 
@@ -1324,9 +1325,8 @@ pub(super) enum MovingWrite {
         new_chunks: Vec<PreparedChunk>,
         /// The superseded header address used for storage reclamation.
         old_addr: u64,
-        /// The absolute address and length of a rewritten trailing chunk, reclaimed after
-        /// publication.
-        old_tail_extent: Option<(u64, u64)>,
+        /// Ownership of the complete trailing allocation, retained until root publication.
+        old_tail_allocation: Option<ChunkAllocation>,
     },
     /// An attribute edit that preserves dataset storage and relocates its header.
     AttrEdit {

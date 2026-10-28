@@ -1,4 +1,4 @@
-//! Allocator snapshots and value restoration from the undo journal before publication.
+//! Allocator snapshots and restoration of value writes from the undo journal.
 
 use std::collections::HashMap;
 
@@ -10,10 +10,7 @@ use crate::edit::staging::StagedEdits;
 use crate::error::Error;
 use crate::object_path::ObjectPathBuf;
 
-/// Stores allocation state from before application starts.
-///
-/// Restoration is permitted only before publication is attempted, while the live tree
-/// remains independent of the attempt's new allocations.
+/// A saved allocator state for rollback or retention after uncertain publication.
 pub(in crate::edit) struct FreeSnapshot {
     space: SessionSpaceSnapshot,
     aggregation: Option<AggregateSpace>,
@@ -49,7 +46,7 @@ impl WriteEngine {
         }
     }
 
-    /// Captures allocator state and heap allocation records for rollback before publication.
+    /// Captures allocator state and heap allocation records at the current placement boundary.
     pub(in crate::edit) fn snapshot_free(&self) -> FreeSnapshot {
         FreeSnapshot {
             space: self.space.allocation_snapshot(),
@@ -59,12 +56,11 @@ impl WriteEngine {
         }
     }
 
-    /// Restores allocation state captured before an unpublished attempt.
+    /// Restores allocator reservations and recorded heap ownership.
     ///
-    /// The caller restores value writes recorded in the undo journal first. Replacement objects
-    /// are unreachable
-    /// until publication, and variable-length replacements are relocated, so the restored
-    /// allocations remain independent of the live tree.
+    /// For rollback, the caller restores values from the undo journal first and establishes that
+    /// publication has not been attempted. After uncertain publication, the caller uses a snapshot
+    /// taken after placement, in which every possibly referenced allocation remains allocated.
     pub(in crate::edit) fn restore_free(&mut self, snapshot: FreeSnapshot) {
         self.vl_overwrite_heaps = snapshot.vl_overwrite_heaps;
         self.space.restore_allocation(snapshot.space);

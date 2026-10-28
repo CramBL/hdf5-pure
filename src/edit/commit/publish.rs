@@ -21,6 +21,7 @@ use crate::address::{StoredAddress, StoredAddressExt};
 use crate::edit::SyncPolicy;
 use crate::edit::context::SuperblockPublication;
 use crate::edit::object_header;
+use crate::edit::retirement::{PendingRootFrees, RootRetirement};
 use crate::edit::{MAX_LINK_GRAPH_NODES, TailPlacement, UNDEF, WriteEngine};
 use crate::edit::{PersistState, paged_persistence};
 use crate::error::{Error, FormatError};
@@ -31,10 +32,10 @@ use crate::width::FormatWidths;
 
 /// Stores the root and address changes after replacement objects have been written.
 pub(super) struct AppliedTree {
-    /// Physical position of the replacement root header.
-    pub(super) root: PhysicalAddress,
-    /// Stored-address spans eligible for release when the root is published.
-    pub(super) freed: Vec<(StoredAddress, u64, FreeClass)>,
+    /// Replacement root and captured chunk allocations awaiting its publication.
+    pub(super) retirement: RootRetirement,
+    /// Physical spans eligible for release when the root is published.
+    pub(super) freed: Vec<(u64, u64, FreeClass)>,
     /// Absolute old and replacement header addresses for stored-reference updates.
     pub(super) relocations: BTreeMap<u64, u64>,
 }
@@ -44,6 +45,9 @@ impl WriteEngine {
     ///
     /// Stored-reference updates run after root publication. Non-persistent PAGE commits require
     /// a tree proved free of object references and retain superseded storage.
+    /// For non-persistent commits without paging, the publisher restores allocation state saved
+    /// after replacement placement if root publication is uncertain, keeping predecessor and
+    /// replacement storage unavailable for reuse.
     ///
     /// # Errors
     ///
@@ -51,10 +55,15 @@ impl WriteEngine {
     /// publication leave rollback disabled.
     pub(super) fn publish_tree(&mut self, tree: AppliedTree) -> Result<(), Error> {
         let AppliedTree {
-            root: new_root,
-            freed: mut to_free,
+            retirement,
+            freed,
             relocations,
         } = tree;
+        let PendingRootFrees {
+            root: new_root,
+            spans: to_free,
+        } = retirement.into_pending_frees(freed, self.image.len());
+        let mut to_free = self.stored_spans(to_free)?;
         if self.persist.is_some() {
             let root_reclamation = self.plan_root_reclamation(new_root, &mut to_free)?;
             self.commit_persisting_releasing_reserve(new_root, to_free)?;
@@ -73,6 +82,9 @@ impl WriteEngine {
             return self.publish_nonpersisting(new_root, None);
         }
 
+        // The publisher allocates no file storage after replacement placement. Restoring this
+        // snapshot preserves every allocation a possibly published root can reference.
+        let snapshot = self.snapshot_free();
         let mut trunc_to = self.release_freed(to_free)?;
         if let Some(aggregation) = self.aggregation {
             let end = self
@@ -83,7 +95,11 @@ impl WriteEngine {
                 trunc_to = Some(end);
             }
         }
-        self.publish_nonpersisting(new_root, trunc_to)?;
+        let publication = self.publish_nonpersisting(new_root, trunc_to);
+        if publication.is_err() && self.publication != PublicationState::Published {
+            self.restore_free(snapshot);
+        }
+        publication?;
         self.repoint_stored_references(&relocations)
     }
 
