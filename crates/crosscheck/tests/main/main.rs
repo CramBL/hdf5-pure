@@ -91,6 +91,7 @@ mod object_path;
 mod owned_append;
 mod owned_swmr;
 mod page_buffer;
+mod paged_index;
 mod partial_edge_chunk_filters;
 mod primitive_read;
 mod provenance;

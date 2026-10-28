@@ -829,12 +829,15 @@ fn paged_open_seeds_each_manager_by_slot(
 }
 
 #[test]
-fn a_c_written_chunk_index_is_not_reclaimed_as_raw() {
-    const PAGE: u64 = 4096;
-    let dir = tempfile::tempdir().unwrap();
-    let path = test_util::copy_data("c/paged_index.h5", dir.path());
+fn a_chunk_index_is_not_reclaimed_as_raw() {
+    let path = test_util::temp::temp_path("paged_index.h5");
+    std::fs::write(&path, test_util::paged_index::paged_index()).unwrap();
+    assert_index_reclamation(&path);
+}
 
-    let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+pub(in crate::edit) fn assert_index_reclamation(path: &Path) {
+    const PAGE: u64 = 4096;
+    let mut s = WriteEngine::open_with_locking(path, FileLocking::Enabled).unwrap();
     let page_size = s.space.page_size().expect("a paged file has a page size");
     assert_eq!(page_size.get(), PAGE);
     let victim_addr = crate::group_v2::resolve_path_any(
@@ -866,7 +869,7 @@ fn a_c_written_chunk_index_is_not_reclaimed_as_raw() {
         .unwrap();
     s.commit().unwrap();
     drop(s);
-    let f = crate::reader::File::open(&path).unwrap();
+    let f = crate::reader::File::open(path).unwrap();
     let added = f.dataset("added").unwrap();
     let crate::Layout::Contiguous {
         address: Some(addr),
