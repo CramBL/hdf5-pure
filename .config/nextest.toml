@@ -136,6 +136,7 @@ package(hdf5-pure-crosscheck) & (
     test(/^fractal_heap_dense_links::/) |
     test(/^global_heap_length_width::/) |
     test(/^layout_introspection::/) |
+    test(/^lzf::/) |
     test(/^partial_edge_chunk_filters::/) |
     test(/^scaleoffset_fill::/) |
     test(/^sohm::/) |

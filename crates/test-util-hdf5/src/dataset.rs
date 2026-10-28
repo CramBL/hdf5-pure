@@ -407,6 +407,13 @@ impl<T: H5Element> Unlimited<'_, T> {
 #[cfg(feature = "__hdf5-1.10")]
 impl<T: hdf5::H5Type + Copy> Unlimited<'_, T> {
     /// Has the C library write a file in the 1.10 format holding only this dataset.
+    ///
+    /// Flushes the dataset and file, and checks close before returning.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chunk length exceeds [`usize::MAX`], or native creation, writing,
+    /// flushing, or close fails.
     #[track_caller]
     pub fn libhdf5_create(&self, path: &Path) {
         let Self {
@@ -433,7 +440,7 @@ impl<T: hdf5::H5Type + Copy> Unlimited<'_, T> {
                 Filter::Shuffle => builder.shuffle(),
                 Filter::Fletcher32 => builder.fletcher32(),
                 Filter::ScaleOffset(mode) => builder.scale_offset(libhdf5_scale_offset(mode)),
-                Filter::Lzf => panic!("the crosschecks' libhdf5 is built without the LZF filter"),
+                Filter::Lzf => builder.lzf(),
             };
         }
         if let Some(fill) = fill {
@@ -450,6 +457,12 @@ impl<T: hdf5::H5Type + Copy> Unlimited<'_, T> {
                 .write_raw(data)
                 .unwrap_or_else(|e| panic!("write {name:?} in {path:?}: {e}"));
         }
+        dataset
+            .flush()
+            .unwrap_or_else(|e| panic!("flush {name:?} in {path:?}: {e}"));
+        drop(dataset);
+        file.flush()
+            .unwrap_or_else(|e| panic!("flush {path:?}: {e}"));
         file.close()
             .unwrap_or_else(|e| panic!("close {path:?}: {e}"));
     }

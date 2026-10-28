@@ -153,16 +153,14 @@ the format boundary, which is a different thing from a particular MathWorks
 build. Only MATLAB itself confirms one, and `examples/octave/check_format.m`
 runs that check under it.
 
-The [LZF filter](crate::_guide::compression) is the one place where the byte
-comparison runs in one direction only. On read, `src/lzf_crosscheck.rs` decodes
-h5py's own compressed streams and compares against the expected bytes. On write,
-it compares the filter pipeline this crate emits, its ids, order, name, optional
-flag, and `cd_values`, against what h5py recorded for the same dataset, and
-leaves the compressed stream out: LZF has many valid encodings of the same data,
-so matching liblzf byte for byte is neither a requirement nor a goal. That h5py
-decodes the streams this crate produces is verified separately, by the read-back
-phase of `tests/data/h5py/lzf/regen.py`, which needs a live h5py and runs when
-the fixtures are regenerated.
+The [LZF filter](crate::_guide::compression) has independent decoder vectors
+from h5py. `src/lzf_crosscheck.rs` checks their decoded bytes and compares writer
+pipeline parameters with the recorded metadata. The native interoperability
+suite reads fresh writer output through liblzf, checks values and pipeline
+metadata, and rewrites incompressible data. After checked flush and close, it
+reopens the file and verifies the raw chunks and their filter masks. LZF has
+multiple valid encodings of the same data, so write conformance is checked
+through decoded values and pipeline metadata.
 
 ### Host-independent output
 

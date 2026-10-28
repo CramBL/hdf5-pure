@@ -1,29 +1,18 @@
-//! Crosscheck the pure-Rust LZF codec against fixtures produced by h5py's
-//! built-in LZF filter.
+//! LZF decoder vectors and pipeline metadata produced by h5py.
 //!
-//! Fixtures and generator script live in `tests/data/h5py/lzf/`. Regenerate:
+//! Extracted single-filter streams decode to the expected raw bytes. Masked
+//! chunks match the raw bytes directly. The writer's pipeline parameters are
+//! compared with the manifest, and its encoded streams are checked by round trips.
 //!
-//!     tests/data/h5py/lzf/.venv/bin/python tests/data/h5py/lzf/regen.py
+//! Fresh writer output is read and rewritten through the native codec in
+//! `crates/crosscheck/tests/main/lzf.rs`. Chained reference files and files with multiple chunks
+//! are checked through the complete reader in `tests/main/lzf_roundtrip.rs`.
 //!
-//! Two directions are checked, and they are not equally strong.
+//! Regenerate the reference vectors with the pinned producer:
 //!
-//! **Read.** For every single-filter LZF fixture with an extracted chunk
-//! stream: an unmasked chunk decodes through our codec to exactly the raw
-//! bytes (LZF is lossless), and a masked chunk (h5py registers LZF as optional
-//! and stores an incompressible chunk raw) is byte-equal to the raw data.
-//!
-//! **Write.** For *every* fixture, the filter pipeline our writer builds for
-//! the same dataset geometry equals the one h5py recorded: same filter ids in
-//! the same order, same name, same optional flag, same cd_values. The codec
-//! stream is deliberately not byte-compared — any conforming stream is valid
-//! (see the module doc in `lzf.rs`) — so what pins our encoder here is only
-//! that its output round-trips through our own decoder. That h5py can decode
-//! it is verified at fixture-regeneration time instead, by the read-back phase
-//! of `regen.py`, which needs a live h5py this test does not have.
-//!
-//! Chained (shuffle+lzf) and multi-chunk fixtures are covered end-to-end in
-//! `tests/main/lzf_roundtrip.rs`, which opens their `.h5` files through the full
-//! reader.
+//! ```console
+//! uv run tests/data/h5py/lzf/regen.py
+//! ```
 
 use std::fs;
 
@@ -82,15 +71,6 @@ fn read_bin(name: &str) -> Vec<u8> {
     fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
-/// Our writer's filter pipeline for a fixture's geometry is the one h5py
-/// recorded for it, field by field.
-///
-/// This is the whole of the write-direction crosscheck that can run without
-/// h5py present, and it covers every fixture rather than only the
-/// codec-comparable ones — including `i64_multichunk`, the only geometry whose
-/// `cd_values[2]` (8 x 128) distinguishes the element size from the chunk
-/// dimensions. A single-chunk-of-bytes fixture cannot tell those apart, since
-/// both orderings multiply out to the same product.
 #[test]
 fn writer_pipeline_matches_h5py() {
     let manifest = load_manifest();
