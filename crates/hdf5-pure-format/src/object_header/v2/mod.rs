@@ -60,12 +60,12 @@ impl ObjectHeader {
             .to_u64()
             .min(source.len().saturating_sub(address))
             .to_usize()?;
-        let prefix = ObjectHeaderPrefix::parse(&source.read_metadata_at(address, head_len)?)?;
-        let image = source.read_metadata_at(address, prefix.chunk0_len()?)?;
+        let prefix = ObjectHeaderPrefix::parse(&source.read_metadata(address, head_len)?)?;
+        let image = source.read_metadata(address, prefix.chunk0_len()?)?;
         let mut collector =
             HeaderCollector::new(context, filter, RootChunk::parse(prefix, &image)?)?;
         while let Some(block) = collector.next_continuation()? {
-            let bytes = source.read_metadata_at(block.address, block.length.to_usize()?)?;
+            let bytes = source.read_metadata(block.address, block.length.to_usize()?)?;
             collector.ingest(block.parse(&bytes)?)?;
         }
         Ok(collector.finish())

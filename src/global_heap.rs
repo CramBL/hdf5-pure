@@ -11,6 +11,7 @@ use core::num::NonZeroU16;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_core::__private::PhysicalAddress;
+use hdf5_pure_core::MetadataBytes;
 use hdf5_pure_format::__private::GlobalHeapCollectionLocator;
 use hdf5_pure_format::__private::GlobalHeapObject;
 use hdf5_pure_format::__private::GlobalHeapPayloadRef;
@@ -207,11 +208,11 @@ pub(crate) fn walk_collection(
 }
 
 /// The bytes of one collection that a walk reads its object headers from.
-struct HeaderWindow {
+struct HeaderWindow<'s> {
     /// The range of the collection, which no read runs past.
     collection: FileRange,
     /// The range and the bytes of the last read.
-    held: Option<(FileRange, Vec<u8>)>,
+    held: Option<(FileRange, MetadataBytes<'s>)>,
     /// The start of the previous object header the walk requested, `None` before the first.
     previous_header: Option<PhysicalAddress>,
     /// The last [`STRIDE_HISTORY`] strides between the object headers the walk requested, the most
@@ -219,7 +220,7 @@ struct HeaderWindow {
     strides: [u64; STRIDE_HISTORY],
 }
 
-impl HeaderWindow {
+impl<'s> HeaderWindow<'s> {
     fn new(collection: FileRange) -> Self {
         Self {
             collection,
@@ -237,7 +238,7 @@ impl HeaderWindow {
     /// Returns the errors [`read`] returns.
     fn region(
         &mut self,
-        source: &(impl Source + ?Sized),
+        source: &'s (impl Source + ?Sized),
         range: FileRange,
     ) -> Result<FileRegion<'_>, FormatError> {
         if let Some(previous_header) = self.previous_header {
@@ -295,8 +296,11 @@ impl HeaderWindow {
 ///
 /// Returns [`FormatError::ValueTooLargeForPlatform`] if the length of `range` is above
 /// [`usize::MAX`], and the error `source` returns if the read fails.
-fn read(source: &(impl Source + ?Sized), range: FileRange) -> Result<Vec<u8>, FormatError> {
-    source.read_metadata_at(range.start().get(), range.length().to_usize()?)
+fn read(
+    source: &(impl Source + ?Sized),
+    range: FileRange,
+) -> Result<MetadataBytes<'_>, FormatError> {
+    source.read_metadata(range.start().get(), range.length().to_usize()?)
 }
 
 /// The most bytes one read of a walk reads.

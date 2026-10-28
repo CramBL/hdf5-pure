@@ -1,6 +1,7 @@
 //! The reads the metadata parsers make of a file.
 
 use alloc::vec::Vec;
+use core::ops::Deref;
 
 use crate::convert::Narrow;
 use crate::error::FormatError;
@@ -15,9 +16,25 @@ use crate::error::FormatError;
 /// A parser that takes a `MetadataSource`, such as
 /// [`ObjectHeader::parse_from_source`](crate::object_header::ObjectHeader::parse_from_source),
 /// reads a structure one piece at a time and holds no more of the file than the piece it parses.
-/// Every offset is an absolute position in the file. `[u8]` implements the trait for a file held
-/// in memory.
+/// Offsets use the source's coordinate frame. `[u8]` implements the trait for a file held in
+/// memory, beginning at offset zero.
 pub trait MetadataSource {
+    /// The byte view held by a parser for one metadata read.
+    type Bytes<'a>: Deref<Target = [u8]>
+    where
+        Self: 'a;
+
+    /// Reads exactly `len` bytes at `offset` for a borrowed parser view.
+    ///
+    /// An implementation may borrow resident bytes or share an immutable allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedSourceEof`] if the file ends before `offset + len`,
+    /// [`FormatError::OffsetOverflow`] if the range end exceeds [`u64::MAX`], and an error from
+    /// the source if the read fails.
+    fn read_metadata(&self, offset: u64, len: usize) -> Result<Self::Bytes<'_>, FormatError>;
+
     /// Returns the length of the file in bytes.
     fn len(&self) -> u64;
 
@@ -43,6 +60,12 @@ pub trait MetadataSource {
 }
 
 impl MetadataSource for [u8] {
+    type Bytes<'a> = &'a [u8];
+
+    fn read_metadata(&self, offset: u64, len: usize) -> Result<Self::Bytes<'_>, FormatError> {
+        region(self, offset, len)
+    }
+
     fn len(&self) -> u64 {
         Narrow::to_u64(<[u8]>::len(self))
     }

@@ -26,6 +26,7 @@ use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
 use crate::convert::Narrow;
 use crate::error::FormatError;
+use crate::source;
 use crate::source::RangeReader;
 use crate::width::FormatWidths;
 
@@ -65,7 +66,7 @@ pub(crate) fn read_chunks(
     };
     let range = index_block.parse_range();
     let bytes = file.read_range(range)?;
-    let index_block = index_block.parse(FileRegion::new(range, &bytes)?)?;
+    let index_block = index_block.parse(source::legacy_framed_region(range, &bytes)?)?;
     visit_elements(index_block.elements())?;
     for block in index_block.data_blocks() {
         let block = block?;
@@ -81,7 +82,7 @@ pub(crate) fn read_chunks(
         let range = super_block.parse_range();
         let bytes = file.read_range(range)?;
         for block in super_block
-            .parse(FileRegion::new(range, &bytes)?)?
+            .parse(source::legacy_framed_region(range, &bytes)?)?
             .data_blocks()
         {
             let block = block?;
@@ -125,7 +126,7 @@ pub(crate) fn index_spans(
     let range = index_block.parse_range();
     spans.push(span(range));
     let bytes = file.read_range(range)?;
-    let index_block = index_block.parse(FileRegion::new(range, &bytes)?)?;
+    let index_block = index_block.parse(source::legacy_framed_region(range, &bytes)?)?;
     for block in index_block.data_blocks() {
         spans.push(span(block?.range()));
     }
@@ -135,7 +136,7 @@ pub(crate) fn index_spans(
         spans.push(span(range));
         let bytes = file.read_range(range)?;
         for block in super_block
-            .parse(FileRegion::new(range, &bytes)?)?
+            .parse(source::legacy_framed_region(range, &bytes)?)?
             .data_blocks()
         {
             spans.push(span(block?.range()));
@@ -158,7 +159,10 @@ pub(crate) fn read_header(
 ) -> Result<ExtensibleArray, FormatError> {
     let locator = ExtensibleArrayHeaderLocator::new(widths, BaseAddress::ZERO, address);
     let range = locator.parse_range()?;
-    locator.parse(FileRegion::new(range, &file.read_range(range)?)?)
+    locator.parse(source::legacy_framed_region(
+        range,
+        &file.read_range(range)?,
+    )?)
 }
 
 // Reads the prefix of a paged data block with the initialized pages that directly follow it, and
@@ -178,7 +182,7 @@ fn read_data_block(
             .peekable(),
     );
     let bytes = file.read_range(range)?;
-    let region = FileRegion::new(range, &bytes)?;
+    let region = source::legacy_framed_region(range, &bytes)?;
     let pages = match block.parse(region)? {
         ExtensibleArrayDataBlock::Elements(elements) => return visit_elements(elements),
         ExtensibleArrayDataBlock::Pages(pages) => pages,
@@ -193,7 +197,7 @@ fn read_data_block(
         let (range, len) = extend_run(first.parse_range(), &mut pending);
         let bytes = file.read_range(range)?;
         visit_pages(
-            FileRegion::new(range, &bytes)?,
+            source::legacy_framed_region(range, &bytes)?,
             run.take(len + 1),
             visit_elements,
         )?;
@@ -309,7 +313,7 @@ mod tests {
     fn buffered_records(image: &[u8], base: u64) -> Result<Vec<(u64, ChunkRecord)>, FormatError> {
         let mut records = Vec::new();
         read_chunks(
-            source::frame(image, BaseAddress::new(base))?,
+            &source::framed_metadata(image, BaseAddress::new(base))?,
             WIDTHS,
             StoredAddress::new(ARRAY_AT),
             8,

@@ -31,6 +31,7 @@ use hdf5_pure::ChunkIndex;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
+use hdf5_pure::UserblockSize;
 use hdf5_pure::{
     ChunkCacheStats, EditBacking, File, FileAccessProperties, FileBuilder, FileSpaceStrategy,
     MaxExtent, MemoryStrategy, SyncPolicy,
@@ -560,6 +561,74 @@ fn a_warm_whole_read_lists_its_chunks_without_an_allocation_per_chunk(
         "a warm whole read must take its {CHUNKS} chunks from the retained index without an \
          allocation per chunk: {measured}"
     );
+}
+
+#[rstest]
+#[case::buffered_zero(UserblockSize::NONE, false, "large_chunk_buffered_zero")]
+#[case::buffered_userblock(UserblockSize::MIN, false, "large_chunk_buffered_userblock")]
+#[case::mirrored_userblock(UserblockSize::MIN, true, "large_chunk_mirrored_userblock")]
+fn resident_whole_reads_borrow_large_unfiltered_chunks(
+    #[case] userblock: UserblockSize,
+    #[case] writable: bool,
+    #[case] region: &str,
+) {
+    const CHUNK_ELEMENTS: u64 = 1_048_576;
+    let values: Vec<i32> = (0..i32::try_from(CHUNK_ELEMENTS * 2).unwrap()).collect();
+    let expected: Vec<u8> = values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("large-chunks.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_userblock(userblock);
+    builder
+        .create_dataset("data")
+        .with_i32_data(&values)
+        .with_shape(&[CHUNK_ELEMENTS * 2])
+        .with_chunks(&[CHUNK_ELEMENTS]);
+    builder.write(&path).unwrap();
+    let access = FileAccessProperties::new()
+        .with_chunk_cache(ChunkCacheConfig::new().with_max_bytes(0).with_max_slots(0))
+        .with_memory_strategy(MemoryStrategy::Mirrored);
+    let file = if writable {
+        File::open_rw_with_options(&path, access)
+    } else {
+        File::open_with_options(&path, access)
+    }
+    .unwrap();
+    if writable {
+        assert_eq!(file.edit_backing(), Some(EditBacking::Mirrored));
+    }
+    let dataset = file.dataset("data").unwrap();
+    assert_eq!(dataset.chunk_shape().unwrap(), Some(vec![CHUNK_ELEMENTS]));
+    let chunks = dataset.chunks().unwrap();
+    assert_eq!(chunks.len(), 2);
+    assert_eq!(
+        chunks
+            .iter()
+            .map(|chunk| chunk.storage_size)
+            .collect::<Vec<_>>(),
+        vec![CHUNK_ELEMENTS * 4; 2]
+    );
+    assert_eq!(dataset.read_raw().unwrap(), expected);
+    assert!(dataset.chunk_cache_stats().index_loaded());
+    let (actual, allocations) = measure(region, || dataset.read_raw().unwrap());
+    assert_eq!(actual, expected);
+    assert!(
+        allocations.live_bytes >= expected.len() as u64,
+        "{allocations}"
+    );
+    assert!(
+        allocations.peak_bytes < expected.len() as u64 + 256 * 1024,
+        "{allocations}"
+    );
+    assert!(
+        allocations.bytes < expected.len() as u64 + 512 * 1024,
+        "{allocations}"
+    );
+    drop(dataset);
+    file.close().unwrap();
 }
 
 #[rstest]

@@ -375,7 +375,7 @@ impl SohmTable {
         offset_width: OffsetWidth,
     ) -> Result<Self, FormatError> {
         let len = table_len(message.index_count, offset_width);
-        let image = source.read_metadata_at(message.table_address.get(), len)?;
+        let image = source.read_metadata(message.table_address.get(), len)?;
         Self::parse_with_offset_width(&image, message.index_count, offset_width)
     }
 

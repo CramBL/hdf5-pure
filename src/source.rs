@@ -4,14 +4,14 @@
 //! reader that seeks. [`MetadataCachingSource`] wraps either with a bounded cache of the metadata
 //! reads and passes a dataset's payload through to the inner source.
 
-use alloc::borrow::Cow;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
 
-use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::{FileRange, FileRegion, MetadataFrame, PhysicalAddress};
+use hdf5_pure_core::MetadataBytes;
 use hdf5_pure_format::__private::MetadataSource;
 
 use crate::address::BaseAddressExt;
@@ -171,8 +171,10 @@ impl MetadataCacheStats {
         self.entries
     }
 
-    /// Bytes currently held, to compare against
-    /// [`MetadataCacheConfig::max_bytes`].
+    /// Returns the payload capacity retained by cache entries.
+    ///
+    /// Compare against [`MetadataCacheConfig::max_bytes`]. Owners held outside the cache may keep
+    /// allocations alive after eviction. Ownership bookkeeping is excluded.
     pub const fn bytes(&self) -> usize {
         self.bytes
     }
@@ -232,16 +234,15 @@ impl MetadataCacheStats {
 /// implementation over a mutable handle owns its own synchronisation, the way
 /// [`ReadSeekSource`] wraps its reader in a mutex.
 ///
-/// Leave the last three defaulted unless you mean to cache.
-/// [`read_metadata_at`](Source::read_metadata_at),
-/// [`metadata_cache_stats`](Source::metadata_cache_stats) and
-/// [`reset_metadata_cache_stats`](Source::reset_metadata_cache_stats) are the
-/// seam this crate's own bounded metadata cache hangs on, and they come as a
-/// set: overriding the first without the other two reports *no* cache where
-/// there is a full one. To have metadata reads cached, ask for it with a
-/// [`MetadataCacheConfig`] through
-/// [`File::from_source_with_options`](crate::File::from_source_with_options),
-/// which wraps the source in an implementation of all three.
+/// Metadata parsers call [`read_metadata`](Source::read_metadata), which may borrow resident
+/// bytes or share an immutable allocation. Its default calls
+/// [`read_metadata_at`](Source::read_metadata_at). A source with base-relative offsets also
+/// implements [`metadata_origin`](Source::metadata_origin) to identify its physical origin.
+///
+/// To cache metadata reads, pass a [`MetadataCacheConfig`] to
+/// [`File::from_source_with_options`](crate::File::from_source_with_options). A wrapper that
+/// forwards metadata reads also forwards [`metadata_cache_stats`](Source::metadata_cache_stats)
+/// and [`reset_metadata_cache_stats`](Source::reset_metadata_cache_stats).
 #[expect(
     clippy::len_without_is_empty,
     reason = "`len` here is a file's byte length, not a container's count — the shape of \
@@ -315,6 +316,37 @@ pub trait Source {
         self.read_exact_at(offset, len)
     }
 
+    /// Returns the physical file position represented by source offset zero.
+    ///
+    /// The default is zero. A base-relative view adds its base to its inner source's origin.
+    /// Metadata owners returned by [`read_metadata`](Self::read_metadata) use physical positions,
+    /// while read offsets remain relative to this origin.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if a view's physical origin exceeds [`u64::MAX`].
+    fn metadata_origin(&self) -> Result<u64, FormatError> {
+        Ok(0)
+    }
+
+    /// Reads metadata with immutable ownership and a checked physical range.
+    ///
+    /// Returns exactly `len` bytes at physical position
+    /// [`metadata_origin`](Self::metadata_origin) `+ offset`. An override may borrow resident
+    /// bytes or share an allocation. The default takes ownership of the vector returned by
+    /// [`read_metadata_at`](Self::read_metadata_at), preserving overrides of that method.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Source`] if the owned adapter returns a different byte count,
+    /// [`FormatError::OffsetOverflow`] if the physical range exceeds [`u64::MAX`], and errors from
+    /// [`read_metadata_at`](Self::read_metadata_at) or [`metadata_origin`](Self::metadata_origin).
+    fn read_metadata(&self, offset: u64, len: usize) -> Result<MetadataBytes<'_>, FormatError> {
+        let bytes = self.read_metadata_at(offset, len)?;
+        exact_metadata(offset, len, bytes.len())?;
+        MetadataBytes::owned(metadata_range(self.metadata_origin()?, offset, len)?, bytes)
+    }
+
     /// What the metadata cache in front of this source has done, or `None` when
     /// it has none.
     ///
@@ -357,6 +389,16 @@ impl<S: Source + ?Sized> Source for &S {
         (**self).read_metadata_at(offset, len)
     }
 
+    fn metadata_origin(&self) -> Result<u64, FormatError> {
+        (**self).metadata_origin()
+    }
+
+    fn read_metadata(&self, offset: u64, len: usize) -> Result<MetadataBytes<'_>, FormatError> {
+        let bytes = (**self).read_metadata(offset, len)?;
+        exact_metadata(offset, len, bytes.len())?;
+        Ok(bytes)
+    }
+
     fn metadata_cache_stats(&self) -> Option<MetadataCacheStats> {
         (**self).metadata_cache_stats()
     }
@@ -383,6 +425,16 @@ impl<S: Source + ?Sized> Source for std::boxed::Box<S> {
         (**self).read_metadata_at(offset, len)
     }
 
+    fn metadata_origin(&self) -> Result<u64, FormatError> {
+        (**self).metadata_origin()
+    }
+
+    fn read_metadata(&self, offset: u64, len: usize) -> Result<MetadataBytes<'_>, FormatError> {
+        let bytes = (**self).read_metadata(offset, len)?;
+        exact_metadata(offset, len, bytes.len())?;
+        Ok(bytes)
+    }
+
     fn metadata_cache_stats(&self) -> Option<MetadataCacheStats> {
         (**self).metadata_cache_stats()
     }
@@ -396,22 +448,10 @@ impl<S: Source + ?Sized> Source for std::boxed::Box<S> {
 // Caller-supplied sources
 // ---------------------------------------------------------------------------
 
-/// Holds a caller-supplied [`Source`] to the part of the trait's contract the
-/// parsers above it cannot check for themselves.
+/// Checks the byte count and physical range returned by a caller-supplied [`Source`].
 ///
-/// [`Source::read_exact_at`] and [`Source::read_metadata_at`] have default
-/// bodies that return exactly the bytes asked for, and every source this crate
-/// builds either uses those bodies or forwards to one that does. An
-/// implementation from outside may override them, and has a reason to — a
-/// remote source that batches or coalesces its reads is the case
-/// [`crate::File::from_source`] exists for. The parsers then index the returned
-/// buffer at offsets derived from the length they *requested*, so a buffer that
-/// comes back short is a slice panic inside a header parser, blaming a file
-/// format for what the source did.
-///
-/// One length comparison per read turns that into [`FormatError::Source`],
-/// which names the source instead. This wraps only what a caller hands in;
-/// the crate's own sources have no override to check.
+/// Metadata parsers index returned bytes using the length passed to the read. A source that
+/// returns a different extent or origin is rejected with [`FormatError::Source`] before parsing.
 #[cfg(feature = "std")]
 pub(crate) struct ValidatedSource<S>(S);
 
@@ -451,6 +491,24 @@ impl<S: Source> Source for ValidatedSource<S> {
         Self::check(offset, len, self.0.read_metadata_at(offset, len)?)
     }
 
+    fn metadata_origin(&self) -> Result<u64, FormatError> {
+        self.0.metadata_origin()
+    }
+
+    fn read_metadata(&self, offset: u64, len: usize) -> Result<MetadataBytes<'_>, FormatError> {
+        let bytes = self.0.read_metadata(offset, len)?;
+        exact_metadata(offset, len, bytes.len())?;
+        let expected = metadata_range(self.metadata_origin()?, offset, len)?;
+        if bytes.range() != expected {
+            return Err(FormatError::Source(alloc::format!(
+                "the source returned metadata at physical offset {} for a read at physical offset {}",
+                bytes.offset(),
+                expected.start().get()
+            )));
+        }
+        Ok(bytes)
+    }
+
     fn metadata_cache_stats(&self) -> Option<MetadataCacheStats> {
         self.0.metadata_cache_stats()
     }
@@ -474,11 +532,9 @@ impl<S: Source> Source for ValidatedSource<S> {
 /// addresses index it directly, exactly as an in-memory path slices the buffer at
 /// `base`. For a plain (base-0) file it is the identity.
 ///
-/// `len`/`read_at` shift by the base; `read_metadata_at` forwards to the inner
-/// source at the *absolute* offset so the inner source's metadata cache is shared
-/// (a chunk-index walk on a streaming userblock file would otherwise re-read every
-/// node), while payload reads keep the default uncached `read_exact_at` so user
-/// data does not evict metadata.
+/// Reads use the inner source at `offset + base`, including metadata reads through its cache.
+/// Metadata owners retain the inner source's physical range. Payload reads use the default
+/// uncached [`Source::read_exact_at`].
 pub(crate) struct BaseOffsetSource<'a, S: Source + ?Sized> {
     pub(crate) inner: &'a S,
     pub(crate) base: BaseAddress,
@@ -525,6 +581,16 @@ impl<S: Source + ?Sized> Source for BaseOffsetSource<'_, S> {
             .read_metadata_at(self.base.absolute(StoredAddress::new(offset))?, len)
     }
 
+    fn metadata_origin(&self) -> Result<u64, FormatError> {
+        self.base
+            .absolute(StoredAddress::new(self.inner.metadata_origin()?))
+    }
+
+    fn read_metadata(&self, offset: u64, len: usize) -> Result<MetadataBytes<'_>, FormatError> {
+        self.inner
+            .read_metadata(self.base.absolute(StoredAddress::new(offset))?, len)
+    }
+
     // The metadata reads above are the inner source's, so its cache is the one
     // to report on. A base-relative view holds none of its own.
     fn metadata_cache_stats(&self) -> Option<MetadataCacheStats> {
@@ -543,6 +609,15 @@ impl<S: Source + ?Sized> Source for BaseOffsetSource<'_, S> {
 pub(crate) struct SourceMetadata<'a, S: Source + ?Sized>(pub(crate) &'a S);
 
 impl<S: Source + ?Sized> MetadataSource for SourceMetadata<'_, S> {
+    type Bytes<'a>
+        = MetadataBytes<'a>
+    where
+        Self: 'a;
+
+    fn read_metadata(&self, offset: u64, len: usize) -> Result<Self::Bytes<'_>, FormatError> {
+        self.0.read_metadata(offset, len)
+    }
+
     fn len(&self) -> u64 {
         self.0.len()
     }
@@ -558,8 +633,8 @@ impl<S: Source + ?Sized> MetadataSource for SourceMetadata<'_, S> {
 
 /// The metadata reads of a file, a byte slice that holds the whole file or a [`Source`].
 ///
-/// A [`Source`] reads each range through [`Source::read_metadata_at`], the read a metadata cache
-/// can keep.
+/// A [`Source`] reads each range through [`Source::read_metadata`]. Requests use the reader's
+/// coordinate frame, and returned owners contain the resolved physical range.
 pub(crate) trait RangeReader {
     /// Returns the bytes of `range`, borrowed from a byte slice or read from a [`Source`].
     ///
@@ -568,20 +643,83 @@ pub(crate) trait RangeReader {
     /// Returns [`FormatError::UnexpectedSourceEof`] if the file ends inside `range`,
     /// [`FormatError::ValueTooLargeForPlatform`] if the range length exceeds [`usize::MAX`], and the
     /// error of a failed read of a [`Source`].
-    fn read_range(&self, range: FileRange) -> Result<Cow<'_, [u8]>, FormatError>;
+    fn read_range(&self, range: FileRange) -> Result<MetadataBytes<'_>, FormatError>;
 }
 
 impl RangeReader for [u8] {
-    fn read_range(&self, range: FileRange) -> Result<Cow<'_, [u8]>, FormatError> {
-        bytes_in(self, range).map(Cow::Borrowed)
+    fn read_range(&self, range: FileRange) -> Result<MetadataBytes<'_>, FormatError> {
+        MetadataBytes::borrowed(range, bytes_in(self, range)?)
     }
 }
 
 impl<S: Source + ?Sized> RangeReader for S {
-    fn read_range(&self, range: FileRange) -> Result<Cow<'_, [u8]>, FormatError> {
-        self.read_metadata_at(range.start().get(), range.length().to_usize()?)
-            .map(Cow::Owned)
+    fn read_range(&self, range: FileRange) -> Result<MetadataBytes<'_>, FormatError> {
+        self.read_metadata(range.start().get(), range.length().to_usize()?)
     }
+}
+
+impl Source for MetadataFrame<'_> {
+    fn len(&self) -> u64 {
+        self.bytes().len().to_u64()
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError> {
+        BytesSource::new(self.bytes()).read_at(offset, buf)
+    }
+
+    fn metadata_origin(&self) -> Result<u64, FormatError> {
+        Ok(self.origin().get())
+    }
+
+    fn read_metadata(&self, offset: u64, len: usize) -> Result<MetadataBytes<'_>, FormatError> {
+        let physical = metadata_range(self.origin().get(), offset, len)?;
+        let local = metadata_range(0, offset, len)?;
+        MetadataBytes::borrowed(physical, bytes_in(self.bytes(), local)?)
+    }
+}
+
+/// Borrows a base-relative slice with its physical origin.
+///
+/// # Errors
+///
+/// Returns the errors of [`frame`] and [`MetadataFrame::new`].
+pub(crate) fn framed_metadata(
+    bytes: &[u8],
+    base: BaseAddress,
+) -> Result<MetadataFrame<'_>, FormatError> {
+    MetadataFrame::new(PhysicalAddress::new(base.get()), frame(bytes, base)?)
+}
+
+/// Borrows the owner's bytes in the coordinate frame used by a legacy locator.
+///
+/// `range` is the locator's range before physical-origin resolution. The owner retains its
+/// physical range independently of this parser view.
+///
+/// # Errors
+///
+/// Returns [`FormatError::FileRegionLengthMismatch`] if the locator's extent differs from the
+/// byte count.
+pub(crate) fn legacy_framed_region<'a>(
+    range: FileRange,
+    bytes: &'a MetadataBytes<'_>,
+) -> Result<FileRegion<'a>, FormatError> {
+    FileRegion::new(range, bytes)
+}
+
+fn metadata_range(origin: u64, offset: u64, len: usize) -> Result<FileRange, FormatError> {
+    FileRange::new(
+        PhysicalAddress::new(origin).checked_add(offset)?,
+        len.to_u64(),
+    )
+}
+
+fn exact_metadata(offset: u64, len: usize, actual: usize) -> Result<(), FormatError> {
+    if actual != len {
+        return Err(FormatError::Source(alloc::format!(
+            "the source returned {actual} bytes for a {len}-byte read at offset {offset}"
+        )));
+    }
+    Ok(())
 }
 
 /// Returns the bytes of `range` in `bytes`, a buffer whose first byte is at address 0.
@@ -655,6 +793,10 @@ impl<T: AsRef<[u8]>> Source for BytesSource<T> {
         buf.copy_from_slice(region);
         Ok(())
     }
+    fn read_metadata(&self, offset: u64, len: usize) -> Result<MetadataBytes<'_>, FormatError> {
+        let range = metadata_range(0, offset, len)?;
+        MetadataBytes::borrowed(range, bytes_in(self.0.as_ref(), range)?)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -663,7 +805,7 @@ impl<T: AsRef<[u8]>> Source for BytesSource<T> {
 
 #[cfg(feature = "std")]
 struct CachedMetadataRead {
-    bytes: Vec<u8>,
+    bytes: MetadataBytes<'static>,
     last_access: u64,
 }
 
@@ -734,24 +876,25 @@ impl MetadataReadCache {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Serve one [`Source::read_metadata_at`] through the cache behind `lock`,
-    /// falling back to `read` and recording what happened.
+    /// Serves a metadata read through the cache, calling `read` on a miss.
     ///
-    /// Both call sites that have a metadata cache — [`MetadataCachingSource`]
-    /// and `crate::image::HandleImage` — go through here rather than each
-    /// repeating the admission rule and its five counters; they differ only in
-    /// what `read` does, which is why it is a closure.
+    /// Admission and hits share owned backing allocations. Borrowed bytes are returned without
+    /// admission. The byte budget includes the backing vector's full capacity, and owners held
+    /// outside the cache may keep that allocation alive after eviction.
     ///
-    /// The lock is taken up to twice and never held across `read`. A metadata
-    /// read is file I/O, and serializing every one of them behind this mutex
-    /// would cost more than the cache saves.
-    pub(crate) fn read_through(
+    /// The lock is released before `read` and before returning the owner to a parser.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors from `read`, and [`FormatError::Source`] if an eligible cache miss returns
+    /// a byte count different from `len`.
+    pub(crate) fn read_through<'a>(
         lock: &std::sync::Mutex<Self>,
         config: MetadataCacheConfig,
         offset: u64,
         len: usize,
-        read: impl FnOnce() -> Result<Vec<u8>, FormatError>,
-    ) -> Result<Vec<u8>, FormatError> {
+        read: impl FnOnce() -> Result<MetadataBytes<'a>, FormatError>,
+    ) -> Result<MetadataBytes<'a>, FormatError> {
         // A zero-length read is not a read of anything, and a disabled cache has
         // no counters worth keeping; neither is worth a lock.
         if len == 0 || !config.is_enabled() {
@@ -765,7 +908,12 @@ impl MetadataReadCache {
             return Ok(bytes);
         }
         let bytes = read()?;
-        Self::locked(lock).insert(offset, len, bytes.clone(), config.max_bytes());
+        exact_metadata(offset, len, bytes.len())?;
+        if let Some(shared) = bytes.shared() {
+            if shared.retained_bytes() <= config.max_entry_bytes() {
+                Self::locked(lock).insert_shared(offset, len, shared, config.max_bytes());
+            }
+        }
         Ok(bytes)
     }
 
@@ -798,7 +946,7 @@ impl MetadataReadCache {
     fn remove(&mut self, key: (u64, usize)) {
         if let Some(entry) = self.entries.remove(&key) {
             self.by_access.remove(&entry.last_access);
-            self.current_bytes -= entry.bytes.len();
+            self.current_bytes -= entry.bytes.retained_bytes();
         }
         debug_assert_eq!(
             self.entries.len(),
@@ -836,7 +984,7 @@ impl MetadataReadCache {
         }
     }
 
-    pub(crate) fn get(&mut self, offset: u64, len: usize) -> Option<Vec<u8>> {
+    pub(crate) fn get(&mut self, offset: u64, len: usize) -> Option<MetadataBytes<'static>> {
         let key = (offset, len);
         // One tick per cached read, so a `u64` outlasts any process that could
         // run. The counter formerly wrapped, which would have inverted the very
@@ -856,8 +1004,20 @@ impl MetadataReadCache {
         Some(bytes)
     }
 
+    #[cfg(test)]
     pub(crate) fn insert(&mut self, offset: u64, len: usize, bytes: Vec<u8>, max_bytes: usize) {
-        if len == 0 || bytes.len() > max_bytes {
+        let bytes = MetadataBytes::from_vec(offset, bytes).unwrap();
+        self.insert_shared(offset, len, bytes, max_bytes);
+    }
+
+    fn insert_shared(
+        &mut self,
+        offset: u64,
+        len: usize,
+        bytes: MetadataBytes<'static>,
+        max_bytes: usize,
+    ) {
+        if len == 0 || bytes.retained_bytes() > max_bytes {
             return;
         }
 
@@ -869,7 +1029,7 @@ impl MetadataReadCache {
         self.tick += 1;
         let tick = self.tick;
         self.longest_entry = self.longest_entry.max(len);
-        self.current_bytes += bytes.len();
+        self.current_bytes += bytes.retained_bytes();
         self.entries.insert(
             key,
             CachedMetadataRead {
@@ -902,9 +1062,14 @@ impl MetadataReadCache {
 
 /// A [`Source`] wrapper with a bounded cache for metadata reads.
 ///
-/// The wrapper only caches calls to [`Source::read_metadata_at`]. Plain
-/// [`Source::read_exact_at`] calls still go directly to the inner source,
-/// which keeps raw dataset payloads out of the metadata cache.
+/// Metadata reads borrow resident bytes or share owned allocations through
+/// [`Source::read_metadata`]. Only owned backing allocations are admitted. Eligible borrowed
+/// reads are counted as misses. The owned adapter,
+/// [`Source::read_metadata_at`], returns a vector. Raw dataset payloads use
+/// [`Source::read_exact_at`] and bypass this cache.
+///
+/// The configured byte budget covers retained payload capacity. An owner held outside the cache
+/// may keep an allocation alive after eviction. Separate reads do not form an atomic snapshot.
 #[cfg(feature = "std")]
 pub struct MetadataCachingSource<S> {
     inner: S,
@@ -939,8 +1104,16 @@ impl<S: Source> Source for MetadataCachingSource<S> {
     }
 
     fn read_metadata_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, FormatError> {
+        Ok(self.read_metadata(offset, len)?.into_vec())
+    }
+
+    fn metadata_origin(&self) -> Result<u64, FormatError> {
+        self.inner.metadata_origin()
+    }
+
+    fn read_metadata(&self, offset: u64, len: usize) -> Result<MetadataBytes<'_>, FormatError> {
         MetadataReadCache::read_through(&self.cache, self.config, offset, len, || {
-            self.inner.read_metadata_at(offset, len)
+            self.inner.read_metadata(offset, len)
         })
     }
 
@@ -1049,8 +1222,270 @@ mod tests {
     use std::io::{Read, Seek, SeekFrom};
 
     use hdf5_pure_core::__private::PhysicalAddress;
+    #[cfg(feature = "std")]
+    use rstest::rstest;
 
     use super::*;
+
+    #[test]
+    fn metadata_read_preserves_legacy_override_and_vector_allocation() {
+        struct LegacySource {
+            payload: Cell<Option<Vec<u8>>>,
+            request: Cell<Option<(u64, usize)>>,
+        }
+        impl Source for LegacySource {
+            fn len(&self) -> u64 {
+                16
+            }
+            fn read_at(&self, _offset: u64, _buf: &mut [u8]) -> Result<(), FormatError> {
+                Err(FormatError::Source("unexpected payload read".into()))
+            }
+            fn read_metadata_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, FormatError> {
+                self.request.set(Some((offset, len)));
+                Ok(self.payload.take().unwrap())
+            }
+        }
+        let payload = vec![1, 2, 3];
+        let pointer = payload.as_ptr();
+        let source = LegacySource {
+            payload: Cell::new(Some(payload)),
+            request: Cell::new(None),
+        };
+        let bytes = source.read_metadata(4, 3).unwrap();
+        assert_eq!(bytes.as_ref(), &[1, 2, 3]);
+        assert_eq!(bytes.offset(), 4);
+        assert_eq!(bytes.as_ptr(), pointer);
+        let owned = bytes.into_vec();
+        assert_eq!(owned.as_ptr(), pointer);
+        assert_eq!(source.request.get(), Some((4, 3)));
+    }
+
+    #[test]
+    fn framed_metadata_preserves_borrow_and_resolves_nested_origins_once() {
+        let data = [1, 2, 3, 4, 5, 6];
+        let source = BytesSource::new(data.as_slice());
+        let first = BaseOffsetSource {
+            inner: &source,
+            base: BaseAddress::new(1),
+        };
+        let second = BaseOffsetSource {
+            inner: &first,
+            base: BaseAddress::new(2),
+        };
+        let bytes = second.read_metadata(1, 2).unwrap();
+        assert_eq!(second.metadata_origin().unwrap(), 3);
+        assert_eq!(bytes.offset(), 4);
+        assert_eq!(bytes.as_ref(), &[5, 6]);
+        assert_eq!(bytes.as_ptr(), data[4..].as_ptr());
+        let legacy =
+            legacy_framed_region(FileRange::new(PhysicalAddress::new(1), 2).unwrap(), &bytes)
+                .unwrap();
+        assert_eq!(legacy.range().start().get(), 1);
+        assert_eq!(legacy.bytes(), &[5, 6]);
+        let frame = MetadataFrame::new(PhysicalAddress::new(3), &data[3..]).unwrap();
+        let framed = frame
+            .read_range(FileRange::new(PhysicalAddress::new(1), 2).unwrap())
+            .unwrap();
+        assert_eq!(framed.offset(), bytes.offset());
+        assert_eq!(framed.as_ptr(), bytes.as_ptr());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn borrowed_metadata_owners_are_returned_without_admission() {
+        let data = [1, 2, 3, 4];
+        let source = MetadataCachingSource::new(
+            BytesSource::new(data.as_slice()),
+            MetadataCacheConfig::new(16),
+        );
+        let first = source.read_metadata(1, 2).unwrap();
+        let second = source.read_metadata(1, 2).unwrap();
+        assert_eq!(first.as_ref(), &[2, 3]);
+        assert_eq!(second.as_ref(), first.as_ref());
+        assert_eq!(first.as_ptr(), data[1..].as_ptr());
+        assert_eq!(second.as_ptr(), first.as_ptr());
+        assert_eq!(first.offset(), 1);
+        assert_eq!(second.offset(), 1);
+        let stats = source.metadata_cache_stats().unwrap();
+        assert_eq!(
+            stats,
+            MetadataCacheStats {
+                hits: 0,
+                misses: 2,
+                oversize_reads: 0,
+                evictions: 0,
+                invalidations: 0,
+                entries: 0,
+                bytes: 0,
+            }
+        );
+    }
+
+    #[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[rstest]
+    #[case::one_mib(
+        1_048_576,
+        "borrowed_metadata_one_mib",
+        "borrowed_metadata_one_mib_control"
+    )]
+    #[case::four_mib(
+        4_194_304,
+        "borrowed_metadata_four_mib",
+        "borrowed_metadata_four_mib_control"
+    )]
+    fn borrowed_metadata_reads_bypass_retention_without_allocating(
+        #[case] length: usize,
+        #[case] region: &str,
+        #[case] control: &str,
+    ) {
+        let data = vec![7; length + 1];
+        let source = MetadataCachingSource::new(
+            BytesSource::new(data.as_slice()),
+            MetadataCacheConfig::new(length * 2).with_max_entry_bytes(length),
+        );
+        let expected = &data[1..];
+        let (copy, positive) =
+            test_util::allocation::measure(control, || std::hint::black_box(expected.to_vec()));
+        assert_eq!(copy, expected);
+        assert!(positive.blocks > 0, "{positive}");
+        assert!(positive.bytes >= length as u64, "{positive}");
+        drop(copy);
+        let ((first, second), measured) = test_util::allocation::measure(region, || {
+            (
+                source.read_metadata(1, length).unwrap(),
+                source.read_metadata(1, length).unwrap(),
+            )
+        });
+        assert_eq!(first.as_ref(), expected);
+        assert_eq!(second.as_ref(), expected);
+        assert_eq!(first.as_ptr(), expected.as_ptr());
+        assert_eq!(second.as_ptr(), expected.as_ptr());
+        assert_eq!(measured.blocks, 0, "{measured}");
+        assert_eq!(measured.bytes, 0, "{measured}");
+        assert_eq!(measured.peak_bytes, 0, "{measured}");
+        assert_eq!(measured.live_bytes, 0, "{measured}");
+        let stats = source.metadata_cache_stats().unwrap();
+        assert_eq!(
+            (stats.hits(), stats.misses(), stats.entries(), stats.bytes()),
+            (0, 2, 0, 0)
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn metadata_cache_admission_and_forwarding_share_the_payload() {
+        let source = MetadataCachingSource::new(
+            ReadSeekSource::new(std::io::Cursor::new(vec![1, 2, 3, 4])).unwrap(),
+            MetadataCacheConfig::new(16),
+        );
+        let cold = source.read_metadata(1, 2).unwrap();
+        let shared: &dyn Source = &source;
+        let boxed: Box<dyn Source + '_> = Box::new(shared);
+        let warm = boxed.read_metadata(1, 2).unwrap();
+        assert_eq!(cold.as_ref(), &[2, 3]);
+        assert_eq!(warm.as_ref(), cold.as_ref());
+        assert_eq!(cold.as_ptr(), warm.as_ptr());
+        assert_eq!(warm.offset(), 1);
+        drop(source.cache.try_lock().unwrap());
+        let stats = source.metadata_cache_stats().unwrap();
+        assert_eq!(
+            (stats.hits(), stats.misses(), stats.bytes(), stats.entries()),
+            (1, 1, 2, 1)
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[rstest]
+    #[case::exact_backing(4, 4, 1, 4)]
+    #[case::retained_capacity_exceeds_budget(32, 4, 0, 0)]
+    #[case::subregion_retains_the_larger_allocation(8, 2, 0, 0)]
+    fn metadata_cache_admission_accounts_for_retained_backing(
+        #[case] capacity: usize,
+        #[case] len: usize,
+        #[case] entries: usize,
+        #[case] retained: usize,
+    ) {
+        let cache = std::sync::Mutex::new(MetadataReadCache::new());
+        let mut payload = Vec::with_capacity(capacity);
+        payload.resize(capacity.min(8), 1);
+        let owner = MetadataBytes::from_vec(0, payload).unwrap();
+        let owner = owner
+            .subregion(FileRange::new(PhysicalAddress::new(0), len as u64).unwrap())
+            .unwrap();
+        let pointer = owner.as_ptr();
+        let bytes =
+            MetadataReadCache::read_through(&cache, MetadataCacheConfig::new(4), 0, len, || {
+                Ok(owner)
+            })
+            .unwrap();
+        assert_eq!(bytes.as_ref(), vec![1; len]);
+        assert_eq!(bytes.as_ptr(), pointer);
+        let stats = MetadataReadCache::locked(&cache).stats();
+        assert_eq!(
+            (stats.entries(), stats.bytes(), stats.misses()),
+            (entries, retained, 1)
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn metadata_cache_releases_its_lock_during_a_miss() {
+        let cache = std::sync::Mutex::new(MetadataReadCache::new());
+        let bytes =
+            MetadataReadCache::read_through(&cache, MetadataCacheConfig::new(16), 1, 2, || {
+                drop(cache.try_lock().unwrap());
+                MetadataBytes::from_vec(1, vec![2, 3])
+            })
+            .unwrap();
+        assert_eq!(bytes.as_ref(), &[2, 3]);
+        drop(cache.try_lock().unwrap());
+        assert_eq!(
+            MetadataReadCache::locked(&cache)
+                .get(1, 2)
+                .unwrap()
+                .as_ptr(),
+            bytes.as_ptr()
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[rstest]
+    #[case::short(2, 0)]
+    #[case::long(4, 0)]
+    #[case::wrong_origin(3, 1)]
+    fn validated_metadata_rejects_a_source_owner_outside_the_request(
+        #[case] len: usize,
+        #[case] origin: u64,
+    ) {
+        struct BadSource {
+            len: usize,
+            origin: u64,
+        }
+        impl Source for BadSource {
+            fn len(&self) -> u64 {
+                16
+            }
+            fn read_at(&self, _offset: u64, _buf: &mut [u8]) -> Result<(), FormatError> {
+                Err(FormatError::Source("unexpected payload read".into()))
+            }
+            fn read_metadata(
+                &self,
+                _offset: u64,
+                _len: usize,
+            ) -> Result<MetadataBytes<'_>, FormatError> {
+                MetadataBytes::from_vec(self.origin, vec![0; self.len])
+            }
+        }
+        let source = ValidatedSource::new(BadSource { len, origin });
+        let err = source.read_metadata(0, 3).unwrap_err();
+        let expected = if len != 3 {
+            format!("the source returned {len} bytes for a 3-byte read at offset 0")
+        } else {
+            "the source returned metadata at physical offset 1 for a read at physical offset 0"
+                .into()
+        };
+        assert_eq!(err, FormatError::Source(expected));
+    }
 
     #[test]
     fn bytes_source_reads_and_reports_len() {
@@ -1514,8 +1949,11 @@ mod tests {
     /// A source of `len` bytes that serves every metadata read, so a cache in
     /// front of it is the only thing that can make a read not happen.
     #[cfg(feature = "std")]
-    fn ramp(len: usize) -> BytesSource<Vec<u8>> {
-        BytesSource::new((0..len).map(|i| i as u8).collect::<Vec<u8>>())
+    fn ramp(len: usize) -> ReadSeekSource<io::Cursor<Vec<u8>>> {
+        ReadSeekSource::new(io::Cursor::new(
+            (0..len).map(|i| i as u8).collect::<Vec<u8>>(),
+        ))
+        .unwrap()
     }
 
     #[cfg(feature = "std")]

@@ -14,6 +14,7 @@ use core::mem::MaybeUninit;
 use core::num::{NonZeroU64, NonZeroUsize};
 
 use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::MetadataFrame;
 use hdf5_pure_core::__private::PhysicalAddress;
 
 use hdf5_pure_format::__private::BTreeV1ChunkNode;
@@ -2118,6 +2119,29 @@ pub fn read_chunked_data_cached(
     widths: FormatWidths,
     cache: &ChunkCache,
 ) -> Result<Vec<u8>, FormatError> {
+    read_chunked_data_cached_framed(
+        MetadataFrame::new(PhysicalAddress::new(0), file_data)?,
+        spec,
+        widths,
+        cache,
+    )
+}
+
+/// Reads a whole chunked dataset while borrowing resident payloads.
+///
+/// The reader resolves metadata positions from the frame's origin and borrows chunk payloads
+/// from its slice at local offsets.
+///
+/// # Errors
+///
+/// Returns the errors of [`read_chunked_data_cached`].
+pub(crate) fn read_chunked_data_cached_framed(
+    frame: MetadataFrame<'_>,
+    spec: RawReadSpec<'_>,
+    widths: FormatWidths,
+    cache: &ChunkCache,
+) -> Result<Vec<u8>, FormatError> {
+    let file_data = frame.bytes();
     let (dataspace, datatype, pipeline, fill) = (
         spec.dataspace(),
         spec.datatype(),
@@ -2153,7 +2177,7 @@ pub fn read_chunked_data_cached(
     let parsed_index = cache.parsed_index_or_load(|| {
         ParsedChunkIndex::new(
             collect_chunks_for_layout(
-                file_data,
+                frame,
                 index,
                 chunk_dimensions,
                 dataspace,
@@ -2225,7 +2249,7 @@ pub fn read_chunked_data_cached(
 /// Returns [`FormatError::ChunkedReadError`] if `chunk_dimensions` is empty or the chunk geometry
 /// is invalid, and the errors of reading a malformed index.
 fn collect_chunks_for_layout(
-    file_data: &[u8],
+    file_data: MetadataFrame<'_>,
     index: ChunkIndexLayout,
     chunk_dimensions: &[u64],
     dataspace: &Dataspace,
@@ -2242,7 +2266,7 @@ fn collect_chunks_for_layout(
     let spatial_dims = &chunk_dimensions[..rank];
     Ok(match index {
         ChunkIndexLayout::BTreeV1 { .. } => {
-            collect_chunk_info(file_data, addr, ndims, widths.offsets)?
+            collect_chunk_info(file_data.bytes(), addr, ndims, widths.offsets)?
         }
         ChunkIndexLayout::SingleChunk { filtered, .. } => {
             let chunk_byte_size = chunk_grid::chunk_byte_size(spatial_dims, elem_size)?;
@@ -2266,7 +2290,7 @@ fn collect_chunks_for_layout(
             let grid = index_grid(dataspace, spatial_dims, GridOrder::RowMajor)?;
             let mut chunks = Vec::new();
             fixed_array::read_chunks(
-                file_data,
+                &file_data,
                 widths,
                 addr,
                 grid.chunk_byte_size(elem_size)?,
@@ -2281,7 +2305,7 @@ fn collect_chunks_for_layout(
             let grid = index_grid(dataspace, spatial_dims, GridOrder::UnlimitedFirst)?;
             let mut chunks = Vec::new();
             extensible_array::read_chunks(
-                file_data,
+                &file_data,
                 widths,
                 addr,
                 grid.chunk_byte_size(elem_size)?,
@@ -2293,7 +2317,7 @@ fn collect_chunks_for_layout(
             chunks
         }
         ChunkIndexLayout::BTreeV2 { .. } => collect_btree_v2_chunks_from_source(
-            &crate::source::BytesSource::new(file_data),
+            &file_data,
             addr,
             spatial_dims,
             dataspace,
@@ -6132,7 +6156,7 @@ mod tests {
             .collect();
 
         let buffered = collect_chunks_for_layout(
-            &file,
+            MetadataFrame::new(PhysicalAddress::new(0), &file).unwrap(),
             *index,
             chunk_dimensions,
             &dataspace,

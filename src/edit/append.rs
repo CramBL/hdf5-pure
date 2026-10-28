@@ -11,6 +11,8 @@ use hdf5_pure_format::__private::ChunkedGeometry;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::{FreeList, PageTransition, PageType, SessionSpace};
 
+use hdf5_pure_core::MetadataBytes;
+
 use crate::DatatypeByteOrder;
 use crate::SuperblockVersion;
 use crate::access_mode::AccessMode;
@@ -773,6 +775,10 @@ impl crate::source::Source for EditStore<'_> {
         len: usize,
     ) -> Result<Vec<u8>, crate::error::FormatError> {
         self.image.read_metadata_at(offset, len)
+    }
+
+    fn read_metadata(&self, offset: u64, len: usize) -> Result<MetadataBytes<'_>, FormatError> {
+        self.image.read_metadata(offset, len)
     }
 
     fn metadata_cache_stats(&self) -> Option<crate::source::MetadataCacheStats> {

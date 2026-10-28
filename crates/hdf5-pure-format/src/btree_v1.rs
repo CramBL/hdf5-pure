@@ -201,7 +201,7 @@ impl BTreeV1Node {
         address: u64,
         widths: FormatWidths,
     ) -> Result<BTreeV1Node, FormatError> {
-        let prefix = source.read_metadata_at(address, BTREE_V1_NODE_PREFIX_LEN)?;
+        let prefix = source.read_metadata(address, BTREE_V1_NODE_PREFIX_LEN)?;
         if &prefix[0..4] != BTREE_V1_SIGNATURE {
             return Err(FormatError::InvalidBTreeSignature);
         }
@@ -212,7 +212,7 @@ impl BTreeV1Node {
         let os = usize::from(widths.offsets.get());
         let ls = usize::from(widths.lengths.get());
         let total = btree_v1_node_header_size(widths.offsets.get()) + entries_used * (ls + os) + ls;
-        let buf = source.read_metadata_at(address, total)?;
+        let buf = source.read_metadata(address, total)?;
         Self::parse_with_widths(&buf, 0, widths)
     }
 }
@@ -265,7 +265,7 @@ impl BTreeV1ChunkNodeBytes {
         offset_width: OffsetWidth,
         ndims: usize,
     ) -> Result<Self, FormatError> {
-        let header = source.read_metadata_at(address, BTREE_V1_NODE_PREFIX_LEN)?;
+        let header = source.read_metadata(address, BTREE_V1_NODE_PREFIX_LEN)?;
         let prefix = header.first_chunk().ok_or(FormatError::UnexpectedEof {
             expected: BTREE_V1_NODE_PREFIX_LEN,
             available: header.len(),
@@ -711,6 +711,16 @@ mod tests {
     }
 
     impl MetadataSource for RecordingSource<'_> {
+        type Bytes<'a>
+            = &'a [u8]
+        where
+            Self: 'a;
+
+        fn read_metadata(&self, offset: u64, len: usize) -> Result<Self::Bytes<'_>, FormatError> {
+            self.reads.borrow_mut().push((offset, len));
+            self.bytes.read_metadata(offset, len)
+        }
+
         fn len(&self) -> u64 {
             MetadataSource::len(self.bytes)
         }
