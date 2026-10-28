@@ -75,11 +75,21 @@ pub fn virtual_storage() -> Vec<u8> {
 pub const UNDEFINED_ADDRESS: u64 = u64::MAX;
 
 const VERSION_THREE: u8 = 3;
-const VERSION_FOUR: u8 = 4;
+
+/// Version 4 of a data layout message, defined in "The Data Layout Message" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
+pub const VERSION_FOUR: u8 = 4;
 
 const COMPACT_CLASS: u8 = 0;
 const CONTIGUOUS_CLASS: u8 = 1;
-const CHUNKED_CLASS: u8 = 2;
+
+/// Chunked storage in the "Layout Class" field, defined in "The Data Layout Message" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
+pub const CHUNKED_CLASS: u8 = 2;
 const VIRTUAL_CLASS: u8 = 3;
 
 /// The "Flags" byte of a chunked layout with neither `DONT_FILTER_PARTIAL_BOUND_CHUNKS` nor
@@ -88,7 +98,7 @@ const VIRTUAL_CLASS: u8 = 3;
 /// Defined in "The Data Layout Message" of the [format specification, version 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
-const NO_CHUNKED_FLAGS: u8 = 0;
+pub const NO_CHUNKED_FLAGS: u8 = 0;
 
 /// The four-byte width this writer selects for each chunk dimension, encoded in the
 /// "Dimension Size Encoded Length" byte.
@@ -97,6 +107,13 @@ const NO_CHUNKED_FLAGS: u8 = 0;
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
 const DIMENSION_SIZE_LEN: u8 = 4;
+
+/// The "Chunk Indexing Type" byte of a Single Chunk index.
+///
+/// Defined in "The Data Layout Message" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
+pub const SINGLE_CHUNK_INDEX: u8 = 1;
 
 /// The "Chunk Indexing Type" byte of an Implicit index.
 ///

@@ -12,6 +12,7 @@
 //! datasets whose chunks the pure reader enumerates and reads.
 
 use core::num::NonZeroU32;
+use std::path::Path;
 
 use hdf5::Extent;
 use hdf5::dataset::Layout as CLayout;
@@ -19,9 +20,178 @@ use hdf5::file::LibraryVersion;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::FilterId;
 use hdf5_pure::FilterParameters;
-use hdf5_pure::{Chunk, ChunkIndex, File, Layout};
-
+use hdf5_pure::{Chunk, ChunkIndex, File, FileBuilder, Layout, MaxExtent, MessageType};
+use hdf5_pure_format::__private::{AccessMode, ObjectHeader};
+use rstest::rstest;
+use test_util::data_layout;
 use test_util_hdf5::dataset;
+use test_util_hdf5::reader::ReadBackend;
+
+use crate::test_util::c_object;
+
+#[rstest]
+#[case::two_byte_max(65_535, 2)]
+#[case::three_byte_min(65_536, 3)]
+#[case::above_boundary(65_537, 3)]
+#[case::cell_ranger(80_000, 3)]
+#[case::larger(131_072, 3)]
+fn chunk_dimensions_written_by_pure_are_readable_by_libhdf5(
+    #[case] chunk: u64,
+    #[case] width: u8,
+    #[values(
+        ChunkIndex::SingleChunk,
+        ChunkIndex::FixedArray,
+        ChunkIndex::ExtensibleArray
+    )]
+    index: ChunkIndex,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dimensions.h5");
+    let len = if index == ChunkIndex::SingleChunk {
+        chunk
+    } else {
+        200_000
+    };
+    let values: Vec<i32> = (0..i32::try_from(len).unwrap()).collect();
+    let wide: Vec<i64> = values.iter().copied().map(i64::from).collect();
+    let mut builder = FileBuilder::new();
+    let narrow_builder = builder.create_dataset("i32");
+    narrow_builder.with_i32_data(&values).with_chunks(&[chunk]);
+    if index == ChunkIndex::ExtensibleArray {
+        narrow_builder.with_maxshape(&[MaxExtent::Unlimited]);
+    }
+    let wide_builder = builder.create_dataset("i64");
+    wide_builder.with_i64_data(&wide).with_chunks(&[chunk]);
+    if index == ChunkIndex::ExtensibleArray {
+        wide_builder.with_maxshape(&[MaxExtent::Unlimited]);
+    }
+    builder.write(&path).unwrap();
+    {
+        let file = File::open_rw(&path).unwrap();
+        file.root()
+            .create_dataset("edited", |builder| {
+                builder.with_i32_data(&values).with_chunks(&[chunk]);
+                if index == ChunkIndex::ExtensibleArray {
+                    builder.with_maxshape(&[MaxExtent::Unlimited]);
+                }
+            })
+            .unwrap();
+        file.commit().unwrap();
+        file.close().unwrap();
+    }
+    let file = hdf5::File::open(&path).unwrap();
+    let narrow_dataset = file.dataset("i32").unwrap();
+    let wide_dataset = file.dataset("i64").unwrap();
+    let edited = file.dataset("edited").unwrap();
+    assert_eq!(narrow_dataset.shape(), vec![usize::try_from(len).unwrap()]);
+    assert_eq!(wide_dataset.shape(), narrow_dataset.shape());
+    assert_eq!(
+        narrow_dataset.chunk(),
+        Some(vec![usize::try_from(chunk).unwrap()])
+    );
+    assert_eq!(wide_dataset.chunk(), narrow_dataset.chunk());
+    assert_eq!(edited.chunk(), narrow_dataset.chunk());
+    assert_eq!(narrow_dataset.read_raw::<i32>().unwrap(), values);
+    assert_eq!(wide_dataset.read_raw::<i64>().unwrap(), wide);
+    assert_eq!(edited.read_raw::<i32>().unwrap(), values);
+    assert_eq!(chunk_dimension_encoding_length(&file, &path, "i32"), width);
+    assert_eq!(chunk_dimension_encoding_length(&file, &path, "i64"), width);
+    assert_eq!(
+        chunk_dimension_encoding_length(&file, &path, "edited"),
+        width
+    );
+    drop(narrow_dataset);
+    drop(wide_dataset);
+    drop(edited);
+    file.close().unwrap();
+    let pure = File::open(&path).unwrap();
+    assert_eq!(
+        pure.dataset("i32").unwrap().chunk_index().unwrap(),
+        Some(index)
+    );
+    assert_eq!(
+        pure.dataset("edited").unwrap().chunk_index().unwrap(),
+        Some(index)
+    );
+}
+
+#[rstest]
+#[case::two_byte_max(65_535, 2)]
+#[case::three_byte_min(65_536, 3)]
+#[case::above_boundary(65_537, 3)]
+#[case::cell_ranger(80_000, 3)]
+#[case::larger(131_072, 3)]
+fn chunk_dimensions_written_by_libhdf5_are_readable_by_pure(
+    #[case] chunk: usize,
+    #[case] width: u8,
+    #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dimensions.h5");
+    let values: Vec<i32> = (0..200_000).collect();
+    let wide: Vec<i64> = values.iter().copied().map(i64::from).collect();
+    {
+        let file = c_file(&path, LibraryVersion::V110, LibraryVersion::V110);
+        let narrow_dataset = file
+            .new_dataset::<i32>()
+            .chunk([chunk])
+            .shape([Extent::resizable(200_000)])
+            .create("i32")
+            .unwrap();
+        narrow_dataset.write_raw(&values).unwrap();
+        let wide_dataset = file
+            .new_dataset::<i64>()
+            .chunk([chunk])
+            .shape([Extent::resizable(200_000)])
+            .create("i64")
+            .unwrap();
+        wide_dataset.write_raw(&wide).unwrap();
+        drop(narrow_dataset);
+        drop(wide_dataset);
+        file.close().unwrap();
+    }
+    {
+        let file = hdf5::File::open(&path).unwrap();
+        assert_eq!(chunk_dimension_encoding_length(&file, &path, "i32"), width);
+        assert_eq!(chunk_dimension_encoding_length(&file, &path, "i64"), width);
+        file.close().unwrap();
+    }
+    let file = backend.open(&path).unwrap();
+    let narrow_dataset = file.dataset("i32").unwrap();
+    let wide_dataset = file.dataset("i64").unwrap();
+    let chunk = u64::try_from(chunk).unwrap();
+    assert_eq!(narrow_dataset.shape().unwrap(), vec![200_000]);
+    assert_eq!(wide_dataset.shape().unwrap(), vec![200_000]);
+    assert_eq!(narrow_dataset.chunk_shape().unwrap(), Some(vec![chunk]));
+    assert_eq!(wide_dataset.chunk_shape().unwrap(), Some(vec![chunk]));
+    assert_eq!(
+        narrow_dataset.chunk_index().unwrap(),
+        Some(ChunkIndex::ExtensibleArray)
+    );
+    assert_eq!(narrow_dataset.read_i32().unwrap(), values);
+    assert_eq!(wide_dataset.read_i64().unwrap(), wide);
+}
+
+fn chunk_dimension_encoding_length(file: &hdf5::File, path: &Path, name: &str) -> u8 {
+    let header = c_object::header_address(file, name);
+    let image = std::fs::read(path).unwrap();
+    let parsed = ObjectHeader::parse(
+        &image,
+        AccessMode::ReadOnly,
+        usize::try_from(header).unwrap(),
+        8,
+        8,
+    )
+    .unwrap();
+    let message = parsed
+        .messages
+        .iter()
+        .find(|message| message.msg_type == MessageType::DATA_LAYOUT)
+        .unwrap();
+    assert_eq!(message.data[0], data_layout::VERSION_FOUR);
+    assert_eq!(message.data[1], data_layout::CHUNKED_CLASS);
+    message.data[4]
+}
 
 /// A reference-library file whose datasets are created under the given libver
 /// bounds. `V18/V18` forces the classic (v1 B-tree) chunked format; `V110/latest`
