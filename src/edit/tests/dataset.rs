@@ -1,5 +1,7 @@
 //! Dataset overwrite compatibility and append behavior.
 
+use core::num::NonZeroUsize;
+
 use hdf5_pure_format::__private::ChunkedGeometry;
 use hdf5_pure_format::__private::FILTER_PIPELINE_VERSION_TWO;
 use rstest::rstest;
@@ -15,6 +17,7 @@ use crate::VariableLengthType;
 #[cfg(feature = "zfp")]
 use crate::ZfpRate;
 use crate::chunked_write;
+use crate::chunked_write::ChunkProvider;
 use crate::data_layout::DONT_FILTER_PARTIAL_BOUND_CHUNKS;
 use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags, DataLayout};
 use crate::dataspace::{Dataspace, DataspaceType, MaxExtent};
@@ -27,7 +30,7 @@ use crate::edit::AppendBuilder;
 use crate::edit::AppendTarget;
 use crate::edit::WriteEngine;
 use crate::edit::dataset::{ChunkGeometry, ChunkedOverwrite};
-use crate::error::Error;
+use crate::error::{Error, FormatError};
 use crate::file_lock::FileLocking;
 use crate::fill_value::PaddingFill;
 use crate::filter_pipeline::FILTER_DEFLATE;
@@ -35,7 +38,7 @@ use crate::filter_pipeline::FilterDescription;
 use crate::filter_pipeline::FilterPipeline;
 use crate::filters;
 use crate::filters::ChunkContext;
-use crate::object_path::ObjectPathBuf;
+use crate::object_path::{LinkName, ObjectPathBuf};
 use crate::type_builders;
 use crate::type_builders::DatasetBuilder;
 use crate::writer::FileBuilder;
@@ -690,4 +693,73 @@ fn variable_length_string_type(
     Datatype::VariableLength(VariableLengthType::String(
         VariableLengthStringType::with_base_type(padding, charset, base).unwrap(),
     ))
+}
+
+#[rstest]
+#[case::encoded_chunks(true, "encoded chunk providers cannot be added in place yet")]
+#[case::producer(false, "data producers cannot be added in place yet")]
+fn in_place_creation_rejects_provider_sources(
+    #[case] chunks: bool,
+    #[case] expected: &str,
+    #[values(false, true)] empty: bool,
+) {
+    let shape = [u64::from(!empty)];
+    let mut builder = DatasetBuilder::new("provider");
+    if chunks {
+        builder.with_raw_chunks_lazy(
+            type_builders::make_i32_type(),
+            &shape,
+            None,
+            &[1],
+            NonZeroUsize::new(4).unwrap(),
+            ChunkedLayoutFlags::new(0),
+            None,
+            Vec::new(),
+            Box::new(UnreadDatasetProvider),
+        );
+    } else {
+        builder.with_produced_data(
+            type_builders::make_i32_type(),
+            &shape,
+            shape[0] * 4,
+            4,
+            Box::new(UnreadDatasetProvider),
+        );
+    }
+    let result = edit::dataset::flatten_dataset(builder, LinkName::new("provider").unwrap().into());
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("expected an unsupported provider source"),
+    };
+    let Error::EditUnsupported(reason) = error else {
+        panic!("expected an unsupported provider source, got {error:?}");
+    };
+    assert_eq!(reason, expected);
+}
+
+struct UnreadDatasetProvider;
+
+impl ChunkProvider for UnreadDatasetProvider {
+    fn chunk_bytes(&self, _: usize, _: &mut Vec<u8>) -> Result<(), FormatError> {
+        Err(FormatError::Internal(
+            "in-place creation read the provider".into(),
+        ))
+    }
+}
+
+#[test]
+fn in_place_creation_preserves_the_missing_data_cause() {
+    let mut builder = DatasetBuilder::new("missing");
+    builder
+        .with_dtype(type_builders::make_i32_type())
+        .with_shape(&[1]);
+    let result = edit::dataset::flatten_dataset(builder, LinkName::new("missing").unwrap().into());
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("expected a missing data error"),
+    };
+    let Error::Format(error) = error else {
+        panic!("expected a format error, got {error:?}");
+    };
+    assert_eq!(error, FormatError::DatasetMissingData);
 }

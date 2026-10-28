@@ -86,7 +86,6 @@ use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::shared_message::DatatypeLocation;
 use crate::type_builders::{
     self, AttrSpec, AttributeSpecs, CommittedDatatype, DatasetBuilder, FinishedGroup, GroupBuilder,
-    VlStringStaging,
 };
 use crate::width::FormatWidths;
 use crate::width::LengthWidth;
@@ -1002,11 +1001,6 @@ impl FileWriter {
             attr_committed_datatype_paths: Vec<Option<ObjectPathBuf>>,
             chunk_options: ChunkOptions,
             maxshape: Option<Vec<MaxExtent>>,
-            reference_targets: Option<Vec<crate::type_builders::ObjectRefPatch>>,
-            /// Global heap collections and patch offsets for variable-length strings whose
-            /// element bytes are held in `storage`. The writer patches their heap addresses
-            /// after placing the collections.
-            vl_string_staging: Option<VlStringStaging>,
             /// A user-defined fill value, encoded in the dataset's datatype, or
             /// `None` for the library default. Validated against the datatype
             /// element size in `flatten_dataset`.
@@ -1033,16 +1027,18 @@ impl FileWriter {
                 }
             }
 
-            /// Removes this dataset's contiguous buffer or describes its produced region.
+            /// Describes this dataset's contiguous region for placement and emission.
             ///
-            /// A produced region's provider remains in the dataset's prepared storage.
-            fn take_contiguous(&mut self) -> DsData<'static> {
+            /// The element buffer or provider stays in prepared storage.
+            fn contiguous_data(&self) -> DsData<'static> {
                 match self.storage.produced() {
                     Some(p) => DsData::Produced {
                         total_bytes: p.total_bytes,
                         block_bytes: p.block_bytes,
                     },
-                    None => DsData::InMemory(self.storage.take_raw()),
+                    None => DsData::InMemory {
+                        len: self.storage.raw().len() as u64,
+                    },
                 }
             }
 
@@ -1124,14 +1120,15 @@ impl FileWriter {
             }
         }
 
-        /// A dataset's data region, retained as bytes or emitted from a plan.
+        /// A dataset's planned data region.
         enum DsData<'a> {
             /// Encoded chunks borrowed from the writer's retained set, with finalized metadata.
             Encoded {
                 chunks: &'a CompressedChunkSet,
                 plan: ChunkedPlan,
             },
-            InMemory(Vec<u8>),
+            /// A contiguous region emitted from the element buffer in prepared storage.
+            InMemory { len: u64 },
             /// A contiguous region written block by block from the provider held in the
             /// dataset's prepared storage.
             Produced {
@@ -1144,14 +1141,6 @@ impl FileWriter {
             Streamed(VerbatimPlan),
         }
         impl DsData<'_> {
-            /// Returns the contiguous element buffer used to patch variable-length references.
-            fn in_memory_mut(&mut self) -> Option<&mut Vec<u8>> {
-                match self {
-                    DsData::InMemory(bytes) => Some(bytes),
-                    DsData::Encoded { .. } | DsData::Streamed(_) | DsData::Produced { .. } => None,
-                }
-            }
-
             /// Writes the data region, including a chunk index for chunked storage.
             ///
             /// # Errors
@@ -1169,7 +1158,7 @@ impl FileWriter {
                     DsData::Encoded { chunks, plan } => {
                         chunked_write::emit_chunked_data(sink, chunks, plan)
                     }
-                    DsData::InMemory(bytes) => sink.put(bytes).map_err(EmissionError::Sink),
+                    DsData::InMemory { .. } => sink.put(storage.raw()).map_err(EmissionError::Sink),
                     DsData::Streamed(plan) => {
                         let provider = storage
                             .chunks()
@@ -1205,7 +1194,7 @@ impl FileWriter {
             fn len(&self) -> u64 {
                 match self {
                     DsData::Encoded { plan, .. } => plan.data_len,
-                    DsData::InMemory(v) => v.len() as u64,
+                    DsData::InMemory { len } => *len,
                     DsData::Streamed(plan) => plan.total_len,
                     DsData::Produced { total_bytes, .. } => *total_bytes,
                 }
@@ -1426,8 +1415,15 @@ impl FileWriter {
             let name = link_name(name)?;
             let dt = datatype.ok_or(FormatError::DatasetMissingDatatype)?;
             let shape = shape.ok_or(FormatError::DatasetMissingShape)?;
-            let storage =
-                PreparedStorage::parse(data, raw_chunks, produced, allocation, shape.contains(&0))?;
+            let storage = PreparedStorage::parse(
+                data,
+                raw_chunks,
+                produced,
+                allocation,
+                shape.contains(&0),
+                reference_targets,
+                vl_string_staging,
+            )?;
             let unallocated = storage.allocation() == StorageAllocation::Unallocated;
             // A zero-byte element type is refused before it reaches a layout
             // decision: the chunk splitter clamps a row copy to an element
@@ -1570,8 +1566,6 @@ impl FileWriter {
                 attr_committed_datatype_paths,
                 chunk_options,
                 maxshape,
-                reference_targets,
-                vl_string_staging,
                 fill,
                 fill_time: fill_time.unwrap_or_default(),
                 declared_contiguous_len,
@@ -2028,8 +2022,8 @@ impl FileWriter {
                 || all_ds.iter().any(|dataset| {
                     dataset.storage.chunks().is_none()
                         && dataset
-                            .vl_string_staging
-                            .as_ref()
+                            .storage
+                            .vl_string_staging()
                             .is_some_and(|staging| !staging.collections.is_empty())
                 });
             let mut cursor = SUPERBLOCK_SIZE as u64;
@@ -2103,13 +2097,14 @@ impl FileWriter {
                 if dataset.storage.chunks().is_some() {
                     continue;
                 }
-                if let Some(staging) = &dataset.vl_string_staging {
+                if let Some(staging) = dataset.storage.take_vl_string_staging() {
                     let addrs = place(&staging.collections)?;
                     type_builders::patch_vl_refs_masked(
                         dataset.storage.raw_mut()?,
                         &staging.patch_offsets,
                         &addrs,
                     );
+                    dataset.storage.restore_vl_string_staging(staging)?;
                     early_gcol.push(i);
                 }
             }
@@ -2119,7 +2114,7 @@ impl FileWriter {
                 if !is_chunked[i] || all_ds[i].storage.chunks().is_some() {
                     continue;
                 }
-                let Some(staging) = all_ds[i].vl_string_staging.take() else {
+                let Some(staging) = all_ds[i].storage.take_vl_string_staging() else {
                     continue;
                 };
                 let addrs = place_collections(
@@ -2133,7 +2128,7 @@ impl FileWriter {
                     &staging.patch_offsets,
                     &addrs,
                 );
-                all_ds[i].vl_string_staging = Some(staging);
+                all_ds[i].storage.restore_vl_string_staging(staging)?;
                 early_gcol.push(i);
             }
             allocation.end() - SUPERBLOCK_SIZE as u64
@@ -2141,8 +2136,8 @@ impl FileWriter {
 
         #[cfg(feature = "provenance")]
         for (i, dataset) in all_ds.iter_mut().enumerate() {
-            if dataset.reference_targets.is_none()
-                && (dataset.vl_string_staging.is_none() || early_gcol.contains(&i))
+            if dataset.storage.reference_targets().is_none()
+                && (dataset.storage.vl_string_staging().is_none() || early_gcol.contains(&i))
             {
                 if let Some(hash) = dataset.pending_hash.take() {
                     hash.complete(&mut dataset.attrs, dataset.storage.raw())?;
@@ -2154,7 +2149,10 @@ impl FileWriter {
             .iter()
             .enumerate()
             .map(|(i, d)| {
-                if is_chunked[i] && d.storage.chunks().is_none() && d.reference_targets.is_none() {
+                if is_chunked[i]
+                    && d.storage.chunks().is_none()
+                    && d.storage.reference_targets().is_none()
+                {
                     d.compress_chunks().map(Some)
                 } else {
                     Ok(None)
@@ -2352,7 +2350,8 @@ impl FileWriter {
                 .map(|plan| plan.attr_info_message(DUMMY_DENSE_BASE))
                 .transpose()?;
             let oh = if is_chunked[i] {
-                let (layout_message, pipeline_message) = if d.reference_targets.is_some() {
+                let (layout_message, pipeline_message) = if d.storage.reference_targets().is_some()
+                {
                     let chunk_dims = d.chunk_options.resolve_chunk_dims(&d.ds.dimensions);
                     let ctx = crate::filters::ChunkContext::from_datatype(&chunk_dims, &d.dt)?;
                     let elem = ctx.element_size.narrow::<NonZeroUsize>()?;
@@ -2553,7 +2552,7 @@ impl FileWriter {
             // destination address (an unknown path falls back to the undefined
             // address); a raw target is written verbatim (null / undefined).
             for (i, d) in all_ds.iter_mut().enumerate() {
-                let Some(patches) = d.reference_targets.take() else {
+                let Some(patches) = d.storage.take_reference_targets() else {
                     continue;
                 };
                 for patch in patches {
@@ -2848,9 +2847,8 @@ impl FileWriter {
             // run and its sub-page remainder becomes a generic-large section.
             let mut layouts: Vec<Option<DsLayout<'_>>> = (0..all_ds.len()).map(|_| None).collect();
             for &i in &empty_indices {
-                let raw = all_ds[i].storage.take_raw();
                 layouts[i] = Some(DsLayout {
-                    data: DsData::InMemory(raw),
+                    data: all_ds[i].contiguous_data(),
                     data_addr: UNDEF_ADDRESS,
                     chunked_msgs: None,
                 });
@@ -2873,7 +2871,7 @@ impl FileWriter {
                         chunked_msgs: Some((built.layout_message, built.pipeline_message)),
                     }
                 } else {
-                    let data = all_ds[i].take_contiguous();
+                    let data = all_ds[i].contiguous_data();
                     c += data.len();
                     DsLayout {
                         data,
@@ -2916,7 +2914,7 @@ impl FileWriter {
                         chunked_msgs: Some((built.layout_message, built.pipeline_message)),
                     }
                 } else {
-                    let data = all_ds[i].take_contiguous();
+                    let data = all_ds[i].contiguous_data();
                     built_len = data.len();
                     DsLayout {
                         data,
@@ -3050,8 +3048,8 @@ impl FileWriter {
                 .chain(ds_vl.iter().flatten().map(|patch| &patch.collections))
                 .chain(early_gcol.iter().filter_map(|&i| {
                     all_ds[i]
-                        .vl_string_staging
-                        .as_ref()
+                        .storage
+                        .vl_string_staging()
                         .map(|staging| &staging.collections)
                 }))
                 .flatten();
@@ -3199,9 +3197,7 @@ impl FileWriter {
                     chunked_msgs: Some((built.layout_message, built.pipeline_message)),
                 });
             } else {
-                // Move in-memory element bytes into the layout. Retain a produced region's
-                // provider in prepared storage for emission.
-                let data = d.take_contiguous();
+                let data = d.contiguous_data();
                 let addr = if data.len() == 0 {
                     UNDEF_ADDRESS
                 } else {
@@ -3221,7 +3217,9 @@ impl FileWriter {
         let has_vl = !vl_root.is_empty()
             || grp_vl.iter().any(|v| !v.is_empty())
             || ds_vl.iter().any(|v| !v.is_empty())
-            || all_ds.iter().any(|d| d.vl_string_staging.is_some());
+            || all_ds
+                .iter()
+                .any(|d| d.storage.vl_string_staging().is_some());
 
         let gcol_start = allocation.end();
         if has_vl {
@@ -3262,22 +3260,23 @@ impl FileWriter {
                     );
                 }
             }
-            // Patch dataset-element references in the contiguous element bytes moved into
-            // `ds_layouts[i].data`. The writer reserves chunked datasets' collections and patches
-            // their references before chunk encoding.
+            // Patch dataset-element references in the contiguous bytes held in prepared storage.
+            // The writer reserves chunked datasets' collections and patches their references before
+            // chunk encoding.
             for (i, d) in all_ds.iter_mut().enumerate() {
                 // A chunked VL dataset was placed and patched before its chunks
                 // were encoded; its references are already final.
                 if early_gcol.contains(&i) {
                     continue;
                 }
-                if let Some(staging) = &d.vl_string_staging {
+                if let Some(staging) = d.storage.take_vl_string_staging() {
                     // A dataset that carries VL staging always has its element
                     // bytes in memory. Report it: heap addresses patched into
                     // another buffer would corrupt the file in silence.
-                    let Some(bytes) = ds_layouts[i].data.in_memory_mut() else {
+                    if !matches!(ds_layouts[i].data, DsData::InMemory { .. }) {
                         return Err(vl_element_bytes_absent(d.name.as_str()).into());
-                    };
+                    }
+                    let bytes = d.storage.raw_mut()?;
                     let addrs = place_collections(
                         &staging.collections,
                         &mut allocation,
@@ -3289,6 +3288,7 @@ impl FileWriter {
                     if let Some(hash) = d.pending_hash.take() {
                         hash.complete(&mut d.attrs, bytes)?;
                     }
+                    d.storage.restore_vl_string_staging(staging)?;
                 }
             }
         }
@@ -3380,8 +3380,8 @@ impl FileWriter {
             .iter()
             .map(|&i| {
                 all_ds[i]
-                    .vl_string_staging
-                    .as_ref()
+                    .storage
+                    .vl_string_staging()
                     .expect("early_gcol only holds datasets with VL staging")
                     .collections
                     .len()
@@ -3395,8 +3395,8 @@ impl FileWriter {
             .iter()
             .flat_map(|&i| {
                 all_ds[i]
-                    .vl_string_staging
-                    .as_ref()
+                    .storage
+                    .vl_string_staging()
                     .expect("early_gcol only holds datasets with VL staging")
                     .collections
                     .iter()
@@ -3429,7 +3429,7 @@ impl FileWriter {
             .iter()
             .enumerate()
             .filter(|(i, _)| !early_gcol.contains(i))
-            .filter_map(|(_, d)| d.vl_string_staging.as_ref())
+            .filter_map(|(_, d)| d.storage.vl_string_staging())
             .flat_map(|staging| &staging.collections);
         let mut late_collections =
             attribute_collections

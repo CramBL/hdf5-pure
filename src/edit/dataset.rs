@@ -28,6 +28,7 @@ use crate::chunked_write::{self, ChunkMeta, ChunkOptions, ChunkProvider, Storage
 use crate::convert::Narrow;
 use crate::data_layout::ChunkedLayoutFlags;
 use crate::data_layout::{ChunkIndexLayout, DataLayout};
+use crate::dataset_request::{PreparedBytes, PreparedElements, PreparedStorage};
 use crate::dataspace::{Dataspace, DataspaceType, Extent, MaxExtent};
 use crate::datatype::Datatype;
 use crate::error::{Error, FormatError, OBJECT_HEADER_MESSAGE_MAX};
@@ -45,7 +46,7 @@ use crate::prepared_chunk::ChunkEncoding;
 use crate::prepared_chunk::PreparedChunk;
 use crate::shared_message::DatatypeLocation;
 use crate::source::{BaseOffsetSource, Source};
-use crate::type_builders::{self, DatasetBuilder, ObjectRefPatch, VlStringStaging};
+use crate::type_builders::{self, DatasetBuilder, VlStringStaging};
 use crate::width::FormatWidths;
 
 use super::LossyTailReencoding;
@@ -171,20 +172,20 @@ impl WriteEngine {
         let oh = if fd.chunk_options.is_chunked() || fd.maxshape.is_some() {
             self.build_chunked_dataset(fd)?
         } else {
-            if let Some(staging) = fd.vl_string_staging.take() {
+            if let Some(staging) = fd.storage.take_vl_string_staging() {
                 if !staging.collections.is_empty() {
                     let addrs = self.place_vl_collections(&staging.collections)?;
                     type_builders::patch_vl_refs_masked(
-                        &mut fd.raw,
+                        fd.storage.raw_mut()?,
                         &staging.patch_offsets,
                         &addrs,
                     );
                 }
             }
-            let data_addr = if fd.raw.is_empty() {
+            let data_addr = if fd.storage.raw().is_empty() {
                 StoredAddress::new(UNDEF)
             } else {
-                base.relative(self.alloc_or_append_typed(&fd.raw, AllocationClass::Raw)?)?
+                base.relative(self.alloc_or_append_typed(fd.storage.raw(), AllocationClass::Raw)?)?
             };
             let attr_info = self.place_dense_attrs_if_needed(fd)?;
             file_writer::build_dataset_oh(
@@ -317,15 +318,15 @@ impl WriteEngine {
                 // references
                 // inside live data would make rollback release reachable storage.
                 if self.fresh_page_boundary.is_none()
-                    && fd.vl_string_staging.is_none()
+                    && fd.storage.vl_string_staging().is_none()
                     && !data_addr.is_undefined(OFFSET_WIDTH)
-                    && data_size == fd.raw.len() as u64
+                    && data_size == fd.storage.raw().len() as u64
                 {
                     if let Ok(start) = base.absolute(data_addr) {
                         if start.checked_add(data_size).is_some_and(|e| e <= src.len()) {
                             return Ok(WritePlan::InPlace {
                                 data_addr: start,
-                                bytes: fd.raw.clone(),
+                                bytes: fd.storage.raw().to_vec(),
                             });
                         }
                     }
@@ -386,19 +387,19 @@ impl WriteEngine {
                 };
 
                 // Heap addresses affect encoded chunk lengths, so resolve them before splitting.
-                if let Some(staging) = &fd.vl_string_staging {
+                if let Some(staging) = fd.storage.vl_string_staging() {
                     return Ok(WritePlan::Moving(MovingWrite::Chunked {
                         region,
                         overwrite,
                         pipeline_message,
                         payload: ChunkPayload::Deferred {
-                            bytes: DeferredBytes::new(&fd.raw, staging, path),
+                            bytes: DeferredBytes::new(fd.storage.raw(), staging, path),
                         },
                         old_addr: addr,
                     }));
                 }
 
-                let new_chunks = overwrite.prepare_chunks(&fd.raw)?;
+                let new_chunks = overwrite.prepare_chunks(fd.storage.raw())?;
 
                 if self.fresh_page_boundary.is_none()
                     && let Some(writes) = try_inplace_chunk_writes(
@@ -967,13 +968,13 @@ impl WriteEngine {
         let fill_time = fd.fill_time.unwrap_or_default();
         let fill = FillPattern::new(fill_time, fd.fill.as_deref(), elem);
         let set = chunked_write::compress_chunks(
-            &fd.raw,
+            fd.storage.raw(),
             &fd.ds.dimensions,
             ctx,
             &fd.chunk_options,
             fd.maxshape.as_deref(),
             fill,
-            fd.allocation,
+            fd.storage.allocation(),
         )?;
         let (_addr, (layout_message, pipeline_message)) = self.place_relocatable(
             chunked_write::chunked_data_len(&set)?,
@@ -1121,7 +1122,7 @@ impl WriteEngine {
             .staged
             .dataset_at_mut(path)
             .expect("caller checked a dataset is staged at this path");
-        if fd.vl_string_staging.is_some() || fd.reference_targets.is_some() {
+        if fd.storage.vl_string_staging().is_some() || fd.storage.reference_targets().is_some() {
             return Err(Error::AppendUnsupported(
                 "a staged variable-length-string or object-reference dataset cannot be appended \
                  to before it is committed: its per-element side table is built with the \
@@ -1177,17 +1178,20 @@ impl WriteEngine {
             .ok_or(Error::AppendUnsupported(
                 "staged dataset byte size overflows",
             ))?;
-        if fd.allocation == StorageAllocation::Unallocated && !bytes.is_empty() {
+        if fd.storage.allocation() == StorageAllocation::Unallocated && !bytes.is_empty() {
             let elem_size = crate::datatype::element_size_usize(&fd.dt)?;
-            fd.raw = FillPattern::new(
-                fd.fill_time.unwrap_or_default(),
-                fd.fill.as_deref(),
-                elem_size,
-            )
-            .buffer(fd.extent.to_usize()?)?;
-            fd.allocation = StorageAllocation::Allocated;
+            fd.storage = PreparedElements::Bytes(PreparedBytes::new(
+                FillPattern::new(
+                    fd.fill_time.unwrap_or_default(),
+                    fd.fill.as_deref(),
+                    elem_size,
+                )
+                .buffer(fd.extent.to_usize()?)?,
+            ));
         }
-        fd.raw.extend_from_slice(bytes);
+        if !bytes.is_empty() {
+            fd.storage.raw_mut()?.extend_from_slice(bytes);
+        }
         fd.extent = extent;
         fd.ds.dimensions[0] = grown;
         #[cfg(feature = "provenance")]
@@ -1208,7 +1212,7 @@ impl WriteEngine {
     /// a [`PartialEdgeFiltering`] policy, attributes, fill settings, or unresolved object-reference
     /// targets.
     pub(super) fn refuse_unsupported_overwrite(fd: &FlatDataset) -> Result<(), Error> {
-        if fd.allocation == StorageAllocation::Unallocated {
+        if fd.storage.allocation() == StorageAllocation::Unallocated {
             return Err(Error::EditUnsupported(
                 "write_dataset requires element data, not unallocated storage",
             ));
@@ -1247,7 +1251,7 @@ impl WriteEngine {
             ));
         }
 
-        if fd.reference_targets.is_some() {
+        if fd.storage.reference_targets().is_some() {
             return Err(Error::EditUnsupported(
                 "write_dataset cannot overwrite an object-reference dataset's \
                  data in place yet",
@@ -1429,10 +1433,7 @@ pub(super) struct FlatDataset {
     pub(super) name: LinkNameBuf,
     pub(super) dt: crate::datatype::Datatype,
     pub(super) ds: Dataspace,
-    /// Prepared element bytes, empty for an unallocated declaration.
-    pub(super) raw: Vec<u8>,
-    /// Whether element storage is supplied or remains unallocated.
-    allocation: StorageAllocation,
+    pub(super) storage: PreparedElements,
     /// The logical byte length of all elements, including unwritten values.
     extent: u64,
     pub(super) attrs: Vec<crate::attribute::AttributeMessage>,
@@ -1446,10 +1447,6 @@ pub(super) struct FlatDataset {
     ///
     /// Reference patching and digest updates preserve serialized lengths.
     pub(super) dense_attrs: Option<PreparedDenseAttrs>,
-    /// Unresolved variable-length element references and their collections.
-    pub(super) vl_string_staging: Option<VlStringStaging>,
-    /// Object-reference targets resolved after the commit has assigned object addresses.
-    pub(super) reference_targets: Option<Vec<ObjectRefPatch>>,
     /// One encoded fill element, or `None` for the default.
     pub(super) fill: Option<Vec<u8>>,
     /// The fill policy, or `None` for the default.
@@ -1469,7 +1466,7 @@ impl FlatDataset {
             return;
         };
         self.attrs.truncate(prov.attrs_start);
-        let rebuilt = prov.inputs.build_attrs(&self.raw);
+        let rebuilt = prov.inputs.build_attrs(self.storage.raw());
         self.attrs.extend(rebuilt);
     }
 }
@@ -1486,17 +1483,19 @@ struct StagedProvenance {
 /// Prepares a dataset builder for storage in the pending edit set.
 ///
 /// Variable-length collections and object-reference targets remain unresolved until commit
-/// application. Unallocated declarations have an empty element buffer and a logical byte length
-/// derived from their shape and datatype. The `provenance` feature computes digest attributes over
-/// the prepared values.
+/// application. Unallocated declarations retain the logical byte length derived from their shape
+/// and datatype. The `provenance` feature computes digest attributes over the prepared values.
 ///
 /// # Errors
 ///
-/// Returns [`Error::EditUnsupported`] for missing values or metadata, incompatible shape or storage
-/// options, committed datatypes, unsupported filters, or a link name too large to encode.
+/// Returns [`Error::EditUnsupported`] for missing metadata, incompatible shape or storage options,
+/// committed datatypes, unsupported filters, or a link name too large to encode. Providers of
+/// encoded chunks or contiguous data are unsupported. Chunked or extensible datasets with deferred
+/// element references are unsupported.
 ///
-/// Returns [`Error::Format`] with [`FormatError::ConflictingDatasetStorage`] if an unallocated
-/// declaration also supplies element data or a provider, [`FormatError::DatasetRankUnsupported`]
+/// Returns [`Error::Format`] with [`FormatError::ConflictingDatasetStorage`] for conflicting
+/// sources or deferred references without an element buffer, [`FormatError::DatasetMissingData`]
+/// if a nonempty allocated dataset has no source, [`FormatError::DatasetRankUnsupported`]
 /// if the rank exceeds the writer's limit, [`FormatError::DatasetDimensionUnlimited`] if a current
 /// dimension is unlimited, or [`FormatError::DatasetSizeOverflow`] if the logical byte length
 /// overflows. With the `provenance` feature, returns [`FormatError::DatasetProvenanceRequiresData`]
@@ -1528,26 +1527,40 @@ pub(super) fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<F
     let shape = shape.ok_or(Error::EditUnsupported("dataset has no shape"))?;
     let is_empty = shape.contains(&0);
     let chunked = chunk_options.is_chunked() || maxshape.is_some();
-    let unallocated = allocation == StorageAllocation::Unallocated;
-    let data = data.transpose().map_err(|error| *error)?;
-    if unallocated && (data.is_some() || raw_chunks.is_some() || produced.is_some()) {
-        return Err(FormatError::ConflictingDatasetStorage.into());
-    }
-    if vl_string_staging.is_some() && chunked {
+    let storage = PreparedStorage::parse(
+        data,
+        raw_chunks,
+        produced,
+        allocation,
+        is_empty,
+        reference_targets,
+        vl_string_staging,
+    )?;
+    let storage = match storage {
+        PreparedStorage::Elements(elements) => elements,
+        PreparedStorage::Chunks(_) => {
+            return Err(Error::EditUnsupported(
+                "encoded chunk providers cannot be added in place yet",
+            ));
+        }
+        PreparedStorage::Produced(_) => {
+            return Err(Error::EditUnsupported(
+                "data producers cannot be added in place yet",
+            ));
+        }
+    };
+    let unallocated = storage.allocation() == StorageAllocation::Unallocated;
+    if storage.vl_string_staging().is_some() && chunked {
         return Err(Error::EditUnsupported(
             "chunked or extensible variable-length-string datasets cannot be added in place yet",
         ));
     }
-    if reference_targets.is_some() && chunked {
+    if storage.reference_targets().is_some() && chunked {
         return Err(Error::EditUnsupported(
             "chunked or extensible object-reference datasets cannot be added in place yet",
         ));
     }
-    let raw = if unallocated || is_empty {
-        data.unwrap_or_default()
-    } else {
-        data.ok_or(Error::EditUnsupported("dataset has no data"))?
-    };
+    let raw = storage.raw();
 
     let elem_size = crate::datatype::element_size_usize(&dt)?;
 
@@ -1643,7 +1656,7 @@ pub(super) fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<F
             source: prov.source.clone(),
         };
         let attrs_start = attrs.len();
-        attrs.extend(inputs.build_attrs(&raw));
+        attrs.extend(inputs.build_attrs(raw));
         StagedProvenance {
             inputs,
             attrs_start,
@@ -1691,16 +1704,13 @@ pub(super) fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<F
         name,
         dt,
         ds,
-        raw,
-        allocation,
+        storage,
         extent,
         attrs,
         chunk_options,
         maxshape,
         vl_attrs,
         dense_attrs,
-        vl_string_staging,
-        reference_targets,
         fill,
         fill_time,
         #[cfg(feature = "provenance")]
@@ -1835,9 +1845,11 @@ pub(super) fn overwrite_datatypes_match(disk: &Datatype, staged: &Datatype) -> b
 ///
 /// The pending set remains intact if commit preparation rejects the write.
 fn staged_bytes(fd: &FlatDataset, path: &ObjectPathBuf) -> OverwriteBytes {
-    match &fd.vl_string_staging {
-        Some(staging) => OverwriteBytes::Deferred(DeferredBytes::new(&fd.raw, staging, path)),
-        None => OverwriteBytes::Prepared(fd.raw.clone()),
+    match fd.storage.vl_string_staging() {
+        Some(staging) => {
+            OverwriteBytes::Deferred(DeferredBytes::new(fd.storage.raw(), staging, path))
+        }
+        None => OverwriteBytes::Prepared(fd.storage.raw().to_vec()),
     }
 }
 

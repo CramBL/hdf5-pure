@@ -182,14 +182,14 @@ impl WriteEngine {
         let dataset =
             edit::dataset::flatten_dataset(builder, LinkNameBuf::new("added").unwrap()).unwrap();
         let raw = self
-            .alloc_or_append_typed(&dataset.raw, AllocationClass::Raw)
+            .alloc_or_append_typed(dataset.storage.raw(), AllocationClass::Raw)
             .unwrap();
         let header = file_writer::build_dataset_oh(
             &dataset.dt,
             &DatatypeLocation::Inline,
             &dataset.ds,
             self.context.addresses().relative(raw).unwrap(),
-            dataset.raw.len() as u64,
+            dataset.storage.raw().len() as u64,
             &dataset.attrs,
             None,
             dataset.fill_time.unwrap_or_default(),

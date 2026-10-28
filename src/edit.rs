@@ -3396,7 +3396,7 @@ impl WriteEngine {
                 .iter()
                 .chain(staged.datasets())
                 .any(|(_, fd)| {
-                    fd.vl_string_staging.is_none()
+                    fd.storage.vl_string_staging().is_none()
                         && datatype::datatype_holds_file_address(&fd.dt)
                 });
         if aliasing_edit {
