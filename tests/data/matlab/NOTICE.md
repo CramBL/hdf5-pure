@@ -1,10 +1,34 @@
 # Vendored real-MATLAB `.mat` v7.3 fixtures
 
-The `.mat` files in this directory are **genuine real-MATLAB output** (the
-userblock header records `Platform: PCWIN64`), vendored as ground-truth read
-fixtures for `tests/main/mat_opaque_real_read.rs`. They let the MCOS opaque-class
-decoder be validated against MATLAB itself rather than only round-tripping
-against this crate's own writer.
+These files retain MATLAB v7.3 output and two deliberately corrupted derivatives.
+All headers identify `PCWIN64` and HDF5 schema 1.00. The MATLAB release is
+unrecorded except for the repository-authored unset-field case below.
+
+Retain these frozen bytes as external MCOS, value, and corruption evidence.
+Writing equivalent decoded values into a new file would discard the original
+object metadata or malformed conditions. Ordinary tests never regenerate these files.
+
+## Consumers and retained observations
+
+| File | Direct consumer under `tests/main/` unless qualified | Invariant |
+|---|---|---|
+| `matjl_struct_table_datetime.mat` | `mat_opaque_real_read.rs` | Datetime double-double residual in version 1 compound `{real, imag}` storage |
+| `test_corrupted_mcos_object_metadata.mat` | `mat_opaque_real_read.rs` | Out-of-range MCOS object ID returns an error without panic |
+| `test_corrupted_subsystem.mat` | `mat_opaque_real_read.rs` | The reader returns success or an error without panic |
+| `test_enum_v73.mat` | `mat_enum_read.rs`, `src/superblock.rs` | Scalar enums, uint32 bases, arrays, nested enums, and user-block-relative parsing |
+| `test_maps_v73.mat` | `mat_containers_map_read.rs` | Map and dictionary keys and values, including nested mappings |
+| `test_string_v73.mat` | `mat_opaque_real_read.rs`, `edit_userblock.rs`, `edit_userblock_chunked.rs`, `crates/crosscheck/tests/main/edit_userblock.rs` | MCOS strings and user-block preservation |
+| `test_struct_unset_field_v73.mat` | `mat_empty_marker_conformance.rs` | Unset structure field refers to the canonical empty placeholder |
+| `test_tables_v73.mat` | `mat_opaque_real_read.rs`, `mat_table_read.rs`, `mat_nested_mcos_read.rs` | Tables, timetables, categorical and nested MCOS columns, row and variable metadata |
+| `test_time_v73.mat` | `mat_opaque_real_read.rs` | Datetime and duration values, dimensions, classes, and timezone metadata |
+
+All files also participate in the directory scans in
+`mat_empty_marker_conformance.rs` and `mat_refs_h5path.rs`. Those scans skip files
+that fail to open, they do not require rejection of each corrupted input.
+
+The two corrupted files are MATLAB-derived regressions supplied by the pinned
+upstream below. Their exact mutation operations and original MATLAB releases
+are unrecorded locally.
 
 ## Source
 
@@ -17,8 +41,7 @@ library), directory `tests/data/`:
   `test_enum_v73.mat`, `test_maps_v73.mat`, `test_corrupted_subsystem.mat`,
   `test_corrupted_mcos_object_metadata.mat`
 
-The expected decoded values asserted in `tests/main/mat_opaque_real_read.rs` are
-transcribed from that project's MATLAB generator scripts
+The expected decoded values for the valid files are transcribed from that project's MATLAB generator scripts
 (`tests/data/generators/*.m`) and its independent pytest oracle
 (`tests/test_datetime.py`, `test_duration.py`, `test_categorical.py`,
 `test_matstring.py`, `test_enum.py`, `test_containermap.py`).
@@ -32,9 +55,11 @@ real MATLAB output (`Platform: PCWIN64`):
 - Commit: `4e05a0169282b6b7d835569175f07dff14ddabad`
 - License: MIT (see below)
 
-It holds a `datetime` with a non-zero imaginary (sub-millisecond) component,
-stored as an HDF5 **version-1 compound** `{real, imag}` of `f64` — the case used
-to pin the datetime double-double scale and to regression-test compound parsing.
+The upstream `struct_table_datetime.mat` is retained locally as
+`matjl_struct_table_datetime.mat`. Its datetime has a nonzero imaginary
+sub-millisecond component stored as a version 1 compound `{real, imag}` of
+`f64`. Preserve that external encoding for the datetime double-double and
+compound-parser observations.
 
 ### Also: `test_struct_unset_field_v73.mat`
 
