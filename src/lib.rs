@@ -437,6 +437,7 @@ pub(crate) mod address;
 pub(crate) mod array_test;
 pub(crate) mod attribute;
 pub(crate) mod attribute_info;
+pub(crate) mod attribute_request;
 pub(crate) mod btree_v1;
 pub(crate) mod btree_v2;
 pub(crate) mod bytes;
