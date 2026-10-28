@@ -1,9 +1,8 @@
 //! Prepared datasets and writes published by an editor commit.
 //!
-//! Preparation reads existing storage without mutating it. The write plans distinguish in-place
-//! bytes from relocating writes and defer variable-length address resolution until allocation.
-
-use std::borrow::Cow;
+//! Overwrite preparation reads existing storage and records payload identifiers or encoded chunks.
+//! Application consumes the matching replacement buffers and resolves variable-length heap
+//! addresses before writing.
 
 use core::num::NonZeroUsize;
 
@@ -56,6 +55,7 @@ use crate::width::FormatWidths;
 use super::LossyTailReencoding;
 use super::append;
 use super::attributes::{DenseAttrSet, EditedAttrs};
+use super::commit::plan::{OverwriteId, OverwritePayloads};
 use super::staging::{StagedKind, StagedOp};
 use crate::file_writer::DenseAttrCreationOrder;
 
@@ -211,7 +211,8 @@ impl WriteEngine {
     ///
     /// The datatype must satisfy [`overwrite_datatypes_match`], and the shape must match. Compact,
     /// contiguous, and chunked storage are supported. Non-persistent PAGE editing relocates
-    /// replacements.
+    /// replacements. Values that do not need chunk encoding remain in the staged buffer
+    /// identified by `source`.
     ///
     /// # Errors
     ///
@@ -221,7 +222,7 @@ impl WriteEngine {
         &self,
         addr: u64,
         fd: &ValueOverwrite,
-        path: &ObjectPathBuf,
+        source: OverwriteId,
     ) -> Result<WritePlan, Error> {
         let src = &self.image();
         let base = self.context.addresses();
@@ -299,7 +300,7 @@ impl WriteEngine {
         match region[lb + 1] {
             0 => Ok(WritePlan::Moving(MovingWrite::Compact {
                 region,
-                bytes: staged_bytes(fd, path),
+                bytes: source,
             })),
             1 => {
                 if le - lb < 18 {
@@ -323,7 +324,7 @@ impl WriteEngine {
                         if start.checked_add(data_size).is_some_and(|e| e <= src.len()) {
                             return Ok(WritePlan::InPlace {
                                 data_addr: start,
-                                bytes: fd.raw().to_vec(),
+                                source,
                             });
                         }
                     }
@@ -337,7 +338,7 @@ impl WriteEngine {
                 Ok(WritePlan::Moving(MovingWrite::Contiguous {
                     region,
                     addr_off,
-                    bytes: staged_bytes(fd, path),
+                    bytes: source,
                     old_extent,
                 }))
             }
@@ -384,14 +385,12 @@ impl WriteEngine {
                 };
 
                 // Heap addresses affect encoded chunk lengths, so resolve them before splitting.
-                if let Some(staging) = fd.vl_string_staging() {
+                if fd.vl_string_staging().is_some() {
                     return Ok(WritePlan::Moving(MovingWrite::Chunked {
                         region,
                         overwrite,
                         pipeline_message,
-                        payload: ChunkPayload::Deferred {
-                            bytes: DeferredBytes::new(fd.raw(), staging, path),
-                        },
+                        payload: ChunkPayload::Deferred { bytes: source },
                         old_addr: addr,
                     }));
                 }
@@ -414,14 +413,17 @@ impl WriteEngine {
                         .into_iter()
                         .map(|(off, b)| Ok((base.absolute(StoredAddress::new(off))?, b)))
                         .collect::<Result<Vec<_>, FormatError>>()?;
-                    return Ok(WritePlan::InPlaceChunks { writes });
+                    return Ok(WritePlan::InPlaceChunks { writes, source });
                 }
 
                 Ok(WritePlan::Moving(MovingWrite::Chunked {
                     region,
                     overwrite,
                     pipeline_message,
-                    payload: ChunkPayload::Encoded(new_chunks),
+                    payload: ChunkPayload::Encoded {
+                        chunks: new_chunks,
+                        source: Some(source),
+                    },
                     old_addr: addr,
                 }))
             }
@@ -709,15 +711,19 @@ impl WriteEngine {
 
     /// Writes a relocating edit and returns its new object-header address.
     ///
-    /// The caller publishes the parent link and reclaims superseded storage after commit
-    /// publication.
+    /// Replacement buffers are consumed through their prepared identifiers. The caller publishes
+    /// the parent link and reclaims superseded storage after commit publication.
     ///
     /// # Errors
     ///
     /// Returns [`Error::EditUnsupported`] if replacement layout or attribute messages cannot be
     /// written. Returns [`Error::Format`] if heap addresses, chunk encoding, header messages, or
     /// allocation geometry are invalid, and [`Error::Io`] if writing replacement storage fails.
-    pub(super) fn write_moving(&mut self, mw: &MovingWrite) -> Result<u64, Error> {
+    pub(super) fn write_moving(
+        &mut self,
+        overwrites: &mut OverwritePayloads,
+        mw: MovingWrite,
+    ) -> Result<u64, Error> {
         let base = self.context.addresses();
         match mw {
             MovingWrite::Contiguous {
@@ -726,21 +732,20 @@ impl WriteEngine {
                 bytes,
                 ..
             } => {
-                let raw = self.resolve_overwrite_bytes(bytes)?;
+                let raw = self.resolve_overwrite_bytes(overwrites.take(bytes))?;
                 let new_data_addr = self.alloc_or_append_typed(&raw, AllocationClass::Raw)?;
-                let mut region = region.clone();
+                let mut region = region;
                 let relative = base.relative(new_data_addr)?.get();
-                region.bytes_mut()[*addr_off..*addr_off + 8]
-                    .copy_from_slice(&relative.to_le_bytes());
-                let size_off = *addr_off + 8;
+                region.bytes_mut()[addr_off..addr_off + 8].copy_from_slice(&relative.to_le_bytes());
+                let size_off = addr_off + 8;
                 let raw_len = raw.len() as u64;
                 region.bytes_mut()[size_off..size_off + 8].copy_from_slice(&raw_len.to_le_bytes());
                 let oh = super::object_header::build_v2_object_header(&region)?;
                 self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
             }
             MovingWrite::Compact { region, bytes } => {
-                let raw = self.resolve_overwrite_bytes(bytes)?;
-                let region = super::object_header::rebuild_compact_layout_region(region, &raw)?;
+                let raw = self.resolve_overwrite_bytes(overwrites.take(bytes))?;
+                let region = super::object_header::rebuild_compact_layout_region(&region, &raw)?;
                 let oh = super::object_header::build_v2_object_header(&region)?;
                 self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
             }
@@ -751,13 +756,11 @@ impl WriteEngine {
                 payload,
                 ..
             } => {
-                let deferred;
                 let chunks = match payload {
-                    ChunkPayload::Encoded(chunks) => chunks,
+                    ChunkPayload::Encoded { chunks, source: _ } => chunks,
                     ChunkPayload::Deferred { bytes } => {
-                        let raw = self.resolve_deferred_bytes(bytes)?;
-                        deferred = overwrite.prepare_chunks(&raw)?;
-                        &deferred
+                        let raw = self.resolve_overwrite_bytes(overwrites.take(bytes))?;
+                        overwrite.prepare_chunks(&raw)?
                     }
                 };
                 let meta: Vec<ChunkMeta> = chunks
@@ -768,12 +771,12 @@ impl WriteEngine {
                     })
                     .collect();
                 self.write_chunked_relocatable(
-                    region,
+                    &region,
                     &overwrite.geometry,
                     overwrite.flags,
                     pipeline_message.as_deref(),
                     &meta,
-                    &PreparedChunkProvider { chunks },
+                    &PreparedChunkProvider { chunks: &chunks },
                     DenseAttrSet::default(),
                 )
             }
@@ -789,19 +792,19 @@ impl WriteEngine {
                 new_chunks,
                 ..
             } => self.write_appended_chunks(
-                region,
-                new_dataspace_body,
-                *flags,
-                chunk_dims_u32,
-                *element_size,
-                *raw_size,
-                *has_filters,
-                kept_chunks,
-                new_chunks,
+                &region,
+                &new_dataspace_body,
+                flags,
+                &chunk_dims_u32,
+                element_size,
+                raw_size,
+                has_filters,
+                &kept_chunks,
+                &new_chunks,
             ),
             MovingWrite::AttrEdit { region, attrs, .. } => {
-                let mut region = region.clone();
-                self.place_edited_attrs(&mut region, attrs.clone())?;
+                let mut region = region;
+                self.place_edited_attrs(&mut region, attrs)?;
                 let oh = super::object_header::build_v2_object_header(&region)?;
                 self.alloc_or_append_typed(&oh, AllocationClass::Metadata)
             }
@@ -1192,23 +1195,23 @@ impl WriteEngine {
         Ok(())
     }
 
-    /// Returns prepared bytes or resolves deferred heap references during commit application.
+    /// Returns owned replacement bytes after resolving any deferred heap references in place.
     ///
     /// # Errors
     ///
     /// Returns the errors of [`resolve_deferred_bytes`](Self::resolve_deferred_bytes) for deferred
     /// values.
-    fn resolve_overwrite_bytes<'b>(
+    pub(super) fn resolve_overwrite_bytes(
         &mut self,
-        bytes: &'b OverwriteBytes,
-    ) -> Result<Cow<'b, [u8]>, Error> {
+        bytes: OverwriteBytes,
+    ) -> Result<Vec<u8>, Error> {
         match bytes {
-            OverwriteBytes::Prepared(raw) => Ok(Cow::Borrowed(raw)),
-            OverwriteBytes::Deferred(bytes) => Ok(Cow::Owned(self.resolve_deferred_bytes(bytes)?)),
+            OverwriteBytes::Prepared(raw) => Ok(raw),
+            OverwriteBytes::Deferred(bytes) => self.resolve_deferred_bytes(bytes),
         }
     }
 
-    /// Places variable-length collections and patches their addresses into element bytes.
+    /// Places variable-length collections and patches references in the owned element buffer.
     ///
     /// The session records the new collections and schedules superseded collections for
     /// reclamation.
@@ -1217,17 +1220,15 @@ impl WriteEngine {
     ///
     /// Returns the errors of [`place_vl_collections`](Self::place_vl_collections) when allocating
     /// replacement collections. Returns [`Error::Format`] if a placed collection's address cannot
-    /// be
-    /// converted to a physical position.
-    fn resolve_deferred_bytes(&mut self, bytes: &DeferredBytes) -> Result<Vec<u8>, Error> {
-        let DeferredBytes { raw, vlen } = bytes;
-        let staging = &vlen.staging;
+    /// be converted to a physical position.
+    fn resolve_deferred_bytes(&mut self, bytes: DeferredBytes) -> Result<Vec<u8>, Error> {
+        let DeferredBytes { mut raw, vlen } = bytes;
+        let staging = vlen.staging;
         let superseded = self
             .vl_overwrite_heaps
             .get(&vlen.path)
             .cloned()
             .unwrap_or_default();
-        let mut raw = raw.clone();
         let base = self.context.addresses();
         let addrs = self.place_vl_collections(&staging.collections)?;
         type_builders::patch_vl_refs_masked(&mut raw, &staging.patch_offsets, &addrs);
@@ -1236,7 +1237,7 @@ impl WriteEngine {
             .zip(&staging.collections)
             .map(|(&a, c)| Ok((base.absolute(StoredAddress::new(a))?, c.len() as u64)))
             .collect::<Result<Vec<_>, FormatError>>()?;
-        self.vl_overwrite_heaps.insert(vlen.path.clone(), placed);
+        self.vl_overwrite_heaps.insert(vlen.path, placed);
         self.superseded_heaps.extend(superseded);
         Ok(raw)
     }
@@ -1250,22 +1251,25 @@ pub(super) enum OverwriteBytes {
     Prepared(Vec<u8>),
 }
 
+impl OverwriteBytes {
+    /// Prepares owned element bytes for optional heap-address resolution.
+    ///
+    /// The dataset path is retained only for deferred values.
+    pub(super) fn new(raw: Vec<u8>, staging: Option<VlStringStaging>, path: ObjectPathBuf) -> Self {
+        match staging {
+            Some(staging) => Self::Deferred(DeferredBytes {
+                raw,
+                vlen: VlenOverwrite { staging, path },
+            }),
+            None => Self::Prepared(raw),
+        }
+    }
+}
+
 /// Pairs unresolved element bytes with the collections and path required to resolve them.
 pub(super) struct DeferredBytes {
     raw: Vec<u8>,
     vlen: VlenOverwrite,
-}
-
-impl DeferredBytes {
-    fn new(raw: &[u8], staging: &VlStringStaging, path: &ObjectPathBuf) -> Self {
-        Self {
-            raw: raw.to_vec(),
-            vlen: VlenOverwrite {
-                staging: staging.clone(),
-                path: path.clone(),
-            },
-        }
-    }
 }
 
 /// Records variable-length collections and the dataset path used to track their allocation.
@@ -1286,10 +1290,13 @@ struct VlenOverwrite {
               here adds an allocation and a free without removing a single copy"
 )]
 pub(super) enum WritePlan {
-    /// Prepared contiguous bytes written without relocating the object header.
-    InPlace { data_addr: u64, bytes: Vec<u8> },
+    /// A contiguous range written from the identified staged replacement.
+    InPlace { data_addr: u64, source: OverwriteId },
     /// Chunk-data writes and any index rewrite that fit their existing allocations.
-    InPlaceChunks { writes: Vec<(u64, Vec<u8>)> },
+    InPlaceChunks {
+        writes: Vec<(u64, Vec<u8>)>,
+        source: OverwriteId,
+    },
     /// An edit published by relocating the object header and updating its parent link.
     Moving(MovingWrite),
 }
@@ -1340,13 +1347,15 @@ pub(super) enum MovingWrite {
     /// Inline values stored in a replacement object header.
     Compact {
         region: OhRegion,
-        bytes: OverwriteBytes,
+        /// The replacement payload consumed during application.
+        bytes: OverwriteId,
     },
     /// Element bytes written to replacement contiguous storage.
     Contiguous {
         region: OhRegion,
         addr_off: usize,
-        bytes: OverwriteBytes,
+        /// The replacement payload consumed during application.
+        bytes: OverwriteId,
         old_extent: Option<(u64, u64)>,
     },
 }
@@ -1354,9 +1363,13 @@ pub(super) enum MovingWrite {
 /// Distinguishes encoded chunks from element bytes awaiting heap-address resolution.
 pub(super) enum ChunkPayload {
     /// Variable-length elements resolved before chunk splitting and encoding.
-    Deferred { bytes: DeferredBytes },
+    Deferred { bytes: OverwriteId },
     /// Chunks encoded during preparation to determine whether existing storage can be reused.
-    Encoded(Vec<PreparedChunk>),
+    Encoded {
+        chunks: Vec<PreparedChunk>,
+        /// The original input's identifier, cleared when its buffer is released after preflight.
+        source: Option<OverwriteId>,
+    },
 }
 
 /// A staged dataset's values, metadata, and unresolved references.
@@ -1639,15 +1652,6 @@ pub(super) fn overwrite_datatypes_match(disk: &Datatype, staged: &Datatype) -> b
                 && overwrite_datatypes_match(disk_base, staged_base)
         }
         _ => disk == staged,
-    }
-}
-/// Copies staged element bytes and their deferred variable-length work.
-///
-/// The pending set remains intact if commit preparation rejects the write.
-fn staged_bytes(fd: &ValueOverwrite, path: &ObjectPathBuf) -> OverwriteBytes {
-    match fd.vl_string_staging() {
-        Some(staging) => OverwriteBytes::Deferred(DeferredBytes::new(fd.raw(), staging, path)),
-        None => OverwriteBytes::Prepared(fd.raw().to_vec()),
     }
 }
 

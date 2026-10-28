@@ -1,7 +1,8 @@
 //! Object placement and relocation for prepared staged edits.
 //!
-//! Application owns the staged dataset and copy payloads. It writes replacement content before
-//! publication and journals writes to existing value storage for rollback on failure.
+//! Application owns staged dataset creations, copies, and replacement buffers. It writes
+//! replacement content before publication and journals writes to existing value storage for
+//! rollback on failure.
 
 use std::collections::BTreeMap;
 
@@ -9,9 +10,9 @@ use hdf5_pure_core::__private::PhysicalAddress;
 use hdf5_pure_space::__private::{AllocationClass, FreeClass, PageType};
 
 use super::plan::{
-    self, ChildLink, CommitPlan, CopyDestination, GroupHeaders, Node, PreparedCommit,
-    PreparedGroup, PreparedReference, PreparedTree, ReferenceTarget, RelocatedDataset,
-    ReplacedHeader,
+    self, ChildLink, CommitPlan, CopyDestination, GroupHeaders, InPlaceWrite, Node,
+    OverwritePayloads, PreparedCommit, PreparedGroup, PreparedReference, PreparedTree,
+    ReferenceTarget, RelocatedDataset, ReplacedHeader,
 };
 use super::publish::AppliedTree;
 use crate::edit::dataset::{FlatDataset, MovingWrite};
@@ -34,23 +35,45 @@ impl WriteEngine {
     ///
     /// Returns the placement, serialization, write, synchronization, or publication error.
     pub(super) fn apply_commit(&mut self, prepared: PreparedCommit) -> Result<(), Error> {
-        let (plan, staged) = prepared.into_parts();
+        let (plan, staged, mut overwrites) = prepared.into_parts();
         match plan {
             CommitPlan::InPlace(writes) => {
                 drop(staged);
-                self.apply_inplace_writes(&writes)?;
+                self.apply_inplace_writes(&mut overwrites, writes)?;
                 self.barrier()
             }
             CommitPlan::Tree(tree) => {
-                let applied = self.apply_tree(tree, staged)?;
+                let applied = self.apply_tree(&mut overwrites, tree, staged)?;
                 self.publish_tree(applied)
             }
         }
     }
 
-    fn apply_inplace_writes(&mut self, writes: &[(u64, Vec<u8>)]) -> Result<(), Error> {
-        for (address, bytes) in writes {
-            self.write_inplace_journaled(*address, bytes)?;
+    /// Writes encoded output or original replacement buffers and journals prior values.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors from [`resolve_overwrite_bytes`](Self::resolve_overwrite_bytes) or
+    /// [`write_inplace_journaled`](Self::write_inplace_journaled).
+    fn apply_inplace_writes(
+        &mut self,
+        overwrites: &mut OverwritePayloads,
+        writes: Vec<InPlaceWrite>,
+    ) -> Result<(), Error> {
+        for write in writes {
+            let (address, bytes) = match write {
+                InPlaceWrite::Encoded { writes, source: _ } => {
+                    for (address, bytes) in writes {
+                        self.write_inplace_journaled(address, &bytes)?;
+                    }
+                    continue;
+                }
+                InPlaceWrite::Replacement { address, source } => (
+                    address,
+                    self.resolve_overwrite_bytes(overwrites.take(source))?,
+                ),
+            };
+            self.write_inplace_journaled(address, &bytes)?;
         }
         Ok(())
     }
@@ -62,6 +85,7 @@ impl WriteEngine {
     /// Returns the reclamation, placement, serialization, or write error.
     fn apply_tree(
         &mut self,
+        overwrites: &mut OverwritePayloads,
         tree: PreparedTree,
         staged: StagedApply,
     ) -> Result<AppliedTree, Error> {
@@ -173,7 +197,7 @@ impl WriteEngine {
                 write,
             } in writes
             {
-                let new_header = self.write_moving(&write)?;
+                let new_header = self.write_moving(overwrites, write)?;
                 group::patch_link_target(&mut region, link.as_str(), base.relative(new_header)?)?;
                 relocations.insert(old_header, new_header);
             }
@@ -206,9 +230,7 @@ impl WriteEngine {
             path_addr.insert(key.clone(), addr);
         }
 
-        for (data_addr, bytes) in &inplace_writes {
-            self.write_inplace_journaled(*data_addr, bytes)?;
-        }
+        self.apply_inplace_writes(overwrites, inplace_writes)?;
 
         for (path, old) in superseded_addrs {
             if let Some(&new) = path_addr.get(&path) {

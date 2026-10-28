@@ -371,6 +371,14 @@ pub(crate) struct ValueOverwrite {
 
 #[cfg(feature = "std")]
 impl ValueOverwrite {
+    /// Takes the replacement buffer and deferred heap staging, leaving an empty buffer and `None`.
+    pub(crate) fn take_payload(&mut self) -> (Vec<u8>, Option<VlStringStaging>) {
+        (
+            core::mem::take(&mut self.bytes.raw),
+            self.bytes.vl_string_staging.take(),
+        )
+    }
+
     /// Returns replacement element bytes before deferred heap addresses are assigned.
     pub(crate) fn raw(&self) -> &[u8] {
         &self.bytes.raw
