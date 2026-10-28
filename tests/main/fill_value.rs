@@ -544,8 +544,11 @@ fn edit_session_created_dataset_preserves_fill_time() {
     assert_eq!(alloc_ds.read_i32().unwrap(), vec![10, 20]);
 }
 
-#[test]
-fn write_dataset_rejects_a_fill_time_change() {
+#[rstest]
+#[case::default_policy(FillTime::IfSet)]
+#[case::allocate(FillTime::Alloc)]
+#[case::never(FillTime::Never)]
+fn write_dataset_rejects_an_explicit_fill_time(#[case] fill_time: FillTime) {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("overwrite_fill_time.h5");
     {
@@ -553,12 +556,13 @@ fn write_dataset_rejects_a_fill_time_change() {
         fb.create_dataset("d").with_i32_data(&[1, 2, 3]);
         fb.write(&p).unwrap();
     }
+    let before = std::fs::read(&p).unwrap();
     let s = File::open_rw(&p).unwrap();
     let err = s
         .dataset("d")
         .unwrap()
         .write_staged(|b| {
-            b.with_i32_data(&[4, 5, 6]).with_fill_time(FillTime::Never);
+            b.with_i32_data(&[4, 5, 6]).with_fill_time(fill_time);
         })
         .unwrap_err();
     let Error::EditUnsupported(reason) = err else {
@@ -572,6 +576,9 @@ fn write_dataset_rejects_a_fill_time_change() {
         !s.has_staged_edits(),
         "a rejected overwrite must not be left staged"
     );
+    s.commit().unwrap();
+    drop(s);
+    assert_eq!(std::fs::read(&p).unwrap(), before);
 }
 
 #[test]

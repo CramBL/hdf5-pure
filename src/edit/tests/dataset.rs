@@ -1,4 +1,4 @@
-//! Dataset overwrite compatibility and append behavior.
+//! Dataset request errors, overwrite compatibility, and append behavior.
 
 use core::num::{NonZeroU32, NonZeroUsize};
 
@@ -18,7 +18,7 @@ use crate::VariableLengthType;
 #[cfg(feature = "zfp")]
 use crate::ZfpRate;
 use crate::chunked_write;
-use crate::chunked_write::ChunkProvider;
+use crate::chunked_write::{ChunkProvider, StorageAllocation};
 use crate::data_layout::DONT_FILTER_PARTIAL_BOUND_CHUNKS;
 use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags, DataLayout};
 use crate::dataspace::{Dataspace, DataspaceType, MaxExtent};
@@ -47,6 +47,7 @@ use crate::writer::FileBuilder;
 #[rstest]
 #[case::missing_datatype(|b: &mut DatasetBuilder| b.datatype = None, FormatError::DatasetMissingDatatype)]
 #[case::missing_shape(|b: &mut DatasetBuilder| b.shape = None, FormatError::DatasetMissingShape)]
+#[case::missing_data(|b: &mut DatasetBuilder| b.data = None, FormatError::DatasetMissingData)]
 #[case::shape_payload(|b: &mut DatasetBuilder| { b.with_shape(&[2]); }, FormatError::LogicalShapeDataMismatch {
     expected: 8, actual: 4, element_size: NonZeroU32::new(4).unwrap().into(),
 })]
@@ -57,6 +58,16 @@ use crate::writer::FileBuilder;
 #[case::rank(|b: &mut DatasetBuilder| { b.with_shape(&[1; 33]); }, FormatError::DatasetRankUnsupported { rank: 33, maximum: 32 })]
 #[case::unlimited_current(|b: &mut DatasetBuilder| { b.with_shape(&[u64::MAX]); }, FormatError::DatasetDimensionUnlimited { dimension: 0 })]
 #[case::chunk_rank(|b: &mut DatasetBuilder| { b.with_chunks(&[1, 1]); }, FormatError::InvalidChunkGeometry("chunk dimensions must have the same rank as the dataset shape"))]
+#[case::chunk_zero(|b: &mut DatasetBuilder| { b.with_chunks(&[0]); }, FormatError::InvalidChunkGeometry("chunk dimensions must all be non-zero"))]
+#[case::scalar_chunks(|b: &mut DatasetBuilder| { b.with_shape(&[]).with_chunks(&[1]); }, FormatError::InvalidChunkGeometry("a scalar dataset cannot be chunked, filtered, or extensible"))]
+#[case::maximum_rank(|b: &mut DatasetBuilder| { b.with_maxshape(&[MaxExtent::Fixed(1), MaxExtent::Fixed(1)]); }, FormatError::InvalidChunkGeometry("maxshape must have the same rank as the dataset shape"))]
+#[case::maximum_below_current(|b: &mut DatasetBuilder| { b.with_maxshape(&[MaxExtent::Fixed(0)]); }, FormatError::InvalidChunkGeometry("maxshape must be at least the current shape in every dimension"))]
+#[case::byte_extent_overflow(|b: &mut DatasetBuilder| { b.with_shape(&[u64::MAX / 4 + 1]); }, FormatError::DatasetSizeOverflow { size: 4, dimension: u64::MAX / 4 + 1 })]
+#[case::zero_element_width(|b: &mut DatasetBuilder| { b.with_dtype(Datatype::String { size: 0, padding: StringPadding::NullPad, charset: CharacterSet::Ascii }); }, FormatError::ZeroSizedDatatype { class: STRING_DATATYPE_CLASS })]
+#[case::unallocated_payload(|b: &mut DatasetBuilder| b.allocation = StorageAllocation::Unallocated, FormatError::ConflictingDatasetStorage)]
+#[case::producer_extent(|b: &mut DatasetBuilder| { b.data = None; b.with_produced_data(type_builders::make_i32_type(), &[1], 8, 4, Box::new(UnreadDatasetProvider)); }, FormatError::LogicalShapeDataMismatch {
+    expected: 4, actual: 8, element_size: NonZeroU32::new(4).unwrap().into(),
+})]
 #[case::empty_attribute(|b: &mut DatasetBuilder| { b.set_attr("", AttrValue::I32(1)); }, FormatError::InvalidAttributeName { name: String::new() })]
 #[case::null_attribute(|b: &mut DatasetBuilder| { b.set_attr("a\0b", AttrValue::I32(1)); }, FormatError::InvalidAttributeName { name: "a\0b".into() })]
 fn creation_backends_preserve_common_request_causes(
@@ -803,3 +814,9 @@ fn in_place_creation_preserves_the_missing_data_cause() {
     };
     assert_eq!(error, FormatError::DatasetMissingData);
 }
+
+/// The string class code defined in "Datatype Message" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_dtmessage
+const STRING_DATATYPE_CLASS: u8 = 3;
