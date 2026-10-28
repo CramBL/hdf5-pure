@@ -23,6 +23,7 @@ use rstest::rstest;
 
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
 use test_util_hdf5::file;
+use test_util_hdf5::reader::ReadBackend;
 
 #[rstest]
 #[case::default_policy(FillTime::IfSet, ReferenceFillTime::IfSet)]
@@ -31,7 +32,7 @@ use test_util_hdf5::file;
 fn creation_requests_preserve_reference_values_and_metadata(
     #[case] fill_time: FillTime,
     #[case] reference_fill_time: ReferenceFillTime,
-    #[values(false, true)] in_place: bool,
+    #[values(CreationTarget::ExistingFile, CreationTarget::NewFile)] target: CreationTarget,
 ) {
     let directory = tempfile::tempdir().unwrap();
     let reference_path = directory.path().join("reference.h5");
@@ -68,15 +69,18 @@ fn creation_requests_preserve_reference_values_and_metadata(
             .with_fill_time(fill_time)
             .set_attr("note", AttrValue::VarLenString("prepared attribute".into()));
     };
-    if in_place {
-        std::fs::copy(&reference_path, &pure_path).unwrap();
-        let session = File::open_rw(&pure_path).unwrap();
-        session.root().create_dataset("created", configure).unwrap();
-        session.commit().unwrap();
-    } else {
-        let mut builder = FileBuilder::new();
-        configure(builder.create_dataset("created"));
-        builder.write(&pure_path).unwrap();
+    match target {
+        CreationTarget::ExistingFile => {
+            std::fs::copy(&reference_path, &pure_path).unwrap();
+            let session = File::open_rw(&pure_path).unwrap();
+            session.root().create_dataset("created", configure).unwrap();
+            session.commit().unwrap();
+        }
+        CreationTarget::NewFile => {
+            let mut builder = FileBuilder::new();
+            configure(builder.create_dataset("created"));
+            builder.write(&pure_path).unwrap();
+        }
     }
     {
         let reference = hdf5::File::open(&reference_path).unwrap();
@@ -146,6 +150,12 @@ fn creation_requests_preserve_reference_values_and_metadata(
     )]);
     assert_eq!(expected.attrs().unwrap(), attributes);
     assert_eq!(actual.attrs().unwrap(), attributes);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CreationTarget {
+    ExistingFile,
+    NewFile,
 }
 
 /// Read a dataset's typed fill value back through libhdf5.
@@ -362,7 +372,7 @@ fn pure_reads_c_written_dense_edge_chunks(
     #[case] shape: &[usize],
     #[case] chunks: &[usize],
     #[values(false, true)] filtered: bool,
-    #[values(false, true)] streaming: bool,
+    #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
 ) {
     let path = test_util::temp::temp_path("dense_edges.h5");
     let expected: Vec<i32> = (0..i32::try_from(shape.iter().product::<usize>()).unwrap()).collect();
@@ -377,11 +387,7 @@ fn pure_reads_c_written_dense_edge_chunks(
         let dataset = builder.create("d").unwrap();
         dataset.write_raw(&expected).unwrap();
     }
-    let file = if streaming {
-        File::open_streaming(&path).unwrap()
-    } else {
-        File::open(&path).unwrap()
-    };
+    let file = backend.open(&path).unwrap();
     let dataset = file.dataset("d").unwrap();
     assert_eq!(
         dataset.chunk_shape().unwrap(),
