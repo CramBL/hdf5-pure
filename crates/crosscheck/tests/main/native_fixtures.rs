@@ -1,11 +1,7 @@
-//! Fresh native fixtures and retained files under `tests/data/c/`.
+//! Fresh reference-library files across reader backends.
 //!
-//! Fresh tests check current constructor output across reader backends. Tests of retained
-//! files check the same contents and storage expectations.
-//! Constructors are supplied by [`test_util_hdf5::native_fixtures`].
-//!
-//! `just test-data::c` sets `HDF5_PURE_UPDATE_TEST_DATA` to rewrite the committed copies
-//! through the bundled reference library. Without that variable, tests read the existing copies.
+//! Constructors from [`test_util_hdf5::native_fixtures`] write to owned temporary
+//! paths. Tests check native observations, decoded contents, and storage premises.
 #![cfg(feature = "__hdf5-1.10")]
 
 use rstest::rstest;
