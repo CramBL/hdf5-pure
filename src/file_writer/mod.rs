@@ -25,6 +25,7 @@ use hdf5_pure_format::__private::DenseLinkPlan;
 use hdf5_pure_format::__private::DenseLinkPlanError;
 #[cfg(test)]
 use hdf5_pure_format::__private::FractalHeapHeader;
+#[cfg(test)]
 use hdf5_pure_format::__private::FreeSection;
 use hdf5_pure_format::__private::GroupLinkStorage;
 use hdf5_pure_format::__private::LayoutVersion;
@@ -32,8 +33,6 @@ use hdf5_pure_format::__private::LinkStorageError;
 use hdf5_pure_format::__private::ManagedHeapPlanError;
 use hdf5_pure_format::__private::OwnedLink;
 use hdf5_pure_format::__private::PreparedDenseAttrs;
-use hdf5_pure_format::__private::SECTION_CLASS_LARGE;
-use hdf5_pure_format::__private::SECTION_CLASS_SMALL;
 use hdf5_pure_space::__private::AllocationClass;
 
 use self::preparation::{DsData, PreparedAttributes, PreparedDataset, VlPatch};
@@ -68,9 +67,9 @@ use crate::file_emission::Reservation;
 use crate::file_space_info;
 use crate::file_space_info::DEFAULT_THRESHOLD;
 use crate::file_space_info::FileSpaceInfo;
+#[cfg(test)]
 use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::FileSpaceStrategy;
-use crate::file_space_info::NUM_FILE_FSM_MANAGERS;
 use crate::free_space_manager;
 use crate::libver::LibVer;
 use crate::link_info::LinkInfoMessage;
@@ -94,6 +93,12 @@ pub use crate::type_builders::AttrValue;
 
 use crate::datatype::{CharacterSet, Datatype};
 
+#[cfg(all(
+    test,
+    feature = "std",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod allocation_tests;
 mod layout;
 mod preparation;
 
@@ -1423,67 +1428,16 @@ impl FileWriter {
         let mut early_gcol: Vec<usize> = Vec::new();
         let mut paged_collection_addresses = Vec::new();
         let mut aggregate_collection_addresses = Vec::new();
-        let mut collection_meta_sections = Vec::new();
-        let mut collection_raw_sections = Vec::new();
-        let mut collection_large_sections = Vec::new();
+        let mut collection_sections = layout::CollectionSections::default();
         let early_gcol_size = if let Some((page_size, _, _)) = paged {
-            let has_collections = vl_root.iter().any(|patch| !patch.collections.is_empty())
-                || grp_vl
-                    .iter()
-                    .flatten()
-                    .any(|patch| !patch.collections.is_empty())
-                || ds_vl
-                    .iter()
-                    .flatten()
-                    .any(|patch| !patch.collections.is_empty())
-                || all_ds.iter().any(|dataset| {
-                    dataset.storage.chunks().is_none()
-                        && dataset
-                            .storage
-                            .vl_string_staging()
-                            .is_some_and(|staging| !staging.collections.is_empty())
-                });
-            let mut cursor = SUPERBLOCK_SIZE as u64;
-            if has_collections {
-                let start = free_space_manager::align_up(cursor, page_size);
-                if start > cursor {
-                    collection_meta_sections.push(FreeSection {
-                        addr: StoredAddress::new(cursor),
-                        size: start - cursor,
-                    });
-                }
-                cursor = start;
-            }
+            let mut placements = layout::PagedCollections::new(SUPERBLOCK_SIZE as u64, page_size);
             let mut place = |collections: &[Vec<u8>]| -> Result<Vec<u64>, FormatError> {
                 collections.iter().try_fold(
                     Vec::with_capacity(collections.len()),
                     |mut addrs, collection| {
-                        let addr = cursor;
-                        let len = collection.len() as u64;
-                        let end = cursor.checked_add(len).ok_or(FormatError::OffsetOverflow {
-                            offset: cursor,
-                            length: len,
-                        })?;
-                        let padding = (page_size.get() - end % page_size.get()) % page_size.get();
-                        cursor = end
-                            .checked_add(padding)
-                            .ok_or(FormatError::OffsetOverflow {
-                                offset: end,
-                                length: padding,
-                            })?;
-                        paged_collection_addresses.push(addr);
-                        if cursor > end {
-                            let section = FreeSection {
-                                addr: StoredAddress::new(end),
-                                size: cursor - end,
-                            };
-                            if len >= page_size.get() {
-                                collection_large_sections.push(section);
-                            } else {
-                                collection_raw_sections.push(section);
-                            }
-                        }
-                        addrs.push(addr);
+                        let placed = placements.reserve(collection.len() as u64)?;
+                        paged_collection_addresses.push(placed.address.get());
+                        addrs.push(placed.address.get());
                         Ok(addrs)
                     },
                 )
@@ -1525,7 +1479,8 @@ impl FileWriter {
                     early_gcol.push(i);
                 }
             }
-            cursor - SUPERBLOCK_SIZE as u64
+            collection_sections = placements.sections;
+            placements.end - SUPERBLOCK_SIZE as u64
         } else {
             for i in 0..all_ds.len() {
                 if !is_chunked[i] || all_ds[i].storage.chunks().is_some() {
@@ -1795,31 +1750,44 @@ impl FileWriter {
         if paged.is_some() {
             allocation = FileAllocation::new(SUPERBLOCK_SIZE as u64 + early_gcol_size, false, None);
         }
-        let root_group_addr = allocation.reserve(root_oh_size as u64, AllocationClass::Metadata)?;
-
-        // Reserve dense storage from its retained geometry. Resolve deferred references and
-        // payloads before serializing the prepared messages into those reservations.
-        let reserve = |allocation: &mut FileAllocation, plan: Option<PreparedDenseAttrs>| {
-            plan.map(|plan| {
-                allocation
-                    .reserve(plan.blob_len(), AllocationClass::Metadata)
-                    .map(|addr| (addr, plan))
-            })
-            .transpose()
+        let reserve = |allocation: &mut FileAllocation,
+                       header: u64,
+                       dense: Option<PreparedDenseAttrs>,
+                       links: Option<usize>|
+         -> Result<_, FormatError> {
+            let layout::ObjectAllocation {
+                header,
+                attributes,
+                links: placed_links,
+            } = layout::ObjectMeasure {
+                header,
+                attributes: dense.as_ref().map(PreparedDenseAttrs::blob_len),
+                links: links.map(|len| len as u64),
+            }
+            .reserve(allocation)?;
+            let attributes = match (attributes, dense) {
+                (Some(span), Some(plan)) => Some((span.address, plan)),
+                (None, None) => None,
+                _ => {
+                    return Err(FormatError::Internal(
+                        "dense attribute placement is absent".into(),
+                    ));
+                }
+            };
+            let links = placed_links
+                .map(|layout::Allocation { address, length }| {
+                    length.to_usize().map(|length| (address, length))
+                })
+                .transpose()?;
+            Ok((header.address, attributes, links))
         };
-
-        let root_dense_span = reserve(&mut allocation, root_dense_plan)?;
-        let reserve_links = |allocation: &mut FileAllocation, len: Option<usize>| {
-            len.map(|len| {
-                allocation
-                    .reserve(len as u64, AllocationClass::Metadata)
-                    .map(|addr| (addr, len))
-            })
-            .transpose()
-        };
-        let root_link_span = reserve_links(&mut allocation, root_link_len)?;
+        let (root_group_addr, root_dense_span, root_link_span) = reserve(
+            &mut allocation,
+            root_oh_size as u64,
+            root_dense_plan,
+            root_link_len,
+        )?;
         let mut group_link_spans = Vec::with_capacity(groups.len());
-
         let mut group_dense_spans = Vec::with_capacity(groups.len());
         let group_addrs2: Vec<StoredAddress> = group_oh_sizes
             .iter()
@@ -1827,35 +1795,37 @@ impl FileWriter {
             .enumerate()
             .try_fold(
                 Vec::with_capacity(group_oh_sizes.len()),
-                |mut addrs, (gi, (&sz, plan))| {
-                    let addr = allocation.reserve(sz as u64, AllocationClass::Metadata)?;
-                    group_dense_spans.push(reserve(&mut allocation, plan)?);
-                    group_link_spans.push(reserve_links(&mut allocation, group_link_lens[gi])?);
-                    addrs.push(addr);
+                |mut addrs, (gi, (&size, dense))| {
+                    let (address, attributes, links) =
+                        reserve(&mut allocation, size as u64, dense, group_link_lens[gi])?;
+                    group_dense_spans.push(attributes);
+                    group_link_spans.push(links);
+                    addrs.push(address);
                     Ok::<_, FormatError>(addrs)
                 },
             )?;
-
-        // Committed datatype headers. Placed with the other metadata so a paged
-        // file keeps them in its metadata region, and before the datasets that
-        // reference them only because the cursor has to run in some order —
-        // nothing here depends on the relative placement.
         let committed_addrs: Vec<StoredAddress> = committed_oh.iter().try_fold(
             Vec::with_capacity(committed_oh.len()),
-            |mut addrs, oh| {
-                addrs.push(allocation.reserve(oh.len() as u64, AllocationClass::Metadata)?);
+            |mut addrs, header| {
+                let placed = layout::ObjectMeasure {
+                    header: header.len() as u64,
+                    attributes: None,
+                    links: None,
+                }
+                .reserve(&mut allocation)?;
+                addrs.push(placed.header.address);
                 Ok::<_, FormatError>(addrs)
             },
         )?;
-
         let mut ds_dense_spans = Vec::with_capacity(all_ds.len());
         let ds_oh_addrs2: Vec<StoredAddress> =
             actual_ds_oh_sizes.iter().zip(ds_dense_plans).try_fold(
                 Vec::with_capacity(actual_ds_oh_sizes.len()),
-                |mut addrs, (&sz, plan)| {
-                    let addr = allocation.reserve(sz as u64, AllocationClass::Metadata)?;
-                    ds_dense_spans.push(reserve(&mut allocation, plan)?);
-                    addrs.push(addr);
+                |mut addrs, (&size, dense)| {
+                    let (address, attributes, _) =
+                        reserve(&mut allocation, size as u64, dense, None)?;
+                    ds_dense_spans.push(attributes);
+                    addrs.push(address);
                     Ok::<_, FormatError>(addrs)
                 },
             )?;
@@ -2072,8 +2042,6 @@ impl FileWriter {
         // physical file reaches the page-aligned end-of-allocation.
         if let Some((page_size, persist_paged, fs_threshold)) = paged {
             let base = BaseAddress::new(ub as u64);
-            let mut meta = allocation.end(); // metadata cursor, base-relative
-
             let (
                 _,
                 DenseBlobs {
@@ -2082,226 +2050,77 @@ impl FileWriter {
                     datasets: ds_dense_blobs,
                 },
             ) = dense_reservations.build(&root_attrs, &groups, &all_ds)?;
-
-            // (b) Superblock extension (File Space Info) in the metadata region.
-            let ext_addr = meta;
-            let ext_len = ext_oh.as_ref().map_or(0, |b| b.len()) as u64;
-            meta += ext_len;
-            let meta_content_end = meta;
-
-            // (c) Classify each dataset's data region by length. Contiguous empty
-            // data is unallocated (undefined address); a chunked region always
-            // has index bytes, so it is never "empty".
-            let mut empty_indices: Vec<usize> = Vec::new();
-            let mut small_indices: Vec<usize> = Vec::new();
-            let mut large_indices: Vec<usize> = Vec::new();
-            for i in 0..all_ds.len() {
-                let len = ds_data_lens[i];
-                if !is_chunked[i] && len == 0 {
-                    empty_indices.push(i);
-                } else if len < page_size.get() {
-                    small_indices.push(i);
-                } else {
-                    large_indices.push(i);
-                }
-            }
-            let small_raw_total: u64 = small_indices.iter().map(|&i| ds_data_lens[i]).sum();
-            let mut large_frag_sizes: Vec<u64> = large_indices
+            let measurements = ds_data_lens
                 .iter()
-                .map(|&i| {
-                    free_space_manager::align_up(ds_data_lens[i], page_size) - ds_data_lens[i]
-                })
-                .filter(|&f| f > 0)
-                .collect();
-
-            large_frag_sizes.extend(collection_large_sections.iter().map(|section| section.size));
-
-            // (d) Which per-page-type managers are active, and place their
-            // FSHD/FSSE blocks in the metadata region (persisting only). Block
-            // lengths depend only on section counts (fixed field widths), so the
-            // page tails are computed in a single forward pass with no iteration.
-            let draw_active = !collection_raw_sections.is_empty()
-                || (small_raw_total > 0
-                    && free_space_manager::align_up(small_raw_total, page_size) != small_raw_total);
-            let large_active = !large_frag_sizes.is_empty();
-            let mut slots = [u64::MAX; NUM_FILE_FSM_MANAGERS];
-            let mut super_fsm: Option<(StoredAddress, StoredAddress, u64)> = None;
-            let mut draw_fsm: Option<(StoredAddress, StoredAddress)> = None;
-            let mut large_fsm: Option<(StoredAddress, StoredAddress)> = None;
-            let mut draw_sizes: Vec<_> = collection_raw_sections
-                .iter()
-                .map(|section| section.size)
-                .collect();
-            draw_sizes.push(0);
-            let draw_block_len = if draw_active {
-                hdf5_pure_format::__private::free_space_manager_header_len(WIDTHS)
-                    + hdf5_pure_format::__private::section_info_len(WIDTHS, &draw_sizes)
-            } else {
-                0
-            };
-            let large_block_len = if large_active {
-                hdf5_pure_format::__private::free_space_manager_header_len(WIDTHS)
-                    + hdf5_pure_format::__private::section_info_len(WIDTHS, &large_frag_sizes)
-            } else {
-                0
-            };
-            let super_allocation = if persist_paged {
-                layout::paged_metadata_section_allocation(
-                    page_size,
-                    meta_content_end,
-                    [draw_block_len, large_block_len],
-                    &collection_meta_sections,
-                )?
-            } else {
-                None
-            };
-            if persist_paged {
-                if let Some(allocated) = super_allocation {
-                    let fshd_addr = StoredAddress::new(meta);
-                    meta += hdf5_pure_format::__private::free_space_manager_header_len(WIDTHS);
-                    let fsse_addr = StoredAddress::new(meta);
-                    meta += allocated;
-                    slots[0] = fshd_addr.get();
-                    super_fsm = Some((fshd_addr, fsse_addr, allocated));
-                }
-                if draw_active {
-                    let fshd_addr = StoredAddress::new(meta);
-                    meta += hdf5_pure_format::__private::free_space_manager_header_len(WIDTHS);
-                    let fsse_addr = StoredAddress::new(meta);
-                    meta += hdf5_pure_format::__private::section_info_len(WIDTHS, &draw_sizes);
-                    slots[2] = fshd_addr.get();
-                    draw_fsm = Some((fshd_addr, fsse_addr));
-                }
-                if large_active {
-                    let fshd_addr = StoredAddress::new(meta);
-                    meta += hdf5_pure_format::__private::free_space_manager_header_len(WIDTHS);
-                    let fsse_addr = StoredAddress::new(meta);
-                    meta +=
-                        hdf5_pure_format::__private::section_info_len(WIDTHS, &large_frag_sizes);
-                    slots[6] = fshd_addr.get();
-                    large_fsm = Some((fshd_addr, fsse_addr));
-                }
-            }
-            let meta_end = meta;
-
-            // (e) The raw-data region starts on a fresh page boundary. The
-            // metadata page tail is the SUPER section (when active).
-            let raw_start = free_space_manager::align_up(meta_end, page_size);
-            if raw_start > meta_end {
-                collection_meta_sections.push(FreeSection {
-                    addr: StoredAddress::new(meta_end),
-                    size: raw_start - meta_end,
+                .zip(&is_chunked)
+                .map(|(&length, &chunked)| {
+                    let kind = if chunked {
+                        layout::DataKind::Chunked
+                    } else {
+                        layout::DataKind::Contiguous
+                    };
+                    layout::DataMeasure::new(length, kind)
                 });
-            }
+            let layout::PagedLayout {
+                extension:
+                    layout::Allocation {
+                        address: extension_address,
+                        length: ext_len,
+                    },
+                data: ds_layouts,
+                small: small_indices,
+                large: large_indices,
+                slots,
+                managers,
+                metadata_end: meta_end,
+                raw_start,
+                small_end: small_raw_end,
+                end: eoa_pre_fsm,
+            } = layout::PagedLayout::new(
+                page_size,
+                persist_paged,
+                allocation.end(),
+                ext_oh.as_ref().map_or(0, |bytes| bytes.len() as u64),
+                measurements,
+                collection_sections,
+                |i, placed: Option<layout::Allocation>| {
+                    let dataset = &mut all_ds[i];
+                    let address = placed.map_or(
+                        UNDEF_ADDRESS,
+                        |layout::Allocation { address, length: _ }| address,
+                    );
+                    if is_chunked[i] {
+                        let built = dataset.build_chunked(address, chunk_sets[i].as_ref())?;
+                        if built.data.len() != ds_data_lens[i] {
+                            return Err(FormatError::Internal(
+                                "chunk data differs from its allocation".into(),
+                            ));
+                        }
+                        Ok(DsLayout {
+                            data: built.data,
+                            data_addr: address,
+                            chunked_msgs: Some((built.layout_message, built.pipeline_message)),
+                        })
+                    } else {
+                        Ok(DsLayout {
+                            data: dataset.contiguous_data(),
+                            data_addr: address,
+                            chunked_msgs: None,
+                        })
+                    }
+                },
+            )?;
+            let ext_addr = extension_address.get();
+            let small_raw_total = small_raw_end - raw_start;
+            let eof_addr2 = base.absolute(StoredAddress::new(eoa_pre_fsm))?;
 
-            // (f) Build the raw data. Small blocks pack; the region is padded to
-            // a page boundary (DRAW tail). Each large block starts a fresh page
-            // run and its sub-page remainder becomes a generic-large section.
-            let mut layouts: Vec<Option<DsLayout<'_>>> = (0..all_ds.len()).map(|_| None).collect();
-            for &i in &empty_indices {
-                layouts[i] = Some(DsLayout {
-                    data: all_ds[i].contiguous_data(),
-                    data_addr: UNDEF_ADDRESS,
-                    chunked_msgs: None,
-                });
-            }
-            let mut c = raw_start;
-            for &i in &small_indices {
-                let base_addr = StoredAddress::new(c);
-                let layout = if is_chunked[i] {
-                    let built = all_ds[i].build_chunked(base_addr, chunk_sets[i].as_ref())?;
-                    // The small/large classification and the free-space-manager
-                    // sizing used the sizing-pass length (`ds_data_lens[i]`); the
-                    // real build must match it, or the reserved manager space and
-                    // the emitted layout would diverge (chunk-index byte length is
-                    // base-address independent, so this always holds).
-                    debug_assert_eq!(built.data.len(), ds_data_lens[i]);
-                    c += built.data.len();
-                    DsLayout {
-                        data: built.data,
-                        data_addr: base_addr,
-                        chunked_msgs: Some((built.layout_message, built.pipeline_message)),
-                    }
-                } else {
-                    let data = all_ds[i].contiguous_data();
-                    c += data.len();
-                    DsLayout {
-                        data,
-                        data_addr: base_addr,
-                        chunked_msgs: None,
-                    }
-                };
-                layouts[i] = Some(layout);
-            }
-            let small_raw_end = c;
-            let draw_section = if small_raw_total > 0
-                && free_space_manager::align_up(small_raw_total, page_size) != small_raw_total
-            {
-                let padded = free_space_manager::align_up(small_raw_end, page_size);
-                c = padded;
-                Some(FreeSection {
-                    addr: StoredAddress::new(small_raw_end),
-                    size: padded - small_raw_end,
-                })
-            } else {
-                if small_raw_total > 0 {
-                    c = free_space_manager::align_up(small_raw_end, page_size);
-                }
-                None
-            };
-            let mut large_sections = collection_large_sections;
-            for &i in &large_indices {
-                c = free_space_manager::align_up(c, page_size);
-                let data_addr = StoredAddress::new(c);
-                let built_len;
-                let layout = if is_chunked[i] {
-                    let built = all_ds[i].build_chunked(data_addr, chunk_sets[i].as_ref())?;
-                    // See the small-run note: the real build length must equal the
-                    // sizing-pass length the large classification/fragment used.
-                    debug_assert_eq!(built.data.len(), ds_data_lens[i]);
-                    built_len = built.data.len();
-                    DsLayout {
-                        data: built.data,
-                        data_addr,
-                        chunked_msgs: Some((built.layout_message, built.pipeline_message)),
-                    }
-                } else {
-                    let data = all_ds[i].contiguous_data();
-                    built_len = data.len();
-                    DsLayout {
-                        data,
-                        data_addr,
-                        chunked_msgs: None,
-                    }
-                };
-                layouts[i] = Some(layout);
-                let data_end = data_addr.get() + built_len;
-                let frag = free_space_manager::align_up(data_end, page_size) - data_end;
-                if frag > 0 {
-                    large_sections.push(FreeSection {
-                        addr: StoredAddress::new(data_end),
-                        size: frag,
-                    });
-                }
-                c = free_space_manager::align_up(data_end, page_size);
-            }
-            let eoa_rel = c; // already page-aligned
-            let eof_addr2 = base.absolute(StoredAddress::new(eoa_rel))?;
-            let eoa_pre_fsm = eoa_rel;
-
-            let ds_layouts: Vec<DsLayout<'_>> = layouts
-                .into_iter()
-                .map(|layout| layout.expect("every dataset placed"))
-                .collect();
-
-            // (h) Build dataset OHs from the final data addresses.
             let ds_oh_bytes = build_ds_ohs(&all_ds, &ds_layouts, &ds_dense_blobs, libver)?;
             debug_assert_eq!(
                 ds_oh_bytes.iter().map(|b| b.len()).collect::<Vec<_>>(),
                 actual_ds_oh_sizes
             );
 
-            // (i) Rebuild the real superblock-extension header. For persisting
+            // Rebuild the superblock-extension header. For persisting
             // files this replaces the placeholder (empty-manager) message with
             // the per-page-type manager addresses; its length is unchanged.
             let real_ext_oh = if persist_paged {
@@ -2326,49 +2145,6 @@ impl FileWriter {
             };
             debug_assert_eq!(real_ext_oh.len() as u64, ext_len);
 
-            collection_raw_sections.extend(draw_section);
-
-            // (j) Serialize the free-space-manager blocks.
-            let super_blocks = super_fsm
-                .map(|(fshd_addr, fsse_addr, allocated)| {
-                    hdf5_pure_format::__private::serialize_free_space_manager_with_allocation(
-                        WIDTHS,
-                        &collection_meta_sections,
-                        fshd_addr,
-                        fsse_addr,
-                        SECTION_CLASS_SMALL,
-                        Some(allocated),
-                    )
-                })
-                .transpose()?;
-            let draw_blocks = draw_fsm
-                .map(|(fshd_addr, fsse_addr)| {
-                    hdf5_pure_format::__private::serialize_free_space_manager_with_allocation(
-                        WIDTHS,
-                        &collection_raw_sections,
-                        fshd_addr,
-                        fsse_addr,
-                        SECTION_CLASS_SMALL,
-                        Some(hdf5_pure_format::__private::section_info_len(
-                            WIDTHS,
-                            &draw_sizes,
-                        )),
-                    )
-                })
-                .transpose()?;
-            let large_blocks = large_fsm
-                .map(|(fshd_addr, fsse_addr)| {
-                    hdf5_pure_format::__private::serialize_free_space_manager(
-                        WIDTHS,
-                        &large_sections,
-                        fshd_addr,
-                        fsse_addr,
-                        SECTION_CLASS_LARGE,
-                    )
-                })
-                .transpose()?;
-
-            // (k) Emit, address-ascending, zero-filling every alignment gap.
             sink.reserve(eof_addr2)?;
             Self::put_userblock(sink, ub, &self.userblock_content)?;
             let sb = SuperblockFields {
@@ -2489,12 +2265,10 @@ impl FileWriter {
             debug_assert_eq!(sink.position(), base.get() + ext_addr);
             sink.put(&real_ext_oh).map_err(EmissionError::Sink)?;
             // Free-space-manager blocks (SUPER, DRAW, generic-large), ascending.
-            for blocks in [&super_blocks, &draw_blocks, &large_blocks]
-                .into_iter()
-                .flatten()
-            {
-                sink.put(&blocks.0).map_err(EmissionError::Sink)?;
-                sink.put(&blocks.1).map_err(EmissionError::Sink)?;
+            for manager in managers.iter().flatten() {
+                sink.put(&manager.header).map_err(EmissionError::Sink)?;
+                sink.put(&manager.section_list)
+                    .map_err(EmissionError::Sink)?;
             }
             debug_assert_eq!(sink.position(), base.get() + meta_end);
 
@@ -2535,7 +2309,12 @@ impl FileWriter {
         let mut ds_layouts: Vec<DsLayout<'_>> = Vec::new();
         for (i, d) in all_ds.iter_mut().enumerate() {
             if is_chunked[i] {
-                let data_address = allocation.reserve(ds_data_lens[i], AllocationClass::Raw)?;
+                let span = layout::DataMeasure::new(ds_data_lens[i], layout::DataKind::Chunked)
+                    .reserve(&mut allocation)?
+                    .ok_or_else(|| {
+                        FormatError::Internal("chunk data allocation is absent".into())
+                    })?;
+                let data_address = span.address;
                 let built = d.build_chunked(data_address, chunk_sets[i].as_ref())?;
                 if built.data.len() != ds_data_lens[i] {
                     return Err(FormatError::Internal(
@@ -2550,11 +2329,9 @@ impl FileWriter {
                 });
             } else {
                 let data = d.contiguous_data();
-                let addr = if data.len() == 0 {
-                    UNDEF_ADDRESS
-                } else {
-                    allocation.reserve(data.len(), AllocationClass::Raw)?
-                };
+                let addr = layout::DataMeasure::new(data.len(), layout::DataKind::Contiguous)
+                    .reserve(&mut allocation)?
+                    .map_or(UNDEF_ADDRESS, |span| span.address);
                 ds_layouts.push(DsLayout {
                     data,
                     data_addr: addr,
@@ -2666,17 +2443,16 @@ impl FileWriter {
         // Reserve the superblock extension as metadata after reserving the global heaps.
         // Its stored address can lie in an earlier aggregate window.
         let ext_len = ext_oh.as_ref().map_or(0, |bytes| bytes.len());
-        let ext_addr = ext_oh
-            .as_ref()
-            .map(|bytes| allocation.reserve(bytes.len() as u64, AllocationClass::Metadata))
-            .transpose()?;
-        let ext_addr = ext_addr.map(StoredAddress::get);
-
-        let (cursor2, manager) = if nonpaged_persist.is_some() {
-            allocation.finish_persisted(WIDTHS)?
-        } else {
-            (allocation.finish()?, None)
-        };
+        let layout::ClassicLayout {
+            extension,
+            end: cursor2,
+            manager,
+        } = layout::ClassicLayout::finish(
+            allocation,
+            ext_oh.as_ref().map(|bytes| bytes.len() as u64),
+            nonpaged_persist.is_some(),
+        )?;
+        let ext_addr = extension.map(|layout::Allocation { address, length: _ }| address.get());
 
         // eof_address is absolute file size (includes userblock + GCOLs + ext)
         let eof_addr2 = (ub as u64)
