@@ -9316,9 +9316,7 @@ mod tests {
     /// group in every file written before the 1.8 format.
     #[test]
     fn a_symbol_table_group_still_opens_by_name() {
-        let file =
-            File::from_bytes(include_bytes!("../tests/data/unattributed/two_groups.h5").to_vec())
-                .unwrap();
+        let file = File::from_bytes(test_util::legacy::two_groups()).unwrap();
 
         // Names, not a count: this file holds two one-child groups, so a lookup
         // that classified correctly and then took its sibling's address would

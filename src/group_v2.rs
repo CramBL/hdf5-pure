@@ -1712,7 +1712,8 @@ mod tests {
     #[test]
     fn integration_resolve_path_any_v1() {
         // Test that resolve_path_any also works for v1 files
-        let file_data: &[u8] = include_bytes!("../tests/data/unattributed/two_groups.h5");
+        let bytes = test_util::legacy::two_groups();
+        let file_data = bytes.as_slice();
         let sb = crate::superblock::read(file_data).unwrap().superblock;
 
         let addr = resolve_path_any(

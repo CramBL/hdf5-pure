@@ -822,7 +822,8 @@ mod tests {
 
     #[test]
     fn integration_simple_dataset_full_traversal() {
-        let file_data: &[u8] = include_bytes!("../tests/data/unattributed/simple_dataset.h5");
+        let bytes = test_util::legacy::simple_dataset();
+        let file_data = bytes.as_slice();
         let sb = crate::superblock::read(file_data).unwrap().superblock;
         let root_sym = get_root_sym_table(file_data, &sb);
 

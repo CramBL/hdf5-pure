@@ -70,6 +70,7 @@ mod group_link_inspection;
 mod hdf5;
 mod hdf5_release_feature;
 mod layout_introspection;
+mod legacy;
 mod libver_matrix;
 mod libver_output;
 mod link_storage;

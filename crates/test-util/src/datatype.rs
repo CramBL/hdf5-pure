@@ -13,7 +13,12 @@ pub fn header(class: Class, version: u8, bit_fields: [u8; 3], size: u32) -> Vec<
 /// A little-endian IEEE 754 double, laid out as the reference library writes
 /// one.
 pub fn f64_le() -> Vec<u8> {
-    let mut datatype = header(Class::FLOATING_POINT, 1, IEEE754_BINARY64_CLASS_FIELDS, 8);
+    let mut datatype = header(
+        Class::FLOATING_POINT,
+        DATATYPE_VERSION,
+        IEEE754_BINARY64_CLASS_FIELDS,
+        8,
+    );
     // Bit offset(2) and bit precision(2), then the exponent's location and
     // size, the mantissa's, and the exponent bias.
     datatype.extend_from_slice(&0u16.to_le_bytes());
@@ -25,7 +30,7 @@ pub fn f64_le() -> Vec<u8> {
 
 /// A fixed-length string of `size` bytes, null-padded and ASCII.
 pub fn fixed_string(size: u32) -> Vec<u8> {
-    header(Class::STRING, 1, [0x01, 0, 0], size)
+    header(Class::STRING, DATATYPE_VERSION, [0x01, 0, 0], size)
 }
 
 /// A reference to a committed datatype, which stands where an encoding
@@ -60,6 +65,9 @@ const SHARED_MESSAGE_VERSION: u8 = 2;
 
 /// The shared message type whose location is an object header.
 const COMMITTED: u8 = 2;
+
+// Section `subsubsec_fmt4_dataobject_hdr_msg_dtmessage`, version 4.0.
+const DATATYPE_VERSION: u8 = 1;
 
 /// The class bit fields for little-endian IEEE 754 binary64.
 ///

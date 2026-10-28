@@ -58,6 +58,7 @@ mod fixed_strings;
 mod fuzz_regressions;
 mod generic_element;
 mod layout_introspection;
+mod legacy;
 mod lzf_roundtrip;
 mod mat_builder;
 mod mat_cell_read;

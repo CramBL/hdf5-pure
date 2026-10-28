@@ -314,9 +314,6 @@ fn child_path(parent: &str, name: &str) -> String {
 fn streaming_matches_buffered_groups_and_attributes_across_fixtures() {
     // (fixture, expected total attributes across the whole walk)
     let cases = [
-        ("two_groups.h5", 0),        // v1 groups, no attributes
-        ("nested_groups.h5", 0),     // nested v1 groups
-        ("simple_dataset.h5", 0),    // v1 root group + dataset
         ("attrs.h5", 4),             // v1 groups + compact attrs (root + dataset)
         ("mixed_attrs.h5", 3),       // v1 subgroup + scalar/array compact attrs
         ("vl_strings.h5", 1),        // v1 root + VL-string attr (global heap)

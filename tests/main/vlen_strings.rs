@@ -87,11 +87,14 @@ fn vlen_specific_apis_reject_non_vlen_datasets() {
     let datatype = dataset.datatype().unwrap();
     assert!(matches!(datatype, hdf5_pure::Datatype::VariableLength(_)));
 
-    let numeric = File::open(test_util::data("unattributed/simple_dataset.h5")).unwrap();
+    let numeric = File::from_bytes(test_util::legacy::simple_dataset()).unwrap();
     let numeric_dataset = numeric.dataset("data").unwrap();
     assert!(matches!(
         numeric_dataset.vlen_string_payload_size(),
-        Err(Error::Format(FormatError::TypeMismatch { .. }))
+        Err(Error::Format(FormatError::TypeMismatch {
+            expected: "VariableLength string",
+            actual: "non-VariableLength string",
+        }))
     ));
 }
 
