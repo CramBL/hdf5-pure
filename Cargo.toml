@@ -424,6 +424,12 @@ required-features = ["std"]
 name = "hot_paths"
 harness = false
 
+# Measure metadata-cache hit throughput across cache sizes.
+[[bench]]
+name = "metadata_cache"
+harness = false
+required-features = ["std"]
+
 [[bench]]
 name = "chunk_index"
 harness = false
