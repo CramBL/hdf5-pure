@@ -461,7 +461,7 @@ enum ManagerDamage {
 }
 
 #[derive(Clone, Copy)]
-enum PersistentStrategy {
+pub(super) enum PersistentStrategy {
     Flat,
     Page,
 }
@@ -477,7 +477,7 @@ impl PersistentStrategy {
     }
 }
 
-fn fixture(path: &Path, strategy: PersistentStrategy) -> (u64, u64) {
+pub(super) fn fixture(path: &Path, strategy: PersistentStrategy) -> (u64, u64) {
     let mut builder = FileBuilder::new();
     builder.with_file_space_settings(strategy.settings());
     builder
@@ -526,7 +526,7 @@ fn fixture(path: &Path, strategy: PersistentStrategy) -> (u64, u64) {
     hole
 }
 
-fn open(path: &Path, backing: MemoryStrategy, policy: SyncPolicy) -> WriteEngine {
+pub(super) fn open(path: &Path, backing: MemoryStrategy, policy: SyncPolicy) -> WriteEngine {
     let mut engine = WriteEngine::open_rw_with_strategy(
         path,
         MetadataCacheConfig::disabled(),

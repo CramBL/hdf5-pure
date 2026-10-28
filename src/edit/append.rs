@@ -307,7 +307,8 @@ impl WriteEngine {
     /// bytes, an unsupported target, or conflicting staged edits. Returns
     /// [`Error::SwmrAppendUnsupported`] for filtered or unaligned SWMR appends. Returns metadata,
     /// allocation, encoding, and I/O errors.
-    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier append outcome is uncertain.
+    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier editing outcome
+    /// is uncertain.
     pub(crate) fn append_inplace_gathered(
         &mut self,
         target: AppendTarget<'_>,
@@ -844,7 +845,7 @@ impl Store for EditStore<'_> {
         self.engine.context.allocations.before_reference()?;
         let result = self.engine.image.write_at(offset, bytes);
         if result.is_err() {
-            self.engine.context.allocations.make_uncertain();
+            self.engine.make_allocation_uncertain();
         }
         result
     }
@@ -856,7 +857,7 @@ impl Store for EditStore<'_> {
             SyncPolicy::OnClose => self.engine.image.flush(),
         };
         if result.is_err() {
-            self.engine.context.allocations.make_uncertain();
+            self.engine.make_allocation_uncertain();
         }
         result
     }

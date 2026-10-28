@@ -595,9 +595,10 @@ Three things are given up, and they are worth separating:
 ### Why the last one is not optional
 
 [`File::sync()`](crate::File::sync) issues pending writes and synchronizes file content and metadata
-to durable storage under every synchronization policy. If an earlier append outcome is uncertain,
-synchronization returns [`Error::AllocationPublicationUncertain`](crate::Error::AllocationPublicationUncertain)
-without issuing further writes. Further appends and commits return the same error. Close and reopen
+to durable storage under every synchronization policy. After an unconfirmed editing operation,
+the editor can reject appends, commits, or synchronization with
+[`Error::AllocationPublicationUncertain`](crate::Error::AllocationPublicationUncertain). The editor
+discards queued storage writes in that state, excluding them from later teardown. Close and reopen
 the file before editing again. An interrupted file can fail to reopen.
 
 New staged edits remain pending for [`commit()`](crate::File::commit), and elements held by a
@@ -608,8 +609,11 @@ In a non-persistent PAGE session, a successful sync also verifies and adopts pen
 
 Successful [`close()`](crate::File::close) applies staged edits, finalizes free-space managers, and
 synchronizes the final writes under either policy. Dropping the last handle discards staged edits
-and attempts finalization and synchronization without reporting errors. After an uncertain append
-outcome, the editor rejects append, commit, and explicit synchronization requests in that session.
+and attempts finalization and synchronization without reporting errors. The editor excludes
+discarded writes from teardown in sessions rejected with
+[`Error::AllocationPublicationUncertain`](crate::Error::AllocationPublicationUncertain). In
+nonpersistent PAGE sessions, the editor verifies pending publication through its separate
+recovery path.
 
 Clearing the SWMR-write flags requires a barrier at teardown. If the clear is lost, plain
 opens return [`Error::FileMarkedInUse`](crate::Error::FileMarkedInUse) until

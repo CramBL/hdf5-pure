@@ -920,26 +920,12 @@ struct FileInner {
 }
 
 impl Drop for FileInner {
-    /// Best-effort cleanup for a writer dropped without an explicit
-    /// [`File::close`], running only when the last `Arc<FileInner>` clone drops;
-    /// a clean `close` already did this work and set `closed`, so this is
-    /// idempotent and skipped in that case.
+    /// Attempts finalization and synchronization for an unclosed editing session.
     ///
-    /// - A SWMR writer clears the superblock's SWMR-write flag (mirroring
-    ///   `File::close`).
-    /// - A read-write file that persists its free space rewrites its on-disk
-    ///   free-space managers into canonical shape (issue #173), so a
-    ///   dropped-without-`close` handle leaves the same file a clean `close`
-    ///   would, including returned aggregate spare. A
-    ///   true crash (`SIGKILL`, power loss) skips `drop` entirely; the appended
-    ///   data is still durable, under the default
-    ///   [`SyncPolicy::Always`](crate::SyncPolicy).
-    /// - An ordinary read-write file using [`FileSpaceStrategy::Aggr`] or
-    ///   [`FileSpaceStrategy::FsmAggr`] releases unused aggregate tails after publishing the shorter
-    ///   EOA with the current root. An uncertain publication prevents this cleanup.
-    ///
-    /// Staged edits are *not* committed here: dropping a handle discards them,
-    /// which is what `close` exists to distinguish.
+    /// Discards staged edits. Releases writer status flags only after successful synchronization.
+    /// For a session rejected with [`Error::AllocationPublicationUncertain`], the editor discards
+    /// queued writes and rejects cleanup. During recoverable nonpersistent PAGE publication, it
+    /// retains pending writes for verification and recovery.
     fn drop(&mut self) {
         if self.closed.load(Ordering::Acquire) {
             return;
@@ -3265,7 +3251,8 @@ impl File {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier append outcome is uncertain.
+    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier editing outcome
+    /// is uncertain.
     /// Close and reopen the file before editing again.
     /// Returns [`Error::EditUnsupported`] in a non-persistent PAGE session if publication bytes
     /// differ from the session image or expected framing after a failed write. Close and reopen
@@ -3422,10 +3409,11 @@ impl File {
     /// Issues pending writes and synchronizes file content and metadata to durable storage.
     ///
     /// Synchronization is durable under every [`SyncPolicy`], including [`SyncPolicy::OnClose`].
-    /// Writes retained after a failed operation are issued before synchronization, unless an
-    /// earlier append outcome is uncertain. New staged
-    /// edits remain pending for [`commit`](Self::commit). Elements held by a [`BufferedAppender`]
-    /// or an [`OwnedBufferedAppender`] require the appender's buffer to be flushed first.
+    /// In a session rejected with [`Error::AllocationPublicationUncertain`], the editor discards
+    /// queued storage writes and rejects synchronization. Other pending writes are issued before
+    /// synchronization. New staged edits remain pending for [`commit`](Self::commit).
+    /// Elements held by a [`BufferedAppender`] or an [`OwnedBufferedAppender`] require the
+    /// appender's buffer to be flushed first.
     /// Call [`commit`](Self::commit) first to include pending free-space manager changes from
     /// immediate tail retirement.
     ///
@@ -3446,7 +3434,8 @@ impl File {
     ///
     /// Returns [`Error::ReadOnly`] if the file has no editing session, or [`Error::FileClosed`] if
     /// it has been sealed. Returns [`Error::Io`] if writing or synchronization fails.
-    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier append outcome is uncertain.
+    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier editing outcome
+    /// is uncertain.
     /// Close and reopen the file before editing again.
     /// Returns [`Error::EditUnsupported`] if pending PAGE publication bytes differ from the
     /// accepted image or expected framing. Close and reopen the file before editing again.
@@ -3477,7 +3466,8 @@ impl File {
     /// [`Error::Io`] if writing, synchronizing, or truncating the file fails. Returns
     /// [`Error::Format`] if metadata geometry or address conversion is invalid. Errors from
     /// applying staged edits are returned as described in [`commit`](Self::commit).
-    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier append outcome is uncertain.
+    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier editing outcome
+    /// is uncertain.
     pub fn close(self) -> Result<(), Error> {
         if matches!(self.inner.backend, Backend::Edit(_)) {
             // SWMR mode stages nothing — the staged surface is refused — so there
@@ -5966,7 +5956,8 @@ impl Dataset {
     /// if the dataset or input is unsupported or conflicts with staged edits. Returns
     /// [`Error::SwmrAppendUnsupported`] for filtered or unaligned SWMR appends. Propagates
     /// metadata, allocation, encoding, and I/O errors.
-    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier append outcome is uncertain.
+    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier editing outcome
+    /// is uncertain.
     pub fn append<T: H5Element>(&mut self, data: &[T]) -> Result<(), Error> {
         self.append_with_options(AppendOptions::new(), data)
     }
@@ -6151,9 +6142,14 @@ impl Dataset {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::FileClosed`] if the appender's session is closed.
+    /// Returns [`Error::FileClosed`] if the appender's session is closed, or [`Error::ReadOnly`]
+    /// if the file has no editing session. Returns [`Error::AllocationPublicationUncertain`] if
+    /// an earlier editing outcome is uncertain, or [`FormatError::Internal`] if an allocation
+    /// batch remains provisional.
     pub(crate) fn check_appender_mutable(&self) -> Result<(), Error> {
-        self.file.check_mutable(false)
+        self.file.check_mutable(false)?;
+        self.file
+            .with_engine_mut(Change::Nothing, |engine| engine.check_append_publication())
     }
 
     /// Register a live `BufferedAppender` on this dataset with the session, so a

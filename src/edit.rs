@@ -2171,18 +2171,20 @@ impl WriteEngine {
         Ok(Some((ext_addr, info)))
     }
 
-    /// Register a live [`BufferedAppender`](crate::BufferedAppender) on `path`
-    /// (`None` for a handle reached by object reference), returning the token
-    /// that releases it.
+    /// Reserves exclusive appender access and returns its release token.
     ///
-    /// Refused when the claim could not be honored: a second appender on the
-    /// same dataset would interleave the two buffers a chunk at a time, and a
-    /// staged edit already pending on that path is one the appender's own flush
-    /// would later refuse.
+    /// `path` is [`None`] for a handle reached by object reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] if another appender or staged edit conflicts with the
+    /// claim. Returns [`Error::AllocationPublicationUncertain`] if an earlier editing outcome is
+    /// uncertain, or [`FormatError::Internal`] if an allocation batch remains provisional.
     pub(crate) fn claim_for_appender(
         &mut self,
         path: Option<&ObjectPathBuf>,
     ) -> Result<u64, Error> {
+        self.check_append_publication()?;
         if self
             .appender_claims
             .iter()

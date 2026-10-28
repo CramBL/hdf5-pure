@@ -258,11 +258,16 @@ fn root_reclamation_failure_preserves_a_readable_committed_root(
     }
     let after_failure = engine.issued_bytes();
     if engine.publication.attempted() {
-        engine.finalize_persist().unwrap();
+        assert!(matches!(
+            engine.finalize_persist(),
+            Err(Error::AllocationPublicationUncertain)
+        ));
         assert_eq!(engine.issued_bytes(), after_failure);
     }
     if references {
         assert!(!engine.proved_free_of_references);
+        drop(engine);
+        engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
         engine
             .set_dataset_attr(&ObjectPathBuf::parse("keep"), "seen", AttrValue::I64(9))
             .unwrap();
@@ -365,7 +370,10 @@ fn tail_recycling_failure_preserves_committed_manager_sections(
     if engine.publication.attempted() {
         assert!(!engine.aggregation.unwrap().publication_confirmed);
         let issued = engine.issued_bytes();
-        engine.finalize_persist().unwrap();
+        assert!(matches!(
+            engine.finalize_persist(),
+            Err(Error::AllocationPublicationUncertain)
+        ));
         assert_eq!(engine.issued_bytes(), issued);
     }
     drop(engine);
@@ -565,6 +573,10 @@ impl FileImage for FailingImage {
 
     fn flush(&mut self) -> Result<(), Error> {
         self.inner.flush()
+    }
+
+    fn discard_pending_writes(&mut self) {
+        self.inner.discard_pending_writes();
     }
 
     fn set_write_buffering(&mut self, mode: WriteBuffering) -> Result<(), Error> {

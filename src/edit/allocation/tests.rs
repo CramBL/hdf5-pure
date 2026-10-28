@@ -4,6 +4,7 @@ use rstest::rstest;
 use super::*;
 
 mod io;
+mod lifecycle;
 mod persistent;
 
 #[rstest]

@@ -240,6 +240,12 @@ pub(crate) trait FileImage: Source + Send + Sync {
     /// or representing a clean gap between pending ranges fails.
     fn flush(&mut self) -> Result<(), Error>;
 
+    /// Discards queued writes without issuing them.
+    ///
+    /// Already issued bytes and the logical image length remain unchanged. The caller establishes
+    /// whether allocator rollback or rejection of further session writes is required.
+    fn discard_pending_writes(&mut self);
+
     /// Every issued write as `(offset, length)`, in the order it went out. What
     /// a count cannot say: that a publish point followed the bytes it names.
     #[cfg(test)]
@@ -704,6 +710,12 @@ impl BufferedWrites {
         Ok(())
     }
 
+    /// Removes every queued write without changing the file or its recorded length.
+    pub(crate) fn discard_pending_writes(&mut self) {
+        self.runs.clear();
+        self.pending_bytes = 0;
+    }
+
     /// Put a run that could not be issued back in the map, pending again.
     fn restore(&mut self, start: u64, bytes: Vec<u8>) {
         self.pending_bytes += bytes.len();
@@ -792,10 +804,10 @@ impl BufferedWrites {
 }
 
 impl Drop for BufferedWrites {
-    /// Last resort for a session dropped without a teardown — a bare engine in a
-    /// test, or an unwind. The engine's own `close`/`drop` path syncs, which
-    /// flushes; this is what keeps a path that does neither from silently
-    /// discarding a write it reported as done.
+    /// Attempts to issue any remaining queued writes.
+    ///
+    /// The editor discards queued writes after uncertain allocation publication, excluding them
+    /// from this flush.
     fn drop(&mut self) {
         let _ = self.flush();
     }
@@ -918,6 +930,10 @@ impl FileImage for MirrorImage {
 
     fn flush(&mut self) -> Result<(), Error> {
         self.writes.flush()
+    }
+
+    fn discard_pending_writes(&mut self) {
+        self.writes.discard_pending_writes();
     }
 
     #[cfg(test)]
@@ -1310,6 +1326,10 @@ impl FileImage for HandleImage {
         self.writes.flush()
     }
 
+    fn discard_pending_writes(&mut self) {
+        self.writes.discard_pending_writes();
+    }
+
     #[cfg(test)]
     fn issued_write_order(&self) -> Vec<(u64, u64)> {
         self.writes.issued_order().to_vec()
@@ -1413,6 +1433,10 @@ impl FileImage for CountingImage {
         self.inner.flush()
     }
 
+    fn discard_pending_writes(&mut self) {
+        self.inner.discard_pending_writes();
+    }
+
     fn issued_write_order(&self) -> Vec<(u64, u64)> {
         self.inner.issued_write_order()
     }
@@ -1497,6 +1521,7 @@ impl FileImage for TornWriteImage {
         }
         self.struck = true;
         self.inner.write_at(offset, bytes)?;
+        self.inner.flush()?;
         Err(Self::failure())
     }
 
@@ -1518,6 +1543,10 @@ impl FileImage for TornWriteImage {
 
     fn flush(&mut self) -> Result<(), Error> {
         self.inner.flush()
+    }
+
+    fn discard_pending_writes(&mut self) {
+        self.inner.discard_pending_writes();
     }
 
     fn issued_write_order(&self) -> Vec<(u64, u64)> {
@@ -1591,6 +1620,10 @@ impl FileImage for SourceOnlyImage {
         self.0.flush()
     }
 
+    fn discard_pending_writes(&mut self) {
+        self.0.discard_pending_writes();
+    }
+
     #[cfg(test)]
     fn issued_write_order(&self) -> Vec<(u64, u64)> {
         self.0.issued_write_order()
@@ -1603,6 +1636,8 @@ impl FileImage for SourceOnlyImage {
 
 #[cfg(test)]
 mod tests {
+    use std::io::ErrorKind;
+
     use rstest::rstest;
 
     use super::*;
@@ -2490,6 +2525,35 @@ mod tests {
             b"abcdefgh",
             "a failed truncate must not have written anything either"
         );
+    }
+
+    #[rstest]
+    #[case::before_write(0)]
+    #[case::partial_write(3)]
+    #[case::completed_write(usize::MAX)]
+    fn discarded_pending_writes_are_excluded_from_teardown(
+        #[case] prefix: usize,
+        #[values(Backing::Mirror, Backing::Handle)] backing: Backing,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let (path, mut image) = image(directory.path(), b"0123456789abcdef", backing);
+        image.set_write_buffering(GATHERED).unwrap();
+        image.write_at(0, b"changed").unwrap();
+        image.write_at(12, b"tail").unwrap();
+        disk_log::fail_write_after(0, prefix);
+        let error = image.flush().unwrap_err();
+        let Error::Io(error) = error else {
+            panic!("expected injected write failure, got {error:?}");
+        };
+        assert_eq!(error.kind(), ErrorKind::Other);
+        assert_eq!(error.to_string(), "injected disk write failure");
+        let before = fs::read(&path).unwrap();
+        assert_eq!(&before[..prefix.min(7)], &b"changed"[..prefix.min(7)]);
+        image.discard_pending_writes();
+        disk_log::start();
+        drop(image);
+        assert!(disk_log::take().is_empty());
+        assert_eq!(fs::read(&path).unwrap(), before);
     }
 
     /// A flush that cannot write leaves its writes **pending**, so the next one
