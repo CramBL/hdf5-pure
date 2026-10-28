@@ -245,7 +245,8 @@ fn repacks_v1_nested_symbol_table_groups() {
     // it exercises the streaming v1 B-tree/local-heap/SNOD traversal across
     // multiple groups and preserves the full subtree.
     let dst = temp::temp_path("hdf5_pure_repack_v1_groups_dst.h5");
-    let src = test_util::data("unattributed/two_groups.h5");
+    let src = temp::temp_path("two_groups.h5");
+    std::fs::write(&src, test_util::legacy::two_groups()).unwrap();
 
     hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
@@ -261,6 +262,12 @@ fn repacks_v1_nested_symbol_table_groups() {
         f.group("group2").unwrap().datasets().unwrap(),
         vec!["temps".to_string()]
     );
+    test_util_hdf5::legacy::assert_contents(
+        &f,
+        test_util::legacy::Fixture::TwoGroups,
+        hdf5_pure::DatatypeByteOrder::LittleEndian,
+    );
+    drop(f);
 }
 
 #[test]
@@ -1151,15 +1158,12 @@ fn preserves_the_source_on_disk_format() {
 #[test]
 fn upgrades_only_where_the_source_format_cannot_hold_the_content() {
     let dst = temp::temp_path("hdf5_pure_repack_libver_forced_dst.h5");
+    let src = temp::temp_path("simple_dataset.h5");
+    std::fs::write(&src, test_util::legacy::simple_dataset()).unwrap();
 
     // Contiguous content under a version 0 superblock: floored at the oldest
     // format this crate writes, and no further.
-    hdf5_pure::repack(
-        test_util::data("unattributed/simple_dataset.h5"),
-        &dst,
-        &RepackOptions::new(),
-    )
-    .unwrap();
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
     assert_eq!(
         superblock::version(&dst),
         2,
