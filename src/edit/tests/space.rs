@@ -264,7 +264,12 @@ fn array_append_preserves_raw_page_reuse(#[case] class: AllocationClass) {
     let at = {
         let mut store = engine.store();
         store.reuse_session_space = true;
-        store.allocate(&[0; 8], class).unwrap()
+        store
+            .allocate(&[0; 8], class)
+            .unwrap()
+            .range()
+            .start()
+            .get()
     };
     assert_eq!(at, raw.start());
     let after = engine.space.paged_sections().unwrap();

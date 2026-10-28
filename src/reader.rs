@@ -358,8 +358,8 @@ pub enum PersistedFreeSpacePolicy {
 /// | `H5Fget_libver_bounds` (read) | [`File::libver_bound`](crate::File::libver_bound) | **Read-only** | Reports the low library-version bound the superblock version implies. |
 /// | `H5Pset_cache` (`rdcc`) / `H5Pset_chunk_cache` (`dapl`) | [`with_chunk_cache`](Self::with_chunk_cache), [`DatasetAccessProperties::with_chunk_cache`](crate::DatasetAccessProperties::with_chunk_cache) | **Genuine (all backends)** | A cache of decompressed chunks and parsed indexes, 1 MiB in 16 slots by default. `rdcc_nslots` and `rdcc_nbytes` map directly. There is no write coalescing, since a mutation clears the cache, and no `rdcc_w0`, for the reason below. [`Dataset::chunk_cache_stats`](crate::Dataset::chunk_cache_stats) reports what it did. |
 /// | `H5Pset_mdc_config` | [`with_metadata_cache`](Self::with_metadata_cache), [`MetadataCacheConfig`] | **Behavioral (partial)** | A byte budget for a metadata-read LRU on the streaming and bounded backends, off by default. [`File::metadata_cache_stats`](crate::File::metadata_cache_stats) reports what it did (`H5Fget_mdc_hit_rate` and `H5Fget_mdc_size`) and [`File::reset_metadata_cache_stats`](crate::File::reset_metadata_cache_stats) clears the counters (`H5Freset_mdc_hit_rate_stats`). Of `H5AC_cache_config_t` this is `max_size`, and [the metadata cache](#the-metadata-cache-h5pset_mdc_config) below covers what the other 29 fields would mean here. |
-/// | no C counterpart | [`with_sync_policy`](Self::with_sync_policy), [`SyncPolicy`], [`File::sync`](crate::File::sync) | **Behavioral** | Who issues the `fsync`s. The default `Always` forces durability at every point the write paths define one. `OnClose` issues none during the session, leaving the cadence to the application through [`File::sync`](crate::File::sync), and one at `close` or drop, which write past the point any caller could order them. Either way, writes reach the operating system by the time the operation making them returns, unless [`with_page_buffer_size`](Self::with_page_buffer_size) is set, which is off by default and requires `OnClose`. What moves to the caller is therefore power-loss durability within the session, and same-machine visibility stays where it was. [Choosing the fsync cadence](crate::_guide::editing#choosing-the-fsync-cadence) has the cost in full. libhdf5 has no property for this because it never `fsync`s at all: the default `sec2` driver installs no flush callback, so `H5Fflush` drains libhdf5's caches with `write` and stops. |
-/// | `H5Pset_page_buffer_size` | [`with_page_buffer_size`](Self::with_page_buffer_size) | **Genuine** | A write-back page buffer for a read-write session: dirty pages live across the ordering barriers inside a commit or append, up to the byte budget, then flush whole. It requires a budget of at least the page it merges within (the file's own when `Page`, and the format's 4 KiB default otherwise), a version-3 superblock, `SyncPolicy::OnClose`, and, on a `Page` file, persisted free space. A request that misses one of those is rejected, and the setting is never quietly ignored. The SWMR writer and any [`File::create_with_options`](crate::File::create_with_options) pair that could not be reopened are rejected too. A `Page` file is not required, where `H5PB_create` requires one: the C page buffer is a page cache whose per-kind reservations count pages the paged allocator segregates, while this is a write gatherer that needs a window to merge within. A budget below 1 MiB is accepted, as it is in C, and it costs something here: `H5PB_write` bypasses the C buffer for any I/O of a page or more, while nothing bypasses this one, so a smaller budget is where a long run is flushed and restarted (one 4 MiB append: 10 writes at 1 MiB, 1,094 at 4 KiB). A sub-page budget is rejected, where `H5Fopen` rounds it up silently. It reorders publish points ahead of the content they identify, so the session raises superblock status-flag bit 0 (`H5F_SUPER_WRITE_ACCESS`) for its lifetime: a writer that dies mid-flush leaves a file this crate, `H5Fopen` and h5py all reject, and never one that reads clean and returns fill values or a deleted object's bytes. libhdf5's page buffer reorders the same way and ships no such mark. The budget is the one field modeled, and `min_meta_perc` and `min_raw_perc` are not: the buffer does not evict, so it has no victim to choose. Off by default, which still leaves the write gathering every read-write session does. |
+/// | no C counterpart | [`with_sync_policy`](Self::with_sync_policy), [`SyncPolicy`], [`File::sync`](crate::File::sync) | **Behavioral** | `Always` requests durability at publication barriers. `OnClose` defers durability until explicit synchronization or session closure. Immediate appends preserve allocation and reference ordering under both policies, including with explicit page buffering. Page-buffered staged commits can retain writes after returning. |
+/// | `H5Pset_page_buffer_size` | [`with_page_buffer_size`](Self::with_page_buffer_size) | **Genuine** | A write buffer with a byte budget. Staged commit writes can remain buffered across operations. Immediate appends drain pending writes at allocation and reference publication boundaries. Requires `SyncPolicy::OnClose`, a version-3 superblock, a budget of at least one merge page, and persisted free space on PAGE files. SWMR writers reject it. The editor marks the file for the session lifetime. Off by default. |
 /// | `H5Pset_fapl_family` / `split` / `multi` / `mpio` / `direct` / `ros3` / `log` | none | **Unsupported** | Only two implicit drivers exist: an in-memory buffer and `Read + Seek` positioned I/O. A multi-file, parallel, or remote-object file is not opened. |
 ///
 /// ## The metadata cache (`H5Pset_mdc_config`)
@@ -555,151 +555,50 @@ impl FileAccessProperties {
         self
     }
 
-    /// Choose who owns this session's `fsync` cadence — this crate, or the
-    /// application through [`File::sync`].
+    /// Selects the durability policy for a read-write editing session.
     ///
-    /// Defaults to [`SyncPolicy::Always`]: every commit and every immediate
-    /// [`Dataset::append`](crate::Dataset::append) forces its writes to durable
-    /// storage before returning. [`SyncPolicy::OnClose`] issues no `fsync` at all,
-    /// matching libhdf5. The writes still reach the
-    /// operating system by the time the operation making them returns, so only
-    /// power-loss durability moves to the caller. [`with_page_buffer_size`](Self::with_page_buffer_size),
-    /// off by default, is the one setting that changes that — and it requires
-    /// this policy.
+    /// The default is [`SyncPolicy::Always`]. [`SyncPolicy::OnClose`] defers durability until
+    /// [`File::sync`] or session closure. Immediate appends issue their writes in publication
+    /// order under either policy, including with an explicit page buffer. Page-buffered staged
+    /// commits can retain writes after returning.
     ///
-    /// The read-only opens ignore this: they write nothing.
+    /// Read-only opens ignore this setting.
     pub const fn with_sync_policy(mut self, sync_policy: SyncPolicy) -> Self {
         self.sync_policy = sync_policy;
         self
     }
 
-    /// Let a read-write session's writes accumulate in a page buffer of
-    /// `bytes`, so repeated small updates landing in the same page cost one
-    /// write rather than one each.
+    /// Sets the byte budget for retaining writes across operations.
     ///
-    /// Defaults to `0`, which is off — as `H5Pset_page_buffer_size` defaults to
-    /// off — and leaves the gathering every read-write session already does: one
-    /// write per dirty page per *ordering barrier*, so a commit or an append
-    /// still reaches the operating system in full before it returns. What this
-    /// buys on top is letting a dirty page survive those barriers, which is where
-    /// a workload of many small appends into a few pages does most of its
-    /// repeating. Measured on a paged file, 32 chunk appends into eight datasets
-    /// followed by a commit: **188 writes with the default gathering and 5 with a
-    /// page buffer**, of which two are the mark below going up and coming down.
-    /// The appends issue nothing at all until the session ends.
+    /// Defaults to `0`, which uses gathering within each operation. A nonzero budget permits staged
+    /// commit writes to remain buffered across operations and general ordering barriers.
+    /// Immediate appends drain the buffer at allocation and reference publication boundaries,
+    /// before publishing their dataspace growth. A successful append has issued its writes to
+    /// the operating system, without requesting power-loss durability under [`SyncPolicy::OnClose`].
     ///
-    /// **It pays off over a long session, and costs on a short one.** The crash
-    /// mark below is two `fsync`s per session whatever the session then does, so
-    /// there is a break-even: measured on an Apple M1 Max (APFS) with 256-byte
-    /// appends into eight datasets, 400 appends ran 0.75x — slower — 800 broke
-    /// even, and 6,400 ran 1.64x. The ratio climbs with session length, because
-    /// the same pages are re-dirtied more often, and narrows to about 1.1x once
-    /// 64 KiB payloads rather than metadata churn dominate. One host's numbers,
-    /// and the short end is noisy; re-measure on the one that matters with
-    /// `cargo bench --bench hot_paths -- page_buffer`, which runs both sides of
-    /// the crossing.
+    /// Pending ranges within a page are combined when flushed. Reaching the byte budget drains
+    /// every pending range, so a smaller budget can increase writes within a long append batch.
+    /// The resulting file bytes are independent of the budget.
     ///
-    /// # What it costs, and what pays for it
+    /// The editor marks the superblock for the session's lifetime and clears the mark during
+    /// successful closure. An interrupted session can leave staged commit references published
+    /// before their content. Opens normally return [`Error::FileMarkedInUse`] while the mark
+    /// remains. [`File::clear_status_flags`] permits inspection after the writer stops, without
+    /// guaranteeing data integrity.
     ///
-    /// Gathered writes go out in address order, and every publish point sits
-    /// below the content it reaches, so all of them are issued first. A write
-    /// that fails, or a process that dies, mid-flush can therefore leave a file
-    /// whose superblock, dataset length or object header names bytes that never
-    /// arrived — and two of those read back **clean**, as fill values or as a
-    /// deleted object's data, with every checksum verifying. That is what a
-    /// write-back page buffer is, rather than a fault in this one:
-    /// `H5Pset_page_buffer_size` reorders the same way and makes no
-    /// crash-consistency claim either.
+    /// # Requirements
     ///
-    /// So this session raises superblock status-flag bit 0
-    /// (`H5F_SUPER_WRITE_ACCESS`) for its whole life, `fsync`ed once at open and
-    /// cleared on a clean [`File::close`] or drop — the mark the reference C
-    /// library raises for *any* writer. A session that dies with pages in memory
-    /// leaves that byte standing, and a file carrying it is refused by this
-    /// crate, by `H5Fopen` and by h5py alike, with
-    /// [`Error::FileMarkedInUse`]. After the writer has stopped,
-    /// [`File::clear_status_flags`] permits inspection without guaranteeing data integrity.
-    /// A completed commit's bytes may also be in this process's memory when it returns.
+    /// A writable open returns [`Error::EditUnsupported`] for any of these configurations:
     ///
-    /// # Refusals
+    /// - A budget smaller than the file-space page size for [`FileSpaceStrategy::Page`], or
+    ///   smaller than 4 KiB for other strategies
+    /// - PAGE storage without persisted free space
+    /// - A superblock older than version 3
+    /// - [`SyncPolicy::Always`]
+    /// - A SWMR writer
     ///
-    /// Four, each refused with
-    /// [`Error::EditUnsupported`]:
-    ///
-    /// - a budget below the page the session merges within: the file's own
-    ///   file-space page size when it was created with
-    ///   [`FileSpaceStrategy::Page`], and the
-    ///   format's 4 KiB default otherwise. A buffer that cannot hold one page
-    ///   drains on every page it touches;
-    /// - a paged file with persistence disabled, whose staged commits require ordered
-    ///   publication without page buffering
-    /// - a superblock older than version 3, whose status-flags byte no library
-    ///   reads back, so the mark above would announce nothing;
-    /// - [`SyncPolicy::Always`], the default, where
-    ///   every barrier is an `fsync` that flushes the buffer on its way out — so
-    ///   it would hold nothing while still costing the mark. Pair this with
-    ///   [`with_sync_policy(SyncPolicy::OnClose)`](Self::with_sync_policy).
-    ///
-    /// [`File::create_with_options`] refuses a creation/access pair it could not
-    /// then reopen with, rather than writing the file first, and
-    /// [`File::open_swmr_writer`] refuses a page buffer outright: its readers
-    /// observe the order its writes become visible in, which is exactly what a
-    /// buffer coalesces away.
-    ///
-    /// # Choosing a budget
-    ///
-    /// Any budget of at least one page is honored. One below 1 MiB is an explicit
-    /// request for less resident memory, not a mistake — a writer inside a tight
-    /// memory cap can ask for 256 KiB and get it — and what it buys that memory
-    /// with is writes: the budget is the point at which everything held is
-    /// flushed, so a long contiguous run is flushed and restarted once per
-    /// budget's worth of it. Writes issued on a 4 KiB-paged file:
-    ///
-    /// | workload | unset | 4 KiB | 64 KiB | 1 MiB |
-    /// | --- | --- | --- | --- | --- |
-    /// | 32 chunk appends into 8 datasets, then a commit | 188 | 25 | 4 | 4 |
-    /// | one 4 MiB append | 131 | 1,094 | 74 | 10 |
-    ///
-    /// On the scattered workload this property exists for, a small budget costs
-    /// little; on the long run 64 KiB is seven times the writes of 1 MiB.
-    ///
-    /// The memory comparison against leaving this unset is not the one the table
-    /// suggests. A session that sets nothing already gathers up to 1 MiB of dirty
-    /// bytes **per operation**, and releases it at every ordering barrier; a page
-    /// buffer holds its budget **across** operations, until the budget is spent,
-    /// an `fsync`, or [`File::close`]. So 1 MiB here trades a per-operation peak
-    /// for a continuous residency of the same size, and a budget below 1 MiB
-    /// lowers both.
-    ///
-    /// # How this differs from `H5Pset_page_buffer_size`
-    ///
-    /// **A paged file is not required, where the C library requires one.**
-    /// `H5PB_create` refuses an unpaged file because the C page buffer is a page
-    /// *cache*, and its `min_meta_perc` / `min_raw_perc` reservations are counted
-    /// in pages that the paged allocator keeps segregated by kind. This is a
-    /// write gatherer: it merges runs within a page-sized window and flushes
-    /// whole, so a window is all it needs, and an unpaged file gets the same
-    /// 4 KiB one that every read-write session already gathers under. Since
-    /// unpaged is the default strategy, requiring `Page` put this property out of
-    /// reach of most files for no reason this implementation had.
-    ///
-    /// **A small budget costs writes here, where it costs none in C.**
-    /// `H5PB_write` sends any I/O of a page or more straight to the driver, so a
-    /// small `page_buf_size` there caps memory without throttling a long write.
-    /// Nothing bypasses this buffer — the budget is the point at which everything
-    /// held is flushed — so a small one turns a single long run into repeated
-    /// flushes. Both libraries accept the budget; only this one charges for it.
-    /// See [Choosing a budget](#choosing-a-budget) for what it charges.
-    ///
-    /// **A sub-page budget is refused rather than rounded.** `H5Fopen` rounds it
-    /// up to one page silently, and `H5Fcreate` refuses it. A property quietly
-    /// ignored is worse than one refused.
-    ///
-    /// The read-only opens ignore this setting; they write nothing.
-    ///
-    /// Only the budget of `H5Pset_page_buffer_size` is modeled; its
-    /// `min_meta_perc` / `min_raw_perc` reservations are not, since this buffer
-    /// does not evict — it flushes whole.
+    /// [`File::create_with_options`] rejects an incompatible creation/access pair before
+    /// writing the file. Read-only opens ignore this setting.
     #[doc(alias = "H5Pset_page_buffer_size")]
     pub const fn with_page_buffer_size(mut self, bytes: usize) -> Self {
         self.page_buffer_size = bytes;
@@ -728,8 +627,8 @@ impl FileAccessProperties {
     /// caller states it. It is exactly true for a writer under
     /// [`SyncPolicy::OnClose`] that syncs at the
     /// points it wants readable, and it is what the mark exists to guard against
-    /// when it is false: a page-buffered session's publish points are written
-    /// before the content they name, so a snapshot taken mid-flush can show a
+    /// when it is false: page-buffered staged commit references can be written
+    /// before their content, so a snapshot taken during flushing can show a
     /// dataset that reads clean and returns fill values, with every checksum
     /// verifying.
     ///
@@ -3366,6 +3265,8 @@ impl File {
     ///
     /// # Errors
     ///
+    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier append outcome is uncertain.
+    /// Close and reopen the file before editing again.
     /// Returns [`Error::EditUnsupported`] in a non-persistent PAGE session if publication bytes
     /// differ from the session image or expected framing after a failed write. Close and reopen
     /// the file before editing again.
@@ -3521,7 +3422,8 @@ impl File {
     /// Issues pending writes and synchronizes file content and metadata to durable storage.
     ///
     /// Synchronization is durable under every [`SyncPolicy`], including [`SyncPolicy::OnClose`].
-    /// Writes retained after a failed operation are issued before synchronization. New staged
+    /// Writes retained after a failed operation are issued before synchronization, unless an
+    /// earlier append outcome is uncertain. New staged
     /// edits remain pending for [`commit`](Self::commit). Elements held by a [`BufferedAppender`]
     /// or an [`OwnedBufferedAppender`] require the appender's buffer to be flushed first.
     /// Call [`commit`](Self::commit) first to include pending free-space manager changes from
@@ -3544,6 +3446,8 @@ impl File {
     ///
     /// Returns [`Error::ReadOnly`] if the file has no editing session, or [`Error::FileClosed`] if
     /// it has been sealed. Returns [`Error::Io`] if writing or synchronization fails.
+    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier append outcome is uncertain.
+    /// Close and reopen the file before editing again.
     /// Returns [`Error::EditUnsupported`] if pending PAGE publication bytes differ from the
     /// accepted image or expected framing. Close and reopen the file before editing again.
     /// Returns [`Error::Format`] if recovery cannot read, parse, or represent the superblock.
@@ -3573,6 +3477,7 @@ impl File {
     /// [`Error::Io`] if writing, synchronizing, or truncating the file fails. Returns
     /// [`Error::Format`] if metadata geometry or address conversion is invalid. Errors from
     /// applying staged edits are returned as described in [`commit`](Self::commit).
+    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier append outcome is uncertain.
     pub fn close(self) -> Result<(), Error> {
         if matches!(self.inner.backend, Backend::Edit(_)) {
             // SWMR mode stages nothing — the staged surface is refused — so there
@@ -6017,9 +5922,9 @@ impl Dataset {
     /// With ordinary write buffering, the writer preserves publication order under either
     /// [`SyncPolicy`]. Under the default [`SyncPolicy::Always`], the writer forces writes to
     /// durable storage at each barrier. Under [`SyncPolicy::OnClose`], the writer defers power-loss
-    /// durability until [`File::sync`] or clean session closure. With explicit page buffering, the
-    /// writer can retain and reorder writes across operations, with the guarantees described by
-    /// [`FileAccessProperties::with_page_buffer_size`].
+    /// durability until [`File::sync`] or clean session closure. The writer also drains explicit
+    /// page buffers at allocation and reference publication boundaries. These ordering guarantees
+    /// do not cover torn physical metadata writes.
     ///
     /// A **SWMR** writer ([`File::open_swmr_writer`]) keeps the narrower rule it
     /// always had — unfiltered, and chunk-aligned at both ends — because its
@@ -6061,6 +5966,7 @@ impl Dataset {
     /// if the dataset or input is unsupported or conflicts with staged edits. Returns
     /// [`Error::SwmrAppendUnsupported`] for filtered or unaligned SWMR appends. Propagates
     /// metadata, allocation, encoding, and I/O errors.
+    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier append outcome is uncertain.
     pub fn append<T: H5Element>(&mut self, data: &[T]) -> Result<(), Error> {
         self.append_with_options(AppendOptions::new(), data)
     }

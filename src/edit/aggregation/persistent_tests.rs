@@ -71,7 +71,12 @@ fn persistent_reuse_precedes_aggregates(
         let mut reserved = std::mem::take(&mut engine.reserved);
         let mut store = engine.store();
         store.reserve = Some(&mut reserved);
-        let address = store.allocate(&[19; 64], class).unwrap();
+        let address = store
+            .allocate(&[19; 64], class)
+            .unwrap()
+            .range()
+            .start()
+            .get();
         engine.reserved = reserved;
         address
     } else {
@@ -569,6 +574,10 @@ impl FileImage for FailingImage {
 
     fn ordering_barrier(&mut self) -> Result<(), Error> {
         self.inner.ordering_barrier()
+    }
+
+    fn flush(&mut self) -> Result<(), Error> {
+        self.inner.flush()
     }
 
     fn set_write_buffering(&mut self, mode: WriteBuffering) -> Result<(), Error> {

@@ -563,6 +563,10 @@ impl FileImage for FailingImage {
         self.inner.ordering_barrier()
     }
 
+    fn flush(&mut self) -> Result<(), Error> {
+        self.inner.flush()
+    }
+
     fn set_write_buffering(&mut self, mode: WriteBuffering) -> Result<(), Error> {
         self.inner.set_write_buffering(mode)
     }

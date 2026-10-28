@@ -351,6 +351,7 @@ use self::staging::StagedEdits;
 pub(crate) use self::staging::{StagedChild, StagedKind, StagedMeta, StagedObject};
 
 mod aggregation;
+pub(crate) mod allocation;
 mod append;
 pub(crate) mod attributes;
 mod commit;
@@ -900,84 +901,36 @@ impl From<EditBacking> for MemoryStrategy {
     }
 }
 
-/// When a read-write session forces its writes to durable storage — who owns the
-/// `fsync` cadence, this crate or the application.
+/// The durability policy for a read-write editing session.
 ///
-/// This is *not* about whether a write reaches the file. Every commit and every
-/// append has gone to the operating system by the time it returns, whatever this
-/// policy says, so a committed edit is visible to any other process on the same
-/// machine and survives this process crashing. What it governs is the `fsync` on
-/// top of that, which is what makes those bytes survive the *machine* losing
-/// power.
+/// With ordinary buffering, successful commits and appends have issued their writes to the
+/// operating system under either policy. Explicit
+/// [page buffering](crate::FileAccessProperties::with_page_buffer_size) can retain staged commit
+/// writes. Immediate appends drain every buffering mode at their publication boundaries.
 ///
-/// A session does gather the many small writes *inside* one such operation and
-/// issue them a page at a time (issue #288), and an explicit
-/// [page buffer](crate::FileAccessProperties::with_page_buffer_size) extends that
-/// across operations — trading exactly the guarantee in the paragraph above,
-/// which is why it is opt-in and this is not.
-///
-/// libhdf5 does not `fsync` on its normal path either: the
-/// default `sec2` driver installs no flush callback at all, so `H5Fflush` drains
-/// libhdf5's own caches with `write` and stops there, leaving power-loss
-/// durability to the application. [`OnClose`](Self::OnClose) is that behavior;
-/// [`Always`](Self::Always), the default here, is the stronger one.
-///
-/// The whole-file writer ([`FileBuilder`](crate::FileBuilder)) and
-/// [`repack`](crate::repack()) are outside this: they never `fsync` under either
-/// policy, since each writes a file and hands it over rather than holding an
-/// editing session.
-///
-/// Sealed: a future policy (syncing on a timer, or once per N bytes) must not be
-/// a breaking change.
+/// [`File::sync`](crate::File::sync), clean closure, and dropping the last handle request
+/// synchronization under either policy. The whole-file writer and [`repack`](crate::repack())
+/// do not use this editing-session policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum SyncPolicy {
-    /// Force durability at every point the write paths define one: after each
-    /// immediate [`Dataset::append`](crate::Dataset::append) batch, at each
-    /// ordering barrier inside a [`File::commit`](crate::File::commit), and when
-    /// the file is closed or dropped.
+    /// Requests durability at each publication barrier and during session closure.
     ///
-    /// This is what makes an append crash-atomic and a commit all-or-nothing
-    /// against power loss: the barriers order the appended data before the
-    /// superblock repoint that publishes it, so an interrupted write leaves the
-    /// previous state rather than a torn one.
+    /// Append content is synchronized before references. An EOF change is synchronized with
+    /// file metadata before a reference to the allocation is published. Physical metadata writes
+    /// can tear if the storage device does not write them atomically.
     #[default]
     Always,
-    /// No `fsync` during the session; one when the file is finished. Nothing an
-    /// append or a commit does is forced to durable storage — writes still reach
-    /// the operating system immediately, so another process on the same machine
-    /// sees them and a crash of *this* process loses nothing — and
-    /// [`File::close`](crate::File::close), or dropping the last handle, issues
-    /// a single barrier at the end. [`File::sync`](crate::File::sync) adds a
-    /// checkpoint wherever the application wants one.
+    /// Defers durability synchronization until explicit synchronization or session closure.
     ///
-    /// One setting suspends the "reach the operating system immediately" half,
-    /// and it is the one that requires this policy:
-    /// [`with_page_buffer_size`](crate::FileAccessProperties::with_page_buffer_size)
-    /// holds dirty pages in this process until the budget is spent, a
-    /// [`File::sync`](crate::File::sync) is issued, or the session closes. Off by
-    /// default, and it marks the file on disk for its lifetime so a session that
-    /// dies holding pages leaves one every reader refuses.
+    /// Append publication drains pending writes before new references, including with an
+    /// explicit page buffer. Successful appends therefore preserve ordering against process
+    /// interruption. Power loss can lose or reorder writes retained by the operating system.
+    /// Explicit page buffering can retain staged commit writes after the commit returns.
     ///
-    /// The terminal barrier is not an exception grafted onto "never sync": it is
-    /// the point past which the application *cannot* act. `close` and `drop`
-    /// both write — they apply staged edits, re-home the free-space managers of
-    /// a file that persists them, and clear a SWMR writer's flag — and they
-    /// destroy the handle that would have ordered those writes. A policy that
-    /// skipped the barrier there would not hand the caller a cadence; it would
-    /// take one away. The cost is one `fsync` per session against the five per
-    /// append batch and two or three per commit that this policy removes.
-    ///
-    /// Three things are given up in exchange. **Power-loss ordering** during the
-    /// session: with the barriers gone, a machine that loses power mid-commit
-    /// can have the superblock repoint on disk without the data it points at.
-    /// **Deferred write errors**: on a filesystem that allocates late, a write
-    /// that will fail at writeback still returns success, and `fsync` is where
-    /// the `ENOSPC`/`EIO` surfaces, so a commit the filesystem cannot complete
-    /// returns `Ok` until the terminal barrier reports it. **Cross-host
-    /// visibility**: "another process sees it" is the page cache, so under NFS's
-    /// close-to-open semantics a reader on another host — a SWMR reader
-    /// included — may not see writes a client is holding.
+    /// [`File::sync`](crate::File::sync) requests an intermediate durability checkpoint.
+    /// [`File::close`](crate::File::close) and dropping the last handle synchronize after their
+    /// final writes. Delayed storage errors may be reported during that synchronization.
     OnClose,
 }
 
@@ -1168,38 +1121,11 @@ fn barrier_data(image: &mut dyn FileImage, sync_policy: SyncPolicy) -> Result<()
     }
 }
 
-/// Byte budget for the writes one operation may gather before they are issued
-/// (see [`WriteBuffering::Operation`]): the default every exclusively locked
-/// read-write session opens under.
+/// The default byte budget for gathering writes within one operation.
 ///
-/// A megabyte, the same figure as [`append::APPEND_BATCH_BYTES`] and for a related
-/// reason: that is already what a bounded session spends holding one batch of
-/// raw append data, so this is a familiar quantum for the write path rather than
-/// a new one. The two are not derived from each other and either may be tuned
-/// alone. An operation larger than this is flushed part-way, which costs it
-/// little — its writes are long and contiguous by then.
-///
-/// # Choosing a page-buffer budget
-///
-/// An explicit [page buffer](crate::FileAccessProperties::with_page_buffer_size)
-/// *replaces* this budget rather than adding to it, and holds what it gathers
-/// across operations rather than releasing it at every ordering barrier. The two
-/// figures are therefore not comparable as memory: this one is a per-operation
-/// peak, a page buffer's is continuous residency. A budget below it asks for less
-/// of that residency and pays in writes, wherever one long contiguous run has to
-/// be flushed and restarted. Writes issued on a 4 KiB-paged file:
-///
-/// ```text
-/// workload                          unset   4 KiB   64 KiB   1 MiB
-/// 32 chunk appends into 8 + commit    188      25        4       4
-/// one 4 MiB append                    131    1094       74      10
-/// ```
-///
-/// Nothing here bypasses the gatherer the way `H5PB_write` bypasses the C page
-/// buffer for any I/O of a page or more (issue #357), so the second row is what
-/// a small budget actually costs; `a_smaller_budget_issues_more_writes` asserts
-/// that ordering rather than these counts. Which side of it to want is the
-/// caller's trade, not this crate's (issue #391).
+/// An explicit [page buffer](crate::FileAccessProperties::with_page_buffer_size) replaces this
+/// budget and can retain staged commit writes across operations. Append publication drains both
+/// modes. A smaller budget bounds pending bytes while increasing writes within long batches.
 const WRITE_GATHER_BYTES: usize = 1 << 20;
 
 /// Page the write gatherer merges within on a file that is not paged.
@@ -1879,36 +1805,16 @@ impl WriteEngine {
             .map_or(DEFAULT_GATHER_PAGE, FileSpacePageSize::get)
     }
 
-    /// Let this session's writes span operations, up to `max_bytes` of them: the
-    /// `H5Pset_page_buffer_size` analogue, requested through
-    /// [`FileAccessProperties::with_page_buffer_size`](crate::FileAccessProperties::with_page_buffer_size).
+    /// Configures session buffering with a byte budget of `max_bytes`.
     ///
-    /// Refused for a budget below the page this session merges within — the
-    /// file's own file-space page size when it is paged and
-    /// [`DEFAULT_GATHER_PAGE`] when it is not, which is what
-    /// [`gather_page_size`](Self::gather_page_size) answers. A buffer that
-    /// cannot hold one page flushes on every page it touches. libhdf5
-    /// reaches the same conclusion and acts on it *silently*, rounding the budget
-    /// up at `H5Fopen`, which is the one part of its behavior not worth copying.
+    /// A zero budget preserves the default operation buffering. Immediate append publication
+    /// drains either mode. Staged commits can retain dirty bytes across general ordering barriers.
     ///
-    /// Every larger budget is honored, including one below the
-    /// [`WRITE_GATHER_BYTES`] this session was already gathering under. That was
-    /// refused until issue #391; see the constant for what a small one costs.
+    /// # Errors
     ///
-    /// It does **not** require a paged file, where `H5Pset_page_buffer_size`
-    /// does. The C page buffer is a page *cache*, and `H5PB_create` rejects an
-    /// unpaged file because its `min_meta_perc`/`min_raw_perc` reservations are
-    /// counted in pages that the paged allocator keeps segregated by kind. This
-    /// is a write gatherer instead: it merges runs within a page-sized window and
-    /// flushes whole, so the window is all it needs, and `gather_page_size`
-    /// supplies one on an unpaged file already — it is what every read-write
-    /// session's default [`Operation`](WriteBuffering::Operation) gathering runs
-    /// under. Lifting the requirement leaves the file byte-identical, which is
-    /// what the unpaged arm of `a_page_buffer_holds_dirty_pages_across_operations`
-    /// asserts (issue #357).
-    ///
-    /// A zero budget leaves the session's default gathering alone, matching the
-    /// property's own "unset" value.
+    /// Returns [`Error::EditUnsupported`] for a budget below the merge page size, a SWMR writer,
+    /// nonpersistent PAGE storage, a superblock older than version 3, or [`SyncPolicy::Always`].
+    /// Returns [`Error::Io`] if publishing the session's write-access mark fails.
     pub(crate) fn set_page_buffer_size(&mut self, max_bytes: usize) -> Result<(), Error> {
         if max_bytes == 0 {
             return Ok(());
@@ -1938,8 +1844,7 @@ impl WriteEngine {
         // budget it replaces is a per-operation peak released at every barrier,
         // while this one is held across operations, so a smaller number lowers
         // both the peak and the residency, and a writer inside a tight memory cap
-        // is entitled to spend the writes for that. See `WRITE_GATHER_BYTES` for
-        // the measurement.
+        // is entitled to spend the writes for that.
         let page_size = self.gather_page_size();
         if (max_bytes as u64) < page_size {
             return Err(Error::EditUnsupported(

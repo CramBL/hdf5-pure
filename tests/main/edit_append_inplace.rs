@@ -6,6 +6,7 @@
 //! hard-link aliasing and a combined mixed-edit file) lives in
 //! `crates/crosscheck/tests/main/edit.rs`.
 
+use std::error::Error as StdError;
 use std::fs;
 use std::panic;
 use std::panic::AssertUnwindSafe;
@@ -23,6 +24,16 @@ use rstest::rstest;
 use test_util::checksum;
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
 use test_util_hdf5::file_space;
+
+#[test]
+fn allocation_publication_uncertainty_has_a_distinct_recovery_error() {
+    let error = Error::AllocationPublicationUncertain;
+    assert_eq!(
+        error.to_string(),
+        "allocation publication is unconfirmed; close and reopen the file before editing"
+    );
+    assert!(StdError::source(&error).is_none());
+}
 
 // ---- functional -------------------------------------------------------------
 

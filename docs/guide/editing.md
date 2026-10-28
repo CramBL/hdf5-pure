@@ -528,8 +528,9 @@ the editor copies it into the reserved original extent. Under
 failures and defers synchronization until close. See
 [Choosing the fsync cadence](#choosing-the-fsync-cadence).
 
-The editor can reorder writes across publication barriers when using an
-[explicit page buffer](#letting-pages-live-longer).
+Staged commits can reorder writes across publication barriers when using an
+[explicit page buffer](#letting-pages-live-longer). Immediate appends drain pending writes at
+allocation and reference publication boundaries.
 
 **Edit validation runs before the first content write.** A validation error leaves the file on disk untouched. In a non-persistent PAGE session recovering from a publication error, the editor first drains pending writes from the preceding attempt.
 
@@ -573,13 +574,17 @@ let mut samples = file.dataset("samples")?;
 for batch in 0..1000 {
     samples.append(&[f64::from(batch); 64])?;  // no fsync
 }
-file.close()?;   // applies staged edits, then one fsync
-# drop(samples);
-# assert_eq!(File::open(&path)?.dataset("samples")?.shape()?, vec![64_000]);
+drop(samples);
+file.close()?;   // applies staged edits and requests durability
+assert_eq!(File::open(&path)?.dataset("samples")?.shape()?, vec![64_000]);
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
-[`SyncPolicy::OnClose`](crate::SyncPolicy::OnClose) provides synchronization behavior similar to libhdf5. With the `sec2` driver, `H5Fflush` writes cached data and metadata, leaving power-loss durability to the application. The driver's flush callback is `NULL`, and `H5FD_flush` calls it only when present (`H5Fint.c`, `H5FDsec2.c`, and `H5FD.c`, HDF5 2.2.0). Under either policy, every successful commit and append has reached the operating system by the time it returns. [Write gathering](#write-gathering) covers what is held back and for how long. A file written under [`OnClose`](crate::SyncPolicy::OnClose) is byte-identical to the same file written under [`Always`](crate::SyncPolicy::Always), is visible to other processes on the machine once the operation that wrote it succeeds, and survives *this process* crashing.
+With ordinary write buffering, successful commits and appends issue their writes to the operating
+system under either policy. Immediate appends also drain explicit page buffers at publication
+boundaries. Staged commits can retain page-buffered writes after returning.
+[Write gathering](#write-gathering) describes these boundaries. The final file bytes are the same
+under either synchronization policy.
 
 Three things are given up, and they are worth separating:
 
@@ -589,13 +594,22 @@ Three things are given up, and they are worth separating:
 
 ### Why the last one is not optional
 
-[`File::sync()`](crate::File::sync) issues pending writes from failed operations and synchronizes file content and metadata to durable storage under every synchronization policy. New staged edits remain pending for [`commit()`](crate::File::commit), and elements held by a [`BufferedAppender`](crate::BufferedAppender) require its [`flush()`](crate::BufferedAppender::flush) first.
+[`File::sync()`](crate::File::sync) issues pending writes and synchronizes file content and metadata
+to durable storage under every synchronization policy. If an earlier append outcome is uncertain,
+synchronization returns [`Error::AllocationPublicationUncertain`](crate::Error::AllocationPublicationUncertain)
+without issuing further writes. Further appends and commits return the same error. Close and reopen
+the file before editing again. An interrupted file can fail to reopen.
+
+New staged edits remain pending for [`commit()`](crate::File::commit), and elements held by a
+[`BufferedAppender`](crate::BufferedAppender) require its [`flush()`](crate::BufferedAppender::flush)
+first.
 
 In a non-persistent PAGE session, a successful sync also verifies and adopts pending publication. If recovery changes the root, existing dataset and group handles opened by path resolve their objects again on their next read. Address-only handles return [`Error::StaleHandle`](crate::Error::StaleHandle). An ordinary sync with no root change preserves handle revisions.
 
-The barrier at the end is a different thing, and it is the reason this policy is [`OnClose`](crate::SyncPolicy::OnClose) and not a literal "never". [`close()`](crate::File::close) is an active call: it applies any staged edits, re-homes the free-space managers of a file that persists them, and clears a SWMR writer's flag, and it *consumes the handle*, so those writes land past the last point a caller could have ordered them. Dropping the last handle does the same, with no return value to report an error through. A policy that skipped the barrier there would take a cadence away, since no [`sync()`](crate::File::sync) you could write reaches those bytes. So [`close`](crate::File::close) and `drop` each issue exactly one `fsync`, under every policy.
-
-The arithmetic makes this a cheap promise to keep: one barrier per session, against the five per append batch and two or three per commit that [`OnClose`](crate::SyncPolicy::OnClose) removes. A thousand-append session goes from about five thousand `fsync`s to one.
+Successful [`close()`](crate::File::close) applies staged edits, finalizes free-space managers, and
+synchronizes the final writes under either policy. Dropping the last handle discards staged edits
+and attempts finalization and synchronization without reporting errors. After an uncertain append
+outcome, the editor rejects append, commit, and explicit synchronization requests in that session.
 
 Clearing the SWMR-write flags requires a barrier at teardown. If the clear is lost, plain
 opens return [`Error::FileMarkedInUse`](crate::Error::FileMarkedInUse) until
@@ -608,21 +622,22 @@ The default is [`SyncPolicy::Always`](crate::SyncPolicy::Always), which is every
 
 ## Write gathering
 
-A commit or an in-place append is not one write. A single append writes the chunk's bytes at end-of-file and the superblock's recorded end-of-file, then patches the chunk index, the array header, and the dataspace dimension in the object header: five writes on a measured file, four of them a few dozen to a hundred-odd bytes, landing in a handful of pages that the *next* append patches again. Issued one at a time, that is four syscalls and four page dirtyings for a few hundred bytes of bookkeeping, and on flash a page dirtied four times is written four times. (An append that has to allocate a new extensible-array data block costs eight, which the first append into a dataset always does.)
+The editor gathers pending byte ranges and combines those within the same page when flushing.
+With default buffering, general editor barriers drain the gathered writes. Immediate appends also
+use allocation and reference publication boundaries: payloads and new index blocks are issued
+before their references, and recorded EOF covers complete allocations before those references
+are published. Dataspace growth follows the data and index updates.
 
-Every read-write session therefore gathers its writes and emits **one write per dirty page**. The bytes it holds are released at every *ordering barrier*, the points the commit and append sequences already define, where writes made before must reach the disk before writes made after. Three things follow:
-
-- A commit or an append that has returned successfully has put its bytes in the operating system, whatever the [`SyncPolicy`](crate::SyncPolicy) says, because every operation ends with a barrier.
-- Gathering preserves the ordering barriers required by each synchronization policy. A write error can occur after partial or complete publication.
-- The resulting file is unchanged, byte for byte.
-
-How much that saves depends on how much of an operation falls between two barriers. Measured on a paged file, a session appending one chunk to each of eight datasets, four times over, and then committing eight staged dataset creations: the appends issue all 184 of the write calls they make, while the commit's 24 go out as 4. An append's writes are separated by the barriers its own ordering needs, so there is almost nothing left to merge: four of the five land in two pages, two apiece, and all five still go out separately. A commit's tail puts many writes into a handful of pages as it rebuilds a group, repoints a root and re-homes the free-space managers, which is what merging within a barrier is for.
-
-There is no setting for the gathering and nothing to opt into. Merging *across* barriers is what [the next section](#letting-pages-live-longer) adds. The one session that does *not* gather is the SWMR writer, whose readers follow its ordered phases as they become visible. Coalescing those would leave the file the same size, and would let a reader see a state the phases exist to hide.
+Under [`SyncPolicy::Always`](crate::SyncPolicy::Always), the editor synchronizes content before
+references and synchronizes file metadata when EOF changes. Under
+[`SyncPolicy::OnClose`](crate::SyncPolicy::OnClose), these boundaries issue writes without
+requesting durability. The ordering applies to process interruption. Torn physical metadata
+writes can produce an unreadable file.
 
 ### Letting pages live longer
 
-Under the default, a page dirtied on either side of a barrier is written twice. `H5Pset_page_buffer_size`'s analogue lifts that:
+An explicit page buffer permits staged commit writes to remain buffered across general ordering
+barriers and across operations:
 
 ```rust
 # let dir = tempfile::tempdir()?;
@@ -642,71 +657,47 @@ let file = File::open_rw_with_options(
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
-Dirty pages then survive across barriers, commits and appends until the budget is spent, an `fsync` is issued, or the session closes. Measured on a paged file, 32 chunk appends into eight datasets followed by a commit: **188 writes with the default gathering, 5 with a page buffer**, two of which are the mark below going up and coming down. The appends issue nothing at all until the session ends. The file it produces is byte-identical either way.
+Immediate appends drain this buffer at their allocation and reference publication boundaries.
+A successful append has issued its writes to the operating system. Staged commits can retain
+writes until the byte budget is reached, explicit synchronization is requested, or the session
+closes. The final file bytes are independent of the buffering budget.
 
-Four things are required, and a page buffer that lacks one is rejected, never quietly ignored:
+A page buffer requires:
 
-- **A budget of at least the page the session merges within**: the file's own page size when it was created with [`FileSpaceStrategy::Page`](crate::FileSpaceStrategy::Page), and the format's 4 KiB default otherwise. A buffer that cannot hold one page drains on every page it touches.
-- **Persisted free space, on a paged file.** Non-persistent PAGE commits require ordered publication without page buffering. An unpaged file has no such constraint.
-- **A version-3 superblock**, because the session marks the file while it holds it and nothing reads that byte back on an older one. See below.
-- **[`SyncPolicy::OnClose`](crate::SyncPolicy::OnClose).** Under the default [`Always`](crate::SyncPolicy::Always) every barrier is an `fsync` that flushes the buffer, so it would hold nothing while still costing the mark.
+- A budget of at least the file-space page size on PAGE files, or 4 KiB on other files
+- Persisted free space on PAGE files
+- A version-3 superblock
+- [`SyncPolicy::OnClose`](crate::SyncPolicy::OnClose)
 
-There is also **a session long enough to pay for the mark**, which is a trade and not a rejection. See below.
-
-[`File::create_with_options`](crate::File::create_with_options) rejects a creation/access pair it could not reopen with, before writing the file, and the SWMR writer rejects a page buffer outright: its readers observe the order its writes become visible in, which is exactly what a buffer coalesces away.
+The editor rejects incompatible settings with [`Error::EditUnsupported`](crate::Error::EditUnsupported).
+SWMR writers reject page buffering. [`File::create_with_options`](crate::File::create_with_options)
+rejects an incompatible creation/access pair before writing the file.
 
 ### Choosing a budget
 
-Any budget of at least one page is accepted, and one below 1 MiB is a request for less resident memory: a writer inside a tight memory cap can set 256 KiB and get it. What it buys that memory with is writes: the budget is the point at which everything held is flushed, so a long contiguous run is flushed and restarted once per budget's worth of it. Writes issued, measured on a 4 KiB-paged file:
+The byte budget limits pending ranges. Reaching it drains every range, so a smaller budget can
+increase the number of writes within a long append batch. Separate small append calls drain at
+their own publication boundaries even when the budget could hold more.
 
-| workload | unset | 4 KiB | 64 KiB | 1 MiB |
-| --- | --- | --- | --- | --- |
-| 32 chunk appends into 8 datasets, then a commit | 188 | 25 | 4 | 4 |
-| one 4 MiB append | 131 | 1,094 | 74 | 10 |
+A nonzero page-buffer budget replaces the default gathering budget. Staged commit writes can
+remain resident across operations, while successful appends drain pending writes before returning.
 
-On the scattered workload a page buffer exists for, a small budget costs little. On the long run 64 KiB is seven times the writes of 1 MiB.
+### Interrupted page-buffered sessions
 
-The memory comparison against leaving the property unset is not the one that table suggests. A session that sets nothing already gathers up to 1 MiB of dirty bytes **per operation** and releases it at every barrier. A page buffer holds its budget **across** operations, until the budget is spent, an `fsync`, or [`close`](crate::File::close). So 1 MiB here trades a per-operation peak for a continuous residency of the same size, and a budget below 1 MiB lowers both.
+Staged commit references can be issued before their content when an explicit page buffer is
+flushed in address order. An interruption can leave a root pointing at missing metadata or a
+dataset pointing at incomplete values.
 
-### Where this differs from `H5Pset_page_buffer_size`
+The editor marks the superblock for the lifetime of a page-buffered session. It synchronizes the
+mark at open and clears it during successful closure. After an interruption, ordinary opens
+return [`Error::FileMarkedInUse`](crate::Error::FileMarkedInUse) while the mark remains.
+[`File::clear_status_flags`](crate::File::clear_status_flags) permits inspection after the writer
+has stopped, without guaranteeing data integrity.
 
-**A paged file is not required.** `H5PB_create` requires one, because the C page buffer is a page *cache* whose `min_meta_perc` / `min_raw_perc` reservations count pages the paged allocator keeps segregated by kind. This is a write gatherer instead: it merges runs within a page-sized window and flushes whole, so a window is all it needs, and an unpaged file gets the same 4 KiB one every read-write session already gathers under. Unpaged is the default strategy, so requiring [`Page`](crate::FileSpaceStrategy::Page) would put the property out of reach of most files, and this implementation has no need of it.
-
-**A small budget costs writes here, where it costs none in C**, because `H5PB_write` bypasses the C buffer for any I/O of a page or more, so capping memory there does not throttle a long write. Nothing bypasses this gatherer, so a small budget is also where a long run is flushed and restarted. Both libraries accept the budget, and only this one charges for it.
-
-**A sub-page budget is rejected, never rounded.** `H5Fcreate` rejects it too, `H5Fopen` rounds it up to one page silently, and on an unpaged file `H5Fopen` silently zeroes the budget outright. A property quietly ignored is worse than one rejected.
-
-### What a page buffer trades, and what pays for it
-
-Gathered writes go out in address order, and every publish point sits below the content it reaches: a commit's superblock and root at address 0, an append's dataspace dimension and chunk-index element count in the object header near the front, the chunk bytes and index blocks those point at, at end-of-file. Held across their barriers, all of them are issued first. A write that fails, or a process that dies, mid-flush can therefore leave:
-
-- a root or an end-of-file pointing at bytes that never arrived, a file that fails to read, which is the benign case
-- a dataset whose length was published but whose rows were not, which reads back **clean**, as fill values
-- a dataset header published over a region an earlier commit freed, which reads back **clean**, as the deleted object's data
-
-The last two are silent: every checksum verifies and a reader has no signal. This is what a write-back page buffer *is*, and `H5Pset_page_buffer_size` reorders the same way, with the same silence on crash consistency. The guarantee being switched off is one this crate adds on top of HDF5, and not one an HDF5 user arrives expecting.
-
-So a page-buffered session **marks the file for its lifetime**: superblock status-flag bit 0, `H5F_SUPER_WRITE_ACCESS`, the byte libhdf5 raises for any writer and this crate otherwise raises only for a SWMR one. It is written and `fsync`ed at open, republished by every commit, and cleared on a clean [`close`](crate::File::close) or drop. A session that dies with pages in memory leaves it standing, and a file carrying it is rejected by this crate, by `H5Fopen` and by h5py alike, with [`Error::FileMarkedInUse`](crate::Error::FileMarkedInUse). The silent wrong result becomes an error. After the writer has stopped, [`File::clear_status_flags`](crate::File::clear_status_flags)
-permits inspection without guaranteeing data integrity. It is equivalent to `h5clear --status`
-(`h5clear -s`), and leaves metadata cache images and the file size unchanged.
-
-A reader has a snapshot while the session is still running. The mark is bit 0 alone, which no SWMR reader can follow, so [`FileAccessProperties::with_write_mark_policy(WriteMarkPolicy::AllowSnapshot)`](crate::FileAccessProperties::with_write_mark_policy) reads the file as it stands through any `*_with_options` open, on the caller's assertion that the writer has flushed, with [`File::sync`](crate::File::sync) or a clean close. It admits nothing else: a SWMR pair still belongs to [`File::open_swmr`](crate::File::open_swmr), and no reader's opt-in lets a second writer in.
-
-### When it is worth it
-
-The mark costs two `fsync`s per session, at open and at close, whatever the session then does, so a page buffer pays off over a long session and costs on a short one. Measured on an Apple M1 Max (APFS), 256-byte appends into eight datasets, arms alternated and medians of seven:
-
-| appends | default | page buffer | ratio |
-|---:|---:|---:|---:|
-| 400 | 14.5 ms | 19.3 ms | 0.75 |
-| 800 | 23.3 ms | 24.3 ms | 0.96 |
-| 1,600 | 41.0 ms | 33.3 ms | 1.23 |
-| 3,200 | 79.1 ms | 54.8 ms | 1.45 |
-| 6,400 | 152.9 ms | 93.5 ms | 1.64 |
-
-Break-even is near 800 appends here, and the ratio climbs past it because the same pages are re-dirtied more often the longer the session runs. The 1,600-append session ran 1.64 with the mark removed against 1.23 with it, which is what the guarantee costs, a fixed price per session and not a rate. The margin narrows to about 1.1 once 64 KiB payloads dominate over metadata churn.
-
-These are one host's numbers and the short end is noisy, since both of its arms are small enough for the fixed `fsync` cost to dominate. `cargo bench --bench hot_paths -- page_buffer` runs both sides of the crossing on yours.
+[`WriteMarkPolicy::AllowSnapshot`](crate::WriteMarkPolicy::AllowSnapshot) permits a read-only open
+on the caller's assertion that the writer has flushed and the stored bytes form a readable state.
+It does not permit a second writer. [`File::sync`](crate::File::sync) or successful closure issues
+pending writes and requests durability.
 
 ## Supported targets and formats
 

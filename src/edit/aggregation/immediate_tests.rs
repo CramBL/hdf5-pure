@@ -275,20 +275,44 @@ fn failed_immediate_append_preserves_consumed_space(
         (0..if new_dimension { 12 } else { 4 }).collect::<Vec<_>>()
     );
     let physical_length = engine.image.len();
-    engine.finalize_persist().unwrap();
+    let before = engine.image.as_slice().unwrap().to_vec();
+    let error = engine.finalize_persist().unwrap_err();
+    assert!(
+        matches!(error, Error::AllocationPublicationUncertain),
+        "{error:?}"
+    );
     assert_eq!(engine.image.len(), physical_length);
     if matches!(next, Continuation::Commit) {
         engine.create_group(&ObjectPathBuf::parse("after")).unwrap();
-        engine.commit().unwrap();
+        let error = engine.commit().unwrap_err();
+        assert!(
+            matches!(error, Error::AllocationPublicationUncertain),
+            "{error:?}"
+        );
     }
     if !matches!(next, Continuation::Drop) {
+        let error = engine
+            .append_inplace_i32_phased("values", &[97, 98], 4)
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::AllocationPublicationUncertain),
+            "{error:?}"
+        );
+    }
+    assert_eq!(engine.image.as_slice().unwrap(), before);
+    drop(engine);
+    if !matches!(next, Continuation::Drop) {
+        let mut engine = open_engine(&path, MemoryStrategy::Mirrored);
+        if matches!(next, Continuation::Commit) {
+            engine.create_group(&ObjectPathBuf::parse("after")).unwrap();
+            engine.commit().unwrap();
+        }
         engine
             .append_inplace_i32_phased("values", &[97, 98], 4)
             .unwrap();
-        assert_eq!(engine.context.superblock().eof_address, engine.image.len());
         engine.finalize_persist().unwrap();
+        drop(engine);
     }
-    drop(engine);
     let file = File::open(&path).unwrap();
     let mut expected = expected;
     if !matches!(next, Continuation::Drop) {
@@ -499,6 +523,10 @@ impl FileImage for FailureImage {
     }
 
     fn ordering_barrier(&mut self) -> Result<(), Error> {
+        self.sync()
+    }
+
+    fn flush(&mut self) -> Result<(), Error> {
         self.sync()
     }
 

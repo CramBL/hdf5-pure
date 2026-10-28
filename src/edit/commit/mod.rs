@@ -62,7 +62,9 @@ impl WriteEngine {
     ///
     /// Returns [`Error::Io`] if writing or synchronization fails. Returns the publication recovery
     /// error if the issued superblock cannot be read or verified.
+    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier append outcome is uncertain.
     pub(crate) fn force_sync(&mut self) -> Result<(), Error> {
+        self.context.allocations.available()?;
         self.image.sync_all()?;
         self.complete_page_publication()
     }
@@ -81,7 +83,9 @@ impl WriteEngine {
     ///
     /// Returns [`Error::Format`] if metadata serialization, aggregate planning, or address
     /// resolution fails. Returns [`Error::Io`] if writing, syncing, or truncating fails.
+    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier append outcome is uncertain.
     pub(crate) fn finalize_persist(&mut self) -> Result<(), Error> {
+        self.context.allocations.available()?;
         if self.aggregation.is_some() {
             if self.persist.is_some() {
                 return self.finalize_persistent_aggregates();
@@ -126,7 +130,9 @@ impl WriteEngine {
     /// be reproduced. Other preparation and I/O errors propagate from planning, writing,
     /// or synchronizing the file. Returns [`Error::CommitPartiallyApplied`] if restoring prior
     /// values from the undo journal fails, with both the original failure and the restore error.
+    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier append outcome is uncertain.
     pub fn commit(&mut self) -> Result<(), Error> {
+        self.context.allocations.available()?;
         if self.fresh_page_boundary.is_some() && self.publication.attempted() {
             self.barrier()?;
             self.complete_page_publication()?;

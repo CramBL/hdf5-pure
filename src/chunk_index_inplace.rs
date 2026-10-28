@@ -65,6 +65,9 @@ use crate::data_layout::DataLayout;
 use crate::dataspace::{Dataspace, MaxExtent};
 use crate::datatype::Datatype;
 use crate::edit::LossyTailReencoding;
+use crate::edit::allocation::{
+    AllocationPublication, ConfirmedAllocation, ConfirmedPublication, ProvisionalAllocation,
+};
 use crate::edit::retirement::ChunkAllocation;
 use crate::edit::{self, LOSSY_TAIL_REFUSAL};
 use crate::error::{Error, FormatError};
@@ -160,12 +163,21 @@ pub(crate) trait Store: Source {
     /// publication.
     fn retire(&mut self, retirement: RetiredChunk);
 
-    /// Returns the end of file recorded in the cached superblock.
-    ///
-    /// An interrupted append may leave image bytes beyond this position.
-    fn recorded_eof(&self) -> u64;
+    /// Returns the editing session's allocation publication state.
+    fn allocation_publication(&self) -> &AllocationPublication;
 
-    /// Writes `bytes` into an allocation of `class` and returns its physical position.
+    /// Issues allocation content and publishes any required EOF change before references.
+    ///
+    /// The returned confirmation is bound to this session and allocation generation.
+    /// The storage layer completes its ordering or durability barriers before returning.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier outcome is uncertain.
+    /// Propagates errors from writing or synchronizing publication metadata.
+    fn publish_allocations(&mut self) -> Result<ConfirmedPublication, Error>;
+
+    /// Writes `bytes` into provisional storage of `class`.
     ///
     /// Chunk payloads use [`AllocationClass::Raw`]. Extensible-array data and super blocks use
     /// [`AllocationClass::Metadata`]. On PAGE files, the editor places both in raw pages.
@@ -173,35 +185,43 @@ pub(crate) trait Store: Source {
     /// its PAGE placement is proven.
     ///
     /// The store may allocate from a classic aggregate, reuse committed free space, or append at
-    /// end-of-file. The allocation lies
-    /// within the image's logical length on return. Before publishing a chunk address,
-    /// [`apply_ea_append`] records any increase in that length in the superblock.
+    /// end-of-file. The complete allocation lies within the image's logical length on return.
     ///
-    /// The caller must issue [`sync`](Self::sync) before publishing a reference to the allocation.
-    /// A store may gather writes and flush them in address order at that barrier.
+    /// Before publishing a reference, the caller obtains confirmation through
+    /// [`publish_allocations`](Self::publish_allocations) and
+    /// [`ConfirmedPublication::confirm`]. A synchronization barrier alone grants no permission.
     ///
     /// # Errors
     ///
+    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier outcome is uncertain.
     /// Returns [`Error::Format`] if address conversion or PAGE allocation geometry is invalid.
     /// Returns [`Error::Io`] if writing the allocation fails.
-    fn allocate(&mut self, bytes: &[u8], class: AllocationClass) -> Result<u64, Error>;
-    /// Overwrite `[offset, offset + bytes.len())` in place.
+    fn allocate(
+        &mut self,
+        bytes: &[u8],
+        class: AllocationClass,
+    ) -> Result<ProvisionalAllocation, Error>;
+    /// Writes reference metadata after every pending allocation has been confirmed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if allocations remain provisional, or
+    /// [`Error::AllocationPublicationUncertain`] if an earlier outcome is uncertain.
+    /// Propagates errors from writing or draining buffered ranges.
     fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), Error>;
-    /// Advance the superblock's recorded end-of-file to the store's current
-    /// logical length and rewrite the superblock.
-    fn patch_superblock_eof(&mut self) -> Result<(), Error>;
     /// An ordering barrier: everything written before this reaches the operating
     /// system before anything written after it, and under
     /// [`SyncPolicy::Always`](crate::SyncPolicy) it is forced to durable storage
     /// as well.
     ///
-    /// Both halves matter, and only the second is the policy's to skip.
-    /// [`SyncPolicy::OnClose`](crate::SyncPolicy) issues no `fsync` here but still
-    /// releases the session's gathered writes, so this is never a no-op: writes
-    /// between two barriers go out in *address* order, and every publish point in
-    /// this format sits at a lower address than the content it names. What
-    /// `OnClose` gives up is power-loss durability, not the order a concurrent
-    /// reader observes (issue #288).
+    /// [`SyncPolicy::OnClose`](crate::SyncPolicy) drains gathered writes, including explicit
+    /// page buffers, without requesting durability.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if allocations remain provisional, or
+    /// [`Error::AllocationPublicationUncertain`] if an earlier outcome is uncertain.
+    /// Propagates errors from writing or synchronizing buffered ranges.
     fn sync(&mut self) -> Result<(), Error>;
 
     /// Read an offset-sized address at `offset`.
@@ -745,12 +765,13 @@ impl Located {
     /// geometry does not cover `e`, the stored chunk size exceeds its field width, or a
     /// checksum publication range lies outside its block. Propagates errors from reading,
     /// encoding, allocating, writing, or synchronizing blocks.
-    pub(crate) fn ea_insert<F: Store>(
+    fn ea_insert<F: Store>(
         &mut self,
         file: &mut F,
         e: u64,
-        rec: ElemRecord,
+        rec: ConfirmedChunk,
     ) -> Result<(), Error> {
+        let rec = rec.record(file)?;
         self.allocation_stats = None;
         let os = file.widths().offsets.get() as usize;
         let elem_size = self.ea_elem_size as u64;
@@ -794,7 +815,10 @@ impl Located {
             // As in `ensure_super_block`: an appended block sits above its parent
             // pointer, so they need a barrier between them or an address-ordered
             // flush names a block that is not there yet.
-            file.sync()?;
+            let publication = file.publish_allocations()?;
+            let allocation = publication.confirm(new_addr)?;
+            let range = file.allocation_publication().require(&allocation)?;
+            let new_addr = file.addresses().relative(range.start().get())?;
             match region.parent {
                 Parent::IndexDirect { .. } => {
                     self.publish_index_block(
@@ -893,11 +917,7 @@ impl Located {
             self.client_id,
             self.ea_bits.block_offset_width(),
         );
-        // Every path into this engine rejects a file with a userblock
-        // (`WriteEngine::append_prepare` and `File::open_swmr_writer`), so the base address
-        // is zero and the position `allocate` returns is the address the file stores. The
-        // three further allocations below rest on the same invariant.
-        let new_addr = StoredAddress::new(file.allocate(&super_block, AllocationClass::Metadata)?);
+        let allocation = file.allocate(&super_block, AllocationClass::Metadata)?;
         #[cfg(test)]
         alloc_probe::note_super_block();
         // The block exists before anything names it. When its bytes were appended
@@ -907,7 +927,10 @@ impl Located {
         // (issue #288). A block drawn from freed space may land either side of
         // the slot, and which it is is not knowable here, so the barrier stands
         // unconditionally. See `Store::allocate`.
-        file.sync()?;
+        let publication = file.publish_allocations()?;
+        let allocation = publication.confirm(allocation)?;
+        let range = file.allocation_publication().require(&allocation)?;
+        let new_addr = file.addresses().relative(range.start().get())?;
 
         let slot_off = self.index_block_addr.get()
             + ib_prefix
@@ -917,16 +940,20 @@ impl Located {
         Ok(new_addr)
     }
 
-    /// Allocates a data block (`EADB`) of `dblk_nelmts` elements that each store
-    /// the undefined address, and returns its address.
+    /// Allocates a provisional data block (`EADB`) with undefined element addresses.
     ///
     /// A block of more than one page of elements is paged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::ValueTooLargeForPlatform`] if the element or page element count
+    /// exceeds [`usize::MAX`]. Propagates errors from [`Store::allocate`].
     fn alloc_undef_data_block<F: Store>(
         &self,
         file: &mut F,
         dblk_nelmts: u64,
         block_offset_rel: u64,
-    ) -> Result<StoredAddress, Error> {
+    ) -> Result<ProvisionalAllocation, Error> {
         let os = self.offset_width;
         let block = hdf5_pure_format::__private::encode_data_block(
             &IndexSlots::dense(&[]),
@@ -940,9 +967,7 @@ impl Located {
             self.client_id,
             self.ea_bits,
         )?;
-        Ok(StoredAddress::new(
-            file.allocate(&block, AllocationClass::Metadata)?,
-        ))
+        file.allocate(&block, AllocationClass::Metadata)
     }
 
     /// Width of a filtered element's stored-size field. Zero for an unfiltered
@@ -1633,71 +1658,54 @@ pub(crate) fn apply_ea_append<F: Store>(
     }: AppendPlan,
     max_phase: u8,
 ) -> Result<(), Error> {
-    // Phase 1: new/relocated chunk bytes, then advance the superblock's recorded
-    // end-of-file to cover them. This must precede the index writes: the trailing
-    // partial chunk's element is *visible* at the old dimension, so once it is
-    // repointed to the relocated chunk that chunk must already lie within the
-    // recorded EOF.
-    //
-    // A chunk served from freed space (issue #349) is inside the recorded EOF
-    // already, so it needs no patch, and issuing one would rewrite the whole
-    // superblock and barrier for it on every batch. Both patches below are
-    // therefore the same rule: rewrite the superblock only where the file grew
-    // past what it records. The initial value comes from the superblock: an
-    // interrupted append can leave reserved storage beyond its recorded EOF.
-    let mut recorded_eof = file.recorded_eof();
-    let mut chunk_addrs = Vec::with_capacity(chunks.len());
+    // Phase 1: write payloads and confirm their publication before index updates. A replacement
+    // tail is visible at the old dimension, so its complete allocation must be within recorded EOF.
+    let mut allocations = Vec::with_capacity(chunks.len());
     for chunk in &chunks {
-        let address = file.allocate(chunk.bytes(), AllocationClass::Raw)?;
-        chunk_addrs.push(file.addresses().relative(address)?);
+        allocations.push(file.allocate(chunk.bytes(), AllocationClass::Raw)?);
     }
-    let completed_record = completed_tail
+    let completed_allocation = completed_tail
         .as_ref()
-        .map(|chunk| {
-            Ok::<_, Error>(ElemRecord {
-                addr: {
-                    let address = file.allocate(chunk.bytes(), AllocationClass::Raw)?;
-                    file.addresses().relative(address)?
-                },
-                stored_size: chunk.stored_size(),
-                filter_mask: chunk.filter_mask(),
-            })
+        .map(|chunk| file.allocate(chunk.bytes(), AllocationClass::Raw))
+        .transpose()?;
+    let publication = file.publish_allocations()?;
+    let completed_record = completed_allocation
+        .zip(completed_tail.as_ref())
+        .map(|(allocation, chunk)| {
+            publication
+                .confirm(allocation)
+                .map(|allocation| ConfirmedChunk {
+                    allocation,
+                    filter_mask: chunk.filter_mask(),
+                })
         })
         .transpose()?;
-    file.sync()?;
-    if file.len() != recorded_eof {
-        file.patch_superblock_eof()?;
-        file.sync()?;
-        recorded_eof = file.len();
-    }
     if max_phase < 2 {
         return Ok(());
     }
 
     // Phase 2: insert new chunk records and repoint the trailing chunk's record.
-    // New index blocks beyond the recorded EOF are covered by the phase-3 EOF patch.
-    // Blocks allocated from freed space are already within the recorded EOF.
-    let mut records =
-        (n_full..).zip(
-            chunk_addrs
-                .into_iter()
-                .zip(&chunks)
-                .map(|(addr, chunk)| ElemRecord {
-                    addr,
-                    stored_size: chunk.stored_size(),
+    // Each new child block is published before its parent pointer is written.
+    let mut records = (n_full..).zip(allocations.into_iter().zip(&chunks).map(
+        |(allocation, chunk)| {
+            publication
+                .confirm(allocation)
+                .map(|allocation| ConfirmedChunk {
+                    allocation,
                     filter_mask: chunk.filter_mask(),
-                }),
-        );
+                })
+        },
+    ));
     if let Some(reference) = predecessor {
         let (index, record) = records
             .next()
             .ok_or_else(|| FormatError::Internal("a tail replacement has no record".into()))?;
         debug_assert_eq!(reference.slot, index);
         UnpublishedChunkReference::bind(file, loc, reference)?
-            .publish(record, records.map(|(_, record)| record))?;
+            .publish(record?, records.map(|(_, record)| record))?;
     } else {
         for (index, record) in records {
-            loc.ea_insert(file, index, record)?;
+            loc.ea_insert(file, index, record?)?;
         }
         file.sync()?;
     }
@@ -1705,11 +1713,7 @@ pub(crate) fn apply_ea_append<F: Store>(
         return Ok(());
     }
 
-    // Phase 3: cover any EA blocks allocated during the element writes, then
-    // publish the EA header element count.
-    if file.len() != recorded_eof {
-        file.patch_superblock_eof()?;
-    }
+    // Phase 3: publish the EA header element count.
     loc.update_ea_header(file, stats)?;
     file.sync()?;
     loc.allocation_stats = Some(stats);
@@ -1728,6 +1732,28 @@ pub(crate) fn apply_ea_append<F: Store>(
         loc.allocation_stats = Some(stats);
     }
     Ok(())
+}
+
+/// A confirmed payload allocation and its encoded filter mask.
+struct ConfirmedChunk {
+    allocation: ConfirmedAllocation,
+    filter_mask: u32,
+}
+
+impl ConfirmedChunk {
+    /// Resolves the allocation through its editing session before constructing an index record.
+    ///
+    /// # Errors
+    ///
+    /// Returns the allocation-state or stored-address conversion error.
+    fn record(&self, file: &impl Store) -> Result<ElemRecord, Error> {
+        let range = file.allocation_publication().require(&self.allocation)?;
+        Ok(ElemRecord {
+            addr: file.addresses().relative(range.start().get())?,
+            stored_size: range.length(),
+            filter_mask: self.filter_mask,
+        })
+    }
 }
 
 /// A predecessor allocation and index record captured at the current dataset extent.
@@ -1835,8 +1861,8 @@ impl<'a, F: Store> UnpublishedChunkReference<'a, F> {
     /// record's index exceeds [`u64::MAX`].
     fn publish(
         self,
-        record: ElemRecord,
-        following: impl IntoIterator<Item = ElemRecord>,
+        record: ConfirmedChunk,
+        following: impl IntoIterator<Item = Result<ConfirmedChunk, Error>>,
     ) -> Result<(), Error> {
         let Self {
             file,
@@ -1858,7 +1884,7 @@ impl<'a, F: Store> UnpublishedChunkReference<'a, F> {
             next = next
                 .checked_add(1)
                 .ok_or_else(|| FormatError::Internal("append record index exceeds u64".into()))?;
-            pending.located.ea_insert(pending.file, next, record)?;
+            pending.located.ea_insert(pending.file, next, record?)?;
         }
         pending.confirm()
     }
@@ -2244,6 +2270,7 @@ mod tests {
     use crate::ScaleOffset;
     use crate::access_mode::AccessMode;
     use crate::edit::LocatedState;
+    use crate::edit::allocation::PublicationAction;
     use crate::filters;
     use crate::group_v2;
     use crate::object_path::ObjectPath;
@@ -2317,6 +2344,13 @@ mod tests {
         assert_eq!(error.to_string(), "injected synchronization failure");
         assert!(state.loc.allocation_stats.is_none());
         store.fail_sync = None;
+        let error = append_state(&mut store, &mut state, &[4], 4).unwrap_err();
+        assert!(
+            matches!(error, Error::AllocationPublicationUncertain),
+            "{error:?}"
+        );
+        let mut store = WindowProbeStore::open(store.data);
+        let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
         append_state(&mut store, &mut state, &[4], 4).unwrap();
         assert_eq!(
             stored_stats(&store, &state.loc),
@@ -2635,6 +2669,7 @@ mod tests {
     /// bounded backend relies on.
     struct WindowProbeStore {
         data: Vec<u8>,
+        publication: AllocationPublication,
         superblock: Superblock,
         widths: FormatWidths,
         sb_sig_off: usize,
@@ -2671,6 +2706,7 @@ mod tests {
             let sb_sig_off = usize::try_from(address.get()).unwrap();
             Self {
                 data,
+                publication: AllocationPublication::new(),
                 superblock,
                 widths,
                 sb_sig_off,
@@ -2714,6 +2750,29 @@ mod tests {
             Ok(addr)
         }
 
+        fn allocate_bytes(&mut self, bytes: &[u8], class: AllocationClass) -> Result<u64, Error> {
+            self.allocations.get_mut().push(class);
+            let len = bytes.len() as u64;
+            if let Some((addr, avail)) = self.free.filter(|&(_, avail)| avail >= len) {
+                self.reuses.set(self.reuses.get() + 1);
+                self.free = (avail > len).then(|| (addr + len, avail - len));
+                let start = addr.to_usize()?;
+                self.data[start..start + bytes.len()].copy_from_slice(bytes);
+                return Ok(addr);
+            }
+            self.append_bytes(bytes)
+        }
+        fn patch_superblock_eof(&mut self) -> Result<(), Error> {
+            self.superblock_patches
+                .set(self.superblock_patches.get() + 1);
+            self.superblock.eof_address = self.data.len() as u64;
+            let bytes =
+                hdf5_pure_format::__private::serialize_superblock(&self.superblock).unwrap();
+            let off = self.sb_sig_off;
+            self.data[off..off + bytes.len()].copy_from_slice(&bytes);
+            Ok(())
+        }
+
         fn reset_counters(&self) {
             self.max_read.set(0);
             self.total_read.set(0);
@@ -2748,38 +2807,45 @@ mod tests {
         fn retire(&mut self, retirement: RetiredChunk) {
             self.retired.push(retirement.range());
         }
-        fn recorded_eof(&self) -> u64 {
-            self.superblock.eof_address
+        fn allocation_publication(&self) -> &AllocationPublication {
+            &self.publication
         }
-        fn allocate(&mut self, bytes: &[u8], class: AllocationClass) -> Result<u64, Error> {
-            self.allocations.get_mut().push(class);
-            let len = bytes.len() as u64;
-            if let Some((addr, avail)) = self.free.filter(|&(_, avail)| avail >= len) {
-                self.reuses.set(self.reuses.get() + 1);
-                self.free = (avail > len).then(|| (addr + len, avail - len));
-                self.write_at(addr, bytes)?;
-                return Ok(addr);
+        fn allocate(
+            &mut self,
+            bytes: &[u8],
+            class: AllocationClass,
+        ) -> Result<ProvisionalAllocation, Error> {
+            self.publication.available()?;
+            let address = self.allocate_bytes(bytes, class)?;
+            self.publication.provision(FileRange::new(
+                PhysicalAddress::new(address),
+                bytes.len() as u64,
+            )?)
+        }
+        fn publish_allocations(&mut self) -> Result<ConfirmedPublication, Error> {
+            let attempt = match self.publication.begin()? {
+                PublicationAction::Current(publication) => {
+                    return Ok(publication);
+                }
+                PublicationAction::Publish(attempt) => attempt,
+            };
+            self.sync()?;
+            if self.data.len() as u64 != self.superblock.eof_address {
+                self.patch_superblock_eof()?;
+                self.sync()?;
             }
-            self.append_bytes(bytes)
+            self.publication.complete(attempt)
         }
         fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), Error> {
+            self.publication.before_reference()?;
             let offset = offset.to_usize()?;
             self.data[offset..offset + bytes.len()].copy_from_slice(bytes);
-            Ok(())
-        }
-        fn patch_superblock_eof(&mut self) -> Result<(), Error> {
-            self.superblock_patches
-                .set(self.superblock_patches.get() + 1);
-            self.superblock.eof_address = self.data.len() as u64;
-            let bytes =
-                hdf5_pure_format::__private::serialize_superblock(&self.superblock).unwrap();
-            let off = self.sb_sig_off;
-            self.data[off..off + bytes.len()].copy_from_slice(&bytes);
             Ok(())
         }
         fn sync(&mut self) -> Result<(), Error> {
             self.syncs.set(self.syncs.get() + 1);
             if self.fail_sync == Some(self.syncs.get()) {
+                self.publication.make_uncertain();
                 return Err(Error::Io(std::io::Error::other(
                     "injected synchronization failure",
                 )));
@@ -2875,6 +2941,8 @@ mod tests {
         let at = loc
             .alloc_undef_data_block(&mut store, dblk_nelmts, 32)
             .unwrap()
+            .range()
+            .start()
             .get()
             .to_usize()
             .unwrap();
@@ -3346,34 +3414,17 @@ mod tests {
         for (round, &(syncs, appends)) in rounds.iter().enumerate() {
             assert_eq!(
                 syncs,
-                base + blocks(appends),
+                base + 2 * blocks(appends),
                 "append {round} allocated {} index block(s) and took {syncs} \
-                 barriers against the {base} a plain append takes: each fresh \
-                 block owes one, between its bytes and the pointer naming it",
+                 barriers against the {base} for a plain append: each fresh \
+                 block requires content and EOF publication barriers",
                 blocks(appends)
             );
         }
     }
 
-    /// The append sequence rewrites the superblock **once** when its index
-    /// writes allocate nothing, and twice when they allocate a block past the
-    /// end-of-file phase 1 recorded.
-    ///
-    /// Phase 1's patch fires here because the chunk bytes extend the file; when
-    /// they are served from freed space instead they do not, which
-    /// [`phase_one_patches_the_superblock_only_when_the_file_grew`] covers.
-    /// Phase 3's exists only to cover blocks the element writes added, and an
-    /// append that adds none used to rewrite the whole superblock with the bytes
-    /// it already held: one wasted write, and one wasted page dirtying, on every
-    /// append (issue #288).
-    ///
-    /// Asserted in both directions on purpose. "Never twice" would be satisfied
-    /// by dropping phase 3's patch altogether, which understates the end-of-file
-    /// on exactly the appends that grow the index — so this also demands that
-    /// some append in the run *does* patch twice, and the sequence below is long
-    /// enough to cross a block boundary and produce one.
     #[test]
-    fn phase_three_patches_the_superblock_only_when_the_index_grew() {
+    fn index_growth_publishes_an_additional_eof_update() {
         let mut store = WindowProbeStore::open(build_unlimited(4, 1));
         let (mut loc, datatype) = locate(&store);
 
@@ -4294,11 +4345,10 @@ mod tests {
 
     fn replace_edge_record(store: &mut WindowProbeStore, stored: &[u8]) {
         let (mut loc, _) = locate(store);
-        let addr = StoredAddress::new(store.allocate(stored, AllocationClass::Raw).unwrap());
-        store.patch_superblock_eof().unwrap();
-        let rec = ElemRecord {
-            addr,
-            stored_size: stored.len() as u64,
+        let allocation = store.allocate(stored, AllocationClass::Raw).unwrap();
+        let publication = store.publish_allocations().unwrap();
+        let rec = ConfirmedChunk {
+            allocation: publication.confirm(allocation).unwrap(),
             filter_mask: 0,
         };
         loc.ea_insert(store, 1, rec).unwrap();

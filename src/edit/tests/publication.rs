@@ -1288,8 +1288,13 @@ fn a_page_buffered_session_flushes_when_it_exceeds_its_budget() {
     );
 }
 
-#[test]
-fn a_smaller_budget_issues_more_writes() {
+#[rstest]
+#[case::scattered(true)]
+#[case::long_run(false)]
+fn page_buffer_budget_controls_writes_within_publication_batches(
+    #[case] scattered: bool,
+    #[values(4096, 65_536)] smaller: usize,
+) {
     let dir = tempfile::tempdir().unwrap();
     let fixture = |path: &std::path::Path, tables: usize| {
         use crate::writer::FileBuilder;
@@ -1336,31 +1341,44 @@ fn a_smaller_budget_issues_more_writes() {
         }
     };
 
-    for (label, tables, scattered) in [("scattered", 8, true), ("one long run", 1, false)] {
-        let workload = workload(scattered);
-        let at = |budget: usize| {
-            let path = dir
-                .path()
-                .join(std::format!("{}_{budget}.h5", label.replace(' ', "_")));
-            fixture(&path, tables);
-            run(&path, budget, &workload)
-        };
-        let ample = at(WRITE_GATHER_BYTES);
-        let smallest = at(4096);
-        for smaller in [4096, 64 * 1024] {
-            let below = at(smaller);
-            assert!(
-                ample <= below,
-                "{label}: a {smaller}-byte budget issued {below} writes against \
-                 {ample} at {WRITE_GATHER_BYTES}, so a smaller budget is not the \
-                 trade the property documents"
+    let label = if scattered { "scattered" } else { "long_run" };
+    let tables = if scattered { 8 } else { 1 };
+    let workload = workload(scattered);
+    let at = |budget: usize| {
+        let path = dir.path().join(std::format!("{label}_{budget}.h5"));
+        fixture(&path, tables);
+        let count = run(&path, budget, &workload);
+        let file = File::open(&path).unwrap();
+        for table in 0..tables {
+            let mut expected: Vec<i32> = (0..256).collect();
+            if scattered {
+                expected.extend((0..4).flat_map(|round| core::iter::repeat_n(round, 64)));
+            } else {
+                expected.extend(core::iter::repeat_n(7, 1 << 20));
+            }
+            assert_eq!(
+                file.dataset(&std::format!("t{table}"))
+                    .unwrap()
+                    .read_i32()
+                    .unwrap(),
+                expected
             );
         }
+        drop(file);
+        count
+    };
+    let ample = at(WRITE_GATHER_BYTES);
+    let below = at(smaller);
+    assert!(ample > 0, "{label}: the workload must issue writes");
+    if scattered {
+        assert_eq!(
+            below, ample,
+            "small appends must drain at each publication boundary"
+        );
+    } else {
         assert!(
-            smallest > ample,
-            "{label}: the budget changed nothing — {smallest} writes at 4 KiB \
-             against {ample} at 1 MiB — so this workload cannot say which \
-             budget is better"
+            below > ample,
+            "{label}: a {smaller}-byte budget issued {below} writes against {ample} at {WRITE_GATHER_BYTES}"
         );
     }
 }
@@ -1437,8 +1455,10 @@ fn a_page_buffer_marks_a_userblock_file_without_repointing_its_root(
     }
 }
 
-#[test]
-fn a_page_buffer_holds_dirty_pages_across_operations() {
+#[rstest]
+#[case::paged(true)]
+#[case::unpaged(false)]
+fn append_publication_drains_explicit_page_buffers(#[case] paged: bool) {
     let dir = tempfile::tempdir().unwrap();
     let run = |path: &std::path::Path, page_buffer: usize| {
         let mut s = WriteEngine::open_with_locking(path, FileLocking::Enabled).unwrap();
@@ -1447,33 +1467,28 @@ fn a_page_buffer_holds_dirty_pages_across_operations() {
             s.set_page_buffer_size(page_buffer).unwrap();
         }
         let (appends, commit) = gather_workload(&mut s);
+        assert!(
+            appends > 0,
+            "appends must issue allocation and reference writes"
+        );
         s.force_sync().unwrap();
         s.release_status_flags().unwrap();
         drop(s);
         appends + commit
     };
 
-    for paged in [true, false] {
-        let label = if paged { "paged" } else { "unpaged" };
-        let per_op = dir.path().join(std::format!("{label}_per_op.h5"));
-        let buffered = dir.path().join(std::format!("{label}_buffered.h5"));
-        common::gather_fixture(&per_op, 4, paged);
-        common::gather_fixture(&buffered, 4, paged);
-
-        let per_op_writes = run(&per_op, 0);
-        let buffered_writes = run(&buffered, 1 << 20);
-
-        assert!(
-            buffered_writes * 4 < per_op_writes,
-            "{label}: a page buffer must cost meaningfully fewer writes than the \
-             per-operation default, but cost {buffered_writes} against {per_op_writes}"
-        );
-        assert_eq!(
-            std::fs::read(&per_op).unwrap(),
-            std::fs::read(&buffered).unwrap(),
-            "{label}: a page buffer changed the file it produced"
-        );
-    }
+    let label = if paged { "paged" } else { "unpaged" };
+    let per_op = dir.path().join(std::format!("{label}_per_op.h5"));
+    let buffered = dir.path().join(std::format!("{label}_buffered.h5"));
+    common::gather_fixture(&per_op, 4, paged);
+    common::gather_fixture(&buffered, 4, paged);
+    run(&per_op, 0);
+    run(&buffered, 1 << 20);
+    assert_eq!(
+        std::fs::read(&per_op).unwrap(),
+        std::fs::read(&buffered).unwrap(),
+        "{label}: a page buffer changed the file it produced"
+    );
 }
 
 #[test]
