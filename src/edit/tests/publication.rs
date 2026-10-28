@@ -1,11 +1,14 @@
 //! Commit rollback, append publication, buffering, and synchronization.
 
+use std::io::ErrorKind;
+
 use hdf5_pure_core::__private::PhysicalAddress;
 use rstest::rstest;
 
 use super::common;
 use crate::DeflateLevel;
 use crate::FileSpaceSettings;
+use crate::Layout;
 use crate::PersistedFreeSpacePolicy;
 use crate::SuperblockStatusFlags;
 use crate::SuperblockVersion;
@@ -29,9 +32,97 @@ use crate::file_space_info::FileSpaceStrategy;
 use crate::image::HandleImage;
 use crate::image::WriteBuffering;
 use crate::object_path::ObjectPathBuf;
+use crate::reader::File;
 use crate::source::MetadataCacheConfig;
 use crate::superblock::LocatedSuperblock;
 use crate::type_builders::DatasetBuilder;
+use crate::writer::FileBuilder;
+
+#[rstest]
+#[case::before_publication(false)]
+#[case::after_publication(true)]
+fn failed_mixed_overwrites_restore_old_values_before_publication_and_keep_new_values_after(
+    #[case] published: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("mixed.h5");
+    let mut builder = FileBuilder::new();
+    builder.create_dataset("fixed").with_i32_data(&[1, 2, 3]);
+    builder
+        .create_dataset("strings")
+        .with_vlen_strings(&["old", "values"]);
+    builder.create_dataset("refs").with_path_references(&[""]);
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_persistence(true)
+            .with_threshold(0),
+    );
+    builder.write(&path).unwrap();
+    let references = {
+        let file = File::open(&path).unwrap();
+        let Layout::Contiguous {
+            address: Some(address),
+            size,
+        } = file.dataset("refs").unwrap().layout().unwrap()
+        else {
+            panic!("expected allocated contiguous reference storage");
+        };
+        address..address + size
+    };
+    let mut engine = if published {
+        WriteEngine::open_torn_writes(&path, references).unwrap()
+    } else {
+        WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap()
+    };
+    let original_heaps = engine.vl_overwrite_heaps.clone();
+    if !published {
+        let mut superblock = engine.context.superblock().clone();
+        superblock.superblock_extension_address = Some(StoredAddress::ZERO);
+        let proposed = engine.context.propose(superblock).unwrap();
+        engine.context.adopt(proposed).unwrap();
+    }
+    let mut strings = DatasetBuilder::new("");
+    strings.with_vlen_strings(&["replacement", "strings"]);
+    engine
+        .stage_dataset_write(&ObjectPathBuf::parse("strings"), strings)
+        .unwrap();
+    let mut fixed = DatasetBuilder::new("");
+    fixed.with_i32_data(&[11, 22, 33]);
+    engine
+        .stage_dataset_write(&ObjectPathBuf::parse("fixed"), fixed)
+        .unwrap();
+    let error = engine.commit().unwrap_err();
+    if published {
+        let Error::Io(error) = error else {
+            panic!("expected the injected reference write error, got {error:?}");
+        };
+        assert_eq!(error.kind(), ErrorKind::Other);
+        assert_eq!(error.to_string(), "simulated device write failure");
+        assert!(!engine.vl_overwrite_heaps.is_empty());
+    } else {
+        let Error::EditUnsupported(reason) = error else {
+            panic!("expected the invalid extension error, got {error:?}");
+        };
+        assert_eq!(reason, "an object does not use a version 2 object header");
+        assert_eq!(engine.vl_overwrite_heaps, original_heaps);
+    }
+    assert_eq!(engine.publication.attempted(), published);
+    assert!(!engine.has_staged_edits());
+    drop(engine);
+    let file = File::open(&path).unwrap();
+    assert_eq!(
+        file.dataset("fixed").unwrap().read_i32().unwrap(),
+        if published { [11, 22, 33] } else { [1, 2, 3] }
+    );
+    assert_eq!(
+        file.dataset("strings").unwrap().read_string().unwrap(),
+        if published {
+            ["replacement", "strings"]
+        } else {
+            ["old", "values"]
+        }
+    );
+}
 
 #[rstest]
 #[case::raise_before_write(0, false)]
