@@ -229,15 +229,12 @@
 //! left as dead bytes. This avoids freeing a region that may still be in use. Under-reclaiming only
 //! wastes space. Over-reclaiming could corrupt the file.
 //!
-//! On a paged file that conservatism extends to anything whose *page type* is not
-//! established. A file another writer produced records free space this one cannot
-//! place — the reference library's generic-large manager holds metadata and raw
-//! alike, and it puts a chunk index among its metadata where this crate puts one
-//! beside the chunk data. Such space is kept and written back where it was found,
-//! but never handed to an allocation
-//! (unclassified PAGE space, [`WriteEngine::index_is_provably_raw`]), because
-//! placing a byte of the wrong kind in a page is the one thing paging exists to
-//! prevent and no reader would report it.
+//! On a paged file, the editor reuses sections from small metadata and raw managers according to
+//! their page type. From a generic-large section, it reuses complete interior pages for either
+//! page type and retains partial edges as unclassified. Other manager sections remain
+//! unclassified and are excluded from allocation. The editor retains these fragments in the
+//! persisted managers, preserving page separation where the type of a partial page is unknown
+//! ([`WriteEngine::index_is_provably_raw`]).
 //!
 //! Space this editor vacates and cannot place is *dead* rather than lost
 //! (dead PAGE space): out of use, not yet reusable. A page whose every byte is

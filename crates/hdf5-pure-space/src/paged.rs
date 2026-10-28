@@ -193,23 +193,32 @@ impl PagedEdit {
         }
     }
 
-    /// Seeds one extent from a persistent PAGE manager.
+    /// Seeds reusable space by manager kind and retains unclassified fragments.
     ///
-    /// Small managers establish their page type. A generic-large section establishes reusable raw
-    /// space only when it is a whole aligned page, because that manager does not record a page
-    /// type. Sections from an unrecognized manager remain unclassified and are never allocated
-    /// independently.
+    /// Records sections from small metadata and raw managers with their page type. From a
+    /// generic-large section, records complete interior pages as raw free space.
+    /// The caller can allocate these pages for either page type through
+    /// [`allocate`](Self::allocate). Partial edges and sections from other manager kinds remain
+    /// unclassified.
     pub(crate) fn seed_persisted(&mut self, kind: Option<ManagerKind>, extent: Extent) {
-        let page_size = self.page_size.get();
         let ty = match kind {
             Some(ManagerKind::PagedSmallMetadata) => Some(PageType::Meta),
             Some(ManagerKind::PagedSmallRaw) => Some(PageType::Raw),
-            Some(ManagerKind::PagedLargeGeneric)
-                if extent.start() % page_size == 0 && extent.len() % page_size == 0 =>
-            {
-                Some(PageType::Raw)
+            Some(ManagerKind::PagedLargeGeneric) => {
+                let Some(pages) = extent.aligned_interior(self.page_size.get()) else {
+                    self.seed(extent, None);
+                    return;
+                };
+                self.seed(pages, Some(PageType::Raw));
+                if let Some(head) = Extent::new(extent.start(), pages.start() - extent.start()) {
+                    self.seed(head, None);
+                }
+                if let Some(tail) = Extent::new(pages.end(), extent.end() - pages.end()) {
+                    self.seed(tail, None);
+                }
+                return;
             }
-            Some(ManagerKind::PagedLargeGeneric) | Some(ManagerKind::Flat) | None => None,
+            Some(ManagerKind::Flat) | None => None,
         };
         self.seed(extent, ty);
     }
@@ -710,6 +719,7 @@ mod tests {
 
     use super::*;
     use crate::admission::Release;
+    use crate::persistence::ManagerSections;
 
     const PAGE: u64 = FileSpacePageSize::DEFAULT.get();
     const META: FreeClass = FreeClass::Page(PageType::Meta);
@@ -718,6 +728,122 @@ mod tests {
     const SHORT_OF_THRESHOLD: u64 = THRESHOLD_IN_A_PAGE - 1;
     const EXTENT_AT: u64 = PAGE + 1024;
     const THRESHOLD_OF_THREE_PAGES: u64 = 3 * PAGE;
+
+    #[rstest]
+    #[case::aligned(0, 0, 1, 3)]
+    #[case::unaligned_head(1, 0, 2, 2)]
+    #[case::unaligned_tail(0, 1, 1, 2)]
+    #[case::unaligned_edges(1, 1, 2, 1)]
+    fn generic_sections_reuse_complete_pages_and_preserve_unclassified_edges(
+        #[case] head_offset: u64,
+        #[case] tail_offset: u64,
+        #[case] first_page: u64,
+        #[case] page_count: u64,
+        #[values(512, 1_536, 4_096)] page_size: u64,
+        #[values(PageType::Meta, PageType::Raw)] ty: PageType,
+    ) {
+        let page = FileSpacePageSize::try_from(page_size).unwrap();
+        let start = page_size + head_offset;
+        let end = 4 * page_size - tail_offset;
+        let section = extent(start, end - start);
+        let pages = extent(first_page * page_size, page_count * page_size);
+        let edges: Vec<_> = [
+            Extent::new(start, pages.start() - start),
+            Extent::new(pages.end(), end - pages.end()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let mut paged = PagedEdit::new(page);
+        paged.seed_persisted(Some(ManagerKind::PagedLargeGeneric), section);
+        paged.finish_seed();
+        assert_eq!(paged.sections().metadata(), []);
+        assert_eq!(paged.sections().raw(), [pages]);
+        assert_eq!(paged.sections().unclassified(), edges);
+        assert_eq!(paged.reusable_bytes().unwrap(), pages.len());
+        assert_eq!(paged.largest(ty), pages.len());
+        assert_eq!(paged.allocate(pages.len() + 1, ty), None);
+
+        let mut reopened = PagedEdit::new(page);
+        for manager in ManagerSections::paged(&paged.sections(), page) {
+            for &extent in manager.sections() {
+                reopened.seed_persisted(Some(manager.kind()), extent);
+            }
+        }
+        reopened.finish_seed();
+        assert_eq!(reopened.sections().metadata(), []);
+        assert_eq!(reopened.sections().raw(), [pages]);
+        assert_eq!(reopened.sections().unclassified(), edges);
+
+        let snapshot = paged.allocation_snapshot();
+        let length = pages.len() - page_size / 2;
+        let allocation = extent(pages.start(), length);
+        assert_eq!(paged.allocate(length, ty), Some(allocation));
+        assert_eq!(paged.sections().unclassified(), edges);
+        assert_eq!(paged.reusable_bytes().unwrap(), page_size / 2);
+        assert_eq!(paged.allocate(page_size / 2 + 1, ty), None);
+        paged.restore_allocation(snapshot);
+        assert_eq!(paged.sections().metadata(), []);
+        assert_eq!(paged.sections().raw(), [pages]);
+        assert_eq!(paged.sections().unclassified(), edges);
+        assert_eq!(paged.allocate(pages.len(), ty), Some(pages));
+        assert_eq!(paged.allocate(1, ty), None);
+        assert_eq!(paged.sections().unclassified(), edges);
+    }
+
+    #[rstest]
+    #[case::inside_page(PAGE + 1, PAGE - 2)]
+    #[case::crosses_boundary(2 * PAGE - 1, 2)]
+    #[case::unaligned_page_length(PAGE + 1, PAGE)]
+    #[case::last_partial_page(u64::MAX - 3, 3)]
+    fn generic_sections_composed_of_partial_pages_remain_unclassified(
+        #[case] start: u64,
+        #[case] length: u64,
+    ) {
+        let mut paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
+        let section = extent(start, length);
+        paged.seed_persisted(Some(ManagerKind::PagedLargeGeneric), section);
+        paged.finish_seed();
+        assert_eq!(paged.sections().metadata(), []);
+        assert_eq!(paged.sections().raw(), []);
+        assert_eq!(paged.sections().unclassified(), [section]);
+        assert_eq!(paged.reusable_bytes().unwrap(), 0);
+        assert_eq!(paged.allocate(1, PageType::Meta), None);
+        assert_eq!(paged.allocate(1, PageType::Raw), None);
+    }
+
+    #[rstest]
+    #[case::flat(Some(ManagerKind::Flat))]
+    #[case::unknown(None)]
+    fn flat_and_unknown_manager_sections_remain_unclassified(#[case] kind: Option<ManagerKind>) {
+        let mut paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
+        let section = extent(PAGE + 1, 3 * PAGE);
+        paged.seed_persisted(kind, section);
+        paged.finish_seed();
+        assert_eq!(paged.sections().metadata(), []);
+        assert_eq!(paged.sections().raw(), []);
+        assert_eq!(paged.sections().unclassified(), [section]);
+        assert_eq!(paged.allocate(1, PageType::Meta), None);
+        assert_eq!(paged.allocate(1, PageType::Raw), None);
+    }
+
+    #[test]
+    fn generic_section_at_the_address_limit_reuses_only_its_complete_page() {
+        let mut paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
+        let start = u64::MAX - 2 * PAGE + 1;
+        let section = extent(start, 2 * PAGE - 1);
+        let tail = extent(start + PAGE, PAGE - 1);
+        paged.seed_persisted(Some(ManagerKind::PagedLargeGeneric), section);
+        paged.finish_seed();
+        assert_eq!(paged.sections().raw(), [extent(start, PAGE)]);
+        assert_eq!(paged.sections().unclassified(), [tail]);
+        assert_eq!(
+            paged.allocate(PAGE, PageType::Raw),
+            Some(extent(start, PAGE))
+        );
+        assert_eq!(paged.allocate(1, PageType::Raw), None);
+        assert_eq!(paged.sections().unclassified(), [tail]);
+    }
 
     #[test]
     fn reusable_bytes_check_the_page_list_sum() {
