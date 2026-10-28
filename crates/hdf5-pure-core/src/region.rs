@@ -2,6 +2,7 @@
 
 use crate::address::PhysicalAddress;
 use crate::error::FormatError;
+use crate::metadata_bytes::MetadataBytes;
 
 /// Borrowed bytes associated with a physical file range.
 ///
@@ -69,6 +70,16 @@ impl<'a> FileRegion<'a> {
             range: required,
             bytes,
         })
+    }
+}
+
+impl<'a> From<&'a MetadataBytes<'_>> for FileRegion<'a> {
+    /// Borrows the owner's bytes and their checked physical range.
+    fn from(bytes: &'a MetadataBytes<'_>) -> Self {
+        Self {
+            range: bytes.range(),
+            bytes: bytes.as_ref(),
+        }
     }
 }
 

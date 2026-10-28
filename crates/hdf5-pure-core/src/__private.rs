@@ -36,6 +36,8 @@ pub use crate::display::QuotedBytes;
 pub use crate::display::write_elided;
 pub use crate::filter_mask::FILTER_COUNT_MAX;
 pub use crate::filter_mask::PipelineFilterMask;
+pub use crate::metadata_bytes::MetadataBytes;
+pub use crate::metadata_bytes::MetadataFrame;
 pub use crate::region::FileRange;
 pub use crate::region::FileRegion;
 
