@@ -25,6 +25,8 @@ use core::fmt;
 use core::num::NonZeroU32;
 
 use hdf5_pure_core::__private::PipelineFilterMask;
+#[cfg(test)]
+use hdf5_pure_format::__private::ExtensibleArrayCreationParameters;
 
 use hdf5_pure_filter::__private::{
     FILTER_DEFLATE, FILTER_FLETCHER32, FILTER_LZF, FILTER_NBIT, FILTER_RESERVED,
@@ -821,7 +823,7 @@ mod tests {
     #[case(ChunkIndexLayout::Implicit { address: Some(StoredAddress::new(0x100)) }, ChunkIndex::Implicit)]
     #[case(ChunkIndexLayout::FixedArray { address: Some(StoredAddress::new(0x100)) }, ChunkIndex::FixedArray)]
     #[case(
-        ChunkIndexLayout::ExtensibleArray { address: Some(StoredAddress::new(0x100)) },
+        ChunkIndexLayout::ExtensibleArray { creation: ExtensibleArrayCreationParameters::canonical(), address: Some(StoredAddress::new(0x100)) },
         ChunkIndex::ExtensibleArray
     )]
     #[case(ChunkIndexLayout::BTreeV2 { address: Some(StoredAddress::new(0x100)) }, ChunkIndex::BTreeV2)]

@@ -20,7 +20,7 @@ use crate::bytes;
 use crate::convert::Narrow;
 use crate::error::FormatError;
 use crate::error::OBJECT_HEADER_MESSAGE_MAX;
-use crate::extensible_array;
+use crate::extensible_array::ExtensibleArrayCreationParameters;
 use crate::fixed_array::FIXED_ARRAY_PAGE_BITS;
 use crate::message_type::MessageType;
 use crate::width;
@@ -79,8 +79,10 @@ impl DataLayout {
     /// [`FormatError::InvalidLayoutClass`] if the class byte is outside the storage classes that
     /// version defines, [`FormatError::InvalidChunkIndexType`] if a version 4 chunked message
     /// stores an indexing type outside 1 to 5, [`FormatError::InvalidChunkGeometry`] if a version 4
-    /// chunked message stores a dimension encoding length outside 1 to 8 bytes, or
-    /// [`FormatError::UnexpectedEof`] if the message body ends inside a field.
+    /// chunked message stores a dimension encoding length outside 1 to 8 bytes,
+    /// [`FormatError::InvalidExtensibleArrayGeometry`] if Extensible Array creation parameters
+    /// are outside the supported block and page geometry, or [`FormatError::UnexpectedEof`] if
+    /// the message body ends inside a field.
     pub fn parse_with_widths(data: &[u8], widths: FormatWidths) -> Result<DataLayout, FormatError> {
         bytes::ensure_len(data, 0, 2)?;
         let layout_class = data[1];
@@ -203,7 +205,7 @@ impl DataLayout {
             }
             ChunkIndexInfo::ExtensibleArray => {
                 buf.push(CHUNK_INDEX_EXTENSIBLE_ARRAY);
-                buf.extend_from_slice(&EXTENSIBLE_ARRAY_CREATION_PARAMETERS);
+                buf.extend_from_slice(&ExtensibleArrayCreationParameters::canonical().encode());
             }
         }
         bytes::write_offset(&mut buf, address.get(), offset_width);
@@ -404,6 +406,8 @@ pub enum ChunkIndexLayout {
     /// An extensible array indexes the chunks of a dataspace with one unlimited
     /// dimension.
     ExtensibleArray {
+        /// The checked creation parameters stored before the header address.
+        creation: ExtensibleArrayCreationParameters,
         /// Address of the extensible array header.
         address: Option<StoredAddress>,
     },
@@ -423,7 +427,7 @@ impl ChunkIndexLayout {
             | ChunkIndexLayout::SingleChunk { address, .. }
             | ChunkIndexLayout::Implicit { address }
             | ChunkIndexLayout::FixedArray { address }
-            | ChunkIndexLayout::ExtensibleArray { address }
+            | ChunkIndexLayout::ExtensibleArray { address, .. }
             | ChunkIndexLayout::BTreeV2 { address } => address,
         }
     }
@@ -528,12 +532,8 @@ fn parse_chunk_index(
     bytes::ensure_len(data, pos, 1)?;
     let index_type = data[pos];
     let info = pos + 1;
-    // Every index type ends with its address, and `info_len` is how many bytes
-    // of indexing information precede it. Only the Single Chunk index's
-    // information is kept: a Fixed Array and an Extensible Array repeat their
-    // creation parameters in their own header, which is where the walkers read
-    // them. A version 2 B-tree carries no extra indexing information here. Its reader gets the
-    // record geometry from the B-tree header itself.
+    // The parser retains Single Chunk information and Extensible Array creation parameters.
+    // `info_len` is the byte count before the trailing address.
     let address = |info_len: usize| {
         Ok::<_, FormatError>(
             bytes::read_optional_offset_width(data, info + info_len, widths.offsets)?
@@ -557,6 +557,12 @@ fn parse_chunk_index(
             address: address(FIXED_ARRAY_INFO_LEN)?,
         },
         CHUNK_INDEX_EXTENSIBLE_ARRAY => ChunkIndexLayout::ExtensibleArray {
+            creation: ExtensibleArrayCreationParameters::parse(data.get(info..).ok_or(
+                FormatError::UnexpectedEof {
+                    expected: info,
+                    available: data.len(),
+                },
+            )?)?,
             address: address(EXTENSIBLE_ARRAY_INFO_LEN)?,
         },
         CHUNK_INDEX_BTREE_V2 => ChunkIndexLayout::BTreeV2 {
@@ -681,16 +687,6 @@ const EXTENSIBLE_ARRAY_INFO_LEN: usize = 5;
 /// Width of the version 2 B-tree indexing information: a four-byte Node Size
 /// and the one-byte Split Percent and Merge Percent.
 const BTREE_V2_INFO_LEN: usize = 6;
-
-/// The Extensible Array indexing information the writer stores, the creation
-/// parameters of the array header it builds, in the order of the message fields.
-const EXTENSIBLE_ARRAY_CREATION_PARAMETERS: [u8; EXTENSIBLE_ARRAY_INFO_LEN] = [
-    extensible_array::EA_MAX_NELMTS_BITS,
-    extensible_array::EA_IDX_BLK_ELMTS,
-    extensible_array::EA_SUPER_BLK_MIN_DATA_PTRS,
-    extensible_array::EA_MIN_DBLK_NELMTS,
-    extensible_array::EA_MAX_DBLK_NELMTS_BITS,
-];
 
 #[cfg(test)]
 mod tests {
@@ -943,7 +939,7 @@ mod tests {
     }
 
     #[test]
-    fn v4_chunked_extensible_array_skips_creation_parameters() {
+    fn v4_chunked_extensible_array_retains_creation_parameters() {
         let layout = DataLayout::parse(&v4_chunked(0, 4, &[32, 4, 4, 16, 10]), 8, 8).unwrap();
         assert_eq!(
             layout,
@@ -951,6 +947,7 @@ mod tests {
                 flags: ChunkedLayoutFlags::NONE,
                 chunk_dimensions: vec![64],
                 index: ChunkIndexLayout::ExtensibleArray {
+                    creation: ExtensibleArrayCreationParameters::canonical(),
                     address: Some(StoredAddress::new(0x3000))
                 },
             }
@@ -985,7 +982,10 @@ mod tests {
             DataLayout::Chunked {
                 flags: ChunkedLayoutFlags::NONE,
                 chunk_dimensions: vec![64],
-                index: ChunkIndexLayout::ExtensibleArray { address: None },
+                index: ChunkIndexLayout::ExtensibleArray {
+                    creation: ExtensibleArrayCreationParameters::canonical(),
+                    address: None
+                },
             }
         );
     }
@@ -1165,7 +1165,7 @@ mod tests {
     #[case::extensible_array(
         ChunkIndexInfo::ExtensibleArray,
         ChunkedLayoutFlags::NONE,
-        ChunkIndexLayout::ExtensibleArray { address: Some(StoredAddress::new(0x1000)) }
+        ChunkIndexLayout::ExtensibleArray { creation: ExtensibleArrayCreationParameters::canonical(), address: Some(StoredAddress::new(0x1000)) }
     )]
     fn an_encoded_chunked_layout_parses_back_to_its_index(
         #[values(OffsetWidth::Four, OffsetWidth::Eight)] offset_width: OffsetWidth,
