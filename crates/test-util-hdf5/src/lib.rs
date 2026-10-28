@@ -51,6 +51,7 @@ pub mod numeric;
 #[cfg(feature = "__hdf5-1.10")]
 pub mod page_publication;
 pub mod paged;
+pub mod paged_index;
 pub mod reader;
 #[cfg(feature = "hdf5")]
 pub mod region;

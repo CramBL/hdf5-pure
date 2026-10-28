@@ -50,6 +50,14 @@ impl Superblock {
         self
     }
 
+    /// Sets the stored address of the superblock extension.
+    ///
+    /// The address is relative to [`Self::base_address`].
+    pub fn extension_address(mut self, address: u64) -> Self {
+        self.extension_address = Some(address);
+        self
+    }
+
     pub fn eof_address(mut self, address: u64) -> Self {
         self.eof_address = address;
         self

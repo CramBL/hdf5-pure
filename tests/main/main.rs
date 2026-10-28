@@ -89,6 +89,7 @@ mod owned_edit;
 mod owned_handles;
 mod owned_parity;
 mod owned_swmr;
+mod paged_index;
 mod paged_mutation;
 mod paged_staged_commit;
 mod paged_write;

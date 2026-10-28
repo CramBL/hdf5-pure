@@ -32,6 +32,7 @@ pub mod local_heap;
 pub mod mcos;
 pub mod modern;
 pub mod object_header;
+pub mod paged_index;
 pub mod process;
 pub mod publication;
 pub mod range;
