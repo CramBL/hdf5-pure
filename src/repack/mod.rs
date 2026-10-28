@@ -165,6 +165,8 @@ use crate::{FixedPointType, TimeType};
 
 mod headers;
 mod objects;
+#[cfg(test)]
+mod test_util;
 
 /// Options controlling a [`repack`].
 ///
@@ -1915,6 +1917,7 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::thread;
 
+    use ::test_util;
     use rstest::rstest;
     use test_util::data_layout;
     use test_util::object_header::MessageType;
@@ -2489,33 +2492,22 @@ mod tests {
 /// (issue #241).
 #[cfg(test)]
 mod attribute_fidelity_tests {
+    use ::test_util;
+
     use super::*;
-    use crate::dataspace::{Dataspace, DataspaceType};
     use crate::datatype::CharacterSet;
     use crate::datatype::ReferenceType;
     use crate::datatype::StringPadding;
 
     use crate::{DatatypeByteOrder, File, FileBuilder, RepackOptions};
-    use std::collections::BTreeMap;
+
+    use super::test_util as repack_test_util;
+    use super::test_util::ExoticAttributes;
 
     fn i32_type() -> Datatype {
         Datatype::FixedPoint(
             FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
         )
-    }
-
-    /// Attribute messages keyed by name, for an object reached by `path`
-    /// (`""` for the root group).
-    fn messages_at(file: &Path, path: &str) -> BTreeMap<String, AttributeMessage> {
-        let f = File::open(file).unwrap();
-        let messages = if path.is_empty() {
-            f.root().attr_messages().unwrap()
-        } else if let Ok(ds) = f.dataset(path) {
-            ds.attr_messages().unwrap()
-        } else {
-            f.group(path).unwrap().attr_messages().unwrap()
-        };
-        messages.into_iter().map(|m| (m.name.clone(), m)).collect()
     }
 
     /// The core claim, stated as an identity rather than as a list of properties:
@@ -2570,8 +2562,8 @@ mod attribute_fidelity_tests {
         repack(&src, &dst, &RepackOptions::new()).unwrap();
 
         for owner in ["", "data", "grp"] {
-            let before = messages_at(&src, owner);
-            let after = messages_at(&dst, owner);
+            let before = repack_test_util::messages_at(&src, owner);
+            let after = repack_test_util::messages_at(&dst, owner);
             assert_eq!(
                 before.keys().collect::<Vec<_>>(),
                 after.keys().collect::<Vec<_>>(),
@@ -2600,147 +2592,6 @@ mod attribute_fidelity_tests {
         assert_fixture_holds(&src, exotic.expected());
     }
 
-    struct ExoticAttributes {
-        messages: [AttributeMessage; 5],
-    }
-
-    impl ExoticAttributes {
-        fn messages() -> [AttributeMessage; 5] {
-            [
-                // Declared width 16 for three bytes of content, null-*terminated* -
-                // the writer's own fixed-width path hardcodes null-padding, so a
-                // rebuild from a value changes both.
-                AttributeMessage {
-                    name: "units".into(),
-                    datatype: Datatype::String {
-                        size: 16,
-                        padding: StringPadding::NullTerminate,
-                        charset: CharacterSet::Ascii,
-                    },
-                    dataspace: Dataspace {
-                        space_type: DataspaceType::Scalar,
-                        rank: 0,
-                        dimensions: vec![],
-                        max_dimensions: None,
-                    },
-                    raw_data: {
-                        let mut v = b"m/s".to_vec();
-                        v.resize(16, 0);
-                        v
-                    },
-                    datatype_location: crate::shared_message::DatatypeLocation::Inline,
-                },
-                // The space-padded string retains its padding across the repack.
-                AttributeMessage {
-                    name: "spaced".into(),
-                    datatype: Datatype::String {
-                        size: 8,
-                        padding: StringPadding::SpacePad,
-                        charset: CharacterSet::Utf8,
-                    },
-                    dataspace: Dataspace {
-                        space_type: DataspaceType::Scalar,
-                        rank: 0,
-                        dimensions: vec![],
-                        max_dimensions: None,
-                    },
-                    raw_data: b"ab      ".to_vec(),
-                    datatype_location: crate::shared_message::DatatypeLocation::Inline,
-                },
-                // A Null dataspace has zero elements, which is distinct from a
-                // rank-1 dataspace of length zero - the shape a decode gives it.
-                AttributeMessage {
-                    name: "nothing".into(),
-                    datatype: crate::make_i32_type(),
-                    dataspace: Dataspace {
-                        space_type: DataspaceType::Null,
-                        rank: 0,
-                        dimensions: vec![],
-                        max_dimensions: None,
-                    },
-                    raw_data: vec![],
-                    datatype_location: crate::shared_message::DatatypeLocation::Inline,
-                },
-                // Big-endian, which every `AttrValue` integer variant normalizes to
-                // little-endian: the width survives a decode since #350, the layout
-                // of the bytes inside it does not.
-                AttributeMessage {
-                    name: "big_endian".into(),
-                    datatype: Datatype::FixedPoint(
-                        FixedPointType::new(4, DatatypeByteOrder::BigEndian, true, 0, 32).unwrap(),
-                    ),
-                    dataspace: Dataspace {
-                        space_type: DataspaceType::Scalar,
-                        rank: 0,
-                        dimensions: vec![],
-                        max_dimensions: None,
-                    },
-                    raw_data: (-7i32).to_be_bytes().to_vec(),
-                    datatype_location: crate::shared_message::DatatypeLocation::Inline,
-                },
-                // Rank 2, which every `AttrValue` array variant flattens.
-                AttributeMessage {
-                    name: "grid".into(),
-                    datatype: crate::make_i32_type(),
-                    dataspace: Dataspace {
-                        space_type: DataspaceType::Simple,
-                        rank: 2,
-                        dimensions: vec![2, 3],
-                        max_dimensions: None,
-                    },
-                    raw_data: (1i32..=6).flat_map(i32::to_le_bytes).collect(),
-                    datatype_location: crate::shared_message::DatatypeLocation::Inline,
-                },
-            ]
-        }
-
-        fn new() -> Self {
-            Self {
-                messages: Self::messages(),
-            }
-        }
-
-        fn expected(&self) -> &[AttributeMessage] {
-            &self.messages
-        }
-
-        fn write(&self, path: &Path) {
-            let mut b = FileBuilder::new();
-            for message in &self.messages {
-                b.set_attr_verbatim(message.clone(), None);
-            }
-            let ds = b.create_dataset("data").with_f64_data(&[1.0]);
-            for message in &self.messages {
-                ds.set_attr_verbatim(message.clone(), None);
-            }
-            b.write(path).unwrap();
-        }
-
-        fn assert_repacked(&self, src: &Path, dst: &Path) {
-            for owner in ["", "data"] {
-                let before = messages_at(src, owner);
-                let after = messages_at(dst, owner);
-                assert_eq!(before.len(), self.messages.len());
-                assert_eq!(after.len(), self.messages.len());
-                for message in &self.messages {
-                    let name = &message.name;
-                    // The source file must really hold what was requested, or the
-                    // comparison below would only prove repack is self-consistent.
-                    assert_eq!(
-                        before.get(name),
-                        Some(message),
-                        "the source file did not record {name:?} as written"
-                    );
-                    assert_eq!(
-                        after.get(name),
-                        Some(message),
-                        "attribute {name:?} on {owner:?} changed across the repack"
-                    );
-                }
-            }
-        }
-    }
-
     /// `tests/data/pure/exotic_attributes.h5` is the source file of the
     /// test above, committed so that `crates/crosscheck/tests/main/repack.rs` can
     /// repack it through the public API and read the result with the reference
@@ -2759,7 +2610,7 @@ mod attribute_fidelity_tests {
             std::fs::copy(src, &fixture).unwrap();
         }
         for owner in ["", "data"] {
-            let messages = messages_at(&fixture, owner);
+            let messages = repack_test_util::messages_at(&fixture, owner);
             for message in exotic {
                 assert_eq!(
                     messages.get(&message.name),
@@ -2798,8 +2649,8 @@ mod attribute_fidelity_tests {
 
         repack(&src, &dst, &RepackOptions::new().drop_path("bulk")).unwrap();
 
-        let before = &messages_at(&src, "")["fields"];
-        let after = &messages_at(&dst, "")["fields"];
+        let before = &repack_test_util::messages_at(&src, "")["fields"];
+        let after = &repack_test_util::messages_at(&dst, "")["fields"];
         assert_eq!(
             after.datatype, before.datatype,
             "the attribute must stay variable-length"
