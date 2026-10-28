@@ -1,10 +1,38 @@
+//! Content and storage observations for paged `keep` and `victim` datasets.
+//!
+//! Independent construction lives in [`test_util::paged_index::paged_index`].
+//! Storage checks follow encoded addresses in independent or native files.
+//!
+//! # Examples
+//!
+//! ```
+//! use hdf5_pure::{DatatypeByteOrder, File};
+//! use test_util_hdf5::paged_index;
+//!
+//! let image = test_util::paged_index::paged_index();
+//! let file = File::from_bytes(image.clone())?;
+//! paged_index::assert_contents(&file, DatatypeByteOrder::LittleEndian);
+//! paged_index::assert_storage(&file, &image);
+//! # Ok::<(), hdf5_pure::Error>(())
+//! ```
+
+#[cfg(feature = "__hdf5-1.10")]
+use std::path::Path;
+
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5::H5Type;
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5::dataset::Layout as NativeLayout;
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5::datatype::ByteOrder as NativeByteOrder;
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5::plist::file_create::FileSpaceStrategy as NativeStrategy;
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::Datatype;
 use hdf5_pure::DatatypeByteOrder;
 use hdf5_pure::File;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FixedPointType;
-use hdf5_pure::FloatingPointType;
 use hdf5_pure::FreeSpaceManagerRole;
 use hdf5_pure::Layout;
 use hdf5_pure::MessageType;
@@ -21,8 +49,18 @@ use hdf5_pure_format::__private::ExtensibleArrayHeaderLocator;
 use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::ObjectHeader;
 
+#[cfg(feature = "__hdf5-1.10")]
+use crate::numeric::ByteOrder as NumericOrder;
 use crate::storage;
 
+/// Checks the complete hierarchy, numeric contents, chunking, and persistence properties.
+///
+/// Both datasets must use [`i32`] in `order`. `victim` contains values 0 through
+/// 8,191 in 512-element chunks, and `keep` contains `[1, 2, 3, 4]` contiguously.
+///
+/// # Panics
+///
+/// Panics if metadata or values cannot be read, or any observation differs from the fixture.
 pub fn assert_contents(file: &File, order: DatatypeByteOrder) {
     assert_root(file, &["keep", "victim"]);
     assert_i32(file, "keep", &[1, 2, 3, 4], order);
@@ -42,37 +80,19 @@ pub fn assert_contents(file: &File, order: DatatypeByteOrder) {
             size: 16
         }
     ));
-    let info = file.file_space_info().unwrap().unwrap();
-    assert_eq!(info.strategy, FileSpaceStrategy::Page);
-    assert!(info.persist);
-    assert_eq!(info.threshold, 1);
-    assert_eq!(info.page_size.get(), 4096);
+    assert_persistence(file);
 }
 
-pub fn assert_after_edit(file: &File, order: DatatypeByteOrder) {
-    assert_root(file, &["added", "keep"]);
-    assert_i32(file, "keep", &[1, 2, 3, 4], order);
-    let added = file.dataset("added").unwrap();
-    assert_eq!(added.shape().unwrap(), [8]);
-    assert_eq!(
-        added.datatype().unwrap(),
-        Datatype::FloatingPoint(FloatingPointType::ieee754_binary64(
-            DatatypeByteOrder::LittleEndian
-        ))
-    );
-    assert_eq!(added.read_f64().unwrap(), [2.5; 8]);
-    assert!(added.attrs().unwrap().is_empty());
-    assert!(added.filter_pipeline().unwrap().is_empty());
-    assert_eq!(added.chunk_shape().unwrap(), None);
-    assert!(matches!(
-        added.layout().unwrap(),
-        Layout::Contiguous {
-            address: Some(_),
-            size: 64
-        }
-    ));
-}
-
+/// Checks the extensible-array index and separation of metadata and raw-data pages.
+///
+/// Pass the bytes from which `file` was opened. Checks the unlimited dimension,
+/// sixteen unfiltered chunks, and nonempty persisted metadata and raw-data managers.
+/// The layout's five creation parameters must match the array header. Allocated
+/// index and data blocks must occupy separate pages from the raw chunks.
+///
+/// # Panics
+///
+/// Panics if metadata cannot be read, or storage differs from the fixture.
 pub fn assert_storage(file: &File, image: &[u8]) {
     let superblock = file.superblock();
     let widths = FormatWidths {
@@ -152,6 +172,7 @@ pub fn assert_storage(file: &File, image: &[u8]) {
         };
         records.extend(elements.records(2048).map(Result::unwrap));
     }
+    assert!(ranges.len() > 2, "fixture includes an allocated data block");
     records.sort_by_key(|(slot, _)| *slot);
     assert_eq!(
         records.iter().map(|(slot, _)| *slot).collect::<Vec<_>>(),
@@ -195,6 +216,71 @@ pub fn assert_storage(file: &File, image: &[u8]) {
             .unwrap();
         assert!(!manager.free_sections().sections().is_empty());
     }
+}
+
+/// Checks `added`, `keep`, and the persisted page policy through the reference library.
+///
+/// `keep` must contain `[1, 2, 3, 4]` as [`i32`] values in `order`. `added` must
+/// contain eight little-endian [`f64`] values equal to 2.5. Closes the file
+/// before returning.
+///
+/// # Panics
+///
+/// Panics if opening, reading, or close fails, or any observation differs from the edited fixture.
+#[cfg(feature = "__hdf5-1.10")]
+pub fn assert_native_after_edit(path: &Path, order: NumericOrder) {
+    let file = crate::file::libhdf5_open(path);
+    let mut names = file.member_names().unwrap();
+    names.sort();
+    assert_eq!(names, ["added", "keep"]);
+    assert!(file.attr_names().unwrap().is_empty());
+    {
+        let keep = file.dataset("keep").unwrap();
+        assert_eq!(keep.shape(), [4]);
+        assert_eq!(
+            keep.dtype().unwrap().to_descriptor().unwrap(),
+            i32::type_descriptor()
+        );
+        assert_eq!(keep.dtype().unwrap().byte_order(), order.native_order());
+        assert_eq!(keep.read_raw::<i32>().unwrap(), [1, 2, 3, 4]);
+        let added = file.dataset("added").unwrap();
+        assert_eq!(added.shape(), [8]);
+        assert_eq!(
+            added.dtype().unwrap().to_descriptor().unwrap(),
+            f64::type_descriptor()
+        );
+        assert_eq!(
+            added.dtype().unwrap().byte_order(),
+            NativeByteOrder::LittleEndian
+        );
+        assert_eq!(added.read_raw::<f64>().unwrap(), [2.5; 8]);
+        for dataset in [&keep, &added] {
+            assert!(dataset.attr_names().unwrap().is_empty());
+            assert!(dataset.filters().is_empty());
+            assert_eq!(dataset.chunk(), None);
+            assert_eq!(dataset.layout(), NativeLayout::Contiguous);
+        }
+    }
+    let properties = file.fcpl().unwrap();
+    assert_eq!(
+        properties.file_space_strategy(),
+        NativeStrategy::FreeSpaceManager {
+            paged: true,
+            persist: true,
+            threshold: 1
+        }
+    );
+    assert_eq!(properties.file_space_page_size(), 4096);
+    drop(properties);
+    file.close().unwrap();
+}
+
+fn assert_persistence(file: &File) {
+    let info = file.file_space_info().unwrap().unwrap();
+    assert_eq!(info.strategy, FileSpaceStrategy::Page);
+    assert!(info.persist);
+    assert_eq!(info.threshold, 1);
+    assert_eq!(info.page_size.get(), 4096);
 }
 
 fn assert_root(file: &File, names: &[&str]) {

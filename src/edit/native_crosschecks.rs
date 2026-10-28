@@ -5,3 +5,5 @@ mod edit_tracked_dense_links;
 mod group_link_inspection;
 
 mod huge_links;
+
+mod paged_index;
