@@ -9,6 +9,7 @@ pub mod btree_v1;
 pub mod btree_v2;
 pub mod bytes;
 pub mod checksum;
+pub mod chunk_offsets;
 pub mod data_layout;
 pub mod dataspace;
 pub mod datatype;
