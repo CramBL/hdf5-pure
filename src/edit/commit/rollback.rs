@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use hdf5_pure_space::__private::{FreeList, SessionSpaceSnapshot};
+use hdf5_pure_space::__private::SessionSpaceSnapshot;
 
 use crate::edit::WriteEngine;
 use crate::edit::aggregation::AggregateSpace;
@@ -14,8 +14,6 @@ use crate::object_path::ObjectPathBuf;
 pub(in crate::edit) struct FreeSnapshot {
     space: SessionSpaceSnapshot,
     aggregation: Option<AggregateSpace>,
-    /// Unspent allocations reserved for immediate appends.
-    reserved: FreeList,
     /// Pending manager publication for previously confirmed immediate retirements.
     fsm_dirty: bool,
     /// Heap collections recorded for variable-length value replacements in this session.
@@ -53,7 +51,6 @@ impl WriteEngine {
         FreeSnapshot {
             space: self.space.allocation_snapshot(),
             aggregation: self.aggregation,
-            reserved: self.reserved.clone(),
             fsm_dirty: self.fsm_dirty,
             vl_overwrite_heaps: self.vl_overwrite_heaps.clone(),
         }
@@ -68,7 +65,6 @@ impl WriteEngine {
         self.vl_overwrite_heaps = snapshot.vl_overwrite_heaps;
         self.space.restore_allocation(snapshot.space);
         self.aggregation = snapshot.aggregation;
-        self.reserved = snapshot.reserved;
         self.fsm_dirty = snapshot.fsm_dirty;
     }
 

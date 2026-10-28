@@ -19,6 +19,118 @@ use test_util_hdf5::numeric::ByteOrder;
 
 use crate::test_util::array_index;
 
+#[rstest]
+#[case::flat_plain(false, false)]
+#[case::flat_filtered(false, true)]
+#[case::page_plain(true, false)]
+#[case::page_filtered(true, true)]
+fn immediate_ownership_publication_matches_native_free_sections(
+    #[case] paged: bool,
+    #[case] filtered: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("native-ownership.h5");
+    let native = hdf5::File::with_options()
+        .with_fapl(|properties| properties.libver_v110())
+        .with_fcpl(|properties| {
+            properties.file_space_strategy(NativeStrategy::FreeSpaceManager {
+                paged,
+                persist: true,
+                threshold: 1,
+            })
+        })
+        .create(&path)
+        .unwrap();
+    let initial = vec![0; 8192];
+    let builder = native
+        .new_dataset::<u8>()
+        .shape([Extent::resizable(initial.len())])
+        .chunk([initial.len()]);
+    let builder = if filtered {
+        builder.deflate(6)
+    } else {
+        builder
+    };
+    let target = builder.create("d").unwrap();
+    drop(builder);
+    target.write_raw(&initial).unwrap();
+    drop(target);
+    let scratch = native
+        .new_dataset_builder()
+        .with_data(&vec![7_u8; 65_536])
+        .create("scratch")
+        .unwrap();
+    let hole = (scratch.offset().unwrap(), scratch.storage_size());
+    drop(scratch);
+    let ceiling = native
+        .new_dataset_builder()
+        .with_data(&vec![9_u8; 8192])
+        .create("ceiling")
+        .unwrap();
+    assert!(ceiling.offset().unwrap() >= hole.0 + hole.1);
+    drop(ceiling);
+    native.unlink("scratch").unwrap();
+    native.close().unwrap();
+    test_util_hdf5::file_space_oracle::assert_persisted_sections(&path);
+    for cycle in 0..3 {
+        let file = File::open_rw_with_options(
+            &path,
+            FileAccessProperties::new()
+                .with_memory_strategy(MemoryStrategy::Bounded)
+                .with_sync_policy(SyncPolicy::OnClose),
+        )
+        .unwrap();
+        let mut target = file.dataset("d").unwrap();
+        target
+            .append(&ownership_payload(0x3cb6_7710 + cycle))
+            .unwrap();
+        let snapshot = directory.path().join(format!("issued-{cycle}.h5"));
+        std::fs::copy(&path, &snapshot).unwrap();
+        let before = std::fs::read(&snapshot).unwrap();
+        test_util_hdf5::file_space_oracle::assert_persisted_sections(&snapshot);
+        test_util_hdf5::file_space_oracle::assert_manager_metadata_bytes(&snapshot);
+        let native = hdf5::File::open(&snapshot).unwrap();
+        let mut expected = initial.clone();
+        for completed in 0..=cycle {
+            expected.extend(ownership_payload(0x3cb6_7710 + completed));
+        }
+        assert_eq!(
+            native.dataset("d").unwrap().read_raw::<u8>().unwrap(),
+            expected
+        );
+        assert_eq!(
+            native.dataset("ceiling").unwrap().read_raw::<u8>().unwrap(),
+            [9; 8192]
+        );
+        native.close().unwrap();
+        let pure = File::open(&snapshot).unwrap();
+        assert_eq!(pure.dataset("d").unwrap().read_u8().unwrap(), expected);
+        let chunks = array_index::libhdf5_chunks(&snapshot, 0);
+        assert_eq!(array_index::pure_chunks(&pure), chunks);
+        let latest = chunks.last().unwrap();
+        assert!(
+            latest.address() < hole.0 + hole.1 && hole.0 < latest.address() + latest.size(),
+            "cycle {cycle}: chunk {latest:?} did not reuse the native hole {hole:?}"
+        );
+        let free = pure.persisted_free_sections().unwrap().unwrap();
+        for chunk in chunks {
+            assert!(
+                free.free_sections()
+                    .sections()
+                    .iter()
+                    .all(
+                        |section| chunk.address() + chunk.size() <= section.address()
+                            || section.end_address() <= chunk.address()
+                    )
+            );
+        }
+        drop(pure);
+        assert_eq!(std::fs::read(&snapshot).unwrap(), before);
+        drop(target);
+        file.close().unwrap();
+    }
+}
+
 #[test]
 fn pure_creates_pure_appends_c_reads() {
     let dir = tempfile::tempdir().unwrap();
@@ -331,6 +443,13 @@ fn immediate_append_rejects_big_endian_storage_without_changing_the_file() {
     file.close().unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
     assert_eq!(dataset::read_libhdf5::<i32>(&path, "d"), [1, 2, 3]);
+}
+
+fn ownership_payload(seed: u32) -> Vec<u8> {
+    dataset::incompressible(seed, 2048)
+        .into_iter()
+        .flat_map(i32::to_le_bytes)
+        .collect()
 }
 
 fn assert_retired_chunk_is_reusable(file: &File, predecessor: &Chunk) {

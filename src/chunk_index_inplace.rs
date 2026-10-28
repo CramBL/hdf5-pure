@@ -166,15 +166,17 @@ pub(crate) trait Store: Source {
     /// Returns the editing session's allocation publication state.
     fn allocation_publication(&self) -> &AllocationPublication;
 
-    /// Issues allocation content and publishes any required EOF change before references.
+    /// Publishes allocation ownership and any required EOF change before references.
     ///
     /// The returned confirmation is bound to this session and allocation generation.
-    /// The storage layer completes its ordering or durability barriers before returning.
+    /// In persistent sessions, the editor writes replacement managers excluding complete
+    /// allocations.
+    /// The storage layer completes its content and publication barriers before returning.
     ///
     /// # Errors
     ///
     /// Returns [`Error::AllocationPublicationUncertain`] if an earlier outcome is uncertain.
-    /// Propagates errors from writing or synchronizing publication metadata.
+    /// Propagates metadata read, parse, placement, write, and synchronization errors.
     fn publish_allocations(&mut self) -> Result<ConfirmedPublication, Error>;
 
     /// Writes `bytes` into provisional storage of `class`.
@@ -184,8 +186,9 @@ pub(crate) trait Store: Source {
     /// During reclamation, the editor returns index storage to raw-page free space only where
     /// its PAGE placement is proven.
     ///
-    /// The store may allocate from a classic aggregate, reuse committed free space, or append at
-    /// end-of-file. The complete allocation lies within the image's logical length on return.
+    /// The store may reuse committed free space or append at end-of-file. Nonpersistent sessions
+    /// can also allocate from classic aggregates. The complete allocation lies within the image's
+    /// logical length on return. The editor checks persistent manager authority before mutation.
     ///
     /// Before publishing a reference, the caller obtains confirmation through
     /// [`publish_allocations`](Self::publish_allocations) and
@@ -196,6 +199,7 @@ pub(crate) trait Store: Source {
     /// Returns [`Error::AllocationPublicationUncertain`] if an earlier outcome is uncertain.
     /// Returns [`Error::Format`] if address conversion or PAGE allocation geometry is invalid.
     /// Returns [`Error::Io`] if writing the allocation fails.
+    /// Propagates authoritative-manager read and parse errors.
     fn allocate(
         &mut self,
         bytes: &[u8],
@@ -1469,18 +1473,6 @@ pub(crate) struct AppendPlan {
     new_num_chunks: u64,
     /// The header statistics to publish after the index writes.
     stats: ExtensibleArrayStats,
-}
-
-impl AppendPlan {
-    /// Returns the stored size of the largest chunk in the plan, or 0 for a plan without chunks.
-    pub(crate) fn largest_stored_size(&self) -> u64 {
-        self.chunks
-            .iter()
-            .chain(self.completed_tail.iter())
-            .map(PreparedChunk::stored_size)
-            .max()
-            .unwrap_or(0)
-    }
 }
 
 /// Plans chunk bytes, index counts, and header statistics for an in-place append.

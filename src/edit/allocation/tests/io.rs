@@ -96,7 +96,9 @@ fn ownership_confirmation_follows_content_and_complete_eof_publication(
         .unwrap();
     let content_barrier = events
         .iter()
-        .position(|event| *event == Event::Synchronize(content, true))
+        .enumerate()
+        .find(|(index, event)| *index > payload && **event == Event::Synchronize(content, true))
+        .map(|(index, _)| index)
         .unwrap();
     let superblock = events
         .iter()
@@ -165,6 +167,38 @@ fn uncertain_ownership_prevents_later_allocation_and_reference_writes(#[case] fa
     drop(engine);
 }
 
+#[test]
+fn an_uncertain_preallocation_drain_prevents_further_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("allocation-drain.h5");
+    FileBuilder::new().write(&path).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = open(&path, SyncPolicy::Always, Failure::AllocationDrain, &events);
+    let mut store = engine.store();
+    let error = match store.allocate(&[7; 128], AllocationClass::Raw) {
+        Ok(_) => panic!("allocation proceeded after a failed prior-publication drain"),
+        Err(error) => error,
+    };
+    let Error::Io(error) = error else {
+        panic!("expected injected drain failure, got {error:?}");
+    };
+    assert_eq!(error.kind(), ErrorKind::Other);
+    assert_eq!(error.to_string(), "injected ownership publication failure");
+    let failed = events.lock().unwrap().clone();
+    assert!(!failed.is_empty());
+    assert!(matches!(
+        store.allocate(&[9; 16], AllocationClass::Raw),
+        Err(Error::AllocationPublicationUncertain)
+    ));
+    assert!(matches!(
+        store.write_at(0, &[0]),
+        Err(Error::AllocationPublicationUncertain)
+    ));
+    assert_eq!(*events.lock().unwrap(), failed);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
 fn open(
     path: &Path,
     policy: SyncPolicy,
@@ -200,8 +234,10 @@ struct BoundaryImage {
 impl BoundaryImage {
     fn synchronize(&mut self, synchronization: Synchronization) -> Result<(), Error> {
         let fail = matches!(
-            (self.failure, self.published),
-            (Failure::ContentSync, false) | (Failure::PublicationSync, true)
+            (self.failure, self.published, synchronization),
+            (Failure::AllocationDrain, false, Synchronization::Ordering)
+                | (Failure::ContentSync, false, Synchronization::Data)
+                | (Failure::PublicationSync, true, _)
         );
         if fail {
             self.failure = Failure::None;
@@ -306,6 +342,7 @@ enum Synchronization {
 
 #[derive(Clone, Copy, Debug)]
 enum Failure {
+    AllocationDrain,
     BeforeWrite,
     ContentSync,
     None,

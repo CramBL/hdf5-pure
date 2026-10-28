@@ -1,5 +1,5 @@
 ---
-source: crates/crosscheck/tests/main/file_space_oracle.rs
+source: crates/crosscheck/tests/main/test_util/file_space.rs
 expression: report
 ---
 case:       append-reuse-flat
@@ -15,25 +15,23 @@ file-space properties
 
 file sizes (absolute bytes)
   measurement                           bytes
-  hdf5-pure stored EOF                3151275
-  libhdf5 H5Fget_filesize             3151275
-  physical file                       3151275
+  hdf5-pure stored EOF                3149155
+  libhdf5 H5Fget_filesize             3149155
+  physical file                       3149155
 
 free-space sections (stored addresses, byte lengths)
   index |        hdf5-pure         |         libhdf5          | match
         |     address      length  |     address      length  |
   ------+--------------------------+--------------------------+------
       0 | (0x0000003c, 0x0000002e) | (0x0000003c, 0x0000002e) | yes
-      1 | (0x000002da, 0x000001b0) | (0x000002da, 0x000001b0) | yes
-      2 | (0x000005d3, 0x0000025d) | (0x000005d3, 0x0000025d) | yes
-      3 | (0x00000887, 0x00000524) | (0x00000887, 0x00000524) | yes
-      4 | (0x00100f57, 0x00000654) | (0x00100f57, 0x00000654) | yes
+      1 | (0x000001c7, 0x00000669) | (0x000001c7, 0x00000669) | yes
+      2 | (0x00000c6b, 0x000000f8) | (0x00000c6b, 0x000000f8) | yes
 
 free-space totals
   measurement                       hdf5-pure        libhdf5
-  section count                             5              5
-  section bytes                          4019           4019
-  H5Fget_freespace                          -           4019
+  section count                             3              3
+  section bytes                          1935           1935
+  H5Fget_freespace                          -           1935
   reported - section bytes                  -              0
 
 

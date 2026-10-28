@@ -92,13 +92,12 @@
 //! dimension.
 //!
 //! An append that allocates out of *freed* space rather than at end-of-file
-//! (issue #349) is swept by [`appending_into_a_reserved_hole_survives_a_crash_at_every_write`],
+//! (issue #349) is swept by [`appending_into_a_persisted_hole_survives_a_crash_at_every_write`],
 //! which reaches the branch through a file that **persists** its free space: such
 //! a session seeds its free list from the on-disk managers at open, so the hole
 //! is there before the recorded window rather than made by a commit inside it.
-//! That sweep is also the only one that crosses a *reservation* — the manager
-//! rewrite an append on such a file makes before it may spend a hole (issue
-//! #387) — which is a superblock repoint in the middle of an append sequence.
+//! That sweep crosses ownership publication through replacement managers and the superblock
+//! before references to the reused allocations are linked.
 //!
 //! On a *non*-persisting file the same branch stays out of reach, and is closed
 //! by argument instead: a session's free list is populated only by its own
@@ -824,21 +823,17 @@ fn a_crashed_append_can_be_reopened_and_appended_to() {
     );
 }
 
-/// Bytes of hole the reserved-append sweep leaves on the disk for the recorded
-/// session to draw on.
+/// Bytes of interior free space available across the recorded append rounds.
 ///
-/// It has to exceed one reserve batch, or the session declines to draw at all
-/// and the sweep is back to covering an ordinary end-of-file append. Twice the
-/// batch, so the draw leaves a remainder and the close-time rewrite that hands it
-/// back is inside the window too.
-const RESERVE_HOLE: usize = 2 << 20;
+/// The retained ceiling prevents truncation of this hole.
+const REUSE_HOLE: usize = 2 << 20;
 
 /// Recorded rounds for that sweep. Fewer than [`ROUNDS`], because every prefix
 /// writes out a file that carries the hole above.
-const RESERVE_ROUNDS: i32 = 20;
+const REUSE_ROUNDS: i32 = 20;
 
 /// [`warmed_base`] on a file that persists its free space, with a hole of
-/// [`RESERVE_HOLE`] bytes already recorded in the on-disk managers when the
+/// [`REUSE_HOLE`] bytes already recorded in the on-disk managers when the
 /// recorded window opens.
 ///
 /// The delete that makes the hole runs in *this* session, which closes before the
@@ -857,7 +852,7 @@ fn warmed_base_with_a_persisted_hole(path: &Path) {
         .with_maxshape(&[MaxExtent::Unlimited])
         .with_chunks(&[CHUNK]);
     b.create_dataset("victim")
-        .with_i32_data(&vec![7i32; RESERVE_HOLE / 4]);
+        .with_i32_data(&vec![7i32; REUSE_HOLE / 4]);
     // Above the hole, so deleting the victim leaves an interior region rather
     // than a run reaching end-of-file that the commit would truncate away.
     b.create_dataset("ceiling").with_i32_data(&[9i32, 9, 9]);
@@ -876,15 +871,9 @@ fn warmed_base_with_a_persisted_hole(path: &Path) {
     drop(s);
 }
 
-/// No region the on-disk free-space managers advertise may overlap a chunk of
-/// `d`, or the survivor beside it.
+/// Checks that persisted free sections exclude every chunk of `d`.
 ///
-/// This is what a reservation buys, stated as the thing a crash must not be able
-/// to break: the managers are a durable record that the *next* session allocates
-/// out of, so one offering space a live chunk occupies is not a stale number but
-/// a file the next writer corrupts. A prefix caught between the reservation's
-/// repoint and the bytes it lets the append write must still satisfy it, and so
-/// must one caught before the reservation at all.
+/// Each replay prefix is inspected before any writer can reuse its free sections.
 ///
 /// Returns [`Verdict::Loud`] if a manager does not parse, and [`Verdict::Silent`] if a free
 /// region overlaps a chunk.
@@ -918,15 +907,12 @@ fn persisted_free_space_holds_nothing_live(path: &Path) -> Verdict {
     })
 }
 
-/// One prefix of the reserved-append sweep: the dataset reads as a prefix of
-/// itself, and the managers describe nothing live.
-fn reserved_append_prefix_is_sound(path: &Path, lo: i32, hi: i32) -> Verdict {
+/// Checks the appended prefix, retained ceiling, and exclusion of live chunks from free sections.
+fn inspect_reused_append_prefix(path: &Path, lo: i32, hi: i32) -> Verdict {
     match appended_prefix_is_intact(path, lo, hi) {
         Verdict::Clean => {}
         other => return other,
     }
-    // The survivor above the hole, which a reservation that handed out the wrong
-    // bytes would be written over.
     let ceiling = crate::reader::File::open(path).and_then(|f| f.dataset("ceiling")?.read_i32());
     match ceiling {
         Ok(v) if v == vec![9, 9, 9] => {}
@@ -936,19 +922,8 @@ fn reserved_append_prefix_is_sound(path: &Path, lo: i32, hi: i32) -> Verdict {
     persisted_free_space_holds_nothing_live(path)
 }
 
-/// An in-place append on a file that persists its free space takes the space it
-/// spends *out* of the on-disk managers first, with a superblock repoint of its
-/// own, and only then writes into it (issue #387). A crash at any instant of that
-/// sequence must leave a file whose managers describe nothing live.
-///
-/// The reservation is a commit in the middle of an append run, so it is the one
-/// publish point in this module that is neither an append's own phase nor a
-/// session's teardown. The states it can be caught between are the interesting
-/// ones: after the draw and before the repoint, where the managers still list the
-/// batch and nothing has been written into it, and after the repoint and before
-/// the append, where they do not and it has not.
 #[test]
-fn appending_into_a_reserved_hole_survives_a_crash_at_every_write() {
+fn appending_into_a_persisted_hole_survives_a_crash_at_every_write() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("reserved.h5");
     warmed_base_with_a_persisted_hole(&path);
@@ -957,17 +932,15 @@ fn appending_into_a_reserved_hole_survives_a_crash_at_every_write() {
     let rec = Recording::of("reserved", &path, |p| {
         let mut s = WriteEngine::open_with_locking(p, FileLocking::Enabled).unwrap();
         s.set_sync_policy(SyncPolicy::OnClose);
-        for r in 0..RESERVE_ROUNDS {
+        for r in 0..REUSE_ROUNDS {
             append(&mut s, WARMUP + r * ROUND, ROUND);
         }
         drop(s);
     });
 
-    // The window has to have *reused* the hole, or this sweeps the ordinary
-    // end-of-file append under a longer file. Every appended byte landing inside
-    // the file is what says the reservation ran.
+    // File growth below the appended byte count establishes reuse of the interior hole.
     let after = std::fs::metadata(&path).unwrap().len();
-    let appended = (RESERVE_ROUNDS * ROUND) as u64 * 4;
+    let appended = (REUSE_ROUNDS * ROUND) as u64 * 4;
     assert!(
         after < before + appended / 2,
         "the recorded session grew the file from {before} to {after} while appending \
@@ -975,10 +948,10 @@ fn appending_into_a_reserved_hole_survives_a_crash_at_every_write() {
     );
     rec.assert_positioned(1, 0);
 
-    let hi = WARMUP + RESERVE_ROUNDS * ROUND;
+    let hi = WARMUP + REUSE_ROUNDS * ROUND;
     rec.replay_every_prefix(
         dir.path(),
-        |p| reserved_append_prefix_is_sound(p, WARMUP, hi),
+        |p| inspect_reused_append_prefix(p, WARMUP, hi),
         |p| appended_all_the_way(p, hi),
     );
 }

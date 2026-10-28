@@ -9,7 +9,7 @@ use core::num::NonZeroUsize;
 use hdf5_pure_format::__private::ChunkedGeometry;
 
 use hdf5_pure_space::__private::AllocationClass;
-use hdf5_pure_space::__private::{FreeList, PageTransition, PageType, SessionSpace};
+use hdf5_pure_space::__private::{PageTransition, PageType};
 
 use hdf5_pure_core::__private::{FileRange, PhysicalAddress};
 use hdf5_pure_core::MetadataBytes;
@@ -27,7 +27,6 @@ use crate::dataspace::Dataspace;
 use crate::datatype::Datatype;
 use crate::error::{Error, FormatError};
 use crate::filter_pipeline::FilterPipeline;
-use crate::image::FileImage;
 use crate::message_type::MessageType;
 use crate::object_path::ObjectPathBuf;
 use crate::primitive_bytes::PrimitiveBytes;
@@ -35,10 +34,7 @@ use crate::type_builders;
 use crate::width::FormatWidths;
 
 use super::LOSSY_TAIL_REFUSAL;
-use super::allocation::{
-    AllocationPublication, ConfirmedPublication, ProvisionalAllocation, PublicationAction,
-};
-use super::context::FileContext;
+use super::allocation::{AllocationPublication, ConfirmedPublication, ProvisionalAllocation};
 use super::staging::StagedOp;
 
 use super::{AggregateSpace, Placement, SyncPolicy, WriteEngine};
@@ -369,26 +365,8 @@ impl WriteEngine {
                 &raw[(done * elem_bytes).to_usize()?..((done + take) * elem_bytes).to_usize()?];
 
             let plan_result = {
-                let Self {
-                    image,
-                    context,
-                    space,
-                    aggregation,
-                    located,
-                    sync_policy,
-                    ..
-                } = self;
-                let st = &located[&oh_addr];
-                let store = EditStore {
-                    image: image.as_mut(),
-                    context,
-                    space,
-                    aggregation: aggregation.as_mut(),
-                    reserve: None,
-                    reuse_session_space: false,
-                    sync_policy: *sync_policy,
-                    fsm_dirty: None,
-                };
+                let store = EditStore { engine: self };
+                let st = &store.engine.located[&oh_addr];
                 chunk_index_inplace::plan_ea_append(
                     &store,
                     &st.loc,
@@ -404,54 +382,22 @@ impl WriteEngine {
                 )
             };
             let plan = plan_result.map_err(as_inplace_error)?;
-            // Remove reserved space from published managers before writing into it.
-            // The manager rewrite publishes a superblock and must precede append application.
-            self.reserve_for_immediate_append(plan.largest_stored_size())?;
             self.synchronize_aggregates()?;
+            let mut state = self.located.remove(&oh_addr).ok_or_else(|| {
+                FormatError::Internal("prepared append dataset is absent from the session".into())
+            })?;
+            let result = {
+                let mut store = EditStore { engine: self };
+                chunk_index_inplace::apply_ea_append(&mut store, &mut state.loc, plan, max_phase)
+            };
+            if result.is_ok() {
+                self.located.insert(oh_addr, state);
+            } else if self.context.allocations.available().is_err()
+                && let Some(aggregation) = &mut self.aggregation
             {
-                let reuse = self.immediate_reuse_allowed();
-                // PAGE allocation must use page-typed reserves.
-                let from_reserve = self.persist.is_some() || self.space.is_paged();
-                let Self {
-                    image,
-                    context,
-                    space,
-                    aggregation,
-                    located,
-                    reserved,
-                    fsm_dirty,
-                    sync_policy,
-                    ..
-                } = self;
-                let st = located.get_mut(&oh_addr).expect("dataset located above");
-                let mut store = EditStore {
-                    image: image.as_mut(),
-                    context,
-                    space,
-                    aggregation: aggregation.as_mut(),
-                    reserve: (reuse && from_reserve).then_some(reserved),
-                    reuse_session_space: reuse && !from_reserve,
-                    sync_policy: *sync_policy,
-                    fsm_dirty: from_reserve.then_some(fsm_dirty),
-                };
-                let confirmed = store
-                    .aggregation
-                    .as_ref()
-                    .is_none_or(|state| state.publication_confirmed);
-                if let Some(state) = store.aggregation.as_deref_mut() {
-                    state.publication_confirmed = false;
-                }
-                let result =
-                    chunk_index_inplace::apply_ea_append(&mut store, &mut st.loc, plan, max_phase);
-                if result.is_ok() {
-                    if let Some(state) = store.aggregation.as_deref_mut() {
-                        state.publication_confirmed = confirmed;
-                    }
-                } else {
-                    located.remove(&oh_addr);
-                }
-                result.map_err(as_inplace_error)?;
+                aggregation.publication_confirmed = false;
             }
+            result.map_err(as_inplace_error)?;
             if max_phase < 4 {
                 self.located.remove(&oh_addr);
                 // Each completed phase has issued its writes under either sync policy.
@@ -678,16 +624,7 @@ impl WriteEngine {
 
     /// Borrows the session's image and allocation state for the shared append writer.
     pub(super) fn store(&mut self) -> EditStore<'_> {
-        EditStore {
-            image: self.image.as_mut(),
-            context: &mut self.context,
-            space: &mut self.space,
-            aggregation: self.aggregation.as_mut(),
-            reserve: None,
-            reuse_session_space: false,
-            sync_policy: self.sync_policy,
-            fsm_dirty: self.persist.is_some().then_some(&mut self.fsm_dirty),
-        }
+        EditStore { engine: self }
     }
 }
 
@@ -732,23 +669,12 @@ pub(crate) struct LocatedState {
 
 /// Adapts session allocation and I/O to the shared extensible-array writer.
 ///
-/// Reusable space is tried before classic aggregates. Chunk payloads use the raw aggregate,
-/// and index blocks use the metadata aggregate. PAGE allocation uses raw pages for both.
+/// In persistent sessions, the editor publishes exact ownership through replacement free-space
+/// managers. Without persistence, the editor tries reusable space before classic aggregates, with
+/// raw aggregates for payloads and metadata aggregates for index blocks. The PAGE allocator uses
+/// raw pages for both.
 pub(super) struct EditStore<'a> {
-    image: &'a mut dyn FileImage,
-    context: &'a mut FileContext,
-    /// Allocation state, including PAGE transitions persisted at commit or close.
-    space: &'a mut SessionSpace,
-    /// Classic aggregates shared with staged edits.
-    aggregation: Option<&'a mut AggregateSpace>,
-    /// Space removed from published free-space managers before an immediate append.
-    pub(super) reserve: Option<&'a mut FreeList>,
-    /// Whether allocation may use the session's free space directly.
-    pub(super) reuse_session_space: bool,
-    /// Durability policy for the shared writer's ordering barriers.
-    sync_policy: SyncPolicy,
-    /// Persistence dirtiness updated when confirmed predecessor storage is retired.
-    fsm_dirty: Option<&'a mut bool>,
+    engine: &'a mut WriteEngine,
 }
 
 impl EditStore<'_> {
@@ -761,14 +687,23 @@ impl EditStore<'_> {
     /// Returns [`Error::Format`] if address conversion, PAGE geometry, or padding size is invalid.
     /// Returns [`Error::Io`] if appending the padding or bytes fails.
     fn append_into_raw_page(&mut self, bytes: &[u8]) -> Result<u64, Error> {
-        let eoa = self.context.addresses().relative(self.image.len())?.get();
-        if let Some(transition) = self.space.plan_transition(eoa, PageType::Raw)? {
+        let eoa = self
+            .engine
+            .context
+            .addresses()
+            .relative(self.engine.image.len())?
+            .get();
+        if let Some(transition) = self.engine.space.plan_transition(eoa, PageType::Raw)? {
             if let PageTransition::Pad { extent, .. } = transition {
-                self.image.append(&vec![0u8; extent.len().to_usize()?])?;
+                self.engine
+                    .image
+                    .append(&vec![0u8; extent.len().to_usize()?])?;
             }
-            self.space.record_transition(PageType::Raw, transition);
+            self.engine
+                .space
+                .record_transition(PageType::Raw, transition);
         }
-        self.image.append(bytes)
+        self.engine.image.append(bytes)
     }
     /// Places bytes in reusable space, a classic aggregate, or at end-of-file.
     ///
@@ -776,35 +711,42 @@ impl EditStore<'_> {
     ///
     /// Returns the placement, address-conversion, or I/O error.
     fn allocate_bytes(&mut self, bytes: &[u8], class: AllocationClass) -> Result<u64, Error> {
-        let extent = if let Some(reserve) = self.reserve.as_deref_mut() {
-            reserve.alloc(bytes.len() as u64)
-        } else if self.reuse_session_space {
-            self.space
+        let extent = if self.engine.immediate_reuse_allowed() {
+            self.engine
+                .space
                 .allocate_with_page_type(bytes.len() as u64, class, PageType::Raw)
         } else {
             None
         };
         if let Some(extent) = extent {
             let at = self
+                .engine
                 .context
                 .addresses()
                 .resolve(StoredAddress::new(extent.start()))?;
-            self.image.write_at(at.get(), bytes)?;
+            self.engine.image.write_at(at.get(), bytes)?;
             return Ok(at.get());
         }
         if let (Some(aggregation), Some(size)) = (
-            self.aggregation.as_deref_mut(),
+            self.engine
+                .aggregation
+                .as_mut()
+                .filter(|_| self.engine.persist.is_none()),
             NonZeroU64::new(bytes.len() as u64),
         ) {
-            let Placement::Aggregated { addr, end, .. } =
-                aggregation.reserve(self.context.addresses(), self.space, size, class)?
+            let Placement::Aggregated { addr, end, .. } = aggregation.reserve(
+                self.engine.context.addresses(),
+                &mut self.engine.space,
+                size,
+                class,
+            )?
             else {
                 return Err(FormatError::Internal(
                     "aggregate reservation is not aggregated".into(),
                 )
                 .into());
             };
-            AggregateSpace::place(self.image, addr, bytes, end)?;
+            AggregateSpace::place(self.engine.image.as_mut(), addr, bytes, end)?;
             return Ok(addr);
         }
         self.append_into_raw_page(bytes)
@@ -813,11 +755,11 @@ impl EditStore<'_> {
 
 impl crate::source::Source for EditStore<'_> {
     fn len(&self) -> u64 {
-        self.image.len()
+        self.engine.image.len()
     }
 
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), crate::error::FormatError> {
-        self.image.read_at(offset, buf)
+        self.engine.image.read_at(offset, buf)
     }
 
     fn read_metadata_at(
@@ -825,47 +767,48 @@ impl crate::source::Source for EditStore<'_> {
         offset: u64,
         len: usize,
     ) -> Result<Vec<u8>, crate::error::FormatError> {
-        self.image.read_metadata_at(offset, len)
+        self.engine.image.read_metadata_at(offset, len)
     }
 
     fn read_metadata(&self, offset: u64, len: usize) -> Result<MetadataBytes<'_>, FormatError> {
-        self.image.read_metadata(offset, len)
+        self.engine.image.read_metadata(offset, len)
     }
 
     fn metadata_cache_stats(&self) -> Option<crate::source::MetadataCacheStats> {
-        self.image.metadata_cache_stats()
+        self.engine.image.metadata_cache_stats()
     }
 
     fn reset_metadata_cache_stats(&self) {
-        self.image.reset_metadata_cache_stats();
+        self.engine.image.reset_metadata_cache_stats();
     }
 }
 
 impl Store for EditStore<'_> {
     fn widths(&self) -> FormatWidths {
-        self.context.widths()
+        self.engine.context.widths()
     }
 
     fn addresses(&self) -> AddressContext {
-        self.context.addresses()
+        self.engine.context.addresses()
     }
 
     fn retire(&mut self, retirement: RetiredChunk) {
         let (extent, class) = retirement.into_extent();
         // Opening checks the base against the image length, and editor truncation preserves it.
         let eoa = self
+            .engine
             .image
             .len()
-            .checked_sub(self.context.addresses().effective_base().get())
+            .checked_sub(self.engine.context.addresses().effective_base().get())
             .expect("the image includes its base address");
-        self.space.record_freed(eoa, extent, class);
-        if let Some(dirty) = &mut self.fsm_dirty {
-            **dirty = true;
+        self.engine.space.record_freed(eoa, extent, class);
+        if self.engine.persist.is_some() {
+            self.engine.fsm_dirty = true;
         }
     }
 
     fn allocation_publication(&self) -> &AllocationPublication {
-        &self.context.allocations
+        &self.engine.context.allocations
     }
 
     fn allocate(
@@ -873,66 +816,47 @@ impl Store for EditStore<'_> {
         bytes: &[u8],
         class: AllocationClass,
     ) -> Result<ProvisionalAllocation, Error> {
-        self.context.allocations.available()?;
+        self.engine.context.allocations.available()?;
+        self.engine.prepare_append_allocation()?;
         let result = self.allocate_bytes(bytes, class).and_then(|address| {
             let range = FileRange::new(PhysicalAddress::new(address), bytes.len() as u64)?;
-            let allocation = self.context.allocations.provision(range)?;
-            if allocation.range().end().get() > self.image.len() {
+            let allocation = self.engine.context.allocations.provision(range)?;
+            if allocation.range().end().get() > self.engine.image.len() {
                 return Err(FormatError::TruncatedFile {
                     expected_eof: allocation.range().end().get(),
-                    actual_len: self.image.len(),
+                    actual_len: self.engine.image.len(),
                 }
                 .into());
             }
             Ok(allocation)
         });
         if result.is_err() {
-            self.context.allocations.make_uncertain();
+            self.engine.restore_append_allocation()?;
         }
         result
     }
 
     fn publish_allocations(&mut self) -> Result<ConfirmedPublication, Error> {
-        let attempt = match self.context.allocations.begin()? {
-            PublicationAction::Current(publication) => return Ok(publication),
-            PublicationAction::Publish(attempt) => attempt,
-        };
-        match self.sync_policy {
-            SyncPolicy::Always => self.image.sync_data()?,
-            SyncPolicy::OnClose => self.image.flush()?,
-        }
-        if self.image.len() != self.context.superblock().eof_address {
-            let mut superblock = self.context.superblock().clone();
-            superblock.eof_address = self.image.len();
-            let publication = self.context.propose(superblock)?.encode()?;
-            self.image
-                .write_at(self.context.signature().get(), publication.bytes())?;
-            match self.sync_policy {
-                SyncPolicy::Always => self.image.sync_all()?,
-                SyncPolicy::OnClose => self.image.flush()?,
-            }
-            self.context.adopt(publication.into_proposed())?;
-        }
-        self.context.allocations.complete(attempt)
+        self.engine.publish_append_allocations()
     }
 
     fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), Error> {
-        self.context.allocations.before_reference()?;
-        let result = self.image.write_at(offset, bytes);
+        self.engine.context.allocations.before_reference()?;
+        let result = self.engine.image.write_at(offset, bytes);
         if result.is_err() {
-            self.context.allocations.make_uncertain();
+            self.engine.context.allocations.make_uncertain();
         }
         result
     }
 
     fn sync(&mut self) -> Result<(), Error> {
-        self.context.allocations.before_reference()?;
-        let result = match self.sync_policy {
-            SyncPolicy::Always => self.image.sync_data(),
-            SyncPolicy::OnClose => self.image.flush(),
+        self.engine.context.allocations.before_reference()?;
+        let result = match self.engine.sync_policy {
+            SyncPolicy::Always => self.engine.image.sync_data(),
+            SyncPolicy::OnClose => self.engine.image.flush(),
         };
         if result.is_err() {
-            self.context.allocations.make_uncertain();
+            self.engine.context.allocations.make_uncertain();
         }
         result
     }

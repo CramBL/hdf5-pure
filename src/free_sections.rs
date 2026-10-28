@@ -63,8 +63,9 @@ impl ReusableSpaceStats {
     ///
     /// Under [`FileSpaceStrategy::Aggr`](crate::FileSpaceStrategy::Aggr) and
     /// [`FileSpaceStrategy::FsmAggr`](crate::FileSpaceStrategy::FsmAggr), includes unused metadata
-    /// and raw aggregate reservations for staged edits and immediate appends, even when the
-    /// spare is shorter than the free-section threshold.
+    /// and raw aggregate reservations, even when the spare is shorter than the free-section
+    /// threshold. During persistent appends, the editor releases unused aggregate spare through
+    /// manager publication and allocates exact extents.
     ///
     /// Under [`FileSpaceStrategy::FsmAggr`](crate::FileSpaceStrategy::FsmAggr), the editor admits
     /// abandoned interior spare under the threshold and adjacency rules for freed extents. A
@@ -77,15 +78,11 @@ impl ReusableSpaceStats {
     ///
     /// # Reservations
     ///
-    /// Includes unused immediate-append reserves. The editor removes these reserves from the
-    /// persisted managers before an append writes into them. A staged commit places its objects
-    /// outside the append reserve, then returns unused reserve space when rewriting the managers.
-    /// The remaining free space is available to subsequent commits. Clean teardown of a persistent
-    /// session also returns unused reservations through a manager rewrite.
-    ///
-    /// The editor excludes held reservations from persisted managers, so this total can exceed
-    /// the persisted section-byte total reported through
-    /// [`File::persisted_free_sections`](crate::File::persisted_free_sections).
+    /// Includes unused aggregate spare held by the session. The editor excludes this spare from
+    /// persisted managers, so this total can exceed the persisted section-byte total reported
+    /// through [`File::persisted_free_sections`](crate::File::persisted_free_sections). Provisional
+    /// allocations are excluded from the session's reusable total before ownership publication
+    /// removes them from the persisted managers.
     pub const fn reusable_free_bytes(&self) -> u64 {
         self.reusable_free_bytes
     }
@@ -148,7 +145,7 @@ impl PersistedFreeSections {
     /// capacity and is zero when every manager slot is undefined.
     ///
     /// Excludes the free sections themselves, the File Space Info message and its object header,
-    /// userblocks, dataset storage and other metadata, aggregate or append reservations, dead
+    /// userblocks, dataset storage and other metadata, aggregate reservations, dead
     /// or unclassified storage, and trailing file slack. It measures persisted manager storage only.
     ///
     /// libhdf5's `H5Fget_info2` reports free-space-manager metadata for an open handle.

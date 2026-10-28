@@ -1,6 +1,7 @@
-//! Storage reclamation, page classification, free lists, and append reserves.
+//! Storage reclamation, page classification, free lists, and immediate allocation.
 
 use core::num::NonZeroU64;
+
 use std::path::Path;
 
 use hdf5_pure_format::__private as format;
@@ -11,7 +12,6 @@ use hdf5_pure_space::__private::AGGREGATE_BLOCK_SIZE;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::Extent as FreeExtent;
 use hdf5_pure_space::__private::FreeClass;
-use hdf5_pure_space::__private::FreeList;
 use hdf5_pure_space::__private::ManagerKind;
 use hdf5_pure_space::__private::ManagerSections;
 use hdf5_pure_space::__private::PageType;
@@ -40,13 +40,11 @@ use crate::convert::Narrow;
 use crate::data_layout::ChunkIndexLayout;
 use crate::dataspace::MaxExtent;
 use crate::edit;
-use crate::edit::APPEND_RESERVE_BYTES;
 use crate::edit::AppendBuilder;
 use crate::edit::AppendTarget;
 use crate::edit::DEFAULT_GATHER_PAGE;
 use crate::edit::OhRegion;
 use crate::edit::Placement;
-use crate::edit::SyncPolicy;
 use crate::edit::TailPlacement;
 use crate::edit::WriteEngine;
 use crate::edit::aggregation::AggregateSpace;
@@ -169,43 +167,8 @@ fn strict_persisted_failure_precedes_image_construction() {
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
 }
 
-#[rstest]
-#[case::flat(FileSpaceStrategy::FsmAggr)]
-#[case::page(FileSpaceStrategy::Page)]
-fn reusable_space_stats_include_and_release_append_reserves(#[case] strategy: FileSpaceStrategy) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("reserve-summary.h5");
-    let mut builder = FileBuilder::new();
-    builder.with_file_space_settings(FileSpaceSettings::new(strategy).with_persistence(true));
-    builder
-        .create_dataset("scratch")
-        .with_i32_data(&vec![1; 32_768]);
-    builder
-        .create_dataset("keep")
-        .with_i32_data(&vec![2; 4_096]);
-    builder.write(&path).unwrap();
-    let mut session = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
-    session.delete(&ObjectPathBuf::parse("/scratch")).unwrap();
-    session.commit().unwrap();
-    session.reserve_for_immediate_append(16_384).unwrap();
-    assert!(session.reserved.total_bytes() >= 16_384);
-    let reserved = session.reusable_space_stats().unwrap();
-    assert_eq!(reserved.logical_size(), session.image.len());
-    let sections = session.reusable_free_sections().unwrap();
-    test_util_hdf5::assert_free_sections_consistent!(
-        &reserved,
-        &sections,
-        FreeSectionCoordinates::Absolute
-    );
-    session.release_reserve();
-    assert!(session.reserved.is_empty());
-    assert_eq!(session.reusable_space_stats().unwrap(), reserved);
-}
-
-#[rstest]
-#[case::reserve(true, 1)]
-#[case::aggregate(false, AGGREGATE_BLOCK_SIZE - 1)]
-fn reusable_space_stats_check_additional_byte_sums(#[case] reserve: bool, #[case] expected: u64) {
+#[test]
+fn reusable_space_stats_check_aggregate_byte_sums() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("summary-overflow.h5");
     FileBuilder::new().write(&path).unwrap();
@@ -215,33 +178,27 @@ fn reusable_space_stats_check_additional_byte_sums(#[case] reserve: bool, #[case
         1,
         FileSpacePageSize::DEFAULT,
     );
-    session.aggregation = None;
     session
         .space
         .seed_persisted(None, FreeExtent::new(0, u64::MAX).unwrap());
-    if reserve {
-        session.reserved.free(FreeExtent::new(0, 1).unwrap());
-    } else {
-        let mut aggregation = AggregateSpace::new(session.end_of_allocation().unwrap().get());
-        aggregation
-            .reserve(
-                session.context.addresses(),
-                &mut session.space,
-                NonZeroU64::new(1).unwrap(),
-                AllocationClass::Raw,
-            )
-            .unwrap();
-        session.aggregation = Some(aggregation);
-    }
+    let mut aggregation = AggregateSpace::new(session.end_of_allocation().unwrap().get());
+    aggregation
+        .reserve(
+            session.context.addresses(),
+            &mut session.space,
+            NonZeroU64::new(1).unwrap(),
+            AllocationClass::Raw,
+        )
+        .unwrap();
+    session.aggregation = Some(aggregation);
     assert_eq!(
         session.reusable_space_stats().unwrap_err(),
         FormatError::OffsetOverflow {
             offset: u64::MAX,
-            length: expected
+            length: AGGREGATE_BLOCK_SIZE - 1,
         }
     );
     session.aggregation = None;
-    session.reserved = FreeList::new();
     session.space = SessionSpace::Disabled;
 }
 
@@ -263,7 +220,6 @@ fn array_append_preserves_raw_page_reuse(#[case] class: AllocationClass) {
     assert!(before.metadata().iter().any(|extent| extent.len() >= 8));
     let at = {
         let mut store = engine.store();
-        store.reuse_session_space = true;
         store
             .allocate(&[0; 8], class)
             .unwrap()
@@ -1119,7 +1075,7 @@ fn a_flat_tail_takes_exactly_the_extent_it_records() {
     let free_total =
         |s: &WriteEngine| -> u64 { s.space.reusable_sections().map(|extent| extent.len()).sum() };
 
-    let (mut placed, mut declined, mut with_slack) = (0usize, 0usize, 0usize);
+    let (mut placed, mut declined) = (0usize, 0usize);
     for hole in 120..420u64 {
         s.space = SessionSpace::from_strategy(
             Some(FileSpaceStrategy::FsmAggr),
@@ -1147,7 +1103,10 @@ fn a_flat_tail_takes_exactly_the_extent_it_records() {
                     free_before - free_after
                 );
                 if written < tail_len {
-                    with_slack += 1;
+                    assert!(
+                        !managers.is_empty(),
+                        "hole {hole}: padding has no owning section list"
+                    );
                 }
             }
             None => {
@@ -1174,11 +1133,6 @@ fn a_flat_tail_takes_exactly_the_extent_it_records() {
         declined > 0,
         "the sweep must reach holes too small for the tail, or the rule about \
          handing back a failed attempt is never exercised"
-    );
-    assert!(
-        with_slack > 0,
-        "the sweep must reach a hole the tail does not fill exactly, or the \
-         rule about spare bytes is never exercised"
     );
 }
 
@@ -1516,7 +1470,7 @@ fn a_failed_commit_leaves_no_reusable_span_the_image_names() {
 }
 
 #[test]
-fn a_commit_after_an_append_pads_the_raw_page_the_append_left() {
+fn a_commit_after_an_append_preserves_published_raw_page_tails() {
     const PAGE: u64 = 4096;
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("paged_interleave.h5");
@@ -1546,10 +1500,10 @@ fn a_commit_after_an_append_pads_the_raw_page_the_append_left() {
         Some(Some(PageType::Raw)),
         "the append must record that the tail page now holds raw data"
     );
-    assert_ne!(
+    assert_eq!(
         engine.image.len() % PAGE,
         0,
-        "the append must leave a partially-filled page for the commit to pad"
+        "ownership publication pads complete PAGE allocations"
     );
 
     engine.create_group(&ObjectPathBuf::parse("g")).unwrap();
@@ -1587,7 +1541,7 @@ fn a_commit_after_an_append_pads_the_raw_page_the_append_left() {
 }
 
 #[test]
-fn an_inplace_append_to_a_paged_file_allocates_only_raw_pages() {
+fn an_inplace_append_keeps_chunk_and_index_allocations_in_raw_pages() {
     const PAGE: u64 = 4096;
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("paged_raw.h5");
@@ -1615,11 +1569,6 @@ fn an_inplace_append_to_a_paged_file_allocates_only_raw_pages() {
             .unwrap();
     }
 
-    assert_eq!(
-        engine.space.paged_tail_type(),
-        Some(Some(PageType::Raw)),
-        "the append left the tail page holding something other than raw data"
-    );
     let meta_padding = engine
         .space
         .pending_padding(PageType::Meta)
@@ -1685,191 +1634,6 @@ fn gather_page_size_matches_file_space_properties() {
         s.gather_page_size(),
         DEFAULT_GATHER_PAGE,
         "an unpaged file has no page size of its own"
-    );
-}
-
-#[test]
-fn the_append_reserve_is_reported_as_one_coalesced_free_list() {
-    use crate::writer::FileBuilder;
-    const VICTIM: usize = (APPEND_RESERVE_BYTES as usize * 3) / 4;
-    const CHUNK: u64 = 16384;
-
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("reserve_coalesced.h5");
-    let mut b = FileBuilder::new();
-    b.with_file_space_settings(
-        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
-    );
-    b.create_dataset("t0")
-        .with_i32_data(&[0i32])
-        .with_shape(&[1])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[CHUNK]);
-    b.create_dataset("victim")
-        .with_i32_data(&vec![7i32; VICTIM]);
-    b.create_dataset("ceiling").with_i32_data(&[9i32, 9, 9]);
-    b.write(&path).unwrap();
-
-    let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
-    s.set_sync_policy(SyncPolicy::OnClose);
-    s.delete(&ObjectPathBuf::parse("victim")).unwrap();
-    s.commit().unwrap();
-
-    let batch: Vec<i32> = (0..CHUNK as i32).collect();
-    let mut reserved_ever = false;
-    for round in 0..16 {
-        s.append_inplace_i32_phased("t0", &batch, 4).unwrap();
-        reserved_ever |= !s.reserved.is_empty();
-        let sections = s.reusable_free_sections().unwrap();
-        for pair in sections.sections().windows(2) {
-            assert!(
-                pair[0].end_address() < pair[1].address(),
-                "round {round}: reusable sections touch or overlap: {sections:?}"
-            );
-        }
-        let stats = s.reusable_space_stats().unwrap();
-        test_util_hdf5::assert_free_sections_consistent!(
-            &stats,
-            &sections,
-            FreeSectionCoordinates::Absolute
-        );
-    }
-    assert!(
-        reserved_ever,
-        "no reserve was ever held, so this measured the plain free list"
-    );
-}
-
-#[test]
-fn an_unspent_append_reserve_goes_back_to_the_managers() {
-    use crate::writer::FileBuilder;
-    const VICTIM: usize = (APPEND_RESERVE_BYTES as usize * 2) / 4;
-
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("reserve_return.h5");
-    let mut b = FileBuilder::new();
-    b.with_file_space_settings(
-        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
-    );
-    b.create_dataset("t0")
-        .with_i32_data(&(0..256).collect::<Vec<_>>())
-        .with_shape(&[256])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[64]);
-    b.create_dataset("victim")
-        .with_i32_data(&vec![7i32; VICTIM]);
-    b.create_dataset("ceiling").with_i32_data(&[9i32, 9, 9]);
-    b.write(&path).unwrap();
-
-    let persisted = |p: &std::path::Path| -> u64 {
-        crate::reader::File::open(p)
-            .unwrap()
-            .persisted_free_sections()
-            .unwrap()
-            .unwrap()
-            .free_sections()
-            .free_bytes()
-    };
-
-    {
-        let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
-        s.set_sync_policy(SyncPolicy::OnClose);
-        s.delete(&ObjectPathBuf::parse("victim")).unwrap();
-        s.commit().unwrap();
-    }
-    let before = persisted(&path);
-    assert!(
-        before > APPEND_RESERVE_BYTES,
-        "the fixture must leave more than one reserve batch on disk, not {before} bytes"
-    );
-    let appended: Vec<i32> = (0..1024).collect();
-    {
-        let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
-        s.set_sync_policy(SyncPolicy::OnClose);
-        s.append_inplace_i32_phased("t0", &appended, 4).unwrap();
-        s.finalize_persist().unwrap();
-    }
-
-    let after = persisted(&path);
-    let spent = 64 * 1024;
-    assert!(
-        after + spent >= before,
-        "the session reserved {APPEND_RESERVE_BYTES} bytes and spent a few of them, \
-         so the managers should still describe nearly all of the {before} they did \
-         before — they describe {after}"
-    );
-    assert!(
-        after < before,
-        "the append placed bytes inside the hole, so the managers must describe \
-         less than the {before} they did (they describe {after})"
-    );
-
-    let f = crate::reader::File::open(&path).unwrap();
-    let mut want = (0..256).collect::<Vec<i32>>();
-    want.extend_from_slice(&appended);
-    assert_eq!(f.dataset("t0").unwrap().read_i32().unwrap(), want);
-    assert_eq!(f.dataset("ceiling").unwrap().read_i32().unwrap(), [9, 9, 9]);
-}
-
-#[test]
-fn a_draw_gathers_every_hole_the_append_fits_in() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("draw_gathers.h5");
-    let mut s = fragmented_persisting_fixture(&path, 3, 4 * 64);
-    let before: Vec<_> = s.space.reusable_sections().collect();
-    assert!(
-        before.len() >= 3,
-        "the fixture must leave three separate holes, not {before:?}"
-    );
-
-    s.append_inplace_i32_phased("t0", &[1i32; 64], 4).unwrap();
-
-    let held: Vec<_> = s
-        .reserved
-        .extents()
-        .iter()
-        .map(|extent| (extent.start(), extent.len()))
-        .collect();
-    assert!(
-        held.len() >= 2,
-        "one draw should have gathered runs from several of the holes {before:?}, \
-         not only {held:?}"
-    );
-    let drawn: u64 = held.iter().map(|&(_, len)| len).sum();
-    assert!(
-        drawn > before.iter().map(|extent| extent.len()).max().unwrap(),
-        "the reserve holds {drawn} bytes, no more than the largest hole alone"
-    );
-}
-
-#[test]
-fn append_reservation_rewrite_uses_reserved_free_space() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("draw_tail.h5");
-    let mut s = fragmented_persisting_fixture(&path, 1, 8 * 64);
-    let len_before = s.image.len();
-
-    s.append_inplace_i32_phased("t0", &[1i32; 64], 4).unwrap();
-
-    assert!(
-        !s.reserved.is_empty(),
-        "no reserve was drawn, so this measured an ordinary end-of-file append"
-    );
-    let ext = s
-        .context
-        .addresses()
-        .absolute(s.context.superblock().superblock_extension_address.unwrap())
-        .unwrap();
-    assert!(
-        ext < len_before,
-        "the rewrite appended its tail at {ext}, the pre-append end-of-file \
-         {len_before}, instead of placing it in the hole it was publishing as taken"
-    );
-    assert!(
-        s.image.len() <= len_before,
-        "a rewrite that placed its tail inside the file must not have grown it \
-         (was {len_before}, now {})",
-        s.image.len()
     );
 }
 
@@ -2179,42 +1943,3 @@ fn filter_attribute_heap(
 }
 
 const UNENCODED_BLOCK_LEN: usize = 64;
-
-/// Opens a persistent session with an append target and separate interior free regions.
-///
-/// Each deleted dataset is followed by a retained dataset to prevent coalescing. A final
-/// retained dataset prevents the free regions from being truncated.
-fn fragmented_persisting_fixture(
-    path: &std::path::Path,
-    victims: usize,
-    victim_elems: usize,
-) -> WriteEngine {
-    use crate::writer::FileBuilder;
-
-    let mut b = FileBuilder::new();
-    b.with_file_space_settings(
-        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
-    );
-    b.create_dataset("t0")
-        .with_i32_data(&[0i32])
-        .with_shape(&[1])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[64]);
-    for v in 0..victims {
-        b.create_dataset(&std::format!("victim{v}"))
-            .with_i32_data(&vec![7i32; victim_elems]);
-        b.create_dataset(&std::format!("keeper{v}"))
-            .with_i32_data(&[v as i32]);
-    }
-    b.create_dataset("ceiling").with_i32_data(&[9i32, 9, 9]);
-    b.write(path).unwrap();
-
-    let mut s = WriteEngine::open_with_locking(path, FileLocking::Enabled).unwrap();
-    s.set_sync_policy(SyncPolicy::OnClose);
-    for v in 0..victims {
-        s.delete(&ObjectPathBuf::parse(&std::format!("victim{v}")))
-            .unwrap();
-    }
-    s.commit().unwrap();
-    s
-}
