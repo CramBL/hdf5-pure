@@ -1,18 +1,18 @@
 #![cfg(feature = "__hdf5-1.10")]
-//! Reference-C-library interop for configurable fill values (issue #151).
-//!
-//! Two directions, both make-or-break:
-//!
-//! * The pure writer sets a fill value and libhdf5 must report
-//!   the same value through its own `H5Pget_fill_value` path.
-//! * libhdf5 writes a fill value - under both the default format
-//!   (a version-2 Fill Value message) and the latest format (a version-3
-//!   message) - and the pure reader must recover it.
+//! Dataset fill values and creation metadata read through libhdf5 and the pure reader.
 
+use std::collections::HashMap;
+use std::str::FromStr;
+
+use hdf5::Extent;
+use hdf5::dataset::FillTime as ReferenceFillTime;
 use hdf5::file::LibraryVersion;
 #[cfg(target_pointer_width = "64")]
 use hdf5::plist::dataset_create::Layout;
+use hdf5::types::VarLenUnicode;
+use hdf5_pure::AttrValue;
 use hdf5_pure::ChunkIndex;
+use hdf5_pure::DatasetBuilder;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
@@ -23,6 +23,130 @@ use rstest::rstest;
 
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
 use test_util_hdf5::file;
+
+#[rstest]
+#[case::default_policy(FillTime::IfSet, ReferenceFillTime::IfSet)]
+#[case::allocate(FillTime::Alloc, ReferenceFillTime::Alloc)]
+#[case::never(FillTime::Never, ReferenceFillTime::Never)]
+fn creation_requests_preserve_reference_values_and_metadata(
+    #[case] fill_time: FillTime,
+    #[case] reference_fill_time: ReferenceFillTime,
+    #[values(false, true)] in_place: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let reference_path = directory.path().join("reference.h5");
+    let pure_path = directory.path().join("created.h5");
+    let values = [11_i32, 13, 17, 19, 23, 29];
+    {
+        let reference = file::libhdf5_create_v110(&reference_path);
+        {
+            let dataset = reference
+                .new_dataset::<i32>()
+                .shape((Extent::resizable(2), Extent::fixed(3)))
+                .chunk((2, 2))
+                .fill_value(-7_i32)
+                .fill_time(reference_fill_time)
+                .create("data")
+                .unwrap();
+            dataset.write_raw(&values).unwrap();
+            dataset
+                .new_attr::<VarLenUnicode>()
+                .create("note")
+                .unwrap()
+                .write_scalar(&VarLenUnicode::from_str("prepared attribute").unwrap())
+                .unwrap();
+        }
+        reference.close().unwrap();
+    }
+    let configure = |dataset: &mut DatasetBuilder| {
+        dataset
+            .with_i32_data(&values)
+            .with_shape(&[2, 3])
+            .with_chunks(&[2, 2])
+            .with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Fixed(3)])
+            .with_fill_value(-7_i32)
+            .with_fill_time(fill_time)
+            .set_attr("note", AttrValue::VarLenString("prepared attribute".into()));
+    };
+    if in_place {
+        std::fs::copy(&reference_path, &pure_path).unwrap();
+        let session = File::open_rw(&pure_path).unwrap();
+        session.root().create_dataset("created", configure).unwrap();
+        session.commit().unwrap();
+    } else {
+        let mut builder = FileBuilder::new();
+        configure(builder.create_dataset("created"));
+        builder.write(&pure_path).unwrap();
+    }
+    {
+        let reference = hdf5::File::open(&reference_path).unwrap();
+        let pure = hdf5::File::open(&pure_path).unwrap();
+        let expected = reference.dataset("data").unwrap();
+        let actual = pure.dataset("created").unwrap();
+        assert_eq!(expected.shape(), [2, 3]);
+        assert_eq!(actual.shape(), expected.shape());
+        assert_eq!(expected.space().unwrap().maxdims(), [None, Some(3)]);
+        assert_eq!(
+            actual.space().unwrap().maxdims(),
+            expected.space().unwrap().maxdims()
+        );
+        assert_eq!(expected.chunk(), Some(vec![2, 2]));
+        assert_eq!(actual.chunk(), expected.chunk());
+        assert_eq!(expected.read_raw::<i32>().unwrap(), values);
+        assert_eq!(actual.read_raw::<i32>().unwrap(), values);
+        let expected_properties = expected.dcpl().unwrap();
+        let actual_properties = actual.dcpl().unwrap();
+        assert_eq!(expected_properties.fill_time(), reference_fill_time);
+        assert_eq!(
+            actual_properties.fill_time(),
+            expected_properties.fill_time()
+        );
+        assert_eq!(
+            expected_properties.get_fill_value_as::<i32>().unwrap(),
+            Some(-7)
+        );
+        assert_eq!(
+            actual_properties.get_fill_value_as::<i32>().unwrap(),
+            expected_properties.get_fill_value_as::<i32>().unwrap()
+        );
+        assert_eq!(expected.attr_names().unwrap(), ["note"]);
+        assert_eq!(actual.attr_names().unwrap(), ["note"]);
+        assert_eq!(
+            expected
+                .attr("note")
+                .unwrap()
+                .read_scalar::<VarLenUnicode>()
+                .unwrap()
+                .as_str(),
+            "prepared attribute"
+        );
+        assert_eq!(
+            actual
+                .attr("note")
+                .unwrap()
+                .read_scalar::<VarLenUnicode>()
+                .unwrap()
+                .as_str(),
+            "prepared attribute"
+        );
+    }
+    let reference = File::open(&reference_path).unwrap();
+    let pure = File::open(&pure_path).unwrap();
+    let expected = reference.dataset("data").unwrap();
+    let actual = pure.dataset("created").unwrap();
+    assert_eq!(expected.read_i32().unwrap(), values);
+    assert_eq!(actual.read_i32().unwrap(), values);
+    assert_eq!(expected.fill_time().unwrap(), fill_time);
+    assert_eq!(actual.fill_time().unwrap(), fill_time);
+    assert_eq!(expected.fill_value::<i32>().unwrap(), Some(-7));
+    assert_eq!(actual.fill_value::<i32>().unwrap(), Some(-7));
+    let attributes = HashMap::from([(
+        "note".into(),
+        AttrValue::VarLenString("prepared attribute".into()),
+    )]);
+    assert_eq!(expected.attrs().unwrap(), attributes);
+    assert_eq!(actual.attrs().unwrap(), attributes);
+}
 
 /// Read a dataset's typed fill value back through libhdf5.
 fn c_fill_value<T: hdf5::H5Type>(path: &std::path::Path, name: &str) -> Option<T> {
