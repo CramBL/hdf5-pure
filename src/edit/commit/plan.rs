@@ -893,7 +893,7 @@ impl WriteEngine {
                 .iter()
                 .chain(staged.writes())
                 .any(|(_, dataset)| {
-                    dataset.attrs_are_dense
+                    dataset.dense_attrs.is_some()
                         || datatype::datatype_holds_object_address(&dataset.dt)
                         || dataset
                             .attrs

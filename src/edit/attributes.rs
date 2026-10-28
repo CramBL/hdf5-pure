@@ -1,11 +1,13 @@
 //! Attribute edit preparation and compact and dense storage placement.
 
-use hdf5_pure_format::__private::RecordSplice;
+use hdf5_pure_format::__private::{
+    DenseAttrFixup, DenseAttrPlan, PreparedDenseAttrs, RecordSplice,
+};
 use hdf5_pure_space::__private::AllocationClass;
 
 use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
-use crate::attribute::StoredAttribute;
+use crate::attribute::{AttributeMessage, StoredAttribute};
 use crate::attribute_info::AttributeInfoMessage;
 use crate::convert::Narrow;
 use crate::error::{Error, FormatError, OBJECT_HEADER_MESSAGE_MAX};
@@ -113,12 +115,12 @@ impl WriteEngine {
 
     /// Places a nonempty dense attribute set and adds its Attribute Info message to `region`.
     ///
-    /// The caller checks the set before commit application with
-    /// [`dense_attrs_check`](crate::file_writer::dense_attribute_write::dense_attrs_check).
+    /// Resolves deferred updates within the geometry prepared before commit application.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Format`] if attribute encoding or allocation geometry is invalid.
+    /// Returns [`Error::Format`] if a prepared update cannot be resolved, the emitted length
+    /// differs from its reservation, or allocation geometry is invalid.
     /// Returns [`Error::Io`] if writing the heap or allocation padding fails.
     pub(super) fn append_dense_attrs(
         &mut self,
@@ -128,7 +130,13 @@ impl WriteEngine {
         if set.is_empty() {
             return Ok(());
         }
-        let attr_info_message = self.place_dense_attrs(&set.attrs, set.creation)?;
+        let attr_info_message =
+            self.place_dense_attrs(crate::file_writer::finalize_dense_attrs(
+                set.prepared.ok_or_else(|| {
+                    FormatError::Internal("a dense set has no prepared geometry".into())
+                })?,
+                &set.attrs,
+            )?)?;
         region.push(MessageType::ATTRIBUTE_INFO, &attr_info_message);
         Ok(())
     }
@@ -137,14 +145,10 @@ impl WriteEngine {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Format`] if attribute encoding, heap addresses, or allocation geometry
-    /// is invalid. Returns [`Error::Io`] if writing the heap or allocation padding fails.
-    pub(super) fn place_dense_attrs(
-        &mut self,
-        attrs: &[crate::attribute::AttributeMessage],
-        creation: DenseAttrCreationOrder,
-    ) -> Result<Vec<u8>, Error> {
-        let plan = crate::file_writer::dense_attribute_write::dense_attrs_plan(attrs, creation)?;
+    /// Returns [`Error::Format`] if heap addresses or allocation geometry are invalid, or the
+    /// emitted length differs from its reservation. Returns [`Error::Io`] if writing the heap
+    /// or allocation padding fails.
+    pub(super) fn place_dense_attrs(&mut self, plan: DenseAttrPlan) -> Result<Vec<u8>, Error> {
         let (_addr, attr_info_message) =
             self.place_relocatable(plan.blob_len(), AllocationClass::Metadata, |stored_base| {
                 let blob = plan.build(stored_base)?;
@@ -329,14 +333,40 @@ impl Default for EditedAttrs {
     }
 }
 
-/// An owned attribute set with the creation-order metadata for its replacement dense storage.
+/// Attribute messages and prepared geometry for replacement dense storage.
+///
+/// The default is an empty set without a heap. Cloning copies the messages and deferred
+/// updates while sharing immutable heap and index geometry.
 #[derive(Clone, Default)]
 pub(super) struct DenseAttrSet {
-    pub(super) attrs: Vec<crate::attribute::AttributeMessage>,
-    pub(super) creation: DenseAttrCreationOrder,
+    attrs: Vec<AttributeMessage>,
+    /// Prepared storage, absent for the default empty set.
+    prepared: Option<PreparedDenseAttrs>,
 }
 
 impl DenseAttrSet {
+    /// Encodes the set with its creation metadata and deferred updates before placement.
+    ///
+    /// # Errors
+    ///
+    /// Returns the encoding, metadata, and update errors of [`PreparedDenseAttrs::new`].
+    pub(super) fn new(
+        attrs: Vec<AttributeMessage>,
+        creation: DenseAttrCreationOrder,
+        fixups: impl IntoIterator<Item = DenseAttrFixup>,
+    ) -> Result<Self, FormatError> {
+        Ok(Self {
+            prepared: Some(PreparedDenseAttrs::new(&attrs, creation, fixups)?),
+            attrs,
+        })
+    }
+
+    /// Returns the messages used to resolve the prepared updates during placement.
+    pub(super) fn attrs(&self) -> &[AttributeMessage] {
+        &self.attrs
+    }
+
+    /// Returns whether the set requires no attribute heap.
     pub(super) fn is_empty(&self) -> bool {
         self.attrs.is_empty()
     }
@@ -513,12 +543,16 @@ pub(super) fn plan_attr_ops<S: Source + ?Sized>(
             }
         }
     }
-    // Check dense storage geometry before commit application.
-    crate::file_writer::dense_attribute_write::dense_attrs_check(&attrs).map_err(Error::Format)?;
     Ok(AttrEdits {
         region,
         attrs: EditedAttrs::Dense(DenseAttrEdit {
-            set: DenseAttrSet { attrs, creation },
+            set: DenseAttrSet::new(
+                attrs,
+                creation,
+                vl.iter().map(|(attribute, _)| DenseAttrFixup::GlobalHeap {
+                    attribute: *attribute,
+                }),
+            )?,
             vl,
         }),
         replaces_dense_storage: dense_now,
@@ -654,10 +688,10 @@ pub(super) fn read_object_attrs<S: Source + ?Sized>(
 pub(super) fn dense_attr_set(
     region: &OhRegion,
     stored: Vec<crate::attribute::StoredAttribute>,
-) -> Result<DenseAttrSet, Error> {
+) -> Result<StoredAttrSet, Error> {
     let layout = region.layout();
     if !layout.tracks_creation_order() {
-        return Ok(DenseAttrSet {
+        return Ok(StoredAttrSet {
             attrs: stored.into_iter().map(|a| a.message).collect(),
             creation: DenseAttrCreationOrder::Untracked,
         });
@@ -682,7 +716,7 @@ pub(super) fn dense_attr_set(
         attrs.push(message);
         indices.push(index);
     }
-    Ok(DenseAttrSet {
+    Ok(StoredAttrSet {
         attrs,
         creation: DenseAttrCreationOrder::Tracked {
             indices,
@@ -690,6 +724,12 @@ pub(super) fn dense_attr_set(
             indexed: layout.indexes_creation_order(),
         },
     })
+}
+
+/// Stored attribute messages combined with their header's creation-order metadata.
+pub(super) struct StoredAttrSet {
+    pub(super) attrs: Vec<AttributeMessage>,
+    pub(super) creation: DenseAttrCreationOrder,
 }
 
 /// Returns the index after `index`.

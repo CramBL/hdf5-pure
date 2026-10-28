@@ -18,14 +18,19 @@
 
 use std::path::Path;
 
+use hdf5::Location;
 use hdf5::file::LibraryVersion;
 use hdf5::plist::attribute_create::CharEncoding;
 use hdf5::types::TypeDescriptor;
 use hdf5::types::VarLenUnicode;
 use hdf5::{ObjectReference1, ReferencedObject};
 use hdf5_pure::CharacterSet;
+use hdf5_pure::FileBuilder;
+use hdf5_pure::FileSpaceSettings;
+use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::FixedPointType;
 use hdf5_pure::StringPadding;
+use hdf5_pure::UserblockSize;
 use hdf5_pure::VariableLengthStringType;
 use hdf5_pure::VariableLengthType;
 use hdf5_pure::{AttrValue, Datatype, File, RepackOptions};
@@ -125,7 +130,7 @@ fn fill_committed_fixture(file: &hdf5::File, fixture: Fixture) {
         .expect("create /data");
     data.write(&[1.0f64]).expect("write /data");
 
-    let owners: [&hdf5::Location; 2] = [file, &data];
+    let owners: [&Location; 2] = [file, &data];
     for owner in owners {
         if fixture.committed_attrs {
             write_attr(owner, "shared_attr", Some(&dtype), ATTR_VALUE);
@@ -1152,4 +1157,145 @@ fn only_what_the_c_library_calls_a_named_datatype_is_accepted() {
     }
     assert_eq!(named, ["mytype"]);
     assert_eq!(root.named_datatypes().unwrap(), named);
+}
+
+#[rstest]
+#[case::managed(3, false, 0)]
+#[case::huge(5_000, true, 1)]
+#[case::multiple_collections(65_536, false, 1)]
+fn dense_attributes_resolve_committed_and_global_heap_references_through_relocation(
+    #[case] count: usize,
+    #[case] page: bool,
+    #[case] huge_objects: u64,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dense_references.h5");
+    let strings: Vec<_> = (0..count).map(|i| format!("value_{i}")).collect();
+    let mut builder = FileBuilder::new();
+    builder.with_userblock(UserblockSize::try_from(4096).unwrap());
+    if page {
+        builder.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true),
+        );
+    }
+    builder.commit_datatype(
+        "text",
+        Datatype::VariableLength(VariableLengthType::string(
+            StringPadding::NullTerminate,
+            CharacterSet::Utf8,
+        )),
+    );
+    builder.set_attr_committed(
+        "labels",
+        AttrValue::VarLenStringArray(strings.clone()),
+        "text",
+    );
+    for i in 0..8 {
+        builder.set_attr(&format!("a{i}"), AttrValue::I64(i));
+    }
+    let mut group = builder.create_group("g");
+    group.set_attr_committed(
+        "labels",
+        AttrValue::VarLenStringArray(strings.clone()),
+        "text",
+    );
+    for i in 0..8 {
+        group.set_attr(&format!("a{i}"), AttrValue::I64(i));
+    }
+    builder.add_group(group.finish());
+    let dataset = builder.create_dataset("d");
+    dataset.with_i32_data(&DATASET_VALUES);
+    dataset.set_attr_committed(
+        "labels",
+        AttrValue::VarLenStringArray(strings.clone()),
+        "text",
+    );
+    for i in 0..8 {
+        dataset.set_attr(&format!("a{i}"), AttrValue::I64(i));
+    }
+    builder.write(&path).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(test_util::fractal_heap::header_offsets(&bytes).len(), 3);
+    assert_eq!(
+        test_util::fractal_heap::huge_object_counts(&bytes),
+        vec![huge_objects; 3]
+    );
+    {
+        let rust = File::open(&path).unwrap();
+        for attrs in [
+            rust.root().attrs().unwrap(),
+            rust.group("g").unwrap().attrs().unwrap(),
+            rust.dataset("d").unwrap().attrs().unwrap(),
+        ] {
+            assert_eq!(attrs.len(), 9);
+            assert_eq!(
+                attrs["labels"],
+                AttrValue::VarLenStringArray(strings.clone())
+            );
+        }
+    }
+    {
+        let c = hdf5::File::open(&path).unwrap();
+        let group = c.group("g").unwrap();
+        let dataset = c.dataset("d").unwrap();
+        let locations: [&Location; 3] = [&c, &group, &dataset];
+        for location in locations {
+            let attr = location.attr("labels").unwrap();
+            assert!(attr.dtype().unwrap().is_committed());
+            let actual: Vec<_> = attr
+                .read_raw::<VarLenUnicode>()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().to_owned())
+                .collect();
+            assert_eq!(actual, strings);
+            assert_eq!(location.attr_names().unwrap().len(), 9);
+        }
+    }
+    {
+        let session = File::open_rw(&path).unwrap();
+        session
+            .root()
+            .set_attr("added", AttrValue::VarLenString("resolved".into()))
+            .unwrap();
+        session
+            .group("g")
+            .unwrap()
+            .set_attr("added", AttrValue::VarLenString("resolved".into()))
+            .unwrap();
+        session
+            .dataset("d")
+            .unwrap()
+            .set_attr("added", AttrValue::VarLenString("resolved".into()))
+            .unwrap();
+        session.commit().unwrap();
+        session.copy("g", "copied").unwrap();
+        session.commit().unwrap();
+    }
+    let c = hdf5::File::open(&path).unwrap();
+    let group = c.group("g").unwrap();
+    let copied = c.group("copied").unwrap();
+    let dataset = c.dataset("d").unwrap();
+    let locations: [&Location; 4] = [&c, &group, &dataset, &copied];
+    for location in locations {
+        assert_eq!(location.attr_names().unwrap().len(), 10);
+        let attr = location.attr("labels").unwrap();
+        assert!(attr.dtype().unwrap().is_committed());
+        let actual: Vec<_> = attr
+            .read_raw::<VarLenUnicode>()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().to_owned())
+            .collect();
+        assert_eq!(actual, strings);
+        assert_eq!(
+            location
+                .attr("added")
+                .unwrap()
+                .read_scalar::<VarLenUnicode>()
+                .unwrap()
+                .as_str(),
+            "resolved"
+        );
+    }
 }

@@ -5,6 +5,7 @@
 
 use alloc::collections::BTreeSet;
 use alloc::format;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -111,43 +112,15 @@ impl DenseAttrCreationOrder {
     }
 }
 
-/// Checks that [`build_dense_attrs`] can represent the attribute fields and managed heap.
-///
-/// Serializes the fields with [`AttributeMessage::serialize_v3`] and plans the managed blocks
-/// with [`ManagedHeapPlan::attributes`]. Attributes larger than [`DENSE_ATTR_MAX_MANAGED_OBJECT`]
-/// use huge-object storage.
-///
-/// # Errors
-///
-/// Returns [`FormatError::AttributeFieldTooLong`] if an attribute's name, datatype, or dataspace
-/// is longer than its 2-byte size field can hold, [`FormatError::DenseAttributeHeapTooLarge`] if
-/// the managed attributes need more space than the heap can address, and
-/// [`FormatError::ValueTooLargeForPlatform`] if the size of the blocks that hold them does not fit
-/// a `usize`. Returns [`FormatError::Internal`] if the fixed attribute-heap geometry or the
-/// selected managed-object sizes violate the planner's invariants.
-pub fn dense_attrs_check(attrs: &[AttributeMessage]) -> Result<(), FormatError> {
-    let mut managed = Vec::new();
-    for a in attrs {
-        let size = a
-            .serialize_v3(DENSE_ATTR_OFFSET_WIDTH, DENSE_ATTR_LENGTH_SIZE)?
-            .len();
-        if size <= DENSE_ATTR_MAX_MANAGED_OBJECT {
-            // A managed attribute's bytes go in the heap's direct blocks. A huge
-            // one's sit outside them and are bounded only by the file.
-            managed.push(size as u64);
-        }
-    }
-    ManagedHeapPlan::attributes(&managed, DENSE_ATTR_OFFSET_WIDTH)
-        .map(|_| ())
-        .map_err(dense_attr_heap_error)
-}
-
 /// Dense attribute geometry and deferred payload updates.
 ///
 /// Each encoded attribute has a creation index. Names and tracked creation indexes are
 /// unique, and tracked indexes are below the retained next-index counter. The managed heap,
 /// huge-object placement, index ordering, and total length are retained during
 /// [`finalize`](Self::finalize).
+///
+/// Cloning copies encoded messages and deferred updates while sharing immutable geometry.
+#[derive(Clone)]
 pub struct PreparedDenseAttrs {
     plan: DenseAttrPlan,
     fixups: Vec<PreparedAttrFixup>,
@@ -408,10 +381,12 @@ pub enum DenseAttrReference {
 ///
 /// The heap and index offsets, creation metadata, and total length are independent of the
 /// heap's file address. [`build`](Self::build) writes the retained layout at a chosen address.
+/// Cloning copies encoded messages while sharing immutable geometry.
+#[derive(Clone)]
 pub struct DenseAttrPlan {
     /// Each attribute's version 3 message bytes and creation index, in the caller's order.
     attributes: Vec<EncodedDenseAttribute>,
-    geometry: DenseAttrGeometry,
+    geometry: Arc<DenseAttrGeometry>,
 }
 
 /// Encodes attributes and plans their heap and indexes before file placement.
@@ -558,7 +533,7 @@ pub fn dense_attrs_plan(
 
     Ok(DenseAttrPlan {
         attributes,
-        geometry: DenseAttrGeometry {
+        geometry: Arc::new(DenseAttrGeometry {
             huge_id_of,
             huge_count,
             huge_total,
@@ -579,7 +554,7 @@ pub fn dense_attrs_plan(
             huge_nodes_off,
             huge_data_off,
             total_len,
-        },
+        }),
     })
 }
 
@@ -649,7 +624,7 @@ impl DenseAttrPlan {
             order,
             corder_order,
             ..
-        } = geometry;
+        } = geometry.as_ref();
         let huge_count = *huge_count;
 
         // The writer adds the heap base to offsets for its blocks, indexes, and huge objects.
@@ -1037,7 +1012,7 @@ impl EncodedDenseAttrs {
 /// A version 3 attribute message paired with its creation index.
 ///
 /// For untracked attributes, the creation index is the position in the caller's set.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct EncodedDenseAttribute {
     bytes: Vec<u8>,
     creation_index: u32,
@@ -1077,7 +1052,7 @@ enum FixupTarget {
 }
 
 /// A declared fixup with its offset in the encoded attribute message.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum PreparedAttrFixup {
     CommittedDatatype { attribute: usize, offset: usize },
     GlobalHeap { attribute: usize, offset: usize },

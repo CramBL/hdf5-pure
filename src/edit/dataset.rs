@@ -11,6 +11,7 @@ use hdf5_pure_format::__private::ChunkIndexInfo;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::ChunkedGeometry;
 use hdf5_pure_format::__private::IndexSlots;
+use hdf5_pure_format::__private::{DenseAttrFixup, PreparedDenseAttrs};
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::PageType;
 
@@ -959,7 +960,7 @@ impl WriteEngine {
     /// Returns [`Error::Format`] if the filter context or pipeline is invalid, chunks cannot be
     /// encoded, the header or attributes cannot be serialized, or allocation geometry is invalid.
     /// Returns [`Error::Io`] if writing chunk storage, attributes, or allocation padding fails.
-    fn build_chunked_dataset(&mut self, fd: &FlatDataset) -> Result<Vec<u8>, Error> {
+    fn build_chunked_dataset(&mut self, fd: &mut FlatDataset) -> Result<Vec<u8>, Error> {
         let chunk_dims = fd.chunk_options.resolve_chunk_dims(&fd.ds.dimensions);
         let ctx = ChunkContext::from_datatype(&chunk_dims, &fd.dt)?;
         let elem = ctx.element_size.narrow::<NonZeroUsize>()?;
@@ -1005,13 +1006,16 @@ impl WriteEngine {
     ///
     /// # Errors
     ///
-    /// Returns the errors of [`place_dense_attrs`](Self::place_dense_attrs) when the prepared
-    /// attributes require dense storage.
-    fn place_dense_attrs_if_needed(&mut self, fd: &FlatDataset) -> Result<Option<Vec<u8>>, Error> {
-        if !fd.attrs_are_dense {
+    /// Propagates errors from [`file_writer::finalize_dense_attrs`] and
+    /// [`place_dense_attrs`](Self::place_dense_attrs) when the attributes require dense storage.
+    fn place_dense_attrs_if_needed(
+        &mut self,
+        fd: &mut FlatDataset,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        let Some(prepared) = fd.dense_attrs.take() else {
             return Ok(None);
-        }
-        self.place_dense_attrs(&fd.attrs, DenseAttrCreationOrder::Untracked)
+        };
+        self.place_dense_attrs(file_writer::finalize_dense_attrs(prepared, &fd.attrs)?)
             .map(Some)
     }
 
@@ -1438,10 +1442,10 @@ pub(super) struct FlatDataset {
     pub(super) maxshape: Option<Vec<MaxExtent>>,
     /// Attribute indices paired with global-heap collections awaiting placement.
     pub(super) vl_attrs: Vec<(usize, Vec<Vec<u8>>)>,
-    /// Whether the prepared attributes require a fractal heap.
+    /// Prepared dense storage, or `None` for inline attributes or after placement.
     ///
     /// Reference patching and digest updates preserve serialized lengths.
-    pub(super) attrs_are_dense: bool,
+    pub(super) dense_attrs: Option<PreparedDenseAttrs>,
     /// Unresolved variable-length element references and their collections.
     pub(super) vl_string_staging: Option<VlStringStaging>,
     /// Object-reference targets resolved after the commit has assigned object addresses.
@@ -1646,10 +1650,24 @@ pub(super) fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<F
         }
     });
     let attrs_are_dense = crate::file_writer::needs_dense_attrs(&attrs).map_err(Error::Format)?;
-    if attrs_are_dense {
-        crate::file_writer::dense_attribute_write::dense_attrs_check(&attrs)
-            .map_err(Error::Format)?;
-    }
+    let dense_attrs = if attrs_are_dense {
+        let fixups = vl_attrs
+            .iter()
+            .map(|(attribute, _)| DenseAttrFixup::GlobalHeap {
+                attribute: *attribute,
+            });
+        #[cfg(feature = "provenance")]
+        let fixups = fixups.chain(provenance.iter().map(|prov| DenseAttrFixup::Payload {
+            attribute: prov.attrs_start,
+        }));
+        Some(PreparedDenseAttrs::new(
+            &attrs,
+            DenseAttrCreationOrder::Untracked,
+            fixups,
+        )?)
+    } else {
+        None
+    };
 
     if committed_datatype_path.is_some() || attrs.iter().any(|a| a.datatype_location.is_committed())
     {
@@ -1680,7 +1698,7 @@ pub(super) fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<F
         chunk_options,
         maxshape,
         vl_attrs,
-        attrs_are_dense,
+        dense_attrs,
         vl_string_staging,
         reference_targets,
         fill,

@@ -12,6 +12,31 @@ use crate::shared_message::DatatypeLocation;
 use super::*;
 
 #[rstest]
+#[case::managed(8)]
+#[case::huge(70_000)]
+fn prepared_clones_retain_shared_geometry_through_finalization(#[case] len: u32) {
+    let attr = canonical_attribute("label", len);
+    let replacement = vec![b'b'; usize::try_from(len).unwrap()];
+    let prepared = PreparedDenseAttrs::new(
+        &[attr],
+        DenseAttrCreationOrder::Untracked,
+        [DenseAttrFixup::Payload { attribute: 0 }],
+    )
+    .unwrap();
+    let cloned = prepared.clone();
+    assert!(Arc::ptr_eq(&prepared.plan.geometry, &cloned.plan.geometry));
+    let ready = cloned
+        .finalize(
+            |reference| panic!("unexpected reference {reference:?}"),
+            |_| Ok(replacement.as_slice()),
+        )
+        .unwrap();
+    assert!(Arc::ptr_eq(&prepared.plan.geometry, &ready.geometry));
+    let blob = ready.build(StoredAddress::new(0x8000)).unwrap();
+    assert_eq!(u64::try_from(blob.blob.len()).unwrap(), prepared.blob_len());
+}
+
+#[rstest]
 #[case::missing_index(vec![1], 9, false,
     FormatError::Internal("a tracked attribute set needs one creation index per attribute".into()))]
 #[case::extra_index(vec![1, 2, 3], 9, true,

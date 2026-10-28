@@ -473,10 +473,7 @@ fn a_copied_reference_attribute_is_screened_in_both_storages() {
         let attr = reference_attr("target", address);
         let dense = verbatim_copy(
             OhRegion::default(),
-            DenseAttrSet {
-                attrs: vec![attr.clone()],
-                creation: DenseAttrCreationOrder::Untracked,
-            },
+            DenseAttrSet::new(vec![attr.clone()], DenseAttrCreationOrder::Untracked, []).unwrap(),
         );
         let inline = verbatim_copy(inline_attr_region(&attr), DenseAttrSet::default());
         for (storage, tree) in [("dense", &dense), ("inline", &inline)] {
@@ -561,7 +558,7 @@ fn a_copy_nested_past_the_native_stack_is_screened_written_and_dropped() {
                 panic!("expected a group at {addr}");
             };
             assert!(children.is_empty(), "{children:?}");
-            assert_eq!(dense_attrs.attrs, vec![attr]);
+            assert_eq!(dense_attrs.attrs(), [attr]);
         })
         .unwrap()
         .join()
@@ -1493,10 +1490,8 @@ fn nested_groups(depth: usize, leaf_attr: AttributeMessage) -> CopyTree {
     let leaf = CopyNode::Group {
         non_link_region: edit::group::fresh_group_region(),
         links: Vec::new(),
-        dense_attrs: DenseAttrSet {
-            attrs: vec![leaf_attr],
-            creation: DenseAttrCreationOrder::Untracked,
-        },
+        dense_attrs: DenseAttrSet::new(vec![leaf_attr], DenseAttrCreationOrder::Untracked, [])
+            .unwrap(),
     };
     let root = (0..depth).fold(leaf, |child, _| CopyNode::Group {
         non_link_region: edit::group::fresh_group_region(),
