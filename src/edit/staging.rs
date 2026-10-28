@@ -698,6 +698,11 @@ pub(crate) struct StagedMeta {
 }
 
 /// An operation accepted by the staged-set mutation interface.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "operations are immediately moved into unboxed per-kind vectors; boxing adds a \
+              temporary allocation"
+)]
 pub(super) enum StagedOp {
     AppendDataset(ObjectPathBuf, AppendBuilder),
     CopyObject(ObjectPathBuf, ObjectPathBuf),
