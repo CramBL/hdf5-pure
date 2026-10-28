@@ -51,6 +51,7 @@ use crate::FillTime;
 use crate::SuperblockVersion;
 use crate::appender::{BufferedAppender, OwnedBufferedAppender};
 use crate::attribute;
+use crate::attribute::AttributeMessage;
 use crate::chunk_cache::{CachePass, ChunkCache, ChunkCacheConfig, ChunkCacheStats};
 use crate::compound::CompoundType;
 use crate::convert::Narrow;
@@ -76,6 +77,8 @@ use crate::group_v2::{self, ChildLookup};
 use crate::layout_info::{Chunk, ChunkIndex, Filter, FilterId, Layout};
 use crate::libver::LibVer;
 use crate::message_type::MessageType;
+use crate::object_header::HeaderMessage;
+use crate::object_header::MessageFilter;
 use crate::object_header::ObjectHeader;
 use crate::object_path::{LinkName, LinkNameBuf, ObjectPath, ObjectPathBuf};
 #[cfg(test)]
@@ -4166,6 +4169,8 @@ impl File {
     /// Returns the class of the object whose header is at `header`, and the hard links of the
     /// object if it is a group.
     ///
+    /// The result includes the parsed header for later reuse.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Format`] if the object header does not parse, or if the object is a group
@@ -4173,14 +4178,65 @@ impl File {
     pub(crate) fn hard_links_at(
         &self,
         header: PhysicalAddress,
-    ) -> Result<(ObjectClass, Vec<GroupEntry>), Error> {
-        let header = self.inner.parse_header(header.get())?;
-        let class = ObjectClass::of(&header);
+    ) -> Result<(ObjectClass, Vec<GroupEntry>, ParsedHeader), Error> {
+        let revision = self.inner.content_revision();
+        let parsed = self.inner.parse_header(header.get())?;
+        let class = ObjectClass::of(&parsed);
         let links = match class {
-            ObjectClass::Group => self.inner.group_children(&header)?,
+            ObjectClass::Group => self.inner.group_children(&parsed)?,
             ObjectClass::Dataset | ObjectClass::NamedDatatype | ObjectClass::Unknown => Vec::new(),
         };
-        Ok((class, links))
+        Ok((
+            class,
+            links,
+            ParsedHeader {
+                file: Arc::clone(&self.inner),
+                address: header,
+                revision,
+                header: parsed,
+            },
+        ))
+    }
+
+    /// Reads the attributes of the object whose header is at `header`.
+    ///
+    /// Consumes `parsed` under the source, address, and revision checks of [`ParsedHeader`].
+    /// For streaming sources, the reader retains attribute messages and attribute storage
+    /// information during a fresh parse.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] with [`FormatError::Internal`] if `parsed` belongs to another
+    /// source or address. Propagates object-header and attribute-reading errors.
+    pub(crate) fn attr_messages_at(
+        &self,
+        header: PhysicalAddress,
+        parsed: Option<ParsedHeader>,
+    ) -> Result<Vec<AttributeMessage>, Error> {
+        let parsed = parsed
+            .map(|parsed| parsed.reuse(self, header))
+            .transpose()?
+            .flatten();
+        let header = match (parsed, &self.inner.backend) {
+            (Some(parsed), _) => parsed,
+            (None, Backend::Streaming(source)) => {
+                ObjectHeader::parse_from_source_filtered_with_widths(
+                    &SourceMetadata(source.as_ref()),
+                    self.inner.access_mode(),
+                    header.get(),
+                    self.inner.widths,
+                    self.inner.addresses().effective_base(),
+                    MessageFilter::Only(&mut |message_type, _| {
+                        matches!(
+                            message_type,
+                            MessageType::ATTRIBUTE | MessageType::ATTRIBUTE_INFO
+                        )
+                    }),
+                )?
+            }
+            (None, _) => self.inner.parse_header(header.get())?,
+        };
+        self.inner.attr_messages_of(&header)
     }
 
     /// Returns a handle to the group whose object header is at `header`, which `path` identifies
@@ -4193,23 +4249,31 @@ impl File {
     /// Returns a handle to the dataset whose object header is at `header`, which `path`
     /// identifies from the root group.
     ///
-    /// The handle has the chunk cache of the file's access properties.
+    /// The handle has the chunk cache of the file's access properties. Consumes `parsed` under
+    /// the source, address, and revision checks of [`ParsedHeader`].
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Format`] if the object header does not parse.
+    /// Returns [`Error::Format`] if the object header does not parse, or with
+    /// [`FormatError::Internal`] if `parsed` belongs to another source or address. Returns
+    /// [`Error::NotADataset`] if the object has another class.
     pub(crate) fn dataset_at(
         &self,
         header: PhysicalAddress,
         path: ObjectPathBuf,
+        parsed: Option<ParsedHeader>,
     ) -> Result<Dataset, Error> {
+        let parsed = self.header_at(header, parsed)?;
+        if ObjectClass::of(&parsed) != ObjectClass::Dataset {
+            return Err(Error::NotADataset(path.to_string()));
+        }
         let at = self.inner.revisions().at(header.get());
         let chunk_cache = DatasetAccessProperties::new()
             .resolved_chunk_cache(self.inner.access_properties.chunk_cache);
         Ok(Dataset::new(
             Arc::clone(&self.inner),
             at,
-            self.inner.parse_header(header.get())?,
+            parsed,
             chunk_cache,
             Some(path),
         ))
@@ -4217,13 +4281,91 @@ impl File {
 
     /// Returns the datatype of the committed datatype whose object header is at `header`.
     ///
+    /// Consumes `parsed` under the source, address, and revision checks of [`ParsedHeader`].
+    ///
     /// # Errors
     ///
-    /// Returns [`Error::Format`] if the object header or its Datatype message does not parse, and
+    /// Returns [`Error::Format`] if the object header or its Datatype message does not parse,
+    /// or with [`FormatError::Internal`] if `parsed` belongs to another source or address. Returns
     /// [`Error::MissingMessage`] if the header has no Datatype message.
-    pub(crate) fn named_datatype_at(&self, header: PhysicalAddress) -> Result<Datatype, Error> {
-        self.inner
-            .header_datatype(&self.inner.parse_header(header.get())?)
+    pub(crate) fn named_datatype_at(
+        &self,
+        header: PhysicalAddress,
+        parsed: Option<ParsedHeader>,
+    ) -> Result<Datatype, Error> {
+        self.inner.header_datatype(&self.header_at(header, parsed)?)
+    }
+
+    /// Reuses a current parsed header or reads it at `address`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] with [`FormatError::Internal`] if `parsed` belongs to another
+    /// source or address. Propagates object-header parsing errors.
+    fn header_at(
+        &self,
+        address: PhysicalAddress,
+        parsed: Option<ParsedHeader>,
+    ) -> Result<ObjectHeader, Error> {
+        match parsed
+            .map(|parsed| parsed.reuse(self, address))
+            .transpose()?
+            .flatten()
+        {
+            Some(header) => Ok(header),
+            None => Ok(self.inner.parse_header(address.get())?),
+        }
+    }
+}
+
+/// A parsed object header with its source, physical address, and content revision.
+///
+/// Reuse requires the same shared file state and address. The reader parses again after an
+/// in-process content revision change. The caller is responsible for the consistency of external
+/// source bytes.
+pub(crate) struct ParsedHeader {
+    file: Arc<FileInner>,
+    address: PhysicalAddress,
+    revision: u64,
+    header: ObjectHeader,
+}
+
+impl ParsedHeader {
+    /// Returns the allocated capacities of the message vector and message bodies, in bytes.
+    pub(crate) fn allocation_bytes(&self) -> usize {
+        self.header.messages.capacity() * core::mem::size_of::<HeaderMessage>()
+            + self
+                .header
+                .messages
+                .iter()
+                .map(|message| message.data.capacity())
+                .sum::<usize>()
+    }
+
+    /// Returns the header if its recorded content revision is current.
+    ///
+    /// Returns [`None`] after an in-process content revision change.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the shared file state or physical address differs.
+    fn reuse(
+        self,
+        file: &File,
+        address: PhysicalAddress,
+    ) -> Result<Option<ObjectHeader>, FormatError> {
+        let Self {
+            file: owner,
+            address: stored,
+            revision,
+            header,
+        } = self;
+        if !Arc::ptr_eq(&owner, &file.inner) || stored != address {
+            return Err(FormatError::Internal(
+                "a parsed object header belongs to another source or address".into(),
+            ));
+        }
+        Ok((revision == file.inner.content_revision()).then_some(header))
     }
 }
 
@@ -8174,6 +8316,65 @@ mod tests {
 
     use crate::message_flags::MessageFlags;
     use crate::{DatatypeByteOrder, FileBuilder};
+
+    #[rstest]
+    #[case::source(true)]
+    #[case::address(false)]
+    fn parsed_headers_reject_a_different_source_or_address(#[case] other_source: bool) {
+        let mut builder = FileBuilder::new();
+        builder.create_dataset("values").with_i32_data(&[7]);
+        let bytes = builder.finish().unwrap();
+        let file = File::from_bytes(bytes.clone()).unwrap();
+        let other = File::from_bytes(bytes).unwrap();
+        let address =
+            PhysicalAddress::new(file.dataset("values").unwrap().header_address().unwrap());
+        let (_, _, parsed) = file.hard_links_at(address).unwrap();
+        let (recipient, address) = if other_source {
+            (&other, address)
+        } else {
+            (
+                &file,
+                PhysicalAddress::new(file.root().header_address().unwrap()),
+            )
+        };
+        let err = recipient
+            .dataset_at(address, ObjectPathBuf::parse("values"), Some(parsed))
+            .unwrap_err();
+        let Error::Format(FormatError::Internal(reason)) = err else {
+            panic!("expected Internal, got {err:?}");
+        };
+        assert_eq!(
+            reason,
+            "a parsed object header belongs to another source or address"
+        );
+    }
+
+    #[test]
+    fn parsed_headers_read_metadata_again_after_an_in_place_change() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source.h5");
+        let mut builder = FileBuilder::new();
+        builder
+            .create_dataset("values")
+            .with_i32_data(&[])
+            .with_chunks(&[2])
+            .with_maxshape(&[MaxExtent::Unlimited]);
+        builder.write(&path).unwrap();
+        let file = File::open_rw(&path).unwrap();
+        let mut dataset = file.dataset("values").unwrap();
+        let address = PhysicalAddress::new(dataset.header_address().unwrap());
+        let (_, _, parsed) = file.hard_links_at(address).unwrap();
+        assert_eq!(dataset.shape().unwrap(), [0]);
+        dataset.append(&[17_i32, 29]).unwrap();
+        let fresh = file
+            .dataset_at(address, ObjectPathBuf::parse("values"), Some(parsed))
+            .unwrap();
+        assert_eq!(fresh.shape().unwrap(), [2]);
+        assert_eq!(fresh.read_i32().unwrap(), [17, 29]);
+        drop(fresh);
+        drop(dataset);
+        file.close().unwrap();
+    }
 
     #[test]
     fn page_publication_failure_preserves_dataset_order_after_retry() {

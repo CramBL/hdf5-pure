@@ -106,7 +106,10 @@
 //! buffers. A single large object or chunk index can therefore require substantial memory.
 //!
 //! Planning and emission read metadata in separate passes, which increases source I/O and
-//! preparation work. [`File::open_streaming`] reads the source on demand.
+//! preparation work. The writer retains parsed discovery headers within a 16 MiB budget for
+//! initial planning. The budget includes cache entry, message-vector, and message-body capacities.
+//! Cached headers are consumed during planning, and remaining cache storage is released before
+//! final layout checks and emission. [`File::open_streaming`] reads the source on demand.
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
@@ -160,6 +163,7 @@ use crate::writer::FileBuilder;
 #[cfg(test)]
 use crate::{FixedPointType, TimeType};
 
+mod headers;
 mod objects;
 
 /// Options controlling a [`repack`].
@@ -533,7 +537,11 @@ impl ObjectSource for RepackSource {
         let path = objects.path(index)?;
         match object.class {
             ObjectClass::Dataset => {
-                let dataset = file.dataset_at(object.id.header_address(), path.clone())?;
+                let dataset = file.dataset_at(
+                    object.id.header_address(),
+                    path.clone(),
+                    objects.take_header(index)?,
+                )?;
                 let mut builder = DatasetBuilder::new(
                     path.components()
                         .last()
@@ -544,19 +552,22 @@ impl ObjectSource for RepackSource {
                 Ok(Object::dataset(builder)?)
             }
             ObjectClass::Group => {
-                let group = file.group_at(object.id.header_address(), path.clone());
                 let mut builder = GroupBuilder::new("repack");
                 copy_attrs(
                     &mut builder,
-                    group.attr_messages()?,
-                    || group.attrs(),
+                    file.attr_messages_at(object.id.header_address(), objects.take_header(index)?)?,
+                    || {
+                        file.group_at(object.id.header_address(), path.clone())
+                            .attrs()
+                    },
                     &group_owner(&path),
                     objects,
                 )?;
                 Ok(Object::group(&builder.finish().attrs)?)
             }
             ObjectClass::NamedDatatype => {
-                let datatype = file.named_datatype_at(object.id.header_address())?;
+                let datatype = file
+                    .named_datatype_at(object.id.header_address(), objects.take_header(index)?)?;
                 check_datatype(&datatype, &format!("committed datatype {path}"))?;
                 Ok(Object::committed(datatype)?)
             }
@@ -579,6 +590,10 @@ impl ObjectSource for RepackSource {
             .objects
             .links(index)?
             .map(|(name, index)| (Cow::Borrowed(name), index)))
+    }
+
+    fn finish_planning(&self) {
+        self.objects.release_headers();
     }
 
     fn resolve(&self, path: &ObjectPathBuf) -> Result<usize, Error> {
@@ -1896,6 +1911,8 @@ fn check_pipeline(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
     use std::thread;
 
     use rstest::rstest;
@@ -1911,7 +1928,63 @@ mod tests {
     use crate::filter_pipeline::FilterDescription;
     use crate::object_graph::TraversalLimit;
     use crate::scaleoffset::{FillAvailability, ScaleOffsetFill};
+    use crate::source::BytesSource;
     use crate::superblock::LocatedSuperblock;
+
+    #[rstest]
+    #[case::reuse(true)]
+    #[case::read_again(false)]
+    fn planning_consumes_discovery_headers(#[case] reuse: bool) {
+        let mut builder = FileBuilder::new();
+        builder.set_attr("root", AttrValue::I32(5));
+        let mut group = GroupBuilder::new("g");
+        group.set_attr("group", AttrValue::I32(7));
+        group
+            .create_dataset("a")
+            .with_unallocated_storage(crate::make_i32_type(), &[4])
+            .set_attr("dataset", AttrValue::I32(11));
+        builder.add_group(group.finish());
+        let reads = Arc::new(AtomicUsize::new(0));
+        let file = Arc::new(
+            File::from_source(CountedSource {
+                bytes: BytesSource::new(builder.finish().unwrap()),
+                reads: Arc::clone(&reads),
+            })
+            .unwrap(),
+        );
+        let objects = SourceObjects::discover(&file, &BTreeSet::new(), REPACK_BUDGET).unwrap();
+        if !reuse {
+            objects.release_headers();
+        }
+        let source = RepackSource { file, objects };
+        reads.store(0, Ordering::Relaxed);
+        for index in 0..source.len() {
+            drop(source.load(index).unwrap());
+        }
+        assert_eq!(source.len(), 3);
+        assert_eq!(reads.load(Ordering::Relaxed), if reuse { 0 } else { 9 });
+        reads.store(0, Ordering::Relaxed);
+        for index in 0..source.len() {
+            drop(source.load(index).unwrap());
+        }
+        assert_eq!(reads.load(Ordering::Relaxed), 9);
+    }
+
+    struct CountedSource {
+        bytes: BytesSource<Vec<u8>>,
+        reads: Arc<AtomicUsize>,
+    }
+
+    impl Source for CountedSource {
+        fn len(&self) -> u64 {
+            self.bytes.len()
+        }
+        fn read_at(&self, offset: u64, out: &mut [u8]) -> Result<(), FormatError> {
+            let Self { bytes, reads } = self;
+            reads.fetch_add(1, Ordering::Relaxed);
+            bytes.read_at(offset, out)
+        }
+    }
 
     #[rstest]
     #[case::mandatory(false)]

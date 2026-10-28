@@ -67,6 +67,12 @@ pub(crate) trait ObjectSource {
     /// Propagates source reading and object preparation errors.
     fn load(&self, index: usize) -> Result<Object, Error>;
 
+    /// Releases source state retained for initial object measurement.
+    ///
+    /// Called after metadata reservation and before final layout checks and emission.
+    /// The default implementation is empty.
+    fn finish_planning(&self) {}
+
     /// Returns each hard link of the object at `index`, with its target's index.
     ///
     /// Link names may borrow from the source.
@@ -511,6 +517,7 @@ impl<S: ObjectSource> Plan<S> {
         }
         reserve_metadata(&source, &mut records, &references, &mut allocation)?;
         drop(references);
+        source.finish_planning();
         let FileLayout {
             extension,
             end,
