@@ -1,122 +1,13 @@
-//! The files under `tests/data/c/` that the crate's unit tests read.
+//! Checks of reference-library fixtures retained under `tests/data/c/`.
 //!
-//! libhdf5 is a dependency of this package alone, so a unit
-//! test that needs what only it writes reads a committed file, written here.
-//! `just test-data::c` rewrites them, and without `HDF5_PURE_UPDATE_TEST_DATA`
-//! set each test checks the committed copy instead, for every property the
-//! unit test that reads it relies on. A generator that changes without a
-//! rewrite fails here, not silently over there.
+//! Reusable constructors are supplied by the optional native helpers in
+//! [`test_util_hdf5::native_fixtures`].
 #![cfg(feature = "__hdf5-1.10")]
 
 use std::path::Path;
 
-use hdf5::file::LibraryVersion;
 use hdf5::plist::file_create::FileSpaceStrategy;
-
-fn huge_links_12(path: &Path) {
-    const COUNT: usize = 12;
-    let file = hdf5::FileBuilder::new()
-        .with_fapl(|fapl| fapl.libver_latest())
-        .create(path)
-        .unwrap();
-    let group = file.create_group("g").unwrap();
-    for i in 0..COUNT {
-        let name = format!("d{i}_{}", "x".repeat(5000));
-        group
-            .new_dataset::<i32>()
-            .shape((1,))
-            .create(name.as_str())
-            .unwrap()
-            .write(&[i as i32])
-            .unwrap();
-    }
-    drop(group);
-    file.close().unwrap();
-}
-
-fn paged_index(path: &Path) {
-    let f = hdf5::FileBuilder::new()
-        .with_fapl(|fapl| fapl.libver_v110())
-        .with_fcpl(|fcpl| {
-            fcpl.file_space_strategy(persisting(true))
-                .file_space_page_size(4096)
-        })
-        .create(path)
-        .unwrap();
-    let ds = f
-        .new_dataset::<i32>()
-        .shape(hdf5::SimpleExtents::resizable(vec![8192]))
-        .chunk((512,))
-        .create("victim")
-        .unwrap();
-    ds.write_raw(&(0..8192i32).collect::<Vec<i32>>()).unwrap();
-    f.new_dataset::<i32>()
-        .shape((4,))
-        .create("keep")
-        .unwrap()
-        .write_raw(&[1i32, 2, 3, 4])
-        .unwrap();
-    drop(ds);
-    f.close().unwrap();
-}
-
-fn generic_large(path: &Path) {
-    let f = hdf5::FileBuilder::new()
-        .with_fapl(|fapl| fapl.libver_v110())
-        .with_fcpl(|fcpl| {
-            fcpl.file_space_strategy(persisting(true))
-                .file_space_page_size(512)
-        })
-        .create(path)
-        .unwrap();
-    let ds = f.new_dataset::<f64>().shape((64,)).create("d").unwrap();
-    ds.write_raw(&vec![1.0f64; 64]).unwrap();
-    let a = ds
-        .new_attr::<i64>()
-        .shape((512,))
-        .create("big_attr")
-        .unwrap();
-    a.write_raw(&vec![7i64; 512]).unwrap();
-    drop(a);
-    drop(ds);
-    f.close().unwrap();
-}
-
-fn committed_datatype_v1(path: &Path) {
-    let f = hdf5::FileBuilder::new()
-        .with_fapl(|fapl| fapl.libver_bounds(LibraryVersion::Earliest, LibraryVersion::V18))
-        .create(path)
-        .unwrap();
-    let dtype = hdf5::Datatype::from_type::<i32>().unwrap();
-    f.commit_datatype("mytype", &dtype).unwrap();
-    for name in ["first", "second"] {
-        f.new_dataset_builder()
-            .empty_as(&dtype)
-            .shape([2])
-            .create(name)
-            .unwrap()
-            .write(&[1i32, 2])
-            .unwrap();
-    }
-    drop(dtype);
-    f.close().unwrap();
-}
-
-fn hard_link_undo(path: &Path) {
-    let f = hdf5::FileBuilder::new()
-        .with_fapl(|fapl| fapl.libver_v110())
-        .with_fcpl(|fcpl| fcpl.file_space_strategy(persisting(false)))
-        .create(path)
-        .unwrap();
-    f.new_dataset::<i32>()
-        .shape((3,))
-        .create("aa")
-        .unwrap()
-        .write(&[1i32, 2, 3])
-        .unwrap();
-    f.link_hard("aa", "bb").unwrap();
-    f.close().unwrap();
-}
+use test_util_hdf5::native_fixtures;
 
 const UPDATE: &str = "HDF5_PURE_UPDATE_TEST_DATA";
 
@@ -135,14 +26,6 @@ fn c_written(name: &str, write: impl FnOnce(&Path)) -> hdf5::File {
         committed.display()
     );
     hdf5::File::open(&committed).unwrap()
-}
-
-fn persisting(paged: bool) -> FileSpaceStrategy {
-    FileSpaceStrategy::FreeSpaceManager {
-        paged,
-        persist: true,
-        threshold: 1,
-    }
 }
 
 /// The file persists its free-space managers, paged with `page` as the page
@@ -169,7 +52,10 @@ fn assert_persisting(file: &hdf5::File, page: Option<u64>) {
 #[test]
 fn huge_links_for_the_dense_link_walk() {
     const COUNT: usize = 12;
-    let file = c_written(&format!("huge_links_{COUNT}.h5"), huge_links_12);
+    let file = c_written(
+        &format!("huge_links_{COUNT}.h5"),
+        native_fixtures::huge_links_12,
+    );
     let names = file.group("g").unwrap().member_names().unwrap();
     assert_eq!(names.len(), COUNT);
     // Twelve is above the C library's `max_compact` of 8, so the links are
@@ -181,7 +67,7 @@ fn huge_links_for_the_dense_link_walk() {
 /// as metadata. For `src/edit.rs`.
 #[test]
 fn paged_file_whose_chunk_index_the_c_library_placed() {
-    let file = c_written("paged_index.h5", paged_index);
+    let file = c_written("paged_index.h5", native_fixtures::paged_index);
     assert_persisting(&file, Some(4096));
     let victim = file.dataset("victim").unwrap();
     assert_eq!(victim.shape(), vec![8192]);
@@ -197,7 +83,7 @@ fn paged_file_whose_chunk_index_the_c_library_placed() {
 /// generic-large manager holds a sub-page fragment. For `src/edit.rs`.
 #[test]
 fn paged_file_with_a_sub_page_fragment_in_the_large_manager() {
-    let file = c_written("generic_large.h5", generic_large);
+    let file = c_written("generic_large.h5", native_fixtures::generic_large);
     assert_persisting(&file, Some(512));
     let dataset = file.dataset("d").unwrap();
     assert_eq!(dataset.read_raw::<f64>().unwrap().len(), 64);
@@ -210,7 +96,10 @@ fn paged_file_with_a_sub_page_fragment_in_the_large_manager() {
 /// header prefix. For `tests/main/named_datatypes.rs`.
 #[test]
 fn committed_datatype_in_a_version_1_header() {
-    let file = c_written("committed_datatype_v1.h5", committed_datatype_v1);
+    let file = c_written(
+        "committed_datatype_v1.h5",
+        native_fixtures::committed_datatype_v1,
+    );
     assert_eq!(file.loc_info_by_name("mytype").unwrap().num_links, 3);
     assert_eq!(
         file.dataset("second").unwrap().read_raw::<i32>().unwrap(),
@@ -222,7 +111,7 @@ fn committed_datatype_in_a_version_1_header() {
 /// persisting file. For `src/edit.rs`.
 #[test]
 fn two_hard_links_to_one_dataset() {
-    let file = c_written("hard_link_undo.h5", hard_link_undo);
+    let file = c_written("hard_link_undo.h5", native_fixtures::hard_link_undo);
     assert_persisting(&file, None);
     let (aa, bb) = (
         file.loc_info_by_name("aa").unwrap(),
