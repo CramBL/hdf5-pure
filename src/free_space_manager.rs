@@ -262,7 +262,8 @@ pub(crate) fn manager_blocks_len(managers: &[ManagerSections], widths: FormatWid
         .get()
 }
 
-fn manager_wire(kind: ManagerKind) -> (usize, u8) {
+/// Returns the File Space Info slot and section class for `kind`.
+pub(crate) fn manager_wire(kind: ManagerKind) -> (usize, u8) {
     match kind {
         ManagerKind::Flat => (0, SECTION_CLASS_SIMPLE),
         ManagerKind::PagedLargeGeneric => (6, SECTION_CLASS_LARGE),
