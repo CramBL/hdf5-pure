@@ -27,6 +27,7 @@ pub mod legacy_attributes;
 pub mod link_message;
 pub mod local_heap;
 pub mod mcos;
+pub mod modern;
 pub mod object_header;
 pub mod process;
 pub mod publication;

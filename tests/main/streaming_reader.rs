@@ -316,7 +316,6 @@ fn streaming_matches_buffered_groups_and_attributes_across_fixtures() {
     let cases = [
         ("dense_attrs.h5", 50),      // v2 dataset + dense (fractal-heap) attrs
         ("dense_attrs_root.h5", 20), // v2 root group + dense attrs
-        ("v2_groups.h5", 0),         // v2 groups, no attributes
     ];
 
     for (fixture, expected_attrs) in cases {
@@ -329,6 +328,13 @@ fn streaming_matches_buffered_groups_and_attributes_across_fixtures() {
             "attribute count mismatch for {fixture}"
         );
     }
+    let path = test_util::temp::temp_path("v2_groups.h5");
+    std::fs::write(&path, test_util::modern::v2_groups()).unwrap();
+    let buffered = File::open(&path).unwrap();
+    let streaming = File::open_streaming(&path).unwrap();
+    assert_eq!(assert_group_parity(&buffered, &streaming, ""), 0);
+    drop(streaming);
+    drop(buffered);
 }
 
 /// `File::from_source` reads what `open_streaming` reads, and reads no more of

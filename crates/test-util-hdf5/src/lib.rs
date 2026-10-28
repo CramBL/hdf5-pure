@@ -40,6 +40,7 @@ pub mod legacy_attributes;
 pub mod lock;
 pub mod lzf;
 pub mod mat_file;
+pub mod modern;
 #[cfg(feature = "hdf5")]
 pub mod numeric;
 #[cfg(feature = "__hdf5-1.10")]

@@ -78,6 +78,7 @@ mod link_storage;
 mod lzf;
 mod mat_streaming;
 mod matio_crosscheck;
+mod modern;
 mod ndarray_roundtrip;
 mod null_attr_padding;
 mod numeric_decode;

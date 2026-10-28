@@ -1410,11 +1410,6 @@ mod tests {
 
     #[test]
     fn compact_storage_link_messages() {
-        // Build a v2 object header with Link messages (compact storage)
-        // We'll test with the actual v2_groups.h5 file since building synthetic v2 headers
-        // with proper checksums is complex.
-
-        // Instead, test the resolve_compact_entries path with a simple object header
         let link_data = {
             // Build a Link message: hard link, name="test", addr=0x1000
             let mut d = Vec::new();
@@ -1596,7 +1591,8 @@ mod tests {
 
     #[test]
     fn integration_v2_groups_temperature() {
-        let file_data: &[u8] = include_bytes!("../tests/data/unattributed/v2_groups.h5");
+        let bytes = test_util::modern::v2_groups();
+        let file_data = bytes.as_slice();
         let sb = crate::superblock::read(file_data).unwrap().superblock;
         assert!(matches!(
             sb.version(),
@@ -1637,7 +1633,8 @@ mod tests {
 
     #[test]
     fn integration_v2_groups_humidity() {
-        let file_data: &[u8] = include_bytes!("../tests/data/unattributed/v2_groups.h5");
+        let bytes = test_util::modern::v2_groups();
+        let file_data = bytes.as_slice();
         let sb = crate::superblock::read(file_data).unwrap().superblock;
 
         let addr = resolve_path_any(
@@ -1674,7 +1671,8 @@ mod tests {
 
     #[test]
     fn integration_v2_many_links() {
-        let file_data: &[u8] = include_bytes!("../tests/data/unattributed/v2_many_links.h5");
+        let bytes = test_util::modern::v2_many_links();
+        let file_data = bytes.as_slice();
         let sb = crate::superblock::read(file_data).unwrap().superblock;
 
         let addr = resolve_path_any(
@@ -1750,7 +1748,8 @@ mod tests {
 
     #[test]
     fn integration_resolve_path_any_v2() {
-        let file_data: &[u8] = include_bytes!("../tests/data/unattributed/v2_groups.h5");
+        let bytes = test_util::modern::v2_groups();
+        let file_data = bytes.as_slice();
         let sb = crate::superblock::read(file_data).unwrap().superblock;
 
         let addr = resolve_path_any(
@@ -1787,7 +1786,8 @@ mod tests {
 
     #[test]
     fn path_not_found_v2() {
-        let file_data: &[u8] = include_bytes!("../tests/data/unattributed/v2_groups.h5");
+        let bytes = test_util::modern::v2_groups();
+        let file_data = bytes.as_slice();
         let sb = crate::superblock::read(file_data).unwrap().superblock;
 
         let err = resolve_path_any(
@@ -1799,10 +1799,10 @@ mod tests {
             &ObjectPath::parse("nonexistent"),
         )
         .unwrap_err();
-        assert!(matches!(
-            err,
-            ResolveError::Format(FormatError::PathNotFound(_))
-        ));
+        let ResolveError::Format(FormatError::PathNotFound(path)) = err else {
+            panic!("expected PathNotFound, got {err:?}");
+        };
+        assert_eq!(path, "nonexistent");
     }
 
     /// A link target that overflows when the superblock base address is added to
