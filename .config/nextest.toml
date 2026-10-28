@@ -170,6 +170,7 @@ package(hdf5-pure-crosscheck) & (
     test(/^enum_base::/) |
     test(/^fixed_string::/) |
     test(/^mat_streaming::/) |
+    test(/^mat_struct_array::/) |
     test(/^ndarray_roundtrip::/) |
     test(/^serde::/)
 )
