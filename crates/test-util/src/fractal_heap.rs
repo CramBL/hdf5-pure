@@ -312,7 +312,7 @@ pub fn huge_object_bytes(bytes: &[u8]) -> u64 {
 /// single direct block, and otherwise how many doubling-table rows the root
 /// indirect block spans.
 ///
-/// Past the twelve 8-byte fields [`u64_at`] indexes come the doubling-table
+/// Past the twelve 8-byte heap fields come the doubling-table
 /// fields: table width(2), starting block size(8), maximum direct block
 /// size(8), maximum heap size(2), starting root rows(2), then the root block
 /// address(8) and this.

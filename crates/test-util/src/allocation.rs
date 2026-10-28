@@ -82,7 +82,7 @@ fn start_profiling() {
 ///
 /// # Every reading that would be a guess panics instead
 ///
-/// heapscope's own [`HeapStats::get`] refuses rather than returning zeros when
+/// heapscope's [`heapscope::HeapStats::get`] returns an error when
 /// the run cannot be trusted, and its documentation is explicit about why: a
 /// getter that answered zero would turn every budget built on it into an
 /// assertion that cannot fail. Reading a region goes through `Snapshot` instead,
