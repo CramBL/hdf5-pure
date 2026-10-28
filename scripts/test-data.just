@@ -5,7 +5,7 @@ default: c pure
 
 # tests/data/c: written by libhdf5, through the crosscheck package.
 c:
-    HDF5_PURE_UPDATE_TEST_DATA=1 cargo nextest run --locked -p hdf5-pure-crosscheck --features __hdf5-bundled,serde,ndarray --test c_test_data
+    HDF5_PURE_UPDATE_TEST_DATA=1 cargo nextest run --locked -p hdf5-pure-crosscheck --features __hdf5-bundled,serde,ndarray --test main c_test_data::committed_native_fixture_has_complete_contents
 
 # tests/data/pure: written by this crate's unit tests through crate-private seams.
 pure:

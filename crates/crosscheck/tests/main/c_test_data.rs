@@ -1,126 +1,88 @@
-//! Checks of reference-library fixtures retained under `tests/data/c/`.
+//! Fresh native fixtures and retained files under `tests/data/c/`.
 //!
-//! Reusable constructors are supplied by the optional native helpers in
-//! [`test_util_hdf5::native_fixtures`].
+//! Fresh tests check current constructor output across reader backends. Tests of retained
+//! files check the same contents and storage expectations.
+//! Constructors are supplied by [`test_util_hdf5::native_fixtures`].
+//!
+//! `just test-data::c` sets `HDF5_PURE_UPDATE_TEST_DATA` to rewrite the committed copies
+//! through the bundled reference library. Without that variable, tests read the existing copies.
 #![cfg(feature = "__hdf5-1.10")]
 
-use std::path::Path;
+use std::path::PathBuf;
 
-use hdf5::plist::file_create::FileSpaceStrategy;
-use test_util_hdf5::native_fixtures;
+use hdf5_pure::File;
+use rstest::rstest;
+use test_util::temp;
+use test_util_hdf5::native_fixtures::Fixture;
+use test_util_hdf5::numeric::ByteOrder;
+use test_util_hdf5::reader::ReadBackend;
 
-const UPDATE: &str = "HDF5_PURE_UPDATE_TEST_DATA";
+#[rstest]
+#[case::committed_datatype_v1(Fixture::CommittedDatatypeV1)]
+#[case::generic_large(Fixture::GenericLarge)]
+#[case::hard_link_undo(Fixture::HardLinkUndo)]
+#[case::huge_links_12(Fixture::HugeLinks12)]
+#[case::paged_index(Fixture::PagedIndex)]
+fn fresh_native_fixture_has_complete_contents(
+    #[case] fixture: Fixture,
+    #[values(
+        ReadBackend::Buffered,
+        ReadBackend::Bytes,
+        ReadBackend::Source,
+        ReadBackend::Streaming
+    )]
+    backend: ReadBackend,
+) {
+    let path = temp::temp_path(fixture.file_name());
+    fixture.write(&path);
+    let order = native_order();
+    fixture.assert_native(&path, order);
+    let bytes = std::fs::read(&path).unwrap();
+    let file = backend.open(&path).unwrap();
+    fixture.assert_contents(&file, order);
+    fixture.assert_representation(&file, &bytes);
+    drop(file);
+}
 
-/// The committed copy of `name`, rewritten from `write` first when `UPDATE` is set.
-fn c_written(name: &str, write: impl FnOnce(&Path)) -> hdf5::File {
-    let committed = test_util::data("c").join(name);
-    if std::env::var_os(UPDATE).is_some() {
-        let tmp = tempfile::tempdir().unwrap();
-        let produced = tmp.path().join(name);
-        write(&produced);
+#[rstest]
+#[case::committed_datatype_v1(Fixture::CommittedDatatypeV1)]
+#[case::generic_large(Fixture::GenericLarge)]
+#[case::hard_link_undo(Fixture::HardLinkUndo)]
+#[case::huge_links_12(Fixture::HugeLinks12)]
+#[case::paged_index(Fixture::PagedIndex)]
+fn committed_native_fixture_has_complete_contents(#[case] fixture: Fixture) {
+    let (path, order) = committed_fixture(fixture);
+    fixture.assert_native(&path, order);
+    let bytes = std::fs::read(&path).unwrap();
+    let file = File::open(&path).unwrap();
+    fixture.assert_contents(&file, order);
+    fixture.assert_representation(&file, &bytes);
+    drop(file);
+}
+
+fn committed_fixture(fixture: Fixture) -> (PathBuf, ByteOrder) {
+    let committed = test_util::data("c").join(fixture.file_name());
+    let order = if std::env::var_os(UPDATE).is_some() {
+        let produced = temp::temp_path(fixture.file_name());
+        fixture.write(&produced);
         std::fs::copy(&produced, &committed).unwrap();
-    }
+        native_order()
+    } else {
+        ByteOrder::LittleEndian
+    };
     assert!(
         committed.is_file(),
-        "{} is missing; `just test-data::c` writes it",
-        committed.display()
+        "{committed:?} is missing; `just test-data::c` writes it"
     );
-    hdf5::File::open(&committed).unwrap()
+    (committed, order)
 }
 
-/// The file persists its free-space managers, paged with `page` as the page
-/// size, or not paged.
-fn assert_persisting(file: &hdf5::File, page: Option<u64>) {
-    let paged = page.is_some();
-    let fcpl = file.fcpl().unwrap();
-    assert!(
-        matches!(
-            fcpl.file_space_strategy(),
-            FileSpaceStrategy::FreeSpaceManager { paged: p, persist: true, .. } if p == paged
-        ),
-        "{:?}",
-        fcpl.file_space_strategy()
-    );
-    if let Some(page) = page {
-        assert_eq!(fcpl.file_space_page_size(), page);
+fn native_order() -> ByteOrder {
+    if cfg!(target_endian = "big") {
+        ByteOrder::BigEndian
+    } else {
+        ByteOrder::LittleEndian
     }
 }
 
-/// One group of 12 links, above the C library's `max_compact` of 8 so they are
-/// stored densely, each name long enough that its link message is a huge heap
-/// object. For `src/group_v2.rs`.
-#[test]
-fn huge_links_for_the_dense_link_walk() {
-    const COUNT: usize = 12;
-    let file = c_written(
-        &format!("huge_links_{COUNT}.h5"),
-        native_fixtures::huge_links_12,
-    );
-    let names = file.group("g").unwrap().member_names().unwrap();
-    assert_eq!(names.len(), COUNT);
-    // Twelve is above the C library's `max_compact` of 8, so the links are
-    // stored densely, and each name is long enough to be a huge heap object.
-    assert!(names.iter().all(|name| name.len() > 5000), "{names:?}");
-}
-
-/// A paged, persisting file whose chunked dataset's index the C library placed
-/// as metadata. For `src/edit.rs`.
-#[test]
-fn paged_file_whose_chunk_index_the_c_library_placed() {
-    let file = c_written("paged_index.h5", native_fixtures::paged_index);
-    assert_persisting(&file, Some(4096));
-    let victim = file.dataset("victim").unwrap();
-    assert_eq!(victim.shape(), vec![8192]);
-    assert_eq!(victim.chunk(), Some(vec![512]));
-    assert_eq!(
-        file.dataset("keep").unwrap().read_raw::<i32>().unwrap(),
-        vec![1, 2, 3, 4]
-    );
-}
-
-/// A paged, persisting file with one attribute far larger than its page, so
-/// the object-header chunk holding it is a large metadata allocation and the
-/// generic-large manager holds a sub-page fragment. For `src/edit.rs`.
-#[test]
-fn paged_file_with_a_sub_page_fragment_in_the_large_manager() {
-    let file = c_written("generic_large.h5", native_fixtures::generic_large);
-    assert_persisting(&file, Some(512));
-    let dataset = file.dataset("d").unwrap();
-    assert_eq!(dataset.read_raw::<f64>().unwrap().len(), 64);
-    let attr = dataset.attr("big_attr").unwrap();
-    assert_eq!(attr.read_raw::<i64>().unwrap().len(), 512);
-}
-
-/// A committed datatype in a version 1 object header, linked once and the
-/// element type of two datasets, so its reference count is 3 and lives in the
-/// header prefix. For `tests/main/named_datatypes.rs`.
-#[test]
-fn committed_datatype_in_a_version_1_header() {
-    let file = c_written(
-        "committed_datatype_v1.h5",
-        native_fixtures::committed_datatype_v1,
-    );
-    assert_eq!(file.loc_info_by_name("mytype").unwrap().num_links, 3);
-    assert_eq!(
-        file.dataset("second").unwrap().read_raw::<i32>().unwrap(),
-        vec![1, 2]
-    );
-}
-
-/// Two hard links to one dataset, which this crate has no API to create, in a
-/// persisting file. For `src/edit.rs`.
-#[test]
-fn two_hard_links_to_one_dataset() {
-    let file = c_written("hard_link_undo.h5", native_fixtures::hard_link_undo);
-    assert_persisting(&file, None);
-    let (aa, bb) = (
-        file.loc_info_by_name("aa").unwrap(),
-        file.loc_info_by_name("bb").unwrap(),
-    );
-    assert_eq!(aa.token, bb.token, "aa and bb are one object");
-    assert_eq!(aa.num_links, 2);
-    assert_eq!(
-        file.dataset("aa").unwrap().read_raw::<i32>().unwrap(),
-        vec![1, 2, 3]
-    );
-}
+const UPDATE: &str = "HDF5_PURE_UPDATE_TEST_DATA";

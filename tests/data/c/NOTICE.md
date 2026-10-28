@@ -6,6 +6,14 @@ The files below are reference-library outputs retained for ordinary tests. Reusa
 construction lives in `crates/test-util-hdf5/src/native_fixtures.rs`, under the helper's
 optional `__hdf5-1.10` capability.
 
+The `c_test_data` suite checks current constructor output on fresh paths and retained
+copies against the same contents and storage expectations. It follows each file's
+encoded addresses.
+
+`just test-data::c` explicitly rewrites these copies with the bundled `hdf5-metno`
+dependency pinned in `Cargo.lock`. It selects the committed-fixture cases and sets
+`HDF5_PURE_UPDATE_TEST_DATA`. Without that variable, those cases read the existing copies.
+
 - `huge_links_12.h5`: a group of 12 links, each name so long that its link
   message is a huge heap object, for the dense-link walk in `src/group_v2.rs`.
 - `paged_index.h5`: a paged, persisting file whose chunk index the C allocator

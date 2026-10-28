@@ -5,8 +5,12 @@ use std::ffi::CString;
 use std::path::Path;
 
 use hdf5::Datatype;
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5::datatype::ByteOrder as NativeByteOrder;
 use hdf5::globals;
 use hdf5::types::TypeDescriptor;
+#[cfg(feature = "__hdf5-1.10")]
+use hdf5_pure::DatatypeByteOrder;
 use hdf5_sys::h5d;
 use hdf5_sys::h5p::H5P_DEFAULT;
 use hdf5_sys::h5s;
@@ -140,6 +144,22 @@ impl ByteOrder {
         });
         assert_eq!(status, 0);
         datatype
+    }
+
+    #[cfg(feature = "__hdf5-1.10")]
+    pub(crate) fn native_order(self) -> NativeByteOrder {
+        match self {
+            Self::BigEndian => NativeByteOrder::BigEndian,
+            Self::LittleEndian => NativeByteOrder::LittleEndian,
+        }
+    }
+
+    #[cfg(feature = "__hdf5-1.10")]
+    pub(crate) fn pure_order(self) -> DatatypeByteOrder {
+        match self {
+            Self::BigEndian => DatatypeByteOrder::BigEndian,
+            Self::LittleEndian => DatatypeByteOrder::LittleEndian,
+        }
     }
 }
 
