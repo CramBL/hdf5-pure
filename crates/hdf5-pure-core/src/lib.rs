@@ -20,6 +20,7 @@ mod file_space_info;
 mod fill_time;
 mod filter_mask;
 mod message_type;
+mod metadata_bytes;
 mod region;
 mod superblock;
 mod userblock_size;
