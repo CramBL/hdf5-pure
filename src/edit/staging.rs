@@ -6,6 +6,7 @@ use super::attributes::AttrOp;
 use super::copy::CopyTree;
 use super::{AppendBuilder, FlatDataset, WriteEngine};
 use crate::access_mode::AccessMode;
+use crate::dataset_request::ValueOverwrite;
 use crate::dataspace::MaxExtent;
 use crate::datatype::Datatype;
 use crate::error::Error;
@@ -310,7 +311,7 @@ pub(super) struct StagedEdits {
     /// Parent group paths and prepared dataset creations.
     datasets: Vec<(ObjectPathBuf, FlatDataset)>,
     /// Full dataset paths and prepared replacement values.
-    writes: Vec<(ObjectPathBuf, FlatDataset)>,
+    writes: Vec<(ObjectPathBuf, ValueOverwrite)>,
     /// Full dataset paths and elements to append after the committed values.
     appends: Vec<(ObjectPathBuf, AppendBuilder)>,
     groups: Vec<ObjectPathBuf>,
@@ -357,7 +358,7 @@ impl StagedEdits {
     }
 
     /// Returns prepared value replacements with their full paths, in staging order.
-    pub(super) fn writes(&self) -> &[(ObjectPathBuf, FlatDataset)] {
+    pub(super) fn writes(&self) -> &[(ObjectPathBuf, ValueOverwrite)] {
         &self.writes
     }
 
@@ -707,7 +708,7 @@ pub(super) enum StagedOp {
     DeleteObject(ObjectPathBuf),
     EditDatasetAttribute(ObjectPathBuf, AttrOp),
     EditGroupAttribute(ObjectPathBuf, AttrOp),
-    WriteDataset(ObjectPathBuf, FlatDataset),
+    WriteDataset(ObjectPathBuf, ValueOverwrite),
 }
 
 /// Owned inputs not already represented by the prepared commit plans.

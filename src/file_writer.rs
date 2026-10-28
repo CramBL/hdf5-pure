@@ -53,16 +53,16 @@ use crate::address::StoredAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
 use crate::attribute::AttributeMessage;
 use crate::attribute_info::AttributeInfoMessage;
-use crate::attribute_request::AttributeName;
+use crate::attribute_request::PreparedAttributes;
 use crate::bytes;
 use crate::chunked_write::{
     self, ByteSink, ChunkOptions, ChunkProvider, ChunkedMeasure, ChunkedPlan, CompressedChunkSet,
-    StorageAllocation, VerbatimLayout, VerbatimPlan,
+    VerbatimLayout, VerbatimPlan,
 };
 use crate::convert::Narrow;
 use crate::data_layout::DataLayout;
-use crate::dataset_request::PreparedStorage;
-use crate::dataspace::{Dataspace, DataspaceType, Extent, MaxExtent};
+use crate::dataset_request::{DatasetMetadata, PreparedDataset, PreparedStorage, WholeFileDataset};
+use crate::dataspace::{Dataspace, MaxExtent};
 use crate::error::{FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::file_allocation::FileAllocation;
 use crate::file_create_properties::FileCreateProperties;
@@ -998,22 +998,16 @@ impl FileWriter {
             /// The reserved content hash, completed after resolving element addresses.
             #[cfg(feature = "provenance")]
             pending_hash: Option<PendingHash>,
-            /// The committed datatype path of each attribute, parallel to `attrs`.
-            attr_committed_datatype_paths: Vec<Option<ObjectPathBuf>>,
+            /// Attribute indices paired with committed datatype paths for address resolution.
+            attr_committed_datatype_paths: Vec<(usize, ObjectPathBuf)>,
             chunk_options: ChunkOptions,
             maxshape: Option<Vec<MaxExtent>>,
-            /// A user-defined fill value, encoded in the dataset's datatype, or
-            /// `None` for the library default. Validated against the datatype
-            /// element size in `flatten_dataset`.
+            /// One encoded fill element, or `None` for the library default.
             fill: Option<Vec<u8>>,
             /// The fill time policy for the dataset.
             fill_time: FillTime,
-            /// The byte length this dataset's contiguous data-layout message
-            /// records — the region it holds, or the extent an unallocated one
-            /// would occupy (issue #293). Derived in `flatten_dataset` so the
-            /// sizing pass and the emit pass, which reach the region by different
-            /// routes, cannot disagree about it. A chunked dataset describes its
-            /// storage in its index instead and never reads this.
+            /// The logical byte extent recorded in a contiguous Data Layout message,
+            /// including elements whose storage remains unallocated.
             declared_contiguous_len: u64,
         }
 
@@ -1365,8 +1359,8 @@ impl FileWriter {
             /// Link name in the owning group.
             name: LinkNameBuf,
             attrs: Vec<AttributeMessage>,
-            /// The committed datatype path of each attribute, parallel to `attrs`.
-            attr_committed_datatype_paths: Vec<Option<ObjectPathBuf>>,
+            /// Attribute indices paired with committed datatype paths for address resolution.
+            attr_committed_datatype_paths: Vec<(usize, ObjectPathBuf)>,
             ds_indices: Vec<usize>,
             sub_group_indices: Vec<usize>,
             committed_indices: Vec<usize>,
@@ -1390,166 +1384,46 @@ impl FileWriter {
         let mut root_group_indices: Vec<usize> = Vec::new();
 
         fn flatten_dataset(
-            db: DatasetBuilder,
+            mut db: DatasetBuilder,
             all_ds: &mut Vec<DsFlat>,
             ds_vl: &mut Vec<Vec<VlPatch>>,
         ) -> Result<usize, FormatError> {
-            let DatasetBuilder {
-                name,
-                datatype,
-                shape,
-                maxshape,
-                data,
-                attrs: attribute_specs,
+            let name = link_name(core::mem::take(&mut db.name))?;
+            let WholeFileDataset {
+                metadata,
+                storage,
+                committed_datatype_paths: attr_committed_datatype_paths,
+            } = PreparedDataset::parse(db)?.into_whole_file()?;
+            let DatasetMetadata {
+                dt,
+                element_size: _,
+                ds: dspace,
+                extent: declared_contiguous_len,
+                attrs:
+                    PreparedAttributes {
+                        messages: attrs,
+                        collections,
+                    },
                 chunk_options,
-                raw_chunks,
-                produced,
-                reference_targets,
-                vl_string_staging,
                 fill,
                 fill_time,
-                allocation,
                 committed_datatype_path,
                 #[cfg(feature = "provenance")]
                 provenance,
-            } = db;
-            let name = link_name(name)?;
-            let dt = datatype.ok_or(FormatError::DatasetMissingDatatype)?;
-            let shape = shape.ok_or(FormatError::DatasetMissingShape)?;
-            let storage = PreparedStorage::parse(
-                data,
-                raw_chunks,
-                produced,
-                allocation,
-                shape.contains(&0),
-                reference_targets,
-                vl_string_staging,
-            )?;
-            let unallocated = storage.allocation() == StorageAllocation::Unallocated;
-            // A zero-byte element type is refused before it reaches a layout
-            // decision: the chunk splitter clamps a row copy to an element
-            // boundary with `% element_size` and would divide by zero, and a
-            // contiguous write of one produces a file this crate's own reader
-            // refuses. A caller-built `Datatype` reaches the writer without
-            // passing through `Datatype::parse`, which refuses the file-sourced
-            // ones, so this is where the same invariant is held on the way out.
-            //
-            // Taking the size as a `NonZeroU32` here is what holds that for the
-            // rest of the write: every later stage receives the proof rather
-            // than the bare number, so none of them re-checks it.
-            let element_size = dt.element_size()?;
-            let elem_size = element_size.narrow::<NonZeroUsize>()?;
-            let elem_bytes = u64::from(element_size.get());
-            let rank = match u8::try_from(shape.len()) {
-                Ok(rank) if rank <= MAX_DATASET_RANK => rank,
-                _ => {
-                    return Err(FormatError::DatasetRankUnsupported {
-                        rank: shape.len(),
-                        maximum: MAX_DATASET_RANK,
-                    });
-                }
-            };
-            if let Some(dimension) = shape.iter().position(|&size| size == UNLIMITED_DIMENSION) {
-                return Err(FormatError::DatasetDimensionUnlimited { dimension });
-            }
-            let extent = if shape.contains(&0) {
-                0
-            } else {
-                shape.iter().try_fold(elem_bytes, |size, &dimension| {
-                    size.checked_mul(dimension)
-                        .ok_or(FormatError::DatasetSizeOverflow { size, dimension })
-                })?
-            };
+            } = metadata;
             #[cfg(feature = "provenance")]
-            if unallocated && extent != 0 && provenance.is_some() {
-                return Err(FormatError::DatasetProvenanceRequiresData);
-            }
-            // The bytes this dataset's data region occupies. A produced region is
-            // measured by the same rule as a materialized one — its size is
-            // declared rather than counted, and a declaration that disagrees with
-            // the shape would produce a file the reader refuses.
-            let region_len = storage
-                .produced()
-                .map_or(storage.raw().len() as u64, |p| p.total_bytes);
-            // What a contiguous data-layout message records for this dataset: the
-            // region it actually holds, or — for a dataset that allocates no
-            // storage at all — the extent it *would* occupy beside the undefined
-            // address, which is what the reference library records there and what
-            // makes `Layout::Contiguous`'s promise that `size` is "the extent that
-            // would be written" hold for a file this crate produced (issue #293).
-            // Derived once, so the sizing pass and the emit pass — which reach the
-            // region by different routes — cannot disagree about it. Read only by
-            // the contiguous layout message; a chunked dataset describes its
-            // storage in its index instead.
-            let declared_contiguous_len = if unallocated { extent } else { region_len };
-            // Compare the shape's byte extent with the supplied or produced bytes, including
-            // zero-element shapes. Verbatim chunks have no flat region to compare, and
-            // unallocated storage has no element payload.
-            if !unallocated && storage.chunks().is_none() && region_len != extent {
-                return Err(FormatError::LogicalShapeDataMismatch {
-                    expected: extent,
-                    actual: region_len,
-                    element_size: element_size.into(),
-                });
-            }
-            // Validate the chunk geometry up front for a chunked / filtered /
-            // extensible dataset, so a malformed request (chunk dimensions of the
-            // wrong rank, a zero chunk dimension, a bad maximum shape, or
-            // chunking a scalar) is refused here instead of panicking in the
-            // chunk splitter or producing an unreadable dataset.
-            if chunk_options.is_chunked() || maxshape.is_some() {
-                Extent::new(&shape, maxshape.as_deref())
-                    .and_then(|geometry| chunk_options.validate_geometry(geometry))
-                    .map_err(FormatError::InvalidChunkGeometry)?;
-            }
-            chunk_options.validate_partial_edge_filtering(maxshape.as_deref())?;
-            // Variable-length string element references live in the global heap.
-            // For chunked/filtered/resizable storage the references sit inside
-            // chunks that are split (and possibly compressed) before the rest of
-            // the file is laid out, so their heap addresses cannot be patched in
-            // afterwards. Such a dataset instead has its collections placed
-            // *ahead* of everything else, at a fixed address known before any
-            // chunk is encoded — see the early-placement block in
-            // `finish_to_sink` that fills `early_gcol`. Nothing is refused here.
-            let max_dimensions = maxshape.clone();
-            let dspace = Dataspace {
-                space_type: if shape.is_empty() {
-                    DataspaceType::Scalar
-                } else {
-                    DataspaceType::Simple
-                },
-                rank,
-                dimensions: shape,
-                max_dimensions,
-            };
-            let mut attrs = Vec::new();
-            let mut attr_committed_datatype_paths = Vec::new();
-            for (n, v) in &attribute_specs {
-                attrs.push(AttributeName::try_from(n.as_str())?.to_message(v)?);
-                attr_committed_datatype_paths.push(v.committed_datatype_path().cloned());
-            }
-            let patches = collect_vl_patches(&attribute_specs);
+            let mut attrs = attrs;
+            let maxshape = dspace.max_dimensions.clone();
+            let patches = collections
+                .into_iter()
+                .map(|(attr_index, collections)| VlPatch {
+                    collections,
+                    attr_index,
+                })
+                .collect();
             #[cfg(feature = "provenance")]
-            let pending_hash = provenance.map(|prov| {
-                PendingHash::reserve(
-                    &mut attrs,
-                    crate::provenance::Provenance {
-                        creator: prov.creator,
-                        timestamp: prov.timestamp,
-                        source: prov.source,
-                    },
-                )
-            });
-            // A user-defined fill value is one element wide, so its byte length
-            // must equal the datatype's element size.
-            if let Some(fill) = &fill {
-                if fill.len() != elem_size.get() {
-                    return Err(FormatError::FillValueSizeMismatch {
-                        expected: elem_size.get(),
-                        actual: fill.len(),
-                    });
-                }
-            }
+            let pending_hash =
+                provenance.map(|provenance| PendingHash::reserve(&mut attrs, provenance));
             let idx = all_ds.len();
             all_ds.push(DsFlat {
                 name,
@@ -1575,13 +1449,14 @@ impl FileWriter {
             Ok(idx)
         }
 
-        /// Flatten one group's committed datatypes into the file-wide list,
-        /// returning their indices.
+        /// Appends one group's committed datatypes to the file-wide list and returns their indices.
         ///
-        /// A committed type is written as an object of its own and named by
-        /// datasets and attributes, so a zero-byte element type is refused here
-        /// for the same reason `flatten_dataset` refuses one: it reaches the
-        /// writer without passing through `Datatype::parse`.
+        /// Each datatype is checked for nonzero element width before object header preparation.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`FormatError::ZeroSizedDatatype`] if an element has zero width, or
+        /// [`FormatError::InvalidLinkName`] if a datatype's name is not a link component.
         fn flatten_committed(
             types: Vec<CommittedDatatype>,
             committed: &mut Vec<CtFlat>,
@@ -1611,13 +1486,18 @@ impl FileWriter {
             ds_vl: &mut Vec<Vec<VlPatch>>,
         ) -> Result<usize, FormatError> {
             let name = g.name?;
-            let mut gattrs = Vec::new();
-            let mut attr_committed_datatype_paths = Vec::new();
-            for (n, v) in &g.attrs {
-                gattrs.push(AttributeName::try_from(n.as_str())?.to_message(v)?);
-                attr_committed_datatype_paths.push(v.committed_datatype_path().cloned());
-            }
-            let patches = collect_vl_patches(&g.attrs);
+            let PreparedAttributes {
+                messages: gattrs,
+                collections,
+            } = PreparedAttributes::parse(&g.attrs)?;
+            let attr_committed_datatype_paths = g.attrs.committed_datatype_paths();
+            let patches = collections
+                .into_iter()
+                .map(|(attr_index, collections)| VlPatch {
+                    collections,
+                    attr_index,
+                })
+                .collect();
             let committed_idx = flatten_committed(g.committed, committed)?;
             let mut ds_idx = Vec::new();
             for db in g.datasets {
@@ -1694,27 +1574,18 @@ impl FileWriter {
             Ok(addresses)
         }
 
-        fn collect_vl_patches(attrs_raw: &AttributeSpecs) -> Vec<VlPatch> {
-            let mut patches = Vec::new();
-            for (i, (_n, v)) in attrs_raw.iter().enumerate() {
-                if let Some(strings) = v.var_len_strings() {
-                    patches.push(VlPatch {
-                        collections: type_builders::build_global_heap_collections(strings),
-                        attr_index: i,
-                    });
-                }
-            }
-            patches
-        }
-
-        let mut root_attrs: Vec<AttributeMessage> = Vec::new();
-        let mut root_attr_committed_datatype_paths = Vec::new();
-        for (n, v) in &self.root_attrs {
-            root_attrs.push(AttributeName::try_from(n.as_str())?.to_message(v)?);
-            root_attr_committed_datatype_paths.push(v.committed_datatype_path().cloned());
-        }
-
-        let vl_root = collect_vl_patches(&self.root_attrs);
+        let PreparedAttributes {
+            messages: mut root_attrs,
+            collections,
+        } = PreparedAttributes::parse(&self.root_attrs)?;
+        let root_attr_committed_datatype_paths = self.root_attrs.committed_datatype_paths();
+        let vl_root = collections
+            .into_iter()
+            .map(|(attr_index, collections)| VlPatch {
+                collections,
+                attr_index,
+            })
+            .collect::<Vec<_>>();
 
         // ---- Committed datatypes: paths, reference counts, and agreement ----
         //
@@ -1788,10 +1659,8 @@ impl FileWriter {
             Ok(())
         }
 
-        for (attr, path) in root_attrs.iter().zip(&root_attr_committed_datatype_paths) {
-            let Some(path) = path else {
-                continue;
-            };
+        for (index, path) in &root_attr_committed_datatype_paths {
+            let attr = &root_attrs[*index];
             register_committed_use(
                 &mut committed,
                 &committed_by_path,
@@ -1801,10 +1670,8 @@ impl FileWriter {
             )?;
         }
         for g in &groups {
-            for (attr, path) in g.attrs.iter().zip(&g.attr_committed_datatype_paths) {
-                let Some(path) = path else {
-                    continue;
-                };
+            for (index, path) in &g.attr_committed_datatype_paths {
+                let attr = &g.attrs[*index];
                 register_committed_use(
                     &mut committed,
                     &committed_by_path,
@@ -1820,10 +1687,8 @@ impl FileWriter {
                     format!("dataset {:?}", d.name.as_str())
                 })?;
             }
-            for (attr, path) in d.attrs.iter().zip(&d.attr_committed_datatype_paths) {
-                let Some(path) = path else {
-                    continue;
-                };
+            for (index, path) in &d.attr_committed_datatype_paths {
+                let attr = &d.attrs[*index];
                 register_committed_use(
                     &mut committed,
                     &committed_by_path,
@@ -2595,11 +2460,9 @@ impl FileWriter {
                 DatatypeLocation::Committed(committed_addrs[ci])
             };
             let resolve_attrs = |attrs: &mut [AttributeMessage],
-                                 paths: &[Option<ObjectPathBuf>]| {
-                for (attr, path) in attrs.iter_mut().zip(paths) {
-                    if let Some(path) = path {
-                        attr.datatype_location = committed_location(path);
-                    }
+                                 paths: &[(usize, ObjectPathBuf)]| {
+                for (index, path) in paths {
+                    attrs[*index].datatype_location = committed_location(path);
                 }
             };
             resolve_attrs(&mut root_attrs, &root_attr_committed_datatype_paths);

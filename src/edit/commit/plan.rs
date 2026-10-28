@@ -748,21 +748,23 @@ impl WriteEngine {
 
         self.screen_shared_message_index(&for_supplied)?;
 
-        for (_, fd) in staged.datasets().iter().chain(staged.writes()) {
+        for (_, fd) in staged.datasets() {
             edit::screen_resolved_references(&fd.dt, fd.storage.raw(), &for_supplied)?;
         }
+        for (_, values) in staged.writes() {
+            edit::screen_resolved_references(&values.dt, values.raw(), &for_supplied)?;
+        }
 
-        if staged
-            .datasets()
+        if staged.datasets().iter().any(|(_, fd)| {
+            datatype::datatype_holds_object_address(&fd.dt)
+                || fd
+                    .attrs
+                    .iter()
+                    .any(|a| datatype::datatype_holds_object_address(&a.datatype))
+        }) || staged
+            .writes()
             .iter()
-            .chain(staged.writes())
-            .any(|(_, fd)| {
-                datatype::datatype_holds_object_address(&fd.dt)
-                    || fd
-                        .attrs
-                        .iter()
-                        .any(|a| datatype::datatype_holds_object_address(&a.datatype))
-            })
+            .any(|(_, values)| datatype::datatype_holds_object_address(&values.dt))
             || !staged.copies().is_empty()
             || !staged.cross_copies().is_empty()
         {
@@ -887,22 +889,21 @@ impl WriteEngine {
         staged: &StagedEdits,
         nodes: &BTreeMap<ObjectPathBuf, Node>,
     ) -> Result<(), Error> {
-        let unsupported_dataset =
-            staged
-                .datasets()
-                .iter()
-                .chain(staged.writes())
-                .any(|(_, dataset)| {
-                    dataset.dense_attrs.is_some()
-                        || datatype::datatype_holds_object_address(&dataset.dt)
-                        || dataset
-                            .attrs
-                            .iter()
-                            .any(|attr| datatype::datatype_holds_object_address(&attr.datatype))
-                });
+        let unsupported_dataset = staged.datasets().iter().any(|(_, dataset)| {
+            dataset.dense_attrs.is_some()
+                || datatype::datatype_holds_object_address(&dataset.dt)
+                || dataset
+                    .attrs
+                    .iter()
+                    .any(|attr| datatype::datatype_holds_object_address(&attr.datatype))
+        });
         // Same-file copies come from the tree checked below. Cross-file copies reject file
         // addresses when staged, so their datatypes cannot add object references.
         if unsupported_dataset
+            || staged
+                .writes()
+                .iter()
+                .any(|(_, values)| datatype::datatype_holds_object_address(&values.dt))
             || staged
                 .cross_copies()
                 .iter()

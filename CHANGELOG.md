@@ -74,7 +74,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - Fixed `repack` rejecting unallocated datasets with lossy or unsupported filters ([#948](https://github.com/CramBL/hdf5-pure/pull/948)).
-- Fixed lost structured causes for missing data in `Group::create_dataset` during in-place creation.
+- Fixed lost structured causes for invalid dataset requests in `Group::create_dataset` during in-place creation.
+- Fixed invalid attribute names being accepted by `File::commit` during in-place attribute edits.
 - Fixed `BufferedAppender` accepting input or completing empty flushes after file closure. Pending bytes remain available for recovery ([#945](https://github.com/CramBL/hdf5-pure/pull/945)).
 - Fixed `repack` disabling file-space persistence in the output ([#946](https://github.com/CramBL/hdf5-pure/pull/946)).
 - Fixed `Dataset::read_f64` and related chunked reads rejecting completely covered selections with unreadable fill metadata. Readable fill is required when complete coverage is unproven ([#943](https://github.com/CramBL/hdf5-pure/pull/943)).

@@ -627,6 +627,17 @@ impl AttributeSpecs {
         }
     }
 
+    /// Copies committed datatype paths with their attribute indices, in insertion order.
+    pub(crate) fn committed_datatype_paths(&self) -> Vec<(usize, ObjectPathBuf)> {
+        self.iter()
+            .enumerate()
+            .filter_map(|(index, (_, spec))| {
+                spec.committed_datatype_path()
+                    .map(|path| (index, path.clone()))
+            })
+            .collect()
+    }
+
     /// Iterates in first insertion order.
     pub(crate) fn iter(&self) -> slice::Iter<'_, (String, AttrSpec)> {
         self.entries.iter()

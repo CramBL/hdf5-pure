@@ -1,13 +1,386 @@
-//! Dataset storage sources and deferred element references.
+//! Dataset requests, backend preparation, and deferred element references.
 
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use core::num::NonZeroUsize;
 
-use crate::chunked_write::StorageAllocation;
+use crate::FillTime;
+use crate::attribute_request::PreparedAttributes;
+use crate::chunked_write::{ChunkOptions, StorageAllocation};
+use crate::convert::Narrow;
+use crate::dataspace::{Dataspace, DataspaceType, Extent};
+use crate::datatype::Datatype;
+#[cfg(feature = "std")]
+use crate::error::Error;
 use crate::error::FormatError;
-use crate::type_builders::{ObjectRefPatch, ProducedPayload, RawChunkPayload, VlStringStaging};
+use crate::file_writer::{MAX_DATASET_RANK, UNLIMITED_DIMENSION};
+use crate::object_path::ObjectPathBuf;
+#[cfg(feature = "provenance")]
+use crate::provenance::Provenance;
+use crate::type_builders::{
+    AttributeSpecs, DatasetBuilder, ObjectRefPatch, ProducedPayload, RawChunkPayload,
+    VlStringStaging,
+};
+
+/// A dataset request with a nonzero element width and checked shape, payload, fill, and attributes.
+///
+/// Explicit creation options are preserved until conversion to a backend operation. Deferred
+/// object and heap references remain unresolved.
+pub(crate) struct PreparedDataset {
+    metadata: DatasetMetadata,
+    storage: PreparedStorage,
+    attribute_specs: AttributeSpecs,
+}
+
+impl PreparedDataset {
+    /// Parses the common dataset invariants without resolving file addresses.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::DatasetMissingDatatype`] or [`FormatError::DatasetMissingShape`]
+    /// if required metadata is absent, [`FormatError::DatasetRankUnsupported`] if the rank exceeds
+    /// [`MAX_DATASET_RANK`], or [`FormatError::DatasetDimensionUnlimited`] if a current dimension
+    /// is unlimited.
+    ///
+    /// Returns [`FormatError::DatasetSizeOverflow`] if the byte extent overflows,
+    /// [`FormatError::LogicalShapeDataMismatch`] if an allocated element buffer's length or a
+    /// producer's declared byte length disagrees with that extent,
+    /// [`FormatError::InvalidChunkGeometry`] if chunk dimensions or maxima are incompatible, or
+    /// [`FormatError::FillValueSizeMismatch`] if a fill value is not one element wide.
+    ///
+    /// With the `provenance` feature, returns [`FormatError::DatasetProvenanceRequiresData`] for a
+    /// nonempty unallocated declaration with requested checksums. Propagates datatype, storage,
+    /// and attribute preparation errors.
+    pub(crate) fn parse(builder: DatasetBuilder) -> Result<Self, FormatError> {
+        let DatasetBuilder {
+            name: _,
+            datatype,
+            shape,
+            maxshape,
+            data,
+            attrs,
+            chunk_options,
+            raw_chunks,
+            produced,
+            reference_targets,
+            vl_string_staging,
+            fill,
+            fill_time,
+            allocation,
+            committed_datatype_path,
+            #[cfg(feature = "provenance")]
+            provenance,
+        } = builder;
+        let dt = datatype.ok_or(FormatError::DatasetMissingDatatype)?;
+        let shape = shape.ok_or(FormatError::DatasetMissingShape)?;
+        let storage = PreparedStorage::parse(
+            data,
+            raw_chunks,
+            produced,
+            allocation,
+            shape.contains(&0),
+            reference_targets,
+            vl_string_staging,
+        )?;
+        let width = dt.element_size()?;
+        let element_size = width.narrow::<NonZeroUsize>()?;
+        let rank = match u8::try_from(shape.len()) {
+            Ok(rank) if rank <= MAX_DATASET_RANK => rank,
+            _ => {
+                return Err(FormatError::DatasetRankUnsupported {
+                    rank: shape.len(),
+                    maximum: MAX_DATASET_RANK,
+                });
+            }
+        };
+        if let Some(dimension) = shape.iter().position(|&size| size == UNLIMITED_DIMENSION) {
+            return Err(FormatError::DatasetDimensionUnlimited { dimension });
+        }
+        let extent = if shape.contains(&0) {
+            0
+        } else {
+            shape
+                .iter()
+                .try_fold(u64::from(width.get()), |size, &dimension| {
+                    size.checked_mul(dimension)
+                        .ok_or(FormatError::DatasetSizeOverflow { size, dimension })
+                })?
+        };
+        let unallocated = storage.allocation() == StorageAllocation::Unallocated;
+        let region_len = storage
+            .produced()
+            .map_or(storage.raw().len() as u64, |p| p.total_bytes);
+        if !unallocated && storage.chunks().is_none() && region_len != extent {
+            return Err(FormatError::LogicalShapeDataMismatch {
+                expected: extent,
+                actual: region_len,
+                element_size: width.into(),
+            });
+        }
+        if chunk_options.is_chunked() || maxshape.is_some() {
+            Extent::new(&shape, maxshape.as_deref())
+                .and_then(|geometry| chunk_options.validate_geometry(geometry))
+                .map_err(FormatError::InvalidChunkGeometry)?;
+        }
+        if let Some(fill) = &fill {
+            if fill.len() != element_size.get() {
+                return Err(FormatError::FillValueSizeMismatch {
+                    expected: element_size.get(),
+                    actual: fill.len(),
+                });
+            }
+        }
+        #[cfg(feature = "provenance")]
+        if unallocated && extent != 0 && provenance.is_some() {
+            return Err(FormatError::DatasetProvenanceRequiresData);
+        }
+        let prepared_attrs = PreparedAttributes::parse(&attrs)?;
+        Ok(Self {
+            metadata: DatasetMetadata {
+                dt,
+                element_size,
+                ds: Dataspace {
+                    space_type: if shape.is_empty() {
+                        DataspaceType::Scalar
+                    } else {
+                        DataspaceType::Simple
+                    },
+                    rank,
+                    dimensions: shape,
+                    max_dimensions: maxshape,
+                },
+                extent,
+                attrs: prepared_attrs,
+                chunk_options,
+                fill,
+                fill_time,
+                committed_datatype_path,
+                #[cfg(feature = "provenance")]
+                provenance: provenance.map(|p| Provenance {
+                    creator: p.creator,
+                    timestamp: p.timestamp,
+                    source: p.source,
+                }),
+            },
+            storage,
+            attribute_specs: attrs,
+        })
+    }
+
+    /// Prepares creation with providers and committed datatype paths available to the writer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::PartialEdgeSkipRequiresChunking`] if the request disables partial
+    /// edge filtering on contiguous storage.
+    pub(crate) fn into_whole_file(self) -> Result<WholeFileDataset, FormatError> {
+        self.metadata
+            .chunk_options
+            .validate_partial_edge_filtering(self.metadata.ds.max_dimensions.as_deref())?;
+        Ok(WholeFileDataset {
+            committed_datatype_paths: self.attribute_specs.committed_datatype_paths(),
+            metadata: self.metadata,
+            storage: self.storage,
+        })
+    }
+
+    /// Prepares creation using the storage and datatypes supported by the editor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] for providers, committed datatypes, or chunked or
+    /// extensible datasets with deferred element references. Returns [`Error::Format`] with
+    /// [`FormatError::PartialEdgeSkipRequiresChunking`] if the request disables partial edge
+    /// filtering on contiguous storage.
+    #[cfg(feature = "std")]
+    pub(crate) fn into_in_place(self) -> Result<InPlaceDataset, Error> {
+        self.metadata
+            .chunk_options
+            .validate_partial_edge_filtering(self.metadata.ds.max_dimensions.as_deref())?;
+        self.into_editor()
+    }
+
+    /// Prepares replacement values after rejecting explicit creation options.
+    ///
+    /// Compatibility with the existing datatype and shape is checked during commit planning.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EditUnsupported`] for unallocated storage, providers, committed datatypes,
+    /// deferred object references, or creation options. An explicitly supplied fill policy is
+    /// rejected even when it equals the default.
+    ///
+    /// Returns [`Error::Format`] with [`FormatError::Internal`] if allocated storage has no element
+    /// buffer after the capability checks.
+    #[cfg(feature = "std")]
+    pub(crate) fn into_overwrite(self) -> Result<ValueOverwrite, Error> {
+        let Self {
+            metadata,
+            storage,
+            attribute_specs,
+        } = self;
+        if storage.allocation() == StorageAllocation::Unallocated {
+            return Err(Error::EditUnsupported(
+                "write_dataset requires element data, not unallocated storage",
+            ));
+        }
+        if metadata.chunk_options.is_chunked() || metadata.ds.max_dimensions.is_some() {
+            return Err(Error::EditUnsupported(
+                "write_dataset overwrites values only; it cannot make a dataset chunked, filtered, or extensible",
+            ));
+        }
+        if metadata.chunk_options.partial_edge_filtering.is_some() {
+            return Err(Error::EditUnsupported(
+                "write_dataset overwrites values only; it cannot set whether partial edge chunks are filtered (set it when the dataset is created)",
+            ));
+        }
+        #[cfg(feature = "provenance")]
+        let generated_attrs = metadata.provenance.is_some();
+        #[cfg(not(feature = "provenance"))]
+        let generated_attrs = false;
+        if !metadata.attrs.messages.is_empty() || generated_attrs {
+            return Err(Error::EditUnsupported(
+                "write_dataset overwrites values only; it cannot set attributes (set them with a separate edit)",
+            ));
+        }
+        if metadata.fill.is_some() {
+            return Err(Error::EditUnsupported(
+                "write_dataset overwrites values only; it cannot change the fill value (set it when the dataset is created)",
+            ));
+        }
+        if metadata.fill_time.is_some() {
+            return Err(Error::EditUnsupported(
+                "write_dataset overwrites values only; it cannot change the fill time (set it when the dataset is created)",
+            ));
+        }
+        if storage.reference_targets().is_some() {
+            return Err(Error::EditUnsupported(
+                "write_dataset cannot overwrite an object-reference dataset's data in place yet",
+            ));
+        }
+        let editor = Self {
+            metadata,
+            storage,
+            attribute_specs,
+        }
+        .into_editor()?;
+        let PreparedElements::Bytes(bytes) = editor.storage else {
+            return Err(FormatError::Internal(
+                "an allocated overwrite has no element buffer".into(),
+            )
+            .into());
+        };
+        Ok(ValueOverwrite {
+            dt: editor.metadata.dt,
+            ds: editor.metadata.ds,
+            bytes,
+        })
+    }
+
+    #[cfg(feature = "std")]
+    fn into_editor(self) -> Result<InPlaceDataset, Error> {
+        let Self {
+            metadata,
+            storage,
+            attribute_specs: _,
+        } = self;
+        let storage = match storage {
+            PreparedStorage::Elements(elements) => elements,
+            PreparedStorage::Chunks(_) => {
+                return Err(Error::EditUnsupported(
+                    "encoded chunk providers cannot be added in place yet",
+                ));
+            }
+            PreparedStorage::Produced(_) => {
+                return Err(Error::EditUnsupported(
+                    "data producers cannot be added in place yet",
+                ));
+            }
+        };
+        let chunked = metadata.chunk_options.is_chunked() || metadata.ds.max_dimensions.is_some();
+        if storage.vl_string_staging().is_some() && chunked {
+            return Err(Error::EditUnsupported(
+                "chunked or extensible variable-length-string datasets cannot be added in place yet",
+            ));
+        }
+        if storage.reference_targets().is_some() && chunked {
+            return Err(Error::EditUnsupported(
+                "chunked or extensible object-reference datasets cannot be added in place yet",
+            ));
+        }
+        if metadata.committed_datatype_path.is_some()
+            || metadata
+                .attrs
+                .messages
+                .iter()
+                .any(|a| a.datatype_location.is_committed())
+        {
+            return Err(Error::EditUnsupported(
+                "a dataset or attribute naming a committed (shared) datatype cannot be added in place; write the file with FileBuilder instead",
+            ));
+        }
+        Ok(InPlaceDataset { metadata, storage })
+    }
+}
+
+/// Common metadata with checked dimensions and explicit fill settings.
+pub(crate) struct DatasetMetadata {
+    /// The element datatype, including the definition of a requested committed datatype.
+    pub(crate) dt: Datatype,
+    pub(crate) element_size: NonZeroUsize,
+    /// The checked current dimensions and optional compatible maximum dimensions.
+    pub(crate) ds: Dataspace,
+    /// The logical byte length, including elements whose storage remains unallocated.
+    pub(crate) extent: u64,
+    pub(crate) attrs: PreparedAttributes,
+    pub(crate) chunk_options: ChunkOptions,
+    pub(crate) fill: Option<Vec<u8>>,
+    /// The explicitly supplied fill policy, before default normalization.
+    pub(crate) fill_time: Option<FillTime>,
+    /// The committed datatype path awaiting address resolution, if supplied.
+    pub(crate) committed_datatype_path: Option<ObjectPathBuf>,
+    /// Inputs for attributes generated from the prepared element bytes.
+    #[cfg(feature = "provenance")]
+    pub(crate) provenance: Option<Provenance>,
+}
+
+/// A creation request with providers and committed attribute paths available for file placement.
+pub(crate) struct WholeFileDataset {
+    pub(crate) metadata: DatasetMetadata,
+    pub(crate) storage: PreparedStorage,
+    /// Attribute indices paired with committed datatype paths awaiting address resolution.
+    pub(crate) committed_datatype_paths: Vec<(usize, ObjectPathBuf)>,
+}
+
+/// A creation request with inline datatypes and storage without providers.
+#[cfg(feature = "std")]
+pub(crate) struct InPlaceDataset {
+    pub(crate) metadata: DatasetMetadata,
+    pub(crate) storage: PreparedElements,
+}
+
+/// Replacement values without creation options, pending compatibility with an existing dataset.
+#[cfg(feature = "std")]
+pub(crate) struct ValueOverwrite {
+    pub(crate) dt: Datatype,
+    pub(crate) ds: Dataspace,
+    bytes: PreparedBytes,
+}
+
+#[cfg(feature = "std")]
+impl ValueOverwrite {
+    /// Returns replacement element bytes before deferred heap addresses are assigned.
+    pub(crate) fn raw(&self) -> &[u8] {
+        &self.bytes.raw
+    }
+
+    /// Returns the variable-length heap collections and reference offsets, if present.
+    pub(crate) fn vl_string_staging(&self) -> Option<&VlStringStaging> {
+        self.bytes.vl_string_staging.as_ref()
+    }
+}
 
 /// A dataset's single storage source after parsing its builder request.
 ///
@@ -274,8 +647,14 @@ mod tests {
     use crate::chunked_write::{ChunkProvider, StorageAllocation};
     use crate::data_layout::ChunkedLayoutFlags;
     use crate::error::FormatError;
+    #[cfg(feature = "std")]
+    use crate::type_builders::DatasetBuilder;
     use crate::type_builders::{ProducedPayload, RawChunkPayload, VlStringStaging};
+    #[cfg(feature = "std")]
+    use crate::{Error, FillTime};
 
+    #[cfg(feature = "std")]
+    use super::PreparedDataset;
     use super::PreparedStorage;
 
     #[rstest]
@@ -356,6 +735,24 @@ mod tests {
         assert_eq!(storage.raw(), b"");
         assert!(storage.reference_targets().is_none());
         assert!(storage.vl_string_staging().is_none());
+    }
+
+    #[cfg(feature = "std")]
+    #[rstest]
+    #[case::default_policy(FillTime::IfSet)]
+    #[case::allocate(FillTime::Alloc)]
+    #[case::never(FillTime::Never)]
+    fn overwrites_reject_explicit_fill_time(#[case] fill_time: FillTime) {
+        let mut builder = DatasetBuilder::new("values");
+        builder.with_i32_data(&[1]).with_fill_time(fill_time);
+        let result = PreparedDataset::parse(builder).unwrap().into_overwrite();
+        let Err(Error::EditUnsupported(reason)) = result else {
+            panic!("expected an unsupported overwrite option");
+        };
+        assert_eq!(
+            reason,
+            "write_dataset overwrites values only; it cannot change the fill time (set it when the dataset is created)"
+        );
     }
 
     struct UnreadProvider;
