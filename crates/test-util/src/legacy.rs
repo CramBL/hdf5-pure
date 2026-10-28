@@ -74,7 +74,7 @@ pub fn two_groups() -> Vec<u8> {
     finish(image, root)
 }
 
-fn finish(mut image: Image, root: u64) -> Vec<u8> {
+pub(crate) fn finish(mut image: Image, root: u64) -> Vec<u8> {
     image.place(
         0,
         &Superblock::new(Widths::EIGHT)
@@ -86,6 +86,14 @@ fn finish(mut image: Image, root: u64) -> Vec<u8> {
 }
 
 fn group(image: &mut Image, links: &[(&str, u64)]) -> u64 {
+    group_with_messages(image, links, &[])
+}
+
+pub(crate) fn group_with_messages(
+    image: &mut Image,
+    links: &[(&str, u64)],
+    messages: &[Message],
+) -> u64 {
     let names: Vec<_> = std::iter::once("")
         .chain(links.iter().map(|(name, _)| *name))
         .collect();
@@ -100,16 +108,19 @@ fn group(image: &mut Image, links: &[(&str, u64)]) -> u64 {
         .enumerate()
         .map(|(index, (_, address))| Entry::new(segment.offset_of(index + 1), *address))
         .collect();
-    let mut symbols = symbol_table::node(&entries, Widths::EIGHT);
-    symbols.resize(SYMBOL_NODE_SIZE, 0);
-    let symbols = image.append_aligned(&symbols, 8) as u64;
-    let mut tree = btree_v1::node_with_group_keys(
-        NodeType::GROUP,
-        0,
-        &[0, segment.offset_of(links.len())],
-        &[symbols],
-        Widths::EIGHT,
-    );
+    let mut tree = if entries.is_empty() {
+        btree_v1::node_with_group_keys(NodeType::GROUP, 0, &[0], &[], Widths::EIGHT)
+    } else {
+        let mut symbols = symbol_table::node(&entries, Widths::EIGHT);
+        symbols.resize(SYMBOL_NODE_SIZE, 0);
+        btree_v1::node_with_group_keys(
+            NodeType::GROUP,
+            0,
+            &[0, segment.offset_of(links.len())],
+            &[image.append_aligned(&symbols, 8) as u64],
+            Widths::EIGHT,
+        )
+    };
     tree.resize(BTREE_NODE_SIZE, 0);
     let tree = image.append_aligned(&tree, 8) as u64;
     let mut table = tree.to_le_bytes().to_vec();
@@ -117,6 +128,7 @@ fn group(image: &mut Image, links: &[(&str, u64)]) -> u64 {
     image.append_aligned(
         &v1::Header::new()
             .message(Message::new(MessageType::SYMBOL_TABLE, &table))
+            .messages(messages.iter().cloned())
             .build(),
         8,
     ) as u64
@@ -150,13 +162,23 @@ fn dataset(image: &mut Image, values: Values<'_>) -> u64 {
         ),
     };
     let raw: Vec<u8> = raw;
-    let address = image.append_aligned(&raw, 8) as u64;
+    dataset_with_messages(image, datatype, &raw, count as u64, &[])
+}
+
+pub(crate) fn dataset_with_messages(
+    image: &mut Image,
+    datatype: Vec<u8>,
+    raw: &[u8],
+    count: u64,
+    messages: &[Message],
+) -> u64 {
+    let address = image.append_aligned(raw, 8) as u64;
     image.append_aligned(
         &v1::Header::new()
             .messages([
                 Message::new(
                     MessageType::DATASPACE,
-                    &dataspace::v1(1, Flags::NONE, &[count as u64], None),
+                    &dataspace::v1(1, Flags::NONE, &[count], None),
                 ),
                 padded_message(MessageType::DATATYPE, datatype),
                 padded_message(
@@ -164,13 +186,14 @@ fn dataset(image: &mut Image, values: Values<'_>) -> u64 {
                     data_layout::contiguous(address, raw.len() as u64),
                 ),
             ])
+            .messages(messages.iter().cloned())
             .build(),
         8,
     ) as u64
 }
 
 fn padded_message(kind: MessageType, mut data: Vec<u8>) -> Message {
-    data.resize(data.len().next_multiple_of(8), 0);
+    data.resize(data.len().next_multiple_of(MESSAGE_ALIGNMENT), 0);
     Message::new(kind, &data)
 }
 
@@ -217,6 +240,10 @@ const SYMBOL_NODE_SIZE: usize = 8 + 8 * 40;
 // Section `subsubsec_fmt4_infra_btrees_v1`, version 4.0, reserves 2K children
 // and 2K+1 keys. The superblock's default internal K is sixteen.
 const BTREE_NODE_SIZE: usize = 24 + 32 * 8 + 33 * 8;
+
+// Section `subsubsec_fmt4_dataobject_hdr_prefix_one`, version 4.0, aligns
+// version 1 message bodies to eight bytes.
+pub(crate) const MESSAGE_ALIGNMENT: usize = 8;
 
 // Section `subsubsec_fmt4_dataobject_hdr_msg_dtmessage`, version 4.0.
 const DATATYPE_VERSION: u8 = 1;
