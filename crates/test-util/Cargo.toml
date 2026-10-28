@@ -10,6 +10,13 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# Exercises fixture-process lifecycle failures without a native library.
+[[bin]]
+name = "process-fixture"
+path = "tests/fixtures/process.rs"
+test = false
+bench = false
+
 [dependencies]
 heapscope.workspace = true
 tempfile.workspace = true
