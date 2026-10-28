@@ -525,6 +525,70 @@ fn roundtrips_lossy_float_scale_offset_verbatim() {
     );
 }
 
+#[rstest]
+#[case::empty_default_fill(0, hdf5_pure::FillTime::IfSet, None)]
+#[case::empty_explicit_fill(0, hdf5_pure::FillTime::IfSet, Some(7.25))]
+#[case::unwritten_unlimited(2000, hdf5_pure::FillTime::Alloc, Some(7.25))]
+#[case::unwritten_never_fill(2000, hdf5_pure::FillTime::Never, Some(7.25))]
+fn repack_preserves_unallocated_lossy_float_datasets(
+    #[case] size: u64,
+    #[case] fill_time: hdf5_pure::FillTime,
+    #[case] fill_value: Option<f64>,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src.h5");
+    let dst = dir.path().join("dst.h5");
+    let mut builder = FileBuilder::new();
+    let dataset = builder.create_dataset("empty_float");
+    if size == 0 {
+        dataset.with_f64_data(&[]);
+    } else {
+        dataset.with_unallocated_storage(hdf5_pure::make_f64_type(), &[size]);
+    }
+    dataset
+        .with_maxshape(&[MaxExtent::Unlimited])
+        .with_chunks(&[512])
+        .with_fill_time(fill_time)
+        .with_scale_offset(ScaleOffset::FloatDScale(7));
+    if let Some(fill_value) = fill_value {
+        dataset.with_fill_value(fill_value);
+    }
+    dataset.set_attr("units", AttrValue::String("temperature".into()));
+    builder.write(&src).unwrap();
+
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
+
+    let source = File::open(&src).unwrap();
+    let source = source.dataset("empty_float").unwrap();
+    let destination = File::open(&dst).unwrap();
+    let destination = destination.dataset("empty_float").unwrap();
+    assert_eq!(source.chunks().unwrap(), []);
+    assert_eq!(destination.chunks().unwrap(), []);
+    assert_eq!(destination.datatype().unwrap(), hdf5_pure::make_f64_type());
+    assert_eq!(destination.shape().unwrap(), [size]);
+    assert_eq!(
+        destination.maxshape().unwrap(),
+        Some(vec![MaxExtent::Unlimited])
+    );
+    assert_eq!(destination.chunk_shape().unwrap(), Some(vec![512]));
+    assert_eq!(destination.fill_value::<f64>().unwrap(), fill_value);
+    assert_eq!(destination.fill_time().unwrap(), fill_time);
+    assert_eq!(
+        destination.filter_pipeline().unwrap(),
+        source.filter_pipeline().unwrap()
+    );
+    assert_eq!(destination.attrs().unwrap(), source.attrs().unwrap());
+    let fill = if fill_time == hdf5_pure::FillTime::Never {
+        0.0
+    } else {
+        fill_value.unwrap_or(0.0)
+    };
+    assert_eq!(
+        destination.read_f64().unwrap(),
+        vec![fill; usize::try_from(size).unwrap()]
+    );
+}
+
 #[test]
 fn roundtrips_opaque_and_bitfield_datatypes() {
     // Opaque and bit-field datatypes now serialize losslessly, so repack carries

@@ -2122,18 +2122,14 @@ fn repack_keeps_the_chunks_a_partly_written_dataset_holds() {
     );
 }
 
-/// A never-written dataset carrying a filter this crate cannot re-apply is still
-/// refused by name.
-///
-/// The unallocated path emits no chunk, so there is nothing for a lossy filter to
-/// perturb and a case could be made for letting it through. It is not made here:
-/// `check_pipeline` runs before the storage is reproduced, and the filters it
-/// decodes are the ones `carry_shape_and_pipeline` re-applies. Widening what
-/// repack accepts is a separate decision from preserving storage, so the set it
-/// rejects is unchanged, and a path that skipped the check would carry the
-/// dataset over without its filter.
-#[test]
-fn repack_still_refuses_a_never_written_dataset_with_a_lossy_filter() {
+#[rstest]
+#[case::empty_unlimited(0, hdf5::dataset::FillTime::IfSet)]
+#[case::unwritten_unlimited(2000, hdf5::dataset::FillTime::Alloc)]
+#[case::unwritten_never_fill(2000, hdf5::dataset::FillTime::Never)]
+fn repack_preserves_native_unallocated_lossy_float_datasets(
+    #[case] size: usize,
+    #[case] fill_time: hdf5::dataset::FillTime,
+) {
     use hdf5::filters::ScaleOffset as CScaleOffset;
 
     let dir = tempfile::tempdir().unwrap();
@@ -2143,31 +2139,67 @@ fn repack_still_refuses_a_never_written_dataset_with_a_lossy_filter() {
         let file = file::libhdf5_create_v110(&src);
         let ds = file
             .new_dataset::<f64>()
-            .shape([2000])
+            .shape([hdf5::Extent::resizable(size)])
             .chunk([512])
-            .scale_offset(CScaleOffset::FloatDScale(3))
+            .fill_value(7.25_f64)
+            .fill_time(fill_time)
+            .scale_offset(CScaleOffset::FloatDScale(7))
+            .deflate(4)
             .create("data")
             .unwrap();
+        assert_eq!(ds.storage_size(), 0);
         drop(ds);
         file.close().unwrap();
     }
 
-    // Nothing was written, so this is the unallocated path rather than the
-    // sparse-fallback one the neighbouring test covers.
+    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
+
     {
-        let f = File::open(&src).unwrap();
-        assert!(f.dataset("data").unwrap().chunks().unwrap().is_empty());
+        let source = File::open(&src).unwrap();
+        let source = source.dataset("data").unwrap();
+        let destination = File::open(&dst).unwrap();
+        let destination = destination.dataset("data").unwrap();
+        assert_eq!(source.chunks().unwrap(), []);
+        assert_eq!(destination.chunks().unwrap(), []);
+        assert_eq!(
+            destination.filter_pipeline().unwrap(),
+            source.filter_pipeline().unwrap()
+        );
+        assert_eq!(
+            destination.fill_time().unwrap(),
+            source.fill_time().unwrap()
+        );
+        assert_eq!(destination.fill_value::<f64>().unwrap(), Some(7.25));
+        assert_eq!(destination.shape().unwrap(), [u64::try_from(size).unwrap()]);
+        assert_eq!(
+            destination.maxshape().unwrap(),
+            Some(vec![MaxExtent::Unlimited])
+        );
+        assert_eq!(destination.chunk_shape().unwrap(), Some(vec![512]));
+        assert_eq!(destination.datatype().unwrap(), source.datatype().unwrap());
     }
 
-    let err = hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap_err();
-    match err {
-        hdf5_pure::Error::RepackUnsupported(msg) => assert!(
-            msg.contains("data") && msg.contains("scale-offset"),
-            "error should name the dataset and reason: {msg}"
-        ),
-        other => panic!("expected RepackUnsupported, got {other:?}"),
+    let source = hdf5::File::open(&src).unwrap();
+    let source_ds = source.dataset("data").unwrap();
+    let destination = hdf5::File::open(&dst).unwrap();
+    let destination_ds = destination.dataset("data").unwrap();
+    assert_eq!(destination_ds.storage_size(), 0);
+    assert_eq!(destination_ds.shape(), [size]);
+    assert_eq!(destination_ds.space().unwrap().maxdims(), [None]);
+    assert_eq!(destination_ds.chunk(), Some(vec![512]));
+    assert_eq!(destination_ds.dtype().unwrap(), source_ds.dtype().unwrap());
+    assert_eq!(destination_ds.filters(), source_ds.filters());
+    let dcpl = destination_ds.dcpl().unwrap();
+    assert_eq!(dcpl.get_fill_value_as::<f64>().unwrap(), Some(7.25));
+    assert_eq!(dcpl.fill_time(), fill_time);
+    if fill_time != hdf5::dataset::FillTime::Never {
+        assert_eq!(destination_ds.read_raw::<f64>().unwrap(), vec![7.25; size]);
     }
-    assert!(!dst.exists(), "dst must not be created when repack refuses");
+    drop(dcpl);
+    drop(destination_ds);
+    destination.close().unwrap();
+    drop(source_ds);
+    source.close().unwrap();
 }
 
 /// A dataset's pipeline as `(filter id, is_optional)`, in stored order — the
@@ -2243,16 +2275,6 @@ fn c_pipeline_order_and_optional_flags_survive_re_encoding_repack() {
     assert_eq!(&c_vals[..written], head.as_slice());
 }
 
-/// The same, through a re-encoding path that writes no chunks at all: a dataset
-/// the C library created and never wrote to (issue #293), whose storage repack
-/// reproduces as storage rather than materializing.
-///
-/// The pipeline is decoded and re-applied by the same `check_pipeline` +
-/// `carry_shape_and_pipeline` pair as every other re-encoding path, so this is
-/// not separate coverage of *that*. What it covers is the emit path afterwards:
-/// the message has to survive `with_unallocated_storage`, a writer that encodes
-/// nothing for it to describe. It is also the one test here that pins the C
-/// library's pipeline as a literal rather than comparing destination to source.
 #[test]
 fn a_never_written_dataset_keeps_its_pipeline_order_and_optional_flags() {
     let dir = tempfile::tempdir().unwrap();

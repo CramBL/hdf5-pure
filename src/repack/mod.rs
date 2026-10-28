@@ -51,12 +51,9 @@
 //!   names the *same* object in the output rather than getting an inline copy of
 //!   the encoding, so `h5dump` still reports `DATATYPE "/mytype"` and the
 //!   object's reference count still matches its users.
-//! - **Unallocated storage**: a dataset the reference library created and never
-//!   wrote to holds nothing, and comes out holding nothing rather than holding
-//!   the fill value a read answers with for every element it declares (issue
-//!   #293). A *resizable* destination keeps the eagerly built chunk index every
-//!   empty resizable dataset here gets, since an in-place append needs one to
-//!   exist; it stores no chunk either way.
+//! - **Unallocated storage**: destination element storage remains unallocated. A chunked
+//!   dataset's filter message is copied verbatim, including lossy and unsupported
+//!   filters. A resizable destination has an empty chunk index for in-place appends.
 //! - Group hierarchy up to 128 levels deep.
 //! - Attributes, on datasets, groups, and root, carried across with the
 //!   encoding the source gave them rather than rebuilt from an [`AttrValue`],
@@ -70,9 +67,8 @@
 //! decompress→recompress round-trip and the per-dataset decompression blowup,
 //! and a lossy filter survives byte-exact. Two paths still re-encode and so
 //! require **lossless** filters: a *contiguous/compact* filtered dataset, and a
-//! *sparse* chunked dataset (one with unallocated chunk-grid holes, which the
-//! dense verbatim path cannot lay out). A lossy pipeline on either of those is
-//! refused.
+//! *partly allocated* chunked dataset (one with both stored chunks and unallocated
+//! chunk-grid entries). A lossy pipeline on either of those is rejected.
 //!
 //! Refused (named, never dropped silently): chunked, filtered, or resizable
 //! datasets whose datatype is or contains an object reference (their element
@@ -908,32 +904,23 @@ fn emit_dataset(
     }
     db.with_fill_time(fill_time);
 
-    // Storage the source never allocated is reproduced as storage, not as the
-    // values reading it answers with. By default the reference library does not
-    // allocate a contiguous or chunked dataset's storage until something is
-    // written to it, so one created and never written holds nothing at all
-    // (compact data is inline and is always present); since #292 reading it
-    // answers the fill value for every element, and re-writing those values
-    // would turn a schema-only file into a fully materialized one of the size
-    // its shape declares (issue #293).
-    //
-    // Placed after every refusal the datatype and layout share and before the
-    // paths that move element bytes, all of which exist to rebuild an address
-    // this dataset does not store: there is no data to carry, so each of them
-    // would be reproducing the fill value it read rather than anything the
-    // source held. `check_pipeline` still runs, so a filter this crate could not
-    // re-apply is refused here exactly as it is on the re-encode path below —
-    // the filters are reproduced through the same `carry_shape_and_pipeline`.
+    // Preserve unallocated storage without materializing fill values. Copy the
+    // filter message verbatim because there are no stored values to re-encode.
     if storage_is_unallocated(&layout, &source_chunks) {
-        let filters = check_pipeline(pipeline.as_ref(), path)?;
+        if pipeline.is_some() && !matches!(&layout, DataLayout::Chunked { .. }) {
+            return Err(Error::RepackUnsupported(format!(
+                "dataset {path}: filter pipeline requires chunked storage"
+            )));
+        }
         db.fill = fill;
         db.with_unallocated_storage(datatype, &dims);
+        db.chunk_options.unallocated_pipeline = ds.filter_pipeline_message_bytes()?;
         carry_shape_and_pipeline(
             db,
             &dims,
             dataspace.extensible_max_dimensions(),
             &layout,
-            &filters,
+            &[],
         );
         copy_dataset_attrs(db, ds, path, objects)?;
         return Ok(());
@@ -2046,6 +2033,9 @@ mod tests {
     use std::thread;
 
     use rstest::rstest;
+    use test_util::data_layout;
+    use test_util::object_header::MessageType;
+    use test_util::object_header::v2;
 
     use super::*;
     use crate::DatatypeByteOrder;
@@ -2056,6 +2046,92 @@ mod tests {
     use crate::object_graph::TraversalLimit;
     use crate::scaleoffset::{FillAvailability, ScaleOffsetFill};
     use crate::superblock::LocatedSuperblock;
+
+    #[rstest]
+    #[case::mandatory(false)]
+    #[case::optional(true)]
+    fn repack_preserves_an_unallocated_unknown_filter(#[case] optional: bool) {
+        let pipeline = test_util::filter_pipeline::user_filter(optional);
+        let source =
+            File::from_bytes(unallocated_user_filter_source(optional, &[17], &[8])).unwrap();
+        assert_eq!(source.dataset("d").unwrap().chunks().unwrap(), []);
+
+        let destination = File::from_bytes(
+            stage(&source, &RepackOptions::new(), REPACK_BUDGET)
+                .unwrap()
+                .finish()
+                .unwrap(),
+        )
+        .unwrap();
+        let dataset = destination.dataset("d").unwrap();
+        assert_eq!(dataset.chunks().unwrap(), []);
+        assert_eq!(dataset.shape().unwrap(), [17]);
+        assert_eq!(dataset.chunk_shape().unwrap(), Some(vec![8]));
+        assert_eq!(
+            dataset.filter_pipeline_message_bytes().unwrap(),
+            Some(pipeline)
+        );
+        assert_eq!(dataset.read_f64().unwrap(), vec![0.0; 17]);
+    }
+
+    #[rstest]
+    #[case::mandatory(false)]
+    #[case::optional(true)]
+    fn repack_rejects_an_unallocated_contiguous_filter(#[case] optional: bool) {
+        let mut bytes = unallocated_user_filter_source(optional, &[17, 1], &[8, 1]);
+        let source = File::from_bytes(bytes.clone()).unwrap();
+        let header = source.dataset("d").unwrap().header_address().unwrap();
+        drop(source);
+        v2::replace_message(
+            &mut bytes,
+            usize::try_from(header).unwrap(),
+            MessageType::DATA_LAYOUT,
+            &data_layout::contiguous(u64::MAX, 136),
+        );
+        let source = File::from_bytes(bytes.clone()).unwrap();
+        assert_eq!(
+            source.dataset("d").unwrap().layout().unwrap(),
+            crate::Layout::Contiguous {
+                address: None,
+                size: 136
+            },
+        );
+        assert_eq!(
+            source
+                .dataset("d")
+                .unwrap()
+                .filter_pipeline_message_bytes()
+                .unwrap(),
+            Some(test_util::filter_pipeline::user_filter(optional)),
+        );
+        drop(source);
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.h5");
+        let dst = dir.path().join("dst.h5");
+        std::fs::write(&src, bytes).unwrap();
+
+        let err = repack(&src, &dst, &RepackOptions::new()).unwrap_err();
+
+        let Error::RepackUnsupported(reason) = &err else {
+            panic!("expected RepackUnsupported, got {err:?}");
+        };
+        assert_eq!(
+            reason,
+            "dataset d: filter pipeline requires chunked storage"
+        );
+        assert!(!dst.exists());
+    }
+
+    fn unallocated_user_filter_source(optional: bool, shape: &[u64], chunks: &[u64]) -> Vec<u8> {
+        let mut builder = FileBuilder::new();
+        let dataset = builder.create_dataset("d");
+        dataset
+            .with_unallocated_storage(crate::make_f64_type(), shape)
+            .with_chunks(chunks);
+        dataset.chunk_options.unallocated_pipeline =
+            Some(test_util::filter_pipeline::user_filter(optional));
+        builder.finish().unwrap()
+    }
 
     #[rstest]
     #[case::objects(TraversalBudget::new(3, 3), TraversalLimit::Objects, 3)]
