@@ -99,6 +99,8 @@ pub(crate) trait ObjectSource {
 pub(crate) struct Object {
     kind: Kind,
     heaps: Vec<VlPatch>,
+    /// Exclusive collection end indices for the attribute heap patches in `heaps`.
+    heap_ends: Vec<usize>,
 }
 
 impl Object {
@@ -109,10 +111,7 @@ impl Object {
     /// Propagates errors from [`PreparedDataset::prepare`].
     pub(crate) fn dataset(builder: DatasetBuilder) -> Result<Self, FormatError> {
         let (dataset, heaps) = PreparedDataset::prepare(builder)?;
-        Ok(Self {
-            kind: Kind::Dataset(Box::new(dataset)),
-            heaps,
-        })
+        Self::new(Kind::Dataset(Box::new(dataset)), heaps)
     }
 
     /// Prepares a group's attributes without its hard links.
@@ -126,13 +125,13 @@ impl Object {
             committed_datatype_paths,
             heaps,
         } = PreparedAttributes::new(attributes)?;
-        Ok(Self {
-            kind: Kind::Group {
+        Self::new(
+            Kind::Group {
                 attributes: messages,
                 paths: committed_datatype_paths,
             },
             heaps,
-        })
+        )
     }
 
     /// Prepares a committed datatype with a nonzero element size.
@@ -142,9 +141,29 @@ impl Object {
     /// Propagates errors from [`Datatype::element_size`].
     pub(crate) fn committed(datatype: Datatype) -> Result<Self, FormatError> {
         datatype.element_size()?;
+        Self::new(Kind::Committed(datatype), Vec::new())
+    }
+
+    /// Constructs an object with an index of its attribute heap collections.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the total collection count exceeds [`usize::MAX`].
+    fn new(kind: Kind, heaps: Vec<VlPatch>) -> Result<Self, FormatError> {
+        let mut end = 0_usize;
+        let heap_ends = heaps
+            .iter()
+            .map(|patch| {
+                end = end
+                    .checked_add(patch.collections.len())
+                    .ok_or_else(inconsistent)?;
+                Ok(end)
+            })
+            .collect::<Result<_, FormatError>>()?;
         Ok(Self {
-            kind: Kind::Committed(datatype),
-            heaps: Vec::new(),
+            kind,
+            heaps,
+            heap_ends,
         })
     }
 
@@ -301,7 +320,11 @@ impl Object {
 
     /// Returns attribute heap collections followed by dataset element heap collections.
     fn collections(&self) -> impl Iterator<Item = &Vec<u8>> {
-        let Self { kind, heaps } = self;
+        let Self {
+            kind,
+            heaps,
+            heap_ends: _,
+        } = self;
         heaps.iter().flat_map(|patch| &patch.collections).chain(
             match kind {
                 Kind::Dataset(dataset) => dataset
@@ -315,6 +338,34 @@ impl Object {
         )
     }
 
+    /// Returns the heap collection at `index` in [`Self::collections`] order.
+    ///
+    /// Returns [`None`] if `index` is outside that sequence.
+    fn collection(&self, index: usize) -> Option<&Vec<u8>> {
+        let Self {
+            kind,
+            heaps,
+            heap_ends,
+        } = self;
+        let patch = heap_ends.partition_point(|&end| end <= index);
+        if let Some(heap) = heaps.get(patch) {
+            let start = if patch == 0 {
+                0
+            } else {
+                *heap_ends.get(patch - 1)?
+            };
+            return heap.collections.get(index.checked_sub(start)?);
+        }
+        let Kind::Dataset(dataset) = kind else {
+            return None;
+        };
+        dataset
+            .storage
+            .vl_string_staging()?
+            .collections
+            .get(index.checked_sub(heap_ends.last().copied().unwrap_or(0))?)
+    }
+
     /// Assigns collection addresses to variable-length attribute and dataset references.
     ///
     /// `spans` has the order of [`Self::collections`].
@@ -324,7 +375,11 @@ impl Object {
     /// Returns [`FormatError::Internal`] if collection counts, lengths, or attribute indices differ
     /// from the prepared metadata. Propagates errors accessing dataset element bytes.
     fn patch_heaps(&mut self, spans: &[Allocation]) -> Result<(), FormatError> {
-        let Self { kind, heaps } = self;
+        let Self {
+            kind,
+            heaps,
+            heap_ends: _,
+        } = self;
         let addresses: Vec<u64> = spans.iter().map(|span| span.address.get()).collect();
         let mut cursor = 0;
         for patch in heaps.iter() {
@@ -562,7 +617,8 @@ impl<S: ObjectSource> Plan<S> {
     /// Writes allocations in address order while reconstructing one source object at a time.
     ///
     /// The working object is retained across adjacent allocations of that object. Chunk providers
-    /// supply verbatim payloads during data emission.
+    /// supply verbatim payloads during data emission. The writer encodes chunks when emitting
+    /// a header or data region.
     ///
     /// # Errors
     ///
@@ -658,8 +714,7 @@ impl<S: ObjectSource> Plan<S> {
                 {
                     drop(working.take());
                     let object = self.load(index)?;
-                    let chunks = object.chunks()?;
-                    working = Some((index, object, chunks));
+                    working = Some((index, object, None));
                 }
             }
             match part {
@@ -668,18 +723,18 @@ impl<S: ObjectSource> Plan<S> {
                 Part::ManagerSections(index) => sink.put(&managers[index].section_list)?,
                 part => {
                     let (index, object, chunks) = working.as_mut().ok_or_else(inconsistent)?;
+                    if chunks.is_none() && matches!(part, Part::Header(_) | Part::Data(_)) {
+                        *chunks = object.chunks()?;
+                    }
                     match part {
                         Part::Header(_) => {
                             sink.put(&self.header(*index, object, chunks.as_ref())?)?
                         }
                         Part::Attributes(_) => sink.put(&self.attributes(object, span)?)?,
                         Part::Links(_) => sink.put(&self.links(*index, span)?)?,
-                        Part::Heap(_, collection) => sink.put(
-                            object
-                                .collections()
-                                .nth(collection)
-                                .ok_or_else(inconsistent)?,
-                        )?,
+                        Part::Heap(_, collection) => {
+                            sink.put(object.collection(collection).ok_or_else(inconsistent)?)?
+                        }
                         Part::Data(_) => {
                             let Kind::Dataset(dataset) = &mut object.kind else {
                                 return Err(inconsistent().into());
@@ -1210,6 +1265,38 @@ mod tests {
     use crate::error::FormatError;
     use crate::object_path::ObjectPathBuf;
     use crate::type_builders::DatasetBuilder;
+
+    #[rstest]
+    #[case::first(0, 0)]
+    #[case::second(1, 1)]
+    #[case::elements(2, 2)]
+    #[case::past_end(3, 3)]
+    fn collection_lookup_preserves_attribute_and_element_order(
+        #[case] index: usize,
+        #[case] selected: usize,
+    ) {
+        let mut builder = DatasetBuilder::new("values");
+        builder.with_vlen_strings(&["element"]);
+        builder.set_attr("first", AttrValue::VarLenString("first".into()));
+        builder.set_attr("empty", AttrValue::VarLenStringArray(Vec::new()));
+        builder.set_attr("second", AttrValue::VarLenString("second".into()));
+        let object = Object::dataset(builder).unwrap();
+        let expected = match selected {
+            0 | 1 => object
+                .heaps
+                .get(selected * 2)
+                .and_then(|patch| patch.collections.first()),
+            2 => match &object.kind {
+                super::Kind::Dataset(dataset) => dataset
+                    .storage
+                    .vl_string_staging()
+                    .and_then(|staging| staging.collections.first()),
+                _ => None,
+            },
+            _ => None,
+        };
+        assert_eq!(object.collection(index), expected);
+    }
 
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     #[rstest]
