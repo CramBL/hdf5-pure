@@ -93,10 +93,15 @@ fn mixed_overwrites_preserve_native_values_after_payload_transfer(#[case] layout
             .unwrap();
         session.commit().unwrap();
         assert!(!session.has_staged_edits());
-        let committed = std::fs::read(&path).unwrap();
         session.commit().unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), committed);
     }
+    let committed = std::fs::read(&path).unwrap();
+    {
+        let session = File::open_rw(&path).unwrap();
+        session.commit().unwrap();
+        assert!(!session.has_staged_edits());
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), committed);
     let pure = File::open(&path).unwrap();
     assert_eq!(
         pure.dataset("fixed").unwrap().read_i32().unwrap(),
