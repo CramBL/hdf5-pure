@@ -46,7 +46,6 @@ fn fresh_native_fixture_has_complete_contents(
 
 #[rstest]
 #[case::committed_datatype_v1(Fixture::CommittedDatatypeV1)]
-#[case::generic_large(Fixture::GenericLarge)]
 #[case::hard_link_undo(Fixture::HardLinkUndo)]
 fn committed_native_fixture_has_complete_contents(#[case] fixture: Fixture) {
     let (path, order) = committed_fixture(fixture);

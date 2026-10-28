@@ -14,9 +14,6 @@ encoded addresses.
 dependency pinned in `Cargo.lock`. It selects the committed-fixture cases and sets
 `HDF5_PURE_UPDATE_TEST_DATA`. Without that variable, those cases read the existing copies.
 
-- `generic_large.h5`: a paged, persisting file with an attribute far larger
-  than its page, so the generic-large manager holds a sub-page fragment, for
-  `src/edit/`.
 - `hard_link_undo.h5`: two hard links to one dataset, for `src/edit/`.
 - `committed_datatype_v1.h5`: a committed datatype in a version 1 object
   header, linked once and used by two datasets, for `tests/main/named_datatypes.rs`.
