@@ -4,10 +4,15 @@
 
 use rstest::rstest;
 
-use super::{CommitPlan, CommitPreparation, InPlaceWrite, PreparedCommit};
+use super::CommitPlan;
+use super::CommitPreparation;
+use super::InPlaceWrite;
+use super::PreparedCommit;
 #[cfg(feature = "deflate")]
 use crate::DeflateLevel;
 use crate::File;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use crate::chunked_write::StorageAllocation;
 use crate::edit::WriteEngine;
 use crate::edit::dataset::MovingWrite;
 use crate::edit::test_util as edit_test_util;
@@ -19,31 +24,31 @@ use crate::writer::FileBuilder;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[rstest]
 #[case::allocated_one_mib(
-    false,
+    StorageAllocation::Allocated,
     262_144,
     "overwrite_allocated_one_mib",
     "overwrite_allocated_one_mib_control"
 )]
 #[case::allocated_four_mib(
-    false,
+    StorageAllocation::Allocated,
     1_048_576,
     "overwrite_allocated_four_mib",
     "overwrite_allocated_four_mib_control"
 )]
 #[case::unallocated_one_mib(
-    true,
+    StorageAllocation::Unallocated,
     262_144,
     "overwrite_unallocated_one_mib",
     "overwrite_unallocated_one_mib_control"
 )]
 #[case::unallocated_four_mib(
-    true,
+    StorageAllocation::Unallocated,
     1_048_576,
     "overwrite_unallocated_four_mib",
     "overwrite_unallocated_four_mib_control"
 )]
 fn overwrite_preparation_allocations_do_not_scale_with_replacement_bytes(
-    #[case] unallocated: bool,
+    #[case] allocation: StorageAllocation,
     #[case] elements: usize,
     #[case] region: &str,
     #[case] control: &str,
@@ -55,14 +60,13 @@ fn overwrite_preparation_allocations_do_not_scale_with_replacement_bytes(
         .collect();
     let mut builder = FileBuilder::new();
     let dataset = builder.create_dataset("d");
-    if unallocated {
-        dataset.with_unallocated_storage(
+    match allocation {
+        StorageAllocation::Allocated => dataset.with_i32_data(&original),
+        StorageAllocation::Unallocated => dataset.with_unallocated_storage(
             crate::type_builders::make_i32_type(),
             &[u64::try_from(elements).unwrap()],
-        );
-    } else {
-        dataset.with_i32_data(&original);
-    }
+        ),
+    };
     builder.write(&path).unwrap();
     let mut engine = edit_test_util::open_engine(&path);
     engine
@@ -88,7 +92,10 @@ fn overwrite_preparation_allocations_do_not_scale_with_replacement_bytes(
     assert!(measured.blocks > 0, "{measured}");
     assert!(measured.bytes < 65_536, "{measured}");
     assert!(measured.bytes < length / 8, "{measured}");
-    assert_eq!(matches!(prepared.plan, CommitPlan::Tree(_)), unallocated);
+    assert_eq!(
+        matches!(prepared.plan, CommitPlan::Tree(_)),
+        allocation == StorageAllocation::Unallocated
+    );
     engine.apply_commit(prepared).unwrap();
     drop(engine);
     let file = File::open(&path).unwrap();
