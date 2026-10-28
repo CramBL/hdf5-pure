@@ -353,11 +353,13 @@ impl PreparedDataset {
 
     /// Computes a chunked dataset's data-region length and object-header messages.
     ///
+    /// Provider payloads remain unread, and encoded chunk indexes are not serialized.
+    ///
     /// # Errors
     ///
     /// Returns [`FormatError::Internal`] if encoded chunks are required and `chunk_set` is
     /// absent. Propagates errors from planning verbatim chunks or measuring encoded chunks.
-    fn measure_chunked(
+    pub(super) fn measure_chunked(
         &self,
         data_address: StoredAddress,
         chunk_set: Option<&CompressedChunkSet>,

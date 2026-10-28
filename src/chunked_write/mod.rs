@@ -805,6 +805,40 @@ pub(crate) enum ChunkArrayKind {
     ExtensibleArray,
 }
 
+impl ChunkArrayKind {
+    /// Serializes an array index using the writer's address and length widths.
+    ///
+    /// # Errors
+    ///
+    /// Propagates array-index serialization errors.
+    fn build_at(
+        self,
+        slots: &IndexSlots<'_>,
+        chunk_bytes: u64,
+        has_filters: bool,
+        address: StoredAddress,
+    ) -> Result<Vec<u8>, FormatError> {
+        match self {
+            Self::ExtensibleArray => hdf5_pure_format::__private::build_extensible_array_at(
+                slots,
+                chunk_bytes,
+                INDEX_OFFSET_SIZE,
+                INDEX_LENGTH_SIZE,
+                has_filters,
+                address,
+            ),
+            Self::FixedArray => hdf5_pure_format::__private::build_fixed_array_at(
+                slots,
+                chunk_bytes,
+                INDEX_OFFSET_SIZE,
+                INDEX_LENGTH_SIZE,
+                has_filters,
+                address,
+            ),
+        }
+    }
+}
+
 impl ChunkIndexKind {
     /// The on-disk array this kind writes, or `None` for the single-chunk
     /// layout, which writes nothing after the chunk bytes.
@@ -941,6 +975,36 @@ pub(crate) struct CompressedChunkSet {
 }
 
 impl CompressedChunkSet {
+    /// Returns scalar index geometry for an array containing no stored chunks.
+    ///
+    /// Returns [`None`] for unallocated and single-chunk layouts, or if the set holds chunks
+    /// or chunk-slot assignments.
+    pub(crate) fn empty_index(&self) -> Option<EmptyChunkIndex> {
+        let Self {
+            chunks,
+            chunk_dims_u32,
+            element_size,
+            flags: _,
+            has_filters,
+            kind,
+            slot_of_chunk,
+            index_slots,
+            pipeline_message: _,
+        } = self;
+        if !chunks.is_empty() || !slot_of_chunk.is_empty() {
+            return None;
+        }
+        Some(EmptyChunkIndex {
+            kind: kind.array_kind()?,
+            chunk_bytes: full_chunk_bytes(
+                chunk_dims_u32.iter().map(|&dimension| u64::from(dimension)),
+                *element_size,
+            ),
+            slots: *index_slots,
+            has_filters: *has_filters,
+        })
+    }
+
     /// Where this set's chunks sit in its chunk index, given the addresses a
     /// layout pass assigned them.
     ///
@@ -959,6 +1023,40 @@ impl CompressedChunkSet {
         full_chunk_bytes(
             self.chunk_dims_u32.iter().map(|&d| u64::from(d)),
             self.element_size,
+        )
+    }
+}
+
+/// The scalar geometry of a chunk array containing no stored chunks.
+#[derive(Clone, Copy)]
+pub(crate) struct EmptyChunkIndex {
+    kind: ChunkArrayKind,
+    /// The unfiltered byte length of a full chunk.
+    chunk_bytes: u64,
+    /// The logical index span, including unallocated slots.
+    slots: u64,
+    /// Whether index records include stored sizes and filter masks.
+    has_filters: bool,
+}
+
+impl EmptyChunkIndex {
+    /// Serializes the empty array index at its assigned stored address.
+    ///
+    /// # Errors
+    ///
+    /// Propagates chunk-index slot and array serialization errors.
+    pub(crate) fn build_at(self, address: StoredAddress) -> Result<Vec<u8>, FormatError> {
+        let Self {
+            kind,
+            chunk_bytes,
+            slots,
+            has_filters,
+        } = self;
+        kind.build_at(
+            &IndexSlots::new(&[], &[], slots)?,
+            chunk_bytes,
+            has_filters,
+            address,
         )
     }
 }
@@ -1271,27 +1369,17 @@ fn chunk_index_bytes(
     written_chunks: &[ChunkRecord],
     index_address: StoredAddress,
 ) -> Result<(Vec<u8>, Vec<u8>), FormatError> {
-    let index = match set.kind {
-        // Nothing stored, so nothing to index; the layout message below carries
-        // the undefined address in place of one.
-        ChunkIndexKind::Unallocated => Vec::new(),
-        ChunkIndexKind::ExtensibleArray => hdf5_pure_format::__private::build_extensible_array_at(
-            &set.index_slots(written_chunks)?,
-            set.full_chunk_bytes(),
-            INDEX_OFFSET_SIZE,
-            INDEX_LENGTH_SIZE,
-            set.has_filters,
-            index_address,
-        )?,
-        ChunkIndexKind::SingleChunk => Vec::new(),
-        ChunkIndexKind::FixedArray => hdf5_pure_format::__private::build_fixed_array_at(
-            &set.index_slots(written_chunks)?,
-            set.full_chunk_bytes(),
-            INDEX_OFFSET_SIZE,
-            INDEX_LENGTH_SIZE,
-            set.has_filters,
-            index_address,
-        )?,
+    let index = match set.empty_index() {
+        Some(index) => index.build_at(index_address)?,
+        None => match set.kind.array_kind() {
+            Some(kind) => kind.build_at(
+                &set.index_slots(written_chunks)?,
+                set.full_chunk_bytes(),
+                set.has_filters,
+                index_address,
+            )?,
+            None => Vec::new(),
+        },
     };
     Ok((
         index,

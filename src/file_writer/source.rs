@@ -31,6 +31,7 @@ use crate::address::StoredAddressExt;
 use crate::attribute::AttributeMessage;
 use crate::chunked_write::ByteSink;
 use crate::chunked_write::CompressedChunkSet;
+use crate::chunked_write::EmptyChunkIndex;
 use crate::convert::Narrow;
 use crate::datatype::Datatype;
 use crate::error::Error;
@@ -227,7 +228,7 @@ impl Object {
             .as_ref()
             .map(|dense| dense.attr_info_message(StoredAddress::ZERO))
             .transpose()?;
-        let (header, data, chunked, links) = match &self.kind {
+        let (header, data, chunked, links, empty_index) = match &self.kind {
             Kind::Dataset(dataset) => {
                 let chunks = self.chunks()?;
                 let measured = dataset.measure(
@@ -244,6 +245,7 @@ impl Object {
                     }),
                     dataset.is_chunked(),
                     None,
+                    chunks.as_ref().and_then(CompressedChunkSet::empty_index),
                 )
             }
             Kind::Group { attributes, .. } => {
@@ -264,9 +266,10 @@ impl Object {
                         address: StoredAddress::ZERO,
                         length: plan.serialized_len(),
                     }),
+                    None,
                 )
             }
-            Kind::Committed(_) => (0, None, false, None),
+            Kind::Committed(_) => (0, None, false, None, None),
         };
         let preflight = !heaps.is_empty()
             || dense.is_some()
@@ -287,6 +290,7 @@ impl Object {
             },
             data,
             chunked,
+            empty_index,
             heaps,
             references: 1,
             preflight,
@@ -674,7 +678,12 @@ impl<S: ObjectSource> Plan<S> {
                 spans.push((span, Part::Heap(index, collection)));
             }
             if let Some(span) = record.data.filter(|span| span.length != 0) {
-                spans.push((span, Part::Data(index)));
+                spans.push((
+                    span,
+                    record
+                        .empty_index
+                        .map_or(Part::Data(index), Part::EmptyIndex),
+                ));
             }
         }
         if let Some((span, _)) = extension.as_ref() {
@@ -718,6 +727,7 @@ impl<S: ObjectSource> Plan<S> {
                 }
             }
             match part {
+                Part::EmptyIndex(index) => sink.put(&index.build_at(span.address)?)?,
                 Part::Extension => sink.put(&extension.as_ref().ok_or_else(inconsistent)?.1)?,
                 Part::ManagerHeader(index) => sink.put(&managers[index].header)?,
                 Part::ManagerSections(index) => sink.put(&managers[index].section_list)?,
@@ -872,7 +882,7 @@ impl<S: ObjectSource> Plan<S> {
     ///
     /// # Errors
     ///
-    /// Propagates source link, chunk planning, dense metadata, and header serialization errors.
+    /// Propagates source link, chunk measurement, dense metadata, and header serialization errors.
     fn header(
         &self,
         index: usize,
@@ -892,11 +902,12 @@ impl<S: ObjectSource> Plan<S> {
                 let address = record
                     .data
                     .map_or(super::UNDEF_ADDRESS, |span| span.address);
-                let built = dataset
+                let measured = dataset
                     .is_chunked()
-                    .then(|| dataset.build_chunked(address, chunks))
+                    .then(|| dataset.measure_chunked(address, chunks))
                     .transpose()?;
-                let messages = built.map(|built| (built.layout_message, built.pipeline_message));
+                let messages =
+                    measured.map(|measured| (measured.layout_message, measured.pipeline_message));
                 dataset.build_header(address, messages.as_ref(), info.as_deref(), self.libver)?
             }
             Kind::Group { attributes, .. } => {
@@ -947,6 +958,8 @@ struct Record {
     metadata: ObjectAllocation,
     data: Option<Allocation>,
     chunked: bool,
+    /// Geometry for an array index with no stored chunks.
+    empty_index: Option<EmptyChunkIndex>,
     heaps: Vec<Allocation>,
     references: u32,
     /// Whether final metadata checks require destination addresses or dense storage.
@@ -970,6 +983,8 @@ impl Record {
 enum Part {
     Attributes(usize),
     Data(usize),
+    /// An array index emitted from scalar geometry.
+    EmptyIndex(EmptyChunkIndex),
     Extension,
     Header(usize),
     Heap(usize, usize),
@@ -986,7 +1001,10 @@ impl Part {
             | Self::Header(index)
             | Self::Heap(index, _)
             | Self::Links(index) => Some(index),
-            Self::Extension | Self::ManagerHeader(_) | Self::ManagerSections(_) => None,
+            Self::EmptyIndex(_)
+            | Self::Extension
+            | Self::ManagerHeader(_)
+            | Self::ManagerSections(_) => None,
         }
     }
 }
@@ -1242,6 +1260,8 @@ mod tests {
     use std::borrow::Cow;
     use std::sync::Arc;
     use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
 
     use rstest::rstest;
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -1253,18 +1273,151 @@ mod tests {
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     use super::Record;
     use crate::AttrValue;
+    use crate::DeflateLevel;
     use crate::File;
     use crate::FileSpaceSettings;
     use crate::FileSpaceStrategy;
     use crate::GroupBuilder;
     use crate::LibVer;
+    use crate::MaxExtent;
     use crate::chunked_write::ChunkMeta;
     use crate::chunked_write::ChunkProvider;
+    use crate::data_layout::ChunkIndexLayout;
     use crate::data_layout::ChunkedLayoutFlags;
+    use crate::data_layout::DataLayout;
     use crate::error::Error;
     use crate::error::FormatError;
     use crate::object_path::ObjectPathBuf;
     use crate::type_builders::DatasetBuilder;
+
+    #[rstest]
+    #[case::classic(None)]
+    #[case::persistent(Some(FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true)))]
+    #[case::page(Some(FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true)))]
+    fn empty_index_emission_uses_retained_geometry(
+        #[case] settings: Option<FileSpaceSettings>,
+        #[values(8, 9, 32)] count: usize,
+        #[values(false, true)] filtered: bool,
+    ) {
+        let loads = Arc::new((0..=count).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>());
+        let plan = Plan::new(
+            EmptyTree {
+                count,
+                filtered,
+                loads: Arc::clone(&loads),
+            },
+            settings,
+            None,
+            LibVer::V110,
+        )
+        .unwrap();
+        let addresses: Vec<_> = plan
+            .records
+            .iter()
+            .take(count)
+            .map(|record| {
+                assert!(record.empty_index.is_some());
+                let allocation = record.data.unwrap();
+                assert!(allocation.length > 0);
+                allocation.address
+            })
+            .collect();
+        assert_eq!(
+            loads
+                .iter()
+                .take(count)
+                .map(|value| value.load(Ordering::Relaxed))
+                .collect::<Vec<_>>(),
+            vec![1; count]
+        );
+        let file = File::from_bytes(plan.finish().unwrap()).unwrap();
+        assert_eq!(
+            loads
+                .iter()
+                .take(count)
+                .map(|value| value.load(Ordering::Relaxed))
+                .collect::<Vec<_>>(),
+            vec![2; count]
+        );
+        assert_eq!(file.file_space_settings().unwrap(), settings);
+        let mut paths = file.root().datasets().unwrap();
+        paths.sort_unstable();
+        assert_eq!(
+            paths,
+            (0..count)
+                .map(|index| format!("d{index:04}"))
+                .collect::<Vec<_>>()
+        );
+        for (index, address) in addresses.into_iter().enumerate() {
+            let dataset = file.dataset(&format!("d{index:04}")).unwrap();
+            assert_eq!(dataset.shape().unwrap(), [0]);
+            assert_eq!(dataset.chunk_shape().unwrap(), Some(vec![2]));
+            assert_eq!(dataset.read_i32().unwrap(), Vec::<i32>::new());
+            assert_eq!(dataset.chunks().unwrap(), []);
+            assert_eq!(
+                dataset.attrs().unwrap()["index"],
+                AttrValue::I32(i32::try_from(index).unwrap())
+            );
+            let layout = dataset.data_layout().unwrap();
+            let DataLayout::Chunked {
+                index:
+                    ChunkIndexLayout::ExtensibleArray {
+                        address: Some(actual),
+                    },
+                ..
+            } = layout
+            else {
+                panic!("expected an allocated extensible array, got {layout:?}");
+            };
+            assert_eq!(actual, address);
+        }
+    }
+
+    struct EmptyTree {
+        count: usize,
+        filtered: bool,
+        loads: Arc<Vec<AtomicUsize>>,
+    }
+
+    impl ObjectSource for EmptyTree {
+        fn len(&self) -> usize {
+            self.count + 1
+        }
+
+        fn load(&self, index: usize) -> Result<Object, Error> {
+            let Self {
+                count,
+                filtered,
+                loads,
+            } = self;
+            loads[index].fetch_add(1, Ordering::Relaxed);
+            if index == *count {
+                return Ok(Object::group(&GroupBuilder::new("root").finish().attrs)?);
+            }
+            let mut builder = DatasetBuilder::new(&format!("d{index:04}"));
+            builder
+                .with_unallocated_storage(crate::make_i32_type(), &[0])
+                .with_chunks(&[2])
+                .with_maxshape(&[MaxExtent::Unlimited])
+                .set_attr("index", AttrValue::I32(i32::try_from(index).unwrap()));
+            if *filtered {
+                builder.with_deflate(DeflateLevel::Six);
+            }
+            Ok(Object::dataset(builder)?)
+        }
+
+        fn links(
+            &self,
+            index: usize,
+        ) -> Result<impl ExactSizeIterator<Item = (Cow<'_, str>, usize)>, Error> {
+            Ok((0..if index == self.count { self.count } else { 0 })
+                .map(|index| (Cow::Owned(format!("d{index:04}")), index)))
+        }
+
+        fn resolve(&self, path: &ObjectPathBuf) -> Result<usize, Error> {
+            Err(FormatError::UnknownCommittedDatatype(path.to_string()).into())
+        }
+    }
 
     #[rstest]
     #[case::first(0, 0)]
