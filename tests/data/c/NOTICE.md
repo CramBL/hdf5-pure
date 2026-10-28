@@ -14,8 +14,6 @@ encoded addresses.
 dependency pinned in `Cargo.lock`. It selects the committed-fixture cases and sets
 `HDF5_PURE_UPDATE_TEST_DATA`. Without that variable, those cases read the existing copies.
 
-- `paged_index.h5`: a paged, persisting file whose chunk index the C allocator
-  placed as metadata, for `src/edit/`.
 - `generic_large.h5`: a paged, persisting file with an attribute far larger
   than its page, so the generic-large manager holds a sub-page fragment, for
   `src/edit/`.

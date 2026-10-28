@@ -51,11 +51,7 @@ use hdf5_pure::FixedPointType;
 use hdf5_pure::FloatingPointType;
 use hdf5_pure::FreeSpaceManagerRole;
 use hdf5_pure::Layout;
-use hdf5_pure::MessageType;
 use hdf5_pure_format::__private::AccessMode;
-use hdf5_pure_format::__private::ChunkIndexLayout;
-use hdf5_pure_format::__private::DataLayout;
-use hdf5_pure_format::__private::ExtensibleArrayHeader;
 use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::ObjectHeader;
 
@@ -395,7 +391,7 @@ impl Fixture {
                 assert_eq!(aa, bb);
             }
             Self::HugeLinks12 => crate::huge_links::assert_storage(file, bytes),
-            Self::PagedIndex => assert_paged_index_storage(file, bytes),
+            Self::PagedIndex => crate::paged_index::assert_storage(file, bytes),
         }
     }
 
@@ -653,49 +649,6 @@ fn parse_header(file: &File, bytes: &[u8], address: u64) -> ObjectHeader {
         file.superblock().base_address,
     )
     .unwrap()
-}
-
-fn assert_paged_index_storage(file: &File, bytes: &[u8]) {
-    let address = storage::root_object_address(file, bytes, "victim");
-    let header = parse_header(file, bytes, address);
-    let layout = header
-        .messages
-        .iter()
-        .find(|message| message.msg_type == MessageType::DATA_LAYOUT)
-        .unwrap();
-    let DataLayout::Chunked {
-        index: ChunkIndexLayout::ExtensibleArray {
-            address: Some(address),
-        },
-        ..
-    } = DataLayout::parse_with_widths(&layout.data, widths(file)).unwrap()
-    else {
-        panic!("expected an allocated extensible array")
-    };
-    let index = ExtensibleArrayHeader::parse_with_widths(
-        bytes,
-        usize::try_from(address.get()).unwrap(),
-        widths(file),
-    )
-    .unwrap();
-    assert_eq!(index.max_idx_set, 16);
-    let metadata_pages = [address.get() / 4096, index.index_block_address.get() / 4096];
-    let mut chunks = file.dataset("victim").unwrap().chunks().unwrap();
-    chunks.sort_by(|left, right| left.offset.cmp(&right.offset));
-    assert_eq!(
-        chunks
-            .iter()
-            .map(|chunk| chunk.offset.clone())
-            .collect::<Vec<_>>(),
-        (0..16).map(|index| vec![index * 512]).collect::<Vec<_>>()
-    );
-    for chunk in chunks {
-        assert_eq!(chunk.storage_size, 512 * 4);
-        assert_eq!(chunk.filter_mask().raw_bits(), 0);
-        for page in chunk.address / 4096..=(chunk.address + chunk.storage_size - 1) / 4096 {
-            assert!(!metadata_pages.contains(&page));
-        }
-    }
 }
 
 // Section `subsubsec_fmt4_dataobject_hdr_prefix_one`, version 4.0.

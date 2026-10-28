@@ -5,7 +5,13 @@ use std::path::Path;
 use hdf5_pure_space::__private::FreeClass;
 use hdf5_pure_space::__private::PageType;
 
+use crate::Datatype;
+use crate::DatatypeByteOrder;
 use crate::FileLocking;
+use crate::FileSpaceStrategy;
+use crate::FixedPointType;
+use crate::FloatingPointType;
+use crate::Layout;
 use crate::PersistedFreeSpacePolicy;
 use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
@@ -14,6 +20,7 @@ use crate::address::BaseAddressExt;
 use crate::edit::MemoryStrategy;
 use crate::edit::SpaceOwnership;
 use crate::edit::WriteEngine;
+use crate::edit::object_header;
 use crate::edit::reclaim;
 use crate::error::Error;
 use crate::error::FormatError;
@@ -24,10 +31,12 @@ use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPath;
 use crate::object_path::ObjectPathBuf;
+use crate::reader::File;
 use crate::source::MetadataCacheConfig;
 use crate::source::Source;
 use crate::source::SourceMetadata;
 use crate::superblock;
+use crate::type_builders::DatasetBuilder;
 
 impl SpaceOwnership {
     /// Asserts complete classification of every byte in the file.
@@ -269,7 +278,17 @@ impl WriteEngine {
     }
 }
 
-pub(in crate::edit) fn assert_index_reclamation(path: &Path) {
+/// Deletes `victim` and checks that replacement raw data avoids its metadata pages.
+///
+/// Creates `added` with eight [`f64`] values equal to 2.5 and checks the completed
+/// hierarchy, dataset metadata, and persisted page policy. `keep` must contain
+/// `[1, 2, 3, 4]` as [`i32`] values in `order`.
+///
+/// # Panics
+///
+/// Panics if editing or reading fails, replacement raw data occupies a metadata
+/// page, or any observation differs from the expected edited fixture.
+pub(in crate::edit) fn assert_index_reclamation(path: &Path, order: DatatypeByteOrder) {
     const PAGE: u64 = 4096;
     let mut s = WriteEngine::open_with_locking(path, FileLocking::Enabled).unwrap();
     let page_size = s.space.page_size().expect("a paged file has a page size");
@@ -285,9 +304,9 @@ pub(in crate::edit) fn assert_index_reclamation(path: &Path) {
     .unwrap();
     let index_spans = s
         .chunked_index_spans(victim_addr)
-        .expect("the C library's extensible-array index is enumerable");
+        .expect("the extensible-array index is enumerable");
     assert!(!index_spans.is_empty());
-    let mut meta_pages: Vec<u64> = vec![0];
+    let mut meta_pages: Vec<u64> = vec![s.context.superblock().base_address.get() / PAGE];
     for (addr, len) in &index_spans {
         for p in (addr / PAGE)..=((addr + len - 1) / PAGE) {
             meta_pages.push(p);
@@ -297,7 +316,7 @@ pub(in crate::edit) fn assert_index_reclamation(path: &Path) {
     meta_pages.dedup();
     s.delete(&ObjectPathBuf::parse("/victim")).unwrap();
     s.commit().unwrap();
-    let mut db = crate::type_builders::DatasetBuilder::new("added");
+    let mut db = DatasetBuilder::new("added");
     db.with_f64_data(&[2.5f64; 8]).with_shape(&[8]);
     s.stage_created_dataset(&ObjectPathBuf::parse("/added"), db)
         .unwrap();
@@ -320,13 +339,15 @@ pub(in crate::edit) fn assert_index_reclamation(path: &Path) {
         );
     }
 
-    assert_eq!(added.read_f64().unwrap(), vec![2.5f64; 8]);
-    assert_eq!(
-        f.dataset("keep").unwrap().read_i32().unwrap(),
-        vec![1, 2, 3, 4]
-    );
+    f.assert_paged_index_edit(order);
 }
 
+/// Checks byte-for-byte preservation when rewriting a superblock extension's free-space record.
+///
+/// # Panics
+///
+/// Panics if the extension or record cannot be read or rewritten, or the rewritten
+/// bytes or header properties differ.
 pub(in crate::edit) fn assert_extension_records(source: &impl Source) {
     let located = superblock::read(source).unwrap();
     let addresses = AddressContext::from_effective_base(located.superblock.base_address);
@@ -343,9 +364,54 @@ pub(in crate::edit) fn assert_extension_records(source: &impl Source) {
             .unwrap();
 
     let rewritten =
-        crate::edit::object_header::rewrite_extension_region_bytes(&region, located.widths, &info)
-            .unwrap();
+        object_header::rewrite_extension_region_bytes(&region, located.widths, &info).unwrap();
 
     assert_eq!(rewritten.props(), region.props());
     assert_eq!(&rewritten[..], &region[..]);
+}
+
+impl File {
+    fn assert_paged_index_edit(&self, order: DatatypeByteOrder) {
+        let root = self.root();
+        let mut names = root.datasets().unwrap();
+        names.sort();
+        assert_eq!(names, ["added", "keep"]);
+        assert!(root.groups().unwrap().is_empty());
+        assert!(root.named_datatypes().unwrap().is_empty());
+        assert!(root.attrs().unwrap().is_empty());
+        let keep = self.dataset("keep").unwrap();
+        assert_eq!(keep.shape().unwrap(), [4]);
+        assert_eq!(
+            keep.datatype().unwrap(),
+            Datatype::FixedPoint(FixedPointType::new(4, order, true, 0, 32).unwrap())
+        );
+        assert_eq!(keep.read_i32().unwrap(), [1, 2, 3, 4]);
+        let added = self.dataset("added").unwrap();
+        assert_eq!(added.shape().unwrap(), [8]);
+        assert_eq!(
+            added.datatype().unwrap(),
+            Datatype::FloatingPoint(FloatingPointType::ieee754_binary64(
+                DatatypeByteOrder::LittleEndian
+            ))
+        );
+        assert_eq!(added.read_f64().unwrap(), [2.5; 8]);
+        for (dataset, expected_size) in [(&keep, 16), (&added, 64)] {
+            assert!(dataset.attrs().unwrap().is_empty());
+            assert!(dataset.filter_pipeline().unwrap().is_empty());
+            assert_eq!(dataset.chunk_shape().unwrap(), None);
+            let Layout::Contiguous {
+                address: Some(_),
+                size,
+            } = dataset.layout().unwrap()
+            else {
+                panic!("expected contiguous storage")
+            };
+            assert_eq!(size, expected_size);
+        }
+        let info = self.file_space_info().unwrap().unwrap();
+        assert_eq!(info.strategy, FileSpaceStrategy::Page);
+        assert!(info.persist);
+        assert_eq!(info.threshold, 1);
+        assert_eq!(info.page_size.get(), 4096);
+    }
 }

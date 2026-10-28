@@ -36,6 +36,7 @@ pub fn paged_index() -> Vec<u8> {
     );
     image.place(EA_HEADER, &array_header());
     image.place(EA_INDEX, &array_index());
+    image.place(EA_DATA_BLOCK, &array_data_block());
     image.place(VICTIM, &Dataset::Victim.build());
     image.place(KEEP, &Dataset::Keep.build());
     image.place(
@@ -145,7 +146,7 @@ fn array_header() -> Vec<u8> {
         MIN_SECONDARY_POINTERS,
         PAGE_ELEMENTS_BITS,
     ]);
-    for field in [0, 0, 0, 0, 16, 16, EA_INDEX as u64] {
+    for field in [0, 0, 1, DATA_BLOCK_SIZE as u64, 16, 20, EA_INDEX as u64] {
         header.extend_from_slice(&field.to_le_bytes());
     }
     checksum::append(&mut header);
@@ -157,14 +158,32 @@ fn array_index() -> Vec<u8> {
     let mut index = INDEX_SIGNATURE.to_vec();
     index.extend_from_slice(&[VERSION_ZERO, CLIENT_UNFILTERED]);
     index.extend_from_slice(&(EA_HEADER as u64).to_le_bytes());
-    for chunk in 0..16u64 {
+    for chunk in 0..u64::from(INDEX_ELEMENTS) {
         index.extend_from_slice(&(RAW as u64 + chunk * 2048).to_le_bytes());
     }
-    for _ in 0..DIRECT_POINTERS + SECONDARY_POINTERS {
+    index.extend_from_slice(&(EA_DATA_BLOCK as u64).to_le_bytes());
+    for _ in 1..DIRECT_POINTERS + SECONDARY_POINTERS {
         index.extend_from_slice(&u64::MAX.to_le_bytes());
     }
     checksum::append(&mut index);
     index
+}
+
+// Section `subsec_fmt4_appendixc_extarr`, version 4.0, defines the data block.
+fn array_data_block() -> Vec<u8> {
+    let mut block = DATA_SIGNATURE.to_vec();
+    block.extend_from_slice(&[VERSION_ZERO, CLIENT_UNFILTERED]);
+    block.extend_from_slice(&(EA_HEADER as u64).to_le_bytes());
+    block.extend_from_slice(&0u32.to_le_bytes());
+    for chunk in u64::from(INDEX_ELEMENTS)..16 {
+        block.extend_from_slice(&(RAW as u64 + chunk * 2048).to_le_bytes());
+    }
+    for _ in 0..INDEX_ELEMENTS {
+        block.extend_from_slice(&u64::MAX.to_le_bytes());
+    }
+    checksum::append(&mut block);
+    assert_eq!(block.len(), DATA_BLOCK_SIZE);
+    block
 }
 
 // Section `subsubsec_fmt4_dataobject_hdr_msg_fsinfo`, version 4.0, defines the
@@ -252,6 +271,7 @@ const VICTIM: usize = 512;
 const KEEP: usize = 768;
 const EA_HEADER: usize = 1024;
 const EA_INDEX: usize = 1152;
+const EA_DATA_BLOCK: usize = 1536;
 const META_MANAGER: usize = PAGE;
 const META_LIST: usize = PAGE + MANAGER_LIST_DISTANCE;
 const RAW_MANAGER: usize = PAGE + 256;
@@ -272,12 +292,14 @@ const EXTENSIBLE_ARRAY: u8 = 4;
 // Section `subsec_fmt4_appendixc_extarr`, version 4.0.
 const EA_SIGNATURE: &[u8; 4] = b"EAHD";
 const INDEX_SIGNATURE: &[u8; 4] = b"EAIB";
+const DATA_SIGNATURE: &[u8; 4] = b"EADB";
 const VERSION_ZERO: u8 = 0;
 const CLIENT_UNFILTERED: u8 = 0;
 const MAX_ELEMENTS_BITS: u8 = 32;
-const INDEX_ELEMENTS: u8 = 16;
+const INDEX_ELEMENTS: u8 = 4;
 const MIN_DATA_ELEMENTS: u8 = 16;
 const MIN_SECONDARY_POINTERS: u8 = 4;
+const DATA_BLOCK_SIZE: usize = 4 + 1 + 1 + 8 + 4 + MIN_DATA_ELEMENTS as usize * 8 + 4;
 const PAGE_ELEMENTS_BITS: u8 = 10;
 // H5EA__hdr_init in H5EAhdr.c and H5EA__iblock_alloc in H5EAiblock.c,
 // HDF5 2.2.0, derive six direct and twenty-five secondary pointers for this geometry.

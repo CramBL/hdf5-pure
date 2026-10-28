@@ -23,6 +23,7 @@ use test_util::fractal_heap;
 use test_util::widths::Widths;
 
 use super::common;
+use crate::DatatypeByteOrder;
 use crate::FileSpaceSettings;
 use crate::FreeSectionCoordinates;
 use crate::MemoryStrategy;
@@ -832,7 +833,7 @@ fn paged_open_seeds_each_manager_by_slot(
 fn a_chunk_index_is_not_reclaimed_as_raw() {
     let path = test_util::temp::temp_path("paged_index.h5");
     std::fs::write(&path, test_util::paged_index::paged_index()).unwrap();
-    edit::test_util::assert_index_reclamation(&path);
+    edit::test_util::assert_index_reclamation(&path, DatatypeByteOrder::LittleEndian);
 }
 
 #[test]
