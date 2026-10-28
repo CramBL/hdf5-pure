@@ -15,6 +15,8 @@ pub mod dense_attr;
 pub mod dense_attributes;
 #[cfg(feature = "hdf5")]
 pub mod dense_links;
+#[cfg(feature = "__hdf5-1.10")]
+pub mod exotic_attributes;
 #[cfg(feature = "hdf5")]
 pub mod file;
 pub mod file_builder;

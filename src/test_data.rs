@@ -2,14 +2,10 @@
 //!
 //! Owner-local native crosschecks use the optional reference-library helpers in `test-util-hdf5`.
 //! Tests without those capabilities use independent byte builders or committed fixtures.
-//! `HDF5_PURE_UPDATE_TEST_DATA` enables regeneration in tests that write committed fixtures.
 
 use crate::filter_pipeline::FilterDescription;
 use crate::filter_pipeline::FilterPipeline;
 use crate::filters::ChunkContext;
-
-/// Set, a unit test that commits a file rewrites it instead of checking it.
-pub const UPDATE: &str = "HDF5_PURE_UPDATE_TEST_DATA";
 
 /// Returns a version 2 filter pipeline of `filters`.
 pub fn filter_pipeline(filters: Vec<FilterDescription>) -> FilterPipeline {
