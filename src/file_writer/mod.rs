@@ -38,6 +38,7 @@ use hdf5_pure_format::__private::SECTION_CLASS_LARGE;
 use hdf5_pure_format::__private::SECTION_CLASS_SMALL;
 use hdf5_pure_space::__private::AllocationClass;
 
+use self::preparation::{DsData, DsFlat, VlPatch};
 #[cfg(test)]
 use crate::DeflateLevel;
 use crate::FileSpaceSettings;
@@ -55,14 +56,12 @@ use crate::attribute::AttributeMessage;
 use crate::attribute_info::AttributeInfoMessage;
 use crate::attribute_request::PreparedAttributes;
 use crate::bytes;
-use crate::chunked_write::{
-    self, ByteSink, ChunkOptions, ChunkProvider, ChunkedMeasure, ChunkedPlan, CompressedChunkSet,
-    VerbatimLayout, VerbatimPlan,
-};
+use crate::chunked_write::{self, ByteSink, CompressedChunkSet};
 use crate::convert::Narrow;
 use crate::data_layout::DataLayout;
-use crate::dataset_request::{DatasetMetadata, PreparedDataset, PreparedStorage, WholeFileDataset};
-use crate::dataspace::{Dataspace, MaxExtent};
+use crate::dataspace::Dataspace;
+#[cfg(test)]
+use crate::dataspace::MaxExtent;
 use crate::error::{FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::file_allocation::FileAllocation;
 use crate::file_create_properties::FileCreateProperties;
@@ -98,6 +97,8 @@ use crate::{SuperblockStatus, SuperblockStatusFlags};
 pub use crate::type_builders::AttrValue;
 
 use crate::datatype::{CharacterSet, Datatype};
+
+mod preparation;
 
 /// The width of every address in a file this crate writes.
 pub(crate) const OFFSET_WIDTH: OffsetWidth = OffsetWidth::Eight;
@@ -982,379 +983,6 @@ impl FileWriter {
         let nonpaged_persist = file_space.filter(|settings| {
             settings.strategy() != FileSpaceStrategy::Page && settings.persist()
         });
-        struct DsFlat {
-            /// Link name in the owning group.
-            name: LinkNameBuf,
-            dt: Datatype,
-            /// Where `dt` is written: in this dataset's header, or in a committed
-            /// datatype object it names.
-            dt_location: DatatypeLocation,
-            /// The path of the committed datatype `dt_location` refers to. `dt_location`
-            /// holds the undefined address until the writer places that datatype.
-            committed_datatype_path: Option<ObjectPathBuf>,
-            ds: Dataspace,
-            storage: PreparedStorage,
-            attrs: Vec<AttributeMessage>,
-            /// The reserved content hash, completed after resolving element addresses.
-            #[cfg(feature = "provenance")]
-            pending_hash: Option<PendingHash>,
-            /// Attribute indices paired with committed datatype paths for address resolution.
-            attr_committed_datatype_paths: Vec<(usize, ObjectPathBuf)>,
-            chunk_options: ChunkOptions,
-            maxshape: Option<Vec<MaxExtent>>,
-            /// One encoded fill element, or `None` for the library default.
-            fill: Option<Vec<u8>>,
-            /// The fill time policy for the dataset.
-            fill_time: FillTime,
-            /// The logical byte extent recorded in a contiguous Data Layout message,
-            /// including elements whose storage remains unallocated.
-            declared_contiguous_len: u64,
-        }
-
-        impl DsFlat {
-            /// Bytes this dataset's contiguous data region occupies. Produced
-            /// data has none in hand, but its total is known from the geometry —
-            /// which is the whole reason it can be laid out without being read.
-            fn contiguous_len(&self) -> u64 {
-                match self.storage.produced() {
-                    Some(p) => p.total_bytes,
-                    None => self.storage.raw().len() as u64,
-                }
-            }
-
-            /// Describes this dataset's contiguous region for placement and emission.
-            ///
-            /// The element buffer or provider stays in prepared storage.
-            fn contiguous_data(&self) -> DsData<'static> {
-                match self.storage.produced() {
-                    Some(p) => DsData::Produced {
-                        total_bytes: p.total_bytes,
-                        block_bytes: p.block_bytes,
-                    },
-                    None => DsData::InMemory {
-                        len: self.storage.raw().len() as u64,
-                    },
-                }
-            }
-
-            /// Encodes the dataset's resolved element bytes into an address-independent chunk set.
-            ///
-            /// # Errors
-            ///
-            /// Returns [`FormatError::ZeroSizedDatatype`] if an element has zero width,
-            /// [`FormatError::UnsupportedFilter`] if a filter has no encoder, or
-            /// [`FormatError::InvalidChunkGeometry`] if a chunk is larger than [`u32::MAX`] bytes.
-            ///
-            /// Returns [`FormatError::ChunkedReadError`] if the chunk-index geometry is
-            /// unsupported or exceeds the writer's index limits, or
-            /// [`FormatError::ValueTooLargeForPlatform`] if an element size or chunk count exceeds
-            /// [`usize::MAX`].
-            ///
-            /// Returns [`FormatError::FilterError`] for invalid filter parameters or input.
-            /// Filter-specific errors from [`ChunkOptions::build_pipeline`] and
-            /// [`crate::filters::compress_chunk_with`] are propagated.
-            fn compress_chunks(&self) -> Result<CompressedChunkSet, FormatError> {
-                let chunk_dims = self.chunk_options.resolve_chunk_dims(&self.ds.dimensions);
-                let ctx = crate::filters::ChunkContext::from_datatype(&chunk_dims, &self.dt)?;
-                let elem = ctx.element_size.narrow::<NonZeroUsize>()?;
-                chunked_write::compress_chunks(
-                    self.storage.raw(),
-                    &self.ds.dimensions,
-                    ctx,
-                    &self.chunk_options,
-                    self.maxshape.as_deref(),
-                    FillPattern::new(self.fill_time, self.fill.as_deref(), elem),
-                    self.storage.allocation(),
-                )
-            }
-        }
-
-        /// The position of a reserved hash attribute.
-        #[cfg(feature = "provenance")]
-        struct PendingHash {
-            /// The index in the dataset's flattened attribute list.
-            attribute: usize,
-        }
-
-        #[cfg(feature = "provenance")]
-        impl PendingHash {
-            /// Appends hash metadata with a 64-byte digest placeholder.
-            fn reserve(
-                attrs: &mut Vec<AttributeMessage>,
-                provenance: crate::provenance::Provenance,
-            ) -> Self {
-                let attribute = attrs.len();
-                attrs.extend(provenance.deferred_attrs());
-                Self { attribute }
-            }
-
-            /// Writes the hash of finalized unfiltered element bytes into the reserved attribute.
-            ///
-            /// # Errors
-            ///
-            /// Returns [`FormatError::Internal`] if the reserved attribute is absent or its
-            /// data length differs from the hexadecimal digest length.
-            fn complete(
-                self,
-                attrs: &mut [AttributeMessage],
-                bytes: &[u8],
-            ) -> Result<(), FormatError> {
-                let attribute = attrs.get_mut(self.attribute).ok_or_else(|| {
-                    FormatError::Internal(
-                        "the reserved provenance digest attribute is absent".into(),
-                    )
-                })?;
-                let hash = crate::provenance::sha256_hex(bytes);
-                if attribute.raw_data.len() != hash.len() {
-                    return Err(FormatError::Internal(
-                        "the provenance digest does not occupy its reserved bytes".into(),
-                    ));
-                }
-                attribute.raw_data.copy_from_slice(hash.as_bytes());
-                Ok(())
-            }
-        }
-
-        /// A dataset's planned data region.
-        enum DsData<'a> {
-            /// Encoded chunks borrowed from the writer's retained set, with finalized metadata.
-            Encoded {
-                chunks: &'a CompressedChunkSet,
-                plan: ChunkedPlan,
-            },
-            /// A contiguous region emitted from the element buffer in prepared storage.
-            InMemory { len: u64 },
-            /// A contiguous region written block by block from the provider held in the
-            /// dataset's prepared storage.
-            Produced {
-                /// Bytes the whole region occupies.
-                total_bytes: u64,
-                /// Bytes per block, the last one excepted.
-                block_bytes: u64,
-            },
-            /// A verbatim chunk plan whose provider is held in the dataset's prepared storage.
-            Streamed(VerbatimPlan),
-        }
-        impl DsData<'_> {
-            /// Writes the data region, including a chunk index for chunked storage.
-            ///
-            /// # Errors
-            ///
-            /// Returns [`EmissionError::Format`] with [`FormatError::Internal`] if a streamed
-            /// or produced region is paired with prepared storage of another kind. Propagates
-            /// provider and serialization errors as [`EmissionError::Format`] and sink errors as
-            /// [`EmissionError::Sink`].
-            fn emit<S: ByteSink>(
-                &self,
-                sink: &mut S,
-                storage: &PreparedStorage,
-            ) -> Result<(), EmissionError<S::Error>> {
-                match self {
-                    DsData::Encoded { chunks, plan } => {
-                        chunked_write::emit_chunked_data(sink, chunks, plan)
-                    }
-                    DsData::InMemory { .. } => sink.put(storage.raw()).map_err(EmissionError::Sink),
-                    DsData::Streamed(plan) => {
-                        let provider = storage
-                            .chunks()
-                            .ok_or_else(|| {
-                                FormatError::Internal(
-                                    "a streamed region requires prepared chunk storage".into(),
-                                )
-                            })?
-                            .provider
-                            .0
-                            .as_ref();
-                        chunked_write::emit_chunked_data_verbatim(sink, plan, provider)
-                    }
-                    DsData::Produced {
-                        total_bytes,
-                        block_bytes,
-                    } => {
-                        let payload = storage.produced().ok_or_else(|| {
-                            FormatError::Internal(
-                                "a produced region requires a prepared producer".into(),
-                            )
-                        })?;
-                        emit_produced_data(
-                            sink,
-                            payload.provider.0.as_ref(),
-                            *total_bytes,
-                            *block_bytes,
-                        )
-                    }
-                }
-            }
-
-            fn len(&self) -> u64 {
-                match self {
-                    DsData::Encoded { plan, .. } => plan.data_len,
-                    DsData::InMemory { len } => *len,
-                    DsData::Streamed(plan) => plan.total_len,
-                    DsData::Produced { total_bytes, .. } => *total_bytes,
-                }
-            }
-        }
-
-        /// Returns the error for a variable-length dataset whose element bytes
-        /// are not held in memory when its global heap references are patched.
-        fn vl_element_bytes_absent(link_name: &str) -> FormatError {
-            // VL staging goes only to a dataset whose bytes are in memory: a
-            // chunked one is patched before its chunks are encoded, and
-            // `with_produced_data` debug-asserts against the combination.
-            debug_assert!(
-                false,
-                "a staged VL-string dataset holds its element bytes in memory"
-            );
-            FormatError::SerializationError(format!(
-                "the element bytes of variable-length dataset {link_name:?} are not held in \
-                 memory, so its global heap references cannot be patched"
-            ))
-        }
-
-        /// Emit a contiguous produced region: pull each block from `provider` and
-        /// write it straight through, so the region's bytes are never all
-        /// resident. The last block is whatever remains, and a block of any other
-        /// length is refused — it would shift every address after this dataset.
-        fn emit_produced_data<Sk: ByteSink>(
-            sink: &mut Sk,
-            provider: &dyn ChunkProvider,
-            total_bytes: u64,
-            block_bytes: u64,
-        ) -> Result<(), EmissionError<Sk::Error>> {
-            // A zero-length block would never advance the cursor, and the loop
-            // below would ask for block 0 forever. Callers construct the payload
-            // from a checked block size, so this is a construction invariant —
-            // but a hang is a far worse failure than a wrong file, and it costs
-            // one comparison to make it an error instead.
-            if block_bytes == 0 && total_bytes > 0 {
-                return Err(FormatError::SerializationError(
-                    "a produced dataset declared a zero-length block".into(),
-                )
-                .into());
-            }
-            // One buffer for the whole region, reused across blocks.
-            let mut block = Vec::new();
-            let mut written = 0u64;
-            let mut index = 0usize;
-            while written < total_bytes {
-                let expected = block_bytes.min(total_bytes - written);
-                block.clear();
-                provider.chunk_bytes(index, &mut block)?;
-                if block.len() as u64 != expected {
-                    return Err(FormatError::SerializationError(
-                        "a produced dataset's block does not match its planned size".into(),
-                    )
-                    .into());
-                }
-                sink.put(&block).map_err(EmissionError::Sink)?;
-                written += expected;
-                index += 1;
-            }
-            Ok(())
-        }
-
-        /// A chunked dataset's object-header messages and planned data region.
-        struct ChunkedBuilt<'a> {
-            layout_message: Vec<u8>,
-            pipeline_message: Option<Vec<u8>>,
-            data: DsData<'a>,
-        }
-
-        /// Computes a chunked dataset's data-region length and object-header messages.
-        ///
-        /// # Errors
-        ///
-        /// Returns the errors of planning verbatim chunks or measuring encoded chunks.
-        ///
-        /// # Panics
-        ///
-        /// Panics if an encoded dataset has no retained chunk set.
-        fn measure_chunked(
-            d: &DsFlat,
-            data_address: StoredAddress,
-            chunk_set: Option<&CompressedChunkSet>,
-        ) -> Result<ChunkedMeasure, FormatError> {
-            if let Some(rc) = d.storage.chunks() {
-                let VerbatimLayout {
-                    plan,
-                    layout_message,
-                    pipeline_message,
-                } = chunked_write::plan_chunked_data_verbatim(
-                    &rc.meta,
-                    &d.ds.dimensions,
-                    &rc.chunk_dims,
-                    rc.element_size,
-                    rc.flags,
-                    rc.pipeline_message.as_deref(),
-                    data_address,
-                    d.maxshape.as_deref(),
-                )?;
-                Ok(ChunkedMeasure {
-                    data_len: plan.total_len,
-                    layout_message,
-                    pipeline_message,
-                })
-            } else {
-                let set = chunk_set
-                    .expect("an encode-path chunked dataset must have a precomputed chunk set");
-                chunked_write::measure_chunked_at(set, data_address)
-            }
-        }
-
-        /// Plans emission of a chunked dataset at `data_address`.
-        ///
-        /// Encoded data borrows the retained chunk set. Verbatim data is read from its provider
-        /// during emission.
-        ///
-        /// # Errors
-        ///
-        /// Returns the errors of planning encoded or verbatim chunks.
-        ///
-        /// # Panics
-        ///
-        /// Panics if an encoded dataset has no retained chunk set.
-        fn build_chunked<'a>(
-            d: &DsFlat,
-            data_address: StoredAddress,
-            chunk_set: Option<&'a CompressedChunkSet>,
-        ) -> Result<ChunkedBuilt<'a>, FormatError> {
-            if let Some(rc) = d.storage.chunks() {
-                // Verbatim chunks are always streamed: the layout is planned from
-                // chunk sizes alone, and the bytes are pulled from the provider in
-                // the assembly loop (buffered `finish` and streaming `finish_to`
-                // share that one emitter, so their output is byte-identical).
-                let VerbatimLayout {
-                    plan,
-                    layout_message,
-                    pipeline_message,
-                } = chunked_write::plan_chunked_data_verbatim(
-                    &rc.meta,
-                    &d.ds.dimensions,
-                    &rc.chunk_dims,
-                    rc.element_size,
-                    rc.flags,
-                    rc.pipeline_message.as_deref(),
-                    data_address,
-                    d.maxshape.as_deref(),
-                )?;
-                Ok(ChunkedBuilt {
-                    layout_message,
-                    pipeline_message,
-                    data: DsData::Streamed(plan),
-                })
-            } else {
-                // Each cached chunk set contains the encoded final element bytes.
-                let set = chunk_set
-                    .expect("an encode-path chunked dataset must have a precomputed chunk set");
-                let plan = chunked_write::plan_chunked_at(set, data_address)?;
-                Ok(ChunkedBuilt {
-                    layout_message: plan.layout_message.clone(),
-                    pipeline_message: plan.pipeline_message.clone(),
-                    data: DsData::Encoded { chunks: set, plan },
-                })
-            }
-        }
         struct GrpFlat {
             /// Link name in the owning group.
             name: LinkNameBuf,
@@ -1382,72 +1010,6 @@ impl FileWriter {
         let mut committed: Vec<CtFlat> = Vec::new();
         let mut root_ds_indices: Vec<usize> = Vec::new();
         let mut root_group_indices: Vec<usize> = Vec::new();
-
-        fn flatten_dataset(
-            mut db: DatasetBuilder,
-            all_ds: &mut Vec<DsFlat>,
-            ds_vl: &mut Vec<Vec<VlPatch>>,
-        ) -> Result<usize, FormatError> {
-            let name = link_name(core::mem::take(&mut db.name))?;
-            let WholeFileDataset {
-                metadata,
-                storage,
-                committed_datatype_paths: attr_committed_datatype_paths,
-            } = PreparedDataset::parse(db)?.into_whole_file()?;
-            let DatasetMetadata {
-                dt,
-                element_size: _,
-                ds: dspace,
-                extent: declared_contiguous_len,
-                attrs:
-                    PreparedAttributes {
-                        messages: attrs,
-                        collections,
-                    },
-                chunk_options,
-                fill,
-                fill_time,
-                committed_datatype_path,
-                #[cfg(feature = "provenance")]
-                provenance,
-            } = metadata;
-            #[cfg(feature = "provenance")]
-            let mut attrs = attrs;
-            let maxshape = dspace.max_dimensions.clone();
-            let patches = collections
-                .into_iter()
-                .map(|(attr_index, collections)| VlPatch {
-                    collections,
-                    attr_index,
-                })
-                .collect();
-            #[cfg(feature = "provenance")]
-            let pending_hash =
-                provenance.map(|provenance| PendingHash::reserve(&mut attrs, provenance));
-            let idx = all_ds.len();
-            all_ds.push(DsFlat {
-                name,
-                dt,
-                dt_location: match committed_datatype_path {
-                    Some(_) => DatatypeLocation::Committed(UNDEF_ADDRESS),
-                    None => DatatypeLocation::Inline,
-                },
-                committed_datatype_path,
-                ds: dspace,
-                storage,
-                attrs,
-                #[cfg(feature = "provenance")]
-                pending_hash,
-                attr_committed_datatype_paths,
-                chunk_options,
-                maxshape,
-                fill,
-                fill_time: fill_time.unwrap_or_default(),
-                declared_contiguous_len,
-            });
-            ds_vl.push(patches);
-            Ok(idx)
-        }
 
         /// Appends one group's committed datatypes to the file-wide list and returns their indices.
         ///
@@ -1501,7 +1063,7 @@ impl FileWriter {
             let committed_idx = flatten_committed(g.committed, committed)?;
             let mut ds_idx = Vec::new();
             for db in g.datasets {
-                ds_idx.push(flatten_dataset(db, all_ds, ds_vl)?);
+                ds_idx.push(preparation::flatten_dataset(db, all_ds, ds_vl)?);
             }
             let mut sub_grp_idx = Vec::new();
             for sg in g.sub_groups {
@@ -1526,7 +1088,7 @@ impl FileWriter {
         let root_committed_indices = flatten_committed(self.root_committed, &mut committed)?;
 
         for db in self.root_datasets {
-            root_ds_indices.push(flatten_dataset(db, &mut all_ds, &mut ds_vl)?);
+            root_ds_indices.push(preparation::flatten_dataset(db, &mut all_ds, &mut ds_vl)?);
         }
 
         for g in self.groups.into_iter() {
@@ -1542,12 +1104,6 @@ impl FileWriter {
 
         // Build global heap collections for variable-length string attributes.
         // Track which attribute messages need VL patching, across root, groups, and datasets.
-        struct VlPatch {
-            /// The attribute's collections, in the order their objects appear.
-            collections: Vec<Vec<u8>>,
-            attr_index: usize, // index into the relevant attrs Vec
-        }
-
         /// Reserves raw collection allocations and returns addresses for reference patching.
         ///
         /// If `retain` is set, appends the addresses to `retained` for address-ordered emission.
@@ -2231,7 +1787,7 @@ impl FileWriter {
                     ds_data_lens.push(0);
                     (header.layout_message, header.pipeline_message)
                 } else {
-                    let measured = measure_chunked(
+                    let measured = preparation::measure_chunked(
                         d,
                         StoredAddress::new(dummy_cursor),
                         chunk_sets[i].as_ref(),
@@ -2721,7 +2277,8 @@ impl FileWriter {
             for &i in &small_indices {
                 let base_addr = StoredAddress::new(c);
                 let layout = if is_chunked[i] {
-                    let built = build_chunked(&all_ds[i], base_addr, chunk_sets[i].as_ref())?;
+                    let built =
+                        preparation::build_chunked(&all_ds[i], base_addr, chunk_sets[i].as_ref())?;
                     // The small/large classification and the free-space-manager
                     // sizing used the sizing-pass length (`ds_data_lens[i]`); the
                     // real build must match it, or the reserved manager space and
@@ -2767,7 +2324,8 @@ impl FileWriter {
                 let data_addr = StoredAddress::new(c);
                 let built_len;
                 let layout = if is_chunked[i] {
-                    let built = build_chunked(&all_ds[i], data_addr, chunk_sets[i].as_ref())?;
+                    let built =
+                        preparation::build_chunked(&all_ds[i], data_addr, chunk_sets[i].as_ref())?;
                     // See the small-run note: the real build length must equal the
                     // sizing-pass length the large classification/fragment used.
                     debug_assert_eq!(built.data.len(), ds_data_lens[i]);
@@ -3048,7 +2606,7 @@ impl FileWriter {
         for (i, d) in all_ds.iter_mut().enumerate() {
             if is_chunked[i] {
                 let data_address = allocation.reserve(ds_data_lens[i], AllocationClass::Raw)?;
-                let built = build_chunked(d, data_address, chunk_sets[i].as_ref())?;
+                let built = preparation::build_chunked(d, data_address, chunk_sets[i].as_ref())?;
                 if built.data.len() != ds_data_lens[i] {
                     return Err(FormatError::Internal(
                         "chunk data differs from its allocation".into(),
@@ -3138,7 +2696,7 @@ impl FileWriter {
                     // bytes in memory. Report it: heap addresses patched into
                     // another buffer would corrupt the file in silence.
                     if !matches!(ds_layouts[i].data, DsData::InMemory { .. }) {
-                        return Err(vl_element_bytes_absent(d.name.as_str()).into());
+                        return Err(preparation::vl_element_bytes_absent(d.name.as_str()).into());
                     }
                     let bytes = d.storage.raw_mut()?;
                     let addrs = place_collections(
