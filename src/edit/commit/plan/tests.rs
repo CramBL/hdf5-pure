@@ -1,4 +1,6 @@
-//! Commit preparation and staged-input ownership across application and rejection.
+//! Commit preparation, replacement allocation, and staged-input ownership.
+//!
+//! Allocation measurements cover [`PreparedCommit::prepare`] after staging and before application.
 
 use rstest::rstest;
 
@@ -13,6 +15,86 @@ use crate::error::Error;
 use crate::object_path::ObjectPathBuf;
 use crate::type_builders::DatasetBuilder;
 use crate::writer::FileBuilder;
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[rstest]
+#[case::allocated_one_mib(
+    false,
+    262_144,
+    "overwrite_allocated_one_mib",
+    "overwrite_allocated_one_mib_control"
+)]
+#[case::allocated_four_mib(
+    false,
+    1_048_576,
+    "overwrite_allocated_four_mib",
+    "overwrite_allocated_four_mib_control"
+)]
+#[case::unallocated_one_mib(
+    true,
+    262_144,
+    "overwrite_unallocated_one_mib",
+    "overwrite_unallocated_one_mib_control"
+)]
+#[case::unallocated_four_mib(
+    true,
+    1_048_576,
+    "overwrite_unallocated_four_mib",
+    "overwrite_unallocated_four_mib_control"
+)]
+fn overwrite_preparation_allocations_do_not_scale_with_replacement_bytes(
+    #[case] unallocated: bool,
+    #[case] elements: usize,
+    #[case] region: &str,
+    #[case] control: &str,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("allocation.h5");
+    let original = vec![0; elements];
+    let replacement: Vec<i32> = (0..elements)
+        .map(|index| i32::try_from(index).unwrap())
+        .collect();
+    let mut builder = FileBuilder::new();
+    let dataset = builder.create_dataset("d");
+    if unallocated {
+        dataset.with_unallocated_storage(
+            crate::type_builders::make_i32_type(),
+            &[u64::try_from(elements).unwrap()],
+        );
+    } else {
+        dataset.with_i32_data(&original);
+    }
+    builder.write(&path).unwrap();
+    let mut engine = edit_test_util::open_engine(&path);
+    engine
+        .stage_dataset_write(&ObjectPathBuf::parse("d"), i32_dataset(&replacement))
+        .unwrap();
+    let bytes = engine.staged.writes()[0].1.raw();
+    let length = u64::try_from(bytes.len()).unwrap();
+    let pointer = bytes.as_ptr();
+    let (copy, positive) =
+        test_util::allocation::measure(control, || std::hint::black_box(bytes.to_vec()));
+    assert_eq!(copy, bytes);
+    assert!(positive.blocks > 0, "{positive}");
+    assert!(positive.bytes >= length, "{positive}");
+    drop(copy);
+    let staged = std::mem::take(&mut engine.staged);
+    engine.begin_commit(&staged);
+    let (prepared, measured) =
+        test_util::allocation::measure(region, || PreparedCommit::prepare(&mut engine, staged));
+    let CommitPreparation::Prepared(prepared) = prepared else {
+        panic!("expected the replacement to prepare");
+    };
+    assert_eq!(prepared.overwrites.writes[0].1.raw().as_ptr(), pointer);
+    assert!(measured.blocks > 0, "{measured}");
+    assert!(measured.bytes < 65_536, "{measured}");
+    assert!(measured.bytes < length / 8, "{measured}");
+    assert_eq!(matches!(prepared.plan, CommitPlan::Tree(_)), unallocated);
+    engine.apply_commit(prepared).unwrap();
+    drop(engine);
+    let file = File::open(&path).unwrap();
+    assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), replacement);
+}
 
 #[rstest]
 #[case::in_place(false)]
