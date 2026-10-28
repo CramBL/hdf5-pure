@@ -832,65 +832,7 @@ fn paged_open_seeds_each_manager_by_slot(
 fn a_chunk_index_is_not_reclaimed_as_raw() {
     let path = test_util::temp::temp_path("paged_index.h5");
     std::fs::write(&path, test_util::paged_index::paged_index()).unwrap();
-    assert_index_reclamation(&path);
-}
-
-pub(in crate::edit) fn assert_index_reclamation(path: &Path) {
-    const PAGE: u64 = 4096;
-    let mut s = WriteEngine::open_with_locking(path, FileLocking::Enabled).unwrap();
-    let page_size = s.space.page_size().expect("a paged file has a page size");
-    assert_eq!(page_size.get(), PAGE);
-    let victim_addr = crate::group_v2::resolve_path_any(
-        s.image.as_slice().unwrap(),
-        AccessMode::ReadWrite,
-        s.context.superblock(),
-        s.context.widths(),
-        AddressContext::from_effective_base(s.context.superblock().base_address),
-        &ObjectPath::parse("victim"),
-    )
-    .unwrap();
-    let index_spans = s
-        .chunked_index_spans(victim_addr)
-        .expect("the C library's extensible-array index is enumerable");
-    assert!(!index_spans.is_empty());
-    let mut meta_pages: Vec<u64> = vec![0];
-    for (addr, len) in &index_spans {
-        for p in (addr / PAGE)..=((addr + len - 1) / PAGE) {
-            meta_pages.push(p);
-        }
-    }
-    meta_pages.sort_unstable();
-    meta_pages.dedup();
-    s.delete(&ObjectPathBuf::parse("/victim")).unwrap();
-    s.commit().unwrap();
-    let mut db = crate::type_builders::DatasetBuilder::new("added");
-    db.with_f64_data(&[2.5f64; 8]).with_shape(&[8]);
-    s.stage_created_dataset(&ObjectPathBuf::parse("/added"), db)
-        .unwrap();
-    s.commit().unwrap();
-    drop(s);
-    let f = crate::reader::File::open(path).unwrap();
-    let added = f.dataset("added").unwrap();
-    let crate::Layout::Contiguous {
-        address: Some(addr),
-        size,
-    } = added.layout().unwrap()
-    else {
-        panic!("a small f64 dataset is stored contiguously");
-    };
-    for p in (addr / PAGE)..=((addr + size - 1) / PAGE) {
-        assert!(
-            !meta_pages.contains(&p),
-            "the new dataset's raw data landed at ({addr}, {size}), in page {p}, \
-             which held live metadata before the edit: {meta_pages:?}"
-        );
-    }
-
-    assert_eq!(added.read_f64().unwrap(), vec![2.5f64; 8]);
-    assert_eq!(
-        f.dataset("keep").unwrap().read_i32().unwrap(),
-        vec![1, 2, 3, 4]
-    );
+    edit::test_util::assert_index_reclamation(&path);
 }
 
 #[test]
