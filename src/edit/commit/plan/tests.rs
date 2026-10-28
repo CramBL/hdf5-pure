@@ -218,7 +218,7 @@ fn rejected_preparation_retains_replacement_buffers_for_retry(#[case] replacemen
         "write_dataset shape does not match the on-disk dataset (overwrite, not reshape)"
     );
     assert_eq!(snapshot(&engine), expected);
-    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(engine.page_publication_snapshot().unwrap(), before);
     let error = engine.commit().unwrap_err();
     let Error::EditUnsupported(reason) = error else {
         panic!("expected the same overwrite shape error on retry, got {error:?}");
@@ -230,6 +230,40 @@ fn rejected_preparation_retains_replacement_buffers_for_retry(#[case] replacemen
     assert_eq!(snapshot(&engine), expected);
     drop(engine);
     assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn empty_commit_preserves_bytes_after_mixed_overwrites() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("empty.h5");
+    let mut builder = FileBuilder::new();
+    builder.create_dataset("fixed").with_i32_data(&[1, 2]);
+    builder
+        .create_dataset("strings")
+        .with_vlen_strings(&["before", "values"]);
+    builder.write(&path).unwrap();
+    let mut engine = edit_test_util::open_engine(&path);
+    engine
+        .stage_dataset_write(&ObjectPathBuf::parse("fixed"), i32_dataset(&[3, 4]))
+        .unwrap();
+    let mut strings = DatasetBuilder::new("");
+    strings.with_vlen_strings(&["replacement", "strings"]);
+    engine
+        .stage_dataset_write(&ObjectPathBuf::parse("strings"), strings)
+        .unwrap();
+    engine.commit().unwrap();
+    assert!(!engine.has_staged_edits());
+    let committed = engine.page_publication_snapshot().unwrap();
+    engine.commit().unwrap();
+    assert_eq!(engine.page_publication_snapshot().unwrap(), committed);
+    drop(engine);
+    assert_eq!(std::fs::read(&path).unwrap(), committed);
+    let file = File::open(&path).unwrap();
+    assert_eq!(file.dataset("fixed").unwrap().read_i32().unwrap(), [3, 4]);
+    assert_eq!(
+        file.dataset("strings").unwrap().read_string().unwrap(),
+        ["replacement", "strings"]
+    );
 }
 
 #[rstest]
