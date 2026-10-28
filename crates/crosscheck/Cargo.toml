@@ -18,6 +18,14 @@ test = false
 bench = false
 required-features = ["__hdf5-1.10"]
 
+# Isolates native dense-attribute reads and writes from test processes.
+[[bin]]
+name = "dense-attributes"
+path = "tests/fixtures/dense_attributes.rs"
+test = false
+bench = false
+required-features = ["__hdf5-1.10"]
+
 [features]
 serde = ["hdf5-pure/serde"]
 ndarray = ["hdf5-pure/ndarray"]
@@ -26,7 +34,7 @@ provenance = ["hdf5-pure/provenance"]
 # Links the reference HDF5 C library (the optional `hdf5-metno` dependency,
 # aliased `hdf5` below, and its raw bindings, aliased `hdf5-sys`). Named
 # explicitly, so it stays the one name for this and nothing invents a second.
-hdf5 = ["dep:hdf5", "dep:hdf5-sys", "test-util-hdf5/hdf5"]
+hdf5 = ["dep:hdf5", "dep:hdf5-sys", "dep:serde", "dep:serde_json", "test-util-hdf5/hdf5"]
 # Which release series of libhdf5 the tests link, from 1.10 up: none of them
 # is 1.8. Each implies the one below, so a test gates on the lowest series that
 # has what it needs. The interop recipes derive it from the version they link,
@@ -51,10 +59,13 @@ hdf5 = { workspace = true, optional = true }
 # expose. `__hdf5-1.12` turns on their `deprecated` feature, since the function
 # that reports the address is a deprecated symbol from 1.12 on.
 hdf5-sys = { workspace = true, optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+test-util-hdf5 = { workspace = true, optional = true }
 
 # Crosscheck targets use both bindings behind the `hdf5` feature.
 [package.metadata.cargo-shear]
-ignored = ["hdf5", "hdf5-sys"]
+ignored = ["hdf5-sys"]
 
 [dev-dependencies]
 insta.workspace = true
