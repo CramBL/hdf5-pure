@@ -749,7 +749,7 @@ impl WriteEngine {
         self.screen_shared_message_index(&for_supplied)?;
 
         for (_, fd) in staged.datasets().iter().chain(staged.writes()) {
-            edit::screen_resolved_references(&fd.dt, &fd.raw, &for_supplied)?;
+            edit::screen_resolved_references(&fd.dt, fd.storage.raw(), &for_supplied)?;
         }
 
         if staged
@@ -1024,10 +1024,10 @@ impl WriteEngine {
             if let Some(datasets) = flat.get(key) {
                 // Match the dataset order used during application.
                 let mut ordered: Vec<&FlatDataset> = datasets.to_vec();
-                ordered.sort_by_key(|fd| fd.reference_targets.is_some());
+                ordered.sort_by_key(|fd| fd.storage.reference_targets().is_some());
                 for fd in ordered {
                     let dataset_path = key.join(&fd.name);
-                    if let Some(patches) = &fd.reference_targets
+                    if let Some(patches) = fd.storage.reference_targets()
                         && !patches.is_empty()
                     {
                         let mut references = Vec::with_capacity(patches.len());

@@ -131,11 +131,11 @@ impl WriteEngine {
 
             let mut group_datasets: Vec<FlatDataset> =
                 flat.remove(key).into_iter().flatten().collect();
-            group_datasets.sort_by_key(|fd| fd.reference_targets.is_some());
+            group_datasets.sort_by_key(|fd| fd.storage.reference_targets().is_some());
             for mut fd in group_datasets {
                 let dataset_path = key.join(&fd.name);
                 self.resolve_dataset_attributes(&mut fd)?;
-                if fd.reference_targets.take().is_some()
+                if fd.storage.take_reference_targets().is_some()
                     && let Some(patches) = references.remove(&dataset_path)
                 {
                     for PreparedReference {
@@ -153,7 +153,11 @@ impl WriteEngine {
                                 })?)?
                             }
                         };
-                        type_builders::write_reference_address(&mut fd.raw, byte_offset, address);
+                        type_builders::write_reference_address(
+                            fd.storage.raw_mut()?,
+                            byte_offset,
+                            address,
+                        );
                     }
                 }
                 let oh_addr = self.write_dataset(&mut fd)?;
