@@ -173,8 +173,9 @@ These are reported as [`Error::RepackUnsupported`](crate::Error::RepackUnsupport
 ## Memory and I/O
 
 The writer retains compact discovery and allocation records and reconstructs one object's metadata
-at a time. Metadata is read again during planning and emission, increasing source I/O and preparation
-work. During initial planning, the writer reuses parsed discovery headers within a 16 MiB budget.
+at a time. The writer rereads and prepares metadata during planning and emission, which adds source
+I/O, CPU work, and temporary allocations. During initial planning, the writer reuses parsed discovery
+headers within a 16 MiB budget.
 The budget includes cache entry, message-vector, and message-body capacities. Oversized headers
 are read again. Cached headers are consumed by planning, and remaining cache storage is released
 before final layout checks and emission. The source must remain unchanged throughout the operation.

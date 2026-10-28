@@ -1,4 +1,4 @@
-//! Allocation bounds for reads and writable-session statistics (issue #228).
+//! Allocation bounds for reads, writes, editing sessions, and repacks.
 //!
 //! Every bound here is a statement about how the work *scales* — a windowed read
 //! allocates on the order of its window, a chunked read allocates a fixed number
@@ -28,11 +28,13 @@
 
 use std::path::Path;
 
+use hdf5_pure::AttrValue;
 use hdf5_pure::ChunkCacheConfig;
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
+use hdf5_pure::RepackOptions;
 use hdf5_pure::UserblockSize;
 use hdf5_pure::{
     ChunkCacheStats, EditBacking, File, FileAccessProperties, FileBuilder, FileSpaceStrategy,
@@ -1898,5 +1900,103 @@ fn encoded_chunk_finish_avoids_a_payload_sized_assembly_allocation(
                 .unwrap(),
             data
         );
+    }
+}
+
+#[rstest]
+#[case::small(32, "repack_tree_small", "repack_tree_small_control")]
+#[case::large(256, "repack_tree_large", "repack_tree_large_control")]
+fn repack_bounds_metadata_retention_and_preparation(
+    #[case] branches: usize,
+    #[case] region: &str,
+    #[case] control: &str,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let source_path = directory.path().join("source.h5");
+    let output_path = directory.path().join("output.h5");
+    write_repack_resource_tree(&source_path, branches);
+    let (probe, positive) = allocation::measure(control, || vec![0_u8; 4_096]);
+    assert!(positive.blocks > 0, "{positive}");
+    assert_eq!(positive.peak_bytes, 4_096, "{positive}");
+    drop(probe);
+    let (result, measured) = allocation::measure(region, || {
+        hdf5_pure::repack(&source_path, &output_path, &RepackOptions::new())
+    });
+    result.unwrap();
+    let objects = u64::try_from(branches * 49 + 1).unwrap();
+    assert!(measured.blocks >= objects, "{measured}");
+    assert!(measured.bytes >= objects * 256, "{measured}");
+    assert!(measured.peak_bytes >= objects * 16, "{measured}");
+    assert!(measured.blocks < objects * 250, "{measured}");
+    assert!(measured.bytes < objects * 24_000 + 65_536, "{measured}");
+    assert!(measured.peak_bytes < objects * 1_400 + 65_536, "{measured}");
+    assert_eq!(measured.live_bytes, 0, "{measured}");
+    let source = File::open_streaming(&source_path).unwrap();
+    let output = File::open_streaming(&output_path).unwrap();
+    let mut groups = output.root().groups().unwrap();
+    groups.sort_unstable();
+    assert_eq!(
+        groups,
+        (0..branches)
+            .map(|index| format!("tree{index:04}"))
+            .collect::<Vec<_>>()
+    );
+    for branch in 0..branches {
+        let root = format!("tree{branch:04}");
+        assert_eq!(output.group(&root).unwrap().groups().unwrap().len(), 16);
+        for index in 0..32 {
+            let path = format!("{root}/group{:02}/data{index:02}", index % 16);
+            let before = source.dataset(&path).unwrap();
+            let after = output.dataset(&path).unwrap();
+            let values = repack_resource_values(index);
+            assert_eq!(after.read_i32().unwrap(), values);
+            assert_eq!(
+                after.shape().unwrap(),
+                [u64::try_from(values.len()).unwrap()]
+            );
+            assert_eq!(after.maxshape().unwrap(), Some(vec![MaxExtent::Unlimited]));
+            assert_eq!(after.chunk_shape().unwrap(), Some(vec![16]));
+            assert_eq!(
+                after.filter_pipeline().unwrap(),
+                before.filter_pipeline().unwrap()
+            );
+            assert_eq!(after.attrs().unwrap(), before.attrs().unwrap());
+            assert_eq!(after.chunks().unwrap().len(), values.len() / 16);
+        }
+    }
+}
+
+/// Writes repeated group trees with mostly empty resizable chunked datasets.
+fn write_repack_resource_tree(path: &Path, branches: usize) {
+    let mut builder = FileBuilder::new();
+    for branch in 0..branches {
+        let mut root = builder.create_group(&format!("tree{branch:04}"));
+        for group in 0..16 {
+            let mut child = root.create_group(&format!("group{group:02}"));
+            for slot in 0..2 {
+                let index = group + slot * 16;
+                let dataset = child.create_dataset(&format!("data{index:02}"));
+                dataset
+                    .with_i32_data(&repack_resource_values(index))
+                    .with_chunks(&[16])
+                    .with_maxshape(&[MaxExtent::Unlimited])
+                    .set_attr("index", AttrValue::I32(i32::try_from(index).unwrap()));
+                if index.is_multiple_of(3) {
+                    dataset.with_deflate(DeflateLevel::Six);
+                }
+            }
+            root.add_group(child.finish());
+        }
+        builder.add_group(root.finish());
+    }
+    builder.write(path).unwrap();
+}
+
+/// Returns values for every eighth dataset and an empty vector for the others.
+fn repack_resource_values(index: usize) -> Vec<i32> {
+    if index.is_multiple_of(8) {
+        (0..64).collect()
+    } else {
+        Vec::new()
     }
 }

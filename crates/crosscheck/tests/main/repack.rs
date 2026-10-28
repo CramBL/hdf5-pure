@@ -1,15 +1,14 @@
 #![cfg(feature = "__hdf5-1.10")]
-//! Cross-validation for whole-file repack (issue #21) against the reference
-//! HDF5 C library: a file the C library *writes* is repacked by `hdf5_pure`,
-//! and the result is read back by both readers. Also proves the fail-loud
-//! contract on a real variable-length string dataset the C library produces.
+//! Repack crosschecks against libhdf5.
 
 use std::path::Path;
 
+use hdf5::GroupStorageType;
 use hdf5::ObjectReference;
 use hdf5::ObjectReference1;
 use hdf5::ReferencedObject;
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
+use hdf5_pure::AttrValue;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileSpacePageSize;
@@ -2753,6 +2752,242 @@ fn the_c_library_reads_a_repacked_chain_at_the_depth_bound() {
         group.group("g").unwrap()
     });
     assert_eq!(deepest.member_names().unwrap(), Vec::<String>::new());
+}
+
+#[rstest]
+#[case::classic(None)]
+#[case::persistent(Some(FileSpaceStrategy::FsmAggr))]
+#[case::page(Some(FileSpaceStrategy::Page))]
+fn repack_preserves_native_metadata_trees_with_empty_and_populated_datasets(
+    #[case] strategy: Option<FileSpaceStrategy>,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let source_path = directory.path().join("native.h5");
+    let output_path = directory.path().join("repacked.h5");
+    let settings = strategy.map(|strategy| FileSpaceSettings::new(strategy).with_persistence(true));
+    let values: Vec<i32> = (0..8).collect();
+    write_native_metadata_tree(&source_path, strategy, &values);
+    hdf5_pure::repack(
+        &source_path,
+        &output_path,
+        &RepackOptions::new().drop_path("padding"),
+    )
+    .unwrap();
+    assert_native_metadata_tree(&source_path, &output_path, settings, &values);
+}
+
+/// Writes dense groups, filtered resizable datasets, and object references through libhdf5.
+fn write_native_metadata_tree(path: &Path, strategy: Option<FileSpaceStrategy>, values: &[i32]) {
+    let mut builder = hdf5::FileBuilder::new();
+    builder.with_fapl(|properties| properties.libver_v110());
+    if let Some(strategy) = strategy {
+        builder.with_fcpl(|properties| {
+            properties.file_space_strategy(CStrategy::FreeSpaceManager {
+                paged: strategy == FileSpaceStrategy::Page,
+                persist: true,
+                threshold: 1,
+            })
+        });
+    }
+    let native = builder.create(path).unwrap();
+    native
+        .new_dataset_builder()
+        .with_data(&vec![99_i32; 4_096])
+        .create("padding")
+        .unwrap();
+    for group in 0..12 {
+        let parent = native.create_group(&format!("group{group:02}")).unwrap();
+        for attribute in 0..12 {
+            parent
+                .new_attr::<i32>()
+                .shape(())
+                .create(format!("attribute{attribute:02}").as_str())
+                .unwrap()
+                .write_scalar(&attribute)
+                .unwrap();
+        }
+        for index in 0..12 {
+            let count = if index == 0 { values.len() } else { 0 };
+            let dataset = parent
+                .new_dataset::<i32>()
+                .shape([hdf5::Extent::resizable(count)])
+                .chunk([4])
+                .shuffle()
+                .deflate(6)
+                .fill_value(7)
+                .create(format!("data{index:02}").as_str())
+                .unwrap();
+            if count > 0 {
+                dataset.write_raw(values).unwrap();
+            }
+            dataset
+                .new_attr::<i32>()
+                .shape(())
+                .create("index")
+                .unwrap()
+                .write_scalar(&index)
+                .unwrap();
+            assert_eq!(dataset.num_chunks(), Some(if count > 0 { 2 } else { 0 }));
+            assert_eq!(
+                dataset.read_raw::<i32>().unwrap(),
+                if count > 0 {
+                    values.to_vec()
+                } else {
+                    Vec::new()
+                }
+            );
+            if count == 0 {
+                assert_eq!(dataset.storage_size(), 0);
+            }
+        }
+        assert_eq!(parent.info().unwrap().storage_type, GroupStorageType::Dense);
+    }
+    let references: Vec<_> = ["group11/data00", "group11/data11", "/"]
+        .into_iter()
+        .map(|path| ObjectReference1::create(&native, path).unwrap())
+        .collect();
+    native
+        .new_dataset_builder()
+        .with_data(&references)
+        .create("references")
+        .unwrap();
+    assert_eq!(native.info().unwrap().storage_type, GroupStorageType::Dense);
+    native.close().unwrap();
+}
+
+/// Checks both readers' values and metadata, encoded chunks, and native reference targets.
+fn assert_native_metadata_tree(
+    source_path: &Path,
+    output_path: &Path,
+    settings: Option<FileSpaceSettings>,
+    values: &[i32],
+) {
+    let source = File::open_streaming(source_path).unwrap();
+    let output = File::open_streaming(output_path).unwrap();
+    let native = hdf5::File::open(output_path).unwrap();
+    let native_source = hdf5::File::open(source_path).unwrap();
+    assert_eq!(source.file_space_settings().unwrap(), settings);
+    assert_eq!(output.file_space_settings().unwrap(), settings);
+    let creation = native.create_plist().unwrap();
+    assert_eq!(
+        creation.get_file_space_strategy().unwrap(),
+        CStrategy::FreeSpaceManager {
+            paged: settings.is_some_and(|settings| settings.strategy() == FileSpaceStrategy::Page),
+            persist: settings.is_some(),
+            threshold: 1,
+        }
+    );
+    absence::assert_libhdf5_absent(&native.dataset("padding").unwrap_err(), "padding");
+    assert_eq!(native.info().unwrap().storage_type, GroupStorageType::Dense);
+    assert_ne!(
+        output.dataset("references").unwrap().read_raw().unwrap(),
+        source.dataset("references").unwrap().read_raw().unwrap()
+    );
+    for group in 0..12 {
+        let group_path = format!("group{group:02}");
+        let pure_group = output.group(&group_path).unwrap();
+        assert_eq!(
+            pure_group.attrs().unwrap(),
+            source.group(&group_path).unwrap().attrs().unwrap()
+        );
+        let native_group = native.group(&group_path).unwrap();
+        assert_eq!(
+            native_group.info().unwrap().storage_type,
+            GroupStorageType::Dense
+        );
+        assert_eq!(native_group.attr_names().unwrap().len(), 12);
+        for attribute in 0..12 {
+            assert_eq!(
+                native_group
+                    .attr(&format!("attribute{attribute:02}"))
+                    .unwrap()
+                    .read_scalar::<i32>()
+                    .unwrap(),
+                attribute
+            );
+        }
+        for index in 0..12 {
+            let path = format!("{group_path}/data{index:02}");
+            let dataset = output.dataset(&path).unwrap();
+            let expected = if index == 0 {
+                values.to_vec()
+            } else {
+                Vec::new()
+            };
+            assert_eq!(dataset.read_i32().unwrap(), expected);
+            assert_eq!(
+                dataset.shape().unwrap(),
+                [u64::try_from(expected.len()).unwrap()]
+            );
+            assert_eq!(
+                dataset.maxshape().unwrap(),
+                Some(vec![MaxExtent::Unlimited])
+            );
+            assert_eq!(dataset.chunk_shape().unwrap(), Some(vec![4]));
+            assert_eq!(
+                dataset.filter_pipeline().unwrap(),
+                source.dataset(&path).unwrap().filter_pipeline().unwrap()
+            );
+            assert_eq!(dataset.fill_value::<i32>().unwrap(), Some(7));
+            assert_eq!(dataset.attrs().unwrap()["index"], AttrValue::I32(index));
+            assert_eq!(dataset.chunks().unwrap().len(), expected.len() / 4);
+            let native_dataset = native.dataset(&path).unwrap();
+            assert_eq!(native_dataset.read_raw::<i32>().unwrap(), expected);
+            assert_eq!(native_dataset.shape(), [expected.len()]);
+            assert_eq!(native_dataset.space().unwrap().maxdims(), [None]);
+            assert_eq!(native_dataset.chunk(), Some(vec![4]));
+            let original = native_source.dataset(&path).unwrap();
+            assert_eq!(native_dataset.filters(), original.filters());
+            assert_eq!(
+                native_dataset.fill_value().unwrap(),
+                original.fill_value().unwrap()
+            );
+            assert_eq!(native_dataset.num_chunks(), Some(expected.len() / 4));
+            assert_eq!(
+                native_dataset
+                    .attr("index")
+                    .unwrap()
+                    .read_scalar::<i32>()
+                    .unwrap(),
+                index
+            );
+            assert_eq!(
+                encoded_chunks(output_path, &path),
+                encoded_chunks(source_path, &path)
+            );
+        }
+    }
+    let references = native
+        .dataset("references")
+        .unwrap()
+        .read_raw::<ObjectReference1>()
+        .unwrap();
+    assert_eq!(references.len(), 3);
+    for (reference, expected_path) in references
+        .iter()
+        .zip(["/group11/data00", "/group11/data11"])
+    {
+        let ReferencedObject::Dataset(dataset) = reference.dereference(&native).unwrap() else {
+            panic!("expected reference to dataset {expected_path:?}");
+        };
+        assert_eq!(dataset.name(), expected_path);
+        assert_eq!(
+            dataset.read_raw::<i32>().unwrap(),
+            if expected_path.ends_with("00") {
+                values.to_vec()
+            } else {
+                Vec::new()
+            }
+        );
+    }
+    let ReferencedObject::Group(root) = references[2].dereference(&native).unwrap() else {
+        panic!("expected reference to root group");
+    };
+    assert_eq!(root.name(), "/");
+    drop(root);
+    drop(native);
+    drop(output);
+    drop(source);
 }
 
 #[derive(Clone, Copy, Debug)]
