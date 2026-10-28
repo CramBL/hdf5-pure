@@ -111,6 +111,86 @@ pub fn v2_many_links() -> Vec<u8> {
     finish(image, root)
 }
 
+/// Builds a dense group `g` with twelve links stored as indexed huge heap objects.
+///
+/// Each name is `d{index}_` followed by 5,000 `x` characters. Each dataset contains
+/// its index, from 0 through 11, as one [`i32`] value. The heap has separate
+/// version 2 B-tree indexes for link names and huge objects, with no managed blocks.
+pub fn huge_links_12() -> Vec<u8> {
+    let mut image = Image::starting_with(&[0; SUPERBLOCK_SIZE]);
+    let mut huge_records = Vec::new();
+    let mut huge_bytes = 0;
+    let mut name_records: Vec<_> = (0..12)
+        .map(|index| {
+            let name = format!("d{index}_{}", "x".repeat(5000));
+            let dataset = dataset(&mut image, Values::I32(&[index]));
+            let link = HardLink::new(&name, dataset)
+                .name_size_width(2)
+                .build(Widths::EIGHT);
+            huge_bytes += link.len() as u64;
+            let address = image.append(&link) as u64;
+            let mut huge = address.to_le_bytes().to_vec();
+            huge.extend_from_slice(&(link.len() as u64).to_le_bytes());
+            let id = u64::try_from(index + 1).unwrap();
+            huge.extend_from_slice(&id.to_le_bytes());
+            huge_records.push(huge);
+            let mut record = checksum::lookup3(name.as_bytes()).to_le_bytes().to_vec();
+            record.push(HUGE_ID);
+            bytes::push_uint(&mut record, id, HUGE_KEY_SIZE);
+            record
+        })
+        .collect();
+    name_records.sort_by_key(|record| bytes::u32_at(record, 0));
+    let huge_index = HugeIndex::Objects.append(&mut image, &huge_records);
+    let heap = image.append(&huge_heap_header(huge_index, huge_bytes)) as u64;
+    let name_index = HugeIndex::Links.append(&mut image, &name_records);
+    let group = image.append(&group_header(Some((heap, name_index))).build()) as u64;
+    let root = compact_group(&mut image, &[("g", group)]);
+    finish(image, root)
+}
+
+enum HugeIndex {
+    Links,
+    Objects,
+}
+
+impl HugeIndex {
+    fn append(self, image: &mut Image, records: &[Vec<u8>]) -> u64 {
+        let (kind, record_size) = match self {
+            Self::Links => (LINK_NAME_INDEX, LINK_RECORD_SIZE),
+            Self::Objects => (HUGE_OBJECT_INDEX, HUGE_RECORD_SIZE),
+        };
+        let mut leaf = btree_v2::leaf(kind, records);
+        leaf.resize(BTREE_NODE_SIZE, 0);
+        let leaf = image.append(&leaf) as u64;
+        image.append(&btree_v2::Header::new(kind, record_size, leaf, 12).build(Widths::EIGHT))
+            as u64
+    }
+}
+
+// Section `subsec_fmt4_infra_fractalheap`, version 4.0, defines the huge-only
+// heap's accounting and block geometry.
+fn huge_heap_header(index: u64, huge_bytes: u64) -> Vec<u8> {
+    let mut header = fractal_heap::SIGNATURE.to_vec();
+    header.push(HEAP_VERSION);
+    header.extend_from_slice(&HUGE_HEAP_ID_LENGTH.to_le_bytes());
+    header.extend_from_slice(&0u16.to_le_bytes());
+    header.push(NO_FLAGS);
+    header.extend_from_slice(&HUGE_MAX_MANAGED.to_le_bytes());
+    for field in [13, index, 0, u64::MAX, 0, 0, 0, 0, huge_bytes, 12, 0, 0] {
+        header.extend_from_slice(&field.to_le_bytes());
+    }
+    header.extend_from_slice(&4u16.to_le_bytes());
+    header.extend_from_slice(&512u64.to_le_bytes());
+    header.extend_from_slice(&MAX_DIRECT_BLOCK_SIZE.to_le_bytes());
+    header.extend_from_slice(&HEAP_OFFSET_BITS.to_le_bytes());
+    header.extend_from_slice(&1u16.to_le_bytes());
+    header.extend_from_slice(&u64::MAX.to_le_bytes());
+    header.extend_from_slice(&0u16.to_le_bytes());
+    checksum::append(&mut header);
+    header
+}
+
 fn finish(mut image: Image, root: u64) -> Vec<u8> {
     image.place(
         0,
@@ -264,3 +344,20 @@ const MAX_DIRECT_BLOCK_SIZE: u64 = 65_536;
 const LINK_NAME_INDEX: u8 = 5;
 const LINK_RECORD_SIZE: u16 = 11;
 const BTREE_NODE_SIZE: usize = 512;
+
+// Section `subsec_fmt4_infra_fractalheap`, version 4.0, defines the huge-ID
+// type bits and the maximum managed object size field.
+const HUGE_ID: u8 = 0x10;
+const HUGE_MAX_MANAGED: u32 = 4096;
+
+// Section `subsubsec_fmt4_infra_btrees_v2`, version 4.0, defines type 1's
+// address, length and ID, and type 5's name hash followed by the heap ID.
+const HUGE_OBJECT_INDEX: u8 = 1;
+const HUGE_RECORD_SIZE: u16 = 24;
+// Section `subsubsec_fmt4_infra_btrees_v2`, version 4.0, defines seven-byte
+// heap IDs for type 5 group link records.
+const HUGE_HEAP_ID_LENGTH: u16 = 7;
+
+// H5HF__huge_init in H5HFhuge.c, HDF5 2.2.0, uses the smaller of the heap-ID
+// payload and sizeof(hsize_t), leaving six key bytes in a seven-byte ID.
+const HUGE_KEY_SIZE: usize = 6;

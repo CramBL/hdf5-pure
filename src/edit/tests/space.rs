@@ -313,7 +313,7 @@ fn deleting_a_dense_attribute_owner_reclaims_its_heap_as_metadata(#[case] huge_a
             "{storage:?}"
         );
 
-        assert_ownership_covers_storage(&session, &storage, false);
+        session.assert_ownership_covers_storage(&storage, false);
 
         let incoming = session.count_incoming_hard_links().unwrap();
         let mut planned = Vec::new();
@@ -521,7 +521,7 @@ fn deleting_the_owner_of_a_filtered_attribute_heap_reclaims_its_storage(
             "the filtered heap allocation ({addr}, {len}) is in {storage:?}"
         );
     }
-    assert_ownership_covers_storage(&session, &storage, true);
+    session.assert_ownership_covers_storage(&storage, true);
     session.delete(&object).unwrap();
     session.commit().unwrap();
     assert!(session.space_ownership().unwrap().analysis_complete);
@@ -647,7 +647,7 @@ fn deleting_a_filtered_heap_with_huge_objects_reclaims_its_encoded_allocations(
     drop(reader);
     let mut session = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     let DenseAttributeOwner { storage, .. } = dense_attribute_owner(&session, &object);
-    assert_ownership_covers_storage(&session, &storage, false);
+    session.assert_ownership_covers_storage(&storage, false);
     session.delete(&object).unwrap();
     session.commit().unwrap();
     assert!(session.space_ownership().unwrap().analysis_complete);
@@ -671,10 +671,14 @@ fn deleting_a_filtered_heap_with_huge_objects_reclaims_its_encoded_allocations(
 }
 
 #[test]
-fn deleting_a_c_written_dense_link_group_reclaims_its_whole_subtree() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = test_util::copy_data("c/huge_links_12.h5", dir.path());
-    let reader = crate::reader::File::open(&path).unwrap();
+fn deleting_a_dense_link_group_reclaims_its_whole_subtree() {
+    let path = test_util::temp::temp_path("huge_links.h5");
+    std::fs::write(&path, test_util::modern::huge_links_12()).unwrap();
+    assert_huge_subtree_reclaimed(&path);
+}
+
+pub(in crate::edit) fn assert_huge_subtree_reclaimed(path: &Path) {
+    let reader = crate::reader::File::open(path).unwrap();
     let link_names = reader.group("g").unwrap().datasets().unwrap();
     assert_eq!(link_names.len(), 12);
     let data_blocks: Vec<(u64, u64, FreeClass)> = link_names
@@ -697,7 +701,7 @@ fn deleting_a_c_written_dense_link_group_reclaims_its_whole_subtree() {
     drop(reader);
 
     let object = ObjectPathBuf::parse("/g");
-    let mut session = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
+    let mut session = WriteEngine::open_with_locking(path, FileLocking::Enabled).unwrap();
     let resolve = |object_path: &ObjectPathBuf| {
         crate::group_v2::resolve_path_any_from_source(
             &session.image(),
@@ -733,7 +737,7 @@ fn deleting_a_c_written_dense_link_group_reclaims_its_whole_subtree() {
     let link_storage = session
         .dense_group_storage_spans(&header_spans, None, &link_info)
         .expect("the dense link storage is structurally complete");
-    assert_ownership_covers_storage(&session, &link_storage, false);
+    session.assert_ownership_covers_storage(&link_storage, false);
     let heap = crate::fractal_heap_storage::collect_fractal_heap_storage_from_source(
         &session.image(),
         AddressContext::from_effective_base(BaseAddress::ZERO),
@@ -778,7 +782,7 @@ fn deleting_a_c_written_dense_link_group_reclaims_its_whole_subtree() {
     session.delete(&object).unwrap();
     session.commit().unwrap();
     drop(session);
-    let err = crate::reader::File::open(&path)
+    let err = crate::reader::File::open(path)
         .unwrap()
         .group("g")
         .unwrap_err();
@@ -2412,26 +2416,29 @@ const UNENCODED_BLOCK_LEN: usize = 64;
 ///
 /// Panics if analysis fails, is incomplete, or the required storage classes do not cover
 /// every selected byte.
-fn assert_ownership_covers_storage(
-    session: &WriteEngine,
-    storage: &[(u64, u64, FreeClass)],
-    metadata: bool,
-) {
-    let owned = session.space_ownership().unwrap();
-    assert!(owned.analysis_complete);
-    for &(at, len, _) in storage {
-        let covered = test_util::range::covered_len(&owned.live_metadata_space, &(at..at + len));
-        let raw = if metadata {
-            0
-        } else {
-            test_util::range::covered_len(&owned.live_raw_space, &(at..at + len))
-        };
-        assert_eq!(
-            covered + raw,
-            len,
-            "heap storage {at}..{} must be classified",
-            at + len
-        );
+impl WriteEngine {
+    pub(in crate::edit) fn assert_ownership_covers_storage(
+        &self,
+        storage: &[(u64, u64, FreeClass)],
+        metadata: bool,
+    ) {
+        let owned = self.space_ownership().unwrap();
+        assert!(owned.analysis_complete);
+        for &(at, len, _) in storage {
+            let covered =
+                test_util::range::covered_len(&owned.live_metadata_space, &(at..at + len));
+            let raw = if metadata {
+                0
+            } else {
+                test_util::range::covered_len(&owned.live_raw_space, &(at..at + len))
+            };
+            assert_eq!(
+                covered + raw,
+                len,
+                "heap storage {at}..{} must be classified",
+                at + len
+            );
+        }
     }
 }
 
