@@ -3315,10 +3315,11 @@ impl File {
         Self::open_rw_with_options(path, access)
     }
 
-    /// Apply all staged structural edits made through this file's handles —
-    /// [`Dataset::write`]/`set_attr`/`remove_attr` and
-    /// [`Group::create_group`]/`delete` — as one transaction. Immediate
-    /// [`Dataset::append`]s need no commit.
+    /// Applies staged edits and publishes pending free-space manager changes.
+    ///
+    /// Staged edits are applied as one transaction. Immediate [`Dataset::append`] calls publish
+    /// their elements during the call. With no staged edits, the editor can publish manager changes
+    /// pending from retired append allocations, including replacements that leave EOF unchanged.
     ///
     /// Requires a read-write file ([`File::open_rw`]); a read-only file returns
     /// [`Error::ReadOnly`].
@@ -3520,6 +3521,8 @@ impl File {
     /// Writes retained after a failed operation are issued before synchronization. New staged
     /// edits remain pending for [`commit`](Self::commit). Elements held by a [`BufferedAppender`]
     /// or an [`OwnedBufferedAppender`] require the appender's buffer to be flushed first.
+    /// Call [`commit`](Self::commit) first to include pending free-space manager changes from
+    /// immediate tail retirement.
     ///
     /// In a non-persistent PAGE session, synchronization also verifies and adopts any pending
     /// publication. The complete earlier batch may become visible even though its commit
@@ -5847,30 +5850,34 @@ impl Dataset {
     /// [`Error::Format`] with [`FormatError::PathNotFound`], and a header message
     /// that does not read or parse returns [`Error::Format`] with the failure the
     /// read or the parse produced.
-    /// Both the dataset's current length and the appended length are
-    /// unconstrained, on a filtered dataset as much as an unfiltered one: a
-    /// partial trailing chunk is rewritten into a fresh allocation — decoded,
-    /// extended and re-encoded when there is a filter pipeline — and its index
-    /// element is repointed once those bytes are on the disk. The bytes the old
-    /// chunk occupied are left for [`repack`](crate::repack()).
+    /// For unfiltered storage and lossless filters, the current and appended lengths may be
+    /// unaligned. The writer decodes a partial tail, extends it, and places the replacement
+    /// separately from its predecessor. It covers the payload with the superblock's recorded EOF
+    /// before publishing the new index record. After confirming the record and its ordering
+    /// barrier, the editor retires the predecessor's complete stored allocation. Reuse follows
+    /// the file-space strategy, threshold, and PAGE class rules.
+    /// Under [`FileSpaceStrategy::Aggr`] and [`FileSpaceStrategy::None`], the editor discards freed
+    /// extents.
     ///
     /// A partial tail stored under lossy filters (ZFP or float D-scale scale-offset) cannot
     /// grow through this call, because re-encoding it could change committed values. Use
     /// [`append_with_options`](Self::append_with_options) to permit such a rewrite. Under
     /// [`PartialEdgeFiltering::Skip`](crate::PartialEdgeFiltering::Skip), partial tails stay
     /// unfiltered and can grow. With a lossy pipeline, the writer filters a tail when it
-    /// becomes complete, after publishing the new extent. An interruption between those
-    /// updates can leave the completed chunk unfiltered.
+    /// becomes complete, after publishing the new extent. The editor retires the original
+    /// allocation after confirming its raw replacement, and the intermediate raw allocation after
+    /// confirming the final filtered record. An interruption between those updates can leave the
+    /// completed chunk unfiltered.
     ///
     /// A trailing chunk absent from the chunk index cannot be read to be grown. Such a dataset
     /// requires a chunk-aligned starting length or [`append_staged`](Self::append_staged).
     ///
-    /// The append is immediate and crash-atomic (no `commit` needed) — under the
-    /// default [`SyncPolicy::Always`]. Under [`SyncPolicy::OnClose`] the same
-    /// writes are made in the same order without the `fsync` barriers between
-    /// them, so the append is still immediate and still crash-atomic against
-    /// *this process* failing, but ordering it against power loss is the
-    /// caller's, through [`File::sync`].
+    /// With ordinary write buffering, the writer preserves publication order under either
+    /// [`SyncPolicy`]. Under the default [`SyncPolicy::Always`], the writer forces writes to
+    /// durable storage at each barrier. Under [`SyncPolicy::OnClose`], the writer defers power-loss
+    /// durability until [`File::sync`] or clean session closure. With explicit page buffering, the
+    /// writer can retain and reorder writes across operations, with the guarantees described by
+    /// [`FileAccessProperties::with_page_buffer_size`].
     ///
     /// A **SWMR** writer ([`File::open_swmr_writer`]) keeps the narrower rule it
     /// always had — unfiltered, and chunk-aligned at both ends — because its
@@ -5887,6 +5894,13 @@ impl Dataset {
     /// such a batch, but nothing can be handed out twice. A batch gathers every
     /// hole the appended chunk fits in, up to a megabyte of them, so the file
     /// grows only when no hole can hold the chunk.
+    ///
+    /// Eligible retired storage is reusable during the session. For persistent files, the editor
+    /// publishes remaining free-space manager changes during [`File::commit`] or clean session
+    /// closure, even when EOF is unchanged. Call [`File::commit`] before [`File::sync`] to include
+    /// pending manager updates in an explicit synchronization. The editor retains confirmed
+    /// retirements if a later phase fails. After uncertain publication, the editor withholds
+    /// possibly referenced allocations and may defer manager cleanup.
     ///
     /// A handle reached by object reference ([`dereference`](Self::dereference))
     /// has no resolvable path, so it names its dataset by the object-header
@@ -6311,6 +6325,9 @@ impl Dataset {
     /// [`Error::ReadOnly`].
     /// The closure configures a standalone builder, not the file, so it may read
     /// the same [`File`]; nothing it stages resolves until [`File::commit`].
+    ///
+    /// The editor retires a replaced tail's complete stored allocation through root publication
+    /// at [`File::commit`]. Reuse follows the file-space strategy and retention threshold.
     ///
     /// # Errors
     ///
@@ -8153,6 +8170,7 @@ mod tests {
     use crate::address::DecodedStoredAddress;
     use crate::data_layout::{ChunkIndexLayout, ChunkedLayoutFlags};
     use crate::dataspace::DataspaceType;
+    use crate::image::WriteBuffering;
 
     use crate::message_flags::MessageFlags;
     use crate::{DatatypeByteOrder, FileBuilder};
@@ -8256,6 +8274,156 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), published);
         drop(snapshot);
         directory.close().unwrap();
+    }
+
+    #[rstest]
+    #[case::index_before(false, 0, 0)]
+    #[case::extent_before(true, 0, 0)]
+    #[case::extent_after(true, usize::MAX, 509)]
+    fn buffered_replacement_failure_keeps_landed_prefix_and_live_storage(
+        #[case] extent: bool,
+        #[case] prefix: usize,
+        #[case] landed: usize,
+        #[values(false, true)] owned: bool,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("buffered-retirement-failure.h5");
+        let mut builder = FileBuilder::new();
+        builder.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+        );
+        builder
+            .create_dataset("d")
+            .with_i32_data(&[0, 1, 2])
+            .with_maxshape(&[MaxExtent::Unlimited])
+            .with_chunks(&[512]);
+        builder.write(&path).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let control_path = directory.path().join("control.h5");
+        std::fs::write(&control_path, &original).unwrap();
+        let control = File::open_rw(&control_path).unwrap();
+        control
+            .with_mirror_session(Change::Nothing, |engine| {
+                engine.set_write_buffering(WriteBuffering::Unbuffered)
+            })
+            .unwrap();
+        let index_offset =
+            u64::try_from(test_util::bytes::find_signature(&original, EA_INDEX_SIGNATURE).unwrap())
+                .unwrap();
+        let values = (3..603).collect::<Vec<i32>>();
+        disk_log::start();
+        control
+            .dataset("d")
+            .unwrap()
+            .append(&values[..509])
+            .unwrap();
+        let operations = disk_log::take();
+        let dimension_offset = operations
+            .iter()
+            .find_map(|operation| match operation {
+                DiskOp::Write { offset, bytes }
+                    if bytes
+                        .windows(8)
+                        .any(|window| window == 512_u64.to_le_bytes()) =>
+                {
+                    Some(*offset)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let failure_write = operations
+            .iter()
+            .filter_map(|operation| match operation {
+                DiskOp::Write { offset, .. } => Some(*offset),
+                DiskOp::SetLen(_) => None,
+            })
+            .position(|offset| {
+                if extent {
+                    offset == dimension_offset
+                } else {
+                    offset >= index_offset && offset < index_offset + 200
+                }
+            })
+            .unwrap();
+        control.close().unwrap();
+        let file = File::open_rw(&path).unwrap();
+        file.with_mirror_session(Change::Nothing, |engine| {
+            engine.set_write_buffering(WriteBuffering::Unbuffered)
+        })
+        .unwrap();
+        let mut dataset = file.dataset("d").unwrap();
+        let predecessor = dataset.chunks().unwrap().remove(0);
+        let expected_unwritten = values[landed..]
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        disk_log::fail_write_after(failure_write, prefix);
+        let (error, unwritten, poison) = if owned {
+            let mut appender = dataset.into_buffered_appender().unwrap();
+            let error = appender.append(&values).unwrap_err();
+            let unwritten = appender.unwritten().to_vec();
+            let poison = appender.flush().unwrap_err();
+            assert_eq!(appender.discard(), unwritten);
+            dataset = file.dataset("d").unwrap();
+            (error, unwritten, poison)
+        } else {
+            let mut appender = dataset.buffered_appender().unwrap();
+            let error = appender.append(&values).unwrap_err();
+            let unwritten = appender.unwritten().to_vec();
+            let poison = appender.flush().unwrap_err();
+            assert_eq!(appender.discard(), unwritten);
+            (error, unwritten, poison)
+        };
+        let Error::Io(error) = error else {
+            panic!("expected injected write error, got {error:?}")
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert_eq!(error.to_string(), "injected disk write failure");
+        let Error::AppendInPlaceUnsupported(reason) = poison else {
+            panic!("expected poisoned appender, got {poison:?}")
+        };
+        assert_eq!(
+            reason,
+            "this buffered appender failed a write and holds unwritten elements; read them back with BufferedAppender::unwritten and start a new appender"
+        );
+        assert_eq!(unwritten, expected_unwritten);
+        assert_eq!(
+            dataset.read_i32().unwrap(),
+            (0..i32::try_from(3 + landed).unwrap()).collect::<Vec<_>>()
+        );
+        file.with_mirror_session(Change::Nothing, |engine| {
+            let ownership = engine.space_ownership()?;
+            assert!(ownership.analysis_complete);
+            let predecessor_ranges = if extent {
+                &ownership.reusable_free_space
+            } else {
+                &ownership.live_raw_space
+            };
+            assert!(
+                predecessor_ranges
+                    .iter()
+                    .any(|&(start, length)| start <= predecessor.address
+                        && predecessor.address + predecessor.storage_size <= start + length)
+            );
+            for &(start, length) in &ownership.reusable_free_space {
+                for &(address, size) in ownership
+                    .live_raw_space
+                    .iter()
+                    .chain(&ownership.live_metadata_space)
+                {
+                    assert!(start + length <= address || address + size <= start);
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+        drop(dataset);
+        file.close().unwrap();
+        let file = File::open(&path).unwrap();
+        assert_eq!(
+            file.dataset("d").unwrap().read_i32().unwrap(),
+            (0..i32::try_from(3 + landed).unwrap()).collect::<Vec<_>>()
+        );
     }
 
     #[rstest]
@@ -11660,4 +11828,9 @@ mod tests {
             );
         }
     }
+    /// The signature of a version 0 Extensible Array index block, defined in "The Extensible Array
+    /// Index" of the [format specification, version 4.0][spec].
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_extarr
+    const EA_INDEX_SIGNATURE: &[u8; 4] = b"EAIB";
 }

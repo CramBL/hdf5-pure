@@ -41,6 +41,20 @@ use crate::reader::Dataset;
 /// Buffered bytes are lost on a crash. Writes use the immediate append path and its
 /// [`SyncPolicy`](crate::SyncPolicy) barriers.
 ///
+/// # Storage reuse
+///
+/// During automatic writes and partial or terminal flushes, the editor retires a replaced tail's
+/// complete allocation after confirming the replacement index record. Reuse follows the file-space
+/// strategy, threshold, and page-class rules described by [`Dataset::append`]. The editor retains
+/// confirmed retirements if a later write fails. Possibly referenced allocations remain unavailable
+/// after uncertain publication.
+///
+/// For persistent files, the editor publishes remaining free-space manager changes during
+/// [`File::commit`](crate::File::commit) or clean session closure, even when EOF is unchanged.
+/// The editor may defer manager cleanup after uncertain publication. Call
+/// [`File::commit`](crate::File::commit) before [`File::sync`](crate::File::sync) to include those
+/// pending manager updates in an explicit synchronization.
+///
 /// # Session state
 ///
 /// The session rejects a second appender on the same dataset and staged edits to the
@@ -72,15 +86,13 @@ use crate::reader::Dataset;
 /// [`PartialEdgeFiltering::Skip`](crate::PartialEdgeFiltering::Skip), partial tails stay
 /// unfiltered until complete, including with a lossy pipeline.
 ///
-/// A partial trailing chunk is decoded, extended, and written to a fresh allocation. Its
-/// previous allocation can be recovered by [`repack`](crate::repack()).
-///
 /// # Examples
 ///
 /// ```
 /// use hdf5_pure::{File, FileBuilder, MaxExtent};
 /// # fn main() -> Result<(), hdf5_pure::Error> {
-/// # let path = test_util::temp::temp_path("samples.h5");
+/// # let directory = tempfile::tempdir()?;
+/// # let path = directory.path().join("samples.h5");
 /// let mut builder = FileBuilder::new();
 /// builder.create_dataset("samples")
 ///     .with_i32_data(&[])
@@ -261,6 +273,11 @@ impl std::fmt::Debug for BufferedAppender<'_> {
 /// to retain access to unwritten bytes. Buffered bytes are lost on a crash. Writes use the
 /// immediate append path and its [`SyncPolicy`](crate::SyncPolicy) barriers.
 ///
+/// # Storage reuse
+///
+/// During automatic writes and partial or terminal flushes, the editor uses the retirement, reuse,
+/// and persistence timing described by [`BufferedAppender`].
+///
 /// # Session state
 ///
 /// The session rejects a second appender on the same dataset and staged edits to the
@@ -296,7 +313,8 @@ impl std::fmt::Debug for BufferedAppender<'_> {
 /// ```
 /// use hdf5_pure::{File, FileBuilder, MaxExtent, OwnedBufferedAppender};
 /// # fn main() -> Result<(), hdf5_pure::Error> {
-/// # let path = test_util::temp::temp_path("samples.h5");
+/// # let directory = tempfile::tempdir()?;
+/// # let path = directory.path().join("samples.h5");
 /// struct Samples {
 ///     appender: OwnedBufferedAppender,
 /// }

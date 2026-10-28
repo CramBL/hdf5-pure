@@ -3989,6 +3989,56 @@ mod tests {
         assert_eq!(chunks[0].filter_mask().raw_bits(), 0);
     }
 
+    #[test]
+    fn filtered_retirement_tracks_growing_and_shrinking_stored_lengths() {
+        let mut builder = FileBuilder::new();
+        builder
+            .create_dataset("d")
+            .with_i32_data(&[0])
+            .with_maxshape(&[MaxExtent::Unlimited])
+            .with_chunks(&[512])
+            .with_deflate(DeflateLevel::Six);
+        let mut store = WindowProbeStore::open(builder.finish().unwrap());
+        let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
+        let mut expected = vec![0_i32];
+        let mut grows = 0;
+        let mut shrinks = 0;
+        for value in 1_i32..400 {
+            let value = value % 5;
+            let predecessor = state.loc.read_element(&store, 0).unwrap().unwrap();
+            let range = FileRange::new(
+                store.addresses().resolve(predecessor.addr).unwrap(),
+                predecessor.stored_size,
+            )
+            .unwrap();
+            let plan = plan_ea_append(
+                &store,
+                &state.loc,
+                &state.datatype,
+                &state.spatial,
+                state.element_size,
+                state.pipeline.as_ref(),
+                true,
+                LossyTailReencoding::Reject,
+                &value.to_le_bytes(),
+                1,
+                state.fill.pattern(state.element_size),
+            )
+            .unwrap();
+            apply_ea_append(&mut store, &mut state.loc, plan, 4).unwrap();
+            assert_eq!(store.retired.pop(), Some(range));
+            assert!(store.retired.is_empty());
+            let replacement = state.loc.read_element(&store, 0).unwrap().unwrap();
+            grows += usize::from(replacement.stored_size > predecessor.stored_size);
+            shrinks += usize::from(replacement.stored_size < predecessor.stored_size);
+            expected.push(value);
+        }
+        assert!(grows > 0, "no encoded allocation grew");
+        assert!(shrinks > 0, "no encoded allocation shrank");
+        let file = crate::File::from_bytes(store.data).unwrap();
+        assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), expected);
+    }
+
     #[rstest]
     #[case::short_raw_tail(true, 12)]
     #[case::long_raw_tail(true, 20)]

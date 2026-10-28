@@ -1,9 +1,9 @@
 use std::path::Path;
 
 use hdf5_pure::{
-    AppendOptions, DatasetCreateProperties, DeflateLevel, File, FileAccessProperties, FileBuilder,
-    FileSpaceSettings, FileSpaceStrategy, LossyTailReencoding, MaxExtent, MemoryStrategy,
-    PartialEdgeFiltering, ScaleOffset, SyncPolicy,
+    AppendOptions, Chunk, DatasetCreateProperties, DeflateLevel, File, FileAccessProperties,
+    FileBuilder, FileSpaceSettings, FileSpaceStrategy, LossyTailReencoding, MaxExtent,
+    MemoryStrategy, PartialEdgeFiltering, ScaleOffset, SyncPolicy,
 };
 use rstest::rstest;
 
@@ -69,6 +69,129 @@ fn replacements_preserve_reusable_storage_across_commit_and_reopen(
     reopened.root().delete("d").unwrap();
     reopened.commit().unwrap();
     reopened.close().unwrap();
+}
+
+#[rstest]
+#[case::borrowed(false)]
+#[case::owned(true)]
+fn buffered_flush_modes_retire_replaced_tails(#[case] owned: bool) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("buffered-modes.h5");
+    create(
+        &path,
+        FileSpaceStrategy::FsmAggr,
+        Encoding::Unfiltered,
+        &[1.0],
+    );
+    let file = File::open_rw(&path).unwrap();
+    let mut dataset = file.dataset("d").unwrap();
+    let predecessor = current_tail(&file);
+    if owned {
+        let mut appender = dataset.into_buffered_appender().unwrap();
+        appender.append(&[2.0_f64; 10]).unwrap();
+        appender.flush().unwrap();
+        assert_retired_chunk_is_reusable(&file, &predecessor);
+        let predecessor = current_tail(&file);
+        appender.append(&[3.0_f64; 520]).unwrap();
+        assert_retired_chunk_is_reusable(&file, &predecessor);
+        assert_eq!(appender.buffered_elements(), 19);
+        appender.flush().unwrap();
+        let predecessor = current_tail(&file);
+        assert_eq!(predecessor.offset, [512]);
+        assert_eq!(file.dataset("d").unwrap().shape().unwrap(), [531]);
+        appender.append(&[4.0_f64; 7]).unwrap();
+        appender.finish().unwrap();
+        assert_retired_chunk_is_reusable(&file, &predecessor);
+        dataset = file.dataset("d").unwrap();
+    } else {
+        let mut appender = dataset.buffered_appender().unwrap();
+        appender.append(&[2.0_f64; 10]).unwrap();
+        appender.flush().unwrap();
+        assert_retired_chunk_is_reusable(&file, &predecessor);
+        let predecessor = current_tail(&file);
+        appender.append(&[3.0_f64; 520]).unwrap();
+        assert_retired_chunk_is_reusable(&file, &predecessor);
+        assert_eq!(appender.buffered_elements(), 19);
+        appender.flush().unwrap();
+        let predecessor = current_tail(&file);
+        assert_eq!(predecessor.offset, [512]);
+        assert_eq!(file.dataset("d").unwrap().shape().unwrap(), [531]);
+        appender.append(&[4.0_f64; 7]).unwrap();
+        appender.finish().unwrap();
+        assert_retired_chunk_is_reusable(&file, &predecessor);
+    }
+    let expected = [vec![1.0], vec![2.0; 10], vec![3.0; 520], vec![4.0; 7]].concat();
+    assert_eq!(dataset.read_f64().unwrap(), expected);
+    drop(dataset);
+    file.commit().unwrap();
+    file.close().unwrap();
+    let file = File::open(&path).unwrap();
+    assert_eq!(file.dataset("d").unwrap().read_f64().unwrap(), expected);
+}
+
+#[rstest]
+fn page_buffered_replacements_survive_sync_and_reopen(
+    #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] memory: MemoryStrategy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("page-buffered-retirement.h5");
+    create(&path, FileSpaceStrategy::Page, Encoding::Unfiltered, &[1.0]);
+    let file = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new()
+            .with_memory_strategy(memory)
+            .with_sync_policy(SyncPolicy::OnClose)
+            .with_page_buffer_size(1 << 20),
+    )
+    .unwrap();
+    let mut dataset = file.dataset("d").unwrap();
+    for value in 2..130 {
+        dataset.append(&[f64::from(value)]).unwrap();
+    }
+    let expected = (1..130).map(f64::from).collect::<Vec<_>>();
+    assert_eq!(dataset.read_f64().unwrap(), expected);
+    let eof = file.reusable_space_stats().unwrap().logical_size();
+    dataset.append(&[130.0]).unwrap();
+    assert_eq!(file.reusable_space_stats().unwrap().logical_size(), eof);
+    drop(dataset);
+    file.commit().unwrap();
+    file.sync().unwrap();
+    file.close().unwrap();
+    let file = File::open_rw(&path).unwrap();
+    assert_eq!(
+        file.dataset("d").unwrap().read_f64().unwrap(),
+        (1..131).map(f64::from).collect::<Vec<_>>()
+    );
+    assert!(file.reusable_space_stats().unwrap().reusable_free_bytes() > 0);
+    let chunks = file.dataset("d").unwrap().chunks().unwrap();
+    let sections = file.reusable_free_sections().unwrap();
+    for chunk in chunks {
+        for section in sections.sections() {
+            assert!(
+                chunk.address + chunk.storage_size <= section.address()
+                    || section.end_address() <= chunk.address
+            );
+        }
+    }
+    file.close().unwrap();
+}
+
+fn current_tail(file: &File) -> Chunk {
+    file.dataset("d").unwrap().chunks().unwrap().pop().unwrap()
+}
+
+fn assert_retired_chunk_is_reusable(file: &File, predecessor: &Chunk) {
+    assert!(
+        file.reusable_free_sections()
+            .unwrap()
+            .sections()
+            .iter()
+            .any(|section| section.address() <= predecessor.address
+                && predecessor.address + predecessor.storage_size <= section.end_address()),
+        "predecessor {}..{} is unavailable",
+        predecessor.address,
+        predecessor.address + predecessor.storage_size
+    );
 }
 
 fn retained_after_deletion(path: &Path, flushes: usize, entry: EntryPoint) -> u64 {

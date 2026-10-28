@@ -26,6 +26,8 @@
 // startup.
 #![cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 
+use std::path::Path;
+
 use hdf5_pure::ChunkCacheConfig;
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::DeflateLevel;
@@ -56,6 +58,65 @@ use allocation::measure;
 
 #[global_allocator]
 static ALLOC: heapscope::Alloc = heapscope::Alloc::system();
+
+#[test]
+fn repeated_partial_replacements_retain_bounded_session_memory() {
+    let directory = tempfile::tempdir().unwrap();
+    let short = measure_partial_replacements(
+        &directory.path().join("short-retirement.h5"),
+        64,
+        "short_retirement_memory",
+    );
+    let long = measure_partial_replacements(
+        &directory.path().join("long-retirement.h5"),
+        1024,
+        "long_retirement_memory",
+    );
+    assert!(short.blocks > 64, "{short}");
+    assert!(long.blocks > short.blocks, "{long}");
+    assert!(long.bytes >= 1024 * 4096 * 8, "{long}");
+    assert!(
+        long.live_bytes <= short.live_bytes + 4096,
+        "retained append memory grew with replacements: {short}; {long}"
+    );
+    assert!(
+        long.peak_bytes <= short.peak_bytes + 16_384,
+        "peak append memory grew with replacements: {short}; {long}"
+    );
+}
+
+fn measure_partial_replacements(
+    path: &Path,
+    count: usize,
+    region: &'static str,
+) -> allocation::Measured {
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_settings(FileSpaceSettings::new(FileSpaceStrategy::FsmAggr));
+    builder
+        .create_dataset("d")
+        .with_i32_data(&[1])
+        .with_maxshape(&[MaxExtent::Unlimited])
+        .with_chunks(&[4096]);
+    builder.write(path).unwrap();
+    let file = File::open_rw_with_options(
+        path,
+        FileAccessProperties::new()
+            .with_memory_strategy(MemoryStrategy::Bounded)
+            .with_sync_policy(SyncPolicy::OnClose),
+    )
+    .unwrap();
+    let mut dataset = file.dataset("d").unwrap();
+    dataset.append(&[1_i32]).unwrap();
+    let ((), measured) = allocation::measure(region, || {
+        for _ in 0..count {
+            dataset.append(&[1_i32]).unwrap();
+        }
+    });
+    assert_eq!(dataset.read_i32().unwrap(), vec![1; count + 2]);
+    drop(dataset);
+    file.close().unwrap();
+    measured
+}
 
 #[rstest]
 #[case::flat(
