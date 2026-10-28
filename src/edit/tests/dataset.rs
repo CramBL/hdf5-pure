@@ -1,6 +1,6 @@
 //! Dataset overwrite compatibility and append behavior.
 
-use core::num::NonZeroUsize;
+use core::num::{NonZeroU32, NonZeroUsize};
 
 use hdf5_pure_format::__private::ChunkedGeometry;
 use hdf5_pure_format::__private::FILTER_PIPELINE_VERSION_TWO;
@@ -8,6 +8,7 @@ use rstest::rstest;
 
 use super::common;
 
+use crate::AttrValue;
 use crate::DatatypeByteOrder;
 use crate::DeflateLevel;
 use crate::FixedPointType;
@@ -42,6 +43,45 @@ use crate::object_path::{LinkName, ObjectPathBuf};
 use crate::type_builders;
 use crate::type_builders::DatasetBuilder;
 use crate::writer::FileBuilder;
+
+#[rstest]
+#[case::missing_datatype(|b: &mut DatasetBuilder| b.datatype = None, FormatError::DatasetMissingDatatype)]
+#[case::missing_shape(|b: &mut DatasetBuilder| b.shape = None, FormatError::DatasetMissingShape)]
+#[case::shape_payload(|b: &mut DatasetBuilder| { b.with_shape(&[2]); }, FormatError::LogicalShapeDataMismatch {
+    expected: 8, actual: 4, element_size: NonZeroU32::new(4).unwrap().into(),
+})]
+#[case::zero_extent_payload(|b: &mut DatasetBuilder| { b.with_shape(&[0]); }, FormatError::LogicalShapeDataMismatch {
+    expected: 0, actual: 4, element_size: NonZeroU32::new(4).unwrap().into(),
+})]
+#[case::fill_width(|b: &mut DatasetBuilder| { b.with_fill_value(1_u8); }, FormatError::FillValueSizeMismatch { expected: 4, actual: 1 })]
+#[case::rank(|b: &mut DatasetBuilder| { b.with_shape(&[1; 33]); }, FormatError::DatasetRankUnsupported { rank: 33, maximum: 32 })]
+#[case::unlimited_current(|b: &mut DatasetBuilder| { b.with_shape(&[u64::MAX]); }, FormatError::DatasetDimensionUnlimited { dimension: 0 })]
+#[case::chunk_rank(|b: &mut DatasetBuilder| { b.with_chunks(&[1, 1]); }, FormatError::InvalidChunkGeometry("chunk dimensions must have the same rank as the dataset shape"))]
+#[case::empty_attribute(|b: &mut DatasetBuilder| { b.set_attr("", AttrValue::I32(1)); }, FormatError::InvalidAttributeName { name: String::new() })]
+#[case::null_attribute(|b: &mut DatasetBuilder| { b.set_attr("a\0b", AttrValue::I32(1)); }, FormatError::InvalidAttributeName { name: "a\0b".into() })]
+fn creation_backends_preserve_common_request_causes(
+    #[case] configure: fn(&mut DatasetBuilder),
+    #[case] expected: FormatError,
+) {
+    let mut file = FileBuilder::new();
+    let builder = file.create_dataset("values");
+    builder.with_i32_data(&[1]);
+    configure(builder);
+    let error = file.finish().unwrap_err();
+    let Error::Format(error) = error else {
+        panic!("expected a format error, got {error:?}");
+    };
+    assert_eq!(error, expected);
+
+    let mut builder = DatasetBuilder::new("values");
+    builder.with_i32_data(&[1]);
+    configure(&mut builder);
+    let result = edit::dataset::flatten_dataset(builder, LinkName::new("values").unwrap().into());
+    let Err(Error::Format(error)) = result else {
+        panic!("expected the same format error from in-place creation");
+    };
+    assert_eq!(error, expected);
+}
 
 #[rstest]
 #[case::unsigned_byte(1, false, 0, 8, false, 0, 8, true)]

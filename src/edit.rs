@@ -3392,13 +3392,15 @@ impl WriteEngine {
             // A dataset staged with element bytes of its own (`with_raw_data`)
             // rather than staging its strings here, whether it is being created
             // or overwritten.
-            || staged.writes()
+            || staged.datasets()
                 .iter()
-                .chain(staged.datasets())
                 .any(|(_, fd)| {
                     fd.storage.vl_string_staging().is_none()
                         && datatype::datatype_holds_file_address(&fd.dt)
-                });
+                })
+            || staged.writes().iter().any(|(_, values)| {
+                values.vl_string_staging().is_none() && datatype::datatype_holds_file_address(&values.dt)
+            });
         if aliasing_edit {
             self.vl_overwrite_heaps.clear();
             return;

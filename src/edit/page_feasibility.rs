@@ -192,7 +192,7 @@ impl WriteEngine {
             dataset.storage.raw().len() as u64,
             &dataset.attrs,
             None,
-            dataset.fill_time.unwrap_or_default(),
+            dataset.fill_time,
             dataset.fill.as_deref(),
             self.libver(),
         )

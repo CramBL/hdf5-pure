@@ -1,9 +1,12 @@
+use std::collections::HashMap;
+
 use hdf5_pure::AttrValue;
 use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::FormatError;
 use rstest::rstest;
+use test_util::fractal_heap;
 
 #[rstest]
 #[case("", None)]
@@ -43,16 +46,57 @@ fn finish_rejects_invalid_attribute_names(
     let Error::Format(error) = error else {
         panic!("expected a format error, got {error:?}");
     };
-    let expected = match encoded_size {
-        Some(size) => FormatError::AttributeFieldTooLong {
-            name: name.into(),
-            field: "name",
-            size,
-            limit: usize::from(u16::MAX),
-        },
-        None => FormatError::InvalidAttributeName { name: name.into() },
+    assert_eq!(error, invalid_attribute_name_error(name, encoded_size));
+}
+
+#[rstest]
+#[case::empty("", None)]
+#[case::embedded_null("prefix\0suffix", None)]
+#[case::oversized(&"x".repeat(usize::from(u16::MAX)), Some(usize::from(u16::MAX) + 1))]
+fn committed_attribute_edits_reject_invalid_names_without_changing_the_file(
+    #[case] name: &str,
+    #[case] encoded_size: Option<usize>,
+    #[values(Owner::Dataset, Owner::Group, Owner::Root)] owner: Owner,
+    #[values(false, true)] dense: bool,
+    #[values(AttrValue::I32(42), AttrValue::VarLenString("value".into()))] value: AttrValue,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("attributes.h5");
+    named_attribute_builder(owner, "valid", dense)
+        .write(&path)
+        .unwrap();
+    let before = std::fs::read(&path).unwrap();
+    assert_eq!(fractal_heap::has_fractal_heap(&before), dense);
+    let error = {
+        let file = File::open_rw(&path).unwrap();
+        match owner {
+            Owner::Dataset => file.dataset("data").unwrap().set_attr(name, value).unwrap(),
+            Owner::Group => file.group("group").unwrap().set_attr(name, value).unwrap(),
+            Owner::Root => file.root().set_attr(name, value).unwrap(),
+        }
+        file.commit().unwrap_err()
     };
-    assert_eq!(error, expected);
+    let Error::Format(error) = error else {
+        panic!("expected a format error, got {error:?}");
+    };
+    assert_eq!(error, invalid_attribute_name_error(name, encoded_size));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let file = File::open(&path).unwrap();
+    let attrs = match owner {
+        Owner::Dataset => file.dataset("data").unwrap().attrs().unwrap(),
+        Owner::Group => file.group("group").unwrap().attrs().unwrap(),
+        Owner::Root => file.root().attrs().unwrap(),
+    };
+    let mut expected = HashMap::from([
+        ("preserved".into(), AttrValue::I32(1)),
+        ("valid".into(), AttrValue::I32(42)),
+    ]);
+    if dense {
+        for index in 0..10 {
+            expected.insert(format!("filler{index}"), AttrValue::I32(index));
+        }
+    }
+    assert_eq!(attrs, expected);
 }
 
 #[test]
@@ -97,6 +141,18 @@ fn stage_attributes(mut set: impl FnMut(&str, AttrValue), name: &str, dense: boo
     }
     set(name, AttrValue::I32(7));
     set(name, AttrValue::I32(42));
+}
+
+fn invalid_attribute_name_error(name: &str, encoded_size: Option<usize>) -> FormatError {
+    match encoded_size {
+        Some(size) => FormatError::AttributeFieldTooLong {
+            name: name.into(),
+            field: "name",
+            size,
+            limit: usize::from(u16::MAX),
+        },
+        None => FormatError::InvalidAttributeName { name: name.into() },
+    }
 }
 
 #[derive(Clone, Copy)]

@@ -9,6 +9,7 @@ use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
 use crate::attribute::{AttributeMessage, StoredAttribute};
 use crate::attribute_info::AttributeInfoMessage;
+use crate::attribute_request::AttributeName;
 use crate::convert::Narrow;
 use crate::error::{Error, FormatError, OBJECT_HEADER_MESSAGE_MAX};
 use crate::file_writer::{DenseAttrCreationOrder, LENGTH_SIZE};
@@ -273,7 +274,7 @@ fn apply_compact_attr_ops(
                     let creation_index = attr_creation_index(&out, name)?;
                     // A new attribute may have no inline record to remove.
                     out = remove_attr_from_region(&out, name, false)?;
-                    let msg = type_builders::build_attr_message(name, value)?;
+                    let msg = AttributeName::try_from(name.as_str())?.build_value(value)?;
                     if msg
                         .serialize(crate::file_writer::OFFSET_WIDTH, LENGTH_SIZE)?
                         .len()
@@ -413,7 +414,8 @@ pub(super) fn plan_attr_ops<S: Source + ?Sized>(
         let mut oversized = false;
         for op in ops {
             if let AttrOp::Set { name, value } = op {
-                oversized |= type_builders::build_attr_message(name, value)?
+                oversized |= AttributeName::try_from(name.as_str())?
+                    .build_value(value)?
                     .serialize(crate::file_writer::OFFSET_WIDTH, LENGTH_SIZE)?
                     .len()
                     > OBJECT_HEADER_MESSAGE_MAX;
@@ -464,7 +466,7 @@ pub(super) fn plan_attr_ops<S: Source + ?Sized>(
     for op in ops {
         match op {
             AttrOp::Set { name, value } => {
-                let msg = type_builders::build_attr_message(name, value)?;
+                let msg = AttributeName::try_from(name.as_str())?.build_value(value)?;
                 let collections = value
                     .var_len_strings()
                     .map(type_builders::build_global_heap_collections);
@@ -1090,7 +1092,8 @@ fn encode_attr_body(name: &str, value: &AttrValue) -> Result<Vec<u8>, Error> {
         value.var_len_strings().is_none(),
         "a variable-length attribute must be intercepted by apply_compact_attr_ops before reaching encode_attr_message"
     );
-    let body = type_builders::build_attr_message(name, value)?
+    let body = AttributeName::try_from(name)?
+        .build_value(value)?
         .serialize(crate::file_writer::OFFSET_WIDTH, LENGTH_SIZE)?;
     if body.len() > OBJECT_HEADER_MESSAGE_MAX {
         return Err(Error::EditUnsupported(
