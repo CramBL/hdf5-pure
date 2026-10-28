@@ -5,6 +5,7 @@
 //! Reclamation checks include sparse tails across supported record locations.
 
 use hdf5::Extent;
+use hdf5::datatype::ByteOrder as NativeByteOrder;
 use hdf5::file::LibraryVersion;
 use hdf5::plist::file_create::{FileSpaceStrategy as NativeStrategy, Sizeof, SizeofInfo};
 use hdf5_pure::FileBuilder;
@@ -14,6 +15,7 @@ use hdf5_pure_format::__private::ExtensibleArrayHeader;
 use rstest::rstest;
 
 use test_util_hdf5::dataset::{self, AppendInteropFixture, Unlimited};
+use test_util_hdf5::numeric::ByteOrder;
 
 use crate::test_util::array_index;
 
@@ -170,12 +172,17 @@ fn immediate_replacement_reclaims_native_tail_at_each_record_location(
         .create(&path)
         .unwrap();
     let dataset = file
-        .new_dataset::<i32>()
+        .new_dataset_builder()
+        .empty_as(ByteOrder::LittleEndian.i32_datatype())
         .chunk((4,))
         .shape((Extent::resizable(len),))
         .deflate(6)
         .create("d")
         .unwrap();
+    assert_eq!(
+        dataset.dtype().unwrap().byte_order(),
+        NativeByteOrder::LittleEndian
+    );
     dataset.write_slice(&[7_i32], len - 1..len).unwrap();
     drop(dataset);
     file.close().unwrap();
@@ -203,6 +210,7 @@ fn immediate_replacement_reclaims_native_tail_at_each_record_location(
     .unwrap();
     assert_eq!(file.dataset("d").unwrap().chunks().unwrap().len(), 1);
     let mut dataset = file.dataset("d").unwrap();
+    assert_eq!(dataset.datatype().unwrap(), hdf5_pure::make_i32_type());
     let predecessor = dataset.chunks().unwrap().remove(0);
     dataset.append(&[8_i32]).unwrap();
     assert_retired_chunk_is_reusable(&file, &predecessor);
@@ -280,6 +288,51 @@ fn narrow_native_tail_editing_is_rejected_without_changing_ownership(#[case] wid
         reason,
         "only 8-byte offsets and lengths are supported for in-place editing"
     );
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert_eq!(dataset::read_libhdf5::<i32>(&path, "d"), [1, 2, 3]);
+}
+
+#[test]
+fn immediate_append_rejects_big_endian_storage_without_changing_the_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("big-endian.h5");
+    let native = hdf5::File::with_options()
+        .with_fapl(|properties| properties.libver_v110())
+        .create(&path)
+        .unwrap();
+    let dataset = native
+        .new_dataset_builder()
+        .empty_as(ByteOrder::BigEndian.i32_datatype())
+        .shape([Extent::resizable(3)])
+        .chunk([4])
+        .deflate(6)
+        .create("d")
+        .unwrap();
+    assert_eq!(
+        dataset.dtype().unwrap().byte_order(),
+        NativeByteOrder::BigEndian
+    );
+    dataset.write_raw(&[1_i32, 2, 3]).unwrap();
+    drop(dataset);
+    native.close().unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let file = File::open_rw(&path).unwrap();
+    let mut dataset = file.dataset("d").unwrap();
+    assert_eq!(dataset.read_i32().unwrap(), [1, 2, 3]);
+    let original = dataset.chunks().unwrap();
+    let error = dataset.append(&[4_i32]).unwrap_err();
+    let Error::AppendInPlaceUnsupported(reason) = error else {
+        panic!("expected AppendInPlaceUnsupported, got {error:?}");
+    };
+    assert_eq!(
+        reason,
+        "append datatype does not match the on-disk dataset (wrong element type or byte order)"
+    );
+    assert_eq!(dataset.chunks().unwrap(), original);
+    assert_eq!(dataset.shape().unwrap(), [3]);
+    assert_eq!(dataset.read_i32().unwrap(), [1, 2, 3]);
+    drop(dataset);
+    file.close().unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
     assert_eq!(dataset::read_libhdf5::<i32>(&path, "d"), [1, 2, 3]);
 }
