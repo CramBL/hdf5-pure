@@ -304,6 +304,7 @@ impl WriteEngine {
         let spare = aggregation.unused().collect::<Vec<_>>();
         if spare.is_empty()
             && !aggregation.manager_dirty
+            && !self.fsm_dirty
             && self.image.len() == self.fsm_len
             && self.reserved.is_empty()
         {

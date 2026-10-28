@@ -5,6 +5,7 @@ use hdf5_pure_core::FileSpacePageSize;
 use hdf5_pure_core::FileSpaceStrategy;
 use hdf5_pure_core::FormatError;
 
+use super::admission::TrackedSpace;
 use super::allocation::AllocationClass;
 use super::extent::Extent;
 use super::list::{self, FreeList};
@@ -378,6 +379,44 @@ impl SessionSpace {
         (eoa < eof).then_some(eoa)
     }
 
+    /// Records an already retired extent under the session's admission policy.
+    ///
+    /// The caller establishes retirement and persistence ordering. `eoa` and `extent` use stored
+    /// addresses. Under disabled strategies, the allocator discards the extent. Under PAGE, the
+    /// allocator applies page-class rules and includes pending page padding in the resulting
+    /// free-space state.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::{FileSpacePageSize, FileSpaceStrategy};
+    /// use hdf5_pure_space::__private::{
+    ///     AllocationClass, Extent, FreeClass, PageType, SessionSpace,
+    /// };
+    ///
+    /// let mut space = SessionSpace::from_strategy(
+    ///     Some(FileSpaceStrategy::Page), 64, FileSpacePageSize::DEFAULT,
+    /// );
+    /// let retired = Extent::new(8_192, 128).unwrap();
+    /// space.record_freed(12_288, retired, FreeClass::Page(PageType::Raw));
+    /// assert_eq!(space.allocate(128, AllocationClass::Metadata), None);
+    /// assert_eq!(space.allocate(128, AllocationClass::Raw), Some(retired));
+    /// ```
+    pub fn record_freed(&mut self, eoa: u64, extent: Extent, class: FreeClass) {
+        match self {
+            Self::Disabled => {}
+            Self::Flat(space) => {
+                space.free.release(space.threshold, extent, ());
+            }
+            Self::Paged(space) => {
+                let (post, _) = space
+                    .paged
+                    .post_free(space.threshold, eoa, [(extent, class)], []);
+                space.paged.adopt_post_free(post, false, None);
+            }
+        }
+    }
+
     /// Builds the flat free-space state that a persisting commit would publish.
     pub fn flat_post_free(
         &self,
@@ -697,6 +736,50 @@ mod tests {
                 Extent::new(300, 60).unwrap()
             ]
         );
+    }
+
+    #[rstest]
+    #[case::below_threshold(32, false, 0)]
+    #[case::at_threshold(64, false, 64)]
+    #[case::above_threshold(128, false, 128)]
+    #[case::merges_below_threshold(32, true, 48)]
+    fn recorded_frees_obey_strategy_threshold_and_raw_page_class(
+        #[case] len: u64,
+        #[case] neighbor: bool,
+        #[case] expected: u64,
+        #[values(
+            FileSpaceStrategy::FsmAggr,
+            FileSpaceStrategy::Page,
+            FileSpaceStrategy::Aggr,
+            FileSpaceStrategy::None
+        )]
+        strategy: FileSpaceStrategy,
+    ) {
+        let mut space = SessionSpace::from_strategy(Some(strategy), 64, FileSpacePageSize::DEFAULT);
+        let start = 8192;
+        if neighbor {
+            space.seed_persisted(
+                Some(ManagerKind::PagedSmallRaw),
+                Extent::new(start, 16).unwrap(),
+            );
+        }
+        space.finish_seed();
+        let extent = Extent::new(start + if neighbor { 16 } else { 0 }, len).unwrap();
+        space.record_freed(extent.end(), extent, FreeClass::Page(PageType::Raw));
+        let expected = if space.is_enabled() { expected } else { 0 };
+        assert_eq!(space.reusable_bytes().unwrap(), expected);
+        if space.is_paged() {
+            assert_eq!(space.allocate(1, AllocationClass::Metadata), None);
+        }
+        if expected > 0 {
+            assert_eq!(
+                space.allocate(expected, AllocationClass::Raw),
+                Extent::new(start, expected)
+            );
+        } else {
+            assert_eq!(space.allocate(1, AllocationClass::Raw), None);
+        }
+        assert_eq!(space.reusable_bytes().unwrap(), 0);
     }
 
     #[rstest]

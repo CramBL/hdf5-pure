@@ -67,7 +67,7 @@ impl WriteEngine {
         self.complete_page_publication()
     }
 
-    /// Finalizes free-space metadata or classic aggregate tails at session teardown.
+    /// Publishes pending free-space state and releases unused aggregate tails.
     ///
     /// A persisting session rewrites stale free-space managers and returns unspent immediate
     /// append reserves. A persistent session also returns unused aggregate spare through those
@@ -75,6 +75,7 @@ impl WriteEngine {
     /// publishing the shorter EOA with the current root. An uncertain publication prevents
     /// aggregate cleanup. Non-persisting sessions without classic aggregation require no
     /// finalization.
+    /// Pending immediate retirements require manager publication even when EOF is unchanged.
     ///
     /// # Errors
     ///
@@ -87,7 +88,8 @@ impl WriteEngine {
             }
             return self.finalize_aggregates();
         }
-        if self.persist.is_none() || (self.image.len() == self.fsm_len && self.reserved.is_empty())
+        if self.persist.is_none()
+            || (self.image.len() == self.fsm_len && self.reserved.is_empty() && !self.fsm_dirty)
         {
             return Ok(());
         }
@@ -104,6 +106,7 @@ impl WriteEngine {
     /// Tree edits rebuild affected group headers and publish the new root through the
     /// superblock. Dataset value writes may update existing storage directly. On success,
     /// the staged set is cleared.
+    /// With no staged edits, finalizes pending manager changes from immediate tail retirement.
     ///
     /// Rejection during preflight preserves the staged set for retry. Once application
     /// consumes the staged set, a failed attempt discards that work. Writes into reusable
@@ -167,7 +170,11 @@ impl WriteEngine {
     /// Prepares edits and transfers their ownership to application after planning succeeds.
     fn commit_inner(&mut self, staged: StagedEdits) -> CommitOutcome {
         if staged.is_empty() {
-            return CommitOutcome::Applied(Ok(()));
+            return CommitOutcome::Applied(if self.fsm_dirty {
+                self.finalize_persist()
+            } else {
+                Ok(())
+            });
         }
         self.begin_commit(&staged);
         match PreparedCommit::prepare(self, staged) {

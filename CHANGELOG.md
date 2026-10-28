@@ -75,6 +75,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed storage growth from superseded partial tails in `Dataset::append` and buffered flushes when the file-space strategy admits reclamation.
 - Fixed `File::commit` making superseded storage reusable after an uncertain nonpersistent root publication.
 - Fixed `FileBuilder::finish` and related dataset creation writing incompatible chunk dimension widths for dimensions from 65,536 through 16,777,215 ([#952](https://github.com/CramBL/hdf5-pure/pull/952)).
 - Fixed `Dataset::chunk_shape` and related reads rejecting chunk dimensions encoded in three, five, six, or seven bytes ([#952](https://github.com/CramBL/hdf5-pure/pull/952)).

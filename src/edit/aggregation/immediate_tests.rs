@@ -136,11 +136,37 @@ fn immediate_phase_stops_keep_reservations_consumed(
         .unwrap();
     let consumed = engine.aggregation.unwrap();
     assert!(consumed.policy.unused(AllocationClass::Raw).is_some());
+    let reusable = engine.reusable_free_sections().unwrap();
+    let spare = consumed.policy.unused(AllocationClass::Raw).unwrap();
     let end = if phase == 4 { 29 } else { 6 };
     engine
         .append_inplace_i32_phased("values", &[97, 98], 4)
         .unwrap();
-    assert_ne!(engine.aggregation.unwrap(), consumed);
+    let address = engine
+        .append_prepare(AppendTarget::Path(&ObjectPathBuf::parse("values")))
+        .unwrap();
+    let state = engine.located.remove(&address).unwrap();
+    let record = state
+        .loc
+        .read_element(&engine.store(), u64::try_from(end).unwrap() / 4)
+        .unwrap()
+        .unwrap();
+    let start = engine.addresses().absolute(record.addr).unwrap();
+    let length = if filtered {
+        record.stored_size
+    } else {
+        u64::try_from(state.loc.chunk_bytes).unwrap()
+    };
+    let finish = start + length;
+    assert!(
+        reusable
+            .sections()
+            .iter()
+            .any(|section| section.address() <= start && finish <= section.end_address())
+            || (spare.start() <= start && finish <= spare.end())
+            || consumed.eoa <= start
+    );
+    engine.located.insert(address, state);
     assert_eq!(engine.context.superblock().eof_address, engine.image.len());
     engine.finalize_persist().unwrap();
     drop(engine);

@@ -16,10 +16,10 @@ use hdf5_pure_core::MetadataBytes;
 use crate::DatatypeByteOrder;
 use crate::SuperblockVersion;
 use crate::access_mode::AccessMode;
-use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
-use crate::chunk_index_inplace::{self, Located, Store};
+use crate::address::{AddressContext, BaseAddressExt};
+use crate::chunk_index_inplace::{self, Located, RetiredChunk, Store};
 use crate::convert::Narrow;
 use crate::data_layout::DataLayout;
 use crate::dataspace::Dataspace;
@@ -381,6 +381,7 @@ impl WriteEngine {
                     reserve: None,
                     reuse_session_space: false,
                     sync_policy: *sync_policy,
+                    fsm_dirty: None,
                 };
                 chunk_index_inplace::plan_ea_append(
                     &store,
@@ -412,6 +413,7 @@ impl WriteEngine {
                     aggregation,
                     located,
                     reserved,
+                    fsm_dirty,
                     sync_policy,
                     ..
                 } = self;
@@ -424,6 +426,7 @@ impl WriteEngine {
                     reserve: (reuse && from_reserve).then_some(reserved),
                     reuse_session_space: reuse && !from_reserve,
                     sync_policy: *sync_policy,
+                    fsm_dirty: from_reserve.then_some(fsm_dirty),
                 };
                 let confirmed = store
                     .aggregation
@@ -677,6 +680,7 @@ impl WriteEngine {
             reserve: None,
             reuse_session_space: false,
             sync_policy: self.sync_policy,
+            fsm_dirty: self.persist.is_some().then_some(&mut self.fsm_dirty),
         }
     }
 }
@@ -737,6 +741,8 @@ pub(super) struct EditStore<'a> {
     pub(super) reuse_session_space: bool,
     /// Durability policy for the shared writer's ordering barriers.
     sync_policy: SyncPolicy,
+    /// Persistence dirtiness updated when confirmed predecessor storage is retired.
+    fsm_dirty: Option<&'a mut bool>,
 }
 
 impl EditStore<'_> {
@@ -793,6 +799,24 @@ impl crate::source::Source for EditStore<'_> {
 impl Store for EditStore<'_> {
     fn widths(&self) -> FormatWidths {
         self.context.widths()
+    }
+
+    fn addresses(&self) -> AddressContext {
+        self.context.addresses()
+    }
+
+    fn retire(&mut self, retirement: RetiredChunk) {
+        let (extent, class) = retirement.into_extent();
+        // Opening checks the base against the image length, and editor truncation preserves it.
+        let eoa = self
+            .image
+            .len()
+            .checked_sub(self.context.addresses().effective_base().get())
+            .expect("the image includes its base address");
+        self.space.record_freed(eoa, extent, class);
+        if let Some(dirty) = &mut self.fsm_dirty {
+            **dirty = true;
+        }
     }
 
     fn recorded_eof(&self) -> u64 {
