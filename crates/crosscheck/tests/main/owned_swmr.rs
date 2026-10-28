@@ -1,11 +1,7 @@
 #![cfg(feature = "__hdf5-1.10")]
-//! Interop for the owned SWMR writer (issue #148, PR B): after a clean
-//! `File::close`, the SWMR-write flag is cleared and libhdf5
-//! reads the streamed appends back exactly.
+//! Native reads and file status flags for owned SWMR writers.
 
-use std::env::{self, VarError};
-use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use hdf5::file::LibraryVersion;
 use hdf5_pure::Error;
@@ -15,6 +11,7 @@ use hdf5_pure::SuperblockStatusFlags;
 use hdf5_pure::SuperblockVersion;
 use rstest::rstest;
 
+use test_util::process::{self, Fixture, Readiness};
 use test_util_hdf5::dataset::{self, Unlimited};
 
 #[test]
@@ -136,25 +133,20 @@ fn clear_status_flags_clears_marks_from_libhdf5_writers(
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("interrupted.h5");
-    let mut child = writer_command()
+    let mut command = process::command(env!("CARGO_BIN_EXE_interrupted-writer")).unwrap();
+    command
         .arg(&path)
-        .arg(if swmr { "swmr" } else { "ordinary" })
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut output = String::new();
-    BufReader::new(child.stdout.take().unwrap())
-        .read_line(&mut output)
-        .unwrap();
-    let status = child.try_wait().unwrap().unwrap_or_else(|| {
-        child.kill().unwrap();
-        child.wait().unwrap()
-    });
-    assert_eq!(
-        output, "HDF5_PURE_WRITER_READY\n",
-        "writer status: {status}"
-    );
+        .arg(if swmr { "swmr" } else { "ordinary" });
+    let child = Fixture::spawn(command, Duration::from_secs(30)).unwrap();
+    let child = child
+        .wait_ready(Readiness::try_from(b"HDF5_PURE_WRITER_READY\n".as_slice()).unwrap())
+        .unwrap_or_else(|error| panic!("interrupted writer failed: {error}"));
+    let output = child
+        .interrupt()
+        .unwrap_or_else(|error| panic!("writer cleanup failed: {error}"));
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"HDF5_PURE_WRITER_READY\n");
+    assert!(output.stderr.is_empty(), "{output:?}");
     assert_eq!(
         File::from_bytes(std::fs::read(&path).unwrap())
             .unwrap()
@@ -189,25 +181,4 @@ fn clear_status_flags_clears_marks_from_libhdf5_writers(
     let cleared = std::fs::read(&path).unwrap();
     File::clear_status_flags(&path).unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), cleared);
-}
-
-/// Builds a fixture command with the optional runner from `CROSS_TARGET_RUNNER`.
-///
-/// # Panics
-///
-/// Panics if `CROSS_TARGET_RUNNER` contains a value that is not Unicode.
-fn writer_command() -> Command {
-    let binary = env!("CARGO_BIN_EXE_interrupted-writer");
-    let runner = match env::var("CROSS_TARGET_RUNNER") {
-        Ok(runner) => runner,
-        Err(VarError::NotPresent) => return Command::new(binary),
-        Err(err) => panic!("invalid cross runner: {err}"),
-    };
-    let mut args = runner.split_whitespace();
-    let Some(program) = args.next() else {
-        return Command::new(binary);
-    };
-    let mut command = Command::new(program);
-    command.args(args).arg(binary);
-    command
 }
