@@ -328,6 +328,7 @@ def migration_shapes(baseline: dict, candidate: dict, core: dict) -> list[str]:
         "FillTime",
         "LengthWidth",
         "MantissaNormalization",
+        "MetadataBytes",
         "OffsetWidth",
         "StoredAddress",
         "VariableLengthStringType",

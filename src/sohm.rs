@@ -58,7 +58,7 @@ pub fn read_index_records_from_source<S: Source + ?Sized>(
         SohmIndexKind::List => {
             let len =
                 hdf5_pure_format::__private::sohm_list_len(index.message_count, widths.offsets);
-            let image = source.read_metadata_at(address.get(), len)?;
+            let image = source.read_metadata(address.get(), len)?;
             hdf5_pure_format::__private::parse_sohm_list_with_offset_width(
                 &image,
                 index.message_count,

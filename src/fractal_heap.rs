@@ -2,13 +2,13 @@
 //!
 //! [`HeapObjectReader`] reads from either an in-memory file image or a [`Source`].
 
-use alloc::borrow::Cow;
 use alloc::collections::BTreeSet;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use core::num::NonZeroU32;
 
 use hdf5_pure_core::__private::{FileRange, FileRegion, PhysicalAddress};
+use hdf5_pure_core::MetadataBytes;
 use hdf5_pure_filter::__private::Error as FilterError;
 pub use hdf5_pure_format::__private::FractalHeapHeader;
 use hdf5_pure_format::__private::{
@@ -113,8 +113,8 @@ pub(crate) fn read_header_range(
     source: &(impl Source + ?Sized),
     addresses: AddressContext,
     range: FileRange,
-) -> Result<Vec<u8>, FormatError> {
-    source.read_metadata_at(
+) -> Result<MetadataBytes<'_>, FormatError> {
+    source.read_metadata(
         addresses.relative(range.start().get())?.get(),
         range.length().to_usize()?,
     )
@@ -242,7 +242,7 @@ pub(crate) fn huge_index_decodes() -> usize {
 
 impl HugeObjectIndex {
     fn decode<'bytes>(
-        read: &impl Fn(FileRange) -> Result<Cow<'bytes, [u8]>, FormatError>,
+        read: &impl Fn(FileRange) -> Result<MetadataBytes<'bytes>, FormatError>,
         addresses: AddressContext,
         layout: &FractalHeapHugeObjectLayout,
         widths: FormatWidths,
@@ -520,7 +520,7 @@ impl<'h> HeapObjectReader<'h> {
                         range.length(),
                     )?,
                 )
-                .map(Cow::Borrowed)
+                .and_then(|bytes| MetadataBytes::borrowed(range, bytes))
             },
             Backend::Buffered,
             id,
@@ -534,7 +534,7 @@ impl<'h> HeapObjectReader<'h> {
     ) -> Result<Vec<u8>, FormatError> {
         let addresses = self.addresses;
         self.read_huge_with(
-            |range| read_header_range(source, addresses, range).map(Cow::Owned),
+            |range| read_header_range(source, addresses, range),
             Backend::Streaming,
             id,
         )
@@ -542,7 +542,7 @@ impl<'h> HeapObjectReader<'h> {
 
     fn read_huge_with<'bytes>(
         &mut self,
-        read: impl Fn(FileRange) -> Result<Cow<'bytes, [u8]>, FormatError>,
+        read: impl Fn(FileRange) -> Result<MetadataBytes<'bytes>, FormatError>,
         backend: Backend,
         id: FractalHeapIdView<'_>,
     ) -> Result<Vec<u8>, FormatError> {
@@ -631,7 +631,7 @@ impl<'h> HeapObjectReader<'h> {
                 other => FormatError::from(other),
             })?
         } else {
-            encoded.into_owned()
+            encoded.into_vec()
         };
         layout.associate_decoded(&reference, &decoded)?;
         Ok(decoded)
@@ -654,7 +654,7 @@ impl<'h> HeapObjectReader<'h> {
             |range| {
                 image
                     .subregion(range)
-                    .map(|region| Cow::Borrowed(region.bytes()))
+                    .and_then(|region| MetadataBytes::borrowed(region.range(), region.bytes()))
             },
             Backend::Buffered,
             heap_offset,
@@ -670,7 +670,7 @@ impl<'h> HeapObjectReader<'h> {
     ) -> Result<Vec<u8>, FormatError> {
         let addresses = self.addresses;
         self.read_managed_object_with(
-            |range| read_header_range(source, addresses, range).map(Cow::Owned),
+            |range| read_header_range(source, addresses, range),
             Backend::Streaming,
             heap_offset,
             object_length,
@@ -679,7 +679,7 @@ impl<'h> HeapObjectReader<'h> {
 
     fn read_managed_object_with<'bytes>(
         &mut self,
-        read: impl Fn(FileRange) -> Result<Cow<'bytes, [u8]>, FormatError>,
+        read: impl Fn(FileRange) -> Result<MetadataBytes<'bytes>, FormatError>,
         backend: Backend,
         heap_offset: u64,
         object_length: u64,
@@ -738,7 +738,7 @@ impl<'h> HeapObjectReader<'h> {
                         self.validated_direct.insert(direct.address());
                         return Ok(object.parse(region)?.to_vec());
                     }
-                    return Ok(read(object.range())?.into_owned());
+                    return Ok(read(object.range())?.into_vec());
                 }
                 FractalHeapBlock::Indirect(indirect) => {
                     let reference = indirect.at(self.addresses.resolve(indirect.address())?)?;

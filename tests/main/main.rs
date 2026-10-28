@@ -75,6 +75,7 @@ mod mat_string_read;
 mod mat_struct_array_read;
 mod mat_table_read;
 mod memory_strategy;
+mod metadata_owners;
 mod modern;
 mod named_datatypes;
 mod object_header_continuation;

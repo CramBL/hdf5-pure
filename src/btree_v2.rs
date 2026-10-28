@@ -97,7 +97,7 @@ pub(crate) fn collect_btree_v2_storage_extents<S: Source + ?Sized>(
     let header_len =
         hdf5_pure_format::__private::btree_v2_header_size(widths.offsets, widths.lengths);
     let header_extent = extent_in_source(source, header_address.get(), header_len.to_u64())?;
-    let header_bytes = source.read_metadata_at(header_address.get(), header_len)?;
+    let header_bytes = source.read_metadata(header_address.get(), header_len)?;
     let header = BTreeV2Header::parse_with_widths(&header_bytes, 0, widths)?;
     // BTIN and BTLF both have a 6-byte signature/version/type prefix and a 4-byte checksum.
     if header.node_size < 10 {
@@ -190,7 +190,7 @@ fn collect_storage_node<S: Source + ?Sized>(
     }
 
     let extent = extent_in_source(source, address.get(), u64::from(header.node_size))?;
-    let node = source.read_metadata_at(address.get(), u64::from(header.node_size).to_usize()?)?;
+    let node = source.read_metadata(address.get(), u64::from(header.node_size).to_usize()?)?;
     extents.push(extent);
 
     let signature = if depth == 0 { b"BTLF" } else { b"BTIN" };
@@ -464,7 +464,7 @@ fn collect_node_from_source<S: Source + ?Sized>(
     let node_len = u64::from(node_size)
         .min(source.len().saturating_sub(address))
         .to_usize()?;
-    let node = source.read_metadata_at(address, node_len)?;
+    let node = source.read_metadata(address, node_len)?;
 
     let Some(depth) = NonZeroU16::new(depth) else {
         validate_node_prefix(&node, b"BTLF", tree_type)?;

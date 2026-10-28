@@ -2,7 +2,7 @@
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::ops::Range;
+use core::ops::{Deref, Range};
 
 use crate::address::PhysicalAddress;
 use crate::error::FormatError;
@@ -12,7 +12,8 @@ use crate::region::{FileRange, FileRegion};
 ///
 /// The byte count equals the range length. Cloning and selecting a subregion share the
 /// backing bytes. An owned allocation remains valid until its last owner is dropped.
-/// The caller asserts the bytes' physical position. Source identity and revision are unchecked.
+/// The caller supplies the bytes' physical position. Source identity and revision are unchecked.
+/// Separate reads of a mutable source may observe different revisions.
 ///
 /// # Examples
 ///
@@ -50,6 +51,57 @@ pub struct MetadataBytes<'a> {
 }
 
 impl<'a> MetadataBytes<'a> {
+    /// Borrows bytes whose first byte is at physical file position `offset`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if `offset + bytes.len()` exceeds [`u64::MAX`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::MetadataBytes;
+    ///
+    /// let data = [1, 2, 3];
+    /// let bytes = MetadataBytes::from_slice(512, &data)?;
+    /// assert_eq!(bytes.offset(), 512);
+    /// assert_eq!(bytes.as_ref(), &[1, 2, 3]);
+    /// # Ok::<(), hdf5_pure_core::FormatError>(())
+    /// ```
+    pub fn from_slice(offset: u64, bytes: &'a [u8]) -> Result<Self, FormatError> {
+        Self::borrowed(
+            FileRange::new(PhysicalAddress::new(offset), bytes.len() as u64)?,
+            bytes,
+        )
+    }
+
+    /// Takes ownership of a vector whose first byte is at physical file position `offset`.
+    ///
+    /// Retains the vector's payload allocation. Clones share that allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if `offset + bytes.len()` exceeds [`u64::MAX`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::MetadataBytes;
+    ///
+    /// let bytes = MetadataBytes::from_vec(512, vec![1, 2, 3])?;
+    /// let retained = bytes.clone();
+    /// drop(bytes);
+    /// assert_eq!(retained.offset(), 512);
+    /// assert_eq!(retained.as_ref(), &[1, 2, 3]);
+    /// # Ok::<(), hdf5_pure_core::FormatError>(())
+    /// ```
+    pub fn from_vec(offset: u64, bytes: Vec<u8>) -> Result<Self, FormatError> {
+        Self::owned(
+            FileRange::new(PhysicalAddress::new(offset), bytes.len() as u64)?,
+            bytes,
+        )
+    }
+
     /// Associates borrowed bytes with their physical range.
     ///
     /// # Errors
@@ -74,6 +126,74 @@ impl<'a> MetadataBytes<'a> {
             local,
             range,
         })
+    }
+
+    /// Returns the physical file position of the first byte.
+    pub fn offset(&self) -> u64 {
+        self.range.start().get()
+    }
+
+    /// Shares owned backing bytes independently of this owner's lifetime.
+    ///
+    /// Returns [`None`] for borrowed bytes. The returned owner has the same physical range
+    /// and shares the entire backing allocation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::MetadataBytes;
+    ///
+    /// let bytes = MetadataBytes::from_vec(512, vec![1, 2, 3])?;
+    /// let retained: MetadataBytes<'static> = bytes.shared().unwrap();
+    /// drop(bytes);
+    /// assert_eq!(retained.as_ref(), &[1, 2, 3]);
+    /// assert!(MetadataBytes::from_slice(0, &[4, 5])?.shared().is_none());
+    /// # Ok::<(), hdf5_pure_core::FormatError>(())
+    /// ```
+    pub fn shared(&self) -> Option<MetadataBytes<'static>> {
+        match &self.backing {
+            MetadataBacking::Borrowed(_) => None,
+            MetadataBacking::Shared(bytes) => Some(MetadataBytes {
+                backing: MetadataBacking::Shared(bytes.clone()),
+                local: self.local.clone(),
+                range: self.range,
+            }),
+        }
+    }
+
+    /// Returns the capacity of the owned backing allocation, or zero for borrowed bytes.
+    ///
+    /// Includes capacity outside the selected subregion and excludes ownership bookkeeping.
+    pub fn retained_bytes(&self) -> usize {
+        match &self.backing {
+            MetadataBacking::Borrowed(_) => 0,
+            MetadataBacking::Shared(bytes) => bytes.capacity(),
+        }
+    }
+
+    /// Returns the selected bytes in a vector.
+    ///
+    /// Reuses the backing vector when this is its sole owner and selects the entire vector.
+    /// Copies the selected bytes otherwise.
+    pub fn into_vec(self) -> Vec<u8> {
+        let Self {
+            backing,
+            local,
+            range,
+        } = self;
+        match backing {
+            MetadataBacking::Shared(bytes) if local == (0..bytes.len()) => {
+                Arc::try_unwrap(bytes).unwrap_or_else(|bytes| bytes.as_ref().clone())
+            }
+            backing => {
+                let bytes = MetadataBytes {
+                    backing,
+                    local,
+                    range,
+                };
+                bytes.as_ref().to_vec()
+            }
+        }
     }
 
     /// Returns the physical range associated with these bytes.
@@ -136,6 +256,14 @@ impl AsRef<[u8]> for MetadataBytes<'_> {
     }
 }
 
+impl Deref for MetadataBytes<'_> {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_ref()
+    }
+}
+
 #[derive(Clone, Debug)]
 enum MetadataBacking<'a> {
     Borrowed(&'a [u8]),
@@ -173,6 +301,11 @@ impl<'a> MetadataFrame<'a> {
         Ok(Self {
             region: FileRegion::new(FileRange::new(origin, bytes.len() as u64)?, bytes)?,
         })
+    }
+
+    /// Returns the complete slice beginning at the frame's origin.
+    pub fn bytes(self) -> &'a [u8] {
+        self.region.bytes()
     }
 
     /// Returns the physical position of the slice's first byte.

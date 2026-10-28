@@ -10,6 +10,9 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use hdf5_pure_core::__private::PhysicalAddress;
 
+use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::MetadataBytes;
+
 #[cfg(test)]
 use crate::FileSpacePageSize;
 use crate::FileSpaceSettings;
@@ -247,6 +250,23 @@ impl Source for SourceView<'_> {
         match self {
             SourceView::Mem(b) => BytesSource::new(*b).read_metadata_at(offset, len),
             SourceView::Stream(s) => s.read_metadata_at(offset, len),
+        }
+    }
+
+    fn metadata_origin(&self) -> Result<u64, FormatError> {
+        match self {
+            SourceView::Mem(_) => Ok(0),
+            SourceView::Stream(s) => s.metadata_origin(),
+        }
+    }
+
+    fn read_metadata(&self, offset: u64, len: usize) -> Result<MetadataBytes<'_>, FormatError> {
+        match self {
+            SourceView::Mem(bytes) => {
+                let range = FileRange::new(PhysicalAddress::new(offset), len.to_u64())?;
+                MetadataBytes::borrowed(range, source::bytes_in(bytes, range)?)
+            }
+            SourceView::Stream(s) => s.read_metadata(offset, len),
         }
     }
 
@@ -2538,9 +2558,12 @@ impl FileInner {
         // read. For a plain file (`base == 0`) this is the identity.
         let base = self.addresses().effective_base();
         match &self.backend {
-            Backend::InMemory(v) => {
-                data_read::read_raw_data_cached(source::frame(v, base)?, spec, widths, cache)
-            }
+            Backend::InMemory(v) => data_read::read_raw_data_cached(
+                source::framed_metadata(v, base)?,
+                spec,
+                widths,
+                cache,
+            ),
             Backend::Streaming(s) if base.is_zero() => {
                 data_read::read_raw_data_cached_from_source(s.as_ref(), spec, widths, cache)
             }
@@ -2554,8 +2577,12 @@ impl FileInner {
             Backend::Edit(m) => Self::with_engine(
                 m,
                 |data| {
-                    let framed = source::frame(data, base)?;
-                    data_read::read_raw_data_cached(framed, spec, widths, cache)
+                    data_read::read_raw_data_cached(
+                        source::framed_metadata(data, base)?,
+                        spec,
+                        widths,
+                        cache,
+                    )
                 },
                 |s| {
                     let framed = BaseOffsetSource { inner: s, base };
@@ -2577,7 +2604,10 @@ impl FileInner {
         let base = self.addresses().effective_base();
         match &self.backend {
             Backend::InMemory(bytes) => read_region_framed(
-                &BytesSource::new(source::frame(bytes, base)?),
+                &BaseOffsetSource {
+                    inner: &BytesSource::new(bytes),
+                    base,
+                },
                 region,
                 self.widths,
                 cache,
@@ -2597,7 +2627,10 @@ impl FileInner {
                 engine,
                 |bytes| {
                     read_region_framed(
-                        &BytesSource::new(source::frame(bytes, base)?),
+                        &BaseOffsetSource {
+                            inner: &BytesSource::new(bytes),
+                            base,
+                        },
                         region,
                         self.widths,
                         cache,

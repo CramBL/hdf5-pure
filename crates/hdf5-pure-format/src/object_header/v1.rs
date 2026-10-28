@@ -203,7 +203,7 @@ impl ObjectHeader {
     ) -> Result<ObjectHeader, FormatError> {
         // version(1) + reserved(1) + num_messages(2) + ref_count(4) +
         // header_size(4) = 12, padded to 16 before the first message.
-        let prefix = source.read_metadata_at(address, 16)?;
+        let prefix = source.read_metadata(address, 16)?;
         let version = prefix[0];
         if version != 1 {
             return Err(FormatError::InvalidObjectHeaderVersion(version));
@@ -260,7 +260,7 @@ impl ObjectHeader {
         if depth_remaining == 0 {
             return Err(FormatError::NestingDepthExceeded);
         }
-        let region = source.read_metadata_at(region_addr, region_len.to_usize()?)?;
+        let region = source.read_metadata(region_addr, region_len.to_usize()?)?;
         let end = region.len();
         let mut pos = 0usize;
         let mut count = 0u16;

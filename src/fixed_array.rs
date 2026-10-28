@@ -12,7 +12,6 @@ use core::num::NonZeroUsize;
 
 #[cfg(feature = "checksum")]
 use hdf5_pure_core::__private::FileRange;
-use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_format::__private::ChunkRecord;
 use hdf5_pure_format::__private::FixedArrayDataBlock;
 use hdf5_pure_format::__private::FixedArrayElements;
@@ -26,6 +25,7 @@ use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
 use crate::address::StoredAddress;
 use crate::error::FormatError;
+use crate::source;
 use crate::source::RangeReader;
 use crate::width::FormatWidths;
 
@@ -66,26 +66,26 @@ pub(crate) fn read_chunks(
     };
     if let Some(range) = block.unpaged_prefix_range()? {
         let bytes = file.read_range(range)?;
-        let unpaged = block.parse_unpaged_prefix(FileRegion::new(range, &bytes)?)?;
+        let unpaged = block.parse_unpaged_prefix(source::legacy_framed_region(range, &bytes)?)?;
         verify_unpaged(file, unpaged)?;
         let mut first_slot = 0;
         while let Some(window) = unpaged.window(first_slot, ENTRY_WINDOW_ENTRIES)? {
             let range = window.parse_range();
             let bytes = file.read_range(range)?;
-            visit_elements(window.parse(FileRegion::new(range, &bytes)?)?)?;
+            visit_elements(window.parse(source::legacy_framed_region(range, &bytes)?)?)?;
             first_slot = window.end_slot();
         }
         return Ok(());
     }
     let range = block.parse_range()?;
     let bytes = file.read_range(range)?;
-    match block.parse(FileRegion::new(range, &bytes)?)? {
+    match block.parse(source::legacy_framed_region(range, &bytes)?)? {
         FixedArrayDataBlock::Elements(elements) => visit_elements(elements),
         FixedArrayDataBlock::PageBitmap(bitmap) => bitmap.pages().try_for_each(|page| {
             let page = page?;
             let range = page.parse_range();
             let bytes = file.read_range(range)?;
-            visit_elements(page.parse(FileRegion::new(range, &bytes)?)?)
+            visit_elements(page.parse(source::legacy_framed_region(range, &bytes)?)?)
         }),
     }
 }
@@ -164,7 +164,10 @@ fn read_header(
 ) -> Result<FixedArrayHeader, FormatError> {
     let locator = FixedArrayHeaderLocator::new(widths, BaseAddress::ZERO, address);
     let range = locator.parse_range()?;
-    locator.parse(FileRegion::new(range, &file.read_range(range)?)?)
+    locator.parse(source::legacy_framed_region(
+        range,
+        &file.read_range(range)?,
+    )?)
 }
 
 #[cfg(test)]
@@ -172,6 +175,7 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
+    use hdf5_pure_core::__private::FileRegion;
     use hdf5_pure_format::__private::IndexSlots;
 
     use rstest::rstest;
@@ -267,7 +271,7 @@ mod tests {
     fn buffered_records(image: &[u8], base: u64) -> Result<Vec<(u64, ChunkRecord)>, FormatError> {
         let mut records = Vec::new();
         read_chunks(
-            source::frame(image, BaseAddress::new(base))?,
+            &source::framed_metadata(image, BaseAddress::new(base))?,
             WIDTHS,
             StoredAddress::new(ARRAY_AT),
             8,

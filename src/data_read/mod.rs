@@ -7,6 +7,7 @@ use core::marker::PhantomData;
 use core::num::NonZeroUsize;
 
 use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::MetadataFrame;
 use hdf5_pure_core::__private::PhysicalAddress;
 
 #[cfg(test)]
@@ -95,22 +96,27 @@ pub fn read_raw_data_full(
     }
 }
 
-/// Read raw bytes with chunk cache support.
+/// Reads raw bytes with index and decoded-chunk caching.
 ///
-/// For chunked layouts the `cache` is used to avoid repeated B-tree
-/// traversals and to cache decompressed chunk data.  For compact and
-/// contiguous layouts this behaves identically to [`read_raw_data_full`].
+/// The reader resolves metadata positions from the frame's origin and borrows payload bytes
+/// from its slice at local offsets.
+/// Compact and contiguous layouts use [`read_raw_data_full`].
+///
+/// # Errors
+///
+/// Returns the errors of [`read_raw_data_full`] and
+/// [`chunked_read::read_chunked_data_cached`].
 pub fn read_raw_data_cached(
-    file_data: &[u8],
+    file_data: MetadataFrame<'_>,
     spec: RawReadSpec<'_>,
     widths: FormatWidths,
     cache: &ChunkCache,
 ) -> Result<Vec<u8>, FormatError> {
     match spec.storage() {
         RawReadStorage::Chunked { .. } => {
-            chunked_read::read_chunked_data_cached(file_data, spec, widths, cache)
+            chunked_read::read_chunked_data_cached_framed(file_data, spec, widths, cache)
         }
-        _ => read_raw_data_full(file_data, spec, widths),
+        _ => read_raw_data_full(file_data.bytes(), spec, widths),
     }
 }
 

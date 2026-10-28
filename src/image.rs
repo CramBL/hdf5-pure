@@ -65,7 +65,9 @@ use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(test)]
 use test_util::disk_log;
 
-use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::{FileRange, PhysicalAddress};
+
+use hdf5_pure_core::MetadataBytes;
 
 use crate::convert::Narrow;
 use crate::error::{Error, FormatError};
@@ -896,6 +898,10 @@ impl Source for MirrorImage {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError> {
         BytesSource::new(&self.data[..]).read_at(offset, buf)
     }
+    fn read_metadata(&self, offset: u64, len: usize) -> Result<MetadataBytes<'_>, FormatError> {
+        let range = FileRange::new(PhysicalAddress::new(offset), len.to_u64())?;
+        MetadataBytes::borrowed(range, crate::source::bytes_in(&self.data, range)?)
+    }
 }
 
 impl FileImage for MirrorImage {
@@ -1248,12 +1254,15 @@ impl Source for HandleImage {
     }
 
     fn read_metadata_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, FormatError> {
+        Ok(self.read_metadata(offset, len)?.into_vec())
+    }
+
+    fn read_metadata(&self, offset: u64, len: usize) -> Result<MetadataBytes<'_>, FormatError> {
+        let read = || MetadataBytes::from_vec(offset, self.read_exact_at(offset, len)?);
         let Some((config, cache)) = &self.metadata_cache else {
-            return self.read_exact_at(offset, len);
+            return read();
         };
-        MetadataReadCache::read_through(cache, *config, offset, len, || {
-            self.read_exact_at(offset, len)
-        })
+        MetadataReadCache::read_through(cache, *config, offset, len, read)
     }
 
     fn metadata_cache_stats(&self) -> Option<MetadataCacheStats> {

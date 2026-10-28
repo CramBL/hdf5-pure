@@ -4,7 +4,6 @@
 use alloc::{string::String, vec::Vec};
 use core::num::NonZeroU16;
 
-use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_format::__private::LocalHeap;
 use hdf5_pure_format::__private::LocalHeapLocator;
 use hdf5_pure_format::__private::SymbolTableEntry;
@@ -20,6 +19,7 @@ use crate::btree_v1;
 use crate::error::FormatError;
 use crate::link_message::LinkTarget;
 use crate::object_path::LinkName;
+use crate::source;
 use crate::source::RangeReader;
 use crate::source::Source;
 use crate::superblock::Superblock;
@@ -114,7 +114,7 @@ pub(crate) fn find_link(
     let heap = read_local_heap(file, sym_table_msg, widths, addresses)?;
     let range = heap.data_segment_range();
     let bytes = file.read_range(range)?;
-    let names = heap.data_segment(FileRegion::new(range, &bytes)?)?;
+    let names = heap.data_segment(source::legacy_framed_region(range, &bytes)?)?;
     let mut found = None;
     for address in symbol_table_nodes()? {
         let node = read_symbol_table_node(file, widths, addresses, group_leaf_node_k, address)?;
@@ -231,7 +231,7 @@ fn symbols(
     let heap = read_local_heap(file, sym_table_msg, widths, addresses)?;
     let range = heap.data_segment_range();
     let bytes = file.read_range(range)?;
-    let names = heap.data_segment(FileRegion::new(range, &bytes)?)?;
+    let names = heap.data_segment(source::legacy_framed_region(range, &bytes)?)?;
 
     let mut entries = Vec::new();
     for address in symbol_table_nodes()? {
@@ -267,7 +267,10 @@ fn read_local_heap(
         sym_table_msg.local_heap_address,
     );
     let range = locator.parse_range()?;
-    locator.parse(FileRegion::new(range, &file.read_range(range)?)?)
+    locator.parse(source::legacy_framed_region(
+        range,
+        &file.read_range(range)?,
+    )?)
 }
 
 /// Reads the symbol table node at `address` from `file`, its prefix and then its entries in use,
@@ -292,9 +295,15 @@ fn read_symbol_table_node(
         group_leaf_node_k,
     );
     let range = locator.parse_range()?;
-    let entries = locator.parse(FileRegion::new(range, &file.read_range(range)?)?)?;
+    let entries = locator.parse(source::legacy_framed_region(
+        range,
+        &file.read_range(range)?,
+    )?)?;
     let range = entries.parse_range();
-    entries.parse(FileRegion::new(range, &file.read_range(range)?)?)
+    entries.parse(source::legacy_framed_region(
+        range,
+        &file.read_range(range)?,
+    )?)
 }
 
 /// The symbol table entry cache type for an entry without cached metadata.

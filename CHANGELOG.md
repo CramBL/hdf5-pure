@@ -64,6 +64,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Performance
 
+- `Source::read_metadata` shares immutable metadata bytes through cached reads and borrows resident input. Cache byte limits cover retained payload capacity, and external owners may extend allocation lifetime ([#958](https://github.com/CramBL/hdf5-pure/pull/958)).
 - `File::commit` transfers staged overwrite buffers into application and patches deferred variable-length references in place. Separate allocations remain for undo data, encoded output, and backend storage ([#953](https://github.com/CramBL/hdf5-pure/pull/953)).
 - `FileBuilder::finish` and in-place edits reuse dense-attribute heap and index plans through reference resolution and emission ([#947](https://github.com/CramBL/hdf5-pure/pull/947)).
 - `Dataset::read_f64` and related chunked reads reuse a logical chunk lookup across row windows even with index retention disabled, and use it for region reads. Payload reads retain physical-address order, and selections spanning the leading dimension can inspect every descriptor ([#943](https://github.com/CramBL/hdf5-pure/pull/943)).

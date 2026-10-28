@@ -594,6 +594,7 @@ pub use file_lock::{FileLocking, WriteMarkPolicy};
 
 pub use chunk_cache::{ChunkCacheConfig, ChunkCacheStats};
 
+pub use hdf5_pure_core::MetadataBytes;
 pub use source::{MetadataCacheConfig, MetadataCacheStats, Source};
 
 // The `Read + Seek` backend, for a caller who has one but no path. Exported

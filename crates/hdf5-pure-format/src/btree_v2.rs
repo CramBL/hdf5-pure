@@ -586,7 +586,7 @@ impl BTreeV2Header {
         let window = MAX_HEADER
             .min(source.len().saturating_sub(address))
             .to_usize()?;
-        let buf = source.read_metadata_at(address, window)?;
+        let buf = source.read_metadata(address, window)?;
         Self::parse_with_widths(&buf, 0, widths)
     }
 }
