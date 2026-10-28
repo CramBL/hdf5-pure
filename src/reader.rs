@@ -8138,6 +8138,7 @@ mod storage_tests;
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
     use std::sync::atomic::AtomicUsize;
 
     use ::test_util;
@@ -8710,17 +8711,28 @@ mod tests {
     /// wrapper `File::metadata_cache_stats` does not itself go through (that
     /// dispatch uses `with_source`, which reaches the read-write backend too), so
     /// nothing else would notice the forward going missing.
-    #[test]
-    fn the_source_view_reports_the_cache_it_reads_through() {
+    #[rstest]
+    #[case::owned_adapter(false)]
+    #[case::shared_owner(true)]
+    fn the_source_view_reports_the_cache_it_reads_through(#[case] shared_owner: bool) {
         let backend = MetadataCachingSource::new(
-            BytesSource::new((0..=255u8).collect::<Vec<u8>>()),
+            ReadSeekSource::new(Cursor::new((0..=255u8).collect::<Vec<u8>>())).unwrap(),
             MetadataCacheConfig::new(4096),
         );
         let view = SourceView::Stream(&backend);
 
         assert_eq!(view.metadata_cache_stats().unwrap().reads(), 0);
-        view.read_metadata_at(0, 64).unwrap();
-        view.read_metadata_at(0, 64).unwrap();
+        let expected: Vec<u8> = (0..64).collect();
+        if shared_owner {
+            let first = view.read_metadata(0, 64).unwrap();
+            let second = view.read_metadata(0, 64).unwrap();
+            assert_eq!(first.as_ref(), expected);
+            assert_eq!(second.as_ref(), expected);
+            assert_eq!(first.as_ptr(), second.as_ptr());
+        } else {
+            assert_eq!(view.read_metadata_at(0, 64).unwrap(), expected);
+            assert_eq!(view.read_metadata_at(0, 64).unwrap(), expected);
+        }
         let stats = view
             .metadata_cache_stats()
             .expect("the backend has a cache, so the view reports it");

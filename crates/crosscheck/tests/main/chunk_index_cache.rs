@@ -4,9 +4,11 @@ use std::path::Path;
 
 use hdf5::Extent;
 use hdf5::dataset::AllocTime;
+use hdf5::file::LibraryVersion;
 use hdf5_pure::ChunkCacheConfig;
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::DatasetAccessProperties;
+use hdf5_pure::{AttrValue, File, FileAccessProperties, MetadataCacheConfig, ReadSeekSource};
 use ndarray::IxDyn;
 use rstest::rstest;
 use test_util_hdf5::file;
@@ -69,6 +71,99 @@ fn reads_with_and_without_a_retained_index_match_libhdf5(
     read();
 
     assert_eq!(dataset.chunk_cache_stats().index_loaded(), index_cache);
+}
+
+#[rstest]
+#[case::streaming_zero(0, false)]
+#[case::streaming_userblock(512, false)]
+#[case::source_zero(0, true)]
+#[case::source_userblock(512, true)]
+fn shared_metadata_reads_preserve_native_values_and_userblock_coordinates(
+    #[case] userblock: u64,
+    #[case] custom_source: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("shared-metadata.h5");
+    let expected: Vec<i32> = (0..96).collect();
+    {
+        let file = hdf5::File::with_options()
+            .with_fapl(|properties| {
+                properties.libver_bounds(LibraryVersion::V110, LibraryVersion::latest())
+            })
+            .with_fcpl(|properties| properties.userblock(userblock))
+            .create(&path)
+            .unwrap();
+        let group = file.create_group("measurements").unwrap();
+        let dataset = group
+            .new_dataset::<i32>()
+            .shape([96])
+            .chunk([8])
+            .create("values")
+            .unwrap();
+        dataset.write_raw(&expected).unwrap();
+        dataset
+            .new_attr::<i32>()
+            .shape([2])
+            .create("bounds")
+            .unwrap()
+            .write_raw(&[0, 95])
+            .unwrap();
+        assert_eq!(dataset.read_raw::<i32>().unwrap(), expected);
+        drop(dataset);
+        drop(group);
+        file.close().unwrap();
+    }
+    let properties =
+        FileAccessProperties::new().with_metadata_cache(MetadataCacheConfig::new(1_048_576));
+    let file = if custom_source {
+        File::from_source_with_options(
+            ReadSeekSource::new(std::fs::File::open(&path).unwrap()).unwrap(),
+            properties,
+        )
+    } else {
+        File::open_streaming_with_options(&path, properties)
+    }
+    .unwrap();
+    assert_eq!(file.superblock().base_address.get(), userblock);
+    let dataset = file
+        .dataset_with_options(
+            "measurements/values",
+            DatasetAccessProperties::new()
+                .with_chunk_cache(ChunkCacheConfig::disabled().with_index_cache(false)),
+        )
+        .unwrap();
+    assert_eq!(dataset.chunk_index().unwrap(), Some(ChunkIndex::FixedArray));
+    assert_eq!(dataset.chunk_shape().unwrap(), Some(vec![8]));
+    assert_eq!(dataset.shape().unwrap(), vec![96]);
+    assert_eq!(
+        dataset.attrs().unwrap().get("bounds"),
+        Some(&AttrValue::I32Array(vec![0, 95]))
+    );
+    assert_eq!(dataset.read_i32().unwrap(), expected);
+    assert_eq!(
+        dataset.read_i32_region(&[11], &[17]).unwrap(),
+        expected[11..28]
+    );
+    let populated = file.metadata_cache_stats().unwrap();
+    assert!(populated.entries() > 0);
+    assert!(populated.misses() > 0);
+    assert_eq!(populated.evictions(), 0);
+    file.reset_metadata_cache_stats();
+    assert_eq!(dataset.read_i32().unwrap(), expected);
+    assert_eq!(
+        dataset.read_i32_region(&[11], &[17]).unwrap(),
+        expected[11..28]
+    );
+    let warm = file.metadata_cache_stats().unwrap();
+    assert!(warm.hits() > 0);
+    assert_eq!(
+        (warm.misses(), warm.evictions(), warm.invalidations()),
+        (0, 0, 0)
+    );
+    assert_eq!(warm.bytes(), populated.bytes());
+    assert!(!dataset.chunk_cache_stats().index_loaded());
+    drop(dataset);
+    file.close().unwrap();
 }
 
 fn libhdf5_create(path: &Path, index: ChunkIndex) {
