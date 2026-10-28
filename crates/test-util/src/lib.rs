@@ -13,6 +13,7 @@ pub mod chunk_offsets;
 pub mod data_layout;
 pub mod dataspace;
 pub mod datatype;
+pub mod dense_attributes;
 pub mod disk_log;
 pub mod extensible_array;
 pub mod file_space_info;

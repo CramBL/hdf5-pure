@@ -12,6 +12,7 @@ pub mod creation_order;
 pub mod dataset;
 pub mod dataset_writer;
 pub mod dense_attr;
+pub mod dense_attributes;
 #[cfg(feature = "hdf5")]
 pub mod dense_links;
 #[cfg(feature = "hdf5")]

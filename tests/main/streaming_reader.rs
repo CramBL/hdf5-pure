@@ -8,6 +8,8 @@
 //! source that never buffers the whole file.
 
 use hdf5_pure::{ChunkCacheConfig, File, FileAccessProperties, FileBuilder, MetadataCacheConfig};
+use rstest::rstest;
+use test_util::dense_attributes::Fixture as DenseAttributeFixture;
 use test_util_hdf5::dataset::Unlimited;
 
 #[test]
@@ -306,28 +308,27 @@ fn child_path(parent: &str, name: &str) -> String {
     }
 }
 
-/// The streaming backend must resolve v1 (symbol-table) groups and read
-/// compact, dense (fractal-heap), and variable-length attributes identically to
-/// the buffered backend. Each fixture's expected attribute count guards against
-/// a trivially-empty parity pass.
-#[test]
-fn streaming_matches_buffered_groups_and_attributes_across_fixtures() {
-    // (fixture, expected total attributes across the whole walk)
-    let cases = [
-        ("dense_attrs.h5", 50),      // v2 dataset + dense (fractal-heap) attrs
-        ("dense_attrs_root.h5", 20), // v2 root group + dense attrs
-    ];
+// The expected dense attribute count rules out an empty parity traversal.
+#[rstest]
+#[case::dataset(DenseAttributeFixture::Dataset)]
+#[case::root(DenseAttributeFixture::Root)]
+fn streaming_matches_buffered_groups_and_attributes_across_fixtures(
+    #[case] fixture: DenseAttributeFixture,
+) {
+    let path = test_util::temp::temp_path("dense_attributes.h5");
+    std::fs::write(&path, fixture.build()).unwrap();
+    let buffered = File::open(&path).unwrap();
+    let streaming = File::open_streaming(&path).unwrap();
+    assert_eq!(
+        assert_group_parity(&buffered, &streaming, ""),
+        usize::from(fixture.attribute_count())
+    );
+    drop(streaming);
+    drop(buffered);
+}
 
-    for (fixture, expected_attrs) in cases {
-        let path = test_util::data("unattributed").join(fixture);
-        let buffered = File::open(&path).unwrap();
-        let streaming = File::open_streaming(&path).unwrap();
-        let counted = assert_group_parity(&buffered, &streaming, "");
-        assert_eq!(
-            counted, expected_attrs,
-            "attribute count mismatch for {fixture}"
-        );
-    }
+#[test]
+fn streaming_matches_buffered_modern_groups_without_attributes() {
     let path = test_util::temp::temp_path("v2_groups.h5");
     std::fs::write(&path, test_util::modern::v2_groups()).unwrap();
     let buffered = File::open(&path).unwrap();
