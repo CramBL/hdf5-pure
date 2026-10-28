@@ -1,7 +1,5 @@
 //! HDF5 file creation with compact or dense group links and attributes.
 
-use core::num::NonZeroUsize;
-
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, string::ToString, vec, vec::Vec};
 
@@ -38,7 +36,7 @@ use hdf5_pure_format::__private::SECTION_CLASS_LARGE;
 use hdf5_pure_format::__private::SECTION_CLASS_SMALL;
 use hdf5_pure_space::__private::AllocationClass;
 
-use self::preparation::{DsData, DsFlat, VlPatch};
+use self::preparation::{DsData, PreparedAttributes, PreparedDataset, VlPatch};
 #[cfg(test)]
 use crate::DeflateLevel;
 use crate::FileSpaceSettings;
@@ -54,7 +52,6 @@ use crate::address::StoredAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
 use crate::attribute::AttributeMessage;
 use crate::attribute_info::AttributeInfoMessage;
-use crate::attribute_request::PreparedAttributes;
 use crate::bytes;
 use crate::chunked_write::{self, ByteSink, CompressedChunkSet};
 use crate::convert::Narrow;
@@ -74,7 +71,6 @@ use crate::file_space_info::FileSpaceInfo;
 use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::FileSpaceStrategy;
 use crate::file_space_info::NUM_FILE_FSM_MANAGERS;
-use crate::fill_value::FillPattern;
 use crate::free_space_manager;
 use crate::libver::LibVer;
 use crate::link_info::LinkInfoMessage;
@@ -1005,20 +1001,37 @@ impl FileWriter {
             references: u32,
         }
 
-        let mut all_ds: Vec<DsFlat> = Vec::new();
+        let mut all_ds: Vec<PreparedDataset> = Vec::new();
         let mut groups: Vec<GrpFlat> = Vec::new();
         let mut committed: Vec<CtFlat> = Vec::new();
         let mut root_ds_indices: Vec<usize> = Vec::new();
         let mut root_group_indices: Vec<usize> = Vec::new();
 
-        /// Appends one group's committed datatypes to the file-wide list and returns their indices.
+        /// Prepares a dataset and appends its metadata and attribute heap patches.
         ///
-        /// Each datatype is checked for nonzero element width before object header preparation.
+        /// Returns its index in `datasets`.
         ///
         /// # Errors
         ///
-        /// Returns [`FormatError::ZeroSizedDatatype`] if an element has zero width, or
-        /// [`FormatError::InvalidLinkName`] if a datatype's name is not a link component.
+        /// Propagates errors from [`PreparedDataset::prepare`].
+        fn flatten_dataset(
+            builder: DatasetBuilder,
+            datasets: &mut Vec<PreparedDataset>,
+            heaps: &mut Vec<Vec<VlPatch>>,
+        ) -> Result<usize, FormatError> {
+            let (dataset, patches) = PreparedDataset::prepare(builder)?;
+            let index = datasets.len();
+            datasets.push(dataset);
+            heaps.push(patches);
+            Ok(index)
+        }
+
+        /// Prepares committed datatype objects and returns their indices in `committed`.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`FormatError::ZeroSizedDatatype`] if a datatype has zero element width.
+        /// Propagates datatype-size and link-name errors.
         fn flatten_committed(
             types: Vec<CommittedDatatype>,
             committed: &mut Vec<CtFlat>,
@@ -1041,7 +1054,7 @@ impl FileWriter {
 
         fn flatten_group(
             g: FinishedGroup,
-            all_ds: &mut Vec<DsFlat>,
+            all_ds: &mut Vec<PreparedDataset>,
             groups: &mut Vec<GrpFlat>,
             committed: &mut Vec<CtFlat>,
             grp_vl: &mut Vec<Vec<VlPatch>>,
@@ -1050,20 +1063,13 @@ impl FileWriter {
             let name = g.name?;
             let PreparedAttributes {
                 messages: gattrs,
-                collections,
-            } = PreparedAttributes::parse(&g.attrs)?;
-            let attr_committed_datatype_paths = g.attrs.committed_datatype_paths();
-            let patches = collections
-                .into_iter()
-                .map(|(attr_index, collections)| VlPatch {
-                    collections,
-                    attr_index,
-                })
-                .collect();
+                committed_datatype_paths: attr_committed_datatype_paths,
+                heaps: patches,
+            } = PreparedAttributes::new(&g.attrs)?;
             let committed_idx = flatten_committed(g.committed, committed)?;
             let mut ds_idx = Vec::new();
             for db in g.datasets {
-                ds_idx.push(preparation::flatten_dataset(db, all_ds, ds_vl)?);
+                ds_idx.push(flatten_dataset(db, all_ds, ds_vl)?);
             }
             let mut sub_grp_idx = Vec::new();
             for sg in g.sub_groups {
@@ -1088,7 +1094,7 @@ impl FileWriter {
         let root_committed_indices = flatten_committed(self.root_committed, &mut committed)?;
 
         for db in self.root_datasets {
-            root_ds_indices.push(preparation::flatten_dataset(db, &mut all_ds, &mut ds_vl)?);
+            root_ds_indices.push(flatten_dataset(db, &mut all_ds, &mut ds_vl)?);
         }
 
         for g in self.groups.into_iter() {
@@ -1132,16 +1138,9 @@ impl FileWriter {
 
         let PreparedAttributes {
             messages: mut root_attrs,
-            collections,
-        } = PreparedAttributes::parse(&self.root_attrs)?;
-        let root_attr_committed_datatype_paths = self.root_attrs.committed_datatype_paths();
-        let vl_root = collections
-            .into_iter()
-            .map(|(attr_index, collections)| VlPatch {
-                collections,
-                attr_index,
-            })
-            .collect::<Vec<_>>();
+            committed_datatype_paths: root_attr_committed_datatype_paths,
+            heaps: vl_root,
+        } = PreparedAttributes::new(&self.root_attrs)?;
 
         // ---- Committed datatypes: paths, reference counts, and agreement ----
         //
@@ -1271,7 +1270,7 @@ impl FileWriter {
         /// this and ask it the same question rather than assembling links
         /// apiece.
         struct LinkTables<'a> {
-            all_ds: &'a [DsFlat],
+            all_ds: &'a [PreparedDataset],
             committed: &'a [CtFlat],
             groups: &'a [GrpFlat],
             ds_addrs: &'a [StoredAddress],
@@ -1397,12 +1396,7 @@ impl FileWriter {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let is_chunked: Vec<bool> = all_ds
-            .iter()
-            .map(|d| {
-                d.chunk_options.is_chunked() || d.maxshape.is_some() || d.storage.chunks().is_some()
-            })
-            .collect();
+        let is_chunked: Vec<bool> = all_ds.iter().map(PreparedDataset::is_chunked).collect();
 
         // Chunked storage here means a version 4 data-layout message and one of
         // the chunk indices HDF5 1.10 introduced (extensible array, fixed array,
@@ -1618,7 +1612,7 @@ impl FileWriter {
                 self,
                 root_attrs: &[AttributeMessage],
                 groups: &[GrpFlat],
-                datasets: &[DsFlat],
+                datasets: &[PreparedDataset],
             ) -> Result<(DenseSpans, DenseBlobs), FormatError> {
                 let Self {
                     root,
@@ -1771,58 +1765,17 @@ impl FileWriter {
                 .as_ref()
                 .map(|plan| plan.attr_info_message(DUMMY_DENSE_BASE))
                 .transpose()?;
-            let oh = if is_chunked[i] {
-                let (layout_message, pipeline_message) = if d.storage.reference_targets().is_some()
-                {
-                    let chunk_dims = d.chunk_options.resolve_chunk_dims(&d.ds.dimensions);
-                    let ctx = crate::filters::ChunkContext::from_datatype(&chunk_dims, &d.dt)?;
-                    let elem = ctx.element_size.narrow::<NonZeroUsize>()?;
-                    let header = d.chunk_options.measure_header(
-                        &d.ds.dimensions,
-                        ctx,
-                        d.maxshape.as_deref(),
-                        FillPattern::new(d.fill_time, d.fill.as_deref(), elem),
-                        d.storage.allocation(),
-                    )?;
-                    ds_data_lens.push(0);
-                    (header.layout_message, header.pipeline_message)
-                } else {
-                    let measured = preparation::measure_chunked(
-                        d,
-                        StoredAddress::new(dummy_cursor),
-                        chunk_sets[i].as_ref(),
-                    )?;
-                    dummy_cursor += measured.data_len;
-                    ds_data_lens.push(measured.data_len);
-                    (measured.layout_message, measured.pipeline_message)
-                };
-                build_chunked_dataset_oh(
-                    &d.dt,
-                    &d.dt_location,
-                    &d.ds,
-                    &layout_message,
-                    pipeline_message.as_deref(),
-                    &d.attrs,
-                    dense_attr_info.as_deref(),
-                    d.fill_time,
-                    d.fill.as_deref(),
-                )?
-            } else {
-                ds_data_lens.push(d.contiguous_len());
-                build_dataset_oh(
-                    &d.dt,
-                    &d.dt_location,
-                    &d.ds,
-                    StoredAddress::new(0),
-                    d.declared_contiguous_len,
-                    &d.attrs,
-                    dense_attr_info.as_deref(),
-                    d.fill_time,
-                    d.fill.as_deref(),
-                    libver,
-                )?
-            };
-            actual_ds_oh_sizes.push(oh.len());
+            let measured = d.measure(
+                StoredAddress::new(dummy_cursor),
+                chunk_sets[i].as_ref(),
+                dense_attr_info.as_deref(),
+                libver,
+            )?;
+            if is_chunked[i] {
+                dummy_cursor += measured.data_len;
+            }
+            ds_data_lens.push(measured.data_len);
+            actual_ds_oh_sizes.push(measured.header_len);
         }
 
         // Pass 2: compute real addresses.
@@ -1940,7 +1893,7 @@ impl FileWriter {
                     groups: &[GrpFlat],
                     ds_addrs: &[StoredAddress],
                     grp_addrs: &[StoredAddress],
-                    all_ds: &[DsFlat],
+                    all_ds: &[PreparedDataset],
                     map: &mut HashMap<ObjectPathBuf, StoredAddress>,
                 ) {
                     map.insert(prefix.clone(), grp_addrs[gi]);
@@ -2047,7 +2000,7 @@ impl FileWriter {
         /// changes shape with a property that is supposed to change only where
         /// its bytes land.
         fn build_ds_ohs(
-            all_ds: &[DsFlat],
+            all_ds: &[PreparedDataset],
             ds_layouts: &[DsLayout<'_>],
             ds_dense_blobs: &[Option<DenseAttrBlob>],
             libver: LibVer,
@@ -2055,36 +2008,14 @@ impl FileWriter {
             let mut oh_bytes: Vec<Vec<u8>> = Vec::with_capacity(all_ds.len());
             for (i, d) in all_ds.iter().enumerate() {
                 let layout = &ds_layouts[i];
-                let oh = if let Some((ref lm, ref pm)) = layout.chunked_msgs {
-                    build_chunked_dataset_oh(
-                        &d.dt,
-                        &d.dt_location,
-                        &d.ds,
-                        lm,
-                        pm.as_deref(),
-                        &d.attrs,
-                        ds_dense_blobs[i]
-                            .as_ref()
-                            .map(|b| b.attr_info_message.as_slice()),
-                        d.fill_time,
-                        d.fill.as_deref(),
-                    )?
-                } else {
-                    build_dataset_oh(
-                        &d.dt,
-                        &d.dt_location,
-                        &d.ds,
-                        layout.data_addr,
-                        d.declared_contiguous_len,
-                        &d.attrs,
-                        ds_dense_blobs[i]
-                            .as_ref()
-                            .map(|b| b.attr_info_message.as_slice()),
-                        d.fill_time,
-                        d.fill.as_deref(),
-                        libver,
-                    )?
-                };
+                let oh = d.build_header(
+                    layout.data_addr,
+                    layout.chunked_msgs.as_ref(),
+                    ds_dense_blobs[i]
+                        .as_ref()
+                        .map(|blob| blob.attr_info_message.as_slice()),
+                    libver,
+                )?;
                 oh_bytes.push(oh);
             }
             Ok(oh_bytes)
@@ -2277,8 +2208,7 @@ impl FileWriter {
             for &i in &small_indices {
                 let base_addr = StoredAddress::new(c);
                 let layout = if is_chunked[i] {
-                    let built =
-                        preparation::build_chunked(&all_ds[i], base_addr, chunk_sets[i].as_ref())?;
+                    let built = all_ds[i].build_chunked(base_addr, chunk_sets[i].as_ref())?;
                     // The small/large classification and the free-space-manager
                     // sizing used the sizing-pass length (`ds_data_lens[i]`); the
                     // real build must match it, or the reserved manager space and
@@ -2324,8 +2254,7 @@ impl FileWriter {
                 let data_addr = StoredAddress::new(c);
                 let built_len;
                 let layout = if is_chunked[i] {
-                    let built =
-                        preparation::build_chunked(&all_ds[i], data_addr, chunk_sets[i].as_ref())?;
+                    let built = all_ds[i].build_chunked(data_addr, chunk_sets[i].as_ref())?;
                     // See the small-run note: the real build length must equal the
                     // sizing-pass length the large classification/fragment used.
                     debug_assert_eq!(built.data.len(), ds_data_lens[i]);
@@ -2606,7 +2535,7 @@ impl FileWriter {
         for (i, d) in all_ds.iter_mut().enumerate() {
             if is_chunked[i] {
                 let data_address = allocation.reserve(ds_data_lens[i], AllocationClass::Raw)?;
-                let built = preparation::build_chunked(d, data_address, chunk_sets[i].as_ref())?;
+                let built = d.build_chunked(data_address, chunk_sets[i].as_ref())?;
                 if built.data.len() != ds_data_lens[i] {
                     return Err(FormatError::Internal(
                         "chunk data differs from its allocation".into(),
