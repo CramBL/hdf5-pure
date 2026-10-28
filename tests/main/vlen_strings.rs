@@ -2,7 +2,9 @@ use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
 use hdf5_pure::{Error, File, FormatError, VlenStringReadOptions};
 
-const FIXTURE: &str = "unattributed/vl_strings.h5";
+use rstest::rstest;
+use test_util::temp;
+use test_util_hdf5::reader::ReadBackend;
 
 fn expected_names() -> Vec<String> {
     ["Alice", "Bob", "Charlie"]
@@ -11,9 +13,19 @@ fn expected_names() -> Vec<String> {
         .collect()
 }
 
-#[test]
-fn buffered_vlen_dataset_read_and_size() {
-    let file = File::open(test_util::data(FIXTURE)).unwrap();
+#[rstest]
+fn vlen_dataset_read_and_size(
+    #[values(
+        ReadBackend::Buffered,
+        ReadBackend::Bytes,
+        ReadBackend::Source,
+        ReadBackend::Streaming
+    )]
+    backend: ReadBackend,
+) {
+    let path = temp::temp_path("vl_strings.h5");
+    std::fs::write(&path, test_util::legacy_attributes::vl_strings()).unwrap();
+    let file = backend.open(&path).unwrap();
     let dataset = file.dataset("names").unwrap();
 
     assert_eq!(dataset.vlen_string_payload_size().unwrap(), 15);
@@ -30,9 +42,19 @@ fn buffered_vlen_dataset_read_and_size() {
     );
 }
 
-#[test]
-fn vlen_element_limit_is_checked_before_payload_read() {
-    let file = File::open(test_util::data(FIXTURE)).unwrap();
+#[rstest]
+fn vlen_element_limit_is_checked_before_payload_read(
+    #[values(
+        ReadBackend::Buffered,
+        ReadBackend::Bytes,
+        ReadBackend::Source,
+        ReadBackend::Streaming
+    )]
+    backend: ReadBackend,
+) {
+    let path = temp::temp_path("vl_strings.h5");
+    std::fs::write(&path, test_util::legacy_attributes::vl_strings()).unwrap();
+    let file = backend.open(&path).unwrap();
     let dataset = file.dataset("names").unwrap();
     let error = dataset
         .read_vlen_strings(VlenStringReadOptions::new().with_max_elements(2))
@@ -47,9 +69,19 @@ fn vlen_element_limit_is_checked_before_payload_read() {
     ));
 }
 
-#[test]
-fn vlen_payload_limit_reports_required_bytes() {
-    let file = File::open(test_util::data(FIXTURE)).unwrap();
+#[rstest]
+fn vlen_payload_limit_reports_required_bytes(
+    #[values(
+        ReadBackend::Buffered,
+        ReadBackend::Bytes,
+        ReadBackend::Source,
+        ReadBackend::Streaming
+    )]
+    backend: ReadBackend,
+) {
+    let path = temp::temp_path("vl_strings.h5");
+    std::fs::write(&path, test_util::legacy_attributes::vl_strings()).unwrap();
+    let file = backend.open(&path).unwrap();
     let dataset = file.dataset("names").unwrap();
     let error = dataset
         .read_vlen_strings(VlenStringReadOptions::new().with_max_payload_bytes(14))
@@ -64,9 +96,19 @@ fn vlen_payload_limit_reports_required_bytes() {
     ));
 }
 
-#[test]
-fn vlen_visitor_delivers_strings_in_order() {
-    let file = File::open(test_util::data(FIXTURE)).unwrap();
+#[rstest]
+fn vlen_visitor_delivers_strings_in_order(
+    #[values(
+        ReadBackend::Buffered,
+        ReadBackend::Bytes,
+        ReadBackend::Source,
+        ReadBackend::Streaming
+    )]
+    backend: ReadBackend,
+) {
+    let path = temp::temp_path("vl_strings.h5");
+    std::fs::write(&path, test_util::legacy_attributes::vl_strings()).unwrap();
+    let file = backend.open(&path).unwrap();
     let dataset = file.dataset("names").unwrap();
     let mut names = Vec::new();
 
@@ -82,11 +124,6 @@ fn vlen_visitor_delivers_strings_in_order() {
 
 #[test]
 fn vlen_specific_apis_reject_non_vlen_datasets() {
-    let file = File::open(test_util::data(FIXTURE)).unwrap();
-    let dataset = file.dataset("names").unwrap();
-    let datatype = dataset.datatype().unwrap();
-    assert!(matches!(datatype, hdf5_pure::Datatype::VariableLength(_)));
-
     let numeric = File::from_bytes(test_util::legacy::simple_dataset()).unwrap();
     let numeric_dataset = numeric.dataset("data").unwrap();
     assert!(matches!(

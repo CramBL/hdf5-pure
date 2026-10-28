@@ -1,8 +1,8 @@
-//! Compact attribute observations through pure and native readers.
+//! Legacy attribute and string observations through pure and native readers.
 //!
 //! Independent construction lives in [`test_util::legacy_attributes`]. The assertion
 //! helpers check complete contents separately from compact attribute and symbol-table
-//! storage.
+//! storage, including global-heap string payloads.
 //!
 //! # Examples
 //!
@@ -11,7 +11,7 @@
 //! use test_util::legacy_attributes::Fixture;
 //! use test_util_hdf5::legacy_attributes;
 //!
-//! let fixture = Fixture::MixedAttributes;
+//! let fixture = Fixture::VlenStrings;
 //! let bytes = fixture.build();
 //! let file = File::from_bytes(bytes.clone())?;
 //! legacy_attributes::assert_contents(&file, fixture, DatatypeByteOrder::LittleEndian);
@@ -20,6 +20,7 @@
 //! ```
 
 use std::collections::HashMap;
+use std::num::NonZeroU16;
 #[cfg(feature = "hdf5")]
 use std::path::Path;
 
@@ -37,6 +38,8 @@ use hdf5::datatype::ByteOrder;
 use hdf5::types::FixedAscii;
 #[cfg(feature = "hdf5")]
 use hdf5::types::TypeDescriptor;
+#[cfg(feature = "hdf5")]
+use hdf5::types::VarLenUnicode;
 
 use hdf5_pure::AttrValue;
 use hdf5_pure::CharacterSet;
@@ -46,10 +49,18 @@ use hdf5_pure::File;
 use hdf5_pure::FixedPointType;
 use hdf5_pure::FloatingPointType;
 use hdf5_pure::Layout;
+use hdf5_pure::LengthWidth;
 use hdf5_pure::StringPadding;
 use hdf5_pure::SuperblockVersion;
+use hdf5_pure::VariableLengthStringType;
+use hdf5_pure::VariableLengthType;
+use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::FileRegion;
+use hdf5_pure_core::__private::PhysicalAddress;
 use hdf5_pure_format::__private::AttributeMessage;
 use hdf5_pure_format::__private::DataspaceType;
+use hdf5_pure_format::__private::GlobalHeapCollectionLocator;
+use test_util::bytes;
 use test_util::legacy_attributes::Fixture;
 use test_util::object_header::MessageType;
 use test_util::object_header::v1;
@@ -66,6 +77,7 @@ pub fn assert_contents(file: &File, fixture: Fixture, byte_order: DatatypeByteOr
     let (groups, datasets): (&[&str], &[&str]) = match fixture {
         Fixture::CompactAttributes => (&[], &["data"]),
         Fixture::MixedAttributes => (&["experiment"], &[]),
+        Fixture::VlenStrings => (&[], &["names"]),
     };
     assert_eq!(file.root().groups().unwrap(), groups);
     assert_eq!(file.root().datasets().unwrap(), datasets);
@@ -108,10 +120,27 @@ pub fn assert_contents(file: &File, fixture: Fixture, byte_order: DatatypeByteOr
                 byte_order,
             );
         }
+        Fixture::VlenStrings => {
+            let names = file.dataset("names").unwrap();
+            assert_eq!(names.shape().unwrap(), [3]);
+            assert_eq!(names.datatype().unwrap(), vlen_datatype(byte_order));
+            assert_eq!(names.read_string().unwrap(), ["Alice", "Bob", "Charlie"]);
+            assert_eq!(names.vlen_string_payload_size().unwrap(), 15);
+            assert_contiguous(&names.layout().unwrap(), 48);
+            assert_attributes(
+                names.attrs().unwrap(),
+                names.attr_datatypes().unwrap(),
+                fixture,
+                "names",
+                byte_order,
+            );
+        }
     }
 }
 
 /// Checks the version 0 superblock, symbol-table groups, and compact attribute storage.
+///
+/// For [`Fixture::VlenStrings`], also checks the global-heap string references and payloads.
 ///
 /// Pass the bytes from which `file` was opened.
 ///
@@ -130,11 +159,24 @@ pub fn assert_storage(file: &File, image: &[u8], fixture: Fixture) {
     let expected = match fixture {
         Fixture::CompactAttributes => "data",
         Fixture::MixedAttributes => "experiment",
+        Fixture::VlenStrings => "names",
     };
     assert_eq!(name, expected);
     assert_header(image, address.get(), fixture, name);
     if matches!(fixture, Fixture::MixedAttributes) {
         assert!(tables.links(*address).is_empty());
+    }
+    if matches!(fixture, Fixture::VlenStrings) {
+        let raw = file.dataset("names").unwrap().read_raw().unwrap();
+        assert_eq!(raw.len(), 48);
+        for (reference, expected) in raw
+            .as_chunks::<VLEN_REFERENCE_BYTES>()
+            .0
+            .iter()
+            .zip(["Alice", "Bob", "Charlie"])
+        {
+            assert_heap_string(image, reference, expected);
+        }
     }
 }
 
@@ -161,6 +203,16 @@ pub fn write_libhdf5(path: &Path, fixture: Fixture) {
             let group = file.create_group("experiment").unwrap();
             write_attributes(&group, fixture, "experiment");
         }
+        Fixture::VlenStrings => {
+            let names: Vec<_> = ["Alice", "Bob", "Charlie"]
+                .into_iter()
+                .map(|name| name.parse::<VarLenUnicode>().unwrap())
+                .collect();
+            file.new_dataset_builder()
+                .with_data(&names)
+                .create("names")
+                .unwrap();
+        }
     }
     drop(root);
     file.close().unwrap();
@@ -183,6 +235,7 @@ pub fn assert_libhdf5_contents(path: &Path, fixture: Fixture, order: ByteOrder) 
     let expected = match fixture {
         Fixture::CompactAttributes => "data",
         Fixture::MixedAttributes => "experiment",
+        Fixture::VlenStrings => "names",
     };
     assert_eq!(root.member_names().unwrap(), [expected]);
     assert_native_attributes(&root, fixture, "", order);
@@ -207,6 +260,25 @@ pub fn assert_libhdf5_contents(path: &Path, fixture: Fixture, order: ByteOrder) 
             );
             assert!(group.member_names().unwrap().is_empty());
             assert_native_attributes(&group, fixture, "experiment", order);
+        }
+        Fixture::VlenStrings => {
+            let dataset = file.dataset("names").unwrap();
+            assert_eq!(dataset.shape(), [3]);
+            assert_eq!(dataset.layout(), NativeLayout::Contiguous);
+            assert_eq!(
+                dataset.dtype().unwrap().to_descriptor().unwrap(),
+                TypeDescriptor::VarLenUnicode
+            );
+            assert_eq!(
+                dataset
+                    .read_raw::<VarLenUnicode>()
+                    .unwrap()
+                    .iter()
+                    .map(VarLenUnicode::as_str)
+                    .collect::<Vec<_>>(),
+                ["Alice", "Bob", "Charlie"]
+            );
+            assert_native_attributes(&dataset, fixture, "names", order);
         }
     }
     drop(root);
@@ -246,6 +318,13 @@ fn write_attributes(location: &Location, fixture: Fixture, path: &str) {
                 .unwrap()
                 .write_scalar(value)
                 .unwrap(),
+            Value::Unicode(value) => location
+                .new_attr::<VarLenUnicode>()
+                .shape(())
+                .create(*name)
+                .unwrap()
+                .write_scalar(&value.parse::<VarLenUnicode>().unwrap())
+                .unwrap(),
         }
     }
 }
@@ -277,6 +356,7 @@ fn assert_native_attributes(location: &Location, fixture: Fixture, path: &str, o
             Value::Ascii(value) => TypeDescriptor::FixedAscii(value.len()),
             Value::F64(_) | Value::F64Array(_) => f64::type_descriptor(),
             Value::I64(_) => i64::type_descriptor(),
+            Value::Unicode(_) => TypeDescriptor::VarLenUnicode,
         };
         assert_eq!(datatype.to_descriptor().unwrap(), descriptor);
         match value {
@@ -296,6 +376,10 @@ fn assert_native_attributes(location: &Location, fixture: Fixture, path: &str, o
                 assert_eq!(datatype.byte_order(), order);
                 assert_eq!(attribute.read_scalar::<i64>().unwrap(), *expected);
             }
+            Value::Unicode(expected) => assert_eq!(
+                attribute.read_scalar::<VarLenUnicode>().unwrap().as_str(),
+                *expected
+            ),
         }
     }
 }
@@ -328,6 +412,9 @@ fn assert_header(image: &[u8], address: u64, fixture: Fixture, path: &str) {
             }
         );
         actual.push(attribute.name);
+        if let Value::Unicode(expected) = value {
+            assert_heap_string(image, &attribute.raw_data, expected);
+        }
     }
     actual.sort();
     let expected: Vec<_> = attributes(fixture, path)
@@ -343,6 +430,37 @@ fn assert_header(image: &[u8], address: u64, fixture: Fixture, path: &str) {
             .count(),
         usize::from(is_group)
     );
+}
+
+fn assert_heap_string(image: &[u8], reference: &[u8], expected: &str) {
+    assert_eq!(reference.len(), VLEN_REFERENCE_BYTES);
+    assert_eq!(bytes::u32_at(reference, 0) as usize, expected.len());
+    let region = FileRegion::new(
+        FileRange::new(PhysicalAddress::new(0), image.len() as u64).unwrap(),
+        image,
+    )
+    .unwrap();
+    let locator = GlobalHeapCollectionLocator::new(
+        PhysicalAddress::new(bytes::u64_at(reference, SEQUENCE_LENGTH_BYTES)),
+        LengthWidth::Eight,
+    );
+    let collection = locator
+        .parse(region.subregion(locator.parse_range().unwrap()).unwrap())
+        .unwrap();
+    let index = NonZeroU16::new(
+        u16::try_from(bytes::u32_at(
+            reference,
+            SEQUENCE_LENGTH_BYTES + Widths::EIGHT.offset,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut lookup = collection.lookup(index);
+    while let Some(range) = lookup.parse_range() {
+        if let Some(object) = lookup.parse(region.subregion(range).unwrap()).unwrap() {
+            assert_eq!(object.payload().parse(region).unwrap(), expected.as_bytes());
+        }
+    }
 }
 
 fn assert_attributes(
@@ -393,6 +511,7 @@ fn attributes(fixture: Fixture, path: &str) -> &'static [(&'static str, Value)] 
             ("name", Value::Ascii("run_001")),
             ("temperatures", Value::F64Array(&[22.5, 23.1, 21.8])),
         ],
+        (Fixture::VlenStrings, "") => &[("vl_attr", Value::Unicode("hello variable length"))],
         _ => &[],
     }
 }
@@ -402,6 +521,7 @@ enum Value {
     F64(f64),
     F64Array(&'static [f64]),
     I64(i64),
+    Unicode(&'static str),
 }
 
 impl Value {
@@ -411,6 +531,7 @@ impl Value {
             Self::F64(value) => AttrValue::F64(*value),
             Self::F64Array(value) => AttrValue::F64Array(value.to_vec()),
             Self::I64(value) => AttrValue::I64(*value),
+            Self::Unicode(value) => AttrValue::VarLenString((*value).to_owned()),
         }
     }
 
@@ -427,6 +548,7 @@ impl Value {
             Self::I64(_) => {
                 Datatype::FixedPoint(FixedPointType::new(8, order, true, 0, 64).unwrap())
             }
+            Self::Unicode(_) => vlen_datatype(order),
         }
     }
 
@@ -437,3 +559,24 @@ impl Value {
         }
     }
 }
+
+fn vlen_datatype(order: DatatypeByteOrder) -> Datatype {
+    Datatype::VariableLength(VariableLengthType::String(
+        VariableLengthStringType::with_base_type(
+            StringPadding::NullTerminate,
+            CharacterSet::Utf8,
+            Datatype::FixedPoint(FixedPointType::new(1, order, false, 0, 8).unwrap()),
+        )
+        .unwrap(),
+    ))
+}
+
+// H5T__vlen_disk_write in H5Tvlen.c, HDF5 2.2.0, writes a four-byte sequence count.
+const SEQUENCE_LENGTH_BYTES: usize = 4;
+
+// Section `subsec_fmt4_infra_globalheap`, version 4.0, stores a four-byte object index.
+const HEAP_INDEX_BYTES: usize = 4;
+
+// H5T__vlen_disk_write in H5Tvlen.c, HDF5 2.2.0, prefixes the global heap ID
+// from section `subsec_fmt4_infra_globalheap`, version 4.0, with a sequence count.
+const VLEN_REFERENCE_BYTES: usize = SEQUENCE_LENGTH_BYTES + Widths::EIGHT.offset + HEAP_INDEX_BYTES;
