@@ -165,6 +165,136 @@ fn immediate_ownership_publication_matches_native_free_sections(
     }
 }
 
+#[rstest]
+#[case::flat_borrowed(false, false, false)]
+#[case::flat_owned_filtered(false, true, true)]
+#[case::page_borrowed(true, false, false)]
+#[case::page_owned_filtered(true, true, true)]
+fn appender_values_persist_across_staged_commits_and_native_writes(
+    #[case] paged: bool,
+    #[case] owned: bool,
+    #[case] filtered: bool,
+    #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] backing: MemoryStrategy,
+    #[values(SyncPolicy::Always, SyncPolicy::OnClose)] policy: SyncPolicy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("appender-lifecycle.h5");
+    let native = hdf5::File::with_options()
+        .with_fapl(|properties| properties.libver_v110())
+        .with_fcpl(|properties| {
+            properties.file_space_strategy(NativeStrategy::FreeSpaceManager {
+                paged,
+                persist: true,
+                threshold: 1,
+            })
+        })
+        .create(&path)
+        .unwrap();
+    let builder = native
+        .new_dataset::<u8>()
+        .shape([Extent::resizable(4)])
+        .chunk([4]);
+    let builder = if filtered {
+        builder.deflate(6)
+    } else {
+        builder
+    };
+    let dataset = builder.create("d").unwrap();
+    drop(builder);
+    dataset.write_raw(&[0_u8, 1, 2, 3]).unwrap();
+    drop(dataset);
+    let scratch = native
+        .new_dataset_builder()
+        .with_data(&vec![7_u8; 65_536])
+        .create("scratch")
+        .unwrap();
+    let hole = (scratch.offset().unwrap(), scratch.storage_size());
+    drop(scratch);
+    let ceiling = native
+        .new_dataset_builder()
+        .with_data(&vec![9_u8; 8192])
+        .create("ceiling")
+        .unwrap();
+    assert!(ceiling.offset().unwrap() >= hole.0 + hole.1);
+    drop(ceiling);
+    native.unlink("scratch").unwrap();
+    native.close().unwrap();
+    test_util_hdf5::file_space_oracle::assert_persisted_sections(&path);
+    let mut access = FileAccessProperties::new()
+        .with_memory_strategy(backing)
+        .with_sync_policy(policy);
+    if policy == SyncPolicy::OnClose {
+        access = access.with_page_buffer_size(1 << 20);
+    }
+    let file = File::open_rw_with_options(&path, access).unwrap();
+    let mut target = file.dataset("d").unwrap();
+    if owned {
+        let mut appender = file.dataset("d").unwrap().into_buffered_appender().unwrap();
+        appender.append(&[4_u8, 5]).unwrap();
+        drop(file.root().create_group("unrelated").unwrap());
+        file.commit().unwrap();
+        appender.flush().unwrap();
+        assert_eq!(target.read_u8().unwrap(), (0..6).collect::<Vec<_>>());
+        appender.append(&(6..14).collect::<Vec<u8>>()).unwrap();
+        assert_eq!(appender.buffered_elements(), 2);
+        drop(file.root().create_group("later").unwrap());
+        file.commit().unwrap();
+        appender.finish().unwrap();
+    } else {
+        let mut appender = target.buffered_appender().unwrap();
+        appender.append(&[4_u8, 5]).unwrap();
+        drop(file.root().create_group("unrelated").unwrap());
+        file.commit().unwrap();
+        appender.flush().unwrap();
+        assert_eq!(
+            file.dataset("d").unwrap().read_u8().unwrap(),
+            (0..6).collect::<Vec<_>>()
+        );
+        appender.append(&(6..14).collect::<Vec<u8>>()).unwrap();
+        assert_eq!(appender.buffered_elements(), 2);
+        drop(file.root().create_group("later").unwrap());
+        file.commit().unwrap();
+        appender.finish().unwrap();
+    }
+    assert_eq!(target.read_u8().unwrap(), (0..14).collect::<Vec<_>>());
+    drop(target);
+    file.close().unwrap();
+    let completed = std::fs::read(&path).unwrap();
+    test_util_hdf5::file_space_oracle::assert_persisted_sections(&path);
+    let native = hdf5::File::open(&path).unwrap();
+    let dataset = native.dataset("d").unwrap();
+    assert_eq!(
+        dataset.read_raw::<u8>().unwrap(),
+        (0..14).collect::<Vec<_>>()
+    );
+    assert_eq!(dataset.num_chunks(), Some(4));
+    assert!(native.link_exists("unrelated"));
+    assert!(native.link_exists("later"));
+    drop(dataset);
+    native.close().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), completed);
+    let native = hdf5::File::open_rw(&path).unwrap();
+    let dataset = native
+        .new_dataset_builder()
+        .with_data(&[73_u8; 8192])
+        .create("native")
+        .unwrap();
+    assert_eq!(dataset.read_raw::<u8>().unwrap(), [73; 8192]);
+    drop(dataset);
+    native.close().unwrap();
+    let file = File::open(&path).unwrap();
+    assert_eq!(
+        file.dataset("d").unwrap().read_u8().unwrap(),
+        (0..14).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        file.dataset("native").unwrap().read_u8().unwrap(),
+        [73; 8192]
+    );
+    drop(file);
+    test_util_hdf5::file_space_oracle::assert_persisted_sections(&path);
+}
+
 #[test]
 fn pure_creates_pure_appends_c_reads() {
     let dir = tempfile::tempdir().unwrap();

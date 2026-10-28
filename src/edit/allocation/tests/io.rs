@@ -8,12 +8,15 @@ use rstest::rstest;
 
 use crate::FileBuilder;
 use crate::FileLocking;
+use crate::FileSpaceSettings;
+use crate::FileSpaceStrategy;
 use crate::MaxExtent;
 use crate::SyncPolicy;
 use crate::chunk_index_inplace::Store;
 use crate::edit::WriteEngine;
 use crate::error::{Error, FormatError};
 use crate::image::{FileImage, MirrorImage, WriteBuffering};
+use crate::object_path::ObjectPathBuf;
 use crate::source::Source;
 
 #[rstest]
@@ -199,6 +202,106 @@ fn an_uncertain_preallocation_drain_prevents_further_writes() {
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
+#[test]
+fn failed_provisional_tail_truncation_blocks_later_publication() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("failed-tail-restoration.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+    );
+    builder
+        .create_dataset("values")
+        .with_i32_data(&[0, 1, 2, 3]);
+    builder.write(&path).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = open(
+        &path,
+        SyncPolicy::Always,
+        Failure::RollbackTruncate,
+        &events,
+    );
+    engine
+        .set_write_buffering(WriteBuffering::Operation {
+            page_size: 4096,
+            max_bytes: 1 << 20,
+        })
+        .unwrap();
+    let allocation = engine
+        .store()
+        .allocate(&[7; 16_384], AllocationClass::Raw)
+        .unwrap();
+    assert!(allocation.range().start().get() >= before.len() as u64);
+    let error = engine.store().publish_allocations().err().unwrap();
+    let Error::Io(error) = error else {
+        panic!("expected rollback truncation failure, got {error:?}");
+    };
+    assert_eq!(error.kind(), ErrorKind::Other);
+    assert_eq!(error.to_string(), "injected ownership publication failure");
+    let failed = events.lock().unwrap().clone();
+    assert!(matches!(
+        engine.commit(),
+        Err(Error::AllocationPublicationUncertain)
+    ));
+    assert!(matches!(
+        engine.finalize_persist(),
+        Err(Error::AllocationPublicationUncertain)
+    ));
+    assert!(matches!(
+        engine.force_sync(),
+        Err(Error::AllocationPublicationUncertain)
+    ));
+    assert_eq!(*events.lock().unwrap(), failed);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    drop(engine);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn failed_explicit_sync_discards_pending_staged_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("uncertain-sync.h5");
+    FileBuilder::new().write(&path).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = open(
+        &path,
+        SyncPolicy::OnClose,
+        Failure::PublicationSync,
+        &events,
+    );
+    engine
+        .set_write_buffering(WriteBuffering::Session {
+            page_size: 4096,
+            max_bytes: 1 << 20,
+        })
+        .unwrap();
+    engine
+        .create_group(&ObjectPathBuf::parse("pending"))
+        .unwrap();
+    engine.commit().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let error = engine.force_sync().unwrap_err();
+    let Error::Io(error) = error else {
+        panic!("expected explicit synchronization failure, got {error:?}");
+    };
+    assert_eq!(error.kind(), ErrorKind::Other);
+    assert_eq!(error.to_string(), "injected ownership publication failure");
+    let failed = events.lock().unwrap().clone();
+    assert!(matches!(
+        engine.commit(),
+        Err(Error::AllocationPublicationUncertain)
+    ));
+    assert!(matches!(
+        engine.force_sync(),
+        Err(Error::AllocationPublicationUncertain)
+    ));
+    assert_eq!(*events.lock().unwrap(), failed);
+    drop(engine);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
 fn open(
     path: &Path,
     policy: SyncPolicy,
@@ -237,10 +340,13 @@ impl BoundaryImage {
             (self.failure, self.published, synchronization),
             (Failure::AllocationDrain, false, Synchronization::Ordering)
                 | (Failure::ContentSync, false, Synchronization::Data)
+                | (Failure::RollbackTruncate, false, Synchronization::Metadata)
                 | (Failure::PublicationSync, true, _)
         );
         if fail {
-            self.failure = Failure::None;
+            if !matches!(self.failure, Failure::RollbackTruncate) {
+                self.failure = Failure::None;
+            }
             self.events
                 .lock()
                 .unwrap()
@@ -273,7 +379,8 @@ impl FileImage for BoundaryImage {
 
     fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), Error> {
         if offset != 0 {
-            return Err(IoError::other(format!("unexpected publication offset {offset}")).into());
+            self.events.lock().unwrap().push(Event::Content);
+            return self.inner.write_at(offset, bytes);
         }
         self.events.lock().unwrap().push(Event::Superblock);
         let failure = std::mem::replace(&mut self.failure, Failure::None);
@@ -295,6 +402,9 @@ impl FileImage for BoundaryImage {
     }
 
     fn truncate(&mut self, len: u64) -> Result<(), Error> {
+        if matches!(self.failure, Failure::RollbackTruncate) {
+            return Err(injected());
+        }
         self.inner.truncate(len)
     }
     fn sync_data(&mut self) -> Result<(), Error> {
@@ -308,6 +418,10 @@ impl FileImage for BoundaryImage {
     }
     fn flush(&mut self) -> Result<(), Error> {
         self.synchronize(Synchronization::Ordering)
+    }
+
+    fn discard_pending_writes(&mut self) {
+        self.inner.discard_pending_writes();
     }
     fn issued_write_order(&self) -> Vec<(u64, u64)> {
         self.inner.issued_write_order()
@@ -348,6 +462,7 @@ enum Failure {
     None,
     PartialWrite,
     PublicationSync,
+    RollbackTruncate,
     WrittenError,
 }
 

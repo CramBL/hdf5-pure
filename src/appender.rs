@@ -51,7 +51,7 @@ use crate::reader::Dataset;
 ///
 /// For persistent files, the editor publishes remaining free-space manager changes during
 /// [`File::commit`](crate::File::commit) or clean session closure, even when EOF is unchanged.
-/// The editor may defer manager cleanup after uncertain publication. Call
+/// After uncertain publication, the editor rejects manager cleanup in that session. Call
 /// [`File::commit`](crate::File::commit) before [`File::sync`](crate::File::sync) to include those
 /// pending manager updates in an explicit synchronization.
 ///
@@ -67,6 +67,9 @@ use crate::reader::Dataset;
 /// appending, flushing, and finishing return [`Error::FileClosed`], including with empty input
 /// or an empty buffer. Rejected appends preserve previously buffered bytes, which remain
 /// accessible through [`unwritten`](Self::unwritten) and [`discard`](Self::discard).
+/// After an uncertain editing operation in the shared session, the editor rejects construction,
+/// appending, flushing, and finishing with [`Error::AllocationPublicationUncertain`], including
+/// empty operations. Rejected append and flush calls preserve previously buffered bytes.
 ///
 /// # Filter policies
 ///
@@ -140,6 +143,8 @@ impl<'a> BufferedAppender<'a> {
     /// Returns [`Error::FileClosed`] if the file is closed, including for empty `data`, or
     /// [`Error::AppendInPlaceUnsupported`] if a write has already failed. Propagates errors
     /// from the immediate append. See [`BufferedAppender`] for recovery after an error.
+    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier editing outcome
+    /// is uncertain.
     pub fn append<T: H5Element>(&mut self, data: &[T]) -> Result<(), Error> {
         self.state.append(self.dataset, data)
     }
@@ -155,6 +160,8 @@ impl<'a> BufferedAppender<'a> {
     /// Returns [`Error::FileClosed`] if the file is closed, including for empty `bytes`, or
     /// [`Error::AppendInPlaceUnsupported`] if a write has already failed. Propagates errors
     /// from the immediate append. See [`BufferedAppender`] for recovery after an error.
+    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier editing outcome
+    /// is uncertain.
     pub fn append_raw(&mut self, bytes: &[u8]) -> Result<(), Error> {
         self.state.append_raw(self.dataset, bytes)
     }
@@ -197,6 +204,8 @@ impl<'a> BufferedAppender<'a> {
     /// Returns [`Error::AppendInPlaceUnsupported`] if a write has already failed, the buffer
     /// ends within an element, or a write would leave a filtered lossy partial tail and
     /// re-encoding is forbidden. Propagates errors from the immediate append.
+    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier editing outcome
+    /// is uncertain.
     pub fn flush(&mut self) -> Result<(), Error> {
         self.state.flush(self.dataset, FlushMode::Continue)
     }
@@ -222,6 +231,8 @@ impl<'a> BufferedAppender<'a> {
     /// Returns [`Error::FileClosed`] if the file is closed, including for an empty buffer.
     /// Returns [`Error::AppendInPlaceUnsupported`] if a write has already failed or the buffer
     /// ends within an element. Propagates errors from the immediate append.
+    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier editing outcome
+    /// is uncertain.
     pub fn finish(mut self) -> Result<(), Error> {
         self.state.finish(self.dataset)
     }
@@ -291,6 +302,9 @@ impl std::fmt::Debug for BufferedAppender<'_> {
 /// [`Error::FileClosed`], including with empty input or an empty buffer. Rejected appends
 /// preserve previously buffered bytes, which remain accessible through
 /// [`unwritten`](Self::unwritten) and [`discard`](Self::discard).
+/// After an uncertain editing operation in the shared session, the editor rejects construction,
+/// appending, flushing, and finishing with [`Error::AllocationPublicationUncertain`], including
+/// empty operations. Rejected append and flush calls preserve previously buffered bytes.
 ///
 /// # Filter policies
 ///
@@ -367,6 +381,8 @@ impl OwnedBufferedAppender {
     /// Returns [`Error::FileClosed`] if the file is closed, including for empty `data`, or
     /// [`Error::AppendInPlaceUnsupported`] if a write has already failed. Propagates errors
     /// from the immediate append. See [`OwnedBufferedAppender`] for recovery after an error.
+    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier editing outcome
+    /// is uncertain.
     pub fn append<T: H5Element>(&mut self, data: &[T]) -> Result<(), Error> {
         self.state.append(&mut self.dataset, data)
     }
@@ -382,6 +398,8 @@ impl OwnedBufferedAppender {
     /// Returns [`Error::FileClosed`] if the file is closed, including for empty `bytes`, or
     /// [`Error::AppendInPlaceUnsupported`] if a write has already failed. Propagates errors
     /// from the immediate append. See [`OwnedBufferedAppender`] for recovery after an error.
+    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier editing outcome
+    /// is uncertain.
     pub fn append_raw(&mut self, bytes: &[u8]) -> Result<(), Error> {
         self.state.append_raw(&mut self.dataset, bytes)
     }
@@ -425,6 +443,8 @@ impl OwnedBufferedAppender {
     /// Returns [`Error::AppendInPlaceUnsupported`] if a write has already failed, the buffer
     /// ends within an element, or a write would leave a filtered lossy partial tail and
     /// re-encoding is forbidden. Propagates errors from the immediate append.
+    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier editing outcome
+    /// is uncertain.
     pub fn flush(&mut self) -> Result<(), Error> {
         self.state.flush(&mut self.dataset, FlushMode::Continue)
     }
@@ -450,6 +470,8 @@ impl OwnedBufferedAppender {
     /// Returns [`Error::FileClosed`] if the file is closed, including for an empty buffer.
     /// Returns [`Error::AppendInPlaceUnsupported`] if a write has already failed or the buffer
     /// ends within an element. Propagates errors from the immediate append.
+    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier editing outcome
+    /// is uncertain.
     pub fn finish(mut self) -> Result<(), Error> {
         self.state.finish(&mut self.dataset)
     }
@@ -707,10 +729,105 @@ mod tests {
     use std::rc::Rc;
 
     use rstest::rstest;
+    use test_util::disk_log;
     use test_util_hdf5::dataset::{self, Unlimited};
 
     use crate::edit::AppendBuilder;
-    use crate::{Dataset, Error, File};
+    use crate::{Dataset, Error, File, FileAccessProperties, FileBuilder, MaxExtent, SyncPolicy};
+
+    #[rstest]
+    #[case::borrowed_empty(false, false)]
+    #[case::borrowed_pending(false, true)]
+    #[case::owned_empty(true, false)]
+    #[case::owned_pending(true, true)]
+    fn session_uncertainty_rejects_buffered_input_and_empty_flushes(
+        #[case] owned: bool,
+        #[case] pending: bool,
+        #[values(SyncPolicy::Always, SyncPolicy::OnClose)] policy: SyncPolicy,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("uncertain-appender.h5");
+        let mut builder = FileBuilder::new();
+        builder
+            .create_dataset("d")
+            .with_i32_data(&[0, 1, 2, 3])
+            .with_chunks(&[4])
+            .with_maxshape(&[MaxExtent::Unlimited]);
+        builder
+            .create_dataset("other")
+            .with_i32_data(&[0, 1, 2, 3])
+            .with_chunks(&[4])
+            .with_maxshape(&[MaxExtent::Unlimited]);
+        builder.write(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let file =
+            File::open_rw_with_options(&path, FileAccessProperties::new().with_sync_policy(policy))
+                .unwrap();
+        let expected = if pending {
+            7i32.to_le_bytes().to_vec()
+        } else {
+            Vec::new()
+        };
+        if owned {
+            let mut appender = file.dataset("d").unwrap().into_buffered_appender().unwrap();
+            if pending {
+                appender.append(&[7i32]).unwrap();
+            }
+            fail_other_append(&file);
+            assert_uncertain(appender.append::<i32>(&[]).unwrap_err());
+            assert_uncertain(appender.append_raw(&[]).unwrap_err());
+            assert_uncertain(appender.append(&[8i32]).unwrap_err());
+            assert_uncertain(appender.flush().unwrap_err());
+            assert_eq!(appender.unwritten(), expected);
+            assert_uncertain(appender.finish().unwrap_err());
+            assert!(matches!(
+                file.dataset("d").unwrap().into_buffered_appender(),
+                Err(Error::AllocationPublicationUncertain)
+            ));
+        } else {
+            let mut dataset = file.dataset("d").unwrap();
+            let mut appender = dataset.buffered_appender().unwrap();
+            if pending {
+                appender.append(&[7i32]).unwrap();
+            }
+            fail_other_append(&file);
+            assert_uncertain(appender.append::<i32>(&[]).unwrap_err());
+            assert_uncertain(appender.append_raw(&[]).unwrap_err());
+            assert_uncertain(appender.append(&[8i32]).unwrap_err());
+            assert_uncertain(appender.flush().unwrap_err());
+            assert_eq!(appender.unwritten(), expected);
+            assert_uncertain(appender.finish().unwrap_err());
+            assert!(matches!(
+                dataset.buffered_appender(),
+                Err(Error::AllocationPublicationUncertain)
+            ));
+            drop(dataset);
+        }
+        disk_log::start();
+        assert_uncertain(file.sync().unwrap_err());
+        assert_uncertain(file.clone().close().unwrap_err());
+        drop(file);
+        assert!(disk_log::take().is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    fn fail_other_append(file: &File) {
+        let mut other = file.dataset("other").unwrap();
+        disk_log::fail_write_after(0, 0);
+        let error = other.append(&[4i32, 5, 6, 7]).unwrap_err();
+        let Error::Io(error) = error else {
+            panic!("expected injected append failure, got {error:?}");
+        };
+        assert_eq!(error.kind(), ErrorKind::Other);
+        assert_eq!(error.to_string(), "injected disk write failure");
+    }
+
+    fn assert_uncertain(error: Error) {
+        assert!(
+            matches!(error, Error::AllocationPublicationUncertain),
+            "{error:?}"
+        );
+    }
 
     #[rstest]
     #[case::before_any_elements(0)]

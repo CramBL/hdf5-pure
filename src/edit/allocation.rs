@@ -331,6 +331,8 @@ enum ManagerAuthority {
 
 /// Allocator and persistence state preceding a provisional persistent batch.
 struct AppendAllocationSnapshot {
+    /// Image length before the provisional batch.
+    length: u64,
     space: SessionSpaceSnapshot,
     aggregation: Option<AggregateSpace>,
     fsm_dirty: bool,
@@ -359,16 +361,14 @@ impl WriteEngine {
         if matches!(self.context.allocations.state, State::Confirmed(_))
             && let Err(error) = self.image.flush()
         {
-            self.context.allocations.make_uncertain();
-            if let Some(aggregation) = &mut self.aggregation {
-                aggregation.publication_confirmed = false;
-            }
+            self.make_allocation_uncertain();
             return Err(error);
         }
         if self.persist.is_none() {
             return Ok(());
         }
         self.append_allocator.pending = Some(AppendAllocationSnapshot {
+            length: self.image.len(),
             space: self.space.allocation_snapshot(),
             aggregation: self.aggregation,
             fsm_dirty: self.fsm_dirty,
@@ -385,21 +385,31 @@ impl WriteEngine {
 
     /// Restores a persistent batch's allocator state after a known unpublished failure.
     ///
-    /// The caller establishes that superblock publication was not attempted. Without a saved
-    /// persistent snapshot, marks the allocation state uncertain.
+    /// Discards queued writes and restores allocator state. If the image has grown, truncates it
+    /// to the saved length before restoration. The caller establishes that superblock publication
+    /// was not attempted.
+    /// If the snapshot is absent or truncation fails, the editor marks allocation publication
+    /// uncertain and discards queued writes.
     ///
     /// # Errors
     ///
     /// Returns [`Error::AllocationPublicationUncertain`] if the allocation state cannot discard
-    /// its provisional batch because publication is uncertain.
+    /// its provisional batch because publication is uncertain. Propagates truncation errors.
     pub(super) fn restore_append_allocation(&mut self) -> Result<(), Error> {
+        self.image.discard_pending_writes();
         if let Some(snapshot) = self.append_allocator.pending.take() {
+            if self.image.len() > snapshot.length
+                && let Err(error) = self.image.truncate(snapshot.length)
+            {
+                self.make_allocation_uncertain();
+                return Err(error);
+            }
             self.space.restore_allocation(snapshot.space);
             self.aggregation = snapshot.aggregation;
             self.fsm_dirty = snapshot.fsm_dirty;
             self.context.allocations.discard_provisional()
         } else {
-            self.context.allocations.make_uncertain();
+            self.make_allocation_uncertain();
             Ok(())
         }
     }
@@ -426,45 +436,80 @@ impl WriteEngine {
             PublicationAction::Current(publication) => return Ok(publication),
             PublicationAction::Publish(attempt) => attempt,
         };
+        let persistent = self.persist.is_some();
+        self.publication = PublicationState::Ready;
+        let result = self.apply_append_allocation_publication();
+        if let Err(error) = result {
+            if persistent && !self.publication.attempted() {
+                self.image.discard_pending_writes();
+                self.context.allocations.cancel(attempt)?;
+                self.restore_append_allocation()?;
+            } else {
+                self.make_allocation_uncertain();
+            }
+            return Err(error);
+        }
+        self.append_allocator.pending = None;
+        self.context.allocations.complete(attempt)
+    }
+
+    /// Rejects further publication and discards queued writes after an uncertain outcome.
+    ///
+    /// Retains allocation state and clears aggregate publication confirmation.
+    pub(super) fn make_allocation_uncertain(&mut self) {
+        self.context.allocations.make_uncertain();
+        self.image.discard_pending_writes();
+        if let Some(aggregation) = &mut self.aggregation {
+            aggregation.publication_confirmed = false;
+        }
+    }
+
+    /// Requires confirmed allocation ownership before a session operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier outcome is uncertain, or
+    /// [`FormatError::Internal`] if an allocation batch remains provisional.
+    pub(crate) fn check_append_publication(&self) -> Result<(), Error> {
+        self.context.allocations.before_reference()
+    }
+
+    /// Writes allocation metadata and completes the selected publication barriers.
+    ///
+    /// # Errors
+    ///
+    /// Propagates manager-publication, address-conversion, write, synchronization, and
+    /// context-adoption errors.
+    fn apply_append_allocation_publication(&mut self) -> Result<(), Error> {
         if self.persist.is_some() {
-            self.publication = PublicationState::Ready;
             let root = self
                 .context
                 .addresses()
                 .resolve(self.context.superblock().root_group_address)?;
-            let result = self.publish_persisting(
+            return self.publish_persisting(
                 root,
                 Vec::new(),
                 TailPlacement::Anywhere,
                 PublicationPurpose::Allocation,
             );
-            if let Err(error) = result {
-                if !self.publication.attempted() {
-                    self.context.allocations.cancel(attempt)?;
-                    self.restore_append_allocation()?;
-                }
-                return Err(error);
-            }
-        } else {
+        }
+        match self.sync_policy {
+            SyncPolicy::Always => self.image.sync_data()?,
+            SyncPolicy::OnClose => self.image.flush()?,
+        }
+        if self.image.len() != self.context.superblock().eof_address {
+            let mut superblock = self.context.superblock().clone();
+            superblock.eof_address = self.image.len();
+            let publication = self.context.propose(superblock)?.encode()?;
+            self.image
+                .write_at(self.context.signature().get(), publication.bytes())?;
             match self.sync_policy {
-                SyncPolicy::Always => self.image.sync_data()?,
+                SyncPolicy::Always => self.image.sync_all()?,
                 SyncPolicy::OnClose => self.image.flush()?,
             }
-            if self.image.len() != self.context.superblock().eof_address {
-                let mut superblock = self.context.superblock().clone();
-                superblock.eof_address = self.image.len();
-                let publication = self.context.propose(superblock)?.encode()?;
-                self.image
-                    .write_at(self.context.signature().get(), publication.bytes())?;
-                match self.sync_policy {
-                    SyncPolicy::Always => self.image.sync_all()?,
-                    SyncPolicy::OnClose => self.image.flush()?,
-                }
-                self.context.adopt(publication.into_proposed())?;
-            }
+            self.context.adopt(publication.into_proposed())?;
         }
-        self.append_allocator.pending = None;
-        self.context.allocations.complete(attempt)
+        Ok(())
     }
 
     /// Reads persisted managers and rejects free sections overlapping their published storage.

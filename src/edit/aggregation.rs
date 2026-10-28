@@ -746,9 +746,21 @@ mod tests {
         }
         assert!(!engine.aggregation.unwrap().publication_confirmed);
         let physical_size = engine.image.len();
-        engine.commit().unwrap();
+        let issued = std::fs::read(&path).unwrap();
+        assert!(matches!(
+            engine.commit(),
+            Err(Error::AllocationPublicationUncertain)
+        ));
         assert!(!engine.aggregation.unwrap().publication_confirmed);
-        engine.finalize_persist().unwrap();
+        assert!(matches!(
+            engine.finalize_persist(),
+            Err(Error::AllocationPublicationUncertain)
+        ));
+        assert!(matches!(
+            engine.force_sync(),
+            Err(Error::AllocationPublicationUncertain)
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), issued);
         let after_cleanup = engine.image.len();
         drop(engine);
         let file = File::open(&path).unwrap();
@@ -883,6 +895,10 @@ mod tests {
 
         fn flush(&mut self) -> Result<(), Error> {
             self.inner.flush()
+        }
+
+        fn discard_pending_writes(&mut self) {
+            self.inner.discard_pending_writes();
         }
 
         fn issued_write_order(&self) -> Vec<(u64, u64)> {

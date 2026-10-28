@@ -52,10 +52,11 @@ impl From<FormatError> for ResolveError {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// An append allocation or reference write has an unconfirmed outcome.
+    /// An earlier editing operation has an unconfirmed allocation or publication outcome.
     ///
-    /// Further appends, commits, and synchronization are rejected in this session. Close and
-    /// reopen the file before editing again. An interrupted file can fail to reopen.
+    /// The editor discards queued storage writes and rejects further appends, commits, and
+    /// explicit synchronization in this session. Close and reopen the file before editing again.
+    /// An interrupted file can fail to reopen.
     AllocationPublicationUncertain,
     /// The dataset or file is not a supported target for the fast, immediate
     /// in-place append

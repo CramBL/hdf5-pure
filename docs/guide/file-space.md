@@ -335,8 +335,10 @@ frequently, and manager loading and serialization depend on the number of free s
 Before persistent append allocation, the editor checks manager checksums even when the
 `checksum` feature is disabled, and rejects free sections overlapping complete published manager
 or extension allocations. Before attempted publication, the editor restores allocator state after
-a known failure. After uncertain publication, it rejects further reference and reuse requests in
-that session.
+a known failure, discards queued writes, and truncates a grown image to its saved length.
+If rollback fails, the editor marks the session uncertain. After uncertain publication, it
+discards queued storage writes and rejects further reference and reuse requests in that session.
+Discarded writes are excluded from teardown.
 These guarantees concern ordered complete writes and do not cover torn physical metadata writes.
 
 ```rust

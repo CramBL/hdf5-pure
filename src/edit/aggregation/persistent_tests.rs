@@ -286,8 +286,13 @@ fn persistent_settlement_failure_preserves_publication_order(
     } else {
         assert!(!engine.aggregation.unwrap().publication_confirmed);
         let length = engine.image.len();
-        engine.finalize_persist().unwrap();
+        let issued = std::fs::read(&path).unwrap();
+        assert!(matches!(
+            engine.finalize_persist(),
+            Err(Error::AllocationPublicationUncertain)
+        ));
         assert_eq!(engine.image.len(), length);
+        assert_eq!(std::fs::read(&path).unwrap(), issued);
     }
     assert!(engine.image.len() <= prior);
     drop(engine);
@@ -586,6 +591,10 @@ impl FileImage for FailingImage {
 
     fn flush(&mut self) -> Result<(), Error> {
         self.inner.flush()
+    }
+
+    fn discard_pending_writes(&mut self) {
+        self.inner.discard_pending_writes();
     }
 
     fn set_write_buffering(&mut self, mode: WriteBuffering) -> Result<(), Error> {
