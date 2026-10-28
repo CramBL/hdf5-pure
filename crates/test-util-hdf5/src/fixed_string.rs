@@ -1,6 +1,47 @@
-//! Provides fixed-width string fixtures shared by pure and interoperability tests.
+//! Fixed-width string fixtures and native observations.
 
 use hdf5_pure::{FileBuilder, MaxExtent};
+
+/// Reads a scalar UTF-8 attribute after checking its fixed width in bytes.
+///
+/// # Panics
+///
+/// Panics if the attribute cannot be opened or read, its datatype cannot be
+/// inspected, or it is not a scalar fixed-width UTF-8 string of `N` bytes.
+///
+/// # Examples
+///
+/// ```
+/// use hdf5_pure::{AttrValue, FileBuilder};
+/// use test_util_hdf5::{file, fixed_string};
+///
+/// # let path = test_util::temp::temp_path("attribute.h5");
+/// let mut builder = FileBuilder::new();
+/// builder.set_attr("units", AttrValue::String("meters".to_owned()));
+/// builder.write(&path)?;
+///
+/// let native = file::libhdf5_open(&path);
+/// assert_eq!(fixed_string::read_libhdf5_attribute::<6>(&native, "units"), "meters");
+/// native.close()?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[cfg(feature = "hdf5")]
+#[track_caller]
+pub fn read_libhdf5_attribute<const N: usize>(location: &hdf5::Location, name: &str) -> String {
+    let attribute = location
+        .attr(name)
+        .unwrap_or_else(|error| panic!("open attribute {name:?}: {error}"));
+    assert!(attribute.is_scalar());
+    assert_eq!(
+        attribute.dtype().unwrap().to_descriptor().unwrap(),
+        hdf5::types::TypeDescriptor::FixedUnicode(N)
+    );
+    attribute
+        .read_scalar::<hdf5::types::FixedUnicode<N>>()
+        .unwrap_or_else(|error| panic!("read attribute {name:?}: {error}"))
+        .as_str()
+        .to_owned()
+}
 
 /// Adds derived and explicit-width ASCII and UTF-8 datasets.
 pub fn matrix(builder: &mut FileBuilder) {

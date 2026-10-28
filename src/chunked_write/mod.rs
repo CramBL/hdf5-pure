@@ -59,6 +59,11 @@ mod allocation_tests;
 mod gathering;
 mod zfp;
 
+#[cfg(all(test, feature = "std"))]
+test_util_hdf5::hdf5_1_10_tests! {
+    mod native_crosschecks;
+}
+
 /// The on-disk address and length widths every chunk index *this module* writes
 /// uses. Named so the path that sizes an index and the path that emits it cannot
 /// read different values.
@@ -3491,87 +3496,6 @@ mod tests {
         }
     }
 
-    // ---- h5py round-trip tests for chunked writes ----
-
-    // Runs `script` under python3, passing the HDF5 file path as `sys.argv[1]`
-    // so the script can open it without interpolating the path into the source.
-    // Interpolating a Windows path (with backslashes) into a Python string
-    // literal breaks the parser (e.g. `\U` triggers a unicode-escape error).
-    #[cfg(feature = "std")]
-    fn h5py_run(path: &std::path::Path, script: &str) -> Option<String> {
-        let o = std::process::Command::new("python3")
-            .args(["-c", script, &path.to_string_lossy()])
-            .output()
-            .ok()?;
-        if !o.status.success() {
-            let err = String::from_utf8_lossy(&o.stderr);
-            // Under QEMU user emulation, a missing binary yields exit status 127
-            // with empty standard error.
-            if o.status.code() == Some(127) && err.is_empty()
-                || err.contains("No module named")
-                || err.contains("not found")
-            {
-                return None;
-            }
-            panic!("h5py: {err}");
-        }
-        Some(String::from_utf8(o.stdout).unwrap().trim().to_string())
-    }
-
-    #[cfg(feature = "std")]
-    #[test]
-    fn h5py_reads_multiple_chunked_datasets() {
-        use crate::file_writer::FileWriter;
-        let mut fw = FileWriter::new();
-        let data1: Vec<f64> = (0..50).map(|i| i as f64).collect();
-        let data2: Vec<f64> = (0..30).map(|i| (i * 10) as f64).collect();
-        fw.create_dataset("a")
-            .with_f64_data(&data1)
-            .with_shape(&[50])
-            .with_chunks(&[25]);
-        fw.create_dataset("b")
-            .with_f64_data(&data2)
-            .with_shape(&[30])
-            .with_chunks(&[10]);
-        let bytes = fw.finish().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("rustyhdf5_chunked_multi.h5");
-        std::fs::write(&path, &bytes).unwrap();
-        let script = "import sys,h5py,json; f=h5py.File(sys.argv[1],'r'); print(json.dumps({'a':f['a'][:].tolist(),'b':f['b'][:].tolist()}))";
-        let Some(out) = h5py_run(&path, script) else {
-            return;
-        };
-        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        let va: Vec<f64> = serde_json::from_value(v["a"].clone()).unwrap();
-        let vb: Vec<f64> = serde_json::from_value(v["b"].clone()).unwrap();
-        assert_eq!(va, data1);
-        assert_eq!(vb, data2);
-    }
-
-    #[cfg(feature = "std")]
-    #[test]
-    fn h5py_reads_chunked_with_attrs() {
-        use crate::file_writer::{AttrValue, FileWriter};
-        let mut fw = FileWriter::new();
-        let data: Vec<f64> = (0..50).map(|i| i as f64).collect();
-        fw.create_dataset("data")
-            .with_f64_data(&data)
-            .with_shape(&[50])
-            .with_chunks(&[25])
-            .set_attr("units", AttrValue::String("meters".to_string()));
-        let bytes = fw.finish().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("rustyhdf5_chunked_attrs.h5");
-        std::fs::write(&path, &bytes).unwrap();
-        let script = "import sys,h5py,json; f=h5py.File(sys.argv[1],'r'); d=f['data']; print(json.dumps({'values':d[:].tolist(),'units':d.attrs['units'].decode() if isinstance(d.attrs['units'],bytes) else str(d.attrs['units'])}))";
-        let Some(out) = h5py_run(&path, script) else {
-            return;
-        };
-        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        let values: Vec<f64> = serde_json::from_value(v["values"].clone()).unwrap();
-        assert_eq!(values, data);
-        assert_eq!(v["units"], serde_json::json!("meters"));
-    }
     #[rstest]
     #[case::single(&[64], &[64], None)]
     #[case::fixed(&[256], &[32], None)]

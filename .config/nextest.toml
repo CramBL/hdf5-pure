@@ -63,7 +63,7 @@ fail-fast = false
 [profile.interop]
 default-filter = '''
 package(hdf5-pure-crosscheck) |
-(package(hdf5-pure) & (test(/^edit::native_crosschecks::/) | test(/^reader::native_crosschecks::/) | test(/^fractal_heap_storage::native_crosschecks::/)))
+(package(hdf5-pure) & test(/::native_crosschecks::/))
 '''
 fail-fast = false
 
@@ -138,7 +138,7 @@ package(hdf5-pure-crosscheck) & (
     test(/^scaleoffset_fill::/) |
     test(/^sohm::/) |
     test(/^vlen_chunked::/)
-)
+) | (package(hdf5-pure) & test(/^chunked_write::native_crosschecks::/))
 '''
 test-group = "storage"
 

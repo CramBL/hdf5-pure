@@ -68,12 +68,12 @@ doctest-each-feature *ARGS:
 
 fmt:
     cargo fmt --all
-    rustfmt --edition 2024 src/edit/group_inspection.rs src/edit/native_crosschecks.rs src/edit/native_crosschecks/*.rs src/reader_native_crosschecks.rs src/fractal_heap_storage/native_crosschecks.rs
+    rustfmt --edition 2024 src/edit/group_inspection.rs src/edit/native_crosschecks.rs src/edit/native_crosschecks/*.rs src/reader_native_crosschecks.rs src/fractal_heap_storage/native_crosschecks.rs src/chunked_write/native_crosschecks.rs
 
 # Check Rust formatting
 fmt-check:
     cargo fmt --all -- --check
-    rustfmt --check --edition 2024 src/edit/group_inspection.rs src/edit/native_crosschecks.rs src/edit/native_crosschecks/*.rs src/reader_native_crosschecks.rs src/fractal_heap_storage/native_crosschecks.rs
+    rustfmt --check --edition 2024 src/edit/group_inspection.rs src/edit/native_crosschecks.rs src/edit/native_crosschecks/*.rs src/reader_native_crosschecks.rs src/fractal_heap_storage/native_crosschecks.rs src/chunked_write/native_crosschecks.rs
 
 # Clippy over every workspace crate but the crosschecks, with the default features.
 clippy *ARGS:
