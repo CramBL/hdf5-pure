@@ -14,6 +14,7 @@ use hdf5_pure::FormatError;
 use hdf5_pure::MemoryStrategy;
 use hdf5_pure::PartialEdgeFiltering;
 use hdf5_pure::PersistedFreeSpacePolicy;
+use hdf5_pure::SuperblockVersion;
 use hdf5_pure::UserblockSize;
 #[cfg(feature = "zfp")]
 use hdf5_pure::ZfpRate;
@@ -1136,58 +1137,39 @@ fn preserves_the_source_on_disk_format() {
     );
 }
 
-/// The carried-forward format yields where the content leaves no choice.
-///
-/// HDF5 1.8 and earlier indexed chunks with a version 1 B-tree, which this crate
-/// reads but does not write, so a pre-1.10 source holding a chunked dataset has
-/// no older encoding to be repacked back into. Upgrading it is forced; refusing
-/// would take repack away from most files the C library ever wrote, which are
-/// chunked under a version 0 or 2 superblock.
-///
-/// `chunked_deflate.h5` is such a file — superblock 0, one chunked and deflated
-/// dataset — so this is the forced case rather than a simulation of it. A source
-/// this crate wrote would not be: its own chunked files are already 1.10, so
-/// preserving and upgrading give the same answer and the test could not tell a
-/// strict rule from the right one.
+// The chunked source pairs a version 0 superblock with a version 1 chunk index.
 #[test]
 fn upgrades_only_where_the_source_format_cannot_hold_the_content() {
-    let dst = temp::temp_path("hdf5_pure_repack_libver_forced_dst.h5");
-    let src = temp::temp_path("simple_dataset.h5");
-    std::fs::write(&src, test_util::legacy::simple_dataset()).unwrap();
-
-    // Contiguous content under a version 0 superblock: floored at the oldest
-    // format this crate writes, and no further.
-    hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let contiguous = directory.path().join("contiguous.h5");
+    let chunked = directory.path().join("chunked.h5");
+    let destination = directory.path().join("destination.h5");
+    std::fs::write(&contiguous, test_util::legacy::simple_dataset()).unwrap();
     assert_eq!(
-        superblock::version(&dst),
-        2,
-        "a contiguous repack upgraded past the oldest writable format"
+        File::open(&contiguous).unwrap().superblock().version(),
+        SuperblockVersion::Zero
     );
-
-    // Chunked content under a version 0 superblock: upgraded rather than
-    // refused, because there is no chunk index the older format can carry.
-    let expected = hdf5_pure::File::open(test_util::data("unattributed/chunked_deflate.h5"))
-        .unwrap()
-        .dataset("data")
-        .unwrap()
-        .read_f64()
-        .unwrap();
-    hdf5_pure::repack(
-        test_util::data("unattributed/chunked_deflate.h5"),
-        &dst,
-        &RepackOptions::new(),
-    )
-    .unwrap();
-    assert_eq!(superblock::version(&dst), 3);
-    assert_eq!(
-        hdf5_pure::File::open(&dst)
-            .unwrap()
-            .dataset("data")
-            .unwrap()
-            .read_f64()
-            .unwrap(),
-        expected
-    );
+    hdf5_pure::repack(&contiguous, &destination, &RepackOptions::new()).unwrap();
+    {
+        let file = File::open(&destination).unwrap();
+        assert_eq!(file.superblock().version(), SuperblockVersion::Two);
+        test_util_hdf5::legacy::assert_contents(
+            &file,
+            test_util::legacy::Fixture::SimpleDataset,
+            DatatypeByteOrder::LittleEndian,
+        );
+    }
+    let bytes = test_util::legacy_chunked::chunked_deflate();
+    std::fs::write(&chunked, &bytes).unwrap();
+    {
+        let file = File::open(&chunked).unwrap();
+        test_util_hdf5::legacy_chunked::assert_source_storage(&file, &bytes);
+        test_util_hdf5::legacy_chunked::assert_contents(&file, DatatypeByteOrder::LittleEndian);
+    }
+    hdf5_pure::repack(&chunked, &destination, &RepackOptions::new()).unwrap();
+    let file = File::open(&destination).unwrap();
+    test_util_hdf5::legacy_chunked::assert_repacked(&file, DatatypeByteOrder::LittleEndian);
+    drop(file);
 }
 
 /// An explicit bound is a guarantee, not a preference: content it cannot express

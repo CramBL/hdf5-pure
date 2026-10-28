@@ -10,8 +10,6 @@ writers this repository can run.
 - `pure/`: this crate's own writer, through seams its public API has no
   spelling for. Each file is checked by its content, never by its bytes.
 - `fuzz/`: inputs the fuzzer found.
-- `unattributed/`: files from the crate's first commit whose writer was not
-  recorded. A file moves out when its writer is established.
 
 A test reads a file from here and never writes one. The writers are the
 generators named in each directory.
