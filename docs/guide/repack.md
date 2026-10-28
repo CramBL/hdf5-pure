@@ -124,7 +124,7 @@ Fidelity checks and drop-path validation run before output bytes are written. Da
 | Embedded addresses | a compound with a variable-length member, an object-reference member, or both, an array of such compounds, and nesting of either. The embedded addresses are rewritten, the surrounding bytes carried through untouched |
 | Layout | contiguous / compact or chunked |
 | Unallocated storage | a dataset created and never written stores nothing in the copy, though a read of it still returns the fill value |
-| Filters | eligible fully allocated chunked datasets preserve any filter pipeline verbatim. Re-encoded paths support deflate, shuffle, Fletcher32, LZF, and lossless integer scale-offset |
+| Filters | unallocated and eligible fully allocated chunked datasets preserve any filter pipeline verbatim. Re-encoded paths support deflate, shuffle, Fletcher32, LZF, and lossless integer scale-offset |
 | Structure | group hierarchy up to 128 levels deep |
 | Attributes | every datatype above, carried across with the source's own encoding (width, charset, string padding, and rank included) on datasets, groups, and root |
 | File-space settings | the source's effective strategy, persistence, threshold, and page size, unless overridden |
@@ -135,11 +135,21 @@ verbatim copying, repack preserves encoded chunk bytes and per-chunk filter mask
 
 Attributes keep their own encoding. An attribute is copied as the source encoded it, not as [`AttrValue`](crate::AttrValue) renders it. That matters because [`AttrValue`](crate::AttrValue) is a deliberately lossy convenience view: it has no byte order, no sub-width precision, no string padding rule, and no rank above one, so an attribute rebuilt from one would come back in this crate's own layout and flattened. Only an attribute whose element bytes hold a *location*, variable-length data or a reference, cannot be copied as-is. A variable-length string keeps its datatype and dataspace while its strings are written into the new file's heap, and a reference attribute is rejected. See [Attributes](crate::_guide::groups_attributes#attributes) for what a *read* still normalizes.
 
-One deviation from byte-for-byte. A dataset that was never written stores nothing in the destination as it did in the source. A **resizable** one is the exception: it is given the eagerly built Extensible Array this crate gives every empty resizable dataset, because an in-place append needs the index to exist before the first chunk arrives. Its chunks stay absent either way, and the index costs a few hundred bytes the source did not spend. A dataset that stores only *some* of its chunks is a separate case and is unaffected: a sparse grid cannot take the verbatim path, so the destination re-encodes and stores every slot.
+Repack preserves unallocated element storage. For a resizable dataset, the writer creates an empty
+chunk index for later appends. For a partly allocated dataset with both stored chunks and unallocated
+entries, repack re-encodes and stores every slot.
 
 Fully allocated chunked datasets whose element bytes contain no variable-length or object-reference addresses take a **verbatim chunk-copy path**: each encoded chunk is copied without decoding or re-encoding it. That preserves lossy filters such as floating-point D-scale scale-offset and ZFP, filters this crate cannot decode or encode such as SZIP, and unknown filters byte-for-byte. The destination rebuilds the chunk index around those encoded chunks.
 
-Two paths still re-encode data: contiguous or compact filtered datasets, and sparse chunked datasets whose chunk grid contains unallocated entries. Those paths require a filter pipeline this crate can reproduce losslessly: deflate, shuffle, Fletcher32, LZF, and lossless integer scale-offset. See [Compression](crate::_guide::compression) for filter behavior and the [compatibility guide](crate::_guide::compatibility#filters) for the support matrix.
+For unallocated chunked datasets, repack copies the source filter message verbatim, including filter
+parameters, order, and optional flags. A filter encoder is unnecessary because there are no stored
+values.
+
+Two paths re-encode data: contiguous or compact filtered datasets, and partly allocated chunked
+datasets with both stored chunks and unallocated entries. Those paths require a filter pipeline this
+crate can reproduce losslessly: deflate, shuffle, Fletcher32, LZF, and lossless integer scale-offset.
+See [Compression](crate::_guide::compression) for filter behavior and the
+[compatibility guide](crate::_guide::compatibility#filters) for the support matrix.
 
 ### What it rejects (by name)
 

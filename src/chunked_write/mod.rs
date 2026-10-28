@@ -179,6 +179,10 @@ pub struct ChunkOptions {
     /// [`push_filter`](Self::push_filter), which appends one exactly where the
     /// caller wants it.
     pub filters: Vec<FilterSpec>,
+    /// The source filter message to copy when storage is unallocated.
+    ///
+    /// The writer uses this message in place of rebuilding the pipeline from [`Self::filters`].
+    pub(crate) unallocated_pipeline: Option<Vec<u8>>,
     /// Whether the filter pipeline applies to a partial edge chunk, a chunk that extends past the
     /// dataset's extent, or `None` where the caller sets no policy.
     ///
@@ -985,7 +989,18 @@ pub(crate) fn compress_chunks(
     let mut scratch = FilterScratch::new();
     let pipeline = match allocation {
         StorageAllocation::Allocated => options.build_pipeline_with(&mut scratch, &ctx, fill)?,
+        StorageAllocation::Unallocated if options.unallocated_pipeline.is_some() => None,
         StorageAllocation::Unallocated => options.build_pipeline(&ctx, fill)?,
+    };
+    let pipeline_message = match allocation {
+        StorageAllocation::Unallocated if options.unallocated_pipeline.is_some() => {
+            options.unallocated_pipeline.clone()
+        }
+        _ => pipeline
+            .as_ref()
+            .map(FilterPipeline::serialize)
+            .transpose()
+            .map_err(crate::filter_pipeline::map_filter_pipeline_error)?,
     };
 
     // Decided from the geometry alone, and decided first: it is the step that
@@ -997,7 +1012,7 @@ pub(crate) fn compress_chunks(
         chunk_dims,
         maxshape,
         full_chunk_bytes(chunk_dims.iter().copied(), element_size),
-        pipeline.is_some(),
+        pipeline_message.is_some(),
         allocation,
     )?;
 
@@ -1026,7 +1041,7 @@ pub(crate) fn compress_chunks(
         )?,
         StorageAllocation::Unallocated => Vec::new(),
     };
-    let has_filters = pipeline.is_some();
+    let has_filters = pipeline_message.is_some();
     debug_assert_eq!(slot_of_chunk.len(), chunks.len());
 
     let mut chunk_dims_u32 = Vec::with_capacity(chunk_dims.len());
@@ -1043,11 +1058,7 @@ pub(crate) fn compress_chunks(
         kind,
         slot_of_chunk,
         index_slots,
-        pipeline_message: pipeline
-            .as_ref()
-            .map(FilterPipeline::serialize)
-            .transpose()
-            .map_err(crate::filter_pipeline::map_filter_pipeline_error)?,
+        pipeline_message,
     })
 }
 
