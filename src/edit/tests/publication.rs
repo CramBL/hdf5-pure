@@ -44,8 +44,7 @@ use crate::writer::FileBuilder;
 fn failed_mixed_overwrites_restore_old_values_before_publication_and_keep_new_values_after(
     #[case] published: bool,
 ) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("mixed.h5");
+    let path = test_util::temp::temp_path("mixed.h5");
     let mut builder = FileBuilder::new();
     builder.create_dataset("fixed").with_i32_data(&[1, 2, 3]);
     builder

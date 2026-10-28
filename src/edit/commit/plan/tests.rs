@@ -48,8 +48,7 @@ fn overwrite_preparation_allocations_do_not_scale_with_replacement_bytes(
     #[case] region: &str,
     #[case] control: &str,
 ) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("allocation.h5");
+    let path = test_util::temp::temp_path("allocation.h5");
     let original = vec![0; elements];
     let replacement: Vec<i32> = (0..elements)
         .map(|index| i32::try_from(index).unwrap())
@@ -160,8 +159,7 @@ fn prepared_applications_retain_their_own_staged_inputs(#[case] create: bool) {
 #[case::fixed(Replacement::Fixed)]
 #[case::variable_length(Replacement::VariableLength)]
 fn rejected_preparation_retains_replacement_buffers_for_retry(#[case] replacement: Replacement) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("rejected.h5");
+    let path = test_util::temp::temp_path("rejected.h5");
     let mut builder = FileBuilder::new();
     match replacement {
         Replacement::Fixed => builder.create_dataset("d").with_i32_data(&[1, 2]),
@@ -234,8 +232,7 @@ fn rejected_preparation_retains_replacement_buffers_for_retry(#[case] replacemen
 
 #[test]
 fn empty_commit_preserves_bytes_after_mixed_overwrites() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("empty.h5");
+    let path = test_util::temp::temp_path("empty.h5");
     let mut builder = FileBuilder::new();
     builder.create_dataset("fixed").with_i32_data(&[1, 2]);
     builder
@@ -274,8 +271,7 @@ fn prepared_overwrites_transfer_the_original_buffers(
     #[case] replacement: Replacement,
     #[case] create: bool,
 ) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("owned.h5");
+    let path = test_util::temp::temp_path("owned.h5");
     let mut builder = FileBuilder::new();
     match replacement {
         Replacement::Fixed => builder.create_dataset("d").with_i32_data(&[1, 2]),
@@ -387,8 +383,7 @@ fn prepared_overwrites_transfer_the_original_buffers(
 #[case::in_place(false)]
 #[case::relocating(true)]
 fn chunk_encoding_releases_original_replacement_buffers(#[case] filtered: bool) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("chunks.h5");
+    let path = test_util::temp::temp_path("chunks.h5");
     let mut builder = FileBuilder::new();
     let dataset = builder.create_dataset("d");
     dataset.with_i32_data(&vec![0; 1_024]).with_chunks(&[1_024]);
@@ -417,8 +412,7 @@ fn chunk_encoding_releases_original_replacement_buffers(#[case] filtered: bool) 
 #[cfg(feature = "deflate")]
 #[test]
 fn overwrite_identifiers_select_matching_payloads_after_grouping() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("ordered.h5");
+    let path = test_util::temp::temp_path("ordered.h5");
     let mut builder = FileBuilder::new();
     builder
         .create_group_with("z", |group| {
