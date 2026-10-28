@@ -23,6 +23,7 @@ pub mod fuzz;
 pub mod global_heap;
 pub mod image;
 pub mod legacy;
+pub mod legacy_attributes;
 pub mod link_message;
 pub mod local_heap;
 pub mod mcos;

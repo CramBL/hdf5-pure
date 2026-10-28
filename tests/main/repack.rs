@@ -218,25 +218,19 @@ fn pure_compaction_preserves_everything() {
 
 #[test]
 fn repacks_v1_symbol_table_source_with_attributes() {
-    // `attrs.h5` is an older-format file (v0 superblock => v1 symbol-table
-    // groups) carrying compact attributes. Repack now opens the source via the
-    // streaming backend, so this drives v1 group traversal and compact attribute
-    // reads end to end through the repack entry point (issues #82 / #27).
+    // The independent source has symbol-table groups and compact attributes.
     let dst = temp::temp_path("hdf5_pure_repack_v1_attrs_dst.h5");
-    let src = test_util::data("unattributed/attrs.h5");
-
-    let source = hdf5_pure::File::open(&src).unwrap();
-    let src_data = source.dataset("data").unwrap().read_f64().unwrap();
-    let src_data_attrs = source.dataset("data").unwrap().attrs().unwrap();
-    let src_root_attrs = source.root().attrs().unwrap();
-    assert!(!src_data_attrs.is_empty() && !src_root_attrs.is_empty());
+    let src = temp::temp_path("attrs.h5");
+    std::fs::write(&src, test_util::legacy_attributes::attrs()).unwrap();
 
     hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap();
 
     let f = hdf5_pure::File::open(&dst).unwrap();
-    assert_eq!(f.dataset("data").unwrap().read_f64().unwrap(), src_data);
-    assert_eq!(f.dataset("data").unwrap().attrs().unwrap(), src_data_attrs);
-    assert_eq!(f.root().attrs().unwrap(), src_root_attrs);
+    test_util_hdf5::legacy_attributes::assert_contents(
+        &f,
+        test_util::legacy_attributes::Fixture::CompactAttributes,
+        hdf5_pure::DatatypeByteOrder::LittleEndian,
+    );
 }
 
 #[test]

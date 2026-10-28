@@ -36,6 +36,7 @@ pub mod heap_allocations;
 #[cfg(feature = "hdf5")]
 pub mod heap_interop;
 pub mod legacy;
+pub mod legacy_attributes;
 pub mod lock;
 pub mod lzf;
 pub mod mat_file;
