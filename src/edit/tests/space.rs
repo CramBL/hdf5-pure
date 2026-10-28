@@ -902,23 +902,27 @@ fn a_generic_large_section_is_only_reusable_as_whole_pages(
     #[values(PersistedFreeSpacePolicy::Tolerant, PersistedFreeSpacePolicy::Strict)]
     policy: PersistedFreeSpacePolicy,
 ) {
+    let path = test_util::temp::temp_path("generic_large.h5");
+    std::fs::write(&path, test_util::generic_large::generic_large()).unwrap();
+    assert_eq!(assert_generic_large_sections(&path, policy), [(5_694, 450)]);
+}
+
+fn assert_generic_large_sections(path: &Path, policy: PersistedFreeSpacePolicy) -> Vec<(u64, u64)> {
     const PAGE: u64 = 512;
-    let dir = tempfile::tempdir().unwrap();
-    let path = test_util::copy_data("c/generic_large.h5", dir.path());
-    let opened = crate::reader::File::open(&path).unwrap();
+    let opened = crate::reader::File::open(path).unwrap();
     let info = opened
         .file_space_info()
         .unwrap()
         .expect("a persisting file");
     drop(opened);
     assert_eq!(info.page_size.get(), PAGE);
-    let bytes = std::fs::read(&path).unwrap();
+    let bytes = std::fs::read(path).unwrap();
     let src = crate::source::BytesSource::new(bytes.as_slice());
     let slot6 = info.manager_addrs[6];
     assert_ne!(
         slot6,
         DecodedStoredAddress::Undefined,
-        "the C library populated the large manager"
+        "the large manager is populated"
     );
     let (sections, _) = free_space_manager::read_persisted_sections_source(
         &src,
@@ -934,11 +938,10 @@ fn a_generic_large_section_is_only_reusable_as_whole_pages(
         .collect();
     assert!(
         !fragments.is_empty(),
-        "the premise of this test: the C library files sub-page fragments in \
-         its generic-large manager, but this file has none ({sections:?})"
+        "the generic-large manager contains sub-page fragments: {sections:?}"
     );
     let s = WriteEngine::open_rw_with_strategy(
-        &path,
+        path,
         MetadataCacheConfig::disabled(),
         FileLocking::Enabled,
         MemoryStrategy::Bounded,
@@ -965,6 +968,7 @@ fn a_generic_large_section_is_only_reusable_as_whole_pages(
             "fragment ({addr}, {size}) must not be offered to any allocation: {reusable:?}"
         );
     }
+    fragments
 }
 
 #[test]
