@@ -16,7 +16,7 @@ use crate::edit::copy::{self, CopyTree};
 use crate::edit::dataset::{FlatDataset, MovingWrite, WritePlan};
 use crate::edit::group;
 use crate::edit::reclaim::DeletedCollections;
-use crate::edit::staging::{StagedEdits, StagedScope};
+use crate::edit::staging::{StagedApply, StagedEdits, StagedScope};
 use crate::edit::{self, OhRegion};
 use crate::edit::{MAX_LINK_GRAPH_NODES, UNDEF, WriteEngine};
 use crate::edit::{REFERENCE_INTO_RECLAIMED_SPACE, REFERENCE_TO_A_MOVED_OBJECT};
@@ -25,6 +25,52 @@ use crate::error::FormatError;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::source::{BaseOffsetSource, Source};
 use crate::type_builders::ObjectRefTarget;
+
+#[cfg(test)]
+mod tests;
+
+/// A commit plan paired with owned application inputs from the same staged set.
+///
+/// The editor borrows the staged edits during preflight and transfers ownership after success.
+pub(super) struct PreparedCommit {
+    plan: CommitPlan,
+    staged: StagedApply,
+}
+
+impl PreparedCommit {
+    /// Plans a commit, returning the original staged inputs on rejection.
+    ///
+    /// Returns [`CommitPreparation::Prepared`] with the plan and matching application inputs
+    /// if preflight succeeds, or [`CommitPreparation::Rejected`] with the original staged set
+    /// and the preparation error.
+    pub(super) fn prepare(engine: &mut WriteEngine, staged: StagedEdits) -> CommitPreparation {
+        match engine.plan_commit(&staged) {
+            Ok(plan) => CommitPreparation::Prepared(Self {
+                plan,
+                staged: staged.into_apply(),
+            }),
+            Err(error) => CommitPreparation::Rejected { staged, error },
+        }
+    }
+
+    /// Returns the plan with the application inputs used to prepare it.
+    pub(super) fn into_parts(self) -> (CommitPlan, StagedApply) {
+        let Self { plan, staged } = self;
+        (plan, staged)
+    }
+}
+
+/// The result of commit preflight, with ownership for application or retry.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "returning rejected staging to the engine requires no heap allocation"
+)]
+pub(super) enum CommitPreparation {
+    /// A plan paired with the owned inputs needed for application.
+    Prepared(PreparedCommit),
+    /// The original staged inputs and the error that prevented preparation.
+    Rejected { staged: StagedEdits, error: Error },
+}
 
 /// Stores prepared writes before application consumes the staged inputs.
 pub(super) enum CommitPlan {
@@ -167,7 +213,7 @@ impl WriteEngine {
     /// Returns [`Error::EditUnsupported`] or [`Error::AppendUnsupported`] if an edit cannot
     /// be reproduced or conflicts with another edit. Returns the read, parsing, or preparation
     /// error if the current file or a staged operation cannot be inspected.
-    pub(super) fn plan_commit(&mut self, staged: &StagedEdits) -> Result<CommitPlan, Error> {
+    fn plan_commit(&mut self, staged: &StagedEdits) -> Result<CommitPlan, Error> {
         let mut edits = DatasetEdits {
             inplace_writes: Vec::new(),
             moving_writes: Vec::new(),

@@ -9,8 +9,9 @@ use hdf5_pure_core::__private::PhysicalAddress;
 use hdf5_pure_space::__private::{AllocationClass, FreeClass, PageType};
 
 use super::plan::{
-    self, ChildLink, CommitPlan, CopyDestination, GroupHeaders, Node, PreparedGroup,
-    PreparedReference, PreparedTree, ReferenceTarget, RelocatedDataset, ReplacedHeader,
+    self, ChildLink, CommitPlan, CopyDestination, GroupHeaders, Node, PreparedCommit,
+    PreparedGroup, PreparedReference, PreparedTree, ReferenceTarget, RelocatedDataset,
+    ReplacedHeader,
 };
 use super::publish::AppliedTree;
 use crate::edit::dataset::{FlatDataset, MovingWrite};
@@ -32,11 +33,8 @@ impl WriteEngine {
     /// # Errors
     ///
     /// Returns the placement, serialization, write, synchronization, or publication error.
-    pub(super) fn apply_commit(
-        &mut self,
-        plan: CommitPlan,
-        staged: StagedApply,
-    ) -> Result<(), Error> {
+    pub(super) fn apply_commit(&mut self, prepared: PreparedCommit) -> Result<(), Error> {
+        let (plan, staged) = prepared.into_parts();
         match plan {
             CommitPlan::InPlace(writes) => {
                 drop(staged);
