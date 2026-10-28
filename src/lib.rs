@@ -451,6 +451,7 @@ pub(crate) mod convert;
 pub(crate) mod data_layout;
 pub(crate) mod data_read;
 pub(crate) mod dataset_create_properties;
+pub(crate) mod dataset_request;
 pub(crate) mod dataspace;
 pub(crate) mod datatype;
 pub(crate) mod dense_storage;
