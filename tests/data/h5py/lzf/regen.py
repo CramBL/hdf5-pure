@@ -12,7 +12,12 @@ The pinned h5py and NumPy versions above produce `manifest.json` and:
 
 - `<name>.raw.bin`: uncompressed values in native byte order
 - `<name>.compressed.bin`: stored bytes for single-chunk, LZF-only cases
-- `<name>.h5`: h5py containers for end-to-end reads and chunk extraction
+- `<name>.h5`: retained containers for `u8_noise`, `f64_shuffle_lzf`, and
+  `i64_multichunk`
+
+Other HDF5 containers are temporary extraction files removed when generation
+ends. The retained containers cover optional-filter fallback, a shuffle/LZF
+pipeline, and a dataset with a partial edge chunk.
 
 Regenerate these retained vectors on a little-endian host. The arrays use
 native byte order, and the Rust consumers decode multibyte raw values as
@@ -44,6 +49,7 @@ import argparse
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import h5py
@@ -70,6 +76,7 @@ class Case:
     chunks: tuple[int, ...] | None = None  # None = one chunk covering shape
     shuffle: bool = False
     notes: str = ""
+    retain_container: bool = False
 
     def to_numpy(self) -> np.ndarray:
         return np.asarray(self.data, dtype=NP_DTYPE[self.dtype]).reshape(self.shape)
@@ -109,6 +116,7 @@ def build_cases() -> list[Case]:
             data=xorshift_noise(4096),
             notes="incompressible; h5py's optional LZF stores the chunk raw "
             "with the filter-mask bit set",
+            retain_container=True,
         ),
         Case(
             name="i16_rle",
@@ -129,6 +137,7 @@ def build_cases() -> list[Case]:
             data=np.sqrt(np.arange(512)),
             shuffle=True,
             notes="shuffle+lzf chain; end-to-end .h5 coverage only",
+            retain_container=True,
         ),
         Case(
             name="i64_multichunk",
@@ -137,6 +146,7 @@ def build_cases() -> list[Case]:
             data=np.arange(300) * 7 - 500,
             chunks=(128,),
             notes="multi-chunk with partial edge chunk; end-to-end .h5 only",
+            retain_container=True,
         ),
         # Half noise, half zeros. The noise half forces liblzf to emit literal
         # runs at the encoding's maximum (ctrl == 31, 32 literals), which no
@@ -172,9 +182,10 @@ def build_cases() -> list[Case]:
     ]
 
 
-def write_fixture(case: Case) -> dict[str, Any]:
+def write_fixture(case: Case, extraction_dir: Path) -> dict[str, Any]:
     arr = case.to_numpy()
-    h5_path = FIXTURE_DIR / f"{case.name}.h5"
+    h5_dir = FIXTURE_DIR if case.retain_container else extraction_dir
+    h5_path = h5_dir / f"{case.name}.h5"
     chunks = case.chunks or arr.shape
 
     with h5py.File(h5_path, "w") as f:
@@ -221,7 +232,8 @@ def write_fixture(case: Case) -> dict[str, Any]:
 
 def main() -> None:
     argparse.ArgumentParser(description="Regenerate h5py LZF decoder fixtures.").parse_args()
-    entries = [write_fixture(case) for case in build_cases()]
+    with TemporaryDirectory(prefix="hdf5-pure-lzf-") as directory:
+        entries = [write_fixture(case, Path(directory)) for case in build_cases()]
     manifest = {
         "generator": f"h5py {h5py.__version__}, numpy {np.__version__}",
         "fixtures": entries,

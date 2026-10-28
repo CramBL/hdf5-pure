@@ -16,6 +16,28 @@ writers this repository can run.
 A test reads a file from here and never writes one. The writers are the
 generators named in each directory.
 
+## LZF and ZFP reference data
+
+The [LZF generator](h5py/lzf/regen.py) uses Python 3.14, h5py 3.16.0, and NumPy 2.4.4.
+The [ZFP generator](h5py/zfp/regen.py) uses Python 3.13, h5py 3.16.0, hdf5plugin 6.0.0,
+and NumPy 2.4.4. The ZFP manifest records H5Z-ZFP 1.1.1 and ZFP 1.0.1. Both
+generators define their numeric inputs and pin their producer dependencies.
+
+The manifests record scalar types, dimensions, and filter parameters. Retain the raw
+and compressed vectors as independent codec evidence for `src/lzf_crosscheck.rs` and
+`src/zfp_crosscheck.rs`, including the integer ZFP cases. Regenerate on a little-endian
+host with `just test-data::lzf` or `just test-data::zfp`. Extraction containers are
+temporary, and ZFP filter parameters are retained in the manifest.
+
+The reader tests use these pipeline containers:
+
+| Container under `h5py/` | Invariant | Consumer |
+|---|---|---|
+| `lzf/u8_noise.h5` | Optional LZF is skipped for an incompressible chunk | `tests/main/lzf_roundtrip.rs` |
+| `lzf/f64_shuffle_lzf.h5` | Shuffle followed by LZF | `tests/main/lzf_roundtrip.rs` |
+| `lzf/i64_multichunk.h5` | Multiple LZF chunks with a partial edge | `tests/main/lzf_roundtrip.rs` |
+| `zfp/f32_1d_2_partial_rate32_zfp_deflate.h5` | A partial ZFP block followed by deflate | `tests/main/zfp_roundtrip.rs` |
+
 ## Dense attribute byte observations
 
 `crates/hdf5-pure-format/src/dense_attribute_write/tests.rs` retains text observations for

@@ -7,12 +7,21 @@
 #     "numpy==2.4.4",
 # ]
 # ///
-"""Regenerate ZFP crosscheck fixtures from the reference H5Z-ZFP plugin.
+"""Regenerates ZFP crosscheck fixtures through the reference H5Z-ZFP plugin.
 
-Produces a `manifest.json` plus three files per fixture:
-  <name>.raw.bin          raw uncompressed values (little-endian native width)
-  <name>.compressed.bin   reference compressed chunk bytes (single chunk)
-  <name>.cd.bin           cd_values as u32 little-endian tuple (informational)
+Each manifest case has two binary files:
+
+- `<name>.raw.bin`: uncompressed values in native byte order
+- `<name>.compressed.bin`: reference compressed bytes from one chunk
+
+Filter parameters are recorded as `cd_values_u32` in `manifest.json`. Per-case
+HDF5 containers are temporary extraction files removed when generation ends.
+The retained `f32_1d_2_partial_rate32_zfp_deflate.h5` container covers a partial
+ZFP block followed by deflate in `tests/main/zfp_roundtrip.rs`.
+
+Regenerate these retained vectors on a little-endian host. The arrays use
+native byte order, and the Rust consumers decode multibyte raw values as
+little-endian.
 
 The pinned versions above are the exact toolchain that produced the committed
 fixtures: hdf5plugin 6.0.0 bundles H5Z-ZFP 1.1.1 / ZFP 1.0.1, matching the
@@ -30,11 +39,10 @@ Or in a venv pinned from the sibling requirements file:
 from __future__ import annotations
 
 import json
-import os
-import struct
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import h5py
@@ -245,9 +253,9 @@ def build_cases() -> list[Case]:
     return cases
 
 
-def write_fixture(case: Case) -> dict[str, Any]:
+def write_fixture(case: Case, extraction_dir: Path) -> dict[str, Any]:
     arr = case.to_numpy()
-    h5_path = FIXTURE_DIR / f"{case.name}.h5"
+    h5_path = extraction_dir / f"{case.name}.h5"
 
     # Single chunk matching the full shape so the fixture holds exactly one
     # compressed payload we can isolate.
@@ -274,13 +282,6 @@ def write_fixture(case: Case) -> dict[str, Any]:
     raw_bytes = arr.tobytes(order="C")
     (FIXTURE_DIR / f"{case.name}.raw.bin").write_bytes(raw_bytes)
     (FIXTURE_DIR / f"{case.name}.compressed.bin").write_bytes(chunk_bytes)
-    cd_bytes = b"".join(struct.pack("<I", int(v) & 0xFFFFFFFF) for v in cd_values)
-    (FIXTURE_DIR / f"{case.name}.cd.bin").write_bytes(cd_bytes)
-
-    # The .h5 is useful as a reference artifact for manual inspection but the
-    # tests only need the three .bin files, so keep .h5 too so humans can
-    # `h5dump` it.
-
     return {
         "name": case.name,
         "dtype": case.dtype,
@@ -329,10 +330,11 @@ def main() -> int:
     cases = build_cases()
     manifest: list[dict[str, Any]] = []
     print(f"generating {len(cases)} fixtures in {FIXTURE_DIR}")
-    for c in cases:
-        entry = write_fixture(c)
-        manifest.append(entry)
-        print(f"  {c.name}: raw={entry['raw_bytes_len']}B compressed={entry['compressed_bytes_len']}B")
+    with TemporaryDirectory(prefix="hdf5-pure-zfp-") as directory:
+        for c in cases:
+            entry = write_fixture(c, Path(directory))
+            manifest.append(entry)
+            print(f"  {c.name}: raw={entry['raw_bytes_len']}B compressed={entry['compressed_bytes_len']}B")
     MANIFEST.write_text(json.dumps({"fixtures": manifest}, indent=2) + "\n")
     write_zfp_deflate_partial_fixture()
     print(f"wrote {MANIFEST}")
