@@ -1,4 +1,4 @@
-//! Complete observations of independent compact attributes across reader backends.
+//! Complete observations of independent legacy attributes and strings across reader backends.
 
 use hdf5_pure::DatatypeByteOrder;
 use rstest::rstest;
@@ -10,6 +10,7 @@ use test_util_hdf5::reader::ReadBackend;
 #[rstest]
 #[case::compact_attributes(Fixture::CompactAttributes)]
 #[case::mixed_attributes(Fixture::MixedAttributes)]
+#[case::vl_strings(Fixture::VlenStrings)]
 fn independent_symbol_table_files_have_complete_contents(
     #[case] fixture: Fixture,
     #[values(

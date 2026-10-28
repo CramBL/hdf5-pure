@@ -1,4 +1,4 @@
-//! Native conformance for independent compact attributes and fresh reference files.
+//! Native conformance for legacy attribute and string fixtures.
 
 #![cfg(feature = "hdf5")]
 
@@ -13,6 +13,7 @@ use test_util_hdf5::reader::ReadBackend;
 #[rstest]
 #[case::compact_attributes(Fixture::CompactAttributes)]
 #[case::mixed_attributes(Fixture::MixedAttributes)]
+#[case::vl_strings(Fixture::VlenStrings)]
 fn libhdf5_symbol_tables_have_complete_contents(
     #[case] fixture: Fixture,
     #[values(
@@ -41,6 +42,7 @@ fn libhdf5_symbol_tables_have_complete_contents(
 #[rstest]
 #[case::compact_attributes(Fixture::CompactAttributes)]
 #[case::mixed_attributes(Fixture::MixedAttributes)]
+#[case::vl_strings(Fixture::VlenStrings)]
 fn libhdf5_reads_independent_symbol_tables(#[case] fixture: Fixture) {
     let path = temp::temp_path("independent_legacy_attributes.h5");
     std::fs::write(&path, fixture.build()).unwrap();
