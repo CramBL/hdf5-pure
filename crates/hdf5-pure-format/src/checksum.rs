@@ -517,7 +517,7 @@ mod tests {
 
     #[test]
     fn a_files_stored_superblock_checksum_equals_jenkins_lookup3() {
-        let file_data: &[u8] = include_bytes!("../../../tests/data/unattributed/v2_groups.h5");
+        let file_data = test_util::modern::v2_groups();
         // Superblock v3: checksum at offset 44, covers bytes 0..44
         let stored =
             u32::from_le_bytes([file_data[44], file_data[45], file_data[46], file_data[47]]);
