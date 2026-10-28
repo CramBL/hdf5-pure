@@ -5,7 +5,7 @@ the producer and regeneration instructions or retention rationale. `just test-da
 lists producer-specific commands.
 
 - `c/`: frozen HDF5 1.8.23 compatibility files.
-- `h5py/`: h5py, with the LZF and zfp filters and MATLAB's v7.3 layout.
+- `h5py/`: h5py, with the LZF and zfp filters.
 - `matlab/`: MATLAB itself.
 - `pure/`: a frozen hdf5-pure 0.28.0 collision regression.
 - `fuzz/`: inputs the fuzzer found.

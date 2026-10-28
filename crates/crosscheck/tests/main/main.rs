@@ -81,6 +81,7 @@ mod libver_output;
 mod link_storage;
 mod lzf;
 mod mat_streaming;
+mod mat_struct_array;
 mod matio_crosscheck;
 mod modern;
 mod native_fixtures;

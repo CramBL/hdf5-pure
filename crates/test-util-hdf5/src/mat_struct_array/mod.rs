@@ -1,8 +1,10 @@
 //! Complete value and storage observations for independent MATLAB struct-array images.
 //!
 //! The assertions check MATLAB attributes, column-major object references,
-//! nested aliases, symbol-table links, and contiguous value datasets. They use
-//! the supplied image bytes to inspect headers and storage alongside the reader API.
+//! nested aliases, symbol-table links, and contiguous value datasets. Ordinary
+//! assertions inspect headers and storage in the supplied image bytes alongside
+//! the reader API.
+//! With the `hdf5` feature, native assertions read the graphs through libhdf5.
 //!
 //! # Examples
 //!
@@ -42,6 +44,9 @@ use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::ObjectHeader;
 
 use crate::symbol_table;
+
+#[cfg(feature = "hdf5")]
+pub mod native;
 
 /// Checks every structure, reference target, attribute, and value in the valid image.
 ///
