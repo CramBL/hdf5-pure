@@ -1,19 +1,11 @@
 # Written by libhdf5
 
-`1.8/` holds files HDF5 1.8.23 wrote, described there.
+[HDF5 1.8.23 compatibility files][historical] are retained as frozen reference evidence.
+Their notice records the producer, consumers, layout premises, and retention rationale.
 
-The files below are reference-library outputs retained for ordinary tests. Reusable
-construction lives in `crates/test-util-hdf5/src/native_fixtures.rs`, under the helper's
-optional `__hdf5-1.10` capability.
+Native interoperability tests construct fresh files through
+`crates/test-util-hdf5/src/native_fixtures.rs`, under the optional `__hdf5-1.10`
+capability. `crates/crosscheck/tests/main/native_fixtures.rs` checks those files
+across reader backends.
 
-The `c_test_data` suite checks current constructor output on fresh paths and retained
-copies against the same contents and storage expectations. It follows each file's
-encoded addresses.
-
-`just test-data::c` explicitly rewrites these copies with the bundled `hdf5-metno`
-dependency pinned in `Cargo.lock`. It selects the committed-fixture cases and sets
-`HDF5_PURE_UPDATE_TEST_DATA`. Without that variable, those cases read the existing copies.
-
-- `hard_link_undo.h5`: two hard links to one dataset, for `src/edit/`.
-- `committed_datatype_v1.h5`: a committed datatype in a version 1 object
-  header, linked once and used by two datasets, for `tests/main/named_datatypes.rs`.
+[historical]: 1.8/NOTICE.md

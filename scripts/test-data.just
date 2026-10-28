@@ -1,11 +1,7 @@
 set working-directory := ".."
 
-# The committed files under tests/data, rewritten by the tool that made them.
-default: c pure
-
-# tests/data/c: written by libhdf5, through the crosscheck package.
-c:
-    HDF5_PURE_UPDATE_TEST_DATA=1 cargo nextest run --locked -p hdf5-pure-crosscheck --features __hdf5-bundled,serde,ndarray --test main c_test_data::committed_native_fixture_has_complete_contents
+# Regenerate committed fixtures produced by the pure writer.
+default: pure
 
 # tests/data/pure: written by this crate's unit tests through crate-private seams.
 pure:

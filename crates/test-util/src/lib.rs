@@ -61,11 +61,7 @@ pub fn data(relative: &str) -> PathBuf {
 /// Panics if the committed fixture is missing, its path has no file name, or the copy fails.
 pub fn copy_data(relative: &str, dir: &Path) -> PathBuf {
     let committed = data(relative);
-    assert!(
-        committed.is_file(),
-        "{} is missing; `just test-data::c` writes it",
-        committed.display()
-    );
+    assert!(committed.is_file(), "{committed:?} is missing");
     let copy = dir.join(committed.file_name().unwrap());
     std::fs::copy(&committed, &copy).unwrap();
     copy

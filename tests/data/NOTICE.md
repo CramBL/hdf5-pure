@@ -1,10 +1,10 @@
 # Test data
 
-Committed files the tests read, one directory per writer. Each directory says
-what wrote its files and how to write them again, and `just test-data` runs the
-writers this repository can run.
+Committed files the tests read, one directory per writer. Each directory records
+the producer and regeneration instructions or retention rationale. `just test-data`
+runs the default generators.
 
-- `c/`: the reference HDF5 C library.
+- `c/`: frozen HDF5 1.8.23 compatibility files.
 - `h5py/`: h5py, with the LZF and zfp filters and MATLAB's v7.3 layout.
 - `matlab/`: MATLAB itself.
 - `pure/`: this crate's own writer, through seams its public API has no

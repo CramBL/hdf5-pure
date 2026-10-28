@@ -7,5 +7,6 @@ mod group_link_inspection;
 
 mod generic_large;
 mod huge_links;
+mod identity;
 
 mod paged_index;
