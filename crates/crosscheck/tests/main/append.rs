@@ -47,8 +47,7 @@ fn c_creates_pure_appends_both_read() {
 #[test]
 #[cfg(target_endian = "little")]
 fn c_partial_tail_replacement_preserves_values() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("partial-tail.h5");
+    let path = test_util::temp::temp_path("partial-tail.h5");
     AppendInteropFixture::filtered_libhdf5(7, 5).write(&path);
     dataset::pure_append_staged(&path, "d", &[7, 8]);
     dataset::pure_append_staged(&path, "d", &[9, 10, 11, 12]);
@@ -150,8 +149,7 @@ fn immediate_replacement_reclaims_native_tail_at_each_record_location(
     #[case] slot: usize,
     #[case] paged: bool,
 ) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("native-retirement.h5");
+    let path = test_util::temp::temp_path("native-retirement.h5");
     let len = slot * 4 + 1;
     let file = hdf5::File::with_options()
         .with_fapl(|properties| {
@@ -254,8 +252,7 @@ fn immediate_replacement_reclaims_native_tail_at_each_record_location(
 #[case::two(Sizeof::Bytes2)]
 #[case::four(Sizeof::Bytes4)]
 fn narrow_native_tail_editing_is_rejected_without_changing_ownership(#[case] width: Sizeof) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("narrow-tail.h5");
+    let path = test_util::temp::temp_path("narrow-tail.h5");
     let native = hdf5::File::with_options()
         .with_fapl(|properties| properties.libver_v110())
         .with_fcpl(|properties| {
@@ -294,8 +291,7 @@ fn narrow_native_tail_editing_is_rejected_without_changing_ownership(#[case] wid
 
 #[test]
 fn immediate_append_rejects_big_endian_storage_without_changing_the_file() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("big-endian.h5");
+    let path = test_util::temp::temp_path("big-endian.h5");
     let native = hdf5::File::with_options()
         .with_fapl(|properties| properties.libver_v110())
         .create(&path)

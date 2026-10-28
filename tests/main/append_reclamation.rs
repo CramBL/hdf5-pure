@@ -33,8 +33,7 @@ fn replacements_preserve_reusable_storage_across_commit_and_reopen(
     #[values(SyncPolicy::Always, SyncPolicy::OnClose)] sync: SyncPolicy,
     #[values(FileSpaceStrategy::FsmAggr, FileSpaceStrategy::Page)] strategy: FileSpaceStrategy,
 ) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("retirement.h5");
+    let path = test_util::temp::temp_path("retirement.h5");
     create(&path, strategy, encoding, &[1.5, 2.5, 3.5]);
     let file = File::open_rw_with_options(
         &path,
@@ -75,8 +74,7 @@ fn replacements_preserve_reusable_storage_across_commit_and_reopen(
 #[case::borrowed(false)]
 #[case::owned(true)]
 fn buffered_flush_modes_retire_replaced_tails(#[case] owned: bool) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("buffered-modes.h5");
+    let path = test_util::temp::temp_path("buffered-modes.h5");
     create(
         &path,
         FileSpaceStrategy::FsmAggr,
@@ -133,8 +131,7 @@ fn buffered_flush_modes_retire_replaced_tails(#[case] owned: bool) {
 fn page_buffered_replacements_survive_sync_and_reopen(
     #[values(MemoryStrategy::Bounded, MemoryStrategy::Mirrored)] memory: MemoryStrategy,
 ) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("page-buffered-retirement.h5");
+    let path = test_util::temp::temp_path("page-buffered-retirement.h5");
     create(&path, FileSpaceStrategy::Page, Encoding::Unfiltered, &[1.0]);
     let file = File::open_rw_with_options(
         &path,

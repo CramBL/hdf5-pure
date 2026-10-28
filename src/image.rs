@@ -2021,8 +2021,7 @@ mod tests {
     fn shared_handle_metadata_owners_survive_writes_and_cache_invalidation(
         #[case] buffering: WriteBuffering,
     ) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("shared-metadata.bin");
+        let path = test_util::temp::temp_path("shared-metadata.bin");
         std::fs::write(&path, b"abcdefgh").unwrap();
         let handle = fs::OpenOptions::new()
             .read(true)
