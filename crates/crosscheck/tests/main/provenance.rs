@@ -248,3 +248,88 @@ fn c_created_strings_and_references_return_values_and_no_hash() {
     );
     assert_eq!(strings.verify_provenance().unwrap(), VerifyResult::NoHash);
 }
+
+#[cfg(feature = "__hdf5-1.10")]
+#[rstest]
+#[case::contiguous(false)]
+#[case::chunked(true)]
+fn staged_dense_attributes_finalize_provenance_after_appends(
+    #[case] chunked: bool,
+    #[values(false, true)] page: bool,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("staged_provenance.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_userblock(UserblockSize::try_from(4096).unwrap());
+    if page {
+        builder.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true),
+        );
+    }
+    builder.write(&path).unwrap();
+    {
+        let session = File::open_rw(&path).unwrap();
+        let mut dataset = session
+            .root()
+            .create_dataset("data", |dataset| {
+                dataset.with_i32_data(&[1, 2]).with_provenance(
+                    "test-suite",
+                    "2026-10-28T00:00:00Z",
+                    None,
+                );
+                if chunked {
+                    dataset.with_chunks(&[2]);
+                }
+                for i in 0..8 {
+                    dataset.set_attr(&format!("extra{i}"), AttrValue::I64(i));
+                }
+                dataset.set_attr("note", AttrValue::VarLenString("staged".into()));
+            })
+            .unwrap();
+        dataset
+            .append_staged(|append| {
+                append.append_i32(&[3, 4]);
+            })
+            .unwrap();
+        session.commit().unwrap();
+    }
+    assert_eq!(
+        test_util::fractal_heap::header_offsets(&std::fs::read(&path).unwrap()).len(),
+        1
+    );
+    let rust = File::open(&path).unwrap();
+    let dataset = rust.dataset("data").unwrap();
+    assert_eq!(dataset.read_i32().unwrap(), [1, 2, 3, 4]);
+    assert_eq!(dataset.verify_provenance().unwrap(), VerifyResult::Ok);
+    let attrs = dataset.attrs().unwrap();
+    assert_eq!(attrs.len(), 12);
+    assert_eq!(attrs["note"], AttrValue::VarLenString("staged".into()));
+    let AttrValue::String(hash) = &attrs["_provenance_sha256"] else {
+        panic!(
+            "expected a string digest, got {:?}",
+            attrs["_provenance_sha256"]
+        );
+    };
+    let c = hdf5::File::open(&path).unwrap();
+    let dataset = c.dataset("data").unwrap();
+    assert_eq!(dataset.attr_names().unwrap().len(), 12);
+    assert_eq!(dataset.read_raw::<i32>().unwrap(), [1, 2, 3, 4]);
+    assert_eq!(
+        dataset
+            .attr("note")
+            .unwrap()
+            .read_scalar::<VarLenUnicode>()
+            .unwrap()
+            .as_str(),
+        "staged"
+    );
+    assert_eq!(
+        dataset
+            .attr("_provenance_sha256")
+            .unwrap()
+            .read_scalar::<FixedUnicode<64>>()
+            .unwrap()
+            .as_str(),
+        hash
+    );
+}

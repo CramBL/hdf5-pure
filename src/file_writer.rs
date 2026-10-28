@@ -21,8 +21,9 @@ pub(crate) use hdf5_pure_format::__private as dense_attribute_write;
 use hdf5_pure_format::__private::DENSE_ATTR_MAX_MANAGED_OBJECT;
 use hdf5_pure_format::__private::DenseAttrBlob;
 pub(crate) use hdf5_pure_format::__private::DenseAttrCreationOrder;
-#[cfg(doc)]
+use hdf5_pure_format::__private::DenseAttrFixup;
 use hdf5_pure_format::__private::DenseAttrPlan;
+use hdf5_pure_format::__private::DenseAttrReference;
 use hdf5_pure_format::__private::DenseLinkImage;
 use hdf5_pure_format::__private::DenseLinkPlan;
 use hdf5_pure_format::__private::DenseLinkPlanError;
@@ -34,6 +35,7 @@ use hdf5_pure_format::__private::LayoutVersion;
 use hdf5_pure_format::__private::LinkStorageError;
 use hdf5_pure_format::__private::ManagedHeapPlanError;
 use hdf5_pure_format::__private::OwnedLink;
+use hdf5_pure_format::__private::PreparedDenseAttrs;
 use hdf5_pure_format::__private::SECTION_CLASS_LARGE;
 use hdf5_pure_format::__private::SECTION_CLASS_SMALL;
 use hdf5_pure_space::__private::AllocationClass;
@@ -53,6 +55,7 @@ use crate::address::StoredAddressExt;
 use crate::address::{BaseAddress, StoredAddress};
 use crate::attribute::AttributeMessage;
 use crate::attribute_info::AttributeInfoMessage;
+use crate::bytes;
 use crate::chunked_write::{
     self, ByteSink, ChunkOptions, ChunkProvider, ChunkedMeasure, ChunkedPlan, CompressedChunkSet,
     StorageAllocation, VerbatimLayout, VerbatimPlan,
@@ -489,6 +492,65 @@ pub(crate) fn make_link(name: &str, addr: StoredAddress) -> LinkMessage {
     }
 }
 
+/// Resolves prepared dense storage from the attributes' completed references and payloads.
+///
+/// The caller passes the same attribute set in its prepared order, after placing global-heap
+/// collections, resolving committed datatypes, and completing deferred payloads. Only declared
+/// updates are copied into the encoded messages. Heap and index geometry are preserved.
+///
+/// # Errors
+///
+/// Returns [`FormatError::Internal`] if a prepared attribute or collection reference is absent,
+/// a committed datatype is inline, a collection offset overflows, or a payload changes length.
+/// Propagates address errors from [`PreparedDenseAttrs::finalize`] and reference-read errors.
+pub(crate) fn finalize_dense_attrs(
+    prepared: PreparedDenseAttrs,
+    attrs: &[AttributeMessage],
+) -> Result<DenseAttrPlan, FormatError> {
+    let attribute = |index: usize| {
+        attrs.get(index).ok_or_else(|| {
+            FormatError::Internal("a prepared dense attribute is absent during finalization".into())
+        })
+    };
+    prepared.finalize(
+        |reference| match reference {
+            DenseAttrReference::CommittedDatatype { attribute: index } => {
+                match attribute(index)?.datatype_location {
+                    DatatypeLocation::Committed(address) => Ok(address),
+                    DatatypeLocation::Inline => Err(FormatError::Internal(
+                        "a prepared committed attribute has an inline datatype".into(),
+                    )),
+                }
+            }
+            DenseAttrReference::GlobalHeap {
+                attribute: index,
+                collection,
+            } => {
+                let offset = collection
+                    .checked_mul(dense_attribute_write::GLOBAL_HEAP_MAX_OBJECTS)
+                    .and_then(|element| element.checked_mul(type_builders::VL_REF_SIZE))
+                    .and_then(|offset| offset.checked_add(core::mem::size_of::<u32>()))
+                    .ok_or_else(|| {
+                        FormatError::Internal(
+                            "a prepared attribute collection offset overflows".into(),
+                        )
+                    })?;
+                // `H5T__vlen_disk_write` writes the sequence length before the heap address
+                // (`H5Tvlen.c`, HDF5 2.2.0). This writer uses eight-byte addresses.
+                bytes::read_offset_width(&attribute(index)?.raw_data, offset, OFFSET_WIDTH)
+                    .map(StoredAddress::new)
+                    .map_err(|error| match error {
+                        FormatError::UnexpectedEof { .. } => FormatError::Internal(
+                            "a prepared attribute collection reference is absent".into(),
+                        ),
+                        error => error,
+                    })
+            }
+        },
+        |index| Ok(attribute(index)?.raw_data.as_slice()),
+    )
+}
+
 /// Returns `true` if `attrs` require dense storage.
 ///
 /// Selects dense storage when the attribute count exceeds [`DENSE_ATTR_THRESHOLD`] or a compact
@@ -511,10 +573,10 @@ pub(crate) fn needs_dense_attrs(attrs: &[AttributeMessage]) -> Result<bool, Form
     Ok(false)
 }
 
-/// The heap address pass 1 of a file build asks a [`DenseAttrPlan`] for its
-/// Attribute Info message at, before the heap's real address is known. The
-/// message's *length* is what that pass needs, and that does not depend on the
-/// address; pass 2 emits the real message at the address it reserves.
+/// The provisional heap address used to size object headers.
+///
+/// The writer sizes headers with [`PreparedDenseAttrs::attr_info_message`] before reserving
+/// their space. The message length is independent of the chosen heap address.
 const DUMMY_DENSE_BASE: StoredAddress = StoredAddress::ZERO;
 
 /// The Attribute Info (0x0015) message a version 2 object header needs when its
@@ -1857,22 +1919,12 @@ impl FileWriter {
             .map(|d| needs_dense_attrs(&d.attrs))
             .collect::<Result<_, _>>()?;
 
-        // A compact attribute is stored as an object-header message, whose size
-        // field is 2 bytes wide. An oversized one would be written with a
-        // truncated length, which silently loses the attribute or leaves the
-        // reader parsing the next message body as a message header, so refuse it
-        // here — while the attribute's name is still at hand — before any header
-        // is built. `ObjectHeaderWriter::serialize` is the unnamed backstop for
-        // every other message this writer emits.
-        //
-        // This runs before the compression pass below so a file that will be
-        // refused does not first pay to compress every chunked dataset in it.
-        //
-        // Dense attributes are stored in a fractal heap rather than the header, so
-        // this limit does not apply to them and the check skips them; the dense
-        // check just below bounds those instead. An attribute that would exceed it
-        // is *why* `needs_dense_attrs` picked the dense path, so what reaches here
-        // is only what a header can hold — this is a backstop, not the decision.
+        /// Checks compact message lengths before chunk compression.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`FormatError::AttributeMessageTooLarge`] if a compact message exceeds the
+        /// object-header size limit. Propagates attribute encoding errors.
         fn check_compact_attrs(attrs: &[AttributeMessage]) -> Result<(), FormatError> {
             for a in attrs {
                 let size = a.serialize(OFFSET_WIDTH, LENGTH_SIZE)?.len();
@@ -1885,35 +1937,52 @@ impl FileWriter {
             }
             Ok(())
         }
-        // The dense emitter has bounds of its own — the attribute message's own
-        // 2-byte header fields and the size of the one direct block it builds —
-        // which it documents its callers must check. An attribute set past them
-        // was previously written anyway, producing a heap that reads back empty
-        // here and aborts an assertion-enabled reference C library (issue #191).
-        // Between this and the compact check above, every attribute is bounded on
-        // whichever path it takes. No bound here is on an attribute's size or on
-        // how many there are: the first is what selects dense storage rather than
-        // what it refuses, and the second is unbounded now that both indexes are
-        // multi-level B-trees.
-        if root_dense {
-            dense_attribute_write::dense_attrs_check(&root_attrs)?;
-        } else {
-            check_compact_attrs(&root_attrs)?;
-        }
-        for (gi, g) in groups.iter().enumerate() {
-            if group_dense[gi] {
-                dense_attribute_write::dense_attrs_check(&g.attrs)?;
-            } else {
-                check_compact_attrs(&g.attrs)?;
+        /// Prepares dense geometry and deferred updates, or checks compact message lengths.
+        ///
+        /// # Errors
+        ///
+        /// Propagates compact attribute encoding and size errors, or errors from
+        /// [`PreparedDenseAttrs::new`] for dense storage.
+        fn prepare_dense(
+            attrs: &[AttributeMessage],
+            dense: bool,
+            patches: &[VlPatch],
+            payload: Option<usize>,
+        ) -> Result<Option<PreparedDenseAttrs>, FormatError> {
+            if !dense {
+                check_compact_attrs(attrs)?;
+                return Ok(None);
             }
+            let fixups = patches
+                .iter()
+                .map(|patch| DenseAttrFixup::GlobalHeap {
+                    attribute: patch.attr_index,
+                })
+                .chain(attrs.iter().enumerate().filter_map(|(attribute, attr)| {
+                    attr.datatype_location
+                        .is_committed()
+                        .then_some(DenseAttrFixup::CommittedDatatype { attribute })
+                }))
+                .chain(payload.map(|attribute| DenseAttrFixup::Payload { attribute }));
+            PreparedDenseAttrs::new(attrs, DenseAttrCreationOrder::Untracked, fixups).map(Some)
         }
-        for (i, d) in all_ds.iter().enumerate() {
-            if ds_dense[i] {
-                dense_attribute_write::dense_attrs_check(&d.attrs)?;
-            } else {
-                check_compact_attrs(&d.attrs)?;
-            }
-        }
+        let root_dense_plan = prepare_dense(&root_attrs, root_dense, &vl_root, None)?;
+        let group_dense_plans = groups
+            .iter()
+            .enumerate()
+            .map(|(i, group)| prepare_dense(&group.attrs, group_dense[i], &grp_vl[i], None))
+            .collect::<Result<Vec<_>, _>>()?;
+        let ds_dense_plans = all_ds
+            .iter()
+            .enumerate()
+            .map(|(i, dataset)| {
+                #[cfg(feature = "provenance")]
+                let payload = dataset.pending_hash.as_ref().map(|hash| hash.attribute);
+                #[cfg(not(feature = "provenance"))]
+                let payload = None;
+                prepare_dense(&dataset.attrs, ds_dense[i], &ds_vl[i], payload)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         let is_chunked: Vec<bool> = all_ds
             .iter()
@@ -2096,49 +2165,49 @@ impl FileWriter {
             })
             .collect::<Result<_, FormatError>>()?;
 
-        /// Where each object's dense-attribute heap will be written and how many
-        /// bytes it occupies, for the objects that have one.
-        struct DenseSpans {
-            root: Option<(StoredAddress, usize)>,
-            groups: Vec<Option<(StoredAddress, usize)>>,
-            datasets: Vec<Option<(StoredAddress, usize)>>,
+        /// Prepared dense storage paired with its reserved file address for each object.
+        struct DenseReservations {
+            root: Option<(StoredAddress, PreparedDenseAttrs)>,
+            groups: Vec<Option<(StoredAddress, PreparedDenseAttrs)>>,
+            datasets: Vec<Option<(StoredAddress, PreparedDenseAttrs)>>,
         }
 
-        /// The heaps themselves, in the same order as the spans reserved for them.
+        /// File addresses of the emitted dense heaps, in object order.
+        struct DenseSpans {
+            root: Option<StoredAddress>,
+            groups: Vec<Option<StoredAddress>>,
+            datasets: Vec<Option<StoredAddress>>,
+        }
+
+        /// Serialized dense heaps and Attribute Info messages, in object order.
         struct DenseBlobs {
             root: Option<DenseAttrBlob>,
             groups: Vec<Option<DenseAttrBlob>>,
             datasets: Vec<Option<DenseAttrBlob>>,
         }
 
-        impl DenseSpans {
-            /// Build every reserved heap, at the address reserved for it.
+        impl DenseReservations {
+            /// Finalizes and serializes each heap at its reserved address.
             ///
-            /// Call once the attributes are final: after the global-heap
-            /// collections have addresses and the variable-length attributes'
-            /// references have been patched with them.
+            /// The caller completes attribute references and element digests before emission.
+            /// Each prepared value retains the geometry used to reserve its file space.
             ///
-            /// Each blob fills its reserved span exactly, and nothing here has to
-            /// arrange that. A heap's length is a function of its attributes'
-            /// serialized sizes, the fixed offset and length widths, and how many
-            /// of those attributes are huge — no term of it is the address it is
-            /// built at. Patching cannot move any of those terms either: it takes
-            /// the attribute bytes as `&mut [u8]` and overwrites references in
-            /// place, so the slice it returns is the length it was given.
+            /// # Errors
             ///
-            /// The span was reserved from [`DenseAttrPlan::blob_len`], which
-            /// derives the length rather than measuring a build of it, and the
-            /// cursor that reservation advanced is what every later object's
-            /// address is computed from. So a disagreement between the two would
-            /// not stop at this heap: it would move every address after it, in a
-            /// file that still looks well formed. That is a refusal rather than a
-            /// `debug_assert`, because a release build has to catch it too.
+            /// Returns [`FormatError::Internal`] if an element digest is pending. Propagates
+            /// errors from [`finalize_dense_attrs`] and [`DenseAttrPlan::build`], including an
+            /// emitted length that differs from its reservation.
             fn build(
-                &self,
+                self,
                 root_attrs: &[AttributeMessage],
                 groups: &[GrpFlat],
                 datasets: &[DsFlat],
-            ) -> Result<DenseBlobs, FormatError> {
+            ) -> Result<(DenseSpans, DenseBlobs), FormatError> {
+                let Self {
+                    root,
+                    groups: group_reservations,
+                    datasets: dataset_reservations,
+                } = self;
                 #[cfg(feature = "provenance")]
                 if datasets
                     .iter()
@@ -2150,55 +2219,57 @@ impl FileWriter {
                 }
                 fn one(
                     attrs: &[AttributeMessage],
-                    span: Option<(StoredAddress, usize)>,
-                ) -> Result<Option<DenseAttrBlob>, FormatError> {
-                    let Some((address, reserved)) = span else {
-                        return Ok(None);
-                    };
-                    let blob = dense_attribute_write::build_dense_attrs(
-                        attrs,
-                        DenseAttrCreationOrder::Untracked,
-                        address,
-                    )?;
-                    if blob.blob.len() != reserved {
-                        return Err(FormatError::SerializationError(format!(
-                            "a dense attribute heap built {} bytes into a span of {reserved} \
-                             reserved for it; every address after it would be wrong",
-                            blob.blob.len(),
-                        )));
+                    span: Option<(StoredAddress, PreparedDenseAttrs)>,
+                ) -> Result<Option<DenseEmission>, FormatError> {
+                    match span {
+                        Some((address, prepared)) => {
+                            let blob = finalize_dense_attrs(prepared, attrs)?.build(address)?;
+                            Ok(Some(DenseEmission { address, blob }))
+                        }
+                        None => Ok(None),
                     }
-                    Ok(Some(blob))
                 }
-                Ok(DenseBlobs {
-                    root: one(root_attrs, self.root)?,
-                    groups: groups
-                        .iter()
-                        .zip(&self.groups)
-                        .map(|(g, &span)| one(&g.attrs, span))
-                        .collect::<Result<_, _>>()?,
-                    datasets: datasets
-                        .iter()
-                        .zip(&self.datasets)
-                        .map(|(d, &span)| one(&d.attrs, span))
-                        .collect::<Result<_, _>>()?,
-                })
+                let split = |emission: Option<DenseEmission>| match emission {
+                    Some(DenseEmission { address, blob }) => (Some(address), Some(blob)),
+                    None => (None, None),
+                };
+                let (root_span, root_blob) = split(one(root_attrs, root)?);
+                let (group_spans, group_blobs) = groups
+                    .iter()
+                    .zip(group_reservations)
+                    .map(|(group, span)| one(&group.attrs, span).map(split))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .unzip();
+                let (dataset_spans, dataset_blobs) = datasets
+                    .iter()
+                    .zip(dataset_reservations)
+                    .map(|(dataset, span)| one(&dataset.attrs, span).map(split))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .unzip();
+                Ok((
+                    DenseSpans {
+                        root: root_span,
+                        groups: group_spans,
+                        datasets: dataset_spans,
+                    },
+                    DenseBlobs {
+                        root: root_blob,
+                        groups: group_blobs,
+                        datasets: dataset_blobs,
+                    },
+                ))
             }
         }
 
-        // Pass 1: compute OH sizes with dummy addresses. Each object needing
-        // dense attributes also records its heap's byte length here, so pass 2
-        // can reserve the span without yet building the bytes that go in it —
-        // see `DenseSpans`.
-        //
-        // Each plan is used for its length and its Attribute Info message and is
-        // then dropped; `DenseSpans::build` plans again from scratch. Do not
-        // "optimize" that by carrying these plans forward: `patch_vl_refs` below
-        // overwrites variable-length references inside `attrs` between the two
-        // passes, so a plan made here holds pre-patch bytes. Only its *length*
-        // survives the patch, which is why that is all this pass takes from it.
-        // Built here rather than beside the dummy addresses above because the
-        // passes between still mutate `all_ds` (VL staging, compression), and
-        // these tables borrow it.
+        struct DenseEmission {
+            address: StoredAddress,
+            blob: DenseAttrBlob,
+        }
+
+        // Size object headers at provisional addresses using the prepared dense metadata.
+        // Borrow the object tables after variable-length staging and chunk compression.
         let dummy_tables = LinkTables {
             all_ds: &all_ds,
             committed: &committed,
@@ -2208,7 +2279,6 @@ impl FileWriter {
             group_addrs: &dummy_grp_addrs,
         };
         let mut group_oh_sizes: Vec<usize> = Vec::with_capacity(groups.len());
-        let mut group_dense_lens: Vec<Option<usize>> = Vec::with_capacity(groups.len());
         let mut group_link_lens = Vec::with_capacity(groups.len());
         for (gi, g) in groups.iter().enumerate() {
             let dummy_links =
@@ -2225,32 +2295,17 @@ impl FileWriter {
                     .map(|plan| plan.serialized_len().to_usize())
                     .transpose()?,
             );
-            let (oh, dense_len) = if group_dense[gi] {
-                // The plan answers both questions this pass asks — how long the
-                // heap will be, and what its Attribute Info message costs the
-                // header — without emitting the heap, which pass 2 does once at
-                // the address reserved here.
-                let plan = dense_attribute_write::dense_attrs_plan(
-                    &g.attrs,
-                    DenseAttrCreationOrder::Untracked,
-                )?;
-                (
-                    build_group_oh(
-                        &dummy_links,
-                        &g.attrs,
-                        Some(&plan.attr_info_message(DUMMY_DENSE_BASE)?),
-                        link_info.as_ref(),
-                    )?,
-                    Some(plan.blob_len().to_usize()?),
-                )
-            } else {
-                (
-                    build_group_oh(&dummy_links, &g.attrs, None, link_info.as_ref())?,
-                    None,
-                )
-            };
+            let attr_info = group_dense_plans[gi]
+                .as_ref()
+                .map(|plan| plan.attr_info_message(DUMMY_DENSE_BASE))
+                .transpose()?;
+            let oh = build_group_oh(
+                &dummy_links,
+                &g.attrs,
+                attr_info.as_deref(),
+                link_info.as_ref(),
+            )?;
             group_oh_sizes.push(oh.len());
-            group_dense_lens.push(dense_len);
         }
 
         let root_dummy_links = dummy_tables.links(
@@ -2268,33 +2323,17 @@ impl FileWriter {
             .as_ref()
             .map(|plan| plan.serialized_len().to_usize())
             .transpose()?;
-        let (root_oh_size, root_dense_len) = if root_dense {
-            let plan = dense_attribute_write::dense_attrs_plan(
-                &root_attrs,
-                DenseAttrCreationOrder::Untracked,
-            )?;
-            (
-                build_group_oh(
-                    &root_dummy_links,
-                    &root_attrs,
-                    Some(&plan.attr_info_message(DUMMY_DENSE_BASE)?),
-                    root_link_info.as_ref(),
-                )?
-                .len(),
-                Some(plan.blob_len().to_usize()?),
-            )
-        } else {
-            (
-                build_group_oh(
-                    &root_dummy_links,
-                    &root_attrs,
-                    None,
-                    root_link_info.as_ref(),
-                )?
-                .len(),
-                None,
-            )
-        };
+        let root_attr_info = root_dense_plan
+            .as_ref()
+            .map(|plan| plan.attr_info_message(DUMMY_DENSE_BASE))
+            .transpose()?;
+        let root_oh_size = build_group_oh(
+            &root_dummy_links,
+            &root_attrs,
+            root_attr_info.as_deref(),
+            root_link_info.as_ref(),
+        )?
+        .len();
 
         drop(root_link_plan);
 
@@ -2308,27 +2347,13 @@ impl FileWriter {
         // chunks have a zero placeholder until their target addresses are resolved and their
         // encoded sizes are known.
         let mut ds_data_lens: Vec<u64> = Vec::with_capacity(all_ds.len());
-        let mut ds_dense_lens: Vec<Option<usize>> = Vec::with_capacity(all_ds.len());
         let mut dummy_cursor = 0u64;
         for (i, d) in all_ds.iter().enumerate() {
-            let dense_plan = if ds_dense[i] {
-                Some(dense_attribute_write::dense_attrs_plan(
-                    &d.attrs,
-                    DenseAttrCreationOrder::Untracked,
-                )?)
-            } else {
-                None
-            };
+            let dense_plan = ds_dense_plans[i].as_ref();
             let dense_attr_info = dense_plan
                 .as_ref()
                 .map(|plan| plan.attr_info_message(DUMMY_DENSE_BASE))
                 .transpose()?;
-            ds_dense_lens.push(
-                dense_plan
-                    .as_ref()
-                    .map(|plan| plan.blob_len().to_usize())
-                    .transpose()?,
-            );
             let oh = if is_chunked[i] {
                 let (layout_message, pipeline_message) = if d.reference_targets.is_some() {
                     let chunk_dims = d.chunk_options.resolve_chunk_dims(&d.ds.dimensions);
@@ -2400,9 +2425,19 @@ impl FileWriter {
         }
         let root_group_addr = allocation.reserve(root_oh_size as u64, AllocationClass::Metadata)?;
 
-        // Reserve dense-attribute spans before building their bytes. The heap contains copies of
-        // the attributes, so every global-heap reference must be resolved before serialization.
-        let reserve = |allocation: &mut FileAllocation, len: Option<usize>| {
+        // Reserve dense storage from its retained geometry. Resolve deferred references and
+        // payloads before serializing the prepared messages into those reservations.
+        let reserve = |allocation: &mut FileAllocation, plan: Option<PreparedDenseAttrs>| {
+            plan.map(|plan| {
+                allocation
+                    .reserve(plan.blob_len(), AllocationClass::Metadata)
+                    .map(|addr| (addr, plan))
+            })
+            .transpose()
+        };
+
+        let root_dense_span = reserve(&mut allocation, root_dense_plan)?;
+        let reserve_links = |allocation: &mut FileAllocation, len: Option<usize>| {
             len.map(|len| {
                 allocation
                     .reserve(len as u64, AllocationClass::Metadata)
@@ -2410,23 +2445,24 @@ impl FileWriter {
             })
             .transpose()
         };
-
-        let root_dense_span = reserve(&mut allocation, root_dense_len)?;
-        let root_link_span = reserve(&mut allocation, root_link_len)?;
+        let root_link_span = reserve_links(&mut allocation, root_link_len)?;
         let mut group_link_spans = Vec::with_capacity(groups.len());
 
-        let mut group_dense_spans: Vec<Option<(StoredAddress, usize)>> =
-            Vec::with_capacity(groups.len());
-        let group_addrs2: Vec<StoredAddress> = group_oh_sizes.iter().enumerate().try_fold(
-            Vec::with_capacity(group_oh_sizes.len()),
-            |mut addrs, (gi, &sz)| {
-                let addr = allocation.reserve(sz as u64, AllocationClass::Metadata)?;
-                group_dense_spans.push(reserve(&mut allocation, group_dense_lens[gi])?);
-                group_link_spans.push(reserve(&mut allocation, group_link_lens[gi])?);
-                addrs.push(addr);
-                Ok::<_, FormatError>(addrs)
-            },
-        )?;
+        let mut group_dense_spans = Vec::with_capacity(groups.len());
+        let group_addrs2: Vec<StoredAddress> = group_oh_sizes
+            .iter()
+            .zip(group_dense_plans)
+            .enumerate()
+            .try_fold(
+                Vec::with_capacity(group_oh_sizes.len()),
+                |mut addrs, (gi, (&sz, plan))| {
+                    let addr = allocation.reserve(sz as u64, AllocationClass::Metadata)?;
+                    group_dense_spans.push(reserve(&mut allocation, plan)?);
+                    group_link_spans.push(reserve_links(&mut allocation, group_link_lens[gi])?);
+                    addrs.push(addr);
+                    Ok::<_, FormatError>(addrs)
+                },
+            )?;
 
         // Committed datatype headers. Placed with the other metadata so a paged
         // file keeps them in its metadata region, and before the datasets that
@@ -2440,19 +2476,19 @@ impl FileWriter {
             },
         )?;
 
-        let mut ds_dense_spans: Vec<Option<(StoredAddress, usize)>> =
-            Vec::with_capacity(all_ds.len());
-        let ds_oh_addrs2: Vec<StoredAddress> = actual_ds_oh_sizes.iter().enumerate().try_fold(
-            Vec::with_capacity(actual_ds_oh_sizes.len()),
-            |mut addrs, (i, &sz)| {
-                let addr = allocation.reserve(sz as u64, AllocationClass::Metadata)?;
-                ds_dense_spans.push(reserve(&mut allocation, ds_dense_lens[i])?);
-                addrs.push(addr);
-                Ok::<_, FormatError>(addrs)
-            },
-        )?;
+        let mut ds_dense_spans = Vec::with_capacity(all_ds.len());
+        let ds_oh_addrs2: Vec<StoredAddress> =
+            actual_ds_oh_sizes.iter().zip(ds_dense_plans).try_fold(
+                Vec::with_capacity(actual_ds_oh_sizes.len()),
+                |mut addrs, (&sz, plan)| {
+                    let addr = allocation.reserve(sz as u64, AllocationClass::Metadata)?;
+                    ds_dense_spans.push(reserve(&mut allocation, plan)?);
+                    addrs.push(addr);
+                    Ok::<_, FormatError>(addrs)
+                },
+            )?;
 
-        let dense_spans = DenseSpans {
+        let dense_reservations = DenseReservations {
             root: root_dense_span,
             groups: group_dense_spans,
             datasets: ds_dense_spans,
@@ -2690,13 +2726,14 @@ impl FileWriter {
             let base = BaseAddress::new(ub as u64);
             let mut meta = allocation.end(); // metadata cursor, base-relative
 
-            // The attributes are final now, so the dense heaps that copy them can
-            // be built into the spans reserved above.
-            let DenseBlobs {
-                root: root_dense_blob,
-                groups: group_dense_blobs,
-                datasets: ds_dense_blobs,
-            } = dense_spans.build(&root_attrs, &groups, &all_ds)?;
+            let (
+                _,
+                DenseBlobs {
+                    root: root_dense_blob,
+                    groups: group_dense_blobs,
+                    datasets: ds_dense_blobs,
+                },
+            ) = dense_reservations.build(&root_attrs, &groups, &all_ds)?;
 
             // (b) Superblock extension (File Space Info) in the metadata region.
             let ext_addr = meta;
@@ -3259,13 +3296,14 @@ impl FileWriter {
             }
         }
 
-        // The attributes are final now, so the dense heaps that copy them can be
-        // built into the spans reserved for them.
-        let DenseBlobs {
-            root: root_dense_blob,
-            groups: group_dense_blobs,
-            datasets: ds_dense_blobs,
-        } = dense_spans.build(&root_attrs, &groups, &all_ds)?;
+        let (
+            dense_spans,
+            DenseBlobs {
+                root: root_dense_blob,
+                groups: group_dense_blobs,
+                datasets: ds_dense_blobs,
+            },
+        ) = dense_reservations.build(&root_attrs, &groups, &all_ds)?;
 
         // Build dataset OHs now that attrs are patched. Only the header bytes
         // are kept here; each dataset's data is emitted directly from
@@ -3487,7 +3525,7 @@ impl FileWriter {
             .map(|(span, blob)| {
                 Reservation::new(
                     base,
-                    span.0,
+                    *span,
                     blob.blob.len() as u64,
                     FileData::Bytes(&blob.blob),
                 )
@@ -5221,11 +5259,7 @@ mod tests {
     }
 
     #[test]
-    fn dense_attrs_check_bounds_each_attribute_not_the_total() {
-        // A multi-megabyte set of individually small attributes is exactly what
-        // the emitter handles: it sizes its root direct block to the content, and
-        // both this crate and libhdf5 read such a heap back. The
-        // old bound rejected these.
+    fn dense_attribute_preparation_accepts_managed_and_huge_messages() {
         let many: Vec<AttributeMessage> = (0..40)
             .map(|i| dense_attr_of_size(&format!("a{i}"), 60_000))
             .collect();
@@ -5234,20 +5268,16 @@ mod tests {
             .map(|a| a.serialize_v3(OFFSET_WIDTH, LENGTH_SIZE).unwrap().len())
             .sum();
         assert!(total > 2_000_000, "expected a multi-megabyte set");
-        assert_eq!(dense_attribute_write::dense_attrs_check(&many), Ok(()));
+        PreparedDenseAttrs::new(&many, DenseAttrCreationOrder::Untracked, []).unwrap();
 
-        // One attribute at the managed-object limit is still fine.
         let at_limit = vec![dense_attr_of_size("edge", DENSE_ATTR_MAX_MANAGED_OBJECT)];
-        assert_eq!(dense_attribute_write::dense_attrs_check(&at_limit), Ok(()));
+        PreparedDenseAttrs::new(&at_limit, DenseAttrCreationOrder::Untracked, []).unwrap();
 
-        // One byte past it needs fractal-heap huge storage, which the emitter now
-        // writes — so it is accepted, and the attribute is no longer in the
-        // direct block.
         let past = vec![dense_attr_of_size(
             "edge",
             DENSE_ATTR_MAX_MANAGED_OBJECT + 1,
         )];
-        assert_eq!(dense_attribute_write::dense_attrs_check(&past), Ok(()));
+        PreparedDenseAttrs::new(&past, DenseAttrCreationOrder::Untracked, []).unwrap();
         assert_eq!(
             huge_object_count(
                 &dense_attribute_write::build_dense_attrs(
@@ -5347,11 +5377,6 @@ mod tests {
         shapes.push(("managed and huge mixed".to_string(), mixed));
 
         for (label, attrs) in shapes {
-            assert_eq!(
-                dense_attribute_write::dense_attrs_check(&attrs),
-                Ok(()),
-                "{label}"
-            );
             let plan =
                 dense_attribute_write::dense_attrs_plan(&attrs, DenseAttrCreationOrder::Untracked)
                     .unwrap();
@@ -5626,7 +5651,6 @@ mod tests {
             dense_attr_of_size("at", DENSE_ATTR_MAX_MANAGED_OBJECT),
             dense_attr_of_size("past", DENSE_ATTR_MAX_MANAGED_OBJECT + 1),
         ];
-        assert_eq!(dense_attribute_write::dense_attrs_check(&mixed), Ok(()));
         let blob = dense_attribute_write::build_dense_attrs(
             &mixed,
             DenseAttrCreationOrder::Untracked,

@@ -91,7 +91,6 @@ pub use crate::dense_attribute_write::DenseAttrPlan;
 pub use crate::dense_attribute_write::DenseAttrReference;
 pub use crate::dense_attribute_write::PreparedDenseAttrs;
 pub use crate::dense_attribute_write::build_dense_attrs;
-pub use crate::dense_attribute_write::dense_attrs_check;
 pub use crate::dense_attribute_write::dense_attrs_plan;
 pub use crate::dense_link_write::DenseLinkImage;
 pub use crate::dense_link_write::DenseLinkPlan;

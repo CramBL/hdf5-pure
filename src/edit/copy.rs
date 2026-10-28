@@ -165,9 +165,7 @@ impl WriteEngine {
         let dense_attrs = if dense {
             let stored = attributes::read_object_attrs(src, access_mode, addr, base)?;
             let set = attributes::dense_attr_set(&region, stored)?;
-            crate::file_writer::dense_attribute_write::dense_attrs_check(&set.attrs)
-                .map_err(Error::Format)?;
-            set
+            DenseAttrSet::new(set.attrs, set.creation, [])?
         } else {
             DenseAttrSet::default()
         };
@@ -645,7 +643,7 @@ impl CopyNode {
         widths: FormatWidths,
         invalidated: &InvalidatedAddresses,
     ) -> Result<(), Error> {
-        for attr in &self.dense_attrs().attrs {
+        for attr in self.dense_attrs().attrs() {
             super::screen_resolved_references(&attr.datatype, &attr.raw_data, invalidated)?;
         }
 
@@ -846,7 +844,7 @@ impl<S: Source + ?Sized> CopyReader<'_, S> {
         if cross_file {
             let (region, dense_attrs) = source.header();
             reject_foreign_addresses(region)?;
-            reject_foreign_dense_attrs(&dense_attrs.attrs)?;
+            reject_foreign_dense_attrs(dense_attrs.attrs())?;
         }
         let links = children
             .into_iter()
