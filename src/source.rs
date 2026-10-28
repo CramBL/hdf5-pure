@@ -1343,6 +1343,10 @@ mod tests {
             BytesSource::new(data.as_slice()),
             MetadataCacheConfig::new(length * 2).with_max_entry_bytes(length),
         );
+        assert_eq!(
+            source.metadata_cache_stats().unwrap(),
+            MetadataCacheStats::default()
+        );
         let expected = &data[1..];
         let (copy, positive) =
             test_util::allocation::measure(control, || std::hint::black_box(expected.to_vec()));
