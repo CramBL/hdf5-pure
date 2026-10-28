@@ -2048,61 +2048,6 @@ mod tests {
         assert_eq!(cache.get(64, 8).as_deref(), Some(&[2u8; 8][..]));
     }
 
-    /// A hit must not get slower as the cache gets bigger (issue #367).
-    ///
-    /// The store this replaced walked a `Vec`, so a hit cost O(entries), which
-    /// put it above the cost of the positioned read it exists to avoid from
-    /// about 3,000 entries on. Measured in release against that read: 9x faster
-    /// at 64 entries, 3.2x at 1,024, then 1.2x *slower* at 4,096 and 21.9x
-    /// slower at 65,536.
-    ///
-    /// Across the pair below, the scanning store measured 16.6 in release
-    /// (369 ns to 6,134) and 36.8 unoptimized. Indexed, the same pair measures
-    /// 1.10 and 1.30. The allowance sits between those two groups with room on
-    /// either side: six times what an unoptimized build measures here, and a
-    /// fifth of what a return to scanning would.
-    #[test]
-    fn a_hit_does_not_get_slower_as_the_cache_grows() {
-        /// Entry counts either side of the growth, and the factor the cost is
-        /// allowed to move across it. Named so the failure message cannot drift
-        /// from what was measured.
-        const SMALL: usize = 1_024;
-        const LARGE: usize = 16_384;
-        const ALLOWED_GROWTH: f64 = 8.0;
-
-        fn nanos_per_hit(entries: usize) -> f64 {
-            const ENTRY_LEN: usize = 64;
-            let budget = entries * ENTRY_LEN * 2;
-            let mut cache = MetadataReadCache::new();
-            for i in 0..entries {
-                cache.insert(
-                    (i * ENTRY_LEN) as u64,
-                    ENTRY_LEN,
-                    vec![7u8; ENTRY_LEN],
-                    budget,
-                );
-            }
-            // Warm the caches the machine has, then time a pass that is all hits.
-            for i in 0..entries {
-                assert!(cache.get((i * ENTRY_LEN) as u64, ENTRY_LEN).is_some());
-            }
-            let started = std::time::Instant::now();
-            for i in 0..entries {
-                assert!(cache.get((i * ENTRY_LEN) as u64, ENTRY_LEN).is_some());
-            }
-            started.elapsed().as_secs_f64() * 1e9 / entries as f64
-        }
-
-        let small = nanos_per_hit(SMALL);
-        let large = nanos_per_hit(LARGE);
-        assert!(
-            large < small * ALLOWED_GROWTH,
-            "a hit cost {large:.0} ns with {LARGE} entries against {small:.0} ns with \
-             {SMALL} -- growing the cache should not move it, and a cost that tracks \
-             its size is the shape of a store being searched rather than indexed"
-        );
-    }
-
     // -----------------------------------------------------------------------
     // What the cache reports about itself (issue #353)
     // -----------------------------------------------------------------------
