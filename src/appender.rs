@@ -91,8 +91,7 @@ use crate::reader::Dataset;
 /// ```
 /// use hdf5_pure::{File, FileBuilder, MaxExtent};
 /// # fn main() -> Result<(), hdf5_pure::Error> {
-/// # let directory = tempfile::tempdir()?;
-/// # let path = directory.path().join("samples.h5");
+/// # let path = test_util::temp::temp_path("samples.h5");
 /// let mut builder = FileBuilder::new();
 /// builder.create_dataset("samples")
 ///     .with_i32_data(&[])
@@ -313,8 +312,7 @@ impl std::fmt::Debug for BufferedAppender<'_> {
 /// ```
 /// use hdf5_pure::{File, FileBuilder, MaxExtent, OwnedBufferedAppender};
 /// # fn main() -> Result<(), hdf5_pure::Error> {
-/// # let directory = tempfile::tempdir()?;
-/// # let path = directory.path().join("samples.h5");
+/// # let path = test_util::temp::temp_path("samples.h5");
 /// struct Samples {
 ///     appender: OwnedBufferedAppender,
 /// }

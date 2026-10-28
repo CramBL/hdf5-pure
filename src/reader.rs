@@ -8351,8 +8351,7 @@ mod tests {
 
     #[test]
     fn parsed_headers_read_metadata_again_after_an_in_place_change() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("source.h5");
+        let path = temp::temp_path("source.h5");
         let mut builder = FileBuilder::new();
         builder
             .create_dataset("values")

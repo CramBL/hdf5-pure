@@ -82,8 +82,7 @@ fn shared_metadata_reads_preserve_native_values_and_userblock_coordinates(
     #[case] userblock: u64,
     #[case] custom_source: bool,
 ) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("shared-metadata.h5");
+    let path = test_util::temp::temp_path("shared-metadata.h5");
     let expected: Vec<i32> = (0..96).collect();
     {
         let file = hdf5::File::with_options()

@@ -182,8 +182,7 @@ mod tests {
     #[case::unfiltered(false)]
     #[case::deflate(true)]
     fn staged_tail_retirement_preserves_storage_accounting(#[case] filtered: bool) {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("staged-retirement.h5");
+        let path = test_util::temp::temp_path("staged-retirement.h5");
         create_partial_tail(&path, filtered, true);
         let mut engine = edit_test_util::open_engine(&path);
         let mut append = AppendBuilder::new();
@@ -212,8 +211,7 @@ mod tests {
         #[case] root: bool,
         #[values(false, true)] persistent: bool,
     ) {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("failed-retirement.h5");
+        let path = test_util::temp::temp_path("failed-retirement.h5");
         create_partial_tail(&path, false, persistent);
         let mut engine = if root {
             WriteEngine::open_torn_writes(&path, 0..48).unwrap()
@@ -324,8 +322,7 @@ mod tests {
     fn reused_tail_replacements_persist_ownership_without_growing_eof(
         #[case] strategy: FileSpaceStrategy,
     ) {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("reused.h5");
+        let path = test_util::temp::temp_path("reused.h5");
         create_reuse_source(&path, strategy);
         let mut engine = edit_test_util::open_engine(&path);
         engine.delete(&ObjectPathBuf::parse("spare")).unwrap();
@@ -358,8 +355,7 @@ mod tests {
         #[case] completed: usize,
         #[case] prefix: usize,
     ) {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("cleanup.h5");
+        let path = test_util::temp::temp_path("cleanup.h5");
         create_reuse_source(&path, FileSpaceStrategy::FsmAggr);
         let file = File::open(&path).unwrap();
         let predecessor = file.dataset("d").unwrap().chunks().unwrap().remove(0);
@@ -414,8 +410,7 @@ mod tests {
 
     #[test]
     fn nonpersistent_tail_retirement_is_reused_during_the_session() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("nonpersistent.h5");
+        let path = test_util::temp::temp_path("nonpersistent.h5");
         create_partial_tail(&path, false, false);
         let mut engine = edit_test_util::open_engine(&path);
         append_one(&mut engine, 3);

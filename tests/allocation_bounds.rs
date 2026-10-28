@@ -641,8 +641,7 @@ fn resident_whole_reads_borrow_large_unfiltered_chunks(
         .iter()
         .flat_map(|value| value.to_le_bytes())
         .collect();
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("large-chunks.h5");
+    let path = test_util::temp::temp_path("large-chunks.h5");
     let mut builder = FileBuilder::new();
     builder.with_userblock(userblock);
     builder
