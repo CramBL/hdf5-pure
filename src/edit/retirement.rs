@@ -318,11 +318,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn reused_tail_replacements_persist_ownership_without_growing_eof() {
+    #[rstest]
+    #[case::flat(FileSpaceStrategy::FsmAggr)]
+    #[case::page(FileSpaceStrategy::Page)]
+    fn reused_tail_replacements_persist_ownership_without_growing_eof(
+        #[case] strategy: FileSpaceStrategy,
+    ) {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("reused.h5");
-        create_reuse_source(&path);
+        create_reuse_source(&path, strategy);
         let mut engine = edit_test_util::open_engine(&path);
         engine.delete(&ObjectPathBuf::parse("spare")).unwrap();
         engine.commit().unwrap();
@@ -346,18 +350,27 @@ mod tests {
         );
     }
 
-    #[test]
-    fn failed_manager_cleanup_retains_confirmed_retirements() {
+    #[rstest]
+    #[case::first_write(0, 0)]
+    #[case::second_write(1, 0)]
+    #[case::torn_second_write(1, 17)]
+    fn failed_manager_cleanup_retains_confirmed_retirements(
+        #[case] completed: usize,
+        #[case] prefix: usize,
+    ) {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("cleanup.h5");
-        create_reuse_source(&path);
+        create_reuse_source(&path, FileSpaceStrategy::FsmAggr);
+        let file = File::open(&path).unwrap();
+        let predecessor = file.dataset("d").unwrap().chunks().unwrap().remove(0);
+        drop(file);
         let mut engine = edit_test_util::open_engine(&path);
         engine.delete(&ObjectPathBuf::parse("spare")).unwrap();
         engine.commit().unwrap();
         append_one(&mut engine, 3);
         let before = engine.reusable_free_sections().unwrap();
         assert!(engine.fsm_dirty);
-        disk_log::fail_write_after(0, 0);
+        disk_log::fail_write_after(completed, prefix);
         let error = engine.finalize_persist().unwrap_err();
         let Error::Io(error) = error else {
             panic!("expected the injected write failure, got {error:?}");
@@ -365,12 +378,38 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::Other);
         assert_eq!(error.to_string(), "injected disk write failure");
         assert!(engine.fsm_dirty);
-        assert_eq!(engine.reusable_free_sections().unwrap(), before);
+        let retained = engine.reusable_free_sections().unwrap();
+        assert!(
+            retained
+                .sections()
+                .iter()
+                .any(|section| section.address() <= predecessor.address
+                    && predecessor.address + predecessor.storage_size <= section.end_address())
+        );
+        if completed == 0 {
+            assert_eq!(retained, before);
+        }
         engine.finalize_persist().unwrap();
-        assert!(!engine.fsm_dirty);
-        drop(engine);
-        let engine = edit_test_util::open_engine(&path);
-        engine.space_ownership().unwrap().assert_exact();
+        assert_eq!(engine.fsm_dirty, completed != 0);
+        if completed == 0 {
+            drop(engine);
+            let engine = edit_test_util::open_engine(&path);
+            engine.space_ownership().unwrap().assert_exact();
+        } else {
+            assert!(engine.publication.attempted());
+            assert_eq!(engine.reusable_free_sections().unwrap(), retained);
+            let ownership = engine.space_ownership().unwrap();
+            assert!(ownership.analysis_complete);
+            for &(start, len) in &ownership.reusable_free_space {
+                for &(live, size) in ownership
+                    .live_raw_space
+                    .iter()
+                    .chain(&ownership.live_metadata_space)
+                {
+                    assert!(start + len <= live || live + size <= start);
+                }
+            }
+        }
     }
 
     #[test]
@@ -402,11 +441,9 @@ mod tests {
             .unwrap();
     }
 
-    fn create_reuse_source(path: &Path) {
+    fn create_reuse_source(path: &Path, strategy: FileSpaceStrategy) {
         let mut builder = FileBuilder::new();
-        builder.with_file_space_settings(
-            FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
-        );
+        builder.with_file_space_settings(FileSpaceSettings::new(strategy).with_persistence(true));
         builder
             .create_dataset("d")
             .with_i32_data(&[0, 1, 2])

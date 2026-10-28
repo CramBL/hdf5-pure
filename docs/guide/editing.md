@@ -369,11 +369,27 @@ file.close()?;
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
-One open file reaches every dataset by name, takes an exclusive file lock for its lifetime, and sets no SWMR flag. **Every [`append`](crate::Dataset::append) is crash-atomic**: writes are ordered child-before-parent with `fsync` barriers and the dataspace dimension is published last as the single commit point, so a crash between appends leaves either the previous length or the new one, and never a torn or lost view. Throughout this page, "crash-atomic" means that ordering holds against a process crash under either [`SyncPolicy`](crate::SyncPolicy) ([Choosing the fsync cadence](#choosing-the-fsync-cadence)), and against power loss under the default one.
+The caller addresses datasets by name through one open file. With ordinary write buffering, the
+writer orders payloads before their references and publishes the new dataspace dimension after the
+index updates. The writer preserves publication order under either [`SyncPolicy`](crate::SyncPolicy)
+and forces durability at each barrier under the default policy.
+[Choosing the fsync cadence](#choosing-the-fsync-cadence) describes durability timing.
+Explicit [page buffering](#letting-pages-live-longer) has separate interruption guarantees.
 
-An append may **start anywhere** under a lossless pipeline, filtered or not. When the current length is not chunk-aligned, the trailing partial chunk is rewritten into a *fresh* allocation, decoded, extended and re-encoded when the dataset is filtered, and its index element is repointed once the new bytes are on the disk. The old slot is never overwritten, so a crash mid-append leaves a reader at the old length decoding the new chunk, whose live prefix is byte-for-byte the one it replaced.
+An append may start at an unaligned length under a lossless pipeline. The writer decodes the partial
+tail, extends it, and places the replacement separately from its predecessor. It publishes the new
+index record after placing the payload and recording the EOF needed to cover it. After confirming
+the index publication, the editor retires the predecessor's complete allocation: the full chunk
+size for unfiltered storage, or the index record's actual stored size for filtered storage, including
+filter-exempt payloads. Under a lossless pipeline, the live prefix is preserved.
 
-A partial tail stored under a lossy pipeline (ZFP or float D-scale scale-offset) is rejected by default, because re-encoding it can change values already published in that tail. Under [`PartialEdgeFiltering::Skip`](crate::PartialEdgeFiltering::Skip), the writer stores partial tails unfiltered and permits them to grow. With a lossy pipeline, the writer filters an exempt tail when it becomes complete.
+A partial tail stored under a lossy pipeline (ZFP or float D-scale scale-offset) is rejected by
+default, because re-encoding it can change values already published in that tail. Under
+[`PartialEdgeFiltering::Skip`](crate::PartialEdgeFiltering::Skip), the writer stores partial tails
+unfiltered and permits them to grow. With a lossy pipeline, completing an exempt tail requires two
+reference replacements. The editor retires the original allocation after confirming its raw
+replacement, then retires the intermediate raw allocation after confirming the filtered record
+published after the new extent.
 
 [`Dataset::append_with_options`](crate::Dataset::append_with_options) and its raw and staged counterparts accept [`AppendOptions`](crate::AppendOptions). Setting [`LossyTailReencoding::Allow`](crate::LossyTailReencoding::Allow) through [`with_lossy_tail_reencoding`](crate::AppendOptions::with_lossy_tail_reencoding) permits rewriting a filtered lossy partial tail. Each rewrite can introduce additional quantization error in previously published values. The options apply to the supplied append, or to every write during a buffered appender's lifetime. They are not stored in the file, so reopening the file does not change the default.
 
@@ -383,7 +399,18 @@ The appended **length** is unconstrained too. An unaligned length only makes the
 
 The SWMR writer is the exception: it keeps the chunk-aligned, unfiltered subset, because its readers are concurrent by contract and follow the chunk-index counts and not the dataspace dimension.
 
-The remaining eligibility rules match [`Dataset::append_staged`](crate::Dataset::append_staged) (chunked, unlimited axis 0, Extensible-Array index, rank 1, a re-encodable filter pipeline), plus the file-level gates in [the tables above](#choosing-a-write-path), with one difference: it grows the index in place, so the index must already be allocated. This crate allocates it eagerly, so an empty dataset it wrote can be grown from the first append. An empty dataset the C library created without any initial data defers its index and is rejected, so make that first append with [`Dataset::append_staged`](crate::Dataset::append_staged), which materializes the index, or create the dataset with initial data. The dead bytes left when a partial trailing chunk is relocated are recovered by [`repack`](crate::repack()), and the session reuses none of them. This is the throughput-oriented counterpart to [`Dataset::append_staged`](crate::Dataset::append_staged) and the filter-capable counterpart to the SWMR writer.
+The remaining eligibility rules match [`Dataset::append_staged`](crate::Dataset::append_staged)
+(chunked, unlimited axis 0, Extensible-Array index, rank 1, a re-encodable filter pipeline), plus the
+file-level gates in [the tables above](#choosing-a-write-path). The index must already be allocated
+for immediate growth. The writer allocates it eagerly, so an empty dataset it wrote can be grown
+from the first append. For an empty dataset created with a deferred index, make the first append
+with [`Dataset::append_staged`](crate::Dataset::append_staged), which materializes the index, or
+create the dataset with initial data.
+
+Eligible retired tails are reusable during the session. Admission and persistence follow the
+[space-reuse rules](#space-reuse-and-truncation), including strategy, threshold, and PAGE class
+requirements. The editor consumes retirement records after confirmed replacements and coalesces
+eligible ranges into allocator state.
 
 This section mirrors [`examples/append_streaming.rs`](https://github.com/CramBL/hdf5-pure/blob/main/examples/append_streaming.rs). Run it with `cargo run --example append_streaming`.
 
@@ -427,7 +454,15 @@ Automatic writes end at a chunk boundary and leave the remainder buffered. Each 
 
 Elements kept only in the buffer are lost on a crash. [`flush`](crate::BufferedAppender::flush) publishes the buffered tail and retains recovery access. [`finish`](crate::BufferedAppender::finish) flushes and consumes the appender, including on error. [`discard`](crate::BufferedAppender::discard) consumes it and returns the pending bytes without writing them. Dropping attempts a terminal flush unless a write has failed, and ignores its error. These operations have the same behavior for both ownership forms.
 
-A partial trailing chunk is decoded, extended, and written to a fresh allocation. Its previous allocation can be recovered by [`repack`](crate::repack()). Default construction rejects a filtered lossy partial tail, and a default partial flush that would leave such a tail is rejected with its buffer retained. A partial flush permitted by the selected policy can leave a tail for the next write to rewrite. Under [`PartialEdgeFiltering::Skip`](crate::PartialEdgeFiltering::Skip), partial tails stay unfiltered until complete.
+During automatic writes, partial flushes, and terminal flushes, the editor applies the immediate
+append's allocation retirement contract. Manager publication and synchronization follow the
+[space-reuse rules](#space-reuse-and-truncation) for both ownership forms.
+
+By default, the writer rejects an existing filtered lossy partial tail during construction. A
+default partial flush that would leave such a tail is rejected with its buffer retained. A partial
+flush permitted by the selected policy can leave a tail for the next write to rewrite. Under
+[`PartialEdgeFiltering::Skip`](crate::PartialEdgeFiltering::Skip), partial tails stay unfiltered until
+complete.
 
 The session rejects staged edits to a live appender's dataset or an ancestor, and a second appender on the same dataset, with [`Error::EditUnsupported`](crate::Error::EditUnsupported). For datasets opened by path, unrelated edits and commits are allowed. Appender writes leave those edits pending, and unrelated commits preserve the buffer and claim. An appender over a dataset handle reached by object reference blocks all staged edits and other appenders.
 
@@ -755,6 +790,14 @@ earlier free space and truncate the file. The [file-space guide](crate::_guide::
 describes the conditions for fixed-width root updates to reach a stable length across sessions.
 
 An immediate [`Dataset::append`](crate::Dataset::append) (and a [`BufferedAppender`](crate::BufferedAppender) flush) draws on free space too. A file that forgets its free space at close spends it directly. A file that persists its free space first removes a batch of space from the on-disk managers in a separate publication. A batch gathers every hole the appended chunk fits in, up to a megabyte of them. Appends spend the reserved batch before aggregate capacity under `FsmAggr`, whose active reservations are also excluded from persisted free sections. A crash can strand the unspent remainder of a batch. The SWMR writer always appends at the end of the file, because its readers may be reading a region the writer freed. A dataset written into a fragmented file may have its chunks placed in several holes. Sequential reads then fetch each chunk separately, where a single run coalesces adjacent ones. [`repack`](crate::repack()) restores a single run.
+
+For persistent files, the editor publishes remaining retirement changes in the free-space managers
+during [`File::commit`](crate::File::commit) or clean session closure. A commit with no staged edits
+includes this work, even when replacements reused existing storage and left EOF unchanged. The
+editor retains confirmed retirements if a later phase or manager cleanup fails. Allocations that
+may remain referenced after uncertain publication stay unavailable for reuse, and the editor may
+defer manager cleanup. To include pending manager changes in an explicit synchronization, call
+[`File::commit`](crate::File::commit) before [`File::sync`](crate::File::sync).
 
 Non-persistent PAGE sessions retain freed extents without reuse or truncation. Under the default strategy, freed space is reused within the open session and forgotten on close. For a file created with `H5Pset_file_space_strategy(persist = true)`, freed space is recorded on disk and survives a reopen, which the [file-space strategy](crate::_guide::file_space) guide sets out. For a guaranteed shrink that rewrites the whole file compact across a reopen, use [`repack`](crate::repack()), and the [repack](crate::_guide::repack) guide has the options.
 
