@@ -1526,6 +1526,7 @@ mod tests {
                 index:
                     ChunkIndexLayout::ExtensibleArray {
                         address: Some(actual),
+                        ..
                     },
                 ..
             } = layout

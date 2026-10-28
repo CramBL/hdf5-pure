@@ -123,9 +123,11 @@ pub fn assert_storage(file: &File, image: &[u8]) {
         .unwrap();
     let DataLayout::Chunked {
         chunk_dimensions,
-        index: ChunkIndexLayout::ExtensibleArray {
-            address: Some(address),
-        },
+        index:
+            ChunkIndexLayout::ExtensibleArray {
+                address: Some(address),
+                creation: _,
+            },
         ..
     } = DataLayout::parse_with_widths(&layout.data, widths).unwrap()
     else {

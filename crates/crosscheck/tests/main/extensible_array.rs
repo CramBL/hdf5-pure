@@ -20,9 +20,16 @@ use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FormatError;
 use hdf5_pure::MessageType as FormatMessageType;
+use hdf5_pure_core::__private::StoredAddressExt;
+use hdf5_pure_core::StoredAddress;
 use hdf5_pure_format::__private::AccessMode;
+use hdf5_pure_format::__private::ExtensibleArrayCreationParameters;
 use hdf5_pure_format::__private::ExtensibleArrayHeader;
+use hdf5_pure_format::__private::ExtensibleArrayInitialization;
+use hdf5_pure_format::__private::FormatWidths;
+use hdf5_pure_format::__private::LengthWidth;
 use hdf5_pure_format::__private::ObjectHeader;
+use hdf5_pure_format::__private::OffsetWidth;
 use rstest::rstest;
 use test_util::bytes;
 use test_util::checksum;
@@ -34,6 +41,97 @@ use test_util_hdf5::dataset::Unlimited;
 use test_util_hdf5::file;
 use test_util_hdf5::numeric::ByteOrder;
 use test_util_hdf5::session;
+
+#[rstest]
+#[case::canonical([32, 4, 4, 16, 10])]
+#[case::nondefault([24, 8, 2, 8, 8])]
+fn pure_initialization_supports_native_first_writes(
+    #[case] parameters: [u8; 5],
+    #[values(false, true)] filtered: bool,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("initialized.h5");
+    {
+        let file = file::libhdf5_create_v110(&path);
+        let builder = file
+            .new_dataset_builder()
+            .empty_as(ByteOrder::LittleEndian.i32_datatype())
+            .chunk([1])
+            .shape([Extent::resizable(0)]);
+        let builder = if filtered {
+            builder.shuffle().deflate(6)
+        } else {
+            builder
+        };
+        let dataset = builder.create("d").unwrap();
+        assert_eq!(dataset.num_chunks().unwrap(), 0);
+        drop(dataset);
+        file.close().unwrap();
+    }
+    let mut image = std::fs::read(&path).unwrap();
+    assert!(bytes::signature_offsets(&image, EA_HEADER_SIGNATURE).is_empty());
+    let reader = File::from_bytes(image.clone()).unwrap();
+    let mut superblock = reader.superblock().clone();
+    drop(reader);
+    let address = StoredAddress::new(u64::try_from(image.len()).unwrap());
+    let creation = ExtensibleArrayCreationParameters::parse(&parameters).unwrap();
+    let initialization = ExtensibleArrayInitialization::new(
+        creation,
+        4,
+        FormatWidths {
+            offsets: OffsetWidth::Eight,
+            lengths: LengthWidth::Eight,
+        },
+        filtered,
+    )
+    .unwrap();
+    let initialized = initialization.encode_at(address).unwrap();
+    assert_eq!(initialized.len() as u64, initialization.allocation_len());
+    image.extend_from_slice(&initialized);
+    patch_layout(&mut image, |layout, tail| {
+        let creation_at = tail + 1;
+        let address_at = creation_at + parameters.len();
+        assert_eq!(&layout[address_at..address_at + 8], &[0xff; 8]);
+        layout[creation_at..address_at].copy_from_slice(&parameters);
+        layout[address_at..address_at + 8].copy_from_slice(&address.get().to_le_bytes());
+    });
+    superblock.eof_address = u64::try_from(image.len()).unwrap();
+    let encoded = hdf5_pure_format::__private::serialize_superblock(&superblock).unwrap();
+    image[..encoded.len()].copy_from_slice(&encoded);
+    std::fs::write(&path, &image).unwrap();
+    {
+        let reader = File::open(&path).unwrap();
+        let dataset = reader.dataset("d").unwrap();
+        assert_eq!(dataset.shape().unwrap(), [0]);
+        assert_eq!(dataset.read_i32().unwrap(), Vec::<i32>::new());
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), image);
+    {
+        let file = hdf5::File::open_rw(&path).unwrap();
+        let dataset = file.dataset("d").unwrap();
+        assert_eq!(dataset.shape(), [0]);
+        assert_eq!(dataset.num_chunks().unwrap(), 0);
+        dataset.resize([3]).unwrap();
+        dataset.write_raw(&[3i32, 4, 5]).unwrap();
+        assert_eq!(dataset.read_raw::<i32>().unwrap(), [3, 4, 5]);
+        assert_eq!(dataset.num_chunks().unwrap(), 3);
+        drop(dataset);
+        file.close().unwrap();
+    }
+    let reader = File::open(&path).unwrap();
+    let dataset = reader.dataset("d").unwrap();
+    assert_eq!(dataset.read_i32().unwrap(), [3, 4, 5]);
+    assert_eq!(dataset.chunks().unwrap().len(), 3);
+    let image = std::fs::read(&path).unwrap();
+    let header =
+        ExtensibleArrayHeader::parse(&image, usize::try_from(address.get()).unwrap(), 8, 8)
+            .unwrap();
+    assert_eq!(header.max_index_bits().get(), parameters[0]);
+    assert_eq!(header.idx_blk_elmts, parameters[1]);
+    assert_eq!(header.super_blk_min_data_ptrs, parameters[2]);
+    assert_eq!(header.min_dblk_nelmts, parameters[3]);
+    assert_eq!(header.page_nelmts().get(), 1u64 << parameters[4]);
+}
 
 const SIZES: &[usize] = &[20, 300, 2000, 50000, 140000];
 

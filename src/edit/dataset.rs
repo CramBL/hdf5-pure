@@ -514,7 +514,7 @@ impl WriteEngine {
                 "append requires a chunked dataset",
             ));
         };
-        let ChunkIndexLayout::ExtensibleArray { address } = index else {
+        let ChunkIndexLayout::ExtensibleArray { address, .. } = index else {
             return Err(Error::AppendUnsupported(
                 "append requires an Extensible-Array-indexed chunked dataset (a single \
                  unlimited dimension under the latest format)",

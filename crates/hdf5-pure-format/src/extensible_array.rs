@@ -296,6 +296,11 @@ impl ExtensibleArrayIndexBlockRef {
     pub const fn parse_range(&self) -> FileRange {
         self.range
     }
+
+    /// Returns the complete allocation of the index block, including its checksum.
+    pub const fn range(&self) -> FileRange {
+        self.range
+    }
 }
 
 /// A parsed Extensible Array index block, from [`ExtensibleArrayIndexBlockRef::parse`].
@@ -931,40 +936,14 @@ impl Layout {
         min_data_blocks: u8,
         page_bits: u8,
     ) -> Result<Self, FormatError> {
-        if !(1..=MAX_INDEX_BITS).contains(&max_index_bits)
-            || !min_elements.is_power_of_two()
-            || !min_data_blocks.is_power_of_two()
-            || min_data_blocks < MIN_DATA_BLOCKS
-            || page_bits > max_index_bits.min(MAX_PAGE_BITS)
-        {
-            return Err(FormatError::InvalidExtensibleArrayGeometry);
-        }
-        let min_elements_bits = min_elements.trailing_zeros();
-        let page_bits = u32::from(page_bits);
-        // The index block holds the addresses of the data blocks of the super blocks before
-        // `2 * log2(min_data_blocks)`, `H5EA_SBLK_FIRST_IDX` (`H5EApkg.h`, HDF5 2.2.0), and the
-        // addresses of the super blocks from it on.
-        let first_super_block = 2 * min_data_blocks.trailing_zeros();
-        let super_blocks = (u32::from(max_index_bits) + 1)
-            .checked_sub(min_elements_bits)
-            .ok_or(FormatError::InvalidExtensibleArrayGeometry)?;
-        // A page-init bitmap is stored in a super block alone, so the data blocks the index block
-        // holds the addresses of are unpaged. The largest of them holds
-        // `min << (first_super_block / 2)` elements.
-        if first_super_block > super_blocks || min_elements_bits + first_super_block / 2 > page_bits
-        {
-            return Err(FormatError::InvalidExtensibleArrayGeometry);
-        }
-        Ok(Self {
-            encoding,
+        Ok(ExtensibleArrayCreationParameters::parse(&[
+            max_index_bits,
             inline_elements,
-            min_elements_bits,
+            min_data_blocks,
+            min_elements,
             page_bits,
-            // `H5EA_SIZEOF_OFFSET_BITS` (`H5EApkg.h`, HDF5 2.2.0).
-            block_offset_len: max_index_bits.div_ceil(8),
-            first_super_block,
-            super_blocks,
-        })
+        ])?
+        .layout(encoding))
     }
 
     fn direct_blocks(self) -> impl Iterator<Item = Result<DataBlock, FormatError>> {
@@ -1179,6 +1158,290 @@ fn internal(detail: &str) -> FormatError {
     FormatError::Internal(format!("an Extensible Array {detail}"))
 }
 
+/// Checked block and page geometry from Extensible Array indexing information.
+///
+/// The five creation fields are stored in a version 4 data layout message before the header
+/// address, including when that address is undefined. The fields are defined in "The Data Layout
+/// Message" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExtensibleArrayCreationParameters {
+    bits: ExtensibleArrayBitGeometry,
+    inline_elements: u8,
+    min_data_blocks: NonZeroU8,
+    min_elements: NonZeroU8,
+}
+
+impl ExtensibleArrayCreationParameters {
+    /// Parses the first five bytes in data layout message order.
+    ///
+    /// The fields are the maximum element bit count, inline element count, minimum data block
+    /// pointer count, minimum data block element count, and page exponent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::UnexpectedEof`] if `data` has fewer than five bytes, or
+    /// [`FormatError::InvalidExtensibleArrayGeometry`] if the fields are outside the supported
+    /// block and page geometry.
+    pub fn parse(data: &[u8]) -> Result<Self, FormatError> {
+        let mut fields = bytes::Fields::new(data, 0);
+        let [
+            max_index_bits,
+            inline_elements,
+            min_data_blocks,
+            min_elements,
+            page_bits,
+        ] = fields.array()?;
+        if !(1..=MAX_INDEX_BITS).contains(&max_index_bits)
+            || !min_elements.is_power_of_two()
+            || !min_data_blocks.is_power_of_two()
+            || min_data_blocks < MIN_DATA_BLOCKS
+            || page_bits > max_index_bits.min(MAX_PAGE_BITS)
+        {
+            return Err(FormatError::InvalidExtensibleArrayGeometry);
+        }
+        let min_elements_bits = min_elements.trailing_zeros();
+        let first_super_block = 2 * min_data_blocks.trailing_zeros();
+        let super_blocks = (u32::from(max_index_bits) + 1)
+            .checked_sub(min_elements_bits)
+            .ok_or(FormatError::InvalidExtensibleArrayGeometry)?;
+        if first_super_block > super_blocks
+            || min_elements_bits + first_super_block / 2 > u32::from(page_bits)
+        {
+            return Err(FormatError::InvalidExtensibleArrayGeometry);
+        }
+        Ok(Self {
+            bits: ExtensibleArrayBitGeometry::parse(max_index_bits, page_bits)?,
+            inline_elements,
+            min_data_blocks: NonZeroU8::new(min_data_blocks)
+                .ok_or(FormatError::InvalidExtensibleArrayGeometry)?,
+            min_elements: NonZeroU8::new(min_elements)
+                .ok_or(FormatError::InvalidExtensibleArrayGeometry)?,
+        })
+    }
+
+    /// Returns the writer's default creation parameters.
+    ///
+    /// The maximum element bit count is 32, the index block holds four elements, the minimum
+    /// data block pointer count is four, the minimum data block size is 16 elements, and a page
+    /// holds 1024 elements.
+    pub fn canonical() -> Self {
+        // These constant parameters satisfy the checked block and page geometry.
+        Self::parse(&[
+            EA_MAX_NELMTS_BITS,
+            EA_IDX_BLK_ELMTS,
+            EA_SUPER_BLK_MIN_DATA_PTRS,
+            EA_MIN_DBLK_NELMTS,
+            EA_MAX_DBLK_NELMTS_BITS,
+        ])
+        .expect("canonical Extensible Array geometry is representable")
+    }
+
+    /// Returns the creation fields in data layout message order.
+    pub fn encode(self) -> [u8; 5] {
+        [
+            self.bits.max_index_bits().get(),
+            self.inline_elements,
+            self.min_data_blocks.get(),
+            self.min_elements.get(),
+            self.bits.page_bits.0,
+        ]
+    }
+
+    /// Returns the maximum element bit count and data block page geometry.
+    pub fn bit_geometry(self) -> ExtensibleArrayBitGeometry {
+        self.bits
+    }
+
+    /// Returns the number of elements stored directly in the index block.
+    pub fn inline_elements(self) -> u8 {
+        self.inline_elements
+    }
+
+    /// Returns the minimum number of data block pointers in a super block.
+    pub fn min_data_blocks(self) -> NonZeroU8 {
+        self.min_data_blocks
+    }
+
+    /// Returns the minimum number of elements in a data block.
+    pub fn min_elements(self) -> NonZeroU8 {
+        self.min_elements
+    }
+
+    // `H5EA_SBLK_FIRST_IDX` and `H5EA_SIZEOF_OFFSET_BITS` (`H5EApkg.h`, HDF5 2.2.0)
+    // determine the first super block and block-offset width.
+    fn layout(self, encoding: ElementEncoding) -> Layout {
+        Layout {
+            encoding,
+            inline_elements: self.inline_elements,
+            min_elements_bits: self.min_elements.get().trailing_zeros(),
+            page_bits: u32::from(self.bits.page_bits.0),
+            block_offset_len: self.bits.max_index_bits().get().div_ceil(8),
+            first_super_block: 2 * self.min_data_blocks.get().trailing_zeros(),
+            super_blocks: u32::from(self.bits.max_index_bits().get()) + 1
+                - self.min_elements.get().trailing_zeros(),
+        }
+    }
+}
+
+/// Geometry for serializing an empty Extensible Array header and index block.
+///
+/// The serialized header is followed immediately by its index block. Both structures include
+/// their checksums. The index block's chunk and child block addresses are undefined. The version 0
+/// header and index block are defined in "The Extensible Array Index" of the [format specification,
+/// version 4.0][spec].
+///
+/// # Examples
+///
+/// ```
+/// use hdf5_pure_core::__private::StoredAddressExt;
+/// use hdf5_pure_core::StoredAddress;
+/// use hdf5_pure_format::__private::{
+///     ExtensibleArrayCreationParameters, ExtensibleArrayInitialization, FormatWidths,
+/// };
+///
+/// let creation = ExtensibleArrayCreationParameters::parse(&[24, 8, 2, 8, 8])?;
+/// let initialization = ExtensibleArrayInitialization::new(
+///     creation,
+///     16,
+///     FormatWidths::from_sizes(8, 8)?,
+///     false,
+/// )?;
+/// let bytes = initialization.encode_at(StoredAddress::new(1024))?;
+/// assert_eq!(bytes.len() as u64, initialization.allocation_len());
+/// # Ok::<(), hdf5_pure_core::FormatError>(())
+/// ```
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_extarr
+pub struct ExtensibleArrayInitialization {
+    creation: ExtensibleArrayCreationParameters,
+    widths: FormatWidths,
+    encoding: ChunkElementEncoding,
+    layout: Layout,
+    index_block_len: usize,
+}
+
+impl ExtensibleArrayInitialization {
+    /// Uses version 4 chunk-record encoding for an empty index.
+    ///
+    /// `chunk_bytes` is the chunk size before filtering. For filtered chunks, the chunk-size
+    /// field width is derived from that size.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if the element encoding or block
+    /// geometry cannot be represented, or [`FormatError::ValueTooLargeForPlatform`] if the index
+    /// block length exceeds [`usize::MAX`].
+    pub fn new(
+        creation: ExtensibleArrayCreationParameters,
+        chunk_bytes: u64,
+        widths: FormatWidths,
+        has_filters: bool,
+    ) -> Result<Self, FormatError> {
+        let encoding =
+            chunk_record::chunk_element_encoding(chunk_bytes, widths.offsets, has_filters);
+        let element_size = u8::try_from(encoding.elem_size)
+            .map_err(|_error| FormatError::InvalidExtensibleArrayGeometry)?;
+        let layout = creation.layout(
+            ElementEncoding::new(widths.offsets, encoding.client_id, element_size)
+                .map_err(|_error| FormatError::InvalidExtensibleArrayGeometry)?,
+        );
+        Ok(Self {
+            creation,
+            widths,
+            encoding,
+            layout,
+            index_block_len: layout.index_block_len()?.to_usize()?,
+        })
+    }
+
+    /// Returns the combined size of the header and index block, including their checksums.
+    pub fn allocation_len(&self) -> u64 {
+        self.header_len() as u64 + self.index_block_len as u64
+    }
+
+    /// Serializes the header at the base-relative `address`, followed by its index block.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if allocation address arithmetic
+    /// overflows, [`FormatError::AddressTooLarge`] if the allocation extends past the encoded
+    /// address domain, or [`FormatError::ValueTooLargeForPlatform`] if the allocation length
+    /// exceeds [`usize::MAX`].
+    pub fn encode_at(&self, address: StoredAddress) -> Result<Vec<u8>, FormatError> {
+        let index_address = StoredAddress::new(
+            address
+                .get()
+                .checked_add(self.header_len() as u64)
+                .ok_or(FormatError::InvalidExtensibleArrayGeometry)?,
+        );
+        let end = address
+            .get()
+            .checked_add(self.allocation_len())
+            .ok_or(FormatError::InvalidExtensibleArrayGeometry)?;
+        if end > StoredAddress::undefined(self.widths.offsets).get() {
+            return Err(FormatError::AddressTooLarge {
+                address: end,
+                offset_size: self.widths.offsets.get(),
+            });
+        }
+        let mut header = Vec::with_capacity(self.allocation_len().to_usize()?);
+        header.extend_from_slice(&HEADER_SIGNATURE);
+        header.push(VERSION);
+        header.push(self.encoding.client_id);
+        header.push(
+            u8::try_from(self.encoding.elem_size)
+                .map_err(|_error| FormatError::InvalidExtensibleArrayGeometry)?,
+        );
+        let [max_bits, inline, min_blocks, min_elements, page_bits] = self.creation.encode();
+        header.extend_from_slice(&[max_bits, inline, min_elements, min_blocks, page_bits]);
+        for statistic in [0, 0, 0, 0, 0, u64::from(inline)] {
+            bytes::write_length(&mut header, statistic, self.widths.lengths);
+        }
+        bytes::try_write_decoded_address(
+            &mut header,
+            DecodedStoredAddress::Defined(index_address),
+            self.widths.offsets,
+        )?;
+        let checksum = checksum::jenkins_lookup3(&header);
+        header.extend_from_slice(&checksum.to_le_bytes());
+        let index_start = header.len();
+        header.extend_from_slice(&INDEX_BLOCK_SIGNATURE);
+        header.push(VERSION);
+        header.push(self.encoding.client_id);
+        bytes::try_write_decoded_address(
+            &mut header,
+            DecodedStoredAddress::Defined(address),
+            self.widths.offsets,
+        )?;
+        for _ in 0..inline {
+            chunk_record::write_undefined_element(
+                &mut header,
+                self.widths.offsets,
+                self.encoding.client_id != EA_CLIENT_ID_UNFILTERED,
+                self.encoding.chunk_size_bytes,
+            );
+        }
+        let addresses = self.layout.direct_data_blocks()
+            + u64::from(self.layout.super_blocks - self.layout.first_super_block);
+        for _ in 0..addresses {
+            bytes::try_write_decoded_address(
+                &mut header,
+                DecodedStoredAddress::Undefined,
+                self.widths.offsets,
+            )?;
+        }
+        let checksum = checksum::jenkins_lookup3(&header[index_start..]);
+        header.extend_from_slice(&checksum.to_le_bytes());
+        Ok(header)
+    }
+
+    fn header_len(&self) -> usize {
+        ExtensibleArrayHeader::serialized_size_with_widths(self.widths)
+    }
+}
+
 /// An Extensible Array header, signature `EAHD`, version 0.
 ///
 /// The maximum element bit count is in `1..=64`, and the page exponent is at most that count
@@ -1351,9 +1614,7 @@ pub struct ExtensibleArrayBitGeometry {
 
 impl ExtensibleArrayBitGeometry {
     fn for_writer() -> Self {
-        // The constant creation parameters have a 32-bit index and 1024-element pages.
-        Self::parse(EA_MAX_NELMTS_BITS, EA_MAX_DBLK_NELMTS_BITS)
-            .expect("writer bit geometry is representable")
+        ExtensibleArrayCreationParameters::canonical().bit_geometry()
     }
 
     /// Parses the maximum element bit count and the data block page exponent.

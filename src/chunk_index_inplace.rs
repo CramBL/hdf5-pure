@@ -433,12 +433,13 @@ impl Located {
                 index:
                     ChunkIndexLayout::ExtensibleArray {
                         address: Some(addr),
+                        ..
                     },
                 flags,
                 ..
             } => (*addr, *flags),
             DataLayout::Chunked {
-                index: ChunkIndexLayout::ExtensibleArray { address: None },
+                index: ChunkIndexLayout::ExtensibleArray { address: None, .. },
                 ..
             } => {
                 return Err(unsupported(
