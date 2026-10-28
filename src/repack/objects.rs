@@ -144,7 +144,71 @@ impl SourceObjects {
         Ok(objects)
     }
 
+    /// Returns the number of retained objects, including the root group.
+    pub(super) fn len(&self) -> usize {
+        self.objects.len()
+    }
+
+    /// Returns the retained object at its post order index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] with [`FormatError::Internal`] if `index` is outside the records.
+    pub(super) fn object(&self, index: usize) -> Result<&SourceObject, Error> {
+        self.objects.get(index).ok_or_else(missing_path)
+    }
+
+    /// Returns link names and target indices for the object at `index`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] with [`FormatError::Internal`] if an object or link index is out
+    /// of bounds.
+    pub(super) fn links(&self, index: usize) -> Result<impl Iterator<Item = (&str, usize)>, Error> {
+        let object = self.object(index)?;
+        Ok(self
+            .links
+            .get(object.links.clone())
+            .ok_or_else(missing_path)?
+            .iter()
+            .map(|link| (link.link_name.as_str(), link.target)))
+    }
+
+    /// Resolves an output path to the retained object's index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] with [`FormatError::Internal`] if `path` is absent or an object
+    /// or link index is out of bounds.
+    pub(super) fn index(&self, path: &ObjectPathBuf) -> Result<usize, Error> {
+        let mut index = self.objects.len().checked_sub(1).ok_or_else(missing_path)?;
+        for component in path.components() {
+            index = self
+                .links(index)?
+                .find(|(name, _)| *name == component.as_str())
+                .map(|(_, index)| index)
+                .ok_or_else(missing_path)?;
+        }
+        Ok(index)
+    }
+
+    /// Returns the path of the group containing the object at `index`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] with [`FormatError::Internal`] if the object has no parent or
+    /// an object or link index is out of bounds. Propagates errors from [`Self::path`].
+    pub(super) fn parent_path(&self, index: usize) -> Result<ObjectPathBuf, Error> {
+        self.path(
+            self.links
+                .get(self.object(index)?.parent.ok_or_else(missing_path)?)
+                .ok_or_else(missing_path)?
+                .parent,
+        )
+    }
+
     /// Returns the final object in the retained tree's post order, the root group.
+    #[cfg(test)]
     pub(super) fn root(&self) -> &SourceObject {
         // The root is always present after discovery.
         self.objects.last().expect("a repack source holds its root")
@@ -157,6 +221,7 @@ impl SourceObjects {
     /// Returns [`Error::RepackUnsupported`] if a link name is not a component of an object path.
     /// Returns [`Error::Format`] with [`FormatError::Internal`] if an object or link index is out
     /// of bounds.
+    #[cfg(test)]
     pub(super) fn children<'a>(
         &'a self,
         object: &SourceObject,
@@ -208,7 +273,7 @@ impl SourceObjects {
     ///
     /// Returns [`Error::Format`] with [`FormatError::Internal`] if an object or link index is out
     /// of bounds, or a parent link name is not a component of an object path.
-    fn path(&self, mut index: usize) -> Result<ObjectPathBuf, Error> {
+    pub(super) fn path(&self, mut index: usize) -> Result<ObjectPathBuf, Error> {
         let mut names = Vec::new();
         while let Some(parent) = self.objects.get(index).ok_or_else(missing_path)?.parent {
             let link = self.links.get(parent).ok_or_else(missing_path)?;
@@ -276,6 +341,7 @@ struct SourceLink {
 }
 
 /// A retained child object with its link name and output path.
+#[cfg(test)]
 pub(super) struct Child<'a> {
     pub(super) link_name: &'a str,
     pub(super) object: &'a SourceObject,
@@ -408,9 +474,6 @@ const REPEATED_OBJECT: &str = "the repacked file would hold more than one hard l
      alias or a cycle), which a repack cannot reproduce yet";
 
 /// The depth of the deepest group a repack writes, in links from the root group.
-///
-/// [`FileBuilder`](crate::FileBuilder) flattens and drops the nested groups of its output
-/// recursively, so the bound also limits the stack a repack uses.
 pub(super) const MAX_DEPTH: usize = 128;
 
 #[cfg(test)]

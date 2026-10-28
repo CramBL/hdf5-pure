@@ -12,9 +12,9 @@ $ cargo run --example repack
 
 Deleting an object inside a [`File::open_rw`](crate::File::open_rw) session, which [Editing files](crate::_guide::editing) covers, reuses the freed space *within that session*, and the file is truncated when the freed bytes happen to reach the very end. But a single delete-then-close cannot shrink a file whose freed region sits in the middle: an HDF5 file is a single address space, and a hole in the middle cannot be removed by truncating the tail. This is the same reason the HDF5 C library ships a separate `h5repack` tool.
 
-[`repack`](crate::repack()) reads every surviving object and rewrites the file through
-[`FileBuilder`](crate::FileBuilder). The writer allocates the output under the selected file-space
-settings, so the output size also depends on its allocation policy.
+[`repack`](crate::repack()) reads every surviving object and plans destination allocations before
+writing the file. The writer allocates the output under the selected file-space settings, so the
+output size also depends on its allocation policy.
 
 ## Basic usage
 
@@ -169,6 +169,18 @@ These are reported as [`Error::RepackUnsupported`](crate::Error::RepackUnsupport
 | an object with more than one path, through an alias or a cycle, unless the drop paths leave one | a repack writes each object at one path |
 | a link to an object that is not a group, a dataset, or a committed datatype | a repack writes only those three classes |
 | an open source with staged edits ([`File::has_staged_edits`](crate::File::has_staged_edits)) | a repack reads only what the file has committed |
+
+## Memory and I/O
+
+The writer retains compact discovery and allocation records and reconstructs one object's metadata
+at a time. Metadata is read again during planning and emission, increasing source I/O and preparation
+work. The source must remain unchanged throughout the operation.
+
+Working memory includes source caches, layout records, serialized free-space managers, and the
+current object's metadata and heap collections. Eligible verbatim datasets use one encoded chunk
+buffer during data emission. Re-encoded datasets and datasets with address-bearing elements can
+require complete dataset buffers. A large object or chunk index can therefore require substantial
+memory.
 
 ## Verifying the result
 
