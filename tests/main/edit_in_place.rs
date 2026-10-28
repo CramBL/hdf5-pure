@@ -1,14 +1,17 @@
 //! Tests for in-place editing via `File::open_rw` (issue #32, Group C):
 //! add, delete, and copy datasets and groups at any path.
 
+use core::num::NonZeroU32;
+
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::VariableLengthType;
 #[cfg(feature = "zfp")]
 use hdf5_pure::ZfpRate;
 use hdf5_pure::{
-    AttrValue, CharacterSet, CompoundTypeBuilder, DType, Datatype, Error, File, FileBuilder,
-    FormatError, MaxExtent, Object, ReferenceType, ScaleOffset, StringPadding,
+    AttrValue, CharacterSet, CompoundTypeBuilder, DType, DatasetBuilder, Datatype, Error, File,
+    FileBuilder, FormatError, MaxExtent, Object, ReferenceType, ScaleOffset, StringPadding,
 };
+use rstest::rstest;
 
 use test_util::fractal_heap;
 use test_util::temp;
@@ -2081,55 +2084,32 @@ fn add_zfp_dataset() {
     assert!(max_err < 1e-6, "ZFP max_err {max_err} > 1e-6");
 }
 
-/// Malformed chunked-dataset requests are refused before any byte is written,
-/// rather than panicking or producing a silently-corrupt dataset: chunk dims
-/// whose rank disagrees with the shape, a zero chunk dimension, a maxshape whose
-/// rank disagrees with the shape or falls below it, a chunked scalar, and a
-/// zero-element shape left to auto-chunking (which would resolve to a zero
-/// chunk dimension and divide by zero in the splitter — an *explicitly* chunked
-/// zero-element shape is legal, see
-/// `add_empty_extensible_chunked_dataset_and_grow_it`).
-///
-/// Each case names the substring its own refusal must carry: without that, a
-/// case refused for some unrelated reason still passes, and the guard under test
-/// is never reached.
-#[test]
-fn malformed_chunked_requests_are_rejected_without_writing() {
-    for case in dataset::INVALID_GEOMETRY_CASES {
-        let path = temp::temp_path(&format!(
-            "hdf5_pure_edit_reject_{}.h5",
-            case.label.replace(' ', "_")
-        ));
-        write_starter(&path);
-        let before = std::fs::read(&path).unwrap();
-        {
-            let session = File::open_rw(&path).unwrap();
-            let err = session
-                .root()
-                .create_dataset("bad", case.configure)
-                .unwrap_err();
-            let text = err.to_string();
-            assert!(
-                text.contains("in-place edit"),
-                "[{}] expected an EditUnsupported refusal, got: {err}",
-                case.label
-            );
-            assert!(
-                text.contains(case.expected),
-                "[{}] refusal must name {:?}, got: {err}",
-                case.label,
-                case.expected
-            );
-            session.commit().unwrap();
-        }
-        // The guard runs as the dataset is staged, so the file is untouched.
-        assert_eq!(
-            std::fs::read(&path).unwrap(),
-            before,
-            "[{}] file modified",
-            case.label
-        );
+#[rstest]
+#[case::auto_chunked_empty(dataset::INVALID_GEOMETRY_CASES[0].configure, "a zero-element dataset must be given explicit chunk dimensions (its shape has none to derive)")]
+#[case::chunk_rank(dataset::INVALID_GEOMETRY_CASES[1].configure, "chunk dimensions must have the same rank as the dataset shape")]
+#[case::zero_chunk(dataset::INVALID_GEOMETRY_CASES[2].configure, "chunk dimensions must all be non-zero")]
+#[case::maximum_rank(dataset::INVALID_GEOMETRY_CASES[3].configure, "maxshape must have the same rank as the dataset shape")]
+#[case::scalar(dataset::INVALID_GEOMETRY_CASES[4].configure, "a scalar dataset cannot be chunked, filtered, or extensible")]
+#[case::maximum_below_current(dataset::INVALID_GEOMETRY_CASES[5].configure, "maxshape must be at least the current shape in every dimension")]
+fn malformed_chunked_requests_are_rejected_without_writing(
+    #[case] configure: fn(&mut DatasetBuilder),
+    #[case] expected: &str,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("geometry.h5");
+    write_starter(&path);
+    let before = std::fs::read(&path).unwrap();
+    {
+        let session = File::open_rw(&path).unwrap();
+        let error = session.root().create_dataset("bad", configure).unwrap_err();
+        let Error::Format(FormatError::InvalidChunkGeometry(reason)) = error else {
+            panic!("expected a structured geometry error, got {error:?}");
+        };
+        assert_eq!(reason, expected);
+        assert!(!session.has_staged_edits());
+        session.commit().unwrap();
     }
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
 // ---- write_dataset: in-place value overwrite (issue #79) ----
@@ -3454,8 +3434,12 @@ fn add_reference_dataset_targeting_unprocessed_sibling_group_is_rejected_without
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
-#[test]
-fn add_chunked_reference_dataset_is_rejected_without_writing() {
+#[rstest]
+#[case::chunked(|builder: &mut DatasetBuilder| { builder.with_chunks(&[1]); })]
+#[case::extensible(|builder: &mut DatasetBuilder| { builder.with_maxshape(&[MaxExtent::Unlimited]); })]
+fn add_chunked_or_extensible_reference_dataset_is_rejected_without_writing(
+    #[case] configure: fn(&mut DatasetBuilder),
+) {
     let path = temp::temp_path("hdf5_pure_edit_add_chunked_ref.h5");
     write_starter(&path);
     let before = std::fs::read(&path).unwrap();
@@ -3465,10 +3449,18 @@ fn add_chunked_reference_dataset_is_rejected_without_writing() {
         let err = session
             .root()
             .create_dataset("refs", |b| {
-                b.with_path_references(&["original"]).with_chunks(&[1]);
+                b.with_path_references(&["original"]);
+                configure(b);
             })
             .unwrap_err();
-        assert!(err.to_string().contains("object-reference"), "got: {err}");
+        let Error::EditUnsupported(reason) = err else {
+            panic!("expected unsupported deferred references, got {err:?}");
+        };
+        assert_eq!(
+            reason,
+            "chunked or extensible object-reference datasets cannot be added in place yet"
+        );
+        assert!(!session.has_staged_edits());
         session.commit().unwrap();
     }
 
@@ -5962,9 +5954,16 @@ fn a_refused_staging_call_stages_none_of_its_batch() {
                 });
             })
             .unwrap_err();
-        assert!(
-            matches!(&err, Error::EditUnsupported(m) if m.contains("shape")),
-            "unexpected error: {err:?}"
+        let Error::Format(error) = err else {
+            panic!("expected a structured shape error, got {err:?}");
+        };
+        assert_eq!(
+            error,
+            FormatError::LogicalShapeDataMismatch {
+                expected: 56,
+                actual: 24,
+                element_size: NonZeroU32::new(8).unwrap().into(),
+            }
         );
 
         session.commit().unwrap();
