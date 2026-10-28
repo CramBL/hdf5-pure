@@ -9,11 +9,12 @@ use hdf5_pure_space::__private::FreeClass;
 
 use crate::access_mode::AccessMode;
 use crate::address::{AddressContext, StoredAddress, StoredAddressExt};
+use crate::dataset_request::ValueOverwrite;
 use crate::datatype;
 use crate::edit::attributes::{self, AttrOp, EditedAttrs};
 use crate::edit::context::FileContext;
 use crate::edit::copy::{self, CopyTree};
-use crate::edit::dataset::{FlatDataset, MovingWrite, WritePlan};
+use crate::edit::dataset::{ChunkPayload, FlatDataset, MovingWrite, OverwriteBytes, WritePlan};
 use crate::edit::group;
 use crate::edit::reclaim::DeletedCollections;
 use crate::edit::staging::{StagedApply, StagedEdits, StagedScope};
@@ -31,10 +32,12 @@ mod tests;
 
 /// A commit plan paired with owned application inputs from the same staged set.
 ///
-/// The editor borrows the staged edits during preflight and transfers ownership after success.
+/// The editor borrows the staged edits during preflight. After success, original replacement
+/// buffers are retained for application or released when their chunks have been encoded.
 pub(super) struct PreparedCommit {
     plan: CommitPlan,
     staged: StagedApply,
+    overwrites: OverwritePayloads,
 }
 
 impl PreparedCommit {
@@ -45,18 +48,28 @@ impl PreparedCommit {
     /// and the preparation error.
     pub(super) fn prepare(engine: &mut WriteEngine, staged: StagedEdits) -> CommitPreparation {
         match engine.plan_commit(&staged) {
-            Ok(plan) => CommitPreparation::Prepared(Self {
-                plan,
-                staged: staged.into_apply(),
-            }),
+            Ok(mut plan) => {
+                let (staged, writes) = staged.into_apply();
+                let mut overwrites = OverwritePayloads { writes };
+                plan.release_chunk_inputs(&mut overwrites);
+                CommitPreparation::Prepared(Self {
+                    plan,
+                    staged,
+                    overwrites,
+                })
+            }
             Err(error) => CommitPreparation::Rejected { staged, error },
         }
     }
 
     /// Returns the plan with the application inputs used to prepare it.
-    pub(super) fn into_parts(self) -> (CommitPlan, StagedApply) {
-        let Self { plan, staged } = self;
-        (plan, staged)
+    pub(super) fn into_parts(self) -> (CommitPlan, StagedApply, OverwritePayloads) {
+        let Self {
+            plan,
+            staged,
+            overwrites,
+        } = self;
+        (plan, staged, overwrites)
     }
 }
 
@@ -75,14 +88,56 @@ pub(super) enum CommitPreparation {
 /// Stores prepared writes before application consumes the staged inputs.
 pub(super) enum CommitPlan {
     /// Existing value ranges to overwrite without publishing a replacement root.
-    InPlace(Vec<(u64, Vec<u8>)>),
+    InPlace(Vec<InPlaceWrite>),
     /// Object placements and link edits to publish through a replacement root.
     Tree(PreparedTree),
 }
 
+impl CommitPlan {
+    /// Drops original replacement buffers whose chunks were encoded during successful preflight.
+    fn release_chunk_inputs(&mut self, overwrites: &mut OverwritePayloads) {
+        let writes = match self {
+            Self::InPlace(writes) => writes,
+            Self::Tree(tree) => {
+                for node in tree.groups.values_mut() {
+                    for edit in &mut node.prepared.writes {
+                        if let MovingWrite::Chunked {
+                            payload: ChunkPayload::Encoded { source, .. },
+                            ..
+                        } = &mut edit.write
+                        {
+                            // Encoded output replaces this uniquely identified staged input.
+                            drop(
+                                overwrites.take(
+                                    source
+                                        .take()
+                                        .expect("encoded overwrite input has not been consumed"),
+                                ),
+                            );
+                        }
+                    }
+                }
+                &mut tree.inplace_writes
+            }
+        };
+        for write in writes {
+            if let InPlaceWrite::Encoded { source, .. } = write {
+                // Encoded output replaces this uniquely identified staged input.
+                drop(
+                    overwrites.take(
+                        source
+                            .take()
+                            .expect("encoded overwrite input has not been consumed"),
+                    ),
+                );
+            }
+        }
+    }
+}
+
 /// Collects existing dataset edits and the ownership checks needed for relocation.
 struct DatasetEdits {
-    inplace_writes: Vec<(u64, Vec<u8>)>,
+    inplace_writes: Vec<InPlaceWrite>,
     moving_writes: Vec<DatasetRelocation>,
     write_targets: Vec<ObjectPathBuf>,
     incoming_links: Option<Option<HashMap<u64, u32>>>,
@@ -121,12 +176,12 @@ pub(super) struct GroupHeaders {
 
 /// Stores checked tree edits and reclamation records before object placement.
 ///
-/// Dataset and cross-file-copy payloads remain in the staged set until application begins.
+/// Staged creations and cross-file-copy payloads are stored separately from the tree plan.
 pub(super) struct PreparedTree {
     pub(super) groups: BTreeMap<ObjectPathBuf, Node>,
     pub(super) headers: GroupHeaders,
     pub(super) cross_copies: Vec<CopyDestination>,
-    pub(super) inplace_writes: Vec<(u64, Vec<u8>)>,
+    pub(super) inplace_writes: Vec<InPlaceWrite>,
     /// Absolute spans whose ownership was established while planning deletions.
     pub(super) deleted_free: Vec<(u64, u64, FreeClass)>,
     pub(super) deleted_collections: DeletedCollections,
@@ -276,7 +331,7 @@ impl WriteEngine {
         staged: &StagedEdits,
         edits: &mut DatasetEdits,
     ) -> Result<(), Error> {
-        for (full, fd) in staged.writes() {
+        for (index, (full, fd)) in staged.writes().iter().enumerate() {
             if edits.write_targets.contains(full) {
                 return Err(Error::EditUnsupported(
                     "the same dataset is overwritten twice in one commit; use separate commits",
@@ -290,11 +345,19 @@ impl WriteEngine {
                 self.context.addresses(),
                 &full.as_path(),
             )?;
-            match self.prepare_write(addr, fd, full)? {
-                WritePlan::InPlace { data_addr, bytes } => {
-                    edits.inplace_writes.push((data_addr, bytes));
+            match self.prepare_write(addr, fd, OverwriteId { index })? {
+                WritePlan::InPlace { data_addr, source } => {
+                    edits.inplace_writes.push(InPlaceWrite::Replacement {
+                        address: data_addr,
+                        source,
+                    });
                 }
-                WritePlan::InPlaceChunks { writes } => edits.inplace_writes.extend(writes),
+                WritePlan::InPlaceChunks { writes, source } => {
+                    edits.inplace_writes.push(InPlaceWrite::Encoded {
+                        writes,
+                        source: Some(source),
+                    })
+                }
                 WritePlan::Moving(mw) => {
                     let counts = edits
                         .incoming_links
@@ -1132,6 +1195,58 @@ impl Node {
         } = self;
         prepared
     }
+}
+
+/// Replacement buffers and deferred heap staging from one prepared commit.
+///
+/// The editor constructs this set and its [`OverwriteId`] values from the same staged writes.
+/// Taking an identifier moves its payload out of the entry at its index.
+pub(in crate::edit) struct OverwritePayloads {
+    writes: Vec<(ObjectPathBuf, ValueOverwrite)>,
+}
+
+impl OverwritePayloads {
+    /// Moves the replacement bytes and deferred heap staging identified by `id`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `id` has an out-of-range index.
+    pub(in crate::edit) fn take(&mut self, id: OverwriteId) -> OverwriteBytes {
+        // IDs are created once per staged write during this prepared commit's preflight.
+        let (path, values) = self
+            .writes
+            .get_mut(id.index)
+            .expect("a prepared overwrite belongs to its staged set");
+        let (raw, staging) = values.take_payload();
+        OverwriteBytes::new(
+            raw,
+            staging,
+            core::mem::replace(path, ObjectPathBuf::root()),
+        )
+    }
+}
+
+/// An overwrite of existing storage with encoded bytes or a staged replacement.
+pub(super) enum InPlaceWrite {
+    /// Encoded chunk and index writes prepared before application.
+    Encoded {
+        writes: Vec<(u64, Vec<u8>)>,
+        /// The original input's identifier, cleared when its buffer is released after preflight.
+        source: Option<OverwriteId>,
+    },
+    /// A contiguous range written from its original staged buffer.
+    Replacement {
+        /// The physical address of the existing data range.
+        address: u64,
+        source: OverwriteId,
+    },
+}
+
+/// Identifies one replacement payload in its prepared commit.
+///
+/// The private index is assigned during preflight. Taking the payload consumes the identifier.
+pub(in crate::edit) struct OverwriteId {
+    index: usize,
 }
 
 /// Records physical addresses invalidated by a commit for object-reference screening.

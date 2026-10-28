@@ -303,7 +303,6 @@ impl WriteEngine {
 
 /// Pending operations and indexes derived from their creation paths.
 ///
-/// Created datasets and value replacements are prepared by [`super::dataset::flatten_dataset`].
 /// During commit preflight, the engine borrows this set and restores it on rejection.
 /// Batch marks record all operation counts, while creation indexes are updated with the vectors.
 #[derive(Default)]
@@ -329,13 +328,14 @@ pub(super) struct StagedEdits {
 }
 
 impl StagedEdits {
-    /// Consumes the staged set after preflight and returns the remaining owned commit inputs.
+    /// Transfers creations, cross-file copies, and replacement values to commit application.
     ///
-    /// Other operations have been prepared into commit-local plans and are discarded.
-    pub(super) fn into_apply(self) -> StagedApply {
+    /// Value replacements retain their staging order. Other operations have been prepared into
+    /// commit-local plans and are discarded.
+    pub(super) fn into_apply(self) -> (StagedApply, Vec<(ObjectPathBuf, ValueOverwrite)>) {
         let Self {
             datasets,
-            writes: _,
+            writes,
             appends: _,
             groups: _,
             group_attrs: _,
@@ -346,10 +346,13 @@ impl StagedEdits {
             dataset_at: _,
             group_at: _,
         } = self;
-        StagedApply {
-            datasets,
-            cross_copies,
-        }
+        (
+            StagedApply {
+                datasets,
+                cross_copies,
+            },
+            writes,
+        )
     }
 
     /// Returns prepared dataset creations with their parent paths, in staging order.
