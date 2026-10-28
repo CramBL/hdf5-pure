@@ -73,6 +73,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed `Dataset::read_f64_rows` and related row reads copying incorrect values from malformed chunk records with nonzero trailing offsets ([#950](https://github.com/CramBL/hdf5-pure/pull/950)).
 - Fixed `repack` rejecting unallocated datasets with lossy or unsupported filters ([#948](https://github.com/CramBL/hdf5-pure/pull/948)).
 - Fixed lost structured causes for invalid dataset requests in `Group::create_dataset` during in-place creation ([#949](https://github.com/CramBL/hdf5-pure/pull/949)).
 - Fixed invalid attribute names being accepted by `File::commit` during in-place attribute edits ([#949](https://github.com/CramBL/hdf5-pure/pull/949)).

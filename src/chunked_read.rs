@@ -1054,12 +1054,13 @@ impl<'a, 'spec> SelectedAssembly<'a, 'spec> {
         };
         let geometry = match region.row_band() {
             Some(rows)
-                if chunk_dims.iter().skip(1).eq(region
-                    .spec()
-                    .dataspace()
-                    .dimensions
-                    .iter()
-                    .skip(1)) =>
+                if selection.trailing_offsets_are_zero()
+                    && chunk_dims.iter().skip(1).eq(region
+                        .spec()
+                        .dataspace()
+                        .dimensions
+                        .iter()
+                        .skip(1)) =>
             {
                 RegionCopy::Band {
                     rows,
@@ -3674,6 +3675,70 @@ mod tests {
     }
 
     #[rstest]
+    #[case::rank_two(&[2, 3], &[3, 3], &[0, 1], &[0, 11, 12, 0, 14, 15, 0, 0, 0])]
+    #[case::rank_three(
+        &[2, 2, 3], &[3, 2, 3], &[0, 0, 1],
+        &[0, 11, 12, 0, 14, 15, 0, 17, 18, 0, 20, 21, 0, 0, 0, 0, 0, 0]
+    )]
+    #[case::rank_three_middle(
+        &[2, 2, 3], &[3, 2, 3], &[0, 1, 0],
+        &[0, 0, 0, 11, 12, 13, 0, 0, 0, 17, 18, 19, 0, 0, 0, 0, 0, 0]
+    )]
+    fn chunk_scatter_clips_nonzero_trailing_offsets(
+        #[case] chunk_dims: &[u64],
+        #[case] ds_dims: &[u64],
+        #[case] offsets: &[u64],
+        #[case] expected: &[i32],
+    ) {
+        let elements = chunk_dims.iter().product::<u64>();
+        let payload: Vec<_> = (11..11 + i32::try_from(elements).unwrap())
+            .flat_map(i32::to_le_bytes)
+            .collect();
+        let index = ParsedChunkIndex::new(
+            vec![ChunkInfo {
+                offsets: offsets.to_vec(),
+                chunk_size: StoredChunkSize::v4(elements * 4),
+                filter_mask: 0,
+                address: StoredAddress::new(0x1000),
+            }],
+            chunk_dims,
+            ds_dims,
+        )
+        .unwrap();
+        let mut whole = WholeAssembly::new(
+            &index,
+            chunk_dims,
+            ds_dims,
+            convert::nz(4),
+            FillPattern::ZERO,
+        )
+        .unwrap();
+        let layout = DataLayout::Contiguous {
+            address: None,
+            size: 0,
+        };
+        let dataspace = Dataspace {
+            space_type: DataspaceType::Simple,
+            rank: u8::try_from(ds_dims.len()).unwrap(),
+            dimensions: ds_dims.to_vec(),
+            max_dimensions: None,
+        };
+        let datatype = crate::type_builders::make_i32_type();
+        let spec =
+            RawReadSpec::parse(&layout, &dataspace, &datatype, None, FillPattern::ZERO).unwrap();
+        let region = ReadRegion::rows(spec, 0, ds_dims[0]).unwrap();
+        let mut selected = SelectedAssembly::new(index.select(&region).unwrap()).unwrap();
+        whole.place(&payload).unwrap();
+        selected.place(&payload).unwrap();
+        let expected: Vec<_> = expected
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        assert_eq!(whole.finish().unwrap(), expected);
+        assert_eq!(selected.finish().unwrap(), expected);
+    }
+
+    #[rstest]
     #[case::rank_one(&[3], &[5])]
     #[case::rank_two_rows(&[2, 3], &[3, 5])]
     #[case::rank_two_band(&[2, 5], &[3, 5])]
@@ -3731,15 +3796,35 @@ mod tests {
     }
 
     #[rstest]
-    fn dense_assembly_rejects_wrong_payload_lengths(#[values(4, 12)] length: usize) {
-        let index = assembly_index(&[2], &[4]);
-        let mut assembly =
-            WholeAssembly::new(&index, &[2], &[4], convert::nz(4), FillPattern::UNKNOWN).unwrap();
-        assembly.place(&[1; 8]).unwrap();
+    #[case::rank_one(&[2], &[4])]
+    #[case::rank_two_rows(&[2, 3], &[3, 5])]
+    #[case::rank_two_band(&[2, 5], &[3, 5])]
+    #[case::rank_three(&[2, 3, 2], &[3, 5, 3])]
+    fn dense_assembly_rejects_wrong_payload_lengths(
+        #[case] chunk_dims: &[u64],
+        #[case] ds_dims: &[u64],
+        #[values(false, true)] oversized: bool,
+    ) {
+        let index = assembly_index(chunk_dims, ds_dims);
+        let mut assembly = WholeAssembly::new(
+            &index,
+            chunk_dims,
+            ds_dims,
+            convert::nz(4),
+            FillPattern::UNKNOWN,
+        )
+        .unwrap();
+        let expected = usize::try_from(chunk_dims.iter().product::<u64>()).unwrap() * 4;
+        assembly.place(&vec![1; expected]).unwrap();
+        let length = if oversized {
+            expected + 4
+        } else {
+            expected - 4
+        };
         assert_eq!(
             assembly.place(&vec![2; length]).unwrap_err(),
             FormatError::DataSizeMismatch {
-                expected: 8,
+                expected,
                 actual: length
             }
         );
