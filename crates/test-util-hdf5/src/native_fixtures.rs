@@ -50,13 +50,8 @@ use hdf5_pure::FileSpaceStrategy as PureStrategy;
 use hdf5_pure::FixedPointType;
 use hdf5_pure::FloatingPointType;
 use hdf5_pure::Layout;
-use hdf5_pure_format::__private::AccessMode;
-use hdf5_pure_format::__private::FormatWidths;
-use hdf5_pure_format::__private::ObjectHeader;
 
 use crate::numeric::ByteOrder as NumericOrder;
-use crate::storage;
-use crate::symbol_table;
 
 /// A native fixture with a selected storage or object-identity premise.
 #[derive(Clone, Copy, Debug)]
@@ -94,7 +89,14 @@ impl Fixture {
         match self {
             Self::CommittedDatatypeV1 => committed_datatype_v1(path),
             Self::GenericLarge => generic_large(path),
-            Self::HardLinkUndo => hard_link_undo(path),
+            Self::HardLinkUndo => hard_link_undo(
+                path,
+                if cfg!(target_endian = "big") {
+                    NumericOrder::BigEndian
+                } else {
+                    NumericOrder::LittleEndian
+                },
+            ),
             Self::HugeLinks12 => huge_links_12(path),
             Self::PagedIndex => paged_index(path),
         }
@@ -243,16 +245,11 @@ impl Fixture {
         };
         assert_eq!(datasets, expected);
         match self {
-            Self::CommittedDatatypeV1 => {
-                assert_eq!(
-                    root.named_datatype("mytype").unwrap(),
-                    integer_type(FixedPointType::i32(), order)
-                );
-                assert_eq!(root.named_datatype_references("mytype").unwrap(), 3);
-                for name in ["first", "second"] {
-                    assert_i32(file, name, &[1, 2], order);
-                }
-            }
+            Self::CommittedDatatypeV1 => crate::identity::assert_data(
+                file,
+                test_util::identity::Fixture::CommittedDatatypeV1,
+                order.pure_order(),
+            ),
             Self::GenericLarge => {
                 let dataset = file.dataset("d").unwrap();
                 assert_eq!(dataset.shape().unwrap(), [64]);
@@ -275,11 +272,11 @@ impl Fixture {
                     )])
                 );
             }
-            Self::HardLinkUndo => {
-                for name in ["aa", "bb"] {
-                    assert_i32(file, name, &[1, 2, 3], order);
-                }
-            }
+            Self::HardLinkUndo => crate::identity::assert_data(
+                file,
+                test_util::identity::Fixture::HardLinkUndo,
+                order.pure_order(),
+            ),
             Self::HugeLinks12 => {
                 let group = file.group("g").unwrap();
                 assert!(group.attrs().unwrap().is_empty());
@@ -351,27 +348,19 @@ impl Fixture {
     /// Panics if metadata cannot be read, or the storage premise differs from the fixture.
     pub fn assert_representation(self, file: &File, bytes: &[u8]) {
         match self {
-            Self::CommittedDatatypeV1 => {
-                let links = symbol_table::Fixture::new(file, bytes)
-                    .links(file.superblock().root_group_address);
-                let address = links
-                    .iter()
-                    .find(|(name, _)| name == "mytype")
-                    .unwrap()
-                    .1
-                    .get();
-                let header = parse_header(file, bytes, address);
-                assert_eq!(header.version, HEADER_VERSION_ONE);
-                assert_eq!(header.reference_count, Some(3));
-            }
+            Self::CommittedDatatypeV1 => crate::identity::assert_storage(
+                file,
+                bytes,
+                test_util::identity::Fixture::CommittedDatatypeV1,
+            ),
             Self::GenericLarge => {
                 crate::generic_large::assert_storage(file, bytes);
             }
-            Self::HardLinkUndo => {
-                let aa = storage::root_object_address(file, bytes, "aa");
-                let bb = storage::root_object_address(file, bytes, "bb");
-                assert_eq!(aa, bb);
-            }
+            Self::HardLinkUndo => crate::identity::assert_storage(
+                file,
+                bytes,
+                test_util::identity::Fixture::HardLinkUndo,
+            ),
             Self::HugeLinks12 => crate::huge_links::assert_storage(file, bytes),
             Self::PagedIndex => crate::paged_index::assert_storage(file, bytes),
         }
@@ -407,6 +396,15 @@ impl Fixture {
             Self::HardLinkUndo => Some(Persistence::Aggregated),
             Self::PagedIndex => Some(Persistence::Paged(FileSpacePageSize::DEFAULT)),
             Self::CommittedDatatypeV1 | Self::HugeLinks12 => None,
+        }
+    }
+}
+
+impl From<test_util::identity::Fixture> for Fixture {
+    fn from(fixture: test_util::identity::Fixture) -> Self {
+        match fixture {
+            test_util::identity::Fixture::CommittedDatatypeV1 => Self::CommittedDatatypeV1,
+            test_util::identity::Fixture::HardLinkUndo => Self::HardLinkUndo,
         }
     }
 }
@@ -549,18 +547,32 @@ pub fn committed_datatype_v1(path: &Path) {
 
 /// Writes `aa` and `bb` as two hard links to one [`i32`] dataset containing `[1, 2, 3]`.
 ///
-/// The file persists free-space managers without paging. Closes the file before returning.
+/// The dataset uses `order`. The file persists free-space managers without paging.
+/// Closes the file before returning.
 ///
 /// # Panics
 ///
 /// Panics if native creation, writing, or close fails.
-pub fn hard_link_undo(path: &Path) {
+///
+/// # Examples
+///
+/// ```
+/// use test_util::temp;
+/// use test_util_hdf5::native_fixtures::{self, Fixture};
+/// use test_util_hdf5::numeric::ByteOrder;
+///
+/// let path = temp::temp_path("aliases.h5");
+/// native_fixtures::hard_link_undo(&path, ByteOrder::LittleEndian);
+/// Fixture::HardLinkUndo.assert_native(&path, ByteOrder::LittleEndian);
+/// ```
+pub fn hard_link_undo(path: &Path, order: NumericOrder) {
     let f = NativeFileBuilder::new()
         .with_fapl(|fapl| fapl.libver_v110())
         .with_fcpl(|fcpl| fcpl.file_space_strategy(persisting(false)))
         .create(path)
         .unwrap();
-    f.new_dataset::<i32>()
+    f.new_dataset_builder()
+        .empty_as(order.i32_datatype())
         .shape((3,))
         .create("aa")
         .unwrap()
@@ -614,24 +626,3 @@ fn integer_type(datatype: FixedPointType, order: NumericOrder) -> Datatype {
 fn huge_link_name(index: i32) -> String {
     format!("d{index}_{}", "x".repeat(5000))
 }
-
-fn widths(file: &File) -> FormatWidths {
-    FormatWidths {
-        offsets: file.superblock().offset_size,
-        lengths: file.superblock().length_size,
-    }
-}
-
-fn parse_header(file: &File, bytes: &[u8], address: u64) -> ObjectHeader {
-    ObjectHeader::parse_with_base_and_widths(
-        bytes,
-        AccessMode::ReadOnly,
-        usize::try_from(address).unwrap(),
-        widths(file),
-        file.superblock().base_address,
-    )
-    .unwrap()
-}
-
-// Section `subsubsec_fmt4_dataobject_hdr_prefix_one`, version 4.0.
-const HEADER_VERSION_ONE: u8 = 1;

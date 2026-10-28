@@ -26,6 +26,12 @@ impl Header {
         }
     }
 
+    /// Sets the reference count in the header prefix.
+    pub fn reference_count(mut self, count: u32) -> Self {
+        self.reference_count = count;
+        self
+    }
+
     pub fn message(mut self, message: Message) -> Self {
         self.messages.push(message);
         self

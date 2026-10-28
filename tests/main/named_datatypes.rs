@@ -2,10 +2,14 @@
 
 use hdf5_pure::AttrValue;
 use hdf5_pure::DatasetBuilder;
+use hdf5_pure::DatatypeByteOrder;
 use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use rstest::rstest;
+use test_util::identity::Fixture;
+use test_util_hdf5::identity;
+use test_util_hdf5::reader::ReadBackend;
 
 #[rstest]
 #[case::dataset(|builder: &mut DatasetBuilder| { builder.with_committed_datatype("integer_type"); })]
@@ -50,11 +54,24 @@ fn in_place_creation_rejects_committed_datatypes_without_changing_the_file(
     );
 }
 
-/// A version 1 object header keeps its reference count in the header prefix,
-/// where a version 2 header stores an Object Reference Count message. The C
-/// library wrote this type with one link and two dataset uses.
-#[test]
-fn the_reference_count_of_a_version_1_header_is_read_from_its_prefix() {
-    let file = File::open(test_util::data("c/committed_datatype_v1.h5")).unwrap();
-    assert_eq!(file.root().named_datatype_references("mytype").unwrap(), 3);
+#[rstest]
+#[case::committed_datatype_v1(Fixture::CommittedDatatypeV1)]
+#[case::hard_link_undo(Fixture::HardLinkUndo)]
+fn independent_identity_files_have_complete_contents(
+    #[case] fixture: Fixture,
+    #[values(
+        ReadBackend::Buffered,
+        ReadBackend::Bytes,
+        ReadBackend::Source,
+        ReadBackend::Streaming
+    )]
+    backend: ReadBackend,
+) {
+    let path = test_util::temp::temp_path("identity.h5");
+    let bytes = fixture.build();
+    std::fs::write(&path, &bytes).unwrap();
+    let file = backend.open(&path).unwrap();
+    identity::assert_contents(&file, fixture, DatatypeByteOrder::LittleEndian);
+    identity::assert_storage(&file, &bytes, fixture);
+    drop(file);
 }
