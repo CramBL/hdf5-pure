@@ -3,6 +3,8 @@
 //! The writer reconstructs individual objects during planning and emission. The retained plan
 //! contains allocations, object-use counts, and serialized file-space managers.
 
+use core::num::NonZeroU64;
+
 use std::borrow::Cow;
 use std::io::BufWriter;
 use std::io::Write;
@@ -43,6 +45,7 @@ use crate::file_space_info;
 use crate::file_space_info::DEFAULT_THRESHOLD;
 use crate::file_space_info::FileSpaceStrategy;
 use crate::libver::LibVer;
+use crate::link_info::LinkInfoMessage;
 use crate::link_message::LinkMessage;
 use crate::object_path::ObjectPathBuf;
 use crate::shared_message::DatatypeLocation;
@@ -228,7 +231,7 @@ impl Object {
             .as_ref()
             .map(|dense| dense.attr_info_message(StoredAddress::ZERO))
             .transpose()?;
-        let (header, data, chunked, links, empty_index) = match &self.kind {
+        let (header, data, chunked, links, empty_index, dense_links) = match &self.kind {
             Kind::Dataset(dataset) => {
                 let chunks = self.chunks()?;
                 let measured = dataset.measure(
@@ -246,6 +249,7 @@ impl Object {
                     dataset.is_chunked(),
                     None,
                     chunks.as_ref().and_then(CompressedChunkSet::empty_index),
+                    None,
                 )
             }
             Kind::Group { attributes, .. } => {
@@ -267,13 +271,13 @@ impl Object {
                         length: plan.serialized_len(),
                     }),
                     None,
+                    link_info.as_ref().map(DenseLinks::new).transpose()?,
                 )
             }
-            Kind::Committed(_) => (0, None, false, None, None),
+            Kind::Committed(_) => (0, None, false, None, None, None),
         };
         let preflight = !heaps.is_empty()
             || dense.is_some()
-            || links.is_some()
             || !self.paths().is_empty()
             || matches!(&self.kind, Kind::Dataset(dataset) if dataset.storage.reference_targets().is_some() || dataset.committed_datatype_path.is_some());
         Ok(Record {
@@ -291,6 +295,7 @@ impl Object {
             data,
             chunked,
             empty_index,
+            dense_links,
             heaps,
             references: 1,
             preflight,
@@ -728,6 +733,7 @@ impl<S: ObjectSource> Plan<S> {
             }
             match part {
                 Part::EmptyIndex(index) => sink.put(&index.build_at(span.address)?)?,
+                Part::Links(index) => sink.put(&self.links(index, span)?)?,
                 Part::Extension => sink.put(&extension.as_ref().ok_or_else(inconsistent)?.1)?,
                 Part::ManagerHeader(index) => sink.put(&managers[index].header)?,
                 Part::ManagerSections(index) => sink.put(&managers[index].section_list)?,
@@ -741,7 +747,6 @@ impl<S: ObjectSource> Plan<S> {
                             sink.put(&self.header(*index, object, chunks.as_ref())?)?
                         }
                         Part::Attributes(_) => sink.put(&self.attributes(object, span)?)?,
-                        Part::Links(_) => sink.put(&self.links(*index, span)?)?,
                         Part::Heap(_, collection) => {
                             sink.put(object.collection(collection).ok_or_else(inconsistent)?)?
                         }
@@ -795,9 +800,6 @@ impl<S: ObjectSource> Plan<S> {
             )?;
             if let Some(span) = record.metadata.attributes {
                 check_length(&self.attributes(&object, span)?, span)?;
-            }
-            if let Some(span) = record.metadata.links {
-                check_length(&self.links(index, span)?, span)?;
             }
             if let (Kind::Dataset(dataset), Some(span)) = (&object.kind, record.data) {
                 let length = if record.chunked {
@@ -911,13 +913,12 @@ impl<S: ObjectSource> Plan<S> {
                 dataset.build_header(address, messages.as_ref(), info.as_deref(), self.libver)?
             }
             Kind::Group { attributes, .. } => {
-                let links = links_at(&self.source, index, Some(&self.records))?;
-                let link_info = super::dense_links_plan(&links)?
-                    .map(|plan| {
-                        plan.link_info(record.metadata.links.ok_or_else(inconsistent)?.address)
-                    })
-                    .transpose()
-                    .map_err(super::dense_link_error)?;
+                let link_info = record.link_info()?;
+                let links = if link_info.is_some() {
+                    Vec::new()
+                } else {
+                    links_at(&self.source, index, Some(&self.records))?
+                };
                 super::build_group_oh(&links, attributes, info.as_deref(), link_info.as_ref())?
             }
             Kind::Committed(datatype) => {
@@ -953,6 +954,82 @@ impl<S: ObjectSource> Plan<S> {
     }
 }
 
+/// The name-index offset within untracked dense link storage.
+#[derive(Clone, Copy)]
+struct DenseLinks {
+    /// Relative to the stored address of the fractal heap.
+    name_index_offset: NonZeroU64,
+}
+
+impl DenseLinks {
+    /// Records relative name-index geometry measured with the heap at address zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if creation-order metadata is present, the heap
+    /// address is absent or nonzero, or the name-index address is absent or zero.
+    fn new(info: &LinkInfoMessage) -> Result<Self, FormatError> {
+        let LinkInfoMessage {
+            max_creation_order,
+            fractal_heap_address,
+            btree_name_index_address,
+            btree_creation_order_address,
+        } = info;
+        if max_creation_order.is_some()
+            || *fractal_heap_address != Some(StoredAddress::ZERO)
+            || btree_creation_order_address.is_some()
+        {
+            return Err(inconsistent());
+        }
+        Ok(Self {
+            name_index_offset: NonZeroU64::new(
+                btree_name_index_address.ok_or_else(inconsistent)?.get(),
+            )
+            .ok_or_else(inconsistent)?,
+        })
+    }
+
+    /// Returns stored heap and name-index addresses for `span`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::AddressTooLarge`] if `span` starts at the undefined address,
+    /// [`FormatError::OffsetOverflow`] if its end exceeds [`u64::MAX`], or
+    /// [`FormatError::Internal`] if the name-index offset is outside the allocation.
+    fn link_info(self, span: Allocation) -> Result<LinkInfoMessage, FormatError> {
+        let Self { name_index_offset } = self;
+        let Allocation { address, length } = span;
+        if address == super::UNDEF_ADDRESS {
+            return Err(FormatError::AddressTooLarge {
+                address: address.get(),
+                offset_size: super::OFFSET_WIDTH.get(),
+            });
+        }
+        address
+            .get()
+            .checked_add(length)
+            .ok_or(FormatError::OffsetOverflow {
+                offset: address.get(),
+                length,
+            })?;
+        if name_index_offset.get() >= length {
+            return Err(inconsistent());
+        }
+        let name_index = address.get().checked_add(name_index_offset.get()).ok_or(
+            FormatError::OffsetOverflow {
+                offset: address.get(),
+                length: name_index_offset.get(),
+            },
+        )?;
+        Ok(LinkInfoMessage {
+            max_creation_order: None,
+            fractal_heap_address: Some(address),
+            btree_name_index_address: Some(StoredAddress::new(name_index)),
+            btree_creation_order_address: None,
+        })
+    }
+}
+
 /// Allocations, storage kind, and relocation state for one source object.
 struct Record {
     metadata: ObjectAllocation,
@@ -960,13 +1037,29 @@ struct Record {
     chunked: bool,
     /// Geometry for an array index with no stored chunks.
     empty_index: Option<EmptyChunkIndex>,
+    /// Relative name-index geometry for the dense links in `metadata`.
+    dense_links: Option<DenseLinks>,
     heaps: Vec<Allocation>,
     references: u32,
-    /// Whether final metadata checks require destination addresses or dense storage.
+    /// Whether heaps, dense attributes, or references require final metadata checks.
     preflight: bool,
 }
 
 impl Record {
+    /// Returns dense link addresses from the reserved span and relative geometry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if only the span or geometry is present. Propagates
+    /// errors from [`DenseLinks::link_info`].
+    fn link_info(&self) -> Result<Option<LinkInfoMessage>, FormatError> {
+        match (self.dense_links, self.metadata.links) {
+            (Some(info), Some(span)) => info.link_info(span).map(Some),
+            (None, None) => Ok(None),
+            _ => Err(inconsistent()),
+        }
+    }
+
     fn measure(&self) -> layout::DataMeasure {
         layout::DataMeasure::new(
             self.data.map_or(0, |span| span.length),
@@ -999,9 +1092,9 @@ impl Part {
             Self::Attributes(index)
             | Self::Data(index)
             | Self::Header(index)
-            | Self::Heap(index, _)
-            | Self::Links(index) => Some(index),
+            | Self::Heap(index, _) => Some(index),
             Self::EmptyIndex(_)
+            | Self::Links(_)
             | Self::Extension
             | Self::ManagerHeader(_)
             | Self::ManagerSections(_) => None,
@@ -1056,6 +1149,9 @@ fn reserve_metadata(
             links: links.map(|span| span.length),
         }
         .reserve(allocation)?;
+        if let Some(info) = record.dense_links {
+            info.link_info(record.metadata.links.ok_or_else(inconsistent)?)?;
+        }
     }
     Ok(())
 }
@@ -1207,7 +1303,8 @@ fn links_at(
                             .header
                             .address
                     }
-                    None => StoredAddress::ZERO,
+                    None if index < source.len() => StoredAddress::ZERO,
+                    None => return Err(inconsistent().into()),
                 },
             ))
         })
@@ -1267,6 +1364,8 @@ mod tests {
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     use test_util::allocation;
 
+    use super::Allocation;
+    use super::DenseLinks;
     use super::Object;
     use super::ObjectSource;
     use super::Plan;
@@ -1280,6 +1379,8 @@ mod tests {
     use crate::GroupBuilder;
     use crate::LibVer;
     use crate::MaxExtent;
+    use crate::address::StoredAddress;
+    use crate::address::StoredAddressExt;
     use crate::chunked_write::ChunkMeta;
     use crate::chunked_write::ChunkProvider;
     use crate::data_layout::ChunkIndexLayout;
@@ -1287,8 +1388,69 @@ mod tests {
     use crate::data_layout::DataLayout;
     use crate::error::Error;
     use crate::error::FormatError;
+    use crate::file_writer;
     use crate::object_path::ObjectPathBuf;
     use crate::type_builders::DatasetBuilder;
+
+    #[rstest]
+    #[case::zero(Some(0))]
+    #[case::above_four_gibibytes(Some((1_u64 << 32) + 512))]
+    #[case::maximum(None)]
+    fn dense_link_geometry_matches_the_full_plan(#[case] address: Option<u64>) {
+        let links: Vec<_> = (0..9)
+            .map(|index| file_writer::make_link(&format!("d{index:04}"), StoredAddress::new(100)))
+            .collect();
+        let plan = file_writer::dense_links_plan(&links).unwrap().unwrap();
+        let geometry = DenseLinks::new(&plan.link_info(StoredAddress::new(0)).unwrap()).unwrap();
+        let span = Allocation {
+            address: StoredAddress::new(address.unwrap_or(u64::MAX - plan.serialized_len())),
+            length: plan.serialized_len(),
+        };
+        assert_eq!(
+            geometry.link_info(span).unwrap(),
+            plan.link_info(span.address).unwrap()
+        );
+    }
+
+    #[rstest]
+    #[case::undefined(true)]
+    #[case::overflow(false)]
+    fn dense_link_geometry_rejects_a_placement_outside_the_address_width(#[case] undefined: bool) {
+        let links: Vec<_> = (0..9)
+            .map(|index| file_writer::make_link(&format!("d{index:04}"), StoredAddress::new(100)))
+            .collect();
+        let plan = file_writer::dense_links_plan(&links).unwrap().unwrap();
+        let geometry = DenseLinks::new(&plan.link_info(StoredAddress::new(0)).unwrap()).unwrap();
+        let length = plan.serialized_len();
+        let address = if undefined {
+            u64::MAX
+        } else {
+            u64::MAX - length + 1
+        };
+        let error = geometry
+            .link_info(Allocation {
+                address: StoredAddress::new(address),
+                length,
+            })
+            .unwrap_err();
+        if undefined {
+            assert_eq!(
+                error,
+                FormatError::AddressTooLarge {
+                    address,
+                    offset_size: super::super::OFFSET_WIDTH.get()
+                }
+            );
+        } else {
+            assert_eq!(
+                error,
+                FormatError::OffsetOverflow {
+                    offset: address,
+                    length
+                }
+            );
+        }
+    }
 
     #[rstest]
     #[case::classic(None)]
@@ -1331,6 +1493,7 @@ mod tests {
             vec![1; count]
         );
         let file = File::from_bytes(plan.finish().unwrap()).unwrap();
+        assert_eq!(loads[count].load(Ordering::Relaxed), 2);
         assert_eq!(
             loads
                 .iter()
