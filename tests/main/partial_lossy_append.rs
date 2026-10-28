@@ -715,8 +715,7 @@ fn assert_raw_tail(dataset: &Dataset, expected: &[f64]) {
 #[case::scale_offset(Filter::ScaleOffset)]
 #[cfg_attr(feature = "zfp", case::zfp(Filter::Zfp))]
 fn owned_default_lossy_flush_is_recoverable_until_terminal_completion(#[case] filter: Filter) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("owned_default_tail.h5");
+    let path = test_util::temp::temp_path("owned_default_tail.h5");
     filter.create(&path, PartialEdgeFiltering::Apply, &[1.5, 2.5, 1.0, 2.0]);
     let file = File::open_rw(&path).unwrap();
     let mut appender = file.dataset("d").unwrap().into_buffered_appender().unwrap();
@@ -764,8 +763,7 @@ fn owned_default_lossy_flush_is_recoverable_until_terminal_completion(#[case] fi
 #[case::scale_offset(Filter::ScaleOffset)]
 #[cfg_attr(feature = "zfp", case::zfp(Filter::Zfp))]
 fn owned_lossy_options_apply_to_split_input_flushes_and_automatic_writes(#[case] filter: Filter) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("owned_lossy_options.h5");
+    let path = test_util::temp::temp_path("owned_lossy_options.h5");
     filter.create(&path, PartialEdgeFiltering::Apply, &[1.5]);
     let file = File::open_rw(&path).unwrap();
     let mut appender = file
@@ -815,8 +813,7 @@ fn owned_lossy_options_apply_to_split_input_flushes_and_automatic_writes(#[case]
 
 #[test]
 fn an_owned_appender_preserves_unfiltered_partial_edges_until_complete() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("owned_skipped_edges.h5");
+    let path = test_util::temp::temp_path("owned_skipped_edges.h5");
     Filter::ScaleOffset.create(&path, PartialEdgeFiltering::Skip, &[]);
     let file = File::open_rw(&path).unwrap();
     let mut appender = file.dataset("d").unwrap().into_buffered_appender().unwrap();

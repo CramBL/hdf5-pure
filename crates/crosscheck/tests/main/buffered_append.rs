@@ -127,8 +127,7 @@ fn c_library_reads_a_buffered_append_onto_its_own_dataset() {
 #[cfg(target_endian = "little")]
 fn c_library_reads_an_owned_buffered_completion_of_its_dataset() {
     let _c = lock::libhdf5_guard();
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("owned_buffered.h5");
+    let path = test_util::temp::temp_path("owned_buffered.h5");
     Unlimited::new("d", &[0i32, 1], 4)
         .filters(SHUFFLE_DEFLATE)
         .libhdf5_create(&path);
