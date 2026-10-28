@@ -17,9 +17,9 @@ use crate::writer::FileBuilder;
 use crate::{AttrValue, FileLocking, FileSpaceStrategy};
 
 #[test]
-fn deleting_a_large_continuation_keeps_its_partial_tail_out_of_small_free_lists() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = test_util::copy_data("c/generic_large.h5", dir.path());
+fn deleting_a_generic_large_continuation_keeps_its_partial_tail_out_of_small_free_lists() {
+    let path = test_util::temp::temp_path("generic_large.h5");
+    std::fs::write(&path, test_util::generic_large::generic_large()).unwrap();
     let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     assert_eq!(
         engine.oh_chunk_spans(512).unwrap(),

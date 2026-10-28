@@ -804,9 +804,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_extension_keeps_its_unmodified_record_bytes() {
-        let source = BytesSource::new(test_util::paged_index::paged_index());
+    #[rstest]
+    #[case::paged_index(test_util::paged_index::paged_index())]
+    #[case::generic_large(test_util::generic_large::generic_large())]
+    fn an_extension_keeps_its_unmodified_record_bytes(#[case] image: Vec<u8>) {
+        let source = BytesSource::new(image);
         crate::edit::test_util::assert_extension_records(&source);
     }
 

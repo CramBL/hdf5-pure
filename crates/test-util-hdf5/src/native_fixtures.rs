@@ -49,7 +49,6 @@ use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceStrategy as PureStrategy;
 use hdf5_pure::FixedPointType;
 use hdf5_pure::FloatingPointType;
-use hdf5_pure::FreeSpaceManagerRole;
 use hdf5_pure::Layout;
 use hdf5_pure_format::__private::AccessMode;
 use hdf5_pure_format::__private::FormatWidths;
@@ -366,24 +365,7 @@ impl Fixture {
                 assert_eq!(header.reference_count, Some(3));
             }
             Self::GenericLarge => {
-                let address = storage::root_object_address(file, bytes, "d");
-                let spans = storage::header_extents(file.superblock(), bytes, address);
-                assert!(spans.len() > 1);
-                assert!(spans.iter().any(|(_, size)| *size > 512));
-                let report = file.persisted_free_sections().unwrap().unwrap();
-                let manager = report
-                    .managers()
-                    .iter()
-                    .find(|manager| manager.role() == FreeSpaceManagerRole::PageLargeGeneric)
-                    .unwrap();
-                assert!(
-                    manager
-                        .free_sections()
-                        .sections()
-                        .iter()
-                        .any(|section| section.address() % 512 != 0
-                            || section.length().get() % 512 != 0)
-                );
+                crate::generic_large::assert_storage(file, bytes);
             }
             Self::HardLinkUndo => {
                 let aa = storage::root_object_address(file, bytes, "aa");

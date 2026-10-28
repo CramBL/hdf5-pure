@@ -59,6 +59,7 @@ mod filter_options;
 mod fixed_strings;
 mod fuzz_regressions;
 mod generic_element;
+mod generic_large;
 mod huge_links;
 mod layout_introspection;
 mod legacy;

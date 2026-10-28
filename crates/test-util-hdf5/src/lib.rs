@@ -28,6 +28,7 @@ pub mod fractal_heap;
 mod free_sections;
 pub mod free_space_churn;
 pub mod free_space_endurance;
+pub mod generic_large;
 #[cfg(feature = "hdf5")]
 pub mod global_heap;
 pub mod global_heap_fixture;

@@ -22,6 +22,7 @@ pub mod filtered_chunks;
 pub mod fractal_heap;
 pub mod free_space;
 pub mod fuzz;
+pub mod generic_large;
 pub mod global_heap;
 pub mod image;
 pub mod legacy;
