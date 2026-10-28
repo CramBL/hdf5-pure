@@ -49,6 +49,7 @@ use test_util::object_header::v2::Header;
 use test_util::superblock::v2::Superblock;
 use test_util::widths::Widths;
 use test_util_hdf5::file_space;
+use test_util_hdf5::reader::ReadBackend;
 
 use allocation::measure;
 
@@ -571,7 +572,7 @@ fn warm_chunk_scatter_uses_bounded_allocations(
     #[case] shape: &[u64],
     #[case] chunks: &[u64],
     #[case] region: &str,
-    #[values(false, true)] streaming: bool,
+    #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
 ) {
     let values: Vec<_> = (0..shape.iter().product::<u64>())
         .map(|value| value as f64)
@@ -590,17 +591,12 @@ fn warm_chunk_scatter_uses_bounded_allocations(
     builder.write(&path).unwrap();
     let access = FileAccessProperties::new()
         .with_chunk_cache(ChunkCacheConfig::new().with_max_bytes(0).with_max_slots(0));
-    let file = if streaming {
-        File::open_streaming_with_options(&path, access)
-    } else {
-        File::open_with_options(&path, access)
-    }
-    .unwrap();
+    let file = backend.open_with_options(&path, access).unwrap();
     let dataset = file.dataset("data").unwrap();
     assert_eq!(dataset.read_raw().unwrap(), expected);
     assert!(dataset.chunk_cache_stats().index_loaded());
-    let whole_region = format!("{region}_{streaming}_whole");
-    let rows_region = format!("{region}_{streaming}_rows");
+    let whole_region = format!("{region}_{backend:?}_whole");
+    let rows_region = format!("{region}_{backend:?}_rows");
     let (whole, whole_allocations) = measure(&whole_region, || dataset.read_raw().unwrap());
     let (rows, rows_allocations) = measure(&rows_region, || {
         dataset.read_raw_rows(1, shape[0] - 2).unwrap()
