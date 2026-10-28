@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
+use std::ops::Range;
 
 use hdf5_pure_core::__private::PhysicalAddress;
 
@@ -23,6 +24,7 @@ use crate::object_graph::ObjectId;
 use crate::object_graph::ObjectIndex;
 use crate::object_graph::TraversalBudget;
 use crate::object_graph::TraversalLimit;
+use crate::object_path::LinkName;
 use crate::object_path::LinkNameBuf;
 use crate::object_path::ObjectPathBuf;
 use crate::reader::File;
@@ -30,15 +32,18 @@ use crate::reader::ObjectClass;
 
 /// The objects a repack keeps, as a tree under the root group, and the placement of every object
 /// the source reaches.
+///
+/// Stores one record per object and one name per link. Paths are constructed from parent links
+/// when requested by a caller.
 pub(super) struct SourceObjects {
     /// The address context of the source, for resolving a stored address to an object.
     addresses: AddressContext,
-    /// The objects the repack keeps other than the root group, in the post order of an
-    /// [`ObjectTree`](crate::object_graph::ObjectTree).
-    descendants: Vec<GraphObject<SourceObject, String>>,
-    root: GraphObject<SourceObject, String>,
-    /// The path in the output of each object the repack keeps, the root group included.
-    kept: BTreeMap<ObjectId, ObjectPathBuf>,
+    /// The retained objects in post order, with the root last.
+    objects: Vec<SourceObject>,
+    /// The links of each object, grouped in the same order as `objects`.
+    links: Vec<SourceLink>,
+    /// Object identities and their indices in `objects`, sorted by identity.
+    kept: Vec<(ObjectId, usize)>,
     /// The objects the drop paths remove, each with the last step of its first path under a drop
     /// path, or `None` if every such path passes a link whose name is not a component of an object
     /// path.
@@ -90,56 +95,83 @@ impl SourceObjects {
             .into_values()
             .map(|object| (object.value.id, last_steps.remove(&object.value.id)))
             .collect();
-        let mut kept: BTreeMap<_, _> = descendants
+        let mut objects: Vec<SourceObject> = Vec::with_capacity(descendants.len() + 1);
+        let mut links = Vec::with_capacity(descendants.len());
+        for (index, object) in descendants.into_iter().chain([root]).enumerate() {
+            let start = links.len();
+            for link in object.links {
+                objects
+                    .get_mut(link.target.get())
+                    .ok_or_else(missing_path)?
+                    .parent = Some(links.len());
+                links.push(SourceLink {
+                    link_name: link.label,
+                    target: link.target.get(),
+                    parent: index,
+                });
+            }
+            objects.push(SourceObject {
+                id: object.value.id,
+                class: object.value.class,
+                links: start..links.len(),
+                parent: None,
+            });
+        }
+        let mut kept: Vec<_> = objects
             .iter()
-            .map(|object| object.value.id)
-            .zip(kept_paths(&root, &descendants)?)
+            .enumerate()
+            .map(|(index, object)| (object.id, index))
             .collect();
-        kept.insert(root.value.id, ObjectPathBuf::root());
-        Ok(Self {
+        kept.sort_unstable_by_key(|&(id, _)| id);
+        let objects = Self {
             addresses: file.addresses(),
-            descendants,
-            root,
+            objects,
+            links,
             kept,
             dropped,
-        })
+        };
+        for object in objects.objects.iter().rev() {
+            for link in objects
+                .links
+                .get(object.links.clone())
+                .ok_or_else(missing_path)?
+            {
+                if LinkName::new(&link.link_name).is_none() {
+                    super::link_name_in(&objects.path(link.parent)?, &link.link_name)?;
+                }
+            }
+        }
+        Ok(objects)
     }
 
-    /// Returns the root group.
-    pub(super) fn root(&self) -> &GraphObject<SourceObject, String> {
-        &self.root
+    /// Returns the final object in the retained tree's post order, the root group.
+    pub(super) fn root(&self) -> &SourceObject {
+        // The root is always present after discovery.
+        self.objects.last().expect("a repack source holds its root")
     }
 
-    /// Returns the objects the links of `object` target, each with the name of its link and its
-    /// path in the output.
+    /// Returns the targets of `object`'s links, with their paths under `path`.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Format`] with [`FormatError::Internal`] if a link of `object` targets an
-    /// object that is not in the tree or that the repack does not keep.
+    /// Returns [`Error::RepackUnsupported`] if a link name is not a component of an object path.
+    /// Returns [`Error::Format`] with [`FormatError::Internal`] if an object or link index is out
+    /// of bounds.
     pub(super) fn children<'a>(
         &'a self,
-        object: &'a GraphObject<SourceObject, String>,
+        object: &SourceObject,
+        path: &ObjectPathBuf,
     ) -> Result<Vec<Child<'a>>, Error> {
-        object
-            .links
+        self.links
+            .get(object.links.clone())
+            .ok_or_else(missing_path)?
             .iter()
             .map(|link| {
-                let object = self.descendants.get(link.target.get()).ok_or_else(|| {
-                    FormatError::Internal(
-                        "a repacked group links an object outside its tree".into(),
-                    )
-                })?;
-                let Some(path) = self.kept.get(&object.value.id) else {
-                    return Err(FormatError::Internal(
-                        "a repacked group links an object the repack does not keep".into(),
-                    )
-                    .into());
-                };
+                let object = self.objects.get(link.target).ok_or_else(missing_path)?;
                 Ok(Child {
-                    link_name: &link.label,
+                    link_name: &link.link_name,
                     object,
-                    path,
+                    path: path.join(&super::link_name_in(path, &link.link_name)?),
                 })
             })
             .collect()
@@ -151,12 +183,13 @@ impl SourceObjects {
     /// # Errors
     ///
     /// Returns [`Error::Format`] if `header` and the base address of the source sum past
-    /// [`u64::MAX`], and [`Error::Format`] with [`FormatError::Internal`] if a dropped object on
-    /// the path to the object has no last step.
-    pub(super) fn placement(&self, header: StoredAddress) -> Result<Option<Placement<'_>>, Error> {
+    /// [`u64::MAX`]. Returns [`Error::Format`] with [`FormatError::Internal`] if a retained object
+    /// has an invalid parent link or index, or if a dropped object on the path to the object has
+    /// no last step.
+    pub(super) fn placement(&self, header: StoredAddress) -> Result<Option<Placement>, Error> {
         let id = ObjectId::resolve(self.addresses, header)?;
-        if let Some(path) = self.kept.get(&id) {
-            return Ok(Some(Placement::Kept(path)));
+        if let Ok(position) = self.kept.binary_search_by_key(&id, |&(id, _)| id) {
+            return Ok(Some(Placement::Kept(self.path(self.kept[position].1)?)));
         }
         let Some(last_step) = self.dropped.get(&id) else {
             return Ok(None);
@@ -167,6 +200,22 @@ impl SourceObjects {
                 .map(|last_step| self.dropped_path(last_step))
                 .transpose()?,
         )))
+    }
+
+    /// Reconstructs an output path by following parent links to the root.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] with [`FormatError::Internal`] if an object or link index is out
+    /// of bounds, or a parent link name is not a component of an object path.
+    fn path(&self, mut index: usize) -> Result<ObjectPathBuf, Error> {
+        let mut names = Vec::new();
+        while let Some(parent) = self.objects.get(index).ok_or_else(missing_path)?.parent {
+            let link = self.links.get(parent).ok_or_else(missing_path)?;
+            names.push(LinkName::new(&link.link_name).ok_or_else(missing_path)?);
+            index = link.parent;
+        }
+        Ok(names.into_iter().rev().map(LinkNameBuf::from).collect())
     }
 
     /// Returns the path under a drop path that ends with `step`, from the last steps of the dropped
@@ -207,28 +256,44 @@ impl SourceObjects {
     }
 }
 
-/// The identity and the class of an object of the source.
-#[derive(Clone, Copy, Debug)]
+/// A retained object's identity, class, and link indices.
 pub(super) struct SourceObject {
     pub(super) id: ObjectId,
     pub(super) class: ObjectClass,
+    /// The range of this object's links in [`SourceObjects::links`].
+    links: Range<usize>,
+    /// The index of the incoming link in [`SourceObjects::links`], or `None` for the root.
+    parent: Option<usize>,
 }
 
-/// An object a link of a group targets, with the name of the link and the path of the object in
-/// the output.
+/// A hard link between two retained objects.
+struct SourceLink {
+    link_name: String,
+    /// The target's index in [`SourceObjects::objects`].
+    target: usize,
+    /// The containing group's index in [`SourceObjects::objects`].
+    parent: usize,
+}
+
+/// A retained child object with its link name and output path.
 pub(super) struct Child<'a> {
     pub(super) link_name: &'a str,
-    pub(super) object: &'a GraphObject<SourceObject, String>,
-    pub(super) path: &'a ObjectPathBuf,
+    pub(super) object: &'a SourceObject,
+    pub(super) path: ObjectPathBuf,
 }
 
-/// Whether a repack keeps an object of its source, and at which path.
-pub(super) enum Placement<'a> {
-    /// An object the drop paths remove, with its path under a drop path, or `None` if every such
-    /// path passes a link whose name is not a component of an object path.
+/// A reachable object's destination path or its removal by a drop path.
+pub(super) enum Placement {
+    /// A removed object's path, or `None` if every path under a drop path has an invalid name.
     Dropped(Option<ObjectPathBuf>),
-    /// An object the output holds at this path.
-    Kept(&'a ObjectPathBuf),
+    /// The output path of a retained object.
+    Kept(ObjectPathBuf),
+}
+
+/// An object's identity and class during graph discovery.
+struct DiscoveredObject {
+    id: ObjectId,
+    class: ObjectClass,
 }
 
 /// The last step of the first path under a drop path to a dropped object.
@@ -253,7 +318,7 @@ enum LastStep {
 fn discover_graph(
     file: &File,
     budget: TraversalBudget,
-) -> Result<ObjectGraph<SourceObject, String>, Error> {
+) -> Result<ObjectGraph<DiscoveredObject, String>, Error> {
     let addresses = file.addresses();
     let root = ObjectId::new(PhysicalAddress::new(file.root().header_address()?));
     Ok(ObjectGraph::discover(budget, root, |id| {
@@ -268,7 +333,7 @@ fn discover_graph(
             })
             .collect::<Result<_, FormatError>>()?;
         Ok::<_, Error>(Expansion {
-            value: SourceObject { id, class },
+            value: DiscoveredObject { id, class },
             links,
         })
     })?)
@@ -280,7 +345,7 @@ fn discover_graph(
 ///
 /// Returns [`Error::RepackUnsupported`] if a path of `drop` matches no link.
 fn find_drops<'a>(
-    graph: &ObjectGraph<SourceObject, String>,
+    graph: &ObjectGraph<DiscoveredObject, String>,
     drop: &'a BTreeSet<ObjectPathBuf>,
 ) -> Result<Vec<(LinkIndex, ObjectIndex, &'a ObjectPathBuf)>, Error> {
     drop.iter()
@@ -300,7 +365,7 @@ fn find_drops<'a>(
 /// Walks breadth-first from the targets of `drops` through the objects of `removed`, and returns
 /// the last step of the first path under a drop path it finds to each.
 fn dropped_last_steps(
-    removed: &BTreeMap<ObjectIndex, GraphObject<SourceObject, String>>,
+    removed: &BTreeMap<ObjectIndex, GraphObject<DiscoveredObject, String>>,
     drops: &[(LinkIndex, ObjectIndex, &ObjectPathBuf)],
 ) -> BTreeMap<ObjectId, LastStep> {
     // `removed` and the targets of `drops` hold the indices from before the removal, which the
@@ -333,55 +398,6 @@ fn dropped_last_steps(
     last_steps
 }
 
-/// Returns the path in the output of each object of `descendants`, at its index.
-///
-/// # Errors
-///
-/// Returns [`Error::RepackUnsupported`] if a link has a name that is not a component of an object
-/// path, and [`Error::Format`] with [`FormatError::Internal`] if `root` and `descendants` are not a
-/// tree in post order.
-fn kept_paths(
-    root: &GraphObject<SourceObject, String>,
-    descendants: &[GraphObject<SourceObject, String>],
-) -> Result<Vec<ObjectPathBuf>, Error> {
-    let mut paths = vec![None; descendants.len()];
-    assign_paths(&mut paths, &ObjectPathBuf::root(), root)?;
-    // In post order each object comes after the objects its links target, so every target of
-    // `descendants[index]` has an index below `index`.
-    for (index, object) in descendants.iter().enumerate().rev() {
-        let (targets, rest) = paths.split_at_mut(index);
-        let path = rest
-            .first()
-            .and_then(Option::as_ref)
-            .ok_or_else(missing_path)?;
-        assign_paths(targets, path, object)?;
-    }
-    paths
-        .into_iter()
-        .map(|path| path.ok_or_else(missing_path))
-        .collect()
-}
-
-/// Sets the path of each object a link of `object` targets to the name of the link under
-/// `parent`.
-///
-/// # Errors
-///
-/// Returns [`Error::RepackUnsupported`] if a link has a name that is not a component of an object
-/// path, and [`Error::Format`] with [`FormatError::Internal`] if a link targets an object outside
-/// `paths`.
-fn assign_paths(
-    paths: &mut [Option<ObjectPathBuf>],
-    parent: &ObjectPathBuf,
-    object: &GraphObject<SourceObject, String>,
-) -> Result<(), Error> {
-    for link in &object.links {
-        let link_name = super::link_name_in(parent, &link.label)?;
-        *paths.get_mut(link.target.get()).ok_or_else(missing_path)? = Some(parent.join(&link_name));
-    }
-    Ok(())
-}
-
 fn missing_path() -> Error {
     FormatError::Internal("a repacked object has no path in the output".into()).into()
 }
@@ -396,3 +412,169 @@ const REPEATED_OBJECT: &str = "the repacked file would hold more than one hard l
 /// [`FileBuilder`](crate::FileBuilder) flattens and drops the nested groups of its output
 /// recursively, so the bound also limits the stack a repack uses.
 pub(super) const MAX_DEPTH: usize = 128;
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+    use test_util::image::Image;
+    use test_util::link_message::HardLink;
+    use test_util::object_header::v2::Header;
+    use test_util::object_header::{Message, MessageType};
+    use test_util::superblock::v2::Superblock;
+    use test_util::widths::Widths;
+
+    use super::*;
+    use crate::FileBuilder;
+    use crate::GroupBuilder;
+    use crate::UserblockSize;
+
+    #[rstest]
+    #[case::root("", false)]
+    #[case::group("outer", false)]
+    #[case::dataset("outer/inner/values", false)]
+    #[case::committed_datatype("outer/type", false)]
+    #[case::userblock_root("", true)]
+    #[case::userblock_dataset("outer/inner/values", true)]
+    #[case::userblock_committed_datatype("outer/type", true)]
+    fn paths_are_reconstructed_from_the_normalized_object_identity(
+        #[case] path: &str,
+        #[case] userblock: bool,
+    ) {
+        let mut builder = FileBuilder::new();
+        if userblock {
+            builder.with_userblock(UserblockSize::MIN);
+        }
+        let mut outer = GroupBuilder::new("outer");
+        let mut inner = GroupBuilder::new("inner");
+        inner.create_dataset("values").with_i32_data(&[3]);
+        outer.add_group(inner.finish());
+        outer.commit_datatype("type", crate::type_builders::make_i32_type());
+        builder.add_group(outer.finish());
+        let source = File::from_bytes(builder.finish().unwrap()).unwrap();
+        let objects =
+            SourceObjects::discover(&source, &BTreeSet::new(), TraversalBudget::new(5, 4)).unwrap();
+        let mut object = objects.root();
+        let mut current = ObjectPathBuf::root();
+        for component in ObjectPathBuf::parse(path).components() {
+            let child = objects
+                .children(object, &current)
+                .unwrap()
+                .into_iter()
+                .find(|child| child.link_name == component.as_str())
+                .unwrap();
+            object = child.object;
+            current = child.path;
+        }
+        assert_eq!(current, ObjectPathBuf::parse(path));
+        let stored = source
+            .addresses()
+            .relative(object.id.header_address().get())
+            .unwrap();
+        let Some(Placement::Kept(actual)) = objects.placement(stored).unwrap() else {
+            panic!("expected a kept object at {path:?}");
+        };
+        assert_eq!(actual, ObjectPathBuf::parse(path));
+    }
+
+    #[test]
+    fn discovery_stores_one_record_per_object_and_one_name_per_link() {
+        let mut group = GroupBuilder::new("g");
+        group.create_dataset("values").with_i32_data(&[3]);
+        let group = (1..MAX_DEPTH).fold(group.finish(), |child, _| {
+            let mut parent = GroupBuilder::new("g");
+            parent.add_group(child);
+            parent.finish()
+        });
+        let mut builder = FileBuilder::new();
+        builder.add_group(group);
+        let source = File::from_bytes(builder.finish().unwrap()).unwrap();
+        let objects = SourceObjects::discover(
+            &source,
+            &BTreeSet::new(),
+            TraversalBudget::new(MAX_DEPTH + 2, MAX_DEPTH + 1),
+        )
+        .unwrap();
+        assert_eq!(objects.objects.len(), MAX_DEPTH + 2);
+        assert_eq!(objects.links.len(), MAX_DEPTH + 1);
+        assert_eq!(objects.kept.len(), MAX_DEPTH + 2);
+        assert_eq!(
+            objects
+                .links
+                .iter()
+                .map(|link| link.link_name.len())
+                .sum::<usize>(),
+            MAX_DEPTH + "values".len()
+        );
+        assert_eq!(
+            objects
+                .path(
+                    objects
+                        .objects
+                        .iter()
+                        .position(|object| object.class == ObjectClass::Dataset)
+                        .unwrap()
+                )
+                .unwrap()
+                .to_string(),
+            format!("{}/values", vec!["g"; MAX_DEPTH].join("/"))
+        );
+        for (index, object) in objects.objects.iter().enumerate() {
+            for link in &objects.links[object.links.clone()] {
+                assert_eq!(link.parent, index);
+                assert!(link.target < index);
+                let parent = objects.objects[link.target].parent.unwrap();
+                assert_eq!(objects.links[parent].target, link.target);
+            }
+        }
+    }
+
+    #[rstest]
+    #[case::root(".", "valid", "root group", ".")]
+    #[case::ancestor_before_descendant(".", "", "root group", ".")]
+    #[case::nested("outer", "bad/name", "group outer", "bad/name")]
+    fn invalid_link_names_report_the_first_invalid_ancestor(
+        #[case] outer: &str,
+        #[case] inner: &str,
+        #[case] owner: &str,
+        #[case] invalid: &str,
+    ) {
+        let mut image = Image::starting_with(&[0; 64]);
+        let leaf = image.append(&Header::new().build());
+        let middle = image.append(
+            &Header::new()
+                .message(Message::new(
+                    MessageType::LINK,
+                    &HardLink::new(inner, leaf as u64).build(Widths::EIGHT),
+                ))
+                .build(),
+        );
+        let root = image.append(
+            &Header::new()
+                .message(Message::new(
+                    MessageType::LINK,
+                    &HardLink::new(outer, middle as u64).build(Widths::EIGHT),
+                ))
+                .build(),
+        );
+        image.place(
+            0,
+            &Superblock::new(Widths::EIGHT)
+                .root_header_address(root as u64)
+                .eof_address(image.as_bytes().len() as u64)
+                .build(),
+        );
+        let source = File::from_bytes(image.build()).unwrap();
+        let err = SourceObjects::discover(&source, &BTreeSet::new(), TraversalBudget::new(3, 2))
+            .map(|_| ())
+            .unwrap_err();
+        let Error::RepackUnsupported(reason) = err else {
+            panic!("expected RepackUnsupported, got {err:?}");
+        };
+        assert_eq!(
+            reason,
+            format!(
+                "{owner}: the link {invalid:?} has a name that is not a component of an object path, so the object it identifies has no path in the output"
+            )
+        );
+    }
+}

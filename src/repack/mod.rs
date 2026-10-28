@@ -137,7 +137,6 @@ use crate::filter_pipeline::{
     FilterPipeline,
 };
 use crate::libver::LibVer;
-use crate::object_graph::GraphObject;
 use crate::object_graph::TraversalBudget;
 use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::reader::Dataset;
@@ -704,7 +703,7 @@ fn populate(
             .map_or(&mut root_subgroups, |group| &mut group.subgroups);
         if let Some(child) = subgroups.next() {
             let mut group = GroupBuilder::new(child.link_name);
-            let subgroups = populate_group(&mut group, file, objects, child.object, child.path)?;
+            let subgroups = populate_group(&mut group, file, objects, child.object, &child.path)?;
             open.push(OpenGroup { group, subgroups });
             continue;
         }
@@ -744,12 +743,12 @@ fn populate_group<'a>(
     sink: &mut impl GroupSink,
     file: &Arc<File>,
     objects: &'a SourceObjects,
-    object: &'a GraphObject<SourceObject, String>,
+    object: &SourceObject,
     path: &ObjectPathBuf,
 ) -> Result<vec::IntoIter<Child<'a>>, Error> {
     // Attributes, copied verbatim where their bytes travel and re-encoded where
     // they do not; refused rather than dropped if neither is possible.
-    let group = file.group_at(object.value.id.header_address(), path.clone());
+    let group = file.group_at(object.id.header_address(), path.clone());
     let owner = group_owner(path);
     copy_attrs(
         sink,
@@ -759,10 +758,10 @@ fn populate_group<'a>(
         objects,
     )?;
 
-    let mut children = objects.children(object)?;
+    let mut children = objects.children(object, path)?;
     if let Some(child) = children
         .iter()
-        .find(|child| child.object.value.class == ObjectClass::Unknown)
+        .find(|child| child.object.class == ObjectClass::Unknown)
     {
         return Err(Error::RepackUnsupported(format!(
             "{owner}: the link {:?} refers to an object that is neither a group, a dataset nor a \
@@ -778,7 +777,7 @@ fn populate_group<'a>(
     // output before anything references it (the writer resolves by path, so the
     // order is not load-bearing, but it matches how the file reads).
     for child in children_of_class(&children, ObjectClass::NamedDatatype) {
-        let datatype = file.named_datatype_at(child.object.value.id.header_address())?;
+        let datatype = file.named_datatype_at(child.object.id.header_address())?;
         check_datatype(&datatype, &format!("committed datatype {}", child.path))?;
         sink.sink_commit_datatype(child.link_name, datatype);
     }
@@ -786,17 +785,17 @@ fn populate_group<'a>(
     // Datasets, sorted by name.
     children.sort_unstable_by_key(|child| child.link_name);
     for child in children_of_class(&children, ObjectClass::Dataset) {
-        let ds = file.dataset_at(child.object.value.id.header_address(), child.path.clone())?;
+        let ds = file.dataset_at(child.object.id.header_address(), child.path.clone())?;
         emit_dataset(
             sink.sink_dataset(child.link_name),
             &ds,
-            child.path,
+            &child.path,
             file,
             objects,
         )?;
     }
 
-    children.retain(|child| child.object.value.class == ObjectClass::Group);
+    children.retain(|child| child.object.class == ObjectClass::Group);
     Ok(children.into_iter())
 }
 
@@ -806,7 +805,7 @@ fn children_of_class<'a>(
 ) -> impl Iterator<Item = &'a Child<'a>> {
     children
         .iter()
-        .filter(move |child| child.object.value.class == class)
+        .filter(move |child| child.object.class == class)
 }
 
 /// Returns how an error message identifies the group at `path`.
@@ -950,7 +949,7 @@ fn emit_dataset(
 
     // Object-reference datasets store absolute object-header addresses that would
     // go stale on rewrite, so each reference is resolved to its target's *new*
-    // address (via the source address->path map and the writer's path resolution)
+    // address (via source object discovery and the writer's path resolution)
     // rather than copied. Routed here before the verbatim chunk-copy path so a
     // chunked one is refused (not copied with stale addresses).
     if is_object_reference(&datatype) {
@@ -1746,7 +1745,7 @@ fn committed_type_path(
     objects: &SourceObjects,
 ) -> Result<ObjectPathBuf, Error> {
     match objects.placement(address)? {
-        Some(Placement::Kept(path)) => Ok(path.clone()),
+        Some(Placement::Kept(path)) => Ok(path),
         Some(Placement::Dropped(path)) => Err(Error::RepackUnsupported(format!(
             "{user}: names the committed datatype {}, which this repack drops",
             dropped_object(path.as_ref(), address)
@@ -1885,7 +1884,7 @@ fn resolve_reference_address(
         return Ok(ObjectRefTarget::Raw(address));
     }
     match objects.placement(address)? {
-        Some(Placement::Kept(target_path)) => Ok(ObjectRefTarget::Path(target_path.clone())),
+        Some(Placement::Kept(target_path)) => Ok(ObjectRefTarget::Path(target_path)),
         Some(Placement::Dropped(target_path)) => Err(Error::RepackUnsupported(format!(
             "dataset {path}: object reference to dropped object {} cannot be repacked",
             dropped_object(target_path.as_ref(), address)
