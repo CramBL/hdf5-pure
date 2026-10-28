@@ -580,8 +580,7 @@ fn warm_chunk_scatter_uses_bounded_allocations(
         .iter()
         .flat_map(|value| value.to_le_bytes())
         .collect();
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("scatter.h5");
+    let path = test_util::temp::temp_path("scatter.h5");
     let mut builder = FileBuilder::new();
     builder
         .create_dataset("data")

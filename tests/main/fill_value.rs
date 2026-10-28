@@ -549,8 +549,7 @@ fn edit_session_created_dataset_preserves_fill_time() {
 #[case::allocate(FillTime::Alloc)]
 #[case::never(FillTime::Never)]
 fn write_dataset_rejects_an_explicit_fill_time(#[case] fill_time: FillTime) {
-    let dir = tempfile::tempdir().unwrap();
-    let p = dir.path().join("overwrite_fill_time.h5");
+    let p = test_util::temp::temp_path("overwrite_fill_time.h5");
     {
         let mut fb = FileBuilder::new();
         fb.create_dataset("d").with_i32_data(&[1, 2, 3]);

@@ -45,8 +45,7 @@ fn chunk_dimensions_written_by_pure_are_readable_by_libhdf5(
     )]
     index: ChunkIndex,
 ) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("dimensions.h5");
+    let path = test_util::temp::temp_path("dimensions.h5");
     let len = if index == ChunkIndex::SingleChunk {
         chunk
     } else {
@@ -126,8 +125,7 @@ fn chunk_dimensions_written_by_libhdf5_are_readable_by_pure(
     #[case] width: u8,
     #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
 ) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("dimensions.h5");
+    let path = test_util::temp::temp_path("dimensions.h5");
     let values: Vec<i32> = (0..200_000).collect();
     let wide: Vec<i64> = values.iter().copied().map(i64::from).collect();
     {

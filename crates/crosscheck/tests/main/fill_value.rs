@@ -364,8 +364,7 @@ fn pure_reads_c_written_dense_edge_chunks(
     #[values(false, true)] filtered: bool,
     #[values(false, true)] streaming: bool,
 ) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("dense_edges.h5");
+    let path = test_util::temp::temp_path("dense_edges.h5");
     let expected: Vec<i32> = (0..i32::try_from(shape.iter().product::<usize>()).unwrap()).collect();
     {
         let file = file::libhdf5_create_v110(&path);
