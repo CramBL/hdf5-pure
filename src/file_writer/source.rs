@@ -3,6 +3,7 @@
 //! The writer reconstructs individual objects during planning and emission. The retained plan
 //! contains allocations, object-use counts, and serialized file-space managers.
 
+use std::borrow::Cow;
 use std::io::BufWriter;
 use std::io::Write;
 use std::path::Path;
@@ -68,10 +69,15 @@ pub(crate) trait ObjectSource {
 
     /// Returns each hard link of the object at `index`, with its target's index.
     ///
+    /// Link names may borrow from the source.
+    ///
     /// # Errors
     ///
     /// Propagates source reading and object index errors.
-    fn links(&self, index: usize) -> Result<Vec<(String, usize)>, Error>;
+    fn links(
+        &self,
+        index: usize,
+    ) -> Result<impl ExactSizeIterator<Item = (Cow<'_, str>, usize)>, Error>;
 
     /// Returns the index of the object at `path` under the root group.
     ///
@@ -1109,7 +1115,6 @@ fn links_at(
 ) -> Result<Vec<LinkMessage>, Error> {
     source
         .links(index)?
-        .into_iter()
         .map(|(name, index)| {
             Ok(super::make_link(
                 &name,
@@ -1172,6 +1177,7 @@ mod tests {
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     use core::mem;
     use core::num::NonZeroUsize;
+    use std::borrow::Cow;
     use std::sync::Arc;
     use std::sync::Mutex;
 
@@ -1309,12 +1315,11 @@ mod tests {
             Ok(Object::dataset(builder)?)
         }
 
-        fn links(&self, index: usize) -> Result<Vec<(String, usize)>, Error> {
-            Ok(if index == 1 {
-                vec![("values".into(), 0)]
-            } else {
-                Vec::new()
-            })
+        fn links(
+            &self,
+            index: usize,
+        ) -> Result<impl ExactSizeIterator<Item = (Cow<'_, str>, usize)>, Error> {
+            Ok((0..usize::from(index == 1)).map(|_| (Cow::Borrowed("values"), 0)))
         }
 
         fn resolve(&self, path: &ObjectPathBuf) -> Result<usize, Error> {
@@ -1364,14 +1369,12 @@ mod tests {
             Ok(Object::group(&group.finish().attrs)?)
         }
 
-        fn links(&self, index: usize) -> Result<Vec<(String, usize)>, Error> {
-            Ok(if index == self.count {
-                (0..self.count)
-                    .map(|index| (format!("g{index:04}"), index))
-                    .collect()
-            } else {
-                Vec::new()
-            })
+        fn links(
+            &self,
+            index: usize,
+        ) -> Result<impl ExactSizeIterator<Item = (Cow<'_, str>, usize)>, Error> {
+            Ok((0..if index == self.count { self.count } else { 0 })
+                .map(|index| (Cow::Owned(format!("g{index:04}")), index)))
         }
 
         fn resolve(&self, path: &ObjectPathBuf) -> Result<usize, Error> {

@@ -108,6 +108,7 @@
 //! Planning and emission read metadata in separate passes, which increases source I/O and
 //! preparation work. [`File::open_streaming`] reads the source on demand.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::Path;
@@ -570,12 +571,14 @@ impl ObjectSource for RepackSource {
         }
     }
 
-    fn links(&self, index: usize) -> Result<Vec<(String, usize)>, Error> {
+    fn links(
+        &self,
+        index: usize,
+    ) -> Result<impl ExactSizeIterator<Item = (Cow<'_, str>, usize)>, Error> {
         Ok(self
             .objects
             .links(index)?
-            .map(|(name, index)| (name.to_string(), index))
-            .collect())
+            .map(|(name, index)| (Cow::Borrowed(name), index)))
     }
 
     fn resolve(&self, path: &ObjectPathBuf) -> Result<usize, Error> {

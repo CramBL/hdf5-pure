@@ -40,7 +40,7 @@ pub(super) struct SourceObjects {
     addresses: AddressContext,
     /// The retained objects in post order, with the root last.
     objects: Vec<SourceObject>,
-    /// The links of each object, grouped in the same order as `objects`.
+    /// The links of each object, grouped in the same order as `objects` and sorted by link name.
     links: Vec<SourceLink>,
     /// Object identities and their indices in `objects`, sorted by identity.
     kept: Vec<(ObjectId, usize)>,
@@ -97,7 +97,8 @@ impl SourceObjects {
             .collect();
         let mut objects: Vec<SourceObject> = Vec::with_capacity(descendants.len() + 1);
         let mut links = Vec::with_capacity(descendants.len());
-        for (index, object) in descendants.into_iter().chain([root]).enumerate() {
+        for (index, mut object) in descendants.into_iter().chain([root]).enumerate() {
+            object.links.sort_by(|a, b| a.label.cmp(&b.label));
             let start = links.len();
             for link in object.links {
                 objects
@@ -158,13 +159,16 @@ impl SourceObjects {
         self.objects.get(index).ok_or_else(missing_path)
     }
 
-    /// Returns link names and target indices for the object at `index`.
+    /// Returns borrowed link names and target indices for the object at `index`, in name order.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Format`] with [`FormatError::Internal`] if an object or link index is out
     /// of bounds.
-    pub(super) fn links(&self, index: usize) -> Result<impl Iterator<Item = (&str, usize)>, Error> {
+    pub(super) fn links(
+        &self,
+        index: usize,
+    ) -> Result<impl ExactSizeIterator<Item = (&str, usize)>, Error> {
         let object = self.object(index)?;
         Ok(self
             .links
@@ -176,6 +180,8 @@ impl SourceObjects {
 
     /// Resolves an output path to the retained object's index.
     ///
+    /// Uses binary search within each group's sorted link names.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Format`] with [`FormatError::Internal`] if `path` is absent or an object
@@ -183,11 +189,17 @@ impl SourceObjects {
     pub(super) fn index(&self, path: &ObjectPathBuf) -> Result<usize, Error> {
         let mut index = self.objects.len().checked_sub(1).ok_or_else(missing_path)?;
         for component in path.components() {
-            index = self
-                .links(index)?
-                .find(|(name, _)| *name == component.as_str())
-                .map(|(_, index)| index)
+            let links = self
+                .links
+                .get(self.object(index)?.links.clone())
                 .ok_or_else(missing_path)?;
+            let position =
+                links.partition_point(|link| link.link_name.as_str() < component.as_str());
+            let link = links
+                .get(position)
+                .filter(|link| link.link_name == component.as_str())
+                .ok_or_else(missing_path)?;
+            index = link.target;
         }
         Ok(index)
     }
