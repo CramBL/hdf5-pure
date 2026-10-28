@@ -80,8 +80,7 @@ use crate::reader::Dataset;
 /// ```
 /// use hdf5_pure::{File, FileBuilder, MaxExtent};
 /// # fn main() -> Result<(), hdf5_pure::Error> {
-/// # let dir = tempfile::tempdir()?;
-/// # let path = dir.path().join("samples.h5");
+/// # let path = test_util::temp::temp_path("samples.h5");
 /// let mut builder = FileBuilder::new();
 /// builder.create_dataset("samples")
 ///     .with_i32_data(&[])
@@ -297,8 +296,7 @@ impl std::fmt::Debug for BufferedAppender<'_> {
 /// ```
 /// use hdf5_pure::{File, FileBuilder, MaxExtent, OwnedBufferedAppender};
 /// # fn main() -> Result<(), hdf5_pure::Error> {
-/// # let dir = tempfile::tempdir()?;
-/// # let path = dir.path().join("samples.h5");
+/// # let path = test_util::temp::temp_path("samples.h5");
 /// struct Samples {
 ///     appender: OwnedBufferedAppender,
 /// }
@@ -702,8 +700,7 @@ mod tests {
     #[case::before_any_elements(0)]
     #[case::after_a_complete_chunk(4)]
     fn write_failure_retains_exact_remaining_bytes_and_prevents_retries(#[case] landed: usize) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("failure.h5");
+        let path = test_util::temp::temp_path("failure.h5");
         Unlimited::<i32>::new("d", &[], 4).pure_create(&path);
         let file = File::open_rw(&path).unwrap();
         let mut dataset = file.dataset("d").unwrap();
@@ -749,8 +746,7 @@ mod tests {
     #[case::discard(true)]
     #[case::drop(false)]
     fn failed_flush_never_retries_during_teardown(#[case] discard: bool) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("flush.h5");
+        let path = test_util::temp::temp_path("flush.h5");
         Unlimited::<i32>::new("d", &[], 4).pure_create(&path);
         let file = File::open_rw(&path).unwrap();
         let mut dataset = file.dataset("d").unwrap();
@@ -785,8 +781,7 @@ mod tests {
     #[case::finish(true)]
     #[case::drop(false)]
     fn terminal_write_failure_releases_the_claim_without_retrying(#[case] finish: bool) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("terminal.h5");
+        let path = test_util::temp::temp_path("terminal.h5");
         Unlimited::<i32>::new("d", &[], 4).pure_create(&path);
         let file = File::open_rw(&path).unwrap();
         let mut dataset = file.dataset("d").unwrap();
@@ -819,8 +814,7 @@ mod tests {
     #[case::before_any_elements(0)]
     #[case::after_a_complete_chunk(4)]
     fn owned_write_failure_preserves_the_unwritten_tail_without_retrying(#[case] landed: usize) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("owned_failure.h5");
+        let path = test_util::temp::temp_path("owned_failure.h5");
         Unlimited::<i32>::new("d", &[], 4).pure_create(&path);
         let file = File::open_rw(&path).unwrap();
         let mut appender = file.dataset("d").unwrap().into_buffered_appender().unwrap();

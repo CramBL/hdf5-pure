@@ -257,8 +257,7 @@ fn staged_dense_attributes_finalize_provenance_after_appends(
     #[case] chunked: bool,
     #[values(false, true)] page: bool,
 ) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("staged_provenance.h5");
+    let path = test_util::temp::temp_path("staged_provenance.h5");
     let mut builder = FileBuilder::new();
     builder.with_userblock(UserblockSize::try_from(4096).unwrap());
     if page {

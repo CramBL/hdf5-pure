@@ -770,8 +770,7 @@ fn incompatible_file_space_bounds_fail_before_output(
     #[case] strategy: FileSpaceStrategy,
     #[values(false, true)] into_writer: bool,
 ) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("destination.h5");
+    let path = test_util::temp::temp_path("destination.h5");
     let mut builder = FileBuilder::new();
     builder.create_dataset("d").with_i32_data(&[1, 2, 3]);
     let source = File::from_bytes(builder.finish().unwrap()).unwrap();

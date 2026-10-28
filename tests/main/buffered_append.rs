@@ -921,8 +921,7 @@ fn dropping_a_lossy_appender_still_writes_its_partial_tail() {
 #[case::whole_element(&[1, 0, 0, 0])]
 #[case::split_element(&[1, 0])]
 fn closed_session_rejects_buffered_operations_without_accepting_bytes(#[case] prior: &[u8]) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("closed.h5");
+    let path = test_util::temp::temp_path("closed.h5");
     Unlimited::<i32>::new("d", &[], 8).pure_create(&path);
     let file = File::open_rw(&path).unwrap();
     let mut dataset = file.dataset("d").unwrap();
@@ -949,8 +948,7 @@ fn closed_session_rejects_buffered_operations_without_accepting_bytes(#[case] pr
 #[case::empty(&[])]
 #[case::sub_chunk(&[1, 0, 0, 0])]
 fn closed_session_rejects_buffered_finish(#[case] prior: &[u8]) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("closed_finish.h5");
+    let path = test_util::temp::temp_path("closed_finish.h5");
     Unlimited::<i32>::new("d", &[], 8).pure_create(&path);
     let file = File::open_rw(&path).unwrap();
     let mut dataset = file.dataset("d").unwrap();
@@ -969,8 +967,7 @@ fn an_owned_appender_retains_the_session_without_a_lifetime_parameter() {
         appender: OwnedBufferedAppender,
     }
 
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("retained.h5");
+    let path = test_util::temp::temp_path("retained.h5");
     Unlimited::<i32>::new("d", &[], 4)
         .filters(SHUFFLE_DEFLATE)
         .pure_create(&path);
@@ -993,8 +990,7 @@ fn an_owned_appender_retains_the_session_without_a_lifetime_parameter() {
 
 #[test]
 fn owned_automatic_writes_end_at_chunk_boundaries_and_preserve_a_split_element() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("split_owned.h5");
+    let path = test_util::temp::temp_path("split_owned.h5");
     Unlimited::<i32>::new("d", &[], 4).pure_create(&path);
     let file = File::open_rw(&path).unwrap();
     let mut appender = file
@@ -1029,8 +1025,7 @@ fn owned_automatic_writes_end_at_chunk_boundaries_and_preserve_a_split_element()
 #[case::owned_claim(true)]
 #[case::borrowed_claim(false)]
 fn mixed_ownership_conflicts_preserve_the_first_claim(#[case] owned_first: bool) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("mixed_claims.h5");
+    let path = test_util::temp::temp_path("mixed_claims.h5");
     Unlimited::<i32>::new("d", &[], 4).pure_create(&path);
     let file = File::open_rw(&path).unwrap();
     let mut borrowed = file.dataset("d").unwrap();
@@ -1079,8 +1074,7 @@ fn owned_terminal_operations_release_the_claim(
     #[case] termination: OwnedTermination,
     #[case] expected: &[i32],
 ) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("owned_terminal.h5");
+    let path = test_util::temp::temp_path("owned_terminal.h5");
     Unlimited::<i32>::new("d", &[], 4).pure_create(&path);
     let file = File::open_rw(&path).unwrap();
     let mut appender = file.dataset("d").unwrap().into_buffered_appender().unwrap();
@@ -1109,8 +1103,7 @@ fn owned_terminal_operations_release_the_claim(
 
 #[test]
 fn an_owned_appender_retains_its_buffer_and_claim_across_an_unrelated_commit() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("retained_commit.h5");
+    let path = test_util::temp::temp_path("retained_commit.h5");
     Unlimited::<i32>::new("d", &[], 4).pure_create(&path);
     let file = File::open_rw(&path).unwrap();
     let mut appender = file.dataset("d").unwrap().into_buffered_appender().unwrap();
@@ -1141,8 +1134,7 @@ fn an_owned_appender_retains_its_buffer_and_claim_across_an_unrelated_commit() {
 
 #[test]
 fn owned_appender_writes_leave_unrelated_edits_staged() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("owned_staged.h5");
+    let path = test_util::temp::temp_path("owned_staged.h5");
     Unlimited::new("d", &[0i32, 1], 4)
         .filters(SHUFFLE_DEFLATE)
         .pure_create(&path);
@@ -1168,8 +1160,7 @@ fn owned_appender_writes_leave_unrelated_edits_staged() {
 
 #[test]
 fn an_owned_address_only_handle_preserves_session_restrictions() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("owned_reference.h5");
+    let path = test_util::temp::temp_path("owned_reference.h5");
     let mut builder = FileBuilder::new();
     Unlimited::<i32>::new("d", &[], 4).add_to(&mut builder);
     Unlimited::<i32>::new("other", &[], 4).add_to(&mut builder);
@@ -1220,8 +1211,7 @@ fn an_owned_address_only_handle_preserves_session_restrictions() {
 #[case::whole_element(&[1, 0, 0, 0])]
 #[case::split_element(&[1, 0])]
 fn closed_session_rejects_owned_operations_without_accepting_bytes(#[case] prior: &[u8]) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("owned_closed.h5");
+    let path = test_util::temp::temp_path("owned_closed.h5");
     Unlimited::<i32>::new("d", &[], 8).pure_create(&path);
     let file = File::open_rw(&path).unwrap();
     let mut appender = file.dataset("d").unwrap().into_buffered_appender().unwrap();
@@ -1246,8 +1236,7 @@ fn closed_session_rejects_owned_operations_without_accepting_bytes(#[case] prior
 #[case::empty(&[])]
 #[case::sub_chunk(&[1, 0, 0, 0])]
 fn closed_session_rejects_owned_finish(#[case] prior: &[u8]) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("owned_closed_finish.h5");
+    let path = test_util::temp::temp_path("owned_closed_finish.h5");
     Unlimited::<i32>::new("d", &[], 8).pure_create(&path);
     let file = File::open_rw(&path).unwrap();
     let mut appender = file.dataset("d").unwrap().into_buffered_appender().unwrap();

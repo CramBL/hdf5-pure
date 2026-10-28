@@ -1168,8 +1168,7 @@ fn dense_attributes_resolve_committed_and_global_heap_references_through_relocat
     #[case] page: bool,
     #[case] huge_objects: u64,
 ) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("dense_references.h5");
+    let path = test_util::temp::temp_path("dense_references.h5");
     let strings: Vec<_> = (0..count).map(|i| format!("value_{i}")).collect();
     let mut builder = FileBuilder::new();
     builder.with_userblock(UserblockSize::try_from(4096).unwrap());
