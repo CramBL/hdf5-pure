@@ -36,6 +36,7 @@ pub mod group_filter;
 pub mod heap_allocations;
 #[cfg(feature = "hdf5")]
 pub mod heap_interop;
+pub mod huge_links;
 pub mod legacy;
 pub mod legacy_attributes;
 pub mod legacy_chunked;

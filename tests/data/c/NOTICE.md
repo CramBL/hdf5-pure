@@ -14,8 +14,6 @@ encoded addresses.
 dependency pinned in `Cargo.lock`. It selects the committed-fixture cases and sets
 `HDF5_PURE_UPDATE_TEST_DATA`. Without that variable, those cases read the existing copies.
 
-- `huge_links_12.h5`: a group of 12 links, each name so long that its link
-  message is a huge heap object, for the dense-link walk in `src/group_v2.rs`.
 - `paged_index.h5`: a paged, persisting file whose chunk index the C allocator
   placed as metadata, for `src/edit/`.
 - `generic_large.h5`: a paged, persisting file with an attribute far larger

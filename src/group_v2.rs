@@ -41,6 +41,12 @@ use crate::superblock::Superblock;
 use crate::symbol_table::SymbolTableMessage;
 use crate::width::{FormatWidths, OffsetWidth};
 
+#[cfg(test)]
+test_util_hdf5::hdf5_1_10_tests! {
+    #[path = "group_v2_native_crosschecks.rs"]
+    mod native_crosschecks;
+}
+
 /// Resolves `path` from the root group, following hard and soft links.
 ///
 /// # Errors
@@ -1957,7 +1963,13 @@ mod huge_link_tests {
         assert_dense_walk(test_util::modern::huge_links_12());
     }
 
-    fn assert_dense_walk(bytes: Vec<u8>) {
+    /// Asserts complete link names and one huge-index parse for each dense-link walk.
+    ///
+    /// # Panics
+    ///
+    /// Panics if metadata cannot be read, the names differ, or either walk's parse
+    /// count differs from one.
+    pub(super) fn assert_dense_walk(bytes: Vec<u8>) {
         const COUNT: usize = 12;
         let (link_info, fh_addr, widths) = dense_link_info(&bytes);
 
@@ -1996,12 +2008,13 @@ mod huge_link_tests {
             "the streaming walk parsed the huge-object index per link rather than per walk"
         );
 
-        let names: Vec<&str> = buffered.iter().map(|e| e.name.as_str()).collect();
-        for (i, entry) in streamed.iter().enumerate() {
-            assert!(
-                names.contains(&entry.name.as_str()),
-                "link {i} differs between the two backends"
-            );
-        }
+        let mut buffered: Vec<_> = buffered.iter().map(|entry| entry.name.as_str()).collect();
+        let mut streamed: Vec<_> = streamed.iter().map(|entry| entry.name.as_str()).collect();
+        let mut expected = test_util_hdf5::huge_links::link_names();
+        buffered.sort();
+        streamed.sort();
+        expected.sort();
+        assert_eq!(buffered, expected);
+        assert_eq!(streamed, expected);
     }
 }

@@ -57,8 +57,6 @@ use hdf5_pure_format::__private::ChunkIndexLayout;
 use hdf5_pure_format::__private::DataLayout;
 use hdf5_pure_format::__private::ExtensibleArrayHeader;
 use hdf5_pure_format::__private::FormatWidths;
-use hdf5_pure_format::__private::FractalHeapHeader;
-use hdf5_pure_format::__private::LinkInfoMessage;
 use hdf5_pure_format::__private::ObjectHeader;
 
 use crate::numeric::ByteOrder as NumericOrder;
@@ -81,7 +79,7 @@ pub enum Fixture {
 }
 
 impl Fixture {
-    /// Returns the file name shared by generated and committed copies.
+    /// Returns a suggested `.h5` file name.
     pub fn file_name(self) -> &'static str {
         match self {
             Self::CommittedDatatypeV1 => "committed_datatype_v1.h5",
@@ -396,30 +394,7 @@ impl Fixture {
                 let bb = storage::root_object_address(file, bytes, "bb");
                 assert_eq!(aa, bb);
             }
-            Self::HugeLinks12 => {
-                let address = storage::root_object_address(file, bytes, "g");
-                let header = parse_header(file, bytes, address);
-                let message = header
-                    .messages
-                    .iter()
-                    .find(|message| message.msg_type == MessageType::LINK_INFO)
-                    .unwrap();
-                let info = LinkInfoMessage::parse_with_offset_width(
-                    &message.data,
-                    file.superblock().offset_size,
-                )
-                .unwrap();
-                assert!(info.btree_name_index_address.is_some());
-                let heap = FractalHeapHeader::parse(
-                    bytes,
-                    usize::try_from(info.fractal_heap_address.unwrap().get()).unwrap(),
-                    file.superblock().offset_size.get(),
-                    file.superblock().length_size.get(),
-                )
-                .unwrap();
-                assert_eq!(heap.huge_objects_count, 12);
-                assert_eq!(heap.managed_objects_count, 0);
-            }
+            Self::HugeLinks12 => crate::huge_links::assert_storage(file, bytes),
             Self::PagedIndex => assert_paged_index_storage(file, bytes),
         }
     }
