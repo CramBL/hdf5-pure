@@ -52,6 +52,11 @@ impl From<FormatError> for ResolveError {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
+    /// An append allocation or reference write has an unconfirmed outcome.
+    ///
+    /// Further appends, commits, and synchronization are rejected in this session. Close and
+    /// reopen the file before editing again. An interrupted file can fail to reopen.
+    AllocationPublicationUncertain,
     /// The dataset or file is not a supported target for the fast, immediate
     /// in-place append
     /// ([`Dataset::append`](crate::Dataset::append)) - for
@@ -310,6 +315,10 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Error::AllocationPublicationUncertain => write!(
+                f,
+                "allocation publication is unconfirmed; close and reopen the file before editing"
+            ),
             Error::Io(e) => write!(f, "I/O error: {e}"),
             Error::Format(e) => write!(f, "HDF5 format error: {e}"),
             Error::InvalidFractalHeapStorage { address } => {

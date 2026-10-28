@@ -121,31 +121,15 @@ pub(crate) enum WriteBuffering {
     /// rather than to widen what this merges — so the guarantee now holds under
     /// [`Unbuffered`](WriteBuffering::Unbuffered) too.
     Operation { page_size: u64, max_bytes: usize },
-    /// Dirty bytes live until `max_bytes` of them accumulate, an `fsync` is
-    /// issued, or the session closes — spanning both operations and the ordering
-    /// barriers inside them.
+    /// Retains dirty bytes across general editor ordering barriers.
     ///
-    /// This is the `H5Pset_page_buffer_size` analogue, and the one mode that does
-    /// nothing at [`ordering_barrier`](FileImage::ordering_barrier). That is the
-    /// whole of what this layer decides. What it costs is a file-format question
-    /// rather than a byte-image one — held across a barrier, an operation's
-    /// publish points are issued ahead of the content they name, and the file a
-    /// crash then leaves can read *clean* and return the wrong bytes — so it is
-    /// stated where the format lives, on
-    /// [`WriteEngine::set_page_buffer_size`](crate::edit::WriteEngine::set_page_buffer_size)
-    /// and on the public
-    /// [`with_page_buffer_size`](crate::FileAccessProperties::with_page_buffer_size).
+    /// The buffer is drained when its budget is reached, when synchronization is requested, or
+    /// when the session closes. Immediate appends also drain it at allocation and reference
+    /// publication boundaries. Staged commits can retain bytes after returning.
     ///
-    /// Installing this mode is not the whole feature: the engine raises the
-    /// superblock's write-access flag for the life of such a session, so those
-    /// files are rejected. libhdf5 ships its page buffer
-    /// without one; this mode is not offered without it (issue #308).
-    ///
-    /// A completed commit's bytes may still be in this process's memory when it
-    /// returns. The engine refuses to pair this with
-    /// [`SyncPolicy::Always`](crate::SyncPolicy::Always), where every barrier is
-    /// an `fsync` that would flush it: the caller would pay the mark and hold
-    /// nothing.
+    /// The engine requires [`SyncPolicy::OnClose`](crate::SyncPolicy::OnClose) and marks the
+    /// superblock for the session's lifetime. The requirements and recovery limits are described
+    /// by [`FileAccessProperties::with_page_buffer_size`](crate::FileAccessProperties::with_page_buffer_size).
     Session { page_size: u64, max_bytes: usize },
 }
 
@@ -211,43 +195,50 @@ pub(crate) trait FileImage: Source + Send + Sync {
     /// applies to the discarded range.
     fn truncate(&mut self, len: u64) -> Result<(), Error>;
 
-    /// Flush buffered writes and force the file's *data* to durable storage.
+    /// Issues buffered writes and forces file content to durable storage.
     ///
-    /// [`SyncPolicy::OnClose`](crate::SyncPolicy) skips every in-session call to
-    /// this and to [`sync_all`](Self::sync_all), so an implementation that buffers
-    /// must not treat this as its only drain: a buffer emptied nowhere else would
-    /// hold a *committed* edit in this process's memory under that policy.
-    /// [`ordering_barrier`](Self::ordering_barrier) is the other drain, and the
-    /// engine calls it at every point where the order of two writes matters —
-    /// which every operation ends with. Which of the two a given
-    /// [`WriteBuffering`] answers to is that enum's whole subject.
+    /// File-length changes require [`sync_all`](Self::sync_all). Callers using
+    /// [`SyncPolicy::OnClose`](crate::SyncPolicy::OnClose) use [`flush`](Self::flush) for append
+    /// ordering without requesting durability.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if writing or synchronizing content fails, or [`Error::Format`] if
+    /// reading or representing a clean gap between pending ranges fails.
     fn sync_data(&mut self) -> Result<(), Error>;
 
-    /// Flush buffered writes and force the file's data **and metadata** to
-    /// durable storage. Distinct from [`sync_data`](Self::sync_data) because a
-    /// commit changes the file's length, which lives in that metadata.
+    /// Issues buffered writes and forces file content and metadata to durable storage.
     ///
-    /// The distinction is not observable in this crate's test suite, which
-    /// simulates a crash by copying the file rather than by losing the page
-    /// cache. Weakening a call site from `sync_all` to `sync_data` would pass
-    /// every test and lose a committed file's length on power loss, so the
-    /// choice at each call site has to be preserved by inspection.
+    /// Allocation publication uses this after changing the file's recorded EOF under
+    /// [`SyncPolicy::Always`](crate::SyncPolicy::Always).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if writing or synchronizing content or metadata fails, or
+    /// [`Error::Format`] if reading or representing a clean gap between pending ranges fails.
     fn sync_all(&mut self) -> Result<(), Error>;
 
-    /// An ordering point has been reached: every write made before it must reach
-    /// the operating system before any write made after it.
+    /// Drains operation buffering at a general editor ordering point.
     ///
-    /// Named for the event rather than the effect, because the effect is the
-    /// mode's to choose. [`WriteBuffering::Operation`] issues what it holds, which
-    /// is what makes gathering free — the engine's barriers keep their ordering
-    /// meaning under every [`SyncPolicy`](crate::SyncPolicy), and every operation
-    /// ends with one, so a finished commit or append has reached the operating
-    /// system either way. [`WriteBuffering::Session`] deliberately does nothing
-    /// here; that is exactly the guarantee an explicit page buffer trades.
+    /// [`WriteBuffering::Session`] retains its dirty bytes. Append allocation and reference
+    /// publication use [`flush`](Self::flush) to drain every buffering mode.
     ///
-    /// It forces nothing to durable storage. That is [`sync_all`](Self::sync_all)'s
-    /// job, and whether it happens is the policy's decision.
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if issuing operation-buffered writes fails, or [`Error::Format`] if
+    /// reading or representing a clean gap between pending ranges fails.
     fn ordering_barrier(&mut self) -> Result<(), Error>;
+
+    /// Issues every pending write without requesting durability.
+    ///
+    /// Every buffering mode is drained, including [`WriteBuffering::Session`]. Successful
+    /// completion orders the pending writes before any subsequently issued reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if issuing pending writes fails, or [`Error::Format`] if reading
+    /// or representing a clean gap between pending ranges fails.
+    fn flush(&mut self) -> Result<(), Error>;
 
     /// Every issued write as `(offset, length)`, in the order it went out. What
     /// a count cannot say: that a publish point followed the bytes it names.
@@ -292,58 +283,15 @@ pub(crate) trait FileImage: Source + Send + Sync {
     }
 }
 
-/// An open read/write handle plus the writes not yet issued against it: the one
-/// place either image touches the disk.
+/// An open file handle and its pending writes.
 ///
-/// # What it gathers
+/// Pending writes are stored as disjoint byte runs and merged when they touch or overlap.
+/// Flushing joins runs within each dirty page, reading clean bytes between them before issuing
+/// the combined write. The same implementation is used by mirrored and bounded images.
 ///
-/// A commit or an in-place append issues many small writes into a few pages. One
-/// measured in-place append costs five write calls — the chunk (appended here,
-/// though it may instead be written into freed space, which drops the next
-/// call), the superblock's recorded end-of-file, and a patch each to the chunk index,
-/// the array header and the object header's dataspace dimension — so four small
-/// patches around one payload write, landing in pages the *next* append dirties
-/// again. An append that has to allocate a new extensible-array data block costs
-/// eight, which the first append into a dataset always does.
-///
-/// A barrier is where held bytes are released, and an append puts one between
-/// each pair of phases that must reach the disk in order, so on the appends there
-/// is little left to merge: measured on a paged fixture, four of those five
-/// writes fall in two pages, two apiece, and all five still go out separately.
-/// What the gathering collects is the commit tail, which puts many writes into a
-/// handful of pages as it rebuilds a group, repoints a root and re-homes the
-/// free-space managers: a commit staging eight dataset creations makes 24 write
-/// calls and issues 4 (issue #288).
-///
-/// Pending writes are held as disjoint byte runs, merged on insert when they
-/// touch or overlap, and emitted at flush as **one write per dirty page**: runs
-/// sharing a page are joined, and the clean bytes between them are read back so
-/// the join is a single write rather than a lie. That read is the deliberate
-/// trade — it is a page-cache hit against a write this crate is trying not to
-/// issue, and the flash it is issued to charges for writes.
-///
-/// # Why both images share it
-///
-/// The mirror already holds every byte of the file, so for that backing the runs
-/// are a second copy of what it is about to write — bounded by the byte budget,
-/// and it could instead have gathered dirty *page indices* and sliced its own
-/// buffer at flush. That was weighed and declined: the saving is ~78 KB per
-/// sixteen appends with no change in peak, and the cost would be two
-/// implementations of write ordering, of which only one would be exercised by any
-/// given test. Every rule in this module's tests is asserted `for backing in
-/// BACKINGS`, from one body — including the crash-ordering rules — and this crate
-/// has already paid for the alternative once, where two emit paths each needed
-/// their own tests and a test through one was blind to the other.
-///
-/// # What it does not do
-///
-/// It does not evict. Exceeding the byte budget flushes everything rather than
-/// choosing a victim page. Under [`WriteBuffering::Operation`] the budget is only
-/// ever reached by one large operation, whose runs are long and contiguous and
-/// gain nothing from being kept; under [`WriteBuffering::Session`] it is reached
-/// by accumulation, and flushing whole then costs one extra pass over pages that
-/// were about to be written anyway. Choosing a victim would buy the difference
-/// between those two, which no measurement here has asked for.
+/// Exceeding the byte budget drains every pending run. Operation buffering also drains at
+/// general ordering barriers. Session buffering retains bytes at those barriers, while append
+/// publication and explicit synchronization drain both modes.
 pub(crate) struct BufferedWrites {
     handle: fs::File,
     mode: WriteBuffering,
@@ -676,12 +624,12 @@ impl BufferedWrites {
         }
     }
 
-    /// Issue what is gathered, so everything written before this reaches the
-    /// operating system before anything written after it.
+    /// Drains operation buffering while retaining session buffering.
     ///
-    /// Dispatched rather than flushed unconditionally — which would be
-    /// equivalent today, since an unbuffered image never holds runs — so that a
-    /// mode which does *not* release here has to say so instead of inheriting it.
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if issuing gathered writes fails, or [`Error::Format`] if reading
+    /// or representing a clean gap between pending ranges fails.
     pub(crate) fn ordering_barrier(&mut self) -> Result<(), Error> {
         match self.mode {
             WriteBuffering::Unbuffered | WriteBuffering::Session { .. } => Ok(()),
@@ -689,7 +637,7 @@ impl BufferedWrites {
         }
     }
 
-    /// Issue every pending run, joining those that share a page into one write.
+    /// Issues every pending run, joining those that share a page into one write.
     ///
     /// A run is removed from the map only once it has been issued, and a run that
     /// cannot be is put back. Taking the whole map up front and returning on the
@@ -699,6 +647,11 @@ impl BufferedWrites {
     /// report success over a batch it had silently lost. An error here means the
     /// writes are still pending and the caller may retry or report; it never
     /// means they are gone.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if issuing writes fails, or [`Error::Format`] if reading or
+    /// representing a clean gap between pending ranges fails.
     pub(crate) fn flush(&mut self) -> Result<(), Error> {
         // A flush is where the page size is spent; an unbuffered image never
         // reaches here with runs, and a mode change flushes under the old size.
@@ -961,6 +914,10 @@ impl FileImage for MirrorImage {
 
     fn ordering_barrier(&mut self) -> Result<(), Error> {
         self.writes.ordering_barrier()
+    }
+
+    fn flush(&mut self) -> Result<(), Error> {
+        self.writes.flush()
     }
 
     #[cfg(test)]
@@ -1349,6 +1306,10 @@ impl FileImage for HandleImage {
         self.writes.ordering_barrier()
     }
 
+    fn flush(&mut self) -> Result<(), Error> {
+        self.writes.flush()
+    }
+
     #[cfg(test)]
     fn issued_write_order(&self) -> Vec<(u64, u64)> {
         self.writes.issued_order().to_vec()
@@ -1446,6 +1407,10 @@ impl FileImage for CountingImage {
 
     fn ordering_barrier(&mut self) -> Result<(), Error> {
         self.inner.ordering_barrier()
+    }
+
+    fn flush(&mut self) -> Result<(), Error> {
+        self.inner.flush()
     }
 
     fn issued_write_order(&self) -> Vec<(u64, u64)> {
@@ -1551,6 +1516,10 @@ impl FileImage for TornWriteImage {
         self.inner.ordering_barrier()
     }
 
+    fn flush(&mut self) -> Result<(), Error> {
+        self.inner.flush()
+    }
+
     fn issued_write_order(&self) -> Vec<(u64, u64)> {
         self.inner.issued_write_order()
     }
@@ -1618,6 +1587,10 @@ impl FileImage for SourceOnlyImage {
         self.0.ordering_barrier()
     }
 
+    fn flush(&mut self) -> Result<(), Error> {
+        self.0.flush()
+    }
+
     #[cfg(test)]
     fn issued_write_order(&self) -> Vec<(u64, u64)> {
         self.0.issued_write_order()
@@ -1630,6 +1603,8 @@ impl FileImage for SourceOnlyImage {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     #[rstest::rstest]
@@ -2380,6 +2355,32 @@ mod tests {
             );
             assert_in_sync(&path, img.as_ref(), backing);
         }
+    }
+
+    #[rstest]
+    #[case::mirror(Backing::Mirror)]
+    #[case::bounded(Backing::Handle)]
+    fn explicit_flush_drains_session_buffering_without_changing_retention(
+        #[case] backing: Backing,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let buffering = WriteBuffering::Session {
+            page_size: PAGE,
+            max_bytes: 4096,
+        };
+        let (path, mut image) =
+            gathering_named(directory.path(), "flushed", b"abcdef", backing, buffering);
+        image.write_at(0, b"Z").unwrap();
+        image.ordering_barrier().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"abcdef");
+        image.flush().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"Zbcdef");
+        image.write_at(1, b"Y").unwrap();
+        image.ordering_barrier().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"Zbcdef");
+        image.flush().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"ZYcdef");
+        drop(image);
     }
 
     /// Operation retention drains at every ordering barrier; session retention

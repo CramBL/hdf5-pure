@@ -11,6 +11,7 @@ use hdf5_pure_format::__private::ChunkedGeometry;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::{FreeList, PageTransition, PageType, SessionSpace};
 
+use hdf5_pure_core::__private::{FileRange, PhysicalAddress};
 use hdf5_pure_core::MetadataBytes;
 
 use crate::DatatypeByteOrder;
@@ -34,6 +35,9 @@ use crate::type_builders;
 use crate::width::FormatWidths;
 
 use super::LOSSY_TAIL_REFUSAL;
+use super::allocation::{
+    AllocationPublication, ConfirmedPublication, ProvisionalAllocation, PublicationAction,
+};
 use super::context::FileContext;
 use super::staging::StagedOp;
 
@@ -307,12 +311,14 @@ impl WriteEngine {
     /// bytes, an unsupported target, or conflicting staged edits. Returns
     /// [`Error::SwmrAppendUnsupported`] for filtered or unaligned SWMR appends. Returns metadata,
     /// allocation, encoding, and I/O errors.
+    /// Returns [`Error::AllocationPublicationUncertain`] if an earlier append outcome is uncertain.
     pub(crate) fn append_inplace_gathered(
         &mut self,
         target: AppendTarget<'_>,
         b: &AppendBuilder,
         max_phase: u8,
     ) -> Result<(), Error> {
+        self.context.allocations.available()?;
         if b.dt_conflict() {
             return Err(Error::AppendInPlaceUnsupported(
                 "append mixes element types in one call; use one element type per append",
@@ -764,6 +770,45 @@ impl EditStore<'_> {
         }
         self.image.append(bytes)
     }
+    /// Places bytes in reusable space, a classic aggregate, or at end-of-file.
+    ///
+    /// # Errors
+    ///
+    /// Returns the placement, address-conversion, or I/O error.
+    fn allocate_bytes(&mut self, bytes: &[u8], class: AllocationClass) -> Result<u64, Error> {
+        let extent = if let Some(reserve) = self.reserve.as_deref_mut() {
+            reserve.alloc(bytes.len() as u64)
+        } else if self.reuse_session_space {
+            self.space
+                .allocate_with_page_type(bytes.len() as u64, class, PageType::Raw)
+        } else {
+            None
+        };
+        if let Some(extent) = extent {
+            let at = self
+                .context
+                .addresses()
+                .resolve(StoredAddress::new(extent.start()))?;
+            self.image.write_at(at.get(), bytes)?;
+            return Ok(at.get());
+        }
+        if let (Some(aggregation), Some(size)) = (
+            self.aggregation.as_deref_mut(),
+            NonZeroU64::new(bytes.len() as u64),
+        ) {
+            let Placement::Aggregated { addr, end, .. } =
+                aggregation.reserve(self.context.addresses(), self.space, size, class)?
+            else {
+                return Err(FormatError::Internal(
+                    "aggregate reservation is not aggregated".into(),
+                )
+                .into());
+            };
+            AggregateSpace::place(self.image, addr, bytes, end)?;
+            return Ok(addr);
+        }
+        self.append_into_raw_page(bytes)
+    }
 }
 
 impl crate::source::Source for EditStore<'_> {
@@ -819,61 +864,77 @@ impl Store for EditStore<'_> {
         }
     }
 
-    fn recorded_eof(&self) -> u64 {
-        self.context.superblock().eof_address
+    fn allocation_publication(&self) -> &AllocationPublication {
+        &self.context.allocations
     }
 
-    fn allocate(&mut self, bytes: &[u8], class: AllocationClass) -> Result<u64, Error> {
-        let extent = if let Some(reserve) = self.reserve.as_deref_mut() {
-            reserve.alloc(bytes.len() as u64)
-        } else if self.reuse_session_space {
-            self.space
-                .allocate_with_page_type(bytes.len() as u64, class, PageType::Raw)
-        } else {
-            None
-        };
-        if let Some(extent) = extent {
-            let at = self
-                .context
-                .addresses()
-                .resolve(StoredAddress::new(extent.start()))?;
-            self.image.write_at(at.get(), bytes)?;
-            return Ok(at.get());
-        }
-        if let (Some(aggregation), Some(size)) = (
-            self.aggregation.as_deref_mut(),
-            NonZeroU64::new(bytes.len() as u64),
-        ) {
-            let Placement::Aggregated { addr, end, .. } =
-                aggregation.reserve(self.context.addresses(), self.space, size, class)?
-            else {
-                return Err(FormatError::Internal(
-                    "aggregate reservation is not aggregated".into(),
-                )
+    fn allocate(
+        &mut self,
+        bytes: &[u8],
+        class: AllocationClass,
+    ) -> Result<ProvisionalAllocation, Error> {
+        self.context.allocations.available()?;
+        let result = self.allocate_bytes(bytes, class).and_then(|address| {
+            let range = FileRange::new(PhysicalAddress::new(address), bytes.len() as u64)?;
+            let allocation = self.context.allocations.provision(range)?;
+            if allocation.range().end().get() > self.image.len() {
+                return Err(FormatError::TruncatedFile {
+                    expected_eof: allocation.range().end().get(),
+                    actual_len: self.image.len(),
+                }
                 .into());
-            };
-            AggregateSpace::place(self.image, addr, bytes, end)?;
-            return Ok(addr);
+            }
+            Ok(allocation)
+        });
+        if result.is_err() {
+            self.context.allocations.make_uncertain();
         }
-        self.append_into_raw_page(bytes)
+        result
+    }
+
+    fn publish_allocations(&mut self) -> Result<ConfirmedPublication, Error> {
+        let attempt = match self.context.allocations.begin()? {
+            PublicationAction::Current(publication) => return Ok(publication),
+            PublicationAction::Publish(attempt) => attempt,
+        };
+        match self.sync_policy {
+            SyncPolicy::Always => self.image.sync_data()?,
+            SyncPolicy::OnClose => self.image.flush()?,
+        }
+        if self.image.len() != self.context.superblock().eof_address {
+            let mut superblock = self.context.superblock().clone();
+            superblock.eof_address = self.image.len();
+            let publication = self.context.propose(superblock)?.encode()?;
+            self.image
+                .write_at(self.context.signature().get(), publication.bytes())?;
+            match self.sync_policy {
+                SyncPolicy::Always => self.image.sync_all()?,
+                SyncPolicy::OnClose => self.image.flush()?,
+            }
+            self.context.adopt(publication.into_proposed())?;
+        }
+        self.context.allocations.complete(attempt)
     }
 
     fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), Error> {
-        self.image.write_at(offset, bytes)
-    }
-
-    fn patch_superblock_eof(&mut self) -> Result<(), Error> {
-        // Preserve the consistency flags and root address when advancing the recorded EOF.
-        let mut superblock = self.context.superblock().clone();
-        superblock.eof_address = self.image.len();
-        let publication = self.context.propose(superblock)?.encode()?;
-        self.write_at(self.context.signature().get(), publication.bytes())?;
-        self.context.adopt(publication.into_proposed())?;
-        Ok(())
+        self.context.allocations.before_reference()?;
+        let result = self.image.write_at(offset, bytes);
+        if result.is_err() {
+            self.context.allocations.make_uncertain();
+        }
+        result
     }
 
     fn sync(&mut self) -> Result<(), Error> {
-        super::barrier_data(self.image, self.sync_policy)
+        self.context.allocations.before_reference()?;
+        let result = match self.sync_policy {
+            SyncPolicy::Always => self.image.sync_data(),
+            SyncPolicy::OnClose => self.image.flush(),
+        };
+        if result.is_err() {
+            self.context.allocations.make_uncertain();
+        }
+        result
     }
 }
 

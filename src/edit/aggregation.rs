@@ -882,6 +882,10 @@ mod tests {
             self.inner.ordering_barrier()
         }
 
+        fn flush(&mut self) -> Result<(), Error> {
+            self.inner.flush()
+        }
+
         fn issued_write_order(&self) -> Vec<(u64, u64)> {
             self.inner.issued_write_order()
         }

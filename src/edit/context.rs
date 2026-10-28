@@ -10,12 +10,15 @@ use crate::file_writer::{LENGTH_WIDTH, OFFSET_WIDTH};
 use crate::superblock::{self, LocatedSuperblock, Superblock};
 use crate::width::FormatWidths;
 
-/// The superblock and address domain of an editable file.
+use super::allocation::AllocationPublication;
+
+/// The superblock, address domain, and allocation publication state of an editable file.
 ///
 /// The editor supports 8-byte offsets and lengths and a superblock located at its base address.
 /// Widths, the address mapping, and the signature position are derived from the superblock.
 pub(super) struct FileContext {
     superblock: Superblock,
+    pub(super) allocations: AllocationPublication,
 }
 
 impl FileContext {
@@ -41,7 +44,10 @@ impl FileContext {
                 "a file whose superblock is not located at its base address is not editable in place",
             ));
         }
-        Ok(Self { superblock })
+        Ok(Self {
+            superblock,
+            allocations: AllocationPublication::new(),
+        })
     }
 
     /// Replaces the session's superblock with a checked proposal.
