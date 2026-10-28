@@ -176,8 +176,10 @@
 //! aggregate space at EOA after publishing the shorter EOA with the same root. An uncertain
 //! publication prevents this cleanup. An ordinary read-write session under
 //! `H5F_FSPACE_STRATEGY_FSM_AGGR`, including a file without a recorded strategy, tries reusable
-//! free space before these aggregates. Persistent sessions exclude active aggregate spare from
-//! their managers and return surrendered spare through a manager rewrite. SWMR sessions under
+//! free space before these aggregates for staged edits and nonpersistent appends. Persistent
+//! appends release aggregate spare through manager publication and allocate exact extents.
+//! During persistent staged edits, the editor excludes active aggregate spare from the managers
+//! and releases surrendered spare through a manager rewrite. SWMR sessions under
 //! `FSM_AGGR` and PAGE sessions use no classic aggregates.
 //! The reuse is crash-safe: it only ever overwrites space
 //! freed by an *earlier*, already-durable commit (never space the current commit
@@ -186,28 +188,25 @@
 //! before its repoint gives back what it drew, so a failed attempt costs the
 //! session nothing.
 //!
-//! Both write paths draw on that list, through allocators of their own. The
-//! immediate [`Dataset::append`](crate::Dataset::append) allocates its chunks and
-//! index blocks through [`crate::chunk_index_inplace::Store::allocate`], which
-//! [`WriteEngine::immediate_reuse_allowed`] gates: an append has no superblock
-//! repoint to publish its allocations with, so it reuses only where the space it
-//! overwrites is dead on the disk as it stands (issue #349). On a file that
-//! **persists** its managers a hole in the list is one the disk still advertises,
-//! so the append does not spend it directly: it takes a batch out of the
-//! published managers first
-//! ([`WriteEngine::reserve_for_immediate_append`], issue #387) and spends only
-//! that, which makes the on-disk record true of every byte it writes at every
-//! instant. What the session does not spend goes back before the managers are
-//! next rewritten; a session that dies in between strands the remainder, which is
-//! accounted to nobody and so can never be handed out twice. The SWMR writer
-//! reuses nothing at all, for a reason publication does not reach: its readers
-//! may still be inside the region. Everything
-//! a *commit* places goes through the other allocator
-//! ([`WriteEngine::reserve`] and [`WriteEngine::place`]), including a chunked
-//! dataset's data region and a dense attribute heap. Those carry addresses of
-//! their own, so they are sized before they are placed and then built for the
-//! address they got — which is why they can land in a freed region at all
-//! (issue #261). A paged file (`H5F_FSPACE_STRATEGY_PAGE`) draws only from free
+//! Immediate [`Dataset::append`](crate::Dataset::append) allocates provisional chunk and index
+//! storage through [`crate::chunk_index_inplace::Store::allocate`]. In a persistent session, the
+//! editor publishes replacement free-space managers before linking references to those allocations.
+//! The editor excludes complete owned extents and the replacement managers' storage from recorded
+//! free sections, and retains unused free space under the configured threshold policy. The object
+//! root and unrelated staged edits are preserved. An interruption before publication leaves the
+//! preceding managers authoritative. An interruption after publication can leave actual allocations
+//! unreferenced. The editor cannot recover space stranded by an earlier writer without ownership
+//! records.
+//!
+//! During persistent appends, the editor releases unused classic aggregate spare through manager
+//! publication and allocates exact extents. Without persistence, the editor can reuse session free
+//! space and classic aggregates. The SWMR writer allocates append-only because its readers may be
+//! using earlier storage. Manager loading and serialization depend on the number of free sections.
+//!
+//! Staged commits place objects through [`WriteEngine::reserve`] and [`WriteEngine::place`],
+//! including chunked dataset data and dense attribute heaps. The writer sizes relocatable
+//! objects before placement and serializes their addresses after reservation.
+//! A paged file (`H5F_FSPACE_STRATEGY_PAGE`) draws only from free
 //! space of the page type it is placing, so reuse cannot make metadata and raw
 //! data share a page — except from pages that are *wholly* free, which hold
 //! nothing of either type to be mixed with and so may be opened for either page
@@ -395,36 +394,6 @@ pub(crate) use global_heap_liveness::GlobalHeapLiveness;
 /// An undefined on-disk address (all bits set), HDF5's "no address" sentinel.
 const UNDEF: u64 = u64::MAX;
 
-/// The most free space an immediate in-place append takes out of a persisting
-/// file's on-disk managers in one draw, when the allocation in front of it needs
-/// less (issue #387).
-///
-/// Every draw costs a manager rewrite and a superblock repoint — a few kilobytes
-/// and two ordering barriers — so drawing per allocation would put a commit
-/// between every pair of chunks and make reuse cost more than the growth it
-/// avoids. A draw therefore takes as much as this of whatever holes can each hold
-/// the allocation, largest first, and a megabyte covers sixteen chunks at the
-/// 64 KiB scale the C library's own chunk-cache default is sized for, which puts
-/// the rewrite well outside the per-chunk path.
-///
-/// It is a cap, not a floor. A file whose holes are all smaller than this still
-/// has them drawn, one rewrite for however many of them fit under the cap: a
-/// floor here made every persisting file whose deleted objects were under a
-/// megabyte grow without bound, since no hole it left was ever spent
-/// (issue #413). What a draw refuses is only a hole too small for the allocation
-/// in hand, which nothing could be placed in. Every hole exists because a commit
-/// freed it, so the rewrites spent reusing them are bounded by the commits the
-/// caller already paid for.
-///
-/// It bounds one draw, not a session's total. A fresh draw is made whenever the
-/// largest reserved region is smaller than the allocation in hand, and the
-/// remainders of earlier draws are kept and still handed out, so what an abrupt
-/// end strands is the sum of every remainder still held: each one smaller than
-/// the allocation that forced the next draw, and one more of them possible per
-/// draw. Larger would amortize further and strand more; this is the point where
-/// the rewrite is already rare enough that making it rarer buys little.
-const APPEND_RESERVE_BYTES: u64 = 1 << 20;
-
 /// The refusal both address-side reference screens report: an object reference
 /// this commit writes names an object the same commit removes.
 ///
@@ -539,44 +508,14 @@ pub(crate) struct WriteEngine {
     /// Its extents are stored addresses, relative to the base address, as a free-space manager
     /// records them.
     space: SessionSpace,
-    /// Classic aggregate windows shared by staged edits and immediate appends under
+    /// Classic aggregate windows for staged edits and nonpersistent immediate appends under
     /// [`FileSpaceStrategy::Aggr`] or [`FileSpaceStrategy::FsmAggr`].
     ///
     /// An ordinary read-write session without a recorded strategy uses FSM_AGGR with persistence
     /// disabled.
     aggregation: Option<AggregateSpace>,
-    /// Space this session has taken *out* of the on-disk free-space managers so
-    /// that an immediate in-place append may spend it (issue #387).
-    ///
-    /// Only a file that persists its free space uses this. Such a file records
-    /// its holes on disk, and an append has no superblock repoint of its own to
-    /// publish an allocation with — so an append that simply drew from
-    /// the active [`SessionSpace`] would leave a manager advertising bytes a live chunk
-    /// now occupies, through a clean close as much as a crash. The reserve is
-    /// the answer: [`reserve_for_immediate_append`](Self::reserve_for_immediate_append)
-    /// moves a batch of bytes out of the session allocator and rewrites the managers
-    /// *without* them, under
-    /// the same crash-atomic superblock repoint every persisting commit uses.
-    /// Only then may an append write there, because by then no durable record
-    /// calls those bytes free.
-    ///
-    /// What is left unspent goes back into the session allocator before the managers are next
-    /// rewritten, which is [`release_reserve`](Self::release_reserve)
-    /// at the next commit and at close. A session that dies in between strands
-    /// the unspent remainder: it is accounted to nobody, so it is never handed
-    /// out twice, and a later `H5repack` or whole-file rewrite recovers it. That
-    /// is the same trade the module header records for
-    /// [`finalize_persist`](Self::finalize_persist), on a surface bounded per
-    /// draw — see [`APPEND_RESERVE_BYTES`], which is the most one draw takes,
-    /// and note that this list holds the unspent remainder of every draw the
-    /// session has made, not just the last.
-    ///
-    /// Empty for a non-persisting session, which reuses from [`space`](Self::space) directly.
-    /// Its allocator state is in memory alone, so nothing on the disk claims those bytes
-    /// are free and nothing has to be published before they are spent.
-    ///
-    /// Its extents are stored addresses, as in [`space`](Self::space).
-    reserved: FreeList,
+    /// Allocator rollback and persisted-manager authority for immediate allocation batches.
+    append_allocator: allocation::AppendAllocator,
     /// Whether this file has been *proved* to hold no object reference at all —
     /// the one thing that lets a commit skip the walk that repoints them
     /// (issue #324).
@@ -765,7 +704,7 @@ pub(crate) struct WriteEngine {
     /// The physical file length associated with the persisted free-space state.
     ///
     /// [`finalize_persist`](Self::finalize_persist) compares this length with the image length
-    /// and checks unspent append reserves, aggregate state, and [`fsm_dirty`](Self::fsm_dirty)
+    /// and checks aggregate state and [`fsm_dirty`](Self::fsm_dirty)
     /// before rewriting the managers.
     /// This field is used when [`persist`](Self::persist) is `Some`.
     fsm_len: u64,
@@ -1744,7 +1683,7 @@ impl WriteEngine {
                 FileSpacePageSize::DEFAULT,
             ),
             aggregation: None,
-            reserved: FreeList::new(),
+            append_allocator: allocation::AppendAllocator::new(),
             proved_free_of_references: false,
             persist: None,
             fresh_page_boundary,
@@ -2540,22 +2479,14 @@ impl WriteEngine {
 
     /// Returns the logical size and reusable bytes from cached session counters.
     ///
-    /// Includes append reserves when free-space management is enabled, plus unused classic
-    /// aggregate reservations. Computes the total without enumerating free sections.
+    /// Includes unused classic aggregate reservations. Computes the total without enumerating
+    /// free sections.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the byte sum exceeds [`u64::MAX`].
     pub(crate) fn reusable_space_stats(&self) -> Result<ReusableSpaceStats, FormatError> {
         let mut reusable_free_bytes = self.space.reusable_bytes()?;
-        if self.space.is_enabled() {
-            reusable_free_bytes = reusable_free_bytes
-                .checked_add(self.reserved.total_bytes())
-                .ok_or(FormatError::OffsetOverflow {
-                    offset: reusable_free_bytes,
-                    length: self.reserved.total_bytes(),
-                })?;
-        }
         if let Some(aggregation) = self.aggregation {
             let unused = aggregation.unused_bytes()?;
             reusable_free_bytes =
@@ -2628,13 +2559,13 @@ impl WriteEngine {
     /// Returns physical reusable ranges, including allocator-held reservations.
     ///
     /// Reports aggregate spare when reusable allocation is disabled. With reusable allocation
-    /// enabled, combines the free lists with append reserves and aggregate spare, preserving
+    /// enabled, combines the free lists with aggregate spare, preserving
     /// page-type boundaries.
     /// Resolves stored ranges against the opened image's effective base.
     fn reusable_ranges(&self) -> impl Iterator<Item = Result<FileRange, FormatError>> + '_ {
         let aggregate_only = self.aggregation.filter(|_| !self.space.is_enabled());
-        let managers_only = self.reserved.is_empty() && self.aggregation.is_none();
-        let with_reserves = aggregate_only.is_none() && !managers_only;
+        let managers_only = self.aggregation.is_none();
+        let combined = aggregate_only.is_none() && !managers_only;
         aggregate_only
             .into_iter()
             .flat_map(AggregateSpace::unused)
@@ -2645,14 +2576,12 @@ impl WriteEngine {
                     .flatten(),
             )
             .chain(
-                with_reserves
+                combined
                     .then(|| {
                         self.space.reusable_sections_with_raw(
-                            self.reserved.extents().iter().copied().chain(
-                                self.aggregation
-                                    .into_iter()
-                                    .flat_map(AggregateSpace::unused),
-                            ),
+                            self.aggregation
+                                .into_iter()
+                                .flat_map(AggregateSpace::unused),
                         )
                     })
                     .into_iter()
@@ -2668,209 +2597,14 @@ impl WriteEngine {
             })
     }
 
-    /// Whether an immediate in-place append may allocate out of already-free
-    /// space instead of growing the file (issue #349, issue #387).
+    /// Returns whether the strategy permits immediate reuse outside SWMR writing.
     ///
-    /// The staged [`commit`](Self::commit) always may: it publishes its
-    /// allocations with the superblock repoint, so a crash before that leaves a
-    /// file whose root never named them. An immediate append has no repoint, so
-    /// what has to hold instead is that the bytes it overwrites are dead *on the
-    /// disk as it stands*. Which list satisfies that depends on the session:
-    ///
-    /// - An ordinary [`File::open_rw`](crate::File::open_rw) session on a
-    ///   default-strategy file holds its free space in memory alone. A region in
-    ///   [`space`](Self::space) was freed by a commit this session already published, so nothing
-    ///   on the disk points at it and nothing on the disk
-    ///   claims it is free; a crash at any point of the append leaves it as dead
-    ///   as it was. It is spent directly.
-    /// - A file that **persists** its free-space managers records its holes on
-    ///   disk, so a hole in the session allocator is one a durable manager still advertises and
-    ///   spending it would leave that manager describing bytes a live chunk
-    ///   occupies — through a clean close as much as a crash, since only a commit
-    ///   or [`finalize_persist`](Self::finalize_persist) rewrites the record.
-    ///   Such a session therefore spends [`reserved`](Self::reserved) instead:
-    ///   space [`reserve_for_immediate_append`](Self::reserve_for_immediate_append)
-    ///   has already taken *out* of the published managers.
-    /// - A **paged** file keeps its free space per page type in [`SessionSpace`]. It draws its
-    ///   reserve through [`SessionSpace::allocate`] with [`AllocationClass::Raw`], which keeps each page
-    ///   homogeneous.
-    ///   Named as its own term at the call site rather than left to the argument
-    ///   that the persist term already covers it (`append_prepare` refuses a
-    ///   paged file that does not persist): a page-type invariant proved from
-    ///   another function's refusal is exactly the shape that has gone wrong here
-    ///   before (issue #261). It costs nothing to name, because `reserved` is
-    ///   empty on a session that never reserved — the term declines reuse rather
-    ///   than misdirecting it.
-    ///
-    /// The **SWMR** writer is one absolute bar, and it is not about
-    /// publication at all: its concurrent readers may still be inside a region
-    /// this session freed, and the format forbids reusing one while they are,
-    /// which is why the C library's own SWMR writer allocates append-only. No
-    /// test can reach this term today, because a SWMR session refuses every
-    /// staged edit ([`Error::SwmrStagedUnsupported`]) and so never frees
-    /// anything. It is here so that lifting that refusal cannot silently enable
-    /// reuse.
-    ///
-    /// [`SessionSpace::Disabled`] is the other bar. Its file's strategy has no reusable
-    /// free-space managers or is unreadable, so an append allocates at the end of the file.
-    ///
-    /// After an uncertain publication, [`publication`](Self::publication) prevents rollback
-    /// of the free-space state. Reuse follows that state even when an I/O error left the
-    /// published root unconfirmed.
+    /// In persistent sessions, the editor publishes complete ownership before linking references.
+    /// Without persistence, the editor reuses storage retired by earlier publications. The PAGE
+    /// allocator preserves page classes through [`SessionSpace`]. The SWMR writer allocates
+    /// append-only because concurrent readers can retain references to earlier storage.
     fn immediate_reuse_allowed(&self) -> bool {
         !self.swmr_mode && self.space.is_enabled()
-    }
-
-    /// Take a batch of free space out of the on-disk free-space managers so an
-    /// immediate in-place append may spend it, for a session that persists them
-    /// (issue #387). Afterwards [`reserved`](Self::reserved) holds whatever could
-    /// be drawn; the allocator that spends it is what says whether that serves
-    /// the append, since the rewrite's own tail may have taken part of it.
-    ///
-    /// The draw and the publication are one step and in that order: the bytes leave
-    /// [`space`](Self::space) first, and the managers are then rewritten through the ordinary
-    /// persisting commit tail
-    /// with nothing to free and the root unchanged — the same call
-    /// [`finalize_persist`](Self::finalize_persist) makes, whose superblock
-    /// repoint is the crash-atomic linearization point. Before that repoint the
-    /// old managers stand and still list the batch, which is correct because
-    /// nothing has been written into it; after it, no durable record calls those
-    /// bytes free and the append may have them.
-    ///
-    /// Nothing here moves a live object: `to_free` is empty and the new root is
-    /// the old one, so the tail places only itself, in a hole or past the live
-    /// data. The [`located`](Self::located) append-geometry cache is therefore
-    /// still valid across this call, which is what lets it run between an
-    /// append's plan and its apply.
-    ///
-    /// When the session has no qualifying persistent free region, the caller tries aggregate
-    /// capacity or allocates at EOA. An error means the manager rewrite
-    /// itself failed, and the lists are put back so they agree with whatever the
-    /// disk now holds, on the rule [`commit`](Self::commit) applies: a rewrite that
-    /// never reached its superblock write left the managers as they were, so the
-    /// lists go back to exactly what they were, tail placement included; one that
-    /// did may have published, so the draw is handed back — those bytes are
-    /// genuinely free, nothing having been written into them, and the next commit
-    /// records them again — while the span its tail took stays out, since that
-    /// tail may now be the live one.
-    fn reserve_for_immediate_append(&mut self, want: u64) -> Result<(), Error> {
-        if want == 0 || self.persist.is_none() || self.swmr_mode || self.reserved.largest() >= want
-        {
-            return Ok(());
-        }
-        let snapshot = self.snapshot_free();
-        if !self.take_raw_spans(want, APPEND_RESERVE_BYTES) {
-            return Ok(());
-        }
-        self.publication = PublicationState::Ready;
-        match self.commit_persisting(
-            self.context
-                .addresses()
-                .resolve(self.context.superblock().root_group_address)?,
-            Vec::new(),
-            TailPlacement::Anywhere,
-        ) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                if self.publication.attempted() {
-                    self.release_reserve();
-                    if let Some(aggregation) = &mut self.aggregation {
-                        aggregation.publication_confirmed = false;
-                    }
-                } else {
-                    self.restore_free(snapshot);
-                }
-                Err(e)
-            }
-        }
-    }
-
-    /// Move raw-appendable free space into [`reserved`](Self::reserved) for one
-    /// manager rewrite to publish: runs that can each hold `want` bytes, until
-    /// `cap` bytes are held or no hole that large is left. Reports whether
-    /// anything was drawn, which is exactly whether the first hole could hold
-    /// `want`.
-    ///
-    /// The draw is sized on what the file has rather than on a fixed batch, and
-    /// that is the whole of the fix for issue #413 — [`APPEND_RESERVE_BYTES`]
-    /// says why the cap is a cap and not a floor. The rewrite that publishes a
-    /// draw is the expensive part, so one draw gathers as many holes as the cap
-    /// allows and the rewrite is paid once for all of them: a file fragmented
-    /// into chunk-sized holes costs one rewrite per cap's worth of them, not one
-    /// per chunk.
-    ///
-    /// Each run is sized on the largest hole and taken best fit, so it is a whole
-    /// hole or a `cap`-bounded prefix of one, and the reserve never holds a
-    /// fragment too small for the allocation that drew it. `want` above `cap`
-    /// draws one run of exactly `want`: the cap bounds the amortization, not
-    /// what a single allocation may need.
-    fn take_raw_spans(&mut self, want: u64, cap: u64) -> bool {
-        debug_assert!(want > 0, "a draw is sized on a real allocation");
-        // The cap is the budget, except that a single allocation larger than it
-        // still draws one run for itself.
-        let budget = cap.max(want);
-        let mut drawn = 0u64;
-        while budget - drawn >= want {
-            let available = self.largest_raw_run();
-            if available < want {
-                break;
-            }
-            let len = available.min(budget - drawn);
-            if !self.take_raw_span(len) {
-                // Sized on the allocator's own figure, so it serves; a refusal
-                // here means the two disagree, and drawing nothing further is
-                // the answer that leaves the file merely larger.
-                debug_assert!(false, "a run of {len} bytes was reported and not served");
-                break;
-            }
-            drawn += len;
-        }
-        drawn > 0
-    }
-
-    /// The longest contiguous run [`take_raw_span`](Self::take_raw_span) could
-    /// move into the reserve right now, or `0` when nothing could.
-    fn largest_raw_run(&self) -> u64 {
-        self.space.largest(AllocationClass::Raw)
-    }
-
-    /// Move `len` bytes of raw-appendable free space into
-    /// [`reserved`](Self::reserved), reporting whether a contiguous run that
-    /// large was available.
-    ///
-    /// A paged file draws through [`SessionSpace::allocate`] with [`AllocationClass::Raw`], the same
-    /// operation the staged commit uses for dataset data. A flat strategy ignores the allocation class.
-    fn take_raw_span(&mut self, len: u64) -> bool {
-        match self.space.allocate(len, AllocationClass::Raw) {
-            Some(extent) => {
-                self.reserved.free(extent);
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// Give the unspent append reserve back to the lists the managers are written
-    /// from, so the next rewrite records it as the free space it is.
-    ///
-    /// Called immediately before every rewrite of the on-disk managers — the
-    /// persisting commit tail and [`finalize_persist`](Self::finalize_persist) —
-    /// and nowhere else, so a commit that does *not* rewrite them (the
-    /// same-length-overwrite fast path) leaves the reserve intact for the appends
-    /// that follow it.
-    ///
-    /// The reserve is raw-typed on a paged file, so it goes back to the raw list.
-    /// A run that was claimed whole from the metadata list is raw space now, and
-    /// a page of it that is wholly free can be claimed back by either type
-    /// through [`SessionSpace::allocate`], exactly as any other free page can.
-    fn release_reserve(&mut self) {
-        if self.reserved.is_empty() {
-            return;
-        }
-        let reserved = std::mem::replace(&mut self.reserved, FreeList::new());
-        for &extent in reserved.extents() {
-            self.space.return_allocation(extent, AllocationClass::Raw);
-        }
     }
 
     /// Adopt the fapl's `fsync` cadence. Called once, on the funnel every

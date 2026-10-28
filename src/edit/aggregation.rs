@@ -283,7 +283,7 @@ impl WriteEngine {
         Ok(())
     }
 
-    /// Returns unused aggregate space and immediate-append reserves through persistent managers.
+    /// Returns unused aggregate space through persistent managers.
     ///
     /// Publishes replacement managers with the current root before truncating. A failure before
     /// publication restores the reservation state. An uncertain publication prevents further
@@ -306,7 +306,6 @@ impl WriteEngine {
             && !aggregation.manager_dirty
             && !self.fsm_dirty
             && self.image.len() == self.fsm_len
-            && self.reserved.is_empty()
         {
             return Ok(());
         }

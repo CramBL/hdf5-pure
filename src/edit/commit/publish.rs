@@ -14,10 +14,9 @@ use hdf5_pure_space::__private::{
     PageType,
 };
 
-use super::PublicationState;
+use super::{PublicationPurpose, PublicationState};
 use crate::SuperblockVersion;
 use crate::address::{StoredAddress, StoredAddressExt};
-#[cfg(doc)]
 use crate::edit::SyncPolicy;
 use crate::edit::context::SuperblockPublication;
 use crate::edit::object_header;
@@ -103,7 +102,7 @@ impl WriteEngine {
         self.repoint_stored_references(&relocations)
     }
 
-    /// Publishes a persistent commit after returning the unspent append reserve.
+    /// Publishes a persistent commit and releases eligible unused aggregate spare.
     ///
     /// Reserves eligible sub-threshold manager storage during the first publication, then
     /// recycles it in a separate publication. Other commits use ordinary tail placement.
@@ -120,7 +119,6 @@ impl WriteEngine {
         mut to_free: Vec<(StoredAddress, u64, FreeClass)>,
     ) -> Result<(), Error> {
         self.release_aggregates_for_tail(&mut to_free)?;
-        self.release_reserve();
         if let Some(target) = self.recyclable_flat_tail() {
             self.commit_persisting(new_root, Vec::new(), TailPlacement::Preserve)?;
             self.recycle_flat_tail(new_root, to_free, target)?;
@@ -378,9 +376,37 @@ impl WriteEngine {
         to_free: Vec<(StoredAddress, u64, FreeClass)>,
         placement: TailPlacement,
     ) -> Result<(), Error> {
+        self.publish_persisting(new_root, to_free, placement, PublicationPurpose::Commit)
+    }
+
+    /// Publishes replacement persistent managers for a commit or an allocation batch.
+    ///
+    /// The caller supplies the root and pending frees. During allocation publication, the editor
+    /// retains the current root and leaves staged edits pending. The allocator excludes provisional
+    /// allocations and published metadata from placement. The writer records complete manager
+    /// allocations, including section-list padding.
+    ///
+    /// [`PublicationPurpose::Allocation`] drains explicit page buffers under
+    /// [`SyncPolicy::OnClose`]. Staged commits use their general buffering policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns metadata-planning, address-conversion, serialization, write, synchronization,
+    /// and truncation errors.
+    ///
+    /// # Panics
+    ///
+    /// Panics if persistence is disabled.
+    pub(in crate::edit) fn publish_persisting(
+        &mut self,
+        new_root: PhysicalAddress,
+        to_free: Vec<(StoredAddress, u64, FreeClass)>,
+        placement: TailPlacement,
+        purpose: PublicationPurpose,
+    ) -> Result<(), Error> {
         // PAGE uses separate managers for each page type.
         if self.space.is_paged() {
-            return self.commit_persisting_paged(new_root, to_free, placement);
+            return self.commit_persisting_paged(new_root, to_free, placement, purpose);
         }
         let widths = self.context.widths();
         let offset_width = widths.offsets;
@@ -539,7 +565,7 @@ impl WriteEngine {
             },
         ))?];
 
-        // The extension and manager blocks remain unreferenced until root publication.
+        // The extension and manager blocks remain unreferenced until superblock publication.
         let region = (ext_addr, tail_len);
         self.write_tail_block(region, StoredAddress::new(ext_addr), &ext_oh)?;
         if let Some(block) = flat_block {
@@ -563,7 +589,7 @@ impl WriteEngine {
             self.write_tail_block(region, block.fsse_addr, &fsse)?;
         }
         // Complete the content barrier before publishing the root, EOF, and extension.
-        self.barrier()?;
+        self.persistence_barrier(purpose)?;
         let mut new_sb = self.context.superblock().clone();
         new_sb.root_group_address = self.context.addresses().relative(new_root.get())?;
         new_sb.eof_address = final_eof.get();
@@ -578,7 +604,7 @@ impl WriteEngine {
         if let Some(state) = &mut self.aggregation {
             state.publication_confirmed = false;
         }
-        self.publish_superblock(publication)?;
+        self.publish_persistent_superblock(publication, purpose)?;
 
         self.space.adopt_flat_post_free(post);
         self.fsm_dirty = false;
@@ -595,7 +621,7 @@ impl WriteEngine {
 
         // Publish the smaller EOF before truncating. The adopted managers exclude the suffix.
         if final_eof < PhysicalAddress::new(self.image.len()) {
-            self.truncate_published(final_eof)?;
+            self.truncate_persistent(final_eof, purpose)?;
         }
 
         // Record the file length associated with the published managers.
@@ -637,8 +663,8 @@ impl WriteEngine {
     /// The address is [`None`] when the caller must append at `current_eoa`. In that case,
     /// the returned EOA is `current_eoa`, before appending the tail.
     ///
-    /// Reservations come from session free space, then the immediate-append reserve when
-    /// available. With a `limit`, only session extents ending at or below it are eligible.
+    /// Reservations come from session free space. With a `limit`, only extents ending at or
+    /// below it are eligible.
     /// Placement retries with a larger reservation when the serialized managers outgrow it.
     /// After bounded retries, the caller appends. Spare reservation bytes remain owned by
     /// the manager allocation until it is superseded.
@@ -668,13 +694,8 @@ impl WriteEngine {
             } else {
                 self.space.allocate(proposed, AllocationClass::Metadata)
             };
-            let (reserved, from_reserve) = match allocation {
-                Some(extent) => (extent, false),
-                None if limit.is_none() => match self.reserved.alloc(proposed) {
-                    Some(extent) => (extent, true),
-                    None => break,
-                },
-                None => break,
+            let Some(reserved) = allocation else {
+                break;
             };
             let at = reserved.start();
             let (mut post, eoa) = self.flat_post_free(current_eoa, to_free, old_blocks);
@@ -684,6 +705,11 @@ impl WriteEngine {
             let eoa = post.release_trailing_run(eoa, proposed);
             let managers = ManagerSections::flat(post.extents().iter().copied());
             let len = ext_len + free_space_manager::manager_blocks_len(&managers, widths);
+            if post.is_empty() && len < proposed {
+                self.space
+                    .return_allocation(reserved, AllocationClass::Metadata);
+                break;
+            }
             if len <= proposed {
                 debug_assert!(
                     at + proposed <= eoa,
@@ -692,12 +718,8 @@ impl WriteEngine {
                 );
                 return (post, Some(at), proposed, eoa);
             }
-            if from_reserve {
-                self.reserved.free(reserved);
-            } else {
-                self.space
-                    .return_allocation(reserved, AllocationClass::Metadata);
-            }
+            self.space
+                .return_allocation(reserved, AllocationClass::Metadata);
             proposed = len;
         }
         // Append beyond the current EOA, retaining the prospective free list below the tail.
@@ -729,6 +751,7 @@ impl WriteEngine {
         new_root: PhysicalAddress,
         to_free: Vec<(StoredAddress, u64, FreeClass)>,
         placement: TailPlacement,
+        purpose: PublicationPurpose,
     ) -> Result<(), Error> {
         let widths = self.context.widths();
         let offset_width = widths.offsets;
@@ -853,7 +876,7 @@ impl WriteEngine {
             },
         ))?];
 
-        // The extension and manager blocks remain unreferenced until root publication.
+        // The extension and manager blocks remain unreferenced until superblock publication.
         let region = (ext_addr, blocks_len);
         self.write_tail_block(region, StoredAddress::new(ext_addr), &ext_oh)?;
         for block in &blocks {
@@ -865,18 +888,18 @@ impl WriteEngine {
             self.pad_zeros_to(final_eof.get())?;
         }
         // Complete the content barrier before publishing the root, EOF, and extension.
-        self.barrier()?;
+        self.persistence_barrier(purpose)?;
         let mut new_sb = self.context.superblock().clone();
         new_sb.root_group_address = self.context.addresses().relative(new_root.get())?;
         new_sb.eof_address = final_eof.get();
         new_sb.superblock_extension_address = Some(StoredAddress::new(ext_addr));
         // Preserve the crash mark throughout a page-buffered session.
         new_sb.set_consistency_flags(self.held_status_flags)?;
-        self.publish_superblock(self.context.propose(new_sb)?.encode()?)?;
+        self.publish_persistent_superblock(self.context.propose(new_sb)?.encode()?, purpose)?;
 
         // Complete EOF publication before removing the trailing suffix.
         if final_eof < PhysicalAddress::new(self.image.len()) {
-            self.truncate_published(final_eof)?;
+            self.truncate_persistent(final_eof, purpose)?;
         }
 
         // Adopt prospective free space after publication and any truncation succeed.
@@ -944,9 +967,24 @@ impl WriteEngine {
     /// from the current context. Returns the write or barrier error if publication fails.
     /// Retains [`PublicationState::Uncertain`] on error.
     fn publish_superblock(&mut self, publication: SuperblockPublication) -> Result<(), Error> {
+        self.publish_persistent_superblock(publication, PublicationPurpose::Commit)
+    }
+
+    /// Adopts the superblock after its write and the selected publication barrier succeed.
+    ///
+    /// Sets [`PublicationState::Uncertain`] before writing and retains it on failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns the write, barrier, or context-adoption error.
+    fn publish_persistent_superblock(
+        &mut self,
+        publication: SuperblockPublication,
+        purpose: PublicationPurpose,
+    ) -> Result<(), Error> {
         self.publication = PublicationState::Uncertain;
         self.write_at(self.context.signature().get(), publication.bytes())?;
-        self.barrier()?;
+        self.persistence_barrier(purpose)?;
         self.context.adopt(publication.into_proposed())?;
         self.publication = PublicationState::Published;
         Ok(())
@@ -958,8 +996,37 @@ impl WriteEngine {
     ///
     /// Returns the truncation or barrier error.
     fn truncate_published(&mut self, cut: PhysicalAddress) -> Result<(), Error> {
+        self.truncate_persistent(cut, PublicationPurpose::Commit)
+    }
+
+    /// Truncates to the confirmed EOF and applies the selected publication barrier.
+    ///
+    /// # Errors
+    ///
+    /// Returns the truncation or barrier error.
+    fn truncate_persistent(
+        &mut self,
+        cut: PhysicalAddress,
+        purpose: PublicationPurpose,
+    ) -> Result<(), Error> {
         debug_assert_eq!(self.publication, PublicationState::Published);
         self.image.truncate(cut.get())?;
-        self.barrier()
+        self.persistence_barrier(purpose)
+    }
+
+    /// Drains allocation writes or applies the staged commit's buffering boundary.
+    ///
+    /// [`SyncPolicy::Always`] synchronizes file content and metadata. Under
+    /// [`SyncPolicy::OnClose`], allocation publication drains every buffering mode, while staged
+    /// commits use the general ordering barrier.
+    ///
+    /// # Errors
+    ///
+    /// Returns the buffered-write or synchronization error.
+    fn persistence_barrier(&mut self, purpose: PublicationPurpose) -> Result<(), Error> {
+        match (purpose, self.sync_policy) {
+            (PublicationPurpose::Allocation, SyncPolicy::OnClose) => self.image.flush(),
+            _ => self.barrier(),
+        }
     }
 }

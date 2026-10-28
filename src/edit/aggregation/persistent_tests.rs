@@ -54,37 +54,29 @@ fn persistent_reuse_precedes_aggregates(
     let mut engine = open_engine(&path, backing);
     engine.delete(&ObjectPathBuf::parse("scratch")).unwrap();
     engine.commit().unwrap();
-    if immediate {
-        engine.reserve_for_immediate_append(64).unwrap();
-    }
-    let expected = if immediate {
-        let extent = engine.reserved.alloc(64).unwrap();
-        engine.reserved.free(extent);
-        extent
-    } else {
-        let extent = engine.space.allocate(64, class).unwrap();
-        engine.space.return_allocation(extent, class);
-        extent
-    };
+    let expected = engine.space.allocate(64, class).unwrap();
+    engine.space.return_allocation(expected, class);
     let policy = engine.aggregation.unwrap();
     let address = if immediate {
-        let mut reserved = std::mem::take(&mut engine.reserved);
         let mut store = engine.store();
-        store.reserve = Some(&mut reserved);
-        let address = store
-            .allocate(&[19; 64], class)
+        let allocation = store.allocate(&[19; 64], class).unwrap();
+        let address = allocation.range().start().get();
+        store
+            .publish_allocations()
             .unwrap()
-            .range()
-            .start()
-            .get();
-        engine.reserved = reserved;
+            .confirm(allocation)
+            .unwrap();
         address
     } else {
         let placement = engine.reserve(64, class).unwrap();
         engine.place(placement, &[19; 64]).unwrap()
     };
     assert_eq!(address, expected.start() + userblock);
-    assert_eq!(engine.aggregation, Some(policy));
+    if !immediate {
+        assert_eq!(engine.aggregation, Some(policy));
+    } else {
+        assert_eq!(engine.aggregation.unwrap().unused_bytes().unwrap(), 0);
+    }
     engine.finalize_persist().unwrap();
     drop(engine);
     let file = File::open(&path).unwrap();
@@ -357,7 +349,10 @@ fn abandoned_persistent_spare_uses_threshold(#[case] threshold: u64, #[case] tra
 #[case::before_publish(Failure::BeforePublish, true)]
 #[case::after_publish(Failure::AfterPublish, true)]
 #[case::barrier(Failure::Barrier, true)]
-fn reserve_publication_failure_prevents_reuse(#[case] failure: Failure, #[case] attempted: bool) {
+fn ownership_publication_failure_preserves_known_free_space(
+    #[case] failure: Failure,
+    #[case] attempted: bool,
+) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("reserve_failure.h5");
     write_file(&path, 0);
@@ -380,23 +375,36 @@ fn reserve_publication_failure_prevents_reuse(#[case] failure: Failure, #[case] 
     engine.commit().unwrap();
     let before = engine.aggregation;
     let free = engine.space.reusable_sections().collect::<Vec<_>>();
+    let mut store = engine.store();
+    let allocation = store.allocate(&[13; 64], AllocationClass::Raw).unwrap();
     armed.store(true, Ordering::Relaxed);
-    let error = engine.reserve_for_immediate_append(64).unwrap_err();
+    let error = match store.publish_allocations() {
+        Ok(_) => panic!("expected ownership publication failure"),
+        Err(error) => error,
+    };
     let Error::Io(error) = error else {
-        panic!("expected reserve publication failure, got {error:?}");
+        panic!("expected ownership publication failure, got {error:?}");
     };
     assert_eq!(error.kind(), ErrorKind::Other);
     assert_eq!(engine.publication.attempted(), attempted);
-    assert!(engine.reserved.is_empty());
     if !attempted {
         assert_eq!(engine.aggregation, before);
         assert_eq!(engine.space.reusable_sections().collect::<Vec<_>>(), free);
-        engine.reserve_for_immediate_append(64).unwrap();
-        assert!(!engine.reserved.is_empty());
+        let mut store = engine.store();
+        let replacement = store.allocate(&[13; 64], AllocationClass::Raw).unwrap();
+        assert_eq!(replacement.range(), allocation.range());
+        store
+            .publish_allocations()
+            .unwrap()
+            .confirm(replacement)
+            .unwrap();
+        engine.finalize_persist().unwrap();
     } else {
-        assert!(!engine.aggregation.unwrap().publication_confirmed);
+        assert!(matches!(
+            engine.finalize_persist(),
+            Err(Error::AllocationPublicationUncertain)
+        ));
     }
-    engine.finalize_persist().unwrap();
     drop(engine);
     let file = File::open(&path).unwrap();
     assert_eq!(file.dataset("keep").unwrap().read_u8().unwrap(), [11; 4096]);

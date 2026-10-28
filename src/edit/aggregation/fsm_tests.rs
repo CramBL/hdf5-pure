@@ -65,13 +65,14 @@ fn reusable_sections_precede_retained_aggregate_windows(
     let physical = engine.image.len();
     let address = if immediate {
         let mut store = engine.store();
-        store.reuse_session_space = true;
+        let allocation = store.allocate(&[19; 64], class).unwrap();
+        let address = allocation.range().start().get();
         store
-            .allocate(&[19; 64], class)
+            .publish_allocations()
             .unwrap()
-            .range()
-            .start()
-            .get()
+            .confirm(allocation)
+            .unwrap();
+        address
     } else {
         let reservation = engine.reserve(64, class).unwrap();
         engine.place(reservation, &[19; 64]).unwrap()

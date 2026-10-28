@@ -742,8 +742,9 @@ With persistence enabled under PAGE, or under `FsmAggr`, the space a deletion fr
 Under [`FileSpaceStrategy::Aggr`](crate::FileSpaceStrategy::Aggr), staged edits and immediate appends use separate metadata and raw aggregates with 2048-byte refill blocks. Unused reservations remain available across commits within the session. A clean close or drop releases unused aggregate space at EOA after publishing the shorter EOA with the current root, unless publication is uncertain. Both `Aggr` and [`FileSpaceStrategy::None`](crate::FileSpaceStrategy::None) discard freed extents. `None` allocates at the end of the file and retains its length after deletion.
 
 Under [`FileSpaceStrategy::FsmAggr`](crate::FileSpaceStrategy::FsmAggr), ordinary read-write sessions
-try reusable freed space before the metadata or raw aggregate, with persistence enabled or disabled,
-including when the file has no recorded strategy. Abandoned aggregate spare is tracked subject to
+try reusable freed space before the metadata or raw aggregate for staged edits and nonpersistent
+appends, including when the file has no recorded strategy. During persistent appends, the editor
+releases aggregate spare through manager publication and allocates exact extents. Abandoned aggregate spare is tracked subject to
 the free-section threshold. Active reservations are excluded from persisted free sections. A commit
 may surrender both windows when their spare permits releasing a larger dead suffix, or when recycling
 sub-threshold persistent manager storage. Persistent close or drop returns unused spare through
@@ -780,7 +781,25 @@ allocation and threshold admission. After publication, the editor may move trail
 earlier free space and truncate the file. The [file-space guide](crate::_guide::file_space)
 describes the conditions for fixed-width root updates to reach a stable length across sessions.
 
-An immediate [`Dataset::append`](crate::Dataset::append) (and a [`BufferedAppender`](crate::BufferedAppender) flush) draws on free space too. A file that forgets its free space at close spends it directly. A file that persists its free space first removes a batch of space from the on-disk managers in a separate publication. A batch gathers every hole the appended chunk fits in, up to a megabyte of them. Appends spend the reserved batch before aggregate capacity under `FsmAggr`, whose active reservations are also excluded from persisted free sections. A crash can strand the unspent remainder of a batch. The SWMR writer always appends at the end of the file, because its readers may be reading a region the writer freed. A dataset written into a fragmented file may have its chunks placed in several holes. Sequential reads then fetch each chunk separately, where a single run coalesces adjacent ones. [`repack`](crate::repack()) restores a single run.
+An immediate [`Dataset::append`](crate::Dataset::append), including a
+[`BufferedAppender`](crate::BufferedAppender) flush, draws on reusable free space. In a persistent
+session, the editor writes provisional payloads and new index blocks before publishing replacement
+free-space managers that exclude their complete allocations. It publishes the extension and EOF
+and completes the allocation barrier before linking references. Unissued free intervals remain
+recorded under the configured threshold policy, including reusable PAGE tails. The object root
+and unrelated staged edits are preserved.
+
+During persistent appends, the editor releases aggregate spare through manager publication and
+allocates exact extents.
+Manager rewrites occur at allocation boundaries, and loading and serialization depend on the number
+of free sections. An interruption after ownership publication can leave actual allocations
+unreferenced. Previously stranded speculative space cannot be recovered from missing ownership
+records. The [file-space guide](crate::_guide::file_space) describes these publication boundaries.
+
+The SWMR writer allocates at the end of the file because readers can be using earlier storage.
+A dataset written into a fragmented file can occupy several holes. Sequential reads fetch each
+chunk separately, while adjacent chunks can be coalesced. [`repack`](crate::repack()) restores a
+single run.
 
 For persistent files, the editor publishes remaining retirement changes in the free-space managers
 during [`File::commit`](crate::File::commit) or clean session closure. A commit with no staged edits

@@ -98,8 +98,10 @@ Whole-file writes under `Aggr` or `FsmAggr` use separate metadata and raw aggreg
 Under `FsmAggr`, the writer reuses abandoned aggregate spare subject to the free-section threshold before reserving more aggregate space. With persistence enabled, it releases the aggregate reservations after placement and records the remaining reusable spare in a free-space manager. The manager's own allocations are excluded from its free sections. If no sections remain after tail release and threshold admission, the writer records the persist flag with undefined manager addresses. With persistence disabled, the construction free list is discarded after output, so its unused interior regions are unavailable after reopening. `Aggr` also leaves unused interior reservations allocated without a manager.
 
 Under [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr), ordinary read-write sessions try reusable
-freed space before the metadata or raw aggregate, with persistence enabled or disabled. This also
-applies to a file without a recorded strategy. Abandoned aggregate spare is tracked subject to the
+freed space before the metadata or raw aggregate for staged edits and nonpersistent appends. This
+also applies to a file without a recorded strategy. During persistent appends, the editor releases
+aggregate spare through manager publication and allocates exact extents. Abandoned spare is tracked
+subject to the
 free-section threshold. Active reservations are excluded from persisted free sections. A commit may
 surrender both windows when their spare permits releasing a larger dead suffix, or when recycling
 sub-threshold persistent manager storage. Clean teardown returns unused spare through the persistent
@@ -256,7 +258,7 @@ assert_eq!(
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
-With persistence enabled, [`File::open_rw`](crate::File::open_rw) supports staged commits and immediate appends on eligible PAGE files. Commits and clean close rewrite the per-page-type managers, including the known free remainder of newly allocated manager pages. Reopening recovers the final persisted sections. Held append reserves remain excluded until released. Both write paths keep metadata and raw pages separate and page-align the end of allocation.
+With persistence enabled, [`File::open_rw`](crate::File::open_rw) supports staged commits and immediate appends on eligible PAGE files. The editor publishes per-page-type managers that record reusable page tails and exclude complete metadata allocations. During immediate appends, it publishes allocation ownership before new references. Reopening loads the persisted sections. The writer keeps metadata and raw pages separate and page-aligns the end of allocation.
 
 With persistence disabled, staged edits require the whole-file mirror. [`MemoryStrategy::Auto`](crate::MemoryStrategy::Auto) selects it, and explicit bounded editing is rejected. New allocations begin at or beyond the first page boundary covering both the original stored EOA and the physical extent converted relative to the effective base. The editor leaves old allocations, apparent holes, and page tails unavailable. Freed extents are discarded without reuse or truncation. Reopening repeats this policy with an empty reusable-space state. The editor preserves `PAGE, persist = false` in the File Space Info message and keeps the manager address list empty.
 
@@ -286,7 +288,7 @@ metadata bytes. Undefined slots contribute zero.
 For a report named `report`, `report.free_sections().free_bytes()` measures tracked free regions,
 and `report.manager_metadata_bytes()` measures their persisted bookkeeping. The latter excludes
 the File Space Info message and its object header, userblocks, dataset storage and other metadata,
-the free regions themselves, aggregate or append reservations, dead or unclassified storage, and
+the free regions themselves, aggregate reservations, dead or unclassified storage, and
 trailing slack. It measures only persisted manager allocations. Relocating a file image or adding
 a userblock leaves this byte count unchanged.
 
@@ -310,7 +312,32 @@ ordinary threshold admission and may leave sub-threshold gaps.
 
 Freed space that reaches the end of the file is given back to the filesystem: the commit shortens the file to where the run starts, to a page boundary on a paged file, and the managers it writes cover nothing above the new length. A few blocks' worth is kept for the tails the following commits have to write, and a run that would return less than that is left alone, so what this guarantees is that the file ends just above its last live allocation, not that a delete never makes a file longer. For a guaranteed shrink that also moves live objects down, use [repack](crate::_guide::repack).
 
-An in-place [`Dataset::append`](crate::Dataset::append) reuses persisted free space as well, under [`FsmAggr`](crate::FileSpaceStrategy::FsmAggr) and [`Page`](crate::FileSpaceStrategy::Page) alike. Before spending a free region, the editor removes it from the on-disk managers in a separate crash-safe publication. One draw takes every hole the appended chunk fits in, up to a megabyte of them. Unspent reserve returns at the next commit or close. A crash between reservation and return strands those bytes without advertising them as reusable. Under `FsmAggr`, appends try this reserve before the metadata or raw aggregate. Unused aggregate reservations are already excluded from the persisted free sections.
+An in-place [`Dataset::append`](crate::Dataset::append) reuses persisted free space under
+[`FsmAggr`](crate::FileSpaceStrategy::FsmAggr) and [`Page`](crate::FileSpaceStrategy::Page).
+The editor selects exact provisional extents and writes payloads and new index blocks while the
+preceding managers remain authoritative. Before linking a reference, it publishes replacement
+standard managers excluding the complete owned allocations and their own metadata storage,
+including unused section-list capacity. The writer records the extension and EOF in the superblock, then completes the selected
+synchronization barrier before writing a reference.
+
+Unissued free space remains in the managers under the configured threshold policy. During
+persistent appends, the editor releases unused aggregate spare through that policy and allocates
+without speculative aggregate reservations. During PAGE publication, it preserves reusable page
+tails and page classes. The editor retains the current object root and leaves unrelated staged
+edits pending. It drains prior pending writes before reusing storage retired by a staged commit.
+
+An interruption before ownership publication leaves the preceding free-space managers
+available on reopen. After ownership publication, an actual allocation can remain unreferenced
+if its owner was not linked. Space stranded by earlier speculative reservations cannot be
+reconstructed from the persisted managers. Allocation publication rewrites managers more
+frequently, and manager loading and serialization depend on the number of free sections.
+
+Before persistent append allocation, the editor checks manager checksums even when the
+`checksum` feature is disabled, and rejects free sections overlapping complete published manager
+or extension allocations. Before attempted publication, the editor restores allocator state after
+a known failure. After uncertain publication, it rejects further reference and reuse requests in
+that session.
+These guarantees concern ordered complete writes and do not cover torn physical metadata writes.
 
 ```rust
 # let dir = tempfile::tempdir()?;

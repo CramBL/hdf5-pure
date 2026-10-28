@@ -4,6 +4,7 @@ use rstest::rstest;
 use super::*;
 
 mod io;
+mod persistent;
 
 #[rstest]
 #[case::one_allocation(1)]
@@ -127,4 +128,39 @@ fn an_empty_publication_cannot_authorize_a_later_allocation() {
         reason,
         "allocation belongs to another session or publication"
     );
+}
+
+#[rstest]
+#[case::before_attempt(false)]
+#[case::unpublished_attempt(true)]
+fn later_batch_confirmation_rejects_canceled_allocations(#[case] attempted: bool) {
+    let mut state = AllocationPublication::new();
+    let range = FileRange::new(PhysicalAddress::new(64), 16).unwrap();
+    let discarded = state.provision(range).unwrap();
+    if attempted {
+        let PublicationAction::Publish(attempt) = state.begin().unwrap() else {
+            panic!("expected a publication attempt");
+        };
+        state.cancel(attempt).unwrap();
+    } else {
+        state.discard_provisional().unwrap();
+    }
+    let replacement = state.provision(range).unwrap();
+    let PublicationAction::Publish(attempt) = state.begin().unwrap() else {
+        panic!("expected a replacement publication attempt");
+    };
+    let publication = state.complete(attempt).unwrap();
+    let error = match publication.confirm(discarded) {
+        Ok(_) => panic!("a canceled allocation was confirmed"),
+        Err(error) => error,
+    };
+    let Error::Format(FormatError::Internal(reason)) = error else {
+        panic!("expected an allocation generation mismatch, got {error:?}");
+    };
+    assert_eq!(
+        reason,
+        "allocation belongs to another session or publication"
+    );
+    let allocation = publication.confirm(replacement).unwrap();
+    assert_eq!(state.require(&allocation).unwrap(), range);
 }

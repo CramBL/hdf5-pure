@@ -1,5 +1,5 @@
 ---
-source: crates/crosscheck/tests/main/file_space_oracle.rs
+source: crates/crosscheck/tests/main/test_util/file_space.rs
 expression: report
 ---
 case:       append-reuse-paged
@@ -15,9 +15,9 @@ file-space properties
 
 file sizes (absolute bytes)
   measurement                           bytes
-  hdf5-pure stored EOF                3211264
-  libhdf5 H5Fget_filesize             3211264
-  physical file                       3211264
+  hdf5-pure stored EOF                3194880
+  libhdf5 H5Fget_filesize             3194880
+  physical file                       3194880
 
 free-space sections (stored addresses, byte lengths)
   index |        hdf5-pure         |         libhdf5          | match
@@ -25,17 +25,16 @@ free-space sections (stored addresses, byte lengths)
   ------+--------------------------+--------------------------+------
       0 | (0x00000030, 0x0000003a) | (0x00000030, 0x0000003a) | yes
       1 | (0x0000014c, 0x0000005e) | (0x0000014c, 0x0000005e) | yes
-      2 | (0x0000020d, 0x0000028d) | (0x0000020d, 0x0000028d) | yes
-      3 | (0x00000703, 0x000038fd) | (0x00000703, 0x000038fd) | yes
-      4 | (0x0000418e, 0x00003e72) | (0x0000418e, 0x00003e72) | yes
+      2 | (0x0000020d, 0x0000027b) | (0x0000020d, 0x0000027b) | yes
+      3 | (0x000006f1, 0x0000390f) | (0x000006f1, 0x0000390f) | yes
+      4 | (0x00004658, 0x000039a8) | (0x00004658, 0x000039a8) | yes
       5 | (0x00008000, 0x00004000) | (0x00008000, 0x00004000) | yes
-      6 | (0x0030c1ac, 0x00003e54) | (0x0030c1ac, 0x00003e54) | yes
 
 free-space totals
   measurement                       hdf5-pure        libhdf5
-  section count                             7              7
-  section bytes                         63720          63720
-  H5Fget_freespace                          -          63720
+  section count                             6              6
+  section bytes                         46538          46538
+  H5Fget_freespace                          -          46538
   reported - section bytes                  -              0
 
 

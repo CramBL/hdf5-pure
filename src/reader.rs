@@ -930,7 +930,7 @@ impl Drop for FileInner {
     /// - A read-write file that persists its free space rewrites its on-disk
     ///   free-space managers into canonical shape (issue #173), so a
     ///   dropped-without-`close` handle leaves the same file a clean `close`
-    ///   would, including returned aggregate spare and unspent append reserves. A
+    ///   would, including returned aggregate spare. A
     ///   true crash (`SIGKILL`, power loss) skips `drop` entirely; the appended
     ///   data is still durable, under the default
     ///   [`SyncPolicy::Always`](crate::SyncPolicy).
@@ -3370,8 +3370,8 @@ impl File {
     /// Returns a snapshot of this writable session's logical size and reusable free bytes.
     ///
     /// Reports committed changes and immediate appends. Staged edits affect the statistics
-    /// when applied by [`commit`](Self::commit). Unused append reserves and classic aggregate
-    /// reservations are included in the reusable total.
+    /// when applied by [`commit`](Self::commit). Unused classic aggregate reservations are
+    /// included in the reusable total.
     /// See [`ReusableSpaceStats::reusable_free_bytes`] for reservation and persistence semantics.
     ///
     /// Computes the values from cached counters without allocating or enumerating free sections.

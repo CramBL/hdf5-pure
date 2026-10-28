@@ -18,6 +18,15 @@ pub(super) mod plan;
 mod publish;
 mod rollback;
 
+/// Selects buffering for ownership or staged publication.
+#[derive(Clone, Copy)]
+pub(in crate::edit) enum PublicationPurpose {
+    /// Drains every buffering mode before confirming immediate allocation ownership.
+    Allocation,
+    /// Uses the staged commit's synchronization and buffering policy.
+    Commit,
+}
+
 /// Records the outcome of the latest superblock publication attempt.
 ///
 /// The publisher enters [`Uncertain`](Self::Uncertain) before writing and enters
@@ -63,38 +72,37 @@ impl WriteEngine {
     /// Returns [`Error::Io`] if writing or synchronization fails. Returns the publication recovery
     /// error if the issued superblock cannot be read or verified.
     /// Returns [`Error::AllocationPublicationUncertain`] if an earlier append outcome is uncertain.
+    /// Returns [`crate::FormatError::Internal`] if an allocation batch remains provisional.
     pub(crate) fn force_sync(&mut self) -> Result<(), Error> {
-        self.context.allocations.available()?;
+        self.context.allocations.before_reference()?;
         self.image.sync_all()?;
         self.complete_page_publication()
     }
 
     /// Publishes pending free-space state and releases unused aggregate tails.
     ///
-    /// A persisting session rewrites stale free-space managers and returns unspent immediate
-    /// append reserves. A persistent session also returns unused aggregate spare through those
-    /// managers. A session with classic aggregation releases unused aggregate space at EOA after
-    /// publishing the shorter EOA with the current root. An uncertain publication prevents
-    /// aggregate cleanup. Non-persisting sessions without classic aggregation require no
-    /// finalization.
-    /// Pending immediate retirements require manager publication even when EOF is unchanged.
+    /// In a persistent session, the editor rewrites stale free-space managers and releases unused
+    /// aggregate spare through those managers. With classic aggregation, it releases unused space
+    /// at EOA after publishing the shorter EOA with the current root. Uncertain publication
+    /// prevents aggregate cleanup. Non-persisting sessions without classic aggregation require no
+    /// finalization. Pending immediate retirements require manager publication even when EOF is
+    /// unchanged.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Format`] if metadata serialization, aggregate planning, or address
     /// resolution fails. Returns [`Error::Io`] if writing, syncing, or truncating fails.
     /// Returns [`Error::AllocationPublicationUncertain`] if an earlier append outcome is uncertain.
+    /// Returns [`crate::FormatError::Internal`] if an allocation batch remains provisional.
     pub(crate) fn finalize_persist(&mut self) -> Result<(), Error> {
-        self.context.allocations.available()?;
+        self.context.allocations.before_reference()?;
         if self.aggregation.is_some() {
             if self.persist.is_some() {
                 return self.finalize_persistent_aggregates();
             }
             return self.finalize_aggregates();
         }
-        if self.persist.is_none()
-            || (self.image.len() == self.fsm_len && self.reserved.is_empty() && !self.fsm_dirty)
-        {
+        if self.persist.is_none() || (self.image.len() == self.fsm_len && !self.fsm_dirty) {
             return Ok(());
         }
         self.commit_persisting_releasing_reserve(
@@ -131,8 +139,9 @@ impl WriteEngine {
     /// or synchronizing the file. Returns [`Error::CommitPartiallyApplied`] if restoring prior
     /// values from the undo journal fails, with both the original failure and the restore error.
     /// Returns [`Error::AllocationPublicationUncertain`] if an earlier append outcome is uncertain.
+    /// Returns [`crate::FormatError::Internal`] if an allocation batch remains provisional.
     pub fn commit(&mut self) -> Result<(), Error> {
-        self.context.allocations.available()?;
+        self.context.allocations.before_reference()?;
         if self.fresh_page_boundary.is_some() && self.publication.attempted() {
             self.barrier()?;
             self.complete_page_publication()?;

@@ -1082,7 +1082,7 @@ fn bounded_persist_append_without_finalize_is_readable() {
 }
 
 #[test]
-fn bounded_paged_reopen_after_crash_realigns_and_stays_readable() {
+fn bounded_paged_reopen_after_publication_stays_aligned_and_readable() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("paged_crash.h5");
     let mut b = crate::writer::FileBuilder::new();
@@ -1107,10 +1107,10 @@ fn bounded_paged_reopen_after_crash_realigns_and_stays_readable() {
             .append_inplace_gathered(AppendTarget::Header(addr), &ab, 4)
             .unwrap();
     }
-    assert_ne!(
-        std::fs::metadata(&p).unwrap().len() % 4096,
+    assert_eq!(
+        std::fs::metadata(&p).unwrap().len() % FileSpacePageSize::DEFAULT.get(),
         0,
-        "a crashed (un-finalized) paged session leaves the file non-page-aligned"
+        "ownership publication covers page padding before interruption"
     );
     {
         let mut engine = common::open_bounded_session(&p);
@@ -1371,9 +1371,9 @@ fn page_buffer_budget_controls_writes_within_publication_batches(
     let below = at(smaller);
     assert!(ample > 0, "{label}: the workload must issue writes");
     if scattered {
-        assert_eq!(
-            below, ample,
-            "small appends must drain at each publication boundary"
+        assert!(
+            below >= ample,
+            "publication batches issue {below} writes with budget {smaller}, against {ample} at {WRITE_GATHER_BYTES}"
         );
     } else {
         assert!(
@@ -1918,6 +1918,8 @@ fn sync_policy_governs_the_persisting_and_flag_barriers() {
         );
         s.append_inplace_i32_phased("d", &[8, 9, 10, 11], 4)
             .unwrap();
+        s.append_inplace_i32_phased("d", &[12], 4).unwrap();
+        s.append_inplace_i32_phased("d", &[13], 4).unwrap();
         let before_close = syncs.load(Ordering::Relaxed);
         s.finalize_persist().unwrap();
         let after_close = syncs.load(Ordering::Relaxed) - before_close;
@@ -1930,7 +1932,7 @@ fn sync_policy_governs_the_persisting_and_flag_barriers() {
         );
         assert_eq!(
             f.dataset("d").unwrap().read_i32().unwrap(),
-            (0..12).collect::<Vec<_>>(),
+            (0..14).collect::<Vec<_>>(),
             "and so must the append under {policy:?}"
         );
         [after_commit, after_flags, after_close]

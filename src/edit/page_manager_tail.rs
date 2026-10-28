@@ -2,6 +2,7 @@ use std::fs;
 use std::io::ErrorKind;
 
 use hdf5_pure_format::__private::HDF5_SIGNATURE;
+use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::{Extent, ManagerKind, ManagerSections};
 use rstest::rstest;
 use test_util::disk_log::{self, DiskOp};
@@ -13,6 +14,7 @@ use crate::FileSpacePageSize;
 use crate::FileSpaceSettings;
 use crate::FormatError;
 use crate::UserblockSize;
+use crate::chunk_index_inplace::Store;
 use crate::edit::test_util as edit_test_util;
 use crate::edit::{TailPlacement, WriteEngine};
 use crate::image::WriteBuffering;
@@ -87,7 +89,7 @@ fn final_typed_manager_sections_survive_commit_finalization_and_reopen(
 }
 
 #[test]
-fn append_reserve_publication_and_finalization_persist_their_final_sections() {
+fn append_ownership_publication_and_finalization_persist_their_final_sections() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("reserve.h5");
     let mut builder = FileBuilder::new();
@@ -100,20 +102,19 @@ fn append_reserve_publication_and_finalization_persist_their_final_sections() {
     let mut engine = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
     engine.delete(&ObjectPathBuf::parse("hole")).unwrap();
     engine.commit().unwrap();
-    engine.reserve_for_immediate_append(4_096).unwrap();
-    assert!(!engine.reserved.is_empty());
-    let held = engine.reserved.extents().to_vec();
-    let reserved_state = typed_sections(&engine);
+    let mut store = engine.store();
+    let allocation = store.allocate(&[1; 4_096], AllocationClass::Raw).unwrap();
+    let publication = store.publish_allocations().unwrap();
+    publication.confirm(allocation).unwrap();
+    let published = typed_sections(&engine);
     assert_manager_allocations_owned(&engine);
     engine.force_sync().unwrap();
-    let snapshot = dir.path().join("reserved_snapshot.h5");
+    let snapshot = dir.path().join("published_snapshot.h5");
     fs::write(&snapshot, issued_bytes(&engine)).unwrap();
     let reopened = WriteEngine::open_with_locking(&snapshot, FileLocking::Enabled).unwrap();
-    assert_eq!(typed_sections(&reopened), reserved_state);
+    assert_eq!(typed_sections(&reopened), published);
     drop(reopened);
-    assert_eq!(engine.reserved.extents(), held);
     engine.finalize_persist().unwrap();
-    assert!(engine.reserved.is_empty());
     let finalized = typed_sections(&engine);
     let bytes = issued_bytes(&engine);
     engine.finalize_persist().unwrap();
@@ -215,12 +216,6 @@ fn assert_manager_allocations_owned(engine: &WriteEngine) {
         assert!(
             free.iter()
                 .all(|extent| extent.end() <= block.start() || extent.start() >= block.end())
-        );
-    }
-    for reserve in engine.reserved.extents() {
-        assert!(
-            free.iter()
-                .all(|extent| extent.end() <= reserve.start() || extent.start() >= reserve.end())
         );
     }
 }
