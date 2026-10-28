@@ -4,8 +4,12 @@ use std::io::ErrorKind;
 
 use hdf5_pure_core::__private::PhysicalAddress;
 use rstest::rstest;
+use test_util::identity::Fixture as IdentityFixture;
+use test_util_hdf5::identity;
+use test_util_hdf5::reader::ReadBackend;
 
 use super::common;
+use crate::DatatypeByteOrder;
 use crate::DeflateLevel;
 use crate::FileSpaceSettings;
 use crate::Layout;
@@ -1989,40 +1993,31 @@ fn a_commit_whose_publish_write_fails_rolls_nothing_back() {
     );
 }
 
-#[test]
-fn an_undo_replays_two_hard_links_to_one_block_newest_first() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = test_util::copy_data("c/hard_link_undo.h5", dir.path());
-
-    let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
-    let mut superblock = s.context.superblock().clone();
-    superblock.superblock_extension_address = Some(StoredAddress::ZERO);
-    let proposed = s.context.propose(superblock).unwrap();
-    s.context.adopt(proposed).unwrap();
-    for (name, data) in [("/aa", [9, 9, 9]), ("/bb", [8, 8, 8])] {
-        s.stage_dataset_write(&ObjectPathBuf::parse(name), {
-            let mut db = crate::type_builders::DatasetBuilder::new("");
-            db.with_i32_data(&data);
-            db
-        })
-        .unwrap();
-    }
-    s.stage_created_dataset(&ObjectPathBuf::parse("/extra"), {
-        let mut db = crate::type_builders::DatasetBuilder::new("");
-        db.with_i32_data(&[42]);
-        db
-    })
-    .unwrap();
-    assert!(s.commit().is_err());
-    drop(s);
-
-    let f = crate::reader::File::open(&path).unwrap();
-    assert_eq!(
-        f.dataset("aa").unwrap().read_i32().unwrap(),
-        vec![1, 2, 3],
-        "the block both links share must hold the value it held before"
+#[rstest]
+#[case::gathered(WriteBuffering::Operation { page_size: 4_096, max_bytes: WRITE_GATHER_BYTES })]
+#[case::unbuffered(WriteBuffering::Unbuffered)]
+fn an_undo_replays_two_hard_links_to_one_block_newest_first(
+    #[case] buffering: WriteBuffering,
+    #[values(
+        ReadBackend::Buffered,
+        ReadBackend::Bytes,
+        ReadBackend::Source,
+        ReadBackend::Streaming
+    )]
+    backend: ReadBackend,
+) {
+    let path = test_util::temp::temp_path("hard_link_undo.h5");
+    std::fs::write(&path, test_util::identity::hard_link_undo()).unwrap();
+    crate::edit::test_util::assert_hard_link_undo(&path, buffering);
+    let bytes = std::fs::read(&path).unwrap();
+    let file = backend.open(&path).unwrap();
+    identity::assert_contents(
+        &file,
+        IdentityFixture::HardLinkUndo,
+        DatatypeByteOrder::LittleEndian,
     );
-    assert_eq!(f.dataset("bb").unwrap().read_i32().unwrap(), vec![1, 2, 3]);
+    identity::assert_storage(&file, &bytes, IdentityFixture::HardLinkUndo);
+    drop(file);
 }
 
 #[test]

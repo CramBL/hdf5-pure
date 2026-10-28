@@ -72,6 +72,7 @@ mod group_link_inspection;
 mod hdf5;
 mod hdf5_release_feature;
 mod huge_links;
+mod identity;
 mod layout_introspection;
 mod legacy;
 mod legacy_attributes;

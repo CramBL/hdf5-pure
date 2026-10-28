@@ -215,7 +215,8 @@ fn f32_datatype() -> Vec<u8> {
 
 // Section `subsubsec_fmt4_dataobject_hdr_msg_dtmessage`, version 4.0, defines
 // the signed flag and bit precision encoded here.
-fn i32_datatype() -> Vec<u8> {
+/// Encodes a signed little-endian 32-bit integer datatype.
+pub(crate) fn i32_datatype() -> Vec<u8> {
     let mut datatype = datatype::header(
         Class::FIXED_POINT,
         DATATYPE_VERSION,

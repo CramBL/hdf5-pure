@@ -5,6 +5,7 @@ use std::path::Path;
 use hdf5_pure_space::__private::Extent as FreeExtent;
 use hdf5_pure_space::__private::FreeClass;
 use hdf5_pure_space::__private::PageType;
+use test_util::disk_log::DiskOp;
 
 use crate::Datatype;
 use crate::DatatypeByteOrder;
@@ -19,6 +20,8 @@ use crate::address::AddressContext;
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
 use crate::address::DecodedStoredAddress;
+use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
 use crate::edit::MemoryStrategy;
 use crate::edit::SpaceOwnership;
 use crate::edit::WriteEngine;
@@ -29,6 +32,7 @@ use crate::error::FormatError;
 use crate::file_writer::OFFSET_WIDTH;
 use crate::fractal_heap_storage::FractalHeapAllocation;
 use crate::free_space_manager;
+use crate::image::WriteBuffering;
 use crate::link_info::LinkInfoMessage;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
@@ -279,6 +283,93 @@ impl WriteEngine {
             );
         }
     }
+}
+
+/// Checks rollback of writes through two aliases of one data block.
+///
+/// Uses an invalid extension address to provoke [`Error::EditUnsupported`].
+/// Both aliases must retain their original `[1, 2, 3]` values after reopen.
+/// With unbuffered writes, also checks disk-write order and newest-first undo.
+///
+/// # Panics
+///
+/// Panics if setup or reading fails, or rollback observations differ.
+pub(in crate::edit) fn assert_hard_link_undo(path: &Path, buffering: WriteBuffering) {
+    let opened = File::open(path).unwrap();
+    let Layout::Contiguous {
+        address: Some(data_address),
+        size: 12,
+    } = opened.dataset("aa").unwrap().layout().unwrap()
+    else {
+        panic!("expected allocated three-element storage")
+    };
+    drop(opened);
+    let mut s = WriteEngine::open_with_locking(path, FileLocking::Enabled).unwrap();
+    s.set_write_buffering(buffering).unwrap();
+    let mut superblock = s.context.superblock().clone();
+    superblock.superblock_extension_address = Some(StoredAddress::ZERO);
+    let proposed = s.context.propose(superblock).unwrap();
+    s.context.adopt(proposed).unwrap();
+    for (name, data) in [("/aa", [9, 9, 9]), ("/bb", [8, 8, 8])] {
+        s.stage_dataset_write(&ObjectPathBuf::parse(name), {
+            let mut db = crate::type_builders::DatasetBuilder::new("");
+            db.with_i32_data(&data);
+            db
+        })
+        .unwrap();
+    }
+    s.stage_created_dataset(&ObjectPathBuf::parse("/extra"), {
+        let mut db = crate::type_builders::DatasetBuilder::new("");
+        db.with_i32_data(&[42]);
+        db
+    })
+    .unwrap();
+    test_util::disk_log::start();
+    let error = s.commit().unwrap_err();
+    let operations = test_util::disk_log::take();
+    let Error::EditUnsupported(reason) = error else {
+        panic!("expected unsupported extension header, got {error:?}");
+    };
+    assert_eq!(reason, "an object does not use a version 2 object header");
+    if buffering == WriteBuffering::Unbuffered {
+        let writes = operations
+            .into_iter()
+            .filter_map(|operation| match operation {
+                DiskOp::Write { offset, bytes } if offset == data_address => Some(bytes),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            writes,
+            [
+                [9i32; 3]
+                    .into_iter()
+                    .flat_map(i32::to_le_bytes)
+                    .collect::<Vec<_>>(),
+                [8i32; 3]
+                    .into_iter()
+                    .flat_map(i32::to_le_bytes)
+                    .collect::<Vec<_>>(),
+                [9i32; 3]
+                    .into_iter()
+                    .flat_map(i32::to_le_bytes)
+                    .collect::<Vec<_>>(),
+                [1i32, 2, 3]
+                    .into_iter()
+                    .flat_map(i32::to_le_bytes)
+                    .collect::<Vec<_>>()
+            ]
+        );
+    }
+    drop(s);
+
+    let f = crate::reader::File::open(path).unwrap();
+    assert_eq!(
+        f.dataset("aa").unwrap().read_i32().unwrap(),
+        vec![1, 2, 3],
+        "the block both links share must hold the value it held before"
+    );
+    assert_eq!(f.dataset("bb").unwrap().read_i32().unwrap(), vec![1, 2, 3]);
 }
 
 /// Returns persisted sub-page fragments after checking that allocations cannot reuse them.
