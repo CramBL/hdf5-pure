@@ -9,6 +9,7 @@
 use crate::edit::SyncPolicy;
 use crate::error::Error;
 
+use self::plan::{CommitPreparation, PreparedCommit};
 use super::WriteEngine;
 use super::staging::StagedEdits;
 
@@ -169,12 +170,14 @@ impl WriteEngine {
             return CommitOutcome::Applied(Ok(()));
         }
         self.begin_commit(&staged);
-        let plan = match self.plan_commit(&staged) {
-            Ok(plan) => plan,
-            Err(error) => return CommitOutcome::Rejected { staged, error },
-        };
-        let owned = staged.into_apply();
-        CommitOutcome::Applied(self.apply_commit(plan, owned))
+        match PreparedCommit::prepare(self, staged) {
+            CommitPreparation::Prepared(prepared) => {
+                CommitOutcome::Applied(self.apply_commit(prepared))
+            }
+            CommitPreparation::Rejected { staged, error } => {
+                CommitOutcome::Rejected { staged, error }
+            }
+        }
     }
 
     /// Clears attempt state and cached append geometry.
