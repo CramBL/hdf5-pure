@@ -89,6 +89,14 @@ fn group(image: &mut Image, links: &[(&str, u64)]) -> u64 {
     group_with_messages(image, links, &[])
 }
 
+/// Writes a symbol-table group with caller-supplied header messages.
+///
+/// Pass links in name order. Symbol entries are distributed across leaves with
+/// at most eight entries each and at least four when more than one leaf is used.
+///
+/// # Panics
+///
+/// Panics if there are more than 256 links.
 pub(crate) fn group_with_messages(
     image: &mut Image,
     links: &[(&str, u64)],
@@ -110,7 +118,7 @@ pub(crate) fn group_with_messages(
         .collect();
     let mut tree = if entries.is_empty() {
         btree_v1::node_with_group_keys(NodeType::GROUP, 0, &[0], &[], Widths::EIGHT)
-    } else {
+    } else if entries.len() <= SYMBOL_NODE_CAPACITY {
         let mut symbols = symbol_table::node(&entries, Widths::EIGHT);
         symbols.resize(SYMBOL_NODE_SIZE, 0);
         btree_v1::node_with_group_keys(
@@ -120,6 +128,24 @@ pub(crate) fn group_with_messages(
             &[image.append_aligned(&symbols, 8) as u64],
             Widths::EIGHT,
         )
+    } else {
+        assert!(entries.len() <= SYMBOL_NODE_CAPACITY * BTREE_CHILD_CAPACITY);
+        let leaves = entries.len().div_ceil(SYMBOL_NODE_CAPACITY);
+        let entries_per_leaf = entries.len() / leaves;
+        let longer_leaves = entries.len() % leaves;
+        let mut keys = vec![0];
+        let children: Vec<_> = (0..leaves)
+            .map(|leaf| {
+                let start = leaf * entries_per_leaf + leaf.min(longer_leaves);
+                let end = start + entries_per_leaf + usize::from(leaf < longer_leaves);
+                let entries = &entries[start..end];
+                let mut symbols = symbol_table::node(entries, Widths::EIGHT);
+                symbols.resize(SYMBOL_NODE_SIZE, 0);
+                keys.push(entries.last().unwrap().link_name_offset);
+                image.append_aligned(&symbols, 8) as u64
+            })
+            .collect();
+        btree_v1::node_with_group_keys(NodeType::GROUP, 0, &keys, &children, Widths::EIGHT)
     };
     tree.resize(BTREE_NODE_SIZE, 0);
     let tree = image.append_aligned(&tree, 8) as u64;
@@ -236,11 +262,13 @@ enum Values<'a> {
 
 // Section `subsec_fmt4_infra_symboltable`, version 4.0, reserves 2K entries
 // after the eight-byte prefix. The superblock's default leaf K is four.
-const SYMBOL_NODE_SIZE: usize = 8 + 8 * 40;
+const SYMBOL_NODE_CAPACITY: usize = 8;
+const SYMBOL_NODE_SIZE: usize = 8 + SYMBOL_NODE_CAPACITY * 40;
 
 // Section `subsubsec_fmt4_infra_btrees_v1`, version 4.0, reserves 2K children
 // and 2K+1 keys. The superblock's default internal K is sixteen.
-const BTREE_NODE_SIZE: usize = 24 + 32 * 8 + 33 * 8;
+const BTREE_CHILD_CAPACITY: usize = 32;
+const BTREE_NODE_SIZE: usize = 24 + BTREE_CHILD_CAPACITY * 8 + (BTREE_CHILD_CAPACITY + 1) * 8;
 
 // Section `subsubsec_fmt4_dataobject_hdr_prefix_one`, version 4.0, aligns
 // version 1 message bodies to eight bytes.
@@ -256,3 +284,89 @@ const IEEE754_BINARY32_CLASS_FIELDS: [u8; 3] = [0x20, 31, 0];
 // Section `subsubsec_fmt4_dataobject_hdr_msg_dtmessage`, version 4.0, defines
 // the signed flag and little-endian byte order encoded here.
 const SIGNED_I32_CLASS_FIELDS: [u8; 3] = [0x08, 0, 0];
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use crate::bytes;
+
+    use super::*;
+
+    #[rstest]
+    #[case::single_leaf(8, 1)]
+    #[case::first_split(9, 2)]
+    #[case::tail_below_minimum(11, 2)]
+    #[case::tail_at_minimum(12, 2)]
+    #[case::mat_reference_group(54, 7)]
+    #[case::full_tree(256, 32)]
+    fn symbol_table_leaves_preserve_occupancy_and_boundaries(
+        #[case] count: usize,
+        #[case] expected_leaves: usize,
+    ) {
+        let names = (0..count)
+            .map(|i| format!("entry_{i:03}"))
+            .collect::<Vec<_>>();
+        let links = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.as_str(), i as u64))
+            .collect::<Vec<_>>();
+        let mut image = Image::new();
+        let address = group_with_messages(&mut image, &links, &[]) as usize;
+        let bytes = image.as_bytes();
+        let chunks = v1::chunks(bytes, address, Widths::EIGHT);
+        let table = chunks[0]
+            .records
+            .iter()
+            .find(|record| record.msg_type == MessageType::SYMBOL_TABLE)
+            .unwrap();
+        let tree = bytes::u64_at(bytes, table.body.start) as usize;
+        assert_eq!(
+            &bytes[tree..tree + btree_v1::SIGNATURE.len()],
+            btree_v1::SIGNATURE
+        );
+        let leaves = usize::from(bytes::u16_at(bytes, tree + NODE_COUNT_AT));
+        assert_eq!(leaves, expected_leaves);
+        let names = Segment::of_names(
+            0,
+            &std::iter::once("")
+                .chain(names.iter().map(String::as_str))
+                .collect::<Vec<_>>(),
+        );
+        let mut seen = 0;
+        for leaf in 0..leaves {
+            let key = tree + BTREE_PREFIX + leaf * 2 * Widths::EIGHT.offset;
+            assert_eq!(bytes::u64_at(bytes, key), names.offset_of(seen));
+            let symbols = bytes::u64_at(bytes, key + Widths::EIGHT.length) as usize;
+            assert_eq!(
+                &bytes[symbols..symbols + symbol_table::SIGNATURE.len()],
+                symbol_table::SIGNATURE
+            );
+            let size = usize::from(bytes::u16_at(bytes, symbols + NODE_COUNT_AT));
+            assert!((MIN_SYMBOLS..=SYMBOL_NODE_CAPACITY).contains(&size));
+            for entry in 0..size {
+                let at = symbols + SYMBOL_PREFIX + entry * SYMBOL_ENTRY_SIZE;
+                assert_eq!(bytes::u64_at(bytes, at), names.offset_of(seen + entry + 1));
+                assert_eq!(
+                    bytes::u64_at(bytes, at + Widths::EIGHT.length),
+                    (seen + entry) as u64
+                );
+            }
+            seen += size;
+            assert_eq!(
+                bytes::u64_at(bytes, key + 2 * Widths::EIGHT.offset),
+                names.offset_of(seen)
+            );
+        }
+        assert_eq!(seen, count);
+    }
+
+    // Sections `subsec_fmt4_boot_super`, `subsubsec_fmt4_infra_btrees_v1`,
+    // `subsec_fmt4_infra_symboltable` and `subsec_fmt4_infra_symboltableentry`, version 4.0.
+    const MIN_SYMBOLS: usize = 4;
+    const NODE_COUNT_AT: usize = 6;
+    const BTREE_PREFIX: usize = 24;
+    const SYMBOL_PREFIX: usize = 8;
+    const SYMBOL_ENTRY_SIZE: usize = 40;
+}

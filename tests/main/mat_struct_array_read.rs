@@ -1,19 +1,16 @@
-//! Reading MATLAB struct *arrays* (issue #127) into `Vec<T>` / `Vec<Vec<T>>`.
+//! MATLAB struct arrays deserialized from independent HDF5 images.
 //!
-//! On disk a struct array is a `MATLAB_class="struct"` group whose every field
-//! is a dataset of per-element object references, unlike a scalar struct whose
-//! fields are direct value datasets. The fixture is synthetic, built to MATLAB's
-//! documented v7.3 layout by `tests/data/h5py/mat/gen_struct_array.py`
-//! (see `tests/data/h5py/mat/NOTICE.md`).
+//! Array fields contain object references, and scalar fields contain direct
+//! values. The byte builders and complete graph assertions also cover
+//! column-major dimensions, nested aliases, and MATLAB attributes.
 #![cfg(feature = "serde")]
 
 use hdf5_pure::mat;
+use rstest::rstest;
 use serde::Deserialize;
 use serde::de::IgnoredAny;
-use test_util_hdf5::mat_file;
-
-const FIXTURE: &str = "h5py/mat/struct_array_v73.mat";
-const MISMATCHED_FIXTURE: &str = "h5py/mat/struct_array_mismatched_v73.mat";
+use test_util::mat_struct_array;
+use test_util_hdf5::reader::ReadBackend;
 
 #[derive(Deserialize, Debug, PartialEq)]
 #[allow(non_snake_case)]
@@ -49,40 +46,44 @@ fn expected_data(n: u64) -> Data {
     }
 }
 
-/// The issue's exact case: a `1×6` struct array deserializes into `Vec<Data>`.
+// The MATLAB row has six elements.
 #[test]
 fn row_struct_array_reads_as_vec() {
     #[derive(Deserialize)]
     struct File {
         row: Vec<Data>,
     }
-    let row = mat_file::decode_fixture(test_util::data(FIXTURE), mat::from_bytes::<File>).row;
+    let row = mat::from_bytes::<File>(&mat_struct_array::struct_array())
+        .unwrap()
+        .row;
     let expected: Vec<Data> = (1..=6).map(expected_data).collect();
     assert_eq!(row, expected);
 }
 
-/// A `6×1` column struct array flattens into the same `Vec<Data>` as the row
-/// orientation, matching how the crate flattens `1×N` / `N×1` numeric arrays.
+// The MATLAB column has six elements.
 #[test]
 fn col_struct_array_reads_as_vec() {
     #[derive(Deserialize)]
     struct File {
         col: Vec<Data>,
     }
-    let col = mat_file::decode_fixture(test_util::data(FIXTURE), mat::from_bytes::<File>).col;
+    let col = mat::from_bytes::<File>(&mat_struct_array::struct_array())
+        .unwrap()
+        .col;
     let expected: Vec<Data> = (1..=6).map(expected_data).collect();
     assert_eq!(col, expected);
 }
 
-/// A true `2×3` struct array yields a row-major `Vec<Vec<T>>`, mirroring the
-/// numeric `Matrix` row split. `id = row*10 + col` pins the ordering.
+// Each MATLAB row has three elements with `id = row * 10 + col`.
 #[test]
 fn grid_struct_array_reads_as_rows() {
     #[derive(Deserialize)]
     struct File {
         grid: Vec<Vec<GridElem>>,
     }
-    let grid = mat_file::decode_fixture(test_util::data(FIXTURE), mat::from_bytes::<File>).grid;
+    let grid = mat::from_bytes::<File>(&mat_struct_array::struct_array())
+        .unwrap()
+        .grid;
     assert_eq!(grid.len(), 2);
     assert_eq!(
         grid[0],
@@ -120,15 +121,15 @@ fn grid_struct_array_reads_as_rows() {
     );
 }
 
-/// Each struct-array element may itself contain a nested *scalar* struct,
-/// resolved through the element's reference like any other field value.
 #[test]
 fn nested_scalar_struct_in_array_decodes() {
     #[derive(Deserialize)]
     struct File {
         nested: Vec<Nested>,
     }
-    let nested = mat_file::decode_fixture(test_util::data(FIXTURE), mat::from_bytes::<File>).nested;
+    let nested = mat::from_bytes::<File>(&mat_struct_array::struct_array())
+        .unwrap()
+        .nested;
     assert_eq!(
         nested,
         vec![
@@ -144,11 +145,10 @@ fn nested_scalar_struct_in_array_decodes() {
     );
 }
 
-/// A struct array whose fields hold the same number of references in different
-/// dimensions is rejected. Read anyway, the transpose would pair the wrong elements.
+// Both fields contain six references but have HDF5 shapes `[3, 2]` and `[2, 3]`.
 #[test]
 fn a_struct_array_field_of_other_dimensions_is_rejected() {
-    let bytes = mat_file::read_fixture(test_util::data(MISMATCHED_FIXTURE));
+    let bytes = mat_struct_array::mismatched_struct_array();
     let err = mat::from_bytes::<IgnoredAny>(&bytes).unwrap_err();
     let mat::MatError::StructArrayFieldShape {
         field,
@@ -163,8 +163,6 @@ fn a_struct_array_field_of_other_dimensions_is_rejected() {
     assert_eq!(actual, &[2, 3]);
 }
 
-/// Regression guard: a scalar (1×1) struct must still read as a single struct,
-/// not be misdetected as a struct array.
 #[test]
 fn scalar_struct_is_not_treated_as_array() {
     #[derive(Deserialize)]
@@ -172,13 +170,13 @@ fn scalar_struct_is_not_treated_as_array() {
         scalar: Data,
     }
     assert_eq!(
-        mat_file::decode_fixture(test_util::data(FIXTURE), mat::from_bytes::<File>).scalar,
+        mat::from_bytes::<File>(&mat_struct_array::struct_array())
+            .unwrap()
+            .scalar,
         expected_data(1)
     );
 }
 
-/// Deserializing a multi-element struct array into a single struct fails with a
-/// clear error rather than silently taking the first element.
 #[test]
 fn struct_array_into_single_struct_errors() {
     #[derive(Deserialize, Debug)]
@@ -186,11 +184,38 @@ fn struct_array_into_single_struct_errors() {
         #[allow(dead_code)]
         row: Data,
     }
-    let bytes = mat_file::read_fixture(test_util::data(FIXTURE));
+    let bytes = mat_struct_array::struct_array();
     let err = mat::from_bytes::<File>(&bytes).unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        msg.contains("struct array"),
-        "error should mention the struct array, got: {msg}"
-    );
+    let mat::MatError::Custom(message) = &err else {
+        panic!("expected Custom, got {err:?}");
+    };
+    assert_eq!(message, "expected map/struct, got struct array");
+}
+
+#[rstest]
+#[case::buffered(ReadBackend::Buffered)]
+#[case::bytes(ReadBackend::Bytes)]
+#[case::source(ReadBackend::Source)]
+#[case::streaming(ReadBackend::Streaming)]
+fn complete_struct_array_graph(#[case] backend: ReadBackend) {
+    let path = test_util::temp::temp_path("struct_array.mat");
+    let bytes = mat_struct_array::struct_array();
+    std::fs::write(&path, &bytes).unwrap();
+    let file = backend.open(&path).unwrap();
+    test_util_hdf5::mat_struct_array::assert_contents(&file, &bytes);
+    file.close().unwrap();
+}
+
+#[rstest]
+#[case::buffered(ReadBackend::Buffered)]
+#[case::bytes(ReadBackend::Bytes)]
+#[case::source(ReadBackend::Source)]
+#[case::streaming(ReadBackend::Streaming)]
+fn complete_mismatched_struct_array_graph(#[case] backend: ReadBackend) {
+    let path = test_util::temp::temp_path("mismatched_struct_array.mat");
+    let bytes = mat_struct_array::mismatched_struct_array();
+    std::fs::write(&path, &bytes).unwrap();
+    let file = backend.open(&path).unwrap();
+    test_util_hdf5::mat_struct_array::assert_mismatched_contents(&file, &bytes);
+    file.close().unwrap();
 }
