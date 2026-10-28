@@ -378,6 +378,7 @@ mod page_header_reclamation;
 mod page_manager_tail;
 mod paged_persistence;
 mod reclaim;
+mod retirement;
 mod root_reclamation;
 mod staging;
 mod tail_recycling;

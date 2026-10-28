@@ -18,6 +18,7 @@ use super::publish::AppliedTree;
 use crate::edit::dataset::{FlatDataset, MovingWrite};
 use crate::edit::group::{self, LinkCreationOrder};
 use crate::edit::object_header;
+use crate::edit::retirement::RootRetirement;
 use crate::edit::staging::StagedApply;
 use crate::edit::{self, WriteEngine};
 use crate::error::{Error, FormatError};
@@ -122,6 +123,7 @@ impl WriteEngine {
                 .push((leaf, tree));
         }
         let mut to_free = self.prepare_reclamation(&groups, deleted_free)?;
+        let mut tail_allocations = Vec::new();
         let base = self.context.addresses();
         let mut path_addr: BTreeMap<ObjectPathBuf, u64> = BTreeMap::new();
         let mut relocations: BTreeMap<u64, u64> = BTreeMap::new();
@@ -194,10 +196,20 @@ impl WriteEngine {
             for RelocatedDataset {
                 link,
                 old_header,
-                write,
+                mut write,
             } in writes
             {
+                let tail_allocation = if let MovingWrite::AppendedChunks {
+                    old_tail_allocation,
+                    ..
+                } = &mut write
+                {
+                    old_tail_allocation.take()
+                } else {
+                    None
+                };
                 let new_header = self.write_moving(overwrites, write)?;
+                tail_allocations.extend(tail_allocation);
                 group::patch_link_target(&mut region, link.as_str(), base.relative(new_header)?)?;
                 relocations.insert(old_header, new_header);
             }
@@ -246,8 +258,8 @@ impl WriteEngine {
         );
         edit::retain_disjoint_in_bounds(&mut to_free, self.image.len());
         Ok(AppliedTree {
-            root: PhysicalAddress::new(new_root),
-            freed: self.stored_spans(to_free)?,
+            retirement: RootRetirement::new(PhysicalAddress::new(new_root), tail_allocations),
+            freed: to_free,
             relocations,
         })
     }
@@ -311,7 +323,7 @@ impl WriteEngine {
                     }
                     MovingWrite::AppendedChunks {
                         old_addr,
-                        old_tail_extent,
+                        old_tail_allocation,
                         kept_chunks,
                         ..
                     } => {
@@ -321,7 +333,10 @@ impl WriteEngine {
                                 .filter_map(|c| {
                                     Some((base.absolute(c.address).ok()?, c.stored_size))
                                 })
-                                .chain(*old_tail_extent)
+                                .chain(old_tail_allocation.iter().map(|allocation| {
+                                    let range = allocation.range();
+                                    (range.start().get(), range.length())
+                                }))
                                 .collect();
                             let class = if self.index_is_provably_raw(&data, &spans) {
                                 FreeClass::Page(PageType::Raw)
@@ -329,9 +344,6 @@ impl WriteEngine {
                                 FreeClass::Dead
                             };
                             to_free.extend(spans.into_iter().map(|(a, l)| (a, l, class)));
-                        }
-                        if let Some(ext) = old_tail_extent {
-                            to_free.push((ext.0, ext.1, FreeClass::Page(PageType::Raw)));
                         }
                     }
                     _ => {}

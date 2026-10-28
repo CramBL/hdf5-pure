@@ -37,6 +37,19 @@ fn c_creates_pure_appends_both_read() {
 
 #[test]
 #[cfg(target_endian = "little")]
+fn c_partial_tail_replacement_preserves_values() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("partial-tail.h5");
+    AppendInteropFixture::filtered_libhdf5(7, 5).write(&path);
+    dataset::pure_append_staged(&path, "d", &[7, 8]);
+    dataset::pure_append_staged(&path, "d", &[9, 10, 11, 12]);
+    let expected: Vec<i32> = (0..13).collect();
+    assert_eq!(dataset::read_libhdf5::<i32>(&path, "d"), expected);
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
+}
+
+#[test]
+#[cfg(target_endian = "little")]
 fn c_incompressible_kept_chunks_filter_mask_preserved() {
     // The load-bearing interop case: the C library stores incompressible chunks
     // uncompressed and records a nonzero per-chunk filter mask. The append must
