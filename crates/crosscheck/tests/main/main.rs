@@ -100,6 +100,7 @@ mod superblock_addresses;
 mod superblock_search;
 mod swmr_append;
 mod swmr_refresh;
+mod swmr_successive_readers;
 mod symbol_table_groups;
 mod symbol_table_soft_links;
 #[cfg(feature = "__hdf5-1.10")]

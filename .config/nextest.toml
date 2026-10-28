@@ -102,7 +102,9 @@ package(hdf5-pure-crosscheck) & (
     test(/^owned_append::/) |
     test(/^owned_swmr::/) |
     test(/^swmr_append::/) |
-    test(/^swmr_refresh::/)
+    test(/^swmr_refresh::/) |
+    test(/^swmr_successive_readers::/) |
+    test(/^test_util::swmr_reader::/)
 )
 '''
 test-group = "append"

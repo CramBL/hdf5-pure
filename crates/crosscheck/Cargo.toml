@@ -26,6 +26,14 @@ test = false
 bench = false
 required-features = ["__hdf5-1.10"]
 
+# Reads successive SWMR append states in fresh native processes.
+[[bin]]
+name = "swmr-reader"
+path = "tests/fixtures/swmr_reader.rs"
+test = false
+bench = false
+required-features = ["__hdf5-1.10"]
+
 [features]
 serde = ["hdf5-pure/serde"]
 ndarray = ["hdf5-pure/ndarray"]

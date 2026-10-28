@@ -7,3 +7,5 @@ pub(crate) mod c_object;
 pub(crate) mod dense_attributes;
 pub(crate) mod file_space;
 pub(crate) mod hard_link_graphs;
+#[path = "../../fixtures/swmr_reader/protocol.rs"]
+pub(crate) mod swmr_reader;
