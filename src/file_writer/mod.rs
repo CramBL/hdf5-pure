@@ -101,6 +101,8 @@ use crate::datatype::{CharacterSet, Datatype};
 mod allocation_tests;
 mod layout;
 mod preparation;
+#[cfg(feature = "std")]
+pub(crate) mod source;
 
 /// The width of every address in a file this crate writes.
 pub(crate) const OFFSET_WIDTH: OffsetWidth = OffsetWidth::Eight;
@@ -753,31 +755,6 @@ impl FileWriter {
     pub fn with_file_space_settings(&mut self, settings: FileSpaceSettings) -> &mut Self {
         self.file_space_settings = Some(settings);
         self
-    }
-
-    /// Whether anything staged needs the 1.10 format, i.e. whether an
-    /// `Earliest..=V18` bound would be refused with
-    /// [`FormatError::LibverTooOldForContent`].
-    ///
-    /// This is the same predicate `finish_to_sink` refuses on — chunked storage,
-    /// which a filter and an unlimited dimension both imply — asked *before* the
-    /// bound is chosen. Repack is the caller: it carries the source file's format
-    /// forward, and needs to know whether the content it staged permits that
-    /// before committing to an answer, since a great many files the C library
-    /// wrote hold chunked datasets under a version 0 or 2 superblock and there is
-    /// no older chunk index this crate can write them back into.
-    pub(crate) fn needs_latest_format(&self) -> bool {
-        fn any_chunked(datasets: &[DatasetBuilder]) -> bool {
-            datasets.iter().any(|d| {
-                d.chunk_options.is_chunked() || d.maxshape.is_some() || d.raw_chunks.is_some()
-            })
-        }
-        fn group_needs(group: &FinishedGroup) -> bool {
-            any_chunked(&group.datasets) || group.sub_groups.iter().any(group_needs)
-        }
-        self.file_space_settings.is_some()
-            || any_chunked(&self.root_datasets)
-            || self.groups.iter().any(group_needs)
     }
 
     pub fn create_group(&mut self, name: &str) -> GroupBuilder {

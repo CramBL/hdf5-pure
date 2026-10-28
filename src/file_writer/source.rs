@@ -1,0 +1,1381 @@
+//! File layout and emission from an indexed source of object metadata.
+//!
+//! The writer reconstructs individual objects during planning and emission. The retained plan
+//! contains allocations, object-use counts, and serialized file-space managers.
+
+use std::io::BufWriter;
+use std::io::Write;
+use std::path::Path;
+
+use hdf5_pure_core::__private::SuperblockFields;
+use hdf5_pure_format::__private::DenseAttrCreationOrder;
+use hdf5_pure_format::__private::DenseAttrFixup;
+use hdf5_pure_format::__private::PreparedDenseAttrs;
+use hdf5_pure_space::__private::AllocationClass;
+
+use super::layout;
+use super::layout::Allocation;
+use super::layout::ObjectAllocation;
+use super::layout::ObjectMeasure;
+use super::preparation::PreparedAttributes;
+use super::preparation::PreparedDataset;
+use super::preparation::VlPatch;
+use crate::FileSpaceSettings;
+use crate::SuperblockStatus;
+use crate::SuperblockStatusFlags;
+use crate::address::BaseAddress;
+use crate::address::BaseAddressExt;
+use crate::address::StoredAddress;
+use crate::address::StoredAddressExt;
+use crate::attribute::AttributeMessage;
+use crate::chunked_write::ByteSink;
+use crate::chunked_write::CompressedChunkSet;
+use crate::convert::Narrow;
+use crate::datatype::Datatype;
+use crate::error::Error;
+use crate::error::FormatError;
+use crate::file_allocation::FileAllocation;
+use crate::file_allocation::FileManager;
+use crate::file_emission::EmissionError;
+use crate::file_space_info;
+use crate::file_space_info::DEFAULT_THRESHOLD;
+use crate::file_space_info::FileSpaceStrategy;
+use crate::libver::LibVer;
+use crate::link_message::LinkMessage;
+use crate::object_path::ObjectPathBuf;
+use crate::shared_message::DatatypeLocation;
+use crate::type_builders;
+use crate::type_builders::AttributeSpecs;
+use crate::type_builders::DatasetBuilder;
+use crate::type_builders::ObjectRefTarget;
+use crate::writer::LazyFile;
+use crate::writer::WriteSink;
+
+/// An indexed source of reproducible object metadata and hard links.
+///
+/// The final index identifies the root group. Indices, links, and object contents must remain
+/// consistent across calls during planning and emission.
+pub(crate) trait ObjectSource {
+    /// Returns the number of objects, including the root group.
+    fn len(&self) -> usize;
+
+    /// Reconstructs the object at `index` with unresolved destination addresses.
+    ///
+    /// # Errors
+    ///
+    /// Propagates source reading and object preparation errors.
+    fn load(&self, index: usize) -> Result<Object, Error>;
+
+    /// Returns each hard link of the object at `index`, with its target's index.
+    ///
+    /// # Errors
+    ///
+    /// Propagates source reading and object index errors.
+    fn links(&self, index: usize) -> Result<Vec<(String, usize)>, Error>;
+
+    /// Returns the index of the object at `path` under the root group.
+    ///
+    /// # Errors
+    ///
+    /// Propagates path resolution errors.
+    fn resolve(&self, path: &ObjectPathBuf) -> Result<usize, Error>;
+}
+
+/// A prepared object and its variable-length attribute heap collections.
+///
+/// Dataset element heap collections are held in prepared storage.
+pub(crate) struct Object {
+    kind: Kind,
+    heaps: Vec<VlPatch>,
+}
+
+impl Object {
+    /// Prepares dataset metadata, attributes, and its storage source.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from [`PreparedDataset::prepare`].
+    pub(crate) fn dataset(builder: DatasetBuilder) -> Result<Self, FormatError> {
+        let (dataset, heaps) = PreparedDataset::prepare(builder)?;
+        Ok(Self {
+            kind: Kind::Dataset(Box::new(dataset)),
+            heaps,
+        })
+    }
+
+    /// Prepares a group's attributes without its hard links.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from [`PreparedAttributes::new`].
+    pub(crate) fn group(attributes: &AttributeSpecs) -> Result<Self, FormatError> {
+        let PreparedAttributes {
+            messages,
+            committed_datatype_paths,
+            heaps,
+        } = PreparedAttributes::new(attributes)?;
+        Ok(Self {
+            kind: Kind::Group {
+                attributes: messages,
+                paths: committed_datatype_paths,
+            },
+            heaps,
+        })
+    }
+
+    /// Prepares a committed datatype with a nonzero element size.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from [`Datatype::element_size`].
+    pub(crate) fn committed(datatype: Datatype) -> Result<Self, FormatError> {
+        datatype.element_size()?;
+        Ok(Self {
+            kind: Kind::Committed(datatype),
+            heaps: Vec::new(),
+        })
+    }
+
+    /// Adds dataset and attribute uses of committed datatypes to `references`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::CommittedDatatypeMismatch`] if a use differs from its committed
+    /// datatype. Returns [`FormatError::Internal`] if a target is not a committed datatype or its
+    /// index is outside `references`. Propagates source loading and path resolution errors.
+    fn count_uses(&self, source: &impl ObjectSource, references: &mut [u32]) -> Result<(), Error> {
+        let mut use_type = |path: &ObjectPathBuf, datatype: &Datatype| -> Result<(), Error> {
+            let target = source.resolve(path)?;
+            let Kind::Committed(committed) = source.load(target)?.kind else {
+                return Err(inconsistent().into());
+            };
+            if hdf5_pure_format::__private::serialize_datatype(&committed)
+                != hdf5_pure_format::__private::serialize_datatype(datatype)
+            {
+                return Err(FormatError::CommittedDatatypeMismatch {
+                    path: path.to_string(),
+                    user: "a repacked object".into(),
+                }
+                .into());
+            }
+            let count = references.get_mut(target).ok_or_else(inconsistent)?;
+            *count = count.saturating_add(1);
+            Ok(())
+        };
+        for (index, path) in self.paths() {
+            let attribute = self.attributes().get(*index).ok_or_else(inconsistent)?;
+            use_type(path, &attribute.datatype)?;
+        }
+        if let Kind::Dataset(dataset) = &self.kind {
+            if let Some(path) = &dataset.committed_datatype_path {
+                use_type(path, &dataset.dt)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Measures an object's metadata and data regions after assigning heap addresses.
+    ///
+    /// A committed datatype's record has a provisional header length of zero. The writer measures
+    /// its header after counting all uses.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if heap allocations differ from the prepared collections.
+    /// Propagates source link, heap patching, chunk preparation, and serialization errors.
+    fn measure(
+        mut self,
+        source: &impl ObjectSource,
+        index: usize,
+        libver: LibVer,
+        heaps: Vec<Allocation>,
+    ) -> Result<Record, Error> {
+        self.patch_heaps(&heaps)?;
+        let dense = self.dense()?;
+        let info = dense
+            .as_ref()
+            .map(|dense| dense.attr_info_message(StoredAddress::ZERO))
+            .transpose()?;
+        let (header, data, chunked, links) = match &self.kind {
+            Kind::Dataset(dataset) => {
+                let chunks = self.chunks()?;
+                let measured = dataset.measure(
+                    StoredAddress::ZERO,
+                    chunks.as_ref(),
+                    info.as_deref(),
+                    libver,
+                )?;
+                (
+                    measured.header_len as u64,
+                    Some(Allocation {
+                        address: StoredAddress::ZERO,
+                        length: measured.data_len,
+                    }),
+                    dataset.is_chunked(),
+                    None,
+                )
+            }
+            Kind::Group { attributes, .. } => {
+                let links = links_at(source, index, None)?;
+                let plan = super::dense_links_plan(&links)?;
+                let link_info = plan
+                    .as_ref()
+                    .map(|plan| plan.link_info(StoredAddress::ZERO))
+                    .transpose()
+                    .map_err(super::dense_link_error)?;
+                let header =
+                    super::build_group_oh(&links, attributes, info.as_deref(), link_info.as_ref())?;
+                (
+                    header.len() as u64,
+                    None,
+                    false,
+                    plan.as_ref().map(|plan| Allocation {
+                        address: StoredAddress::ZERO,
+                        length: plan.serialized_len(),
+                    }),
+                )
+            }
+            Kind::Committed(_) => (0, None, false, None),
+        };
+        let preflight = !heaps.is_empty()
+            || dense.is_some()
+            || links.is_some()
+            || !self.paths().is_empty()
+            || matches!(&self.kind, Kind::Dataset(dataset) if dataset.storage.reference_targets().is_some() || dataset.committed_datatype_path.is_some());
+        Ok(Record {
+            metadata: ObjectAllocation {
+                header: Allocation {
+                    address: StoredAddress::ZERO,
+                    length: header,
+                },
+                attributes: dense.map(|dense| Allocation {
+                    address: StoredAddress::ZERO,
+                    length: dense.blob_len(),
+                }),
+                links,
+            },
+            data,
+            chunked,
+            heaps,
+            references: 1,
+            preflight,
+        })
+    }
+
+    fn attributes(&self) -> &[AttributeMessage] {
+        match &self.kind {
+            Kind::Dataset(dataset) => &dataset.attrs,
+            Kind::Group { attributes, .. } => attributes,
+            Kind::Committed(_) => &[],
+        }
+    }
+
+    fn attributes_mut(&mut self) -> &mut [AttributeMessage] {
+        match &mut self.kind {
+            Kind::Dataset(dataset) => &mut dataset.attrs,
+            Kind::Group { attributes, .. } => attributes,
+            Kind::Committed(_) => &mut [],
+        }
+    }
+
+    /// Returns attribute indices paired with committed datatype paths.
+    fn paths(&self) -> &[(usize, ObjectPathBuf)] {
+        match &self.kind {
+            Kind::Dataset(dataset) => &dataset.attr_committed_datatype_paths,
+            Kind::Group { paths, .. } => paths,
+            Kind::Committed(_) => &[],
+        }
+    }
+
+    /// Returns attribute heap collections followed by dataset element heap collections.
+    fn collections(&self) -> impl Iterator<Item = &Vec<u8>> {
+        let Self { kind, heaps } = self;
+        heaps.iter().flat_map(|patch| &patch.collections).chain(
+            match kind {
+                Kind::Dataset(dataset) => dataset
+                    .storage
+                    .vl_string_staging()
+                    .map(|staging| &staging.collections),
+                _ => None,
+            }
+            .into_iter()
+            .flatten(),
+        )
+    }
+
+    /// Assigns collection addresses to variable-length attribute and dataset references.
+    ///
+    /// `spans` has the order of [`Self::collections`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if collection counts, lengths, or attribute indices differ
+    /// from the prepared metadata. Propagates errors accessing dataset element bytes.
+    fn patch_heaps(&mut self, spans: &[Allocation]) -> Result<(), FormatError> {
+        let Self { kind, heaps } = self;
+        let addresses: Vec<u64> = spans.iter().map(|span| span.address.get()).collect();
+        let mut cursor = 0;
+        for patch in heaps.iter() {
+            let end = cursor + patch.collections.len();
+            let addresses = addresses.get(cursor..end).ok_or_else(inconsistent)?;
+            match &mut *kind {
+                Kind::Dataset(dataset) => type_builders::patch_vl_refs(
+                    &mut dataset
+                        .attrs
+                        .get_mut(patch.attr_index)
+                        .ok_or_else(inconsistent)?
+                        .raw_data,
+                    addresses,
+                ),
+                Kind::Group { attributes, .. } => type_builders::patch_vl_refs(
+                    &mut attributes
+                        .get_mut(patch.attr_index)
+                        .ok_or_else(inconsistent)?
+                        .raw_data,
+                    addresses,
+                ),
+                Kind::Committed(_) => return Err(inconsistent()),
+            }
+            cursor = end;
+        }
+        if let Kind::Dataset(dataset) = &mut *kind {
+            if let Some(staging) = dataset.storage.take_vl_string_staging() {
+                let end = cursor + staging.collections.len();
+                type_builders::patch_vl_refs_masked(
+                    dataset.storage.raw_mut()?,
+                    &staging.patch_offsets,
+                    addresses.get(cursor..end).ok_or_else(inconsistent)?,
+                );
+                dataset.storage.restore_vl_string_staging(staging)?;
+                cursor = end;
+            }
+        }
+        if cursor != spans.len()
+            || self
+                .collections()
+                .zip(spans)
+                .any(|(bytes, span)| bytes.len() as u64 != span.length)
+        {
+            return Err(inconsistent());
+        }
+        Ok(())
+    }
+
+    /// Prepares dense attribute storage when the attributes require it.
+    ///
+    /// # Errors
+    ///
+    /// Propagates attribute sizing and dense storage preparation errors.
+    fn dense(&self) -> Result<Option<PreparedDenseAttrs>, FormatError> {
+        let attributes = self.attributes();
+        if !super::needs_dense_attrs(attributes)? {
+            return Ok(None);
+        }
+        let fixups = self
+            .heaps
+            .iter()
+            .map(|patch| DenseAttrFixup::GlobalHeap {
+                attribute: patch.attr_index,
+            })
+            .chain(
+                attributes
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(attribute, attr)| {
+                        attr.datatype_location
+                            .is_committed()
+                            .then_some(DenseAttrFixup::CommittedDatatype { attribute })
+                    }),
+            );
+        PreparedDenseAttrs::new(attributes, DenseAttrCreationOrder::Untracked, fixups).map(Some)
+    }
+
+    /// Encodes chunks for a chunked dataset whose storage is not verbatim.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from [`PreparedDataset::compress_chunks`].
+    fn chunks(&self) -> Result<Option<CompressedChunkSet>, FormatError> {
+        match &self.kind {
+            Kind::Dataset(dataset)
+                if dataset.is_chunked() && dataset.storage.chunks().is_none() =>
+            {
+                dataset.compress_chunks().map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+}
+
+/// The prepared content of a committed datatype, dataset, or group.
+enum Kind {
+    Committed(Datatype),
+    Dataset(Box<PreparedDataset>),
+    Group {
+        attributes: Vec<AttributeMessage>,
+        /// Indices in `attributes` paired with the paths of their committed datatypes.
+        paths: Vec<(usize, ObjectPathBuf)>,
+    },
+}
+
+/// Stored allocations and file metadata for emission from a retained source.
+///
+/// Object metadata is reconstructed from `source` for layout checks and emission. Each record
+/// holds allocation spans and counts. Serialized file-space managers are retained.
+pub(crate) struct Plan<S> {
+    source: S,
+    records: Vec<Record>,
+    libver: LibVer,
+    extension: Option<(Allocation, Vec<u8>)>,
+    managers: Vec<FileManager>,
+    end: u64,
+}
+
+impl<S: ObjectSource> Plan<S> {
+    /// Plans object allocations, resolves references, and checks metadata before output.
+    ///
+    /// Uses `inherited` when `bounds` is absent, upgrading the format for content that requires
+    /// it. Each source object is reconstructed for measurement and, where needed, final checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::LibverTooOldForContent`] if explicit bounds cannot represent the
+    /// content. Propagates source, preparation, allocation, and metadata serialization errors.
+    pub(crate) fn new(
+        source: S,
+        settings: Option<FileSpaceSettings>,
+        bounds: Option<(LibVer, LibVer)>,
+        inherited: LibVer,
+    ) -> Result<Self, Error> {
+        let mut libver = LibVer::resolve_writable(bounds.or(Some((LibVer::Earliest, inherited))))?;
+        let mut latest = settings.is_some();
+        let threshold = match settings {
+            None => Some(DEFAULT_THRESHOLD),
+            Some(settings) if settings.strategy() == FileSpaceStrategy::FsmAggr => {
+                Some(settings.threshold())
+            }
+            _ => None,
+        };
+        let paged = settings.filter(|settings| settings.strategy() == FileSpaceStrategy::Page);
+        let aggregated = paged.is_none()
+            && (threshold.is_some()
+                || settings.is_some_and(|settings| settings.strategy() == FileSpaceStrategy::Aggr));
+        let mut allocation =
+            FileAllocation::new(super::SUPERBLOCK_SIZE as u64, aggregated, threshold);
+        let mut collections = paged.map(|settings| {
+            layout::PagedCollections::new(super::SUPERBLOCK_SIZE as u64, settings.page_size())
+        });
+        let mut records = Vec::with_capacity(source.len());
+        let mut references = vec![1u32; source.len()];
+        for index in 0..source.len() {
+            let object = source.load(index)?;
+            object.count_uses(&source, &mut references)?;
+            if let Kind::Dataset(dataset) = &object.kind {
+                latest |= dataset.is_chunked();
+            }
+            let heaps = object
+                .collections()
+                .map(|bytes| match &mut collections {
+                    Some(collections) => collections.reserve(bytes.len() as u64),
+                    None => Ok(Allocation {
+                        address: allocation.reserve(bytes.len() as u64, AllocationClass::Raw)?,
+                        length: bytes.len() as u64,
+                    }),
+                })
+                .collect::<Result<Vec<_>, FormatError>>()?;
+            records.push(object.measure(&source, index, libver, heaps)?);
+        }
+        if latest && bounds.is_none() {
+            libver = LibVer::WRITER_DEFAULT;
+        }
+        if latest && libver < LibVer::V110 {
+            return Err(FormatError::LibverTooOldForContent {
+                content: if settings.is_some() {
+                    "a file-space setting"
+                } else {
+                    "a chunked, filtered, or resizable dataset"
+                },
+                needs: LibVer::V110.name(),
+                writing: libver.name(),
+            }
+            .into());
+        }
+        if let Some(collections) = &collections {
+            allocation = FileAllocation::new(collections.end, false, None);
+        }
+        reserve_metadata(&source, &mut records, &references, &mut allocation)?;
+        drop(references);
+        let FileLayout {
+            extension,
+            end,
+            managers,
+        } = FileLayout::finish(allocation, collections, settings, &mut records)?;
+        let plan = Self {
+            source,
+            records,
+            libver,
+            extension,
+            managers,
+            end,
+        };
+        plan.preflight()?;
+        Ok(plan)
+    }
+
+    /// Serializes the planned file into memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::finish_to`].
+    #[cfg(test)]
+    pub(crate) fn finish(self) -> Result<Vec<u8>, Error> {
+        let mut bytes = Vec::new();
+        self.finish_to(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// Writes the plan to `path`, creating the file on the first output write.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::finish_to`]. An emission failure can leave a partial file.
+    pub(crate) fn write(self, path: impl AsRef<Path>) -> Result<(), Error> {
+        self.finish_to(LazyFile {
+            path: path.as_ref().to_path_buf(),
+            file: None,
+        })
+    }
+
+    /// Writes allocations in address order while reconstructing one source object at a time.
+    ///
+    /// The working object is retained across adjacent allocations of that object. Chunk providers
+    /// supply verbatim payloads during data emission.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if reconstructed output differs from its planned spans.
+    /// Propagates source, reference resolution, serialization, provider, and output I/O errors.
+    pub(crate) fn finish_to(self, writer: impl Write) -> Result<(), Error> {
+        let Self {
+            source: _,
+            records,
+            libver,
+            extension,
+            managers,
+            end,
+        } = &self;
+        let mut sink = WriteSink::new(BufWriter::new(writer));
+        let superblock = SuperblockFields {
+            status: SuperblockStatus::new(
+                super::superblock_version(*libver),
+                SuperblockStatusFlags::new(),
+            )?,
+            offset_size: super::OFFSET_WIDTH,
+            length_size: super::LENGTH_WIDTH,
+            base_address: BaseAddress::ZERO,
+            eof_address: *end,
+            root_group_address: records
+                .last()
+                .ok_or_else(inconsistent)?
+                .metadata
+                .header
+                .address,
+            group_leaf_node_k: None,
+            group_internal_node_k: None,
+            indexed_storage_internal_node_k: None,
+            free_space_address: None,
+            driver_info_address: None,
+            superblock_extension_address: extension.as_ref().map(|(span, _)| span.address),
+            checksum: None,
+        }
+        .build();
+        sink.put(&hdf5_pure_format::__private::serialize_superblock(
+            &superblock,
+        )?)?;
+        let mut spans = Vec::new();
+        for (index, record) in records.iter().enumerate() {
+            spans.push((record.metadata.header, Part::Header(index)));
+            if let Some(span) = record.metadata.attributes {
+                spans.push((span, Part::Attributes(index)));
+            }
+            if let Some(span) = record.metadata.links {
+                spans.push((span, Part::Links(index)));
+            }
+            for (collection, &span) in record.heaps.iter().enumerate() {
+                spans.push((span, Part::Heap(index, collection)));
+            }
+            if let Some(span) = record.data.filter(|span| span.length != 0) {
+                spans.push((span, Part::Data(index)));
+            }
+        }
+        if let Some((span, _)) = extension.as_ref() {
+            spans.push((*span, Part::Extension));
+        }
+        for (index, manager) in managers.iter().enumerate() {
+            spans.push((
+                Allocation {
+                    address: manager.header_address,
+                    length: manager.header.len() as u64,
+                },
+                Part::ManagerHeader(index),
+            ));
+            spans.push((
+                Allocation {
+                    address: manager.section_list_address,
+                    length: manager.section_list.len() as u64,
+                },
+                Part::ManagerSections(index),
+            ));
+        }
+        spans.sort_unstable_by_key(|(span, _)| span.address);
+        let mut working = None;
+        for (span, part) in spans {
+            let start = BaseAddress::ZERO.absolute(span.address)?;
+            let end = start
+                .checked_add(span.length)
+                .ok_or(FormatError::OffsetOverflow {
+                    offset: start,
+                    length: span.length,
+                })?;
+            pad(&mut sink, start)?;
+            if let Some(index) = part.object() {
+                if !working
+                    .as_ref()
+                    .is_some_and(|(current, _, _)| *current == index)
+                {
+                    drop(working.take());
+                    let object = self.load(index)?;
+                    let chunks = object.chunks()?;
+                    working = Some((index, object, chunks));
+                }
+            }
+            match part {
+                Part::Extension => sink.put(&extension.as_ref().ok_or_else(inconsistent)?.1)?,
+                Part::ManagerHeader(index) => sink.put(&managers[index].header)?,
+                Part::ManagerSections(index) => sink.put(&managers[index].section_list)?,
+                part => {
+                    let (index, object, chunks) = working.as_mut().ok_or_else(inconsistent)?;
+                    match part {
+                        Part::Header(_) => {
+                            sink.put(&self.header(*index, object, chunks.as_ref())?)?
+                        }
+                        Part::Attributes(_) => sink.put(&self.attributes(object, span)?)?,
+                        Part::Links(_) => sink.put(&self.links(*index, span)?)?,
+                        Part::Heap(_, collection) => sink.put(
+                            object
+                                .collections()
+                                .nth(collection)
+                                .ok_or_else(inconsistent)?,
+                        )?,
+                        Part::Data(_) => {
+                            let Kind::Dataset(dataset) = &mut object.kind else {
+                                return Err(inconsistent().into());
+                            };
+                            if dataset.is_chunked() {
+                                dataset
+                                    .build_chunked(span.address, chunks.as_ref())?
+                                    .data
+                                    .emit(&mut sink, &dataset.storage)
+                                    .map_err(emission_error)?;
+                            } else {
+                                dataset
+                                    .contiguous_data()
+                                    .emit(&mut sink, &dataset.storage)
+                                    .map_err(emission_error)?;
+                            }
+                        }
+                        _ => return Err(inconsistent().into()),
+                    }
+                }
+            }
+            if sink.position() != end {
+                return Err(inconsistent().into());
+            }
+        }
+        pad(&mut sink, *end)?;
+        sink.into_inner().flush()?;
+        Ok(())
+    }
+
+    /// Checks relocated metadata and lengths for records that require destination addresses.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if emitted lengths would differ from the reservations.
+    /// Propagates source loading, relocation, and serialization errors.
+    fn preflight(&self) -> Result<(), Error> {
+        for index in 0..self.records.len() {
+            if !self.records[index].preflight {
+                continue;
+            }
+            let object = self.load(index)?;
+            let chunks = object.chunks()?;
+            let record = &self.records[index];
+            check_length(
+                &self.header(index, &object, chunks.as_ref())?,
+                record.metadata.header,
+            )?;
+            if let Some(span) = record.metadata.attributes {
+                check_length(&self.attributes(&object, span)?, span)?;
+            }
+            if let Some(span) = record.metadata.links {
+                check_length(&self.links(index, span)?, span)?;
+            }
+            if let (Kind::Dataset(dataset), Some(span)) = (&object.kind, record.data) {
+                let length = if record.chunked {
+                    dataset
+                        .build_chunked(span.address, chunks.as_ref())?
+                        .data
+                        .len()
+                } else {
+                    dataset.contiguous_len()
+                };
+                if length != span.length {
+                    return Err(inconsistent().into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Reconstructs an object and resolves its heap, committed datatype, and object references.
+    ///
+    /// # Errors
+    ///
+    /// Propagates source loading, reference resolution, heap patching, and content hash errors.
+    fn load(&self, index: usize) -> Result<Object, Error> {
+        let mut object = self.source.load(index)?;
+        let record = self.records.get(index).ok_or_else(inconsistent)?;
+        object.patch_heaps(&record.heaps)?;
+        let locations = object
+            .paths()
+            .iter()
+            .map(|(index, path)| self.address(path).map(|address| (*index, address)))
+            .collect::<Result<Vec<_>, Error>>()?;
+        for (index, location) in locations {
+            object
+                .attributes_mut()
+                .get_mut(index)
+                .ok_or_else(inconsistent)?
+                .datatype_location = DatatypeLocation::Committed(location);
+        }
+        if let Kind::Dataset(dataset) = &mut object.kind {
+            if let Some(path) = &dataset.committed_datatype_path {
+                dataset.dt_location = DatatypeLocation::Committed(self.address(path)?);
+            }
+            if let Some(patches) = dataset.storage.take_reference_targets() {
+                for patch in patches {
+                    let address = match patch.target {
+                        ObjectRefTarget::Path(path) => self.address(&path)?,
+                        ObjectRefTarget::Raw(address) => address,
+                    };
+                    type_builders::write_reference_address(
+                        dataset.storage.raw_mut()?,
+                        patch.byte_offset,
+                        address,
+                    );
+                }
+            }
+            #[cfg(feature = "provenance")]
+            if let Some(hash) = dataset.pending_hash.take() {
+                hash.complete(&mut dataset.attrs, dataset.storage.raw())?;
+            }
+        }
+        Ok(object)
+    }
+
+    /// Returns the destination header address for a source object path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if a resolved index is outside the plan. Propagates
+    /// path resolution errors.
+    fn address(&self, path: &ObjectPathBuf) -> Result<StoredAddress, Error> {
+        Ok(self
+            .records
+            .get(self.source.resolve(path)?)
+            .ok_or_else(inconsistent)?
+            .metadata
+            .header
+            .address)
+    }
+
+    /// Serializes an object's header using its planned addresses and committed-type use count.
+    ///
+    /// # Errors
+    ///
+    /// Propagates source link, chunk planning, dense metadata, and header serialization errors.
+    fn header(
+        &self,
+        index: usize,
+        object: &Object,
+        chunks: Option<&CompressedChunkSet>,
+    ) -> Result<Vec<u8>, Error> {
+        let record = &self.records[index];
+        let info = object
+            .dense()?
+            .map(|dense| {
+                dense
+                    .attr_info_message(record.metadata.attributes.ok_or_else(inconsistent)?.address)
+            })
+            .transpose()?;
+        Ok(match &object.kind {
+            Kind::Dataset(dataset) => {
+                let address = record
+                    .data
+                    .map_or(super::UNDEF_ADDRESS, |span| span.address);
+                let built = dataset
+                    .is_chunked()
+                    .then(|| dataset.build_chunked(address, chunks))
+                    .transpose()?;
+                let messages = built.map(|built| (built.layout_message, built.pipeline_message));
+                dataset.build_header(address, messages.as_ref(), info.as_deref(), self.libver)?
+            }
+            Kind::Group { attributes, .. } => {
+                let links = links_at(&self.source, index, Some(&self.records))?;
+                let link_info = super::dense_links_plan(&links)?
+                    .map(|plan| {
+                        plan.link_info(record.metadata.links.ok_or_else(inconsistent)?.address)
+                    })
+                    .transpose()
+                    .map_err(super::dense_link_error)?;
+                super::build_group_oh(&links, attributes, info.as_deref(), link_info.as_ref())?
+            }
+            Kind::Committed(datatype) => {
+                super::build_committed_datatype_oh(datatype, record.references)?
+            }
+        })
+    }
+
+    /// Serializes dense attribute storage at its reserved address.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the object has no dense attribute storage. Propagates
+    /// dense attribute preparation and serialization errors.
+    fn attributes(&self, object: &Object, span: Allocation) -> Result<Vec<u8>, FormatError> {
+        let prepared = object.dense()?.ok_or_else(inconsistent)?;
+        Ok(super::finalize_dense_attrs(prepared, object.attributes())?
+            .build(span.address)?
+            .blob)
+    }
+
+    /// Serializes a group's dense links with destination object addresses.
+    ///
+    /// # Errors
+    ///
+    /// Propagates source link, allocation length conversion, and dense link serialization errors.
+    fn links(&self, index: usize, span: Allocation) -> Result<Vec<u8>, Error> {
+        Ok(super::dense_links_image(
+            &links_at(&self.source, index, Some(&self.records))?,
+            (span.address, span.length.to_usize()?),
+        )?
+        .bytes)
+    }
+}
+
+/// Allocations, storage kind, and relocation state for one source object.
+struct Record {
+    metadata: ObjectAllocation,
+    data: Option<Allocation>,
+    chunked: bool,
+    heaps: Vec<Allocation>,
+    references: u32,
+    /// Whether final metadata checks require destination addresses or dense storage.
+    preflight: bool,
+}
+
+impl Record {
+    fn measure(&self) -> layout::DataMeasure {
+        layout::DataMeasure::new(
+            self.data.map_or(0, |span| span.length),
+            if self.chunked {
+                layout::DataKind::Chunked
+            } else {
+                layout::DataKind::Contiguous
+            },
+        )
+    }
+}
+
+/// The source of bytes for one allocation in the ordered output.
+enum Part {
+    Attributes(usize),
+    Data(usize),
+    Extension,
+    Header(usize),
+    Heap(usize, usize),
+    Links(usize),
+    ManagerHeader(usize),
+    ManagerSections(usize),
+}
+
+impl Part {
+    fn object(&self) -> Option<usize> {
+        match *self {
+            Self::Attributes(index)
+            | Self::Data(index)
+            | Self::Header(index)
+            | Self::Heap(index, _)
+            | Self::Links(index) => Some(index),
+            Self::Extension | Self::ManagerHeader(_) | Self::ManagerSections(_) => None,
+        }
+    }
+}
+
+/// Reserves root, group, committed datatype, and dataset metadata in that order.
+///
+/// # Errors
+///
+/// Returns [`FormatError::Internal`] if a committed datatype record has another object kind.
+/// Propagates source loading, header serialization, and allocation errors.
+fn reserve_metadata(
+    source: &impl ObjectSource,
+    records: &mut [Record],
+    references: &[u32],
+    allocation: &mut FileAllocation,
+) -> Result<(), Error> {
+    let root = records.len().checked_sub(1).ok_or_else(inconsistent)?;
+    let mut order: Vec<_> = (0..records.len()).collect();
+    order.sort_by_key(|&index| {
+        let record = &records[index];
+        if index == root {
+            0
+        } else if record.data.is_some() {
+            3
+        } else if record.metadata.header.length == 0 {
+            2
+        } else {
+            1
+        }
+    });
+    for index in order {
+        let record = &mut records[index];
+        record.references = references[index];
+        if record.metadata.header.length == 0 {
+            let Kind::Committed(datatype) = source.load(index)?.kind else {
+                return Err(inconsistent().into());
+            };
+            record.metadata.header.length =
+                super::build_committed_datatype_oh(&datatype, record.references)?.len() as u64;
+        }
+        let ObjectAllocation {
+            header,
+            attributes,
+            links,
+        } = record.metadata;
+        record.metadata = ObjectMeasure {
+            header: header.length,
+            attributes: attributes.map(|span| span.length),
+            links: links.map(|span| span.length),
+        }
+        .reserve(allocation)?;
+    }
+    Ok(())
+}
+
+/// The superblock extension, serialized managers, and stored end of allocation.
+struct FileLayout {
+    extension: Option<(Allocation, Vec<u8>)>,
+    end: u64,
+    managers: Vec<FileManager>,
+}
+
+impl FileLayout {
+    /// Places dataset regions and serializes file-space settings and managers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if extension lengths differ from their reservations.
+    /// Propagates classic or PAGE allocation and file-space serialization errors.
+    fn finish(
+        mut allocation: FileAllocation,
+        collections: Option<layout::PagedCollections>,
+        settings: Option<FileSpaceSettings>,
+        records: &mut [Record],
+    ) -> Result<Self, Error> {
+        let extension = settings
+            .map(|settings| {
+                super::file_space_extension_oh(&super::file_space_placeholder(settings))
+            })
+            .transpose()?;
+        let (extension_span, end, managers, extension_info) = if let Some(settings) =
+            settings.filter(|settings| settings.strategy() == FileSpaceStrategy::Page)
+        {
+            let measures: Vec<_> = records.iter().map(Record::measure).collect();
+            let layout::PagedLayout {
+                extension,
+                data: _,
+                small: _,
+                large: _,
+                slots,
+                managers,
+                metadata_end: _,
+                raw_start: _,
+                small_end: _,
+                end,
+            } = layout::PagedLayout::new(
+                settings.page_size(),
+                settings.persist(),
+                allocation.end(),
+                extension.as_ref().map_or(0, |bytes| bytes.len() as u64),
+                measures.iter().copied(),
+                collections.ok_or_else(inconsistent)?.sections,
+                |index, placed| {
+                    records[index].data = placed;
+                    Ok(())
+                },
+            )?;
+            let info = settings.persist().then(|| {
+                file_space_info::persistent_managers(
+                    FileSpaceStrategy::Page,
+                    settings.threshold(),
+                    settings.page_size(),
+                    slots,
+                    end,
+                )
+            });
+            (
+                Some(extension),
+                end,
+                managers.into_iter().flatten().collect(),
+                info,
+            )
+        } else {
+            for record in &mut *records {
+                if record.data.is_some() {
+                    record.data = record.measure().reserve(&mut allocation)?;
+                }
+            }
+            let layout::ClassicLayout {
+                extension: span,
+                end,
+                manager,
+            } = layout::ClassicLayout::finish(
+                allocation,
+                extension.as_ref().map(|bytes| bytes.len() as u64),
+                settings.is_some_and(|settings| settings.persist()),
+            )?;
+            let info =
+                settings
+                    .filter(|settings| settings.persist())
+                    .map(|settings| match &manager {
+                        Some(manager) => file_space_info::persistent_single_manager(
+                            super::OFFSET_WIDTH,
+                            settings.strategy(),
+                            settings.threshold(),
+                            settings.page_size(),
+                            manager.header_address.get(),
+                            manager.header_address.get(),
+                        ),
+                        None => file_space_info::persistent_empty(
+                            super::OFFSET_WIDTH,
+                            settings.strategy(),
+                            settings.threshold(),
+                            settings.page_size(),
+                            end,
+                        ),
+                    });
+            (span, end, manager.into_iter().collect(), info)
+        };
+        let extension = extension_info
+            .as_ref()
+            .map(super::file_space_extension_oh)
+            .transpose()?
+            .or(extension);
+        let extension = match (extension_span, extension) {
+            (Some(span), Some(bytes)) if span.length == bytes.len() as u64 => Some((span, bytes)),
+            (None, None) => None,
+            _ => return Err(inconsistent().into()),
+        };
+        Ok(Self {
+            extension,
+            end,
+            managers,
+        })
+    }
+}
+
+/// Builds hard-link messages with planned header addresses, or zero placeholders.
+///
+/// # Errors
+///
+/// Returns [`FormatError::Internal`] if a target index is outside `records`. Propagates source link
+/// errors.
+fn links_at(
+    source: &impl ObjectSource,
+    index: usize,
+    records: Option<&[Record]>,
+) -> Result<Vec<LinkMessage>, Error> {
+    source
+        .links(index)?
+        .into_iter()
+        .map(|(name, index)| {
+            Ok(super::make_link(
+                &name,
+                match records {
+                    Some(records) => {
+                        records
+                            .get(index)
+                            .ok_or_else(inconsistent)?
+                            .metadata
+                            .header
+                            .address
+                    }
+                    None => StoredAddress::ZERO,
+                },
+            ))
+        })
+        .collect()
+}
+
+/// Writes zero padding in bounded blocks up to the absolute output position `end`.
+///
+/// # Errors
+///
+/// Returns [`FormatError::Internal`] if output is already past `end`. Propagates sink errors.
+fn pad(sink: &mut impl ByteSink<Error = std::io::Error>, end: u64) -> Result<(), Error> {
+    if end < sink.position() {
+        return Err(inconsistent().into());
+    }
+    while sink.position() < end {
+        sink.put_zeros((end - sink.position()).min(65_536).to_usize()?)?;
+    }
+    Ok(())
+}
+
+/// Checks serialized bytes against their reserved length.
+///
+/// # Errors
+///
+/// Returns [`FormatError::Internal`] if the lengths differ.
+fn check_length(bytes: &[u8], span: Allocation) -> Result<(), FormatError> {
+    if bytes.len() as u64 != span.length {
+        return Err(inconsistent());
+    }
+    Ok(())
+}
+
+fn emission_error(error: EmissionError<std::io::Error>) -> Error {
+    match error {
+        EmissionError::Format(error) => Error::Format(error),
+        EmissionError::Sink(error) => Error::Io(error),
+    }
+}
+
+fn inconsistent() -> FormatError {
+    FormatError::Internal("source-backed metadata differs from its planned allocation".into())
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    use core::mem;
+    use core::num::NonZeroUsize;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    use rstest::rstest;
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    use test_util::allocation;
+
+    use super::Object;
+    use super::ObjectSource;
+    use super::Plan;
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    use super::Record;
+    use crate::AttrValue;
+    use crate::File;
+    use crate::FileSpaceSettings;
+    use crate::FileSpaceStrategy;
+    use crate::GroupBuilder;
+    use crate::LibVer;
+    use crate::chunked_write::ChunkMeta;
+    use crate::chunked_write::ChunkProvider;
+    use crate::data_layout::ChunkedLayoutFlags;
+    use crate::error::Error;
+    use crate::error::FormatError;
+    use crate::object_path::ObjectPathBuf;
+    use crate::type_builders::DatasetBuilder;
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[rstest]
+    #[case::groups(16, "source_groups", "source_groups_control")]
+    #[case::many_groups(64, "source_many_groups", "source_many_groups_control")]
+    fn planning_retains_compact_allocation_records(
+        #[case] count: usize,
+        #[case] region: &'static str,
+        #[case] control_region: &'static str,
+    ) {
+        let (control, positive) =
+            allocation::measure(control_region, || std::hint::black_box(vec![0_u8; 1024]));
+        assert!(positive.blocks > 0, "{positive}");
+        assert!(positive.peak_bytes >= 1024, "{positive}");
+        drop(control);
+        let (plan, measured) = allocation::measure(region, || {
+            Plan::new(AttributeSource { count }, None, None, LibVer::V110).unwrap()
+        });
+        let retained = (plan.records.capacity() * mem::size_of::<Record>()) as u64;
+        assert_eq!(measured.live_bytes, retained, "{measured}");
+        assert!(measured.peak_bytes >= 9 * 16_384, "{measured}");
+        assert!(measured.peak_bytes <= retained + 1_048_576, "{measured}");
+        let file = File::from_bytes(plan.finish().unwrap()).unwrap();
+        let mut groups = file.root().groups().unwrap();
+        groups.sort_unstable();
+        assert_eq!(
+            groups,
+            (0..count)
+                .map(|index| format!("g{index:04}"))
+                .collect::<Vec<_>>()
+        );
+        for index in 0..count {
+            let group = file.group(&format!("g{index:04}")).unwrap();
+            assert_eq!(group.datasets().unwrap(), Vec::<String>::new());
+            assert_eq!(group.groups().unwrap(), Vec::<String>::new());
+            let attributes = group.attrs().unwrap();
+            assert_eq!(attributes.len(), 9);
+            for attribute in 0..9 {
+                assert_eq!(
+                    attributes[&format!("a{attribute}")],
+                    AttrValue::I32Array(vec![i32::try_from(index).unwrap(); 4096])
+                );
+            }
+        }
+    }
+
+    #[rstest]
+    #[case::classic(None)]
+    #[case::direct(Some(FileSpaceSettings::new(FileSpaceStrategy::None)))]
+    #[case::persistent(Some(FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true)))]
+    #[case::page(Some(FileSpaceSettings::new(FileSpaceStrategy::Page)))]
+    #[case::persistent_page(Some(FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true)))]
+    fn verbatim_payloads_are_read_once_after_metadata_planning(
+        #[case] settings: Option<FileSpaceSettings>,
+    ) {
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let plan = Plan::new(
+            ChunkSource {
+                reads: Arc::clone(&reads),
+            },
+            settings,
+            None,
+            LibVer::V110,
+        )
+        .unwrap();
+        assert_eq!(*reads.lock().unwrap(), Vec::<usize>::new());
+        let file = File::from_bytes(plan.finish().unwrap()).unwrap();
+        assert_eq!(*reads.lock().unwrap(), [0, 1]);
+        assert_eq!(file.file_space_settings().unwrap(), settings);
+        assert_eq!(file.root().datasets().unwrap(), ["values"]);
+        let dataset = file.dataset("values").unwrap();
+        assert_eq!(dataset.shape().unwrap(), [4]);
+        assert_eq!(dataset.chunk_shape().unwrap(), Some(vec![2]));
+        assert_eq!(dataset.read_i32().unwrap(), [1, 2, 3, 4]);
+    }
+
+    struct ChunkSource {
+        reads: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl ObjectSource for ChunkSource {
+        fn len(&self) -> usize {
+            2
+        }
+
+        fn load(&self, index: usize) -> Result<Object, Error> {
+            if index == 1 {
+                return Ok(Object::group(&GroupBuilder::new("root").finish().attrs)?);
+            }
+            let mut builder = DatasetBuilder::new("values");
+            builder.with_raw_chunks_lazy(
+                crate::make_i32_type(),
+                &[4],
+                None,
+                &[2],
+                NonZeroUsize::new(4).unwrap(),
+                ChunkedLayoutFlags::NONE,
+                None,
+                vec![
+                    ChunkMeta {
+                        compressed_size: 8,
+                        filter_mask: 0
+                    };
+                    2
+                ],
+                Box::new(CountingChunks {
+                    reads: Arc::clone(&self.reads),
+                }),
+            );
+            Ok(Object::dataset(builder)?)
+        }
+
+        fn links(&self, index: usize) -> Result<Vec<(String, usize)>, Error> {
+            Ok(if index == 1 {
+                vec![("values".into(), 0)]
+            } else {
+                Vec::new()
+            })
+        }
+
+        fn resolve(&self, path: &ObjectPathBuf) -> Result<usize, Error> {
+            Err(FormatError::UnknownCommittedDatatype(path.to_string()).into())
+        }
+    }
+
+    struct CountingChunks {
+        reads: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl ChunkProvider for CountingChunks {
+        fn chunk_bytes(&self, index: usize, out: &mut Vec<u8>) -> Result<(), FormatError> {
+            let chunks = [[1_i32, 2], [3, 4]];
+            let chunk = chunks
+                .get(index)
+                .ok_or_else(|| FormatError::Internal("the test source has two chunks".into()))?;
+            self.reads.lock().unwrap().push(index);
+            for value in chunk {
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    struct AttributeSource {
+        count: usize,
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    impl ObjectSource for AttributeSource {
+        fn len(&self) -> usize {
+            self.count + 1
+        }
+
+        fn load(&self, index: usize) -> Result<Object, Error> {
+            let mut group = GroupBuilder::new("g");
+            if index < self.count {
+                for attribute in 0..9 {
+                    group.set_attr(
+                        &format!("a{attribute}"),
+                        AttrValue::I32Array(vec![i32::try_from(index).unwrap(); 4096]),
+                    );
+                }
+            }
+            Ok(Object::group(&group.finish().attrs)?)
+        }
+
+        fn links(&self, index: usize) -> Result<Vec<(String, usize)>, Error> {
+            Ok(if index == self.count {
+                (0..self.count)
+                    .map(|index| (format!("g{index:04}"), index))
+                    .collect()
+            } else {
+                Vec::new()
+            })
+        }
+
+        fn resolve(&self, path: &ObjectPathBuf) -> Result<usize, Error> {
+            Err(FormatError::UnknownCommittedDatatype(path.to_string()).into())
+        }
+    }
+}

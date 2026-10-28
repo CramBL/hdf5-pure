@@ -5,8 +5,8 @@
 //! space only within a session and cannot return a single deleted-and-closed
 //! file's bytes to the OS. Repack is the complementary answer — the same one the
 //! HDF5 C ecosystem ships as `h5repack`: it reads every surviving object and
-//! rewrites the whole file through [`FileBuilder`]. The writer allocates the
-//! surviving objects under the destination file-space settings.
+//! rewrites the whole file. The writer plans destination allocations, then reconstructs each
+//! object's metadata for emission under the selected file-space settings.
 //!
 //! # Fidelity contract
 //!
@@ -97,21 +97,21 @@
 //!
 //! # Memory
 //!
-//! Repack is **out-of-core** (issue [#82]): it opens the source with
-//! [`File::open_streaming`], reading metadata and one working chunk on demand
-//! rather than buffering the whole file, copies each chunked dataset's
-//! compressed chunks verbatim one at a time, and streams the output straight to
-//! the destination. Peak memory is therefore bounded by a single chunk plus the
-//! file's metadata, independent of dataset (or file) size, so a file whose data
-//! exceeds available RAM repacks successfully.
+//! The writer retains discovery records, allocation spans, and serialized file-space managers.
+//! It reconstructs one object's metadata at a time during planning and emission. Working memory
+//! also includes source caches, the current object's heap collections, and its storage buffers.
 //!
-//! [#82]: https://github.com/CramBL/hdf5-pure/issues/82
+//! Eligible chunked datasets use one encoded chunk buffer during verbatim data emission.
+//! Re-encoded datasets and datasets with address-bearing elements can require complete dataset
+//! buffers. A single large object or chunk index can therefore require substantial memory.
+//!
+//! Planning and emission read metadata in separate passes, which increases source I/O and
+//! preparation work. [`File::open_streaming`] reads the source on demand.
 
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
-use std::vec;
 
 use crate::DeflateLevel;
 use crate::FileSpaceSettings;
@@ -132,6 +132,9 @@ use crate::data_layout::DataLayout;
 use crate::dataspace::MaxExtent;
 use crate::datatype::{self, Datatype, ReferenceType};
 use crate::error::{Error, FormatError};
+use crate::file_writer::source::Object;
+use crate::file_writer::source::ObjectSource;
+use crate::file_writer::source::Plan;
 use crate::filter_pipeline::{
     FILTER_DEFLATE, FILTER_FLETCHER32, FILTER_LZF, FILTER_SCALEOFFSET, FILTER_SHUFFLE,
     FilterPipeline,
@@ -142,9 +145,7 @@ use crate::object_path::{LinkNameBuf, ObjectPathBuf};
 use crate::reader::Dataset;
 use crate::reader::File;
 use crate::reader::ObjectClass;
-use crate::repack::objects::Child;
 use crate::repack::objects::Placement;
-use crate::repack::objects::SourceObject;
 use crate::repack::objects::SourceObjects;
 use crate::scaleoffset::{self, ScaleOffset};
 use crate::shared_message::DatatypeLocation;
@@ -347,13 +348,11 @@ impl RepackOptions {
 /// Preserves the source's recorded effective file-space settings by default, including
 /// persistence. [`RepackOptions::with_file_space_settings`] selects a different output policy.
 ///
-/// The fidelity checks run first: every object is validated while the output is
-/// staged, so an [`Error::RepackUnsupported`] (an object that cannot be
-/// reproduced faithfully, or a drop path that does not exist) is reported before
-/// any byte is written to `dst`. Dataset *chunk bytes*, by contrast, are streamed
-/// from `src` to `dst` during the write rather than buffered, so an I/O error
-/// reading the source or writing the destination partway through can leave a
-/// partial `dst` (remove it and retry).
+/// Fidelity checks and destination layout planning run before output. An
+/// [`Error::RepackUnsupported`] for an object or drop path is reported before bytes are written
+/// to `dst`. The writer rereads object metadata during emission and streams eligible encoded
+/// chunks from `src`. An I/O error reading the source or writing the destination can leave a
+/// partial `dst`.
 ///
 /// See [`Error::RepackUnsupported`] for the objects that cannot be reproduced
 /// faithfully.
@@ -388,18 +387,16 @@ pub fn repack<P: AsRef<Path>, Q: AsRef<Path>>(
     dst: Q,
     options: &RepackOptions,
 ) -> Result<(), Error> {
-    // Open the source for on-demand streaming reads: metadata and one working chunk are
-    // resident at a time, never the whole file.
+    // Read source metadata and payloads on demand.
     let source = File::open_streaming_with_access_mode(src.as_ref(), options.source_access_mode())?;
     stage(&source, options, REPACK_BUDGET)?.write(dst)
 }
 
 /// Repacks the open file `source` into `writer` with `options`.
 ///
-/// Performs what [`repack`](fn@repack) does, with the same fidelity checks and errors. The
-/// difference is that it writes the file front to back into `writer` through
-/// [`FileBuilder::finish_to`], so the output can be an in-memory buffer, a pipe or a file
-/// the caller already holds open.
+/// Performs what [`repack`](fn@repack) does, with the same fidelity checks and errors. Writes
+/// the file in address order into `writer`, which may be an in-memory buffer, a pipe, or an
+/// open file. The caller must keep source contents unchanged during planning and emission.
 ///
 /// An [`Error::RepackUnsupported`] is reported before bytes reach `writer`. If an
 /// I/O error happens partway through, it leaves what was already written there.
@@ -470,8 +467,7 @@ fn check_source_access_mode(source: &File, options: &RepackOptions) -> Result<()
     Ok(())
 }
 
-/// Stages every object of `source` that `options` keeps in a [`FileBuilder`], with the
-/// output format chosen, running every fidelity check before a byte is written.
+/// Discovers retained objects and checks fidelity while planning destination allocations.
 ///
 /// The repack reads no more objects and hard links of `source` than `budget` allows.
 ///
@@ -485,27 +481,21 @@ fn stage(
     source: &File,
     options: &RepackOptions,
     budget: TraversalBudget,
-) -> Result<FileBuilder, Error> {
+) -> Result<Plan<RepackSource>, Error> {
     let RepackOptions {
         drop,
         libver_bounds,
         file_space_settings,
         reject_unknown_messages_only_a_writer_must_understand: _,
     } = options;
-    // Shared so each streamed dataset's chunk provider can pull from the same handle
-    // during the write without an extra open.
     let file = Arc::new(source.clone());
-
     let drop: BTreeSet<ObjectPathBuf> =
         drop.iter().map(|path| ObjectPathBuf::parse(path)).collect();
-    // The root group's path ends with no link, so there is none to leave out of the output.
     if drop.iter().any(ObjectPathBuf::is_empty) {
         return Err(Error::RepackUnsupported(String::from(
             "a repack cannot drop the root group",
         )));
     }
-
-    let mut builder = FileBuilder::new();
     let settings = match *file_space_settings {
         Some(settings) => Some(settings),
         None => file.file_space_settings().map_err(|err| match err {
@@ -515,62 +505,86 @@ fn stage(
             err => err,
         })?,
     };
-    if let Some(settings) = settings {
-        builder.with_file_space_settings(settings);
-    }
     let objects = SourceObjects::discover(&file, &drop, budget)?;
-    populate(&mut builder, &file, &objects)?;
-
-    // Choose the output format now that the content is staged.
-    //
-    // A repack compacts a file; it is not a request to re-target it, and the
-    // format is the one property whose loss is invisible until an old reader
-    // refuses the output — a `.mat` written to the 1.8 bound so MATLAB can load
-    // it used to come back with a version 3 superblock MATLAB cannot open at
-    // all. So the source's format is carried forward.
-    //
-    // Except where the content will not fit in it. A chunked dataset needs the
-    // version 4 data-layout message and a 1.10 chunk index, and 1.8's version 1
-    // B-tree index is one this crate reads but does not write — so a great many
-    // files the C library wrote (chunked data under a version 0 or 2 superblock)
-    // have no older encoding to be repacked back into. Upgrading there is forced
-    // rather than gratuitous, and refusing instead would take repack away from
-    // most real HDF5 files. `h5repack` makes the same trade, writing whatever
-    // format the content needs unless `--low`/`--high` say otherwise.
-    //
-    // `RepackOptions::with_libver_bounds` is that "unless": set explicitly, the
-    // bound is a guarantee, and content it cannot express is refused by the
-    // writer rather than upgraded past it.
-    //
-    // The carried-forward ceiling is floored at `WRITER_OLDEST` because a
-    // version 0/1 superblock source is older than anything this crate writes:
-    // that format can be read but not produced, so the oldest writable one is as
-    // close as the output gets. `Earliest` as the low bound rather than the
-    // source's own version, since `high` is what selects the format and a floor
-    // equal to it would leave nothing satisfiable.
-    let (low, high) = match *libver_bounds {
-        Some(explicit) => explicit,
-        None if builder.needs_latest_format() => (LibVer::Earliest, LibVer::WRITER_DEFAULT),
-        None => (
-            LibVer::Earliest,
-            file.libver_bound().max(LibVer::WRITER_OLDEST),
-        ),
-    };
-    builder.with_libver_bounds(low, high);
-    Ok(builder)
+    let inherited = file.libver_bound().max(LibVer::WRITER_OLDEST);
+    Plan::new(
+        RepackSource { file, objects },
+        settings,
+        *libver_bounds,
+        inherited,
+    )
 }
 
-/// A destination that group contents can be added to. Implemented for both the
-/// top-level [`FileBuilder`] (the root group) and [`GroupBuilder`] (subgroups)
-/// so [`populate_group`] stages the contents of every group.
-trait GroupSink: AttrSink {
-    fn sink_dataset(&mut self, name: &str) -> &mut DatasetBuilder;
-    fn sink_commit_datatype(&mut self, name: &str, datatype: Datatype);
+/// The source file and retained object identities used to reconstruct repack metadata.
+struct RepackSource {
+    file: Arc<File>,
+    objects: SourceObjects,
+}
+
+impl ObjectSource for RepackSource {
+    fn len(&self) -> usize {
+        self.objects.len()
+    }
+
+    fn load(&self, index: usize) -> Result<Object, Error> {
+        let Self { file, objects } = self;
+        let object = objects.object(index)?;
+        let path = objects.path(index)?;
+        match object.class {
+            ObjectClass::Dataset => {
+                let dataset = file.dataset_at(object.id.header_address(), path.clone())?;
+                let mut builder = DatasetBuilder::new(
+                    path.components()
+                        .last()
+                        .ok_or_else(|| FormatError::Internal("a dataset has no link name".into()))?
+                        .as_str(),
+                );
+                emit_dataset(&mut builder, &dataset, &path, file, objects)?;
+                Ok(Object::dataset(builder)?)
+            }
+            ObjectClass::Group => {
+                let group = file.group_at(object.id.header_address(), path.clone());
+                let mut builder = GroupBuilder::new("repack");
+                copy_attrs(
+                    &mut builder,
+                    group.attr_messages()?,
+                    || group.attrs(),
+                    &group_owner(&path),
+                    objects,
+                )?;
+                Ok(Object::group(&builder.finish().attrs)?)
+            }
+            ObjectClass::NamedDatatype => {
+                let datatype = file.named_datatype_at(object.id.header_address())?;
+                check_datatype(&datatype, &format!("committed datatype {path}"))?;
+                Ok(Object::committed(datatype)?)
+            }
+            ObjectClass::Unknown => Err(Error::RepackUnsupported(format!(
+                "{}: the link {:?} refers to an object that is neither a group, a dataset nor a committed datatype",
+                group_owner(&objects.parent_path(index)?),
+                path.components()
+                    .last()
+                    .map(|name| name.as_str())
+                    .unwrap_or("")
+            ))),
+        }
+    }
+
+    fn links(&self, index: usize) -> Result<Vec<(String, usize)>, Error> {
+        Ok(self
+            .objects
+            .links(index)?
+            .map(|(name, index)| (name.to_string(), index))
+            .collect())
+    }
+
+    fn resolve(&self, path: &ObjectPathBuf) -> Result<usize, Error> {
+        self.objects.index(path)
+    }
 }
 
 /// Anything a repacked attribute can be attached to: the root group, a subgroup,
-/// or a dataset. Split from [`GroupSink`] because a dataset takes attributes but
-/// holds no children, so one attribute-copying routine serves all three.
+/// or a dataset.
 trait AttrSink {
     fn sink_set_attr(&mut self, name: &str, value: AttrValue);
     fn sink_set_attr_verbatim(
@@ -656,156 +670,6 @@ impl AttrSink for DatasetBuilder {
         self.set_attr_var_len_verbatim(message, strings, committed_datatype_path)?;
         Ok(())
     }
-}
-
-impl GroupSink for FileBuilder {
-    fn sink_dataset(&mut self, name: &str) -> &mut DatasetBuilder {
-        self.create_dataset(name)
-    }
-    fn sink_commit_datatype(&mut self, name: &str, datatype: Datatype) {
-        self.commit_datatype(name, datatype);
-    }
-}
-
-impl GroupSink for GroupBuilder {
-    fn sink_dataset(&mut self, name: &str) -> &mut DatasetBuilder {
-        self.create_dataset(name)
-    }
-    fn sink_commit_datatype(&mut self, name: &str, datatype: Datatype) {
-        self.commit_datatype(name, datatype);
-    }
-}
-
-/// Stages the root group of `objects` in `builder`, with every group under it.
-///
-/// Walks the groups depth-first on a stack of the open groups, without recursion, and adds each
-/// group to its parent once its subgroups are added to it.
-///
-/// # Errors
-///
-/// Returns the errors of [`populate_group`].
-fn populate(
-    builder: &mut FileBuilder,
-    file: &Arc<File>,
-    objects: &SourceObjects,
-) -> Result<(), Error> {
-    let mut root_subgroups = populate_group(
-        builder,
-        file,
-        objects,
-        objects.root(),
-        &ObjectPathBuf::root(),
-    )?;
-    let mut open: Vec<OpenGroup<'_>> = Vec::new();
-    loop {
-        let subgroups = open
-            .last_mut()
-            .map_or(&mut root_subgroups, |group| &mut group.subgroups);
-        if let Some(child) = subgroups.next() {
-            let mut group = GroupBuilder::new(child.link_name);
-            let subgroups = populate_group(&mut group, file, objects, child.object, &child.path)?;
-            open.push(OpenGroup { group, subgroups });
-            continue;
-        }
-        let Some(OpenGroup { group, .. }) = open.pop() else {
-            return Ok(());
-        };
-        let finished = group.finish();
-        match open.last_mut() {
-            Some(parent) => parent.group.add_group(finished),
-            None => builder.add_group(finished),
-        }
-    }
-}
-
-/// A group [`populate`] has staged the contents of, and the subgroups it has yet to stage.
-struct OpenGroup<'a> {
-    group: GroupBuilder,
-    /// The subgroups not yet staged, sorted by link name.
-    subgroups: vec::IntoIter<Child<'a>>,
-}
-
-/// Stages the attributes, committed datatypes, and datasets of the group `object` in `sink`, and
-/// returns the subgroups of `object` sorted by link name.
-///
-/// `path` identifies `object` from the root group, and has no components for the root group
-/// itself.
-///
-/// # Errors
-///
-/// Returns [`Error::RepackUnsupported`] if a link of `object` targets an object that is neither a
-/// group, a dataset, nor a committed datatype, or if an attribute, a committed datatype, or a
-/// dataset of `object` cannot be reproduced faithfully. Returns [`Error::Format`] with
-/// [`FormatError::Internal`] if a link of `object` targets an object that is not in the tree or
-/// that the repack does not keep. Propagates the errors of reading the attributes, committed
-/// datatypes, and datasets of `object`.
-fn populate_group<'a>(
-    sink: &mut impl GroupSink,
-    file: &Arc<File>,
-    objects: &'a SourceObjects,
-    object: &SourceObject,
-    path: &ObjectPathBuf,
-) -> Result<vec::IntoIter<Child<'a>>, Error> {
-    // Attributes, copied verbatim where their bytes travel and re-encoded where
-    // they do not; refused rather than dropped if neither is possible.
-    let group = file.group_at(object.id.header_address(), path.clone());
-    let owner = group_owner(path);
-    copy_attrs(
-        sink,
-        group.attr_messages()?,
-        || group.attrs(),
-        &owner,
-        objects,
-    )?;
-
-    let mut children = objects.children(object, path)?;
-    if let Some(child) = children
-        .iter()
-        .find(|child| child.object.class == ObjectClass::Unknown)
-    {
-        return Err(Error::RepackUnsupported(format!(
-            "{owner}: the link {:?} refers to an object that is neither a group, a dataset nor a \
-             committed datatype",
-            child.link_name
-        )));
-    }
-
-    // Committed (`H5Tcommit`) datatype objects. Neither a group nor a dataset, so
-    // the two walks below never see one: without this loop the object and its
-    // link leave the output, and every dataset that named the type through it
-    // stops resolving. Placed before the datasets so the type exists in the
-    // output before anything references it (the writer resolves by path, so the
-    // order is not load-bearing, but it matches how the file reads).
-    for child in children_of_class(&children, ObjectClass::NamedDatatype) {
-        let datatype = file.named_datatype_at(child.object.id.header_address())?;
-        check_datatype(&datatype, &format!("committed datatype {}", child.path))?;
-        sink.sink_commit_datatype(child.link_name, datatype);
-    }
-
-    // Datasets, sorted by name.
-    children.sort_unstable_by_key(|child| child.link_name);
-    for child in children_of_class(&children, ObjectClass::Dataset) {
-        let ds = file.dataset_at(child.object.id.header_address(), child.path.clone())?;
-        emit_dataset(
-            sink.sink_dataset(child.link_name),
-            &ds,
-            &child.path,
-            file,
-            objects,
-        )?;
-    }
-
-    children.retain(|child| child.object.class == ObjectClass::Group);
-    Ok(children.into_iter())
-}
-
-fn children_of_class<'a>(
-    children: &'a [Child<'a>],
-    class: ObjectClass,
-) -> impl Iterator<Item = &'a Child<'a>> {
-    children
-        .iter()
-        .filter(move |child| child.object.class == class)
 }
 
 /// Returns how an error message identifies the group at `path`.

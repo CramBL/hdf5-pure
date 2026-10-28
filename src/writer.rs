@@ -385,12 +385,6 @@ impl FileBuilder {
             .set_root_attr_var_len_verbatim(message, strings, committed_datatype_path)
     }
 
-    /// Whether the staged content needs the 1.10 format — see
-    /// [`FileWriter::needs_latest_format`](crate::file_writer::FileWriter::needs_latest_format).
-    pub(crate) fn needs_latest_format(&self) -> bool {
-        self.writer.needs_latest_format()
-    }
-
     /// Serializes the staged file into memory.
     ///
     /// # Errors
@@ -404,11 +398,9 @@ impl FileBuilder {
     /// Serializes the file directly to a [`Write`] sink, without first buffering
     /// the whole file in memory.
     ///
-    /// Produces byte-for-byte the same file as [`finish`](Self::finish), but a
-    /// dataset staged for verbatim chunk *streaming* (repack's out-of-core path)
-    /// has its chunks pulled from the source and written one at a time, so peak
-    /// memory stays bounded by a single chunk plus the file metadata rather than
-    /// the whole dataset.
+    /// Produces byte-for-byte the same file as [`finish`](Self::finish). For datasets staged
+    /// with verbatim chunk providers, reads and writes one encoded chunk at a time. The writer
+    /// retains file metadata and supplied dataset buffers during layout planning.
     ///
     /// The sink is written front-to-back with no seeks, so it can be a socket
     /// or a pipe as readily as a file. That is possible because the writer
@@ -452,9 +444,6 @@ impl FileBuilder {
 
     /// Serializes the file to `path`.
     ///
-    /// Streams the file to disk (see [`finish_to`](Self::finish_to)), so a repack
-    /// staging streamed chunks does not hold the whole output in memory.
-    ///
     /// The writer creates `path` when the first byte is ready. A rejection before output,
     /// including incompatible format bounds or userblock settings, leaves an existing file
     /// at `path` unchanged. Later failures can leave partial output, as
@@ -473,9 +462,9 @@ impl FileBuilder {
 }
 
 /// A [`Write`] adapter that creates its destination on the first write call.
-struct LazyFile {
-    path: std::path::PathBuf,
-    file: Option<std::fs::File>,
+pub(crate) struct LazyFile {
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) file: Option<std::fs::File>,
 }
 
 impl Write for LazyFile {
@@ -501,17 +490,19 @@ impl Write for LazyFile {
 ///
 /// Returns the original [`std::io::Error`] from failed writes. [`FileBuilder::finish_to`] converts
 /// the sink failure to [`Error::Io`].
-struct WriteSink<W: Write> {
+pub(crate) struct WriteSink<W: Write> {
     inner: W,
     written: u64,
 }
 
 impl<W: Write> WriteSink<W> {
-    fn new(inner: W) -> Self {
+    /// Starts tracking output at position zero.
+    pub(crate) fn new(inner: W) -> Self {
         Self { inner, written: 0 }
     }
 
-    fn into_inner(self) -> W {
+    /// Returns the writer after the recorded writes.
+    pub(crate) fn into_inner(self) -> W {
         self.inner
     }
 }
