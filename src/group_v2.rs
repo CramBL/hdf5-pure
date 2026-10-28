@@ -1910,11 +1910,7 @@ mod tests {
     }
 }
 
-/// The dense-link walks hold to the same one-parse-per-walk invariant as the
-/// dense-attribute ones. The file comes from libhdf5, the only
-/// writer that produces a huge *link*: this crate's writer stores even a
-/// 60,000-byte link name as a managed heap object, so the huge path these tests
-/// cover is unreachable from a file it wrote.
+/// Dense-link walks over indexed huge heap objects.
 #[cfg(test)]
 mod huge_link_tests {
     use super::*;
@@ -1926,13 +1922,6 @@ mod huge_link_tests {
             offsets: superblock.offset_size,
             lengths: superblock.length_size,
         }
-    }
-
-    /// A file with one group of `count` links, each name long enough that its
-    /// link message exceeds the heap's managed-object limit and is stored as a
-    /// huge object. Written by `crates/crosscheck/tests/main/c_test_data.rs`.
-    fn file_with_huge_links(count: usize) -> Vec<u8> {
-        std::fs::read(test_util::data(&format!("c/huge_links_{count}.h5"))).unwrap()
     }
 
     /// Group `g`'s dense-link storage: its info message, its heap address, and
@@ -1963,17 +1952,13 @@ mod huge_link_tests {
         (link_info, fh_addr, widths)
     }
 
-    /// Both dense-link walks resolve every huge object against one parse of the
-    /// heap's huge-object index, not one parse per link.
-    ///
-    /// Costs, not answers, are what regress here: parsing the index per object
-    /// returns exactly the same links while making the walk quadratic in their
-    /// number, so the count of parses is the only thing that catches it.
     #[test]
     fn a_dense_link_walk_parses_its_huge_object_index_once() {
-        // Above the C library's max_compact of 8, so the links are stored densely.
+        assert_dense_walk(test_util::modern::huge_links_12());
+    }
+
+    fn assert_dense_walk(bytes: Vec<u8>) {
         const COUNT: usize = 12;
-        let bytes = file_with_huge_links(COUNT);
         let (link_info, fh_addr, widths) = dense_link_info(&bytes);
 
         fractal_heap::reset_huge_index_decodes();
