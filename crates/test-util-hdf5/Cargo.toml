@@ -25,7 +25,7 @@ __hdf5-bundled = ["hdf5/static", "__hdf5-2"]
 __matio = []
 
 [dependencies]
-hdf5 = { workspace = true, optional = true }
+hdf5 = { workspace = true, optional = true, features = ["lzf"] }
 # The C bindings used by fixture writers.
 hdf5-sys = { workspace = true, optional = true }
 hdf5-pure = { workspace = true, features = ["std"] }

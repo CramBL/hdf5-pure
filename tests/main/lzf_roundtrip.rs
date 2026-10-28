@@ -182,100 +182,13 @@ fn overwrite_lzf_dataset_in_place() {
     assert_eq!(file.dataset("v").unwrap().read_i32().unwrap(), after);
 }
 
-/// Build `pure_written.h5`: the LZF file *this crate* emits, committed so that
-/// `regen.py`'s read-back phase can hand it to a real h5py.
-///
-/// Four datasets, chosen for what they make h5py do rather than for coverage
-/// of our own reader: a plain multi-chunk dataset, a shuffle+lzf chain, a
-/// partial edge chunk, and an incompressible one whose stream our compressor
-/// grows — the case that fails outright if the filter is not recorded optional.
-///
-/// Every value here must be bit-identical on every target, because
-/// [`pure_written_fixture_is_current`] compares the file byte for byte against
-/// a fixture generated on one machine. That rules out the transcendental
-/// functions: Rust makes no cross-platform guarantee about `f64::sin`, and one
-/// ULP of libm disagreement is enough to change the bytes. `sqrt` is safe where
-/// `sin` is not — IEEE-754 mandates it be correctly rounded — and it still
-/// gives the varied mantissas that make a shuffle+LZF chain worth writing.
-fn build_pure_written() -> Vec<u8> {
-    let ramp: Vec<i32> = (0..1024).collect();
-    let waves: Vec<f64> = (0..512).map(|i| f64::from(i).sqrt()).collect();
-    let edge: Vec<i64> = (0..1000).map(|i| i * 7 - 500).collect();
-    let noise = std::fs::read(test_util::data("h5py/lzf/u8_noise.raw.bin")).unwrap();
-
-    let mut b = FileBuilder::new();
-    b.create_dataset("plain_i32")
-        .with_i32_data(&ramp)
-        .with_chunks(&[256])
-        .with_lzf();
-    b.create_dataset("shuffle_f64")
-        .with_f64_data(&waves)
-        .with_chunks(&[128])
-        .with_shuffle()
-        .with_lzf();
-    b.create_dataset("multichunk_i64")
-        .with_i64_data(&edge)
-        .with_chunks(&[128])
-        .with_lzf();
-    b.create_dataset("incompressible_u8")
-        .with_u8_data(&noise)
-        .with_chunks(&[1024])
-        .with_lzf();
-    b.finish().unwrap()
-}
-
-/// The committed `pure_written.h5` is still what our writer emits today.
-///
-/// The fixture is an input to a verification step that runs outside CI (h5py
-/// reads it in `regen.py`), so nothing else would notice it going stale. When
-/// this fails, the writer's output changed: rewrite the file from
-/// `build_pure_written` and re-run `regen.py` so the h5py read-back covers the
-/// new bytes rather than last release's.
 #[test]
-fn pure_written_fixture_is_current() {
-    let committed = std::fs::read(test_util::data("h5py/lzf/pure_written.h5")).unwrap();
-    assert_eq!(
-        build_pure_written(),
-        committed,
-        "tests/data/h5py/lzf/pure_written.h5 is stale — see this test's doc comment"
-    );
+fn fresh_lzf_fixture_reads_back() {
+    let fixture = test_util_hdf5::lzf::Fixture::new();
+    fixture.assert_pure(&File::from_bytes(fixture.pure_bytes()).unwrap());
 }
 
-/// Everything in `pure_written.h5` reads back through our own stack. h5py's
-/// half of this is `regen.py --verify-pure`; this half at least keeps the
-/// fixture from being self-inconsistent.
-#[test]
-fn pure_written_fixture_reads_back() {
-    let file = File::from_bytes(build_pure_written()).unwrap();
-
-    let ramp: Vec<i32> = (0..1024).collect();
-    assert_eq!(file.dataset("plain_i32").unwrap().read_i32().unwrap(), ramp);
-
-    let waves: Vec<f64> = (0..512).map(|i| f64::from(i).sqrt()).collect();
-    assert_eq!(
-        file.dataset("shuffle_f64").unwrap().read_f64().unwrap(),
-        waves
-    );
-
-    let edge: Vec<i64> = (0..1000).map(|i| i * 7 - 500).collect();
-    assert_eq!(
-        file.dataset("multichunk_i64").unwrap().read_i64().unwrap(),
-        edge
-    );
-
-    let noise = std::fs::read(test_util::data("h5py/lzf/u8_noise.raw.bin")).unwrap();
-    assert_eq!(
-        file.dataset("incompressible_u8")
-            .unwrap()
-            .read_u8()
-            .unwrap(),
-        noise
-    );
-}
-
-/// h5py registers LZF as optional and stored this incompressible chunk raw
-/// with its filter-mask bit set — a file our writer can never produce, and the
-/// only way to exercise the mask-skip path on an LZF pipeline.
+// h5py stored this incompressible chunk with its optional LZF filter skipped.
 #[test]
 fn reads_h5py_lzf_masked_chunk() {
     let file = File::open(test_util::data("h5py/lzf/u8_noise.h5")).unwrap();
