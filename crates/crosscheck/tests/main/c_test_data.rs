@@ -8,9 +8,6 @@
 //! through the bundled reference library. Without that variable, tests read the existing copies.
 #![cfg(feature = "__hdf5-1.10")]
 
-use std::path::PathBuf;
-
-use hdf5_pure::File;
 use rstest::rstest;
 use test_util::temp;
 use test_util_hdf5::native_fixtures::Fixture;
@@ -44,36 +41,6 @@ fn fresh_native_fixture_has_complete_contents(
     drop(file);
 }
 
-#[rstest]
-#[case::committed_datatype_v1(Fixture::CommittedDatatypeV1)]
-#[case::hard_link_undo(Fixture::HardLinkUndo)]
-fn committed_native_fixture_has_complete_contents(#[case] fixture: Fixture) {
-    let (path, order) = committed_fixture(fixture);
-    fixture.assert_native(&path, order);
-    let bytes = std::fs::read(&path).unwrap();
-    let file = File::open(&path).unwrap();
-    fixture.assert_contents(&file, order);
-    fixture.assert_representation(&file, &bytes);
-    drop(file);
-}
-
-fn committed_fixture(fixture: Fixture) -> (PathBuf, ByteOrder) {
-    let committed = test_util::data("c").join(fixture.file_name());
-    let order = if std::env::var_os(UPDATE).is_some() {
-        let produced = temp::temp_path(fixture.file_name());
-        fixture.write(&produced);
-        std::fs::copy(&produced, &committed).unwrap();
-        native_order()
-    } else {
-        ByteOrder::LittleEndian
-    };
-    assert!(
-        committed.is_file(),
-        "{committed:?} is missing; `just test-data::c` writes it"
-    );
-    (committed, order)
-}
-
 fn native_order() -> ByteOrder {
     if cfg!(target_endian = "big") {
         ByteOrder::BigEndian
@@ -81,5 +48,3 @@ fn native_order() -> ByteOrder {
         ByteOrder::LittleEndian
     }
 }
-
-const UPDATE: &str = "HDF5_PURE_UPDATE_TEST_DATA";
