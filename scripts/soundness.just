@@ -34,6 +34,10 @@ heap-baseline-record:
 heap-profile:
     cargo run --release --example heap_profile
 
+# Profile metadata-heavy repacks or time them without allocation recording.
+repack-profile MODE="memory" SUBTREES="512" ROUNDS="5":
+    CARGO_PROFILE_RELEASE_DEBUG=line-tables-only cargo run --locked --release --example repack_profile -- {{ MODE }} {{ SUBTREES }} {{ ROUNDS }}
+
 # Measure raw staging, retained encoding, and completed output for filtered creation.
 filtered-chunk-memory:
     cargo test --locked -p hdf5-pure --lib chunked_write::allocation_tests -- --nocapture
