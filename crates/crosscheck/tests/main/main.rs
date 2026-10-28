@@ -73,6 +73,7 @@ mod hdf5_release_feature;
 mod layout_introspection;
 mod legacy;
 mod legacy_attributes;
+mod legacy_chunked;
 mod libver_matrix;
 mod libver_output;
 mod link_storage;

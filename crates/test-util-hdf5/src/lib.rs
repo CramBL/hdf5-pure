@@ -38,6 +38,7 @@ pub mod heap_allocations;
 pub mod heap_interop;
 pub mod legacy;
 pub mod legacy_attributes;
+pub mod legacy_chunked;
 pub mod lock;
 pub mod lzf;
 pub mod mat_file;
