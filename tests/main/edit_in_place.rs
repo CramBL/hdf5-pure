@@ -2095,8 +2095,7 @@ fn malformed_chunked_requests_are_rejected_without_writing(
     #[case] configure: fn(&mut DatasetBuilder),
     #[case] expected: &str,
 ) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("geometry.h5");
+    let path = temp::temp_path("geometry.h5");
     write_starter(&path);
     let before = std::fs::read(&path).unwrap();
     {

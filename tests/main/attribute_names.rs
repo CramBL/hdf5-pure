@@ -60,8 +60,7 @@ fn committed_attribute_edits_reject_invalid_names_without_changing_the_file(
     #[values(false, true)] dense: bool,
     #[values(AttrValue::I32(42), AttrValue::VarLenString("value".into()))] value: AttrValue,
 ) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("attributes.h5");
+    let path = test_util::temp::temp_path("attributes.h5");
     named_attribute_builder(owner, "valid", dense)
         .write(&path)
         .unwrap();
