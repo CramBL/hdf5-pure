@@ -14,6 +14,26 @@ use hdf5_pure::FilterId;
 use hdf5_pure::UserblockSize;
 use hdf5_pure::{ChunkIndex, Dataset, File, FileBuilder, Layout, MaxExtent};
 
+#[rstest::rstest]
+#[case::two_byte_max(65_535)]
+#[case::three_byte_min(65_536)]
+#[case::cell_ranger(80_000)]
+#[case::larger(131_072)]
+fn chunk_dimensions_at_and_above_the_two_byte_limit_preserve_values(#[case] chunk: u64) {
+    let values: Vec<i32> = (0..200_000).collect();
+    let mut builder = FileBuilder::new();
+    builder
+        .create_dataset("d")
+        .with_i32_data(&values)
+        .with_chunks(&[chunk])
+        .with_maxshape(&[MaxExtent::Unlimited]);
+    let file = File::from_bytes(builder.finish().unwrap()).unwrap();
+    let dataset = file.dataset("d").unwrap();
+    assert_eq!(dataset.shape().unwrap(), vec![200_000]);
+    assert_eq!(dataset.chunk_shape().unwrap(), Some(vec![chunk]));
+    assert_eq!(dataset.read_i32().unwrap(), values);
+}
+
 fn open(f: &File, name: &str) -> Dataset {
     f.dataset(name).unwrap()
 }

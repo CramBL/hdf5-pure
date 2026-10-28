@@ -23,10 +23,10 @@ use crate::error::OBJECT_HEADER_MESSAGE_MAX;
 use crate::extensible_array;
 use crate::fixed_array::FIXED_ARRAY_PAGE_BITS;
 use crate::message_type::MessageType;
+use crate::width;
 use crate::width::FormatWidths;
 use crate::width::LengthWidth;
 use crate::width::OffsetWidth;
-use crate::width::UintWidth;
 
 /// Parsed HDF5 data layout message.
 #[derive(Debug, Clone, PartialEq)]
@@ -78,8 +78,9 @@ impl DataLayout {
     /// Returns [`FormatError::InvalidLayoutVersion`] if the version byte is neither 3 nor 4,
     /// [`FormatError::InvalidLayoutClass`] if the class byte is outside the storage classes that
     /// version defines, [`FormatError::InvalidChunkIndexType`] if a version 4 chunked message
-    /// stores an indexing type outside 1 to 5, or [`FormatError::UnexpectedEof`] if the message
-    /// body ends inside a field.
+    /// stores an indexing type outside 1 to 5, [`FormatError::InvalidChunkGeometry`] if a version 4
+    /// chunked message stores a dimension encoding length outside 1 to 8 bytes, or
+    /// [`FormatError::UnexpectedEof`] if the message body ends inside a field.
     pub fn parse_with_widths(data: &[u8], widths: FormatWidths) -> Result<DataLayout, FormatError> {
         bytes::ensure_len(data, 0, 2)?;
         let layout_class = data[1];
@@ -147,7 +148,7 @@ impl DataLayout {
     /// index of a filtered chunk and clear for every other index.
     ///
     /// The message stores every chunk dimension and the element size in the
-    /// fewest bytes, of 1, 2, or 4, that hold the largest of them. A Fixed Array
+    /// fewest bytes, from 1 through 4, that hold the largest of them. A Fixed Array
     /// and an Extensible Array index store the creation parameters the writer
     /// gives the header of that array. For a Single Chunk index, `address` is the
     /// address of the chunk.
@@ -171,17 +172,18 @@ impl DataLayout {
                 "a chunked layout message stores at most 254 chunk dimensions",
             )
         })?;
-        let dimension_width =
-            dimension_width(chunk_dims.iter().copied().fold(element_size, u32::max));
+        let dimension_width = width::encoded_unsigned_width(u64::from(
+            chunk_dims.iter().copied().fold(element_size, u32::max),
+        ));
 
         let mut buf = Vec::new();
         buf.push(LayoutVersion::Four.get());
         buf.push(LAYOUT_CLASS_CHUNKED);
         buf.push(flags.stored_with(index));
         buf.push(dimensionality);
-        buf.push(dimension_width.get());
+        buf.push(dimension_width);
         for &dim in chunk_dims.iter().chain(core::iter::once(&element_size)) {
-            write_dimension(&mut buf, dim, dimension_width);
+            buf.extend_from_slice(&dim.to_le_bytes()[..usize::from(dimension_width)]);
         }
         match index {
             ChunkIndexInfo::SingleChunk { filtered } => {
@@ -258,39 +260,24 @@ impl DataLayout {
                 bytes::ensure_len(data, pos, 3)?;
                 let flags = ChunkedLayoutFlags::new(data[pos]);
                 let dimensionality = data[pos + 1] as usize;
-                let dim_size_encoded_length = data[pos + 2] as usize;
+                let dim_size_encoded_length = match data[pos + 2] {
+                    width @ 1..=8 => usize::from(width),
+                    _ => {
+                        return Err(FormatError::InvalidChunkGeometry(
+                            "chunk dimension encoding length must be between 1 and 8 bytes",
+                        ));
+                    }
+                };
                 let mut p = pos + 3;
 
                 // dimension sizes
                 bytes::ensure_len(data, p, dimensionality * dim_size_encoded_length)?;
                 let mut chunk_dimensions = Vec::with_capacity(dimensionality);
                 for _ in 0..dimensionality {
-                    let val = match dim_size_encoded_length {
-                        1 => u64::from(data[p]),
-                        2 => u64::from(u16::from_le_bytes([data[p], data[p + 1]])),
-                        4 => u64::from(u32::from_le_bytes([
-                            data[p],
-                            data[p + 1],
-                            data[p + 2],
-                            data[p + 3],
-                        ])),
-                        8 => u64::from_le_bytes([
-                            data[p],
-                            data[p + 1],
-                            data[p + 2],
-                            data[p + 3],
-                            data[p + 4],
-                            data[p + 5],
-                            data[p + 6],
-                            data[p + 7],
-                        ]),
-                        _ => {
-                            return Err(FormatError::UnexpectedEof {
-                                expected: p + dim_size_encoded_length,
-                                available: data.len(),
-                            });
-                        }
-                    };
+                    let mut encoded = [0; 8];
+                    encoded[..dim_size_encoded_length]
+                        .copy_from_slice(&data[p..p + dim_size_encoded_length]);
+                    let val = u64::from_le_bytes(encoded);
                     chunk_dimensions.push(val);
                     p += dim_size_encoded_length;
                 }
@@ -603,30 +590,6 @@ fn read_filtered_single_chunk(
     }))
 }
 
-/// Returns the narrowest of the 1-, 2- and 4-byte widths that holds `largest`.
-fn dimension_width(largest: u32) -> UintWidth {
-    if u8::try_from(largest).is_ok() {
-        UintWidth::One
-    } else if u16::try_from(largest).is_ok() {
-        UintWidth::Two
-    } else {
-        UintWidth::Four
-    }
-}
-
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "`dimension_width` picks a width that holds the largest dimension of the message"
-)]
-fn write_dimension(buf: &mut Vec<u8>, dim: u32, width: UintWidth) {
-    match width {
-        UintWidth::One => buf.push(dim as u8),
-        UintWidth::Two => buf.extend_from_slice(&(dim as u16).to_le_bytes()),
-        UintWidth::Four => buf.extend_from_slice(&dim.to_le_bytes()),
-        UintWidth::Eight => buf.extend_from_slice(&u64::from(dim).to_le_bytes()),
-    }
-}
-
 /// Byte offset of a layout message's class-specific property description, past
 /// the version and layout class bytes the message opens with. From "The Data
 /// Layout Message", version 4.0.
@@ -732,6 +695,7 @@ const EXTENSIBLE_ARRAY_CREATION_PARAMETERS: [u8; EXTENSIBLE_ARRAY_INFO_LEN] = [
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
+    use test_util::data_layout;
 
     use super::*;
 
@@ -856,10 +820,15 @@ mod tests {
     }
 
     #[rstest]
-    #[case(1, 0x7f)]
-    #[case(2, 0x7fff)]
-    #[case(4, 0x7fff_ffff)]
-    #[case(8, 0x1_0000_0000)]
+    #[case::one(1, 0x7f)]
+    #[case::two(2, 0x7fff)]
+    #[case::three(3, 0x7f_ffff)]
+    #[case::four(4, 0x7fff_ffff)]
+    #[case::legacy_four_byte_encoding(4, 65_536)]
+    #[case::five(5, 0x7f_ffff_ffff)]
+    #[case::six(6, 0x7fff_ffff_ffff)]
+    #[case::seven(7, 0x7f_ffff_ffff_ffff)]
+    #[case::eight(8, 0x7fff_ffff_ffff_ffff)]
     fn v4_chunked_dimension_width_is_preserved(
         #[case] dim_size_encoded_length: u8,
         #[case] dim: u64,
@@ -1084,6 +1053,100 @@ mod tests {
     }
 
     #[rstest]
+    #[case::one_byte_max(0xff, 4, 1, &[0xff, 4])]
+    #[case::two_byte_min(0x100, 4, 2, &[0, 1, 4, 0])]
+    #[case::two_byte_max(0xffff, 8, 2, &[0xff, 0xff, 8, 0])]
+    #[case::three_byte_min(0x1_0000, 4, 3, &[0, 0, 1, 4, 0, 0])]
+    #[case::three_byte_max(0xff_ffff, 8, 3, &[0xff, 0xff, 0xff, 8, 0, 0])]
+    #[case::four_byte_min(0x100_0000, 4, 4, &[0, 0, 0, 1, 4, 0, 0, 0])]
+    #[case::four_byte_max(u32::MAX, 8, 4, &[0xff, 0xff, 0xff, 0xff, 8, 0, 0, 0])]
+    #[case::element_size(2, 0x1_0000, 3, &[2, 0, 0, 0, 0, 1])]
+    fn a_chunked_layout_uses_the_minimum_width_of_its_largest_dimension(
+        #[case] dimension: u32,
+        #[case] element_size: u32,
+        #[case] width: u8,
+        #[case] encoded: &[u8],
+    ) {
+        let message = DataLayout::encode_chunked(
+            ChunkedLayoutFlags::NONE,
+            &[dimension],
+            element_size,
+            ChunkIndexInfo::SingleChunk { filtered: None },
+            StoredAddress::new(0x1000),
+            OffsetWidth::Eight,
+            LengthWidth::Eight,
+        )
+        .unwrap();
+        let mut expected = vec![
+            data_layout::VERSION_FOUR,
+            data_layout::CHUNKED_CLASS,
+            data_layout::NO_CHUNKED_FLAGS,
+            2,
+            width,
+        ];
+        expected.extend_from_slice(encoded);
+        expected.push(data_layout::SINGLE_CHUNK_INDEX);
+        expected.extend_from_slice(&0x1000u64.to_le_bytes());
+        assert_eq!(message, expected);
+    }
+
+    #[rstest]
+    #[case::zero(0)]
+    #[case::nine(9)]
+    #[case::maximum(u8::MAX)]
+    fn a_chunked_layout_rejects_an_unrepresentable_dimension_width(#[case] width: u8) {
+        let err = DataLayout::parse(
+            &[
+                data_layout::VERSION_FOUR,
+                data_layout::CHUNKED_CLASS,
+                data_layout::NO_CHUNKED_FLAGS,
+                2,
+                width,
+            ],
+            8,
+            8,
+        )
+        .unwrap_err();
+        let FormatError::InvalidChunkGeometry(reason) = err else {
+            panic!("expected InvalidChunkGeometry, got {err:?}");
+        };
+        assert_eq!(
+            reason,
+            "chunk dimension encoding length must be between 1 and 8 bytes"
+        );
+    }
+
+    #[rstest]
+    #[case::three(3)]
+    #[case::five(5)]
+    #[case::six(6)]
+    #[case::seven(7)]
+    fn a_chunked_layout_reports_truncated_dimensions(#[case] width: u8) {
+        let err = DataLayout::parse(
+            &[
+                data_layout::VERSION_FOUR,
+                data_layout::CHUNKED_CLASS,
+                data_layout::NO_CHUNKED_FLAGS,
+                2,
+                width,
+                1,
+            ],
+            8,
+            8,
+        )
+        .unwrap_err();
+        let FormatError::UnexpectedEof {
+            expected,
+            available,
+        } = err
+        else {
+            panic!("expected UnexpectedEof, got {err:?}");
+        };
+        assert_eq!(expected, 5 + 2 * usize::from(width));
+        assert_eq!(available, 6);
+    }
+
+    #[rstest]
     #[case::single_chunk(
         ChunkIndexInfo::SingleChunk { filtered: None },
         ChunkedLayoutFlags::NONE,
@@ -1206,7 +1269,8 @@ mod tests {
     #[rstest]
     #[case::one_byte(255, 1)]
     #[case::two_bytes(256, 2)]
-    #[case::four_bytes(65_536, 4)]
+    #[case::three_bytes(65_536, 3)]
+    #[case::four_bytes(16_777_216, 4)]
     fn a_dimension_takes_the_narrowest_width_that_holds_the_largest(
         #[case] largest: u32,
         #[case] width: u8,

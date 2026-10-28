@@ -51,6 +51,15 @@ impl FormatWidths {
     }
 }
 
+/// Returns the minimum number of bytes needed to encode `value`, with one byte for zero.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the bit length of a u64 needs at most eight bytes"
+)]
+pub(crate) fn encoded_unsigned_width(value: u64) -> u8 {
+    (u64::BITS - value.leading_zeros()).div_ceil(8).max(1) as u8
+}
+
 pub(crate) const fn offset_width_max(width: OffsetWidth) -> u64 {
     u64::MAX >> (64 - 8 * width.get())
 }
@@ -185,6 +194,30 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+
+    #[rstest]
+    #[case::zero(0, 1)]
+    #[case::one_byte_max(0xff, 1)]
+    #[case::two_byte_min(0x100, 2)]
+    #[case::two_byte_max(0xffff, 2)]
+    #[case::three_byte_min(0x1_0000, 3)]
+    #[case::three_byte_max(0xff_ffff, 3)]
+    #[case::four_byte_min(0x100_0000, 4)]
+    #[case::four_byte_max(0xffff_ffff, 4)]
+    #[case::five_byte_min(0x1_0000_0000, 5)]
+    #[case::five_byte_max(0xff_ffff_ffff, 5)]
+    #[case::six_byte_min(0x100_0000_0000, 6)]
+    #[case::six_byte_max(0xffff_ffff_ffff, 6)]
+    #[case::seven_byte_min(0x1_0000_0000_0000, 7)]
+    #[case::seven_byte_max(0xff_ffff_ffff_ffff, 7)]
+    #[case::eight_byte_min(0x100_0000_0000_0000, 8)]
+    #[case::eight_byte_max(u64::MAX, 8)]
+    fn unsigned_encoding_uses_the_minimum_number_of_bytes(
+        #[case] value: u64,
+        #[case] expected: u8,
+    ) {
+        assert_eq!(encoded_unsigned_width(value), expected);
+    }
 
     #[rstest]
     #[case::two(OffsetWidth::Two, &[0xFF, 0xFF])]
