@@ -630,7 +630,6 @@ mod tests {
     use crate::file_space_info::{self, FileSpacePageSize, FileSpaceStrategy};
     use crate::file_writer::WIDTHS;
     use crate::source::BytesSource;
-    use crate::superblock;
 
     use super::*;
 
@@ -808,35 +807,7 @@ mod tests {
     #[test]
     fn an_extension_keeps_its_unmodified_record_bytes() {
         let source = BytesSource::new(test_util::paged_index::paged_index());
-        assert_extension_records(&source);
-    }
-
-    pub(in crate::edit) fn assert_extension_records(source: &impl Source) {
-        let located = superblock::read(source).unwrap();
-        let addresses = AddressContext::from_effective_base(located.superblock.base_address);
-        let extension = addresses
-            .absolute(located.superblock.superblock_extension_address.unwrap())
-            .unwrap();
-        let region = WriteEngine::gather_oh_messages(source, extension, addresses).unwrap();
-        let splice = region
-            .splice_first(MessageType::FILE_SPACE_INFO)
-            .unwrap()
-            .unwrap();
-        let info = hdf5_pure_format::__private::parse_file_space_info(
-            located.widths,
-            splice.record().body,
-        )
-        .unwrap();
-
-        let rewritten = crate::edit::object_header::rewrite_extension_region_bytes(
-            &region,
-            located.widths,
-            &info,
-        )
-        .unwrap();
-
-        assert_eq!(rewritten.props(), region.props());
-        assert_eq!(&rewritten[..], &region[..]);
+        crate::edit::test_util::assert_extension_records(&source);
     }
 
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
