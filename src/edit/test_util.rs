@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use hdf5_pure_space::__private::Extent as FreeExtent;
 use hdf5_pure_space::__private::FreeClass;
 use hdf5_pure_space::__private::PageType;
 
@@ -17,6 +18,7 @@ use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
+use crate::address::DecodedStoredAddress;
 use crate::edit::MemoryStrategy;
 use crate::edit::SpaceOwnership;
 use crate::edit::WriteEngine;
@@ -26,6 +28,7 @@ use crate::error::Error;
 use crate::error::FormatError;
 use crate::file_writer::OFFSET_WIDTH;
 use crate::fractal_heap_storage::FractalHeapAllocation;
+use crate::free_space_manager;
 use crate::link_info::LinkInfoMessage;
 use crate::message_type::MessageType;
 use crate::object_header::ObjectHeader;
@@ -276,6 +279,82 @@ impl WriteEngine {
             );
         }
     }
+}
+
+/// Returns persisted sub-page fragments after checking that allocations cannot reuse them.
+///
+/// Requires 512-byte pages and a populated generic-large manager. Checks that
+/// each fragment is unclassified and absent from reusable sections under `policy`.
+///
+/// # Panics
+///
+/// Panics if metadata cannot be read, the layout premise differs, or a fragment
+/// is classified or reusable.
+pub(in crate::edit) fn assert_generic_large_sections(
+    path: &Path,
+    policy: PersistedFreeSpacePolicy,
+) -> Vec<(u64, u64)> {
+    const PAGE: u64 = 512;
+    let opened = crate::reader::File::open(path).unwrap();
+    let info = opened
+        .file_space_info()
+        .unwrap()
+        .expect("a persisting file");
+    drop(opened);
+    assert_eq!(info.page_size.get(), PAGE);
+    let bytes = std::fs::read(path).unwrap();
+    let src = crate::source::BytesSource::new(bytes.as_slice());
+    let slot6 = info.manager_addrs[6];
+    assert_ne!(
+        slot6,
+        DecodedStoredAddress::Undefined,
+        "the large manager is populated"
+    );
+    let (sections, _) = free_space_manager::read_persisted_sections_source(
+        &src,
+        crate::file_writer::WIDTHS,
+        BaseAddress::ZERO,
+        &[slot6],
+    )
+    .unwrap();
+    let fragments: Vec<(u64, u64)> = sections
+        .iter()
+        .map(|s| (s.addr.get(), s.size))
+        .filter(|&(addr, size)| addr % PAGE != 0 || size % PAGE != 0)
+        .collect();
+    assert!(
+        !fragments.is_empty(),
+        "the generic-large manager contains sub-page fragments: {sections:?}"
+    );
+    let s = WriteEngine::open_rw_with_strategy(
+        path,
+        MetadataCacheConfig::disabled(),
+        FileLocking::Enabled,
+        MemoryStrategy::Bounded,
+        policy,
+    )
+    .unwrap();
+    let unclassified = s
+        .space
+        .paged_sections()
+        .expect("a paged file installs paged state")
+        .unclassified()
+        .to_vec();
+    let reusable: Vec<_> = s.space.reusable_sections().collect();
+    for &(addr, size) in &fragments {
+        let fragment = FreeExtent::new(addr, size).expect("wire sections are non-empty");
+        assert!(
+            unclassified.contains(&fragment),
+            "fragment ({addr}, {size}) must be recorded as unclassified, not lost"
+        );
+        assert!(
+            !reusable.iter().any(|extent| {
+                extent.start() < fragment.end() && fragment.start() < extent.end()
+            }),
+            "fragment ({addr}, {size}) must not be offered to any allocation: {reusable:?}"
+        );
+    }
+    fragments
 }
 
 /// Deletes `victim` and checks that replacement raw data avoids its metadata pages.

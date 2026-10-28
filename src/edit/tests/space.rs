@@ -33,7 +33,6 @@ use crate::access_mode::AccessMode;
 use crate::address::AddressContext;
 use crate::address::BaseAddress;
 use crate::address::BaseAddressExt;
-use crate::address::DecodedStoredAddress;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::chunk_index_inplace::Store;
@@ -904,71 +903,10 @@ fn a_generic_large_section_is_only_reusable_as_whole_pages(
 ) {
     let path = test_util::temp::temp_path("generic_large.h5");
     std::fs::write(&path, test_util::generic_large::generic_large()).unwrap();
-    assert_eq!(assert_generic_large_sections(&path, policy), [(5_694, 450)]);
-}
-
-fn assert_generic_large_sections(path: &Path, policy: PersistedFreeSpacePolicy) -> Vec<(u64, u64)> {
-    const PAGE: u64 = 512;
-    let opened = crate::reader::File::open(path).unwrap();
-    let info = opened
-        .file_space_info()
-        .unwrap()
-        .expect("a persisting file");
-    drop(opened);
-    assert_eq!(info.page_size.get(), PAGE);
-    let bytes = std::fs::read(path).unwrap();
-    let src = crate::source::BytesSource::new(bytes.as_slice());
-    let slot6 = info.manager_addrs[6];
-    assert_ne!(
-        slot6,
-        DecodedStoredAddress::Undefined,
-        "the large manager is populated"
+    assert_eq!(
+        crate::edit::test_util::assert_generic_large_sections(&path, policy),
+        [(5_694, 450)]
     );
-    let (sections, _) = free_space_manager::read_persisted_sections_source(
-        &src,
-        crate::file_writer::WIDTHS,
-        BaseAddress::ZERO,
-        &[slot6],
-    )
-    .unwrap();
-    let fragments: Vec<(u64, u64)> = sections
-        .iter()
-        .map(|s| (s.addr.get(), s.size))
-        .filter(|&(addr, size)| addr % PAGE != 0 || size % PAGE != 0)
-        .collect();
-    assert!(
-        !fragments.is_empty(),
-        "the generic-large manager contains sub-page fragments: {sections:?}"
-    );
-    let s = WriteEngine::open_rw_with_strategy(
-        path,
-        MetadataCacheConfig::disabled(),
-        FileLocking::Enabled,
-        MemoryStrategy::Bounded,
-        policy,
-    )
-    .unwrap();
-    let unclassified = s
-        .space
-        .paged_sections()
-        .expect("a paged file installs paged state")
-        .unclassified()
-        .to_vec();
-    let reusable: Vec<_> = s.space.reusable_sections().collect();
-    for &(addr, size) in &fragments {
-        let fragment = FreeExtent::new(addr, size).expect("wire sections are non-empty");
-        assert!(
-            unclassified.contains(&fragment),
-            "fragment ({addr}, {size}) must be recorded as unclassified, not lost"
-        );
-        assert!(
-            !reusable.iter().any(|extent| {
-                extent.start() < fragment.end() && fragment.start() < extent.end()
-            }),
-            "fragment ({addr}, {size}) must not be offered to any allocation: {reusable:?}"
-        );
-    }
-    fragments
 }
 
 #[test]
