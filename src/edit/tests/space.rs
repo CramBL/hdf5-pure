@@ -58,19 +58,14 @@ use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::FileSpaceStrategy;
 use crate::file_writer::LENGTH_SIZE;
 use crate::file_writer::OFFSET_SIZE;
-use crate::file_writer::OFFSET_WIDTH;
 use crate::fractal_heap_storage::FractalHeapAllocation;
 use crate::fractal_heap_storage::FractalHeapStorage;
 use crate::fractal_heap_storage::FractalHeapStorageError;
 use crate::free_space_manager;
-use crate::link_info::LinkInfoMessage;
-use crate::message_type::MessageType;
-use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPath;
 use crate::object_path::ObjectPathBuf;
 use crate::source::BytesSource;
 use crate::source::MetadataCacheConfig;
-use crate::source::SourceMetadata;
 use crate::type_builders::AttrValue;
 use crate::width::FormatWidths;
 use crate::width::LengthWidth;
@@ -674,122 +669,7 @@ fn deleting_a_filtered_heap_with_huge_objects_reclaims_its_encoded_allocations(
 fn deleting_a_dense_link_group_reclaims_its_whole_subtree() {
     let path = test_util::temp::temp_path("huge_links.h5");
     std::fs::write(&path, test_util::modern::huge_links_12()).unwrap();
-    assert_huge_subtree_reclaimed(&path);
-}
-
-pub(in crate::edit) fn assert_huge_subtree_reclaimed(path: &Path) {
-    let reader = crate::reader::File::open(path).unwrap();
-    let link_names = reader.group("g").unwrap().datasets().unwrap();
-    assert_eq!(link_names.len(), 12);
-    let data_blocks: Vec<(u64, u64, FreeClass)> = link_names
-        .iter()
-        .map(|link_name| {
-            let crate::Layout::Contiguous {
-                address: Some(data_addr),
-                size,
-            } = reader
-                .dataset(&format!("g/{link_name}"))
-                .unwrap()
-                .layout()
-                .unwrap()
-            else {
-                panic!("the child {link_name:?} stores its data contiguously");
-            };
-            (data_addr, size, FreeClass::Page(PageType::Raw))
-        })
-        .collect();
-    drop(reader);
-
-    let object = ObjectPathBuf::parse("/g");
-    let mut session = WriteEngine::open_with_locking(path, FileLocking::Enabled).unwrap();
-    let resolve = |object_path: &ObjectPathBuf| {
-        crate::group_v2::resolve_path_any_from_source(
-            &session.image(),
-            AccessMode::ReadWrite,
-            session.superblock(),
-            session.widths(),
-            session.addresses(),
-            &object_path.as_path(),
-        )
-        .unwrap()
-    };
-    let addr = resolve(&object);
-    let header_spans = session.oh_chunk_spans(addr).unwrap();
-    let header = ObjectHeader::parse_from_source_with_widths(
-        &SourceMetadata(&session.image()),
-        AccessMode::ReadWrite,
-        addr,
-        session.widths(),
-        BaseAddress::ZERO,
-    )
-    .unwrap();
-    let link_info = header
-        .messages
-        .iter()
-        .find(|message| message.msg_type == MessageType::LINK_INFO)
-        .map(|message| {
-            LinkInfoMessage::parse_with_offset_width(&message.data, OFFSET_WIDTH).unwrap()
-        })
-        .expect("a dense group has a Link Info message");
-    let heap_address = link_info
-        .fractal_heap_address
-        .expect("a dense group's Link Info message stores its heap");
-    let link_storage = session
-        .dense_group_storage_spans(&header_spans, None, &link_info)
-        .expect("the dense link storage is structurally complete");
-    session.assert_ownership_covers_storage(&link_storage, false);
-    let heap = crate::fractal_heap_storage::collect_fractal_heap_storage_from_source(
-        &session.image(),
-        AddressContext::from_effective_base(BaseAddress::ZERO),
-        heap_address,
-        crate::file_writer::WIDTHS,
-    )
-    .unwrap();
-    assert_eq!(
-        heap.allocations()
-            .iter()
-            .filter(|(_, kind)| *kind == FractalHeapAllocation::HugeObject)
-            .count(),
-        12
-    );
-    for &(extent, kind) in heap.allocations() {
-        let span = (
-            extent.start(),
-            extent.len(),
-            FreeClass::Page(kind.allocation_class().into()),
-        );
-        assert!(
-            link_storage.contains(&span),
-            "{span:?} is not in {link_storage:?}"
-        );
-    }
-
-    let mut expected: Vec<(u64, u64, FreeClass)> = reclaim::meta_spans(header_spans)
-        .chain(link_storage)
-        .chain(data_blocks)
-        .chain(link_names.iter().flat_map(|link_name| {
-            let child = resolve(&ObjectPathBuf::parse(&format!("/g/{link_name}")));
-            reclaim::meta_spans(session.oh_chunk_spans(child).unwrap())
-        }))
-        .collect();
-    expected.sort_unstable_by_key(|&(span_addr, _, _)| span_addr);
-    let incoming = session.count_incoming_hard_links().unwrap();
-    let mut planned = Vec::new();
-    session.collect_free_spans(addr, 0, &incoming, &mut planned);
-    planned.sort_unstable_by_key(|&(span_addr, _, _)| span_addr);
-    assert_eq!(planned, expected);
-
-    session.delete(&object).unwrap();
-    session.commit().unwrap();
-    drop(session);
-    let err = crate::reader::File::open(path)
-        .unwrap()
-        .group("g")
-        .unwrap_err();
-    let Error::Format(FormatError::PathNotFound(missing)) = &err else {
-        panic!("expected PathNotFound for g, got {err:?}");
-    };
-    assert_eq!(missing, "g");
+    edit::test_util::assert_huge_subtree_reclaimed(&path);
 }
 
 #[test]
@@ -2406,41 +2286,6 @@ fn filter_attribute_heap(
 }
 
 const UNENCODED_BLOCK_LEN: usize = 64;
-
-/// Asserts complete ownership analysis and coverage of every selected allocation.
-///
-/// With `metadata`, coverage must come entirely from live metadata. Otherwise, both live
-/// metadata and raw storage count toward coverage.
-///
-/// # Panics
-///
-/// Panics if analysis fails, is incomplete, or the required storage classes do not cover
-/// every selected byte.
-impl WriteEngine {
-    pub(in crate::edit) fn assert_ownership_covers_storage(
-        &self,
-        storage: &[(u64, u64, FreeClass)],
-        metadata: bool,
-    ) {
-        let owned = self.space_ownership().unwrap();
-        assert!(owned.analysis_complete);
-        for &(at, len, _) in storage {
-            let covered =
-                test_util::range::covered_len(&owned.live_metadata_space, &(at..at + len));
-            let raw = if metadata {
-                0
-            } else {
-                test_util::range::covered_len(&owned.live_raw_space, &(at..at + len))
-            };
-            assert_eq!(
-                covered + raw,
-                len,
-                "heap storage {at}..{} must be classified",
-                at + len
-            );
-        }
-    }
-}
 
 /// Opens a persistent session with an append target and separate interior free regions.
 ///
