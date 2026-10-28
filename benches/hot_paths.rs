@@ -17,7 +17,9 @@ use std::time::{Duration, Instant};
 
 use criterion::BenchmarkId;
 use criterion::{Criterion, criterion_group, criterion_main};
+use hdf5_pure::ChunkCacheConfig;
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::FileAccessProperties;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::FileSpaceStrategy;
@@ -208,7 +210,7 @@ fn bench_primitive_append(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
-// Chunked assembly (isolates copy_chunk_to_output scatter into the output buf)
+// Chunked reads, including dataset lookup, index traversal, and element decoding
 // ---------------------------------------------------------------------------
 
 fn bench_chunked_assembly(c: &mut Criterion) {
@@ -216,14 +218,12 @@ fn bench_chunked_assembly(c: &mut Criterion) {
     let cols = 1024u64;
     let data: Vec<f64> = (0..(rows * cols)).map(|i| i as f64).collect();
 
-    // Uncompressed chunked: read time is dominated by chunk assembly + decode.
     let plain = build(|b| {
         b.create_dataset("d")
             .with_f64_data(&data)
             .with_shape(&[rows, cols])
             .with_chunks(&[128, 128]);
     });
-    // Shuffle + deflate: adds the shuffle filter and inflate to the assembly.
     let shuf_def = build(|b| {
         b.create_dataset("d")
             .with_f64_data(&data)
@@ -244,6 +244,51 @@ fn bench_chunked_assembly(c: &mut Criterion) {
         b.iter(|| std::hint::black_box(shuf_def_file.dataset("d").unwrap().read_f64().unwrap()))
     });
     g.finish();
+}
+
+// Whole and row-window reads with retained handles and indexes, with decoded-chunk caching disabled.
+fn bench_warm_chunked_scatter(c: &mut Criterion) {
+    let mut group = c.benchmark_group("warm_chunked_scatter");
+    for (case, shape, chunks) in [
+        ("square", [1024, 1024], [128, 128]),
+        ("narrow", [1024, 1024], [128, 8]),
+        ("full_width", [1024, 1024], [128, 1024]),
+        ("edges", [1023, 1009], [127, 31]),
+    ] {
+        let data: Vec<_> = (0..shape.iter().product::<u64>())
+            .map(|value| value as f64)
+            .collect();
+        let image = build(|builder| {
+            builder
+                .create_dataset("data")
+                .with_f64_data(&data)
+                .with_shape(&shape)
+                .with_chunks(&chunks);
+        });
+        let access = FileAccessProperties::new()
+            .with_chunk_cache(ChunkCacheConfig::new().with_max_bytes(0).with_max_slots(0));
+        let file = File::from_bytes_with_options(image, access).unwrap();
+        let dataset = file.dataset("data").unwrap();
+        let expected: Vec<_> = data.iter().flat_map(|value| value.to_le_bytes()).collect();
+        assert_eq!(dataset.read_raw().unwrap(), expected);
+        assert!(dataset.chunk_cache_stats().index_loaded());
+        let row_bytes = usize::try_from(shape[1]).unwrap() * 8;
+        assert_eq!(
+            dataset.read_raw_rows(1, shape[0] - 2).unwrap(),
+            expected[row_bytes..expected.len() - row_bytes]
+        );
+        group.throughput(criterion::Throughput::Bytes(expected.len() as u64));
+        group.bench_function(BenchmarkId::new("whole", case), |bench| {
+            bench.iter(|| std::hint::black_box(dataset.read_raw().unwrap()))
+        });
+        group.throughput(criterion::Throughput::Bytes(
+            (expected.len() - 2 * row_bytes) as u64,
+        ));
+        group.bench_function(BenchmarkId::new("rows", case), |bench| {
+            bench.iter(|| std::hint::black_box(dataset.read_raw_rows(1, shape[0] - 2).unwrap()))
+        });
+    }
+    group.finish();
 }
 
 // ---------------------------------------------------------------------------
@@ -481,6 +526,7 @@ criterion_group!(
     bench_primitive_encode,
     bench_primitive_append,
     bench_chunked_assembly,
+    bench_warm_chunked_scatter,
     bench_write,
     bench_mat_roundtrip,
     bench_page_buffer,

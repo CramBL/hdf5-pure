@@ -562,6 +562,66 @@ fn a_warm_whole_read_lists_its_chunks_without_an_allocation_per_chunk(
 }
 
 #[rstest]
+#[case::rank_two(&[256, 256], &[8, 8], "rank_two_scatter")]
+#[case::rank_two_bands(&[1024, 64], &[1, 64], "rank_two_bands")]
+#[case::rank_two_edges(&[255, 253], &[8, 8], "rank_two_edges")]
+#[case::rank_three(&[32, 32, 32], &[2, 4, 4], "rank_three_scatter")]
+#[case::rank_three_bands(&[256, 8, 8], &[1, 8, 8], "rank_three_bands")]
+fn warm_chunk_scatter_uses_bounded_allocations(
+    #[case] shape: &[u64],
+    #[case] chunks: &[u64],
+    #[case] region: &str,
+    #[values(false, true)] streaming: bool,
+) {
+    let values: Vec<_> = (0..shape.iter().product::<u64>())
+        .map(|value| value as f64)
+        .collect();
+    let expected: Vec<_> = values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("scatter.h5");
+    let mut builder = FileBuilder::new();
+    builder
+        .create_dataset("data")
+        .with_f64_data(&values)
+        .with_shape(shape)
+        .with_chunks(chunks);
+    builder.write(&path).unwrap();
+    let access = FileAccessProperties::new()
+        .with_chunk_cache(ChunkCacheConfig::new().with_max_bytes(0).with_max_slots(0));
+    let file = if streaming {
+        File::open_streaming_with_options(&path, access)
+    } else {
+        File::open_with_options(&path, access)
+    }
+    .unwrap();
+    let dataset = file.dataset("data").unwrap();
+    assert_eq!(dataset.read_raw().unwrap(), expected);
+    assert!(dataset.chunk_cache_stats().index_loaded());
+    let whole_region = format!("{region}_{streaming}_whole");
+    let rows_region = format!("{region}_{streaming}_rows");
+    let (whole, whole_allocations) = measure(&whole_region, || dataset.read_raw().unwrap());
+    let (rows, rows_allocations) = measure(&rows_region, || {
+        dataset.read_raw_rows(1, shape[0] - 2).unwrap()
+    });
+    let row_bytes = usize::try_from(shape[1..].iter().product::<u64>()).unwrap() * 8;
+    assert_eq!(whole, expected);
+    assert_eq!(rows, expected[row_bytes..expected.len() - row_bytes]);
+    assert!(
+        whole_allocations.live_bytes >= whole.len() as u64,
+        "{whole_allocations}"
+    );
+    assert!(
+        rows_allocations.live_bytes >= rows.len() as u64,
+        "{rows_allocations}"
+    );
+    assert!(whole_allocations.blocks < 64, "{whole_allocations}");
+    assert!(rows_allocations.blocks < 64, "{rows_allocations}");
+}
+
+#[rstest]
 #[case::buffered(false, "cold_implicit_read_buffered", "warm_implicit_read_buffered")]
 #[case::streaming(true, "cold_implicit_read_streaming", "warm_implicit_read_streaming")]
 fn a_cold_implicit_read_bounds_extra_allocations_beyond_a_warm_read(

@@ -114,6 +114,7 @@ impl ParsedChunkIndex {
                 selected: Vec::new(),
                 intersections: Vec::new(),
                 coverage: SelectionCoverage::Empty,
+                trailing_offsets_zero: true,
             });
         }
         let axes: Vec<_> = region.axes().collect();
@@ -129,10 +130,15 @@ impl ParsedChunkIndex {
             .collect();
         selected.sort_unstable();
         let mut intersections = Vec::new();
+        let mut trailing_offsets_zero = true;
         for &ordinal in &selected {
-            for ((axis, &offset), &edge) in
-                axes.iter().zip(&chunks[ordinal].offsets).zip(chunk_dims)
+            for (dimension, ((axis, &offset), &edge)) in axes
+                .iter()
+                .zip(&chunks[ordinal].offsets)
+                .zip(chunk_dims)
+                .enumerate()
             {
+                trailing_offsets_zero &= dimension == 0 || offset == 0;
                 intersections.push(ClippedAxis {
                     start: axis.start().max(offset),
                     end: axis.end().min(offset.saturating_add(edge)),
@@ -151,6 +157,7 @@ impl ParsedChunkIndex {
             selected,
             intersections,
             coverage,
+            trailing_offsets_zero,
         })
     }
 
@@ -272,6 +279,7 @@ pub(crate) struct ChunkSelection<'a, 'spec> {
     selected: Vec<usize>,
     intersections: Vec<ClippedAxis>,
     coverage: SelectionCoverage,
+    trailing_offsets_zero: bool,
 }
 
 impl<'a, 'spec> ChunkSelection<'a, 'spec> {
@@ -302,6 +310,13 @@ impl<'a, 'spec> ChunkSelection<'a, 'spec> {
         &self.coverage
     }
 
+    /// Returns `true` if every selected chunk starts at zero after the leading dataset dimension.
+    ///
+    /// Returns `true` for an empty selection or a dataset with at most one dimension.
+    pub(crate) fn trailing_offsets_are_zero(&self) -> bool {
+        self.trailing_offsets_zero
+    }
+
     /// Borrows the selected descriptors and their intersections in ascending address order.
     pub(crate) fn chunks(&self) -> impl ExactSizeIterator<Item = SelectedChunk<'_>> {
         let Self {
@@ -310,6 +325,7 @@ impl<'a, 'spec> ChunkSelection<'a, 'spec> {
             selected,
             intersections,
             coverage,
+            trailing_offsets_zero: _,
         } = self;
         let count = match coverage {
             SelectionCoverage::Empty => 0,

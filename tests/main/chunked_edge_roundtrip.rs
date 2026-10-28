@@ -1,13 +1,96 @@
-//! Roundtrip tests for chunked datasets whose chunk dimensions do *not* evenly
-//! divide the dataset dimensions, so chunks overhang the dataset edge in both
-//! the innermost (contiguous) and outer dimensions. This is the case the bulk
-//! row-copy assembly kernel (`copy_chunk_to_output`) must get exactly right: it
-//! clamps the inner row and skips out-of-bounds outer rows. Even/odd ranks,
-//! several element types, and an uncompressed vs shuffle+deflate path are all
-//! covered, comparing the read-back against the known row-major input.
+//! Chunk placement at dataset edges and at nonzero trailing offsets.
+//!
+//! Compares clipped edge chunks with row-major input and checks malformed offsets using
+//! independently constructed version 1 B-tree files.
 
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::{File, FileBuilder};
+use rstest::rstest;
+use test_util::btree_v1;
+use test_util::data_layout;
+use test_util::dataspace;
+use test_util::datatype;
+use test_util::image::Image;
+use test_util::object_header::{Message, MessageType};
+use test_util::widths::Widths;
+use test_util_hdf5::reader::ReadBackend;
+
+#[rstest]
+#[case::rank_two(&[2, 3], &[3, 3], &[0, 1], &[0, 11, 12, 0, 14, 15, 0, 0, 0])]
+#[case::rank_three_inner(
+    &[2, 2, 3], &[3, 2, 3], &[0, 0, 1],
+    &[0, 11, 12, 0, 14, 15, 0, 17, 18, 0, 20, 21, 0, 0, 0, 0, 0, 0]
+)]
+#[case::rank_three_middle(
+    &[2, 2, 3], &[3, 2, 3], &[0, 1, 0],
+    &[0, 0, 0, 11, 12, 13, 0, 0, 0, 17, 18, 19, 0, 0, 0, 0, 0, 0]
+)]
+fn row_bands_clip_chunks_with_nonzero_trailing_offsets(
+    #[case] chunks: &[u64],
+    #[case] shape: &[u64],
+    #[case] offsets: &[u64],
+    #[case] expected: &[i32],
+    #[values(ReadBackend::Buffered, ReadBackend::Streaming)] backend: ReadBackend,
+) {
+    let payload: Vec<_> = (11..11 + u32::try_from(chunks.iter().product::<u64>()).unwrap())
+        .flat_map(|value| f64::from(value).to_le_bytes())
+        .collect();
+    let mut image = Image::starting_with(&[0; 64]);
+    let payload_address = image.append(&payload);
+    let mut key_offsets = offsets.to_vec();
+    key_offsets.push(0);
+    let index = image.append(&btree_v1::node(
+        btree_v1::NodeType::CHUNK,
+        0,
+        &[
+            btree_v1::chunk_key(u32::try_from(payload.len()).unwrap(), 0, &key_offsets),
+            btree_v1::chunk_key(0, 0, &vec![u64::MAX; key_offsets.len()]),
+        ],
+        &[payload_address as u64],
+        Widths::EIGHT,
+    ));
+    let chunk_dimensions: Vec<_> = chunks
+        .iter()
+        .map(|&edge| u32::try_from(edge).unwrap())
+        .collect();
+    let image = image.build_with_dataset(
+        "data",
+        [
+            Message::new(
+                MessageType::DATASPACE,
+                &dataspace::v2(
+                    u8::try_from(shape.len()).unwrap(),
+                    dataspace::Flags::NONE,
+                    dataspace::Kind::SIMPLE,
+                    shape,
+                    None,
+                ),
+            ),
+            Message::new(MessageType::DATATYPE, &datatype::f64_le()),
+            Message::new(
+                MessageType::DATA_LAYOUT,
+                &data_layout::chunked(index as u64, &chunk_dimensions, 8),
+            ),
+        ],
+    );
+    let path = test_util::temp::temp_path("trailing_offsets.h5");
+    std::fs::write(&path, image).unwrap();
+    let file = backend.open(&path).unwrap();
+    let dataset = file.dataset("data").unwrap();
+    assert_eq!(dataset.chunk_shape().unwrap(), Some(chunks.to_vec()));
+    let descriptors = dataset.chunks().unwrap();
+    assert_eq!(descriptors.len(), 1);
+    assert_eq!(&descriptors[0].offset[..shape.len()], offsets);
+    assert_eq!(dataset.read_i32().unwrap(), expected);
+    assert_eq!(dataset.read_i32_rows(0, shape[0]).unwrap(), expected);
+    let row_elements = usize::try_from(shape[1..].iter().product::<u64>()).unwrap();
+    assert_eq!(
+        dataset.read_i32_rows(1, 1).unwrap(),
+        expected[row_elements..2 * row_elements]
+    );
+    drop(dataset);
+    file.close().unwrap();
+}
 
 /// Write a flat row-major `f64` dataset with the given shape and chunk shape,
 /// read it back, and assert it equals the input.

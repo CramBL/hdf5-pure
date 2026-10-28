@@ -355,19 +355,24 @@ fn pure_reads_c_written_chunked_f64_fill() {
 }
 
 #[rstest]
+#[case::rank_two_band(&[3, 5], &[2, 5])]
+#[case::rank_three_band(&[3, 5, 3], &[2, 5, 3])]
+#[case::rank_three_scatter(&[3, 5, 3], &[2, 3, 2])]
 fn pure_reads_c_written_dense_edge_chunks(
+    #[case] shape: &[usize],
+    #[case] chunks: &[usize],
     #[values(false, true)] filtered: bool,
     #[values(false, true)] streaming: bool,
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dense_edges.h5");
-    let expected: Vec<i32> = (0..45).collect();
+    let expected: Vec<i32> = (0..i32::try_from(shape.iter().product::<usize>()).unwrap()).collect();
     {
         let file = file::libhdf5_create_v110(&path);
         let builder = file
             .new_dataset::<i32>()
-            .shape((3, 5, 3))
-            .chunk((2, 3, 2))
+            .shape(shape)
+            .chunk(chunks)
             .fill_value(-7);
         let builder = if filtered { builder.shuffle() } else { builder };
         let dataset = builder.create("d").unwrap();
@@ -379,8 +384,19 @@ fn pure_reads_c_written_dense_edge_chunks(
         File::open(&path).unwrap()
     };
     let dataset = file.dataset("d").unwrap();
+    assert_eq!(
+        dataset.chunk_shape().unwrap(),
+        Some(chunks.iter().map(|&edge| edge as u64).collect())
+    );
     assert_eq!(dataset.read_i32().unwrap(), expected);
     assert_eq!(dataset.read_i32().unwrap(), expected);
+    let row_elements = shape[1..].iter().product::<usize>();
+    assert_eq!(
+        dataset.read_i32_rows(1, 1).unwrap(),
+        expected[row_elements..2 * row_elements]
+    );
+    drop(dataset);
+    file.close().unwrap();
 }
 
 /// Create an i32 dataset whose fill value is explicitly *undefined* (a version-3
