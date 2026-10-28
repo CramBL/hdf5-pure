@@ -4,6 +4,7 @@
 //! paths name and then the objects the root group does not reach, and accepts the rest only as a
 //! tree, since a repack writes each object at one path.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
@@ -11,6 +12,7 @@ use std::ops::Range;
 
 use hdf5_pure_core::__private::PhysicalAddress;
 
+use super::headers::HeaderCache;
 use crate::address::AddressContext;
 use crate::address::StoredAddress;
 use crate::error::Error;
@@ -29,6 +31,7 @@ use crate::object_path::LinkNameBuf;
 use crate::object_path::ObjectPathBuf;
 use crate::reader::File;
 use crate::reader::ObjectClass;
+use crate::reader::ParsedHeader;
 
 /// The objects a repack keeps, as a tree under the root group, and the placement of every object
 /// the source reaches.
@@ -38,6 +41,8 @@ use crate::reader::ObjectClass;
 pub(super) struct SourceObjects {
     /// The address context of the source, for resolving a stored address to an object.
     addresses: AddressContext,
+    /// Parsed discovery headers available for one planning load per retained object.
+    headers: RefCell<HeaderCache>,
     /// The retained objects in post order, with the root last.
     objects: Vec<SourceObject>,
     /// The links of each object, grouped in the same order as `objects` and sorted by link name.
@@ -74,7 +79,9 @@ impl SourceObjects {
                  committed",
             )));
         }
-        let mut graph = discover_graph(file, budget)?;
+        let mut headers = HeaderCache::new(HEADER_CACHE_BYTES);
+        let mut graph = discover_graph(file, budget, &mut headers)?;
+        headers.sort();
         let drops = find_drops(&graph, drop)?;
         let removed = graph.remove_links(&drops.iter().map(|&(link, _, _)| link).collect());
         let Ok(tree) = graph.into_tree() else {
@@ -124,8 +131,10 @@ impl SourceObjects {
             .map(|(index, object)| (object.id, index))
             .collect();
         kept.sort_unstable_by_key(|&(id, _)| id);
+        headers.retain(|id| kept.binary_search_by_key(&id, |&(id, _)| id).is_ok());
         let objects = Self {
             addresses: file.addresses(),
+            headers: RefCell::new(headers),
             objects,
             links,
             kept,
@@ -143,6 +152,20 @@ impl SourceObjects {
             }
         }
         Ok(objects)
+    }
+
+    /// Releases all cached discovery headers and their storage.
+    pub(super) fn release_headers(&self) {
+        self.headers.borrow_mut().clear();
+    }
+
+    /// Removes the cached discovery header for the object at `index`, if present.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] with [`FormatError::Internal`] if `index` is outside the records.
+    pub(super) fn take_header(&self, index: usize) -> Result<Option<ParsedHeader>, Error> {
+        Ok(self.headers.borrow_mut().take(self.object(index)?.id))
     }
 
     /// Returns the number of retained objects, including the root group.
@@ -396,11 +419,13 @@ enum LastStep {
 fn discover_graph(
     file: &File,
     budget: TraversalBudget,
+    headers: &mut HeaderCache,
 ) -> Result<ObjectGraph<DiscoveredObject, String>, Error> {
     let addresses = file.addresses();
     let root = ObjectId::new(PhysicalAddress::new(file.root().header_address()?));
     Ok(ObjectGraph::discover(budget, root, |id| {
-        let (class, entries) = file.hard_links_at(id.header_address())?;
+        let (class, entries, header) = file.hard_links_at(id.header_address())?;
+        headers.insert(id, header);
         let links = entries
             .into_iter()
             .map(|entry| {
@@ -479,6 +504,9 @@ fn dropped_last_steps(
 fn missing_path() -> Error {
     FormatError::Internal("a repacked object has no path in the output".into()).into()
 }
+
+/// The retained-byte budget for parsed discovery headers, including cache entry storage.
+const HEADER_CACHE_BYTES: usize = 16 * 1024 * 1024;
 
 /// The reason [`Error::RepackUnsupported`] reports for a source that does not form a tree once the
 /// links the drop paths name are removed.
