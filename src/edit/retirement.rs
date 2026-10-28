@@ -1,4 +1,4 @@
-//! Chunk ownership retained until publication of a replacement root.
+//! Chunk allocation ownership for immediate and staged replacements.
 
 use hdf5_pure_core::__private::{FileRange, PhysicalAddress};
 use hdf5_pure_space::__private::{Extent, FreeClass, PageType};
@@ -9,10 +9,10 @@ use crate::error::FormatError;
 
 /// A complete, nonempty chunk allocation captured from its index metadata.
 ///
-/// The physical range and raw-page class are retained until the publisher consumes the allocation
-/// through [`RootRetirement`]. Reclamation requires publishing the associated replacement root.
+/// The editor retains its physical range, stored-address extent, and raw-page class through the
+/// replacement's publication. Reuse requires separate publication evidence.
 #[derive(Debug)]
-pub(super) struct ChunkAllocation {
+pub(crate) struct ChunkAllocation {
     range: FileRange,
     extent: Extent,
     class: FreeClass,
@@ -25,12 +25,12 @@ impl ChunkAllocation {
     ///
     /// Returns [`FormatError::OffsetOverflow`] if the physical address or allocation end exceeds
     /// [`u64::MAX`], or [`FormatError::InvalidChunkGeometry`] if the allocation is empty.
-    pub(super) fn capture(
+    pub(crate) fn capture(
         addresses: AddressContext,
         chunk: &ChunkInfo,
     ) -> Result<Self, FormatError> {
         let range = FileRange::new(addresses.resolve(chunk.address)?, chunk.chunk_size.get())?;
-        let extent = Extent::new(range.start().get(), range.length()).ok_or(
+        let extent = Extent::new(chunk.address.get(), range.length()).ok_or(
             FormatError::InvalidChunkGeometry("chunk allocation is empty"),
         )?;
         Ok(Self {
@@ -41,8 +41,18 @@ impl ChunkAllocation {
     }
 
     /// Returns the complete physical range for ownership comparisons.
-    pub(super) fn range(&self) -> FileRange {
+    pub(crate) fn range(&self) -> FileRange {
         self.range
+    }
+
+    /// Consumes allocation metadata into its stored-address extent and free-space class.
+    pub(crate) fn into_extent(self) -> (Extent, FreeClass) {
+        let Self {
+            range: _,
+            extent,
+            class,
+        } = self;
+        (extent, class)
     }
 }
 
@@ -72,10 +82,10 @@ impl RootRetirement {
         let Self { root, chunks } = self;
         spans.extend(chunks.into_iter().map(
             |ChunkAllocation {
-                 range: _,
-                 extent,
+                 range,
+                 extent: _,
                  class,
-             }| { (extent.start(), extent.len(), class) },
+             }| { (range.start().get(), range.length(), class) },
         ));
         super::retain_disjoint_in_bounds(&mut spans, eof);
         PendingRootFrees { root, spans }
@@ -104,9 +114,9 @@ mod tests {
         AddressContext, BaseAddress, BaseAddressExt, StoredAddress, StoredAddressExt,
     };
     use crate::chunked_read::{ChunkInfo, StoredChunkSize};
-    use crate::edit::WriteEngine;
     use crate::edit::dataset::MovingWrite;
     use crate::edit::test_util as edit_test_util;
+    use crate::edit::{AppendTarget, WriteEngine};
     use crate::error::{Error, FormatError};
     use crate::group_v2;
     use crate::image::WriteBuffering;
@@ -306,6 +316,107 @@ mod tests {
                 vec![0, 1, 2]
             }
         );
+    }
+
+    #[test]
+    fn reused_tail_replacements_persist_ownership_without_growing_eof() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("reused.h5");
+        create_reuse_source(&path);
+        let mut engine = edit_test_util::open_engine(&path);
+        engine.delete(&ObjectPathBuf::parse("spare")).unwrap();
+        engine.commit().unwrap();
+        append_one(&mut engine, 3);
+        let eof = engine.image.len();
+        append_one(&mut engine, 4);
+        assert_eq!(engine.image.len(), eof);
+        assert!(engine.fsm_dirty);
+        engine.space_ownership().unwrap().assert_exact();
+        engine.commit().unwrap();
+        assert!(!engine.fsm_dirty);
+        engine.finalize_persist().unwrap();
+        drop(engine);
+        let engine = edit_test_util::open_engine(&path);
+        engine.space_ownership().unwrap().assert_exact();
+        drop(engine);
+        let file = File::open(&path).unwrap();
+        assert_eq!(
+            file.dataset("d").unwrap().read_i32().unwrap(),
+            [0, 1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn failed_manager_cleanup_retains_confirmed_retirements() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cleanup.h5");
+        create_reuse_source(&path);
+        let mut engine = edit_test_util::open_engine(&path);
+        engine.delete(&ObjectPathBuf::parse("spare")).unwrap();
+        engine.commit().unwrap();
+        append_one(&mut engine, 3);
+        let before = engine.reusable_free_sections().unwrap();
+        assert!(engine.fsm_dirty);
+        disk_log::fail_write_after(0, 0);
+        let error = engine.finalize_persist().unwrap_err();
+        let Error::Io(error) = error else {
+            panic!("expected the injected write failure, got {error:?}");
+        };
+        assert_eq!(error.kind(), ErrorKind::Other);
+        assert_eq!(error.to_string(), "injected disk write failure");
+        assert!(engine.fsm_dirty);
+        assert_eq!(engine.reusable_free_sections().unwrap(), before);
+        engine.finalize_persist().unwrap();
+        assert!(!engine.fsm_dirty);
+        drop(engine);
+        let engine = edit_test_util::open_engine(&path);
+        engine.space_ownership().unwrap().assert_exact();
+    }
+
+    #[test]
+    fn nonpersistent_tail_retirement_is_reused_during_the_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("nonpersistent.h5");
+        create_partial_tail(&path, false, false);
+        let mut engine = edit_test_util::open_engine(&path);
+        append_one(&mut engine, 3);
+        let eof = engine.image.len();
+        append_one(&mut engine, 4);
+        assert_eq!(engine.image.len(), eof);
+        assert!(!engine.fsm_dirty);
+        assert!(engine.space.reusable_bytes().unwrap() >= 2048);
+        engine.finalize_persist().unwrap();
+        drop(engine);
+        let file = File::open(&path).unwrap();
+        assert_eq!(
+            file.dataset("d").unwrap().read_i32().unwrap(),
+            [0, 1, 2, 3, 4]
+        );
+    }
+
+    fn append_one(engine: &mut WriteEngine, value: i32) {
+        let mut append = AppendBuilder::new();
+        append.append_i32(&[value]);
+        engine
+            .append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("d")), &append, 4)
+            .unwrap();
+    }
+
+    fn create_reuse_source(path: &Path) {
+        let mut builder = FileBuilder::new();
+        builder.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+        );
+        builder
+            .create_dataset("d")
+            .with_i32_data(&[0, 1, 2])
+            .with_maxshape(&[MaxExtent::Unlimited])
+            .with_chunks(&[512]);
+        builder
+            .create_dataset("spare")
+            .with_u8_data(&vec![0; 131_072]);
+        builder.create_dataset("ceiling").with_i32_data(&[99]);
+        builder.write(path).unwrap();
     }
 
     fn create_partial_tail(path: &Path, filtered: bool, persistent: bool) {

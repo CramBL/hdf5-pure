@@ -29,6 +29,8 @@
 
 use core::num::NonZeroUsize;
 
+#[cfg(test)]
+use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_format::__private::BlockOffsetWidth;
 use hdf5_pure_format::__private::ChunkedGeometry;
 use hdf5_pure_format::__private::DataBlockGeometry;
@@ -44,14 +46,13 @@ use hdf5_pure_format::__private::OBJECT_HEADER_PREFIX_MAX_LEN;
 use hdf5_pure_format::__private::ObjectHeaderContinuation;
 use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::SuperBlockGeometry;
-use hdf5_pure_space::__private::AllocationClass;
+use hdf5_pure_space::__private::{AllocationClass, Extent, FreeClass};
 
 #[cfg(test)]
 use crate::DeflateLevel;
-#[cfg(test)]
-use crate::address::AddressContext;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
+use crate::address::{AddressContext, BaseAddress};
 use crate::checksum;
 use crate::chunked_read::ChunkDecoding;
 use crate::chunked_read::ChunkInfo;
@@ -64,6 +65,7 @@ use crate::data_layout::DataLayout;
 use crate::dataspace::{Dataspace, MaxExtent};
 use crate::datatype::Datatype;
 use crate::edit::LossyTailReencoding;
+use crate::edit::retirement::ChunkAllocation;
 use crate::edit::{self, LOSSY_TAIL_REFUSAL};
 use crate::error::{Error, FormatError};
 use crate::fill_value::FillPattern;
@@ -116,7 +118,7 @@ pub(crate) mod alloc_probe {
 /// One stored Extensible-Array element: the chunk address, plus (for filtered
 /// arrays) the stored/compressed chunk size and this chunk's filter mask. The
 /// size and mask are ignored for unfiltered arrays (client id 0).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ElemRecord {
     pub addr: StoredAddress,
     pub stored_size: u64,
@@ -147,6 +149,16 @@ impl ElemRecord {
 pub(crate) trait Store: Source {
     /// This file's validated address and length field widths.
     fn widths(&self) -> FormatWidths;
+
+    /// Returns the stored-to-physical address mapping for this image.
+    fn addresses(&self) -> AddressContext;
+
+    /// Consumes a confirmed predecessor retirement under the session's allocation policy.
+    ///
+    /// The editor applies strategy admission, threshold, and page-class rules. For
+    /// persistent sessions, the editor persists changed ownership during the next manager
+    /// publication.
+    fn retire(&mut self, retirement: RetiredChunk);
 
     /// Returns the end of file recorded in the cached superblock.
     ///
@@ -528,39 +540,60 @@ impl Located {
         })
     }
 
-    /// Reads the trailing partial chunk and returns the bytes of its live elements.
+    /// Reads the live partial tail and captures its index reference and complete allocation.
     ///
     /// The chunk is decoded as a reader at the current extent decodes it, through the filter
     /// pipeline unless the layout flags exempt it.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::AppendUnsupported`] if the index has no record for the chunk, and the
-    /// errors of the read of the record and of [`ChunkInfo::read_live_elements`].
+    /// Returns [`Error::AppendUnsupported`] if the index has no record for the chunk. Propagates
+    /// errors from reading the record, capturing its allocation, or
+    /// [`ChunkInfo::read_live_elements`].
     fn read_live_tail<F: Store>(
         &self,
         file: &F,
         scratch: &mut FilterScratch,
         pipeline: Option<&FilterPipeline>,
         ctx: ChunkContext<'_>,
-    ) -> Result<Vec<u8>, Error> {
+    ) -> Result<(Vec<u8>, CapturedChunkReference), Error> {
         let rec = self
             .read_element(file, self.current_dim / self.chunk_elems)?
             .ok_or(Error::AppendUnsupported(
                 "trailing partial chunk is missing from the index",
             ))?;
+        let chunk = self.chunk_info(rec);
+        let allocation = ChunkAllocation::capture(file.addresses(), &chunk)?;
+        let live =
+            chunk.read_live_elements(file, scratch, self.flags, pipeline, ctx, self.current_dim)?;
+        Ok((
+            live,
+            CapturedChunkReference {
+                owner: ChunkReferenceOwner::new(file, self),
+                slot: self.current_dim / self.chunk_elems,
+                dimension: self.current_dim,
+                record: rec,
+                allocation,
+            },
+        ))
+    }
+
+    /// Preserves complete allocation lengths when adapting an index record for chunk decoding.
+    ///
+    /// Uses the checked full chunk size for unfiltered chunks. Uses the record's stored size for
+    /// filtered chunks, including filter-exempt payloads.
+    fn chunk_info(&self, rec: ElemRecord) -> ChunkInfo {
         let stored_size = if self.client_id == EA_CLIENT_ID_UNFILTERED {
             self.chunk_bytes.to_u64()
         } else {
             rec.stored_size
         };
-        let chunk = ChunkInfo {
+        ChunkInfo {
             chunk_size: StoredChunkSize::v4(stored_size),
             filter_mask: rec.filter_mask,
             offsets: vec![self.current_dim - self.current_dim % self.chunk_elems],
             address: rec.addr,
-        };
-        Ok(chunk.read_live_elements(file, scratch, self.flags, pipeline, ctx, self.current_dim)?)
+        }
     }
 
     /// Returns how a reader at the extent `extent` decodes the chunk at element `offset`.
@@ -1400,6 +1433,8 @@ pub(crate) struct AppendPlan {
     chunks: Vec<PreparedChunk>,
     /// Filtered replacement for a completed raw tail, published after the new extent.
     completed_tail: Option<PreparedChunk>,
+    /// Captured tail reference and allocation retained until replacement publication.
+    predecessor: Option<CapturedChunkReference>,
     /// Element index the first new chunk occupies.
     n_full: u64,
     /// New axis-0 dimension after the append (the commit value).
@@ -1502,10 +1537,11 @@ pub(crate) fn plan_ea_append<F: Store>(
     let ctx = ChunkContext::from_datatype(spatial, datatype)?;
     // One encoder and decoder across the appended tail. See `FilterScratch`.
     let mut scratch = FilterScratch::new();
-    let mut tail_raw = if has_partial {
-        loc.read_live_tail(file, &mut scratch, pipeline, ctx)?
+    let (mut tail_raw, predecessor) = if has_partial {
+        let (bytes, reference) = loc.read_live_tail(file, &mut scratch, pipeline, ctx)?;
+        (bytes, Some(reference))
     } else {
-        Vec::new()
+        (Vec::new(), None)
     };
     tail_raw.extend_from_slice(raw);
 
@@ -1552,6 +1588,7 @@ pub(crate) fn plan_ea_append<F: Store>(
     Ok(AppendPlan {
         chunks,
         completed_tail,
+        predecessor,
         n_full,
         new_dim,
         new_num_chunks,
@@ -1570,18 +1607,24 @@ pub(crate) fn plan_ea_append<F: Store>(
 /// barrier. If a raw tail becomes complete under a lossy pipeline, publishes its filtered
 /// replacement after that barrier. An interruption can leave the completed chunk unfiltered.
 ///
+/// Transfers predecessor ownership to [`Store::retire`] after confirmed index publication. The
+/// original tail and any intermediate raw completion have separate publication barriers. The
+/// store retains confirmed retirements if a later phase fails.
+///
 /// # Errors
 ///
 /// Returns [`Error::Format`] if a file offset cannot be represented or encoded block metadata
 /// is invalid. Returns [`Error::AppendUnsupported`] if an index element or publication range
-/// lies outside its block. Propagates errors from allocating, reading, writing, or
-/// synchronizing file storage.
+/// lies outside its block, or a captured tail reference belongs to another index or has changed
+/// since planning. Propagates errors from allocating, reading, writing, or synchronizing file
+/// storage.
 pub(crate) fn apply_ea_append<F: Store>(
     file: &mut F,
     loc: &mut Located,
     AppendPlan {
         chunks,
         completed_tail,
+        predecessor,
         n_full,
         new_dim,
         new_num_chunks,
@@ -1604,15 +1647,17 @@ pub(crate) fn apply_ea_append<F: Store>(
     let mut recorded_eof = file.recorded_eof();
     let mut chunk_addrs = Vec::with_capacity(chunks.len());
     for chunk in &chunks {
-        chunk_addrs.push(StoredAddress::new(
-            file.allocate(chunk.bytes(), AllocationClass::Raw)?,
-        ));
+        let address = file.allocate(chunk.bytes(), AllocationClass::Raw)?;
+        chunk_addrs.push(file.addresses().relative(address)?);
     }
     let completed_record = completed_tail
         .as_ref()
         .map(|chunk| {
             Ok::<_, Error>(ElemRecord {
-                addr: StoredAddress::new(file.allocate(chunk.bytes(), AllocationClass::Raw)?),
+                addr: {
+                    let address = file.allocate(chunk.bytes(), AllocationClass::Raw)?;
+                    file.addresses().relative(address)?
+                },
                 stored_size: chunk.stored_size(),
                 filter_mask: chunk.filter_mask(),
             })
@@ -1631,15 +1676,30 @@ pub(crate) fn apply_ea_append<F: Store>(
     // Phase 2: insert new chunk records and repoint the trailing chunk's record.
     // New index blocks beyond the recorded EOF are covered by the phase-3 EOF patch.
     // Blocks allocated from freed space are already within the recorded EOF.
-    for (e, (addr, chunk)) in (n_full..).zip(chunk_addrs.into_iter().zip(&chunks)) {
-        let rec = ElemRecord {
-            addr,
-            stored_size: chunk.stored_size(),
-            filter_mask: chunk.filter_mask(),
-        };
-        loc.ea_insert(file, e, rec)?;
+    let mut records =
+        (n_full..).zip(
+            chunk_addrs
+                .into_iter()
+                .zip(&chunks)
+                .map(|(addr, chunk)| ElemRecord {
+                    addr,
+                    stored_size: chunk.stored_size(),
+                    filter_mask: chunk.filter_mask(),
+                }),
+        );
+    if let Some(reference) = predecessor {
+        let (index, record) = records
+            .next()
+            .ok_or_else(|| FormatError::Internal("a tail replacement has no record".into()))?;
+        debug_assert_eq!(reference.slot, index);
+        UnpublishedChunkReference::bind(file, loc, reference)?
+            .publish(record, records.map(|(_, record)| record))?;
+    } else {
+        for (index, record) in records {
+            loc.ea_insert(file, index, record)?;
+        }
+        file.sync()?;
     }
-    file.sync()?;
     if max_phase < 3 {
         return Ok(());
     }
@@ -1663,11 +1723,184 @@ pub(crate) fn apply_ea_append<F: Store>(
     loc.current_dim = new_dim;
     loc.num_chunks = new_num_chunks;
     if let Some(record) = completed_record {
-        loc.ea_insert(file, n_full, record)?;
-        file.sync()?;
+        UnpublishedChunkReference::read(file, loc, n_full)?.publish(record, [])?;
         loc.allocation_stats = Some(stats);
     }
     Ok(())
+}
+
+/// A predecessor allocation and index record captured at the current dataset extent.
+struct CapturedChunkReference {
+    owner: ChunkReferenceOwner,
+    slot: u64,
+    dimension: u64,
+    record: ElemRecord,
+    allocation: ChunkAllocation,
+}
+
+/// Index, dataspace-field, and base-address coordinates used to bind a captured reference.
+#[derive(Eq, PartialEq)]
+struct ChunkReferenceOwner {
+    index_header: StoredAddress,
+    dimension_offset: u64,
+    base: BaseAddress,
+}
+
+impl ChunkReferenceOwner {
+    fn new(file: &impl Store, located: &Located) -> Self {
+        Self {
+            index_header: located.ea_addr,
+            dimension_offset: located.dim0_off,
+            base: file.addresses().effective_base(),
+        }
+    }
+}
+
+/// A checked predecessor held with exclusive access for one replacement publication.
+struct UnpublishedChunkReference<'a, F: Store> {
+    file: &'a mut F,
+    located: &'a mut Located,
+    slot: u64,
+    allocation: ChunkAllocation,
+}
+
+impl<'a, F: Store> UnpublishedChunkReference<'a, F> {
+    /// Binds a captured predecessor after comparing its owner coordinates, dimension, and record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AppendUnsupported`] if the captured reference belongs to another index, or
+    /// its dimension or record has changed. Propagates record-read errors.
+    fn bind(
+        file: &'a mut F,
+        located: &'a mut Located,
+        captured: CapturedChunkReference,
+    ) -> Result<Self, Error> {
+        let CapturedChunkReference {
+            owner,
+            slot,
+            dimension,
+            record,
+            allocation,
+        } = captured;
+        if owner != ChunkReferenceOwner::new(file, located) {
+            return Err(Error::AppendUnsupported(
+                "append plan refers to a different chunk index",
+            ));
+        }
+        if dimension != located.current_dim || located.read_element(file, slot)? != Some(record) {
+            return Err(Error::AppendUnsupported(
+                "chunk reference changed after append planning",
+            ));
+        }
+        Ok(Self {
+            file,
+            located,
+            slot,
+            allocation,
+        })
+    }
+
+    /// Reads the current index record and captures ownership of its allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AppendUnsupported`] if the slot is unallocated. Propagates metadata and
+    /// allocation-geometry errors.
+    fn read(file: &'a mut F, located: &'a mut Located, slot: u64) -> Result<Self, Error> {
+        let record = located
+            .read_element(file, slot)?
+            .ok_or(Error::AppendUnsupported(
+                "replaced chunk is missing from the index",
+            ))?;
+        let allocation = ChunkAllocation::capture(file.addresses(), &located.chunk_info(record))?;
+        Ok(Self {
+            file,
+            located,
+            slot,
+            allocation,
+        })
+    }
+
+    /// Writes replacement and following records, then confirms retirement after the ordering
+    /// barrier.
+    ///
+    /// On a write or barrier error, the predecessor and replacement allocations remain unavailable
+    /// for reuse.
+    ///
+    /// # Errors
+    ///
+    /// Returns the index-write or synchronization error, or [`Error::Format`] if a following
+    /// record's index exceeds [`u64::MAX`].
+    fn publish(
+        self,
+        record: ElemRecord,
+        following: impl IntoIterator<Item = ElemRecord>,
+    ) -> Result<(), Error> {
+        let Self {
+            file,
+            located,
+            slot,
+            allocation,
+        } = self;
+        let pending = UncertainChunkReference {
+            file,
+            located,
+            slot,
+            allocation,
+        };
+        pending
+            .located
+            .ea_insert(pending.file, pending.slot, record)?;
+        let mut next = pending.slot;
+        for record in following {
+            next = next
+                .checked_add(1)
+                .ok_or_else(|| FormatError::Internal("append record index exceeds u64".into()))?;
+            pending.located.ea_insert(pending.file, next, record)?;
+        }
+        pending.confirm()
+    }
+}
+
+/// A predecessor held while replacement publication is unconfirmed.
+struct UncertainChunkReference<'a, F: Store> {
+    file: &'a mut F,
+    located: &'a mut Located,
+    slot: u64,
+    allocation: ChunkAllocation,
+}
+
+impl<F: Store> UncertainChunkReference<'_, F> {
+    /// Completes the ordering barrier and transfers the predecessor to [`Store::retire`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the synchronization error before transferring ownership if the barrier fails.
+    fn confirm(self) -> Result<(), Error> {
+        self.file.sync()?;
+        self.file.retire(RetiredChunk {
+            allocation: self.allocation,
+        });
+        Ok(())
+    }
+}
+
+/// A predecessor allocation whose replacement passed the index publication barrier.
+pub(crate) struct RetiredChunk {
+    allocation: ChunkAllocation,
+}
+
+impl RetiredChunk {
+    #[cfg(test)]
+    fn range(&self) -> FileRange {
+        self.allocation.range()
+    }
+
+    /// Consumes a confirmed retirement into its stored-address extent and free-space class.
+    pub(crate) fn into_extent(self) -> (Extent, FreeClass) {
+        self.allocation.into_extent()
+    }
 }
 
 /// The byte of a super block's page-init bitmap that holds page `global_page`'s
@@ -1994,6 +2227,7 @@ mod tests {
     use std::cell::Cell;
     use std::cell::RefCell;
 
+    use hdf5_pure_core::__private::{FileRange, PhysicalAddress};
     use hdf5_pure_format::__private::LAYOUT_PROPERTIES_OFFSET;
     use hdf5_pure_format::__private::LayoutVersion;
     use rstest::rstest;
@@ -2407,6 +2641,7 @@ mod tests {
         total_read: Cell<usize>,
         reads: RefCell<Vec<(u64, usize)>>,
         allocations: RefCell<Vec<AllocationClass>>,
+        retired: Vec<FileRange>,
         /// How many times the append sequence rewrote the superblock to advance
         /// its recorded end-of-file. Two of the four durability phases can, and
         /// only one of them always must.
@@ -2442,6 +2677,7 @@ mod tests {
                 total_read: Cell::new(0),
                 reads: RefCell::new(Vec::new()),
                 allocations: RefCell::new(Vec::new()),
+                retired: Vec::new(),
                 superblock_patches: Cell::new(0),
                 syncs: Cell::new(0),
                 appends: Cell::new(0),
@@ -2504,6 +2740,12 @@ mod tests {
     impl Store for WindowProbeStore {
         fn widths(&self) -> FormatWidths {
             self.widths
+        }
+        fn addresses(&self) -> AddressContext {
+            AddressContext::from_effective_base(self.superblock.base_address)
+        }
+        fn retire(&mut self, retirement: RetiredChunk) {
+            self.retired.push(retirement.range());
         }
         fn recorded_eof(&self) -> u64 {
             self.superblock.eof_address
@@ -3485,6 +3727,10 @@ mod tests {
     }
 
     #[rstest]
+    #[case::payload_barrier(4, Some(1), &[1.46, 1.56], 0)]
+    #[case::eof_barrier(4, Some(2), &[1.46, 1.56], 0)]
+    #[case::index_barrier(4, Some(3), &[1.46, 1.56], 1)]
+    #[case::header_barrier(4, Some(4), &[1.46, 1.56], 1)]
     #[case::payloads(1, None, &[1.46, 1.56], 0)]
     #[case::index(2, None, &[1.46, 1.56], 1)]
     #[case::header(3, None, &[1.46, 1.56], 1)]
@@ -3511,6 +3757,13 @@ mod tests {
             );
         let mut store = WindowProbeStore::open(builder.finish().unwrap());
         let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
+        let original = state.loc.read_element(&store, 0).unwrap().unwrap();
+        let original = FileRange::new(
+            store.addresses().resolve(original.addr).unwrap(),
+            original.stored_size,
+        )
+        .unwrap();
+        let intermediate = FileRange::new(PhysicalAddress::new(store.len()), 32).unwrap();
         let raw: Vec<_> = [1.0_f64, 2.0]
             .into_iter()
             .flat_map(f64::to_le_bytes)
@@ -3539,12 +3792,126 @@ mod tests {
             }
             Err(error) => panic!("expected a synchronization error, got {error:?}"),
         }
+        let mut retired = Vec::new();
+        if phase >= 2 && fail_sync.is_none_or(|barrier| barrier > 3) {
+            retired.push(original);
+        }
+        if phase == 4 && fail_sync.is_none() {
+            retired.push(intermediate);
+        }
+        assert_eq!(store.retired, retired);
         let file = crate::File::from_bytes(store.data).unwrap();
         let dataset = file.dataset("d").unwrap();
         assert_eq!(dataset.read_f64().unwrap(), expected);
         let chunks = dataset.chunks().unwrap();
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].filter_mask().raw_bits(), mask);
+    }
+
+    #[rstest]
+    #[case::other_dataset(
+        ReferenceChange::UseOtherDataset,
+        "append plan refers to a different chunk index"
+    )]
+    #[case::duplicate_before_extent(
+        ReferenceChange::PublishIndex,
+        "chunk reference changed after append planning"
+    )]
+    #[case::duplicate_after_extent(
+        ReferenceChange::PublishExtent,
+        "chunk reference changed after append planning"
+    )]
+    fn captured_tail_references_reject_unrelated_or_duplicate_publication(
+        #[case] change: ReferenceChange,
+        #[case] expected: &str,
+    ) {
+        let mut builder = FileBuilder::new();
+        for name in ["d", "e"] {
+            builder
+                .create_dataset(name)
+                .with_f64_data(&[1.46, 1.56])
+                .with_maxshape(&[MaxExtent::Unlimited])
+                .with_create_properties(
+                    DatasetCreateProperties::new()
+                        .with_chunks(&[4])
+                        .with_scale_offset(ScaleOffset::FloatDScale(1))
+                        .with_partial_edge_filtering(PartialEdgeFiltering::Skip),
+                );
+        }
+        let mut store = WindowProbeStore::open(builder.finish().unwrap());
+        let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
+        let plan = lossy_completion_plan(&store, &state);
+        let confirmed;
+        let error = match change {
+            ReferenceChange::PublishExtent | ReferenceChange::PublishIndex => {
+                let first = lossy_completion_plan(&store, &state);
+                let phase = if matches!(change, ReferenceChange::PublishIndex) {
+                    2
+                } else {
+                    4
+                };
+                apply_ea_append(&mut store, &mut state.loc, first, phase).unwrap();
+                confirmed = store.retired.clone();
+                assert_eq!(confirmed.len(), if phase == 2 { 1 } else { 2 });
+                apply_ea_append(&mut store, &mut state.loc, plan, 4).unwrap_err()
+            }
+            ReferenceChange::UseOtherDataset => {
+                let address = group_v2::resolve_path_any(
+                    &store.data,
+                    AccessMode::ReadOnly,
+                    &store.superblock,
+                    store.widths,
+                    store.addresses(),
+                    &ObjectPath::parse("e"),
+                )
+                .unwrap();
+                let mut other = edit::locate_dataset_state(&store, address).unwrap();
+                confirmed = Vec::new();
+                apply_ea_append(&mut store, &mut other.loc, plan, 4).unwrap_err()
+            }
+        };
+        let Error::AppendUnsupported(reason) = error else {
+            panic!("expected a changed chunk reference, got {error:?}");
+        };
+        assert_eq!(reason, expected);
+        assert_eq!(store.retired, confirmed);
+        let file = crate::File::from_bytes(store.data).unwrap();
+        assert_eq!(file.dataset("e").unwrap().read_f64().unwrap(), [1.46, 1.56]);
+        assert_eq!(
+            file.dataset("d").unwrap().read_f64().unwrap(),
+            match change {
+                ReferenceChange::PublishExtent => vec![1.5, 1.6, 1.0, 2.0],
+                ReferenceChange::PublishIndex | ReferenceChange::UseOtherDataset =>
+                    vec![1.46, 1.56],
+            }
+        );
+    }
+
+    #[derive(Clone, Copy)]
+    enum ReferenceChange {
+        PublishExtent,
+        PublishIndex,
+        UseOtherDataset,
+    }
+
+    fn lossy_completion_plan(store: &WindowProbeStore, state: &LocatedState) -> AppendPlan {
+        plan_ea_append(
+            store,
+            &state.loc,
+            &state.datatype,
+            &state.spatial,
+            state.element_size,
+            state.pipeline.as_ref(),
+            true,
+            LossyTailReencoding::Reject,
+            &[1.0_f64, 2.0]
+                .into_iter()
+                .flat_map(f64::to_le_bytes)
+                .collect::<Vec<_>>(),
+            2,
+            state.fill.pattern(state.element_size),
+        )
+        .unwrap()
     }
 
     #[rstest]
@@ -3575,6 +3942,12 @@ mod tests {
             .with_scale_offset(ScaleOffset::FloatDScale(1));
         let mut store = WindowProbeStore::open(builder.finish().unwrap());
         let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
+        let original = state.loc.read_element(&store, 0).unwrap().unwrap();
+        let original = FileRange::new(
+            store.addresses().resolve(original.addr).unwrap(),
+            original.stored_size,
+        )
+        .unwrap();
         let plan = plan_ea_append(
             &store,
             &state.loc,
@@ -3602,6 +3975,12 @@ mod tests {
             }
             Err(error) => panic!("expected a synchronization error, got {error:?}"),
         }
+        let expected_retired = if phase >= 2 && fail_sync.is_none_or(|barrier| barrier > 3) {
+            vec![original]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(store.retired, expected_retired);
         let file = crate::File::from_bytes(store.data).unwrap();
         let dataset = file.dataset("d").unwrap();
         assert_eq!(dataset.read_f64().unwrap(), expected);

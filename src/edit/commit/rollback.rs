@@ -16,6 +16,8 @@ pub(in crate::edit) struct FreeSnapshot {
     aggregation: Option<AggregateSpace>,
     /// Unspent allocations reserved for immediate appends.
     reserved: FreeList,
+    /// Pending manager publication for previously confirmed immediate retirements.
+    fsm_dirty: bool,
     /// Heap collections recorded for variable-length value replacements in this session.
     vl_overwrite_heaps: HashMap<ObjectPathBuf, Vec<(u64, u64)>>,
 }
@@ -52,6 +54,7 @@ impl WriteEngine {
             space: self.space.allocation_snapshot(),
             aggregation: self.aggregation,
             reserved: self.reserved.clone(),
+            fsm_dirty: self.fsm_dirty,
             vl_overwrite_heaps: self.vl_overwrite_heaps.clone(),
         }
     }
@@ -66,6 +69,7 @@ impl WriteEngine {
         self.space.restore_allocation(snapshot.space);
         self.aggregation = snapshot.aggregation;
         self.reserved = snapshot.reserved;
+        self.fsm_dirty = snapshot.fsm_dirty;
     }
 
     /// Records prior values before overwriting an existing dataset range.

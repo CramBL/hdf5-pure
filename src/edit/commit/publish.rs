@@ -581,6 +581,7 @@ impl WriteEngine {
         self.publish_superblock(publication)?;
 
         self.space.adopt_flat_post_free(post);
+        self.fsm_dirty = false;
         self.persist = Some(PersistState {
             strategy,
             threshold,
@@ -880,6 +881,7 @@ impl WriteEngine {
 
         // Adopt prospective free space after publication and any truncation succeed.
         self.space.adopt_paged_post_free(tail.post, !reused, None);
+        self.fsm_dirty = false;
         self.persist = Some(PersistState {
             strategy,
             threshold,

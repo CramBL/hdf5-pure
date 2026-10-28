@@ -5,6 +5,7 @@
 
 mod append;
 mod append_by_reference;
+mod append_reclamation;
 mod append_writer;
 mod attaching_groups;
 mod attr_message_size_limit;

@@ -378,7 +378,7 @@ mod page_header_reclamation;
 mod page_manager_tail;
 mod paged_persistence;
 mod reclaim;
-mod retirement;
+pub(crate) mod retirement;
 mod root_reclamation;
 mod staging;
 mod tail_recycling;
@@ -764,9 +764,12 @@ pub(crate) struct WriteEngine {
     /// The physical file length associated with the persisted free-space state.
     ///
     /// [`finalize_persist`](Self::finalize_persist) compares this length with the image length
-    /// and checks unspent append reserves and aggregate state before rewriting the managers.
+    /// and checks unspent append reserves, aggregate state, and [`fsm_dirty`](Self::fsm_dirty)
+    /// before rewriting the managers.
     /// This field is used when [`persist`](Self::persist) is `Some`.
     fsm_len: u64,
+    /// Whether confirmed immediate retirements require another manager publication.
+    fsm_dirty: bool,
     /// The latest publication attempt's completion state and rollback eligibility.
     ///
     /// Non-persistent PAGE sessions retain an attempted state after an error. Before consuming
@@ -1830,6 +1833,7 @@ impl WriteEngine {
             bounded: false,
             libver_ceiling: None,
             fsm_len: len,
+            fsm_dirty: false,
             publication: PublicationState::Ready,
             staging_batch: false,
             staged_generation: 0,
