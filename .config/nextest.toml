@@ -188,6 +188,6 @@ package(hdf5-pure-crosscheck) & (
     test(/^object_header_v1_malformed::/) |
     test(/^repack::/) |
     test(/^userblock_base_address::/)
-)
+) | (package(hdf5-pure) & test(/^repack::native_crosschecks::/))
 '''
 test-group = "compat"

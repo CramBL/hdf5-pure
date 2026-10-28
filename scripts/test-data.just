@@ -1,11 +1,8 @@
 set working-directory := ".."
 
-# Regenerate committed fixtures produced by the pure writer.
-default: pure
-
-# tests/data/pure: written by this crate's unit tests through crate-private seams.
-pure:
-    HDF5_PURE_UPDATE_TEST_DATA=1 cargo test --locked --lib
+# List the remaining producer-specific fixture commands.
+default:
+    @{{ quote(just_executable()) }} --list test-data
 
 # tests/data/h5py/lzf: h5py's LZF filter.
 lzf:

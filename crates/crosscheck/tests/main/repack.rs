@@ -2391,45 +2391,6 @@ fn a_vlen_string_dataset_keeps_its_pipeline_order_and_optional_flags() {
     );
 }
 
-/// The attribute encodings this crate writes only through a crate-private seam:
-/// a fixed-width string with null termination and a Null dataspace, which the C
-/// library's own API cannot express. `src/repack/mod.rs` commits its source file as
-/// `tests/data/pure/exotic_attributes.h5` and checks the fixture still
-/// holds them. Repacked through the public API, the C library finds every
-/// attribute it found in the source, and can open each.
-#[test]
-fn the_encodings_only_this_crate_writes_survive_a_repack_for_the_c_library() {
-    let fixture = test_util::data("pure/exotic_attributes.h5");
-    let dir = tempfile::tempdir().unwrap();
-    let repacked = dir.path().join("repacked.h5");
-    hdf5_pure::repack(&fixture, &repacked, &hdf5_pure::RepackOptions::new()).unwrap();
-
-    let source = hdf5::File::open(&fixture).unwrap();
-    let repacked = hdf5::File::open(&repacked).unwrap();
-    let names = |file: &hdf5::File| {
-        let dataset = file.dataset("data").unwrap();
-        (file.attr_names().unwrap(), dataset.attr_names().unwrap())
-    };
-    let (root, dataset) = names(&source);
-    assert!(
-        !root.is_empty() && !dataset.is_empty(),
-        "the fixture holds no attributes"
-    );
-    assert_eq!(names(&repacked), (root.clone(), dataset.clone()));
-    // Opening reads the datatype and dataspace, which is where a malformed one
-    // is caught.
-    for name in &root {
-        repacked
-            .attr(name)
-            .unwrap_or_else(|e| panic!("the C library could not open {name:?}: {e}"));
-    }
-    let data = repacked.dataset("data").unwrap();
-    for name in &dataset {
-        data.attr(name)
-            .unwrap_or_else(|e| panic!("the C library could not open data/{name:?}: {e}"));
-    }
-}
-
 /// A drop path reads the way the C library reads a path it is handed: `H5G__component` walks
 /// past the separators between two names, so a repeated or a trailing one separates nothing, and
 /// `H5G__traverse_real` resolves a `.` component to the group it is already in (`H5Gname.c` and

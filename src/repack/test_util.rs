@@ -108,10 +108,13 @@ impl ExoticAttributes {
         }
     }
 
-    pub(super) fn expected(&self) -> &[AttributeMessage] {
-        &self.messages
-    }
-
+    /// Writes the messages on the root group and dataset `data`.
+    ///
+    /// The dataset contains one little-endian [`f64`] value equal to 1.0.
+    ///
+    /// # Panics
+    ///
+    /// Panics if writing the file fails.
     pub(super) fn write(&self, path: &Path) {
         let mut b = FileBuilder::new();
         for message in &self.messages {

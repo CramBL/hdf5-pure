@@ -2,17 +2,15 @@
 
 Committed files the tests read, one directory per writer. Each directory records
 the producer and regeneration instructions or retention rationale. `just test-data`
-runs the default generators.
+lists producer-specific commands.
 
 - `c/`: frozen HDF5 1.8.23 compatibility files.
 - `h5py/`: h5py, with the LZF and zfp filters and MATLAB's v7.3 layout.
 - `matlab/`: MATLAB itself.
-- `pure/`: this crate's own writer, through seams its public API has no
-  spelling for. Each file is checked by its content, never by its bytes.
+- `pure/`: a frozen hdf5-pure 0.28.0 collision regression.
 - `fuzz/`: inputs the fuzzer found.
 
-A test reads a file from here and never writes one. The writers are the
-generators named in each directory.
+A test reads a file from here and never writes one.
 
 ## LZF and ZFP reference data
 

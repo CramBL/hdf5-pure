@@ -1,14 +1,12 @@
-# Written by this crate
+# Historical pure-writer fixture
 
-Files this crate's writer produced through seams its public API has no
-spelling for, so that the crosscheck package can read them with the reference
-C library. Each is checked by its content: the test that writes it decodes the
-committed copy and requires it to still hold what it writes, and
-`just test-data::pure` rewrites it when that changes.
+`dense_attrs_colliding_v0_28_0.h5` was written by the MIT-licensed hdf5-pure 0.28.0
+before the fix for colliding attribute names in a multi-level dense index (#225).
 
-- `exotic_attributes.h5`: attribute encodings the C library's own API cannot
-  express, a fixed-width string with null termination and a Null dataspace,
-  written by `src/repack/mod.rs` and repacked by `crates/crosscheck/tests/main/repack.rs`.
-- `dense_attrs_colliding_v0_28_0.h5`: written by hdf5-pure 0.28.0 before the
-  fix for colliding attribute names in a multi-level dense index (#225), read
-  by `crates/crosscheck/tests/main/dense_attr_limits.rs`. Not regenerated.
+`c_repairs_a_file_written_before_the_fix` in
+`crates/crosscheck/tests/main/dense_attr_limits.rs` checks that native lookups miss
+half of the colliding names, the pure reader reads every value, and repacking
+produces a file the native reader can search completely.
+
+Retain the original bytes as frozen evidence for repairing the malformed index order.
+This fixture has no regeneration command.

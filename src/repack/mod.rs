@@ -166,6 +166,10 @@ use crate::{FixedPointType, TimeType};
 mod headers;
 mod objects;
 #[cfg(test)]
+test_util_hdf5::hdf5_1_10_tests! {
+    mod native_crosschecks;
+}
+#[cfg(test)]
 mod test_util;
 
 /// Options controlling a [`repack`].
@@ -2492,8 +2496,6 @@ mod tests {
 /// (issue #241).
 #[cfg(test)]
 mod attribute_fidelity_tests {
-    use ::test_util;
-
     use super::*;
     use crate::datatype::CharacterSet;
     use crate::datatype::ReferenceType;
@@ -2589,40 +2591,6 @@ mod attribute_fidelity_tests {
         exotic.write(&src);
         repack(&src, &dst, &RepackOptions::new()).unwrap();
         exotic.assert_repacked(&src, &dst);
-        assert_fixture_holds(&src, exotic.expected());
-    }
-
-    /// `tests/data/pure/exotic_attributes.h5` is the source file of the
-    /// test above, committed so that `crates/crosscheck/tests/main/repack.rs` can
-    /// repack it through the public API and read the result with the reference
-    /// C library. Without that the test proves only that this crate agrees with
-    /// itself, which a message it encodes wrongly and parses back just as
-    /// wrongly would satisfy. The seam that writes these encodings is
-    /// crate-private, so the fixture cannot be built over there.
-    ///
-    /// Not pinned byte for byte, since the encodings are what matter: the
-    /// committed copy has to hold them, and `HDF5_PURE_UPDATE_TEST_DATA` rewrites
-    /// it.
-    fn assert_fixture_holds(src: &Path, exotic: &[AttributeMessage]) {
-        let fixture = test_util::data("pure/exotic_attributes.h5");
-        if std::env::var_os(crate::test_data::UPDATE).is_some() {
-            std::fs::create_dir_all(fixture.parent().unwrap()).unwrap();
-            std::fs::copy(src, &fixture).unwrap();
-        }
-        for owner in ["", "data"] {
-            let messages = repack_test_util::messages_at(&fixture, owner);
-            for message in exotic {
-                assert_eq!(
-                    messages.get(&message.name),
-                    Some(message),
-                    "{} does not hold {:?} on {owner:?} as this test writes it; \
-                     rerun with {}=1 to refresh it",
-                    fixture.display(),
-                    message.name,
-                    crate::test_data::UPDATE
-                );
-            }
-        }
     }
 
     /// The other half of the rule: an attribute whose bytes are a *location* must
