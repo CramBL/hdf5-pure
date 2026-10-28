@@ -1,16 +1,15 @@
 #![cfg(feature = "__hdf5-1.10")]
 // Fails identically under `cross` on i686 and s390x, and passes natively.
 #![cfg(all(not(target_pointer_width = "32"), target_endian = "little"))]
-//! Reference-C-library interop for the dense (fractal-heap) attribute bounds
-//! (issue #191).
+//! Native interoperability for dense attribute storage and name indexes.
 //!
-//! The bound this crate enforces is one libhdf5 enforces too, and
-//! it enforces it by *aborting*: an assertion-enabled build hits
-//! `H5A__attr_release_table` and raises SIGABRT rather than returning an error.
-//! A test that opened such a file in-process would take the whole test binary
-//! down with it, so every read here happens in a re-exec of this binary and the
-//! parent inspects the child's exit status. That also makes the abort itself an
-//! observable, asserted outcome rather than a crash.
+//! Native operations run in the explicit `dense-attributes` fixture binary.
+//! The parent checks the exit status and typed response before asserting the
+//! observed attributes. Native rejection and an explicitly permitted assertion
+//! abort are distinct from infrastructure or protocol failures.
+
+use std::path::Path;
+use std::time::Duration;
 
 use hdf5_pure::{AttrValue, FileBuilder};
 
@@ -18,41 +17,40 @@ use test_util::btree_v2;
 use test_util::fractal_heap;
 use test_util_hdf5::dense_attr;
 
-/// Set on the child process to make it open `$DENSE_XCHECK_FILE` with libhdf5
-/// and report what it found on stdout.
-const CHILD_ENV: &str = "DENSE_XCHECK_FILE";
+use test_util::process::{self, Fixture};
 
-/// Comma-separated attribute names for the child to open individually, rather
-/// than by iterating everything the object carries.
-const CHILD_LOOKUP_ENV: &str = "DENSE_XCHECK_LOOKUP";
+use crate::test_util::dense_attributes::{
+    self, AbortPolicy, Attribute, Lookup, Operation, Outcome, Rejection, Response,
+};
 
-/// What libhdf5 made of a file, as observed from the parent.
 #[derive(Debug, PartialEq, Eq)]
 enum CReads {
-    /// The library opened the file and reported this many attributes.
+    Aborted,
     Attrs(usize),
-    /// The library rejected the file without crashing.
-    Error,
-    /// The library died — an assertion abort or a signal.
-    Died,
+    Error(Rejection),
 }
 
-/// Open `path` with libhdf5 in a child process, so an abort is a status rather
-/// than the end of this test run.
-fn c_reads(path: &std::path::Path) -> CReads {
-    c_child(path, "dense_attr_limits::child_reads_with_libhdf5").verdict
+fn c_reads(path: &Path) -> CReads {
+    c_child(path, Operation::Count, AbortPolicy::Forbid).verdict
 }
 
-/// As [`c_reads`], plus what libhdf5 made of each attribute's contents.
 struct CDetail {
     verdict: CReads,
-    /// Each attribute's total data size in bytes, keyed by name.
+    /// Total data sizes in bytes, keyed by attribute name.
     sizes: Vec<(String, usize)>,
-    /// The wrapping sum of each `i64` attribute's values, keyed by name.
+    /// Wrapping sums of `i64` values, keyed by attribute name.
     sums: Vec<(String, i64)>,
 }
 
 impl CDetail {
+    fn new(verdict: CReads) -> Self {
+        Self {
+            verdict,
+            sizes: Vec::new(),
+            sums: Vec::new(),
+        }
+    }
+
     #[track_caller]
     fn size_of(&self, name: &str) -> Option<usize> {
         self.sizes.iter().find(|(n, _)| n == name).map(|(_, s)| *s)
@@ -64,245 +62,66 @@ impl CDetail {
     }
 }
 
-/// Read `path` with libhdf5 and report what it made of every attribute.
-fn c_reads_in_detail(path: &std::path::Path) -> CDetail {
-    c_child(path, "dense_attr_limits::child_reads_attribute_sizes")
+fn c_reads_in_detail(path: &Path) -> CDetail {
+    c_child(path, Operation::Details, AbortPolicy::Forbid)
 }
 
-/// Re-exec this binary to run `child` against `path`, and parse what it reported.
-fn c_child(path: &std::path::Path, child: &str) -> CDetail {
-    c_child_looking_up(path, child, "")
-}
-
-/// As [`c_child`], additionally handing the child a comma-separated list of
-/// attribute names to open individually.
-fn c_child_looking_up(path: &std::path::Path, child: &str, lookup: &str) -> CDetail {
-    let exe = std::env::current_exe().expect("test binary path");
-    let out = std::process::Command::new(exe)
-        .args([child, "--exact", "--nocapture"])
-        .env(CHILD_ENV, path)
-        .env(CHILD_LOOKUP_ENV, lookup)
-        .output()
-        .expect("re-exec the test binary");
-
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let reported = stdout
-        .lines()
-        .find_map(|l| l.strip_prefix("ATTRS="))
-        .and_then(|n| n.parse::<usize>().ok());
-    let sizes = stdout
-        .lines()
-        .filter_map(|l| l.strip_prefix("SIZE="))
-        .filter_map(|l| l.split_once('='))
-        .map(|(name, n)| (name.to_string(), n.parse::<usize>().expect("a byte count")))
-        .collect();
-    let sums = stdout
-        .lines()
-        .filter_map(|l| l.strip_prefix("SUM="))
-        .filter_map(|l| l.split_once('='))
-        .map(|(name, n)| (name.to_string(), n.parse::<i64>().expect("a value sum")))
-        .collect();
-
-    let verdict = match (out.status.success(), reported) {
-        (true, Some(n)) => CReads::Attrs(n),
-        (true, None) if stdout.contains("OPEN_FAILED") => CReads::Error,
-        _ => CReads::Died,
-    };
-    CDetail {
-        verdict,
-        sizes,
-        sums,
-    }
-}
-
-/// The child half of [`c_reads`]. Inert unless the environment variable is set,
-/// so a normal `cargo test` run treats it as a trivially passing test.
-#[test]
-fn child_reads_with_libhdf5() {
-    let Ok(path) = std::env::var(CHILD_ENV) else {
-        return;
-    };
-    match hdf5::File::open(&path) {
-        Ok(f) => {
-            let n = f.attr_names().expect("attribute names").len();
-            println!("ATTRS={n}");
-            f.close().expect("close");
-        }
-        Err(_) => println!("OPEN_FAILED"),
-    }
-}
-
-/// The child half of [`c_reads_with_sizes`]. Reports each attribute's datatype
-/// size, and for `i64` attributes the values themselves.
-///
-/// The datatype is part of the attribute *message*, which for a huge object lives
-/// entirely outside the managed blocks, so producing these numbers at all means
-/// libhdf5 followed the heap ID through the huge-objects B-tree to the right
-/// bytes. The `i64` values then prove it read the whole object and not just a
-/// well-formed prefix.
-#[test]
-fn child_reads_attribute_sizes() {
-    let Ok(path) = std::env::var(CHILD_ENV) else {
-        return;
-    };
-    child_report_attributes(&path);
-}
-
-/// Open `path` with libhdf5 and print every attribute's size, and its `i64` sum
-/// where the type allows. Shared by the children that read and the ones that
-/// write first, so the parent parses one format either way.
-fn child_report_attributes(path: &str) {
-    match hdf5::File::open(path) {
-        Ok(f) => {
-            let names = f.attr_names().expect("attribute names");
-            println!("ATTRS={}", names.len());
-            for name in names {
-                let attr = f.attr(&name).expect("open attribute");
-                let dtype = attr.dtype().expect("attribute datatype");
-                println!("SIZE={name}={}", dtype.size() * attr.size());
-                // Only meaningful for the integer-valued fixtures; a type
-                // mismatch is an error rather than an abort, so the string
-                // fixtures simply report nothing here.
-                if let Ok(values) = attr.read_raw::<i64>() {
-                    let sum: i64 = values
-                        .iter()
-                        .copied()
-                        .reduce(i64::wrapping_add)
-                        .unwrap_or(0);
-                    println!("SUM={name}={sum}");
+fn c_child(path: &Path, operation: Operation, abort: AbortPolicy) -> CDetail {
+    assert!(path.is_file(), "missing dense-attribute fixture: {path:?}");
+    let mut command = process::command(env!("CARGO_BIN_EXE_dense-attributes")).unwrap();
+    command
+        .arg(path)
+        .arg(serde_json::to_string(&operation).unwrap());
+    let output = Fixture::spawn(command, Duration::from_secs(30))
+        .unwrap()
+        .finish()
+        .unwrap_or_else(|error| panic!("dense-attribute fixture failed: {error}"));
+    let outcome = dense_attributes::observe(&operation, abort, output)
+        .unwrap_or_else(|error| panic!("dense-attribute protocol failed: {error}"));
+    match outcome {
+        Outcome::Aborted => CDetail::new(CReads::Aborted),
+        Outcome::Completed(Response::Rejected(rejection)) => CDetail::new(CReads::Error(rejection)),
+        Outcome::Completed(Response::Count(count)) => CDetail::new(CReads::Attrs(count)),
+        Outcome::Completed(Response::Details(attributes)) => {
+            let mut detail = CDetail::new(CReads::Attrs(attributes.len()));
+            for attribute in attributes {
+                match attribute {
+                    Attribute::Integer { name, size, sum } => {
+                        detail.sizes.push((name.clone(), size));
+                        detail.sums.push((name, sum));
+                    }
+                    Attribute::Other { name, size } => detail.sizes.push((name, size)),
                 }
             }
-            f.close().expect("close");
+            detail
         }
-        Err(_) => println!("OPEN_FAILED"),
-    }
-}
-
-/// The child half of [`c_looks_up_by_name`]. Opens only the named attributes,
-/// so libhdf5 has to *search* the name index rather than walk it.
-///
-/// A search descends the B-tree comparing name hashes, which is the one thing
-/// iteration never checks: a tree whose records are in the wrong order still
-/// yields every record in an in-order walk, and still fails every lookup that
-/// takes a wrong branch.
-#[test]
-fn child_looks_up_attributes_by_name() {
-    let Ok(path) = std::env::var(CHILD_ENV) else {
-        return;
-    };
-    let wanted = std::env::var(CHILD_LOOKUP_ENV).unwrap_or_default();
-    match hdf5::File::open(&path) {
-        Ok(f) => {
-            let mut found = 0usize;
-            for name in wanted.split(',').filter(|n| !n.is_empty()) {
-                let Ok(attr) = f.attr(name) else {
-                    println!("MISSING={name}");
-                    continue;
-                };
-                found += 1;
-                let values = attr.read_raw::<i64>().expect("an i64 attribute");
-                let sum: i64 = values
-                    .iter()
-                    .copied()
-                    .reduce(i64::wrapping_add)
-                    .unwrap_or(0);
-                println!("SUM={name}={sum}");
+        Outcome::Completed(Response::Lookup(attributes)) => {
+            let sums: Vec<_> = attributes
+                .into_iter()
+                .filter_map(|attribute| match attribute {
+                    Lookup::Found { name, sum } => Some((name, sum)),
+                    Lookup::Missing(_) => None,
+                })
+                .collect();
+            CDetail {
+                verdict: CReads::Attrs(sums.len()),
+                sizes: Vec::new(),
+                sums,
             }
-            println!("ATTRS={found}");
-            f.close().expect("close");
         }
-        Err(_) => println!("OPEN_FAILED"),
     }
 }
 
-/// Have libhdf5 open each of `names` by name and report the values it read.
-fn c_looks_up_by_name(path: &std::path::Path, names: &[String]) -> CDetail {
-    c_child_looking_up(
-        path,
-        "dense_attr_limits::child_looks_up_attributes_by_name",
-        &names.join(","),
-    )
+fn c_looks_up_by_name(path: &Path, names: &[String]) -> CDetail {
+    c_child(path, Operation::Lookup(names.to_vec()), AbortPolicy::Forbid)
 }
 
-/// The child half of [`c_inserts_then_reads`]. Opens the file read-write with
-/// libhdf5, adds an attribute large enough to need huge storage, then reopens and
-/// reports what is there.
-///
-/// Reading alone never consults the heap header's `next_huge_object_id`; only an
-/// insert does, because that is where the C library derives the next ID from it.
-/// A heap that declares the wrong value reads back perfectly and then collides on
-/// the first write.
-#[test]
-fn child_inserts_with_libhdf5() {
-    let Ok(path) = std::env::var(CHILD_ENV) else {
-        return;
-    };
-    let added: Vec<i64> = (0..12_000).collect();
-    {
-        let f = match hdf5::File::open_rw(&path) {
-            Ok(f) => f,
-            Err(_) => {
-                println!("OPEN_FAILED");
-                return;
-            }
-        };
-        f.new_attr::<i64>()
-            .shape([added.len()])
-            .create("inserted")
-            .expect("create attribute")
-            .write(&added)
-            .expect("write attribute");
-        f.close().expect("close");
-    }
-    child_report_attributes(&path);
+fn c_inserts_then_reads(path: &Path) -> CDetail {
+    c_child(path, Operation::InsertHuge, AbortPolicy::Forbid)
 }
 
-/// Have libhdf5 add a huge attribute to a heap this crate wrote, then read the
-/// result back.
-fn c_inserts_then_reads(path: &std::path::Path) -> CDetail {
-    c_child(path, "dense_attr_limits::child_inserts_with_libhdf5")
-}
-
-/// The child half of [`c_inserts_managed_then_reads`]. Adds an attribute small
-/// enough to be a *managed* object, so libhdf5 has to place it in the doubling
-/// table rather than outside it.
-///
-/// That placement starts from the heap header's allocation iterator, the offset
-/// where the next direct block goes. A heap that declares the wrong one has the
-/// library allocate a block on top of one already holding attributes, which no
-/// amount of reading would reveal.
-#[test]
-fn child_inserts_managed_with_libhdf5() {
-    let Ok(path) = std::env::var(CHILD_ENV) else {
-        return;
-    };
-    let added: Vec<i64> = (0..16).collect();
-    {
-        let f = match hdf5::File::open_rw(&path) {
-            Ok(f) => f,
-            Err(_) => {
-                println!("OPEN_FAILED");
-                return;
-            }
-        };
-        f.new_attr::<i64>()
-            .shape([added.len()])
-            .create("inserted")
-            .expect("create attribute")
-            .write(&added)
-            .expect("write attribute");
-        f.close().expect("close");
-    }
-    child_report_attributes(&path);
-}
-
-/// Have libhdf5 add a managed attribute to a heap this crate wrote, then read
-/// every attribute back.
-fn c_inserts_managed_then_reads(path: &std::path::Path) -> CDetail {
-    c_child(
-        path,
-        "dense_attr_limits::child_inserts_managed_with_libhdf5",
-    )
+fn c_inserts_managed_then_reads(path: &Path) -> CDetail {
+    c_child(path, Operation::InsertManaged, AbortPolicy::Forbid)
 }
 
 /// Both sides of the managed/huge threshold, against the library that has to read
@@ -550,7 +369,7 @@ fn c_rejects_a_heap_whose_objects_exceed_its_declared_limit() {
     let bad = dir.path().join("bad.h5");
     std::fs::write(&bad, &bytes).unwrap();
     assert_ne!(
-        c_reads(&bad),
+        c_child(&bad, Operation::Count, AbortPolicy::AttributeRelease).verdict,
         CReads::Attrs(9),
         "libhdf5 accepted a heap whose objects exceed its own declared limit"
     );

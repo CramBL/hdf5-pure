@@ -512,6 +512,7 @@ dependencies = [
  "proptest",
  "rstest",
  "serde",
+ "serde_json",
  "tempfile",
  "test-util",
  "test-util-hdf5",
