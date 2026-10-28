@@ -29,8 +29,7 @@ use crate::test_util::hard_link_graphs::TreeGraph;
 #[case::contiguous(CLayout::Contiguous)]
 #[case::chunked(CLayout::Chunked)]
 fn mixed_overwrites_preserve_native_values_after_payload_transfer(#[case] layout: CLayout) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("payloads.h5");
+    let path = test_util::temp::temp_path("payloads.h5");
     {
         let file = file::libhdf5_create_v110(&path);
         file.new_dataset_builder()
