@@ -47,6 +47,7 @@ pub mod legacy_chunked;
 pub mod lock;
 pub mod lzf;
 pub mod mat_file;
+pub mod mat_struct_array;
 pub mod modern;
 #[cfg(feature = "__hdf5-1.10")]
 pub mod native_fixtures;
