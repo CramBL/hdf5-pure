@@ -1,24 +1,18 @@
 #![cfg(feature = "__hdf5-1.10")]
-//! Cross-validation for in-place editing against libhdf5
-//! (issue #32): files the C library *writes* are edited in place by
-//! `File::open_rw`, and the result is read back by both `hdf5-pure` and the C
-//! library. This proves the editor works on files it did not itself produce, in
-//! both the HDF5 1.8 (v2 superblock) and 1.10+ (v3 superblock) formats, and
-//! including headers the C library splits across multiple chunks (which the
-//! editor collapses into a single chunk on rewrite).
-//!
-//! The default earliest format (version 0 superblock with symbol-table groups)
-//! is also editable: each group on the edited path is converted to the latest
-//! compact-link format on rewrite, the superblock's root symbol-table entry is
-//! repointed, and the result is read back correctly by the C library.
+//! In-place edits of libhdf5 files read through both libraries.
 
+use hdf5::dataset::Layout as CLayout;
 use hdf5::file::LibraryVersion;
+use hdf5::types::VarLenUnicode;
 use hdf5_pure::AttrValue;
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
+use hdf5_pure::FilterId;
+use hdf5_pure::FilterParameters;
+use hdf5_pure::Layout;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::ScaleOffset;
 use hdf5_pure::SuperblockVersion;
@@ -29,6 +23,106 @@ use test_util_hdf5::{absence, file, fixtures};
 
 use crate::test_util::hard_link_graphs::RepeatedObjectGraph;
 use crate::test_util::hard_link_graphs::TreeGraph;
+
+#[rstest]
+#[case::compact(CLayout::Compact)]
+#[case::contiguous(CLayout::Contiguous)]
+#[case::chunked(CLayout::Chunked)]
+fn mixed_overwrites_preserve_native_values_after_payload_transfer(#[case] layout: CLayout) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("payloads.h5");
+    {
+        let file = file::libhdf5_create_v110(&path);
+        file.new_dataset_builder()
+            .empty_as(ByteOrder::LittleEndian.i32_datatype())
+            .shape([3])
+            .create("fixed")
+            .unwrap()
+            .write(&[1, 2, 3])
+            .unwrap();
+        let strings = file.new_dataset::<VarLenUnicode>().shape([3]);
+        let strings = match layout {
+            CLayout::Chunked => strings.chunk([2]).deflate(6),
+            layout => strings.layout(layout),
+        };
+        let values: Vec<VarLenUnicode> = ["old", "values", "here"]
+            .into_iter()
+            .map(|value| value.parse().unwrap())
+            .collect();
+        strings.create("strings").unwrap().write(&values).unwrap();
+        file.close().unwrap();
+    }
+    {
+        let file = File::open(&path).unwrap();
+        let strings = file.dataset("strings").unwrap();
+        assert_eq!(strings.read_string().unwrap(), ["old", "values", "here"]);
+        match (layout, strings.layout().unwrap()) {
+            (CLayout::Compact, Layout::Compact { size }) => assert!(size > 0),
+            (CLayout::Contiguous, Layout::Contiguous { address, size }) => {
+                assert!(address.is_some());
+                assert!(size > 0);
+            }
+            (CLayout::Chunked, Layout::Chunked { .. }) => {
+                assert_eq!(strings.chunk_shape().unwrap(), Some(vec![2]));
+                let filters = strings.filter_pipeline().unwrap();
+                assert_eq!(filters.len(), 1);
+                assert_eq!(filters[0].id, FilterId::Deflate);
+                assert_eq!(
+                    filters[0].parameters,
+                    FilterParameters::Deflate(DeflateLevel::Six)
+                );
+            }
+            (_, actual) => panic!("expected {layout:?} storage, got {actual:?}"),
+        }
+    }
+    {
+        let session = File::open_rw(&path).unwrap();
+        session
+            .dataset("strings")
+            .unwrap()
+            .write_staged(|builder| {
+                builder.with_vlen_strings(&["replacement", "", "mètre"]);
+            })
+            .unwrap();
+        session
+            .dataset("fixed")
+            .unwrap()
+            .write_staged(|builder| {
+                builder.with_i32_data(&[11, 22, 33]);
+            })
+            .unwrap();
+        session.commit().unwrap();
+        assert!(!session.has_staged_edits());
+        let committed = std::fs::read(&path).unwrap();
+        session.commit().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), committed);
+    }
+    let pure = File::open(&path).unwrap();
+    assert_eq!(
+        pure.dataset("fixed").unwrap().read_i32().unwrap(),
+        [11, 22, 33]
+    );
+    assert_eq!(
+        pure.dataset("strings").unwrap().read_string().unwrap(),
+        ["replacement", "", "mètre"]
+    );
+    let native = hdf5::File::open(&path).unwrap();
+    assert_eq!(
+        native.dataset("fixed").unwrap().read_raw::<i32>().unwrap(),
+        [11, 22, 33]
+    );
+    assert_eq!(
+        native
+            .dataset("strings")
+            .unwrap()
+            .read_raw::<VarLenUnicode>()
+            .unwrap()
+            .iter()
+            .map(VarLenUnicode::as_str)
+            .collect::<Vec<_>>(),
+        ["replacement", "", "mètre"]
+    );
+}
 
 /// Stage an add, an add-into-a-group, a delete, and a copy — the full op set.
 fn stage_edits(session: &File) {
