@@ -8,19 +8,23 @@
 //! observed attributes. Native rejection and an explicitly permitted assertion
 //! abort are distinct from infrastructure or protocol failures.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
 use hdf5_pure::{AttrValue, FileBuilder};
+use rstest::rstest;
 
 use test_util::btree_v2;
+use test_util::bytes;
+use test_util::checksum;
 use test_util::fractal_heap;
 use test_util_hdf5::dense_attr;
 
 use test_util::process::{self, Fixture};
 
 use crate::test_util::dense_attributes::{
-    self, AbortPolicy, Attribute, Lookup, Operation, Outcome, Rejection, Response,
+    self, AbortPolicy, Attribute, Lookup, Operation, Outcome, Rejection, Response, Stage,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -335,54 +339,250 @@ fn c_reads_a_heap_of_many_huge_objects() {
     }
 }
 
-/// What the managed/huge split exists to avoid. The writer never emits a heap
-/// whose managed objects exceed its declared limit — it moves them to huge
-/// storage instead — so this reproduces that condition by hand, writing a good
-/// file and then editing the limit in its fractal-heap header down below the
-/// objects already stored in it. libhdf5 must not read that file back happily;
-/// on an assertion-enabled build it aborts, which is both what the split
-/// prevents and proof that the child-process harness above can detect it.
-#[test]
-fn c_rejects_a_heap_whose_objects_exceed_its_declared_limit() {
+#[derive(Clone, Copy, Debug)]
+enum HeapCorruption {
+    /// Changes only a header checksum byte.
+    Checksum,
+    /// Lowers the managed-object limit and recomputes the header checksum.
+    ManagedLimit,
+}
+
+/// A valid dense-attribute image with a managed object larger than the lowered limit.
+struct DenseHeapFixture {
+    bytes: Vec<u8>,
+    header: std::ops::Range<usize>,
+    max_managed: u32,
+    payload: usize,
+}
+
+impl DenseHeapFixture {
+    fn at_managed_boundary() -> Self {
+        let payload = dense_attr::largest_managed_payload();
+        let bytes = dense_attr::nine_attrs(payload).finish().unwrap();
+        let offsets = fractal_heap::header_offsets(&bytes);
+        let &[at] = offsets.as_slice() else {
+            panic!("expected one dense attribute heap, got {offsets:?}");
+        };
+        let len = usize::try_from(fractal_heap::encoded_header_len(&bytes, at)).unwrap();
+        let header = at..at + len;
+        let max_managed = bytes::u32_at(&bytes, at + MAX_MANAGED_AT);
+        let checksum_at = header.end - checksum::CHECKSUM;
+        assert_eq!(
+            bytes::u32_at(&bytes, checksum_at),
+            checksum::lookup3(&bytes[header.start..checksum_at])
+        );
+        assert_eq!(fractal_heap::huge_object_count(&bytes), 0);
+        assert_eq!(fractal_heap::managed_object_count(&bytes), 9);
+        assert!(payload > usize::try_from(LOWERED_LIMIT).unwrap());
+        assert!(max_managed > LOWERED_LIMIT);
+        assert_eq!(
+            (u32::BITS - max_managed.leading_zeros()).div_ceil(8),
+            (u32::BITS - LOWERED_LIMIT.leading_zeros()).div_ceil(8)
+        );
+        let object_length = big_managed_object_length(&bytes, at, max_managed);
+        assert!(object_length > u64::from(LOWERED_LIMIT));
+        assert!(object_length <= u64::from(max_managed));
+        Self {
+            bytes,
+            header,
+            max_managed,
+            payload,
+        }
+    }
+
+    fn corrupt(&self, corruption: HeapCorruption) -> Vec<u8> {
+        let mut bytes = self.bytes.clone();
+        match corruption {
+            HeapCorruption::Checksum => bytes[self.header.end - checksum::CHECKSUM] ^= 1,
+            HeapCorruption::ManagedLimit => {
+                let at = self.header.start + MAX_MANAGED_AT;
+                bytes[at..at + size_of::<u32>()].copy_from_slice(&LOWERED_LIMIT.to_le_bytes());
+                checksum::restamp(&mut bytes, self.header.start, self.header.len());
+            }
+        }
+        bytes
+    }
+}
+
+// Attribute-name records and managed heap IDs follow sections `subsubsec_fmt4_infra_btrees_v2`
+// and `subsec_fmt4_infra_fractalheap`, version 4.0.
+fn big_managed_object_length(file: &[u8], heap: usize, max_managed: u32) -> u64 {
+    let tree = bytes::sole_signature(file, btree_v2::SIGNATURE);
+    assert_eq!(btree_v2::sole_btree_depth(file), 0);
+    assert_eq!(
+        bytes::u8_at(file, tree + btree_v2::SIGNATURE.len() + 1),
+        ATTRIBUTE_NAME_INDEX_TYPE
+    );
+    let id_len = usize::from(bytes::u16_at(file, heap + HEAP_ID_LENGTH_AT));
+    assert_eq!(id_len, ATTRIBUTE_HEAP_ID_LENGTH);
+    let record_len = id_len + 1 + 2 * size_of::<u32>();
+    assert_eq!(
+        usize::from(bytes::u16_at(
+            file,
+            tree + btree_v2::NODE_PREFIX + size_of::<u32>()
+        )),
+        record_len
+    );
+    let records = btree_v2::name_index_leaf_records(file, 9);
+    let matches: Vec<_> = records
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, hash))| *hash == checksum::lookup3(b"big"))
+        .map(|(index, _)| index)
+        .collect();
+    let &[index] = matches.as_slice() else {
+        panic!("expected one name-index record for big, got {matches:?}");
+    };
+    assert_eq!(records[index].0, 0);
+    let leaf = bytes::sole_signature(file, btree_v2::LEAF_SIGNATURE);
+    assert_eq!(
+        bytes::u8_at(file, leaf + btree_v2::LEAF_SIGNATURE.len() + 1),
+        ATTRIBUTE_NAME_INDEX_TYPE
+    );
+    let id = bytes::slice_at(
+        file,
+        leaf + btree_v2::NODE_PREFIX + index * record_len,
+        id_len,
+    );
+    assert_eq!(id[0], MANAGED_ID_FLAGS);
+    let table_at = heap
+        + MAX_MANAGED_AT
+        + size_of::<u32>()
+        + HEAP_LENGTH_AND_ADDRESS_FIELDS * size_of::<u64>();
+    let max_direct_at = table_at + size_of::<u16>() + size_of::<u64>();
+    assert!(bytes::u64_at(file, max_direct_at) > u64::from(max_managed));
+    let offset_bytes =
+        usize::from(bytes::u16_at(file, max_direct_at + size_of::<u64>())).div_ceil(8);
+    let length_bytes =
+        usize::try_from((u32::BITS - max_managed.leading_zeros()).div_ceil(8)).unwrap();
+    assert_eq!(1 + offset_bytes + length_bytes, id_len);
+    bytes::uint_at(id, 1 + offset_bytes, length_bytes)
+}
+
+#[rstest]
+#[case::checksum(HeapCorruption::Checksum)]
+#[case::managed_limit(HeapCorruption::ManagedLimit)]
+fn c_observes_checksum_and_managed_limit_corruption(#[case] corruption: HeapCorruption) {
+    let fixture = DenseHeapFixture::at_managed_boundary();
     let dir = tempfile::tempdir().unwrap();
     let good = dir.path().join("good.h5");
-    dense_attr::nine_attrs(dense_attr::largest_managed_payload())
-        .write(&good)
-        .unwrap();
+    std::fs::write(&good, &fixture.bytes).unwrap();
     assert_eq!(c_reads(&good), CReads::Attrs(9));
-
-    // Fractal heap header: "FRHP", version(1), heap ID length(2), I/O filter
-    // length(2), flags(1), then the 4-byte maximum managed object size.
-    let mut bytes = std::fs::read(&good).unwrap();
-    let frhp = bytes
-        .windows(4)
-        .position(|w| w == b"FRHP")
-        .expect("a dense heap has a fractal heap header");
-    let max_managed = frhp + 4 + 1 + 2 + 2 + 1;
-    let stored = u32::from_le_bytes(bytes[max_managed..max_managed + 4].try_into().unwrap());
-    assert!(stored > 1_000, "expected a real limit, found {stored}");
-    bytes[max_managed..max_managed + 4].copy_from_slice(&1_000u32.to_le_bytes());
-
-    // The checksum over the header is now wrong as well, which is itself a valid
-    // reason for the library to reject the file — either way it must not report
-    // the attributes as readable.
+    assert_nine_native_attributes(&good, fixture.payload);
     let bad = dir.path().join("bad.h5");
-    std::fs::write(&bad, &bytes).unwrap();
-    assert_ne!(
-        c_child(&bad, Operation::Count, AbortPolicy::AttributeRelease).verdict,
-        CReads::Attrs(9),
-        "libhdf5 accepted a heap whose objects exceed its own declared limit"
+    let corrupted = fixture.corrupt(corruption);
+    let checksum_at = fixture.header.end - checksum::CHECKSUM;
+    let stored = bytes::u32_at(&corrupted, checksum_at);
+    let computed = checksum::lookup3(&corrupted[fixture.header.start..checksum_at]);
+    let limit_at = fixture.header.start + MAX_MANAGED_AT;
+    match corruption {
+        HeapCorruption::Checksum => {
+            assert_eq!(bytes::u32_at(&corrupted, limit_at), fixture.max_managed);
+            assert_ne!(stored, computed);
+            assert_eq!(corrupted[..checksum_at], fixture.bytes[..checksum_at]);
+        }
+        HeapCorruption::ManagedLimit => {
+            assert_eq!(bytes::u32_at(&corrupted, limit_at), LOWERED_LIMIT);
+            assert_eq!(stored, computed);
+            assert_eq!(corrupted[..limit_at], fixture.bytes[..limit_at]);
+            let limit_end = limit_at + size_of::<u32>();
+            assert_eq!(
+                corrupted[limit_end..checksum_at],
+                fixture.bytes[limit_end..checksum_at]
+            );
+        }
+    }
+    assert_eq!(
+        corrupted[fixture.header.end..],
+        fixture.bytes[fixture.header.end..]
     );
-
-    // And the writer never produces that shape: one byte past the threshold the
-    // attribute leaves the managed blocks entirely rather than overflowing the
-    // declared limit.
-    let past = dense_attr::nine_attrs(dense_attr::largest_managed_payload() + 1)
+    assert_eq!(fractal_heap::huge_object_count(&corrupted), 0);
+    assert_eq!(fractal_heap::managed_object_count(&corrupted), 9);
+    std::fs::write(&bad, &corrupted).unwrap();
+    assert_native_corruption(&bad, corruption, fixture.payload);
+    let past = dense_attr::nine_attrs(fixture.payload + 1)
         .finish()
         .unwrap();
     assert_eq!(fractal_heap::huge_object_count(&past), 1);
     assert_eq!(fractal_heap::managed_object_count(&past), 8);
 }
+
+// H5C_load_entry in H5C.c and H5HF__man_op_real in H5HFman.c, HDF5 1.10.11, report
+// checksum and size errors. H5A__attr_release_table in H5Aint.c, HDF5 2.2.0, can assert during cleanup.
+/// Checks the native outcome against the corruption's permitted observations.
+///
+/// The size case permits native acceptance, a size-specific rejection, or the
+/// assertion abort permitted by the child protocol. Acceptance requires every
+/// attribute name, data size, and integer sum to match the valid control.
+fn assert_native_corruption(path: &Path, corruption: HeapCorruption, payload: usize) {
+    let detail = c_child(path, Operation::Count, AbortPolicy::AttributeRelease);
+    match (corruption, detail.verdict) {
+        (_, CReads::Aborted) => {}
+        (HeapCorruption::Checksum, CReads::Error(rejection)) => {
+            assert_eq!(rejection.stage, Stage::Names);
+            assert!(
+                rejection.frames.iter().any(|frame| frame.major == "Cache"
+                    && frame.minor == "ReadError"
+                    && frame.description.contains("checksum")),
+                "{rejection:?}"
+            );
+        }
+        (HeapCorruption::ManagedLimit, CReads::Error(rejection)) => {
+            assert_eq!(rejection.stage, Stage::Names);
+            assert!(
+                rejection.frames.iter().any(|frame| frame.major == "Heap"
+                    && frame.minor == "BadRange"
+                    && frame.function == "H5HF__man_op_real"
+                    && frame.description == "fractal heap object should be standalone"),
+                "{rejection:?}"
+            );
+            assert!(
+                rejection
+                    .frames
+                    .iter()
+                    .all(|frame| !frame.description.contains("checksum")),
+                "{rejection:?}"
+            );
+        }
+        (HeapCorruption::ManagedLimit, CReads::Attrs(9)) => {
+            assert_nine_native_attributes(path, payload)
+        }
+        (corruption, observed) => panic!(
+            "unexpected native result for {corruption:?} under HDF5 {:?}: {observed:?}",
+            hdf5::library_version()
+        ),
+    }
+}
+
+fn assert_nine_native_attributes(path: &Path, payload: usize) {
+    let CDetail {
+        verdict,
+        sizes,
+        sums,
+    } = c_reads_in_detail(path);
+    assert_eq!(verdict, CReads::Attrs(9));
+    let mut expected_sizes = BTreeMap::from([("big".to_string(), payload)]);
+    for i in 0..8 {
+        expected_sizes.insert(format!("a{i}"), size_of::<i64>());
+    }
+    assert_eq!(
+        sizes.into_iter().collect::<BTreeMap<_, _>>(),
+        expected_sizes
+    );
+    assert_eq!(
+        sums.into_iter().collect::<BTreeMap<_, _>>(),
+        (0..8i64).map(|i| (format!("a{i}"), i)).collect()
+    );
+}
+
+// The managed-size field follows the flags in section `subsec_fmt4_infra_fractalheap`, version 4.0.
+const MAX_MANAGED_AT: usize = 10;
+const LOWERED_LIMIT: u32 = 1_000;
+const ATTRIBUTE_NAME_INDEX_TYPE: u8 = 8;
+const ATTRIBUTE_HEAP_ID_LENGTH: usize = 8;
+const HEAP_ID_LENGTH_AT: usize = 5;
+const HEAP_LENGTH_AND_ADDRESS_FIELDS: usize = 12;
+const MANAGED_ID_FLAGS: u8 = 0;
 
 /// Attribute counts that need a multi-level name index, against the library
 /// that defines the shape. 61,680 was the ceiling while the index was a single
