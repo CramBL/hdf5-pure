@@ -1084,34 +1084,36 @@ pub(super) fn assert_empty_operations(path: &Path, owned: bool, hole: &Coverage)
         FileAccessProperties::new().with_sync_policy(SyncPolicy::OnClose),
     )
     .unwrap();
-    let mut dataset = file.dataset("d").unwrap();
-    let mut buffer = if owned {
-        Buffer::Owned(dataset.into_buffered_appender().unwrap())
-    } else {
-        Buffer::Borrowed(dataset.buffered_appender().unwrap())
-    };
-    assert_eq!(file.disk_bytes().unwrap(), before);
-    buffer.append(&[]);
-    buffer.flush().unwrap();
-    assert_eq!(file.disk_bytes().unwrap(), before);
-    buffer.append_raw(&[0]);
-    let error = buffer.flush().unwrap_err();
-    let Error::AppendInPlaceUnsupported(reason) = error else {
-        panic!("expected incomplete buffered element, got {error:?}")
-    };
-    assert_eq!(
-        reason,
-        "the buffered byte length is not a whole number of elements; append the rest of the trailing element before flushing"
-    );
-    assert_eq!(file.disk_bytes().unwrap(), before);
-    assert_eq!(buffer.discard(), [0]);
-    if owned {
-        drop(file.dataset("d").unwrap().into_buffered_appender().unwrap());
-    } else {
-        let mut empty = file.dataset("d").unwrap();
-        drop(empty.buffered_appender().unwrap());
+    {
+        let mut dataset = file.dataset("d").unwrap();
+        let mut buffer = if owned {
+            Buffer::Owned(dataset.into_buffered_appender().unwrap())
+        } else {
+            Buffer::Borrowed(dataset.buffered_appender().unwrap())
+        };
+        assert_eq!(file.disk_bytes().unwrap(), before);
+        buffer.append(&[]);
+        buffer.flush().unwrap();
+        assert_eq!(file.disk_bytes().unwrap(), before);
+        buffer.append_raw(&[0]);
+        let error = buffer.flush().unwrap_err();
+        let Error::AppendInPlaceUnsupported(reason) = error else {
+            panic!("expected incomplete buffered element, got {error:?}")
+        };
+        assert_eq!(
+            reason,
+            "the buffered byte length is not a whole number of elements; append the rest of the trailing element before flushing"
+        );
+        assert_eq!(file.disk_bytes().unwrap(), before);
+        assert_eq!(buffer.discard(), [0]);
+        if owned {
+            drop(file.dataset("d").unwrap().into_buffered_appender().unwrap());
+        } else {
+            let mut empty = file.dataset("d").unwrap();
+            drop(empty.buffered_appender().unwrap());
+        }
+        assert_eq!(file.disk_bytes().unwrap(), before);
     }
-    assert_eq!(file.disk_bytes().unwrap(), before);
     file.close().unwrap();
     assert_eq!(fs::read(path).unwrap(), before);
     let after = Observation::read(&before);

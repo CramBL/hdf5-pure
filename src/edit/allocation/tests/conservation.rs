@@ -5,6 +5,7 @@
 //! from parsed standard metadata and inspect stored EA pointers before final dataspace growth.
 //! Native crosschecks compare normalized free ranges and chunk records with libhdf5.
 
+use std::cell::Cell;
 use std::fs;
 use std::path::Path;
 
@@ -240,6 +241,67 @@ fn readable_file_controls_reject_lost_unused_or_free_live_storage(#[case] contro
     assert_eq!(fs::read(&path).unwrap(), damaged);
 }
 
+#[rstest]
+#[case::commit(false)]
+#[case::close(true)]
+fn recording_image_reads_preserve_staged_edits_and_issued_bytes(
+    #[case] close: bool,
+    #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] backing: MemoryStrategy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("recording.h5");
+    pure_fixture(&path, false, false, true);
+    let base = fs::read(&path).unwrap();
+    let file = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new()
+            .with_sync_policy(SyncPolicy::OnClose)
+            .with_memory_strategy(backing),
+    )
+    .unwrap();
+    file.root().create_group("pending").unwrap();
+    let reads = Cell::new(0);
+    let workload = Workload::record_elements(
+        || {
+            assert_eq!(file.has_staged_edits(), reads.get() == 0);
+            disk_log::start();
+            let bytes = file.disk_bytes().unwrap();
+            let recording = disk_log::finish();
+            assert!(recording.operations.is_empty());
+            assert!(recording.events.is_empty());
+            if reads.get() == 0 {
+                assert_eq!(bytes, base);
+                assert!(file.has_staged_edits());
+            }
+            reads.set(reads.get() + 1);
+            bytes
+        },
+        0,
+        |_| {
+            if close {
+                file.clone().close().unwrap();
+            } else {
+                file.commit().unwrap();
+            }
+        },
+    );
+    assert_eq!(reads.get(), 2);
+    assert_eq!(workload.base, base);
+    assert_eq!(workload.final_bytes, file.disk_bytes().unwrap());
+    assert_eq!(
+        File::from_bytes(workload.final_bytes.clone())
+            .unwrap()
+            .root()
+            .groups()
+            .unwrap(),
+        ["pending"]
+    );
+    if !close {
+        file.clone().close().unwrap();
+    }
+    drop(file);
+}
+
 /// The appender form exercised by a recorded workload.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum WritePath {
@@ -301,15 +363,20 @@ impl Workload {
     ///
     /// Passes consecutive fixture values to `append` and checks every reconstructed prefix.
     pub(super) fn record_with(path: &Path, rounds: usize, append: impl FnOnce(&[i32])) -> Self {
-        Self::record_elements(path, rounds * CHUNK, append)
+        Self::record_elements(|| fs::read(path).unwrap(), rounds * CHUNK, append)
     }
 
     /// Records a callback with consecutive fixture values and parses every completed prefix.
     ///
+    /// Calls `read` before and after recording `append` for the base and final images.
     /// Passes an empty slice when `elements` is zero, for commit and close operations without an
-    /// append. Checks complete replay against the finished file and its expected values.
-    fn record_elements(path: &Path, elements: usize, append: impl FnOnce(&[i32])) -> Self {
-        let base = fs::read(path).unwrap();
+    /// append. Checks complete replay against the final image and its expected values.
+    fn record_elements(
+        read: impl Fn() -> Vec<u8>,
+        elements: usize,
+        append: impl FnOnce(&[i32]),
+    ) -> Self {
+        let base = read();
         let initial = Observation::read(&base);
         let initial_values = initial.values.len();
         let values: Vec<_> = (initial_values..initial_values + elements)
@@ -321,7 +388,7 @@ impl Workload {
         let operations = recording.operations;
         assert!(!operations.is_empty());
         assert!(!recording.events.is_empty());
-        let final_bytes = fs::read(path).unwrap();
+        let final_bytes = read();
         let mut image = base.clone();
         let mut snapshots = vec![initial];
         let mut history = Vec::new();
