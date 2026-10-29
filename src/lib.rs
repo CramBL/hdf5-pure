@@ -528,6 +528,12 @@ pub(crate) mod reference_patch;
 pub(crate) mod repack;
 #[cfg(test)]
 mod test_data;
+#[cfg(all(
+    test,
+    feature = "std",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod test_util;
 #[cfg(feature = "std")]
 pub(crate) mod types;
 #[cfg(feature = "std")]
