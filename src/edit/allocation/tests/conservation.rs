@@ -22,6 +22,7 @@ use test_util::allocation_oracle::PublicationState;
 use test_util::allocation_oracle::Violation;
 use test_util::disk_log;
 use test_util::disk_log::DiskOp;
+use test_util::disk_log::IoEvent;
 use test_util::object_header::MessageType as FixtureMessage;
 use test_util::object_header::v2;
 
@@ -58,6 +59,7 @@ test_util_hdf5::hdf5_1_10_tests! {
 }
 
 mod extents;
+mod references;
 mod transient;
 
 #[rstest]
@@ -274,6 +276,8 @@ pub(super) struct Workload {
     base: Vec<u8>,
     pub(super) final_bytes: Vec<u8>,
     operations: Vec<DiskOp>,
+    /// Write, resize, and synchronization attempts in execution order.
+    events: Vec<IoEvent>,
     snapshots: Vec<Observation>,
     initial_values: usize,
     candidates: Vec<Fact>,
@@ -401,6 +405,7 @@ impl Workload {
             base,
             final_bytes,
             operations,
+            events: recording.events,
             snapshots,
             initial_values,
             candidates,
