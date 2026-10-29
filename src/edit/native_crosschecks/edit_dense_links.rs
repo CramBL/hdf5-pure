@@ -301,9 +301,7 @@ fn assert_symbolic_targets_and_encoding(links: &GroupLinkStorage) {
         .unwrap();
     assert_eq!(
         soft.target(),
-        &OwnedLinkTarget::Soft {
-            target_path: "/absent_λ".as_bytes().to_vec()
-        }
+        &OwnedLinkTarget::soft("/absent_λ".as_bytes().to_vec())
     );
     assert_eq!(soft.charset(), CharacterSet::Ascii);
     let external = links
@@ -313,10 +311,10 @@ fn assert_symbolic_targets_and_encoding(links: &GroupLinkStorage) {
         .unwrap();
     assert_eq!(
         external.target(),
-        &OwnedLinkTarget::External {
-            filename: "absent_λ.h5".as_bytes().to_vec(),
-            object_path: "/目标".as_bytes().to_vec(),
-        }
+        &OwnedLinkTarget::external(
+            "absent_λ.h5".as_bytes().to_vec(),
+            "/目标".as_bytes().to_vec()
+        )
     );
     assert_eq!(external.charset(), CharacterSet::Ascii);
     let unicode = links

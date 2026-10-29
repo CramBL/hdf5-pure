@@ -63,7 +63,7 @@ use crate::width::OffsetWidth;
 /// let links = vec![OwnedLink::new(
 ///     b"alias".to_vec(),
 ///     CharacterSet::Ascii,
-///     OwnedLinkTarget::Soft { target_path: b"/data".to_vec() },
+///     OwnedLinkTarget::soft(b"/data".to_vec()),
 ///     None,
 /// )?];
 /// let info = LinkInfoMessage {

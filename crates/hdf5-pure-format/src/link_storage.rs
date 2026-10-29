@@ -6,6 +6,7 @@
 //! [link]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_link
 //! [info]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_linkinfo
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
@@ -401,9 +402,7 @@ impl OwnedLink {
                     return Err(LinkStorageError::TrailingBytes);
                 }
                 if prefix.link_type_code == SOFT_LINK {
-                    OwnedLinkTarget::Soft {
-                        target_path: value.to_vec(),
-                    }
+                    OwnedLinkTarget::soft(value.to_vec())
                 } else {
                     let (&version_flags, strings) =
                         value.split_first().ok_or(LinkStorageError::ExternalValue)?;
@@ -419,10 +418,7 @@ impl OwnedLink {
                         .get(1..)
                         .and_then(|rest| rest.strip_suffix(&[0]))
                         .ok_or(LinkStorageError::ExternalValue)?;
-                    OwnedLinkTarget::External {
-                        filename: filename.to_vec(),
-                        object_path: object_path.to_vec(),
-                    }
+                    OwnedLinkTarget::external(filename.to_vec(), object_path.to_vec())
                 }
             }
             other => return Err(FormatError::InvalidLinkType(other).into()),
@@ -568,10 +564,11 @@ impl OwnedLink {
             flags |= LINK_TYPE_PRESENT;
         }
         out.extend_from_slice(&[LINK_VERSION, flags]);
-        match target {
-            OwnedLinkTarget::Soft { .. } => out.push(SOFT_LINK),
-            OwnedLinkTarget::External { .. } => out.push(EXTERNAL_LINK),
-            OwnedLinkTarget::Hard { .. } => {}
+        if let OwnedLinkTarget::Indirect(target) = target {
+            out.push(match target.as_ref() {
+                OwnedSymbolicLinkTarget::Soft { .. } => SOFT_LINK,
+                OwnedSymbolicLinkTarget::External { .. } => EXTERNAL_LINK,
+            });
         }
         if let Some(index) = creation_order {
             out.extend_from_slice(&index.to_le_bytes());
@@ -592,30 +589,32 @@ impl OwnedLink {
                 DecodedStoredAddress::Defined(*object_header_address),
                 offset_width,
             )?,
-            OwnedLinkTarget::Soft { target_path } => {
-                let length = u16::try_from(target_path.len())
-                    .map_err(|_error| LinkStorageError::TargetLength(target_path.len()))?;
-                out.extend_from_slice(&length.to_le_bytes());
-                out.extend_from_slice(target_path);
-            }
-            OwnedLinkTarget::External {
-                filename,
-                object_path,
-            } => {
-                let length = self
-                    .target
-                    .encoded_len(offset_width)?
-                    .checked_sub(TARGET_LENGTH_LEN)
-                    .ok_or(LinkStorageError::LengthOverflow)?;
-                let length = u16::try_from(length)
-                    .map_err(|_error| LinkStorageError::TargetLength(length))?;
-                out.extend_from_slice(&length.to_le_bytes());
-                out.push(EXTERNAL_VERSION_FLAGS);
-                out.extend_from_slice(filename);
-                out.push(0);
-                out.extend_from_slice(object_path);
-                out.push(0);
-            }
+            OwnedLinkTarget::Indirect(target) => match target.as_ref() {
+                OwnedSymbolicLinkTarget::Soft { target_path } => {
+                    let length = u16::try_from(target_path.len())
+                        .map_err(|_error| LinkStorageError::TargetLength(target_path.len()))?;
+                    out.extend_from_slice(&length.to_le_bytes());
+                    out.extend_from_slice(target_path);
+                }
+                OwnedSymbolicLinkTarget::External {
+                    filename,
+                    object_path,
+                } => {
+                    let length = self
+                        .target
+                        .encoded_len(offset_width)?
+                        .checked_sub(TARGET_LENGTH_LEN)
+                        .ok_or(LinkStorageError::LengthOverflow)?;
+                    let length = u16::try_from(length)
+                        .map_err(|_error| LinkStorageError::TargetLength(length))?;
+                    out.extend_from_slice(&length.to_le_bytes());
+                    out.push(EXTERNAL_VERSION_FLAGS);
+                    out.extend_from_slice(filename);
+                    out.push(0);
+                    out.extend_from_slice(object_path);
+                    out.push(0);
+                }
+            },
         }
         debug_assert_eq!(out.len(), length);
         Ok(out)
@@ -635,6 +634,50 @@ pub enum OwnedLinkTarget {
         /// The stored object-header address.
         object_header_address: StoredAddress,
     },
+    /// Refers to a symbolic path.
+    Indirect(Box<OwnedSymbolicLinkTarget>),
+}
+
+impl OwnedLinkTarget {
+    /// Creates a soft link pointing to `target_path`.
+    pub fn soft(target_path: Vec<u8>) -> Self {
+        Self::Indirect(Box::new(OwnedSymbolicLinkTarget::Soft { target_path }))
+    }
+
+    /// Creates an external link pointing to `object_path` in `filename`.
+    pub fn external(filename: Vec<u8>, object_path: Vec<u8>) -> Self {
+        Self::Indirect(Box::new(OwnedSymbolicLinkTarget::External {
+            filename,
+            object_path,
+        }))
+    }
+
+    /// Returns the complete encoded target length at `offset_width`, including symbolic framing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LinkStorageError::UndefinedAddress`] or [`LinkStorageError::Format`] for an
+    /// invalid hard address, and the errors of [`OwnedSymbolicLinkTarget::encoded_len`] for
+    /// invalid symbolic targets.
+    fn encoded_len(&self, offset_width: OffsetWidth) -> Result<usize, LinkStorageError> {
+        match self {
+            Self::Hard {
+                object_header_address,
+            } => {
+                required_address(*object_header_address, offset_width)?;
+                Ok(usize::from(offset_width.get()))
+            }
+            Self::Indirect(target) => target.encoded_len(),
+        }
+    }
+}
+
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::size_of::<OwnedLinkTarget>() == 16);
+
+/// The undecoded target bytes of an [`OwnedLinkTarget::Indirect`] link.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OwnedSymbolicLinkTarget {
     /// Refers to a path in the same file.
     Soft {
         /// The target path bytes, without a null terminator.
@@ -649,23 +692,16 @@ pub enum OwnedLinkTarget {
     },
 }
 
-impl OwnedLinkTarget {
+impl OwnedSymbolicLinkTarget {
     /// Returns the encoded target length, including a symbolic target's length field.
     ///
     /// # Errors
     ///
-    /// Returns [`LinkStorageError::UndefinedAddress`] or [`LinkStorageError::Format`] for an
-    /// invalid hard address, [`LinkStorageError::InvalidTarget`] for invalid symbolic paths,
+    /// Returns [`LinkStorageError::InvalidTarget`] for invalid symbolic paths,
     /// [`LinkStorageError::TargetLength`] for a value longer than [`u16::MAX`], and
     /// [`LinkStorageError::LengthOverflow`] for a framing length that exceeds [`usize::MAX`].
-    fn encoded_len(&self, offset_width: OffsetWidth) -> Result<usize, LinkStorageError> {
+    fn encoded_len(&self) -> Result<usize, LinkStorageError> {
         let value_length = match self {
-            Self::Hard {
-                object_header_address,
-            } => {
-                required_address(*object_header_address, offset_width)?;
-                return Ok(usize::from(offset_width.get()));
-            }
             Self::Soft { target_path } => {
                 Self::path(target_path)?;
                 target_path.len()
@@ -892,11 +928,46 @@ mod tests {
     use super::*;
 
     #[rstest]
+    #[case::hard(
+        b"\x01\x00\x01l\x00\x02\x00\x00\x00\x00\x00\x00",
+        OwnedLinkTarget::Hard { object_header_address: StoredAddress::new(512) },
+        LinkTarget::Hard { object_header_address: StoredAddress::new(512) },
+    )]
+    #[case::soft(
+        b"\x01\x08\x01\x01l\x04\x00../x",
+        OwnedLinkTarget::soft(b"../x".to_vec()),
+        LinkTarget::soft("../x".into()),
+    )]
+    #[case::external(
+        b"\x01\x08\x40\x01l\x09\x00\x00f.h5\x00/x\x00",
+        OwnedLinkTarget::external(b"f.h5".to_vec(), b"/x".to_vec()),
+        LinkTarget::external("f.h5".into(), "/x".into()),
+    )]
+    fn link_targets_preserve_independent_message_bytes(
+        #[case] bytes: &[u8],
+        #[case] owned_target: OwnedLinkTarget,
+        #[case] target: LinkTarget,
+    ) {
+        let owned = OwnedLink::new(b"l".to_vec(), CharacterSet::Ascii, owned_target, None).unwrap();
+        let message = LinkMessage {
+            name: "l".into(),
+            link_target: target,
+            creation_order: None,
+            charset: CharacterSet::Ascii,
+        };
+        assert_eq!(OwnedLink::parse(bytes, OffsetWidth::Eight).unwrap(), owned);
+        assert_eq!(LinkMessage::parse(bytes, 8).unwrap(), message);
+        assert_eq!(owned.encoded_len(OffsetWidth::Eight).unwrap(), bytes.len());
+        assert_eq!(owned.clone().serialize(OffsetWidth::Eight).unwrap(), bytes);
+        assert_eq!(message.clone().serialize(OffsetWidth::Eight), bytes);
+    }
+
+    #[rstest]
     #[case::hard(OwnedLinkTarget::Hard { object_header_address: StoredAddress::new(512) })]
-    #[case::soft(OwnedLinkTarget::Soft { target_path: b"../target".to_vec() })]
-    #[case::external(OwnedLinkTarget::External { filename: b"other.h5".to_vec(), object_path: b"/target".to_vec() })]
-    #[case::raw_soft(OwnedLinkTarget::Soft { target_path: vec![0xfe] })]
-    #[case::raw_external(OwnedLinkTarget::External { filename: vec![0xfe], object_path: vec![b'/', 0xff] })]
+    #[case::soft(OwnedLinkTarget::soft(b"../target".to_vec()))]
+    #[case::external(OwnedLinkTarget::external(b"other.h5".to_vec(), b"/target".to_vec()))]
+    #[case::raw_soft(OwnedLinkTarget::soft(vec![0xfe]))]
+    #[case::raw_external(OwnedLinkTarget::external(vec![0xfe], vec![b'/', 0xff]))]
     fn owned_links_round_trip_raw_names_targets_and_creation_indexes(
         #[case] target: OwnedLinkTarget,
         #[values(OffsetWidth::Two, OffsetWidth::Four, OffsetWidth::Eight)] width: OffsetWidth,
@@ -922,8 +993,8 @@ mod tests {
 
     #[rstest]
     #[case::hard(LinkTarget::Hard { object_header_address: StoredAddress::new(512) })]
-    #[case::soft(LinkTarget::Soft { target_path: "../软".into() })]
-    #[case::external(LinkTarget::External { filename: "文件.h5".into(), object_path: "/target".into() })]
+    #[case::soft(LinkTarget::soft("../软".into()))]
+    #[case::external(LinkTarget::external("文件.h5".into(), "/target".into()))]
     fn owned_links_preserve_messages_written_by_the_existing_serializer(
         #[case] target: LinkTarget,
     ) {
@@ -964,9 +1035,7 @@ mod tests {
             OwnedLink::new(
                 name.clone(),
                 CharacterSet::Ascii,
-                OwnedLinkTarget::Soft {
-                    target_path: b"target".to_vec()
-                },
+                OwnedLinkTarget::soft(b"target".to_vec()),
                 None
             )
             .unwrap_err(),
@@ -986,7 +1055,7 @@ mod tests {
             OwnedLink::new(
                 b"a".to_vec(),
                 CharacterSet::Ascii,
-                OwnedLinkTarget::Soft { target_path },
+                OwnedLinkTarget::soft(target_path),
                 None
             )
             .unwrap_err(),
@@ -995,8 +1064,8 @@ mod tests {
     }
 
     #[rstest]
-    #[case::soft(OwnedLinkTarget::Soft { target_path: vec![b'x'; 65_535] })]
-    #[case::external(OwnedLinkTarget::External { filename: vec![b'x'; 65_531], object_path: vec![b'/'] })]
+    #[case::soft(OwnedLinkTarget::soft(vec![b'x'; 65_535]))]
+    #[case::external(OwnedLinkTarget::external(vec![b'x'; 65_531], vec![b'/']))]
     fn the_maximum_target_value_length_round_trips(#[case] target: OwnedLinkTarget) {
         let link = OwnedLink::new(b"a".to_vec(), CharacterSet::Ascii, target, None).unwrap();
         let bytes = link.serialize(OffsetWidth::Eight).unwrap();
@@ -1017,10 +1086,7 @@ mod tests {
             OwnedLink::new(
                 b"a".to_vec(),
                 CharacterSet::Ascii,
-                OwnedLinkTarget::External {
-                    filename,
-                    object_path
-                },
+                OwnedLinkTarget::external(filename, object_path),
                 None
             )
             .unwrap_err(),
@@ -1142,9 +1208,7 @@ mod tests {
         let mut link = OwnedLink::new(
             b"a".to_vec(),
             CharacterSet::Ascii,
-            OwnedLinkTarget::Soft {
-                target_path: b"target".to_vec(),
-            },
+            OwnedLinkTarget::soft(b"target".to_vec()),
             None,
         )
         .unwrap();

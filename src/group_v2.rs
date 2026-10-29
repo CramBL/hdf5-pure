@@ -31,7 +31,7 @@ use crate::error::{FormatError, ResolveError};
 use crate::fractal_heap::HeapObjectReader;
 use crate::group_v1::{self, GroupEntry};
 use crate::link_info::LinkInfoMessage;
-use crate::link_message::{self, LinkMessage, LinkTarget};
+use crate::link_message::{self, LinkMessage, LinkTarget, SymbolicLinkTarget};
 use crate::message_type::MessageType;
 use crate::object_header::{MessageFilter, ObjectHeader};
 use crate::object_path::{LinkName, ObjectPath, ObjectPathBuf, SoftLinkPath};
@@ -320,16 +320,18 @@ impl ChildLookup {
             Some(LinkTarget::Hard {
                 object_header_address,
             }) => ChildLookup::Found(ChildTarget::Hard(addresses.resolve(object_header_address)?)),
-            Some(LinkTarget::Soft { target_path }) => {
-                ChildLookup::Found(ChildTarget::Soft(SoftLinkPath::parse(&target_path)?))
-            }
-            Some(LinkTarget::External {
-                filename,
-                object_path,
-            }) => ChildLookup::Found(ChildTarget::External {
-                filename,
-                object_path,
-            }),
+            Some(LinkTarget::Indirect(target)) => match *target {
+                SymbolicLinkTarget::Soft { target_path } => {
+                    ChildLookup::Found(ChildTarget::Soft(SoftLinkPath::parse(&target_path)?))
+                }
+                SymbolicLinkTarget::External {
+                    filename,
+                    object_path,
+                } => ChildLookup::Found(ChildTarget::External {
+                    filename,
+                    object_path,
+                }),
+            },
             None => ChildLookup::Absent,
         })
     }
@@ -1097,9 +1099,7 @@ mod tests {
         .serialize(OffsetWidth::Eight);
         let mut soft = LinkMessage {
             name: names[1].into(),
-            link_target: LinkTarget::Soft {
-                target_path: "x".into(),
-            },
+            link_target: LinkTarget::soft("x".into()),
             creation_order: None,
             charset: CharacterSet::Ascii,
         }
@@ -1580,9 +1580,7 @@ mod tests {
         assert_eq!(
             scan_compact_links(&header, OffsetWidth::Eight, LinkName::new("soft").unwrap(),)
                 .unwrap(),
-            Some(LinkTarget::Soft {
-                target_path: String::from("/abc")
-            })
+            Some(LinkTarget::soft(String::from("/abc")))
         );
         assert_eq!(
             scan_compact_links(

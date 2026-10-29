@@ -120,11 +120,11 @@ fn parsing_ten_thousand_hard_link_messages_has_bounded_allocations() {
     assert!(measured.blocks > LINK_COUNT as u64, "{measured}");
     assert!(measured.blocks <= 2 * LINK_COUNT as u64, "{measured}");
     assert!(measured.live_bytes >= retained_floor, "{measured}");
-    assert!(measured.live_bytes <= 112 * LINK_COUNT as u64, "{measured}");
+    assert!(measured.live_bytes <= 76 * LINK_COUNT as u64, "{measured}");
     assert!(measured.peak_bytes >= measured.live_bytes, "{measured}");
-    assert!(measured.peak_bytes <= 160 * LINK_COUNT as u64, "{measured}");
+    assert!(measured.peak_bytes <= 120 * LINK_COUNT as u64, "{measured}");
     assert!(measured.bytes >= measured.peak_bytes, "{measured}");
-    assert!(measured.bytes <= 160 * LINK_COUNT as u64, "{measured}");
+    assert!(measured.bytes <= 120 * LINK_COUNT as u64, "{measured}");
 }
 
 #[test]

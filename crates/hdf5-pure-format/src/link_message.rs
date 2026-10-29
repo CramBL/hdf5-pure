@@ -1,5 +1,6 @@
 //! HDF5 Link message parsing (message type 0x0006).
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -15,12 +16,37 @@ use crate::width::OffsetWidth;
 use crate::width::UintWidth;
 
 /// The type of a link in an HDF5 v2 group.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum LinkTarget {
     /// Hard link pointing to an object header address.
     Hard {
         object_header_address: StoredAddress,
     },
+    /// Soft or external link pointing to a path.
+    Indirect(Box<SymbolicLinkTarget>),
+}
+
+impl LinkTarget {
+    /// Creates a soft link pointing to `target_path`.
+    pub fn soft(target_path: String) -> Self {
+        Self::Indirect(Box::new(SymbolicLinkTarget::Soft { target_path }))
+    }
+
+    /// Creates an external link pointing to `object_path` in `filename`.
+    pub fn external(filename: String, object_path: String) -> Self {
+        Self::Indirect(Box::new(SymbolicLinkTarget::External {
+            filename,
+            object_path,
+        }))
+    }
+}
+
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::size_of::<LinkTarget>() == 16);
+
+/// The target of a soft or an external link.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SymbolicLinkTarget {
     /// Soft (symbolic) link with a target path string.
     Soft { target_path: String },
     /// External link pointing to a file and object path within it.
@@ -162,7 +188,7 @@ impl<'a> LinkPrefix<'a> {
                     core::str::from_utf8(&data[pos..pos + soft_len])
                         .map_err(|source| FormatError::InvalidSoftLinkEncoding { source })?,
                 );
-                LinkTarget::Soft { target_path }
+                LinkTarget::soft(target_path)
             }
             EXTERNAL_LINK => {
                 bytes::ensure_len(data, pos, 2)?;
@@ -185,10 +211,7 @@ impl<'a> LinkPrefix<'a> {
                 let rest2 = &rest[after_null1..];
                 let null2 = rest2.iter().position(|&b| b == 0).unwrap_or(rest2.len());
                 let object_path = String::from_utf8_lossy(&rest2[..null2]).into_owned();
-                LinkTarget::External {
-                    filename,
-                    object_path,
-                }
+                LinkTarget::external(filename, object_path)
             }
             other => return Err(FormatError::InvalidLinkType(other)),
         })
@@ -392,12 +415,11 @@ impl LinkMessage {
         }
         buf.push(flags);
 
-        if has_link_type {
-            match &self.link_target {
-                LinkTarget::Soft { .. } => buf.push(1),
-                LinkTarget::External { .. } => buf.push(64),
-                _ => {}
-            }
+        if let LinkTarget::Indirect(target) = &self.link_target {
+            buf.push(match target.as_ref() {
+                SymbolicLinkTarget::Soft { .. } => SOFT_LINK,
+                SymbolicLinkTarget::External { .. } => EXTERNAL_LINK,
+            });
         }
 
         if let Some(co) = self.creation_order {
@@ -418,24 +440,26 @@ impl LinkMessage {
             LinkTarget::Hard {
                 object_header_address,
             } => bytes::write_offset(&mut buf, object_header_address.get(), offset_width),
-            LinkTarget::Soft { target_path } => {
-                let path_bytes = target_path.as_bytes();
-                push_link_information_length(&mut buf, path_bytes.len());
-                buf.extend_from_slice(path_bytes);
-            }
-            LinkTarget::External {
-                filename,
-                object_path,
-            } => {
-                let mut ext_data = Vec::new();
-                ext_data.push(0); // flags
-                ext_data.extend_from_slice(filename.as_bytes());
-                ext_data.push(0);
-                ext_data.extend_from_slice(object_path.as_bytes());
-                ext_data.push(0);
-                push_link_information_length(&mut buf, ext_data.len());
-                buf.extend_from_slice(&ext_data);
-            }
+            LinkTarget::Indirect(target) => match target.as_ref() {
+                SymbolicLinkTarget::Soft { target_path } => {
+                    let path_bytes = target_path.as_bytes();
+                    push_link_information_length(&mut buf, path_bytes.len());
+                    buf.extend_from_slice(path_bytes);
+                }
+                SymbolicLinkTarget::External {
+                    filename,
+                    object_path,
+                } => {
+                    let mut ext_data = Vec::new();
+                    ext_data.push(0); // flags
+                    ext_data.extend_from_slice(filename.as_bytes());
+                    ext_data.push(0);
+                    ext_data.extend_from_slice(object_path.as_bytes());
+                    ext_data.push(0);
+                    push_link_information_length(&mut buf, ext_data.len());
+                    buf.extend_from_slice(&ext_data);
+                }
+            },
         }
 
         buf
@@ -512,8 +536,8 @@ mod tests {
 
     #[rstest]
     #[case::hard(LinkTarget::Hard { object_header_address: StoredAddress::new(42) })]
-    #[case::soft(LinkTarget::Soft { target_path: "target".into() })]
-    #[case::external(LinkTarget::External { filename: "file.h5".into(), object_path: "/target".into() })]
+    #[case::soft(LinkTarget::soft("target".into()))]
+    #[case::external(LinkTarget::external("file.h5".into(), "/target".into()))]
     fn link_names_borrow_prefix_bytes_before_the_target(#[case] link_target: LinkTarget) {
         let data = LinkMessage {
             name: "link".into(),
@@ -608,21 +632,14 @@ mod tests {
 
         let msg = LinkMessage::parse(&data, 8).unwrap();
         assert_eq!(msg.name, "link");
-        assert_eq!(
-            msg.link_target,
-            LinkTarget::Soft {
-                target_path: target.to_string()
-            }
-        );
+        assert_eq!(msg.link_target, LinkTarget::soft(target.to_string()));
     }
 
     #[test]
     fn a_soft_link_target_with_invalid_utf8_is_rejected() {
         let mut data = LinkMessage {
             name: String::from("link"),
-            link_target: LinkTarget::Soft {
-                target_path: String::from("x"),
-            },
+            link_target: LinkTarget::soft(String::from("x")),
             creation_order: None,
             charset: CharacterSet::Ascii,
         }
@@ -767,9 +784,7 @@ mod tests {
     fn a_soft_link_target_longer_than_its_length_field_panics() {
         LinkMessage {
             name: "link".into(),
-            link_target: LinkTarget::Soft {
-                target_path: "a".repeat(usize::from(u16::MAX) + 1),
-            },
+            link_target: LinkTarget::soft("a".repeat(usize::from(u16::MAX) + 1)),
             creation_order: None,
             charset: CharacterSet::Ascii,
         }
@@ -796,9 +811,7 @@ mod tests {
     fn soft_link_body() -> Vec<u8> {
         LinkMessage {
             name: "link".into(),
-            link_target: LinkTarget::Soft {
-                target_path: "/group1".into(),
-            },
+            link_target: LinkTarget::soft("/group1".into()),
             creation_order: None,
             charset: CharacterSet::Ascii,
         }

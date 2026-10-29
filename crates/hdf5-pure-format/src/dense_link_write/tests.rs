@@ -143,9 +143,7 @@ fn real_name_hash_collisions_are_sorted_by_raw_name_bytes() {
             OwnedLink::new(
                 name,
                 CharacterSet::Ascii,
-                OwnedLinkTarget::Soft {
-                    target_path: b"/target".to_vec(),
-                },
+                OwnedLinkTarget::soft(b"/target".to_vec()),
                 None,
             )
             .unwrap()
@@ -369,18 +367,10 @@ fn storage(count: usize, policy: u8, offsets: OffsetWidth, name_len: usize) -> G
                         object_header_address: StoredAddress::new(42),
                     },
                 ),
-                1 => (
-                    CharacterSet::Ascii,
-                    OwnedLinkTarget::Soft {
-                        target_path: vec![b'/', 0xFF],
-                    },
-                ),
+                1 => (CharacterSet::Ascii, OwnedLinkTarget::soft(vec![b'/', 0xFF])),
                 2 => (
                     CharacterSet::Utf8,
-                    OwnedLinkTarget::External {
-                        filename: vec![0xFE],
-                        object_path: b"/object".to_vec(),
-                    },
+                    OwnedLinkTarget::external(vec![0xFE], b"/object".to_vec()),
                 ),
                 _ => (
                     CharacterSet::Utf8,

@@ -243,10 +243,11 @@ pub use crate::group_info::GroupPhaseChange;
 pub use crate::link_info::LinkInfoMessage;
 pub use crate::link_message::LinkMessage;
 pub use crate::link_message::LinkTarget;
+pub use crate::link_message::SymbolicLinkTarget;
 pub use crate::link_message::link_is_named;
 pub use crate::link_storage::{
     GroupLinkStorage, LinkCreationCounter, LinkCreationPolicy, LinkStorageError, OwnedLink,
-    OwnedLinkTarget,
+    OwnedLinkTarget, OwnedSymbolicLinkTarget,
 };
 pub use crate::local_heap::LocalHeap;
 pub use crate::local_heap::LocalHeapDataSegment;

@@ -127,16 +127,11 @@ fn libhdf5_link_messages_preserve_targets_encodings_and_creation_policy(
     ));
     assert_eq!(
         links[b"soft".as_slice()].target(),
-        &OwnedLinkTarget::Soft {
-            target_path: b"/hard".to_vec()
-        }
+        &OwnedLinkTarget::soft(b"/hard".to_vec())
     );
     assert_eq!(
         links[b"external".as_slice()].target(),
-        &OwnedLinkTarget::External {
-            filename: "外部.h5".as_bytes().to_vec(),
-            object_path: "/目标".as_bytes().to_vec()
-        }
+        &OwnedLinkTarget::external("外部.h5".as_bytes().to_vec(), "/目标".as_bytes().to_vec())
     );
     assert_eq!(links["别名".as_bytes()].charset(), CharacterSet::Ascii);
     assert_eq!(links["utf8_链".as_bytes()].charset(), CharacterSet::Utf8);

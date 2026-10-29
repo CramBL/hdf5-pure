@@ -712,7 +712,7 @@ fn dense_heaps(path: &Path) -> Vec<DenseHeap> {
             LinkTarget::Hard {
                 object_header_address,
             } => Some((link.name, object_header_address.get())),
-            LinkTarget::Soft { .. } | LinkTarget::External { .. } => None,
+            LinkTarget::Indirect(_) => None,
         })
         .flat_map(|(owner, address)| {
             object_header(address)
