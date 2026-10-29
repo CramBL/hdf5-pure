@@ -497,10 +497,10 @@ mod tests {
     }
 
     #[rstest]
-    #[case(1, 2048)]
-    #[case(2047, 2048)]
-    #[case(2048, 2048)]
-    #[case(2049, 2049)]
+    #[case::one_byte(1, 2048)]
+    #[case::below_block_size(2047, 2048)]
+    #[case::block_size(2048, 2048)]
+    #[case::above_block_size(2049, 2049)]
     fn initial_reservation_uses_request_size_with_block_minimum(
         #[case] size: u64,
         #[case] reserved: u64,

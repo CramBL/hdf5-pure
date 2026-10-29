@@ -550,13 +550,13 @@ mod tests {
     use crate::FormatError;
 
     #[rstest]
-    #[case(Datatype::String {
+    #[case::zero_width_string(Datatype::String {
         size: 0,
         padding: StringPadding::NullTerminate,
         charset: CharacterSet::Ascii,
     }, STRING_CLASS)]
-    #[case(Datatype::Opaque { size: 0, tag: Vec::new() }, OPAQUE_CLASS)]
-    #[case(Datatype::Array {
+    #[case::zero_width_opaque(Datatype::Opaque { size: 0, tag: Vec::new() }, OPAQUE_CLASS)]
+    #[case::zero_element_array(Datatype::Array {
         base_type: Box::new(Datatype::String {
             size: 1,
             padding: StringPadding::NullTerminate,

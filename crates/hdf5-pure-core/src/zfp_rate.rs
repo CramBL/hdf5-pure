@@ -46,23 +46,23 @@ mod tests {
     use super::*;
 
     #[rstest]
-    #[case(16.0)]
-    #[case(32.0)]
-    #[case(64.0)]
-    #[case(f64::MIN_POSITIVE)]
-    #[case(f64::from_bits(1))]
+    #[case::sixteen(16.0)]
+    #[case::thirty_two(32.0)]
+    #[case::maximum(64.0)]
+    #[case::smallest_normal(f64::MIN_POSITIVE)]
+    #[case::smallest_subnormal(f64::from_bits(1))]
     fn parses_finite_positive_rates_up_to_sixty_four(#[case] rate: f64) {
         assert_eq!(ZfpRate::try_from(rate).unwrap().get(), rate);
     }
 
     #[rstest]
-    #[case(f64::NAN)]
-    #[case(f64::INFINITY)]
-    #[case(f64::NEG_INFINITY)]
-    #[case(0.0)]
-    #[case(-0.0)]
-    #[case(-1.0)]
-    #[case(64.0001)]
+    #[case::not_a_number(f64::NAN)]
+    #[case::positive_infinity(f64::INFINITY)]
+    #[case::negative_infinity(f64::NEG_INFINITY)]
+    #[case::positive_zero(0.0)]
+    #[case::negative_zero(-0.0)]
+    #[case::negative_one(-1.0)]
+    #[case::above_maximum(64.0001)]
     fn rejects_rates_outside_the_finite_positive_range(#[case] rate: f64) {
         assert_eq!(
             ZfpRate::try_from(rate).unwrap_err(),

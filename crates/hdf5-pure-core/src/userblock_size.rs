@@ -47,22 +47,22 @@ mod tests {
     use super::*;
 
     #[rstest]
-    #[case(0)]
-    #[case(512)]
-    #[case(1024)]
-    #[case(2048)]
-    #[case(1 << 63)]
+    #[case::none(0)]
+    #[case::minimum(512)]
+    #[case::one_kibibyte(1024)]
+    #[case::two_kibibytes(2048)]
+    #[case::highest_power_of_two(1 << 63)]
     fn parses_userblock_size(#[case] size: u64) {
         assert_eq!(UserblockSize::try_from(size).unwrap().get(), size);
     }
 
     #[rstest]
-    #[case(1)]
-    #[case(511)]
-    #[case(513)]
-    #[case(700)]
-    #[case(1023)]
-    #[case(u64::MAX)]
+    #[case::one_byte(1)]
+    #[case::below_minimum(511)]
+    #[case::above_minimum(513)]
+    #[case::non_power_of_two(700)]
+    #[case::below_one_kibibyte(1023)]
+    #[case::maximum_u64(u64::MAX)]
     fn rejects_invalid_userblock_size(#[case] size: u64) {
         assert_eq!(
             UserblockSize::try_from(size),

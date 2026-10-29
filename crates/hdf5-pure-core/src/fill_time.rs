@@ -93,18 +93,18 @@ mod tests {
     use rstest::rstest;
 
     #[rstest]
-    #[case(0, FillTime::Alloc)]
-    #[case(1, FillTime::Never)]
-    #[case(2, FillTime::IfSet)]
+    #[case::on_allocation(0, FillTime::Alloc)]
+    #[case::never(1, FillTime::Never)]
+    #[case::if_set(2, FillTime::IfSet)]
     fn parses_valid_fill_time(#[case] raw: u8, #[case] expected: FillTime) {
         assert_eq!(FillTime::try_from(raw).unwrap(), expected);
         assert_eq!(expected.to_u8(), raw);
     }
 
     #[rstest]
-    #[case(3)]
-    #[case(4)]
-    #[case(255)]
+    #[case::first_unsupported_value(3)]
+    #[case::value_four(4)]
+    #[case::maximum_byte(255)]
     fn rejects_invalid_fill_time(#[case] raw: u8) {
         let err = FillTime::try_from(raw).unwrap_err();
         assert_eq!(err, FormatError::InvalidFillTime(raw));

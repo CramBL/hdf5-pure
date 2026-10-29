@@ -919,13 +919,13 @@ mod tests {
     use super::*;
 
     #[rstest]
-    #[case(0, 0, 8, FormatError::ZeroSizedDatatype { class: FIXED_POINT_CLASS })]
-    #[case(1, 0, 0, FormatError::InvalidFixedPointRange { size: 1, bit_offset: 0, bit_precision: 0 })]
-    #[case(1, 8, 1, FormatError::InvalidFixedPointRange { size: 1, bit_offset: 8, bit_precision: 1 })]
-    #[case(1, 4, 5, FormatError::InvalidFixedPointRange { size: 1, bit_offset: 4, bit_precision: 5 })]
-    #[case(2, 0, 17, FormatError::InvalidFixedPointRange { size: 2, bit_offset: 0, bit_precision: 17 })]
-    #[case(8, 64, 1, FormatError::InvalidFixedPointRange { size: 8, bit_offset: 64, bit_precision: 1 })]
-    #[case(8, u16::MAX, u16::MAX, FormatError::InvalidFixedPointRange { size: 8, bit_offset: u16::MAX, bit_precision: u16::MAX })]
+    #[case::zero_size(0, 0, 8, FormatError::ZeroSizedDatatype { class: FIXED_POINT_CLASS })]
+    #[case::zero_precision(1, 0, 0, FormatError::InvalidFixedPointRange { size: 1, bit_offset: 0, bit_precision: 0 })]
+    #[case::offset_at_storage_end(1, 8, 1, FormatError::InvalidFixedPointRange { size: 1, bit_offset: 8, bit_precision: 1 })]
+    #[case::range_past_one_byte(1, 4, 5, FormatError::InvalidFixedPointRange { size: 1, bit_offset: 4, bit_precision: 5 })]
+    #[case::precision_past_two_bytes(2, 0, 17, FormatError::InvalidFixedPointRange { size: 2, bit_offset: 0, bit_precision: 17 })]
+    #[case::offset_at_eight_byte_end(8, 64, 1, FormatError::InvalidFixedPointRange { size: 8, bit_offset: 64, bit_precision: 1 })]
+    #[case::maximum_offset_and_precision(8, u16::MAX, u16::MAX, FormatError::InvalidFixedPointRange { size: 8, bit_offset: u16::MAX, bit_precision: u16::MAX })]
     fn rejects_fixed_point_range(
         #[case] size: u32,
         #[case] offset: u16,
@@ -946,10 +946,10 @@ mod tests {
     }
 
     #[rstest]
-    #[case(1, 4, 4)]
-    #[case(3, 7, 13)]
-    #[case(16, 1, 127)]
-    #[case(u32::MAX, u16::MAX, u16::MAX)]
+    #[case::one_byte_high_nibble(1, 4, 4)]
+    #[case::three_byte_offset_range(3, 7, 13)]
+    #[case::sixteen_byte_offset_range(16, 1, 127)]
+    #[case::maximum_size_and_fields(u32::MAX, u16::MAX, u16::MAX)]
     fn accepts_fixed_point_range(
         #[case] size: u32,
         #[case] offset: u16,
@@ -1015,16 +1015,16 @@ mod tests {
     }
 
     #[rstest]
-    #[case(0, FloatingFields::BINARY32, FormatError::ZeroSizedDatatype { class: FLOATING_POINT_CLASS })]
-    #[case(4, FloatingFields { bit_precision: 0, ..FloatingFields::BINARY32 }, FormatError::InvalidFloatingPointRange { size: 4, bit_offset: 0, bit_precision: 0 })]
-    #[case(4, FloatingFields { bit_offset: 1, ..FloatingFields::BINARY32 }, FormatError::InvalidFloatingPointRange { size: 4, bit_offset: 1, bit_precision: 32 })]
-    #[case(2, FloatingFields::BINARY32, FormatError::InvalidFloatingPointRange { size: 2, bit_offset: 0, bit_precision: 32 })]
-    #[case(4, FloatingFields { sign_location: 32, ..FloatingFields::BINARY32 }, FormatError::InvalidFloatingPointField { field: FloatingPointField::Sign, location: 32, size: 1, bit_offset: 0, bit_precision: 32 })]
-    #[case(4, FloatingFields { exponent_size: 0, ..FloatingFields::BINARY32 }, FormatError::InvalidFloatingPointField { field: FloatingPointField::Exponent, location: 23, size: 0, bit_offset: 0, bit_precision: 32 })]
-    #[case(4, FloatingFields { exponent_size: 10, ..FloatingFields::BINARY32 }, FormatError::InvalidFloatingPointField { field: FloatingPointField::Exponent, location: 23, size: 10, bit_offset: 0, bit_precision: 32 })]
-    #[case(4, FloatingFields { mantissa_size: 0, ..FloatingFields::BINARY32 }, FormatError::InvalidFloatingPointField { field: FloatingPointField::Mantissa, location: 0, size: 0, bit_offset: 0, bit_precision: 32 })]
-    #[case(4, FloatingFields { mantissa_location: 250, mantissa_size: 255, ..FloatingFields::BINARY32 }, FormatError::InvalidFloatingPointField { field: FloatingPointField::Mantissa, location: 250, size: 255, bit_offset: 0, bit_precision: 32 })]
-    #[case(5, FloatingFields { bit_offset: 1, ..FloatingFields::BINARY32 }, FormatError::InvalidFloatingPointField { field: FloatingPointField::Mantissa, location: 0, size: 23, bit_offset: 1, bit_precision: 32 })]
+    #[case::zero_size(0, FloatingFields::BINARY32, FormatError::ZeroSizedDatatype { class: FLOATING_POINT_CLASS })]
+    #[case::zero_precision(4, FloatingFields { bit_precision: 0, ..FloatingFields::BINARY32 }, FormatError::InvalidFloatingPointRange { size: 4, bit_offset: 0, bit_precision: 0 })]
+    #[case::precision_past_offset_end(4, FloatingFields { bit_offset: 1, ..FloatingFields::BINARY32 }, FormatError::InvalidFloatingPointRange { size: 4, bit_offset: 1, bit_precision: 32 })]
+    #[case::binary32_in_two_bytes(2, FloatingFields::BINARY32, FormatError::InvalidFloatingPointRange { size: 2, bit_offset: 0, bit_precision: 32 })]
+    #[case::sign_at_precision_end(4, FloatingFields { sign_location: 32, ..FloatingFields::BINARY32 }, FormatError::InvalidFloatingPointField { field: FloatingPointField::Sign, location: 32, size: 1, bit_offset: 0, bit_precision: 32 })]
+    #[case::zero_exponent_size(4, FloatingFields { exponent_size: 0, ..FloatingFields::BINARY32 }, FormatError::InvalidFloatingPointField { field: FloatingPointField::Exponent, location: 23, size: 0, bit_offset: 0, bit_precision: 32 })]
+    #[case::exponent_past_precision_end(4, FloatingFields { exponent_size: 10, ..FloatingFields::BINARY32 }, FormatError::InvalidFloatingPointField { field: FloatingPointField::Exponent, location: 23, size: 10, bit_offset: 0, bit_precision: 32 })]
+    #[case::zero_mantissa_size(4, FloatingFields { mantissa_size: 0, ..FloatingFields::BINARY32 }, FormatError::InvalidFloatingPointField { field: FloatingPointField::Mantissa, location: 0, size: 0, bit_offset: 0, bit_precision: 32 })]
+    #[case::mantissa_past_precision_end(4, FloatingFields { mantissa_location: 250, mantissa_size: 255, ..FloatingFields::BINARY32 }, FormatError::InvalidFloatingPointField { field: FloatingPointField::Mantissa, location: 250, size: 255, bit_offset: 0, bit_precision: 32 })]
+    #[case::mantissa_below_bit_offset(5, FloatingFields { bit_offset: 1, ..FloatingFields::BINARY32 }, FormatError::InvalidFloatingPointField { field: FloatingPointField::Mantissa, location: 0, size: 23, bit_offset: 1, bit_precision: 32 })]
     fn rejects_floating_point_range_or_field(
         #[case] size: u32,
         #[case] fields: FloatingFields,
@@ -1039,10 +1039,10 @@ mod tests {
     }
 
     #[rstest]
-    #[case(FloatingFields { sign_location: 23, ..FloatingFields::BINARY32 }, FloatingPointField::Sign, 23, 1, FloatingPointField::Exponent, 23, 8)]
-    #[case(FloatingFields { sign_location: 0, ..FloatingFields::BINARY32 }, FloatingPointField::Sign, 0, 1, FloatingPointField::Mantissa, 0, 23)]
-    #[case(FloatingFields { mantissa_size: 24, ..FloatingFields::BINARY32 }, FloatingPointField::Exponent, 23, 8, FloatingPointField::Mantissa, 0, 24)]
-    #[case(FloatingFields { mantissa_location: 23, mantissa_size: 8, ..FloatingFields::BINARY32 }, FloatingPointField::Exponent, 23, 8, FloatingPointField::Mantissa, 23, 8)]
+    #[case::sign_overlaps_exponent(FloatingFields { sign_location: 23, ..FloatingFields::BINARY32 }, FloatingPointField::Sign, 23, 1, FloatingPointField::Exponent, 23, 8)]
+    #[case::sign_overlaps_mantissa(FloatingFields { sign_location: 0, ..FloatingFields::BINARY32 }, FloatingPointField::Sign, 0, 1, FloatingPointField::Mantissa, 0, 23)]
+    #[case::mantissa_overlaps_exponent_start(FloatingFields { mantissa_size: 24, ..FloatingFields::BINARY32 }, FloatingPointField::Exponent, 23, 8, FloatingPointField::Mantissa, 0, 24)]
+    #[case::mantissa_matches_exponent(FloatingFields { mantissa_location: 23, mantissa_size: 8, ..FloatingFields::BINARY32 }, FloatingPointField::Exponent, 23, 8, FloatingPointField::Mantissa, 23, 8)]
     fn rejects_overlapping_floating_point_fields(
         #[case] fields: FloatingFields,
         #[case] first: FloatingPointField,
@@ -1068,12 +1068,12 @@ mod tests {
     }
 
     #[rstest]
-    #[case(4, FloatingFields::BINARY32)]
-    #[case(8, FloatingFields::BINARY64)]
-    #[case(16, FloatingFields::BINARY64)]
-    #[case(u32::MAX, FloatingFields::BINARY64)]
-    #[case(5, FloatingFields { sign_location: 32, bit_offset: 1, exponent_location: 24, mantissa_location: 1, ..FloatingFields::BINARY32 })]
-    #[case(4, FloatingFields { mantissa_size: 20, exponent_size: 7, ..FloatingFields::BINARY32 })]
+    #[case::binary32(4, FloatingFields::BINARY32)]
+    #[case::binary64(8, FloatingFields::BINARY64)]
+    #[case::binary64_in_sixteen_bytes(16, FloatingFields::BINARY64)]
+    #[case::binary64_in_maximum_size(u32::MAX, FloatingFields::BINARY64)]
+    #[case::offset_binary32(5, FloatingFields { sign_location: 32, bit_offset: 1, exponent_location: 24, mantissa_location: 1, ..FloatingFields::BINARY32 })]
+    #[case::reduced_mantissa_and_exponent(4, FloatingFields { mantissa_size: 20, exponent_size: 7, ..FloatingFields::BINARY32 })]
     fn accepts_floating_point_fields(
         #[case] size: u32,
         #[case] fields: FloatingFields,
@@ -1091,10 +1091,10 @@ mod tests {
     }
 
     #[rstest]
-    #[case(0, 0, 1)]
-    #[case(1, 0, 0)]
-    #[case(1, 4, 5)]
-    #[case(8, u16::MAX, u16::MAX)]
+    #[case::zero_size(0, 0, 1)]
+    #[case::zero_precision(1, 0, 0)]
+    #[case::range_past_one_byte(1, 4, 5)]
+    #[case::maximum_offset_and_precision(8, u16::MAX, u16::MAX)]
     fn rejects_bit_field_range(
         #[case] size: u32,
         #[case] bit_offset: u16,
@@ -1125,9 +1125,9 @@ mod tests {
     }
 
     #[rstest]
-    #[case(0, 1)]
-    #[case(1, 0)]
-    #[case(1, 9)]
+    #[case::zero_size(0, 1)]
+    #[case::zero_precision(1, 0)]
+    #[case::precision_past_one_byte(1, 9)]
     fn rejects_time_precision(#[case] size: u32, #[case] bit_precision: u16) {
         let expected = if size == 0 {
             FormatError::ZeroSizedDatatype { class: TIME_CLASS }
@@ -1145,9 +1145,9 @@ mod tests {
         );
     }
     #[rstest]
-    #[case(FixedPointType::new(1, DatatypeByteOrder::Vax, false, 0, 8).unwrap_err(), FIXED_POINT_CLASS)]
-    #[case(TimeType::new(1, DatatypeByteOrder::Vax, 8).unwrap_err(), TIME_CLASS)]
-    #[case(BitFieldType::new(1, DatatypeByteOrder::Vax, 0, 8).unwrap_err(), BIT_FIELD_CLASS)]
+    #[case::fixed_point_vax(FixedPointType::new(1, DatatypeByteOrder::Vax, false, 0, 8).unwrap_err(), FIXED_POINT_CLASS)]
+    #[case::time_vax(TimeType::new(1, DatatypeByteOrder::Vax, 8).unwrap_err(), TIME_CLASS)]
+    #[case::bit_field_vax(BitFieldType::new(1, DatatypeByteOrder::Vax, 0, 8).unwrap_err(), BIT_FIELD_CLASS)]
     fn rejects_invalid_numeric_byte_order(#[case] error: FormatError, #[case] class: u8) {
         assert_eq!(
             error,
