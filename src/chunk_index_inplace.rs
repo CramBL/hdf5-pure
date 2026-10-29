@@ -29,8 +29,7 @@
 
 use core::num::NonZeroUsize;
 
-#[cfg(test)]
-use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::{FileRange, PhysicalAddress};
 use hdf5_pure_format::__private::BlockOffsetWidth;
 use hdf5_pure_format::__private::ChunkedGeometry;
 use hdf5_pure_format::__private::DataBlockGeometry;
@@ -39,6 +38,7 @@ use hdf5_pure_format::__private::ExtensibleArrayBitGeometry;
 use hdf5_pure_format::__private::ExtensibleArrayCreationParameters;
 use hdf5_pure_format::__private::ExtensibleArrayGeometry;
 use hdf5_pure_format::__private::ExtensibleArrayHeader;
+use hdf5_pure_format::__private::ExtensibleArrayInitialization;
 use hdf5_pure_format::__private::ExtensibleArrayStats;
 use hdf5_pure_format::__private::IndexSlots;
 use hdf5_pure_format::__private::MessageRecord;
@@ -344,6 +344,7 @@ impl AppendIndex {
     /// # Errors
     ///
     /// Returns [`Error::AppendUnsupported`] if the index header is unallocated.
+    #[cfg(test)]
     pub(crate) fn allocated(&self) -> Result<&Located, Error> {
         match self {
             Self::Allocated(located) => Ok(located),
@@ -424,6 +425,66 @@ pub(crate) struct UnallocatedIndex {
     pub(crate) element_size: NonZeroUsize,
     /// Uncompressed bytes in one complete chunk.
     pub(crate) chunk_bytes: usize,
+    /// Location of the layout field to update after allocating the index.
+    pub(crate) reference: IndexInitializationReference,
+}
+
+/// Checked physical ranges of an undefined index-header field and its object-header chunk.
+pub(crate) struct IndexInitializationReference {
+    field: FileRange,
+    chunk: FileRange,
+}
+
+impl IndexInitializationReference {
+    /// Resolves the message-local field range within its checksummed object-header chunk.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if a physical range exceeds [`u64::MAX`], or
+    /// [`FormatError::InvalidExtensibleArrayGeometry`] if the chunk range is invalid or the
+    /// field lies outside the chunk's checksum coverage.
+    fn new(message: &WalkedMessage, field: core::ops::Range<usize>) -> Result<Self, FormatError> {
+        let field = FileRange::new(
+            PhysicalAddress::new(message.data_off).checked_add(field.start.to_u64())?,
+            field.len().to_u64(),
+        )?;
+        let chunk = FileRange::new(
+            PhysicalAddress::new(message.chunk_start),
+            message
+                .chunk_msg_end
+                .checked_sub(message.chunk_start)
+                .and_then(|length| length.checked_add(EA_CHECKSUM_SIZE))
+                .ok_or(FormatError::InvalidExtensibleArrayGeometry)?,
+        )?;
+        if field.start() < chunk.start() || field.end().get() > message.chunk_msg_end {
+            return Err(FormatError::InvalidExtensibleArrayGeometry);
+        }
+        Ok(Self { field, chunk })
+    }
+
+    /// Writes the confirmed index-header address and its object-header checksum.
+    ///
+    /// The caller synchronizes this reference before appending through the initialized index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AllocationPublicationUncertain`] if ownership is uncertain. Propagates
+    /// errors from checking the allocation's session, converting its address, or reading and
+    /// writing the object-header chunk.
+    pub(crate) fn publish(
+        &self,
+        file: &mut impl Store,
+        allocation: &ConfirmedAllocation,
+    ) -> Result<(), Error> {
+        let allocation = file.allocation_publication().require(allocation)?;
+        let address = file.addresses().relative(allocation.start().get())?;
+        file.publish_checksummed(
+            self.chunk.start().get(),
+            self.chunk.end().get() - EA_CHECKSUM_SIZE,
+            self.field.start().get(),
+            &address.get().to_le_bytes()[..usize::from(file.widths().offsets.get())],
+        )
+    }
 }
 
 /// Allocated index geometry and message locations maintained across appends.
@@ -564,7 +625,7 @@ impl Located {
 
         // Parse the layout: must be a v4 chunked Extensible Array (index type 4).
         let layout_bytes = file.read_metadata_at(layout_msg.data_off, layout_msg.size)?;
-        let layout = DataLayout::parse_with_widths(&layout_bytes, widths)?;
+        let (layout, layout_address) = DataLayout::parse_with_ea_address(&layout_bytes, widths)?;
         let (ea_addr, creation, flags) = match &layout {
             DataLayout::Chunked {
                 index: ChunkIndexLayout::ExtensibleArray { address, creation },
@@ -619,6 +680,14 @@ impl Located {
                     chunk_elems,
                     element_size: elem_bytes,
                     chunk_bytes,
+                    reference: IndexInitializationReference::new(
+                        layout_msg,
+                        layout_address.ok_or_else(|| {
+                            FormatError::Internal(
+                                "an extensible-array layout has no address field".into(),
+                            )
+                        })?,
+                    )?,
                 }),
                 spans,
             });
@@ -738,11 +807,6 @@ impl Located {
             offsets: vec![self.current_dim - self.current_dim % self.chunk_elems],
             address: rec.addr,
         }
-    }
-
-    /// Returns how a reader at the extent `extent` decodes the chunk at element `offset`.
-    fn decoding_at(&self, offset: u64, extent: u64) -> ChunkDecoding {
-        ChunkDecoding::at_extent(self.flags, &[self.chunk_elems], &[extent], &[offset])
     }
 
     /// Read the element record stored at byte offset `off`.
@@ -1469,8 +1533,60 @@ impl Located {
     /// size or data-block index exceeds [`usize::MAX`]. Returns [`Error::AppendUnsupported`] if
     /// the prefix extends beyond the geometry.
     fn dense_prefix_stats(&self, num_chunks: u64) -> Result<ExtensibleArrayStats, Error> {
+        self.planning_geometry().dense_prefix_stats(num_chunks)
+    }
+
+    /// Returns the encoded data-block size, including page storage and checksums.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if the size exceeds [`u64::MAX`].
+    fn data_block_size(&self, elements: u64) -> Result<u64, FormatError> {
+        self.planning_geometry().data_block_size(elements)
+    }
+
+    /// Returns the prefix length through the block-offset field of a data or secondary block.
+    ///
+    /// Version 0 blocks are defined in "The Extensible Array Index" of the [format specification,
+    /// version 4.0][spec].
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_extarr
+    fn block_prefix_size(&self) -> u64 {
+        self.planning_geometry().block_prefix_size()
+    }
+
+    fn planning_geometry(&self) -> IndexPlanningGeometry<'_> {
+        IndexPlanningGeometry {
+            geom: &self.geom,
+            idx_blk_elmts: self.idx_blk_elmts,
+            ea_elem_size: self.ea_elem_size,
+            ea_bits: self.ea_bits,
+            offset_width: self.offset_width,
+        }
+    }
+}
+
+/// Block geometry and element encoding used to size an append before allocating storage.
+struct IndexPlanningGeometry<'a> {
+    geom: &'a ExtensibleArrayGeometry,
+    idx_blk_elmts: u64,
+    ea_elem_size: usize,
+    ea_bits: ExtensibleArrayBitGeometry,
+    offset_width: OffsetWidth,
+}
+
+impl IndexPlanningGeometry<'_> {
+    /// Computes header statistics for a dense prefix, including complete block allocations.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if a range, size, or statistic
+    /// exceeds [`u64::MAX`], or [`FormatError::ValueTooLargeForPlatform`] if a block size or
+    /// index exceeds [`usize::MAX`]. Returns [`Error::AppendUnsupported`] if the prefix extends
+    /// beyond the geometry.
+    fn dense_prefix_stats(&self, num_chunks: u64) -> Result<ExtensibleArrayStats, Error> {
         if num_chunks > self.idx_blk_elmts {
-            locate_data_block(&self.geom, self.idx_blk_elmts, num_chunks - 1)?;
+            locate_data_block(self.geom, self.idx_blk_elmts, num_chunks - 1)?;
         }
         let mut stats = ExtensibleArrayStats {
             nsuper_blks: 0,
@@ -1529,11 +1645,6 @@ impl Located {
         Ok(stats)
     }
 
-    /// Returns the encoded data-block size, including page storage and checksums.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if the size exceeds [`u64::MAX`].
     fn data_block_size(&self, elements: u64) -> Result<u64, FormatError> {
         let blocks = DataBlockGeometry {
             dblk_nelmts: elements,
@@ -1560,12 +1671,6 @@ impl Located {
         }
     }
 
-    /// Returns the prefix length through the block-offset field of a data or secondary block.
-    ///
-    /// Version 0 blocks are defined in "The Extensible Array Index" of the [format specification,
-    /// version 4.0][spec].
-    ///
-    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_extarr
     fn block_prefix_size(&self) -> u64 {
         EA_BLOCK_PREFIX_SIZE
             + u64::from(self.offset_width.get())
@@ -1685,33 +1790,25 @@ pub(crate) fn plan_ea_append<F: Store>(
     // Split the tail into full chunk buffers and encode each for a reader at the current
     // dimension and one at the new dimension. The final chunk's slots past the new dimension
     // take the dataset's fill value (issue #296).
-    let tail_len_elems = new_dim - n_full * chunk_elems;
-    let split =
-        chunked_write::split_into_chunks(&tail_raw, &[tail_len_elems], spatial, element_size, fill)
-            .map_err(Error::Format)?;
     let filter_completed_tail = has_partial
         && loc.flags.partial_edge_chunks_stored_raw()
         && new_dim / chunk_elems > n_full
         && pipeline.is_some_and(|pipeline| !edit::pipeline_lossless(pipeline));
-    let mut completed_tail = None;
-    let chunks = (n_full..)
-        .zip(split)
-        .map(|(e, logical)| {
-            let offset = e * chunk_elems;
-            if e == n_full && filter_completed_tail {
-                completed_tail = Some(PreparedChunk::encode(
-                    &mut scratch,
-                    pipeline,
-                    ctx,
-                    ChunkEncoding::Filtered,
-                    logical.clone(),
-                )?);
-            }
-            let current = (offset < current_dim).then(|| loc.decoding_at(offset, current_dim));
-            let encoding = ChunkEncoding::decodable_by(current, loc.decoding_at(offset, new_dim));
-            PreparedChunk::encode(&mut scratch, pipeline, ctx, encoding, logical)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let (chunks, completed_tail) = prepare_append_chunks(
+        &mut scratch,
+        pipeline,
+        ctx,
+        spatial,
+        element_size,
+        loc.flags,
+        chunk_elems,
+        current_dim,
+        new_dim,
+        n_full,
+        &tail_raw,
+        fill,
+        filter_completed_tail,
+    )?;
 
     // Every blob has to fit the element it will be recorded in. Checked here,
     // while nothing has been written, rather than where the element is laid out
@@ -1731,6 +1828,137 @@ pub(crate) fn plan_ea_append<F: Store>(
         new_num_chunks,
         stats,
     })
+}
+
+/// Encodes padded chunks readable at both the current and appended extents.
+///
+/// If `filter_completed_tail` is set, also prepares a filtered replacement for the first chunk.
+/// The caller publishes that replacement after the appended extent.
+///
+/// # Errors
+///
+/// Propagates chunk splitting, fill, and filter encoding errors.
+fn prepare_append_chunks(
+    scratch: &mut FilterScratch,
+    pipeline: Option<&FilterPipeline>,
+    ctx: ChunkContext<'_>,
+    spatial: &[u64],
+    element_size: NonZeroUsize,
+    flags: ChunkedLayoutFlags,
+    chunk_elems: u64,
+    current_dim: u64,
+    new_dim: u64,
+    n_full: u64,
+    tail_raw: &[u8],
+    fill: FillPattern<'_>,
+    filter_completed_tail: bool,
+) -> Result<(Vec<PreparedChunk>, Option<PreparedChunk>), Error> {
+    let tail_len_elems = new_dim - n_full * chunk_elems;
+    let split =
+        chunked_write::split_into_chunks(tail_raw, &[tail_len_elems], spatial, element_size, fill)
+            .map_err(Error::Format)?;
+    let mut completed_tail = None;
+    let chunks = (n_full..)
+        .zip(split)
+        .map(|(e, logical)| {
+            let offset = e * chunk_elems;
+            if e == n_full && filter_completed_tail {
+                completed_tail = Some(PreparedChunk::encode(
+                    scratch,
+                    pipeline,
+                    ctx,
+                    ChunkEncoding::Filtered,
+                    logical.clone(),
+                )?);
+            }
+            let current = (offset < current_dim).then(|| {
+                ChunkDecoding::at_extent(flags, &[chunk_elems], &[current_dim], &[offset])
+            });
+            let encoding = ChunkEncoding::decodable_by(
+                current,
+                ChunkDecoding::at_extent(flags, &[chunk_elems], &[new_dim], &[offset]),
+            );
+            PreparedChunk::encode(scratch, pipeline, ctx, encoding, logical)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok((chunks, completed_tail))
+}
+
+/// Prepares the first append and empty index geometry without allocating or writing storage.
+///
+/// Checks complete block sizes and encodes the payloads before the caller initializes the index.
+///
+/// # Errors
+///
+/// Returns [`Error::AppendUnsupported`] if the append exceeds the index geometry or an encoded
+/// chunk exceeds the canonical element width. Propagates geometry, datatype, fill, and filter
+/// encoding errors.
+pub(crate) fn plan_initial_ea_append(
+    index: &UnallocatedIndex,
+    widths: FormatWidths,
+    datatype: &Datatype,
+    spatial: &[u64],
+    element_size: NonZeroUsize,
+    pipeline: Option<&FilterPipeline>,
+    raw: &[u8],
+    new_elems: u64,
+    fill: FillPattern<'_>,
+) -> Result<(AppendPlan, ExtensibleArrayInitialization), Error> {
+    let initialization = ExtensibleArrayInitialization::new(
+        index.creation,
+        index.chunk_bytes.to_u64(),
+        widths,
+        pipeline.is_some(),
+    )?;
+    let geometry = initialization.geometry()?;
+    let encoding = initialization.element_encoding();
+    let num_chunks = new_elems.div_ceil(index.chunk_elems);
+    let stats = IndexPlanningGeometry {
+        geom: &geometry,
+        idx_blk_elmts: u64::from(index.creation.inline_elements()),
+        ea_elem_size: encoding.elem_size,
+        ea_bits: index.creation.bit_geometry(),
+        offset_width: widths.offsets,
+    }
+    .dense_prefix_stats(num_chunks)?;
+    let ctx = ChunkContext::from_datatype(spatial, datatype)?;
+    let (chunks, completed_tail) = prepare_append_chunks(
+        &mut FilterScratch::new(),
+        pipeline,
+        ctx,
+        spatial,
+        element_size,
+        index.flags,
+        index.chunk_elems,
+        0,
+        new_elems,
+        0,
+        raw,
+        fill,
+        false,
+    )?;
+    if pipeline.is_some()
+        && chunks
+            .iter()
+            .any(|chunk| !encoding.holds_stored_size(chunk.stored_size()))
+    {
+        return Err(Error::AppendUnsupported(
+            "encoded chunk size exceeds the dataset's extensible-array element width",
+        ));
+    }
+    Ok((
+        AppendPlan {
+            chunks,
+            completed_tail,
+            predecessor: None,
+            n_full: 0,
+            new_dim: new_elems,
+            new_num_chunks: num_chunks,
+            stats,
+        },
+        initialization,
+    ))
 }
 
 /// Publishes a planned append with synchronization barriers between its storage updates.

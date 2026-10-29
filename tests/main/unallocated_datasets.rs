@@ -15,10 +15,166 @@ use hdf5_pure::MaxExtent;
 use hdf5_pure::MemoryStrategy;
 use hdf5_pure::MessageType;
 use hdf5_pure::ScaleOffset;
+use hdf5_pure::SyncPolicy;
 use hdf5_pure_format::__private::{AccessMode, ChunkIndexLayout, DataLayout, ObjectHeader};
 use rstest::rstest;
 use test_util::object_header::MessageType as FixtureMessage;
 use test_util::object_header::v2;
+
+#[rstest]
+#[case::immediate(FirstAppend::Immediate)]
+#[case::borrowed(FirstAppend::Borrowed)]
+#[case::owned(FirstAppend::Owned)]
+fn first_and_subsequent_appends_materialize_deferred_indexes(
+    #[case] operation: FirstAppend,
+    #[values(false, true)] filtered: bool,
+    #[values(FileSpaceStrategy::FsmAggr, FileSpaceStrategy::Page)] strategy: FileSpaceStrategy,
+    #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] backing: MemoryStrategy,
+    #[values(SyncPolicy::Always, SyncPolicy::OnClose)] sync: SyncPolicy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("first.h5");
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_settings(FileSpaceSettings::new(strategy).with_persistence(true));
+    let target = builder.create_dataset("schema");
+    target
+        .with_unallocated_storage(hdf5_pure::make_i32_type(), &[0])
+        .with_chunks(&[4])
+        .with_maxshape(&[MaxExtent::Unlimited])
+        .with_fill_value(-7_i32);
+    if filtered {
+        target.with_fletcher32();
+    }
+    builder.write(&path).unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    clear_index_header(&mut bytes);
+    std::fs::write(&path, bytes).unwrap();
+    let file = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new()
+            .with_memory_strategy(backing)
+            .with_sync_policy(sync),
+    )
+    .unwrap();
+    operation.run(file.dataset("schema").unwrap());
+    let mut target = file.dataset("schema").unwrap();
+    assert_eq!(target.read_i32().unwrap(), (0..7).collect::<Vec<_>>());
+    target.append(&(7..11).collect::<Vec<i32>>()).unwrap();
+    assert_eq!(target.read_i32().unwrap(), (0..11).collect::<Vec<_>>());
+    assert_eq!(target.shape().unwrap(), [11]);
+    assert_eq!(target.chunks().unwrap().len(), 3);
+    drop(target);
+    file.close().unwrap();
+    let file = File::open(&path).unwrap();
+    assert_eq!(
+        file.dataset("schema").unwrap().read_i32().unwrap(),
+        (0..11).collect::<Vec<_>>()
+    );
+}
+
+#[rstest]
+#[case::two_bytes(256)]
+#[case::three_bytes(65_536)]
+fn first_append_uses_the_layouts_encoded_dimension_width(#[case] chunk_elements: u64) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("wide-dimension.h5");
+    let mut builder = FileBuilder::new();
+    builder
+        .create_dataset("schema")
+        .with_unallocated_storage(hdf5_pure::make_i32_type(), &[0])
+        .with_chunks(&[chunk_elements])
+        .with_maxshape(&[MaxExtent::Unlimited])
+        .with_fill_value(-7_i32);
+    builder.write(&path).unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    clear_index_header(&mut bytes);
+    std::fs::write(&path, bytes).unwrap();
+    let file = File::open_rw(&path).unwrap();
+    file.dataset("schema")
+        .unwrap()
+        .append(&[17_i32, 19])
+        .unwrap();
+    file.close().unwrap();
+    let file = File::open(&path).unwrap();
+    let target = file.dataset("schema").unwrap();
+    assert_eq!(target.read_i32().unwrap(), [17, 19]);
+    assert_eq!(target.chunk_shape().unwrap().unwrap(), [chunk_elements]);
+    drop(target);
+    file.close().unwrap();
+}
+
+#[derive(Clone, Copy)]
+enum FirstAppend {
+    Borrowed,
+    Immediate,
+    Owned,
+}
+
+impl FirstAppend {
+    fn run(self, mut target: Dataset) {
+        match self {
+            Self::Immediate => target.append(&(0..7).collect::<Vec<i32>>()).unwrap(),
+            Self::Borrowed => {
+                let mut appender = target.buffered_appender().unwrap();
+                appender.append(&(0..7).collect::<Vec<i32>>()).unwrap();
+                appender.finish().unwrap();
+            }
+            Self::Owned => {
+                let mut appender = target.into_buffered_appender().unwrap();
+                appender.append(&(0..7).collect::<Vec<i32>>()).unwrap();
+                appender.finish().unwrap();
+            }
+        }
+    }
+}
+
+#[rstest]
+#[case::plain(false)]
+#[case::filtered(true)]
+fn first_append_rejects_unreadable_padding_before_initialization(#[case] filtered: bool) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("fill.h5");
+    let mut builder = FileBuilder::new();
+    let target = builder.create_dataset("schema");
+    target
+        .with_unallocated_storage(hdf5_pure::make_i32_type(), &[0])
+        .with_chunks(&[4])
+        .with_maxshape(&[MaxExtent::Unlimited]);
+    if filtered {
+        target.with_fletcher32();
+    }
+    builder.write(&path).unwrap();
+    let mut image = std::fs::read(&path).unwrap();
+    clear_index_header(&mut image);
+    let (header, fill) = test_util::bytes::signature_offsets(&image, v2::SIGNATURE)
+        .into_iter()
+        .find_map(|at| {
+            ObjectHeader::parse(&image, AccessMode::ReadOnly, at, 8, 8)
+                .unwrap()
+                .messages
+                .into_iter()
+                .find(|message| message.msg_type == MessageType::FILL_VALUE)
+                .map(|message| (at, message.data))
+        })
+        .unwrap();
+    let mut fill = fill;
+    fill[0] = u8::MAX;
+    v2::replace_message(&mut image, header, FixtureMessage::FILL_VALUE, &fill);
+    std::fs::write(&path, &image).unwrap();
+    let file = File::open_rw(&path).unwrap();
+    let error = file
+        .dataset("schema")
+        .unwrap()
+        .append(&[3_i32])
+        .unwrap_err();
+    assert!(
+        matches!(error, Error::Format(FormatError::UnreadableFillValue)),
+        "{error:?}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), image);
+    file.close().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), image);
+}
 
 #[rstest]
 #[case::immediate(EmptyAppendOperation::Immediate)]

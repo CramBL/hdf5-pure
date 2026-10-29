@@ -142,10 +142,9 @@
 //! - Rows can be appended to an existing chunked, unlimited, Extensible-Array
 //!   dataset **immediately and in place** with an in-place append (amortized O(1),
 //!   crash-atomic, no `commit`), interleaved with the staged edits above. A
-//!   target the fast path cannot handle — a userblock or pre-v2 file, an
-//!   unallocated index, a non-Extensible-Array or multi-hard-link dataset, a
-//!   a filtered dataset sitting on a partial trailing chunk — is refused with
-//!   [`Error::AppendInPlaceUnsupported`]; use the staged `append_dataset` instead.
+//!   target must satisfy the requirements of [`Dataset::append`](crate::Dataset::append).
+//!   The first nonempty write initializes an eligible empty dataset's unallocated index.
+//!   Unsupported targets return [`Error::AppendInPlaceUnsupported`].
 //!
 //! # Free-space reuse (issue #21)
 //!
