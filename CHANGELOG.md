@@ -8,8 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- `Dataset::append` initializes eligible empty datasets with an unallocated Extensible Array index, including through buffered appenders. Empty operations leave index and element storage unallocated.
-- `Error::AllocationPublicationUncertain` reports append, commit, or synchronization requests rejected after an unconfirmed editing operation.
+- `Dataset::append` initializes eligible empty datasets with an unallocated Extensible Array index, including through buffered appenders. Empty operations leave index and element storage unallocated ([#973](https://github.com/CramBL/hdf5-pure/pull/973)).
+- `Error::AllocationPublicationUncertain` reports append, commit, or synchronization requests rejected after an unconfirmed editing operation ([#973](https://github.com/CramBL/hdf5-pure/pull/973)).
 - `Dataset::into_buffered_appender` creates an owned buffered appender that can be stored without a lifetime parameter and retains the editing session after the original file handle is dropped. Explicit file closure makes further appender writes fail ([#945](https://github.com/CramBL/hdf5-pure/pull/945)).
 - `RepackOptions::with_file_space_settings` selects the output allocation policy while preserving eligible encoded chunks verbatim ([#946](https://github.com/CramBL/hdf5-pure/pull/946)).
 - `FileAccessProperties::with_persisted_free_space_policy` enables strict writable opening that rejects invalid persisted free-space metadata before changing the file. Tolerant recovery remains the default ([#941](https://github.com/CramBL/hdf5-pure/pull/941)).
@@ -17,7 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `Error::TraversalLimitExceeded` reports an object graph with more objects or hard links than a copy or a repack reads, or with groups nested deeper than a repack writes ([#922](https://github.com/CramBL/hdf5-pure/pull/922), [#926](https://github.com/CramBL/hdf5-pure/pull/926), [#928](https://github.com/CramBL/hdf5-pure/pull/928)).
 - `AppendOptions` permits explicitly re-encoding a filtered lossy partial tail through immediate, staged, and buffered appends. Each rewrite can introduce additional quantization error in previously published tail values ([#916](https://github.com/CramBL/hdf5-pure/pull/916)).
 - `FileSpaceSettings` groups file-space configuration in a portable value, with normalized settings for strategies without free-space managers ([#894](https://github.com/CramBL/hdf5-pure/pull/894)).
-- `File::reusable_space_stats` reads a writable session's logical size and reusable free bytes without allocations after platform mutex initialization. The reusable total includes unused aggregates and does not guarantee that a particular write fits.
+- `File::reusable_space_stats` reads a writable session's logical size and reusable free bytes without allocations after platform mutex initialization. The reusable total includes unused aggregates and does not guarantee that a particular write fits ([#973](https://github.com/CramBL/hdf5-pure/pull/973)).
 - `File::persisted_free_sections` inspects typed, base-relative free sections, per-manager totals, and persisted manager metadata allocation bytes through buffered or streaming readers. The metadata count includes unused section-list capacity, and overlapping sections are rejected ([#906](https://github.com/CramBL/hdf5-pure/pull/906), [#941](https://github.com/CramBL/hdf5-pure/pull/941)).
 - `DatasetCreateProperties` configures a dataset's chunk dimensions, filters, partial edge chunk filtering, and fill settings as a dataset creation property list. Applying it replaces the settings the builder methods made earlier ([#879](https://github.com/CramBL/hdf5-pure/pull/879), [#892](https://github.com/CramBL/hdf5-pure/pull/892)).
 - `FixedPointType::with_padding` and related numeric APIs configure padding bits that survive metadata reads and writes ([#862](https://github.com/CramBL/hdf5-pure/pull/862)).
@@ -79,10 +79,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- Fixed `Dataset::append` accepting malformed Extensible Array metadata required to plan the append, including when checksum verification is disabled for reads.
-- Fixed premature publication of Extensible Array page initialization bits in `Dataset::append`. The editor flushes page contents before writing the bit and requests a durability barrier under the Always synchronization policy.
-- Fixed `File::open_rw` leaving complete pages inside unaligned generic-large PAGE free sections unavailable for reuse, while partial edges remain unclassified.
-- Fixed unused reserved space being lost after interrupted `Dataset::append` calls in files with persisted free space. Allocations are published through the free-space managers before new references, with more frequent manager rewrites.
+- Fixed `Dataset::append` accepting malformed Extensible Array metadata required to plan the append, including when checksum verification is disabled for reads ([#973](https://github.com/CramBL/hdf5-pure/pull/973)).
+- Fixed premature publication of Extensible Array page initialization bits in `Dataset::append`. The editor flushes page contents before writing the bit and requests a durability barrier under the Always synchronization policy ([#973](https://github.com/CramBL/hdf5-pure/pull/973)).
+- Fixed `File::open_rw` leaving complete pages inside unaligned generic-large PAGE free sections unavailable for reuse, while partial edges remain unclassified ([#973](https://github.com/CramBL/hdf5-pure/pull/973)).
+- Fixed unused reserved space being lost after interrupted `Dataset::append` calls in files with persisted free space. Allocations are published through the free-space managers before new references, with more frequent manager rewrites ([#973](https://github.com/CramBL/hdf5-pure/pull/973)).
 - Fixed storage growth from superseded partial tails in `Dataset::append` and buffered flushes when the file-space strategy admits reclamation ([#957](https://github.com/CramBL/hdf5-pure/pull/957)).
 - Fixed `File::commit` making superseded storage reusable after an uncertain nonpersistent root publication ([#957](https://github.com/CramBL/hdf5-pure/pull/957)).
 - Fixed `FileBuilder::finish` and related dataset creation writing incompatible chunk dimension widths for dimensions from 65,536 through 16,777,215 ([#952](https://github.com/CramBL/hdf5-pure/pull/952)).

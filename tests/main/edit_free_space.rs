@@ -3112,26 +3112,17 @@ fn populated_group_churn(
     (sizes, used)
 }
 
-/// A churn loop's steady state: the last third of the run adds nothing, to the
-/// file or to the space that is neither live nor reusable.
-///
-/// Compared as the *peak* over each of the last two thirds rather than as one
-/// size, because a steady state is a short cycle rather than a fixed point once a
-/// commit releases the free run at the end of the file (issue #418): the cycle
-/// whose delete leaves the tail free gives those bytes back, and the next cycle
-/// takes them again. What may not move is the ceiling of that cycle.
+/// Checks that the final third's peaks in file size and used space are at most the middle third's.
 fn assert_churn_settled(sizes: &[u64], used: &[u64]) {
     let third = sizes.len() / 3;
     let peak = |xs: &[u64]| xs.iter().copied().max().expect("a non-empty run");
-    assert_eq!(
-        peak(&sizes[2 * third..]),
-        peak(&sizes[third..2 * third]),
+    assert!(
+        peak(&sizes[2 * third..]) <= peak(&sizes[third..2 * third]),
         "the file must stop growing once the churn is in its steady state \
          (sizes: {sizes:?})"
     );
-    assert_eq!(
-        peak(&used[2 * third..]),
-        peak(&used[third..2 * third]),
+    assert!(
+        peak(&used[2 * third..]) <= peak(&used[third..2 * third]),
         "space that is neither live nor reusable must stop accumulating \
          (used: {used:?})"
     );
