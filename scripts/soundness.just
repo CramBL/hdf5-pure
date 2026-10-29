@@ -40,7 +40,7 @@ repack-profile MODE="memory" SUBTREES="512" ROUNDS="5":
 
 # Measure raw staging, retained encoding, and completed output for filtered creation.
 filtered-chunk-memory:
-    cargo test --locked -p hdf5-pure --lib chunked_write::allocation_tests -- --nocapture
+    cargo test --locked -p hdf5-pure --lib chunked_write::tests::allocation -- --nocapture
 
 # Measure filtered dataset creation throughput for the shared chunk workloads.
 filtered-chunk-bench *ARGS:

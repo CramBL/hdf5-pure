@@ -11,9 +11,9 @@ use test_util::allocation;
 use test_util::filtered_chunks::WORKLOADS;
 use test_util::filtered_chunks::Workload;
 
-use super::ChunkOptions;
-use super::FilterKind;
-use super::gathering::ChunkTraversal;
+use super::super::ChunkOptions;
+use super::super::FilterKind;
+use super::super::gathering::ChunkTraversal;
 use crate::File;
 use crate::FileBuilder;
 use crate::FillTime;
