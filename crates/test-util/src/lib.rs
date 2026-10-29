@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 pub mod allocation;
+pub mod allocation_oracle;
 pub mod attribute;
 pub mod btree_v1;
 pub mod btree_v2;
