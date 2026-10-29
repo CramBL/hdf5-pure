@@ -60,6 +60,7 @@ test_util_hdf5::hdf5_1_10_tests! {
 }
 
 mod extents;
+mod history;
 mod lifecycle;
 mod managers;
 mod metadata;
@@ -144,8 +145,8 @@ fn repeated_interrupted_appends_reuse_the_surviving_unique_interval(
         let interrupted = workload.prefix(point);
         fs::write(&path, &interrupted).unwrap();
         let observation = Observation::read(&interrupted);
-        histories.extend(workload.published_history(point));
-        observation.inspect("repeated interruption", cycle, &hole, &histories);
+        histories = workload.retained_history(point, &histories);
+        observation.inspect("repeated interruption", cycle, &hole, &mut histories);
         let before = fs::read(&path).unwrap();
         let reader = File::open(&path).unwrap();
         assert_eq!(
@@ -347,6 +348,7 @@ pub(super) struct Workload {
     snapshots: Vec<Observation>,
     initial_values: usize,
     candidates: Vec<Fact>,
+    /// Allocation facts and the prefixes where their ownership was first observed.
     history: Vec<(usize, Fact)>,
 }
 
@@ -391,7 +393,12 @@ impl Workload {
         let final_bytes = read();
         let mut image = base.clone();
         let mut snapshots = vec![initial];
-        let mut history = Vec::new();
+        let mut history = snapshots[0]
+            .live
+            .iter()
+            .filter(|fact| fact.kind == AllocationKind::Manager)
+            .map(|fact| (0, *fact))
+            .collect::<Vec<_>>();
         for (point, operation) in operations.iter().enumerate() {
             operation.apply(&mut image);
             let snapshot = Observation::read(&image);
@@ -400,7 +407,7 @@ impl Workload {
                 .iter()
                 .filter(|fact| fact.kind == AllocationKind::Manager)
             {
-                if !history.iter().any(|(_, prior)| prior == fact) {
+                if !snapshots.last().unwrap().live.contains(fact) {
                     history.push((point + 1, *fact));
                 }
             }
@@ -513,7 +520,12 @@ impl Workload {
             assert!(snapshot.values.len() >= previous_values);
             previous_values = snapshot.values.len();
             let allocations = self.facts(point, snapshot);
-            snapshot.inspect("append prefix", point, hole, &self.published_history(point));
+            snapshot.inspect(
+                "append prefix",
+                point,
+                hole,
+                &mut self.published_history(point),
+            );
             allocation_oracle::inspect(
                 Context {
                     case: "append allocation states",
@@ -549,6 +561,7 @@ impl Workload {
         image
     }
 
+    /// Combines reachable allocations, prepared candidates, and retained ownership at `point`.
     fn facts(&self, point: usize, observation: &Observation) -> Vec<Allocation> {
         let mut facts = observation
             .live
@@ -559,80 +572,103 @@ impl Workload {
             if observation.live.contains(candidate) {
                 continue;
             }
-            let coverage = Coverage::new([candidate.range]);
-            let length = if candidate.kind == AllocationKind::Index {
-                test_util::extensible_array::SIGNATURE.len()
-            } else {
-                usize::try_from(candidate.range.length()).unwrap().min(16)
-            };
-            let start = usize::try_from(candidate.range.start()).unwrap();
-            let expected = &self.final_bytes[start..start + length];
-            let prepared = self.operations[..point].iter().any(|operation| {
-                let DiskOp::Write { offset, bytes } = operation else {
-                    return false;
-                };
-                candidate
-                    .range
-                    .start()
-                    .checked_sub(*offset)
-                    .and_then(|offset| usize::try_from(offset).ok())
-                    .is_some_and(|local| bytes.get(local..local + length) == Some(expected))
-            });
-            if !prepared {
+            let Some(state) = self.candidate_state(point, *candidate) else {
                 continue;
-            }
-            let state = if coverage.intersection(&observation.free).is_empty()
-                && candidate.range.end() <= observation.eof
-            {
-                AllocationState::Orphaned
-            } else {
-                AllocationState::Provisional
             };
             facts.push(candidate.allocation(state));
         }
-        for (_, fact) in self
-            .history
-            .iter()
-            .filter(|(published, _)| *published <= point)
-        {
-            if observation.live.contains(fact) {
-                continue;
-            }
-            let coverage = Coverage::new([fact.range]);
-            if coverage.intersection(&observation.free).is_empty()
-                && coverage.intersection(&observation.reachable()).is_empty()
-                && !facts.iter().any(|other| {
-                    !coverage
-                        .intersection(&Coverage::new([other.complete()]))
-                        .is_empty()
-                })
-            {
-                facts.push(fact.allocation(AllocationState::Orphaned));
-            }
+        let mut history = self.published_history(point);
+        observation.retain_history(&mut history);
+        for fact in history {
+            observation.retain_owned(&mut facts, fact);
         }
         facts
     }
 
+    /// Returns complete allocations retained through `point`.
+    ///
+    /// Includes observed manager lifetimes and index or payload allocations after preparation and
+    /// ownership. Omits a lifetime after any persisted free overlap, including allocation padding.
     fn published_history(&self, point: usize) -> Vec<Fact> {
-        self.history
+        let mut history = Vec::new();
+        for (published, fact) in self
+            .history
             .iter()
             .filter(|(published, _)| *published <= point)
-            .map(|(_, fact)| *fact)
-            .chain(
-                self.candidates
+        {
+            if !history.contains(fact)
+                && !self.snapshots[*published..=point]
                     .iter()
-                    .filter(|candidate| {
-                        let coverage = Coverage::new([candidate.range]);
-                        (0..=point).any(|index| {
-                            coverage
-                                .intersection(&self.snapshots[index].free)
-                                .is_empty()
-                                && candidate.range.end() <= self.snapshots[index].eof
-                        })
-                    })
-                    .copied(),
-            )
-            .collect()
+                    .any(|snapshot| snapshot.releases(*fact))
+            {
+                history.push(*fact);
+            }
+        }
+        history.extend(
+            self.candidates
+                .iter()
+                .filter(|candidate| {
+                    self.candidate_state(point, **candidate) == Some(AllocationState::Orphaned)
+                })
+                .copied(),
+        );
+        history
+    }
+
+    /// Classifies a final allocation after its latest matching preparation write.
+    ///
+    /// Returns [`None`] before preparation or after persisted free coverage overlaps an owned
+    /// lifetime. A caller can observe a fresh lifetime after another matching preparation write.
+    fn candidate_state(&self, point: usize, candidate: Fact) -> Option<AllocationState> {
+        let length = if candidate.kind == AllocationKind::Index {
+            test_util::extensible_array::SIGNATURE.len()
+        } else {
+            usize::try_from(candidate.range.length()).unwrap().min(16)
+        };
+        let start = usize::try_from(candidate.range.start()).unwrap();
+        let expected = &self.final_bytes[start..start + length];
+        let prepared = self.operations[..point].iter().rposition(|operation| {
+            let DiskOp::Write { offset, bytes } = operation else {
+                return false;
+            };
+            candidate
+                .range
+                .start()
+                .checked_sub(*offset)
+                .and_then(|offset| usize::try_from(offset).ok())
+                .is_some_and(|local| bytes.get(local..local + length) == Some(expected))
+        })? + 1;
+        let mut state = AllocationState::Provisional;
+        for snapshot in &self.snapshots[prepared..=point] {
+            if snapshot.releases(candidate) {
+                if state == AllocationState::Orphaned {
+                    return None;
+                }
+            } else if candidate.range.end() <= snapshot.eof {
+                state = AllocationState::Orphaned;
+            }
+        }
+        Some(state)
+    }
+
+    /// Combines published allocations with inherited facts unreleased through `point`.
+    ///
+    /// Checks every intervening observation for persisted free coverage over an inherited extent.
+    fn retained_history(&self, point: usize, inherited: &[Fact]) -> Vec<Fact> {
+        let mut history = self.published_history(point);
+        history.extend(
+            inherited
+                .iter()
+                .filter(|fact| {
+                    !self.snapshots[..=point]
+                        .iter()
+                        .any(|snapshot| snapshot.releases(**fact))
+                })
+                .copied(),
+        );
+        history.sort_unstable_by_key(|fact| fact.range);
+        history.dedup();
+        history
     }
 }
 
@@ -949,25 +985,9 @@ impl Observation {
         }
     }
 
-    fn inspect(&self, case: &str, point: usize, hole: &Coverage, history: &[Fact]) {
-        let mut facts = self
-            .live
-            .iter()
-            .map(|fact| fact.allocation(AllocationState::Linked))
-            .collect::<Vec<_>>();
-        for fact in history {
-            let coverage = Coverage::new([fact.range]);
-            if coverage.intersection(&self.free).is_empty()
-                && coverage.intersection(&self.reachable()).is_empty()
-                && !facts.iter().any(|other| {
-                    !coverage
-                        .intersection(&Coverage::new([other.complete()]))
-                        .is_empty()
-                })
-            {
-                facts.push(fact.allocation(AllocationState::Orphaned));
-            }
-        }
+    /// Checks ownership after expiring released facts from `history`.
+    fn inspect(&self, case: &str, point: usize, hole: &Coverage, history: &mut Vec<Fact>) {
+        let facts = self.allocation_facts(history);
         allocation_oracle::inspect(
             Context {
                 case,
@@ -980,6 +1000,32 @@ impl Observation {
             &facts,
         )
         .unwrap();
+    }
+
+    /// Returns reachable and retained orphan allocations after expiring released history.
+    fn allocation_facts(&self, history: &mut Vec<Fact>) -> Vec<Allocation> {
+        self.retain_history(history);
+        let mut facts = self
+            .live
+            .iter()
+            .map(|fact| fact.allocation(AllocationState::Linked))
+            .collect::<Vec<_>>();
+        for fact in history.iter().copied() {
+            self.retain_owned(&mut facts, fact);
+        }
+        facts
+    }
+
+    /// Removes allocation facts that overlap persisted free coverage.
+    fn retain_history(&self, history: &mut Vec<Fact>) {
+        history.retain(|fact| !self.releases(*fact));
+    }
+
+    /// Returns whether persisted free coverage overlaps any part of the complete allocation.
+    fn releases(&self, fact: Fact) -> bool {
+        !Coverage::new([fact.range])
+            .intersection(&self.free)
+            .is_empty()
     }
 
     fn reachable(&self) -> Coverage {
@@ -1203,7 +1249,7 @@ fn force_unique_reuse(path: &Path, hole: &Coverage, history: &[Fact], paged: boo
         length,
     )];
     allocations.extend_from_slice(history);
-    Observation::read(&published).inspect("unique interval reused", 0, hole, &allocations);
+    Observation::read(&published).inspect("unique interval reused", 0, hole, &mut allocations);
 }
 
 fn replace_free_sections(original: &[u8], coverage: &Coverage) -> Vec<u8> {

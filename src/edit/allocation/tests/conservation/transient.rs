@@ -167,13 +167,11 @@ fn run_pure(writer: WritePath, paged: bool, deferred: bool, encoding: Encoding) 
         workload.assert_reclaimed();
         let point = workload.interruption();
         fs::write(&path, workload.prefix(point)).unwrap();
-        let mut current = workload.owned_history(point);
-        current.extend(history);
-        history = current;
+        history = workload.retained_history(point, &history);
     }
     let resumed = Workload::record(&path, WritePath::Immediate);
     resumed.replay_with_history(&path, &hole, &history, |_, _| {});
-    history.extend(resumed.owned_history(resumed.operations.len()));
+    history = resumed.retained_history(resumed.operations.len(), &history);
     super::force_unique_reuse(&path, &hole, &history, paged);
 }
 
@@ -769,19 +767,7 @@ impl Workload {
             .iter()
             .map(|fact| fact.allocation(AllocationState::Linked))
             .collect::<Vec<_>>();
-        let mut retained = self.owned_history(point);
-        retained.extend(
-            history
-                .iter()
-                .filter(|fact| {
-                    !self.snapshots[..=point].iter().any(|observed| {
-                        !Coverage::new([fact.range])
-                            .intersection(&observed.free)
-                            .is_empty()
-                    })
-                })
-                .copied(),
-        );
+        let retained = self.retained_history(point, history);
         for fact in retained {
             snapshot.retain_owned(&mut facts, fact);
         }
@@ -818,6 +804,26 @@ impl Workload {
             }
         }
         facts
+    }
+
+    /// Combines owned allocations with inherited facts unreleased through `point`.
+    ///
+    /// Checks every intervening observation for persisted free coverage over an inherited extent.
+    fn retained_history(&self, point: usize, history: &[Fact]) -> Vec<Fact> {
+        let mut retained = self.owned_history(point);
+        retained.extend(
+            history
+                .iter()
+                .filter(|fact| {
+                    !self.snapshots[..=point].iter().any(|observed| {
+                        !Coverage::new([fact.range])
+                            .intersection(&observed.free)
+                            .is_empty()
+                    })
+                })
+                .copied(),
+        );
+        retained
     }
 
     /// Returns payload ranges whose final reference precedes the completed log.
@@ -1053,7 +1059,7 @@ impl Chunk {
 
 impl Observation {
     /// Adds an orphan allocation whose extent overlaps neither free sections nor existing facts.
-    fn retain_owned(&self, facts: &mut Vec<Allocation>, fact: Fact) {
+    pub(super) fn retain_owned(&self, facts: &mut Vec<Allocation>, fact: Fact) {
         let coverage = Coverage::new([fact.range]);
         if coverage.intersection(&self.free).is_empty()
             && !facts.iter().any(|other| {
@@ -1118,7 +1124,7 @@ pub(super) fn assert_empty_operations(path: &Path, owned: bool, hole: &Coverage)
     assert_eq!(fs::read(path).unwrap(), before);
     let after = Observation::read(&before);
     assert!(!after.index_defined);
-    after.inspect("empty buffered operations", 0, hole, &[]);
+    after.inspect("empty buffered operations", 0, hole, &mut Vec::new());
 }
 
 fn values(start: usize, length: usize) -> Vec<i32> {

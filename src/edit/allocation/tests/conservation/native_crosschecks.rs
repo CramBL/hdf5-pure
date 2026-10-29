@@ -159,7 +159,7 @@ fn native_write_after_interruption(
     fs::copy(&path, &control_path).unwrap();
     allocation_publication::append(&control_path);
     let control = Observation::read(&fs::read(&control_path).unwrap());
-    control.inspect("native-only append control", 0, &hole, &[]);
+    control.inspect("native-only append control", 0, &hole, &mut Vec::new());
     let workload = Workload::record(&path, WritePath::Immediate, 3);
     let point = workload
         .snapshots
@@ -202,6 +202,6 @@ fn native_write_after_interruption(
         "native allocation after interruption",
         point,
         &hole,
-        &workload.published_history(point),
+        &mut workload.published_history(point),
     );
 }
