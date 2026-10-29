@@ -16,7 +16,7 @@ repository.workspace = true
 hdf5 = ["dep:hdf5", "dep:hdf5-sys", "ndarray"]
 # The release series of the linked libhdf5, each implying the one below.
 "__hdf5-1.10" = ["hdf5"]
-"__hdf5-1.12" = ["__hdf5-1.10"]
+"__hdf5-1.12" = ["__hdf5-1.10", "hdf5-sys/deprecated"]
 "__hdf5-1.14" = ["__hdf5-1.12"]
 "__hdf5-2" = ["__hdf5-1.14"]
 # Builds and links the libhdf5 that `hdf5-metno` bundles.
