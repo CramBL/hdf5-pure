@@ -2,7 +2,6 @@ use rstest::rstest;
 use test_util::userblock::Userblock;
 use test_util_hdf5::paged;
 
-use super::file_space;
 use crate::AttrValue;
 use crate::File;
 use crate::FreeSectionCoordinates;
@@ -39,7 +38,7 @@ fn created_page_metadata_tail_is_owned(
     let exact_fill = [(512, 18), (4_096, 3_601), (8_192, 7_697)].contains(&(page, attribute_len))
         && u64::try_from(raw_len).unwrap() == page;
     if exact_fill || (page == 512 && attribute_len == 412 && (raw_len == 511 || raw_len == 513)) {
-        assert_eq!(file_space::serialized_manager_padding(&path), 1);
+        assert_eq!(reader_test_util::serialized_manager_padding(&path), 1);
     }
     if attribute_len == 18 && (raw_len == 511 || raw_len == 513) {
         assert_eq!(
@@ -63,7 +62,7 @@ fn created_page_metadata_tail_is_owned(
         );
     }
     let unclassified = if raw_len == 513 {
-        vec![(file_space::raw_extents(&file, "d")[0].end, 511)]
+        vec![(reader_test_util::raw_extents(&file, "d")[0].end, 511)]
     } else {
         Vec::new()
     };
@@ -75,7 +74,7 @@ fn created_page_metadata_tail_is_owned(
         file.root().attrs().unwrap()["fill"],
         AttrValue::U8Array(vec![0; attribute_len])
     );
-    file_space::assert_space_ownership(&file, &unclassified);
+    reader_test_util::assert_space_ownership(&file, &unclassified);
     file.close().unwrap();
     let file = File::open_rw(&path).unwrap();
     assert_eq!(file.reusable_free_sections().unwrap(), initial);
@@ -104,7 +103,7 @@ fn created_page_metadata_tail_is_owned(
     } else {
         unclassified
     };
-    file_space::assert_space_ownership(&file, &unclassified);
+    reader_test_util::assert_space_ownership(&file, &unclassified);
     let reusable = file.reusable_free_sections().unwrap();
     assert_eq!(
         file.dataset("d").unwrap().read_u8().unwrap(),
@@ -125,7 +124,7 @@ fn created_page_metadata_tail_is_owned(
         reopened.dataset("added").unwrap().read_u8().unwrap(),
         vec![9; 32]
     );
-    file_space::assert_space_ownership(&reopened, &unclassified);
+    reader_test_util::assert_space_ownership(&reopened, &unclassified);
     reopened.close().unwrap();
     paged::assert_consistent(&path, page);
     if raw_len != 0 {

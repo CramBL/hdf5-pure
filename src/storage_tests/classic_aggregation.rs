@@ -8,7 +8,6 @@ use test_util_hdf5::aggregation::Object;
 use test_util_hdf5::aggregation::Step;
 use test_util_hdf5::aggregation::Workload;
 
-use super::file_space;
 use crate::File;
 use crate::FileAccessProperties;
 use crate::FileBuilder;
@@ -66,7 +65,7 @@ fn persistent_creation_recovers_settled_spare_and_reuses_it_after_reopen(
         })
         .unwrap();
     file.commit().unwrap();
-    let extent = file_space::contiguous_extent(&file, "added");
+    let extent = reader_test_util::contiguous_extent(&file, "added");
     if has_manager {
         assert!(reusable.sections().iter().any(
             |section| section.address() <= extent.start && extent.end <= section.end_address()
@@ -182,7 +181,7 @@ fn hdf5_pure_places_every_allocation_of_an_edit_under_none_at_or_past_the_end_of
     for (name, end) in strings {
         let collection = aggregation::collection_address(
             &bytes,
-            file_space::contiguous_extent(&file, name).start,
+            reader_test_util::contiguous_extent(&file, name).start,
         );
         assert!(
             collection >= end,
@@ -249,7 +248,7 @@ fn staged_aggr_allocations_reuse_session_windows(
         })
         .unwrap();
     file.commit().unwrap();
-    let first = file_space::contiguous_extent(&file, "first");
+    let first = reader_test_util::contiguous_extent(&file, "first");
     let ownership = reader_test_util::ownership(&file).unwrap();
     assert!(ownership.analysis_complete);
     assert_eq!(ownership.physical_size, ownership.logical_size);
@@ -279,7 +278,7 @@ fn staged_aggr_allocations_reuse_session_windows(
         })
         .unwrap();
     file.commit().unwrap();
-    let second = file_space::contiguous_extent(&file, "second");
+    let second = reader_test_util::contiguous_extent(&file, "second");
     if reopen {
         assert!(second.start >= before_second);
     } else {

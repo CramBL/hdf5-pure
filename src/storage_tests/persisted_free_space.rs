@@ -7,7 +7,6 @@ use test_util::range;
 use test_util::temp;
 use test_util::userblock::Userblock;
 
-use super::file_space;
 use crate::AttrValue;
 use crate::File;
 use crate::FileBuilder;
@@ -27,7 +26,7 @@ fn a_session_reuses_the_free_space_an_earlier_session_persisted(
     let userblock = base.userblock(strategy);
     let path = temp::temp_path(&format!("persisted_reuse_{strategy:?}_{userblock}.h5"));
     let stamped = write_fixture(&path, strategy, userblock);
-    let hole = file_space::contiguous_extent(&File::open(&path).unwrap(), "b");
+    let hole = reader_test_util::contiguous_extent(&File::open(&path).unwrap(), "b");
 
     let first = File::open_rw(&path).unwrap();
     first.root().delete("b").unwrap();
@@ -83,7 +82,7 @@ fn a_session_reuses_the_free_space_an_earlier_session_persisted(
 
     let file = File::open(&path).unwrap();
     assert_eq!(
-        file_space::contiguous_extent(&file, "d"),
+        reader_test_util::contiguous_extent(&file, "d"),
         expected..expected + 1_200
     );
     assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), vec![9; 300]);
@@ -219,8 +218,8 @@ fn a_reopened_paged_session_reuses_each_page_type_in_its_own_pages(
     builder.write(&path).unwrap();
     let stamped = Userblock::read(&path, usize::try_from(userblock).unwrap());
     let file = File::open(&path).unwrap();
-    let pages = file_space::contiguous_extent(&file, "pages");
-    let c = file_space::contiguous_extent(&file, "c");
+    let pages = reader_test_util::contiguous_extent(&file, "pages");
+    let c = reader_test_util::contiguous_extent(&file, "c");
     drop(file);
     assert_eq!(pages.start, userblock + 2 * PAGE);
     assert_eq!(c.end, userblock + PAGE + 800);
@@ -281,7 +280,7 @@ fn a_reopened_paged_session_reuses_each_page_type_in_its_own_pages(
     );
     let file = File::open(&path).unwrap();
     assert_eq!(
-        file_space::contiguous_extent(&file, "d"),
+        reader_test_util::contiguous_extent(&file, "d"),
         c.end..c.end + 1_200
     );
     assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), vec![9; 300]);
