@@ -92,10 +92,14 @@ fn writing_and_reading_a_chunked_dataset_matches_its_recorded_figures() {
     let file = File::open_streaming(&path).unwrap();
     let all = file.dataset("t").unwrap().read_raw().unwrap();
     let read_len = all.len();
-    let first_mismatch = all.chunks_exact(8).enumerate().find_map(|(index, bytes)| {
-        (bytes != (index as f64).to_le_bytes())
-            .then(|| (index, <[u8; 8]>::try_from(bytes).unwrap()))
-    });
+    let first_mismatch = all
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .enumerate()
+        .find_map(|(index, bytes)| {
+            (bytes != &(index as f64).to_le_bytes()).then_some((index, *bytes))
+        });
     drop(all);
     drop(file);
 
