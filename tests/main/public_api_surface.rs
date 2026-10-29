@@ -202,10 +202,10 @@ fn a_traversal_limit_displays_the_count_it_bounds(
 }
 
 #[rstest::rstest]
-#[case(SuperblockVersion::Zero, 0, LibVer::Earliest)]
-#[case(SuperblockVersion::One, 1, LibVer::Earliest)]
-#[case(SuperblockVersion::Two, 2, LibVer::V18)]
-#[case(SuperblockVersion::Three, 3, LibVer::V110)]
+#[case::version_zero(SuperblockVersion::Zero, 0, LibVer::Earliest)]
+#[case::version_one(SuperblockVersion::One, 1, LibVer::Earliest)]
+#[case::version_two(SuperblockVersion::Two, 2, LibVer::V18)]
+#[case::version_three(SuperblockVersion::Three, 3, LibVer::V110)]
 fn a_public_superblock_version_has_a_wire_value_and_a_library_bound(
     #[case] version: SuperblockVersion,
     #[case] byte: u8,
@@ -236,8 +236,8 @@ fn a_public_superblock_version_has_a_wire_value_and_a_library_bound(
 }
 
 #[rstest::rstest]
-#[case(4)]
-#[case(u8::MAX)]
+#[case::first_unsupported_version(4)]
+#[case::maximum_byte(u8::MAX)]
 fn public_superblock_versions_reject_unsupported_bytes(#[case] byte: u8) {
     assert_eq!(
         SuperblockVersion::try_from(byte).unwrap_err(),
@@ -250,9 +250,9 @@ fn public_superblock_versions_reject_unsupported_bytes(#[case] byte: u8) {
 }
 
 #[rstest::rstest]
-#[case(SuperblockStatusFlags::new(), 0x00, false, false)]
-#[case(SuperblockStatusFlags::write_marked(), 0x01, true, false)]
-#[case(SuperblockStatusFlags::swmr_write_marked(), 0x05, true, true)]
+#[case::empty(SuperblockStatusFlags::new(), 0x00, false, false)]
+#[case::write_marked(SuperblockStatusFlags::write_marked(), 0x01, true, false)]
+#[case::swmr_write_marked(SuperblockStatusFlags::swmr_write_marked(), 0x05, true, true)]
 fn status_flags_have_named_constructors_and_typed_queries(
     #[case] flags: SuperblockStatusFlags,
     #[case] bits: u8,
@@ -408,9 +408,9 @@ fn filter_parameter_matches_require_a_consumer_fallback() {
 }
 
 #[rstest::rstest]
-#[case(FilterDisposition::Applied, (true, true))]
-#[case(FilterDisposition::BypassedRaw, (false, false))]
-#[case(FilterDisposition::Skipped, (true, false))]
+#[case::applied(FilterDisposition::Applied, (true, true))]
+#[case::bypassed_raw(FilterDisposition::BypassedRaw, (false, false))]
+#[case::skipped(FilterDisposition::Skipped, (true, false))]
 fn filter_dispositions_can_be_matched_exhaustively(
     #[case] disposition: FilterDisposition,
     #[case] expected: (bool, bool),
@@ -455,14 +455,14 @@ fn variable_length_kinds_and_string_metadata_are_public() {
 }
 
 #[rstest]
-#[case(SuperblockStatus::Zero(u32::MAX), SuperblockVersion::Zero, u32::MAX)]
-#[case(
+#[case::v0_all_flags(SuperblockStatus::Zero(u32::MAX), SuperblockVersion::Zero, u32::MAX)]
+#[case::version_one_high_flags(
     SuperblockStatus::One(0x8000_0004),
     SuperblockVersion::One,
     0x8000_0004
 )]
-#[case(SuperblockStatus::Two(0x84), SuperblockVersion::Two, 0x84)]
-#[case(SuperblockStatus::Three(0x04), SuperblockVersion::Three, 0x04)]
+#[case::version_two_unknown_flags(SuperblockStatus::Two(0x84), SuperblockVersion::Two, 0x84)]
+#[case::version_three_swmr_only(SuperblockStatus::Three(0x04), SuperblockVersion::Three, 0x04)]
 fn superblock_status_preserves_version_and_observed_bits(
     #[case] status: SuperblockStatus,
     #[case] version: SuperblockVersion,
@@ -478,9 +478,9 @@ fn superblock_status_preserves_version_and_observed_bits(
 }
 
 #[rstest]
-#[case(0x100)]
-#[case(0x8000_0004)]
-#[case(u32::MAX)]
+#[case::first_bit_above_byte(0x100)]
+#[case::high_bit_and_swmr(0x8000_0004)]
+#[case::all_bits(u32::MAX)]
 fn modern_superblock_status_rejects_a_wider_legacy_field(
     #[case] bits: u32,
     #[values(SuperblockVersion::Two, SuperblockVersion::Three)] version: SuperblockVersion,
@@ -493,9 +493,9 @@ fn modern_superblock_status_rejects_a_wider_legacy_field(
 }
 
 #[rstest]
-#[case(0x100)]
-#[case(0x8000_0004)]
-#[case(u32::MAX)]
+#[case::first_bit_above_byte(0x100)]
+#[case::high_bit_and_swmr(0x8000_0004)]
+#[case::all_bits(u32::MAX)]
 fn public_superblock_updates_reject_narrowing_without_changing_state(
     #[case] bits: u32,
     #[values(SuperblockVersion::Two, SuperblockVersion::Three)] version: SuperblockVersion,

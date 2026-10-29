@@ -59,15 +59,15 @@ impl EntryPoint {
 }
 
 #[rstest]
-#[case("a/b")]
-#[case("/a/b")]
-#[case("a/b/")]
-#[case("/a/b/")]
-#[case("a//b")]
-#[case("///a///b///")]
-#[case("./a/b")]
-#[case("a/./b")]
-#[case("a/b/.")]
+#[case::relative("a/b")]
+#[case::absolute("/a/b")]
+#[case::trailing_separator("a/b/")]
+#[case::absolute_trailing_separator("/a/b/")]
+#[case::repeated_separator("a//b")]
+#[case::repeated_separators("///a///b///")]
+#[case::leading_dot("./a/b")]
+#[case::interior_dot("a/./b")]
+#[case::trailing_dot("a/b/.")]
 fn every_spelling_of_a_path_names_one_dataset(
     #[case] spelling: &str,
     #[values(EntryPoint::File, EntryPoint::Root)] entry: EntryPoint,
@@ -97,9 +97,9 @@ fn a_group_resolves_every_kind_of_object_below_it() {
 }
 
 #[rstest]
-#[case("b")]
-#[case("./b")]
-#[case("b/")]
+#[case::relative("b")]
+#[case::leading_dot("./b")]
+#[case::trailing_separator("b/")]
 fn a_subgroup_resolves_a_path_relative_to_itself(#[case] spelling: &str) {
     let file = File::from_bytes(nested_file()).unwrap();
     let a = file.group("a").unwrap();
@@ -107,10 +107,10 @@ fn a_subgroup_resolves_a_path_relative_to_itself(#[case] spelling: &str) {
 }
 
 #[rstest]
-#[case("/b", 2)]
-#[case("//b", 2)]
-#[case("/a/b", 1)]
-#[case("/./a/b/", 1)]
+#[case::absolute_sibling("/b", 2)]
+#[case::repeated_root_separator("//b", 2)]
+#[case::absolute_nested("/a/b", 1)]
+#[case::absolute_nested_with_dots("/./a/b/", 1)]
 fn an_absolute_path_through_a_subgroup_starts_at_the_root(
     #[case] spelling: &str,
     #[case] value: i32,
@@ -146,9 +146,9 @@ fn an_absolute_path_stages_a_creation_at_the_root() {
 }
 
 #[rstest]
-#[case("")]
-#[case(".")]
-#[case("./.")]
+#[case::empty("")]
+#[case::dot(".")]
+#[case::repeated_dots("./.")]
 fn a_relative_path_that_spells_no_link_identifies_the_group_it_is_relative_to(
     #[case] spelling: &str,
 ) {
@@ -164,9 +164,9 @@ fn a_relative_path_that_spells_no_link_identifies_the_group_it_is_relative_to(
 }
 
 #[rstest]
-#[case("/")]
-#[case("//")]
-#[case("/./")]
+#[case::root_separator("/")]
+#[case::repeated_root_separators("//")]
+#[case::root_with_dot("/./")]
 fn an_absolute_path_that_spells_no_link_identifies_the_root(#[case] spelling: &str) {
     let file = File::from_bytes(nested_file()).unwrap();
 
@@ -188,9 +188,9 @@ fn an_absolute_path_that_spells_no_link_identifies_the_root(#[case] spelling: &s
 }
 
 #[rstest]
-#[case("absent", "absent")]
-#[case("a/absent", "a/absent")]
-#[case("/a//absent/", "a/absent")]
+#[case::missing_at_root("absent", "absent")]
+#[case::missing_below_group("a/absent", "a/absent")]
+#[case::normalized_missing("/a//absent/", "a/absent")]
 fn a_component_that_reaches_nothing_is_named_by_its_path(
     #[case] asked: &str,
     #[case] missing: &str,
@@ -205,9 +205,9 @@ fn a_component_that_reaches_nothing_is_named_by_its_path(
 }
 
 #[rstest]
-#[case("b/deeper", "b")]
-#[case("a/b/deeper", "a/b")]
-#[case("a/mytype/deeper", "a/mytype")]
+#[case::dataset_at_root("b/deeper", "b")]
+#[case::nested_dataset("a/b/deeper", "a/b")]
+#[case::committed_datatype("a/mytype/deeper", "a/mytype")]
 fn an_object_that_stopped_a_walk_is_named_by_its_path(
     #[case] asked: &str,
     #[case] stopper: &str,
@@ -331,9 +331,9 @@ impl StagedWrite {
 }
 
 #[rstest]
-#[case("/")]
-#[case("//")]
-#[case("/./")]
+#[case::root_separator("/")]
+#[case::repeated_root_separators("//")]
+#[case::root_with_dot("/./")]
 fn a_creation_staged_in_a_closure_at_the_root_group_path_is_rejected(#[case] spelling: &str) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("root_creation.h5");
@@ -360,9 +360,9 @@ fn a_creation_staged_in_a_closure_at_the_root_group_path_is_rejected(#[case] spe
 }
 
 #[rstest]
-#[case("")]
-#[case(".")]
-#[case("./.")]
+#[case::empty("")]
+#[case::dot(".")]
+#[case::repeated_dots("./.")]
 fn a_path_that_spells_no_link_is_no_target_for_a_write(
     #[case] spelling: &str,
     #[values(
@@ -434,11 +434,11 @@ impl BuilderEntryPoint {
 }
 
 #[rstest]
-#[case("")]
-#[case(".")]
-#[case("/")]
-#[case("a/b")]
-#[case("/a")]
+#[case::empty("")]
+#[case::dot(".")]
+#[case::root_separator("/")]
+#[case::nested_path("a/b")]
+#[case::absolute_path("/a")]
 fn a_builder_name_that_is_not_a_link_name_is_rejected_by_the_write(
     #[case] name: &str,
     #[values(
@@ -458,9 +458,9 @@ fn a_builder_name_that_is_not_a_link_name_is_rejected_by_the_write(
 
 /// `..` is one component like any other, and so is a name holding a space.
 #[rstest]
-#[case("d")]
-#[case("..")]
-#[case("a b")]
+#[case::simple("d")]
+#[case::literal_parent("..")]
+#[case::whitespace("a b")]
 fn a_builder_name_that_is_one_link_name_is_written(#[case] name: &str) {
     let mut builder = FileBuilder::new();
     builder.create_dataset(name).with_i32_data(&[7]);
@@ -471,10 +471,10 @@ fn a_builder_name_that_is_one_link_name_is_written(#[case] name: &str) {
 }
 
 #[rstest]
-#[case("a/b")]
-#[case("/a/b")]
-#[case("a//b/")]
-#[case("./a/./b")]
+#[case::relative("a/b")]
+#[case::absolute("/a/b")]
+#[case::repeated_and_trailing_separators("a//b/")]
+#[case::leading_and_interior_dots("./a/./b")]
 fn every_spelling_of_a_reference_target_names_one_object(#[case] spelling: &str) {
     let mut builder = FileBuilder::new();
     let mut a = builder.create_group("a");

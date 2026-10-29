@@ -20,10 +20,10 @@ use hdf5_pure::VerifyResult;
 use rstest::rstest;
 
 #[rstest]
-#[case(&[6], None)]
-#[case(&[2], None)]
-#[case(&[2], Some(&[MaxExtent::Unlimited][..]))]
-#[case(&[4], None)]
+#[case::single_chunk(&[6], None)]
+#[case::fixed_array(&[2], None)]
+#[case::extensible_array(&[2], Some(&[MaxExtent::Unlimited][..]))]
+#[case::partial_edge(&[4], None)]
 fn c_resolves_chunked_path_references_and_reads_chunk_records(
     #[case] chunk: &[u64],
     #[case] maxshape: Option<&[MaxExtent]>,
@@ -130,8 +130,8 @@ fn c_resolves_chunked_path_references_and_reads_chunk_records(
 }
 
 #[rstest]
-#[case(false)]
-#[case(true)]
+#[case::unfiltered(false)]
+#[case::filtered(true)]
 fn rust_resolves_c_created_chunked_reference_values(#[case] filtered: bool) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c-references.h5");

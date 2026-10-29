@@ -46,8 +46,8 @@ fn attaching_groups_retain_their_contents_once() {
 }
 
 #[rstest]
-#[case(false)]
-#[case(true)]
+#[case::root(false)]
+#[case::nested(true)]
 fn callback_failure_leaves_the_parent_unchanged(#[case] nested: bool) {
     let mut builder = FileBuilder::new();
     builder.create_group_with("preserved", |_| Ok(())).unwrap();
@@ -88,9 +88,9 @@ fn callback_failure_leaves_the_parent_unchanged(#[case] nested: bool) {
 }
 
 #[rstest]
-#[case("")]
-#[case(".")]
-#[case("a/b")]
+#[case::empty("")]
+#[case::dot(".")]
+#[case::path("a/b")]
 fn invalid_names_are_rejected_before_the_callback(
     #[case] name: &str,
     #[values(false, true)] nested: bool,
@@ -128,8 +128,8 @@ fn invalid_names_are_rejected_before_the_callback(
 }
 
 #[rstest]
-#[case("..")]
-#[case("測定")]
+#[case::literal_parent("..")]
+#[case::utf8("測定")]
 fn attaching_groups_accept_link_names(#[case] name: &str) {
     let mut builder = FileBuilder::new();
     builder
@@ -141,8 +141,8 @@ fn attaching_groups_accept_link_names(#[case] name: &str) {
 }
 
 #[rstest]
-#[case("different")]
-#[case("invalid/name")]
+#[case::different_link("different")]
+#[case::path_shaped_replacement("invalid/name")]
 fn replacement_builders_attach_under_the_requested_name(#[case] replacement_name: &str) {
     let mut builder = FileBuilder::new();
     let mut detached = builder.create_group(replacement_name);
@@ -205,8 +205,8 @@ fn detached_groups_attach_only_when_added() {
 }
 
 #[rstest]
-#[case(false)]
-#[case(true)]
+#[case::root(false)]
+#[case::nested(true)]
 fn callback_panic_leaves_parent_empty(#[case] nested: bool) {
     let mut builder = FileBuilder::new();
     let result = panic::catch_unwind(AssertUnwindSafe(|| {

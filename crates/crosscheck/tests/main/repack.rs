@@ -2397,11 +2397,11 @@ fn a_vlen_string_dataset_keeps_its_pipeline_order_and_optional_flags() {
 /// `H5Gtraverse.c`, HDF5 1.14.6). Every spelling below drops the one dataset the C library wrote
 /// at `grp/doomed`, and both readers agree on what the output holds.
 #[rstest]
-#[case("grp/doomed")]
-#[case("/grp/doomed")]
-#[case("grp//doomed")]
-#[case("./grp/doomed")]
-#[case("grp/./doomed/")]
+#[case::relative("grp/doomed")]
+#[case::absolute("/grp/doomed")]
+#[case::repeated_separator("grp//doomed")]
+#[case::leading_dot("./grp/doomed")]
+#[case::interior_dot_and_trailing_separator("grp/./doomed/")]
 fn every_spelling_of_a_drop_path_drops_one_object_the_c_library_wrote(#[case] spelling: &str) {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("c_drop_spelling.h5");
