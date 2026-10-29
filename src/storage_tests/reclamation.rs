@@ -5,7 +5,6 @@ use test_util::range;
 use test_util::temp;
 use test_util_hdf5::dataset::{Filter, Unlimited};
 
-use super::file_space;
 use crate::FileSpaceSettings;
 use crate::FreeSectionCoordinates;
 use crate::edit::SpaceOwnership;
@@ -30,15 +29,15 @@ fn edited_storage_partitions_every_byte_across_close_and_reopen(
     builder.create_dataset("last").with_u8_data(&[11; 8_192]);
     builder.write(&path).unwrap();
     let file = File::open_rw(&path).unwrap();
-    file_space::assert_exact_space_ownership(&file);
+    reader_test_util::assert_exact_space_ownership(&file);
     file.root().delete("hole").unwrap();
     file.commit().unwrap();
-    let owned = file_space::assert_exact_space_ownership(&file);
+    let owned = reader_test_util::assert_exact_space_ownership(&file);
     assert!(!owned.reusable_free_space.is_empty());
     assert!(!owned.free_space_manager_space.is_empty());
     for payload in [
-        file_space::contiguous_extent(&file, "first"),
-        file_space::contiguous_extent(&file, "last"),
+        reader_test_util::contiguous_extent(&file, "first"),
+        reader_test_util::contiguous_extent(&file, "last"),
     ] {
         assert_eq!(
             range::covered_len(&owned.live_raw_space, &payload),
@@ -60,7 +59,7 @@ fn edited_storage_partitions_every_byte_across_close_and_reopen(
         .assert_exact();
     drop(survivor);
     let reopened = File::open_rw(&path).unwrap();
-    file_space::assert_exact_space_ownership(&reopened);
+    reader_test_util::assert_exact_space_ownership(&reopened);
     assert_eq!(
         reopened.dataset("first").unwrap().read_u8().unwrap(),
         [7; 8_192]
@@ -92,7 +91,7 @@ fn isolated_deletion_classifies_exactly_the_bytes_admitted_by_the_threshold(
     builder.create_dataset("last").with_i32_data(&[11; 256]);
     builder.write(&path).unwrap();
     let file = File::open_rw(&path).unwrap();
-    let deleted = file_space::contiguous_extent(&file, "hole");
+    let deleted = reader_test_util::contiguous_extent(&file, "hole");
     let length = deleted.end - deleted.start;
     file.root().delete("hole").unwrap();
     file.commit().unwrap();
@@ -197,7 +196,7 @@ fn a_paged_commit_tail_is_placed_in_free_space() {
             );
         }
     }
-    file_space::assert_eof_matches_physical_size(&path);
+    reader_test_util::assert_eof_matches_physical_size(&path);
 }
 
 #[test]
@@ -244,10 +243,10 @@ fn a_reused_flat_manager_tail_preserves_its_spare_allocation_across_reopen() {
             .set_attr("n", AttrValue::I64(generation))
             .unwrap();
         file.commit().unwrap();
-        let ownership = file_space::assert_exact_space_ownership(&file);
+        let ownership = reader_test_util::assert_exact_space_ownership(&file);
         let physical_size = std::fs::metadata(&path).unwrap().len();
         file.close().unwrap();
-        let spare = file_space::serialized_manager_padding(&path);
+        let spare = reader_test_util::serialized_manager_padding(&path);
         if spare > 0 {
             assert!(
                 ownership
@@ -286,7 +285,7 @@ fn a_reused_flat_manager_tail_preserves_its_spare_allocation_across_reopen() {
         persisted_free,
         "reopen must recover the same reusable free-space total"
     );
-    let ownership = file_space::assert_exact_space_ownership(&reopened);
+    let ownership = reader_test_util::assert_exact_space_ownership(&reopened);
     assert_eq!(ownership.unclassified_space, []);
 
     reopened
@@ -294,7 +293,7 @@ fn a_reused_flat_manager_tail_preserves_its_spare_allocation_across_reopen() {
         .set_attr("n", AttrValue::I64(10_000))
         .unwrap();
     reopened.commit().unwrap();
-    let ownership = file_space::assert_exact_space_ownership(&reopened);
+    let ownership = reader_test_util::assert_exact_space_ownership(&reopened);
     assert_eq!(ownership.unclassified_space, []);
     assert!(
         std::fs::metadata(&path).unwrap().len() <= size_with_spare_tail,
@@ -302,7 +301,7 @@ fn a_reused_flat_manager_tail_preserves_its_spare_allocation_across_reopen() {
     );
     reopened.close().unwrap();
 
-    file_space::assert_eof_matches_physical_size(&path);
+    reader_test_util::assert_eof_matches_physical_size(&path);
     let final_reader = File::open(&path).unwrap();
     assert_eq!(
         final_reader.dataset("seed").unwrap().read_i32().unwrap(),
@@ -441,10 +440,10 @@ fn scratch_delete_releases(
         })
         .unwrap();
     f.commit().unwrap();
-    let before = file_space::assert_exact_space_ownership(&f);
+    let before = reader_test_util::assert_exact_space_ownership(&f);
     f.root().delete("scratch").unwrap();
     f.commit().unwrap();
-    let after = file_space::assert_exact_space_ownership(&f);
+    let after = reader_test_util::assert_exact_space_ownership(&f);
     (f, live_bytes(&before) - live_bytes(&after))
 }
 
