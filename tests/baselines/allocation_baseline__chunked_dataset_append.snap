@@ -1,0 +1,11 @@
+---
+source: tests/allocation_baseline.rs
+expression: append_report
+---
+Operation: Append one f64 chunk through an open session
+Existing elements: 16,384
+Appended elements: 512
+Allocation count:             53
+Cumulative bytes:         20,999
+Peak bytes:               14,991
+Retained bytes:            2,543

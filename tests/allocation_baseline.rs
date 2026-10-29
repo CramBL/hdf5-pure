@@ -134,7 +134,10 @@ fn writing_and_reading_a_chunked_dataset_matches_its_recorded_figures() {
     }
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    hard_link_messages_match_recorded_figures(&_profiler);
+    {
+        hard_link_messages_match_recorded_figures(&_profiler);
+        chunked_dataset_operations_match_recorded_figures(&_profiler);
+    }
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -212,5 +215,105 @@ fn hard_link_messages_match_recorded_figures(profiler: &heapscope::Profiler) {
     let report = format!("Hard-link messages: 10,000\n{}", measured.snapshot_report(),);
     insta::with_settings!({snapshot_path => "baselines"}, {
         insta::assert_snapshot!("ten_thousand_hard_link_messages", report);
+    });
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn chunked_dataset_operations_match_recorded_figures(profiler: &heapscope::Profiler) {
+    use hdf5_pure::FileAccessProperties;
+    use hdf5_pure::SyncPolicy;
+    use test_util::allocation;
+
+    const ELEMENTS: usize = 16_384;
+    const CHUNK_ELEMENTS: usize = 512;
+    const PAYLOAD_BYTES: usize = ELEMENTS * core::mem::size_of::<f64>();
+    let path = test_util::temp::temp_path("chunked_operations");
+    let data: Vec<_> = (0..ELEMENTS).map(|index| index as f64).collect();
+    let (image, creation) = allocation::measure_with_profiler(profiler, "chunked_creation", || {
+        let mut builder = FileBuilder::new();
+        builder
+            .create_dataset("samples")
+            .with_f64_data(&data)
+            .with_shape(&[ELEMENTS as u64])
+            .with_maxshape(&[MaxExtent::Unlimited])
+            .with_chunks(&[CHUNK_ELEMENTS as u64]);
+        builder.finish().unwrap()
+    });
+    assert!(creation.blocks > 0, "{creation}");
+    assert!(creation.live_bytes >= PAYLOAD_BYTES as u64, "{creation}");
+    assert_eq!(creation.live_bytes, image.capacity() as u64);
+    assert!(creation.peak_bytes >= creation.live_bytes, "{creation}");
+    assert!(creation.bytes >= creation.peak_bytes, "{creation}");
+    std::fs::write(&path, &image).unwrap();
+    drop(image);
+
+    let file = File::open_streaming(&path).unwrap();
+    let dataset = file.dataset("samples").unwrap();
+    assert_eq!(dataset.shape().unwrap(), vec![ELEMENTS as u64]);
+    assert_eq!(
+        dataset.chunk_shape().unwrap(),
+        Some(vec![CHUNK_ELEMENTS as u64])
+    );
+    assert!(!dataset.chunk_cache_stats().index_loaded());
+    let (values, read) =
+        allocation::measure_with_profiler(profiler, "chunked_cold_typed_read", || {
+            dataset.read_f64().unwrap()
+        });
+    assert_eq!(values, data);
+    assert!(dataset.chunk_cache_stats().index_loaded());
+    assert!(read.blocks > 0, "{read}");
+    assert!(read.live_bytes >= PAYLOAD_BYTES as u64, "{read}");
+    assert!(read.peak_bytes >= read.live_bytes, "{read}");
+    assert!(read.bytes >= read.peak_bytes, "{read}");
+    drop(dataset);
+    drop(file);
+
+    let batch: Vec<_> = (ELEMENTS..ELEMENTS + CHUNK_ELEMENTS)
+        .map(|index| index as f64)
+        .collect();
+    let file = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new().with_sync_policy(SyncPolicy::OnClose),
+    )
+    .unwrap();
+    let mut dataset = file.dataset("samples").unwrap();
+    let ((), append) =
+        allocation::measure_with_profiler(profiler, "chunked_one_chunk_append", || {
+            dataset.append(&batch).unwrap();
+        });
+    assert!(append.blocks > 0, "{append}");
+    assert!(
+        append.bytes >= (CHUNK_ELEMENTS * core::mem::size_of::<f64>()) as u64,
+        "{append}"
+    );
+    assert!(append.peak_bytes >= append.live_bytes, "{append}");
+    assert!(append.bytes >= append.peak_bytes, "{append}");
+    drop(dataset);
+    file.close().unwrap();
+
+    let file = File::open(&path).unwrap();
+    let dataset = file.dataset("samples").unwrap();
+    let expected: Vec<_> = (0..ELEMENTS + CHUNK_ELEMENTS)
+        .map(|index| index as f64)
+        .collect();
+    assert_eq!(dataset.shape().unwrap(), vec![expected.len() as u64]);
+    assert_eq!(dataset.read_f64().unwrap(), expected);
+
+    let creation_report = format!(
+        "Operation: Create an unlimited f64 dataset in memory\nElements: 16,384\nChunk elements: 512\n{}",
+        creation.snapshot_report(),
+    );
+    let read_report = format!(
+        "Operation: Read a cold chunked f64 dataset through a streaming file\nElements: 16,384\nChunk elements: 512\n{}",
+        read.snapshot_report(),
+    );
+    let append_report = format!(
+        "Operation: Append one f64 chunk through an open session\nExisting elements: 16,384\nAppended elements: 512\n{}",
+        append.snapshot_report(),
+    );
+    insta::with_settings!({snapshot_path => "baselines"}, {
+        insta::assert_snapshot!("chunked_dataset_creation", creation_report);
+        insta::assert_snapshot!("chunked_dataset_cold_read", read_report);
+        insta::assert_snapshot!("chunked_dataset_append", append_report);
     });
 }

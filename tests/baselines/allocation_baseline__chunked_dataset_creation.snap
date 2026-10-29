@@ -1,0 +1,11 @@
+---
+source: tests/allocation_baseline.rs
+expression: creation_report
+---
+Operation: Create an unlimited f64 dataset in memory
+Elements: 16,384
+Chunk elements: 512
+Allocation count:            161
+Cumulative bytes:        413,627
+Peak bytes:              402,162
+Retained bytes:          133,966
