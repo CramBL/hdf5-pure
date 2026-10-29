@@ -345,9 +345,9 @@ mod tests {
 
     #[rstest]
     #[cfg(feature = "serde")]
-    #[case(DeflateLevel::Zero)]
-    #[case(DeflateLevel::Six)]
-    #[case(DeflateLevel::Nine)]
+    #[case::level_zero(DeflateLevel::Zero)]
+    #[case::level_six(DeflateLevel::Six)]
+    #[case::level_nine(DeflateLevel::Nine)]
     fn serializes_typed_deflate_as_a_number(#[case] level: DeflateLevel) {
         let compression = Compression::Deflate {
             level,
@@ -363,8 +363,8 @@ mod tests {
 
     #[rstest]
     #[cfg(feature = "serde")]
-    #[case(10)]
-    #[case(u8::MAX)]
+    #[case::above_level_limit(10)]
+    #[case::byte_limit(u8::MAX)]
     fn rejects_invalid_deflate_during_deserialization(#[case] level: u8) {
         let value = serde_json::json!({"Deflate": {"level": level, "shuffle": true}});
         let error = serde_json::from_value::<Compression>(value).unwrap_err();

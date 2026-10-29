@@ -75,8 +75,8 @@ fn rejects_attribute_names_before_sink_output(
 }
 
 #[rstest]
-#[case("scale")]
-#[case("échelle")]
+#[case::ascii("scale")]
+#[case::utf8("échelle")]
 fn attribute_names_retain_encoding_across_staging_forms(
     #[case] name: &str,
     #[values(
@@ -178,9 +178,9 @@ fn stage_encoded_name_attributes(
 }
 
 #[rstest]
-#[case("xx", 0, false)]
-#[case("é", 1, false)]
-#[case("é", 0, true)]
+#[case::ascii_at_limit("xx", 0, false)]
+#[case::utf8_at_limit("é", 1, false)]
+#[case::utf8_above_limit("é", 0, true)]
 fn attribute_name_encoding_counts_toward_compact_storage_limit(
     #[case] name: &str,
     #[case] trim: usize,

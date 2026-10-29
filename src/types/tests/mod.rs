@@ -12,8 +12,8 @@ mod display;
 
 // The declared `u32::MAX` width exercises bit-count formatting beyond 32 bits.
 #[rstest]
-#[case(Datatype::FixedPoint(FixedPointType::new(u32::MAX, DatatypeByteOrder::LittleEndian, true, 0, 1).unwrap()), "other(i34359738360(bits 0..1))")]
-#[case(Datatype::FloatingPoint(FloatingPointType::from_layout(u32::MAX, DatatypeByteOrder::LittleEndian, FloatingPointLayout::IEEE754_BINARY64).unwrap()), "other(f34359738360(bits 0..64))")]
+#[case::fixed_point(Datatype::FixedPoint(FixedPointType::new(u32::MAX, DatatypeByteOrder::LittleEndian, true, 0, 1).unwrap()), "other(i34359738360(bits 0..1))")]
+#[case::floating_point(Datatype::FloatingPoint(FloatingPointType::from_layout(u32::MAX, DatatypeByteOrder::LittleEndian, FloatingPointLayout::IEEE754_BINARY64).unwrap()), "other(f34359738360(bits 0..64))")]
 fn an_unusual_size_arrives_whole_and_writes_its_width(
     #[case] datatype: Datatype,
     #[case] expected: &str,

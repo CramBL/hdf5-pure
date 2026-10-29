@@ -511,8 +511,8 @@ mod tests {
     }
 
     #[rstest]
-    #[case(3)]
-    #[case(u32::MAX)]
+    #[case::first_unknown_type(3)]
+    #[case::maximum_cache_type(u32::MAX)]
     fn a_lookup_rejects_an_unknown_symbol_table_cache_type(#[case] cache_type: u32) {
         let group = group(
             &[&[("child", 0x100, cache_type)]],

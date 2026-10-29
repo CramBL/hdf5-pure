@@ -464,14 +464,14 @@ mod tests {
     const READ: OpenIntent = OpenIntent::Read(WriteMarkPolicy::Refuse);
 
     #[rstest::rstest]
-    #[case(0x00, [true, true, true, true])]
-    #[case(0x01, [false, false, true, false])]
-    #[case(0x04, [false, false, false, false])]
-    #[case(0x05, [false, false, false, true])]
-    #[case(0x02, [true, true, true, true])]
-    #[case(0x81, [false, false, true, false])]
-    #[case(0x84, [false, false, false, false])]
-    #[case(0xFF, [false, false, false, true])]
+    #[case::unmarked(0x00, [true, true, true, true])]
+    #[case::write_mark(0x01, [false, false, true, false])]
+    #[case::swmr_mark_without_write(0x04, [false, false, false, false])]
+    #[case::write_and_swmr_marks(0x05, [false, false, false, true])]
+    #[case::unrelated_low_bit(0x02, [true, true, true, true])]
+    #[case::write_mark_with_high_bit(0x81, [false, false, true, false])]
+    #[case::swmr_mark_with_high_bit(0x84, [false, false, false, false])]
+    #[case::all_bits(0xFF, [false, false, false, true])]
     fn status_flags_follow_the_version_and_open_intent(
         #[case] bits: u32,
         #[case] allowed: [bool; 4],

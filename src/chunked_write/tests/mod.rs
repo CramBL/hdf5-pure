@@ -524,10 +524,10 @@ fn bytes_to_f64(data: &[u8]) -> Vec<f64> {
 }
 
 #[rstest]
-#[case(&[64], &[64], None, [16, 28], 17)]
-#[case(&[128], &[32], None, [17, 17], 17)]
-#[case(&[128], &[32], Some(&[MaxExtent::Unlimited][..]), [21, 21], 21)]
-#[case(&[2, 3], &[2, 2], None, [18, 18], 18)]
+#[case::single_chunk(&[64], &[64], None, [16, 28], 17)]
+#[case::multiple_chunks(&[128], &[32], None, [17, 17], 17)]
+#[case::unlimited_axis(&[128], &[32], Some(&[MaxExtent::Unlimited][..]), [21, 21], 21)]
+#[case::partial_edge(&[2, 3], &[2, 2], None, [18, 18], 18)]
 fn header_lengths_and_filter_parameters_match_geometry(
     #[case] shape: &[u64],
     #[case] chunk_dims: &[u64],
@@ -1118,9 +1118,9 @@ fn the_scale_offset_fill_availability_reaches_the_filter_parameters() {
 }
 
 #[rstest]
-#[case(DeflateLevel::Zero)]
-#[case(DeflateLevel::Six)]
-#[case(DeflateLevel::Nine)]
+#[case::level_zero(DeflateLevel::Zero)]
+#[case::level_six(DeflateLevel::Six)]
+#[case::level_nine(DeflateLevel::Nine)]
 fn pipeline_preserves_deflate_level_parameters(#[case] level: DeflateLevel) {
     let options = filtered(&[FilterKind::Deflate(level)]);
     assert_eq!(options.filters[0].kind, FilterKind::Deflate(level));

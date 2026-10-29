@@ -68,11 +68,11 @@ mod tests {
     use super::*;
 
     #[rstest::rstest]
-    #[case(
+    #[case::invalid_name(
         FilterPipelineError::InvalidName { filter_id: 300, reason: "invalid UTF-8" },
         "invalid name for filter 300: invalid UTF-8"
     )]
-    #[case(
+    #[case::filter_count(
         FilterPipelineError::FieldTooLarge { field: "filter count", value: 33, maximum: 32 },
         "filter pipeline filter count is 33, above maximum 32"
     )]
@@ -324,8 +324,8 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(1)]
-    #[case(2)]
+    #[case::version_one(1)]
+    #[case::version_two(2)]
     fn encoding_rejects_too_many_filters(#[case] version: u8) {
         let pipeline = FilterPipeline {
             version,
@@ -354,8 +354,8 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(1)]
-    #[case(2)]
+    #[case::version_one(1)]
+    #[case::version_two(2)]
     fn encoding_rejects_a_name_longer_than_its_field(#[case] version: u8) {
         let mut filter = filter_description();
         filter.name = Some("x".repeat(65_535));
@@ -374,8 +374,8 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(1)]
-    #[case(2)]
+    #[case::version_one(1)]
+    #[case::version_two(2)]
     fn encoding_rejects_too_many_client_values(#[case] version: u8) {
         let mut filter = filter_description();
         filter.client_data = vec![0; 65_536];
@@ -394,8 +394,8 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(1)]
-    #[case(2)]
+    #[case::version_one(1)]
+    #[case::version_two(2)]
     fn parsing_rejects_invalid_utf8_in_a_filter_name(#[case] version: u8) {
         let mut bytes = vec![version, 1];
         if version == 1 {

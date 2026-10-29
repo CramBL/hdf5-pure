@@ -415,10 +415,10 @@ fn a_raw_reference_target_is_screened_like_a_path_one() {
 }
 
 #[rstest]
-#[case("a/b")]
-#[case("/a/b")]
-#[case("a/./b")]
-#[case("a//b/")]
+#[case::relative("a/b")]
+#[case::absolute("/a/b")]
+#[case::interior_dot("a/./b")]
+#[case::repeated_separators("a//b/")]
 fn reference_targets_resolve_equivalent_path_spellings(#[case] spelling: &str) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("path_target.h5");
