@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Shared public types of hdf5-pure"
+include = ["/src/**", "/LICENSE-*", "/README.md"]
 
 [features]
 default = []

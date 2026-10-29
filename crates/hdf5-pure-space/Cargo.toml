@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Pure HDF5 file-space allocation and free-space policy"
+include = ["/src/**", "/LICENSE-*", "/README.md"]
 
 [dependencies]
 hdf5-pure-core.workspace = true

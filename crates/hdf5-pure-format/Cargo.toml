@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Pure-Rust HDF5 on-disk structures and codecs"
+include = ["/src/**", "/LICENSE-*", "/README.md"]
 
 [features]
 default = ["checksum"]
