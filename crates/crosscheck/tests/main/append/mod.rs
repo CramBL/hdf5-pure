@@ -9,12 +9,12 @@ use hdf5::datatype::ByteOrder as NativeByteOrder;
 use hdf5::file::LibraryVersion;
 use hdf5::plist::file_create::{FileSpaceStrategy as NativeStrategy, Sizeof, SizeofInfo};
 use hdf5_pure::FileBuilder;
-use hdf5_pure::FreeSpaceManagerRole;
 use hdf5_pure::UserblockSize;
 use hdf5_pure::{Chunk, Error, File, FileAccessProperties, MemoryStrategy, SyncPolicy};
 use hdf5_pure_format::__private::ExtensibleArrayHeader;
 use rstest::rstest;
 
+use test_util_hdf5::__private::ownership_append;
 use test_util_hdf5::dataset::{self, AppendInteropFixture, Unlimited};
 use test_util_hdf5::numeric::ByteOrder;
 
@@ -36,74 +36,7 @@ fn immediate_ownership_publication_matches_native_free_sections(
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("native-ownership.h5");
-    let native = hdf5::File::with_options()
-        .with_fapl(|properties| properties.libver_v110())
-        .with_fcpl(|properties| {
-            properties.file_space_strategy(NativeStrategy::FreeSpaceManager {
-                paged,
-                persist: true,
-                threshold: 1,
-            })
-        })
-        .create(&path)
-        .unwrap();
-    let initial = if incompressible {
-        ownership_payload(0xc603_8f14)
-    } else {
-        vec![0; 8192]
-    };
-    let builder = native
-        .new_dataset_builder()
-        .empty_as(ByteOrder::LittleEndian.u8_datatype())
-        .shape([Extent::resizable(initial.len())])
-        .chunk([initial.len()]);
-    let builder = if filtered {
-        builder.deflate(6)
-    } else {
-        builder
-    };
-    let target = builder.create("d").unwrap();
-    drop(builder);
-    assert_eq!(
-        target.dtype().unwrap().byte_order(),
-        NativeByteOrder::LittleEndian
-    );
-    target.write_raw(&initial).unwrap();
-    drop(target);
-    let scratch = native
-        .new_dataset_builder()
-        .with_data(&vec![7_u8; 65_536])
-        .create("scratch")
-        .unwrap();
-    let hole = (scratch.offset().unwrap(), scratch.storage_size());
-    drop(scratch);
-    let ceiling = native
-        .new_dataset_builder()
-        .with_data(&vec![9_u8; 8192])
-        .create("ceiling")
-        .unwrap();
-    assert!(ceiling.offset().unwrap() >= hole.0 + hole.1);
-    drop(ceiling);
-    native.unlink("scratch").unwrap();
-    native.close().unwrap();
-    test_util_hdf5::file_space_oracle::assert_persisted_sections(&path);
-    if incompressible && filtered {
-        let original = std::fs::read(&path).unwrap();
-        let pure = File::open(&path).unwrap();
-        let page = pure.file_space_info().unwrap().unwrap().page_size.get();
-        let report = pure.persisted_free_sections().unwrap().unwrap();
-        assert!(report.managers().iter().any(|manager| {
-            manager.role() == FreeSpaceManagerRole::PageLargeGeneric
-                && manager.free_sections().sections().iter().any(|section| {
-                    !section.address().is_multiple_of(page)
-                        && section.address().next_multiple_of(page) <= hole.0
-                        && hole.0 + hole.1 <= section.end_address() / page * page
-                })
-        }));
-        assert!(array_index::libhdf5_chunks(&path, 0)[0].size() > initial.len() as u64);
-        drop(pure);
-        assert_eq!(std::fs::read(&path).unwrap(), original);
-    }
+    let fixture = ownership_append::Fixture::write(&path, paged, filtered, incompressible);
     for cycle in 0..3 {
         let file = File::open_rw_with_options(
             &path,
@@ -114,59 +47,11 @@ fn immediate_ownership_publication_matches_native_free_sections(
         .unwrap();
         let mut target = file.dataset("d").unwrap();
         target
-            .append(&ownership_payload(0x3cb6_7710 + cycle))
+            .append(&ownership_append::payload(0x3cb6_7710 + cycle))
             .unwrap();
         let snapshot = directory.path().join(format!("issued-{cycle}.h5"));
         std::fs::copy(&path, &snapshot).unwrap();
-        let before = std::fs::read(&snapshot).unwrap();
-        test_util_hdf5::file_space_oracle::assert_persisted_sections(&snapshot);
-        test_util_hdf5::file_space_oracle::assert_manager_metadata_bytes(&snapshot);
-        let native = hdf5::File::open(&snapshot).unwrap();
-        let mut expected = initial.clone();
-        for completed in 0..=cycle {
-            expected.extend(ownership_payload(0x3cb6_7710 + completed));
-        }
-        assert_eq!(
-            native.dataset("d").unwrap().read_raw::<u8>().unwrap(),
-            expected
-        );
-        assert_eq!(
-            native.dataset("ceiling").unwrap().read_raw::<u8>().unwrap(),
-            [9; 8192]
-        );
-        native.close().unwrap();
-        let pure = File::open(&snapshot).unwrap();
-        assert_eq!(pure.dataset("d").unwrap().read_u8().unwrap(), expected);
-        let chunks = array_index::libhdf5_chunks(&snapshot, 0);
-        assert_eq!(array_index::pure_chunks(&pure), chunks);
-        let latest = chunks.last().unwrap();
-        assert!(
-            latest.address() < hole.0 + hole.1 && hole.0 < latest.address() + latest.size(),
-            "cycle {cycle}: chunk {latest:?} did not reuse the native hole {hole:?}"
-        );
-        if incompressible {
-            assert!(
-                hole.0 <= latest.address() && latest.address() + latest.size() <= hole.0 + hole.1,
-                "cycle {cycle}: chunk {latest:?}, hole {hole:?}"
-            );
-            if cycle == 0 {
-                assert_eq!(latest.address(), hole.0, "chunk {latest:?}, hole {hole:?}");
-            }
-        }
-        let free = pure.persisted_free_sections().unwrap().unwrap();
-        for chunk in chunks {
-            assert!(
-                free.free_sections()
-                    .sections()
-                    .iter()
-                    .all(
-                        |section| chunk.address() + chunk.size() <= section.address()
-                            || section.end_address() <= chunk.address()
-                    )
-            );
-        }
-        drop(pure);
-        assert_eq!(std::fs::read(&snapshot).unwrap(), before);
+        fixture.assert_contents(&snapshot, cycle);
         drop(target);
         file.close().unwrap();
     }
@@ -630,13 +515,6 @@ fn immediate_append_rejects_big_endian_storage_without_changing_the_file() {
     file.close().unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
     assert_eq!(dataset::read_libhdf5::<i32>(&path, "d"), [1, 2, 3]);
-}
-
-fn ownership_payload(seed: u32) -> Vec<u8> {
-    dataset::incompressible(seed, 2048)
-        .into_iter()
-        .flat_map(i32::to_le_bytes)
-        .collect()
 }
 
 fn assert_retired_chunk_is_reusable(file: &File, predecessor: &Chunk) {
