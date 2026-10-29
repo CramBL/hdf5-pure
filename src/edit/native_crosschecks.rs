@@ -1,5 +1,6 @@
-//! Group-link crosschecks against libhdf5.
+//! Editing and append crosschecks against libhdf5.
 
+mod append_inspection;
 mod edit_dense_links;
 mod edit_tracked_dense_links;
 mod extension_records;

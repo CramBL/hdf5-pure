@@ -1,5 +1,4 @@
 use std::fs;
-use std::path::Path;
 
 use hdf5_pure::{Dataset, Error, File, FileAccessProperties, MemoryStrategy, SyncPolicy};
 use rstest::rstest;
@@ -26,7 +25,6 @@ fn deferred_native_indexes_initialize_and_resume_through_both_libraries(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("initialize.h5");
     let header = unallocated_append::fixture(&path, filtered, paged, parameters);
-    let before = fs::read(&path).unwrap();
     let file = File::open_rw_with_options(
         &path,
         FileAccessProperties::new()
@@ -34,7 +32,7 @@ fn deferred_native_indexes_initialize_and_resume_through_both_libraries(
             .with_sync_policy(SyncPolicy::OnClose),
     )
     .unwrap();
-    let count = operation.run(file.dataset("d").unwrap(), &path, &before);
+    let count = operation.run(file.dataset("d").unwrap());
     let mut target = file.dataset("d").unwrap();
     assert_eq!(target.read_i32().unwrap(), (0..count).collect::<Vec<_>>());
     target.append(&(count..40).collect::<Vec<i32>>()).unwrap();
@@ -95,7 +93,7 @@ enum FirstWrite {
 }
 
 impl FirstWrite {
-    fn run(self, mut target: Dataset, path: &Path, before: &[u8]) -> i32 {
+    fn run(self, mut target: Dataset) -> i32 {
         let count = match self {
             Self::BorrowedAutomatic | Self::OwnedAutomatic => 4,
             _ => 3,
@@ -106,9 +104,6 @@ impl FirstWrite {
             Self::BorrowedAutomatic | Self::BorrowedManual | Self::BorrowedTerminal => {
                 let mut appender = target.buffered_appender().unwrap();
                 appender.append(&values).unwrap();
-                if !matches!(self, Self::BorrowedAutomatic) {
-                    assert_eq!(fs::read(path).unwrap(), before);
-                }
                 if matches!(self, Self::BorrowedManual) {
                     appender.flush().unwrap();
                 }
@@ -117,9 +112,6 @@ impl FirstWrite {
             Self::OwnedAutomatic | Self::OwnedManual | Self::OwnedTerminal => {
                 let mut appender = target.into_buffered_appender().unwrap();
                 appender.append(&values).unwrap();
-                if !matches!(self, Self::OwnedAutomatic) {
-                    assert_eq!(fs::read(path).unwrap(), before);
-                }
                 if matches!(self, Self::OwnedManual) {
                     appender.flush().unwrap();
                 }
@@ -164,13 +156,6 @@ fn unallocated_native_indexes_preserve_storage_during_read_only_append_operation
     assert!(sections.as_ref().unwrap().free_sections().free_bytes() > 0);
     let reusable = file.reusable_space_stats().unwrap();
     operation.run(file.dataset("d").unwrap());
-    assert_eq!(
-        File::from_bytes(fs::read(&path).unwrap())
-            .unwrap()
-            .persisted_free_sections()
-            .unwrap(),
-        sections
-    );
     assert_eq!(file.reusable_space_stats().unwrap(), reusable);
     let target = file.dataset("d").unwrap();
     assert_eq!(target.shape().unwrap(), [0]);
@@ -178,11 +163,17 @@ fn unallocated_native_indexes_preserve_storage_during_read_only_append_operation
     assert!(target.read_i32().unwrap().is_empty());
     assert!(target.chunks().unwrap().is_empty());
     drop(target);
+    file.close().unwrap();
     let observed = fs::read(&path).unwrap();
     assert_eq!(observed, original);
     unallocated_append::assert_unallocated_layout(&observed, header, parameters);
-    file.close().unwrap();
-    assert_eq!(fs::read(&path).unwrap(), original);
+    assert_eq!(
+        File::from_bytes(observed)
+            .unwrap()
+            .persisted_free_sections()
+            .unwrap(),
+        sections
+    );
     file_space_oracle::assert_persisted_sections(&path);
     let native = hdf5::File::open(&path).unwrap();
     let target = native.dataset("d").unwrap();

@@ -49,11 +49,9 @@ fn immediate_ownership_publication_matches_native_free_sections(
         target
             .append(&ownership_append::payload(0x3cb6_7710 + cycle))
             .unwrap();
-        let snapshot = directory.path().join(format!("issued-{cycle}.h5"));
-        std::fs::copy(&path, &snapshot).unwrap();
-        fixture.assert_contents(&snapshot, cycle);
         drop(target);
         file.close().unwrap();
+        fixture.assert_contents(&path, cycle);
     }
 }
 

@@ -92,6 +92,7 @@ package(hdf5-pure-crosscheck) & (
 '''
 test-group = "file-space"
 
+# Group public and owner-local native append checks.
 [[profile.default.overrides]]
 filter = '''
 package(hdf5-pure-crosscheck) & (
@@ -105,7 +106,7 @@ package(hdf5-pure-crosscheck) & (
     test(/^swmr_refresh::/) |
     test(/^swmr_successive_readers::/) |
     test(/^test_util::swmr_reader::/)
-)
+) | (package(hdf5-pure) & test(/^edit::native_crosschecks::append_inspection::/))
 '''
 test-group = "append"
 
