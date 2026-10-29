@@ -31,8 +31,8 @@ Pure-Rust HDF5 reader, writer, and in-place editor. No C dependencies, no build 
 
 ## Features
 
-- **Read and write HDF5** datasets, groups, attributes and nested hierarchies, with compact,
-  contiguous and chunked dataset storage.
+- **Read and write HDF5** datasets, groups, attributes and nested hierarchies, with contiguous
+  and chunked dataset storage.
 - **[In-place editing](docs/guide/editing.md)** with staged commits, dataset overwrites, attribute
   updates, object creation and deletion, and copying within or between files. Eligible files support
   bounded-memory editing.
@@ -334,14 +334,15 @@ interoperability.
 ## Userblock (MATLAB v7.3)
 
 ```rust
+use hdf5_pure::{FileBuilder, UserblockSize};
+use hdf5_pure::mat::userblock;
+
 let mut builder = FileBuilder::new();
-builder.with_userblock(512);
+builder.with_userblock(UserblockSize::MIN);
+builder.with_userblock_content(&userblock::header_block(userblock::DEFAULT_DESCRIPTION));
 builder.create_dataset("data").with_f64_data(&[1.0]);
 
-let mut bytes = builder.finish().unwrap();
-// Write MATLAB header into userblock
-bytes[126] = b'I';
-bytes[127] = b'M';
+let bytes = builder.finish().unwrap();
 ```
 
 ## MATLAB struct pattern
@@ -452,7 +453,12 @@ In MATLAB this loads as `iscell(path) == true`, `path{1}.x`, etc. Empty `None` s
 
 **Reader compatibility.** Cell arrays load correctly in MATLAB, libmatio (reference C library), Julia's `MAT.jl`, and Python via `pymatreader` / `hdf5storage`. GNU Octave 11's `load` does not yet follow object references for v7.3 cells (warns "unknown datatype"); load such files with one of the above instead.
 
-Reading decodes the MATLAB opaque value classes `datetime`, `duration`, and `categorical` into `MatDatetime` / `MatDuration` / `MatCategorical`, and surfaces any other opaque class (`table`, `containers.Map`, …) losslessly as its raw property map. Not supported for _writing_: non-unit enum variants, MATLAB objects (`classdef`), datetime / duration / categorical types.
+Reading provides `MatDatetime`, `MatDuration`, `MatCategorical`, `MatEnum`, `MatTable` and
+`MatTimetable` views. MATLAB `containers.Map` values deserialize into Rust maps. Other opaque
+classes retain their raw property maps.
+
+Not supported for _writing_: non-unit enum variants, MATLAB objects (`classdef`),
+datetime / duration / categorical types.
 
 ## Cargo features
 
