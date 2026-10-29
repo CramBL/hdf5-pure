@@ -132,9 +132,7 @@ pub(crate) fn find_link(
                     // The first four scratch-pad bytes store the local-heap offset, as defined in
                     // "Symbol Table Entry" of the format specification, version 4.0.
                     let offset = u64::from(u32::from_le_bytes([a, b, c, d]));
-                    LinkTarget::Soft {
-                        target_path: String::from(names.name(offset)?),
-                    }
+                    LinkTarget::soft(String::from(names.name(offset)?))
                 }
                 other => return Err(FormatError::InvalidSymbolTableCacheType(other)),
             };

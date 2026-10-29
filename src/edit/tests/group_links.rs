@@ -69,19 +69,14 @@ fn inspection_preserves_encoded_names_and_targets(
         OwnedLink::new(
             vec![0xFF],
             CharacterSet::Utf8,
-            OwnedLinkTarget::Soft {
-                target_path: vec![b'/', 0xFF],
-            },
+            OwnedLinkTarget::soft(vec![b'/', 0xFF]),
             tracked.then_some(7),
         )
         .unwrap(),
         OwnedLink::new(
             b"external".to_vec(),
             CharacterSet::Ascii,
-            OwnedLinkTarget::External {
-                filename: vec![0xFE],
-                object_path: vec![b'/', 0xFF],
-            },
+            OwnedLinkTarget::external(vec![0xFE], vec![b'/', 0xFF]),
             tracked.then_some(31),
         )
         .unwrap(),
@@ -417,9 +412,7 @@ fn multilevel_storage(count: usize) -> GroupLinkStorage {
             OwnedLink::new(
                 format!("link_{index:04}").into_bytes(),
                 CharacterSet::Ascii,
-                OwnedLinkTarget::Soft {
-                    target_path: b"/target".to_vec(),
-                },
+                OwnedLinkTarget::soft(b"/target".to_vec()),
                 Some(u64::try_from(index).unwrap() + 3),
             )
             .unwrap()
@@ -441,9 +434,7 @@ fn one_link_storage() -> GroupLinkStorage {
             OwnedLink::new(
                 b"link".to_vec(),
                 CharacterSet::Ascii,
-                OwnedLinkTarget::Soft {
-                    target_path: b"/target".to_vec(),
-                },
+                OwnedLinkTarget::soft(b"/target".to_vec()),
                 Some(3),
             )
             .unwrap(),

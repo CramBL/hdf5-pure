@@ -53,9 +53,7 @@ fn libhdf5_groups_retain_links_policy_and_thresholds(
     assert_eq!(hard.creation_order(), expected_index(1));
     assert_eq!(
         links[b"soft".as_slice()].target(),
-        &OwnedLinkTarget::Soft {
-            target_path: b"/target".to_vec()
-        }
+        &OwnedLinkTarget::soft(b"/target".to_vec())
     );
     assert_eq!(
         links[b"soft".as_slice()].creation_order(),
@@ -63,10 +61,7 @@ fn libhdf5_groups_retain_links_policy_and_thresholds(
     );
     assert_eq!(
         links[b"external".as_slice()].target(),
-        &OwnedLinkTarget::External {
-            filename: "外部.h5".as_bytes().to_vec(),
-            object_path: "/目标".as_bytes().to_vec()
-        }
+        &OwnedLinkTarget::external("外部.h5".as_bytes().to_vec(), "/目标".as_bytes().to_vec())
     );
     assert_eq!(
         links[b"external".as_slice()].creation_order(),

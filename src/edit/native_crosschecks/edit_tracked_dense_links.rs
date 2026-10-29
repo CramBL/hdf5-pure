@@ -245,12 +245,7 @@ fn tracked_multilevel_indexes_preserve_symbolic_links_and_creation_order(
         .iter()
         .find(|link| link.name() == b"soft")
         .unwrap();
-    assert_eq!(
-        soft.target(),
-        &OwnedLinkTarget::Soft {
-            target_path: b"/target".to_vec()
-        }
-    );
+    assert_eq!(soft.target(), &OwnedLinkTarget::soft(b"/target".to_vec()));
     let external = after
         .links
         .links()
@@ -259,10 +254,7 @@ fn tracked_multilevel_indexes_preserve_symbolic_links_and_creation_order(
         .unwrap();
     assert_eq!(
         external.target(),
-        &OwnedLinkTarget::External {
-            filename: "外部.h5".as_bytes().to_vec(),
-            object_path: "/目标".as_bytes().to_vec()
-        }
+        &OwnedLinkTarget::external("外部.h5".as_bytes().to_vec(), "/目标".as_bytes().to_vec())
     );
     let unicode = after
         .links

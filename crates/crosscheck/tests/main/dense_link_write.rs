@@ -313,31 +313,22 @@ fn planned_storage(
                 1 => (
                     b"k69209".to_vec(),
                     CharacterSet::Ascii,
-                    OwnedLinkTarget::Soft {
-                        target_path: b"/payload".to_vec(),
-                    },
+                    OwnedLinkTarget::soft(b"/payload".to_vec()),
                 ),
                 2 => (
                     b"k155448".to_vec(),
                     CharacterSet::Ascii,
-                    OwnedLinkTarget::External {
-                        filename: b"external.h5".to_vec(),
-                        object_path: b"/values".to_vec(),
-                    },
+                    OwnedLinkTarget::external(b"external.h5".to_vec(), b"/values".to_vec()),
                 ),
                 3 => (
                     "别名".as_bytes().to_vec(),
                     CharacterSet::Ascii,
-                    OwnedLinkTarget::Soft {
-                        target_path: b"/payload".to_vec(),
-                    },
+                    OwnedLinkTarget::soft(b"/payload".to_vec()),
                 ),
                 4 => (
                     "utf8_链".as_bytes().to_vec(),
                     CharacterSet::Utf8,
-                    OwnedLinkTarget::Soft {
-                        target_path: b"/payload".to_vec(),
-                    },
+                    OwnedLinkTarget::soft(b"/payload".to_vec()),
                 ),
                 _ => (
                     format!(
@@ -346,9 +337,7 @@ fn planned_storage(
                     )
                     .into_bytes(),
                     CharacterSet::Ascii,
-                    OwnedLinkTarget::Soft {
-                        target_path: b"/payload".to_vec(),
-                    },
+                    OwnedLinkTarget::soft(b"/payload".to_vec()),
                 ),
             };
             let order = tracked.then_some(CREATION_BASE + index as u64 * 3 + 1);
