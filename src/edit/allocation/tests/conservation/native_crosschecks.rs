@@ -16,6 +16,8 @@ use super::Observation;
 use super::Workload;
 use super::WritePath;
 
+mod transient;
+
 #[rstest]
 #[case::immediate(WritePath::Immediate)]
 #[case::borrowed(WritePath::Borrowed)]

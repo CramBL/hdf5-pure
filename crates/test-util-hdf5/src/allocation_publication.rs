@@ -1,11 +1,14 @@
 //! Native fixtures and observations for allocation publication crosschecks.
 
+use core::num::NonZeroUsize;
 use std::fs;
 use std::path::Path;
 
 use hdf5::Extent;
 use hdf5::File;
+use hdf5::dataset::ChunkOpts;
 use hdf5::plist::file_create::FileSpaceStrategy;
+use hdf5_pure::DeflateLevel;
 
 use crate::file_space;
 use crate::numeric::ByteOrder;
@@ -94,6 +97,62 @@ impl Observation {
 /// # Ok::<(), std::io::Error>(())
 /// ```
 pub fn write_fixture(path: &Path, paged: bool, deferred: bool, filtered: bool) -> (u64, u64) {
+    write_tail_fixture(
+        path,
+        paged,
+        deferred,
+        if filtered {
+            TailEncoding::Fletcher32
+        } else {
+            TailEncoding::Plain
+        },
+    )
+}
+
+/// The chunk filters used by a native fixture.
+#[derive(Clone, Copy, Debug)]
+pub enum TailEncoding {
+    /// Deflate at level six.
+    Deflate,
+    /// A Fletcher32 checksum on each chunk.
+    Fletcher32,
+    /// Unfiltered chunk storage.
+    Plain,
+    /// Deflate at level six, with partial chunks stored without filters.
+    RawEdges,
+}
+
+/// Writes a persistent fixture with the selected filters and returns its free hole.
+///
+/// Creates the datasets described by [`write_fixture`] with the same initial values and storage
+/// strategy.
+/// Applies `encoding` to the dataset named `d` and closes the file before returning.
+///
+/// # Panics
+///
+/// Panics if creating, writing, inspecting, deleting, or closing the fixture fails, or the hole
+/// length or ceiling placement differs from the fixture requirements.
+///
+/// # Examples
+///
+/// ```
+/// use core::num::NonZeroUsize;
+///
+/// use test_util_hdf5::allocation_publication::{self, Observation, TailEncoding};
+///
+/// let directory = tempfile::tempdir()?;
+/// let path = directory.path().join("filtered.h5");
+/// allocation_publication::write_tail_fixture(&path, false, true, TailEncoding::RawEdges);
+/// allocation_publication::append_chunks(&path, NonZeroUsize::new(2).unwrap());
+/// assert_eq!(Observation::read(&path).values, (0..2048).collect::<Vec<i32>>());
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn write_tail_fixture(
+    path: &Path,
+    paged: bool,
+    deferred: bool,
+    encoding: TailEncoding,
+) -> (u64, u64) {
     let file = File::with_options()
         .with_fapl(|properties| properties.libver_v110())
         .with_fcpl(|properties| {
@@ -111,10 +170,13 @@ pub fn write_fixture(path: &Path, paged: bool, deferred: bool, filtered: bool) -
         .empty_as(ByteOrder::LittleEndian.i32_datatype())
         .shape([Extent::resizable(length)])
         .chunk([CHUNK]);
-    let builder = if filtered {
-        builder.fletcher32()
-    } else {
-        builder
+    let builder = match encoding {
+        TailEncoding::Deflate => builder.deflate(DeflateLevel::Six.get()),
+        TailEncoding::Fletcher32 => builder.fletcher32(),
+        TailEncoding::Plain => builder,
+        TailEncoding::RawEdges => builder
+            .deflate(DeflateLevel::Six.get())
+            .chunk_opts(ChunkOpts::DONT_FILTER_PARTIAL_CHUNKS),
     };
     let dataset = builder.create("d").unwrap();
     drop(builder);
@@ -147,7 +209,7 @@ pub fn write_fixture(path: &Path, paged: bool, deferred: bool, filtered: bool) -
     hole
 }
 
-/// Appends one complete chunk through libhdf5 and returns its physical address.
+/// Appends 1024 elements through libhdf5 and returns the last chunk's physical address.
 ///
 /// Extends the dataset named `d` by 1024 consecutive integers, starting at its previous length.
 /// Checks all decoded values and closes the file before returning.
@@ -158,10 +220,30 @@ pub fn write_fixture(path: &Path, paged: bool, deferred: bool, filtered: bool) -
 /// indices exceed [`i32::MAX`], its length arithmetic overflows, or its decoded values differ
 /// from the consecutive sequence.
 pub fn append(path: &Path) -> u64 {
+    append_chunks(path, NonZeroUsize::MIN)
+}
+
+/// Appends elements through libhdf5 and returns the last chunk's physical address.
+///
+/// Extends the dataset named `d` by `chunks.get() * 1024` consecutive integers, starting at its
+/// previous length. Checks all decoded values and closes the file before returning.
+///
+/// # Panics
+///
+/// Panics if opening, extending, writing, inspecting, or closing the fixture fails, its element
+/// count overflows, an element index exceeds [`i32::MAX`], or its decoded values differ from the
+/// consecutive sequence.
+///
+/// # Examples
+///
+/// See [`write_tail_fixture`].
+pub fn append_chunks(path: &Path, chunks: NonZeroUsize) -> u64 {
     let file = File::open_rw(path).unwrap();
     let dataset = file.dataset("d").unwrap();
     let start = dataset.shape()[0];
-    let end = start + CHUNK;
+    let end = start
+        .checked_add(CHUNK.checked_mul(chunks.get()).unwrap())
+        .unwrap();
     dataset.resize([end]).unwrap();
     dataset
         .write_slice(
