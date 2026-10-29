@@ -263,14 +263,24 @@ pub(crate) fn manager_blocks_len(managers: &[ManagerSections], widths: FormatWid
 }
 
 /// Returns the File Space Info slot and section class for `kind`.
+// The writer writes flat sections in DRAW to preserve unused space through native raw appends.
+// The C library persists non-self-referential managers in `H5MF_settle_raw_data_fsm`
+// (`H5MF.c`, HDF5 2.2.0).
 pub(crate) fn manager_wire(kind: ManagerKind) -> (usize, u8) {
     match kind {
-        ManagerKind::Flat => (0, SECTION_CLASS_SIMPLE),
+        ManagerKind::Flat => (DRAW_MANAGER_SLOT, SECTION_CLASS_SIMPLE),
         ManagerKind::PagedLargeGeneric => (6, SECTION_CLASS_LARGE),
         ManagerKind::PagedSmallMetadata => (0, SECTION_CLASS_SMALL),
-        ManagerKind::PagedSmallRaw => (2, SECTION_CLASS_SMALL),
+        ManagerKind::PagedSmallRaw => (DRAW_MANAGER_SLOT, SECTION_CLASS_SMALL),
     }
 }
+
+/// The zero-based slot for the small DRAW manager in a version 1 File Space Info message.
+///
+/// Defined in "The File Space Info Message" of the [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_fsinfo
+const DRAW_MANAGER_SLOT: usize = 2;
 
 #[cfg(test)]
 mod tests {

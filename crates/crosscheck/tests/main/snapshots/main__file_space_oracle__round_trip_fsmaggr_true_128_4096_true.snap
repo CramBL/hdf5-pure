@@ -1,5 +1,6 @@
 ---
-source: crates/crosscheck/tests/main/file_space_oracle.rs
+source: crates/crosscheck/tests/main/test_util/file_space.rs
+assertion_line: 34
 expression: report
 ---
 case:       FsmAggr/persist=true/page=4096/threshold=128/base=4096/c_origin=true
@@ -312,23 +313,24 @@ file-space properties
 
 file sizes (absolute bytes)
   measurement                           bytes
-  hdf5-pure stored EOF                  35328
-  libhdf5 H5Fget_filesize               35328
-  physical file                         35328
+  hdf5-pure stored EOF                  23767
+  libhdf5 H5Fget_filesize               23767
+  physical file                         23767
 
 free-space sections (stored addresses, byte lengths)
   index |        hdf5-pure         |         libhdf5          | match
         |     address      length  |     address      length  |
   ------+--------------------------+--------------------------+------
-      0 | (0x0000014f, 0x00000010) | (0x0000014f, 0x00000010) | yes
-      1 | (0x00000591, 0x0000026f) | (0x00000591, 0x0000026f) | yes
-      2 | (0x00000990, 0x00004000) | (0x00000990, 0x00004000) | yes
+      0 | (0x000000b3, 0x000000ac) | (0x000000b3, 0x000000ac) | yes
+      1 | (0x0000026b, 0x0000010c) | (0x0000026b, 0x0000010c) | yes
+      2 | (0x0000063f, 0x000001c1) | (0x0000063f, 0x000001c1) | yes
+      3 | (0x00003870, 0x00001120) | (0x00003870, 0x00001120) | yes
 
 free-space totals
   measurement                       hdf5-pure        libhdf5
-  section count                             3              3
-  section bytes                         17023          17023
-  H5Fget_freespace                          -          17023
+  section count                             4              4
+  section bytes                          5273           5273
+  H5Fget_freespace                          -           5273
   reported - section bytes                  -              0
 
 
@@ -348,17 +350,17 @@ file-space properties
 
 file sizes (absolute bytes)
   measurement                           bytes
-  hdf5-pure stored EOF                  23328
-  libhdf5 H5Fget_filesize               23328
-  physical file                         23328
+  hdf5-pure stored EOF                  23499
+  libhdf5 H5Fget_filesize               23499
+  physical file                         23499
 
 free-space sections (stored addresses, byte lengths)
   index |        hdf5-pure         |         libhdf5          | match
         |     address      length  |     address      length  |
   ------+--------------------------+--------------------------+------
-      0 | (0x0000014f, 0x00000010) | (0x0000014f, 0x00000010) | yes
-      1 | (0x00000316, 0x00000061) | (0x00000316, 0x00000061) | yes
-      2 | (0x000004f8, 0x00000308) | (0x000004f8, 0x00000308) | yes
+      0 | (0x000000b3, 0x000000ac) | (0x000000b3, 0x000000ac) | yes
+      1 | (0x0000026b, 0x0000010c) | (0x0000026b, 0x0000010c) | yes
+      2 | (0x0000063f, 0x000001c1) | (0x0000063f, 0x000001c1) | yes
       3 | (0x00000990, 0x00004000) | (0x00000990, 0x00004000) | yes
 
 free-space totals

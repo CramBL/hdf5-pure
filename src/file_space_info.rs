@@ -9,10 +9,12 @@ pub use hdf5_pure_core::FileSpacePageSize;
 pub use hdf5_pure_core::FileSpaceStrategy;
 pub(crate) use hdf5_pure_format::__private::DEFAULT_THRESHOLD;
 pub(crate) use hdf5_pure_format::__private::NUM_FILE_FSM_MANAGERS;
+use hdf5_pure_space::__private::ManagerKind;
 
 use crate::address::DecodedStoredAddress;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
+use crate::free_space_manager;
 use crate::width::OffsetWidth;
 
 /// A non-persisting message recording `strategy`, `threshold` and `page_size`.
@@ -87,22 +89,22 @@ pub(crate) fn persistent_empty(
     .build()
 }
 
-/// A persisting message whose first free-space manager is at `manager0_addr`
-/// (the others undefined, all ones at `offsets`), recording `eoa_pre_fsm`, the
-/// end-of-allocation before the on-disk free-space-manager blocks were
-/// appended. This is the form [`File::open_rw`](crate::File::open_rw) writes
-/// when it persists a non-empty free list: every tracked region lives in that
-/// one manager.
+/// Returns a persisting message with one manager at `manager_addr` in the DRAW slot.
+///
+/// The other manager addresses are undefined. The caller passes the final stored end of
+/// allocation as `eoa_pre_fsm`, including the complete manager storage. The writer and editor
+/// call this constructor for a nonempty flat free list.
 pub(crate) fn persistent_single_manager(
     _offsets: OffsetWidth,
     strategy: FileSpaceStrategy,
     threshold: u64,
     page_size: FileSpacePageSize,
-    manager0_addr: u64,
+    manager_addr: u64,
     eoa_pre_fsm: u64,
 ) -> FileSpaceInfo {
     let mut manager_addrs = vec![DecodedStoredAddress::Undefined; NUM_FILE_FSM_MANAGERS];
-    manager_addrs[0] = DecodedStoredAddress::Defined(StoredAddress::new(manager0_addr));
+    manager_addrs[free_space_manager::manager_wire(ManagerKind::Flat).0] =
+        DecodedStoredAddress::Defined(StoredAddress::new(manager_addr));
     FileSpaceInfoFields {
         strategy,
         persist: true,
@@ -263,8 +265,9 @@ mod tests {
         assert_eq!(
             info.manager_addrs,
             [
+                vec![DecodedStoredAddress::Undefined; 2],
                 vec![DecodedStoredAddress::Defined(StoredAddress::new(0x0a48))],
-                vec![DecodedStoredAddress::Undefined; NUM_FILE_FSM_MANAGERS - 1]
+                vec![DecodedStoredAddress::Undefined; NUM_FILE_FSM_MANAGERS - 3]
             ]
             .concat()
         );

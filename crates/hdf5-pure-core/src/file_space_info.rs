@@ -118,11 +118,11 @@ pub enum FileSpaceStrategy {
 /// parses this message, and `hdf5_pure::File::persisted_free_sections` reads its stored free
 /// sections.
 ///
-/// A version 0 message has no page size, page-end metadata threshold, or pre-manager end of
-/// allocation. The parser supplies [`FileSpacePageSize::DEFAULT`] and a page-end threshold of 0,
-/// and leaves [`eoa_pre_fsm`](Self::eoa_pre_fsm) as `None`. Persistent version 0 messages have six
-/// manager slots, while version 1 has twelve. The message layouts are defined in "The File Space
-/// Info Message" of the [format specification, version 4.0][spec].
+/// A version 0 message has no page size, page-end metadata threshold, or EOA field for
+/// self-referential managers. The parser supplies [`FileSpacePageSize::DEFAULT`] and a page-end
+/// threshold of 0, and leaves [`eoa_pre_fsm`](Self::eoa_pre_fsm) as `None`. Persistent version 0
+/// messages have six manager slots, while version 1 has twelve. The message layouts are defined in
+/// "The File Space Info Message" of the [format specification, version 4.0][spec].
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_fsinfo
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,7 +139,7 @@ pub struct FileSpaceInfo {
     pub page_size: FileSpacePageSize,
     /// The page-end metadata threshold, or 0 for a version 0 message.
     pub page_end_meta_threshold: u16,
-    /// The end-of-allocation address recorded before allocating free-space manager metadata, or
+    /// The end of allocation recorded before allocating self-referential manager metadata, or
     /// `None` for format version 0, which has no such field.
     pub eoa_pre_fsm: Option<DecodedStoredAddress>,
     /// The addresses of the free-space manager headers, present only if [`persist`] is true. An
