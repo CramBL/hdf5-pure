@@ -196,14 +196,28 @@ QEMU.
 
 ### Memory safety
 
-The crate is almost entirely safe Rust, and with the default features it
-compiles no `unsafe` code of its own. `std` with `serde` introduces some in the
-[`mat`](crate::mat) module: the tiled row-major to column-major transpose the
-MATLAB writer uses writes through a raw pointer into uninitialized `Vec`
-capacity, and the [`mat::complex`](crate::mat::complex) array helpers read a
-slice of complex values as bytes. CI exercises both under Miri with
-`-Zmiri-strict-provenance`. A `no_std` build excludes the `mat` module and with
-it all of the crate's `unsafe` code.
+The default and `no_std` builds include unsafe numeric byte copies and dense
+chunk assembly. With `serde`, the MATLAB writer also writes through raw pointers
+for tiled row-major to column-major transposition, and the
+[`mat::complex`](crate::mat::complex) array helpers read complex slices as bytes.
+CI exercises selected boundaries under Miri with `-Zmiri-strict-provenance`.
+
+| Test family | Boundary coverage |
+|---|---|
+| `mat::complex` | Empty and populated complex slices, including every supported `num_complex::Complex<T>` component type |
+| `mat::transpose` | Tiled transposition into uninitialized capacity |
+| `nosync` | Single-threaded cache guards and successive borrows |
+| `chunked_read::tests::dense_assembly` | Complete initialization, clipped chunks, and failed assembly |
+| `data_read::primitive::tests` | Native byte copies and converted primitive reads |
+| `primitive_bytes::tests` | Primitive-byte encoding through dataset, attribute, and append callers |
+
+`just soundness::miri` runs two library-test batches with artifacts isolated by
+the pinned nightly. `just soundness::miri-selection` executes each family
+separately with native nextest and fails on an empty selection. The native
+checks establish discovery with the same feature profiles and families as
+Miri. Actual Miri execution checks the selected memory operations and
+`cfg(miri)` paths. `scripts/soundness.just` defines the family selectors and
+feature profiles for both commands.
 
 The [crate documentation](crate#safety-and-robustness) covers the safety and
 robustness guarantees in more detail.
