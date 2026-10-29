@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use crate::bytes;
+use crate::checksum;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HeaderStats {
@@ -36,6 +37,70 @@ pub fn header_stats(path: impl AsRef<Path>) -> HeaderStats {
         element_count: stat(5),
     }
 }
+
+/// Builds an index block and its sole allocated secondary block with eight-byte addresses.
+///
+/// The secondary block holds 16,384 undefined data block pointers and their zeroed page bitmaps.
+/// The caller supplies four encoded, unfiltered inline elements and places the secondary block
+/// immediately after the index block. Both blocks include their checksums.
+///
+/// Returns [`None`] if `inline_elements` is not 32 bytes or the secondary block address overflows.
+pub fn large_secondary_blocks(
+    header_address: u64,
+    index_address: u64,
+    inline_elements: &[u8],
+) -> Option<(Vec<u8>, Vec<u8>)> {
+    if inline_elements.len() != INLINE_BYTES {
+        return None;
+    }
+    let secondary_address = index_address.checked_add(u64::try_from(INDEX_BYTES).ok()?)?;
+    let mut index = INDEX_SIGNATURE.to_vec();
+    index.extend_from_slice(&[VERSION, UNFILTERED_CLIENT]);
+    index.extend_from_slice(&header_address.to_le_bytes());
+    index.extend_from_slice(inline_elements);
+    for pointer in 0..DIRECT_POINTERS + SECONDARY_POINTERS {
+        index.extend_from_slice(
+            &if pointer == DIRECT_POINTERS + SECONDARY_ORDINAL {
+                secondary_address
+            } else {
+                u64::MAX
+            }
+            .to_le_bytes(),
+        );
+    }
+    checksum::append(&mut index);
+    let mut secondary = SECONDARY_SIGNATURE.to_vec();
+    secondary.extend_from_slice(&[VERSION, UNFILTERED_CLIENT]);
+    secondary.extend_from_slice(&header_address.to_le_bytes());
+    secondary.extend_from_slice(&SECONDARY_OFFSET.to_le_bytes());
+    secondary.resize(secondary.len() + DATA_BLOCKS * BITMAP_BYTES, 0);
+    secondary.resize(secondary.len() + DATA_BLOCKS * LENGTH, 0xff);
+    checksum::append(&mut secondary);
+    Some((index, secondary))
+}
+
+/// The checksum width defined in "The Extensible Array Index" of the [format specification,
+/// version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_extarr
+pub const CHECKSUM_BYTES: usize = 4;
+// Section `subsec_fmt4_appendixc_extarr`, version 4.0, defines the index signature.
+const INDEX_SIGNATURE: &[u8; 4] = b"EAIB";
+// Section `subsec_fmt4_appendixc_extarr`, version 4.0, defines the secondary-block signature.
+const SECONDARY_SIGNATURE: &[u8; 4] = b"EASB";
+// Section `subsec_fmt4_appendixc_extarr`, version 4.0, defines version zero.
+const VERSION: u8 = 0;
+// Section `subsec_fmt4_appendixc_extarr`, version 4.0, assigns client zero to unfiltered chunks.
+const UNFILTERED_CLIENT: u8 = 0;
+const INLINE_BYTES: usize = 4 * LENGTH;
+const DIRECT_POINTERS: usize = 6;
+const SECONDARY_POINTERS: usize = 57;
+const SECONDARY_ORDINAL: usize = 24;
+const SECONDARY_OFFSET: u64 = 4_294_967_280;
+const DATA_BLOCKS: usize = 16_384;
+const BITMAP_BYTES: usize = 32;
+const INDEX_BYTES: usize =
+    14 + INLINE_BYTES + (DIRECT_POINTERS + SECONDARY_POINTERS) * LENGTH + CHECKSUM_BYTES;
 
 // Each statistic is a length field, eight bytes wide in every file this crate
 // writes and in every file it is compared against.

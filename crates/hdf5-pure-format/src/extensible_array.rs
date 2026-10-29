@@ -185,6 +185,98 @@ impl ExtensibleArrayHeaderLocator {
     }
 }
 
+/// The expected prefix fields and physical ranges of a version 0 secondary or data block.
+///
+/// A caller can parse the prefix separately from reading and verifying the checksummed region.
+/// For a paged data block, that region ends before the pages, while the allocation includes every
+/// page. The block layouts are defined in "The Extensible Array Index" of the [format
+/// specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_extarr
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExtensibleArrayBlockFraming {
+    owner: Owner,
+    range: FileRange,
+    parse_range: FileRange,
+    signature: [u8; 4],
+    offset: (u64, Option<u64>),
+}
+
+impl ExtensibleArrayBlockFraming {
+    fn data(owner: Owner, address: PhysicalAddress, block: DataBlock) -> Result<Self, FormatError> {
+        let layout = owner.layout;
+        let range = FileRange::new(address, layout.data_block_len(block)?)?;
+        Ok(Self {
+            owner,
+            range,
+            parse_range: if layout.pages(block.elements).is_some() {
+                FileRange::new(address, layout.pages_offset())?
+            } else {
+                range
+            },
+            signature: DATA_BLOCK_SIGNATURE,
+            offset: (block.offset, block.libhdf5_offset),
+        })
+    }
+
+    /// Parses the signature, version, client ID, header address, and block offset in `region`.
+    ///
+    /// The caller verifies the checksum over [`parse_range`](Self::parse_range) separately.
+    /// For a direct data block, accepts either the block's position or the alternate offset
+    /// described by [`ExtensibleArrayDataBlockRef::parse`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InsufficientRegion`] if `region` does not contain
+    /// [`prefix_range`](Self::prefix_range), [`FormatError::InvalidExtensibleArraySignature`] if
+    /// the signature differs from the expected block kind, or
+    /// [`FormatError::InvalidExtensibleArrayVersion`] if the version is not 0. Returns
+    /// [`FormatError::InvalidExtensibleArrayBlockClient`] if the client differs from the header's,
+    /// [`FormatError::InvalidExtensibleArrayBlockOwner`] if the header address differs from the
+    /// array's, or [`FormatError::InvalidExtensibleArrayBlockOffset`] if the block offset is
+    /// outside the accepted offsets. Returns
+    /// [`FormatError::OffsetOverflow`] if the base address plus the stored header address
+    /// exceeds [`u64::MAX`].
+    pub fn parse_prefix(&self, region: FileRegion<'_>) -> Result<(), FormatError> {
+        let Self {
+            owner,
+            range: _,
+            parse_range: _,
+            signature,
+            offset,
+        } = *self;
+        let prefix = region.subregion(self.prefix_range()?)?;
+        let mut fields = owner.parse_prefix(prefix.bytes(), signature)?;
+        let (expected, alternate) = offset;
+        owner.parse_block_offset(&mut fields, expected, alternate)?;
+        Ok(())
+    }
+
+    /// Returns the prefix range through the block offset, excluding the checksum.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::OffsetOverflow`] if the end exceeds [`u64::MAX`].
+    pub fn prefix_range(&self) -> Result<FileRange, FormatError> {
+        FileRange::new(
+            self.range.start(),
+            self.owner.layout.prefix_len() + u64::from(self.owner.layout.block_offset_len),
+        )
+    }
+
+    /// Returns the checksummed region, including its trailing checksum.
+    ///
+    /// For a paged data block, the region excludes the separately checksummed pages.
+    pub const fn parse_range(&self) -> FileRange {
+        self.parse_range
+    }
+
+    /// Returns the complete allocation, including every page of a paged data block.
+    pub const fn range(&self) -> FileRange {
+        self.range
+    }
+}
+
 /// The parsed header of an Extensible Array and the reference to its index block, from
 /// [`ExtensibleArrayHeaderLocator::parse`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -394,6 +486,48 @@ impl ExtensibleArraySuperBlockRef {
         })
     }
 
+    /// Returns the expected prefix fields and ranges for this secondary block.
+    pub fn framing(&self) -> ExtensibleArrayBlockFraming {
+        let Self {
+            owner,
+            range,
+            super_block,
+        } = *self;
+        ExtensibleArrayBlockFraming {
+            owner,
+            range,
+            parse_range: range,
+            signature: SUPER_BLOCK_SIGNATURE,
+            offset: (super_block.offset, None),
+        }
+    }
+
+    /// Returns the expected prefix fields and ranges for data block `local` at `address`.
+    ///
+    /// `local` counts from zero within this secondary block. The caller reads `address` from
+    /// its data block pointers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if `local` is out of range or
+    /// the block offset or allocation length exceeds [`u64::MAX`]. Returns
+    /// [`FormatError::OffsetOverflow`] if the allocation end exceeds [`u64::MAX`].
+    pub fn data_block_framing(
+        &self,
+        local: u64,
+        address: PhysicalAddress,
+    ) -> Result<ExtensibleArrayBlockFraming, FormatError> {
+        let Self {
+            owner,
+            range: _,
+            super_block,
+        } = *self;
+        if local >= super_block.blocks {
+            return Err(FormatError::InvalidExtensibleArrayGeometry);
+        }
+        ExtensibleArrayBlockFraming::data(owner, address, super_block.data_block(local)?)
+    }
+
     /// Parses the super block in `region`.
     ///
     /// # Errors
@@ -542,6 +676,23 @@ impl<'a> ExtensibleArrayDataBlockRef<'a> {
             block,
             pages,
         })
+    }
+
+    /// Returns the expected prefix fields and ranges for this data block.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if the allocation length exceeds
+    /// [`u64::MAX`], or [`FormatError::OffsetOverflow`] if its end exceeds [`u64::MAX`].
+    pub fn framing(&self) -> Result<ExtensibleArrayBlockFraming, FormatError> {
+        let Self {
+            owner,
+            range,
+            parse_range: _,
+            block,
+            pages: _,
+        } = *self;
+        ExtensibleArrayBlockFraming::data(owner, range.start(), block)
     }
 
     /// Parses the data block in `region`, and returns its elements or, in a paged block, its

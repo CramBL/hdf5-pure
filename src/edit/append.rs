@@ -955,6 +955,10 @@ impl Store for EditStore<'_> {
         self.engine.context.addresses()
     }
 
+    fn logical_end(&self) -> u64 {
+        self.engine.context.superblock().eof_address
+    }
+
     fn retire(&mut self, retirement: RetiredChunk) {
         let (extent, class) = retirement.into_extent();
         // Opening checks the base against the image length, and editor truncation preserves it.

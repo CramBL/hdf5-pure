@@ -100,6 +100,7 @@ pub use crate::extensible_array::DataBlockGeometry;
 pub use crate::extensible_array::EA_CLIENT_ID_UNFILTERED;
 pub use crate::extensible_array::ExtensibleArray;
 pub use crate::extensible_array::ExtensibleArrayBitGeometry;
+pub use crate::extensible_array::ExtensibleArrayBlockFraming;
 pub use crate::extensible_array::ExtensibleArrayCreationParameters;
 pub use crate::extensible_array::ExtensibleArrayDataBlock;
 pub use crate::extensible_array::ExtensibleArrayDataBlockRef;

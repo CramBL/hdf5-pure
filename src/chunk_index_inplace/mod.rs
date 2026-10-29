@@ -34,6 +34,7 @@ use hdf5_pure_format::__private::BlockOffsetWidth;
 use hdf5_pure_format::__private::ChunkedGeometry;
 use hdf5_pure_format::__private::DataBlockGeometry;
 use hdf5_pure_format::__private::EA_CLIENT_ID_UNFILTERED;
+use hdf5_pure_format::__private::ExtensibleArray;
 use hdf5_pure_format::__private::ExtensibleArrayBitGeometry;
 use hdf5_pure_format::__private::ExtensibleArrayCreationParameters;
 use hdf5_pure_format::__private::ExtensibleArrayGeometry;
@@ -82,6 +83,8 @@ use crate::prepared_chunk::ChunkEncoding;
 use crate::prepared_chunk::PreparedChunk;
 use crate::source::Source;
 use crate::width::{FormatWidths, OffsetWidth};
+
+mod metadata;
 
 /// Counts the two index-block allocations, so a test can say whether its fixture
 /// reached them.
@@ -156,6 +159,9 @@ pub(crate) trait Store: Source {
 
     /// Returns the stored-to-physical address mapping for this image.
     fn addresses(&self) -> AddressContext;
+
+    /// Returns the absolute end-of-file address stored in the superblock.
+    fn logical_end(&self) -> u64;
 
     /// Consumes a confirmed predecessor retirement under the session's allocation policy.
     ///
@@ -541,15 +547,20 @@ impl Located {
     /// The caller supplies `unsupported` for policy rejections and decides which filters it accepts.
     /// The result includes filter and fill message locations for that decision.
     ///
-    /// For allocated indexes, the reader computes statistics from referenced index blocks. The
-    /// reader uses bounded [`Source`] windows and leaves file storage unchanged.
+    /// For allocated indexes, the reader verifies the header, index block, and every defined
+    /// secondary block, including their checksums regardless of the `checksum` feature. It checks
+    /// complete index and data block allocations against the published EOF and physical source,
+    /// computes allocation statistics, and leaves file storage unchanged. Reads use bounded
+    /// [`Source`] windows.
     ///
     /// # Errors
     ///
     /// Returns [`Error::MissingMessage`] for a missing dataspace, layout, or datatype. Returns
     /// [`Error::Format`] for malformed chunk geometry, inconsistent element sizes, invalid index
-    /// geometry, or metadata read and parse errors. Returns [`Error::AppendUnsupported`] for an
-    /// unallocated index block, and `unsupported` for other unsupported storage or metadata.
+    /// geometry, failed checksums, or metadata read and parse errors. Returns
+    /// [`Error::InvalidSpaceOwnershipExtent`] for an allocation beyond the published EOF and
+    /// [`Error::AppendUnsupported`] for an unallocated index block. Returns `unsupported` for other
+    /// unsupported storage or metadata.
     pub(crate) fn locate_at<F: Store>(
         file: &F,
         oh_addr: u64,
@@ -693,7 +704,7 @@ impl Located {
             });
         };
 
-        let array = crate::extensible_array::read_header(file, widths, ea_addr)?;
+        let array = metadata::read_header(file, ea_addr)?;
         let ea_header = array.header();
         let has_filters = filter_msg.is_some();
         if (ea_header.client_id == 1) != has_filters {
@@ -745,7 +756,7 @@ impl Located {
             num_chunks,
             allocation_stats: None,
         };
-        located.allocation_stats = Some(located.read_allocation_stats(file)?);
+        located.allocation_stats = Some(located.read_allocation_stats(file, &array)?);
         Ok(LocateResult {
             datatype,
             located: AppendIndex::Allocated(located),
@@ -1329,7 +1340,9 @@ impl Located {
     ) -> Result<ExtensibleArrayStats, Error> {
         let mut stats = match self.allocation_stats {
             Some(stats) => stats,
-            None => self.read_allocation_stats(file)?,
+            None => {
+                self.read_allocation_stats(file, &metadata::read_header(file, self.ea_addr)?)?
+            }
         };
         stats.max_idx_set = num_chunks;
         let mut last_new_secondary = None;
@@ -1372,6 +1385,8 @@ impl Located {
     /// Computes allocation statistics from defined data and secondary block pointers.
     ///
     /// Counts all referenced blocks, including blocks beyond the current dataset extent.
+    /// Verifies index and secondary block framing and checksums, and checks every complete
+    /// allocation against the published EOF and physical source. Data block contents are not read.
     /// Uses the current chunk count for the maximum index and includes inline slots in the
     /// element capacity. The version 0 header statistics are defined in "The Extensible Array
     /// Index" of the [format specification, version 4.0][spec].
@@ -1380,14 +1395,28 @@ impl Located {
     ///
     /// Returns [`Error::AppendUnsupported`] if the index block is unallocated, or
     /// [`FormatError::InvalidExtensibleArrayGeometry`] if a pointer offset, block size, or
-    /// statistic exceeds [`u64::MAX`]. Propagates errors from reading block pointers.
+    /// statistic exceeds [`u64::MAX`]. Returns [`Error::InvalidSpaceOwnershipExtent`] if an
+    /// allocation ends past the published EOF, or [`FormatError::UnexpectedSourceEof`] if it ends
+    /// past the physical source. Propagates metadata read, parse, and checksum errors.
     ///
     /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_extarr
-    fn read_allocation_stats(&self, file: &impl Store) -> Result<ExtensibleArrayStats, Error> {
+    fn read_allocation_stats(
+        &self,
+        file: &impl Store,
+        array: &ExtensibleArray,
+    ) -> Result<ExtensibleArrayStats, Error> {
         if self.index_block_addr.is_undefined(self.offset_width) {
             return Err(Error::AppendUnsupported(
                 "the dataset's extensible-array index block is not allocated",
             ));
+        }
+        let bytes = metadata::IndexBlockBytes::read(file, array)?;
+        let index = bytes.parse()?;
+        for reference in index.data_blocks() {
+            metadata::require_range(file, reference?.range())?;
+        }
+        for reference in index.super_blocks() {
+            metadata::check_block(file, reference?.framing())?;
         }
         let mut stats = ExtensibleArrayStats {
             nsuper_blks: 0,
@@ -1409,6 +1438,7 @@ impl Located {
                 file,
                 ea_sum([pointers, ea_product(ordinal.to_u64(), os)?])?,
                 1,
+                self.data_block_size(elements)?,
             )?;
             self.add_data_blocks(&mut stats, elements, count)?;
         }
@@ -1433,7 +1463,8 @@ impl Located {
             };
             self.add_super_block(&mut stats, block)?;
             let pointers = ea_sum([addr.get(), self.block_prefix_size(), block.bitmap_size()])?;
-            let count = self.allocated_pointers(file, pointers, ndblks)?;
+            let count =
+                self.allocated_pointers(file, pointers, ndblks, self.data_block_size(elements)?)?;
             self.add_data_blocks(&mut stats, elements, count)?;
         }
         Ok(stats)
@@ -1442,16 +1473,21 @@ impl Located {
     /// Counts defined addresses in `count` consecutive pointer slots at `offset`.
     ///
     /// Reads at most [`EA_POINTER_BATCH_BYTES`] bytes at a time.
+    /// Resolves each defined address and checks the complete allocation of `allocation_length`
+    /// bytes against the published EOF and physical source.
     ///
     /// # Errors
     ///
     /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if a pointer offset exceeds
-    /// [`u64::MAX`]. Propagates errors from [`Source::read_at`].
+    /// [`u64::MAX`], [`Error::InvalidSpaceOwnershipExtent`] if an allocation ends past the
+    /// published EOF, or [`FormatError::UnexpectedSourceEof`] if it ends past the physical source.
+    /// Propagates address resolution, range overflow, and [`Source::read_at`] errors.
     fn allocated_pointers(
         &self,
         file: &impl Store,
         mut offset: u64,
         mut count: u64,
+        allocation_length: u64,
     ) -> Result<u64, Error> {
         let os = usize::from(self.offset_width.get());
         let mut bytes = [0u8; EA_POINTER_BATCH_BYTES];
@@ -1460,19 +1496,19 @@ impl Located {
             let take = count.min((bytes.len() / os).to_u64()).to_usize()?;
             let span = take * os;
             file.read_at(offset, &mut bytes[..span])?;
-            allocated = ea_sum([
-                allocated,
-                bytes[..span]
-                    .chunks_exact(os)
-                    .filter(|pointer| {
-                        let mut addr = [0u8; 8];
-                        addr[..os].copy_from_slice(pointer);
-                        !StoredAddress::new(u64::from_le_bytes(addr))
-                            .is_undefined(self.offset_width)
-                    })
-                    .count()
-                    .to_u64(),
-            ])?;
+            for pointer in bytes[..span].chunks_exact(os) {
+                let mut addr = [0u8; 8];
+                addr[..os].copy_from_slice(pointer);
+                let address = StoredAddress::new(u64::from_le_bytes(addr));
+                if address.is_undefined(self.offset_width) {
+                    continue;
+                }
+                metadata::require_range(
+                    file,
+                    FileRange::new(file.addresses().resolve(address)?, allocation_length)?,
+                )?;
+                allocated = ea_sum([allocated, 1])?;
+            }
             offset = ea_sum([offset, span.to_u64()])?;
             count -= take.to_u64();
         }
@@ -1711,6 +1747,9 @@ pub(crate) struct AppendPlan {
 /// referenced blocks and the blocks needed for the appended chunks. Planning leaves the file
 /// unchanged.
 ///
+/// Verifies existing data blocks and initialized pages touched by the append before allocating
+/// storage. Metadata checksum verification is independent of the `checksum` feature.
+///
 /// `grow_visible_tail` permits rewriting a trailing chunk under a filter pipeline. An
 /// exclusively locked session passes `true`, and the SWMR writer passes `false`. A partial
 /// tail stored under lossy filters is rejected unless `lossy_tail_reencoding` permits rewriting
@@ -1726,7 +1765,8 @@ pub(crate) struct AppendPlan {
 /// Returns [`Error::AppendUnsupported`] if the new dimension overflows, the index geometry does
 /// not cover the append, a filtered tail rewrite is unsupported, or an encoded chunk size does
 /// not fit its index record. Errors from reading the trailing chunk, constructing its datatype
-/// context, splitting the element bytes, or encoding the chunks are propagated.
+/// context, verifying index metadata, splitting the element bytes, or encoding the chunks are
+/// propagated.
 pub(crate) fn plan_ea_append<F: Store>(
     file: &F,
     loc: &Located,
@@ -1750,6 +1790,7 @@ pub(crate) fn plan_ea_append<F: Store>(
     let new_num_chunks = new_dim.div_ceil(chunk_elems);
     loc.dense_prefix_stats(new_num_chunks)?;
     let n_full = current_dim / chunk_elems;
+    loc.check_append_metadata(file, n_full, new_num_chunks)?;
     let stats = loc.planned_allocation_stats(file, n_full, new_num_chunks)?;
     let has_partial = current_dim % chunk_elems != 0;
 
@@ -2598,6 +2639,7 @@ mod tests {
     use std::cell::Cell;
     use std::cell::RefCell;
 
+    use hdf5_pure_core::__private::FileRegion;
     use hdf5_pure_core::__private::{FileRange, PhysicalAddress};
     use hdf5_pure_format::__private::LAYOUT_PROPERTIES_OFFSET;
     use hdf5_pure_format::__private::LayoutVersion;
@@ -2608,6 +2650,8 @@ mod tests {
     use test_util::object_header::v2 as v2_bytes;
     use test_util::widths::Widths;
 
+    use super::metadata as metadata_io;
+    use super::metadata::IndexBlockBytes;
     use super::*;
     use crate::DatasetCreateProperties;
     use crate::PartialEdgeFiltering;
@@ -2622,6 +2666,8 @@ mod tests {
     use crate::superblock::LocatedSuperblock;
     use crate::superblock::Superblock;
     use crate::writer::FileBuilder;
+
+    mod metadata;
 
     #[rstest]
     #[case::canonical([32, 4, 4, 16, 10])]
@@ -2886,10 +2932,60 @@ mod tests {
         let mut store = allocation_store(50_000, false);
         let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
         append_state(&mut store, &mut state, &[50_000], 4).unwrap();
+        let located = state.index.allocated().unwrap();
+        let array = metadata_io::read_header(&store, located.ea_addr).unwrap();
+        let bytes = IndexBlockBytes::read(&store, &array).unwrap();
+        let index = bytes.parse().unwrap();
+        let secondary = index
+            .super_blocks()
+            .map(Result::unwrap)
+            .find(|reference| reference.slots().unwrap().contains(&50_001))
+            .unwrap();
+        let range = secondary.parse_range();
+        let start = range.start().get().to_usize().unwrap();
+        let end = range.end().get().to_usize().unwrap();
+        let secondary = secondary
+            .parse(FileRegion::new(range, &store.data[start..end]).unwrap())
+            .unwrap();
+        let target = secondary
+            .data_blocks()
+            .map(Result::unwrap)
+            .find(|reference| reference.slots().unwrap().contains(&50_001))
+            .unwrap();
+        let fields = test_util::bytes::signature_offsets(
+            &store.data[start..end],
+            &target.range().start().get().to_le_bytes(),
+        );
+        assert_eq!(fields.len(), 1);
+        let pointer = (start + fields[0]).to_u64();
+        let expected = [(pointer, usize::from(store.widths.offsets.get())); 2];
         store.reset_counters();
         let plan = state_plan(&store, &state, &[50_001]).unwrap();
-        assert_eq!(store.total_read.get(), 16);
-        assert_eq!(store.max_read.get(), 8);
+        let secondary_reads = store
+            .reads
+            .borrow()
+            .iter()
+            .copied()
+            .filter(|&(offset, _)| range.start().get() <= offset && offset < range.end().get())
+            .collect::<Vec<_>>();
+        assert_eq!(secondary_reads, expected);
+        let cached_reads = store.total_read.get();
+        assert!(store.total_read.get() >= 8192);
+        assert!(store.total_read.get() <= 16 * 1024);
+        assert!(store.max_read.get() <= 1024);
+        state.index.allocated_mut().unwrap().allocation_stats = None;
+        store.reset_counters();
+        let uncached = state_plan(&store, &state, &[50_001]).unwrap();
+        assert_eq!(uncached.stats, plan.stats);
+        assert!(store.total_read.get() > cached_reads);
+        let secondary_reads = store
+            .reads
+            .borrow()
+            .iter()
+            .copied()
+            .filter(|&(offset, _)| range.start().get() <= offset && offset < range.end().get())
+            .collect::<Vec<_>>();
+        assert_ne!(secondary_reads, expected);
         apply_ea_append(&mut store, state.index.allocated_mut().unwrap(), plan, 4).unwrap();
         let file = crate::File::from_bytes(store.data).unwrap();
         assert_eq!(
@@ -3297,6 +3393,9 @@ mod tests {
         }
         fn addresses(&self) -> AddressContext {
             AddressContext::from_effective_base(self.superblock.base_address)
+        }
+        fn logical_end(&self) -> u64 {
+            self.superblock.eof_address
         }
         fn retire(&mut self, retirement: RetiredChunk) {
             self.retired.push(retirement.range());
