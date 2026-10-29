@@ -957,8 +957,8 @@ impl FileWriter {
         let ext_oh = file_space
             .map(|settings| file_space_extension_oh(&file_space_placeholder(settings)))
             .transpose()?;
-        // Persistent File Space Info requires final manager addresses and the EOA before
-        // manager allocation. Retain the settings for the rewrite after placement.
+        // The writer needs final manager addresses and EOA for persistent File Space Info.
+        // Retain the settings for the rewrite after placement.
         let nonpaged_persist = file_space.filter(|settings| {
             settings.strategy() != FileSpaceStrategy::Page && settings.persist()
         });
@@ -2661,8 +2661,8 @@ impl FileWriter {
                 )
             });
 
-        // Replace the placeholder with the manager address and pre-manager EOA, or the final
-        // EOA if no manager is needed. The message has the same length in either case.
+        // Replace the placeholder with the manager address and final EOA. The message has
+        // the same length with or without a manager.
         let real_ext_oh = match (&ext_oh, nonpaged_persist) {
             (Some(_), Some(settings)) => {
                 let info = match &manager {
@@ -2672,7 +2672,7 @@ impl FileWriter {
                         settings.threshold(),
                         settings.page_size(),
                         manager.header_address.get(),
-                        manager.header_address.get(),
+                        cursor2,
                     ),
                     None => file_space_info::persistent_empty(
                         OFFSET_WIDTH,
@@ -2800,7 +2800,7 @@ impl FileWriter {
 
 /// Returns the File Space Info message used to size the superblock extension.
 ///
-/// Persistent manager addresses and the pre-manager end of allocation are undefined until
+/// Persistent manager addresses and the end of allocation are undefined until
 /// placement is complete.
 fn file_space_placeholder(settings: FileSpaceSettings) -> FileSpaceInfo {
     if settings.persist() {

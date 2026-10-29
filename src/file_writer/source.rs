@@ -1248,7 +1248,7 @@ impl FileLayout {
                             settings.threshold(),
                             settings.page_size(),
                             manager.header_address.get(),
-                            manager.header_address.get(),
+                            end,
                         ),
                         None => file_space_info::persistent_empty(
                             super::OFFSET_WIDTH,

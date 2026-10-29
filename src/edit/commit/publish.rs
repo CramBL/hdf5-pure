@@ -519,13 +519,10 @@ impl WriteEngine {
 
         // An empty free list is recorded with persistence enabled and undefined manager addresses.
         let ext_oh = if let Some(block) = flat_block {
-            // Retain the extension below the manager blocks when an appended manager tail
-            // is discarded. A reused tail retains the final EOA.
-            let eoa_pre_fsm = if reused {
-                final_eoa
-            } else {
-                block.fshd_addr.get()
-            };
+            // The C library truncates the self-referential suffix above this EOA in
+            // `H5MF_tidy_self_referential_fsm_hack` (`H5MF.c`, HDF5 1.10.11).
+            // DRAW storage remains below that suffix.
+            let eoa_pre_fsm = final_eoa;
             let info = file_space_info::persistent_single_manager(
                 offset_width,
                 strategy,

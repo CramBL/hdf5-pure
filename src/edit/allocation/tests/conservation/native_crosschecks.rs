@@ -1,6 +1,7 @@
 //! Crosschecks allocation conservation and chunk facts against libhdf5.
 
 use std::fs;
+use std::path::Path;
 
 use rstest::rstest;
 use test_util::allocation_oracle::AllocationKind;
@@ -101,9 +102,48 @@ fn native_append_prefixes_conserve_holes_and_agree_on_allocations(
 #[rstest]
 #[case::existing(false)]
 #[case::deferred(true)]
-fn native_allocation_after_interruption_preserves_values_and_ownership(
+fn native_raw_append_after_interruption_preserves_values_and_ownership(
     #[case] deferred: bool,
     #[values(false, true)] paged: bool,
+) {
+    native_write_after_interruption(paged, deferred, |path, before| NativeWrite {
+        address: allocation_publication::append(path),
+        length: super::CHUNK * size_of::<i32>(),
+        values: (0..before.len() + super::CHUNK)
+            .map(|value| i32::try_from(value).unwrap())
+            .collect(),
+        created: None,
+    });
+}
+
+test_util_hdf5::hdf5_bundled_tests! {
+    #[rstest]
+    #[case::existing(false)]
+    #[case::deferred(true)]
+    fn native_metadata_creation_after_interruption_preserves_values_and_ownership(
+        #[case] deferred: bool,
+        #[values(false, true)] paged: bool,
+    ) {
+        native_write_after_interruption(paged, deferred, |path, before| NativeWrite {
+            address: allocation_publication::allocate_contiguous(path, 8192),
+            length: 8192,
+            values: before.to_vec(),
+            created: Some(vec![19; 8192]),
+        });
+    }
+}
+
+struct NativeWrite {
+    address: u64,
+    length: usize,
+    values: Vec<i32>,
+    created: Option<Vec<u8>>,
+}
+
+fn native_write_after_interruption(
+    paged: bool,
+    deferred: bool,
+    write: impl FnOnce(&Path, &[i32]) -> NativeWrite,
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("native-reuse.h5");
@@ -132,21 +172,24 @@ fn native_allocation_after_interruption_preserves_values_and_ownership(
         .unwrap();
     fs::write(&path, workload.prefix(point)).unwrap();
     let observation = Observation::read(&fs::read(&path).unwrap());
-    let length = 8192;
-    let address = allocation_publication::allocate_contiguous(&path, length);
+    let NativeWrite {
+        address,
+        length,
+        values,
+        created,
+    } = write(&path, &observation.values);
     assert!(
         address + u64::try_from(length).unwrap()
             <= u64::try_from(fs::read(&path).unwrap().len()).unwrap()
     );
     let file = File::open(&path).unwrap();
-    assert_eq!(
-        file.dataset("d").unwrap().read_i32().unwrap(),
-        observation.values
-    );
-    assert_eq!(
-        file.dataset("native_reuse").unwrap().read_u8().unwrap(),
-        vec![19; usize::try_from(length).unwrap()]
-    );
+    assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), values);
+    if let Some(created) = created {
+        assert_eq!(
+            file.dataset("native_reuse").unwrap().read_u8().unwrap(),
+            created
+        );
+    }
     drop(file);
     let after = Observation::read(&fs::read(&path).unwrap());
     after.inspect(
