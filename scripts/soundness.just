@@ -3,7 +3,31 @@ set lazy
 import "constants.just"
 set working-directory := ".."
 
-default: miri heap-baseline
+# Features shared by native checks and the MAT Miri batch.
+MIRI_MAT_FEATURES := "std,serde,num-complex"
+# Test families in the MAT Miri batch.
+MIRI_MAT_FAMILIES := "mat::complex mat::transpose"
+# Features shared by native checks and the memory Miri batch.
+MIRI_MEMORY_FEATURES := "std"
+# Cache, assembly, read, and encoding families in the memory Miri batch.
+MIRI_MEMORY_FAMILIES := "nosync chunked_read::tests::dense_assembly data_read::primitive::tests primitive_bytes::tests"
+
+default: miri-selection miri heap-baseline
+
+# Execute each Miri family natively and fail if its selection is empty.
+miri-selection:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for family in {{ MIRI_MAT_FAMILIES }}; do
+        cargo nextest run --locked -p hdf5-pure --no-default-features \
+            --features {{ MIRI_MAT_FEATURES }} --lib --no-tests fail --ignore-default-filter \
+            -E "test(/^$family/)"
+    done
+    for family in {{ MIRI_MEMORY_FAMILIES }}; do
+        cargo nextest run --locked -p hdf5-pure --no-default-features \
+            --features {{ MIRI_MEMORY_FEATURES }} --lib --no-tests fail --ignore-default-filter \
+            -E "test(/^$family/)"
+    done
 
 # Check MAT buffers, cache synchronization, dense assembly, and primitive byte operations with Miri.
 miri $MIRIFLAGS="-Zmiri-strict-provenance": miri-toolchain
@@ -11,13 +35,13 @@ miri $MIRIFLAGS="-Zmiri-strict-provenance": miri-toolchain
     # artifacts from another Miri toolchain cannot share this target directory. cargo-miri adds its
     # own `miri` subdirectory below this path.
     CARGO_TARGET_DIR="target/{{ NIGHTLY }}" cargo +{{ NIGHTLY }} miri test --locked \
-        -p hdf5-pure --no-default-features --features std,serde --lib -- \
-        mat::complex mat::transpose
+        -p hdf5-pure --no-default-features --features {{ MIRI_MAT_FEATURES }} --lib -- \
+        {{ MIRI_MAT_FAMILIES }}
     # Check primitive copies into initialized vectors and their spare capacity, and primitive encoding
     # through dataset, attribute, and append callers.
     CARGO_TARGET_DIR="target/{{ NIGHTLY }}" cargo +{{ NIGHTLY }} miri test --locked \
-        -p hdf5-pure --no-default-features --features std --lib -- \
-        nosync chunked_read::tests::dense_assembly data_read::primitive::tests primitive_bytes::tests
+        -p hdf5-pure --no-default-features --features {{ MIRI_MEMORY_FEATURES }} --lib -- \
+        {{ MIRI_MEMORY_FAMILIES }}
 
 # Install the pinned nightly with Miri and the standard library sources it builds.
 miri-toolchain:

@@ -55,6 +55,7 @@ jobs:
               - justfile
               - scripts/nightly.txt
               - scripts/constants.just
+              - scripts/soundness.just
               - scripts/ci/**
               - .github/workflows/ci.yml
 
@@ -132,6 +133,11 @@ jobs:
 
       - name: Tests
         run: just ${{ matrix.config.name == 'full' && 'test-full' || 'test' }}
+
+      # Execute each Miri family with its native feature configuration.
+      - name: Check Miri test selection
+        if: matrix.os == 'ubuntu-latest' && matrix.config.name == 'default'
+        run: just soundness::miri-selection
 
       # rustdoc compiles doctests, so nextest cannot run them.
       - name: Doctests
