@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 use rstest::rstest;
 use test_util::allocation;
 
-use super::FileWriter;
+use super::super::FileWriter;
 use crate::File;
 use crate::FileSpacePageSize;
 use crate::FileSpaceSettings;
