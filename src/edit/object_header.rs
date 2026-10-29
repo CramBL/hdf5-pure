@@ -812,10 +812,6 @@ mod tests {
         crate::edit::test_util::assert_extension_records(&source);
     }
 
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    #[global_allocator]
-    static ALLOC: heapscope::Alloc = heapscope::Alloc::system();
-
     const TRACKED: MessageRecordLayout =
         MessageRecordLayout::from_header_flags(HeaderFlags::TRACKS_CREATION_ORDER.0);
 }
