@@ -4,6 +4,8 @@
 #[cfg(feature = "hdf5")]
 pub mod absence;
 pub mod aggregation;
+#[cfg(feature = "__hdf5-1.10")]
+pub mod allocation_publication;
 pub mod attr;
 #[cfg(feature = "__hdf5-1.10")]
 pub mod chunk_filter;

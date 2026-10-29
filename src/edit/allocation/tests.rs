@@ -3,6 +3,7 @@ use rstest::rstest;
 
 use super::*;
 
+mod conservation;
 mod io;
 mod lifecycle;
 mod persistent;
