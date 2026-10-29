@@ -53,7 +53,8 @@ fn immediate_ownership_publication_matches_native_free_sections(
         vec![0; 8192]
     };
     let builder = native
-        .new_dataset::<u8>()
+        .new_dataset_builder()
+        .empty_as(ByteOrder::LittleEndian.u8_datatype())
         .shape([Extent::resizable(initial.len())])
         .chunk([initial.len()]);
     let builder = if filtered {
@@ -63,6 +64,10 @@ fn immediate_ownership_publication_matches_native_free_sections(
     };
     let target = builder.create("d").unwrap();
     drop(builder);
+    assert_eq!(
+        target.dtype().unwrap().byte_order(),
+        NativeByteOrder::LittleEndian
+    );
     target.write_raw(&initial).unwrap();
     drop(target);
     let scratch = native
@@ -193,7 +198,8 @@ fn appender_values_persist_across_staged_commits_and_native_writes(
         .create(&path)
         .unwrap();
     let builder = native
-        .new_dataset::<u8>()
+        .new_dataset_builder()
+        .empty_as(ByteOrder::LittleEndian.u8_datatype())
         .shape([Extent::resizable(4)])
         .chunk([4]);
     let builder = if filtered {
@@ -203,6 +209,10 @@ fn appender_values_persist_across_staged_commits_and_native_writes(
     };
     let dataset = builder.create("d").unwrap();
     drop(builder);
+    assert_eq!(
+        dataset.dtype().unwrap().byte_order(),
+        NativeByteOrder::LittleEndian
+    );
     dataset.write_raw(&[0_u8, 1, 2, 3]).unwrap();
     drop(dataset);
     let scratch = native
@@ -276,19 +286,30 @@ fn appender_values_persist_across_staged_commits_and_native_writes(
     native.close().unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), completed);
     let native = hdf5::File::open_rw(&path).unwrap();
-    let dataset = native
-        .new_dataset_builder()
-        .with_data(&[73_u8; 8192])
-        .create("native")
-        .unwrap();
-    assert_eq!(dataset.read_raw::<u8>().unwrap(), [73; 8192]);
-    drop(dataset);
+    let ceiling = native.dataset("ceiling").unwrap();
+    ceiling.write_raw(&[73_u8; 8192]).unwrap();
+    drop(ceiling);
+    #[cfg(feature = "__hdf5-bundled")]
+    {
+        let dataset = native
+            .new_dataset_builder()
+            .with_data(&[73_u8; 8192])
+            .create("native")
+            .unwrap();
+        assert_eq!(dataset.read_raw::<u8>().unwrap(), [73; 8192]);
+        drop(dataset);
+    }
     native.close().unwrap();
     let file = File::open(&path).unwrap();
     assert_eq!(
         file.dataset("d").unwrap().read_u8().unwrap(),
         (0..14).collect::<Vec<_>>()
     );
+    assert_eq!(
+        file.dataset("ceiling").unwrap().read_u8().unwrap(),
+        [73; 8192]
+    );
+    #[cfg(feature = "__hdf5-bundled")]
     assert_eq!(
         file.dataset("native").unwrap().read_u8().unwrap(),
         [73; 8192]
