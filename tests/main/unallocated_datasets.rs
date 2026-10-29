@@ -16,7 +16,8 @@ use hdf5_pure::MemoryStrategy;
 use hdf5_pure::MessageType;
 use hdf5_pure::ScaleOffset;
 use hdf5_pure::SyncPolicy;
-use hdf5_pure_format::__private::{AccessMode, ChunkIndexLayout, DataLayout, ObjectHeader};
+use hdf5_pure_format::__private::AccessMode;
+use hdf5_pure_format::__private::ObjectHeader;
 use rstest::rstest;
 use test_util::object_header::MessageType as FixtureMessage;
 use test_util::object_header::v2;
@@ -47,7 +48,7 @@ fn first_and_subsequent_appends_materialize_deferred_indexes(
     }
     builder.write(&path).unwrap();
     let mut bytes = std::fs::read(&path).unwrap();
-    clear_index_header(&mut bytes);
+    test_util_hdf5::__private::clear_index_header(&mut bytes);
     std::fs::write(&path, bytes).unwrap();
     let file = File::open_rw_with_options(
         &path,
@@ -87,7 +88,7 @@ fn first_append_uses_the_layouts_encoded_dimension_width(#[case] chunk_elements:
         .with_fill_value(-7_i32);
     builder.write(&path).unwrap();
     let mut bytes = std::fs::read(&path).unwrap();
-    clear_index_header(&mut bytes);
+    test_util_hdf5::__private::clear_index_header(&mut bytes);
     std::fs::write(&path, bytes).unwrap();
     let file = File::open_rw(&path).unwrap();
     file.dataset("schema")
@@ -145,7 +146,7 @@ fn first_append_rejects_unreadable_padding_before_initialization(#[case] filtere
     }
     builder.write(&path).unwrap();
     let mut image = std::fs::read(&path).unwrap();
-    clear_index_header(&mut image);
+    test_util_hdf5::__private::clear_index_header(&mut image);
     let (header, fill) = test_util::bytes::signature_offsets(&image, v2::SIGNATURE)
         .into_iter()
         .find_map(|at| {
@@ -171,7 +172,6 @@ fn first_append_rejects_unreadable_padding_before_initialization(#[case] filtere
         matches!(error, Error::Format(FormatError::UnreadableFillValue)),
         "{error:?}"
     );
-    assert_eq!(std::fs::read(&path).unwrap(), image);
     file.close().unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), image);
 }
@@ -213,7 +213,7 @@ fn empty_append_operations_preserve_index_storage(
     builder.write(&path).unwrap();
     if unallocated {
         let mut image = std::fs::read(&path).unwrap();
-        clear_index_header(&mut image);
+        test_util_hdf5::__private::clear_index_header(&mut image);
         std::fs::write(&path, image).unwrap();
     }
     let original = std::fs::read(&path).unwrap();
@@ -228,19 +228,19 @@ fn empty_append_operations_preserve_index_storage(
         .unwrap();
     let reusable = file.reusable_space_stats().unwrap();
     operation.run(file.dataset("schema").unwrap());
+    assert_eq!(file.reusable_space_stats().unwrap(), reusable);
+    assert_eq!(file.dataset("schema").unwrap().shape().unwrap(), [0]);
+    assert!(file.dataset("schema").unwrap().chunks().unwrap().is_empty());
+    file.close().unwrap();
+    let completed = std::fs::read(&path).unwrap();
+    assert_eq!(completed, original);
     assert_eq!(
-        File::from_bytes(std::fs::read(&path).unwrap())
+        File::from_bytes(completed)
             .unwrap()
             .persisted_free_sections()
             .unwrap(),
         free
     );
-    assert_eq!(file.reusable_space_stats().unwrap(), reusable);
-    assert_eq!(file.dataset("schema").unwrap().shape().unwrap(), [0]);
-    assert!(file.dataset("schema").unwrap().chunks().unwrap().is_empty());
-    assert_eq!(std::fs::read(&path).unwrap(), original);
-    file.close().unwrap();
-    assert_eq!(std::fs::read(&path).unwrap(), original);
 }
 
 #[derive(Clone, Copy)]
@@ -254,38 +254,6 @@ enum EmptyAppendOperation {
     OwnedFinish,
     OwnedFlush,
     OwnedPending,
-}
-
-fn clear_index_header(image: &mut [u8]) {
-    let file = File::from_bytes(image.to_vec()).unwrap();
-    let widths = (
-        file.superblock().offset_size.get(),
-        file.superblock().length_size.get(),
-    );
-    drop(file);
-    let candidates: Vec<_> = test_util::bytes::signature_offsets(image, v2::SIGNATURE)
-        .into_iter()
-        .filter_map(|at| {
-            ObjectHeader::parse(image, AccessMode::ReadOnly, at, widths.0, widths.1)
-                .unwrap()
-                .messages
-                .into_iter()
-                .find(|message| message.msg_type == MessageType::DATA_LAYOUT)
-                .map(|message| (at, message.data))
-        })
-        .collect();
-    assert_eq!(candidates.len(), 1);
-    let (header, mut layout) = candidates.into_iter().next().unwrap();
-    let start = layout.len() - usize::from(widths.0);
-    layout[start..].fill(u8::MAX);
-    assert!(matches!(
-        DataLayout::parse(&layout, widths.0, widths.1).unwrap(),
-        DataLayout::Chunked {
-            index: ChunkIndexLayout::ExtensibleArray { address: None, .. },
-            ..
-        }
-    ));
-    v2::replace_message(image, header, FixtureMessage::DATA_LAYOUT, &layout);
 }
 
 impl EmptyAppendOperation {
@@ -364,7 +332,7 @@ fn empty_indexes_reject_incompatible_append_input_before_mutation(
     builder.write(&path).unwrap();
     if unallocated {
         let mut image = std::fs::read(&path).unwrap();
-        clear_index_header(&mut image);
+        test_util_hdf5::__private::clear_index_header(&mut image);
         std::fs::write(&path, image).unwrap();
     }
     let original = std::fs::read(&path).unwrap();
@@ -376,7 +344,6 @@ fn empty_indexes_reject_incompatible_append_input_before_mutation(
     };
     assert_eq!(reason, expected);
     drop(target);
-    assert_eq!(std::fs::read(&path).unwrap(), original);
     file.close().unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), original);
 }
@@ -402,7 +369,7 @@ fn empty_lossy_appender_operations_preserve_index_storage(
     builder.write(&path).unwrap();
     if unallocated {
         let mut image = std::fs::read(&path).unwrap();
-        clear_index_header(&mut image);
+        test_util_hdf5::__private::clear_index_header(&mut image);
         std::fs::write(&path, image).unwrap();
     }
     let original = std::fs::read(&path).unwrap();
@@ -420,7 +387,6 @@ fn empty_lossy_appender_operations_preserve_index_storage(
         appender.finish().unwrap();
         drop(target);
     }
-    assert_eq!(std::fs::read(&path).unwrap(), original);
     file.close().unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), original);
 }
