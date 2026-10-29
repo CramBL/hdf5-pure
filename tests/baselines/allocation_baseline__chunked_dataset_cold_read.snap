@@ -1,0 +1,11 @@
+---
+source: tests/allocation_baseline.rs
+expression: read_report
+---
+Operation: Read a cold chunked f64 dataset through a streaming file
+Elements: 16,384
+Chunk elements: 512
+Allocation count:            104
+Cumulative bytes:        465,118
+Peak bytes:              330,512
+Retained bytes:          199,240
