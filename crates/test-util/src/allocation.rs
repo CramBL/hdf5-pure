@@ -200,7 +200,7 @@ fn grouped_decimal(value: u64) -> String {
 mod tests {
     use rstest::rstest;
 
-    use super::{Measured, grouped_decimal};
+    use super::Measured;
 
     #[rstest]
     #[case::zero(0, "0")]
@@ -211,7 +211,7 @@ mod tests {
     #[case::readable_example(1_300_233, "1,300,233")]
     #[case::maximum(u64::MAX, "18,446,744,073,709,551,615")]
     fn decimal_numbers_have_thousands_separators(#[case] value: u64, #[case] expected: &str) {
-        assert_eq!(grouped_decimal(value), expected);
+        assert_eq!(super::grouped_decimal(value), expected);
     }
 
     #[test]
