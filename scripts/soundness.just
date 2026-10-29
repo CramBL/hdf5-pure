@@ -29,7 +29,7 @@ heap-baseline:
 
 # Record exact allocation figures in the default feature configuration.
 heap-baseline-record:
-    HEAPSCOPE_UPDATE_BASELINE=1 cargo nextest run --locked -p hdf5-pure --test allocation_baseline --run-ignored only --no-tests fail
+    HEAPSCOPE_UPDATE_BASELINE=1 INSTA_UPDATE=always cargo nextest run --locked -p hdf5-pure --test allocation_baseline --run-ignored only --no-tests fail
 
 heap-profile:
     cargo run --release --example heap_profile
