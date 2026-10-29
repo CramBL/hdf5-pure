@@ -304,10 +304,10 @@ mod tests {
     }
 
     #[rstest]
-    #[case(0x00, UintWidth::One, 1)]
-    #[case(0x01, UintWidth::Two, 2)]
-    #[case(0x02, UintWidth::Four, 4)]
-    #[case(0x03, UintWidth::Eight, 8)]
+    #[case::one_byte(0x00, UintWidth::One, 1)]
+    #[case::two_bytes(0x01, UintWidth::Two, 2)]
+    #[case::four_bytes(0x02, UintWidth::Four, 4)]
+    #[case::eight_bytes(0x03, UintWidth::Eight, 8)]
     fn each_flag_value_selects_the_width_it_encodes(
         #[case] flags: u8,
         #[case] expected: UintWidth,
@@ -319,14 +319,14 @@ mod tests {
     }
 
     #[rstest]
-    #[case(0, UintWidth::One)]
-    #[case(255, UintWidth::One)]
-    #[case(256, UintWidth::Two)]
-    #[case(65_535, UintWidth::Two)]
-    #[case(65_536, UintWidth::Four)]
-    #[case(u32::MAX.into(), UintWidth::Four)]
-    #[case(u64::from(u32::MAX) + 1, UintWidth::Eight)]
-    #[case(u64::MAX, UintWidth::Eight)]
+    #[case::zero(0, UintWidth::One)]
+    #[case::u8_limit(255, UintWidth::One)]
+    #[case::above_u8_limit(256, UintWidth::Two)]
+    #[case::u16_limit(65_535, UintWidth::Two)]
+    #[case::above_u16_limit(65_536, UintWidth::Four)]
+    #[case::u32_limit(u32::MAX.into(), UintWidth::Four)]
+    #[case::above_u32_limit(u64::from(u32::MAX) + 1, UintWidth::Eight)]
+    #[case::u64_limit(u64::MAX, UintWidth::Eight)]
     fn a_value_selects_the_smallest_width_that_holds_it(
         #[case] value: u64,
         #[case] expected: UintWidth,
@@ -335,10 +335,10 @@ mod tests {
     }
 
     #[rstest]
-    #[case(0xFC, UintWidth::One)]
-    #[case(0xFD, UintWidth::Two)]
-    #[case(0xFE, UintWidth::Four)]
-    #[case(0xFF, UintWidth::Eight)]
+    #[case::one_byte(0xFC, UintWidth::One)]
+    #[case::two_bytes(0xFD, UintWidth::Two)]
+    #[case::four_bytes(0xFE, UintWidth::Four)]
+    #[case::eight_bytes(0xFF, UintWidth::Eight)]
     fn only_bits_zero_and_one_select_the_width(#[case] flags: u8, #[case] expected: UintWidth) {
         assert_eq!(UintWidth::from_flags(flags), expected);
     }
@@ -358,10 +358,10 @@ mod tests {
     }
 
     #[rstest]
-    #[case(UintWidth::One, 0xFF, vec![0xFF])]
-    #[case(UintWidth::Two, 0x0102, vec![0x02, 0x01])]
-    #[case(UintWidth::Four, 0x0102, vec![0x02, 0x01, 0, 0])]
-    #[case(UintWidth::Eight, 0x0102, vec![0x02, 0x01, 0, 0, 0, 0, 0, 0])]
+    #[case::one_byte_maximum(UintWidth::One, 0xFF, vec![0xFF])]
+    #[case::two_byte_value(UintWidth::Two, 0x0102, vec![0x02, 0x01])]
+    #[case::four_byte_zero_padding(UintWidth::Four, 0x0102, vec![0x02, 0x01, 0, 0])]
+    #[case::eight_byte_zero_padding(UintWidth::Eight, 0x0102, vec![0x02, 0x01, 0, 0, 0, 0, 0, 0])]
     fn a_value_is_written_little_endian_at_its_width(
         #[case] width: UintWidth,
         #[case] value: usize,

@@ -594,9 +594,9 @@ mod tests {
     }
 
     #[rstest]
-    #[case(OffsetWidth::Two, LengthWidth::Two)]
-    #[case(OffsetWidth::Four, LengthWidth::Four)]
-    #[case(OffsetWidth::Eight, LengthWidth::Eight)]
+    #[case::two_byte_fields(OffsetWidth::Two, LengthWidth::Two)]
+    #[case::four_byte_fields(OffsetWidth::Four, LengthWidth::Four)]
+    #[case::eight_byte_fields(OffsetWidth::Eight, LengthWidth::Eight)]
     fn a_version_0_or_1_superblock_of_every_width_parses_at_its_candidate(
         #[values(SuperblockVersion::Zero, SuperblockVersion::One)] version: SuperblockVersion,
         #[case] offsets: OffsetWidth,
@@ -744,10 +744,10 @@ mod tests {
     }
 
     #[rstest]
-    #[case(SuperblockVersion::Zero, false)]
-    #[case(SuperblockVersion::Zero, true)]
-    #[case(SuperblockVersion::One, false)]
-    #[case(SuperblockVersion::One, true)]
+    #[case::v0_optional_absent(SuperblockVersion::Zero, false)]
+    #[case::v0_optional_defined(SuperblockVersion::Zero, true)]
+    #[case::v1_optional_absent(SuperblockVersion::One, false)]
+    #[case::v1_optional_defined(SuperblockVersion::One, true)]
     fn legacy_address_fields_reencode_in_stored_coordinates(
         #[case] version: SuperblockVersion,
         #[case] defined: bool,
@@ -814,10 +814,10 @@ mod tests {
     }
 
     #[rstest]
-    #[case(SuperblockVersion::Two, false)]
-    #[case(SuperblockVersion::Two, true)]
-    #[case(SuperblockVersion::Three, false)]
-    #[case(SuperblockVersion::Three, true)]
+    #[case::v2_extension_absent(SuperblockVersion::Two, false)]
+    #[case::v2_extension_defined(SuperblockVersion::Two, true)]
+    #[case::v3_extension_absent(SuperblockVersion::Three, false)]
+    #[case::v3_extension_defined(SuperblockVersion::Three, true)]
     fn direct_address_fields_roundtrip_in_stored_coordinates(
         #[case] version: SuperblockVersion,
         #[case] defined: bool,
@@ -918,8 +918,8 @@ mod tests {
     }
 
     #[rstest]
-    #[case(SuperblockVersion::Zero)]
-    #[case(SuperblockVersion::One)]
+    #[case::version_zero(SuperblockVersion::Zero)]
+    #[case::version_one(SuperblockVersion::One)]
     fn a_legacy_superblock_version_is_rejected_by_the_serializer(
         #[case] version: SuperblockVersion,
     ) {
@@ -957,9 +957,9 @@ mod tests {
     }
 
     #[rstest]
-    #[case(0x100)]
-    #[case(0x8000_0004)]
-    #[case(u32::MAX)]
+    #[case::above_byte_limit(0x100)]
+    #[case::swmr_with_high_bit(0x8000_0004)]
+    #[case::all_bits(u32::MAX)]
     fn modern_superblocks_reject_status_flags_wider_than_one_byte(
         #[case] bits: u32,
         #[values(SuperblockVersion::Two, SuperblockVersion::Three)] version: SuperblockVersion,
@@ -977,12 +977,12 @@ mod tests {
     }
 
     #[rstest]
-    #[case(0, 0)]
-    #[case(1, 0)]
-    #[case(4, 0)]
-    #[case(5, 0)]
-    #[case(0x8000_0004, 0x8000_0000)]
-    #[case(u32::MAX, 0xFFFF_FFFA)]
+    #[case::clear(0, 0)]
+    #[case::write_mark(1, 0)]
+    #[case::swmr_mark(4, 0)]
+    #[case::write_and_swmr_marks(5, 0)]
+    #[case::swmr_with_high_bit(0x8000_0004, 0x8000_0000)]
+    #[case::all_bits(u32::MAX, 0xFFFF_FFFA)]
     fn legacy_status_flags_preserve_every_observed_bit(
         #[case] bits: u32,
         #[case] unknown: u32,

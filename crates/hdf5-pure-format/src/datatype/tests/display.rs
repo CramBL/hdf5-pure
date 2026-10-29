@@ -29,10 +29,10 @@ fn ordinary_numeric_types_read_as_their_rust_names() {
 /// multiplying. The test exercises each class that calls it, including the
 /// classes that `classify_datatype` routes here.
 #[rstest]
-#[case(Datatype::FixedPoint(FixedPointType::new(u32::MAX, DatatypeByteOrder::LittleEndian, true, 0, 1).unwrap()), "i34359738360(bits 0..1)")]
-#[case(Datatype::FloatingPoint(FloatingPointType::from_layout(u32::MAX, DatatypeByteOrder::LittleEndian, FloatingPointLayout::IEEE754_BINARY64).unwrap()), "f34359738360(bits 0..64)")]
-#[case(Datatype::Time(TimeType::new(u32::MAX, DatatypeByteOrder::LittleEndian, 1).unwrap()), "time34359738360(bits 0..1)")]
-#[case(Datatype::BitField(BitFieldType::new(u32::MAX, DatatypeByteOrder::LittleEndian, 0, 1).unwrap()), "bitfield34359738360(bits 0..1)")]
+#[case::fixed_point(Datatype::FixedPoint(FixedPointType::new(u32::MAX, DatatypeByteOrder::LittleEndian, true, 0, 1).unwrap()), "i34359738360(bits 0..1)")]
+#[case::floating_point(Datatype::FloatingPoint(FloatingPointType::from_layout(u32::MAX, DatatypeByteOrder::LittleEndian, FloatingPointLayout::IEEE754_BINARY64).unwrap()), "f34359738360(bits 0..64)")]
+#[case::time(Datatype::Time(TimeType::new(u32::MAX, DatatypeByteOrder::LittleEndian, 1).unwrap()), "time34359738360(bits 0..1)")]
+#[case::bit_field(Datatype::BitField(BitFieldType::new(u32::MAX, DatatypeByteOrder::LittleEndian, 0, 1).unwrap()), "bitfield34359738360(bits 0..1)")]
 fn a_crafted_size_writes_its_width_instead_of_overflowing(
     #[case] datatype: Datatype,
     #[case] expected: &str,

@@ -626,10 +626,10 @@ mod tests {
     use crate::shared_message;
 
     #[rstest]
-    #[case("scale", false, VERSION_TWO, ASCII_NAME_CHARACTER_SET)]
-    #[case("scale", true, VERSION_THREE, ASCII_NAME_CHARACTER_SET)]
-    #[case("échelle", false, VERSION_THREE, UTF8_NAME_CHARACTER_SET)]
-    #[case("échelle", true, VERSION_THREE, UTF8_NAME_CHARACTER_SET)]
+    #[case::ascii_v2("scale", false, VERSION_TWO, ASCII_NAME_CHARACTER_SET)]
+    #[case::ascii_forced_v3("scale", true, VERSION_THREE, ASCII_NAME_CHARACTER_SET)]
+    #[case::utf8_auto_v3("échelle", false, VERSION_THREE, UTF8_NAME_CHARACTER_SET)]
+    #[case::utf8_forced_v3("échelle", true, VERSION_THREE, UTF8_NAME_CHARACTER_SET)]
     fn serialized_name_declares_its_character_set(
         #[case] name: &str,
         #[case] version_three: bool,
