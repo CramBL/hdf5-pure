@@ -18,6 +18,7 @@ use super::WritePath;
 
 mod extents;
 mod lifecycle;
+mod managers;
 mod metadata;
 mod transient;
 

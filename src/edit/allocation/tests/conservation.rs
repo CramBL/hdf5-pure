@@ -60,6 +60,7 @@ test_util_hdf5::hdf5_1_10_tests! {
 
 mod extents;
 mod lifecycle;
+mod managers;
 mod metadata;
 mod references;
 mod transient;
