@@ -41,8 +41,11 @@ pub fn header_stats(path: impl AsRef<Path>) -> HeaderStats {
 // writes and in every file it is compared against.
 const LENGTH: usize = 8;
 
-// Section `subsec_fmt4_appendixc_extarr`, version 4.0.
-const SIGNATURE: &[u8; 4] = b"EAHD";
+/// The version 0 header signature defined in "The Extensible Array Index" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_extarr
+pub const SIGNATURE: &[u8; 4] = b"EAHD";
 
 #[cfg(test)]
 mod tests {

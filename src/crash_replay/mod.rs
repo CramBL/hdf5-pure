@@ -1,122 +1,16 @@
-//! Replay every prefix of what reached the disk, and read what it left.
+//! Replays completed file-write prefixes and checks allocation publication ordering.
 //!
-//! # The defect class this exists for
+//! Prefix sweeps reconstruct each file from its starting bytes and recorded writes and resizes.
+//! Each prefix must remain readable with an allowed data prefix, and replaying the complete log
+//! must reproduce the completed workload. The sweeps cover EA appends, deferred initialization,
+//! filtered tail replacement, and staged commits.
 //!
-//! Since the write gathering of issue #288, the writes an operation makes
-//! between two ordering barriers are issued in **address order** rather than in
-//! the order the engine made them. In this format that is systematically the
-//! wrong way round: every publish point sits at a *lower* address than the
-//! content it names — the superblock at address 0, an object header's dataspace
-//! dimension and Extensible-Array element count near the front of the file, the
-//! chunk bytes and index blocks they name at end-of-file. So an
-//! append-then-publish pair with no barrier between them now publishes *first*.
-//!
-//! The resulting failure is the bad kind. A pointer that survives while the
-//! block it names does not is a checksummed, valid-looking address into bytes
-//! past end-of-file, and the *next* append believes the block exists and writes
-//! into nothing.
-//!
-//! What holds this together is [`FileImage::ordering_barrier`], and a missing one
-//! is invisible to every ordinary test: the operation completes, the file is
-//! correct, and only a machine that stops at the wrong instant can tell. This
-//! module is what stops the machine at every instant.
-//!
-//! # How it works
-//!
-//! [`disk_log`] records each write and each `set_len` that a session actually
-//! issued. A [`Recording`] pairs that log with the file's bytes as they were
-//! before the session opened, which makes every prefix of the log a file that
-//! could really have existed: the operations are positioned, so applying the
-//! first *k* of them to the starting bytes is exactly the disk state after *k* of
-//! them completed. Each prefix is written out and read back, and judged as
-//! [`Verdict::Clean`], [`Verdict::Loud`] or [`Verdict::Silent`].
-//!
-//! # This one can fail
-//!
-//! A crash harness that cannot fail is decoration, and the first draft of this
-//! one was: it swept five hundred prefixes, called every one of them clean, and
-//! went on doing so with **both** of the ordering barriers it was written for
-//! deleted. Nothing about that was visible from the outside — the sweep was wide,
-//! the assertions were real, and the numbers looked healthy.
-//!
-//! Three separate things were wrong, and the fix for each is a *demand the code
-//! makes* rather than a value that happens to be right:
-//!
-//! 1. The window did not cross the allocations that reach the barriers — see
-//!    [`WARMUP_ROUNDS`] and [`Recording::assert_positioned`].
-//! 2. The file was small enough that a publish point and the content it names
-//!    merged into a single write, which is atomic — see [`CHUNK`] and the same
-//!    method's second condition.
-//! 3. A prefix that refused to read was counted as benign — see
-//!    [`Tally::assert_sound`].
-//!
-//! Each of those is now something a future change trips over rather than
-//! silently loses. [`Recording::replay_every_prefix`] adds two more of the same
-//! kind: replaying the *whole* log must reproduce the file the session really
-//! left, so a write escaping [`disk_log`] cannot pass unnoticed, and the last
-//! prefix must satisfy the workload's finished state, so a session that quietly
-//! stopped doing work cannot either.
-//!
-//! # What it covers, and what it does not
-//!
-//! Measured by deleting each barrier in the Extensible-Array append engine in
-//! turn and running the library:
-//!
-//! | barrier | caught |
-//! | --- | --- |
-//! | before a fresh data-block pointer | yes, and by the pre-existing structural test |
-//! | before a fresh super-block pointer | yes, only by [`a_crashed_append_can_be_reopened_and_appended_to`] |
-//! | `apply_ea_append` phase 1, chunk bytes → superblock end-of-file | yes, by [`recorded_eof_covers_the_file`] |
-//! | `apply_ea_append` phase 1, end-of-file → index writes | **no** |
-//! | `apply_ea_append` phase 2 → 3 | **no** |
-//! | `apply_ea_append` phase 3, header count → dimension | yes |
-//!
-//! A barrier is not the only way this class of defect arrives. A *publish* is
-//! the other: a value written apart from the checksum covering it is two writes
-//! with a crash point between them, no matter how the barriers fall. That was
-//! issue #307, and it is why the sweeps here are run at more than one header
-//! width — see [`warmed_base_padded`] and
-//! [`a_publish_costs_the_same_whether_or_not_it_spans_a_page`].
-//!
-//! The two uncovered ones are not gaps in the sweep, and it is worth knowing why
-//! before adding a workload to chase them. Deleting the first changes **nothing
-//! that reaches the disk** under gathering — the recorded write order is
-//! byte-identical, because the order it enforces is the order address-sorting
-//! already produces. Deleting the second does reorder two metadata writes, but
-//! the state between them is a published element count with a stale block, which
-//! is indistinguishable from a normal in-progress append to a reader bounded by
-//! the dataspace dimension. Both remain load-bearing for the two things this
-//! module does not model: `fsync` durability under
-//! [`SyncPolicy::Always`](crate::SyncPolicy), and the visibility order a *SWMR*
-//! reader follows, which is defined in terms of the header counts rather than the
-//! dimension.
-//!
-//! An append that allocates out of *freed* space rather than at end-of-file
-//! (issue #349) is swept by [`appending_into_a_persisted_hole_survives_a_crash_at_every_write`],
-//! which reaches the branch through a file that **persists** its free space: such
-//! a session seeds its free list from the on-disk managers at open, so the hole
-//! is there before the recorded window rather than made by a commit inside it.
-//! That sweep crosses ownership publication through replacement managers and the superblock
-//! before references to the reused allocations are linked.
-//!
-//! On a *non*-persisting file the same branch stays out of reach, and is closed
-//! by argument instead: a session's free list is populated only by its own
-//! commits, so reaching it would mean bringing a whole `commit` into the recorded
-//! window and undoing the positioning [`WARMUP_ROUNDS`] and
-//! [`Recording::assert_positioned`] exist to guarantee. The barriers are there
-//! because an *appended* region sits above the pointer naming it, and a reused
-//! region either sits above it too — the same case — or below it, where
-//! address-ordered gathering already issues the content first. See
-//! [`Store::alloc_raw`](crate::chunk_index_inplace::Store::alloc_raw).
-//!
-//! Filtered chunk writes are covered only through this engine, by
-//! [`regrowing_a_filtered_trailing_chunk_survives_a_crash_at_every_write`],
-//! which sweeps the one write in the crate that moves an *already visible*
-//! chunk: the trailing-chunk rewrite of issue #393. Outside this engine, nothing
-//! is covered: dense attribute heaps, the Fixed-Array and v2 B-tree chunk
-//! indexes, the chunked writer's own filtered output, and group link-table
-//! growth all publish low-address pointers to high-address content and have no
-//! sweep here. That is the remaining half of issue #309.
+//! The ordering tests also inspect synchronization outcomes at the storage boundary. For completed
+//! full-chunk workloads, the tests locate content, ownership publication, and reference writes by
+//! parsing chunk and index ranges, layout pointers, managers, and EOF generations. The tests use the
+//! same discovery for altered traces whose files remain readable. These tests check requested
+//! barriers and reported completion, without modeling physical power loss, torn metadata writes,
+//! or SWMR visibility.
 
 use std::path::Path;
 
@@ -145,6 +39,9 @@ use crate::source::MetadataCacheConfig;
 use crate::type_builders::DatasetBuilder;
 use crate::width::FormatWidths;
 use crate::writer::FileBuilder;
+
+mod ordering;
+mod ordering_facts;
 
 /// What reading one replayed prefix made of it.
 enum Verdict {
@@ -1726,73 +1623,6 @@ fn a_publish_costs_the_same_whether_or_not_it_spans_a_page() {
             counts.iter().all(|&(_, n, _)| n == first),
             "{mode:?}: one append must cost the same writes at every header width, \
              but cost {counts:?}"
-        );
-    }
-}
-
-/// A publish being one write leaves the gathering almost nothing to merge inside
-/// an append, so the two buffering modes must cost writes that differ by a
-/// **constant** rather than by a per-append one.
-///
-/// This is the half [`a_publish_costs_the_same_whether_or_not_it_spans_a_page`]
-/// cannot see. That one compares header widths, so a publish that splits at
-/// *every* width — the array header's six statistics and its checksum are fifty
-/// bytes apart and share a page whatever the dataset looks like — changes both
-/// sides of its comparison and passes. Splitting shows up here instead, as a gap
-/// that grows with the number of appends.
-///
-/// Measured: 5 writes against 5 for one append and 40 against 40 for eight,
-/// unpaged; one more on the unbuffered side throughout when the file is paged,
-/// from padding a page at the raw/metadata boundary. Before issue #307 the same
-/// eight appends were 40 against 64, and the excess was three writes per append.
-#[test]
-fn buffering_saves_a_constant_number_of_writes_not_one_per_append() {
-    use crate::image::WriteBuffering;
-
-    /// Room for the handful of writes gathering merges that are *not* per-append:
-    /// a paged file's boundary padding, and the joins around an allocation round.
-    const SLACK: usize = 4;
-
-    for paged in [false, true] {
-        let cost = |rounds: i32, unbuffered: bool| -> usize {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("gap.h5");
-            // NONE isolates write gathering from classic aggregate padding.
-            warmed_base_padded(&path, paged, 0, Some(FileSpaceStrategy::None));
-            let mut s = WriteEngine::open_with_locking(&path, FileLocking::Enabled).unwrap();
-            s.set_sync_policy(SyncPolicy::OnClose);
-            if unbuffered {
-                s.set_write_buffering(WriteBuffering::Unbuffered).unwrap();
-            }
-            for i in 0..rounds {
-                append(&mut s, WARMUP + i * ROUND, ROUND);
-            }
-            let n = s.issued_write_order().len();
-            drop(s);
-            n
-        };
-
-        // Two append counts an order of magnitude apart: a per-append excess
-        // grows between them and a constant one does not, which is the whole
-        // distinction. Comparing one count against an absolute would pin a number
-        // that every unrelated change to the append path moves.
-        let (few, many) = (2i32, 24i32);
-        let gap = |rounds: i32| cost(rounds, true).saturating_sub(cost(rounds, false));
-        let (gap_few, gap_many) = (gap(few), gap(many));
-        // A floor as well as a ceiling. If `set_write_buffering` silently did
-        // nothing, both sides would be the same session and every gap would be
-        // zero, which satisfies the rule below without measuring anything.
-        assert!(
-            gap_many > 0,
-            "paged={paged}: unbuffered writing must cost more writes than gathered \
-             over {many} appends, but the two were equal — the buffering mode is \
-             not taking effect and nothing below is being measured"
-        );
-        assert!(
-            gap_many <= gap_few + SLACK,
-            "paged={paged}: buffering must save a constant number of writes, but saved \
-             {gap_few} over {few} appends and {gap_many} over {many} — a gap that grows \
-             with the appends is a publish that is still two writes"
         );
     }
 }

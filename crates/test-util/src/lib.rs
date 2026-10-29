@@ -39,6 +39,7 @@ pub mod object_header;
 pub mod paged_index;
 pub mod process;
 pub mod publication;
+pub mod publication_order;
 pub mod range;
 pub mod sohm;
 pub mod superblock;
