@@ -16,6 +16,7 @@ use super::Observation;
 use super::Workload;
 use super::WritePath;
 
+mod extents;
 mod transient;
 
 #[rstest]

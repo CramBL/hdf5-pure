@@ -1,9 +1,9 @@
 //! Checks persisted ownership across completed file writes and resizes.
 //!
-//! Fixtures use persistent FSM_AGGR or PAGE storage with threshold one, a zero base address, and
-//! eight-byte addresses and lengths. Tests derive complete live allocations from parsed standard
-//! metadata and inspect stored EA pointers before final dataspace growth. Native crosschecks compare
-//! normalized free ranges and chunk records with libhdf5.
+//! Fixtures for exact hole coverage use persistent FSM_AGGR or PAGE storage with threshold one, a
+//! zero base address, and eight-byte addresses and lengths. Tests derive complete live allocations
+//! from parsed standard metadata and inspect stored EA pointers before final dataspace growth.
+//! Native crosschecks compare normalized free ranges and chunk records with libhdf5.
 
 use std::fs;
 use std::path::Path;
@@ -57,6 +57,7 @@ test_util_hdf5::hdf5_1_10_tests! {
     mod native_crosschecks;
 }
 
+mod extents;
 mod transient;
 
 #[rstest]
@@ -285,6 +286,13 @@ impl Workload {
     /// Parses each prefix, locates stored references, and checks that complete replay reproduces
     /// the finished file and its expected values.
     pub(super) fn record(path: &Path, writer: WritePath, rounds: usize) -> Self {
+        Self::record_with(path, rounds, |values| writer.append(path, values))
+    }
+
+    /// Records a caller's append of `rounds` complete chunks through `append`.
+    ///
+    /// Passes consecutive fixture values to `append` and checks every reconstructed prefix.
+    pub(super) fn record_with(path: &Path, rounds: usize, append: impl FnOnce(&[i32])) -> Self {
         let base = fs::read(path).unwrap();
         let initial = Observation::read(&base);
         let initial_values = initial.values.len();
@@ -292,7 +300,7 @@ impl Workload {
             .map(|value| i32::try_from(value).unwrap())
             .collect();
         disk_log::start();
-        writer.append(path, &values);
+        append(&values);
         let recording = disk_log::finish();
         let operations = recording.operations;
         assert!(!operations.is_empty());
@@ -467,18 +475,24 @@ impl Workload {
                 continue;
             }
             let coverage = Coverage::new([candidate.range]);
-            let prepared = self.operations[..point]
-                .iter()
-                .any(|operation| match operation {
-                    DiskOp::Write { offset, bytes } => !Coverage::new([Interval::new(
-                        *offset,
-                        u64::try_from(bytes.len()).unwrap(),
-                    )
-                    .unwrap()])
-                    .intersection(&coverage)
-                    .is_empty(),
-                    DiskOp::SetLen(_) => false,
-                });
+            let length = if candidate.kind == AllocationKind::Index {
+                test_util::extensible_array::SIGNATURE.len()
+            } else {
+                usize::try_from(candidate.range.length()).unwrap().min(16)
+            };
+            let start = usize::try_from(candidate.range.start()).unwrap();
+            let expected = &self.final_bytes[start..start + length];
+            let prepared = self.operations[..point].iter().any(|operation| {
+                let DiskOp::Write { offset, bytes } = operation else {
+                    return false;
+                };
+                candidate
+                    .range
+                    .start()
+                    .checked_sub(*offset)
+                    .and_then(|offset| usize::try_from(offset).ok())
+                    .is_some_and(|local| bytes.get(local..local + length) == Some(expected))
+            });
             if !prepared {
                 continue;
             }
@@ -777,6 +791,13 @@ impl Observation {
                                     Fact::new(AllocationKind::Index, address, length)
                                 }),
                         );
+                        for allocation in extents::IndexStorage::read(bytes).allocations {
+                            let stored = live
+                                .iter_mut()
+                                .find(|fact| fact.range == allocation.range)
+                                .unwrap();
+                            stored.parsed = allocation.parsed;
+                        }
                     }
                     _ => {}
                 }
@@ -1117,12 +1138,7 @@ fn replace_free_sections(original: &[u8], coverage: &Coverage) -> Vec<u8> {
     info.manager_addrs.fill(DecodedStoredAddress::Undefined);
     info.manager_addrs[0] = DecodedStoredAddress::Defined(StoredAddress::new(header_at));
     let encoded = format::serialize_file_space_info_v1(context.widths(), &info).unwrap();
-    v2::replace_message(
-        &mut bytes,
-        usize::try_from(extension).unwrap(),
-        FixtureMessage::FILE_SPACE_INFO,
-        &encoded,
-    );
+    extents::replace_space_info(&mut bytes, &context, extension, &encoded);
     superblock.eof_address = u64::try_from(bytes.len()).unwrap();
     let encoded = format::serialize_superblock(&superblock).unwrap();
     bytes[..encoded.len()].copy_from_slice(&encoded);
