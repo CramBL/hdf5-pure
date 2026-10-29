@@ -7,6 +7,7 @@ use core::num::NonZeroU64;
 use core::num::NonZeroUsize;
 
 use hdf5_pure_format::__private::ChunkedGeometry;
+use hdf5_pure_format::__private::ExtensibleArrayInitialization;
 
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::{PageTransition, PageType};
@@ -20,7 +21,7 @@ use crate::access_mode::AccessMode;
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
 use crate::address::{AddressContext, BaseAddressExt};
-use crate::chunk_index_inplace::{self, Located, RetiredChunk, Store};
+use crate::chunk_index_inplace::{self, AppendIndex, Located, RetiredChunk, Store};
 use crate::convert::Narrow;
 use crate::data_layout::DataLayout;
 use crate::dataspace::Dataspace;
@@ -276,17 +277,17 @@ impl WriteEngine {
     ) -> Result<AppendGeometry, Error> {
         let oh_addr = self.append_prepare(target)?;
         let st = &self.located[&oh_addr];
-        let chunk_elems = st.loc.chunk_elems;
+        let chunk_elems = st.index.chunk_elems();
         Ok(AppendGeometry {
             chunk_elems,
             element_size: st.element_size,
-            current_dim: st.loc.current_dim,
+            current_dim: st.index.current_dim(),
             lossy_filters: st
                 .pipeline
                 .as_ref()
                 .is_some_and(|p| !super::pipeline_lossless(p))
-                && !st.loc.flags.partial_edge_chunks_stored_raw(),
-            full_batch_elems: self.batch_elems(st.loc.chunk_bytes, chunk_elems),
+                && !st.index.flags().partial_edge_chunks_stored_raw(),
+            full_batch_elems: self.batch_elems(st.index.chunk_bytes(), chunk_elems),
         })
     }
 
@@ -337,8 +338,8 @@ impl WriteEngine {
                     "filtered datasets are not supported for SWMR append",
                 ));
             }
-            let chunk_elems = st.loc.chunk_elems;
-            if st.loc.current_dim % chunk_elems != 0 || new_elems % chunk_elems != 0 {
+            let chunk_elems = st.index.chunk_elems();
+            if st.index.current_dim() % chunk_elems != 0 || new_elems % chunk_elems != 0 {
                 return Err(Error::SwmrAppendUnsupported(
                     "SWMR append must be chunk-aligned: the current length and the appended \
                      length must both be whole multiples of the chunk length",
@@ -349,9 +350,9 @@ impl WriteEngine {
         let (chunk_elems, elem_bytes, full_batch_elems) = {
             let st = &self.located[&oh_addr];
             (
-                st.loc.chunk_elems,
+                st.index.chunk_elems(),
                 st.element_size.get() as u64,
-                self.batch_elems(st.loc.chunk_bytes, st.loc.chunk_elems),
+                self.batch_elems(st.index.chunk_bytes(), st.index.chunk_elems()),
             )
         };
         let grow_visible_tail = !self.swmr_mode;
@@ -359,7 +360,7 @@ impl WriteEngine {
         let mut done = 0u64;
         while done < new_elems {
             // Add the leading partial chunk's capacity to the full-chunk budget.
-            let current_dim = self.located[&oh_addr].loc.current_dim;
+            let current_dim = self.located[&oh_addr].index.current_dim();
             let to_boundary = (chunk_elems - current_dim % chunk_elems) % chunk_elems;
             let take = (new_elems - done).min(to_boundary.saturating_add(full_batch_elems));
             let batch =
@@ -370,7 +371,7 @@ impl WriteEngine {
                 let st = &store.engine.located[&oh_addr];
                 chunk_index_inplace::plan_ea_append(
                     &store,
-                    &st.loc,
+                    st.index.allocated().map_err(as_inplace_error)?,
                     &st.datatype,
                     &st.spatial,
                     st.element_size,
@@ -389,7 +390,12 @@ impl WriteEngine {
             })?;
             let result = {
                 let mut store = EditStore { engine: self };
-                chunk_index_inplace::apply_ea_append(&mut store, &mut state.loc, plan, max_phase)
+                chunk_index_inplace::apply_ea_append(
+                    &mut store,
+                    state.index.allocated_mut().map_err(as_inplace_error)?,
+                    plan,
+                    max_phase,
+                )
             };
             if result.is_ok() {
                 self.located.insert(oh_addr, state);
@@ -655,7 +661,8 @@ pub(crate) struct AppendGeometry {
 
 /// Caches dataset metadata maintained across immediate appends.
 pub(crate) struct LocatedState {
-    pub(crate) loc: Located,
+    /// Checked geometry for an allocated or empty unallocated index.
+    pub(crate) index: AppendIndex,
     /// The datatype used for append compatibility and filter context.
     pub(crate) datatype: Datatype,
     /// The rank-one spatial chunk dimensions.
@@ -912,9 +919,10 @@ pub(crate) fn validate_gathered_append(st: &LocatedState, b: &AppendBuilder) -> 
 
 /// Reads checked geometry, the datatype, and encoding metadata for an immediate append.
 ///
-/// The dataset must be rank one, unlimited, and indexed by an allocated Extensible Array. The
-/// filter
-/// pipeline must be re-encodable. Unreadable fill metadata is rejected only when padding is needed.
+/// The dataset must be rank one, unlimited, and indexed by an Extensible Array. An empty dataset
+/// may have an undefined index-header address. The filter pipeline must be re-encodable.
+/// Unreadable fill metadata is rejected only when padding is needed. File storage remains
+/// unchanged during lookup.
 ///
 /// # Errors
 ///
@@ -927,7 +935,7 @@ pub(crate) fn locate_dataset_state<F: Store>(
 ) -> Result<LocatedState, Error> {
     let result = Located::locate_at(file, oh_addr, Error::AppendInPlaceUnsupported)?;
     let datatype = result.datatype;
-    let element_size = result.located.elem_bytes;
+    let element_size = result.located.element_size();
     let pipeline = match result.spans.filter {
         Some((fb, fsize)) => {
             let fp_bytes = file.read_metadata_at(fb, fsize)?;
@@ -941,7 +949,15 @@ pub(crate) fn locate_dataset_state<F: Store>(
         }
         None => None,
     };
-    let spatial = vec![result.located.chunk_elems];
+    if let AppendIndex::Unallocated(index) = &result.located {
+        ExtensibleArrayInitialization::new(
+            index.creation,
+            index.chunk_bytes as u64,
+            file.widths(),
+            pipeline.is_some(),
+        )?;
+    }
+    let spatial = vec![result.located.chunk_elems()];
     // Unreadable fill metadata is rejected only when a chunk needs padding.
     let fill = match result.spans.fill {
         Some((msg_type, off, size)) => match file.read_metadata_at(off, size) {
@@ -951,7 +967,7 @@ pub(crate) fn locate_dataset_state<F: Store>(
         None => crate::fill_value::PaddingFill::Zero,
     };
     Ok(LocatedState {
-        loc: result.located,
+        index: result.located,
         datatype,
         spatial,
         element_size,

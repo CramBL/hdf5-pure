@@ -20,6 +20,8 @@ use test_util_hdf5::numeric::ByteOrder;
 
 use crate::test_util::array_index;
 
+mod unallocated;
+
 #[rstest]
 #[case::flat_plain(false, false, false)]
 #[case::flat_filtered(false, true, false)]
