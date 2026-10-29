@@ -1,5 +1,7 @@
 #![cfg(feature = "__hdf5-1.10")]
 
+use std::ops::Range;
+use std::panic;
 use std::path::Path;
 
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
@@ -658,13 +660,40 @@ fn libhdf5_fsm_file_reuses_deleted_storage_before_aggregate_spare(
     };
     assert_eq!(size, 3072);
     assert!(free_start <= address && address + size <= free_start + free_size);
+    let before_chunks = file.dataset("values").unwrap().chunks().unwrap();
+    assert_eq!(before_chunks.len(), 1);
+    assert_eq!(before_chunks[0].storage_size, 4);
+    let reusable = file
+        .reusable_free_sections()
+        .unwrap()
+        .sections()
+        .iter()
+        .map(|section| {
+            assert_eq!(section.coordinates(), FreeSectionCoordinates::Absolute);
+            section.address()..section.end_address()
+        })
+        .collect::<Vec<_>>();
     file.dataset("values")
         .unwrap()
         .append_raw(&[5; 1024])
         .unwrap();
     let chunks = file.dataset("values").unwrap().chunks().unwrap();
-    assert!(chunks.iter().any(|chunk| free_start <= chunk.address
-        && chunk.address + chunk.storage_size <= free_start + free_size));
+    assert_eq!(chunks.len(), before_chunks.len() + 256);
+    assert!(before_chunks.iter().all(|chunk| chunks.contains(chunk)));
+    let allocated = chunks
+        .iter()
+        .filter(|chunk| !before_chunks.contains(chunk))
+        .map(|chunk| chunk.address..chunk.address.checked_add(chunk.storage_size).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(allocated.len(), 256);
+    assert_eq!(
+        allocated
+            .iter()
+            .map(|extent| extent.end - extent.start)
+            .sum::<u64>(),
+        1024
+    );
+    assert_chunks_reuse(&reusable, &allocated);
     if strategy != PERSISTENT_FSM_AGGR {
         storage::assert_no_managers(&file);
     }
@@ -705,6 +734,60 @@ fn libhdf5_fsm_file_reuses_deleted_storage_before_aggregate_spare(
             .unwrap(),
         expected
     );
+}
+
+#[rstest]
+#[case::all_reused(vec![100..104, 200..204, 204..208], None)]
+#[case::eof_allocation(vec![100..104, 200..204, 4096..4100], Some(2))]
+#[case::partial_reuse(vec![100..104, 200..204, 206..210], Some(2))]
+#[case::only_first_reused(vec![100..104, 4096..4100, 4100..4104], Some(1))]
+fn chunk_reuse_assertion_checks_every_allocation(
+    #[case] allocated: Vec<Range<u64>>,
+    #[case] rejected_chunk: Option<usize>,
+) {
+    let reusable = [100..104, 200..208];
+    let result = panic::catch_unwind(|| assert_chunks_reuse(&reusable, &allocated));
+    match rejected_chunk {
+        Some(index) => {
+            let error = result.unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<String>().unwrap(),
+                &format!(
+                    "chunk {:?} does not reuse pre-append free sections {reusable:?}",
+                    allocated[index]
+                )
+            );
+        }
+        None => result.unwrap(),
+    }
+}
+
+/// Asserts that every byte of each allocated chunk was reusable before append.
+///
+/// The ranges in `reusable` must be disjoint.
+///
+/// # Panics
+///
+/// Panics if `allocated` is empty, a chunk range is empty or reversed, or any chunk has incomplete
+/// coverage.
+fn assert_chunks_reuse(reusable: &[Range<u64>], allocated: &[Range<u64>]) {
+    assert!(!allocated.is_empty());
+    for extent in allocated {
+        assert!(extent.start < extent.end);
+        assert!(
+            reusable
+                .iter()
+                .map(|section| {
+                    section
+                        .end
+                        .min(extent.end)
+                        .saturating_sub(section.start.max(extent.start))
+                })
+                .sum::<u64>()
+                == extent.end - extent.start,
+            "chunk {extent:?} does not reuse pre-append free sections {reusable:?}"
+        );
+    }
 }
 
 /// Where the C library places the allocations of a workload, and the file size after each step.
