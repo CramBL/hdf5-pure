@@ -34,13 +34,16 @@ use hdf5_pure::ChunkIndex;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
+use hdf5_pure::OffsetWidth;
 use hdf5_pure::RepackOptions;
+use hdf5_pure::StoredAddress;
 use hdf5_pure::UserblockSize;
 use hdf5_pure::{
     ChunkCacheStats, EditBacking, File, FileAccessProperties, FileBuilder, FileSpaceStrategy,
     MaxExtent, MemoryStrategy, SyncPolicy,
 };
-
+use hdf5_pure_core::__private::StoredAddressExt;
+use hdf5_pure_format::__private::{GroupLinkStorage, LinkInfoMessage, OwnedLink, OwnedLinkTarget};
 use rstest::rstest;
 use test_util::allocation;
 use test_util::data_layout;
@@ -60,6 +63,69 @@ use allocation::measure;
 
 #[global_allocator]
 static ALLOC: heapscope::Alloc = heapscope::Alloc::system();
+
+#[test]
+fn parsing_ten_thousand_hard_link_messages_has_bounded_allocations() {
+    const LINK_COUNT: usize = 10_000;
+    let (probe, positive) = allocation::measure("hard_link_messages_control", || {
+        std::hint::black_box(vec![0u8; 1_024])
+    });
+    assert!(positive.blocks > 0, "{positive}");
+    assert!(positive.bytes >= 1_024, "{positive}");
+    assert!(positive.live_bytes >= 1_024, "{positive}");
+    assert!(positive.peak_bytes >= 1_024, "{positive}");
+    drop(probe);
+
+    let mut encoded_links = Vec::with_capacity(LINK_COUNT);
+    let mut expected = Vec::with_capacity(LINK_COUNT);
+    for index in 0..LINK_COUNT {
+        let name = format!("link_{index:05}");
+        let address = (u64::try_from(index).unwrap() + 1) * 64;
+        encoded_links.push(HardLink::new(&name, address).build(Widths::EIGHT));
+        expected.push((name.into_bytes(), StoredAddress::new(address)));
+    }
+
+    let info_bytes = LinkInfoMessage {
+        max_creation_order: None,
+        fractal_heap_address: None,
+        btree_name_index_address: None,
+        btree_creation_order_address: None,
+    }
+    .serialize(OffsetWidth::Eight);
+
+    let (storage, measured) = allocation::measure("hard_link_messages_parse_and_assemble", || {
+        let mut links = Vec::with_capacity(LINK_COUNT);
+        for data in &encoded_links {
+            links.push(OwnedLink::parse(data, OffsetWidth::Eight).unwrap());
+        }
+        GroupLinkStorage::parse(&info_bytes, links, OffsetWidth::Eight).unwrap()
+    });
+
+    assert_eq!(storage.links().len(), LINK_COUNT);
+    for (link, (name, address)) in storage.links().iter().zip(&expected) {
+        assert_eq!(link.name(), name);
+        assert_eq!(
+            link.target(),
+            &OwnedLinkTarget::Hard {
+                object_header_address: *address
+            }
+        );
+    }
+
+    let retained_floor = u64::try_from(
+        LINK_COUNT * std::mem::size_of::<OwnedLink>()
+            + expected.iter().map(|(name, _)| name.len()).sum::<usize>(),
+    )
+    .unwrap();
+    assert!(measured.blocks > LINK_COUNT as u64, "{measured}");
+    assert!(measured.blocks <= 2 * LINK_COUNT as u64, "{measured}");
+    assert!(measured.live_bytes >= retained_floor, "{measured}");
+    assert!(measured.live_bytes <= 112 * LINK_COUNT as u64, "{measured}");
+    assert!(measured.peak_bytes >= measured.live_bytes, "{measured}");
+    assert!(measured.peak_bytes <= 160 * LINK_COUNT as u64, "{measured}");
+    assert!(measured.bytes >= measured.peak_bytes, "{measured}");
+    assert!(measured.bytes <= 160 * LINK_COUNT as u64, "{measured}");
+}
 
 #[test]
 fn repeated_partial_replacements_retain_bounded_session_memory() {

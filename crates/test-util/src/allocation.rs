@@ -40,6 +40,22 @@ pub struct Measured {
     pub live_bytes: u64,
 }
 
+impl Measured {
+    /// Formats allocation metrics as an aligned report with comma-separated numbers across multiple lines.
+    pub fn snapshot_report(&self) -> String {
+        format!(
+            "Allocation count:  {:>13}\n\
+             Cumulative bytes:  {:>13}\n\
+             Peak bytes:        {:>13}\n\
+             Retained bytes:    {:>13}",
+            grouped_decimal(self.blocks),
+            grouped_decimal(self.bytes),
+            grouped_decimal(self.peak_bytes),
+            grouped_decimal(self.live_bytes),
+        )
+    }
+}
+
 impl std::fmt::Display for Measured {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -93,6 +109,33 @@ fn start_profiling() {
 pub fn measure<R>(name: &str, work: impl FnOnce() -> R) -> (R, Measured) {
     start_profiling();
 
+    measure_region(name, work)
+}
+
+/// Runs `work` inside a named region using an already running profiler.
+///
+/// The `_profiler` argument borrows an active profiler. Uses the same region
+/// measurement and safety checks as [`measure`].
+///
+/// `name` must be unique within the binary: measurements with the same region
+/// name are accumulated.
+///
+/// # Panics
+///
+/// Panics if the snapshot is poisoned or inexact, allocation or attribution
+/// records were dropped, or the region is absent from the snapshot. Also
+/// propagates panics from `work`.
+#[track_caller]
+pub fn measure_with_profiler<R>(
+    _profiler: &heapscope::Profiler,
+    name: &str,
+    work: impl FnOnce() -> R,
+) -> (R, Measured) {
+    measure_region(name, work)
+}
+
+#[track_caller]
+fn measure_region<R>(name: &str, work: impl FnOnce() -> R) -> (R, Measured) {
     let result = {
         let _region = heapscope::region(name);
         work()
@@ -139,4 +182,52 @@ pub fn measure<R>(name: &str, work: impl FnOnce() -> R) -> (R, Measured) {
     };
     eprintln!("{name}: {measured}");
     (result, measured)
+}
+
+fn grouped_decimal(value: u64) -> String {
+    let digits = value.to_string();
+    let mut grouped = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::{Measured, grouped_decimal};
+
+    #[rstest]
+    #[case::zero(0, "0")]
+    #[case::below_thousand(999, "999")]
+    #[case::thousand(1_000, "1,000")]
+    #[case::below_million(999_999, "999,999")]
+    #[case::million(1_000_000, "1,000,000")]
+    #[case::readable_example(1_300_233, "1,300,233")]
+    #[case::maximum(u64::MAX, "18,446,744,073,709,551,615")]
+    fn decimal_numbers_have_thousands_separators(#[case] value: u64, #[case] expected: &str) {
+        assert_eq!(grouped_decimal(value), expected);
+    }
+
+    #[test]
+    fn snapshot_report_labels_and_aligns_allocation_metrics() {
+        let measured = Measured {
+            blocks: 11_668,
+            bytes: 1_082_754,
+            peak_bytes: 1_082_720,
+            live_bytes: 740_000,
+        };
+        assert_eq!(
+            measured.snapshot_report(),
+            "Allocation count:         11,668\n\
+             Cumulative bytes:      1,082,754\n\
+             Peak bytes:            1,082,720\n\
+             Retained bytes:          740,000"
+        );
+    }
 }
