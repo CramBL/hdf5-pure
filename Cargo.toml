@@ -13,7 +13,9 @@ categories = ["science", "encoding", "filesystem", "wasm", "no-std"]
 # and tooling stay in the repository.
 include = [
     "/src/**",
-    "/examples/**",
+    "/examples/*.rs",
+    "!/examples/*_profile.rs",
+    "!/examples/*_fixtures.rs",
     "/docs/guide/*.md",
     "/README.md",
     "/CHANGELOG.md",

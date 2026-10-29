@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Pure-Rust HDF5 chunk filter codecs and pipelines"
+include = ["/src/**", "/LICENSE-*", "/README.md"]
 
 [features]
 default = []
