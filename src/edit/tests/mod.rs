@@ -1,4 +1,5 @@
 mod common;
+mod crash_replay;
 mod dataset;
 mod global_heap_liveness;
 mod group_links;

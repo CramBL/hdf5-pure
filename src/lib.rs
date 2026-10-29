@@ -501,7 +501,6 @@ pub(crate) mod symbol_table;
 pub(crate) mod type_builders;
 pub(crate) mod vl_data;
 pub(crate) mod width;
-mod zfp_crosscheck;
 
 #[cfg(feature = "provenance")]
 pub(crate) mod provenance;
@@ -513,8 +512,6 @@ pub(crate) mod nosync;
 pub(crate) mod appender;
 #[cfg(feature = "std")]
 pub(crate) mod chunk_index_inplace;
-#[cfg(all(test, feature = "std"))]
-mod crash_replay;
 #[cfg(feature = "std")]
 pub(crate) mod edit;
 #[cfg(feature = "std")]
@@ -694,6 +691,3 @@ pub use type_builders::{
     FinishedGroup, GroupBuilder, make_f32_type, make_f64_type, make_i8_type, make_i16_type,
     make_i32_type, make_i64_type, make_u8_type, make_u16_type, make_u32_type, make_u64_type,
 };
-
-#[cfg(all(test, feature = "std"))]
-mod lzf_crosscheck;

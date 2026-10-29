@@ -1,8 +1,7 @@
-//! End-to-end write/read roundtrip through the full HDF5 stack with LZF
-//! compression enabled. The codec itself is covered by `src/lzf_crosscheck.rs`
-//! against h5py-produced fixtures; this harness checks that the chunked
-//! writer, filter pipeline, edit engine, and repack all thread LZF through
-//! correctly. LZF is lossless, so every comparison is exact equality.
+//! LZF writer, reader, editing, and repack tests.
+//!
+//! Codec comparisons against h5py vectors are in `src/filters/tests/lzf_reference.rs`.
+//! Lossless value comparisons use exact equality.
 
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::FilterDisposition;

@@ -86,15 +86,10 @@ use crate::width::{FormatWidths, OffsetWidth};
 
 mod metadata;
 
-/// Counts the two index-block allocations, so a test can say whether its fixture
-/// reached them.
+/// Counts Extensible-Array data-block and super-block allocations on the current thread.
 ///
-/// Both are rare: with the C library's Extensible-Array defaults a data block is
-/// allocated roughly every sixteen appends and a *super* block twice in the first
-/// five hundred. A crash sweep positioned over the wrong window exercises neither
-/// while looking exactly like one that exercises both, which is how the first
-/// draft of [`crate::crash_replay`] came to pass with both barriers below
-/// deleted.
+/// Crash-prefix tests require allocations within the recorded window to exercise the
+/// allocation-specific ordering barriers.
 #[cfg(test)]
 pub(crate) mod alloc_probe {
     use core::cell::Cell;
@@ -112,8 +107,7 @@ pub(crate) mod alloc_probe {
         SUPER_BLOCKS.with(|c| c.set(c.get() + 1));
     }
 
-    /// Zero both counters and return what they held, so a caller measures one
-    /// window rather than the whole process.
+    /// Returns both allocation counts and resets the current thread's counters.
     pub(crate) fn take() -> (usize, usize) {
         (
             DATA_BLOCKS.with(|c| c.replace(0)),
@@ -243,33 +237,20 @@ pub(crate) trait Store: Source {
         Ok(StoredAddress::new(u64::from_le_bytes(buf)))
     }
 
-    /// Change a checksummed structure and publish it as **one** write.
+    /// Writes a changed field and its checksum together, starting at the field's offset.
     ///
-    /// Reads `[start, cks_off + 4)`, places `value` at `at` inside the body
-    /// before `cks_off`, recomputes the Jenkins checksum over it, and writes back
-    /// everything from `at` through the checksum field.
+    /// Reads `[start, cks_off + 4)`, copies `value` at `at`, and recomputes the Jenkins checksum
+    /// over the body preceding `cks_off`. Passes the suffix from `at` through the checksum to
+    /// [`Self::write_at`] in one call, including when the suffix crosses gather-page boundaries.
+    /// The write may tear at a device boundary.
     ///
-    /// The single write is the point, not an optimization. A value written
-    /// separately from the checksum covering it is atomic only where the
-    /// gatherer joins the two, which it does only when both land in the same
-    /// page; a structure wider than one page publishes the new value under the
-    /// *old* checksum, and a failure between the two writes leaves it unreadable
-    /// (issue #307). Every other publish point in this crate — the superblock
-    /// repoint above all — is already a single write, and this is what brings
-    /// these into line rather than a new mechanism.
+    /// The read covers the whole body for checksum computation. The write covers only the
+    /// suffix, bounding write amplification when updating an element near the end of a block.
     ///
-    /// One write is not crash-atomicity: a `pwrite` wide enough may still tear at
-    /// a device boundary. It is the same window the superblock publish has always
-    /// had, which is this crate's bar.
+    /// # Errors
     ///
-    /// The write starts at `at` rather than at `start`, so patching an element
-    /// near the end of a large block does not rewrite the block. The *read* still
-    /// covers the whole body, because the checksum does. Measured over six
-    /// appends at the same number of writes: 3,066 bytes against 5,952 unpaged
-    /// and 31,266 against 34,158 on a paged file with a 4 KiB header — the index
-    /// block, not the object header, is where most of that sits.
-    /// `crash_replay::a_publish_writes_from_the_byte_it_changed` is what holds
-    /// it, since the write count is the same either way.
+    /// Returns [`Error::AppendUnsupported`] if the field extends outside the checksummed body.
+    /// Propagates address-conversion, read, and write errors.
     fn publish_checksummed(
         &mut self,
         start: u64,

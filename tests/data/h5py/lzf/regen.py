@@ -23,7 +23,7 @@ Regenerate these retained vectors on a little-endian host. The arrays use
 native byte order, and the Rust consumers decode multibyte raw values as
 little-endian.
 
-`src/lzf_crosscheck.rs` checks extracted streams against the raw bytes and
+`src/filters/tests/lzf_reference.rs` checks extracted streams against the raw bytes and
 writer pipeline parameters against the manifest. When h5py skips its optional
 LZF filter, the extracted chunk contains raw bytes and the manifest records
 its filter mask. Chained and multichunk reference files are read through the

@@ -2610,13 +2610,13 @@ impl WriteEngine {
         self.sync_policy
     }
 
-    /// Override how long this session's writes may sit in memory.
+    /// Sets write buffering for a test session.
     ///
-    /// The image is private to this module, and the only caller outside it is
-    /// [`crate::crash_replay`], which sweeps the *same* workload under gathering
-    /// and without it. That comparison is the answer to the obvious worry about
-    /// making writes larger, so it is worth an accessor; nothing outside a test
-    /// build has one.
+    /// Crash-prefix tests compare gathered and immediate output for the same workload.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from [`FileImage::set_write_buffering`].
     #[cfg(test)]
     pub(crate) fn set_write_buffering(&mut self, mode: WriteBuffering) -> Result<(), Error> {
         self.image.set_write_buffering(mode)
