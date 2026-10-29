@@ -79,6 +79,13 @@ pub struct PagedAllocationSnapshot {
     raw: FreeList,
 }
 
+/// Stores the complete PAGE state for an append rollback after truncation.
+///
+/// Includes all free lists, their cached totals, the tail page type, and pending padding.
+pub struct PagedAppendSnapshot {
+    paged: PagedEdit,
+}
+
 /// Tracks reusable-space state for a paged editing session.
 #[derive(Clone)]
 pub(crate) struct PagedEdit {
@@ -330,6 +337,18 @@ impl PagedEdit {
     pub(crate) fn restore_allocation(&mut self, snapshot: PagedAllocationSnapshot) {
         self.meta = snapshot.meta;
         self.raw = snapshot.raw;
+    }
+
+    /// Copies all PAGE state, including the tail page type and pending padding.
+    pub(crate) fn append_snapshot(&self) -> PagedAppendSnapshot {
+        PagedAppendSnapshot {
+            paged: self.clone(),
+        }
+    }
+
+    /// Restores all PAGE state after truncation to the pre-append length.
+    pub(crate) fn restore_append(&mut self, snapshot: PagedAppendSnapshot) {
+        *self = snapshot.paged;
     }
 
     /// Bounds the section count after page splitting and tail reservation.
@@ -857,6 +876,102 @@ mod tests {
                 length: 1
             })
         );
+    }
+
+    #[rstest]
+    #[case::unknown(None)]
+    #[case::metadata(Some(PageType::Meta))]
+    #[case::raw(Some(PageType::Raw))]
+    fn append_snapshot_restores_every_page_state_field(#[case] tail: Option<PageType>) {
+        let mut paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
+        paged.seed(extent(PAGE + 16, 100), Some(PageType::Meta));
+        paged.seed(extent(2 * PAGE + 16, 100), Some(PageType::Raw));
+        paged.track(extent(3 * PAGE + 16, 100), FreeClass::Dead);
+        paged.seed(extent(4 * PAGE + 16, 100), None);
+        paged.record_page_padding(PageTransition::Pad {
+            extent: extent(5 * PAGE + 16, 100),
+            track_as: Some(PageType::Meta),
+        });
+        paged.record_page_padding(PageTransition::Pad {
+            extent: extent(6 * PAGE + 16, 100),
+            track_as: Some(PageType::Raw),
+        });
+        paged.last = tail;
+        let snapshot = paged.append_snapshot();
+        assert_eq!(
+            paged.allocate(50, PageType::Meta),
+            Some(extent(PAGE + 16, 50))
+        );
+        assert_eq!(
+            paged.allocate(50, PageType::Raw),
+            Some(extent(2 * PAGE + 16, 50))
+        );
+        let (post, _) = paged.post_free(
+            1,
+            12 * PAGE,
+            [(extent(7 * PAGE + 16, 100), FreeClass::Dead)],
+            [],
+        );
+        paged.adopt_post_free(post, true, None);
+        paged.seed(extent(8 * PAGE + 16, 100), None);
+        let next = if tail == Some(PageType::Meta) {
+            PageType::Raw
+        } else {
+            PageType::Meta
+        };
+        paged.record_transition(next, PageTransition::Unchanged);
+        paged.record_page_padding(paged.page_padding(9 * PAGE + 16).unwrap().unwrap());
+        paged.restore_append(snapshot);
+        let PagedEdit {
+            page_size,
+            meta,
+            raw,
+            unclassified,
+            dead,
+            last,
+            meta_pad,
+            raw_pad,
+        } = paged;
+        assert_eq!(page_size, FileSpacePageSize::DEFAULT);
+        assert_eq!(meta.extents(), [extent(PAGE + 16, 100)]);
+        assert_eq!(raw.extents(), [extent(2 * PAGE + 16, 100)]);
+        assert_eq!(dead.extents(), [extent(3 * PAGE + 16, 100)]);
+        assert_eq!(unclassified.extents(), [extent(4 * PAGE + 16, 100)]);
+        assert_eq!(
+            [
+                meta.total_bytes(),
+                raw.total_bytes(),
+                dead.total_bytes(),
+                unclassified.total_bytes()
+            ],
+            [100; 4]
+        );
+        assert_eq!(last, tail);
+        assert_eq!(meta_pad, [extent(5 * PAGE + 16, 100)]);
+        assert_eq!(raw_pad, [extent(6 * PAGE + 16, 100)]);
+    }
+
+    #[test]
+    fn allocation_snapshot_retains_page_state_for_the_grown_image() {
+        let mut paged = PagedEdit::new(FileSpacePageSize::DEFAULT);
+        paged.seed(extent(PAGE + 16, 100), Some(PageType::Raw));
+        let snapshot = paged.allocation_snapshot();
+        assert_eq!(
+            paged.allocate(50, PageType::Raw),
+            Some(extent(PAGE + 16, 50))
+        );
+        paged.record_transition(PageType::Raw, PageTransition::Unchanged);
+        let padding = paged.page_padding(2 * PAGE + 16).unwrap().unwrap();
+        paged.record_page_padding(padding);
+        paged.record_transition(PageType::Meta, PageTransition::Unchanged);
+        paged.restore_allocation(snapshot);
+        assert_eq!(paged.sections().raw(), [extent(PAGE + 16, 100)]);
+        assert_eq!(paged.tail_type(), Some(PageType::Meta));
+        assert_eq!(
+            paged.pending_padding(PageType::Raw),
+            [extent(2 * PAGE + 16, PAGE - 16)]
+        );
+        assert_eq!(paged.pending_padding(PageType::Meta), []);
     }
 
     #[test]

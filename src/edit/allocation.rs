@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use hdf5_pure_core::__private::{FileRange, PhysicalAddress};
-use hdf5_pure_space::__private::{FreeClass, SessionSpaceSnapshot};
+use hdf5_pure_space::__private::{FreeClass, SessionAppendSnapshot};
 
 use super::aggregation::AggregateSpace;
 use super::commit::{PublicationPurpose, PublicationState};
@@ -333,7 +333,7 @@ enum ManagerAuthority {
 struct AppendAllocationSnapshot {
     /// Image length before the provisional batch.
     length: u64,
-    space: SessionSpaceSnapshot,
+    space: SessionAppendSnapshot,
     aggregation: Option<AggregateSpace>,
     fsm_dirty: bool,
 }
@@ -369,7 +369,7 @@ impl WriteEngine {
         }
         self.append_allocator.pending = Some(AppendAllocationSnapshot {
             length: self.image.len(),
-            space: self.space.allocation_snapshot(),
+            space: self.space.append_snapshot(),
             aggregation: self.aggregation,
             fsm_dirty: self.fsm_dirty,
         });
@@ -404,7 +404,7 @@ impl WriteEngine {
                 self.make_allocation_uncertain();
                 return Err(error);
             }
-            self.space.restore_allocation(snapshot.space);
+            self.space.restore_append(snapshot.space);
             self.aggregation = snapshot.aggregation;
             self.fsm_dirty = snapshot.fsm_dirty;
             self.context.allocations.discard_provisional()
