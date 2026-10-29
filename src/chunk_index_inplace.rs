@@ -36,6 +36,7 @@ use hdf5_pure_format::__private::ChunkedGeometry;
 use hdf5_pure_format::__private::DataBlockGeometry;
 use hdf5_pure_format::__private::EA_CLIENT_ID_UNFILTERED;
 use hdf5_pure_format::__private::ExtensibleArrayBitGeometry;
+use hdf5_pure_format::__private::ExtensibleArrayCreationParameters;
 use hdf5_pure_format::__private::ExtensibleArrayGeometry;
 use hdf5_pure_format::__private::ExtensibleArrayHeader;
 use hdf5_pure_format::__private::ExtensibleArrayStats;
@@ -310,11 +311,122 @@ pub(crate) struct MessageSpans {
 /// Pairs parsed datatype and checked append geometry with remaining message locations.
 pub(crate) struct LocateResult {
     pub datatype: Datatype,
-    pub located: Located,
+    pub located: AppendIndex,
     pub spans: MessageSpans,
 }
 
-/// Metadata located once per dataset, then maintained across appends.
+/// Checked append geometry for an allocated index or an empty unallocated index.
+pub(crate) enum AppendIndex {
+    /// The index header and index block are allocated.
+    Allocated(Located),
+    /// The empty dataset's index-header address is undefined.
+    Unallocated(UnallocatedIndex),
+}
+
+impl AppendIndex {
+    /// Returns the allocated index metadata by value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AppendUnsupported`] if the index header is unallocated.
+    #[cfg(test)]
+    fn into_allocated(self) -> Result<Located, Error> {
+        match self {
+            Self::Allocated(located) => Ok(located),
+            Self::Unallocated(_) => Err(Error::AppendUnsupported(
+                "the dataset's extensible-array index is not allocated; use Dataset::append_staged",
+            )),
+        }
+    }
+
+    /// Borrows metadata for an allocated index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AppendUnsupported`] if the index header is unallocated.
+    pub(crate) fn allocated(&self) -> Result<&Located, Error> {
+        match self {
+            Self::Allocated(located) => Ok(located),
+            Self::Unallocated(_) => Err(Error::AppendUnsupported(
+                "the dataset's extensible-array index is not allocated; use Dataset::append_staged",
+            )),
+        }
+    }
+
+    /// Borrows allocated index metadata for mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AppendUnsupported`] if the index header is unallocated.
+    pub(crate) fn allocated_mut(&mut self) -> Result<&mut Located, Error> {
+        match self {
+            Self::Allocated(located) => Ok(located),
+            Self::Unallocated(_) => Err(Error::AppendUnsupported(
+                "the dataset's extensible-array index is not allocated; use Dataset::append_staged",
+            )),
+        }
+    }
+
+    /// Returns the number of dataset elements in a complete chunk.
+    pub(crate) fn chunk_elems(&self) -> u64 {
+        match self {
+            Self::Allocated(located) => located.chunk_elems,
+            Self::Unallocated(index) => index.chunk_elems,
+        }
+    }
+
+    /// Returns the uncompressed size of a complete chunk in bytes.
+    pub(crate) fn chunk_bytes(&self) -> usize {
+        match self {
+            Self::Allocated(located) => located.chunk_bytes,
+            Self::Unallocated(index) => index.chunk_bytes,
+        }
+    }
+
+    /// Returns the size of one dataset element in bytes.
+    pub(crate) fn element_size(&self) -> NonZeroUsize {
+        match self {
+            Self::Allocated(located) => located.elem_bytes,
+            Self::Unallocated(index) => index.element_size,
+        }
+    }
+
+    /// Returns the current extent along the unlimited axis.
+    ///
+    /// An unallocated index has zero current elements.
+    pub(crate) fn current_dim(&self) -> u64 {
+        match self {
+            Self::Allocated(located) => located.current_dim,
+            Self::Unallocated(_) => 0,
+        }
+    }
+
+    /// Returns the chunk-layout flags used for partial-edge filtering.
+    pub(crate) fn flags(&self) -> ChunkedLayoutFlags {
+        match self {
+            Self::Allocated(located) => located.flags,
+            Self::Unallocated(index) => index.flags,
+        }
+    }
+}
+
+/// Checked creation and chunk geometry for an empty Extensible Array.
+///
+/// The dataset has zero current elements and an undefined index-header address.
+pub(crate) struct UnallocatedIndex {
+    /// Creation parameters from the dataset's layout message.
+    pub(crate) creation: ExtensibleArrayCreationParameters,
+    /// Chunk-layout flags for partial-edge filtering.
+    pub(crate) flags: ChunkedLayoutFlags,
+    /// Elements per chunk along the unlimited axis.
+    pub(crate) chunk_elems: u64,
+    /// Bytes per dataset element.
+    pub(crate) element_size: NonZeroUsize,
+    /// Uncompressed bytes in one complete chunk.
+    pub(crate) chunk_bytes: usize,
+}
+
+/// Allocated index geometry and message locations maintained across appends.
 pub(crate) struct Located {
     /// File offset of the dataspace message's first current-dimension value.
     pub dim0_off: u64,
@@ -363,12 +475,13 @@ pub(crate) struct Located {
 impl Located {
     /// Reads the datatype and checked geometry for an immediate append at `oh_addr`.
     ///
-    /// The dataset must be rank one, unlimited, and indexed by an allocated Extensible Array.
+    /// The dataset must be rank one, unlimited, and indexed by an Extensible Array. An undefined
+    /// index-header address is accepted only when the current extent is empty.
     /// The caller supplies `unsupported` for policy rejections and decides which filters it accepts.
     /// The result includes filter and fill message locations for that decision.
     ///
-    /// Allocation statistics are computed from referenced index blocks. Each metadata read uses a
-    /// bounded [`Source`] window.
+    /// For allocated indexes, the reader computes statistics from referenced index blocks. The
+    /// reader uses bounded [`Source`] windows and leaves file storage unchanged.
     ///
     /// # Errors
     ///
@@ -452,26 +565,12 @@ impl Located {
         // Parse the layout: must be a v4 chunked Extensible Array (index type 4).
         let layout_bytes = file.read_metadata_at(layout_msg.data_off, layout_msg.size)?;
         let layout = DataLayout::parse_with_widths(&layout_bytes, widths)?;
-        let (ea_addr, flags) = match &layout {
+        let (ea_addr, creation, flags) = match &layout {
             DataLayout::Chunked {
-                index:
-                    ChunkIndexLayout::ExtensibleArray {
-                        address: Some(addr),
-                        ..
-                    },
+                index: ChunkIndexLayout::ExtensibleArray { address, creation },
                 flags,
                 ..
-            } => (*addr, *flags),
-            DataLayout::Chunked {
-                index: ChunkIndexLayout::ExtensibleArray { address: None, .. },
-                ..
-            } => {
-                return Err(unsupported(
-                    "the dataset's extensible-array index is not allocated yet (an empty \
-                     dataset with no chunks); write initial data at creation or make the \
-                     first append with Dataset::append_staged",
-                ));
-            }
+            } => (*address, *creation, *flags),
             _ => {
                 return Err(unsupported(
                     "only Extensible-Array-indexed chunked datasets are supported",
@@ -501,6 +600,29 @@ impl Located {
         } = ChunkedGeometry::new(&datatype, &dataspace, &layout)?;
         let chunk_elems = spatial[0];
         let chunk_bytes = raw_size.to_usize()?;
+
+        let spans = MessageSpans {
+            filter: filter_msg.map(|m| (m.data_off, m.size)),
+            fill: fill_msg.map(|m| (m.msg_type, m.data_off, m.size)),
+        };
+        let Some(ea_addr) = ea_addr else {
+            if current_dim != 0 {
+                return Err(unsupported(
+                    "an unallocated extensible-array index requires an empty dataset",
+                ));
+            }
+            return Ok(LocateResult {
+                datatype,
+                located: AppendIndex::Unallocated(UnallocatedIndex {
+                    creation,
+                    flags,
+                    chunk_elems,
+                    element_size: elem_bytes,
+                    chunk_bytes,
+                }),
+                spans,
+            });
+        };
 
         let array = crate::extensible_array::read_header(file, widths, ea_addr)?;
         let ea_header = array.header();
@@ -557,11 +679,8 @@ impl Located {
         located.allocation_stats = Some(located.read_allocation_stats(file)?);
         Ok(LocateResult {
             datatype,
-            located,
-            spans: MessageSpans {
-                filter: filter_msg.map(|m| (m.data_off, m.size)),
-                fill: fill_msg.map(|m| (m.msg_type, m.data_off, m.size)),
-            },
+            located: AppendIndex::Allocated(located),
+            spans,
         })
     }
 
@@ -2272,6 +2391,143 @@ mod tests {
     use crate::writer::FileBuilder;
 
     #[rstest]
+    #[case::canonical([32, 4, 4, 16, 10])]
+    #[case::nondefault([24, 8, 2, 8, 8])]
+    fn locating_unallocated_indexes_retains_checked_creation_geometry(
+        #[case] parameters: [u8; 5],
+        #[values(false, true)] filtered: bool,
+    ) {
+        let mut store = unallocated_index_store(0, filtered);
+        let address = dataset_address(&store);
+        let walk = walk_v2_object_header(&store, address, store.widths).unwrap();
+        let layout = walk
+            .messages
+            .iter()
+            .find(|message| message.msg_type == MessageType::DATA_LAYOUT)
+            .unwrap();
+        let parameter_start = usize::try_from(layout.data_off).unwrap() + layout.size
+            - usize::from(store.widths.offsets.get())
+            - parameters.len();
+        assert_eq!(
+            &store.data[parameter_start..parameter_start + parameters.len()],
+            &[32, 4, 4, 16, 10]
+        );
+        store.data[parameter_start..parameter_start + parameters.len()]
+            .copy_from_slice(&parameters);
+        test_util::checksum::restamp(
+            &mut store.data,
+            usize::try_from(layout.chunk_start).unwrap(),
+            usize::try_from(layout.chunk_msg_end - layout.chunk_start).unwrap()
+                + core::mem::size_of::<u32>(),
+        );
+        let before = store.data.clone();
+        store.reset_counters();
+        let state = edit::locate_dataset_state(&store, address).unwrap();
+        assert_eq!(state.index.current_dim(), 0);
+        assert_eq!(state.index.chunk_elems(), 4);
+        assert_eq!(state.index.chunk_bytes(), 16);
+        assert_eq!(state.index.element_size().get(), 4);
+        assert_eq!(state.pipeline.is_some(), filtered);
+        let AppendIndex::Unallocated(index) = state.index else {
+            panic!("expected an unallocated index");
+        };
+        assert_eq!(index.creation.encode(), parameters);
+        assert_eq!(store.data, before);
+        assert!(store.allocations.borrow().is_empty());
+        assert_eq!(store.appends.get(), 0);
+        assert_eq!(store.syncs.get(), 0);
+    }
+
+    #[rstest]
+    fn a_nonempty_unallocated_extent_is_rejected_before_writes(
+        #[values(false, true)] filtered: bool,
+    ) {
+        let store = unallocated_index_store(3, filtered);
+        let before = store.data.clone();
+        let error = match edit::locate_dataset_state(&store, dataset_address(&store)) {
+            Ok(_) => panic!("expected an unsupported nonempty unallocated extent"),
+            Err(error) => error,
+        };
+        let Error::AppendInPlaceUnsupported(reason) = error else {
+            panic!("expected AppendInPlaceUnsupported, got {error:?}");
+        };
+        assert_eq!(
+            reason,
+            "an unallocated extensible-array index requires an empty dataset"
+        );
+        assert_eq!(store.data, before);
+        assert!(store.allocations.borrow().is_empty());
+    }
+
+    fn unallocated_index_store(dimension: u64, filtered: bool) -> WindowProbeStore {
+        let mut builder = FileBuilder::new();
+        let dataset = builder
+            .create_dataset("d")
+            .with_unallocated_storage(crate::make_i32_type(), &[dimension])
+            .with_maxshape(&[MaxExtent::Unlimited])
+            .with_chunks(&[4]);
+        if filtered {
+            dataset.with_fletcher32();
+        }
+        let mut store = WindowProbeStore::open(builder.finish().unwrap());
+        clear_layout_index(&mut store);
+        store
+    }
+
+    fn clear_layout_index(store: &mut WindowProbeStore) {
+        let walk = walk_v2_object_header(store, dataset_address(store), store.widths).unwrap();
+        let layout = walk
+            .messages
+            .into_iter()
+            .find(|message| message.msg_type == MessageType::DATA_LAYOUT)
+            .unwrap();
+        let end = usize::try_from(layout.data_off).unwrap() + layout.size;
+        let start = end - usize::from(store.widths.offsets.get());
+        store.data[start..end].fill(u8::MAX);
+        test_util::checksum::restamp(
+            &mut store.data,
+            usize::try_from(layout.chunk_start).unwrap(),
+            usize::try_from(layout.chunk_msg_end - layout.chunk_start).unwrap()
+                + core::mem::size_of::<u32>(),
+        );
+    }
+
+    #[rstest]
+    #[case::rank_two(&[0, 2], &[4, 2], &[MaxExtent::Unlimited, MaxExtent::Fixed(2)], "only rank-1 datasets are supported")]
+    #[case::finite(&[0], &[4], &[MaxExtent::Fixed(8)], "dataset has no unlimited (maxshape) dimension")]
+    fn empty_index_eligibility_rejects_unsupported_dataspaces(
+        #[case] shape: &[u64],
+        #[case] chunk: &[u64],
+        #[case] maximum: &[MaxExtent],
+        #[case] expected: &str,
+        #[values(false, true)] unallocated: bool,
+    ) {
+        let mut builder = FileBuilder::new();
+        let dataset = builder.create_dataset("d");
+        if unallocated {
+            dataset.with_unallocated_storage(crate::make_i32_type(), shape);
+        } else {
+            dataset.with_i32_data(&[]).with_shape(shape);
+        }
+        dataset.with_chunks(chunk).with_maxshape(maximum);
+        let mut store = WindowProbeStore::open(builder.finish().unwrap());
+        if unallocated {
+            clear_layout_index(&mut store);
+        }
+        let original = store.data.clone();
+        let error = match edit::locate_dataset_state(&store, dataset_address(&store)) {
+            Ok(_) => panic!("expected unsupported dataset geometry"),
+            Err(error) => error,
+        };
+        let Error::AppendInPlaceUnsupported(reason) = error else {
+            panic!("expected AppendInPlaceUnsupported, got {error:?}");
+        };
+        assert_eq!(reason, expected);
+        assert_eq!(store.data, original);
+        assert!(store.allocations.borrow().is_empty());
+    }
+
+    #[rstest]
     #[case::direct(4, 54, [0, 0, 3, 80])]
     #[case::secondary(244, 444, [1, 54, 10, 496])]
     fn retry_counts_referenced_blocks_after_interrupted_publication(
@@ -2286,7 +2542,10 @@ mod tests {
         let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
         let staged: Vec<_> = (start..staged_end).collect();
         append_state(&mut store, &mut state, &staged, phase).unwrap();
-        assert_eq!(state.loc.allocation_stats.is_none(), phase == 2);
+        assert_eq!(
+            state.index.allocated().unwrap().allocation_stats.is_none(),
+            phase == 2
+        );
         if reopen {
             store = WindowProbeStore::open(store.data);
             state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
@@ -2303,12 +2562,12 @@ mod tests {
             counts
         };
         assert_eq!(
-            stored_stats(&store, &state.loc),
+            stored_stats(&store, state.index.allocated().unwrap()),
             [
                 secondary,
                 secondary_bytes,
                 data,
-                capacity * state.loc.ea_elem_size.to_u64() + data * 22,
+                capacity * state.index.allocated().unwrap().ea_elem_size.to_u64() + data * 22,
                 u64::try_from(start + 2).unwrap(),
                 4 + capacity,
             ]
@@ -2334,7 +2593,7 @@ mod tests {
         };
         assert_eq!(error.kind(), std::io::ErrorKind::Other);
         assert_eq!(error.to_string(), "injected synchronization failure");
-        assert!(state.loc.allocation_stats.is_none());
+        assert!(state.index.allocated().unwrap().allocation_stats.is_none());
         store.fail_sync = None;
         let error = append_state(&mut store, &mut state, &[4], 4).unwrap_err();
         assert!(
@@ -2345,8 +2604,15 @@ mod tests {
         let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
         append_state(&mut store, &mut state, &[4], 4).unwrap();
         assert_eq!(
-            stored_stats(&store, &state.loc),
-            [0, 0, 1, 16 * state.loc.ea_elem_size.to_u64() + 22, 5, 20]
+            stored_stats(&store, state.index.allocated().unwrap()),
+            [
+                0,
+                0,
+                1,
+                16 * state.index.allocated().unwrap().ea_elem_size.to_u64() + 22,
+                5,
+                20
+            ]
         );
         let file = crate::File::from_bytes(store.data).unwrap();
         assert_eq!(
@@ -2375,8 +2641,11 @@ mod tests {
         let before = store.data.clone();
         let plan = state_plan(&store, &state, &[4]).unwrap();
         assert_eq!(store.data, before);
-        apply_ea_append(&mut store, &mut state.loc, plan, 4).unwrap();
-        assert_eq!(stored_stats(&store, &state.loc), [0, 0, 1, 150, 5, 20]);
+        apply_ea_append(&mut store, state.index.allocated_mut().unwrap(), plan, 4).unwrap();
+        assert_eq!(
+            stored_stats(&store, state.index.allocated().unwrap()),
+            [0, 0, 1, 150, 5, 20]
+        );
     }
 
     #[test]
@@ -2388,7 +2657,7 @@ mod tests {
         let plan = state_plan(&store, &state, &[50_001]).unwrap();
         assert_eq!(store.total_read.get(), 16);
         assert_eq!(store.max_read.get(), 8);
-        apply_ea_append(&mut store, &mut state.loc, plan, 4).unwrap();
+        apply_ea_append(&mut store, state.index.allocated_mut().unwrap(), plan, 4).unwrap();
         let file = crate::File::from_bytes(store.data).unwrap();
         assert_eq!(
             file.dataset("d").unwrap().read_i32().unwrap(),
@@ -2417,7 +2686,7 @@ mod tests {
         phase: u8,
     ) -> Result<(), Error> {
         let plan = state_plan(store, state, values)?;
-        apply_ea_append(store, &mut state.loc, plan, phase)
+        apply_ea_append(store, state.index.allocated_mut().unwrap(), plan, phase)
     }
 
     fn state_plan(
@@ -2427,7 +2696,7 @@ mod tests {
     ) -> Result<AppendPlan, Error> {
         plan_ea_append(
             store,
-            &state.loc,
+            state.index.allocated().unwrap(),
             &state.datatype,
             &state.spatial,
             state.element_size,
@@ -2864,7 +3133,7 @@ mod tests {
     fn locate(store: &WindowProbeStore) -> (Located, crate::datatype::Datatype) {
         let result =
             Located::locate_at(store, dataset_address(store), Error::AppendUnsupported).unwrap();
-        (result.located, result.datatype)
+        (result.located.into_allocated().unwrap(), result.datatype)
     }
 
     fn dataset_address(store: &WindowProbeStore) -> u64 {
@@ -3164,7 +3433,9 @@ mod tests {
         store.reset_counters();
         let located = Located::locate_at(&store, address, Error::AppendUnsupported)
             .unwrap()
-            .located;
+            .located
+            .into_allocated()
+            .unwrap();
         assert_eq!(
             store
                 .reads
@@ -3187,6 +3458,8 @@ mod tests {
         let header = Located::locate_at(&store, address, Error::AppendUnsupported)
             .unwrap()
             .located
+            .into_allocated()
+            .unwrap()
             .ea_addr
             .get()
             .to_usize()
@@ -3801,7 +4074,13 @@ mod tests {
             );
         let mut store = WindowProbeStore::open(builder.finish().unwrap());
         let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
-        let original = state.loc.read_element(&store, 0).unwrap().unwrap();
+        let original = state
+            .index
+            .allocated()
+            .unwrap()
+            .read_element(&store, 0)
+            .unwrap()
+            .unwrap();
         let original = FileRange::new(
             store.addresses().resolve(original.addr).unwrap(),
             original.stored_size,
@@ -3814,7 +4093,7 @@ mod tests {
             .collect();
         let plan = plan_ea_append(
             &store,
-            &state.loc,
+            state.index.allocated().unwrap(),
             &state.datatype,
             &state.spatial,
             state.element_size,
@@ -3827,7 +4106,12 @@ mod tests {
         )
         .unwrap();
         store.fail_sync = fail_sync;
-        match apply_ea_append(&mut store, &mut state.loc, plan, phase) {
+        match apply_ea_append(
+            &mut store,
+            state.index.allocated_mut().unwrap(),
+            plan,
+            phase,
+        ) {
             Ok(()) => assert_eq!(fail_sync, None),
             Err(Error::Io(error)) => {
                 assert!(fail_sync.is_some());
@@ -3894,10 +4178,17 @@ mod tests {
                 } else {
                     4
                 };
-                apply_ea_append(&mut store, &mut state.loc, first, phase).unwrap();
+                apply_ea_append(
+                    &mut store,
+                    state.index.allocated_mut().unwrap(),
+                    first,
+                    phase,
+                )
+                .unwrap();
                 confirmed = store.retired.clone();
                 assert_eq!(confirmed.len(), if phase == 2 { 1 } else { 2 });
-                apply_ea_append(&mut store, &mut state.loc, plan, 4).unwrap_err()
+                apply_ea_append(&mut store, state.index.allocated_mut().unwrap(), plan, 4)
+                    .unwrap_err()
             }
             ReferenceChange::UseOtherDataset => {
                 let address = group_v2::resolve_path_any(
@@ -3911,7 +4202,8 @@ mod tests {
                 .unwrap();
                 let mut other = edit::locate_dataset_state(&store, address).unwrap();
                 confirmed = Vec::new();
-                apply_ea_append(&mut store, &mut other.loc, plan, 4).unwrap_err()
+                apply_ea_append(&mut store, other.index.allocated_mut().unwrap(), plan, 4)
+                    .unwrap_err()
             }
         };
         let Error::AppendUnsupported(reason) = error else {
@@ -3941,7 +4233,7 @@ mod tests {
     fn lossy_completion_plan(store: &WindowProbeStore, state: &LocatedState) -> AppendPlan {
         plan_ea_append(
             store,
-            &state.loc,
+            state.index.allocated().unwrap(),
             &state.datatype,
             &state.spatial,
             state.element_size,
@@ -3986,7 +4278,13 @@ mod tests {
             .with_scale_offset(ScaleOffset::FloatDScale(1));
         let mut store = WindowProbeStore::open(builder.finish().unwrap());
         let mut state = edit::locate_dataset_state(&store, dataset_address(&store)).unwrap();
-        let original = state.loc.read_element(&store, 0).unwrap().unwrap();
+        let original = state
+            .index
+            .allocated()
+            .unwrap()
+            .read_element(&store, 0)
+            .unwrap()
+            .unwrap();
         let original = FileRange::new(
             store.addresses().resolve(original.addr).unwrap(),
             original.stored_size,
@@ -3994,7 +4292,7 @@ mod tests {
         .unwrap();
         let plan = plan_ea_append(
             &store,
-            &state.loc,
+            state.index.allocated().unwrap(),
             &state.datatype,
             &state.spatial,
             state.element_size,
@@ -4010,7 +4308,12 @@ mod tests {
         )
         .unwrap();
         store.fail_sync = fail_sync;
-        match apply_ea_append(&mut store, &mut state.loc, plan, phase) {
+        match apply_ea_append(
+            &mut store,
+            state.index.allocated_mut().unwrap(),
+            plan,
+            phase,
+        ) {
             Ok(()) => assert_eq!(fail_sync, None),
             Err(Error::Io(error)) => {
                 assert!(fail_sync.is_some());
@@ -4049,7 +4352,13 @@ mod tests {
         let mut shrinks = 0;
         for value in 1_i32..400 {
             let value = value % 5;
-            let predecessor = state.loc.read_element(&store, 0).unwrap().unwrap();
+            let predecessor = state
+                .index
+                .allocated()
+                .unwrap()
+                .read_element(&store, 0)
+                .unwrap()
+                .unwrap();
             let range = FileRange::new(
                 store.addresses().resolve(predecessor.addr).unwrap(),
                 predecessor.stored_size,
@@ -4057,7 +4366,7 @@ mod tests {
             .unwrap();
             let plan = plan_ea_append(
                 &store,
-                &state.loc,
+                state.index.allocated().unwrap(),
                 &state.datatype,
                 &state.spatial,
                 state.element_size,
@@ -4069,10 +4378,16 @@ mod tests {
                 state.fill.pattern(state.element_size),
             )
             .unwrap();
-            apply_ea_append(&mut store, &mut state.loc, plan, 4).unwrap();
+            apply_ea_append(&mut store, state.index.allocated_mut().unwrap(), plan, 4).unwrap();
             assert_eq!(store.retired.pop(), Some(range));
             assert!(store.retired.is_empty());
-            let replacement = state.loc.read_element(&store, 0).unwrap().unwrap();
+            let replacement = state
+                .index
+                .allocated()
+                .unwrap()
+                .read_element(&store, 0)
+                .unwrap()
+                .unwrap();
             grows += usize::from(replacement.stored_size > predecessor.stored_size);
             shrinks += usize::from(replacement.stored_size < predecessor.stored_size);
             expected.push(value);
@@ -4354,7 +4669,7 @@ mod tests {
         let mut state = edit::locate_dataset_state(&*store, dataset_address(store)).unwrap();
         let plan = plan_ea_append(
             store,
-            &state.loc,
+            state.index.allocated().unwrap(),
             &state.datatype,
             &state.spatial,
             state.element_size,
@@ -4365,7 +4680,7 @@ mod tests {
             values.len() as u64,
             state.fill.pattern(state.element_size),
         )?;
-        apply_ea_append(store, &mut state.loc, plan, max_phase)
+        apply_ea_append(store, state.index.allocated_mut().unwrap(), plan, max_phase)
     }
 
     fn stored_chunks(data: &[u8]) -> Vec<(Vec<u64>, u32, Vec<u8>)> {

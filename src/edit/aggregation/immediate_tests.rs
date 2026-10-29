@@ -147,7 +147,9 @@ fn immediate_phase_stops_keep_reservations_consumed(
         .unwrap();
     let state = engine.located.remove(&address).unwrap();
     let record = state
-        .loc
+        .index
+        .allocated()
+        .unwrap()
         .read_element(&engine.store(), u64::try_from(end).unwrap() / 4)
         .unwrap()
         .unwrap();
@@ -155,7 +157,7 @@ fn immediate_phase_stops_keep_reservations_consumed(
     let length = if filtered {
         record.stored_size
     } else {
-        u64::try_from(state.loc.chunk_bytes).unwrap()
+        u64::try_from(state.index.chunk_bytes()).unwrap()
     };
     let finish = start + length;
     assert!(
@@ -235,7 +237,7 @@ fn failed_immediate_append_preserves_consumed_space(
     let address = engine
         .append_prepare(AppendTarget::Path(&ObjectPathBuf::parse("values")))
         .unwrap();
-    let state = &engine.located[&address].loc;
+    let state = engine.located[&address].index.allocated().unwrap();
     let index = state.index_block_addr.get();
     let header = state.ea_addr.get() + HEADER_STATISTICS_OFFSET;
     let dimension = state.dim0_off;
