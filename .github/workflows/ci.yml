@@ -31,7 +31,7 @@ jobs:
     permissions:
       pull-requests: read
     outputs:
-      run: ${{ github.event_name != 'pull_request' || steps.filter.outputs.run == 'true' }}
+      run: ${{ github.event_name != 'pull_request' || startsWith(github.head_ref, 'release-v') || steps.filter.outputs.run == 'true' }}
     steps:
       - name: Filter the changed paths
         id: filter
@@ -258,6 +258,10 @@ jobs:
 
       - name: Cargo.lock is current
         run: cargo update --workspace --locked
+
+      - name: Verify release packages
+        if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'release-v')
+        run: cargo publish --dry-run --workspace
 
       # Each example ends in assertions, so running them tests the public API.
       # Clippy above built them with the same features.
