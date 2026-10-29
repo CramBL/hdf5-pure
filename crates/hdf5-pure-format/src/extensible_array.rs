@@ -2980,14 +2980,14 @@ mod tests {
     }
 
     #[rstest]
-    #[case(BlockOffsetWidth::One, &[0x01], 0x01)]
-    #[case(BlockOffsetWidth::Two, &[0x01, 0x02], 0x0201)]
-    #[case(BlockOffsetWidth::Three, &[0x01, 0x02, 0x03], 0x03_0201)]
-    #[case(BlockOffsetWidth::Four, &[0x01, 0x02, 0x03, 0x04], 0x0403_0201)]
-    #[case(BlockOffsetWidth::Five, &[0x01, 0x02, 0x03, 0x04, 0x05], 0x0005_0403_0201)]
-    #[case(BlockOffsetWidth::Six, &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06], 0x0605_0403_0201)]
-    #[case(BlockOffsetWidth::Seven, &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07], 0x0007_0605_0403_0201)]
-    #[case(BlockOffsetWidth::Eight, &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08], 0x0807_0605_0403_0201)]
+    #[case::one_byte(BlockOffsetWidth::One, &[0x01], 0x01)]
+    #[case::two_bytes(BlockOffsetWidth::Two, &[0x01, 0x02], 0x0201)]
+    #[case::three_bytes(BlockOffsetWidth::Three, &[0x01, 0x02, 0x03], 0x03_0201)]
+    #[case::four_bytes(BlockOffsetWidth::Four, &[0x01, 0x02, 0x03, 0x04], 0x0403_0201)]
+    #[case::five_bytes(BlockOffsetWidth::Five, &[0x01, 0x02, 0x03, 0x04, 0x05], 0x0005_0403_0201)]
+    #[case::six_bytes(BlockOffsetWidth::Six, &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06], 0x0605_0403_0201)]
+    #[case::seven_bytes(BlockOffsetWidth::Seven, &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07], 0x0007_0605_0403_0201)]
+    #[case::eight_bytes(BlockOffsetWidth::Eight, &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08], 0x0807_0605_0403_0201)]
     fn block_offset_width_reads_the_value_and_reports_missing_bytes(
         #[case] width: BlockOffsetWidth,
         #[case] bytes: &[u8],
@@ -4054,11 +4054,11 @@ mod tests {
     }
 
     #[rstest]
-    #[case(OffsetWidth::Two, LengthWidth::Two)]
-    #[case(OffsetWidth::Four, LengthWidth::Four)]
-    #[case(OffsetWidth::Eight, LengthWidth::Eight)]
-    #[case(OffsetWidth::Four, LengthWidth::Eight)]
-    #[case(OffsetWidth::Eight, LengthWidth::Four)]
+    #[case::two_byte_fields(OffsetWidth::Two, LengthWidth::Two)]
+    #[case::four_byte_fields(OffsetWidth::Four, LengthWidth::Four)]
+    #[case::eight_byte_fields(OffsetWidth::Eight, LengthWidth::Eight)]
+    #[case::short_offsets_long_lengths(OffsetWidth::Four, LengthWidth::Eight)]
+    #[case::long_offsets_short_lengths(OffsetWidth::Eight, LengthWidth::Four)]
     fn the_region_parser_preserves_append_metadata_and_geometry(
         #[case] offsets: OffsetWidth,
         #[case] lengths: LengthWidth,
@@ -4342,12 +4342,12 @@ mod tests {
     }
 
     #[rstest]
-    #[case(0, 4, 10)]
-    #[case(3, 4, 10)]
-    #[case(16, 0, 10)]
-    #[case(16, 1, 10)]
-    #[case(16, 3, 10)]
-    #[case(16, 4, 4)]
+    #[case::zero_minimum_elements(0, 4, 10)]
+    #[case::non_power_of_two_elements(3, 4, 10)]
+    #[case::zero_minimum_pointers(16, 0, 10)]
+    #[case::single_minimum_pointer(16, 1, 10)]
+    #[case::non_power_of_two_pointers(16, 3, 10)]
+    #[case::direct_block_exceeds_page(16, 4, 4)]
     fn append_geometry_rejects_invalid_creation_parameters(
         #[case] min_elements: u8,
         #[case] minimum_pointers: u8,
@@ -4441,10 +4441,10 @@ mod tests {
     }
 
     #[rstest]
-    #[case(2, 2, 2, 282)]
-    #[case(4, 6, 4, 298)]
-    #[case(8, 14, 6, 346)]
-    #[case(16, 30, 8, 458)]
+    #[case::two_pointer_minimum(2, 2, 2, 282)]
+    #[case::four_pointer_minimum(4, 6, 4, 298)]
+    #[case::eight_pointer_minimum(8, 14, 6, 346)]
+    #[case::sixteen_pointer_minimum(16, 30, 8, 458)]
     fn reader_and_writer_geometry_agree_on_pointer_counts(
         #[case] min_data_pointers: u8,
         #[case] direct_blocks: usize,

@@ -157,8 +157,8 @@ fn build_float(
 }
 
 #[rstest]
-#[case(FIXED_POINT_CLASS)]
-#[case(BIT_FIELD_CLASS)]
+#[case::fixed_point(FIXED_POINT_CLASS)]
+#[case::bit_field(BIT_FIELD_CLASS)]
 fn preserves_low_and_high_padding(
     #[case] class: u8,
     #[values(false, true)] low: bool,
@@ -263,9 +263,9 @@ fn test_fixed_point_i64_le() {
 }
 
 #[rstest]
-#[case(MantissaNormalization::Unnormalized, FLOAT_NORMALIZATION_UNNORMALIZED)]
-#[case(MantissaNormalization::LeadingOne, FLOAT_NORMALIZATION_LEADING_ONE)]
-#[case(
+#[case::unnormalized(MantissaNormalization::Unnormalized, FLOAT_NORMALIZATION_UNNORMALIZED)]
+#[case::leading_one(MantissaNormalization::LeadingOne, FLOAT_NORMALIZATION_LEADING_ONE)]
+#[case::implied_leading_one(
     MantissaNormalization::ImpliedLeadingOne,
     FLOAT_NORMALIZATION_IMPLIED_LEADING_ONE
 )]
@@ -348,10 +348,10 @@ fn test_float_f64_le() {
 }
 
 #[rstest]
-#[case(0x00, DatatypeByteOrder::LittleEndian)]
-#[case(0x01, DatatypeByteOrder::BigEndian)]
-#[case(0x40, DatatypeByteOrder::Vax)]
-#[case(0x41, DatatypeByteOrder::Vax)]
+#[case::little_endian(0x00, DatatypeByteOrder::LittleEndian)]
+#[case::big_endian(0x01, DatatypeByteOrder::BigEndian)]
+#[case::vax_low_bit_clear(0x40, DatatypeByteOrder::Vax)]
+#[case::vax_low_bit_set(0x41, DatatypeByteOrder::Vax)]
 fn each_pair_of_byte_order_bits_parses_to_its_order(
     #[case] bit_field: u8,
     #[case] expected: DatatypeByteOrder,
@@ -415,15 +415,15 @@ fn test_opaque() {
 }
 
 #[rstest]
-#[case(1, 1)]
-#[case(255, 1)]
-#[case(256, 2)]
-#[case(65_535, 2)]
-#[case(65_536, 3)]
-#[case(70_000, 3)]
-#[case(16_777_215, 3)]
-#[case(16_777_216, 4)]
-#[case(u32::MAX, 4)]
+#[case::minimum_size(1, 1)]
+#[case::one_byte_limit(255, 1)]
+#[case::two_byte_start(256, 2)]
+#[case::two_byte_limit(65_535, 2)]
+#[case::three_byte_start(65_536, 3)]
+#[case::three_byte_interior(70_000, 3)]
+#[case::three_byte_limit(16_777_215, 3)]
+#[case::four_byte_start(16_777_216, 4)]
+#[case::four_byte_limit(u32::MAX, 4)]
 fn compound_offsets_use_the_minimum_byte_width(#[case] size: u32, #[case] width: usize) {
     let datatype = Datatype::Compound {
         size,
@@ -447,10 +447,10 @@ fn compound_offsets_use_the_minimum_byte_width(#[case] size: u32, #[case] width:
 }
 
 #[rstest]
-#[case(COMPOUND_CLASS, DATATYPE_VERSION_THREE)]
-#[case(COMPOUND_CLASS, DATATYPE_VERSION_FOUR)]
-#[case(COMPOUND_CLASS, DATATYPE_VERSION_FIVE)]
-#[case(COMPLEX_CLASS, DATATYPE_VERSION_FIVE)]
+#[case::compound_v3(COMPOUND_CLASS, DATATYPE_VERSION_THREE)]
+#[case::compound_v4(COMPOUND_CLASS, DATATYPE_VERSION_FOUR)]
+#[case::compound_v5(COMPOUND_CLASS, DATATYPE_VERSION_FIVE)]
+#[case::complex_v5(COMPLEX_CLASS, DATATYPE_VERSION_FIVE)]
 fn three_byte_member_offsets_preserve_the_next_datatype(#[case] class: u8, #[case] version: u8) {
     let member = byte_member_type();
     let mut encoded = build_dt_header(class, version, [2, 0, 0], 70_000);
@@ -620,20 +620,20 @@ fn test_enumeration() {
 }
 
 #[rstest]
-#[case(2)]
-#[case(3)]
-#[case(4)]
-#[case(5)]
-#[case(6)]
-#[case(7)]
-#[case(8)]
-#[case(9)]
-#[case(10)]
-#[case(11)]
-#[case(12)]
-#[case(13)]
-#[case(14)]
-#[case(15)]
+#[case::reserved_subtype_2(2)]
+#[case::reserved_subtype_3(3)]
+#[case::reserved_subtype_4(4)]
+#[case::reserved_subtype_5(5)]
+#[case::reserved_subtype_6(6)]
+#[case::reserved_subtype_7(7)]
+#[case::reserved_subtype_8(8)]
+#[case::reserved_subtype_9(9)]
+#[case::reserved_subtype_10(10)]
+#[case::reserved_subtype_11(11)]
+#[case::reserved_subtype_12(12)]
+#[case::reserved_subtype_13(13)]
+#[case::reserved_subtype_14(14)]
+#[case::reserved_subtype_15(15)]
 fn rejects_reserved_variable_length_subtypes(#[case] subtype: u8) {
     let mut bytes = build_dt_header(
         VARIABLE_LENGTH_CLASS,
@@ -649,18 +649,18 @@ fn rejects_reserved_variable_length_subtypes(#[case] subtype: u8) {
 }
 
 #[rstest]
-#[case(0x00_1000)]
-#[case(0x00_2000)]
-#[case(0x00_4000)]
-#[case(0x00_8000)]
-#[case(0x01_0000)]
-#[case(0x02_0000)]
-#[case(0x04_0000)]
-#[case(0x08_0000)]
-#[case(0x10_0000)]
-#[case(0x20_0000)]
-#[case(0x40_0000)]
-#[case(0x80_0000)]
+#[case::reserved_bit_12(0x00_1000)]
+#[case::reserved_bit_13(0x00_2000)]
+#[case::reserved_bit_14(0x00_4000)]
+#[case::reserved_bit_15(0x00_8000)]
+#[case::reserved_bit_16(0x01_0000)]
+#[case::reserved_bit_17(0x02_0000)]
+#[case::reserved_bit_18(0x04_0000)]
+#[case::reserved_bit_19(0x08_0000)]
+#[case::reserved_bit_20(0x10_0000)]
+#[case::reserved_bit_21(0x20_0000)]
+#[case::reserved_bit_22(0x40_0000)]
+#[case::reserved_bit_23(0x80_0000)]
 fn rejects_variable_length_reserved_bits(
     #[case] bits: u32,
     #[values(VARIABLE_LENGTH_SEQUENCE, VARIABLE_LENGTH_STRING)] subtype: u8,
@@ -680,12 +680,12 @@ fn rejects_variable_length_reserved_bits(
 }
 
 #[rstest]
-#[case(1, 0)]
-#[case(2, 0)]
-#[case(15, 0)]
-#[case(0, 1)]
-#[case(0, 15)]
-#[case(1, 1)]
+#[case::null_pad(1, 0)]
+#[case::space_pad(2, 0)]
+#[case::reserved_padding(15, 0)]
+#[case::utf8_charset(0, 1)]
+#[case::reserved_charset(0, 15)]
+#[case::null_pad_and_utf8(1, 1)]
 fn rejects_string_metadata_on_variable_length_sequences(#[case] padding: u8, #[case] charset: u8) {
     let mut bytes = build_dt_header(
         VARIABLE_LENGTH_CLASS,
@@ -701,10 +701,10 @@ fn rejects_string_metadata_on_variable_length_sequences(#[case] padding: u8, #[c
 }
 
 #[rstest]
-#[case([0x31, 0, 0], FormatError::InvalidStringPadding(3))]
-#[case([0xF1, 0, 0], FormatError::InvalidStringPadding(15))]
-#[case([1, 2, 0], FormatError::InvalidCharacterSet(2))]
-#[case([1, 15, 0], FormatError::InvalidCharacterSet(15))]
+#[case::padding_three([0x31, 0, 0], FormatError::InvalidStringPadding(3))]
+#[case::padding_fifteen([0xF1, 0, 0], FormatError::InvalidStringPadding(15))]
+#[case::charset_two([1, 2, 0], FormatError::InvalidCharacterSet(2))]
+#[case::charset_fifteen([1, 15, 0], FormatError::InvalidCharacterSet(15))]
 fn rejects_invalid_variable_length_string_metadata(
     #[case] flags: [u8; 3],
     #[case] expected: FormatError,
@@ -715,8 +715,8 @@ fn rejects_invalid_variable_length_string_metadata(
 }
 
 #[rstest]
-#[case(STRING_CLASS)]
-#[case(OPAQUE_CLASS)]
+#[case::string_base(STRING_CLASS)]
+#[case::opaque_base(OPAQUE_CLASS)]
 fn rejects_zero_sized_variable_length_string_bases(#[case] class: u8) {
     let mut bytes = build_dt_header(
         VARIABLE_LENGTH_CLASS,
@@ -732,9 +732,9 @@ fn rejects_zero_sized_variable_length_string_bases(#[case] class: u8) {
 }
 
 #[rstest]
-#[case(0, StringPadding::NullTerminate)]
-#[case(1, StringPadding::NullPad)]
-#[case(2, StringPadding::SpacePad)]
+#[case::null_terminate(0, StringPadding::NullTerminate)]
+#[case::null_pad(1, StringPadding::NullPad)]
+#[case::space_pad(2, StringPadding::SpacePad)]
 fn variable_length_strings_preserve_metadata_and_base_byte_order(
     #[case] padding_code: u8,
     #[case] padding: StringPadding,
@@ -1391,11 +1391,11 @@ fn byte_member_type() -> Datatype {
 
 const DATATYPE_VERSION_FOUR: u8 = 4;
 #[rstest]
-#[case(0, 0, 8, FormatError::ZeroSizedDatatype { class: FIXED_POINT_CLASS })]
-#[case(1, 0, 0, FormatError::InvalidFixedPointRange { size: 1, bit_offset: 0, bit_precision: 0 })]
-#[case(1, 8, 1, FormatError::InvalidFixedPointRange { size: 1, bit_offset: 8, bit_precision: 1 })]
-#[case(1, 4, 5, FormatError::InvalidFixedPointRange { size: 1, bit_offset: 4, bit_precision: 5 })]
-#[case(8, u16::MAX, u16::MAX, FormatError::InvalidFixedPointRange { size: 8, bit_offset: u16::MAX, bit_precision: u16::MAX })]
+#[case::zero_size(0, 0, 8, FormatError::ZeroSizedDatatype { class: FIXED_POINT_CLASS })]
+#[case::zero_precision(1, 0, 0, FormatError::InvalidFixedPointRange { size: 1, bit_offset: 0, bit_precision: 0 })]
+#[case::offset_at_end(1, 8, 1, FormatError::InvalidFixedPointRange { size: 1, bit_offset: 8, bit_precision: 1 })]
+#[case::precision_past_end(1, 4, 5, FormatError::InvalidFixedPointRange { size: 1, bit_offset: 4, bit_precision: 5 })]
+#[case::maximum_bit_fields(8, u16::MAX, u16::MAX, FormatError::InvalidFixedPointRange { size: 8, bit_offset: u16::MAX, bit_precision: u16::MAX })]
 fn rejects_invalid_fixed_point_metadata(
     #[case] size: u32,
     #[case] offset: u16,
@@ -1409,15 +1409,15 @@ fn rejects_invalid_fixed_point_metadata(
 }
 
 #[rstest]
-#[case(4, 0, FormatError::ZeroSizedDatatype { class: FLOATING_POINT_CLASS })]
-#[case(8, 1, FormatError::InvalidFloatingPointRange { size: 4, bit_offset: 1, bit_precision: 32 })]
-#[case(10, 0, FormatError::InvalidFloatingPointRange { size: 4, bit_offset: 0, bit_precision: 0 })]
-#[case(10, 33, FormatError::InvalidFloatingPointRange { size: 4, bit_offset: 0, bit_precision: 33 })]
-#[case(2, 32, FormatError::InvalidFloatingPointField { field: FloatingPointField::Sign, location: 32, size: 1, bit_offset: 0, bit_precision: 32 })]
-#[case(13, 0, FormatError::InvalidFloatingPointField { field: FloatingPointField::Exponent, location: 23, size: 0, bit_offset: 0, bit_precision: 32 })]
-#[case(13, 10, FormatError::InvalidFloatingPointField { field: FloatingPointField::Exponent, location: 23, size: 10, bit_offset: 0, bit_precision: 32 })]
-#[case(15, 0, FormatError::InvalidFloatingPointField { field: FloatingPointField::Mantissa, location: 0, size: 0, bit_offset: 0, bit_precision: 32 })]
-#[case(14, 250, FormatError::InvalidFloatingPointField { field: FloatingPointField::Mantissa, location: 250, size: 23, bit_offset: 0, bit_precision: 32 })]
+#[case::zero_size(4, 0, FormatError::ZeroSizedDatatype { class: FLOATING_POINT_CLASS })]
+#[case::shifted_full_precision(8, 1, FormatError::InvalidFloatingPointRange { size: 4, bit_offset: 1, bit_precision: 32 })]
+#[case::zero_precision(10, 0, FormatError::InvalidFloatingPointRange { size: 4, bit_offset: 0, bit_precision: 0 })]
+#[case::precision_past_size(10, 33, FormatError::InvalidFloatingPointRange { size: 4, bit_offset: 0, bit_precision: 33 })]
+#[case::sign_at_end(2, 32, FormatError::InvalidFloatingPointField { field: FloatingPointField::Sign, location: 32, size: 1, bit_offset: 0, bit_precision: 32 })]
+#[case::zero_exponent_size(13, 0, FormatError::InvalidFloatingPointField { field: FloatingPointField::Exponent, location: 23, size: 0, bit_offset: 0, bit_precision: 32 })]
+#[case::exponent_past_end(13, 10, FormatError::InvalidFloatingPointField { field: FloatingPointField::Exponent, location: 23, size: 10, bit_offset: 0, bit_precision: 32 })]
+#[case::zero_mantissa_size(15, 0, FormatError::InvalidFloatingPointField { field: FloatingPointField::Mantissa, location: 0, size: 0, bit_offset: 0, bit_precision: 32 })]
+#[case::mantissa_past_end(14, 250, FormatError::InvalidFloatingPointField { field: FloatingPointField::Mantissa, location: 250, size: 23, bit_offset: 0, bit_precision: 32 })]
 fn rejects_invalid_floating_point_metadata(
     #[case] index: usize,
     #[case] value: u8,
@@ -1439,7 +1439,7 @@ fn rejects_reserved_mantissa_normalization() {
 }
 
 #[rstest]
-#[case(
+#[case::sign_exponent(
     2,
     23,
     FloatingPointField::Sign,
@@ -1449,7 +1449,7 @@ fn rejects_reserved_mantissa_normalization() {
     23,
     8
 )]
-#[case(
+#[case::sign_mantissa(
     2,
     0,
     FloatingPointField::Sign,
@@ -1459,7 +1459,7 @@ fn rejects_reserved_mantissa_normalization() {
     0,
     23
 )]
-#[case(
+#[case::exponent_mantissa(
     15,
     24,
     FloatingPointField::Exponent,
@@ -1495,11 +1495,11 @@ fn rejects_overlapping_floating_point_metadata(
 }
 
 #[rstest]
-#[case(
+#[case::binary32(
     FloatingPointType::ieee754_binary32(DatatypeByteOrder::LittleEndian),
     build_float(4, 23, 8, 0, 23, 127)
 )]
-#[case(
+#[case::binary64(
     FloatingPointType::ieee754_binary64(DatatypeByteOrder::LittleEndian),
     build_float(8, 52, 11, 0, 52, 1023)
 )]
@@ -1511,8 +1511,8 @@ fn preserves_ieee_bytes(#[case] numeric: FloatingPointType, #[case] expected: Ve
 }
 
 #[rstest]
-#[case(16)]
-#[case(u32::MAX)]
+#[case::sixteen_bytes(16)]
+#[case::u32_limit(u32::MAX)]
 fn parses_wide_numeric_metadata(#[case] size: u32) {
     let fixed = Datatype::FixedPoint(
         FixedPointType::new(size, DatatypeByteOrder::BigEndian, true, 1, 127).unwrap(),
@@ -1531,9 +1531,9 @@ fn parses_wide_numeric_metadata(#[case] size: u32) {
     assert_eq!(parse_datatype(&encoded).unwrap().0, floating);
 }
 #[rstest]
-#[case(0, 1, FormatError::ZeroSizedDatatype { class: TIME_CLASS })]
-#[case(1, 0, FormatError::InvalidNumericBitRange { class: TIME_CLASS, size: 1, bit_offset: 0, bit_precision: 0 })]
-#[case(1, 9, FormatError::InvalidNumericBitRange { class: TIME_CLASS, size: 1, bit_offset: 0, bit_precision: 9 })]
+#[case::zero_size(0, 1, FormatError::ZeroSizedDatatype { class: TIME_CLASS })]
+#[case::zero_precision(1, 0, FormatError::InvalidNumericBitRange { class: TIME_CLASS, size: 1, bit_offset: 0, bit_precision: 0 })]
+#[case::precision_past_end(1, 9, FormatError::InvalidNumericBitRange { class: TIME_CLASS, size: 1, bit_offset: 0, bit_precision: 9 })]
 fn rejects_invalid_time_metadata(
     #[case] size: u32,
     #[case] precision: u16,
@@ -1545,9 +1545,9 @@ fn rejects_invalid_time_metadata(
 }
 
 #[rstest]
-#[case(0, 0, 1, FormatError::ZeroSizedDatatype { class: BIT_FIELD_CLASS })]
-#[case(1, 0, 0, FormatError::InvalidNumericBitRange { class: BIT_FIELD_CLASS, size: 1, bit_offset: 0, bit_precision: 0 })]
-#[case(1, 4, 5, FormatError::InvalidNumericBitRange { class: BIT_FIELD_CLASS, size: 1, bit_offset: 4, bit_precision: 5 })]
+#[case::zero_size(0, 0, 1, FormatError::ZeroSizedDatatype { class: BIT_FIELD_CLASS })]
+#[case::zero_precision(1, 0, 0, FormatError::InvalidNumericBitRange { class: BIT_FIELD_CLASS, size: 1, bit_offset: 0, bit_precision: 0 })]
+#[case::range_past_end(1, 4, 5, FormatError::InvalidNumericBitRange { class: BIT_FIELD_CLASS, size: 1, bit_offset: 4, bit_precision: 5 })]
 fn rejects_invalid_bit_field_metadata(
     #[case] size: u32,
     #[case] offset: u16,

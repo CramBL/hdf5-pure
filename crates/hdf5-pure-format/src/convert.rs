@@ -187,16 +187,16 @@ mod tests {
     use super::*;
 
     #[rstest]
-    #[case(0)]
-    #[case(1000)]
-    #[case(u64::from(u32::MAX))]
+    #[case::zero(0)]
+    #[case::interior(1000)]
+    #[case::u32_limit(u64::from(u32::MAX))]
     fn a_value_within_the_target_width_converts(#[case] value: u64) {
         assert_eq!(u64::from(value.narrow::<u32>().unwrap()), value);
     }
 
     #[rstest]
-    #[case(u64::from(u32::MAX) + 1)]
-    #[case(u64::MAX)]
+    #[case::above_u32_limit(u64::from(u32::MAX) + 1)]
+    #[case::u64_limit(u64::MAX)]
     fn a_value_past_the_target_width_is_reported_with_the_value(#[case] original: u64) {
         let err = original.narrow::<u32>().unwrap_err();
         let FormatError::ValueTooLargeForRepresentation { value, target } = err else {

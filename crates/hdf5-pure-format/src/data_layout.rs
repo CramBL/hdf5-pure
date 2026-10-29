@@ -877,10 +877,10 @@ mod tests {
     }
 
     #[rstest]
-    #[case(0, false)]
-    #[case(DONT_FILTER_PARTIAL_BOUND_CHUNKS, true)]
-    #[case(SINGLE_INDEX_WITH_FILTER, false)]
-    #[case(DONT_FILTER_PARTIAL_BOUND_CHUNKS | SINGLE_INDEX_WITH_FILTER, true)]
+    #[case::plain_layout(0, false)]
+    #[case::skip_partial_filtering(DONT_FILTER_PARTIAL_BOUND_CHUNKS, true)]
+    #[case::filtered_single_index(SINGLE_INDEX_WITH_FILTER, false)]
+    #[case::both_flags(DONT_FILTER_PARTIAL_BOUND_CHUNKS | SINGLE_INDEX_WITH_FILTER, true)]
     fn v4_chunked_flags_reach_the_parsed_layout(#[case] raw: u8, #[case] stored_raw: bool) {
         let layout = DataLayout::parse(&v4_chunked(raw, CHUNK_INDEX_IMPLICIT, &[]), 8, 8).unwrap();
         let DataLayout::Chunked { flags, .. } = layout else {

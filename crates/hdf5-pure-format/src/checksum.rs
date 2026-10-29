@@ -373,21 +373,21 @@ mod tests {
     use super::*;
 
     #[rstest]
-    #[case(0, 0xdead_beef)]
-    #[case(1, 0x04ec_883b)]
-    #[case(2, 0x022b_c7fb)]
-    #[case(3, 0x96c2_fd10)]
-    #[case(4, 0x46f8_eec9)]
-    #[case(5, 0xb217_35c1)]
-    #[case(6, 0x2779_a0dd)]
-    #[case(7, 0x098f_be6f)]
-    #[case(8, 0x9afd_b1b3)]
-    #[case(9, 0xdd6e_13f5)]
-    #[case(10, 0x3a58_a365)]
-    #[case(11, 0x7529_9b1b)]
-    #[case(12, 0x3891_9c27)]
-    #[case(13, 0xe1f0_cbae)]
-    #[case(14, 0x49ef_0328)]
+    #[case::empty(0, 0xdead_beef)]
+    #[case::one_byte(1, 0x04ec_883b)]
+    #[case::two_bytes(2, 0x022b_c7fb)]
+    #[case::three_bytes(3, 0x96c2_fd10)]
+    #[case::four_bytes(4, 0x46f8_eec9)]
+    #[case::five_bytes(5, 0xb217_35c1)]
+    #[case::six_bytes(6, 0x2779_a0dd)]
+    #[case::seven_bytes(7, 0x098f_be6f)]
+    #[case::eight_bytes(8, 0x9afd_b1b3)]
+    #[case::nine_bytes(9, 0xdd6e_13f5)]
+    #[case::ten_bytes(10, 0x3a58_a365)]
+    #[case::eleven_bytes(11, 0x7529_9b1b)]
+    #[case::one_block(12, 0x3891_9c27)]
+    #[case::block_one_byte_tail(13, 0xe1f0_cbae)]
+    #[case::block_two_byte_tail(14, 0x49ef_0328)]
     fn each_input_length_through_one_block_and_its_tail_hashes_to_a_fixed_value(
         #[case] len: usize,
         #[case] expected: u32,
@@ -406,10 +406,10 @@ mod tests {
     }
 
     #[rstest]
-    #[case(0, 0xdead_beef)]
-    #[case(4_294_967_296, 0xdead_beef)]
-    #[case(4_294_967_310, 0xdead_befd)]
-    #[case(u64::MAX, 0xdead_beee)]
+    #[case::zero_length(0, 0xdead_beef)]
+    #[case::u32_wrap(4_294_967_296, 0xdead_beef)]
+    #[case::wrapped_fourteen_bytes(4_294_967_310, 0xdead_befd)]
+    #[case::u64_limit(u64::MAX, 0xdead_beee)]
     fn incremental_seed_adds_the_low_32_bits_of_the_total_length(
         #[case] len: u64,
         #[case] seed: u32,
@@ -428,12 +428,12 @@ mod tests {
     }
 
     #[rstest]
-    #[case(24)]
-    #[case(25)]
-    #[case(36)]
-    #[case(37)]
-    #[case(64)]
-    #[case(65)]
+    #[case::two_blocks(24)]
+    #[case::two_blocks_tail(25)]
+    #[case::three_blocks(36)]
+    #[case::three_blocks_tail(37)]
+    #[case::five_blocks_four_byte_tail(64)]
+    #[case::five_blocks_five_byte_tail(65)]
     fn incremental_windows_match_one_shot_across_multiple_blocks(
         #[case] len: usize,
         #[values(1, 8, 12, 13, 16, 65)] window_len: usize,
@@ -458,8 +458,8 @@ mod tests {
     }
 
     #[rstest]
-    #[case(0, b"".as_slice())]
-    #[case(3, b"ab".as_slice())]
+    #[case::empty_declared_input(0, b"".as_slice())]
+    #[case::partially_supplied_input(3, b"ab".as_slice())]
     fn incremental_update_rejects_excess_input_without_changing_state(
         #[case] total_len: u64,
         #[case] prefix: &[u8],
@@ -489,8 +489,8 @@ mod tests {
     }
 
     #[rstest]
-    #[case(1, b"".as_slice())]
-    #[case(14, b"twelve bytes".as_slice())]
+    #[case::missing_input(1, b"".as_slice())]
+    #[case::missing_tail(14, b"twelve bytes".as_slice())]
     fn incremental_finish_rejects_incomplete_input(#[case] total_len: u64, #[case] data: &[u8]) {
         let mut checksum = JenkinsLookup3::new(total_len);
         checksum.update(data).unwrap();
@@ -503,8 +503,8 @@ mod tests {
     }
 
     #[rstest]
-    #[case(0, 0x1777_0551)]
-    #[case(1, 0xcd62_8161)]
+    #[case::zero_seed(0, 0x1777_0551)]
+    #[case::one_seed(1, 0xcd62_8161)]
     fn the_self_test_vector_of_lookup3_c_hashes_to_its_published_value(
         #[case] initval: u32,
         #[case] expected: u32,

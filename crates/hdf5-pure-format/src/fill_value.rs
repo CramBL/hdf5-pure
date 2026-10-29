@@ -384,12 +384,12 @@ mod tests {
     }
 
     #[rstest]
-    #[case(FillTime::Alloc, None, vec![3, 0x02])]
-    #[case(FillTime::Alloc, Some(&[1u8, 2, 3, 4][..]), vec![3, 0x22, 4, 0, 0, 0, 1, 2, 3, 4])]
-    #[case(FillTime::Never, None, vec![3, 0x06])]
-    #[case(FillTime::Never, Some(&[1u8, 2, 3, 4][..]), vec![3, 0x26, 4, 0, 0, 0, 1, 2, 3, 4])]
-    #[case(FillTime::IfSet, None, vec![3, 0x0a])]
-    #[case(FillTime::IfSet, Some(&[1u8, 2, 3, 4][..]), vec![3, 0x2a, 4, 0, 0, 0, 1, 2, 3, 4])]
+    #[case::alloc_absent(FillTime::Alloc, None, vec![3, 0x02])]
+    #[case::alloc_defined(FillTime::Alloc, Some(&[1u8, 2, 3, 4][..]), vec![3, 0x22, 4, 0, 0, 0, 1, 2, 3, 4])]
+    #[case::never_absent(FillTime::Never, None, vec![3, 0x06])]
+    #[case::never_defined(FillTime::Never, Some(&[1u8, 2, 3, 4][..]), vec![3, 0x26, 4, 0, 0, 0, 1, 2, 3, 4])]
+    #[case::if_set_absent(FillTime::IfSet, None, vec![3, 0x0a])]
+    #[case::if_set_defined(FillTime::IfSet, Some(&[1u8, 2, 3, 4][..]), vec![3, 0x2a, 4, 0, 0, 0, 1, 2, 3, 4])]
     fn canonical_v3_serialization(
         #[case] fill_time: FillTime,
         #[case] fill: Option<&[u8]>,
@@ -418,19 +418,19 @@ mod tests {
     }
 
     #[rstest]
-    #[case(
+    #[case::version_one(
         MessageType::FILL_VALUE,
         &[1u8, 2, 1, 1, 4, 0, 0, 0, 42, 0, 0, 0],
         FillTime::Never,
         Some(&[42u8, 0, 0, 0][..])
     )]
-    #[case(
+    #[case::version_two(
         MessageType::FILL_VALUE,
         &[2u8, 2, 1, 1, 4, 0, 0, 0, 42, 0, 0, 0],
         FillTime::Never,
         Some(&[42u8, 0, 0, 0][..])
     )]
-    #[case(
+    #[case::version_three(
         MessageType::FILL_VALUE,
         &[3u8, 0x26, 4, 0, 0, 0, 42, 0, 0, 0],
         FillTime::Never,
@@ -453,73 +453,73 @@ mod tests {
     }
 
     #[rstest]
-    #[case(
+    #[case::v1_defined(
         MessageType::FILL_VALUE,
         &[1u8, 2, 2, 1, 2, 0, 0, 0, 0xed, 0xfe],
         FillTime::IfSet,
         Some(&[0xed, 0xfe][..])
     )]
-    #[case(
+    #[case::v1_undefined_trailing_bytes(
         MessageType::FILL_VALUE,
         &[1u8, 2, 2, 0, 4, 0, 0, 0, 1, 2, 3, 4],
         FillTime::IfSet,
         None
     )]
-    #[case(
+    #[case::v1_zero_length(
         MessageType::FILL_VALUE,
         &[1u8, 2, 2, 1, 0, 0, 0, 0],
         FillTime::IfSet,
         None
     )]
-    #[case(
+    #[case::v2_defined(
         MessageType::FILL_VALUE,
         &[2u8, 2, 2, 1, 4, 0, 0, 0, 0xf9, 0xff, 0xff, 0xff],
         FillTime::IfSet,
         Some(&[0xf9, 0xff, 0xff, 0xff][..])
     )]
-    #[case(
+    #[case::v2_undefined(
         MessageType::FILL_VALUE,
         &[2u8, 2, 2, 0],
         FillTime::IfSet,
         None
     )]
-    #[case(
+    #[case::v2_zero_length(
         MessageType::FILL_VALUE,
         &[2u8, 2, 2, 1, 0, 0, 0, 0],
         FillTime::IfSet,
         None
     )]
-    #[case(
+    #[case::v3_default(
         MessageType::FILL_VALUE,
         &[3u8, 0x0a],
         FillTime::IfSet,
         None
     )]
-    #[case(
+    #[case::v3_undefined(
         MessageType::FILL_VALUE,
         &[3u8, 0x1a],
         FillTime::IfSet,
         None
     )]
-    #[case(
+    #[case::v3_defined(
         MessageType::FILL_VALUE,
         &[3u8, 0x2a, 4, 0, 0, 0, 5, 6, 7, 8],
         FillTime::IfSet,
         Some(&[5, 6, 7, 8][..])
     )]
-    #[case(
+    #[case::v3_zero_length(
         MessageType::FILL_VALUE,
         &[3u8, 0x2a, 0, 0, 0, 0],
         FillTime::IfSet,
         None
     )]
-    #[case(
+    #[case::legacy_defined(
         MessageType::FILL_VALUE_OLD,
         &[4u8, 0, 0, 0, 10, 20, 30, 40],
         FillTime::IfSet,
         Some(&[10, 20, 30, 40][..])
     )]
-    #[case(
+    #[case::legacy_zero_length(
         MessageType::FILL_VALUE_OLD,
         &[0u8, 0, 0, 0],
         FillTime::IfSet,
@@ -542,10 +542,10 @@ mod tests {
     }
 
     #[rstest]
-    #[case(&[3u8, 0x4a], FormatError::InvalidFillValueFlags(0x4a))]
-    #[case(&[3u8, 0x8a], FormatError::InvalidFillValueFlags(0x8a))]
-    #[case(&[3u8, 0xca], FormatError::InvalidFillValueFlags(0xca))]
-    #[case(&[3u8, 0x3a], FormatError::InvalidFillValueFlags(0x3a))]
+    #[case::reserved_bit_6(&[3u8, 0x4a], FormatError::InvalidFillValueFlags(0x4a))]
+    #[case::reserved_bit_7(&[3u8, 0x8a], FormatError::InvalidFillValueFlags(0x8a))]
+    #[case::both_reserved_bits(&[3u8, 0xca], FormatError::InvalidFillValueFlags(0xca))]
+    #[case::conflicting_value_flags(&[3u8, 0x3a], FormatError::InvalidFillValueFlags(0x3a))]
     fn v3_rejects_invalid_flags(#[case] bytes: &[u8], #[case] expected: FormatError) {
         let err = FillValueView::parse(MessageType::FILL_VALUE, bytes).unwrap_err();
         assert_eq!(err, expected);
@@ -559,24 +559,24 @@ mod tests {
     }
 
     #[rstest]
-    #[case(&[1u8, 4, 2, 0, 0, 0, 0, 0], FormatError::InvalidSpaceAllocationTime(4))]
-    #[case(&[2u8, 5, 2, 0], FormatError::InvalidSpaceAllocationTime(5))]
+    #[case::v1_time_four(&[1u8, 4, 2, 0, 0, 0, 0, 0], FormatError::InvalidSpaceAllocationTime(4))]
+    #[case::v2_time_five(&[2u8, 5, 2, 0], FormatError::InvalidSpaceAllocationTime(5))]
     fn rejects_invalid_space_allocation_time(#[case] bytes: &[u8], #[case] expected: FormatError) {
         let err = FillValueView::parse(MessageType::FILL_VALUE, bytes).unwrap_err();
         assert_eq!(err, expected);
     }
 
     #[rstest]
-    #[case(&[1u8, 2, 3, 0, 0, 0, 0, 0], FormatError::InvalidFillTime(3))]
-    #[case(&[2u8, 2, 9, 0], FormatError::InvalidFillTime(9))]
+    #[case::v1_time_three(&[1u8, 2, 3, 0, 0, 0, 0, 0], FormatError::InvalidFillTime(3))]
+    #[case::v2_time_nine(&[2u8, 2, 9, 0], FormatError::InvalidFillTime(9))]
     fn rejects_invalid_fill_time(#[case] bytes: &[u8], #[case] expected: FormatError) {
         let err = FillValueView::parse(MessageType::FILL_VALUE, bytes).unwrap_err();
         assert_eq!(err, expected);
     }
 
     #[rstest]
-    #[case(&[1u8, 2, 2, 2, 0, 0, 0, 0], FormatError::InvalidFillValueDefined(2))]
-    #[case(&[2u8, 2, 2, 255], FormatError::InvalidFillValueDefined(255))]
+    #[case::v1_indicator_two(&[1u8, 2, 2, 2, 0, 0, 0, 0], FormatError::InvalidFillValueDefined(2))]
+    #[case::v2_indicator_maximum(&[2u8, 2, 2, 255], FormatError::InvalidFillValueDefined(255))]
     fn rejects_invalid_defined_indicator(#[case] bytes: &[u8], #[case] expected: FormatError) {
         let err = FillValueView::parse(MessageType::FILL_VALUE, bytes).unwrap_err();
         assert_eq!(err, expected);
@@ -589,28 +589,28 @@ mod tests {
     }
 
     #[rstest]
-    #[case(&[0u8, 0], FormatError::UnsupportedFillValueVersion(0))]
-    #[case(&[4u8, 0], FormatError::UnsupportedFillValueVersion(4))]
-    #[case(&[255u8, 0], FormatError::UnsupportedFillValueVersion(255))]
+    #[case::version_zero(&[0u8, 0], FormatError::UnsupportedFillValueVersion(0))]
+    #[case::version_four(&[4u8, 0], FormatError::UnsupportedFillValueVersion(4))]
+    #[case::maximum_version(&[255u8, 0], FormatError::UnsupportedFillValueVersion(255))]
     fn rejects_unsupported_version(#[case] bytes: &[u8], #[case] expected: FormatError) {
         let err = FillValueView::parse(MessageType::FILL_VALUE, bytes).unwrap_err();
         assert_eq!(err, expected);
     }
 
     #[rstest]
-    #[case(MessageType::FILL_VALUE, &[], FormatError::UnexpectedEof { expected: 1, available: 0 })]
-    #[case(MessageType::FILL_VALUE, &[1u8, 2], FormatError::UnexpectedEof { expected: 4, available: 2 })]
-    #[case(MessageType::FILL_VALUE, &[1u8, 2, 2, 1, 4, 0], FormatError::UnexpectedEof { expected: 8, available: 6 })]
-    #[case(MessageType::FILL_VALUE, &[1u8, 2, 2, 1, 4, 0, 0, 0, 1, 2], FormatError::UnexpectedEof { expected: 12, available: 10 })]
-    #[case(MessageType::FILL_VALUE, &[2u8, 2], FormatError::UnexpectedEof { expected: 4, available: 2 })]
-    #[case(MessageType::FILL_VALUE, &[2u8, 2, 2, 1, 4, 0], FormatError::UnexpectedEof { expected: 8, available: 6 })]
-    #[case(MessageType::FILL_VALUE, &[2u8, 2, 2, 1, 4, 0, 0, 0, 1, 2], FormatError::UnexpectedEof { expected: 12, available: 10 })]
-    #[case(MessageType::FILL_VALUE, &[3u8], FormatError::UnexpectedEof { expected: 2, available: 1 })]
-    #[case(MessageType::FILL_VALUE, &[3u8, 0x2a, 4, 0], FormatError::UnexpectedEof { expected: 6, available: 4 })]
-    #[case(MessageType::FILL_VALUE, &[3u8, 0x2a, 4, 0, 0, 0, 1, 2], FormatError::UnexpectedEof { expected: 10, available: 8 })]
-    #[case(MessageType::FILL_VALUE_OLD, &[], FormatError::UnexpectedEof { expected: 4, available: 0 })]
-    #[case(MessageType::FILL_VALUE_OLD, &[4u8, 0], FormatError::UnexpectedEof { expected: 4, available: 2 })]
-    #[case(MessageType::FILL_VALUE_OLD, &[4u8, 0, 0, 0, 1, 2], FormatError::UnexpectedEof { expected: 8, available: 6 })]
+    #[case::missing_version(MessageType::FILL_VALUE, &[], FormatError::UnexpectedEof { expected: 1, available: 0 })]
+    #[case::v1_prefix(MessageType::FILL_VALUE, &[1u8, 2], FormatError::UnexpectedEof { expected: 4, available: 2 })]
+    #[case::v1_length(MessageType::FILL_VALUE, &[1u8, 2, 2, 1, 4, 0], FormatError::UnexpectedEof { expected: 8, available: 6 })]
+    #[case::v1_payload(MessageType::FILL_VALUE, &[1u8, 2, 2, 1, 4, 0, 0, 0, 1, 2], FormatError::UnexpectedEof { expected: 12, available: 10 })]
+    #[case::v2_prefix(MessageType::FILL_VALUE, &[2u8, 2], FormatError::UnexpectedEof { expected: 4, available: 2 })]
+    #[case::v2_length(MessageType::FILL_VALUE, &[2u8, 2, 2, 1, 4, 0], FormatError::UnexpectedEof { expected: 8, available: 6 })]
+    #[case::v2_payload(MessageType::FILL_VALUE, &[2u8, 2, 2, 1, 4, 0, 0, 0, 1, 2], FormatError::UnexpectedEof { expected: 12, available: 10 })]
+    #[case::v3_flags(MessageType::FILL_VALUE, &[3u8], FormatError::UnexpectedEof { expected: 2, available: 1 })]
+    #[case::v3_length(MessageType::FILL_VALUE, &[3u8, 0x2a, 4, 0], FormatError::UnexpectedEof { expected: 6, available: 4 })]
+    #[case::v3_payload(MessageType::FILL_VALUE, &[3u8, 0x2a, 4, 0, 0, 0, 1, 2], FormatError::UnexpectedEof { expected: 10, available: 8 })]
+    #[case::legacy_missing_length(MessageType::FILL_VALUE_OLD, &[], FormatError::UnexpectedEof { expected: 4, available: 0 })]
+    #[case::legacy_partial_length(MessageType::FILL_VALUE_OLD, &[4u8, 0], FormatError::UnexpectedEof { expected: 4, available: 2 })]
+    #[case::legacy_payload(MessageType::FILL_VALUE_OLD, &[4u8, 0, 0, 0, 1, 2], FormatError::UnexpectedEof { expected: 8, available: 6 })]
     fn rejects_truncated_bytes(
         #[case] msg_type: MessageType,
         #[case] bytes: &[u8],
