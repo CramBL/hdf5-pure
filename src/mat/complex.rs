@@ -347,4 +347,110 @@ mod tests {
             Value::Leaf(Leaf::ComplexVec1D(ComplexVec::F64(vec![(1.5, -2.5)]))),
         );
     }
+
+    #[cfg(feature = "num-complex")]
+    macro_rules! num_complex_arrays {
+        ($($test:ident => $component:ty, $helper:ident, $variant:ident,
+            $class:literal, [$first:expr, $second:expr]),* $(,)?) => {
+            $(
+                #[rstest::rstest]
+                #[case::empty(&[])]
+                #[case::single(&[$first])]
+                #[case::multiple(&[$first, $second])]
+                fn $test(#[case] expected: &[($component, $component)]) {
+                    use num_complex::Complex;
+
+                    use crate::mat::options::Options;
+                    use crate::mat::ser::value::Leaf;
+                    use crate::mat::ser::value::Value;
+                    use crate::mat::ser::value_ser::ValueSerializer;
+                    use crate::mat::value::ComplexVec;
+
+                    let values: Vec<Complex<$component>> = expected
+                        .iter()
+                        .map(|&(re, im)| Complex::new(re, im))
+                        .collect();
+                    let options = Options::default();
+                    assert_eq!(
+                        super::$helper(&values, ValueSerializer::new(&options)).unwrap(),
+                        Value::Leaf(Leaf::ComplexVec1D(
+                            ComplexVec::$variant(expected.to_vec())
+                        )),
+                    );
+
+                    #[cfg(not(miri))]
+                    {
+                        use crate::AttrValue;
+                        use crate::File;
+                        use crate::mat;
+
+                        #[derive(Serialize)]
+                        struct Capture<'a> {
+                            samples: Samples<'a>,
+                        }
+
+                        struct Samples<'a>(&'a [Complex<$component>]);
+
+                        impl Serialize for Samples<'_> {
+                            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                                super::$helper(self.0, serializer)
+                            }
+                        }
+
+                        let bytes = mat::to_bytes(&Capture {
+                            samples: Samples(&values),
+                        })
+                        .unwrap();
+                        let file = File::from_bytes(bytes).unwrap();
+                        let dataset = file.dataset("samples").unwrap();
+                        let shape = if expected.is_empty() {
+                            [0, 0]
+                        } else {
+                            [1, u64::try_from(expected.len()).unwrap()]
+                        };
+                        assert_eq!(dataset.shape().unwrap(), &shape);
+                        assert_eq!(
+                            dataset
+                                .attrs()
+                                .unwrap()
+                                .get("MATLAB_class")
+                                .and_then(AttrValue::as_str),
+                            Some($class),
+                        );
+                        let bytes: Vec<u8> = expected
+                            .iter()
+                            .flat_map(|(re, im)| {
+                                re.to_le_bytes().into_iter().chain(im.to_le_bytes())
+                            })
+                            .collect();
+                        assert_eq!(dataset.read_raw().unwrap(), bytes);
+                    }
+                }
+            )*
+        };
+    }
+
+    #[cfg(feature = "num-complex")]
+    num_complex_arrays! {
+        num_complex_f64_arrays_preserve_components =>
+            f64, f64_array, F64, "double", [(1.5, -2.5), (-3.25, 4.75)],
+        num_complex_f32_arrays_preserve_components =>
+            f32, f32_array, F32, "single", [(1.5, -2.5), (-3.25, 4.75)],
+        num_complex_i64_arrays_preserve_components =>
+            i64, i64_array, I64, "int64", [(i64::MIN, i64::MAX), (17, -31)],
+        num_complex_i32_arrays_preserve_components =>
+            i32, i32_array, I32, "int32", [(i32::MIN, i32::MAX), (17, -31)],
+        num_complex_i16_arrays_preserve_components =>
+            i16, i16_array, I16, "int16", [(i16::MIN, i16::MAX), (17, -31)],
+        num_complex_i8_arrays_preserve_components =>
+            i8, i8_array, I8, "int8", [(i8::MIN, i8::MAX), (17, -31)],
+        num_complex_u64_arrays_preserve_components =>
+            u64, u64_array, U64, "uint64", [(u64::MAX, 0), (17, 31)],
+        num_complex_u32_arrays_preserve_components =>
+            u32, u32_array, U32, "uint32", [(u32::MAX, 0), (17, 31)],
+        num_complex_u16_arrays_preserve_components =>
+            u16, u16_array, U16, "uint16", [(u16::MAX, 0), (17, 31)],
+        num_complex_u8_arrays_preserve_components =>
+            u8, u8_array, U8, "uint8", [(u8::MAX, 0), (17, 31)],
+    }
 }
