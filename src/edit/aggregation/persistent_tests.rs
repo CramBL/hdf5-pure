@@ -286,13 +286,13 @@ fn persistent_settlement_failure_preserves_publication_order(
     } else {
         assert!(!engine.aggregation.unwrap().publication_confirmed);
         let length = engine.image.len();
-        let issued = std::fs::read(&path).unwrap();
+        let issued = engine.disk_bytes().unwrap();
         assert!(matches!(
             engine.finalize_persist(),
             Err(Error::AllocationPublicationUncertain)
         ));
         assert_eq!(engine.image.len(), length);
-        assert_eq!(std::fs::read(&path).unwrap(), issued);
+        assert_eq!(engine.disk_bytes().unwrap(), issued);
     }
     assert!(engine.image.len() <= prior);
     drop(engine);
@@ -525,6 +525,10 @@ impl FailingImage {
 }
 
 impl FileImage for FailingImage {
+    fn disk_bytes(&self) -> Result<Vec<u8>, Error> {
+        self.inner.disk_bytes()
+    }
+
     fn read_disk_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
         self.inner.read_disk_at(offset, bytes)
     }

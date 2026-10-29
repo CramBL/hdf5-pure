@@ -242,7 +242,7 @@ impl WritePath {
                 .with_memory_strategy(MemoryStrategy::Bounded),
         )
         .unwrap();
-        let initial = Observation::read(&fs::read(path).unwrap()).values.len();
+        let initial = Observation::read(&file.disk_bytes().unwrap()).values.len();
         let terminal = match self {
             Self::Immediate => {
                 let mut dataset = file.dataset("d").unwrap();
@@ -282,7 +282,7 @@ impl WritePath {
             )
             .unwrap();
             let mut dataset = file.dataset("d").unwrap();
-            let start = Observation::read(&fs::read(path).unwrap()).values.len();
+            let start = Observation::read(&file.disk_bytes().unwrap()).values.len();
             let mut buffer = match kind {
                 BufferKind::Borrowed => Buffer::Borrowed(dataset.buffered_appender().unwrap()),
                 BufferKind::Owned => Buffer::Owned(dataset.into_buffered_appender().unwrap()),
@@ -1090,10 +1090,10 @@ pub(super) fn assert_empty_operations(path: &Path, owned: bool, hole: &Coverage)
     } else {
         Buffer::Borrowed(dataset.buffered_appender().unwrap())
     };
-    assert_eq!(fs::read(path).unwrap(), before);
+    assert_eq!(file.disk_bytes().unwrap(), before);
     buffer.append(&[]);
     buffer.flush().unwrap();
-    assert_eq!(fs::read(path).unwrap(), before);
+    assert_eq!(file.disk_bytes().unwrap(), before);
     buffer.append_raw(&[0]);
     let error = buffer.flush().unwrap_err();
     let Error::AppendInPlaceUnsupported(reason) = error else {
@@ -1103,7 +1103,7 @@ pub(super) fn assert_empty_operations(path: &Path, owned: bool, hole: &Coverage)
         reason,
         "the buffered byte length is not a whole number of elements; append the rest of the trailing element before flushing"
     );
-    assert_eq!(fs::read(path).unwrap(), before);
+    assert_eq!(file.disk_bytes().unwrap(), before);
     assert_eq!(buffer.discard(), [0]);
     if owned {
         drop(file.dataset("d").unwrap().into_buffered_appender().unwrap());
@@ -1111,7 +1111,7 @@ pub(super) fn assert_empty_operations(path: &Path, owned: bool, hole: &Coverage)
         let mut empty = file.dataset("d").unwrap();
         drop(empty.buffered_appender().unwrap());
     }
-    assert_eq!(fs::read(path).unwrap(), before);
+    assert_eq!(file.disk_bytes().unwrap(), before);
     file.close().unwrap();
     assert_eq!(fs::read(path).unwrap(), before);
     let after = Observation::read(&before);

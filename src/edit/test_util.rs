@@ -251,6 +251,18 @@ pub(in crate::edit) fn assert_huge_subtree_reclaimed(path: &Path) {
 }
 
 impl WriteEngine {
+    /// Reads the complete file through the editing session's retained disk handle.
+    ///
+    /// Pending writes remain buffered, and the session lock remains held.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if reading the length or bytes fails, or [`Error::Format`] if the
+    /// length exceeds [`usize::MAX`].
+    pub(crate) fn disk_bytes(&self) -> Result<Vec<u8>, Error> {
+        self.image.disk_bytes()
+    }
+
     /// Asserts complete ownership analysis and coverage of every selected allocation.
     ///
     /// With `metadata`, coverage must come entirely from live metadata. Otherwise, both live

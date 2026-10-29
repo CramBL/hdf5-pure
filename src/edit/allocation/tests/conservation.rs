@@ -1119,7 +1119,7 @@ fn force_unique_reuse(path: &Path, hole: &Coverage, history: &[Fact], paged: boo
         .unwrap()
         .confirm(issued)
         .unwrap();
-    let published = fs::read(path).unwrap();
+    let published = editor.disk_bytes().unwrap();
     drop(editor);
     assert_eq!(fs::read(path).unwrap(), published);
     let starts = published

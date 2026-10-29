@@ -167,6 +167,18 @@ pub(crate) trait FileImage: Source + Send + Sync {
     /// range exceeds the recorded physical length or cannot be represented.
     fn read_disk_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError>;
 
+    /// Reads the complete file through the retained disk handle.
+    ///
+    /// Reads the length from the handle, including partial writes after an I/O failure.
+    /// Pending writes remain buffered, and the session lock remains held.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if reading the length or bytes fails, or [`Error::Format`] if the
+    /// length exceeds [`usize::MAX`].
+    #[cfg(test)]
+    fn disk_bytes(&self) -> Result<Vec<u8>, Error>;
+
     /// Append `bytes` at end-of-file, returning the absolute address they were
     /// written at — which is the pre-call [`Source::len`]. Extends `len` by
     /// exactly `bytes.len()`; see the module docs for why callers rely on that.
@@ -353,6 +365,22 @@ impl BufferedWrites {
     #[cfg(test)]
     pub(crate) fn issued_order(&self) -> &[(u64, u64)] {
         &self.issued_order
+    }
+
+    /// Reads the complete file at the length reported by the retained handle.
+    ///
+    /// Pending writes remain buffered, and the session lock remains held.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if reading the length or bytes fails, or [`Error::Format`] if the
+    /// length exceeds [`usize::MAX`].
+    #[cfg(test)]
+    fn disk_bytes(&self) -> Result<Vec<u8>, Error> {
+        let length = self.handle.metadata()?.len();
+        let mut bytes = vec![0; length.to_usize()?];
+        read_at_handle_io(&self.handle, length, 0, &mut bytes)?;
+        Ok(bytes)
     }
 
     /// The handle, for the positioned reads an image serves from it.
@@ -877,6 +905,11 @@ impl Source for MirrorImage {
 }
 
 impl FileImage for MirrorImage {
+    #[cfg(test)]
+    fn disk_bytes(&self) -> Result<Vec<u8>, Error> {
+        self.writes.disk_bytes()
+    }
+
     fn read_disk_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
         read_at_handle(
             self.writes.handle(),
@@ -1258,6 +1291,11 @@ impl Source for HandleImage {
 }
 
 impl FileImage for HandleImage {
+    #[cfg(test)]
+    fn disk_bytes(&self) -> Result<Vec<u8>, Error> {
+        self.writes.disk_bytes()
+    }
+
     fn read_disk_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
         read_at_handle(
             self.writes.handle(),
@@ -1415,6 +1453,10 @@ impl Source for CountingImage {
 
 #[cfg(test)]
 impl FileImage for CountingImage {
+    fn disk_bytes(&self) -> Result<Vec<u8>, Error> {
+        self.inner.disk_bytes()
+    }
+
     fn read_disk_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
         self.inner.read_disk_at(offset, bytes)
     }
@@ -1520,6 +1562,10 @@ impl Source for TornWriteImage {
 
 #[cfg(test)]
 impl FileImage for TornWriteImage {
+    fn disk_bytes(&self) -> Result<Vec<u8>, Error> {
+        self.inner.disk_bytes()
+    }
+
     fn read_disk_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
         self.inner.read_disk_at(offset, bytes)
     }
@@ -1604,6 +1650,10 @@ impl Source for SourceOnlyImage {
 
 #[cfg(test)]
 impl FileImage for SourceOnlyImage {
+    fn disk_bytes(&self) -> Result<Vec<u8>, Error> {
+        self.0.disk_bytes()
+    }
+
     fn read_disk_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
         self.0.read_disk_at(offset, bytes)
     }
@@ -2406,6 +2456,64 @@ mod tests {
             );
             assert_in_sync(&path, img.as_ref(), backing);
         }
+    }
+
+    #[rstest]
+    #[case::mirror(Backing::Mirror)]
+    #[case::bounded(Backing::Handle)]
+    fn disk_inspection_preserves_pending_writes_and_reads_partial_growth(#[case] backing: Backing) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("locked.bin");
+        fs::write(&path, b"abcdef").unwrap();
+        let handle = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        handle.try_lock().unwrap();
+        let mut image: Box<dyn FileImage> = match backing {
+            Backing::Mirror => Box::new(MirrorImage::new(handle, b"abcdef".to_vec())),
+            Backing::Handle => {
+                Box::new(HandleImage::new(handle, 6, MetadataCacheConfig::new(4096)))
+            }
+        };
+        image
+            .set_write_buffering(WriteBuffering::Session {
+                page_size: 4096,
+                max_bytes: 4096,
+            })
+            .unwrap();
+        image.write_at(0, b"ZZ").unwrap();
+        assert_eq!(image.append(b"tail").unwrap(), 6);
+        assert_eq!(bytes(image.as_ref()), b"ZZcdeftail");
+        disk_log::start();
+        assert_eq!(image.disk_bytes().unwrap(), b"abcdef");
+        assert_eq!(bytes(image.as_ref()), b"ZZcdeftail");
+        assert!(disk_log::finish().events.is_empty());
+        disk_log::fail_write_after(0, 8);
+        let error = image.flush().unwrap_err();
+        let Error::Io(error) = error else {
+            panic!("expected injected write failure, got {error:?}");
+        };
+        assert_eq!(error.kind(), ErrorKind::Other);
+        assert_eq!(error.to_string(), "injected disk write failure");
+        disk_log::clear_failures();
+        disk_log::start();
+        assert_eq!(image.disk_bytes().unwrap(), b"ZZcdefta");
+        assert_eq!(image.len(), 10);
+        assert!(disk_log::finish().events.is_empty());
+        let contender = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let error = contender.try_lock().unwrap_err();
+        assert!(matches!(error, fs::TryLockError::WouldBlock), "{error:?}");
+        drop(contender);
+        image.discard_pending_writes();
+        drop(image);
+        assert_eq!(fs::read(&path).unwrap(), b"ZZcdefta");
+        directory.close().unwrap();
     }
 
     #[rstest]

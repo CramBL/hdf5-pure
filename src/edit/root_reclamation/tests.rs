@@ -481,6 +481,10 @@ impl FailingImage {
 }
 
 impl FileImage for FailingImage {
+    fn disk_bytes(&self) -> Result<Vec<u8>, Error> {
+        self.inner.disk_bytes()
+    }
+
     fn read_disk_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
         self.inner.read_disk_at(offset, bytes)
     }

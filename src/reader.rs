@@ -3015,6 +3015,21 @@ impl File {
         })
     }
 
+    /// Reads the complete file through the editing session's retained disk handle.
+    ///
+    /// Pending writes remain buffered, and the session lock remains held.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ReadOnly`] if the file has no editing session, [`Error::Io`] if reading
+    /// the length or bytes fails, or [`Error::Format`] if the length exceeds [`usize::MAX`].
+    #[cfg(test)]
+    pub(crate) fn disk_bytes(&self) -> Result<Vec<u8>, Error> {
+        self.inner
+            .query_engine(WriteEngine::disk_bytes)
+            .ok_or(Error::ReadOnly)?
+    }
+
     /// Reads issued file bytes through the editing session's disk handle.
     ///
     /// # Errors
@@ -8521,7 +8536,7 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        let interrupted = std::fs::read(&path).unwrap();
+        let interrupted = file.disk_bytes().unwrap();
         drop(dataset);
         let error = file.close().unwrap_err();
         assert!(

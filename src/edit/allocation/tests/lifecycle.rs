@@ -39,7 +39,7 @@ fn unpublished_manager_writes_are_discarded_before_allocation_reuse(
     let range = original.range();
     disk_log::fail_write_after(0, 0);
     assert_injected(engine.store().publish_allocations().err().unwrap());
-    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(engine.disk_bytes().unwrap(), before);
     assert_eq!(engine.image.len(), prior_length);
     if size > 65_536 {
         assert!(range.start().get() >= prior_length);
@@ -69,7 +69,7 @@ fn unpublished_manager_writes_are_discarded_before_allocation_reuse(
         .read_disk_at(range.start().get(), &mut payload)
         .unwrap();
     assert_eq!(payload, vec![83; size]);
-    let issued = fs::read(&path).unwrap();
+    let issued = engine.disk_bytes().unwrap();
     disk_log::start();
     drop(engine);
     assert!(disk_log::take().is_empty());
@@ -134,7 +134,7 @@ fn uncertain_manager_publication_excludes_teardown_writes(
         .unwrap();
     disk_log::fail_write_after(target, prefix);
     assert_injected(engine.store().publish_allocations().err().unwrap());
-    let issued = fs::read(&path).unwrap();
+    let issued = engine.disk_bytes().unwrap();
     disk_log::start();
     assert_uncertain(
         engine
@@ -178,7 +178,7 @@ fn uncertain_reference_io_discards_pending_writes(#[case] barrier: bool) {
         .confirm(allocation)
         .unwrap();
     let signature = engine.context.signature().get();
-    let original = fs::read(&path).unwrap();
+    let original = engine.disk_bytes().unwrap();
     let length = hdf5_pure_format::__private::serialize_superblock(engine.superblock())
         .unwrap()
         .len();
@@ -198,7 +198,7 @@ fn uncertain_reference_io_discards_pending_writes(#[case] barrier: bool) {
         disk_log::fail_write_after(0, 0);
         assert_injected(engine.store().write_at(signature, &bytes).unwrap_err());
     }
-    let issued = fs::read(&path).unwrap();
+    let issued = engine.disk_bytes().unwrap();
     disk_log::start();
     assert_uncertain(engine.force_sync().unwrap_err());
     drop(engine);
