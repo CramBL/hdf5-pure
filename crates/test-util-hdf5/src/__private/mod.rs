@@ -14,6 +14,8 @@ pub mod array_index;
 #[cfg(feature = "__hdf5-1.10")]
 pub mod c_object;
 #[cfg(feature = "__hdf5-1.10")]
+pub mod ownership_append;
+#[cfg(feature = "__hdf5-1.10")]
 pub mod unallocated_append;
 
 /// Sets the extensible-array index address to undefined in a single-dataset fixture.
