@@ -120,20 +120,30 @@
 
 use std::path::Path;
 
+use hdf5_pure_core::__private::FileRegion;
+use hdf5_pure_format::__private::ExtensibleArrayHeaderLocator;
 use test_util::disk_log::{self, DiskOp};
+use test_util::object_header::MessageType as FixtureMessage;
+use test_util::object_header::v2;
 
 use crate::FileSpaceSettings;
 use crate::PersistedFreeSpacePolicy;
+use crate::access_mode::AccessMode;
+use crate::address::{BaseAddress, BaseAddressExt};
 use crate::chunk_index_inplace::alloc_probe;
+use crate::data_layout::{ChunkIndexLayout, DataLayout};
 use crate::dataspace::MaxExtent;
 use crate::edit::{AppendBuilder, AppendTarget, MemoryStrategy, SyncPolicy, WriteEngine};
 use crate::error::{Error, FormatError};
 use crate::file_lock::FileLocking;
 use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::FileSpaceStrategy;
+use crate::message_type::MessageType;
+use crate::object_header::ObjectHeader;
 use crate::object_path::ObjectPathBuf;
 use crate::source::MetadataCacheConfig;
 use crate::type_builders::DatasetBuilder;
+use crate::width::FormatWidths;
 use crate::writer::FileBuilder;
 
 /// What reading one replayed prefix made of it.
@@ -418,6 +428,196 @@ impl Tally {
             self.loud.join("\n  ")
         );
     }
+}
+
+#[rstest::rstest]
+fn deferred_initialization_survives_every_completed_write(
+    #[values(false, true)] filtered: bool,
+    #[values(false, true)] paged: bool,
+    #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] backing: MemoryStrategy,
+    #[values(SyncPolicy::Always, SyncPolicy::OnClose)] sync: SyncPolicy,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("initialize.h5");
+    let header = deferred_base(&path, filtered, paged);
+    let recording = Recording::of("initialize", &path, |path| {
+        let file = crate::File::open_rw_with_options(
+            path,
+            crate::FileAccessProperties::new()
+                .with_memory_strategy(backing)
+                .with_sync_policy(sync),
+        )
+        .unwrap();
+        file.dataset("d")
+            .unwrap()
+            .append(&(0..11).collect::<Vec<i32>>())
+            .unwrap();
+        file.close().unwrap();
+    });
+    let states = std::cell::Cell::new(0_u8);
+    recording.replay_every_prefix(
+        directory.path(),
+        |path| {
+            match inspect_deferred_pair(path, header) {
+                Ok(allocated) => states.set(states.get() | if allocated { 2 } else { 1 }),
+                Err(error) => return Verdict::Loud(std::format!("{error:?}")),
+            }
+            match appended_prefix_is_intact(path, 0, 11) {
+                Verdict::Clean => {}
+                other => return other,
+            }
+            match persisted_free_space_holds_nothing_live(path) {
+                Verdict::Clean => {}
+                other => return other,
+            }
+            let before = std::fs::read(path).unwrap();
+            let file = crate::File::open(path).unwrap();
+            let values = file.dataset("d").unwrap().read_i32().unwrap();
+            file.close().unwrap();
+            assert_eq!(std::fs::read(path).unwrap(), before);
+            if values.is_empty() && states.get() & 2 != 0 {
+                states.set(states.get() | 4);
+            }
+            let resumed = crate::File::open_rw(path).and_then(|file| {
+                file.dataset("d")?
+                    .append(&(i32::try_from(values.len()).unwrap()..13).collect::<Vec<_>>())?;
+                file.close()
+            });
+            if let Err(error) = resumed {
+                return Verdict::Loud(std::format!("resuming initialization: {error:?}"));
+            }
+            appended_prefix_is_intact(path, 13, 13)
+        },
+        |path| appended_all_the_way(path, 11),
+    );
+    assert_eq!(
+        states.get(),
+        7,
+        "unallocated, allocated empty, and data states must occur"
+    );
+}
+
+fn deferred_base(path: &Path, filtered: bool, paged: bool) -> usize {
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(if paged {
+            FileSpaceStrategy::Page
+        } else {
+            FileSpaceStrategy::FsmAggr
+        })
+        .with_persistence(true),
+    );
+    let dataset = builder
+        .create_dataset("d")
+        .with_unallocated_storage(crate::make_i32_type(), &[0])
+        .with_maxshape(&[MaxExtent::Unlimited])
+        .with_chunks(&[4]);
+    if filtered {
+        dataset.with_fletcher32();
+    }
+    builder.write(path).unwrap();
+    let mut bytes = std::fs::read(path).unwrap();
+    let (header, mut layout) = test_util::bytes::signature_offsets(&bytes, v2::SIGNATURE)
+        .into_iter()
+        .find_map(|at| {
+            ObjectHeader::parse(&bytes, AccessMode::ReadOnly, at, 8, 8)
+                .unwrap()
+                .messages
+                .into_iter()
+                .find(|message| message.msg_type == MessageType::DATA_LAYOUT)
+                .map(|message| (at, message.data))
+        })
+        .unwrap();
+    let (_, range) =
+        DataLayout::parse_with_ea_address(&layout, FormatWidths::from_sizes(8, 8).unwrap())
+            .unwrap();
+    layout[range.unwrap()].fill(u8::MAX);
+    v2::replace_message(&mut bytes, header, FixtureMessage::DATA_LAYOUT, &layout);
+    std::fs::write(path, bytes).unwrap();
+    assert!(!inspect_deferred_pair(path, header).unwrap());
+    header
+}
+
+fn inspect_deferred_pair(path: &Path, header: usize) -> Result<bool, String> {
+    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+    let object = ObjectHeader::parse(&bytes, AccessMode::ReadOnly, header, 8, 8)
+        .map_err(|error| error.to_string())?;
+    let layout = object
+        .messages
+        .iter()
+        .find(|message| message.msg_type == MessageType::DATA_LAYOUT)
+        .unwrap();
+    let DataLayout::Chunked {
+        index: ChunkIndexLayout::ExtensibleArray { address, .. },
+        ..
+    } = DataLayout::parse(&layout.data, 8, 8).map_err(|error| error.to_string())?
+    else {
+        return Err("expected Extensible Array layout".into());
+    };
+    let Some(address) = address else {
+        return Ok(false);
+    };
+    let locator = ExtensibleArrayHeaderLocator::new(
+        FormatWidths::from_sizes(8, 8).map_err(|error| error.to_string())?,
+        BaseAddress::new(0),
+        address,
+    );
+    let header_range = locator.parse_range().map_err(|error| error.to_string())?;
+    let array = locator
+        .parse(
+            FileRegion::new(
+                header_range,
+                &bytes[usize::try_from(header_range.start().get()).unwrap()
+                    ..usize::try_from(header_range.end().get()).unwrap()],
+            )
+            .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+    let index = array
+        .index_block()
+        .expect("a published header has its complete index block");
+    let range = index.range();
+    if range.start() != array.range().end() {
+        return Err(format!(
+            "index {range:?} does not follow header {:?}",
+            array.range()
+        ));
+    }
+    index
+        .parse(
+            FileRegion::new(
+                range,
+                &bytes[usize::try_from(range.start().get()).unwrap()
+                    ..usize::try_from(range.end().get()).unwrap()],
+            )
+            .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+    let file = crate::File::open(path).map_err(|error| error.to_string())?;
+    if range.end().get() > file.superblock().eof_address {
+        return Err(format!(
+            "published pair ends at {} past EOF {}",
+            range.end().get(),
+            file.superblock().eof_address
+        ));
+    }
+    for section in file
+        .persisted_free_sections()
+        .map_err(|error| error.to_string())?
+        .unwrap()
+        .free_sections()
+        .sections()
+    {
+        if section.end_address() > header_range.start().get()
+            && range.end().get() > section.address()
+        {
+            return Err(format!(
+                "published pair {header_range:?}..{range:?} overlaps {section:?}"
+            ));
+        }
+    }
+    file.close().map_err(|error| error.to_string())?;
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------

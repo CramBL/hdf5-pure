@@ -300,6 +300,11 @@ impl WriteEngine {
     /// after its data and index updates, with barriers governed by [`SyncPolicy`]. Predictable
     /// rejections are checked before writing. SWMR appends require unfiltered, chunk-aligned input.
     ///
+    /// For an empty dataset with an undefined index-header address, prepares the first batch
+    /// before initializing its index. Publishes ownership and EOF for the complete header and
+    /// index block before linking the header from the layout message. Empty appends leave that
+    /// storage unallocated.
+    ///
     /// Production callers pass 4 for `max_phase`. Crash tests stop at an earlier phase boundary.
     ///
     /// # Errors
@@ -369,26 +374,54 @@ impl WriteEngine {
             let plan_result = {
                 let store = EditStore { engine: self };
                 let st = &store.engine.located[&oh_addr];
-                chunk_index_inplace::plan_ea_append(
-                    &store,
-                    st.index.allocated().map_err(as_inplace_error)?,
-                    &st.datatype,
-                    &st.spatial,
-                    st.element_size,
-                    st.pipeline.as_ref(),
-                    grow_visible_tail,
-                    b.options().lossy_tail_reencoding(),
-                    batch,
-                    take,
-                    st.fill.pattern(st.element_size),
-                )
+                match &st.index {
+                    AppendIndex::Allocated(index) => chunk_index_inplace::plan_ea_append(
+                        &store,
+                        index,
+                        &st.datatype,
+                        &st.spatial,
+                        st.element_size,
+                        st.pipeline.as_ref(),
+                        grow_visible_tail,
+                        b.options().lossy_tail_reencoding(),
+                        batch,
+                        take,
+                        st.fill.pattern(st.element_size),
+                    )
+                    .map(|plan| (plan, None)),
+                    AppendIndex::Unallocated(index) => chunk_index_inplace::plan_initial_ea_append(
+                        index,
+                        store.widths(),
+                        &st.datatype,
+                        &st.spatial,
+                        st.element_size,
+                        st.pipeline.as_ref(),
+                        batch,
+                        take,
+                        st.fill.pattern(st.element_size),
+                    )
+                    .map(|(plan, initialization)| (plan, Some(initialization))),
+                }
             };
-            let plan = plan_result.map_err(as_inplace_error)?;
+            let (plan, initialization) = plan_result.map_err(as_inplace_error)?;
             self.synchronize_aggregates()?;
             let mut state = self.located.remove(&oh_addr).ok_or_else(|| {
                 FormatError::Internal("prepared append dataset is absent from the session".into())
             })?;
-            let result = {
+            let result = (|| {
+                if let Some(initialization) = initialization {
+                    let AppendIndex::Unallocated(index) = &state.index else {
+                        return Err(FormatError::Internal(
+                            "initialization requires an unallocated index".into(),
+                        )
+                        .into());
+                    };
+                    state.index = AppendIndex::Allocated(self.initialize_append_index(
+                        oh_addr,
+                        index,
+                        &initialization,
+                    )?);
+                }
                 let mut store = EditStore { engine: self };
                 chunk_index_inplace::apply_ea_append(
                     &mut store,
@@ -396,7 +429,7 @@ impl WriteEngine {
                     plan,
                     max_phase,
                 )
-            };
+            })();
             if result.is_ok() {
                 self.located.insert(oh_addr, state);
             } else if self.context.allocations.available().is_err()
@@ -413,6 +446,49 @@ impl WriteEngine {
             done += take;
         }
         Ok(())
+    }
+
+    /// Publishes a complete empty index before adopting its allocated append state.
+    ///
+    /// Confirms ownership and EOF before updating the layout address and object-header checksum,
+    /// then synchronizes that reference before reading the allocated index. A failed read after
+    /// publication makes the session's allocation state uncertain.
+    ///
+    /// # Errors
+    ///
+    /// Propagates allocation, encoding, publication, synchronization, and metadata read errors.
+    fn initialize_append_index(
+        &mut self,
+        oh_addr: u64,
+        index: &chunk_index_inplace::UnallocatedIndex,
+        initialization: &ExtensibleArrayInitialization,
+    ) -> Result<Located, Error> {
+        let addresses = self.context.addresses();
+        let mut store = EditStore { engine: self };
+        let allocation = store.allocate_prepared(
+            initialization.allocation_len(),
+            AllocationClass::Metadata,
+            |address| {
+                initialization
+                    .encode_at(addresses.relative(address.get())?)
+                    .map_err(Error::Format)
+            },
+        )?;
+        let allocation = store.publish_allocations()?.confirm(allocation)?;
+        index.reference.publish(&mut store, &allocation)?;
+        store.sync()?;
+        let result = Located::locate_at(&store, oh_addr, Error::AppendInPlaceUnsupported).and_then(
+            |located| match located.located {
+                AppendIndex::Allocated(index) => Ok(index),
+                AppendIndex::Unallocated(_) => {
+                    Err(FormatError::Internal("published index remains unallocated".into()).into())
+                }
+            },
+        );
+        if result.is_err() {
+            store.engine.make_allocation_uncertain();
+        }
+        result
     }
 
     /// Stops an immediate append at a durability phase boundary for crash tests.
@@ -686,22 +762,33 @@ pub(super) struct EditStore<'a> {
 }
 
 impl EditStore<'_> {
-    /// Appends `bytes`, padding a metadata tail page before writing into raw PAGE space.
+    /// Prepares bytes at their allocation address before padding and appending in raw PAGE space.
     ///
     /// Extensible-array index blocks use the same raw-page placement as chunk payloads.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Format`] if address conversion, PAGE geometry, or padding size is invalid.
-    /// Returns [`Error::Io`] if appending the padding or bytes fails.
-    fn append_into_raw_page(&mut self, bytes: &[u8]) -> Result<u64, Error> {
+    /// Returns [`Error::Io`] if appending the padding or bytes fails. Propagates preparation errors.
+    fn append_into_raw_page<B: AsRef<[u8]>>(
+        &mut self,
+        length: u64,
+        prepare: impl FnOnce(PhysicalAddress) -> Result<B, Error>,
+    ) -> Result<u64, Error> {
         let eoa = self
             .engine
             .context
             .addresses()
             .relative(self.engine.image.len())?
             .get();
-        if let Some(transition) = self.engine.space.plan_transition(eoa, PageType::Raw)? {
+        let transition = self.engine.space.plan_transition(eoa, PageType::Raw)?;
+        let padding = match transition {
+            Some(PageTransition::Pad { extent, .. }) => extent.len(),
+            _ => 0,
+        };
+        let address = PhysicalAddress::new(self.engine.image.len()).checked_add(padding)?;
+        let bytes = Self::prepare_allocation_bytes(length, address, prepare)?;
+        if let Some(transition) = transition {
             if let PageTransition::Pad { extent, .. } = transition {
                 self.engine
                     .image
@@ -711,18 +798,24 @@ impl EditStore<'_> {
                 .space
                 .record_transition(PageType::Raw, transition);
         }
-        self.engine.image.append(bytes)
+        self.engine.image.append(bytes.as_ref())
     }
-    /// Places bytes in reusable space, a classic aggregate, or at end-of-file.
+
+    /// Prepares and places bytes in reusable space, a classic aggregate, or at end-of-file.
     ///
     /// # Errors
     ///
-    /// Returns the placement, address-conversion, or I/O error.
-    fn allocate_bytes(&mut self, bytes: &[u8], class: AllocationClass) -> Result<u64, Error> {
+    /// Returns the placement, preparation, address-conversion, or I/O error.
+    fn allocate_bytes<B: AsRef<[u8]>>(
+        &mut self,
+        length: u64,
+        class: AllocationClass,
+        prepare: impl FnOnce(PhysicalAddress) -> Result<B, Error>,
+    ) -> Result<u64, Error> {
         let extent = if self.engine.immediate_reuse_allowed() {
             self.engine
                 .space
-                .allocate_with_page_type(bytes.len() as u64, class, PageType::Raw)
+                .allocate_with_page_type(length, class, PageType::Raw)
         } else {
             None
         };
@@ -732,7 +825,8 @@ impl EditStore<'_> {
                 .context
                 .addresses()
                 .resolve(StoredAddress::new(extent.start()))?;
-            self.engine.image.write_at(at.get(), bytes)?;
+            let bytes = Self::prepare_allocation_bytes(length, at, prepare)?;
+            self.engine.image.write_at(at.get(), bytes.as_ref())?;
             return Ok(at.get());
         }
         if let (Some(aggregation), Some(size)) = (
@@ -740,7 +834,7 @@ impl EditStore<'_> {
                 .aggregation
                 .as_mut()
                 .filter(|_| self.engine.persist.is_none()),
-            NonZeroU64::new(bytes.len() as u64),
+            NonZeroU64::new(length),
         ) {
             let Placement::Aggregated { addr, end, .. } = aggregation.reserve(
                 self.engine.context.addresses(),
@@ -754,10 +848,71 @@ impl EditStore<'_> {
                 )
                 .into());
             };
-            AggregateSpace::place(self.engine.image.as_mut(), addr, bytes, end)?;
+            let bytes =
+                Self::prepare_allocation_bytes(length, PhysicalAddress::new(addr), prepare)?;
+            AggregateSpace::place(self.engine.image.as_mut(), addr, bytes.as_ref(), end)?;
             return Ok(addr);
         }
-        self.append_into_raw_page(bytes)
+        self.append_into_raw_page(length, prepare)
+    }
+
+    /// Prepares bytes for the chosen physical address and checks their complete allocation length.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if the prepared length differs from `length`.
+    /// Propagates preparation errors.
+    fn prepare_allocation_bytes<B: AsRef<[u8]>>(
+        length: u64,
+        address: PhysicalAddress,
+        prepare: impl FnOnce(PhysicalAddress) -> Result<B, Error>,
+    ) -> Result<B, Error> {
+        let bytes = prepare(address)?;
+        if bytes.as_ref().len() as u64 != length {
+            return Err(FormatError::Internal(
+                "prepared allocation length differs from its reservation".into(),
+            )
+            .into());
+        }
+        Ok(bytes)
+    }
+
+    /// Writes address-dependent content and records its complete provisional allocation.
+    ///
+    /// Checks the image length before accepting ownership. In persistent sessions, restores the
+    /// allocator snapshot after a known unpublished failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AllocationPublicationUncertain`] if ownership is uncertain, or
+    /// [`FormatError::TruncatedFile`] if the complete allocation extends past the image.
+    /// Propagates preparation, placement, I/O, and allocator restoration errors.
+    fn allocate_prepared<B: AsRef<[u8]>>(
+        &mut self,
+        length: u64,
+        class: AllocationClass,
+        prepare: impl FnOnce(PhysicalAddress) -> Result<B, Error>,
+    ) -> Result<ProvisionalAllocation, Error> {
+        self.engine.context.allocations.available()?;
+        self.engine.prepare_append_allocation()?;
+        let result = self
+            .allocate_bytes(length, class, prepare)
+            .and_then(|address| {
+                let range = FileRange::new(PhysicalAddress::new(address), length)?;
+                let allocation = self.engine.context.allocations.provision(range)?;
+                if allocation.range().end().get() > self.engine.image.len() {
+                    return Err(FormatError::TruncatedFile {
+                        expected_eof: allocation.range().end().get(),
+                        actual_len: self.engine.image.len(),
+                    }
+                    .into());
+                }
+                Ok(allocation)
+            });
+        if result.is_err() {
+            self.engine.restore_append_allocation()?;
+        }
+        result
     }
 }
 
@@ -824,24 +979,7 @@ impl Store for EditStore<'_> {
         bytes: &[u8],
         class: AllocationClass,
     ) -> Result<ProvisionalAllocation, Error> {
-        self.engine.context.allocations.available()?;
-        self.engine.prepare_append_allocation()?;
-        let result = self.allocate_bytes(bytes, class).and_then(|address| {
-            let range = FileRange::new(PhysicalAddress::new(address), bytes.len() as u64)?;
-            let allocation = self.engine.context.allocations.provision(range)?;
-            if allocation.range().end().get() > self.engine.image.len() {
-                return Err(FormatError::TruncatedFile {
-                    expected_eof: allocation.range().end().get(),
-                    actual_len: self.engine.image.len(),
-                }
-                .into());
-            }
-            Ok(allocation)
-        });
-        if result.is_err() {
-            self.engine.restore_append_allocation()?;
-        }
-        result
+        self.allocate_prepared(bytes.len() as u64, class, |_| Ok(bytes))
     }
 
     fn publish_allocations(&mut self) -> Result<ConfirmedPublication, Error> {

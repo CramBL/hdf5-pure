@@ -23,6 +23,10 @@ use crate::reader::Dataset;
 /// the dataset's current length from the session. For an appender that owns its dataset, see
 /// [`OwnedBufferedAppender`].
 ///
+/// An eligible empty dataset may have an unallocated index. Construction and buffering leave
+/// index and element storage unallocated until the first write, as described by [`Dataset::append`].
+/// Empty appends, empty flushes, and dropping an empty appender leave that storage unallocated.
+///
 /// # Buffering and recovery
 ///
 /// Automatic writes end at a chunk boundary and leave the remaining bytes buffered.
@@ -260,6 +264,10 @@ impl std::fmt::Debug for BufferedAppender<'_> {
 /// is dropped. The appender can be stored in a struct without a lifetime parameter. For an
 /// appender that borrows a dataset, see [`BufferedAppender`]. Before each write, the appender
 /// reads the dataset's current length from the session.
+///
+/// An eligible empty dataset may have an unallocated index. Construction and buffering leave
+/// index and element storage unallocated until the first write, as described by [`Dataset::append`].
+/// Empty appends, empty flushes, and dropping an empty appender leave that storage unallocated.
 ///
 /// # Buffering and recovery
 ///

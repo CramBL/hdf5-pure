@@ -1356,6 +1356,23 @@ impl ExtensibleArrayInitialization {
         })
     }
 
+    /// Returns the block geometry defined by the retained creation parameters.
+    ///
+    /// Includes the geometry of unallocated blocks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if a derived block offset
+    /// exceeds [`u64::MAX`].
+    pub fn geometry(&self) -> Result<ExtensibleArrayGeometry, FormatError> {
+        ExtensibleArrayGeometry::from_layout(self.layout)
+    }
+
+    /// Returns the canonical chunk-record encoding used to serialize the empty index.
+    pub fn element_encoding(&self) -> ChunkElementEncoding {
+        self.encoding
+    }
+
     /// Returns the combined size of the header and index block, including their checksums.
     pub fn allocation_len(&self) -> u64 {
         self.header_len() as u64 + self.index_block_len as u64

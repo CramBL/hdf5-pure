@@ -5887,6 +5887,12 @@ impl Dataset {
     /// [`Error::Format`] with [`FormatError::PathNotFound`], and a header message
     /// that does not read or parse returns [`Error::Format`] with the failure the
     /// read or the parse produced.
+    ///
+    /// An eligible empty dataset may have an undefined index-header address. The first nonempty
+    /// write initializes the index with the layout's creation parameters. The writer publishes
+    /// ownership and EOF for the complete header and index block before linking the header from
+    /// the layout message. Empty appends leave index and element storage unallocated.
+    ///
     /// For unfiltered storage and lossless filters, the current and appended lengths may be
     /// unaligned. The writer decodes a partial tail, extends it, and places the replacement
     /// separately from its predecessor. It covers the payload with the superblock's recorded EOF
@@ -5922,15 +5928,12 @@ impl Dataset {
     /// they could be crossing. It allocates at end-of-file for that same reason:
     /// a region this session freed is one a reader may still be inside.
     ///
-    /// Where the new chunks land otherwise depends on how the file records its
-    /// free space. A default-strategy file spends a hole an earlier commit in
-    /// this session left; a file that **persists** its free-space managers
-    /// spends only space the session has first taken
-    /// *out* of them, in a rewrite of its own, so no byte an append writes is one
-    /// a durable manager advertises — a crash can strand the unspent remainder of
-    /// such a batch, but nothing can be handed out twice. A batch gathers every
-    /// hole the appended chunk fits in, up to a megabyte of them, so the file
-    /// grows only when no hole can hold the chunk.
+    /// The editor tries reusable free space before extending the file. In a persistent session,
+    /// it writes provisional content before publishing replacement free-space managers that
+    /// exclude the complete allocations. It completes ownership publication before linking
+    /// references. Unissued intervals remain recorded under the configured threshold policy,
+    /// including reusable PAGE tails. An interruption after ownership publication can leave
+    /// actual allocations unreferenced.
     ///
     /// Eligible retired storage is reusable during the session. For persistent files, the editor
     /// publishes remaining free-space manager changes during [`File::commit`] or clean session

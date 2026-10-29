@@ -13,6 +13,7 @@
 //! [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
 
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use crate::address::StoredAddress;
 use crate::address::StoredAddressExt;
@@ -84,10 +85,27 @@ impl DataLayout {
     /// are outside the supported block and page geometry, or [`FormatError::UnexpectedEof`] if
     /// the message body ends inside a field.
     pub fn parse_with_widths(data: &[u8], widths: FormatWidths) -> Result<DataLayout, FormatError> {
+        Self::parse_with_ea_address(data, widths).map(|(layout, _)| layout)
+    }
+
+    /// Parses a layout and locates its Extensible Array header-address field.
+    ///
+    /// The range is relative to `data` and includes the field when its address is undefined.
+    /// Returns `None` for other layouts and chunk index types.
+    ///
+    /// # Errors
+    ///
+    /// Returns the layout errors described by [`parse_with_widths`](Self::parse_with_widths).
+    pub fn parse_with_ea_address(
+        data: &[u8],
+        widths: FormatWidths,
+    ) -> Result<(DataLayout, Option<Range<usize>>), FormatError> {
         bytes::ensure_len(data, 0, 2)?;
         let layout_class = data[1];
         match LayoutVersion::try_from(data[0])? {
-            LayoutVersion::Three => Self::parse_v3(data, layout_class, widths),
+            LayoutVersion::Three => {
+                Self::parse_v3(data, layout_class, widths).map(|layout| (layout, None))
+            }
             LayoutVersion::Four => Self::parse_v4(data, layout_class, widths),
         }
     }
@@ -253,11 +271,13 @@ impl DataLayout {
         data: &[u8],
         layout_class: u8,
         widths: FormatWidths,
-    ) -> Result<DataLayout, FormatError> {
+    ) -> Result<(DataLayout, Option<Range<usize>>), FormatError> {
         let pos = LAYOUT_PROPERTIES_OFFSET;
         match layout_class {
-            LAYOUT_CLASS_COMPACT => Self::parse_compact(data),
-            LAYOUT_CLASS_CONTIGUOUS => Self::parse_contiguous(data, widths),
+            LAYOUT_CLASS_COMPACT => Self::parse_compact(data).map(|layout| (layout, None)),
+            LAYOUT_CLASS_CONTIGUOUS => {
+                Self::parse_contiguous(data, widths).map(|layout| (layout, None))
+            }
             LAYOUT_CLASS_CHUNKED => {
                 bytes::ensure_len(data, pos, 3)?;
                 let flags = ChunkedLayoutFlags::new(data[pos]);
@@ -284,13 +304,22 @@ impl DataLayout {
                     p += dim_size_encoded_length;
                 }
 
-                Ok(DataLayout::Chunked {
-                    flags,
-                    chunk_dimensions,
-                    index: parse_chunk_index(data, p, flags, widths)?,
-                })
+                let index = parse_chunk_index(data, p, flags, widths)?;
+                let address =
+                    matches!(index, ChunkIndexLayout::ExtensibleArray { .. }).then(|| {
+                        let start = p + 1 + EXTENSIBLE_ARRAY_INFO_LEN;
+                        start..start + usize::from(widths.offsets.get())
+                    });
+                Ok((
+                    DataLayout::Chunked {
+                        flags,
+                        chunk_dimensions,
+                        index,
+                    },
+                    address,
+                ))
             }
-            LAYOUT_CLASS_VIRTUAL => Ok(DataLayout::Virtual),
+            LAYOUT_CLASS_VIRTUAL => Ok((DataLayout::Virtual, None)),
             _ => Err(FormatError::InvalidLayoutClass(layout_class)),
         }
     }
@@ -950,6 +979,41 @@ mod tests {
                     creation: ExtensibleArrayCreationParameters::canonical(),
                     address: Some(StoredAddress::new(0x3000))
                 },
+            }
+        );
+    }
+
+    #[rstest]
+    fn extensible_array_address_framing_tracks_dimension_width(
+        #[values(1_u8, 2, 3, 4, 5, 6, 7, 8)] dimension_width: u8,
+        #[values(2_u8, 4, 8)] address_width: u8,
+    ) {
+        let mut bytes = vec![4, 2, 0, 2, dimension_width];
+        bytes.extend_from_slice(&4_u64.to_le_bytes()[..usize::from(dimension_width)]);
+        bytes.extend_from_slice(&4_u64.to_le_bytes()[..usize::from(dimension_width)]);
+        bytes.extend_from_slice(&[4, 32, 4, 4, 16, 10]);
+        let start = bytes.len();
+        bytes.extend_from_slice(&0x1234_u64.to_le_bytes()[..usize::from(address_width)]);
+        let widths = FormatWidths::from_sizes(address_width, 8).unwrap();
+        let (layout, range) = DataLayout::parse_with_ea_address(&bytes, widths).unwrap();
+        assert_eq!(range, Some(start..bytes.len()));
+        let DataLayout::Chunked {
+            chunk_dimensions,
+            index: ChunkIndexLayout::ExtensibleArray { address, .. },
+            ..
+        } = layout
+        else {
+            panic!("expected Extensible Array layout");
+        };
+        assert_eq!(chunk_dimensions, [4, 4]);
+        assert_eq!(address, Some(StoredAddress::new(0x1234)));
+        let error =
+            DataLayout::parse_with_ea_address(&bytes[..bytes.len() - 1], widths).unwrap_err();
+        assert_eq!(
+            error,
+            FormatError::UnexpectedEof {
+                expected: bytes.len(),
+                available: bytes.len() - 1,
             }
         );
     }

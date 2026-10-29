@@ -376,6 +376,13 @@ and forces durability at each barrier under the default policy.
 [Choosing the fsync cadence](#choosing-the-fsync-cadence) describes durability timing.
 Explicit [page buffering](#letting-pages-live-longer) has separate interruption guarantees.
 
+An eligible empty dataset may have an undefined Extensible Array header address. The first
+nonempty write initializes its header and index block using the layout's creation parameters.
+The editor publishes ownership and EOF for the complete pair before linking it from the dataset
+layout, then synchronizes the reference before appending values. Construction of either buffered
+appender, buffering without a write, empty operations, and dropping an empty appender leave index
+and element storage unallocated.
+
 An append may start at an unaligned length under a lossless pipeline. The writer decodes the partial
 tail, extends it, and places the replacement separately from its predecessor. It publishes the new
 index record after placing the payload and recording the EOF needed to cover it. After confirming

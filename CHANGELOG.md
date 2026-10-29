@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- `Dataset::buffered_appender` accepts eligible empty datasets with an unallocated Extensible Array index, while nonempty flushes require an allocated index.
+- `Dataset::append` initializes eligible empty datasets with an unallocated Extensible Array index, including through buffered appenders. Empty operations leave index and element storage unallocated.
 - `Error::AllocationPublicationUncertain` reports append, commit, or synchronization requests rejected after an unconfirmed editing operation.
 - `Dataset::into_buffered_appender` creates an owned buffered appender that can be stored without a lifetime parameter and retains the editing session after the original file handle is dropped. Explicit file closure makes further appender writes fail ([#945](https://github.com/CramBL/hdf5-pure/pull/945)).
 - `RepackOptions::with_file_space_settings` selects the output allocation policy while preserving eligible encoded chunks verbatim ([#946](https://github.com/CramBL/hdf5-pure/pull/946)).
