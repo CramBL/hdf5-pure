@@ -2,7 +2,7 @@
 
 This page lists HDF5 features supported by `hdf5-pure`.
 
-The tables cover file-format compatibility and HDF5 behavior. Features not listed here have not been audited for this page. Section placement reflects typical reader relevance.
+The tables cover file-format compatibility and HDF5 behavior. Unlisted features have not been audited for this page.
 
 | Status | Meaning |
 |:---:|---|
@@ -17,10 +17,19 @@ The tables cover file-format compatibility and HDF5 behavior. Features not liste
 
 | Storage | Read | Create | Modify | Detail |
 |---|:---:|:---:|:---:|---|
-| Version 1 symbol table | ✅ | ⬆️ | ✅ | Modified groups use compact link storage. |
+| Version 1 symbol table | ✅ | ⬆️ | 🟡 | Edits convert storage to compact/dense. Soft links prevent modification. |
 | Compact link storage | ✅ | ✅ | ✅ | |
-| Dense link storage | ✅ | 🟡 | ❌ | File creation writes groups with more than eight links densely. Encoded links are limited to 4096 bytes. Deletion may leave heap storage allocated. |
-| Link creation-order tracking | ✅ | ❌ | 🟡 | New links can be added while compact storage remains valid. |
+| Dense link storage | ✅ | 🟡 | 🟡 | Edits: unfiltered managed heaps with seven-byte IDs. Encoded links up to 4096 bytes. |
+| Link creation-order tracking | ✅ | ❌ | ✅ | Preserved across compact/dense transitions. |
+| Link phase-change thresholds | ✅ | ❌ | ✅ | Existing thresholds preserved. New groups use 8/6. |
+
+### Link resolution
+
+| Link | Resolve | Detail |
+|---|:---:|---|
+| Hard link | ✅ | |
+| Soft link | ✅ | |
+| External link | ❌ | |
 
 ### Attributes
 
@@ -48,23 +57,37 @@ The tables cover file-format compatibility and HDF5 behavior. Features not liste
 
 `Inspect` means that the layout metadata can be read without reading dataset values.
 
-| Layout | Inspect | Read data | Write |
-|---|:---:|:---:|:---:|
-| Compact | ✅ | ✅ | ✅ |
-| Contiguous | ✅ | ✅ | ✅ |
-| Chunked | ✅ | ✅ | ✅ |
-| Virtual | ✅ | ❌ | ❌ |
-| External raw storage | ✅ | ❌ | ❌ |
+| Layout | Inspect | Read data | Write | Detail |
+|---|:---:|:---:|:---:|---|
+| Compact | ✅ | ✅ | ⬆️ | Output uses contiguous or chunked storage. |
+| Contiguous | ✅ | ✅ | ✅ | |
+| Chunked | ✅ | ✅ | ✅ | |
+| Unallocated contiguous/chunked | ✅ | ✅ | ✅ | Fill-value reads. |
+| Virtual | ✅ | ❌ | ❌ | |
+| External raw storage | ✅ | ❌ | ❌ | |
+
+### Dataset selections
+
+| Selection | Read | Write | Detail |
+|---|:---:|:---:|---|
+| Whole dataset | ✅ | ✅ | Overwrites require the existing shape and datatype. |
+| Leading-dimension rows | ✅ | ❌ | Clamps to the current extent. |
+| Unit-stride multidimensional region | ✅ | ❌ | |
+| Strided or repeated-block selection | ❌ | ❌ | |
+| Point selection | ❌ | ❌ | |
 
 ### Dataset extension
 
 | Feature | Status | Detail |
 |---|:---:|---|
-| Staged append | ✅ | |
-| In-place append | 🟡 | Requires an Extensible Array chunk index. |
-| Filtered append | ✅ | |
-| Non-chunk-aligned filtered append | ✅ | |
-| Lossy filtered partial-chunk append | ❌ | |
+| Dataset geometry | 🟡 | Rank-one, chunked, unlimited. Extensible Array indexes only. |
+| Staged append | ✅ | Allocated or unallocated indexes. |
+| In-place append | 🟡 | Allocated index required. |
+| Buffered append | 🟡 | Allocated index required. No SWMR. |
+| Filtered append | ✅ | Re-encodable pipelines only. |
+| Non-chunk-aligned lossless filtered append | ✅ | |
+| Lossy filtered partial-chunk append | 🟡 | Opt-in with `LossyTailReencoding::Allow`. |
+| Unfiltered partial tails with lossy filters | ✅ | `PartialEdgeFiltering::Skip`. |
 | Multiple unlimited dimensions | ❌ | |
 
 ### Chunk semantics
@@ -95,7 +118,11 @@ The tables cover file-format compatibility and HDF5 behavior. Features not liste
 | ZFP | 🟡 | 🟡 | ✅ | Requires the `zfp` feature. Fixed-rate `f32`, `f64`, `i32`, and `i64` are supported for ranks 1 through 4. |
 | Unknown filter | ❌ | ❌ | ✅ | |
 
-Verbatim repack requires a fully allocated chunk grid.
+| Chunk allocation | Repack | Detail |
+|---|:---:|---|
+| Fully allocated | ✅ | Verbatim chunk copy. |
+| Partially allocated | 🟡 | Lossless re-encoding only. |
+| Unallocated | ✅ | Filter metadata preserved. |
 
 ### Datatypes
 
@@ -220,7 +247,7 @@ Verbatim repack requires a fully allocated chunk grid.
 | Feature | Status | Detail |
 |---|:---:|---|
 | SWMR reader | 🟡 | Supports refreshing reads for the append-oriented subset. |
-| SWMR writer | 🟡 | Requires an unfiltered chunked dataset with one unlimited dimension and chunk-aligned appends. |
+| SWMR writer | 🟡 | v3 superblock. Unfiltered rank-one Extensible Array datasets. Chunk-aligned length and appends. |
 
 ### File-space management
 
@@ -251,6 +278,8 @@ Verbatim repack requires a fully allocated chunk grid.
 | Object header v2 | ✅ | ✅ | |
 | Object-header continuation blocks | ✅ | ✅ | |
 | Shared object-header messages | ✅ | ⬆️ | Edits that invalidate shared-message tables are rejected. |
+| File Space Info v0 | ✅ | ⬆️ | New messages use v1. |
+| File Space Info v1 | ✅ | ✅ | |
 | Metadata checksums | ✅ | ✅ | General validation requires the `checksum` feature. |
 
 Shared object-header messages are supported for datatypes, dataspaces, fill values, filter pipelines, and attributes.
