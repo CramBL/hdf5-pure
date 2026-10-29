@@ -821,11 +821,11 @@ mod tests {
     mod zfp;
 
     #[rstest]
-    #[case(10)]
-    #[case(255)]
-    #[case(256)]
-    #[case(262)]
-    #[case(u32::MAX)]
+    #[case::first_unsupported_level(10)]
+    #[case::maximum_byte(255)]
+    #[case::first_value_above_byte(256)]
+    #[case::wrapping_to_level_six(262)]
+    #[case::maximum_u32(u32::MAX)]
     fn rejects_invalid_deflate_metadata_before_encoding(#[case] level: u32) {
         let filters = vec![FilterDescription {
             filter_id: FILTER_DEFLATE,
@@ -866,8 +866,8 @@ mod tests {
 
     #[rstest::rstest]
     #[cfg(feature = "deflate")]
-    #[case((0..256).map(|i| (i % 256) as u8).collect())]
-    #[case((0..10).collect())]
+    #[case::all_byte_values((0..256).map(|i| (i % 256) as u8).collect())]
+    #[case::ten_byte_ramp((0..10).collect())]
     fn deflate_compress_decompress_roundtrip(#[case] data: Vec<u8>) {
         let compressed =
             deflate_compress(&mut FilterScratch::new(), &data, DeflateLevel::Six).unwrap();
@@ -933,14 +933,14 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(1)]
-    #[case(2)]
-    #[case(3)]
-    #[case(4)]
-    #[case(6)]
-    #[case(7)]
-    #[case(8)]
-    #[case(16)]
+    #[case::one_byte(1)]
+    #[case::two_bytes(2)]
+    #[case::three_bytes(3)]
+    #[case::four_bytes(4)]
+    #[case::six_bytes(6)]
+    #[case::seven_bytes(7)]
+    #[case::eight_bytes(8)]
+    #[case::sixteen_bytes(16)]
     fn shuffle_roundtrip(
         #[case] width: usize,
         #[values(0, 1, 50)] elements: usize,
@@ -955,10 +955,10 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(2)]
-    #[case(4)]
-    #[case(8)]
-    #[case(16)]
+    #[case::two_bytes(2)]
+    #[case::four_bytes(4)]
+    #[case::eight_bytes(8)]
+    #[case::sixteen_bytes(16)]
     fn shuffle_specialized_matches_generic(#[case] width: usize) {
         fn generic_shuffle(data: &[u8], es: usize) -> Vec<u8> {
             let ne = data.len() / es;
@@ -988,15 +988,15 @@ mod tests {
     }
 
     #[rstest]
-    #[case(2, &[1, 2, 3, 4, 91], &[1, 3, 2, 4, 91])]
-    #[case(3, &[1, 2, 3, 4, 5, 6, 91, 92], &[1, 4, 2, 5, 3, 6, 91, 92])]
-    #[case(4, &[1, 2, 3, 4, 5, 6, 7, 8, 91, 92], &[1, 5, 2, 6, 3, 7, 4, 8, 91, 92])]
-    #[case(
+    #[case::two_byte_elements_one_tail_byte(2, &[1, 2, 3, 4, 91], &[1, 3, 2, 4, 91])]
+    #[case::three_byte_elements_two_tail_bytes(3, &[1, 2, 3, 4, 5, 6, 91, 92], &[1, 4, 2, 5, 3, 6, 91, 92])]
+    #[case::four_byte_elements_two_tail_bytes(4, &[1, 2, 3, 4, 5, 6, 7, 8, 91, 92], &[1, 5, 2, 6, 3, 7, 4, 8, 91, 92])]
+    #[case::eight_byte_elements_two_tail_bytes(
         8,
         &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 91, 92],
         &[1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15, 8, 16, 91, 92]
     )]
-    #[case(
+    #[case::sixteen_byte_elements_two_tail_bytes(
         16,
         &[
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
@@ -1007,9 +1007,9 @@ mod tests {
             9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31, 16, 32, 91, 92
         ]
     )]
-    #[case(4, &[], &[])]
-    #[case(4, &[91, 92], &[91, 92])]
-    #[case(4, &[1, 2, 3, 4, 91, 92], &[1, 2, 3, 4, 91, 92])]
+    #[case::empty(4, &[], &[])]
+    #[case::shorter_than_element(4, &[91, 92], &[91, 92])]
+    #[case::one_element_with_tail(4, &[1, 2, 3, 4, 91, 92], &[1, 2, 3, 4, 91, 92])]
     fn shuffle_preserves_remainder(
         #[case] width: usize,
         #[case] data: &[u8],
@@ -1314,9 +1314,9 @@ mod tests {
 
     #[rstest::rstest]
     #[cfg(feature = "deflate")]
-    #[case(DeflateLevel::One)]
-    #[case(DeflateLevel::Six)]
-    #[case(DeflateLevel::Nine)]
+    #[case::level_one(DeflateLevel::One)]
+    #[case::level_six(DeflateLevel::Six)]
+    #[case::level_nine(DeflateLevel::Nine)]
     fn a_reused_encoder_writes_the_same_bytes_as_a_fresh_one(#[case] level: DeflateLevel) {
         let chunks: Vec<Vec<u8>> = vec![
             vec![7u8; 4096],
@@ -1652,10 +1652,10 @@ mod tests {
     }
 
     #[rstest]
-    #[case(&[FILTER_DEFLATE, FILTER_FLETCHER32], FILTER_SHUFFLE, 0)]
-    #[case(&[FILTER_SHUFFLE, FILTER_FLETCHER32], FILTER_DEFLATE, 1)]
-    #[case(&[FILTER_SHUFFLE, FILTER_DEFLATE], FILTER_FLETCHER32, 2)]
-    #[case(&[FILTER_FLETCHER32, FILTER_DEFLATE], FILTER_SHUFFLE, 0)]
+    #[case::shuffle_before_deflate_and_checksum(&[FILTER_DEFLATE, FILTER_FLETCHER32], FILTER_SHUFFLE, 0)]
+    #[case::deflate_between_shuffle_and_checksum(&[FILTER_SHUFFLE, FILTER_FLETCHER32], FILTER_DEFLATE, 1)]
+    #[case::checksum_after_shuffle_and_deflate(&[FILTER_SHUFFLE, FILTER_DEFLATE], FILTER_FLETCHER32, 2)]
+    #[case::shuffle_before_reversed_pipeline(&[FILTER_FLETCHER32, FILTER_DEFLATE], FILTER_SHUFFLE, 0)]
     fn canonical_position_keeps_existing_pipeline_order(
         #[case] existing: &[u16],
         #[case] added: u16,
@@ -1668,11 +1668,11 @@ mod tests {
     }
 
     #[rstest]
-    #[case(&[FILTER_LZF, FILTER_DEFLATE], Some(("lzf", "deflate")))]
-    #[case(&[FILTER_DEFLATE, FILTER_LZF], Some(("lzf", "deflate")))]
-    #[case(&[FILTER_SCALEOFFSET, FILTER_SHUFFLE], Some(("shuffle", "scale-offset")))]
-    #[case(&[FILTER_SHUFFLE, FILTER_SCALEOFFSET], Some(("shuffle", "scale-offset")))]
-    #[case(&[FILTER_SHUFFLE, FILTER_FLETCHER32], None)]
+    #[case::lzf_then_deflate(&[FILTER_LZF, FILTER_DEFLATE], Some(("lzf", "deflate")))]
+    #[case::deflate_then_lzf(&[FILTER_DEFLATE, FILTER_LZF], Some(("lzf", "deflate")))]
+    #[case::scale_offset_then_shuffle(&[FILTER_SCALEOFFSET, FILTER_SHUFFLE], Some(("shuffle", "scale-offset")))]
+    #[case::shuffle_then_scale_offset(&[FILTER_SHUFFLE, FILTER_SCALEOFFSET], Some(("shuffle", "scale-offset")))]
+    #[case::shuffle_then_checksum(&[FILTER_SHUFFLE, FILTER_FLETCHER32], None)]
     fn conflicts_are_independent_of_filter_order(
         #[case] filters: &[u16],
         #[case] expected: Option<(&str, &str)>,

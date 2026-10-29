@@ -3019,8 +3019,8 @@ mod tests {
     use super::*;
 
     #[rstest]
-    #[case(ZfpElementType::F32)]
-    #[case(ZfpElementType::I32)]
+    #[case::float32(ZfpElementType::F32)]
+    #[case::int32(ZfpElementType::I32)]
     fn resolved_settings_reject_rates_above_the_scalar_width(#[case] scalar: ZfpElementType) {
         let rate = ZfpRate::try_from(64.0).unwrap();
         assert_eq!(
@@ -3033,8 +3033,8 @@ mod tests {
     }
 
     #[rstest]
-    #[case(ZfpElementType::F64)]
-    #[case(ZfpElementType::I64)]
+    #[case::float64(ZfpElementType::F64)]
+    #[case::int64(ZfpElementType::I64)]
     fn resolved_settings_accept_the_maximum_rate_for_sixty_four_bit_scalars(
         #[case] scalar: ZfpElementType,
     ) {
@@ -3046,10 +3046,10 @@ mod tests {
     }
 
     #[rstest]
-    #[case(&[4][..], 1, 0.25)]
-    #[case(&[4, 4][..], 2, 0.0625)]
-    #[case(&[4, 4, 4][..], 3, 0.015625)]
-    #[case(&[4, 4, 4, 4][..], 4, 0.00390625)]
+    #[case::one_dimension(&[4][..], 1, 0.25)]
+    #[case::two_dimensions(&[4, 4][..], 2, 0.0625)]
+    #[case::three_dimensions(&[4, 4, 4][..], 3, 0.015625)]
+    #[case::four_dimensions(&[4, 4, 4, 4][..], 4, 0.00390625)]
     fn resolved_settings_require_one_bit_per_block_at_the_actual_rank(
         #[case] dimensions: &[u64],
         #[case] rank: u32,
@@ -3074,9 +3074,9 @@ mod tests {
     }
 
     #[rstest]
-    #[case(16.125, 64)]
-    #[case(16.25, 65)]
-    #[case(16.999, 67)]
+    #[case::half_bit_above_sixty_four(16.125, 64)]
+    #[case::sixty_five_bits(16.25, 65)]
+    #[case::just_below_sixty_eight_bits(16.999, 67)]
     fn resolved_settings_truncate_fractional_block_budgets(
         #[case] requested: f64,
         #[case] budget: u16,
@@ -3309,8 +3309,8 @@ mod tests {
     }
 
     #[rstest]
-    #[case(&[], "only 1D-4D chunks are supported, got rank 0")]
-    #[case(&[2, 2, 2, 2, 2], "only 1D-4D chunks are supported, got rank 5")]
+    #[case::zero_dimensions(&[], "only 1D-4D chunks are supported, got rank 0")]
+    #[case::five_dimensions(&[2, 2, 2, 2, 2], "only 1D-4D chunks are supported, got rank 5")]
     fn a_chunk_rank_outside_one_to_four_is_rejected_by_the_codec(
         #[case] dims: &[usize],
         #[case] expected: &str,
@@ -3411,11 +3411,11 @@ mod tests {
     }
 
     #[rstest]
-    #[case(
+    #[case::short_buffer(
         12,
         "ZFP: data length 12 does not match dims product × element size (16)"
     )]
-    #[case(
+    #[case::long_buffer(
         20,
         "ZFP: data length 20 does not match dims product × element size (16)"
     )]
@@ -3428,12 +3428,12 @@ mod tests {
     }
 
     #[rstest]
-    #[case(f64::NAN)]
-    #[case(f64::INFINITY)]
-    #[case(f64::NEG_INFINITY)]
-    #[case(0.0)]
-    #[case(-1.0)]
-    #[case(64.0001)]
+    #[case::not_a_number(f64::NAN)]
+    #[case::positive_infinity(f64::INFINITY)]
+    #[case::negative_infinity(f64::NEG_INFINITY)]
+    #[case::zero(0.0)]
+    #[case::negative_one(-1.0)]
+    #[case::above_maximum(64.0001)]
     fn codec_entry_points_reject_invalid_independent_rates(#[case] rate: f64) {
         let error = Error::ZfpConfiguration(FormatError::InvalidZfpRate {
             rate_bits: rate.to_bits(),
@@ -3449,8 +3449,8 @@ mod tests {
     }
 
     #[rstest]
-    #[case(32.0, ZfpElementType::F32, 16)]
-    #[case(64.0, ZfpElementType::F64, 32)]
+    #[case::float32(32.0, ZfpElementType::F32, 16)]
+    #[case::float64(64.0, ZfpElementType::F64, 32)]
     fn compress_rate_at_scalar_width_is_accepted(
         #[case] rate: f64,
         #[case] element_type: ZfpElementType,

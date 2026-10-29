@@ -325,14 +325,14 @@ mod tests {
     use crate::address::{BaseAddressExt, StoredAddressExt};
 
     #[rstest]
-    #[case(
+    #[case::version_zero_high_flags(
         SuperblockStatus::Zero(0x8000_0004),
         SuperblockVersion::Zero,
         0x8000_0004
     )]
-    #[case(SuperblockStatus::One(u32::MAX), SuperblockVersion::One, u32::MAX)]
-    #[case(SuperblockStatus::Two(0x84), SuperblockVersion::Two, 0x84)]
-    #[case(SuperblockStatus::Three(0x04), SuperblockVersion::Three, 0x04)]
+    #[case::one_all_flags(SuperblockStatus::One(u32::MAX), SuperblockVersion::One, u32::MAX)]
+    #[case::version_two_unknown_flags(SuperblockStatus::Two(0x84), SuperblockVersion::Two, 0x84)]
+    #[case::version_three_swmr_only(SuperblockStatus::Three(0x04), SuperblockVersion::Three, 0x04)]
     fn construction_preserves_the_typed_status(
         #[case] status: SuperblockStatus,
         #[case] version: SuperblockVersion,
@@ -345,10 +345,10 @@ mod tests {
     }
 
     #[rstest]
-    #[case(SuperblockStatus::Zero(0), SuperblockStatus::Zero(u32::MAX))]
-    #[case(SuperblockStatus::One(0), SuperblockStatus::One(0x8000_0004))]
-    #[case(SuperblockStatus::Two(0), SuperblockStatus::Two(0x84))]
-    #[case(SuperblockStatus::Three(0), SuperblockStatus::Three(0x04))]
+    #[case::version_zero_all_flags(SuperblockStatus::Zero(0), SuperblockStatus::Zero(u32::MAX))]
+    #[case::version_one_high_flags(SuperblockStatus::One(0), SuperblockStatus::One(0x8000_0004))]
+    #[case::version_two_unknown_flags(SuperblockStatus::Two(0), SuperblockStatus::Two(0x84))]
+    #[case::version_three_swmr_only(SuperblockStatus::Three(0), SuperblockStatus::Three(0x04))]
     fn changing_flags_preserves_version_and_other_fields(
         #[case] initial: SuperblockStatus,
         #[case] expected: SuperblockStatus,
@@ -362,17 +362,17 @@ mod tests {
     }
 
     #[rstest]
-    #[case(
+    #[case::zero_to_one(
         SuperblockStatus::Zero(0x8000_0004),
         SuperblockStatus::One(0x8000_0004)
     )]
-    #[case(SuperblockStatus::One(u32::MAX), SuperblockStatus::Zero(u32::MAX))]
-    #[case(SuperblockStatus::Zero(0x84), SuperblockStatus::Two(0x84))]
-    #[case(SuperblockStatus::One(0x04), SuperblockStatus::Three(0x04))]
-    #[case(SuperblockStatus::Two(0xFF), SuperblockStatus::Zero(0xFF))]
-    #[case(SuperblockStatus::Three(0x84), SuperblockStatus::One(0x84))]
-    #[case(SuperblockStatus::Two(0x01), SuperblockStatus::Three(0x01))]
-    #[case(SuperblockStatus::Three(0x04), SuperblockStatus::Two(0x04))]
+    #[case::one_to_zero(SuperblockStatus::One(u32::MAX), SuperblockStatus::Zero(u32::MAX))]
+    #[case::zero_to_two(SuperblockStatus::Zero(0x84), SuperblockStatus::Two(0x84))]
+    #[case::one_to_three(SuperblockStatus::One(0x04), SuperblockStatus::Three(0x04))]
+    #[case::two_to_zero(SuperblockStatus::Two(0xFF), SuperblockStatus::Zero(0xFF))]
+    #[case::three_to_one(SuperblockStatus::Three(0x84), SuperblockStatus::One(0x84))]
+    #[case::two_to_three(SuperblockStatus::Two(0x01), SuperblockStatus::Three(0x01))]
+    #[case::three_to_two(SuperblockStatus::Three(0x04), SuperblockStatus::Two(0x04))]
     fn changing_version_preserves_flags_and_other_fields(
         #[case] initial: SuperblockStatus,
         #[case] expected: SuperblockStatus,
@@ -386,9 +386,9 @@ mod tests {
     }
 
     #[rstest]
-    #[case(0x100)]
-    #[case(0x8000_0004)]
-    #[case(u32::MAX)]
+    #[case::first_bit_above_byte(0x100)]
+    #[case::high_bit_and_swmr(0x8000_0004)]
+    #[case::all_bits(u32::MAX)]
     fn rejected_version_narrowing_preserves_the_superblock(
         #[case] bits: u32,
         #[values(SuperblockVersion::Zero, SuperblockVersion::One)] legacy: SuperblockVersion,
@@ -406,9 +406,9 @@ mod tests {
     }
 
     #[rstest]
-    #[case(0x100)]
-    #[case(0x8000_0004)]
-    #[case(u32::MAX)]
+    #[case::first_bit_above_byte(0x100)]
+    #[case::high_bit_and_swmr(0x8000_0004)]
+    #[case::all_bits(u32::MAX)]
     fn rejected_wide_flags_preserve_the_superblock(
         #[case] bits: u32,
         #[values(SuperblockStatus::Two(0x84), SuperblockStatus::Three(0x04))]
@@ -424,14 +424,14 @@ mod tests {
     }
 
     #[rstest]
-    #[case(
+    #[case::version_zero_high_flags(
         SuperblockStatus::Zero(0x8000_0004),
         SuperblockVersion::Zero,
         0x8000_0004
     )]
-    #[case(SuperblockStatus::One(u32::MAX), SuperblockVersion::One, u32::MAX)]
-    #[case(SuperblockStatus::Two(0x84), SuperblockVersion::Two, 0x84)]
-    #[case(SuperblockStatus::Three(0x04), SuperblockVersion::Three, 0x04)]
+    #[case::one_all_flags(SuperblockStatus::One(u32::MAX), SuperblockVersion::One, u32::MAX)]
+    #[case::version_two_unknown_flags(SuperblockStatus::Two(0x84), SuperblockVersion::Two, 0x84)]
+    #[case::version_three_swmr_only(SuperblockStatus::Three(0x04), SuperblockVersion::Three, 0x04)]
     fn status_preserves_its_version_and_encoded_bits(
         #[case] status: SuperblockStatus,
         #[case] version: SuperblockVersion,
@@ -446,9 +446,9 @@ mod tests {
     }
 
     #[rstest]
-    #[case(0x100)]
-    #[case(0x8000_0004)]
-    #[case(u32::MAX)]
+    #[case::first_bit_above_byte(0x100)]
+    #[case::high_bit_and_swmr(0x8000_0004)]
+    #[case::all_bits(u32::MAX)]
     fn modern_status_rejects_bits_wider_than_its_field(
         #[case] bits: u32,
         #[values(SuperblockVersion::Two, SuperblockVersion::Three)] version: SuperblockVersion,
@@ -460,19 +460,19 @@ mod tests {
     }
 
     #[rstest]
-    #[case(0, SuperblockVersion::Zero)]
-    #[case(1, SuperblockVersion::One)]
-    #[case(2, SuperblockVersion::Two)]
-    #[case(3, SuperblockVersion::Three)]
+    #[case::version_zero(0, SuperblockVersion::Zero)]
+    #[case::version_one(1, SuperblockVersion::One)]
+    #[case::version_two(2, SuperblockVersion::Two)]
+    #[case::version_three(3, SuperblockVersion::Three)]
     fn a_version_preserves_its_byte(#[case] byte: u8, #[case] version: SuperblockVersion) {
         assert_eq!(SuperblockVersion::try_from(byte), Ok(version));
         assert_eq!(version.get(), byte);
     }
 
     #[rstest]
-    #[case(4)]
-    #[case(16)]
-    #[case(255)]
+    #[case::first_unsupported_version(4)]
+    #[case::version_sixteen(16)]
+    #[case::maximum_byte(255)]
     fn an_unknown_version_is_rejected(#[case] byte: u8) {
         assert_eq!(
             SuperblockVersion::try_from(byte),
@@ -481,13 +481,13 @@ mod tests {
     }
 
     #[rstest]
-    #[case(0x00, (true, false, false, false, 0))]
-    #[case(0x01, (false, true, false, false, 0))]
-    #[case(0x04, (false, false, true, true, 0))]
-    #[case(0x05, (false, true, true, false, 0))]
-    #[case(0x02, (false, false, false, false, 0x02))]
-    #[case(0x8000_0004, (false, false, true, true, 0x8000_0000))]
-    #[case(u32::MAX, (false, true, true, false, 0xFFFF_FFFA))]
+    #[case::empty(0x00, (true, false, false, false, 0))]
+    #[case::write_only(0x01, (false, true, false, false, 0))]
+    #[case::swmr_only(0x04, (false, false, true, true, 0))]
+    #[case::write_and_swmr(0x05, (false, true, true, false, 0))]
+    #[case::unknown_low_bit(0x02, (false, false, false, false, 0x02))]
+    #[case::high_bit_and_swmr(0x8000_0004, (false, false, true, true, 0x8000_0000))]
+    #[case::all_bits(u32::MAX, (false, true, true, false, 0xFFFF_FFFA))]
     fn observed_status_flags_preserve_unknown_and_inconsistent_bits(
         #[case] bits: u32,
         #[case] expected: (bool, bool, bool, bool, u32),

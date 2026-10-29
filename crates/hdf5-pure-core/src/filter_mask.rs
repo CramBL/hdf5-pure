@@ -154,8 +154,8 @@ mod tests {
     }
 
     #[rstest]
-    #[case(33)]
-    #[case(usize::MAX)]
+    #[case::first_count_above_mask(33)]
+    #[case::maximum_usize(usize::MAX)]
     fn a_pipeline_larger_than_the_mask_is_rejected(#[case] count: usize) {
         let expected = FormatError::InvalidFilterPipelineField {
             field: "filter count",

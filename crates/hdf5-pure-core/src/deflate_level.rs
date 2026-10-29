@@ -123,11 +123,11 @@ mod tests {
     }
 
     #[rstest]
-    #[case(10)]
-    #[case(u32::from(u8::MAX))]
-    #[case(256)]
-    #[case(262)]
-    #[case(u32::MAX)]
+    #[case::first_unsupported_level(10)]
+    #[case::maximum_byte(u32::from(u8::MAX))]
+    #[case::first_value_above_byte(256)]
+    #[case::wrapping_to_level_six(262)]
+    #[case::maximum_u32(u32::MAX)]
     fn rejects_invalid_metadata(#[case] level: u32) {
         assert_eq!(
             DeflateLevel::try_from(level).unwrap_err(),
