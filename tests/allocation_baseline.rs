@@ -91,7 +91,11 @@ fn writing_and_reading_a_chunked_dataset_matches_its_recorded_figures() {
 
     let file = File::open_streaming(&path).unwrap();
     let all = file.dataset("t").unwrap().read_raw().unwrap();
-    assert_eq!(all.len(), N0 * 8);
+    let read_len = all.len();
+    let first_mismatch = all.chunks_exact(8).enumerate().find_map(|(index, bytes)| {
+        (bytes != (index as f64).to_le_bytes())
+            .then(|| (index, <[u8; 8]>::try_from(bytes).unwrap()))
+    });
     drop(all);
     drop(file);
 
@@ -115,6 +119,15 @@ fn writing_and_reading_a_chunked_dataset_matches_its_recorded_figures() {
     }
 
     heapscope::assert_baseline!("tests/baselines/chunked_write_read.txt");
+    assert_eq!(read_len, N0 * 8);
+    assert_eq!(first_mismatch, None);
+    {
+        let file = File::open(&path).unwrap();
+        let dataset = file.dataset("growing").unwrap();
+        let batch: Vec<_> = (0..CHUNK_ELEMS).map(|index| index as f64).collect();
+        assert_eq!(dataset.shape().unwrap(), &[CHUNK_ELEMS * 17]);
+        assert_eq!(dataset.read_f64().unwrap(), batch.repeat(17));
+    }
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     hard_link_messages_match_recorded_figures(&_profiler);

@@ -1,33 +1,29 @@
-//! Measuring what one piece of work allocates, from inside a test binary.
+//! Allocation measurement for a region on the calling thread.
 //!
-//! # What the including binary has to declare
+//! The including binary installs the allocator:
 //!
-//! ```ignore
+//! ```
 //! #[global_allocator]
 //! static ALLOC: heapscope::Alloc = heapscope::Alloc::system();
 //! ```
 //!
-//! A `#[global_allocator]` is a property of the binary, so it cannot live here.
-//! Leaving it out is not a silent miss: [`measure`] refuses to start a profiler
-//! that would record nothing, naming the line above.
+//! Give each measurement a unique region name within its binary, including parameter cases.
+//! Allocations on other threads or outside the measured call are excluded. Keep fixture paths,
+//! inputs, and assertions outside the call unless they are part of the measured operation.
+//! Return owned results from the call to include their retained allocations in
+//! [`Measured::live_bytes`], and check their complete values and state after measurement.
+//!
+//! Pair an upper bound with a known allocation floor or a separate allocating control. Check
+//! the control before asserting zero allocations. [`measure`] rejects poisoned or inexact
+//! snapshots, dropped allocation or attribution records, and absent regions.
+//!
+//! Scaling bounds run separately from pinned exact baselines. Diagnostic heap profiles support
+//! manual inspection, and Criterion benchmarks measure throughput.
 #![allow(dead_code)]
 
 use std::sync::OnceLock;
 
-/// What one measured piece of work allocated.
-///
-/// Every figure is that work's own: allocations made on another thread, or on
-/// this one outside the measured call, are not in it. That is what lets several
-/// measured tests share a process — which they must, since the profiler is
-/// process-wide and `cargo test` runs a binary's tests concurrently.
-///
-/// **It is also the way a test built on this goes quietly hollow.** Work that
-/// moves to a worker thread stops being measured, and every figure here collapses
-/// toward zero while an upper bound on it goes on passing. This is not
-/// hypothetical for this crate: the read path has a parallel variant waiting to
-/// be written. So a test that asserts a ceiling must assert a floor beside it —
-/// the read's own output is in these figures, so its size is a floor that costs
-/// one line and cannot be satisfied by a measurement of nothing.
+/// Allocation counts and byte totals for one measured region.
 #[derive(Clone, Copy, Debug)]
 pub struct Measured {
     /// Allocations made, counting a reallocation as one.
@@ -96,15 +92,11 @@ fn start_profiling() {
 /// `name` must be unique within the binary: heapscope interns region names, so
 /// two measurements sharing one would be added together.
 ///
-/// # Every reading that would be a guess panics instead
+/// # Panics
 ///
-/// heapscope's [`heapscope::HeapStats::get`] returns an error when
-/// the run cannot be trusted, and its documentation is explicit about why: a
-/// getter that answered zero would turn every budget built on it into an
-/// assertion that cannot fail. Reading a region goes through `Snapshot` instead,
-/// which reports those conditions rather than refusing on them, so this is where
-/// they have to be checked — otherwise this helper would be exactly the
-/// zero-returning getter that design exists to prevent.
+/// Panics if the profiler cannot start, the snapshot is poisoned or inexact,
+/// allocation or attribution records were dropped, or the region is absent from
+/// the snapshot. Also propagates panics from `work`.
 #[track_caller]
 pub fn measure<R>(name: &str, work: impl FnOnce() -> R) -> (R, Measured) {
     start_profiling();

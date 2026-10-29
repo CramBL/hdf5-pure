@@ -13,19 +13,15 @@
 //! loop* is exactly what it exists to catch, and a growth step there would fail
 //! it too. That is the trade it is meant to make.
 //!
-//! Measurement is per region and per thread (`tests/common/allocation.rs`), so
-//! these tests share a process without serializing against each other: what a
-//! region records is what the calling thread allocated inside it, and nothing
-//! else. That last part is also how a test here could go quiet, which is why each
-//! one checks that allocation measurement is active. Read bounds assert a floor as well as a
-//! ceiling, and statistics polls use a separate allocating control before asserting zero
-//! allocations. See [`allocation::Measured`].
+//! Measurements use [`allocation::measure`]. Read bounds include an output-size floor, and
+//! statistics polls use a separate allocating control before asserting zero allocations.
 
 // heapscope unwinds with the frame-pointer convention, which it implements for
 // x86_64 and aarch64 only, and on any other target the profiler errors at
 // startup.
 #![cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 
+use std::fs::File as StdFile;
 use std::path::Path;
 
 use hdf5_pure::AttrValue;
@@ -65,11 +61,10 @@ use test_util::object_header::MessageType;
 use test_util::object_header::v2;
 use test_util::object_header::v2::Header;
 use test_util::superblock::v2::Superblock;
+use test_util::temp::TempPath;
 use test_util::widths::Widths;
 use test_util_hdf5::file_space;
 use test_util_hdf5::reader::ReadBackend;
-
-use allocation::measure;
 
 #[global_allocator]
 static ALLOC: heapscope::Alloc = heapscope::Alloc::system();
@@ -263,9 +258,10 @@ fn persistent_append_memory_is_bounded_as_data_and_session_duration_grow(
         deferred.peak_bytes <= small_first.peak_bytes + 32 * 1024,
         "{small_first}; {deferred}"
     );
-    let (control, positive) = measure(&format!("{region}_{active}_dataset_copy_control"), || {
-        vec![7_i32; 8192 * 64]
-    });
+    let (control, positive) =
+        allocation::measure(&format!("{region}_{active}_dataset_copy_control"), || {
+            vec![7_i32; 8192 * 64]
+        });
     assert!(positive.blocks > 0, "{positive}");
     assert!(positive.live_bytes >= 8192 * 64 * 4, "{positive}");
     assert!(
@@ -363,18 +359,19 @@ fn measure_persistent_appends(
             _ => panic!("resource test requires an explicit backing"),
         }
     );
-    let ((mut dataset, mut buffer), first) = measure(&format!("{region}_first"), || {
-        let mut dataset = file.dataset("d").unwrap();
-        let mut buffer =
-            active.then(|| file.dataset("d").unwrap().into_buffered_appender().unwrap());
-        if let Some(buffer) = &mut buffer {
-            buffer.append(&[7; CHUNK]).unwrap();
-            buffer.flush().unwrap();
-        } else {
-            dataset.append(&[7; CHUNK]).unwrap();
-        }
-        (dataset, buffer)
-    });
+    let ((mut dataset, mut buffer), first) =
+        allocation::measure(&format!("{region}_first"), || {
+            let mut dataset = file.dataset("d").unwrap();
+            let mut buffer =
+                active.then(|| file.dataset("d").unwrap().into_buffered_appender().unwrap());
+            if let Some(buffer) = &mut buffer {
+                buffer.append(&[7; CHUNK]).unwrap();
+                buffer.flush().unwrap();
+            } else {
+                dataset.append(&[7; CHUNK]).unwrap();
+            }
+            (dataset, buffer)
+        });
     assert!(first.blocks > 0, "{first}");
     assert!(first.bytes >= (CHUNK * 4) as u64, "{first}");
     assert!(first.live_bytes > 0, "{first}");
@@ -385,7 +382,7 @@ fn measure_persistent_appends(
     let sections = file.reusable_free_sections().unwrap().section_count();
     assert!(sections <= 16, "sections before appends: {sections}");
     let length = std::fs::metadata(path).unwrap().len();
-    let ((), measured) = measure(region, || {
+    let ((), measured) = allocation::measure(region, || {
         for round in 0..appends {
             if let Some(buffer) = &mut buffer {
                 buffer.append(&[7; CHUNK]).unwrap();
@@ -664,6 +661,7 @@ fn row_windows_preserve_the_whole_reads_allocation_count(
     } else {
         start + usize::try_from(count).unwrap() * 2 * 8
     };
+    assert_eq!(whole, bytes);
     assert_eq!(window, whole[start..end]);
     assert!(measured.live_bytes >= window.len() as u64, "{measured}");
     assert!(
@@ -692,6 +690,7 @@ fn full_inner_chunk_bands_preserve_the_whole_reads_allocation_count() {
     let (rows, measured) = allocation::measure("chunk_bands_rows", || {
         dataset.read_raw_rows(1, 126).unwrap()
     });
+    assert_f64_bytes(&whole, values.iter().copied());
     assert_eq!(rows, whole[128..whole.len() - 128]);
     assert!(measured.live_bytes >= rows.len() as u64, "{measured}");
     assert!(
@@ -721,7 +720,7 @@ fn typed_contiguous_sweeps_allocate_the_output_and_windows() {
     let (typed, measured) =
         allocation::measure("contiguous_sweep_typed", || dataset.read_f64().unwrap());
     assert_eq!(typed, values);
-    assert_eq!(whole.len(), typed.len() * 8);
+    assert_f64_bytes(&whole, values.iter().copied());
     assert!(measured.live_bytes >= whole.len() as u64, "{measured}");
     assert!(
         measured.blocks <= baseline.blocks + WINDOWS,
@@ -758,7 +757,8 @@ fn windowed_row_read_allocates_on_the_order_of_the_window() {
 
     // A 64-row window straddling a chunk-band boundary mid-file, so it decodes
     // chunks from two leading bands.
-    let (window, measured) = measure("windowed_row_read", || ds.read_f64_rows(992, 64).unwrap());
+    let (window, measured) =
+        allocation::measure("windowed_row_read", || ds.read_f64_rows(992, 64).unwrap());
 
     // Window + raw/typed conversion + a few decompressed 32 KiB chunks lands
     // well under 1 MiB; a whole-read fallback peaks above the full dataset
@@ -813,7 +813,7 @@ fn windowed_vlen_string_read_allocates_on_the_order_of_the_window() {
 
     // 256 mid-file rows — ~32 KiB of text plus ~4 KiB of references, resolved
     // against a window-filtered slice of the collection's directory.
-    let (window, measured) = measure("windowed_vlen_read", || {
+    let (window, measured) = allocation::measure("windowed_vlen_read", || {
         ds.read_string_rows(15_000, 256).unwrap()
     });
 
@@ -912,7 +912,7 @@ fn whole_read_of_adjacent_chunks_costs_a_constant_per_chunk() {
     let file = File::open_streaming(&path).unwrap();
     let ds = file.dataset("t").unwrap();
 
-    let (all, measured) = measure("whole_read", || ds.read_raw().unwrap());
+    let (all, measured) = allocation::measure("whole_read", || ds.read_raw().unwrap());
 
     // The read's own output is the dataset, and the parsed chunk index is most
     // of what is left; an unbudgeted span would add the dataset again.
@@ -954,11 +954,7 @@ fn whole_read_of_adjacent_chunks_costs_a_constant_per_chunk() {
          three bounds above are bounding something other than the read: {measured}"
     );
 
-    assert_eq!(all.len(), DATASET_BYTES);
-    assert_eq!(
-        &all[DATASET_BYTES - 8..],
-        &((N0 - 1) as f64).to_le_bytes()[..]
-    );
+    assert_f64_bytes(&all, (0..N0).map(|index| index as f64));
 }
 
 /// With no decompressed chunk retained, the warm read reuses only the cold read's index.
@@ -994,8 +990,9 @@ fn a_warm_whole_read_lists_its_chunks_without_an_allocation_per_chunk(
     let cold = ds.read_raw().unwrap();
     assert!(ds.chunk_cache_stats().index_loaded());
 
-    let (warm, measured) = measure(region, || ds.read_raw().unwrap());
+    let (warm, measured) = allocation::measure(region, || ds.read_raw().unwrap());
 
+    assert_f64_bytes(&cold, data.iter().copied());
     assert_eq!(warm, cold);
     assert!(
         measured.live_bytes >= warm.len() as u64,
@@ -1057,7 +1054,7 @@ fn resident_whole_reads_borrow_large_unfiltered_chunks(
     );
     assert_eq!(dataset.read_raw().unwrap(), expected);
     assert!(dataset.chunk_cache_stats().index_loaded());
-    let (actual, allocations) = measure(region, || dataset.read_raw().unwrap());
+    let (actual, allocations) = allocation::measure(region, || dataset.read_raw().unwrap());
     assert_eq!(actual, expected);
     assert!(
         allocations.live_bytes >= expected.len() as u64,
@@ -1110,8 +1107,9 @@ fn warm_chunk_scatter_uses_bounded_allocations(
     assert!(dataset.chunk_cache_stats().index_loaded());
     let whole_region = format!("{region}_{backend:?}_whole");
     let rows_region = format!("{region}_{backend:?}_rows");
-    let (whole, whole_allocations) = measure(&whole_region, || dataset.read_raw().unwrap());
-    let (rows, rows_allocations) = measure(&rows_region, || {
+    let (whole, whole_allocations) =
+        allocation::measure(&whole_region, || dataset.read_raw().unwrap());
+    let (rows, rows_allocations) = allocation::measure(&rows_region, || {
         dataset.read_raw_rows(1, shape[0] - 2).unwrap()
     });
     let row_bytes = usize::try_from(shape[1..].iter().product::<u64>()).unwrap() * 8;
@@ -1176,8 +1174,8 @@ fn a_cold_implicit_read_bounds_extra_allocations_beyond_a_warm_read(
     let ds = file.dataset("data").unwrap();
     assert_eq!(ds.chunk_index().unwrap(), Some(ChunkIndex::Implicit));
 
-    let (cold_bytes, cold) = measure(cold_region, || ds.read_raw().unwrap());
-    let (warm_bytes, warm) = measure(warm_region, || ds.read_raw().unwrap());
+    let (cold_bytes, cold) = allocation::measure(cold_region, || ds.read_raw().unwrap());
+    let (warm_bytes, warm) = allocation::measure(warm_region, || ds.read_raw().unwrap());
 
     assert_eq!(cold_bytes, data);
     assert_eq!(warm_bytes, data);
@@ -1241,7 +1239,7 @@ fn typed_whole_read_costs_its_output_and_a_window() {
     let file = File::open_streaming(&path).unwrap();
     let ds = file.dataset("t").unwrap();
 
-    let (values, measured) = measure("typed_whole_read", || ds.read_f64().unwrap());
+    let (values, measured) = allocation::measure("typed_whole_read", || ds.read_f64().unwrap());
 
     assert!(
         measured.peak_bytes < (DATASET_BYTES + DATASET_BYTES / 4) as u64,
@@ -1288,10 +1286,10 @@ fn typed_whole_read_costs_its_output_and_a_window() {
 
     // The values must still be the right ones, in the right order — a sweep that
     // lost or repeated a window would pass every bound above.
-    assert_eq!(values.len(), N0);
-    assert_eq!(values[0], 0.0);
-    assert_eq!(values[N0 / 2], (N0 / 2) as f64);
-    assert_eq!(values[N0 - 1], (N0 - 1) as f64);
+    assert_eq!(
+        values,
+        (0..N0).map(|index| index as f64).collect::<Vec<_>>()
+    );
 }
 
 /// Writing a chunked dataset costs a constant per chunk, and about one copy of
@@ -1314,7 +1312,7 @@ fn chunked_write_costs_a_constant_per_chunk() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("write.h5");
 
-    let ((), measured) = measure("chunked_write", || {
+    let ((), measured) = allocation::measure("chunked_write", || {
         let mut builder = FileBuilder::new();
         builder
             .create_dataset("t")
@@ -1354,8 +1352,7 @@ fn chunked_write_costs_a_constant_per_chunk() {
     // The file must still be the right file.
     let file = File::open(&path).unwrap();
     let back = file.dataset("t").unwrap().read_f64().unwrap();
-    assert_eq!(back.len(), N0);
-    assert_eq!(back[N0 - 1], (N0 - 1) as f64);
+    assert_eq!(back, data);
 }
 
 /// A filtered write builds one compressor, not one per chunk.
@@ -1377,7 +1374,7 @@ fn filtered_write_does_not_build_a_compressor_per_chunk() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("deflate.h5");
 
-    let ((), measured) = measure("filtered_write", || {
+    let ((), measured) = allocation::measure("filtered_write", || {
         let mut builder = FileBuilder::new();
         builder
             .create_dataset("t")
@@ -1408,8 +1405,7 @@ fn filtered_write_does_not_build_a_compressor_per_chunk() {
 
     let file = File::open(&path).unwrap();
     let back = file.dataset("t").unwrap().read_f64().unwrap();
-    assert_eq!(back.len(), N0);
-    assert_eq!(back[N0 - 1], (N0 - 1) as f64);
+    assert_eq!(back, data);
 }
 
 /// The same for the read side, where a decoder per chunk cost 174 MB to read the
@@ -1435,7 +1431,7 @@ fn filtered_read_does_not_build_a_decompressor_per_chunk() {
 
     let file = File::open_streaming(&path).unwrap();
     let ds = file.dataset("t").unwrap();
-    let (all, measured) = measure("filtered_read", || ds.read_raw().unwrap());
+    let (all, measured) = allocation::measure("filtered_read", || ds.read_raw().unwrap());
 
     assert!(
         measured.bytes >= DATASET_BYTES as u64,
@@ -1456,7 +1452,7 @@ fn filtered_read_does_not_build_a_decompressor_per_chunk() {
         "filtered read allocated an extra block per chunk: {measured} over {CHUNKS} chunks"
     );
 
-    assert_eq!(all.len(), DATASET_BYTES);
+    assert_f64_bytes(&all, (0..N0).map(|index| index as f64));
 }
 
 /// Opening one child of a group costs the group's header, not one allocation per
@@ -1497,11 +1493,14 @@ fn opening_one_child_does_not_allocate_per_child_of_the_group() {
     // what is being measured is the lookup inside it.
     let buffered = File::open(&path).unwrap();
 
-    let (by_path, path_measured) = measure("child_by_path", || file.dataset(&last).unwrap());
-    let (by_name, name_measured) = measure("child_by_name", || file.root().dataset(&last).unwrap());
-    let (buffered_by_path, buffered_measured) = measure("child_by_path_buffered", || {
-        buffered.dataset(&last).unwrap()
-    });
+    let (by_path, path_measured) =
+        allocation::measure("child_by_path", || file.dataset(&last).unwrap());
+    let (by_name, name_measured) =
+        allocation::measure("child_by_name", || file.root().dataset(&last).unwrap());
+    let (buffered_by_path, buffered_measured) =
+        allocation::measure("child_by_path_buffered", || {
+            buffered.dataset(&last).unwrap()
+        });
 
     for (what, measured) in [
         ("by path", path_measured),
@@ -1570,7 +1569,7 @@ fn vlen_string_write_does_not_own_each_string_before_staging_it() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("vlen.h5");
 
-    let ((), measured) = measure("vlen_string_write", || {
+    let ((), measured) = allocation::measure("vlen_string_write", || {
         let mut builder = FileBuilder::new();
         builder.create_dataset("labels").with_vlen_strings(&refs);
         builder.write(&path).unwrap();
@@ -1607,8 +1606,7 @@ fn vlen_string_write_does_not_own_each_string_before_staging_it() {
     // The file must still be the right file.
     let file = File::open(&path).unwrap();
     let back = file.dataset("labels").unwrap().read_string().unwrap();
-    assert_eq!(back.len(), N0);
-    assert_eq!(back[N0 - 1], strings[N0 - 1]);
+    assert_eq!(back, strings);
 }
 
 /// One in-place append allocates on the order of its own batch, not of the
@@ -1652,7 +1650,7 @@ fn one_append_costs_its_batch_not_the_dataset() {
             ds.append(&batch).unwrap();
         }
 
-        let ((), measured) = measure("append_in_place", || ds.append(&batch).unwrap());
+        let ((), measured) = allocation::measure("append_in_place", || ds.append(&batch).unwrap());
 
         // The batch's own bytes are staged inside this measurement, so their size
         // is a floor a measurement of nothing cannot reach.
@@ -1687,8 +1685,9 @@ fn one_append_costs_its_batch_not_the_dataset() {
     let back = file.dataset("t").unwrap().read_f64().unwrap();
     // The dataset it was written with, plus the warmup appends and the measured
     // one.
-    assert_eq!(back.len(), (WARMUP_APPENDS + 2) * CHUNK_ELEMS as usize);
-    assert_eq!(back[back.len() - 1], (CHUNK_ELEMS - 1) as f64);
+    let mut expected = vec![0.0; CHUNK_ELEMS as usize];
+    expected.extend(batch.repeat(WARMUP_APPENDS + 1));
+    assert_eq!(back, expected);
 }
 
 /// Gathering writes does not copy what it has already gathered on every new one.
@@ -1740,7 +1739,7 @@ fn gathering_writes_does_not_recopy_what_it_holds() {
         )
         .unwrap();
         let mut ds = file.dataset("growing").unwrap();
-        measure("gathered_append", || {
+        allocation::measure("gathered_append", || {
             ds.append(&batch).unwrap();
         })
         .1
@@ -1766,8 +1765,9 @@ fn gathering_writes_does_not_recopy_what_it_holds() {
 
     let file = File::open(&path).unwrap();
     let back = file.dataset("growing").unwrap().read_f64().unwrap();
-    assert_eq!(back.len(), CHUNK * (CHUNKS + 1));
-    assert_eq!(&back[CHUNK..CHUNK * 2], &batch[..CHUNK]);
+    let mut expected = vec![1.0; CHUNK];
+    expected.extend_from_slice(&batch);
+    assert_eq!(back, expected);
 }
 
 /// A page buffer does not recopy what it holds when a write lands *inside* a run
@@ -1817,7 +1817,7 @@ fn a_page_buffer_does_not_recopy_what_it_holds_across_operations() {
         )
         .unwrap();
         let mut ds = file.dataset("growing").unwrap();
-        measure("page_buffered_appends", || {
+        allocation::measure("page_buffered_appends", || {
             for _ in 0..APPENDS {
                 ds.append(&batch).unwrap();
             }
@@ -1845,8 +1845,9 @@ fn a_page_buffer_does_not_recopy_what_it_holds_across_operations() {
 
     let file = File::open(&path).unwrap();
     let back = file.dataset("growing").unwrap().read_f64().unwrap();
-    assert_eq!(back.len(), CHUNK * (APPENDS + 1));
-    assert_eq!(&back[CHUNK..CHUNK * 2], &batch[..]);
+    let mut expected = vec![1.0; CHUNK];
+    expected.extend(batch.repeat(APPENDS));
+    assert_eq!(back, expected);
 }
 
 /// A write too large for the gather budget is issued rather than copied into it.
@@ -1875,7 +1876,7 @@ fn a_write_larger_than_the_gather_budget_is_not_copied_into_it() {
     let measured = {
         let file = File::open_rw(&path).unwrap();
         let root = file.root();
-        let ((), m) = measure("big_staged_commit", || {
+        let ((), m) = allocation::measure("big_staged_commit", || {
             root.create_dataset("big", |b| {
                 b.with_f64_data(&data).with_shape(&[ELEMS as u64]);
             })
@@ -1899,6 +1900,14 @@ fn a_write_larger_than_the_gather_budget_is_not_copied_into_it() {
         measured.bytes < DATASET_BYTES * 3 / 2,
         "a staged commit must not copy its data into the gather buffer as well: \
          measured {measured} against a {DATASET_BYTES}-byte dataset"
+    );
+    let file = File::open(&path).unwrap();
+    let dataset = file.dataset("big").unwrap();
+    assert_eq!(dataset.shape().unwrap(), &[ELEMS as u64]);
+    assert_eq!(dataset.read_f64().unwrap(), data);
+    assert_eq!(
+        file.dataset("seed").unwrap().read_f64().unwrap(),
+        vec![1.0; 8]
     );
 }
 
@@ -1948,8 +1957,8 @@ fn open_rw_of_a_persisting_fsm_file_does_not_allocate_the_file() {
             .with_memory_strategy(strategy)
     };
 
-    let open_and_append = |name: &'static str, strategy| {
-        let (file, measured) = measure(name, || {
+    let open_and_append = |name: &'static str, strategy, batches| {
+        let (file, measured) = allocation::measure(name, || {
             let file = File::open_rw_with_options(&path, access(strategy)).unwrap();
             let mut ds = file.dataset("samples").unwrap();
             for _ in 0..APPENDS {
@@ -1960,11 +1969,20 @@ fn open_rw_of_a_persisting_fsm_file_does_not_allocate_the_file() {
         });
         let backing = file.edit_backing();
         file.close().unwrap();
+        let file = File::open(&path).unwrap();
+        let dataset = file.dataset("samples").unwrap();
+        let mut expected: Vec<_> = (0..(CHUNK_ELEMS * CHUNKS) as u64).collect();
+        expected.extend(batch.repeat(batches));
+        assert_eq!(dataset.shape().unwrap(), &[expected.len() as u64]);
+        assert_eq!(dataset.read_u64().unwrap(), expected);
         (backing, measured)
     };
 
-    let (backing, bounded) =
-        open_and_append("bounded_open_rw_of_a_large_file", MemoryStrategy::Auto);
+    let (backing, bounded) = open_and_append(
+        "bounded_open_rw_of_a_large_file",
+        MemoryStrategy::Auto,
+        APPENDS,
+    );
     assert_eq!(
         backing,
         Some(EditBacking::Bounded),
@@ -2004,8 +2022,11 @@ fn open_rw_of_a_persisting_fsm_file_does_not_allocate_the_file() {
 
     // The contrast that makes the ceilings above mean something: the same file,
     // the same appends, one strategy apart.
-    let (backing, mirrored) =
-        open_and_append("mirrored_open_rw_of_a_large_file", MemoryStrategy::Mirrored);
+    let (backing, mirrored) = open_and_append(
+        "mirrored_open_rw_of_a_large_file",
+        MemoryStrategy::Mirrored,
+        APPENDS * 2,
+    );
     assert_eq!(backing, Some(EditBacking::Mirrored));
     assert!(
         mirrored.live_bytes > file_len,
@@ -2052,7 +2073,7 @@ fn repeated_staged_append_commits_retain_nothing_per_commit() {
             commit_one_batch_per_dataset(&file, DATASETS, &batch);
         }
 
-        let ((), measured) = measure("staged_append_commits", || {
+        let ((), measured) = allocation::measure("staged_append_commits", || {
             for _ in 0..MEASURED_COMMITS {
                 commit_one_batch_per_dataset(&file, DATASETS, &batch);
             }
@@ -2121,7 +2142,7 @@ fn the_mirror_retains_the_file_not_the_commits_made_through_it() {
     // The open is inside the region so the image itself is in the measurement,
     // and the file is handed back out of it so that image is still live when the
     // region closes.
-    let (file, measured) = measure("mirrored_staged_append_commits", || {
+    let (file, measured) = allocation::measure("mirrored_staged_append_commits", || {
         let file = File::open_rw_with_options(
             &path,
             FileAccessProperties::new()
@@ -2199,8 +2220,7 @@ fn commit_one_batch_per_dataset(file: &File, datasets: usize, batch: &[f64]) {
     file.commit().unwrap();
 }
 
-/// Every dataset holds its initial chunk plus one batch per commit, ending in
-/// the batch's last element.
+/// Checks every dataset's shape and complete initial and appended values.
 fn assert_growing_fixture_contents(
     path: &std::path::Path,
     datasets: usize,
@@ -2209,9 +2229,12 @@ fn assert_growing_fixture_contents(
 ) {
     let file = File::open(path).unwrap();
     for i in 0..datasets {
-        let back = file.dataset(&format!("d{i}")).unwrap().read_f64().unwrap();
-        assert_eq!(back.len(), (commits + 1) * chunk_elems as usize);
-        assert_eq!(back[back.len() - 1], (chunk_elems - 1) as f64);
+        let dataset = file.dataset(&format!("d{i}")).unwrap();
+        let mut expected = vec![0.0; chunk_elems as usize];
+        let batch: Vec<_> = (0..chunk_elems).map(|index| index as f64).collect();
+        expected.extend(batch.repeat(commits));
+        assert_eq!(dataset.shape().unwrap(), &[expected.len() as u64]);
+        assert_eq!(dataset.read_f64().unwrap(), expected);
     }
 }
 
@@ -2252,14 +2275,14 @@ fn encoded_chunk_finish_avoids_a_payload_sized_assembly_allocation(
     if filtered {
         dataset.with_deflate(DeflateLevel::Three);
     }
-    let (output, measured) = measure(region, || {
-        if buffered {
-            Some(builder.finish().unwrap())
-        } else {
-            builder.finish_to(std::io::sink()).unwrap();
-            None
-        }
-    });
+    let destination = if buffered {
+        OutputDestination::Buffered
+    } else {
+        let path = test_util::temp::temp_path("encoded");
+        let file = StdFile::create(&path).unwrap();
+        OutputDestination::Streamed { file, path }
+    };
+    let (output, measured) = allocation::measure(region, || destination.finish(builder));
     assert!(measured.bytes >= PAYLOAD as u64, "{measured}");
     let byte_budget = PAYLOAD * (if filtered { 21 } else { 6 } + 4 * usize::from(buffered)) / 4;
     let peak_budget = PAYLOAD * (if filtered { 10 } else { 6 } + 4 * usize::from(buffered)) / 4;
@@ -2271,17 +2294,47 @@ fn encoded_chunk_finish_avoids_a_payload_sized_assembly_allocation(
         measured.peak_bytes < peak_budget as u64,
         "{measured} against {peak_budget} bytes at peak"
     );
-    if let Some(output) = output {
-        assert_eq!(
-            File::from_bytes(output)
-                .unwrap()
-                .dataset("encoded")
-                .unwrap()
-                .read_raw()
-                .unwrap(),
-            data
-        );
+    let file = output.open();
+    let dataset = file.dataset("encoded").unwrap();
+    assert_eq!(dataset.shape().unwrap(), &[PAYLOAD as u64]);
+    assert_eq!(dataset.chunk_shape().unwrap(), Some(vec![65_536]));
+    assert_eq!(dataset.read_raw().unwrap(), data);
+}
+
+enum OutputDestination {
+    Buffered,
+    Streamed { file: StdFile, path: TempPath },
+}
+
+impl OutputDestination {
+    fn finish(self, builder: FileBuilder) -> WrittenOutput {
+        match self {
+            Self::Buffered => WrittenOutput::Buffered(builder.finish().unwrap()),
+            Self::Streamed { file, path } => {
+                builder.finish_to(file).unwrap();
+                WrittenOutput::Streamed(path)
+            }
+        }
     }
+}
+
+enum WrittenOutput {
+    Buffered(Vec<u8>),
+    Streamed(TempPath),
+}
+
+impl WrittenOutput {
+    fn open(&self) -> File {
+        match self {
+            Self::Buffered(bytes) => File::from_bytes(bytes.clone()).unwrap(),
+            Self::Streamed(path) => File::open(path).unwrap(),
+        }
+    }
+}
+
+fn assert_f64_bytes(bytes: &[u8], values: impl Iterator<Item = f64>) {
+    let expected: Vec<_> = values.flat_map(f64::to_le_bytes).collect();
+    assert_eq!(bytes, expected);
 }
 
 #[rstest]
