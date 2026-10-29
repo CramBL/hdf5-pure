@@ -59,18 +59,18 @@ impl DiskOp {
 /// Completed byte operations and the outcomes of recorded I/O calls.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Recording {
-    /// Writes and successful resizes, in completion order, for byte replay.
+    /// Completed writes and resizes in completion order, including before an injected error.
     pub operations: Vec<DiskOp>,
     /// Call outcomes, including failures and synchronization requests, in call order.
     pub events: Vec<IoEvent>,
 }
 
-/// When to report an injected synchronization error.
+/// When to report an injected resize or synchronization error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FailurePoint {
-    /// After the file synchronization succeeds.
+    /// After resizing or synchronization succeeds.
     After,
-    /// Before calling the file synchronization.
+    /// Before calling [`File::set_len`], [`File::sync_all`], or [`File::sync_data`].
     Before,
 }
 
@@ -100,7 +100,7 @@ pub enum IoEvent {
         /// The length passed to [`set_len`], in bytes.
         length: u64,
         outcome: IoOutcome,
-        /// An index into [`Recording::operations`] on success, or `None` on failure.
+        /// An index into [`Recording::operations`] if resizing completed, including before an error.
         operation: Option<usize>,
     },
     /// A request to synchronize the file.
@@ -134,7 +134,7 @@ impl IoEvent {
 
     /// Returns the index of the completed byte operation in [`Recording::operations`].
     ///
-    /// Returns `None` for synchronization, a failed resize, or a write of zero bytes.
+    /// Returns `Some` for a completed resize or a nonempty written prefix, and `None` otherwise.
     pub fn operation(&self) -> Option<usize> {
         match self {
             Self::Resize { operation, .. } | Self::Write { operation, .. } => *operation,
@@ -279,25 +279,84 @@ pub fn write_all(writer: &mut impl Write, offset: u64, bytes: &[u8]) -> io::Resu
 
 /// Changes the file length and records the result if this thread is recording.
 ///
+/// Records completed resizes even when reporting an error scheduled with [`fail_resize_after`].
+///
 /// # Errors
 ///
-/// Returns an error from [`File::set_len`] if resizing fails.
+/// Returns an error from [`File::set_len`] if resizing fails, or [`io::ErrorKind::Other`]
+/// for a failure scheduled with [`fail_resize_after`].
 pub fn set_len(file: &File, length: u64) -> io::Result<()> {
-    let result = file.set_len(length);
-    if result.is_ok() {
-        record_set_len(length);
-    } else {
-        LOG.with(|log| {
-            if let Some(log) = log.borrow_mut().as_mut() {
-                log.events.push(IoEvent::Resize {
-                    length,
-                    outcome: outcome(&result),
-                    operation: None,
-                });
+    let point = RESIZE_FAILURE.with(|failure| {
+        let mut failure = failure.borrow_mut();
+        match failure.as_mut() {
+            Some((0, point)) => {
+                let point = *point;
+                *failure = None;
+                Some(point)
             }
-        });
-    }
+            Some((remaining, _)) => {
+                *remaining -= 1;
+                None
+            }
+            None => None,
+        }
+    });
+    let mut completed = false;
+    let result = if point == Some(FailurePoint::Before) {
+        Err(io::Error::other("injected disk resize failure"))
+    } else {
+        file.set_len(length).and_then(|()| {
+            completed = true;
+            if point == Some(FailurePoint::After) {
+                Err(io::Error::other("injected disk resize failure"))
+            } else {
+                Ok(())
+            }
+        })
+    };
+    LOG.with(|log| {
+        if let Some(log) = log.borrow_mut().as_mut() {
+            let operation = completed.then(|| {
+                let operation = log.operations.len();
+                log.operations.push(DiskOp::SetLen(length));
+                operation
+            });
+            log.events.push(IoEvent::Resize {
+                length,
+                outcome: outcome(&result),
+                operation,
+            });
+        }
+    });
     result
+}
+
+/// Skips `completed` calls to [`set_len`] before injecting one resize error on this thread.
+///
+/// Replaces any previously scheduled resize failure. On the following call, reports
+/// [`io::ErrorKind::Other`] at `point`, independently of whether recording is enabled.
+///
+/// # Examples
+///
+/// ```
+/// use std::fs::File;
+/// use std::io::ErrorKind;
+///
+/// use test_util::disk_log::{self, FailurePoint};
+///
+/// # let directory = tempfile::tempdir()?;
+/// let file = File::create(directory.path().join("resize.h5"))?;
+/// disk_log::fail_resize_after(0, FailurePoint::After);
+/// let error = disk_log::set_len(&file, 8).unwrap_err();
+/// assert_eq!(error.kind(), ErrorKind::Other);
+/// assert_eq!(file.metadata()?.len(), 8);
+/// disk_log::set_len(&file, 4)?;
+/// assert_eq!(file.metadata()?.len(), 4);
+/// drop(file);
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn fail_resize_after(completed: usize, point: FailurePoint) {
+    RESIZE_FAILURE.with(|failure| *failure.borrow_mut() = Some((completed, point)));
 }
 
 /// Skips `completed` calls to [`synchronize`] before injecting one synchronization error.
@@ -321,12 +380,13 @@ pub fn synchronize(file: &File, kind: Synchronization) -> io::Result<()> {
     })
 }
 
-/// Clears scheduled write and synchronization failures on this thread.
+/// Clears scheduled write, resize, and synchronization failures on this thread.
 ///
 /// Recording remains enabled or disabled as before the call.
 pub fn clear_failures() {
     WRITE_FAILURE.with(|failure| *failure.borrow_mut() = None);
     SYNC_FAILURE.with(|failure| *failure.borrow_mut() = None);
+    RESIZE_FAILURE.with(|failure| *failure.borrow_mut() = None);
 }
 
 fn synchronize_with(
@@ -402,6 +462,7 @@ fn record_write_outcome(offset: u64, requested: usize, bytes: &[u8], outcome: Io
 }
 
 thread_local! {
+    static RESIZE_FAILURE: RefCell<Option<(usize, FailurePoint)>> = const { RefCell::new(None) };
     static WRITE_FAILURE: RefCell<Option<(usize, usize)>> = const { RefCell::new(None) };
     static SYNC_FAILURE: RefCell<Option<(usize, FailurePoint)>> = const { RefCell::new(None) };
     static LOG: RefCell<Option<Recording>> = const { RefCell::new(None) };
@@ -535,6 +596,44 @@ mod tests {
         assert_eq!(file.metadata().unwrap().len(), 0);
         drop(file);
         drop(temporary);
+    }
+
+    #[rstest]
+    #[case::before(FailurePoint::Before)]
+    #[case::after(FailurePoint::After)]
+    fn injected_resize_failure_records_completed_storage(#[case] point: FailurePoint) {
+        let file = tempfile::tempfile().unwrap();
+        file.set_len(16).unwrap();
+        super::start();
+        super::fail_resize_after(1, point);
+        super::set_len(&file, 12).unwrap();
+        let error = super::set_len(&file, 8).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Other);
+        assert_eq!(error.to_string(), "injected disk resize failure");
+        let completed = point == FailurePoint::After;
+        assert_eq!(
+            file.metadata().unwrap().len(),
+            if completed { 8 } else { 12 }
+        );
+        let recording = super::finish();
+        assert_eq!(
+            recording.events[1],
+            IoEvent::Resize {
+                length: 8,
+                outcome: IoOutcome::Failed(ErrorKind::Other),
+                operation: completed.then_some(1),
+            }
+        );
+        let mut image = vec![0; 16];
+        for operation in &recording.operations {
+            operation.apply(&mut image);
+        }
+        assert_eq!(
+            u64::try_from(image.len()).unwrap(),
+            file.metadata().unwrap().len()
+        );
+        super::set_len(&file, 4).unwrap();
+        assert_eq!(file.metadata().unwrap().len(), 4);
     }
 
     struct FailingWriter {
