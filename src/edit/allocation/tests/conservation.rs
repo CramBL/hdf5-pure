@@ -66,6 +66,7 @@ mod managers;
 mod metadata;
 mod references;
 mod resources;
+mod rollback;
 mod transient;
 
 #[rstest]
