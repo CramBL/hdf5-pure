@@ -9,8 +9,8 @@ use hdf5_pure::{Error, File, FileBuilder, FormatError};
 use rstest::rstest;
 
 #[rstest]
-#[case(false)]
-#[case(true)]
+#[case::floating_point(false)]
+#[case::integer(true)]
 fn thirty_two_bit_datasets_reject_a_sixty_four_bit_zfp_rate(#[case] integer: bool) {
     let mut builder = FileBuilder::new();
     let dataset = builder.create_dataset("v");

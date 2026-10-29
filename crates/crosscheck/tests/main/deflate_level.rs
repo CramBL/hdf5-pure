@@ -11,9 +11,9 @@ use hdf5_pure::FilterParameters;
 use rstest::rstest;
 
 #[rstest]
-#[case(DeflateLevel::Zero)]
-#[case(DeflateLevel::Six)]
-#[case(DeflateLevel::Nine)]
+#[case::level_zero(DeflateLevel::Zero)]
+#[case::level_six(DeflateLevel::Six)]
+#[case::level_nine(DeflateLevel::Nine)]
 fn reads_c_deflate_values_and_level_metadata(
     #[case] level: DeflateLevel,
     #[values(false, true)] shuffle: bool,
@@ -62,9 +62,9 @@ fn reads_c_deflate_values_and_level_metadata(
 
 #[rstest]
 #[cfg(feature = "__hdf5-1.10")]
-#[case(DeflateLevel::Zero)]
-#[case(DeflateLevel::Six)]
-#[case(DeflateLevel::Nine)]
+#[case::level_zero(DeflateLevel::Zero)]
+#[case::level_six(DeflateLevel::Six)]
+#[case::level_nine(DeflateLevel::Nine)]
 fn c_reads_requested_deflate_levels(
     #[case] level: DeflateLevel,
     #[values(false, true)] shuffle: bool,

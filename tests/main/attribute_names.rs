@@ -9,9 +9,9 @@ use rstest::rstest;
 use test_util::fractal_heap;
 
 #[rstest]
-#[case("", None)]
-#[case("prefix\0suffix", None)]
-#[case(&"x".repeat(usize::from(u16::MAX)), Some(usize::from(u16::MAX) + 1))]
+#[case::empty("", None)]
+#[case::embedded_null("prefix\0suffix", None)]
+#[case::encoded_size_above_u16(&"x".repeat(usize::from(u16::MAX)), Some(usize::from(u16::MAX) + 1))]
 fn finish_rejects_invalid_attribute_names(
     #[case] name: &str,
     #[case] encoded_size: Option<usize>,

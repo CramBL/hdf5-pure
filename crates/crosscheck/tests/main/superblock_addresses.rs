@@ -7,9 +7,9 @@ use rstest::rstest;
 use test_util::superblock;
 
 #[rstest]
-#[case(LibraryVersion::Earliest, 32, superblock::VERSION_0)]
-#[case(LibraryVersion::Earliest, 33, superblock::VERSION_1)]
-#[case(LibraryVersion::V18, 32, superblock::VERSION_2)]
+#[case::version_zero(LibraryVersion::Earliest, 32, superblock::VERSION_0)]
+#[case::version_one(LibraryVersion::Earliest, 33, superblock::VERSION_1)]
+#[case::version_two(LibraryVersion::V18, 32, superblock::VERSION_2)]
 fn libhdf5_superblock_retains_stored_addresses_across_open_and_edit(
     #[case] low: LibraryVersion,
     #[case] indexed_storage_k: u32,

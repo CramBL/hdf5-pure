@@ -20,18 +20,18 @@ use sha2::Sha256;
 const ATTR_SHA256: &str = "_provenance_sha256";
 
 #[rstest]
-#[case(AddressData::ContiguousStrings)]
-#[case(AddressData::ChunkedStrings)]
+#[case::contiguous_strings(AddressData::ContiguousStrings)]
+#[case::chunked_strings(AddressData::ChunkedStrings)]
 #[cfg_attr(
     any(feature = "deflate", feature = "fast-deflate"),
-    case(AddressData::DeflatedStrings)
+    case::deflated_strings(AddressData::DeflatedStrings)
 )]
-#[case(AddressData::PathReferences)]
-#[case(AddressData::ChunkedPathReferences)]
-#[case(AddressData::ResolvedReferences)]
+#[case::path_references(AddressData::PathReferences)]
+#[case::chunked_path_references(AddressData::ChunkedPathReferences)]
+#[case::resolved_references(AddressData::ResolvedReferences)]
 #[cfg_attr(
     any(feature = "deflate", feature = "fast-deflate"),
-    case(AddressData::ShuffledDeflatedStrings)
+    case::shuffled_deflated_strings(AddressData::ShuffledDeflatedStrings)
 )]
 fn provenance_hashes_final_unfiltered_element_bytes(
     #[case] data: AddressData,
@@ -201,9 +201,9 @@ enum Output {
 }
 
 #[rstest]
-#[case(&[])]
-#[case(&[""])]
-#[case(&["", "", ""])]
+#[case::empty_dataset(&[])]
+#[case::one_empty_string(&[""])]
+#[case::three_empty_strings(&["", "", ""])]
 fn empty_variable_length_values_verify(
     #[case] values: &[&str],
     #[values(false, true)] page: bool,
@@ -232,9 +232,9 @@ fn empty_variable_length_values_verify(
 }
 
 #[rstest]
-#[case(true, u64::MAX)]
-#[case(false, 0)]
-#[case(false, u64::MAX)]
+#[case::missing_path(true, u64::MAX)]
+#[case::null_address(false, 0)]
+#[case::undefined_address(false, u64::MAX)]
 fn provenance_preserves_missing_and_undefined_reference_values(
     #[case] path: bool,
     #[case] expected: u64,

@@ -30,12 +30,12 @@ use rstest::rstest;
 
 #[cfg(feature = "__hdf5-1.10")]
 #[rstest]
-#[case(Data::ChunkedStrings)]
-#[case(Data::ContiguousStrings)]
-#[case(Data::DeflatedStrings)]
-#[case(Data::PathReferences)]
-#[case(Data::ResolvedReferences)]
-#[case(Data::ShuffledDeflatedStrings)]
+#[case::chunked_strings(Data::ChunkedStrings)]
+#[case::contiguous_strings(Data::ContiguousStrings)]
+#[case::deflated_strings(Data::DeflatedStrings)]
+#[case::path_references(Data::PathReferences)]
+#[case::resolved_references(Data::ResolvedReferences)]
+#[case::shuffled_deflated_strings(Data::ShuffledDeflatedStrings)]
 fn c_reads_values_and_final_provenance(
     #[case] data: Data,
     #[values(false, true)] page: bool,

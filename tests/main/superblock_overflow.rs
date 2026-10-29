@@ -31,10 +31,10 @@ fn assert_root_address_overflow(err: Error) {
 }
 
 #[rstest]
-#[case(ReadBackend::Buffered)]
-#[case(ReadBackend::Streaming)]
-#[case(ReadBackend::Bytes)]
-#[case(ReadBackend::Source)]
+#[case::buffered(ReadBackend::Buffered)]
+#[case::streaming(ReadBackend::Streaming)]
+#[case::bytes(ReadBackend::Bytes)]
+#[case::source(ReadBackend::Source)]
 fn root_address_overflow_is_reported_when_navigation_resolves_it(#[case] backend: ReadBackend) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("overflowing-base-address.h5");

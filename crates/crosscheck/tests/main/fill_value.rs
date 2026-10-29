@@ -923,10 +923,10 @@ fn c_reads_pure_written_chunk_padding_under_fill_time_never() {
 
 #[cfg(target_pointer_width = "64")]
 #[rstest]
-#[case(false, false, 4_294_967_360, 7.0)]
-#[case(false, true, 4_294_967_360, 7.0)]
-#[case(true, false, 2, 13.0)]
-#[case(true, true, 2, 13.0)]
+#[case::unallocated_buffered(false, false, 4_294_967_360, 7.0)]
+#[case::unallocated_streaming(false, true, 4_294_967_360, 7.0)]
+#[case::allocated_buffered(true, false, 2, 13.0)]
+#[case::allocated_streaming(true, true, 2, 13.0)]
 fn row_windows_read_large_chunked_extents_written_by_the_c_library(
     #[case] allocated: bool,
     #[case] streaming: bool,

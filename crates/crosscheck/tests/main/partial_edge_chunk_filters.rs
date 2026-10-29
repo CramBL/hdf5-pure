@@ -189,18 +189,18 @@ fn read_c_creation_properties(path: &Path) -> (Vec<CFilter>, Option<ChunkOpts>) 
 }
 
 #[rstest]
-#[case(Filter::Shuffle, &[10], &[4])]
-#[case(Filter::Deflate, &[10], &[4])]
-#[case(Filter::Shuffle, &[5, 5], &[2, 3])]
-#[case(Filter::Deflate, &[5, 5], &[2, 3])]
-#[case(Filter::Shuffle, &[3], &[4])]
-#[case(Filter::Deflate, &[2, 2], &[4, 2])]
-#[case(Filter::Shuffle, &[12], &[4])]
-#[case(Filter::Deflate, &[6, 9], &[2, 3])]
-#[case(Filter::Deflate, &[4, 5], &[2, 3])]
-#[case(Filter::Shuffle, &[5, 6], &[2, 3])]
-#[case(Filter::ShuffleDeflate, &[10], &[4])]
-#[case(Filter::ShuffleDeflate, &[5, 5], &[2, 3])]
+#[case::shuffle_one_dimensional_edge(Filter::Shuffle, &[10], &[4])]
+#[case::deflate_one_dimensional_edge(Filter::Deflate, &[10], &[4])]
+#[case::shuffle_two_dimensional_edges(Filter::Shuffle, &[5, 5], &[2, 3])]
+#[case::deflate_two_dimensional_edges(Filter::Deflate, &[5, 5], &[2, 3])]
+#[case::shuffle_single_partial_chunk(Filter::Shuffle, &[3], &[4])]
+#[case::deflate_single_partial_chunk(Filter::Deflate, &[2, 2], &[4, 2])]
+#[case::shuffle_complete_one_dimensional(Filter::Shuffle, &[12], &[4])]
+#[case::deflate_complete_two_dimensional(Filter::Deflate, &[6, 9], &[2, 3])]
+#[case::deflate_partial_column(Filter::Deflate, &[4, 5], &[2, 3])]
+#[case::shuffle_partial_row(Filter::Shuffle, &[5, 6], &[2, 3])]
+#[case::combined_one_dimensional_edge(Filter::ShuffleDeflate, &[10], &[4])]
+#[case::combined_two_dimensional_edges(Filter::ShuffleDeflate, &[5, 5], &[2, 3])]
 fn a_dataset_exempting_its_partial_chunks_from_the_filters_reads_back(
     #[case] filter: Filter,
     #[case] shape: &[usize],

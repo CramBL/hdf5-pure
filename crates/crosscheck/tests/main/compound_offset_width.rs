@@ -16,13 +16,13 @@ use hdf5_pure::LibVer;
 use rstest::rstest;
 
 #[rstest]
-#[case(255)]
-#[case(256)]
-#[case(65_535)]
-#[case(65_536)]
-#[case(70_000)]
-#[case(16_777_215)]
-#[case(16_777_216)]
+#[case::below_two_byte_boundary(255)]
+#[case::two_byte_boundary(256)]
+#[case::below_three_byte_boundary(65_535)]
+#[case::three_byte_boundary(65_536)]
+#[case::interior_three_byte_size(70_000)]
+#[case::below_four_byte_boundary(16_777_215)]
+#[case::four_byte_boundary(16_777_216)]
 fn c_library_reads_compound_offset_widths(#[case] size: u32) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pure_compound.h5");
@@ -48,13 +48,13 @@ fn c_library_reads_compound_offset_widths(#[case] size: u32) {
 }
 
 #[rstest]
-#[case(255)]
-#[case(256)]
-#[case(65_535)]
-#[case(65_536)]
-#[case(70_000)]
-#[case(16_777_215)]
-#[case(16_777_216)]
+#[case::below_two_byte_boundary(255)]
+#[case::two_byte_boundary(256)]
+#[case::below_three_byte_boundary(65_535)]
+#[case::three_byte_boundary(65_536)]
+#[case::interior_three_byte_size(70_000)]
+#[case::below_four_byte_boundary(16_777_215)]
+#[case::four_byte_boundary(16_777_216)]
 fn pure_reader_reads_c_compound_offset_widths(#[case] size: u32) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c_compound.h5");

@@ -17,10 +17,10 @@ use test_util_hdf5::numeric;
 use test_util_hdf5::numeric::NumericClass;
 
 #[rstest]
-#[case(NumericClass::FixedPoint, false)]
-#[case(NumericClass::FloatingPoint, false)]
-#[case(NumericClass::FloatingPoint, true)]
-#[case(NumericClass::BitField, false)]
+#[case::fixed_point(NumericClass::FixedPoint, false)]
+#[case::floating_point(NumericClass::FloatingPoint, false)]
+#[case::floating_point_internal(NumericClass::FloatingPoint, true)]
+#[case::bit_field(NumericClass::BitField, false)]
 fn preserves_c_padding_through_nested_types(
     #[case] class: NumericClass,
     #[case] internal: bool,

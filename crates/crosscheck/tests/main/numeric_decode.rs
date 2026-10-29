@@ -197,9 +197,9 @@ fn reads_c_offset_integers(
 }
 
 #[rstest]
-#[case(1, 4, 4)]
-#[case(3, 7, 13)]
-#[case(8, 60, 4)]
+#[case::one_byte_high_nibble(1, 4, 4)]
+#[case::three_byte_offset_range(3, 7, 13)]
+#[case::eight_byte_high_nibble(8, 60, 4)]
 fn reads_c_signed_bit_ranges(
     #[case] size: u32,
     #[case] offset: u16,

@@ -87,10 +87,10 @@ fn malformed_chunks_are_rejected_before_cache_admission(
 }
 
 #[rstest]
-#[case(Some(vec![7_i32, 8]), 2, vec![7, 8])]
-#[case(Some(vec![7_i32, 8]), 1, vec![7])]
-#[case(Some(vec![7_i32, 8]), 3, vec![7, 8, 17])]
-#[case(None, 2, vec![17, 17])]
+#[case::complete_chunk(Some(vec![7_i32, 8]), 2, vec![7, 8])]
+#[case::truncated_edge(Some(vec![7_i32, 8]), 1, vec![7])]
+#[case::missing_final_element(Some(vec![7_i32, 8]), 3, vec![7, 8, 17])]
+#[case::absent_chunk(None, 2, vec![17, 17])]
 fn complete_edge_chunks_and_absent_chunks_retain_their_values(
     #[case] stored: Option<Vec<i32>>,
     #[case] extent: u64,

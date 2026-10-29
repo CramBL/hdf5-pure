@@ -1208,11 +1208,11 @@ fn an_explicit_bound_refuses_content_it_cannot_express() {
 
 /// Every spelling of one path identifies one object to a drop, as it does to a read.
 #[rstest]
-#[case("doomed/a")]
-#[case("/doomed/a")]
-#[case("doomed//a")]
-#[case("./doomed/a")]
-#[case("doomed/./a/")]
+#[case::relative("doomed/a")]
+#[case::absolute("/doomed/a")]
+#[case::repeated_separator("doomed//a")]
+#[case::leading_dot("./doomed/a")]
+#[case::interior_dot_and_trailing_separator("doomed/./a/")]
 fn every_spelling_of_a_drop_path_drops_one_object(#[case] spelling: &str) {
     let src = temp::temp_path("hdf5_pure_repack_drop_spelling_src.h5");
     let dst = temp::temp_path("hdf5_pure_repack_drop_spelling_dst.h5");
@@ -1242,9 +1242,9 @@ fn a_drop_path_is_recorded_in_its_root_relative_form() {
 }
 
 #[rstest]
-#[case("/")]
-#[case(".")]
-#[case("")]
+#[case::root_separator("/")]
+#[case::dot(".")]
+#[case::empty("")]
 fn a_drop_of_the_root_group_is_rejected(#[case] spelling: &str) {
     let src = temp::temp_path("hdf5_pure_repack_drop_root_src.h5");
     let dst = temp::temp_path("hdf5_pure_repack_drop_root_dst.h5");

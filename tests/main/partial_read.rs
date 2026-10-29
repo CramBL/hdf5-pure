@@ -1014,8 +1014,8 @@ fn region_reads_preserve_scalar_and_empty_dataspaces(
 }
 
 #[rstest]
-#[case(&[4_294_967_424, 0], &[4_294_967_360, 0], &[1, 0])]
-#[case(&[2, 0, 4_294_967_296], &[1, 0, 4_294_967_295], &[1, 0, 1])]
+#[case::wide_leading_coordinate(&[4_294_967_424, 0], &[4_294_967_360, 0], &[1, 0])]
+#[case::wide_trailing_coordinate(&[2, 0, 4_294_967_296], &[1, 0, 4_294_967_295], &[1, 0, 1])]
 fn empty_regions_preserve_file_width_coordinates(
     #[case] shape: &[u64],
     #[case] start: &[u64],

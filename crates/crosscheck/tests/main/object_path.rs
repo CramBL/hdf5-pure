@@ -31,15 +31,15 @@ fn nested_file(path: &std::path::Path) {
 }
 
 #[rstest]
-#[case("a/b")]
-#[case("/a/b")]
-#[case("a/b/")]
-#[case("/a/b/")]
-#[case("a//b")]
-#[case("///a///b///")]
-#[case("./a/b")]
-#[case("a/./b")]
-#[case("a/b/.")]
+#[case::relative("a/b")]
+#[case::absolute("/a/b")]
+#[case::trailing_separator("a/b/")]
+#[case::absolute_trailing_separator("/a/b/")]
+#[case::repeated_separator("a//b")]
+#[case::repeated_separators("///a///b///")]
+#[case::leading_dot("./a/b")]
+#[case::interior_dot("a/./b")]
+#[case::trailing_dot("a/b/.")]
 fn both_libraries_resolve_every_spelling_of_a_path_to_one_dataset(#[case] spelling: &str) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nested.h5");
@@ -62,10 +62,10 @@ fn both_libraries_resolve_every_spelling_of_a_path_to_one_dataset(#[case] spelli
 }
 
 #[rstest]
-#[case("/b", 2)]
-#[case("//b", 2)]
-#[case("/a/b", 1)]
-#[case("b", 1)]
+#[case::absolute_sibling("/b", 2)]
+#[case::repeated_root_separator("//b", 2)]
+#[case::absolute_nested("/a/b", 1)]
+#[case::relative_child("b", 1)]
 fn both_libraries_walk_a_path_opened_on_a_group_from_the_same_place(
     #[case] spelling: &str,
     #[case] value: i32,
@@ -147,9 +147,9 @@ fn both_libraries_read_two_dots_as_an_ordinary_link_name() {
 }
 
 #[rstest]
-#[case("", MajorErrorCode::Args, MinorErrorCode::BadValue)]
-#[case(".", MajorErrorCode::Link, MinorErrorCode::CantDelete)]
-#[case("./.", MajorErrorCode::Link, MinorErrorCode::CantDelete)]
+#[case::empty("", MajorErrorCode::Args, MinorErrorCode::BadValue)]
+#[case::dot(".", MajorErrorCode::Link, MinorErrorCode::CantDelete)]
+#[case::repeated_dots("./.", MajorErrorCode::Link, MinorErrorCode::CantDelete)]
 fn neither_library_deletes_a_group_through_a_path_that_spells_no_link(
     #[case] spelling: &str,
     #[case] major: MajorErrorCode,

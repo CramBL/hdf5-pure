@@ -161,8 +161,8 @@ impl AttributeForm {
 }
 
 #[rstest]
-#[case(0)]
-#[case(10)]
+#[case::no_fillers(0)]
+#[case::ten_fillers(10)]
 fn rust_reads_the_attribute_updated_by_c(#[case] fillers: i32) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("c-replacement.h5");

@@ -13,9 +13,9 @@ use test_util::object_header::v2;
 
 #[rstest]
 #[cfg(feature = "deflate")]
-#[case(DeflateLevel::Zero)]
-#[case(DeflateLevel::Six)]
-#[case(DeflateLevel::Nine)]
+#[case::level_zero(DeflateLevel::Zero)]
+#[case::level_six(DeflateLevel::Six)]
+#[case::level_nine(DeflateLevel::Nine)]
 fn deflate_preserves_typed_level(
     #[case] level: DeflateLevel,
     #[values(false, true)] shuffle: bool,
@@ -142,9 +142,9 @@ fn filter_accessors_report_malformed_metadata(
 }
 
 #[rstest]
-#[case(32000, FilterId::Lzf)]
-#[case(32013, FilterId::Zfp)]
-#[case(40000, FilterId::Custom(CustomFilterId::try_from(40000).unwrap()))]
+#[case::lzf(32000, FilterId::Lzf)]
+#[case::zfp(32013, FilterId::Zfp)]
+#[case::custom(40000, FilterId::Custom(CustomFilterId::try_from(40000).unwrap()))]
 fn opaque_filter_metadata_is_lossless(#[case] raw: u16, #[case] id: FilterId) {
     let values = vec![u32::MAX, 0, 7];
     let mut builder = FileBuilder::new();

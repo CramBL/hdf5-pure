@@ -239,11 +239,11 @@ fn eahd_stats_match_c_after_an_in_place_append() {
 }
 
 #[rstest]
-#[case(Boundary::Inline)]
-#[case(Boundary::Direct)]
-#[case(Boundary::Secondary)]
-#[case(Boundary::Paged)]
-#[case(Boundary::Page)]
+#[case::inline_boundary(Boundary::Inline)]
+#[case::direct_boundary(Boundary::Direct)]
+#[case::secondary_boundary(Boundary::Secondary)]
+#[case::paged_boundary(Boundary::Paged)]
+#[case::page_boundary(Boundary::Page)]
 fn nondefault_geometry_round_trips_through_rust_append_and_c_mutation(
     #[case] boundary: Boundary,
     #[values(2, 4, 8, 16)] minimum_pointers: u8,
@@ -351,28 +351,28 @@ fn nondefault_geometry_round_trips_through_rust_append_and_c_mutation(
 }
 
 #[rstest]
-#[case(
+#[case::zero_minimum_elements(
     HEADER_MINIMUM_ELEMENTS,
     0,
     FormatError::InvalidExtensibleArrayGeometry
 )]
-#[case(
+#[case::one_minimum_pointer(
     HEADER_MINIMUM_POINTERS,
     1,
     FormatError::InvalidExtensibleArrayGeometry
 )]
-#[case(
+#[case::three_minimum_pointers(
     HEADER_MINIMUM_POINTERS,
     3,
     FormatError::InvalidExtensibleArrayGeometry
 )]
-#[case(
+#[case::invalid_signature(
     HEADER_SIGNATURE_BYTE,
     b'X',
     FormatError::InvalidExtensibleArraySignature
 )]
-#[case(HEADER_VERSION, 1, FormatError::InvalidExtensibleArrayVersion(1))]
-#[case(HEADER_CLIENT, 2, FormatError::InvalidExtensibleArrayClient(2))]
+#[case::unsupported_version(HEADER_VERSION, 1, FormatError::InvalidExtensibleArrayVersion(1))]
+#[case::unsupported_client(HEADER_CLIENT, 2, FormatError::InvalidExtensibleArrayClient(2))]
 fn invalid_headers_are_rejected_before_append_writes(
     #[case] field: usize,
     #[case] value: u8,

@@ -18,15 +18,15 @@ use rstest::rstest;
 use test_util_hdf5::file;
 
 #[rstest]
-#[case("échelle")]
-#[case("温度")]
-#[case(".")]
-#[case("/")]
-#[case("a/b")]
-#[case("./a//b/")]
-#[case("../name")]
-#[case(" space:[]\n")]
-#[case(&"x".repeat(usize::from(u16::MAX) - 1))]
+#[case::latin_utf8("échelle")]
+#[case::cjk_utf8("温度")]
+#[case::literal_dot(".")]
+#[case::root_separator("/")]
+#[case::path_separator("a/b")]
+#[case::path_punctuation("./a//b/")]
+#[case::parent_path("../name")]
+#[case::whitespace(" space:[]\n")]
+#[case::maximum_length(&"x".repeat(usize::from(u16::MAX) - 1))]
 fn attribute_name_punctuation_whitespace_and_maximum_length_round_trip(
     #[case] name: &str,
     #[values(false, true)] dense: bool,
@@ -236,9 +236,9 @@ fn staged_attribute_names_declare_encoding_independently_of_value_type(
 }
 
 #[rstest]
-#[case("xx", 0, false)]
-#[case("é", 1, false)]
-#[case("é", 0, true)]
+#[case::ascii_compact("xx", 0, false)]
+#[case::utf8_compact("é", 1, false)]
+#[case::utf8_dense("é", 0, true)]
 fn c_reads_attributes_at_the_utf8_compact_storage_boundary(
     #[case] name: &str,
     #[case] trim: usize,
@@ -283,10 +283,10 @@ fn c_reads_attributes_at_the_utf8_compact_storage_boundary(
 }
 
 #[rstest]
-#[case("scale", AttrValue::I32(99))]
-#[case("échelle", AttrValue::I32(99))]
-#[case("scale", AttrValue::VarLenString("new".into()))]
-#[case("échelle", AttrValue::VarLenString("new".into()))]
+#[case::ascii_integer("scale", AttrValue::I32(99))]
+#[case::utf8_integer("échelle", AttrValue::I32(99))]
+#[case::ascii_vlen_string("scale", AttrValue::VarLenString("new".into()))]
+#[case::utf8_vlen_string("échelle", AttrValue::VarLenString("new".into()))]
 fn c_reads_attribute_name_encoding_after_compact_edits(
     #[case] name: &str,
     #[case] value: AttrValue,

@@ -19,11 +19,11 @@ use hdf5_pure::VerifyResult;
 use rstest::rstest;
 
 #[rstest]
-#[case(Index::Single)]
-#[case(Index::Fixed)]
-#[case(Index::Extensible)]
-#[case(Index::Edge)]
-#[case(Index::Multidimensional)]
+#[case::single_chunk(Index::Single)]
+#[case::fixed_array(Index::Fixed)]
+#[case::extensible_array(Index::Extensible)]
+#[case::partial_edge(Index::Edge)]
+#[case::multidimensional(Index::Multidimensional)]
 fn chunked_references_resolve_every_target(
     #[case] index: Index,
     #[values(Filters::None, Filters::Shuffle, Filters::Deflate, Filters::Combined)]
@@ -142,9 +142,9 @@ fn chunked_references_resolve_every_target(
 }
 
 #[rstest]
-#[case(false, 0)]
-#[case(false, u64::MAX)]
-#[case(true, u64::MAX)]
+#[case::null_address(false, 0)]
+#[case::undefined_address(false, u64::MAX)]
+#[case::missing_path(true, u64::MAX)]
 fn chunked_references_preserve_null_and_undefined_values(
     #[case] path: bool,
     #[case] expected: u64,
@@ -171,8 +171,8 @@ fn chunked_references_preserve_null_and_undefined_values(
 }
 
 #[rstest]
-#[case(false)]
-#[case(true)]
+#[case::unsupported_filter(false)]
+#[case::v18_bounds(true)]
 fn chunked_reference_errors_preserve_the_destination(#[case] old_bounds: bool) {
     let mut builder = FileBuilder::new();
     if old_bounds {

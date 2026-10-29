@@ -37,10 +37,10 @@ fn c_library_reads_swmr_appends_after_close() {
 }
 
 #[rstest]
-#[case(LibraryVersion::Earliest, 32, SuperblockVersion::Zero)]
-#[case(LibraryVersion::Earliest, 33, SuperblockVersion::One)]
-#[case(LibraryVersion::V18, 33, SuperblockVersion::Two)]
-#[case(LibraryVersion::V110, 33, SuperblockVersion::Three)]
+#[case::version_zero(LibraryVersion::Earliest, 32, SuperblockVersion::Zero)]
+#[case::version_one(LibraryVersion::Earliest, 33, SuperblockVersion::One)]
+#[case::version_two(LibraryVersion::V18, 33, SuperblockVersion::Two)]
+#[case::version_three(LibraryVersion::V110, 33, SuperblockVersion::Three)]
 fn a_superblock_reports_the_flags_the_c_library_wrote(
     #[case] libver: LibraryVersion,
     #[case] indexed_storage_k: u32,

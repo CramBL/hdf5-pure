@@ -277,10 +277,10 @@ fn c_reads_a_file_written_at_a_lower_bound_of_latest() {
 }
 
 #[rstest::rstest]
-#[case(0)]
-#[case(512)]
-#[case(1024)]
-#[case(2048)]
+#[case::no_userblock(0)]
+#[case::minimum_userblock(512)]
+#[case::one_kibibyte(1024)]
+#[case::two_kibibytes(2048)]
 fn userblock_sizes_roundtrip_through_both_libraries(#[case] raw_size: u64) {
     let directory = tempfile::tempdir().unwrap();
     let pure_path = directory.path().join("pure.h5");

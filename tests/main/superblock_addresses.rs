@@ -9,10 +9,10 @@ use test_util::superblock;
 use test_util_hdf5::reader::ReadBackend;
 
 #[rstest]
-#[case(ReadBackend::Buffered)]
-#[case(ReadBackend::Streaming)]
-#[case(ReadBackend::Bytes)]
-#[case(ReadBackend::Source)]
+#[case::buffered(ReadBackend::Buffered)]
+#[case::streaming(ReadBackend::Streaming)]
+#[case::bytes(ReadBackend::Bytes)]
+#[case::source(ReadBackend::Source)]
 fn opened_superblock_retains_encoded_addresses(
     #[case] backend: ReadBackend,
     #[values(LibVer::V18, LibVer::V110)] libver: LibVer,
@@ -32,10 +32,10 @@ fn opened_superblock_retains_encoded_addresses(
 }
 
 #[rstest]
-#[case(ReadBackend::Buffered)]
-#[case(ReadBackend::Streaming)]
-#[case(ReadBackend::Bytes)]
-#[case(ReadBackend::Source)]
+#[case::buffered(ReadBackend::Buffered)]
+#[case::streaming(ReadBackend::Streaming)]
+#[case::bytes(ReadBackend::Bytes)]
+#[case::source(ReadBackend::Source)]
 fn stored_root_and_children_resolve_in_userblock_image(
     #[case] backend: ReadBackend,
     #[values(LibVer::V18, LibVer::V110)] libver: LibVer,
@@ -70,8 +70,8 @@ fn stored_root_and_children_resolve_in_userblock_image(
 }
 
 #[rstest]
-#[case(LibVer::V18)]
-#[case(LibVer::V110)]
+#[case::version_18(LibVer::V18)]
+#[case::version_110(LibVer::V110)]
 fn root_relocation_stores_relative_address_in_userblock_image(#[case] libver: LibVer) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("relocation.h5");

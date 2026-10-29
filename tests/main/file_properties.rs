@@ -458,10 +458,10 @@ fn an_editing_session_honors_the_library_version_bound() {
 }
 
 #[rstest::rstest]
-#[case(0)]
-#[case(512)]
-#[case(1024)]
-#[case(2048)]
+#[case::no_userblock(0)]
+#[case::minimum_userblock(512)]
+#[case::one_kibibyte(1024)]
+#[case::two_kibibytes(2048)]
 fn userblock_size_sets_signature_offset_in_buffered_streamed_and_owned_output(
     #[case] raw_size: u64,
 ) {

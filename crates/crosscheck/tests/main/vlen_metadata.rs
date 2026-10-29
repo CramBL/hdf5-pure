@@ -30,9 +30,9 @@ use rstest::rstest;
 use test_util_hdf5::numeric;
 
 #[rstest]
-#[case(StringPadding::NullTerminate, H5T_str_t::H5T_STR_NULLTERM)]
-#[case(StringPadding::NullPad, H5T_str_t::H5T_STR_NULLPAD)]
-#[case(StringPadding::SpacePad, H5T_str_t::H5T_STR_SPACEPAD)]
+#[case::null_terminate(StringPadding::NullTerminate, H5T_str_t::H5T_STR_NULLTERM)]
+#[case::null_pad(StringPadding::NullPad, H5T_str_t::H5T_STR_NULLPAD)]
+#[case::space_pad(StringPadding::SpacePad, H5T_str_t::H5T_STR_SPACEPAD)]
 fn reads_c_variable_length_string_metadata(
     #[case] padding: StringPadding,
     #[case] c_padding: H5T_str_t,
@@ -138,9 +138,9 @@ fn reads_c_variable_length_string_metadata(
 }
 
 #[rstest]
-#[case([2, 0, 0], FormatError::InvalidVariableLengthSubtype(2))]
-#[case([0, 0x10, 0], FormatError::InvalidVariableLengthReservedBits(0x00_1000))]
-#[case([0x10, 1, 0], FormatError::InvalidVariableLengthSequenceMetadata { padding: 1, charset: 1 })]
+#[case::invalid_subtype([2, 0, 0], FormatError::InvalidVariableLengthSubtype(2))]
+#[case::reserved_bits([0, 0x10, 0], FormatError::InvalidVariableLengthReservedBits(0x00_1000))]
+#[case::sequence_string_metadata([0x10, 1, 0], FormatError::InvalidVariableLengthSequenceMetadata { padding: 1, charset: 1 })]
 fn reports_variable_length_metadata_errors_through_the_public_api(
     #[case] flags: [u8; 3],
     #[case] expected: FormatError,
@@ -285,11 +285,11 @@ fn preserves_c_variable_length_string_bases(#[case] descriptor: Option<TypeDescr
 }
 
 #[rstest]
-#[case(false, 1, 8, 0, false, false)]
-#[case(true, 1, 8, 0, false, false)]
-#[case(false, 1, 7, 1, true, true)]
-#[case(true, 7, 33, 17, true, false)]
-#[case(false, 1, 1, 0, false, true)]
+#[case::unsigned_byte(false, 1, 8, 0, false, false)]
+#[case::signed_byte(true, 1, 8, 0, false, false)]
+#[case::unsigned_offset_with_padding(false, 1, 7, 1, true, true)]
+#[case::signed_wide_offset_low_padding(true, 7, 33, 17, true, false)]
+#[case::unsigned_single_bit_high_padding(false, 1, 1, 0, false, true)]
 fn preserves_c_variable_length_integer_string_bases(
     #[case] signed: bool,
     #[case] size: u32,

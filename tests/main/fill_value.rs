@@ -416,9 +416,9 @@ fn fill_time_invalid_flag_is_rejected() {
 }
 
 #[rstest]
-#[case(FillTime::Alloc)]
-#[case(FillTime::Never)]
-#[case(FillTime::IfSet)]
+#[case::on_allocation(FillTime::Alloc)]
+#[case::never(FillTime::Never)]
+#[case::if_set(FillTime::IfSet)]
 fn fill_time_selection_round_trips(#[case] fill_time: FillTime) {
     let file = file_builder::build_and_open(|fb| {
         fb.create_dataset("contig")

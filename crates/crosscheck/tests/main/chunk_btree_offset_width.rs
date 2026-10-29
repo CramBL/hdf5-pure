@@ -39,14 +39,14 @@ fn write_c_chunked_file(path: &Path, sizeof_addr: Sizeof, sizeof_size: Sizeof) {
 }
 
 #[rstest]
-#[case(Sizeof::Bytes2, Sizeof::Bytes2)]
-#[case(Sizeof::Bytes4, Sizeof::Bytes4)]
-#[case(Sizeof::Bytes2, Sizeof::Bytes8)]
-#[case(Sizeof::Bytes4, Sizeof::Bytes8)]
-#[case(Sizeof::Bytes8, Sizeof::Bytes2)]
-#[case(Sizeof::Bytes8, Sizeof::Bytes4)]
-#[case(Sizeof::Bytes4, Sizeof::Bytes2)]
-#[case(Sizeof::Bytes2, Sizeof::Bytes4)]
+#[case::offset_two_length_two(Sizeof::Bytes2, Sizeof::Bytes2)]
+#[case::offset_four_length_four(Sizeof::Bytes4, Sizeof::Bytes4)]
+#[case::offset_two_length_eight(Sizeof::Bytes2, Sizeof::Bytes8)]
+#[case::offset_four_length_eight(Sizeof::Bytes4, Sizeof::Bytes8)]
+#[case::offset_eight_length_two(Sizeof::Bytes8, Sizeof::Bytes2)]
+#[case::offset_eight_length_four(Sizeof::Bytes8, Sizeof::Bytes4)]
+#[case::offset_four_length_two(Sizeof::Bytes4, Sizeof::Bytes2)]
+#[case::offset_two_length_four(Sizeof::Bytes2, Sizeof::Bytes4)]
 fn read_chunked_dataset_with_various_offset_and_length_sizes(
     #[case] sizeof_addr: Sizeof,
     #[case] sizeof_size: Sizeof,
