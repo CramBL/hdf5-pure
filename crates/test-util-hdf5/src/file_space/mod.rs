@@ -27,6 +27,7 @@ use crate::dataset::Unlimited;
 use crate::file_space_oracle::OracleError;
 
 pub mod persisted;
+pub mod publication;
 
 /// Creates a writable session after committing deletions of `holes` alternating datasets.
 ///

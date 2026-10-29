@@ -20,6 +20,7 @@ mod extents;
 mod lifecycle;
 mod managers;
 mod metadata;
+mod resources;
 mod transient;
 
 #[rstest]

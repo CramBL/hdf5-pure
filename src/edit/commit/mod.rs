@@ -18,7 +18,7 @@ pub(super) mod plan;
 mod publish;
 mod rollback;
 
-/// Selects buffering for ownership or staged publication.
+/// Selects manager sizing and buffering for allocation or staged publication.
 #[derive(Clone, Copy)]
 pub(in crate::edit) enum PublicationPurpose {
     /// Drains every buffering mode before confirming immediate allocation ownership.
