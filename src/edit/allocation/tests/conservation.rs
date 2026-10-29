@@ -1,4 +1,4 @@
-//! Checks persisted ownership across completed full-chunk append prefixes.
+//! Checks persisted ownership across completed file writes and resizes.
 //!
 //! Fixtures use persistent FSM_AGGR or PAGE storage with threshold one, a zero base address, and
 //! eight-byte addresses and lengths. Tests derive complete live allocations from parsed standard
@@ -56,6 +56,8 @@ use crate::source::RangeReader;
 test_util_hdf5::hdf5_1_10_tests! {
     mod native_crosschecks;
 }
+
+mod transient;
 
 #[rstest]
 #[case::immediate(WritePath::Immediate)]
@@ -567,12 +569,14 @@ impl Fact {
 pub(super) struct Observation {
     pub(super) free: Coverage,
     large_free: Coverage,
+    raw_free: Coverage,
     page_size: Option<u64>,
     pub(super) live: Vec<Fact>,
     pub(super) values: Vec<i32>,
     eof: u64,
     index_defined: bool,
     element_blocks: Vec<Interval>,
+    element_size: Option<usize>,
     pub(super) chunks: Vec<(Vec<u64>, u64, u64, u32)>,
 }
 
@@ -634,6 +638,19 @@ impl Observation {
                 }),
         );
         let page_size = (info.strategy == FileSpaceStrategy::Page).then_some(info.page_size.get());
+        let raw_free = Coverage::new(
+            report
+                .managers()
+                .iter()
+                .filter(|manager| {
+                    manager.role() == crate::free_sections::FreeSpaceManagerRole::PageSmallRawData
+                })
+                .flat_map(|manager| {
+                    manager.free_sections().sections().iter().map(|section| {
+                        Interval::new(section.address(), section.length().get()).unwrap()
+                    })
+                }),
+        );
 
         let mut live = metadata
             .iter()
@@ -704,6 +721,7 @@ impl Observation {
         ));
         let mut index_defined = false;
         let mut element_blocks = Vec::new();
+        let mut element_size = None;
         for header in headers {
             live.extend(
                 object_header::read_oh_chunks(&source, header, addresses)
@@ -744,6 +762,12 @@ impl Observation {
                         ..
                     } => {
                         index_defined = true;
+                        element_size = Some(usize::from(
+                            extensible_array::read_header(&source, widths, address)
+                                .unwrap()
+                                .header()
+                                .element_size,
+                        ));
                         element_blocks.extend(index_element_blocks(&source, widths, address));
                         live.extend(
                             extensible_array::index_spans(&source, widths, address)
@@ -802,12 +826,14 @@ impl Observation {
         Self {
             free,
             large_free,
+            raw_free,
             page_size,
             live,
             values,
             eof: context.superblock().eof_address,
             index_defined,
             element_blocks,
+            element_size,
             chunks,
         }
     }
@@ -850,8 +876,8 @@ impl Observation {
     }
 
     fn unique_large_interval(&self, hole: &Coverage) -> (Interval, u64) {
-        let candidates = self.large_free.intersection(hole);
-        let available = candidates
+        let available = self
+            .large_free
             .intervals()
             .iter()
             .map(|interval| {
@@ -864,22 +890,27 @@ impl Observation {
                 }
             })
             .collect::<Vec<_>>();
-        let candidate = *available
+        let eligible = Coverage::new(
+            available
+                .into_iter()
+                .chain(self.raw_free.intervals().iter().copied()),
+        )
+        .intersection(hole);
+        let candidate = *eligible
+            .intervals()
             .iter()
             .max_by_key(|interval| interval.length())
             .unwrap();
         let length = candidate.length() - self.page_size.unwrap_or(128);
         assert!(length > 8192);
         assert!(
-            self.large_free
+            self.free
+                .difference(&Coverage::new([candidate]))
                 .intervals()
                 .iter()
-                .all(|other| !Coverage::new([candidate])
-                    .intersection(&Coverage::new([*other]))
-                    .is_empty()
-                    || other.length() < length),
-            "another eligible interval fits {length}: {:?}",
-            self.large_free
+                .all(|other| other.length() < length),
+            "another free interval fits {length}: {:?}",
+            self.free
         );
         (candidate, length)
     }
@@ -908,6 +939,19 @@ enum Control {
 /// Selects PAGE when `paged` is `true`, and FSM_AGGR otherwise. Sets the layout's EA header address
 /// to undefined when `deferred` is `true`, and enables Fletcher32 when `filtered` is `true`.
 pub(super) fn pure_fixture(path: &Path, paged: bool, deferred: bool, filtered: bool) -> Coverage {
+    pure_fixture_with(path, paged, deferred, |target| {
+        if filtered {
+            target.with_fletcher32();
+        }
+    })
+}
+
+fn pure_fixture_with(
+    path: &Path,
+    paged: bool,
+    deferred: bool,
+    configure: impl FnOnce(&mut crate::DatasetBuilder),
+) -> Coverage {
     let mut builder = FileBuilder::new();
     builder.with_file_space_settings(
         FileSpaceSettings::new(if paged {
@@ -927,12 +971,10 @@ pub(super) fn pure_fixture(path: &Path, paged: bool, deferred: bool, filtered: b
             .create_dataset("d")
             .with_i32_data(&(0..i32::try_from(CHUNK).unwrap()).collect::<Vec<_>>())
     };
+    configure(target);
     target
         .with_chunks(&[u64::try_from(CHUNK).unwrap()])
         .with_maxshape(&[MaxExtent::Unlimited]);
-    if filtered {
-        target.with_fletcher32();
-    }
     builder
         .create_dataset("scratch")
         .with_u8_data(&vec![7; HOLE]);
@@ -1033,13 +1075,13 @@ fn force_unique_reuse(path: &Path, hole: &Coverage, history: &[Fact], paged: boo
     assert_eq!(starts.len(), 1);
     assert_eq!(u64::try_from(starts[0]).unwrap(), actual.start().get());
     assert_eq!(actual.start().get(), candidate.start());
-    let mut history = history.to_vec();
-    history.push(Fact::new(
+    let mut allocations = vec![Fact::new(
         AllocationKind::Payload,
         actual.start().get(),
         length,
-    ));
-    Observation::read(&published).inspect("unique interval reused", 0, hole, &history);
+    )];
+    allocations.extend_from_slice(history);
+    Observation::read(&published).inspect("unique interval reused", 0, hole, &allocations);
 }
 
 fn replace_free_sections(original: &[u8], coverage: &Coverage) -> Vec<u8> {
