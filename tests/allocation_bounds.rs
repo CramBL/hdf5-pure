@@ -34,6 +34,7 @@ use hdf5_pure::ChunkIndex;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
+use hdf5_pure::MessageType as ParsedMessageType;
 use hdf5_pure::OffsetWidth;
 use hdf5_pure::RepackOptions;
 use hdf5_pure::StoredAddress;
@@ -43,7 +44,15 @@ use hdf5_pure::{
     MaxExtent, MemoryStrategy, SyncPolicy,
 };
 use hdf5_pure_core::__private::StoredAddressExt;
-use hdf5_pure_format::__private::{GroupLinkStorage, LinkInfoMessage, OwnedLink, OwnedLinkTarget};
+use hdf5_pure_format::__private::AccessMode;
+use hdf5_pure_format::__private::ChunkIndexLayout;
+use hdf5_pure_format::__private::DataLayout;
+use hdf5_pure_format::__private::FormatWidths;
+use hdf5_pure_format::__private::GroupLinkStorage;
+use hdf5_pure_format::__private::LinkInfoMessage;
+use hdf5_pure_format::__private::ObjectHeader;
+use hdf5_pure_format::__private::OwnedLink;
+use hdf5_pure_format::__private::OwnedLinkTarget;
 use rstest::rstest;
 use test_util::allocation;
 use test_util::data_layout;
@@ -53,6 +62,7 @@ use test_util::image::Image;
 use test_util::link_message::HardLink;
 use test_util::object_header::Message;
 use test_util::object_header::MessageType;
+use test_util::object_header::v2;
 use test_util::object_header::v2::Header;
 use test_util::superblock::v2::Superblock;
 use test_util::widths::Widths;
@@ -184,6 +194,312 @@ fn measure_partial_replacements(
     drop(dataset);
     file.close().unwrap();
     measured
+}
+
+#[rstest]
+#[case::bounded_flat(MemoryStrategy::Bounded, FileSpaceStrategy::FsmAggr, "bounded_flat")]
+#[case::bounded_page(MemoryStrategy::Bounded, FileSpaceStrategy::Page, "bounded_page")]
+#[case::mirrored_flat(MemoryStrategy::Mirrored, FileSpaceStrategy::FsmAggr, "mirrored_flat")]
+#[case::mirrored_page(MemoryStrategy::Mirrored, FileSpaceStrategy::Page, "mirrored_page")]
+fn persistent_append_memory_is_bounded_as_data_and_session_duration_grow(
+    #[case] backing: MemoryStrategy,
+    #[case] strategy: FileSpaceStrategy,
+    #[case] region: &str,
+    #[values(false, true)] active: bool,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let PersistentAppendMemory {
+        first: small_first,
+        warm: small,
+    } = measure_persistent_appends(
+        &directory.path().join("small.h5"),
+        backing,
+        strategy,
+        active,
+        32,
+        16,
+        &format!("{region}_{active}_small"),
+    );
+    let PersistentAppendMemory {
+        first: large_first,
+        warm: large,
+    } = measure_persistent_appends(
+        &directory.path().join("large.h5"),
+        backing,
+        strategy,
+        active,
+        8192,
+        512,
+        &format!("{region}_{active}_large"),
+    );
+    let PersistentAppendMemory {
+        first: deferred, ..
+    } = measure_persistent_appends(
+        &directory.path().join("deferred.h5"),
+        backing,
+        strategy,
+        active,
+        0,
+        16,
+        &format!("{region}_{active}_deferred"),
+    );
+    assert!(
+        large_first.live_bytes <= small_first.live_bytes + 8192,
+        "{small_first}; {large_first}"
+    );
+    assert!(
+        large_first.peak_bytes <= small_first.peak_bytes + 32 * 1024,
+        "{small_first}; {large_first}"
+    );
+    assert!(
+        large_first.bytes <= small_first.bytes + 64 * 1024,
+        "{small_first}; {large_first}"
+    );
+    assert!(
+        deferred.live_bytes <= small_first.live_bytes + 8192,
+        "{small_first}; {deferred}"
+    );
+    assert!(
+        deferred.peak_bytes <= small_first.peak_bytes + 32 * 1024,
+        "{small_first}; {deferred}"
+    );
+    let (control, positive) = measure(&format!("{region}_{active}_dataset_copy_control"), || {
+        vec![7_i32; 8192 * 64]
+    });
+    assert!(positive.blocks > 0, "{positive}");
+    assert!(positive.live_bytes >= 8192 * 64 * 4, "{positive}");
+    assert!(
+        positive.peak_bytes > small.peak_bytes + 32 * 1024,
+        "{positive}; {small}"
+    );
+    assert!(
+        positive.peak_bytes > small_first.peak_bytes + 32 * 1024,
+        "{positive}; {small_first}"
+    );
+    assert!(
+        positive.live_bytes > small_first.live_bytes + 8192,
+        "{positive}; {small_first}"
+    );
+    drop(control);
+    assert!(large.blocks > small.blocks * 8, "{small}; {large}");
+    assert!(large.bytes >= 512 * 64 * 4, "{large}");
+    assert!(large.live_bytes < 32 * 1024, "{large}");
+    assert!(
+        large.live_bytes <= small.live_bytes + 8192,
+        "{small}; {large}"
+    );
+    assert!(
+        large.peak_bytes <= small.peak_bytes + 32 * 1024,
+        "{small}; {large}"
+    );
+    assert!(
+        large.bytes / 512 <= small.bytes / 16 + 16 * 1024,
+        "{small}; {large}"
+    );
+}
+
+/// Allocations during the first append and a subsequent append loop.
+struct PersistentAppendMemory {
+    /// Includes dataset lookup, appender construction, and retained handles after the first append.
+    first: allocation::Measured,
+    /// Includes repeated fixed batches and unrelated attribute commits with an active appender.
+    warm: allocation::Measured,
+}
+
+/// Measures first and repeated 256-byte appends into an interior free hole.
+///
+/// Excludes fixture creation, file opening, mirror residency, free-section queries, and value
+/// checks from both regions. The persistence threshold is 4096 bytes, and the free-section count
+/// is bounded before and after the loop. The separate copy control allocates the large dataset's
+/// payload and exceeds the permitted peak and retained-memory growth.
+fn measure_persistent_appends(
+    path: &Path,
+    backing: MemoryStrategy,
+    strategy: FileSpaceStrategy,
+    active: bool,
+    chunks: usize,
+    appends: usize,
+    region: &str,
+) -> PersistentAppendMemory {
+    const CHUNK: usize = 64;
+    let initial = chunks * CHUNK;
+    let mut builder = FileBuilder::new();
+    builder.with_file_space_settings(
+        FileSpaceSettings::new(strategy)
+            .with_persistence(true)
+            .with_threshold(4096),
+    );
+    let target = builder.create_dataset("d");
+    if initial == 0 {
+        target.with_unallocated_storage(hdf5_pure::make_i32_type(), &[0]);
+    } else {
+        target.with_i32_data(&vec![7; initial]);
+    }
+    target
+        .with_chunks(&[CHUNK as u64])
+        .with_maxshape(&[MaxExtent::Unlimited]);
+    builder
+        .create_dataset("scratch")
+        .with_u8_data(&vec![3; 2 * 1024 * 1024]);
+    builder.create_dataset("ceiling").with_u8_data(&[9; 8192]);
+    builder.write(path).unwrap();
+    let options = FileAccessProperties::new()
+        .with_memory_strategy(backing)
+        .with_chunk_cache(ChunkCacheConfig::disabled())
+        .with_sync_policy(SyncPolicy::OnClose);
+    let file = File::open_rw_with_options(path, options).unwrap();
+    file.root().delete("scratch").unwrap();
+    file.commit().unwrap();
+    file.close().unwrap();
+    if initial == 0 {
+        defer_resource_index(path);
+    }
+    let file = File::open_rw_with_options(path, options).unwrap();
+    assert_eq!(
+        file.edit_backing().unwrap(),
+        match backing {
+            MemoryStrategy::Bounded => EditBacking::Bounded,
+            MemoryStrategy::Mirrored => EditBacking::Mirrored,
+            _ => panic!("resource test requires an explicit backing"),
+        }
+    );
+    let ((mut dataset, mut buffer), first) = measure(&format!("{region}_first"), || {
+        let mut dataset = file.dataset("d").unwrap();
+        let mut buffer =
+            active.then(|| file.dataset("d").unwrap().into_buffered_appender().unwrap());
+        if let Some(buffer) = &mut buffer {
+            buffer.append(&[7; CHUNK]).unwrap();
+            buffer.flush().unwrap();
+        } else {
+            dataset.append(&[7; CHUNK]).unwrap();
+        }
+        (dataset, buffer)
+    });
+    assert!(first.blocks > 0, "{first}");
+    assert!(first.bytes >= (CHUNK * 4) as u64, "{first}");
+    assert!(first.live_bytes > 0, "{first}");
+    let initialized = file.dataset("d").unwrap();
+    assert_eq!(initialized.chunks().unwrap().len(), chunks + 1);
+    assert_eq!(initialized.read_i32().unwrap(), vec![7; initial + CHUNK]);
+    drop(initialized);
+    let sections = file.reusable_free_sections().unwrap().section_count();
+    assert!(sections <= 16, "sections before appends: {sections}");
+    let length = std::fs::metadata(path).unwrap().len();
+    let ((), measured) = measure(region, || {
+        for round in 0..appends {
+            if let Some(buffer) = &mut buffer {
+                buffer.append(&[7; CHUNK]).unwrap();
+                buffer.flush().unwrap();
+                if (round + 1) % 16 == 0 {
+                    file.dataset("ceiling")
+                        .unwrap()
+                        .set_attr("cycle", AttrValue::I32(i32::try_from(round + 1).unwrap()))
+                        .unwrap();
+                    file.commit().unwrap();
+                }
+            } else {
+                dataset.append(&[7; CHUNK]).unwrap();
+            }
+        }
+    });
+    assert!(measured.blocks >= appends as u64, "{measured}");
+    assert!(measured.bytes >= (appends * CHUNK * 4) as u64, "{measured}");
+    assert!(
+        file.reusable_free_sections().unwrap().section_count() <= 16,
+        "sections: {sections} -> {}",
+        file.reusable_free_sections().unwrap().section_count()
+    );
+    assert!(std::fs::metadata(path).unwrap().len() <= length + 64 * 1024);
+    assert_eq!(
+        dataset.read_i32().unwrap(),
+        vec![7; initial + (appends + 1) * CHUNK]
+    );
+    assert_eq!(
+        file.dataset("ceiling").unwrap().read_u8().unwrap(),
+        [9; 8192]
+    );
+    if let Some(buffer) = buffer {
+        buffer.finish().unwrap();
+        assert_eq!(
+            file.dataset("ceiling").unwrap().attrs().unwrap()["cycle"],
+            AttrValue::I32(i32::try_from(appends).unwrap())
+        );
+    }
+    drop(dataset);
+    file.close().unwrap();
+    let file = File::open(path).unwrap();
+    assert_eq!(
+        file.dataset("d").unwrap().read_i32().unwrap(),
+        vec![7; initial + (appends + 1) * CHUNK]
+    );
+    PersistentAppendMemory {
+        first,
+        warm: measured,
+    }
+}
+
+/// Sets the empty fixture's stored EA header address to undefined before reopening.
+fn defer_resource_index(path: &Path) {
+    let file = File::open(path).unwrap();
+    let dataset = file.dataset("d").unwrap();
+    assert_eq!(dataset.shape().unwrap(), [0]);
+    let widths = FormatWidths::from_sizes(
+        file.superblock().offset_size.get(),
+        file.superblock().length_size.get(),
+    )
+    .unwrap();
+    drop(dataset);
+    drop(file);
+    let mut bytes = std::fs::read(path).unwrap();
+    let mut candidates = test_util::bytes::signature_offsets(&bytes, v2::SIGNATURE)
+        .into_iter()
+        .filter_map(|header_at| {
+            ObjectHeader::parse(
+                &bytes,
+                AccessMode::ReadOnly,
+                header_at,
+                widths.offsets.get(),
+                widths.lengths.get(),
+            )
+            .unwrap()
+            .messages
+            .into_iter()
+            .find(|message| {
+                message.msg_type == ParsedMessageType::DATA_LAYOUT
+                    && matches!(
+                        DataLayout::parse_with_widths(&message.data, widths).unwrap(),
+                        DataLayout::Chunked {
+                            index: ChunkIndexLayout::ExtensibleArray { .. },
+                            ..
+                        }
+                    )
+            })
+            .map(|message| (header_at, message.data))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(candidates.len(), 1);
+    let (header_at, mut layout) = candidates.pop().unwrap();
+    let (original, pointer) = DataLayout::parse_with_ea_address(&layout, widths).unwrap();
+    assert!(matches!(
+        original,
+        DataLayout::Chunked {
+            index: ChunkIndexLayout::ExtensibleArray {
+                address: Some(_),
+                ..
+            },
+            ..
+        }
+    ));
+    layout[pointer.unwrap()].copy_from_slice(&data_layout::UNDEFINED_ADDRESS.to_le_bytes());
+    assert!(matches!(
+        DataLayout::parse_with_widths(&layout, widths).unwrap(),
+        DataLayout::Chunked {
+            index: ChunkIndexLayout::ExtensibleArray { address: None, .. },
+            ..
+        }
+    ));
+    v2::replace_message(&mut bytes, header_at, MessageType::DATA_LAYOUT, &layout);
+    std::fs::write(path, bytes).unwrap();
 }
 
 #[rstest]

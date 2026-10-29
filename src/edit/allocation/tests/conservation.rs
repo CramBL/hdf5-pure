@@ -63,6 +63,7 @@ mod lifecycle;
 mod managers;
 mod metadata;
 mod references;
+mod resources;
 mod transient;
 
 #[rstest]
@@ -620,6 +621,11 @@ impl Observation {
     /// allocation exceeds published EOF or physical file length. Also panics for a nonzero base
     /// address, widths other than eight bytes, disabled persistence, or a threshold other than one.
     pub(super) fn read(bytes: &[u8]) -> Self {
+        Self::read_with_threshold(bytes, 1)
+    }
+
+    /// Parses fixture ownership and values, asserting the supplied persistence threshold.
+    fn read_with_threshold(bytes: &[u8], threshold: u64) -> Self {
         let file = File::from_bytes(bytes.to_vec()).unwrap();
         let located = crate::superblock::read(bytes).unwrap();
         let context = FileContext::new(located).unwrap();
@@ -633,7 +639,7 @@ impl Observation {
             .unwrap()
             .unwrap();
         assert!(info.persist);
-        assert_eq!(info.threshold, 1);
+        assert_eq!(info.threshold, threshold);
         let (report, metadata) = PersistedManagerSet::read(
             &source,
             widths,
@@ -990,6 +996,17 @@ fn pure_fixture_with(
     deferred: bool,
     configure: impl FnOnce(&mut crate::DatasetBuilder),
 ) -> Coverage {
+    pure_fixture_with_threshold(path, paged, deferred, 1, configure)
+}
+
+/// Writes an interior-hole fixture with the supplied persistence threshold.
+fn pure_fixture_with_threshold(
+    path: &Path,
+    paged: bool,
+    deferred: bool,
+    threshold: u64,
+    configure: impl FnOnce(&mut crate::DatasetBuilder),
+) -> Coverage {
     let mut builder = FileBuilder::new();
     builder.with_file_space_settings(
         FileSpaceSettings::new(if paged {
@@ -998,7 +1015,7 @@ fn pure_fixture_with(
             FileSpaceStrategy::FsmAggr
         })
         .with_persistence(true)
-        .with_threshold(1),
+        .with_threshold(threshold),
     );
     let target = if deferred {
         builder
@@ -1072,7 +1089,7 @@ fn pure_fixture_with(
         v2::replace_message(&mut bytes, header, FixtureMessage::DATA_LAYOUT, &layout);
         fs::write(path, bytes).unwrap();
     }
-    let snapshot = Observation::read(&fs::read(path).unwrap());
+    let snapshot = Observation::read_with_threshold(&fs::read(path).unwrap(), threshold);
     assert_eq!(snapshot.index_defined, !deferred);
     assert!(hole.difference(&snapshot.free).is_empty());
     hole
