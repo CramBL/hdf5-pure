@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Pure-Rust HDF5 library: read, write, and edit files in place (WASM-compatible, no C dependencies)"
-keywords = ["hdf5", "serialization", "scientific", "no-std", "wasm"]
+keywords = ["hdf5", "matlab", "scientific", "no-std", "wasm"]
 categories = ["science", "encoding", "filesystem", "wasm", "no-std"]
 # What the published crate holds: the library, the examples, the guide pages
 # `src/_guide/` includes into the documentation, and the documents a user reads. Tests, test data
@@ -59,6 +59,8 @@ edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/CramBL/hdf5-pure"
+keywords = ["hdf5", "scientific", "no-std"]
+categories = ["science", "no-std"]
 
 # Workspace crates, the published ones at the exact release, and versions several crates share.
 [workspace.dependencies]

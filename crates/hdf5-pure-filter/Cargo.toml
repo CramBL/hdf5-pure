@@ -5,6 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords = ["hdf5", "compression", "filters", "scientific", "no-std"]
+categories = ["compression", "encoding", "science", "no-std"]
 description = "Pure-Rust HDF5 chunk filter codecs and pipelines"
 include = ["/src/**", "/LICENSE-*", "/README.md"]
 

@@ -5,6 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords = ["hdf5", "serialization", "parser", "scientific", "no-std"]
+categories = ["encoding", "parser-implementations", "science", "no-std"]
 description = "Pure-Rust HDF5 on-disk structures and codecs"
 include = ["/src/**", "/LICENSE-*", "/README.md"]
 
