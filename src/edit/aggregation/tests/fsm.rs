@@ -29,9 +29,10 @@ use crate::edit::AppendTarget;
 use crate::object_path::ObjectPathBuf;
 use crate::source::MetadataCacheConfig;
 
-use super::AggregateSpace;
-use super::AllocationClass;
-use super::WriteEngine;
+use crate::edit::aggregation::AggregateSpace;
+use crate::edit::aggregation::AllocationClass;
+use crate::edit::aggregation::ClassicAggregators;
+use crate::edit::aggregation::WriteEngine;
 
 #[rstest]
 #[case::staged_mirror(false, MemoryStrategy::Mirrored, 0)]
@@ -206,7 +207,7 @@ fn accounting_coalesces_spare_with_adjacent_reusable_bytes() {
     assert_eq!(engine.image.len(), address);
     assert_eq!(
         engine.aggregation.unwrap().policy,
-        super::ClassicAggregators::new()
+        ClassicAggregators::new()
     );
     assert_eq!(engine.space.reusable_sections().collect::<Vec<_>>(), []);
 }

@@ -34,9 +34,9 @@ use crate::source::MetadataCacheConfig;
 use crate::source::Source;
 use crate::type_builders::DatasetBuilder;
 
-use super::AllocationClass;
-use super::ClassicAggregators;
-use super::Extent;
+use crate::edit::aggregation::AllocationClass;
+use crate::edit::aggregation::ClassicAggregators;
+use crate::edit::aggregation::Extent;
 
 #[rstest]
 #[case::mirror(MemoryStrategy::Mirrored, 0)]
@@ -264,10 +264,9 @@ fn persistent_settlement_failure_preserves_publication_order(
     engine.delete(&ObjectPathBuf::parse("scratch")).unwrap();
     engine.commit().unwrap();
     let vacant = engine.image.append(&[0; 16_384]).unwrap();
-    engine.space.return_allocation(
-        super::Extent::new(vacant, 16_384).unwrap(),
-        AllocationClass::Raw,
-    );
+    engine
+        .space
+        .return_allocation(Extent::new(vacant, 16_384).unwrap(), AllocationClass::Raw);
     engine.synchronize_aggregates().unwrap();
     let before = engine.aggregation;
     let prior = engine.image.len();
@@ -329,7 +328,7 @@ fn abandoned_persistent_spare_uses_threshold(#[case] threshold: u64, #[case] tra
             .unwrap();
         engine.place(placement, &bytes).unwrap();
     }
-    let extent = super::Extent::new(start + 2000, 48).unwrap();
+    let extent = Extent::new(start + 2000, 48).unwrap();
     assert_eq!(
         engine.space.reusable_sections().collect::<Vec<_>>(),
         if tracked { vec![extent] } else { vec![] }

@@ -27,7 +27,7 @@ use crate::source::MetadataCacheConfig;
 use crate::source::Source;
 use crate::type_builders::DatasetBuilder;
 
-use super::AllocationClass;
+use crate::edit::aggregation::AllocationClass;
 
 #[rstest]
 #[case::small(4, 4, 8)]
