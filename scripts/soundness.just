@@ -12,7 +12,7 @@ MIRI_MEMORY_FEATURES := "std"
 # Cache, assembly, read, and encoding families in the memory Miri batch.
 MIRI_MEMORY_FAMILIES := "nosync chunked_read::tests::dense_assembly data_read::primitive::tests primitive_bytes::tests"
 
-default: miri-selection miri heap-baseline
+default: miri-selection miri allocation-coverage heap-baseline
 
 # Execute each Miri family natively and fail if its selection is empty.
 miri-selection:
@@ -64,7 +64,13 @@ repack-profile MODE="memory" SUBTREES="512" ROUNDS="5":
 
 # Measure raw staging, retained encoding, and completed output for filtered creation.
 filtered-chunk-memory:
-    cargo test --locked -p hdf5-pure --lib chunked_write::tests::allocation -- --nocapture
+    cargo nextest run --locked -p hdf5-pure --features std --lib --no-tests fail --ignore-default-filter --success-output immediate -E 'test(/^chunked_write::tests::allocation::/)'
+
+# Execute each supported-host allocation suite and fail if its selection is empty.
+allocation-coverage: filtered-chunk-memory
+    cargo nextest run --locked -p hdf5-pure --features std --test allocation_bounds --no-tests fail --ignore-default-filter
+    cargo nextest run --locked -p hdf5-pure --features std --lib --no-tests fail --ignore-default-filter -E 'test(/^edit::object_header::tests::a_growing_extension_rewrite_keeps_the_allocation_count/)'
+    cargo nextest run --locked -p hdf5-pure --features std --lib --no-tests fail --ignore-default-filter -E 'test(/^file_writer::tests::allocation::/)'
 
 # Measure filtered dataset creation throughput for the shared chunk workloads.
 filtered-chunk-bench *ARGS:
