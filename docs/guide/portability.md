@@ -141,7 +141,7 @@ Byte-level crosscheck tests check the interoperability. They compare the bytes
 this crate emits against fixtures the reference toolchain produced, so a
 regression in the on-disk layout fails the test suite. The same discipline backs
 the optional [ZFP filter](crate::_guide::compression), where
-`src/zfp_crosscheck.rs` compares against `h5py` with `hdf5plugin`, and the
+`src/filters/tests/zfp_reference.rs` compares against `h5py` with `hdf5plugin`, and the
 MATLAB `.mat` path. The [`mat` module](crate::mat) has the cross-tool detail.
 
 The 1.8 output format is the one claim those tests cannot make, since every
@@ -154,7 +154,7 @@ build. Only MATLAB itself confirms one, and `examples/octave/check_format.m`
 runs that check under it.
 
 The [LZF filter](crate::_guide::compression) has independent decoder vectors
-from h5py. `src/lzf_crosscheck.rs` checks their decoded bytes and compares writer
+from h5py. `src/filters/tests/lzf_reference.rs` checks their decoded bytes and compares writer
 pipeline parameters with the recorded metadata. The native interoperability
 suite reads fresh writer output through liblzf, checks values and pipeline
 metadata, and rewrites incompressible data. After checked flush and close, it

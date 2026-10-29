@@ -18,7 +18,7 @@ mixed magnitudes, and partial shapes.
 
 ## Consumers and invariants
 
-`src/zfp_crosscheck.rs` consumes every manifest pair. It compares encoded bytes
+`src/filters/tests/zfp_reference.rs` consumes every manifest pair. It compares encoded bytes
 with the reference stream and checks decoding against the raw values with a
 type- and rate-dependent tolerance. The manifest contains 39 pairs across
 `f32`, `f64`, `i32`, and `i64`, with ranks one through four. Fourteen pairs use

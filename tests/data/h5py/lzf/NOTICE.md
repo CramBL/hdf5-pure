@@ -29,7 +29,7 @@ the listed suffixes to the case name.
 | `f64_shuffle_lzf` | None | `.h5` | `f64[512]`, shuffle followed by LZF |
 | `i64_multichunk` | None | `.h5` | `i64[300]`, 128-element chunks with a partial final chunk |
 
-`src/lzf_crosscheck.rs` consumes the manifest and the five stored/raw pairs. It
+`src/filters/tests/lzf_reference.rs` consumes the manifest and the five stored/raw pairs. It
 checks reference decoding or raw fallback, pure codec roundtrip results, and pipeline
 parameters. `tests/main/lzf_roundtrip.rs` reads all three retained containers
 against their raw values. It also uses `u8_noise.raw.bin` for fresh-writer
