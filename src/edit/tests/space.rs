@@ -5,9 +5,12 @@ use core::num::NonZeroU64;
 use std::path::Path;
 
 use hdf5_pure_format::__private as format;
-use hdf5_pure_format::__private::{
-    BTreeV2Layout, FractalHeapHeader, FreeSpaceManagerHeader, HugeObjectRecordContext,
-};
+#[cfg(feature = "deflate")]
+use hdf5_pure_format::__private::BTreeV2Layout;
+use hdf5_pure_format::__private::FractalHeapHeader;
+use hdf5_pure_format::__private::FreeSpaceManagerHeader;
+#[cfg(feature = "deflate")]
+use hdf5_pure_format::__private::HugeObjectRecordContext;
 use hdf5_pure_space::__private::AGGREGATE_BLOCK_SIZE;
 use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::Extent as FreeExtent;
@@ -18,6 +21,7 @@ use hdf5_pure_space::__private::PageType;
 use hdf5_pure_space::__private::PagedSections;
 use hdf5_pure_space::__private::SessionSpace;
 use rstest::rstest;
+#[cfg(feature = "deflate")]
 use test_util::btree_v2;
 use test_util::fractal_heap;
 use test_util::widths::Widths;
@@ -57,6 +61,7 @@ use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::FileSpaceStrategy;
 use crate::file_writer::LENGTH_SIZE;
 use crate::file_writer::OFFSET_SIZE;
+#[cfg(feature = "deflate")]
 use crate::fractal_heap_storage::FractalHeapAllocation;
 use crate::fractal_heap_storage::FractalHeapStorage;
 use crate::fractal_heap_storage::FractalHeapStorageError;

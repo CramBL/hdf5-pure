@@ -21,6 +21,7 @@ use crate::chunked_write;
 use crate::convert;
 use crate::data_layout::ChunkedLayoutFlags;
 use crate::fill_value::FillPattern;
+use crate::filters;
 use crate::filters::ChunkContext;
 use crate::filters::FilterScratch;
 use crate::prepared_chunk::ChunkEncoding;
@@ -113,6 +114,10 @@ fn measure_staging(workload: Workload, raw: &[u8], names: [&'static str; 2]) {
         collected_raw.blocks,
         u64::try_from(collected.len() + 1).unwrap()
     );
+    assert_eq!(collected.len(), chunk_count(workload));
+    for (index, bytes) in collected.iter().enumerate() {
+        assert_eq!(*bytes, expected_chunk(workload, raw, index));
+    }
     drop(collected);
 
     let (gathered, incremental_raw) = allocation::measure(names[1], || {
@@ -137,6 +142,10 @@ fn measure_staging(workload: Workload, raw: &[u8], names: [&'static str; 2]) {
         assert_eq!(scratch, 0);
     } else {
         assert_eq!(scratch, traversal.byte_len());
+        assert_eq!(
+            gathered,
+            expected_chunk(workload, raw, chunk_count(workload) - 1)
+        );
     }
     drop(gathered);
 
@@ -203,6 +212,31 @@ fn measure_encoding(workload: Workload, raw: &[u8], names: [&'static str; 2]) {
             .map(PreparedChunk::bytes)
             .collect::<Vec<_>>()
     );
+    assert_eq!(encoded.len(), chunk_count(workload));
+    assert_eq!(collected_encoded.len(), chunk_count(workload));
+    for (index, (incremental, collected)) in encoded.iter().zip(&collected_encoded).enumerate() {
+        let expected = expected_chunk(workload, raw, index);
+        assert_eq!(
+            filters::decompress_chunk(
+                incremental.bytes(),
+                &pipeline,
+                context,
+                incremental.filter_mask()
+            )
+            .unwrap(),
+            expected
+        );
+        assert_eq!(
+            filters::decompress_chunk(
+                collected.bytes(),
+                &pipeline,
+                context,
+                collected.filter_mask()
+            )
+            .unwrap(),
+            expected
+        );
+    }
     let chunks = encoded.len();
     let retained = encoded
         .iter()
@@ -226,4 +260,34 @@ fn measure_encoding(workload: Workload, raw: &[u8], names: [&'static str; 2]) {
         "{}: collected encoding {collected_encoding}; incremental encoding {encoding}; retained encoded {retained} bytes",
         name
     );
+}
+
+fn chunk_count(workload: Workload) -> usize {
+    usize::try_from(
+        workload.shape[0].div_ceil(workload.chunks[0])
+            * workload.shape[1].div_ceil(workload.chunks[1]),
+    )
+    .unwrap()
+}
+
+fn expected_chunk(workload: Workload, raw: &[u8], index: usize) -> Vec<u8> {
+    let rows = usize::try_from(workload.shape[0]).unwrap();
+    let columns = usize::try_from(workload.shape[1]).unwrap();
+    let chunk_rows = usize::try_from(workload.chunks[0]).unwrap();
+    let chunk_columns = usize::try_from(workload.chunks[1]).unwrap();
+    let grid_columns = columns.div_ceil(chunk_columns);
+    let first_row = index / grid_columns * chunk_rows;
+    let first_column = index % grid_columns * chunk_columns;
+    let mut expected = Vec::with_capacity(chunk_rows * chunk_columns * 4);
+    for row in first_row..first_row + chunk_rows {
+        for column in first_column..first_column + chunk_columns {
+            if row < rows && column < columns {
+                let offset = (row * columns + column) * 4;
+                expected.extend_from_slice(&raw[offset..offset + 4]);
+            } else {
+                expected.extend_from_slice(&workload.fill.to_le_bytes());
+            }
+        }
+    }
+    expected
 }
