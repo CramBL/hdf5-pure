@@ -10,8 +10,8 @@ use super::allocation::AllocationClass;
 use super::extent::Extent;
 use super::list::{self, FreeList};
 use super::paged::{
-    FreeClass, PageTransition, PageType, PagedAllocationSnapshot, PagedEdit, PagedPostFree,
-    PagedSections, PagedTail,
+    FreeClass, PageTransition, PageType, PagedAllocationSnapshot, PagedAppendSnapshot, PagedEdit,
+    PagedPostFree, PagedSections, PagedTail,
 };
 use super::persistence::ManagerKind;
 
@@ -44,6 +44,18 @@ pub enum SessionSpaceSnapshot {
     Disabled,
     Flat(FreeList),
     Paged(PagedAllocationSnapshot),
+}
+
+/// Stores reusable-space state for an append rollback after truncation.
+///
+/// For PAGE, includes all free lists, their cached totals, the tail page type, and pending padding.
+pub enum SessionAppendSnapshot {
+    /// Reusable allocation is disabled.
+    Disabled,
+    /// The unpaged free list and its cached total.
+    Flat(FreeList),
+    /// The complete PAGE state.
+    Paged(PagedAppendSnapshot),
 }
 
 /// Merges two address-sorted extent iterators without allocating another snapshot.
@@ -625,6 +637,65 @@ impl SessionSpace {
         }
     }
 
+    /// Copies the reusable-space state preceding an append.
+    ///
+    /// For PAGE, includes the tail page type and pending padding. The caller restores this state
+    /// through [`Self::restore_append`] after discarding unpublished writes and truncating any
+    /// appended bytes.
+    pub fn append_snapshot(&self) -> SessionAppendSnapshot {
+        match self {
+            Self::Disabled => SessionAppendSnapshot::Disabled,
+            Self::Flat(space) => SessionAppendSnapshot::Flat(space.free.clone()),
+            Self::Paged(space) => SessionAppendSnapshot::Paged(space.paged.append_snapshot()),
+        }
+    }
+
+    /// Restores reusable-space state after truncating an unpublished append.
+    ///
+    /// The caller discards unpublished writes and truncates any appended bytes before restoration.
+    /// For PAGE, restores all free lists, their cached totals, the tail page type, and pending
+    /// padding. The tracking threshold is unchanged.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::{FileSpacePageSize, FileSpaceStrategy};
+    /// use hdf5_pure_space::__private::{
+    ///     AllocationClass, Extent, ManagerKind, PageTransition, PageType, SessionSpace,
+    /// };
+    ///
+    /// let mut space = SessionSpace::from_strategy(
+    ///     Some(FileSpaceStrategy::Page), 1, FileSpacePageSize::DEFAULT,
+    /// );
+    /// let free = Extent::new(4_112, 100).unwrap();
+    /// space.seed_persisted(Some(ManagerKind::PagedSmallRaw), free);
+    /// space.record_transition(PageType::Raw, PageTransition::Unchanged);
+    /// let snapshot = space.append_snapshot();
+    /// assert_eq!(space.allocate(50, AllocationClass::Raw), Extent::new(4_112, 50));
+    /// let padding = space.page_padding(8_208)?.unwrap();
+    /// space.record_page_padding(padding);
+    /// space.record_transition(PageType::Meta, PageTransition::Unchanged);
+    /// space.restore_append(snapshot);
+    /// assert_eq!(space.reusable_sections().collect::<Vec<_>>(), [free]);
+    /// assert_eq!(space.paged_tail_type(), Some(Some(PageType::Raw)));
+    /// assert_eq!(space.pending_padding(PageType::Raw), Some([].as_slice()));
+    /// # Ok::<(), hdf5_pure_core::FormatError>(())
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if `snapshot` belongs to a different strategy.
+    pub fn restore_append(&mut self, snapshot: SessionAppendSnapshot) {
+        match (self, snapshot) {
+            (Self::Disabled, SessionAppendSnapshot::Disabled) => {}
+            (Self::Flat(space), SessionAppendSnapshot::Flat(free)) => space.free = free,
+            (Self::Paged(space), SessionAppendSnapshot::Paged(paged)) => {
+                space.paged.restore_append(paged);
+            }
+            _ => debug_assert!(false, "a session append snapshot changed strategy"),
+        }
+    }
+
     /// Returns PAGE section state when this session is paged.
     pub fn paged_sections(&self) -> Option<PagedSections> {
         match self {
@@ -658,6 +729,52 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+
+    #[rstest]
+    #[case::disabled(FileSpaceStrategy::None)]
+    #[case::flat(FileSpaceStrategy::FsmAggr)]
+    #[case::page(FileSpaceStrategy::Page)]
+    fn append_snapshot_restores_the_session_strategy_state(#[case] strategy: FileSpaceStrategy) {
+        let mut space = SessionSpace::from_strategy(Some(strategy), 1, FileSpacePageSize::DEFAULT);
+        let original = Extent::new(4_112, 100).unwrap();
+        space.seed_persisted(Some(ManagerKind::PagedSmallRaw), original);
+        space.record_transition(PageType::Raw, PageTransition::Unchanged);
+        let snapshot = space.append_snapshot();
+        let prior = space.reusable_sections().collect::<Vec<_>>();
+        let tail = space.paged_tail_type();
+        let allocated = space.allocate(50, AllocationClass::Raw);
+        assert_eq!(
+            allocated,
+            if strategy == FileSpaceStrategy::None {
+                None
+            } else {
+                Extent::new(4_112, 50)
+            }
+        );
+        if let Some(transition) = space.page_padding(8_208).unwrap() {
+            space.record_page_padding(transition);
+        }
+        space.record_transition(PageType::Meta, PageTransition::Unchanged);
+        space.restore_append(snapshot);
+        assert_eq!(space.reusable_sections().collect::<Vec<_>>(), prior);
+        assert_eq!(space.paged_tail_type(), tail);
+        assert_eq!(
+            space.pending_padding(PageType::Raw),
+            if strategy == FileSpaceStrategy::Page {
+                Some([].as_slice())
+            } else {
+                None
+            }
+        );
+        assert_eq!(
+            space.pending_padding(PageType::Meta),
+            if strategy == FileSpaceStrategy::Page {
+                Some([].as_slice())
+            } else {
+                None
+            }
+        );
+    }
 
     #[test]
     fn flat_mutations_update_and_restore_cached_total() {

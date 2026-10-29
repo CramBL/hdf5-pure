@@ -3,6 +3,7 @@ use rstest::rstest;
 
 use super::*;
 
+mod append_rollback;
 mod conservation;
 mod io;
 mod lifecycle;
