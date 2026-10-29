@@ -48,6 +48,7 @@ use crate::edit::Placement;
 use crate::edit::TailPlacement;
 use crate::edit::WriteEngine;
 use crate::edit::aggregation::AggregateSpace;
+use crate::edit::commit::PublicationPurpose;
 use crate::edit::reclaim;
 use crate::error::Error;
 use crate::error::FormatError;
@@ -1088,7 +1089,15 @@ fn a_flat_tail_takes_exactly_the_extent_it_records() {
         );
         let free_before = free_total(&s);
         let eoa = s.end_of_allocation().unwrap().get();
-        let (post, at, tail_len, _) = s.flat_tail_layout(eoa, &[], &[], EXT_LEN, widths, None);
+        let (post, at, tail_len, _) = s.flat_tail_layout(
+            eoa,
+            &[],
+            &[],
+            EXT_LEN,
+            widths,
+            None,
+            PublicationPurpose::Commit,
+        );
         let free_after = free_total(&s);
         let managers = ManagerSections::flat(post.extents().iter().copied());
         let written = EXT_LEN + free_space_manager::manager_blocks_len(&managers, widths);

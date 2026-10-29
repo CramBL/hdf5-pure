@@ -470,7 +470,15 @@ impl WriteEngine {
             None
         };
         let (post, placed_at, tail_len, eoa) = recycled.unwrap_or_else(|| {
-            self.flat_tail_layout(current_eoa, &to_free, &old_blocks, ext_len, widths, limit)
+            self.flat_tail_layout(
+                current_eoa,
+                &to_free,
+                &old_blocks,
+                ext_len,
+                widths,
+                limit,
+                purpose,
+            )
         });
         if placed_at.is_none() && placement == TailPlacement::ReuseOnly {
             // The shrink pass requires a reusable allocation below the old tail.
@@ -666,6 +674,10 @@ impl WriteEngine {
     /// After bounded retries, the caller appends. Spare reservation bytes remain owned by
     /// the manager allocation until it is superseded.
     ///
+    /// During allocation publication with a nonempty manager set, the writer rounds the complete
+    /// extension and manager length to a power of two when representable, through
+    /// [`flat_tail_capacity`]. The writer serializes spare bytes as section-list padding.
+    ///
     /// The caller restores its allocation snapshot after a failure before publication.
     pub(in crate::edit) fn flat_tail_layout(
         &mut self,
@@ -675,6 +687,7 @@ impl WriteEngine {
         ext_len: u64,
         widths: FormatWidths,
         limit: Option<u64>,
+        purpose: PublicationPurpose,
     ) -> (FreeList, Option<u64>, u64, u64) {
         /// Limits reservation retries when the serialized manager length increases.
         const ROUNDS: usize = 4;
@@ -682,7 +695,7 @@ impl WriteEngine {
         // Size the append fallback before trying reservations from reusable space.
         let (probe, _) = self.flat_post_free(current_eoa, to_free, old_blocks);
         let managers = ManagerSections::flat(probe.extents().iter().copied());
-        let appended_len = ext_len + free_space_manager::manager_blocks_len(&managers, widths);
+        let appended_len = flat_tail_capacity(ext_len, &managers, widths, purpose);
         let mut proposed = appended_len;
 
         for _ in 0..ROUNDS {
@@ -701,7 +714,7 @@ impl WriteEngine {
             // above the reservation's end.
             let eoa = post.release_trailing_run(eoa, proposed);
             let managers = ManagerSections::flat(post.extents().iter().copied());
-            let len = ext_len + free_space_manager::manager_blocks_len(&managers, widths);
+            let len = flat_tail_capacity(ext_len, &managers, widths, purpose);
             if post.is_empty() && len < proposed {
                 self.space
                     .return_allocation(reserved, AllocationClass::Metadata);
@@ -1025,5 +1038,65 @@ impl WriteEngine {
             (PublicationPurpose::Allocation, SyncPolicy::OnClose) => self.image.flush(),
             _ => self.barrier(),
         }
+    }
+}
+
+/// Returns the flat publication allocation length with optional spare capacity.
+///
+/// For [`PublicationPurpose::Allocation`] with a nonempty manager set, rounds the complete
+/// extension and manager length up to a power of two. Returns the serialized length if rounding
+/// would overflow or the section-list capacity exceeds the file's length width. For staged
+/// commits and empty manager sets, also returns the serialized length.
+fn flat_tail_capacity(
+    ext_len: u64,
+    managers: &[ManagerSections],
+    widths: FormatWidths,
+    purpose: PublicationPurpose,
+) -> u64 {
+    let len = ext_len + free_space_manager::manager_blocks_len(managers, widths);
+    if managers.is_empty() || matches!(purpose, PublicationPurpose::Commit) {
+        return len;
+    }
+    let Some(capacity) = len.checked_next_power_of_two() else {
+        return len;
+    };
+    let overhead = ext_len + hdf5_pure_format::__private::free_space_manager_header_len(widths);
+    let maximum = u64::MAX >> (64 - 8 * widths.lengths.get());
+    if capacity - overhead > maximum {
+        return len;
+    }
+    capacity
+}
+
+#[cfg(test)]
+mod tests {
+    use hdf5_pure_space::__private::Extent;
+    use hdf5_pure_space::__private::ManagerSections;
+    use rstest::rstest;
+
+    use super::PublicationPurpose;
+    use crate::free_space_manager;
+    use crate::width::FormatWidths;
+
+    #[rstest]
+    #[case::empty(1000, 0, 8, PublicationPurpose::Allocation, None)]
+    #[case::staged(1000, 1, 8, PublicationPurpose::Commit, None)]
+    #[case::narrow(1000, 1, 2, PublicationPurpose::Allocation, Some(2048))]
+    #[case::wide(1000, 1, 8, PublicationPurpose::Allocation, Some(2048))]
+    #[case::length_limit(60_000, 1000, 2, PublicationPurpose::Allocation, None)]
+    fn flat_tail_capacity_preserves_representable_manager_allocations(
+        #[case] ext_len: u64,
+        #[case] sections: u64,
+        #[case] lengths: u8,
+        #[case] purpose: PublicationPurpose,
+        #[case] capacity: Option<u64>,
+    ) {
+        let widths = FormatWidths::from_sizes(8, lengths).unwrap();
+        let managers = ManagerSections::flat((0..sections).map(|i| Extent::new(i * 2, 1).unwrap()));
+        let minimum = ext_len + free_space_manager::manager_blocks_len(&managers, widths);
+        let actual = super::flat_tail_capacity(ext_len, &managers, widths, purpose);
+        assert_eq!(actual, capacity.unwrap_or(minimum));
+        assert!(actual >= minimum);
+        assert!(actual < 2 * minimum);
     }
 }

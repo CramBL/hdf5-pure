@@ -1,9 +1,12 @@
-//! Checks append read costs and publication-state lifetimes.
+//! Checks append I/O costs and publication-state lifetimes.
 //!
 //! Tests compare read costs for fixed batches after growing the dataset and extending the session.
-//! For these measurements, tests use a persistence threshold of 4096 bytes and bound the free-section
-//! count. Tests repeat an append after clearing the located-dataset cache to measure the metadata
+//! The read measurements use a persistence threshold of 4096 bytes and bound the free-section
+//! count. Tests repeat an append after clearing the located-dataset cache to measure metadata
 //! traversal as a control.
+//!
+//! Write measurements use a threshold of one byte and separate or batched full-chunk appends.
+//! Tests bound recorded metadata bytes and free-section counts and check allocation conservation.
 
 use std::fs;
 use std::path::Path;
@@ -12,8 +15,13 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use rstest::rstest;
+use test_util::allocation_oracle::Coverage;
+use test_util::disk_log;
+use test_util::disk_log::DiskOp;
+use test_util_hdf5::file_space::publication;
 
 use crate::File;
+use crate::FileAccessProperties;
 use crate::MemoryStrategy;
 use crate::SyncPolicy;
 use crate::edit::WriteEngine;
@@ -335,4 +343,72 @@ fn assert_session_state(engine: &WriteEngine) {
     assert_eq!(engine.located.len(), 1);
     assert!(engine.resolved.len() <= 1);
     engine.context.allocations.before_reference().unwrap();
+}
+
+#[rstest]
+#[case::separate_2000(2000, 1)]
+#[case::batched_2000(2000, 250)]
+#[case::separate_8000(8000, 1)]
+#[case::batched_8000(8000, 1000)]
+fn threshold_one_manager_writes_and_sections_remain_bounded(
+    #[case] chunks: usize,
+    #[case] batch: usize,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    threshold_one_workload(&directory.path().join("threshold-one.h5"), chunks, batch);
+}
+
+/// Checks write and free-section bounds for `chunks` new chunks in batches of `batch` chunks.
+///
+/// Records only the append loop and subtracts one copy of the appended payload from the written
+/// bytes. Checks complete values, live/free separation, and conservation of the initial free space.
+pub(super) fn threshold_one_workload(path: &Path, chunks: usize, batch: usize) {
+    publication::session(path).close().unwrap();
+    let initial = Observation::read(&fs::read(path).unwrap());
+    let file = File::open_rw_with_options(
+        path,
+        FileAccessProperties::new()
+            .with_sync_policy(SyncPolicy::OnClose)
+            .with_memory_strategy(MemoryStrategy::Bounded),
+    )
+    .unwrap();
+    let initial_sections = file.reusable_free_sections().unwrap().section_count();
+    let values = publication::values(chunks);
+    let mut dataset = file.dataset("d").unwrap();
+    disk_log::start();
+    for values in values.chunks(batch * publication::CHUNK) {
+        dataset.append(values).unwrap();
+    }
+    let recording = disk_log::finish();
+    drop(dataset);
+    let written: usize = recording
+        .operations
+        .iter()
+        .map(|operation| match operation {
+            DiskOp::Write { bytes, .. } => bytes.len(),
+            DiskOp::SetLen(_) => 0,
+        })
+        .sum();
+    let metadata = written.checked_sub(values.len() * 4).unwrap();
+    let sections = file.reusable_free_sections().unwrap().section_count();
+    file.close().unwrap();
+    publication::verify(path, chunks);
+    let final_state = Observation::read(&fs::read(path).unwrap());
+    let live = Coverage::new(final_state.live.iter().map(|fact| fact.range));
+    assert_eq!(
+        initial.free.difference(&live),
+        final_state.free.intersection(&initial.free)
+    );
+    assert!(
+        final_state
+            .free
+            .intersection(&final_state.reachable())
+            .is_empty()
+    );
+    eprintln!(
+        "chunks={chunks}, batch={batch}, metadata={metadata}, sections={initial_sections}->{sections}"
+    );
+    assert!(metadata >= chunks * 8);
+    assert!(metadata <= (chunks / batch) * 2048 + chunks * 32);
+    assert!(sections <= initial_sections + 8);
 }

@@ -431,6 +431,12 @@ name = "dense_chunk_reads"
 harness = false
 required-features = ["std"]
 
+# Measure persistent threshold-one appends with separate and batched full chunks.
+[[bench]]
+name = "persistent_append"
+harness = false
+required-features = ["std"]
+
 # Style-preference clippy lints muted crate-wide. The remaining clippy
 # surface is still on (`-D warnings` in CI), so genuinely problematic
 # patterns continue to fail the build.
