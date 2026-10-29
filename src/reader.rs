@@ -8463,33 +8463,32 @@ mod tests {
             .flat_map(|value| value.to_le_bytes())
             .collect::<Vec<_>>();
         disk_log::fail_write_after(failure_write, prefix);
-        let (error, unwritten, poison) = if owned {
+        let (error, unwritten, blocked) = if owned {
             let mut appender = dataset.into_buffered_appender().unwrap();
             let error = appender.append(&values).unwrap_err();
+            disk_log::start();
             let unwritten = appender.unwritten().to_vec();
-            let poison = appender.flush().unwrap_err();
+            let blocked = appender.flush().unwrap_err();
             assert_eq!(appender.discard(), unwritten);
             dataset = file.dataset("d").unwrap();
-            (error, unwritten, poison)
+            (error, unwritten, blocked)
         } else {
             let mut appender = dataset.buffered_appender().unwrap();
             let error = appender.append(&values).unwrap_err();
+            disk_log::start();
             let unwritten = appender.unwritten().to_vec();
-            let poison = appender.flush().unwrap_err();
+            let blocked = appender.flush().unwrap_err();
             assert_eq!(appender.discard(), unwritten);
-            (error, unwritten, poison)
+            (error, unwritten, blocked)
         };
         let Error::Io(error) = error else {
             panic!("expected injected write error, got {error:?}")
         };
         assert_eq!(error.kind(), std::io::ErrorKind::Other);
         assert_eq!(error.to_string(), "injected disk write failure");
-        let Error::AppendInPlaceUnsupported(reason) = poison else {
-            panic!("expected poisoned appender, got {poison:?}")
-        };
-        assert_eq!(
-            reason,
-            "this buffered appender failed a write and holds unwritten elements; read them back with BufferedAppender::unwritten and start a new appender"
+        assert!(
+            matches!(blocked, Error::AllocationPublicationUncertain),
+            "{blocked:?}"
         );
         assert_eq!(unwritten, expected_unwritten);
         assert_eq!(
@@ -8522,13 +8521,22 @@ mod tests {
             Ok(())
         })
         .unwrap();
+        let interrupted = std::fs::read(&path).unwrap();
         drop(dataset);
-        file.close().unwrap();
+        let error = file.close().unwrap_err();
+        assert!(
+            matches!(error, Error::AllocationPublicationUncertain),
+            "{error:?}"
+        );
+        assert!(disk_log::finish().events.is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), interrupted);
         let file = File::open(&path).unwrap();
         assert_eq!(
             file.dataset("d").unwrap().read_i32().unwrap(),
             (0..i32::try_from(3 + landed).unwrap()).collect::<Vec<_>>()
         );
+        drop(file);
+        directory.close().unwrap();
     }
 
     #[rstest]
