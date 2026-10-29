@@ -115,6 +115,50 @@ macro_rules! hdf5_1_10_tests {
     ($($item:item)*) => {};
 }
 
+/// Includes the supplied items when only the helper's HDF5 1.10 release tier is enabled.
+///
+/// Items are included when `__hdf5-1.10` is enabled and `__hdf5-1.12` is disabled.
+/// The invoking crate can use this macro without defining a release feature of its own.
+///
+/// # Examples
+///
+/// ```test_harness
+/// test_util_hdf5::hdf5_1_10_series_tests! {
+///     #[test]
+///     fn linked_library_is_in_the_1_10_series() {
+///         let (major, minor, _) = hdf5::library_version();
+///         assert_eq!((major, minor), (1, 10));
+///     }
+/// }
+/// ```
+#[cfg(all(feature = "__hdf5-1.10", not(feature = "__hdf5-1.12")))]
+#[macro_export]
+macro_rules! hdf5_1_10_series_tests {
+    ($($item:item)*) => { $($item)* };
+}
+
+/// Includes the supplied items when only the helper's HDF5 1.10 release tier is enabled.
+///
+/// Items are included when `__hdf5-1.10` is enabled and `__hdf5-1.12` is disabled.
+/// The invoking crate can use this macro without defining a release feature of its own.
+///
+/// # Examples
+///
+/// ```test_harness
+/// test_util_hdf5::hdf5_1_10_series_tests! {
+///     #[test]
+///     fn linked_library_is_in_the_1_10_series() {
+///         let (major, minor, _) = hdf5::library_version();
+///         assert_eq!((major, minor), (1, 10));
+///     }
+/// }
+/// ```
+#[cfg(not(all(feature = "__hdf5-1.10", not(feature = "__hdf5-1.12"))))]
+#[macro_export]
+macro_rules! hdf5_1_10_series_tests {
+    ($($item:item)*) => {};
+}
+
 /// Includes the supplied items when the helper's `__hdf5-bundled` feature is enabled.
 ///
 /// The invoking crate can use this macro without defining a matching feature of its own.
