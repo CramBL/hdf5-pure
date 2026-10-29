@@ -36,12 +36,17 @@ use hdf5_pure::PersistedFreeSpacePolicy;
 use hdf5_pure::SyncPolicy;
 use hdf5_pure::UserblockSize;
 use hdf5_pure_core::__private::BaseAddressExt;
+use hdf5_pure_core::__private::FileRange;
+use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_core::__private::FileSpaceInfoFields;
 use hdf5_pure_core::__private::StoredAddressExt;
 use hdf5_pure_core::OffsetWidth;
 use hdf5_pure_core::StoredAddress;
 use hdf5_pure_format::__private::AccessMode;
+use hdf5_pure_format::__private::ChunkIndexLayout;
 use hdf5_pure_format::__private::DEFAULT_THRESHOLD;
+use hdf5_pure_format::__private::DataLayout;
+use hdf5_pure_format::__private::ExtensibleArrayHeaderLocator;
 use hdf5_pure_format::__private::FormatWidths;
 use hdf5_pure_format::__private::FreeSpaceManagerHeader;
 use hdf5_pure_format::__private::LinkMessage;
@@ -52,6 +57,8 @@ use hdf5_pure_format::__private::ObjectHeaderPrefix;
 use hdf5_pure_format::__private::SECTION_CLASS_SIMPLE;
 use rstest::rstest;
 
+use test_util::allocation_oracle::Coverage;
+use test_util::allocation_oracle::Interval;
 use test_util::file_space_info;
 use test_util::free_space;
 use test_util::object_header::v2 as header_bytes;
@@ -4658,154 +4665,260 @@ fn c_library_reads_our_file_after_a_release_shortened_it() {
     }
 }
 
-/// An in-place `Dataset::append` on a persisting file spends holes an earlier
-/// commit left, and it does so by taking them out of the on-disk managers first
-/// (issue #387). The reference library is the reader that has to agree with the
-/// result: it re-parses those rewritten managers, reads every appended value
-/// back, and reports exactly the free space we record.
-///
-/// Both strategies, because the reserve is drawn from one list on a flat file and
-/// from the raw-typed one on a paged file, and only the C library's own accounting
-/// says the paged managers still segregate what they should.
-#[test]
-fn c_library_reads_our_file_after_an_append_reused_free_space() {
+#[rstest]
+#[case::flat(false)]
+#[case::paged(true)]
+fn c_library_reads_our_file_after_an_append_reused_free_space(#[case] paged: bool) {
     let dir = tempfile::tempdir().unwrap();
+    let (label, strategy) = if paged {
+        ("paged", FileSpaceStrategy::Page)
+    } else {
+        ("flat", FileSpaceStrategy::FsmAggr)
+    };
 
-    // Comfortably more than one reserve batch, so the append draws from the hole
-    // rather than declining it.
     let payload: Vec<i32> = (0..768 * 1024).collect();
 
-    for (label, strategy, paged) in [
-        ("flat", FileSpaceStrategy::FsmAggr, false),
-        ("paged", FileSpaceStrategy::Page, true),
-    ] {
-        let path = dir.path().join(format!("ours_append_reuse_{label}.h5"));
-        let mut b = FileBuilder::new();
-        let settings = FileSpaceSettings::new(strategy).with_persistence(true);
-        b.with_file_space_settings(if paged {
-            settings.with_page_size(FileSpacePageSize::try_from(16384).unwrap())
-        } else {
-            settings
-        });
-        b.create_dataset("keep").with_i32_data(&[1, 2, 3, 4]);
-        b.write(&path).unwrap();
+    let path = dir.path().join(format!("ours_append_reuse_{label}.h5"));
+    let mut b = FileBuilder::new();
+    let settings = FileSpaceSettings::new(strategy).with_persistence(true);
+    b.with_file_space_settings(if paged {
+        settings.with_page_size(FileSpacePageSize::try_from(16384).unwrap())
+    } else {
+        settings
+    });
+    b.create_dataset("keep").with_i32_data(&[1, 2, 3, 4]);
+    b.write(&path).unwrap();
 
-        let make_log = |file: &File, name: &str| {
-            file.root()
-                .create_dataset(name, |b| {
-                    b.with_i32_data(&[])
-                        .with_shape(&[0])
-                        .with_chunks(&[16384])
-                        .with_maxshape(&[MaxExtent::Unlimited]);
-                })
-                .unwrap();
-            file.commit().unwrap();
-        };
-
-        {
-            let file = File::open_rw_with_options(
-                &path,
-                FileAccessProperties::new().with_sync_policy(hdf5_pure::SyncPolicy::OnClose),
-            )
+    let make_log = |file: &File, name: &str| {
+        file.root()
+            .create_dataset(name, |b| {
+                b.with_i32_data(&[])
+                    .with_shape(&[0])
+                    .with_chunks(&[16384])
+                    .with_maxshape(&[MaxExtent::Unlimited]);
+            })
             .unwrap();
-            make_log(&file, "log");
-            file.dataset("log").unwrap().append(&payload).unwrap();
-            // A live object above the churn, so the delete leaves an interior hole
-            // rather than a run the commit simply truncates away.
-            file.root()
-                .create_dataset("ceiling", |b| {
-                    b.with_i32_data(&[9, 9, 9]);
-                })
-                .unwrap();
-            file.commit().unwrap();
-            let after_first = std::fs::metadata(&path).unwrap().len();
+        file.commit().unwrap();
+    };
 
-            file.root().delete("log").unwrap();
-            file.commit().unwrap();
+    let initial_free;
+    {
+        let file = File::open_rw_with_options(
+            &path,
+            FileAccessProperties::new().with_sync_policy(hdf5_pure::SyncPolicy::OnClose),
+        )
+        .unwrap();
+        make_log(&file, "log");
+        file.dataset("log").unwrap().append(&payload).unwrap();
+        // The deleted dataset's storage is below a live dataset.
+        file.root()
+            .create_dataset("ceiling", |b| {
+                b.with_i32_data(&[9, 9, 9]);
+            })
+            .unwrap();
+        file.commit().unwrap();
+        let after_first = std::fs::metadata(&path).unwrap().len();
 
-            make_log(&file, "log2");
-            file.dataset("log2").unwrap().append(&payload).unwrap();
-            file.close().unwrap();
+        file.root().delete("log").unwrap();
+        file.commit().unwrap();
 
-            let after_second = std::fs::metadata(&path).unwrap().len();
-            // The delete left a hole one payload wide. An append that reuses it
-            // grows the file barely at all; one that goes past the end grows it by
-            // the whole payload. Half of that, in bytes, is the line — the same
-            // figure the elements-times-two form above it worked out to, said in
-            // the unit the file size is in.
-            let payload_bytes = std::mem::size_of_val(&payload[..]) as u64;
-            assert!(
-                after_second < after_first + payload_bytes / 2,
-                "{label}: the second append should have reused the hole (was \
-                 {after_first}, now {after_second}, payload {payload_bytes} bytes)"
-            );
-        }
+        make_log(&file, "log2");
+        let before = file.reusable_free_sections().unwrap();
+        initial_free = Coverage::new(
+            before
+                .sections()
+                .iter()
+                .map(|section| Interval::new(section.address(), section.length().get()).unwrap()),
+        );
+        assert!(!initial_free.is_empty());
+        file.dataset("log2").unwrap().append(&payload).unwrap();
+        file.close().unwrap();
 
-        oracle_test_util::checkpoint(&path, &format!("append-reuse-{label}"), "rust-close");
-        let ours = File::open(&path).unwrap();
-        assert_eq!(ours.dataset("log2").unwrap().read_i32().unwrap(), payload);
-        let total_ours: u64 = ours
-            .persisted_free_sections()
-            .unwrap()
-            .unwrap()
-            .free_sections()
-            .free_bytes();
-        drop(ours);
-
-        let f = hdf5::File::open(&path).unwrap();
-        assert_eq!(
-            f.create_plist().unwrap().get_file_space_strategy().unwrap(),
-            CStrategy::FreeSpaceManager {
-                paged,
-                persist: true,
-                threshold: 1,
-            },
-            "{label}: C library recovers our strategy after an append reused free space"
-        );
-        assert_eq!(
-            f.dataset("log2").unwrap().read_raw::<i32>().unwrap(),
-            payload,
-            "{label}: the C library reads every value the reusing append wrote"
-        );
-        assert_eq!(
-            f.dataset("keep").unwrap().read_raw::<i32>().unwrap(),
-            vec![1, 2, 3, 4]
-        );
-        assert_eq!(
-            f.dataset("ceiling").unwrap().read_raw::<i32>().unwrap(),
-            vec![9, 9, 9]
-        );
-        let free_c = f.free_space() as i64;
-        assert_eq!(
-            free_c as u64, total_ours,
-            "{label}: C free-space total matches the managers the reservation rewrote"
-        );
-        drop(f);
-
-        // And the C library reopens the file read-write and allocates out of those
-        // managers itself — the session that would have written over live data had
-        // the append spent a hole the managers still advertised.
-        {
-            let f = hdf5::File::open_rw(&path).unwrap();
-            f.new_dataset::<f64>()
-                .shape((4096,))
-                .create("c_added")
-                .unwrap()
-                .write(&vec![2.5f64; 4096])
-                .unwrap();
-            f.close().unwrap();
-        }
-        let ours = File::open(&path).unwrap();
-        assert_eq!(
-            ours.dataset("log2").unwrap().read_i32().unwrap(),
-            payload,
-            "{label}: the C library's own allocation must not have landed on live chunks"
-        );
-        assert_eq!(
-            ours.dataset("c_added").unwrap().read_f64().unwrap(),
-            vec![2.5f64; 4096]
+        let after_second = std::fs::metadata(&path).unwrap().len();
+        // The file growth must be less than half the payload's byte length.
+        let payload_bytes = std::mem::size_of_val(&payload[..]) as u64;
+        assert!(
+            after_second < after_first + payload_bytes / 2,
+            "{label}: the second append should have reused the hole (was \
+             {after_first}, now {after_second}, payload {payload_bytes} bytes)"
         );
     }
+
+    let manager_bytes = file_space_oracle::assert_manager_metadata_bytes(&path);
+    let bytes = std::fs::read(&path).unwrap();
+    let ours = File::open(&path).unwrap();
+    let live = append_reuse_live_extents(&ours, &bytes);
+    storage::assert_unavailable(&ours, &live);
+    assert_eq!(
+        storage::manager_extents(&ours, &bytes)
+            .iter()
+            .map(|(_, length)| length)
+            .sum::<u64>(),
+        manager_bytes,
+    );
+    let live = Coverage::new(
+        live.into_iter()
+            .map(|(address, length)| Interval::new(address, length).unwrap()),
+    );
+    let report = ours.persisted_free_sections().unwrap().unwrap();
+    let free = Coverage::new(
+        report
+            .free_sections()
+            .sections()
+            .iter()
+            .map(|section| Interval::new(section.address(), section.length().get()).unwrap()),
+    );
+    assert!(initial_free.difference(&live).difference(&free).is_empty());
+    if !paged {
+        assert!(file_space::serialized_manager_padding(&path) > 0);
+        assert_eq!(
+            Coverage::new([Interval::new(0, ours.file_size()).unwrap()]).difference(&live),
+            free,
+        );
+    }
+    oracle_test_util::checkpoint(&path, &format!("append-reuse-{label}"), "rust-close");
+    assert_eq!(ours.dataset("log2").unwrap().read_i32().unwrap(), payload);
+    let total_ours: u64 = ours
+        .persisted_free_sections()
+        .unwrap()
+        .unwrap()
+        .free_sections()
+        .free_bytes();
+    drop(ours);
+
+    let f = hdf5::File::open(&path).unwrap();
+    assert_eq!(
+        f.create_plist().unwrap().get_file_space_strategy().unwrap(),
+        CStrategy::FreeSpaceManager {
+            paged,
+            persist: true,
+            threshold: 1,
+        },
+        "{label}: C library recovers our strategy after an append reused free space"
+    );
+    assert_eq!(
+        f.dataset("log2").unwrap().read_raw::<i32>().unwrap(),
+        payload,
+        "{label}: the C library reads every value the reusing append wrote"
+    );
+    assert_eq!(
+        f.dataset("keep").unwrap().read_raw::<i32>().unwrap(),
+        vec![1, 2, 3, 4]
+    );
+    assert_eq!(
+        f.dataset("ceiling").unwrap().read_raw::<i32>().unwrap(),
+        vec![9, 9, 9]
+    );
+    let free_c = f.free_space() as i64;
+    assert_eq!(
+        free_c as u64, total_ours,
+        "{label}: C free-space total matches the managers the reservation rewrote"
+    );
+    drop(f);
+
+    // libhdf5 writes another dataset before hdf5-pure reads every survivor.
+    {
+        let f = hdf5::File::open_rw(&path).unwrap();
+        f.new_dataset::<f64>()
+            .shape((4096,))
+            .create("c_added")
+            .unwrap()
+            .write(&vec![2.5f64; 4096])
+            .unwrap();
+        f.close().unwrap();
+    }
+    let ours = File::open(&path).unwrap();
+    assert_eq!(
+        ours.dataset("log2").unwrap().read_i32().unwrap(),
+        payload,
+        "{label}: the C library's own allocation must not have landed on live chunks"
+    );
+    assert_eq!(
+        ours.dataset("c_added").unwrap().read_f64().unwrap(),
+        vec![2.5f64; 4096]
+    );
+    assert_eq!(
+        ours.dataset("keep").unwrap().read_i32().unwrap(),
+        [1, 2, 3, 4]
+    );
+    assert_eq!(
+        ours.dataset("ceiling").unwrap().read_i32().unwrap(),
+        [9, 9, 9]
+    );
+    ours.close().unwrap();
+}
+
+/// Returns absolute offsets and lengths for the append fixture's complete live allocations.
+///
+/// Includes unused section-list capacity. The `log2` dataset must use an Extensible Array index
+/// without secondary blocks.
+fn append_reuse_live_extents(file: &File, bytes: &[u8]) -> Vec<(u64, u64)> {
+    let mut extents = storage::file_metadata_extents(file, bytes);
+    for dataset in ["keep", "ceiling", "log2"] {
+        extents.extend(storage::header_extents(
+            file.superblock(),
+            bytes,
+            storage::root_object_address(file, bytes, dataset),
+        ));
+        extents.extend(
+            file_space::raw_extents(file, dataset)
+                .into_iter()
+                .map(|range| (range.start, range.end - range.start)),
+        );
+    }
+    let widths = FormatWidths {
+        offsets: file.superblock().offset_size,
+        lengths: file.superblock().length_size,
+    };
+    let header = ObjectHeader::parse_with_base_and_widths(
+        bytes,
+        AccessMode::ReadOnly,
+        usize::try_from(storage::root_object_address(file, bytes, "log2")).unwrap(),
+        widths,
+        file.superblock().base_address,
+    )
+    .unwrap();
+    let layout = header
+        .messages
+        .iter()
+        .find(|message| message.msg_type == MessageType::DATA_LAYOUT)
+        .unwrap();
+    let DataLayout::Chunked {
+        index:
+            ChunkIndexLayout::ExtensibleArray {
+                address: Some(address),
+                ..
+            },
+        ..
+    } = DataLayout::parse_with_widths(&layout.data, widths).unwrap()
+    else {
+        panic!("expected an allocated Extensible Array index")
+    };
+    let region = |range: FileRange| {
+        FileRegion::new(
+            range,
+            &bytes[usize::try_from(range.start().get()).unwrap()
+                ..usize::try_from(range.end().get()).unwrap()],
+        )
+        .unwrap()
+    };
+    let locator =
+        ExtensibleArrayHeaderLocator::new(widths, file.superblock().base_address, address);
+    let array = locator
+        .parse(region(locator.parse_range().unwrap()))
+        .unwrap();
+    extents.push((array.range().start().get(), array.range().length()));
+    let index = array.index_block().unwrap();
+    extents.push((index.range().start().get(), index.range().length()));
+    let index = index.parse(region(index.parse_range())).unwrap();
+    assert_eq!(index.super_blocks().count(), 0);
+    for block in index.data_blocks() {
+        let block = block.unwrap();
+        let range = block.range();
+        block.parse(region(block.parse_range())).unwrap();
+        extents.push((range.start().get(), range.length()));
+    }
+    extents
 }
 
 #[rstest]
