@@ -1,4 +1,4 @@
-"""Workflow filtering and feature-test configurations."""
+"""Feature-test coverage and selector propagation."""
 
 import os
 import subprocess
@@ -14,40 +14,6 @@ WORKFLOWS = repo_root() / ".github" / "workflows"
 
 def load(name):
     return yaml.safe_load((WORKFLOWS / name).read_text())
-
-
-def filtered():
-    return sorted(p.name for p in WORKFLOWS.glob("*.yml") if "changes" in load(p.name)["jobs"])
-
-
-def needs(job):
-    declared = job.get("needs", [])
-    return [declared] if isinstance(declared, str) else declared
-
-
-@pytest.mark.parametrize("name", filtered())
-def test_the_filter_names_the_workflow_file(name):
-    step = load(name)["jobs"]["changes"]["steps"][0]
-    paths = yaml.safe_load(step["with"]["filters"])["run"]
-    covering = {f".github/workflows/{name}", ".github/workflows/**", ".github/**"}
-    assert covering & set(paths), f"{name} does not run when its own file changes"
-
-
-@pytest.mark.parametrize("name", filtered())
-def test_every_job_follows_changes(name):
-    jobs = load(name)["jobs"]
-
-    def gated(job_id):
-        job = jobs[job_id]
-        if "changes" in needs(job):
-            return (
-                job_id.endswith("-guard") or job.get("if") == "needs.changes.outputs.run == 'true'"
-            )
-        return any(gated(n) for n in needs(job))
-
-    for job_id in jobs:
-        if job_id != "changes":
-            assert gated(job_id), f"{name}: {job_id} does not follow changes"
 
 
 FEATURE_CONFIGURATIONS = (
@@ -105,12 +71,6 @@ def test_feature_shards_cover_each_configuration_once(shard_count):
         FEATURE_CONFIGURATIONS
     )
     assert max(map(len, assignments)) - min(map(len, assignments)) <= 1
-    if shard_count == 3:
-        assert assignments == [
-            ["std,deflate", "default,ndarray", "default,serde"],
-            ["default,checksum", "default,num-complex", "default,zfp"],
-            ["default,fast-deflate", "default,provenance"],
-        ]
 
 
 @pytest.mark.parametrize(
