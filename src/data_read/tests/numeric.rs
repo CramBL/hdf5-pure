@@ -5,7 +5,7 @@ use alloc::vec;
 
 use rstest::rstest;
 
-use super::*;
+use crate::data_read::*;
 use crate::datatype::layout::FloatingPointLayout;
 use crate::{Error, H5Element, MantissaNormalization};
 use crate::{FixedPointType, FloatingPointType};
