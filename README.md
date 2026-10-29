@@ -12,19 +12,53 @@ Pure-Rust HDF5 reader, writer, and in-place editor. No C dependencies, no build 
 > [HDF5 compatibility matrix](docs/guide/compatibility.md) for feature-level
 > read and write support.
 
+> [!WARNING]
+> Several Rust HDF5 projects claim compatibility and safety while overlooking format requirements
+> that affect correctness.
+>
+> Avoiding writes and in-place edits does not eliminate the risk: **reads can silently return incorrect
+> values.** Filters, chunk storage and fill values interact in ways that affect even common datatypes.
+> Numeric layouts and conversion rules introduce further requirements. An implementation can overlook
+> these semantics, or accept content that message flags require it to reject, while passing tests on
+> ordinary files written by libhdf5.
+>
+> `hdf5-pure` takes a bottom-up approach: format correctness and compliance with the HDF5 specification
+> come first, with values, metadata and file layouts tested against libhdf5. Development continues on
+> the edit engine, chunk-reading runtime, allocation policies and cache configuration to support more
+> demanding workloads and improve performance. Supported operations and known limitations are
+> documented in the
+> [compatibility matrix](docs/guide/compatibility.md).
+
 ## Features
 
-- **Write** HDF5 files with datasets, groups, attributes, and nested hierarchies
-- **Read** HDF5 files (v0/v1/v2/v3 superblocks, v1/v2 object headers, contiguous/chunked/compact storage)
-- **Edit in place** Incremental add, delete (`H5Ldelete`), and copy (`H5Ocopy`) for datasets and groups.
-- **SWMR** (single-writer / multiple-reader) append and refreshing read for 1-D unlimited datasets, interoperable with the `libhdf5` and `h5py`
-- **Free Space Management** persistent tracking and reuse of space from deleted objects across sessions to prevent file bloat during in-place edits
-- **Tunable metadata cache** configure memory limits and eviction behavior to optimize I/O performance for heavy read/write workloads
-- **No C dependencies** pure Rust, with support for WASM and bare-metal targets (`no_std` with `alloc`)
-- **MATLAB v7.3 compatible** userblock support, fixed-length ASCII attributes, variable-length string arrays, object references
-- **Filters** Deflate, shuffle, Fletcher32, LZF, scale-offset, and optional ZFP
-- Compound types, enumerations, array types
-- Complex number datasets (as compound `{real, imag}`)
+- **Read and write HDF5** datasets, groups, attributes and nested hierarchies, with compact,
+  contiguous and chunked dataset storage.
+- **[In-place editing](docs/guide/editing.md)** with staged commits, dataset overwrites, attribute
+  updates, object creation and deletion, and copying within or between files. Eligible files support
+  bounded-memory editing.
+- **[Streaming and partial reads](docs/guide/streaming.md)** with on-demand I/O, custom sources,
+  row windows and multidimensional region selection.
+- **[Appending](docs/guide/editing.md#appending-to-an-unlimited-dataset)** with immediate, staged
+  and buffered writes to growing datasets.
+- **[File-space management](docs/guide/file-space.md)** with configurable allocation strategies,
+  persistent free-space reuse and inspection.
+- **[Configurable caching](docs/guide/streaming.md)** for metadata, decoded chunks and parsed chunk
+  indexes, with memory budgets and statistics.
+- **[Repacking](docs/guide/repack.md)** to compact files, omit selected objects, choose output
+  allocation settings and preserve eligible compressed chunks without recompression.
+- **[SWMR](docs/guide/swmr.md)** for concurrent readers following an append-only writer, interoperable
+  with libhdf5 and h5py. Writing supports unfiltered, chunk-aligned appends to 1-D unlimited datasets.
+- **MATLAB v7.3 `.mat` files** with serde-based reading and writing of matrices, structs, cell arrays
+  and complex values, alongside lower-level MATLAB convention helpers.
+- **Typed data** with numeric conversions, compound types, enumerations, array types, variable-length
+  strings and complex datasets represented as compound `{real, imag}` values. Optional `ndarray`
+  integration provides N-dimensional array I/O.
+- **[Filters](docs/guide/compression.md)** including Deflate, shuffle, Fletcher32, LZF, scale-offset
+  and optional ZFP.
+- **Content verification** with SHA-256 hashes and creator metadata through the optional `provenance`
+  feature.
+- **No C dependencies** with WebAssembly support and lower-level primitives available on bare-metal
+  targets through `no_std` with `alloc`.
 
 ## Examples
 
