@@ -59,6 +59,7 @@ test_util_hdf5::hdf5_1_10_tests! {
 }
 
 mod extents;
+mod lifecycle;
 mod references;
 mod transient;
 
@@ -297,10 +298,18 @@ impl Workload {
     ///
     /// Passes consecutive fixture values to `append` and checks every reconstructed prefix.
     pub(super) fn record_with(path: &Path, rounds: usize, append: impl FnOnce(&[i32])) -> Self {
+        Self::record_elements(path, rounds * CHUNK, append)
+    }
+
+    /// Records a callback with consecutive fixture values and parses every completed prefix.
+    ///
+    /// Passes an empty slice when `elements` is zero, for commit and close operations without an
+    /// append. Checks complete replay against the finished file and its expected values.
+    fn record_elements(path: &Path, elements: usize, append: impl FnOnce(&[i32])) -> Self {
         let base = fs::read(path).unwrap();
         let initial = Observation::read(&base);
         let initial_values = initial.values.len();
-        let values: Vec<_> = (initial_values..initial_values + rounds * CHUNK)
+        let values: Vec<_> = (initial_values..initial_values + elements)
             .map(|value| i32::try_from(value).unwrap())
             .collect();
         disk_log::start();
@@ -381,7 +390,7 @@ impl Workload {
         assert_eq!(image, final_bytes, "full-log reconstruction differs");
         assert_eq!(
             snapshots.last().unwrap().values,
-            (0..initial_values + rounds * CHUNK)
+            (0..initial_values + elements)
                 .map(|value| i32::try_from(value).unwrap())
                 .collect::<Vec<_>>()
         );
@@ -397,9 +406,10 @@ impl Workload {
             .copied()
             .collect::<Vec<_>>();
         assert!(
-            candidates
-                .iter()
-                .any(|fact| fact.kind == AllocationKind::Payload)
+            elements == 0
+                || candidates
+                    .iter()
+                    .any(|fact| fact.kind == AllocationKind::Payload)
         );
         Self {
             base,
