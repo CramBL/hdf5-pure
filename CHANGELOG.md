@@ -79,6 +79,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Fixed premature publication of Extensible Array page initialization bits in `Dataset::append`. The editor flushes page contents before writing the bit and requests a durability barrier under the Always synchronization policy.
 - Fixed `File::open_rw` leaving complete pages inside unaligned generic-large PAGE free sections unavailable for reuse, while partial edges remain unclassified.
 - Fixed unused reserved space being lost after interrupted `Dataset::append` calls in files with persisted free space. Allocations are published through the free-space managers before new references, with more frequent manager rewrites.
 - Fixed storage growth from superseded partial tails in `Dataset::append` and buffered flushes when the file-space strategy admits reclamation ([#957](https://github.com/CramBL/hdf5-pure/pull/957)).

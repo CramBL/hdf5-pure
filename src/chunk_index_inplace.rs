@@ -944,6 +944,10 @@ impl Located {
     /// modifying the index. Planning a subsequent append reads block pointers again until
     /// the header publication barrier completes successfully.
     ///
+    /// Before setting a page's initialization bit, drains its buffered contents through
+    /// [`Store::sync`]. Under [`SyncPolicy::Always`](crate::SyncPolicy::Always), also requests
+    /// durability for those contents.
+    ///
     /// # Errors
     ///
     /// Returns [`FormatError::InvalidExtensibleArrayGeometry`] if an element range exceeds
@@ -1050,6 +1054,7 @@ impl Located {
             file.publish_checksummed(page_off, page_cks_off, elem_off, &buf[..n])?;
 
             if slot_in_page == 0 {
+                file.sync()?;
                 let sblk_addr = sblk_addr.unwrap();
                 let npages = dblk_nelmts / self.ea_bits.page_nelmts().get();
                 if let Parent::Super { dblk_local, .. } = region.parent {
