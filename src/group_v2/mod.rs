@@ -43,7 +43,6 @@ use crate::width::{FormatWidths, OffsetWidth};
 
 #[cfg(test)]
 test_util_hdf5::hdf5_1_10_tests! {
-    #[path = "group_v2_native_crosschecks.rs"]
     mod native_crosschecks;
 }
 

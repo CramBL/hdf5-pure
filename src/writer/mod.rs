@@ -1,4 +1,4 @@
-//! Writing API: FileBuilder and GroupBuilder for creating HDF5 files.
+//! Builders for creating HDF5 files and groups.
 
 use std::io::Write;
 
@@ -34,21 +34,26 @@ use crate::object_path::ObjectPathBuf;
 ///
 /// # Examples
 ///
-/// ```no_run
-/// use hdf5_pure::FileBuilder;
-/// use hdf5_pure::AttrValue;
+/// ```
+/// use hdf5_pure::{AttrValue, File, FileBuilder};
+/// # let path = test_util::temp::temp_path("output.h5");
 ///
 /// let mut builder = FileBuilder::new();
 /// builder.create_dataset("data").with_f64_data(&[1.0, 2.0, 3.0]);
 /// builder.set_attr("version", AttrValue::I64(1));
-/// builder.write("output.h5").unwrap();
+/// builder.write(&path)?;
+/// let file = File::open(&path)?;
+/// assert_eq!(file.dataset("data")?.read_f64()?, [1.0, 2.0, 3.0]);
+/// assert_eq!(file.root().attrs()?["version"], AttrValue::I64(1));
+/// file.close()?;
+/// # Ok::<(), hdf5_pure::Error>(())
 /// ```
 pub struct FileBuilder {
     writer: FormatWriter,
 }
 
 impl FileBuilder {
-    /// Create a new file builder.
+    /// Creates an empty file builder.
     pub fn new() -> Self {
         Self {
             writer: FormatWriter::new(),
@@ -91,7 +96,7 @@ impl FileBuilder {
     /// callback's error if `configure` fails.
     #[doc = concat!(
         "\n# Examples\n\n```\n",
-        include_str!("../examples/attaching_groups.rs"),
+        include_str!("../../examples/attaching_groups.rs"),
         "\n```"
     )]
     pub fn create_group_with(
@@ -103,33 +108,24 @@ impl FileBuilder {
         Ok(())
     }
 
-    /// Add a finished group to the file.
+    /// Attaches a finished group to the root group.
     pub fn add_group(&mut self, group: FinishedGroup) {
         self.writer.add_group(group);
     }
 
-    /// Commits `datatype` in the root group under `name`, the way `H5Tcommit`
-    /// does: the type is written as an object of its own, and datasets and
-    /// attributes reference it by path instead of encoding it again.
+    /// Stages a named datatype in the root group for datasets and attributes to share.
     ///
-    /// `name` is one link name: not empty, not `.`, and holding no `/`.
-    /// The write reports [`FormatError::InvalidLinkName`] for a name that is not a component
-    /// of an object path.
+    /// `name` must be a nonempty object-path component other than `.`. The writer reports
+    /// [`FormatError::InvalidLinkName`] for an invalid component when producing output.
     ///
-    /// A committed datatype is what a C-library reader reports by name — `h5dump`
-    /// prints `DATATYPE "/mytype"` for a dataset using one — and what netCDF-4
-    /// writes for every user-defined type. It is also the only way several
-    /// objects in a file can be said to share *one* type rather than to each
-    /// declare an identical one.
+    /// Reference the datatype with
+    /// [`DatasetBuilder::with_committed_datatype`](crate::DatasetBuilder::with_committed_datatype),
+    /// [`DatasetBuilder::set_attr_committed`](crate::DatasetBuilder::set_attr_committed),
+    /// [`GroupBuilder::set_attr_committed`](crate::GroupBuilder::set_attr_committed), or
+    /// [`Self::set_attr_committed`]. The writer rejects unresolved references and datatypes that
+    /// disagree with the referring dataset or attribute.
     ///
-    /// Name it from a dataset with
-    /// [`DatasetBuilder::with_committed_datatype`](crate::DatasetBuilder::with_committed_datatype)
-    /// or from an attribute with
-    /// [`DatasetBuilder::set_attr_committed`](crate::DatasetBuilder::set_attr_committed)
-    /// and its group and root counterparts. A name that no committed datatype
-    /// matches, or one whose type disagrees with the naming object's, fails the
-    /// write rather than producing a file whose element bytes and declared type
-    /// do not match.
+    /// # Examples
     ///
     /// ```
     /// use hdf5_pure::{FileBuilder, make_i32_type};
@@ -140,7 +136,7 @@ impl FileBuilder {
     ///     .with_i32_data(&[1, 2, 3])
     ///     .with_committed_datatype("mytype");
     /// let bytes = b.finish().unwrap();
-    /// # assert!(hdf5_pure::is_hdf5_bytes(&bytes));
+    /// assert!(hdf5_pure::is_hdf5_bytes(&bytes));
     /// ```
     pub fn commit_datatype(&mut self, name: &str, datatype: Datatype) {
         self.writer.commit_datatype(name, datatype);
@@ -155,20 +151,13 @@ impl FileBuilder {
         self.writer.set_root_attr_committed(name, value, path);
     }
 
-    /// Apply every creation property in `properties` at once — the `fcpl`
-    /// analogue of handing a property list to `H5Fcreate`.
+    /// Replaces the userblock size, library-version bounds, and file-space settings.
     ///
-    /// Each property is applied exactly as the individual setter would, so this
-    /// **overwrites** any value set individually before the call — including the
-    /// properties `properties` leaves unset, which are reset to their defaults
-    /// rather than left behind. The two spellings interoperate in the order that
-    /// says so: apply a shared [`FileCreateProperties`] first, then override one
-    /// property for this file.
+    /// The writer resets properties left unset in `properties` to their defaults, including
+    /// library-version bounds. Apply a shared [`FileCreateProperties`] first, then override
+    /// individual properties for this file with setters.
     ///
-    /// The reset matters most for the library-version bounds, which select the
-    /// on-disk format rather than merely validating it: a stale 1.8 bound
-    /// surviving a property list that names no version would decide the bytes
-    /// this file is written in.
+    /// # Examples
     ///
     /// ```
     /// use hdf5_pure::UserblockSize;
@@ -176,14 +165,14 @@ impl FileBuilder {
     ///
     /// let mut builder = FileBuilder::new();
     /// builder.with_libver_bounds(LibVer::Earliest, LibVer::V18);
-    /// // The list names no version, so the bound above is dropped with it.
+    /// // Reset the bounds to the default format.
     /// builder.with_create_properties(
     ///     FileCreateProperties::new().with_userblock(UserblockSize::MIN),
     /// );
     /// builder.create_dataset("values").with_f64_data(&[1.0]);
     ///
     /// let bytes = builder.finish().unwrap();
-    /// assert_eq!(bytes[512 + 8], 3); // the default format, not the 1.8 one
+    /// assert_eq!(bytes[512 + 8], 3); // version 3 superblock after the userblock
     /// ```
     #[doc(alias = "fcpl")]
     pub fn with_create_properties(&mut self, properties: FileCreateProperties) -> &mut Self {
@@ -249,35 +238,24 @@ impl FileBuilder {
         self
     }
 
-    /// Constrain the on-disk format version of the file, mirroring HDF5's
-    /// `H5Pset_libver_bounds`. The file is written in the newest format the
-    /// bounds allow, between [`LibVer::WRITER_OLDEST`] and
-    /// [`LibVer::WRITER_DEFAULT`]; bounds that leave no such format fail with
-    /// [`Error::Format`] wrapping [`FormatError::LibverBoundsUnsatisfiable`].
+    /// Sets the library-version bounds used to select the output format.
     ///
-    /// `high` selects the format. `Earliest..=V18` writes the HDF5 1.8 format —
-    /// a version 2 superblock and version 3 data-layout messages — and anything
-    /// reaching 1.10 writes the 1.10 one. That is what a file destined for an
-    /// older reader wants: MATLAB's MAT v7.3 loader, for instance, is HDF5
-    /// 1.8.12 before R2021b, which does not understand a version 3 superblock.
+    /// The writer supports [`LibVer::V18`] and [`LibVer::V110`] output and selects the newest
+    /// permitted format. With an upper bound of [`LibVer::V18`], the writer emits a version 2
+    /// superblock and version 3 data-layout messages. With [`LibVer::V110`] or a newer upper bound,
+    /// it emits a version 3 superblock. Without explicit bounds, it uses [`LibVer::WRITER_DEFAULT`].
     ///
-    /// `low` only rules formats out: as in the C library it licenses newer
-    /// encodings without requiring them, so a lower bound of `V112`, `V114` or
-    /// `LATEST` is satisfied by the 1.10 format rather than refused. It does not
-    /// license `high` away — an inverted range such as `V114..=V110` is refused
-    /// with
-    /// [`FormatError::LibverBoundsUnsatisfiable`],
-    /// as `H5Pset_libver_bounds` refuses one.
+    /// The writer accepts a lower bound newer than [`LibVer::WRITER_DEFAULT`] when the range is
+    /// ordered. With both bounds set to [`LibVer::LATEST`], it selects the 1.10 format. When
+    /// producing output, it rejects inverted bounds and an upper bound of [`LibVer::Earliest`]
+    /// with [`Error::Format`] containing [`FormatError::LibverBoundsUnsatisfiable`].
     ///
-    /// Content the 1.8 format cannot express is refused rather than silently
-    /// upgraded, with
-    /// [`FormatError::LibverTooOldForContent`]:
-    /// a chunked, filtered, or resizable dataset needs the 1.10 chunk indices,
-    /// and a file-space setting — a strategy or a page size — needs the 1.10
-    /// File Space Info message.
-    /// [`File::open_swmr_writer`](crate::File::open_swmr_writer) likewise needs
-    /// a version 3 superblock, so a file written to the 1.8 bound cannot host a
-    /// SWMR writer.
+    /// This writer requires its 1.10 output format for chunked, filtered, or resizable datasets
+    /// and explicit file-space settings. Under a 1.8 upper bound, it rejects that content with
+    /// [`Error::Format`] containing [`FormatError::LibverTooOldForContent`].
+    /// [`File::open_swmr_writer`](crate::File::open_swmr_writer) requires a version 3 superblock.
+    ///
+    /// # Examples
     ///
     /// ```
     /// use hdf5_pure::{FileBuilder, LibVer};
@@ -286,13 +264,8 @@ impl FileBuilder {
     /// builder.with_libver_bounds(LibVer::Earliest, LibVer::V18);
     /// builder.create_dataset("values").with_f64_data(&[1.0, 2.0, 3.0]);
     /// let bytes = builder.finish().unwrap();
-    /// assert_eq!(bytes[8], 2); // version 2 superblock, readable by HDF5 1.8
+    /// assert_eq!(bytes[8], 2); // version 2 superblock
     /// ```
-    ///
-    /// This differs from the C library, which picks the *oldest* format the
-    /// content needs and reads `low` as a floor; on `Earliest..=Latest`
-    /// `H5Fcreate` writes a version 0 superblock where this writes a version 3
-    /// one. Leaving the bounds unset is the same as leaving `high` at `Latest`.
     pub fn with_libver_bounds(&mut self, low: LibVer, high: LibVer) -> &mut Self {
         self.writer.with_libver_bounds(low, high);
         self
@@ -402,14 +375,9 @@ impl FileBuilder {
     /// with verbatim chunk providers, reads and writes one encoded chunk at a time. The writer
     /// retains file metadata and supplied dataset buffers during layout planning.
     ///
-    /// The sink is written front-to-back with no seeks, so it can be a socket
-    /// or a pipe as readily as a file. That is possible because the writer
-    /// computes every object's address before it emits a byte, rather than
-    /// seeking back to patch addresses the way a backpatching writer would.
-    ///
-    /// A failure partway leaves whatever was already written on the sink. With a
-    /// non-seekable sink there is nothing to roll back, so a caller needing
-    /// all-or-nothing should write to a temporary path and rename on success.
+    /// The writer plans addresses before output and writes forward without seeking. On failure,
+    /// bytes already written remain in the sink. For atomic replacement, write to a temporary
+    /// path and rename it after successful output.
     ///
     /// # Errors
     ///
@@ -477,8 +445,7 @@ impl Write for LazyFile {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        // Nothing was written, so there is no file to flush and none to create:
-        // a refused build must not leave an empty one behind either.
+        // Flushing an unopened destination must not create or truncate it.
         match &mut self.file {
             Some(f) => f.flush(),
             None => Ok(()),
