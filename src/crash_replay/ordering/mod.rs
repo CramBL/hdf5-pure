@@ -39,6 +39,8 @@ use crate::width::FormatWidths;
 
 use super::ordering_facts::PublicationFacts;
 
+mod pages;
+
 #[rstest]
 #[case::flat_durable(
     false,
