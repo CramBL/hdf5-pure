@@ -7,6 +7,7 @@ mod conservation;
 mod io;
 mod lifecycle;
 mod persistent;
+mod unallocated_inspection;
 
 #[rstest]
 #[case::one_allocation(1)]
