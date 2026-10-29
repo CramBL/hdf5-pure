@@ -1,4 +1,4 @@
-//! Fixture mutations shared by public API tests and owner-local inspection tests.
+//! Fixtures and observations shared by public API tests and owner-local inspection tests.
 
 use hdf5_pure::File;
 use hdf5_pure::MessageType;
@@ -8,6 +8,13 @@ use hdf5_pure_format::__private::DataLayout;
 use hdf5_pure_format::__private::ObjectHeader;
 use test_util::object_header::MessageType as FixtureMessage;
 use test_util::object_header::v2;
+
+#[cfg(feature = "__hdf5-1.10")]
+pub mod array_index;
+#[cfg(feature = "__hdf5-1.10")]
+pub mod c_object;
+#[cfg(feature = "__hdf5-1.10")]
+pub mod unallocated_append;
 
 /// Sets the extensible-array index address to undefined in a single-dataset fixture.
 ///
