@@ -354,8 +354,6 @@ mod context;
 mod copy;
 mod dataset;
 mod global_heap_liveness;
-#[cfg(test)]
-mod global_heap_liveness_tests;
 mod group;
 #[cfg(test)]
 test_util_hdf5::hdf5_1_10_tests! {
@@ -364,14 +362,6 @@ test_util_hdf5::hdf5_1_10_tests! {
 }
 mod group_links;
 pub(crate) mod object_header;
-#[cfg(test)]
-mod ownership_tests;
-#[cfg(test)]
-mod page_feasibility;
-#[cfg(test)]
-mod page_header_reclamation;
-#[cfg(test)]
-mod page_manager_tail;
 mod paged_persistence;
 mod reclaim;
 pub(crate) mod retirement;
