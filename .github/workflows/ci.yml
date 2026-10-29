@@ -139,6 +139,11 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.config.name == 'default'
         run: just soundness::miri-selection
 
+      # Execute each allocation suite on supported default-feature hosts.
+      - name: Check allocation coverage
+        if: matrix.config.name == 'default' && (runner.arch == 'X64' || runner.arch == 'ARM64')
+        run: just soundness::allocation-coverage
+
       # rustdoc compiles doctests, so nextest cannot run them.
       - name: Doctests
         run: just ${{ matrix.config.name == 'full' && 'doctest-full' || 'doctest' }}
