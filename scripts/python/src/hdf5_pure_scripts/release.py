@@ -15,7 +15,7 @@ is given, and packages with `cargo publish --dry-run`. It commits nothing. A
 candidate does not change the changelog: [Unreleased] stays open until the
 final release promotes it.
 
-`pr` commits those changes on `release/vX.Y.Z`, prompts for confirmation, then
+`pr` commits those changes on `release-vX.Y.Z`, prompts for confirmation, then
 pushes the branch and opens the pull request.
 
 `publish` runs on the merged release commit, from the Release workflow on the
@@ -326,7 +326,7 @@ def release_notes(version):
 def prepare(args):
     version = args.version
     tag = f"v{version}"
-    branch = f"release/{tag}"
+    branch = f"release-{tag}"
 
     if output("git", "rev-parse", "--abbrev-ref", "HEAD") != "main":
         fail("not on main; prepare a release from main")
@@ -407,9 +407,9 @@ def prepare(args):
         )
         CHANGELOG.write_text(promoted)
 
-    note("Checking workspace packages and packaging the first published dependency")
+    note("Checking and packaging the published workspace packages")
     run("cargo", "check", "--locked", "--all-features", "-p", CRATE)
-    run("cargo", "publish", "--dry-run", "--allow-dirty", "-p", names[0])
+    run("cargo", "publish", "--dry-run", "--allow-dirty", "--workspace")
 
     note(f"Prepared {tag} in the working tree. Next: `just release::pr {version}`")
     run("git", "status", "--short")
@@ -435,7 +435,7 @@ def pr(args):
     the pull request."""
     version = args.version
     tag = f"v{version}"
-    branch = f"release/{tag}"
+    branch = f"release-{tag}"
 
     if output("git", "rev-parse", "--abbrev-ref", "HEAD") != "main":
         fail("not on main; run this where `prepare` ran")
@@ -518,9 +518,9 @@ def publish(args):
         release_type_word = semver_checks_release_type(release_type, previous_stable)
         note(semver_verdict(previous_stable, release_type_word))
 
-    note("Checking workspace packages and packaging the first published dependency")
+    note("Checking and packaging the published workspace packages")
     run("cargo", "check", "--locked", "--all-features", "-p", CRATE)
-    run("cargo", "publish", "--dry-run", "-p", packages[0]["name"])
+    run("cargo", "publish", "--dry-run", "--workspace")
 
     if args.dry_run:
         note(f"Dry run: {tag} would be published from {sha}")

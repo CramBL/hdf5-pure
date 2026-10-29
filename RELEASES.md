@@ -2,57 +2,84 @@
 
 ## Versioning
 
-`0.x.0` may break, `0.x.y` may not. `Cargo.toml` on `main` reads the last release, no pull request modifies it. A pull request that breaks the public API marks its changelog entry `**Breaking:**`, and the release decides the bump from that: a cycle with a marked entry releases as the next minor, and any other as a patch. `prepare` rejects a patch version over a marked cycle. CI verifies that the accumulated public API delta is compatible with the release type the current cycle requires. Before the first breaking entry in a cycle, an unmarked API break therefore fails the semver gate. Once the cycle is marked breaking, a later breaking change still marks its entry `**Breaking:**` for accurate release notes, but review enforces that, not the semver gate.
+`0.x.0` may break, `0.x.y` may not. Bump versions only in release pull requests.
+Between releases, `Cargo.toml` on `main` keeps the last published version.
+
+Mark every public API break `**Breaking:**` in the changelog. A marked cycle requires a minor release,
+otherwise a patch. CI checks the accumulated API delta against that bump. Review checks each entry.
 
 ## Changelog
 
-One or two sentences per entry: the capability, the public API name, one caveat clause, then the pull request link, `([#NN](url))`. A `Fixed` entry states the bug that no longer happens, "Fixed <the bug>". It describes the behavior that replaces it only where a user may act on it, such as a change in performance or durability. Prefix breaking changes with `**Breaking:**` and list them first in their section.
+Edit `CHANGELOG.md`. One or two sentences per entry: capability, public API name, caveat if needed,
+then `([#NN](url))`. Put `**Breaking:**` entries first in each section.
 
-Use `### Performance` for changes that improve execution time, memory use, allocations, or I/O without changing API semantics. State the operation improved. Avoid making quantitative claims unless they are backed up with benchmark results.
-
-A released section may open with a summary paragraph, written by hand.
-
-`CHANGELOG.md` is the source.
+Start fixes with "Fixed <the bug>". Describe replacement behavior only where users need to act.
+Use `### Performance` for execution time, memory, allocation or I/O improvements without API changes.
+Name the operation. Back numerical claims with benchmarks.
 
 ## Cutting one
 
-1. `just ci-local`, the broad local validation gate. GitHub Actions additionally runs CI-specific matrix and cross-target jobs.
-2. `just release::prepare 0.45.0`, or `just release::prepare 0.45.0-rc.1` for a candidate. `--summary-file notes.md` opens the section with a summary paragraph.
-3. `just release::pr 0.45.0`, and merge the pull request it opens. The Release workflow runs on the merge.
+1. Start from clean `main`. Run `just ci-local`.
+2. `just release::prepare VERSION`. Optional final-release summary: `--summary-file PATH`.
+3. `just release::pr VERSION`, using the same version.
+4. Wait for approval and passing CI, including the workspace publication dry run.
+5. For unpublished crate names, follow the first-publication steps below.
+6. Merge. The Release workflow publishes packages, tags the commit and creates the GitHub release.
 
-Re-running the workflow's job resumes after a failure.
+Rerun a failed workflow job to resume. Already-published versions are skipped.
 
-`just release::publish` runs the same steps from a checkout of the merged commit on a machine with `cargo login` and `gh auth login` done, if Actions is unavailable.
+Manual fallback: check out the merged release commit. Run `cargo login`, `gh auth login`,
+then `just release::publish`.
 
 ## A crate's first publication
 
-Trusted Publishing cannot create a crate on crates.io, so the Release workflow fails on a crate name that has not been published yet. The first release with `hdf5-pure-core`, `hdf5-pure-format`, `hdf5-pure-filter` and
-`hdf5-pure-space` publishes by hand:
+Before merging its first release PR:
 
-1. Prepare and merge the release as usual.
-2. Check out the merged release commit.
-3. Run `cargo login` with a crates.io token, and `gh auth login`.
-4. Run `just release::publish`. It publishes the workspace packages in dependency order and skips any already published.
-5. On crates.io, add a Trusted Publishing entry for each new crate that lists this repository and `release.yml`.
+1. Check out the approved PR revision. Keep the tree clean.
+2. `cargo login` with an API token that permits creating crates.
+3. Publish new crates with `cargo publish`, one `-p NAME` per crate. Cargo orders uploads by dependency.
+4. Add each crate's Trusted Publishing entry on crates.io: `CramBL/hdf5-pure`, workflow `release.yml`.
 
-Later releases publish from the Release workflow.
+For the first workspace release:
+
+```sh
+cargo publish \
+  -p hdf5-pure-core \
+  -p hdf5-pure-filter \
+  -p hdf5-pure-format \
+  -p hdf5-pure-space
+```
+
+Retry only unpublished versions. Changes to published contents require a new version.
 
 ## Release candidates
 
-`X.Y.Z-rc.N`, published as a pre-release. `[Unreleased]` stays open until the final release promotes it. While a candidate cycle is open, no other version can be prepared.
+Use `X.Y.Z-rc.N` with the same release steps. `[Unreleased]` stays open until the final release.
+Finish the candidate cycle before preparing a different target version.
+
+Announce candidates to dependents. Collect feedback. Publish another candidate for fixes.
+Prepare the final release explicitly.
 
 ## The API delta
 
-`prepare` prints the public-API delta since the last release. Read it against the `[Unreleased]` section. The Release workflow stops a release whose delta needs a larger bump than the release makes, which catches a break in a cycle that no entry marked. `just api::release-type` prints the release type the `[Unreleased]` section calls for, or, on a release pull request, the one the dated section it promotes calls for. `just api::semver-release-type` prints that type in the word `cargo semver-checks --release-type` takes, which is what CI checks a pull request against.
+`prepare` reports the delta from the previous stable release. Check it against the changelog.
+`publish` blocks an insufficient version bump.
 
-`--skip-api-delta` skips the report on `prepare`, and on `publish` run by hand it releases without the check.
+`just api::release-type` reads the bump from `[Unreleased]` or the section promoted by the release PR.
+`just api::semver-release-type` translates it for `cargo semver-checks`, as CI uses it.
 
-After publishing the first release containing `hdf5-pure-core`, the release maintainer opens a cleanup pull request that removes the temporary 0.47 ownership migration bridge:
+Manual override: `--skip-api-delta` on `prepare` or `publish`.
+
+## Migration cleanup
+
+Keep the ownership migration bridge through candidates. After the first stable workspace release,
+open a cleanup PR to remove:
 
 - `migration.py`, `rustdoc_json.py`, `nightly.py` and their tests, `test_migration.py` and `test_nightly.py`
 - the migration branches in `semver.py` and their cases in `test_semver.py`
 - the `core_features` keys in `scripts/api-profiles.toml` and their handling in `api_profiles.py`
-- `[package.metadata.hdf5-pure-api-migration]` and the `[package.metadata.cargo-semver-checks.lints]` downgrades in `Cargo.toml`
+- `[package.metadata.hdf5-pure-api-migration]` and the
+  `[package.metadata.cargo-semver-checks.lints]` downgrades in `Cargo.toml`
 - the rustdoc JSON nightly step in `api.yml` and `release.yml`, if nothing else there needs it
 
-Check the list against the code at that point. CI rejects the bridge once the published `hdf5-pure` baseline advances.
+Check the list against the code. CI rejects the bridge once the stable facade baseline advances.
