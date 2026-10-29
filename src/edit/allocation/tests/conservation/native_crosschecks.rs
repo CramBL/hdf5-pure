@@ -21,6 +21,8 @@ mod lifecycle;
 mod managers;
 mod metadata;
 mod resources;
+#[cfg(feature = "deflate")]
+mod rollback;
 mod transient;
 
 #[rstest]
