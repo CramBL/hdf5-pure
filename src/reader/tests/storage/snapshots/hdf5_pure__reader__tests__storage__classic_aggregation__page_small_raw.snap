@@ -1,5 +1,5 @@
 ---
-source: src/storage_tests/classic_aggregation.rs
+source: src/reader/tests/storage/classic_aggregation.rs
 expression: report
 ---
 PAGE allocation workload: small_raw
