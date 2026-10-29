@@ -411,15 +411,15 @@ mod tests {
     }
 
     #[rstest]
-    #[case("a/b")]
-    #[case("/a/b")]
-    #[case("a/b/")]
-    #[case("/a/b/")]
-    #[case("a//b")]
-    #[case("///a///b///")]
-    #[case("./a/b")]
-    #[case("a/./b")]
-    #[case("a/b/.")]
+    #[case::relative("a/b")]
+    #[case::leading_separator("/a/b")]
+    #[case::trailing_separator("a/b/")]
+    #[case::surrounding_separators("/a/b/")]
+    #[case::repeated_separators("a//b")]
+    #[case::repeated_surrounding_separators("///a///b///")]
+    #[case::leading_dot("./a/b")]
+    #[case::interior_dot("a/./b")]
+    #[case::trailing_dot("a/b/.")]
     fn every_spelling_of_a_path_parses_to_the_same_components(#[case] spelling: &str) {
         let path = ObjectPath::parse(spelling);
         let components: Vec<&str> = path
@@ -432,12 +432,12 @@ mod tests {
     }
 
     #[rstest]
-    #[case("")]
-    #[case("/")]
-    #[case("//")]
-    #[case(".")]
-    #[case("/./")]
-    #[case("./.")]
+    #[case::empty("")]
+    #[case::separator("/")]
+    #[case::repeated_separators("//")]
+    #[case::dot(".")]
+    #[case::absolute_dot("/./")]
+    #[case::relative_dots("./.")]
     fn a_path_that_spells_no_link_has_no_components(#[case] spelling: &str) {
         let path = ObjectPath::parse(spelling);
         assert_eq!(path.components(), []);
@@ -445,8 +445,8 @@ mod tests {
     }
 
     #[rstest]
-    #[case("/a//b/", "a/b")]
-    #[case("a", "a")]
+    #[case::normalized_components("/a//b/", "a/b")]
+    #[case::single_component("a", "a")]
     fn a_parsed_path_displays_in_the_form_a_handle_stores(
         #[case] spelling: &str,
         #[case] stored: &str,
@@ -461,11 +461,11 @@ mod tests {
     }
 
     #[rstest]
-    #[case("a", Some("a"))]
-    #[case("", None)]
-    #[case(".", None)]
-    #[case("a/b", None)]
-    #[case("/", None)]
+    #[case::ordinary_component("a", Some("a"))]
+    #[case::empty("", None)]
+    #[case::dot(".", None)]
+    #[case::multiple_components("a/b", None)]
+    #[case::separator("/", None)]
     fn a_link_name_is_one_component_that_names_a_link(
         #[case] name: &str,
         #[case] link_name: Option<&str>,
@@ -474,9 +474,9 @@ mod tests {
     }
 
     #[rstest]
-    #[case("/g/", "a//b", "g/a/b")]
-    #[case("/g/", "", "g")]
-    #[case("", "a", "a")]
+    #[case::normalized_child_path("/g/", "a//b", "g/a/b")]
+    #[case::empty_relative_path("/g/", "", "g")]
+    #[case::root_base("", "a", "a")]
     fn joining_a_relative_path_appends_its_components(
         #[case] base: &str,
         #[case] rest: &str,
@@ -491,9 +491,9 @@ mod tests {
     }
 
     #[rstest]
-    #[case("/g/", "/h/", "h")]
-    #[case("g/i", "/h/", "h")]
-    #[case("", "/g/", "g")]
+    #[case::replace_one_component("/g/", "/h/", "h")]
+    #[case::replace_multiple_components("g/i", "/h/", "h")]
+    #[case::replace_root("", "/g/", "g")]
     fn joining_an_absolute_path_replaces_the_base(
         #[case] base: &str,
         #[case] rest: &str,
@@ -508,10 +508,10 @@ mod tests {
     }
 
     #[rstest]
-    #[case(0, "")]
-    #[case(2, "a/b")]
-    #[case(3, "a/b/c")]
-    #[case(9, "a/b/c")]
+    #[case::root_prefix(0, "")]
+    #[case::intermediate_prefix(2, "a/b")]
+    #[case::complete_prefix(3, "a/b/c")]
+    #[case::beyond_depth(9, "a/b/c")]
     fn a_prefix_names_the_object_reached_after_that_many_components(
         #[case] count: usize,
         #[case] prefix: &str,
@@ -520,19 +520,19 @@ mod tests {
     }
 
     #[rstest]
-    #[case("a/b")]
-    #[case("/a/b")]
-    #[case("a//b/")]
-    #[case("./a/./b")]
+    #[case::relative("a/b")]
+    #[case::absolute("/a/b")]
+    #[case::repeated_separators("a//b/")]
+    #[case::embedded_dots("./a/./b")]
     fn every_spelling_of_a_path_owns_the_same_components(#[case] spelling: &str) {
         assert_eq!(path(spelling), path("a/b"));
         assert_eq!(path(spelling).to_string(), "a/b");
     }
 
     #[rstest]
-    #[case("")]
-    #[case("/")]
-    #[case(".")]
+    #[case::empty("")]
+    #[case::absolute_root("/")]
+    #[case::dot(".")]
     fn a_path_that_spells_no_link_owns_the_root_group_path(#[case] spelling: &str) {
         assert_eq!(path(spelling), ObjectPathBuf::root());
         assert!(path(spelling).is_empty());
@@ -540,17 +540,17 @@ mod tests {
     }
 
     #[rstest]
-    #[case("", "a")]
-    #[case("g", "g/a")]
-    #[case("/g/h/", "g/h/a")]
+    #[case::root("", "a")]
+    #[case::one_level("g", "g/a")]
+    #[case::normalized_nested("/g/h/", "g/h/a")]
     fn joining_appends_one_component_to_an_owned_path(#[case] base: &str, #[case] joined: &str) {
         assert_eq!(path(base).join(&name("a")), path(joined));
     }
 
     #[rstest]
-    #[case("/g/", "a//b", "g/a/b")]
-    #[case("/g/", "", "g")]
-    #[case("g/i", "/h/", "h")]
+    #[case::normalized_relative("/g/", "a//b", "g/a/b")]
+    #[case::empty_relative("/g/", "", "g")]
+    #[case::absolute_replacement("g/i", "/h/", "h")]
     fn joining_a_path_resolves_it_from_the_object_this_one_names(
         #[case] base: &str,
         #[case] rest: &str,
@@ -560,9 +560,9 @@ mod tests {
     }
 
     #[rstest]
-    #[case(0, "")]
-    #[case(2, "a/b")]
-    #[case(9, "a/b/c")]
+    #[case::root_prefix(0, "")]
+    #[case::intermediate_prefix(2, "a/b")]
+    #[case::beyond_depth(9, "a/b/c")]
     fn an_owned_prefix_names_the_object_reached_after_that_many_components(
         #[case] count: usize,
         #[case] prefix: &str,
@@ -579,10 +579,10 @@ mod tests {
     }
 
     #[rstest]
-    #[case("g/a", Some("a"))]
-    #[case("g", None)]
-    #[case("g/a/b", None)]
-    #[case("h/a", None)]
+    #[case::direct_child("g/a", Some("a"))]
+    #[case::same_group("g", None)]
+    #[case::nested_descendant("g/a/b", None)]
+    #[case::other_group("h/a", None)]
     fn a_name_under_a_group_is_the_leaf_of_a_direct_child(
         #[case] child: &str,
         #[case] link_name: Option<&str>,
@@ -594,11 +594,11 @@ mod tests {
     }
 
     #[rstest]
-    #[case("a/b", "a", true)]
-    #[case("a/b", "a/b", true)]
-    #[case("a/b", "", true)]
-    #[case("a/b", "a/b/c", false)]
-    #[case("a/b", "b", false)]
+    #[case::parent_prefix("a/b", "a", true)]
+    #[case::complete_prefix("a/b", "a/b", true)]
+    #[case::root_prefix("a/b", "", true)]
+    #[case::descendant("a/b", "a/b/c", false)]
+    #[case::unrelated_prefix("a/b", "b", false)]
     fn a_path_starts_with_itself_and_with_each_of_its_ancestors(
         #[case] path_of: &str,
         #[case] prefix: &str,
@@ -608,10 +608,10 @@ mod tests {
     }
 
     #[rstest]
-    #[case("a/b", "a", true)]
-    #[case("a", "a/b", true)]
-    #[case("a/b", "a/b", true)]
-    #[case("a/b", "a/c", false)]
+    #[case::second_is_ancestor("a/b", "a", true)]
+    #[case::first_is_ancestor("a", "a/b", true)]
+    #[case::same_path("a/b", "a/b", true)]
+    #[case::separate_branches("a/b", "a/c", false)]
     fn two_paths_overlap_when_one_names_the_other_or_an_ancestor_of_it(
         #[case] one: &str,
         #[case] other: &str,
@@ -621,12 +621,12 @@ mod tests {
     }
 
     #[rstest]
-    #[case("", true)]
-    #[case("g", true)]
-    #[case("g/col", true)]
-    #[case("g/col/deeper", false)]
-    #[case("g/other", false)]
-    #[case("h", false)]
+    #[case::root_ancestor("", true)]
+    #[case::parent_group("g", true)]
+    #[case::target_child("g/col", true)]
+    #[case::child_descendant("g/col/deeper", false)]
+    #[case::sibling_child("g/other", false)]
+    #[case::unrelated_group("h", false)]
     fn a_path_covers_a_child_it_identifies_or_holds(#[case] prefix: &str, #[case] covers: bool) {
         assert_eq!(path(prefix).covers_child(&path("g"), &name("col")), covers);
     }

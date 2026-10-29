@@ -76,17 +76,17 @@ fn reads_unsigned_offset_nibble_as_f64(#[values(false, true)] enumeration: bool)
 }
 
 #[rstest]
-#[case(1, 0, 8)]
-#[case(2, 0, 16)]
-#[case(3, 0, 24)]
-#[case(4, 0, 32)]
-#[case(5, 0, 40)]
-#[case(6, 0, 48)]
-#[case(7, 0, 56)]
-#[case(8, 0, 64)]
-#[case(1, 4, 4)]
-#[case(2, 4, 8)]
-#[case(8, 60, 4)]
+#[case::one_byte(1, 0, 8)]
+#[case::two_bytes(2, 0, 16)]
+#[case::three_bytes(3, 0, 24)]
+#[case::four_bytes(4, 0, 32)]
+#[case::five_bytes(5, 0, 40)]
+#[case::six_bytes(6, 0, 48)]
+#[case::seven_bytes(7, 0, 56)]
+#[case::eight_bytes(8, 0, 64)]
+#[case::offset_nibble(1, 4, 4)]
+#[case::offset_byte(2, 4, 8)]
+#[case::high_nibble(8, 60, 4)]
 fn appends_every_fixed_point_element(
     #[case] size: u32,
     #[case] offset: u16,
@@ -117,8 +117,8 @@ fn appends_every_fixed_point_element(
 }
 
 #[rstest]
-#[case(4, FloatingPointLayout::IEEE754_BINARY32)]
-#[case(8, FloatingPointLayout::IEEE754_BINARY64)]
+#[case::binary32(4, FloatingPointLayout::IEEE754_BINARY32)]
+#[case::binary64(8, FloatingPointLayout::IEEE754_BINARY64)]
 fn appends_every_ieee_element(
     #[case] size: u32,
     #[case] layout: FloatingPointLayout,
@@ -175,7 +175,7 @@ fn rejects_unsupported_float_layouts(
 }
 
 #[rstest]
-#[case(Datatype::FloatingPoint(FloatingPointType::from_layout(4, DatatypeByteOrder::Vax, FloatingPointLayout::IEEE754_BINARY32).unwrap()))]
+#[case::vax_float(Datatype::FloatingPoint(FloatingPointType::from_layout(4, DatatypeByteOrder::Vax, FloatingPointLayout::IEEE754_BINARY32).unwrap()))]
 fn rejects_unsupported_byte_order(
     #[case] datatype: Datatype,
     #[values(&[][..], &[0][..], &[0; 8][..])] raw: &[u8],
@@ -215,9 +215,9 @@ fn rejects_partial_elements(#[values(false, true)] floating: bool) {
 }
 
 #[rstest]
-#[case(2, 1)]
-#[case(1, 2)]
-#[case(0, 1)]
+#[case::declared_wider(2, 1)]
+#[case::base_wider(1, 2)]
+#[case::zero_declared_width(0, 1)]
 fn rejects_enumeration_width_mismatch(
     #[case] size: u32,
     #[case] base_size: u32,
@@ -245,9 +245,9 @@ fn rejects_enumeration_width_mismatch(
 }
 
 #[rstest]
-#[case(1, 4, 4, &[0xB0, 0x70])]
-#[case(3, 4, 4, &[0xB0, 0, 0, 0x70, 0, 0])]
-#[case(8, 60, 4, &[0, 0, 0, 0, 0, 0, 0, 0xB0, 0, 0, 0, 0, 0, 0, 0, 0x70])]
+#[case::byte_nibble(1, 4, 4, &[0xB0, 0x70])]
+#[case::three_byte_nibble(3, 4, 4, &[0xB0, 0, 0, 0x70, 0, 0])]
+#[case::high_nibble(8, 60, 4, &[0, 0, 0, 0, 0, 0, 0, 0xB0, 0, 0, 0, 0, 0, 0, 0, 0x70])]
 fn sign_extends_supported_ranges(
     #[case] size: u32,
     #[case] offset: u16,

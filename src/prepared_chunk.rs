@@ -269,10 +269,10 @@ mod tests {
     use crate::filter_pipeline::FilterDescription;
 
     #[rstest]
-    #[case(0, 0)]
-    #[case(1, 0b1)]
-    #[case(2, 0b11)]
-    #[case(32, u32::MAX)]
+    #[case::no_filters(0, 0)]
+    #[case::one_filter(1, 0b1)]
+    #[case::two_filters(2, 0b11)]
+    #[case::mask_width(32, u32::MAX)]
     fn a_chunk_stored_with_every_filter_skipped_has_one_mask_bit_per_filter(
         #[case] filters: usize,
         #[case] filter_mask: u32,

@@ -373,10 +373,10 @@ fn budget_source() -> File {
 }
 
 #[rstest]
-#[case(None, DeflateLevel::Six)]
-#[case(Some(0), DeflateLevel::Zero)]
-#[case(Some(6), DeflateLevel::Six)]
-#[case(Some(9), DeflateLevel::Nine)]
+#[case::missing_uses_default(None, DeflateLevel::Six)]
+#[case::level_zero(Some(0), DeflateLevel::Zero)]
+#[case::level_six(Some(6), DeflateLevel::Six)]
+#[case::level_nine(Some(9), DeflateLevel::Nine)]
 fn reconstructs_typed_deflate_level(#[case] raw: Option<u32>, #[case] level: DeflateLevel) {
     let pipeline = deflate_pipeline(raw);
     let filters = check_pipeline(Some(&pipeline), &ObjectPathBuf::parse("data")).unwrap();
@@ -384,11 +384,11 @@ fn reconstructs_typed_deflate_level(#[case] raw: Option<u32>, #[case] level: Def
 }
 
 #[rstest]
-#[case(10)]
-#[case(255)]
-#[case(256)]
-#[case(262)]
-#[case(u32::MAX)]
+#[case::above_level_limit(10)]
+#[case::u8_limit(255)]
+#[case::above_u8_limit(256)]
+#[case::six_in_low_byte(262)]
+#[case::u32_limit(u32::MAX)]
 fn rejects_invalid_deflate_metadata_without_truncation(#[case] level: u32) {
     let pipeline = deflate_pipeline(Some(level));
     let error = check_pipeline(Some(&pipeline), &ObjectPathBuf::parse("data")).unwrap_err();

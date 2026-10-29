@@ -3685,10 +3685,10 @@ mod tests {
     }
 
     #[rstest]
-    #[case(0)]
-    #[case(7)]
-    #[case(9)]
-    #[case(255)]
+    #[case::zero_width(0)]
+    #[case::below_address_width(7)]
+    #[case::above_address_width(9)]
+    #[case::maximum_width(255)]
     fn an_unfiltered_element_width_other_than_an_address_is_readable_but_append_is_unsupported(
         #[case] element_size: u8,
     ) {

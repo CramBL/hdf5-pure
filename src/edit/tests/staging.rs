@@ -370,9 +370,9 @@ fn recreating_a_deleted_group_makes_staged_children_visible() {
 }
 
 #[rstest]
-#[case("")]
-#[case("/")]
-#[case(".")]
+#[case::empty("")]
+#[case::absolute_root("/")]
+#[case::dot(".")]
 fn the_root_cannot_be_deleted(#[case] spelling: &str) {
     let dir = tempfile::tempdir().unwrap();
     let mut e = open_session(&dir.path().join("q.h5"));
@@ -395,9 +395,9 @@ fn the_root_cannot_be_deleted(#[case] spelling: &str) {
 }
 
 #[rstest]
-#[case("")]
-#[case("/")]
-#[case(".")]
+#[case::empty("")]
+#[case::absolute_root("/")]
+#[case::dot(".")]
 fn the_root_group_cannot_be_created(#[case] spelling: &str) {
     let dir = tempfile::tempdir().unwrap();
     let mut e = open_session(&dir.path().join("q.h5"));

@@ -402,12 +402,12 @@ mod tests {
     use crate::type_builders;
 
     #[rstest]
-    #[case(&[3, 4], &[1], &[1, 1], FormatError::RegionRankMismatch { rank: 2, start: 1, count: 2 })]
-    #[case(&[3, 4], &[1, 1], &[1], FormatError::RegionRankMismatch { rank: 2, start: 2, count: 1 })]
-    #[case(&[3, 4], &[4, 1], &[0, 1], FormatError::RegionOutOfBounds { dimension: 0, start: 4, count: 0, extent: 3 })]
-    #[case(&[3, 4], &[1, 3], &[0, 2], FormatError::RegionOutOfBounds { dimension: 1, start: 3, count: 2, extent: 4 })]
-    #[case(&[3, 4], &[1, u64::MAX], &[0, 1], FormatError::RegionOutOfBounds { dimension: 1, start: u64::MAX, count: 1, extent: 4 })]
-    #[case(&[u64::MAX, 2], &[0, 0], &[1, 1], FormatError::OffsetOverflow { offset: 2, length: u64::MAX })]
+    #[case::start_rank_mismatch(&[3, 4], &[1], &[1, 1], FormatError::RegionRankMismatch { rank: 2, start: 1, count: 2 })]
+    #[case::count_rank_mismatch(&[3, 4], &[1, 1], &[1], FormatError::RegionRankMismatch { rank: 2, start: 2, count: 1 })]
+    #[case::start_beyond_extent(&[3, 4], &[4, 1], &[0, 1], FormatError::RegionOutOfBounds { dimension: 0, start: 4, count: 0, extent: 3 })]
+    #[case::count_beyond_extent(&[3, 4], &[1, 3], &[0, 2], FormatError::RegionOutOfBounds { dimension: 1, start: 3, count: 2, extent: 4 })]
+    #[case::maximum_start(&[3, 4], &[1, u64::MAX], &[0, 1], FormatError::RegionOutOfBounds { dimension: 1, start: u64::MAX, count: 1, extent: 4 })]
+    #[case::stride_product_overflow(&[u64::MAX, 2], &[0, 0], &[1, 1], FormatError::OffsetOverflow { offset: 2, length: u64::MAX })]
     fn regions_reject_rank_bounds_and_stride_errors(
         #[case] shape: &[u64],
         #[case] start: &[u64],
@@ -434,11 +434,11 @@ mod tests {
     }
 
     #[rstest]
-    #[case(&[3, 4], &[1, 1], &[2, 2], &[(5, 2), (9, 2)])]
-    #[case(&[3, 4], &[1, 0], &[2, 4], &[(4, 8)])]
-    #[case(&[3, 4, 5], &[1, 1, 2], &[2, 2, 2], &[(27, 2), (32, 2), (47, 2), (52, 2)])]
-    #[case(&[u64::MAX, 1], &[u64::MAX - 2, 0], &[2, 1], &[(u64::MAX - 2, 2)])]
-    #[case(&[4_294_967_424, 0], &[4_294_967_360, 0], &[1, 0], &[])]
+    #[case::partial_rows(&[3, 4], &[1, 1], &[2, 2], &[(5, 2), (9, 2)])]
+    #[case::complete_rows(&[3, 4], &[1, 0], &[2, 4], &[(4, 8)])]
+    #[case::three_dimensional(&[3, 4, 5], &[1, 1, 2], &[2, 2, 2], &[(27, 2), (32, 2), (47, 2), (52, 2)])]
+    #[case::maximum_row_offsets(&[u64::MAX, 1], &[u64::MAX - 2, 0], &[2, 1], &[(u64::MAX - 2, 2)])]
+    #[case::zero_columns(&[4_294_967_424, 0], &[4_294_967_360, 0], &[1, 0], &[])]
     fn regions_visit_contiguous_runs(
         #[case] shape: &[u64],
         #[case] start: &[u64],

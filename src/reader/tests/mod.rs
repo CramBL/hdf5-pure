@@ -2063,8 +2063,8 @@ fn a_layout_size_disagreeing_with_the_dataspace_is_refused_at_every_dataset_size
 }
 
 #[rstest::rstest]
-#[case(DataLayout::Contiguous { address: None, size: 0 }, None)]
-#[case(DataLayout::Virtual, Some(FormatError::UnsupportedVirtualLayout))]
+#[case::unallocated_contiguous(DataLayout::Contiguous { address: None, size: 0 }, None)]
+#[case::virtual_layout(DataLayout::Virtual, Some(FormatError::UnsupportedVirtualLayout))]
 fn empty_region_reads_preserve_layout_errors(
     #[case] layout: DataLayout,
     #[case] expected: Option<FormatError>,

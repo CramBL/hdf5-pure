@@ -21,8 +21,8 @@ mod attr_value_display;
 mod fixed_strings;
 
 #[rstest]
-#[case(false)]
-#[case(true)]
+#[case::direct_reference(false)]
+#[case::embedded_reference(true)]
 fn chunked_reference_patches_preserve_embedded_values(#[case] embedded: bool) {
     let mut builder = FileBuilder::new();
     builder
@@ -83,9 +83,9 @@ fn chunked_reference_patches_preserve_embedded_values(#[case] embedded: bool) {
 }
 
 #[rstest]
-#[case(0, Ok(0))]
-#[case(u64::from(u32::MAX), Ok(u32::MAX))]
-#[case(
+#[case::empty(0, Ok(0))]
+#[case::u32_limit(u64::from(u32::MAX), Ok(u32::MAX))]
+#[case::above_u32_limit(
     u64::from(u32::MAX) + 1,
     Err(FormatError::ValueTooLargeForRepresentation {
         value: 4_294_967_296,
@@ -100,9 +100,9 @@ fn a_descriptor_count_uses_the_full_u32_range(
 }
 
 #[rstest]
-#[case(1, 8)]
-#[case(2, 4)]
-#[case(4, 2)]
+#[case::byte_elements(1, 8)]
+#[case::two_byte_elements(2, 4)]
+#[case::four_byte_elements(4, 2)]
 fn sequence_counts_are_measured_in_base_elements(#[case] width: usize, #[case] count: u32) {
     let elements = [
         VlStringElement::Bytes(vec![1, 2, 3, 4, 5, 6, 7, 8]),
@@ -163,9 +163,9 @@ fn a_staged_count_error_reaches_the_public_file_builder() {
 }
 
 #[rstest]
-#[case(AttrValue::VarLenStringArray(vec!["é".into(), String::new()]))]
-#[case(AttrValue::VarLenAsciiStringArray(vec!["ab".into(), String::new()]))]
-#[case(AttrValue::VarLenAsciiCharArray(vec!["ab".into(), String::new()]))]
+#[case::utf8_strings(AttrValue::VarLenStringArray(vec!["é".into(), String::new()]))]
+#[case::ascii_strings(AttrValue::VarLenAsciiStringArray(vec!["ab".into(), String::new()]))]
+#[case::ascii_char_arrays(AttrValue::VarLenAsciiCharArray(vec!["ab".into(), String::new()]))]
 fn attribute_descriptors_count_payload_bytes(#[case] value: AttrValue) {
     let message = type_builders::build_attr_message("text", &value).unwrap();
     assert_eq!(
@@ -178,8 +178,8 @@ fn attribute_descriptors_count_payload_bytes(#[case] value: AttrValue) {
 }
 
 #[rstest]
-#[case(false)]
-#[case(true)]
+#[case::populated_shape(false)]
+#[case::empty_shape(true)]
 fn a_staged_count_error_reaches_finish_even_for_an_empty_shape(#[case] empty: bool) {
     let mut writer = FileWriter::new();
     let dataset = writer.create_dataset("text");
@@ -204,8 +204,8 @@ fn a_staged_count_error_reaches_finish_even_for_an_empty_shape(#[case] empty: bo
 }
 
 #[rstest]
-#[case(false)]
-#[case(true)]
+#[case::numeric_data(false)]
+#[case::string_data(true)]
 fn replacing_element_data_clears_a_staged_count_error(#[case] strings: bool) {
     let mut writer = FileWriter::new();
     let dataset = writer.create_dataset("text");

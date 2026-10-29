@@ -2935,8 +2935,8 @@ mod tests {
     }
 
     #[rstest]
-    #[case(false)]
-    #[case(true)]
+    #[case::no_pipeline(false)]
+    #[case::raw_with_pipeline(true)]
     fn complete_identity_chunks_remain_borrowed(#[case] pipeline: bool) {
         let pipeline = pipeline.then(shuffle_pipeline);
         let stored = [7; 8];
@@ -5384,23 +5384,23 @@ mod tests {
     }
 
     #[rstest]
-    #[case(ChunkedLayoutFlags::NONE, &[4, 4, 0], ChunkFiltering::Filtered { filter_mask: 3 })]
-    #[case(
+    #[case::edge_without_skip_flag(ChunkedLayoutFlags::NONE, &[4, 4, 0], ChunkFiltering::Filtered { filter_mask: 3 })]
+    #[case::interior_with_skip_flag(
         ChunkedLayoutFlags::new(DONT_FILTER_PARTIAL_BOUND_CHUNKS),
         &[0, 0, 0],
         ChunkFiltering::Filtered { filter_mask: 3 }
     )]
-    #[case(
+    #[case::row_edge(
         ChunkedLayoutFlags::new(DONT_FILTER_PARTIAL_BOUND_CHUNKS),
         &[4, 0, 0],
         ChunkFiltering::Raw
     )]
-    #[case(
+    #[case::column_edge(
         ChunkedLayoutFlags::new(DONT_FILTER_PARTIAL_BOUND_CHUNKS),
         &[0, 4, 0],
         ChunkFiltering::Raw
     )]
-    #[case(
+    #[case::corner_edge(
         ChunkedLayoutFlags::new(DONT_FILTER_PARTIAL_BOUND_CHUNKS),
         &[4, 4, 0],
         ChunkFiltering::Raw
@@ -5716,7 +5716,7 @@ mod tests {
     // --- Implicit chunk generation tests ---
 
     #[rstest]
-    #[case(
+    #[case::one_dimensional(
         vec![100],
         None,
         vec![20],
@@ -5729,7 +5729,7 @@ mod tests {
             (0x1280, vec![80], 160),
         ],
     )]
-    #[case(
+    #[case::two_dimensional(
         vec![10, 6],
         None,
         vec![4, 3],
@@ -5743,7 +5743,7 @@ mod tests {
             (0x10f0, vec![8, 3], 48),
         ],
     )]
-    #[case(
+    #[case::partial_edge(
         vec![25],
         None,
         vec![10],
@@ -5754,14 +5754,14 @@ mod tests {
             (0x10a0, vec![20], 80),
         ],
     )]
-    #[case(
+    #[case::large_element_width(
         vec![1],
         None,
         vec![1],
         u64::from(u32::MAX) + 1,
         vec![(0x1000, vec![0], u64::from(u32::MAX) + 1)],
     )]
-    #[case(
+    #[case::maximum_extent_stride(
         vec![4, 4],
         Some(vec![MaxExtent::Fixed(4), MaxExtent::Fixed(8)]),
         vec![2, 2],
@@ -6402,9 +6402,9 @@ mod tests {
     }
 
     #[rstest]
-    #[case(4_294_967_424, 1, 0, 1, 8)]
-    #[case(4_294_967_424, 1, 4_294_967_360, 1, 8)]
-    #[case(4_294_967_297, 0, 1, 1, 0)]
+    #[case::leading_row(4_294_967_424, 1, 0, 1, 8)]
+    #[case::row_above_u32(4_294_967_424, 1, 4_294_967_360, 1, 8)]
+    #[case::zero_columns(4_294_967_297, 0, 1, 1, 0)]
     fn windowed_rows_materialize_only_the_selected_geometry(
         #[case] rows: u64,
         #[case] columns: u64,
@@ -6528,8 +6528,8 @@ mod tests {
     }
 
     #[rstest]
-    #[case(false)]
-    #[case(true)]
+    #[case::absent_index(false)]
+    #[case::present_index(true)]
     fn whole_chunked_reads_return_an_empty_output_for_large_zero_element_geometry(
         #[case] allocated: bool,
         #[values(false, true)] unreadable_fill: bool,

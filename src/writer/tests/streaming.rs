@@ -1011,11 +1011,11 @@ fn a_produced_block_of_the_wrong_size_is_refused_by_the_emitter() {
 }
 
 #[rstest::rstest]
-#[case(0)]
-#[case(512)]
-#[case(1024)]
-#[case(2048)]
-#[case(4096)]
+#[case::no_userblock(0)]
+#[case::minimum_userblock(512)]
+#[case::one_kibibyte(1024)]
+#[case::two_kibibytes(2048)]
+#[case::four_kibibytes(4096)]
 fn writes_valid_userblock_sizes(#[case] size: u64) {
     let mut builder = FileBuilder::new();
     builder.with_userblock(UserblockSize::try_from(size).unwrap());
