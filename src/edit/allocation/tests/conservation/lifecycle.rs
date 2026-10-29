@@ -109,11 +109,15 @@ pub(super) fn failure_on(
     hole: &Coverage,
 ) {
     let elements = action.elements();
-    let workload = Workload::record_elements(path, elements, |values| {
-        let file = open(path, policy);
-        action.run(&file, values, true).unwrap();
-        file.close().unwrap();
-    });
+    let workload = Workload::record_elements(
+        || fs::read(path).unwrap(),
+        elements,
+        |values| {
+            let file = open(path, policy);
+            action.run(&file, values, true).unwrap();
+            file.close().unwrap();
+        },
+    );
     let replay = tempfile::tempdir().unwrap();
     workload.replay(&replay.path().join("prefix.h5"), hole, |_, _, _| {});
     let boundary = Boundary::read(&workload, policy);
@@ -627,15 +631,19 @@ fn terminal_failure(operation: Terminal, policy: SyncPolicy, fault: Fault, clean
     let fixture = fs::read(&path).unwrap();
     let file = open(&path, policy);
     let retired = prepare_terminal(&file, cleanup);
-    let mut workload = Workload::record_elements(&path, 0, |_| {
-        operation.run(&file).unwrap();
-        if !cleanup {
-            assert_eq!(file.root().groups().unwrap(), ["pending"]);
-        }
-        if matches!(operation, Terminal::Commit) {
-            file.clone().close().unwrap();
-        }
-    });
+    let mut workload = Workload::record_elements(
+        || file.disk_bytes().unwrap(),
+        0,
+        |_| {
+            operation.run(&file).unwrap();
+            if !cleanup {
+                assert_eq!(file.root().groups().unwrap(), ["pending"]);
+            }
+            if matches!(operation, Terminal::Commit) {
+                file.clone().close().unwrap();
+            }
+        },
+    );
     drop(file);
     if let Some(retired) = retired {
         assert!(!workload.snapshots[0].live.contains(&retired));
