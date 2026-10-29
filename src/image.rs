@@ -1349,15 +1349,11 @@ impl FileImage for HandleImage {
     // No `as_slice`: withholding the whole-file slice is what this image is for.
 }
 
-/// A [`FileImage`] that counts what passes through it — bytes read, and
-/// durability barriers issued — so a test can measure how much of a file an
-/// operation touches and how many `fsync`s it costs. A caller that cares about
-/// only one counter passes a throwaway `Arc` for the other.
+/// Counts requested read bytes and synchronization calls through a wrapped image.
 ///
-/// It deliberately does *not* forward `read_metadata_at`, taking [`Source`]'s
-/// default instead, so every read funnels through this one `read_at` and is
-/// counted. Callers build the inner image with the metadata cache disabled, so
-/// nothing is bypassed and the count is exact rather than an upper bound.
+/// The reader uses the default [`Source`] metadata methods, which call [`Source::read_at`].
+/// Tests disable the inner image's metadata cache. Direct disk reads through
+/// [`FileImage::read_disk_at`] are excluded.
 ///
 /// Both synchronization methods increment the same counter before calling the inner image,
 /// including requests that return an error. Tests that distinguish synchronization kinds and
@@ -1366,6 +1362,8 @@ impl FileImage for HandleImage {
 pub(crate) struct CountingImage {
     inner: Box<dyn FileImage>,
     read_bytes: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Optional counter for read attempts, including failures and empty reads.
+    read_calls: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
     syncs: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -1379,8 +1377,18 @@ impl CountingImage {
         Self {
             inner,
             read_bytes,
+            read_calls: None,
             syncs,
         }
+    }
+
+    /// Enables counting each call to [`Source::read_at`] before the inner read.
+    pub(crate) fn with_read_calls(
+        mut self,
+        read_calls: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ) -> Self {
+        self.read_calls = Some(read_calls);
+        self
     }
 
     fn count_sync(&self) {
@@ -1398,6 +1406,9 @@ impl Source for CountingImage {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError> {
         self.read_bytes
             .fetch_add(buf.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        if let Some(read_calls) = &self.read_calls {
+            read_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         self.inner.read_at(offset, buf)
     }
 }
