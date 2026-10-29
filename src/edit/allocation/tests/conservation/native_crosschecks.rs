@@ -123,21 +123,45 @@ fn native_raw_append_after_interruption_preserves_values_and_ownership(
     });
 }
 
-test_util_hdf5::hdf5_bundled_tests! {
+#[rstest]
+#[case::existing(false)]
+#[case::deferred(true)]
+fn native_metadata_creation_after_interruption_preserves_values_and_ownership(
+    #[case] deferred: bool,
+) {
+    native_metadata_creation_after_interruption(false, deferred);
+}
+
+test_util_hdf5::hdf5_1_12_tests! {
     #[rstest]
     #[case::existing(false)]
     #[case::deferred(true)]
-    fn native_metadata_creation_after_interruption_preserves_values_and_ownership(
+    fn native_page_metadata_creation_after_interruption_preserves_values_and_ownership(
         #[case] deferred: bool,
-        #[values(false, true)] paged: bool,
     ) {
-        native_write_after_interruption(paged, deferred, |path, before| NativeWrite {
-            address: allocation_publication::allocate_contiguous(path, 8192),
-            length: 8192,
-            values: before.to_vec(),
-            created: Some(vec![19; 8192]),
-        });
+        native_metadata_creation_after_interruption(true, deferred);
     }
+}
+
+test_util_hdf5::hdf5_1_10_series_tests! {
+    #[rstest]
+    #[case::existing(false)]
+    #[case::deferred(true)]
+    #[ignore = "HDF5 1.10 PAGE metadata creation produces an invalid free-section checksum"]
+    fn native_page_metadata_creation_after_interruption_preserves_values_and_ownership(
+        #[case] deferred: bool,
+    ) {
+        native_metadata_creation_after_interruption(true, deferred);
+    }
+}
+
+fn native_metadata_creation_after_interruption(paged: bool, deferred: bool) {
+    native_write_after_interruption(paged, deferred, |path, before| NativeWrite {
+        address: allocation_publication::allocate_contiguous(path, 8192),
+        length: 8192,
+        values: before.to_vec(),
+        created: Some(vec![19; 8192]),
+    });
 }
 
 struct NativeWrite {

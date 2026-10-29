@@ -56,14 +56,27 @@ fn immediate_ownership_publication_matches_native_free_sections(
 }
 
 #[rstest]
-#[case::flat_borrowed(false, false, false)]
-#[case::flat_owned_filtered(false, true, true)]
-#[case::page_borrowed(true, false, false)]
-#[case::page_owned_filtered(true, true, true)]
+#[case::flat_borrowed(false, false, false, false)]
+#[case::flat_owned_filtered(false, true, true, false)]
+#[case::page_borrowed(true, false, false, false)]
+#[case::page_owned_filtered(true, true, true, false)]
+#[case::flat_borrowed_metadata(false, false, false, true)]
+#[case::flat_owned_filtered_metadata(false, true, true, true)]
+#[cfg_attr(
+    not(feature = "__hdf5-1.12"),
+    ignore = "HDF5 1.10 PAGE metadata creation produces an invalid free-section checksum"
+)]
+#[case::page_borrowed_metadata(true, false, false, true)]
+#[cfg_attr(
+    not(feature = "__hdf5-1.12"),
+    ignore = "HDF5 1.10 PAGE metadata creation produces an invalid free-section checksum"
+)]
+#[case::page_owned_filtered_metadata(true, true, true, true)]
 fn appender_values_persist_across_staged_commits_and_native_writes(
     #[case] paged: bool,
     #[case] owned: bool,
     #[case] filtered: bool,
+    #[case] native_metadata: bool,
     #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] backing: MemoryStrategy,
     #[values(SyncPolicy::Always, SyncPolicy::OnClose)] policy: SyncPolicy,
 ) {
@@ -172,8 +185,7 @@ fn appender_values_persist_across_staged_commits_and_native_writes(
     let ceiling = native.dataset("ceiling").unwrap();
     ceiling.write_raw(&[73_u8; 8192]).unwrap();
     drop(ceiling);
-    #[cfg(feature = "__hdf5-bundled")]
-    {
+    if native_metadata {
         let dataset = native
             .new_dataset_builder()
             .with_data(&[73_u8; 8192])
@@ -192,11 +204,12 @@ fn appender_values_persist_across_staged_commits_and_native_writes(
         file.dataset("ceiling").unwrap().read_u8().unwrap(),
         [73; 8192]
     );
-    #[cfg(feature = "__hdf5-bundled")]
-    assert_eq!(
-        file.dataset("native").unwrap().read_u8().unwrap(),
-        [73; 8192]
-    );
+    if native_metadata {
+        assert_eq!(
+            file.dataset("native").unwrap().read_u8().unwrap(),
+            [73; 8192]
+        );
+    }
     drop(file);
     test_util_hdf5::file_space_oracle::assert_persisted_sections(&path);
 }
