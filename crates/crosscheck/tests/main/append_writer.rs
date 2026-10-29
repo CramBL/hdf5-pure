@@ -11,6 +11,7 @@
 use hdf5_pure::{File, FileAccessProperties, SyncPolicy};
 
 use test_util_hdf5::dataset::{self, AppendInteropFixture, Unlimited};
+use test_util_hdf5::numeric::ByteOrder;
 
 /// Append `values` one element per call in a single session.
 ///
@@ -81,28 +82,24 @@ fn c_incompressible_kept_chunks_untouched() {
 }
 
 #[test]
-fn c_empty_unallocated_index_is_refused() {
-    // libhdf5 defers allocating an empty resizable dataset's
-    // Extensible-Array index until the first chunk is written, so there is no
-    // index block for in-place growth. `File::open_rw` + `Dataset::append` refuses it cleanly; the
-    // batch path (`Dataset::append_staged`) materializes the index instead.
+fn c_empty_unallocated_index_initializes_on_its_first_append() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("d.h5");
     Unlimited::<i32>::new("d", &[], 4)
         .filters(dataset::SHUFFLE_DEFLATE_6)
+        .stored_as(ByteOrder::LittleEndian.i32_datatype())
         .libhdf5_create(&path);
     let file = File::open_rw(&path).unwrap();
-    let r = file
-        .dataset("d")
-        .unwrap()
-        .append(&(0..10).collect::<Vec<_>>());
-    assert!(
-        matches!(r, Err(hdf5_pure::Error::AppendInPlaceUnsupported(_))),
-        "expected a clean refusal, got {r:?}"
-    );
-    drop(file);
-    // The file is unchanged and still readable by C.
-    assert!(dataset::read_libhdf5::<i32>(&path, "d").is_empty());
+    let mut target = file.dataset("d").unwrap();
+    assert_eq!(target.shape().unwrap(), [0]);
+    assert!(target.chunks().unwrap().is_empty());
+    let expected: Vec<i32> = (0..10).collect();
+    target.append(&expected).unwrap();
+    assert_eq!(target.read_i32().unwrap(), expected);
+    drop(target);
+    file.close().unwrap();
+    assert_eq!(dataset::read_libhdf5::<i32>(&path, "d"), expected);
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
 }
 
 #[test]

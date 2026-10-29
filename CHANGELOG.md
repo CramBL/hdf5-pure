@@ -80,7 +80,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - Fixed `File::open_rw` leaving complete pages inside unaligned generic-large PAGE free sections unavailable for reuse, while partial edges remain unclassified.
-- Fixed unused reservation space being lost after interrupted `Dataset::append` calls in files with persisted free space. Allocations are published through the free-space managers before new references, with more frequent manager rewrites.
+- Fixed unused free space being lost after interrupted `Dataset::append` calls or later raw data writes in files with persisted free space. Allocations are published through the free-space managers before new references, with more frequent manager rewrites.
 - Fixed storage growth from superseded partial tails in `Dataset::append` and buffered flushes when the file-space strategy admits reclamation ([#957](https://github.com/CramBL/hdf5-pure/pull/957)).
 - Fixed `File::commit` making superseded storage reusable after an uncertain nonpersistent root publication ([#957](https://github.com/CramBL/hdf5-pure/pull/957)).
 - Fixed `FileBuilder::finish` and related dataset creation writing incompatible chunk dimension widths for dimensions from 65,536 through 16,777,215 ([#952](https://github.com/CramBL/hdf5-pure/pull/952)).
