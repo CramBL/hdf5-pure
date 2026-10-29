@@ -754,9 +754,10 @@ impl BufferedWrites {
         // keeps every surviving run pending but has already moved the file. That
         // is an error path in both orders; this one is the half that cannot lose
         // a write.
+        #[cfg(not(test))]
         self.handle.set_len(len).map_err(Error::Io)?;
         #[cfg(test)]
-        disk_log::record_set_len(len);
+        disk_log::set_len(&self.handle, len).map_err(Error::Io)?;
         self.discard_from(len);
         self.on_disk_len = len;
         self.flush()?;
@@ -790,7 +791,10 @@ impl BufferedWrites {
     pub(crate) fn sync_data(&mut self) -> Result<(), Error> {
         self.flush()?;
         self.handle.flush().map_err(Error::Io)?;
+        #[cfg(not(test))]
         self.handle.sync_data().map_err(Error::Io)?;
+        #[cfg(test)]
+        disk_log::synchronize(&self.handle, disk_log::Synchronization::Data).map_err(Error::Io)?;
         Ok(())
     }
 
@@ -798,7 +802,10 @@ impl BufferedWrites {
     pub(crate) fn sync_all(&mut self) -> Result<(), Error> {
         self.flush()?;
         self.handle.flush().map_err(Error::Io)?;
+        #[cfg(not(test))]
         self.handle.sync_all().map_err(Error::Io)?;
+        #[cfg(test)]
+        disk_log::synchronize(&self.handle, disk_log::Synchronization::All).map_err(Error::Io)?;
         Ok(())
     }
 }
@@ -1352,11 +1359,9 @@ impl FileImage for HandleImage {
 /// counted. Callers build the inner image with the metadata cache disabled, so
 /// nothing is bypassed and the count is exact rather than an upper bound.
 ///
-/// Both barriers feed one counter. What a [`SyncPolicy`](crate::SyncPolicy)
-/// governs is whether a barrier is issued at all, and a test that also pinned
-/// *which* of the two each site chose would fail on any later re-weighing of
-/// that choice — which the trait above documents as an inspection-time decision,
-/// not a tested one.
+/// Both synchronization methods increment the same counter before calling the inner image,
+/// including requests that return an error. Tests that distinguish synchronization kinds and
+/// reported outcomes use [`disk_log`].
 #[cfg(test)]
 pub(crate) struct CountingImage {
     inner: Box<dyn FileImage>,
