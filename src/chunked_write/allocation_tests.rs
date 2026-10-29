@@ -14,10 +14,10 @@ use test_util::filtered_chunks::Workload;
 use super::ChunkOptions;
 use super::FilterKind;
 use super::gathering::ChunkTraversal;
-use super::split_into_chunks;
 use crate::File;
 use crate::FileBuilder;
 use crate::FillTime;
+use crate::chunked_write;
 use crate::convert;
 use crate::data_layout::ChunkedLayoutFlags;
 use crate::fill_value::FillPattern;
@@ -166,7 +166,8 @@ fn measure_encoding(workload: Workload, raw: &[u8], names: [&'static str; 2]) {
     let pipeline = options.build_pipeline(&context, fill).unwrap().unwrap();
 
     let (collected_encoded, collected_encoding) = allocation::measure(names[0], || {
-        let raw_chunks = split_into_chunks(raw, &shape, &chunks, convert::nz(4), fill).unwrap();
+        let raw_chunks =
+            chunked_write::split_into_chunks(raw, &shape, &chunks, convert::nz(4), fill).unwrap();
         let mut encoded = Vec::with_capacity(raw_chunks.len());
         let mut scratch = FilterScratch::new();
         for chunk in raw_chunks {
