@@ -219,7 +219,7 @@ fn page_classes_retain_unused_tails_across_ownership_publications(#[case] buffer
     }
     let mut actual: Vec<Payload> = Vec::new();
     for (step, length) in [137, 3000, 5000].into_iter().enumerate() {
-        let base = fs::read(&path).unwrap();
+        let base = engine.disk_bytes().unwrap();
         let payload = vec![u8::try_from(step + 31).unwrap(); length];
         disk_log::start();
         let allocation = engine
@@ -227,14 +227,14 @@ fn page_classes_retain_unused_tails_across_ownership_publications(#[case] buffer
             .allocate(&payload, AllocationClass::Raw)
             .unwrap();
         engine.image.flush().unwrap();
-        let prepared = fs::read(&path).unwrap();
+        let prepared = engine.disk_bytes().unwrap();
         let stored = Payload::find(&prepared, payload);
         let publication = engine.store().publish_allocations().unwrap();
         publication.confirm(allocation).unwrap();
         let recording = disk_log::finish();
         assert!(!recording.operations.is_empty());
         assert!(!recording.events.is_empty());
-        let published = fs::read(&path).unwrap();
+        let published = engine.disk_bytes().unwrap();
         let mut image = base;
         let mut started = false;
         let mut complete = false;
@@ -310,7 +310,7 @@ fn page_classes_retain_unused_tails_across_ownership_publications(#[case] buffer
                 .contains(&FreeSpaceManagerRole::PageSmallMetadata)
         );
     }
-    let before = fs::read(&path).unwrap();
+    let before = engine.disk_bytes().unwrap();
     drop(engine);
     assert_eq!(fs::read(&path).unwrap(), before);
     let eof = Space::read(&before).eof;
@@ -345,7 +345,7 @@ fn page_buffered_index_creation_preserves_complete_extents(#[case] paged: bool) 
                 u8::MAX,
             )
             .unwrap();
-        let before = fs::read(&path).unwrap();
+        let before = engine.disk_bytes().unwrap();
         drop(engine);
         assert_eq!(fs::read(&path).unwrap(), before);
     });

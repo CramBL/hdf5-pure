@@ -360,7 +360,7 @@ fn actual_io_failure_prevents_dependent_reference_publication(
         "{deferred:?}/{policy:?}/{failure:?}, event {target}: issued writes after failure: {:?}",
         trace.events
     );
-    let interrupted = fs::read(&path).unwrap();
+    let interrupted = engine.disk_bytes().unwrap();
     let mut replay = observed.base.clone();
     for operation in trace.operations {
         operation.apply(&mut replay);
@@ -387,7 +387,7 @@ fn actual_io_failure_prevents_dependent_reference_publication(
             .append_inplace_gathered(AppendTarget::Path(&ObjectPathBuf::parse("d")), &append, 4)
             .unwrap();
         let retry = disk_log::finish();
-        let final_bytes = fs::read(&path).unwrap();
+        let final_bytes = engine.disk_bytes().unwrap();
         let retry = Observation::new(
             interrupted,
             final_bytes,
@@ -872,7 +872,7 @@ fn record(
         super::append(&mut engine, start + round * 4, 4);
     }
     let trace = disk_log::finish();
-    let final_bytes = fs::read(path).unwrap();
+    let final_bytes = engine.disk_bytes().unwrap();
     drop(engine);
     assert_eq!(
         fs::read(path).unwrap(),

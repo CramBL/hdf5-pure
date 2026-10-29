@@ -746,7 +746,7 @@ mod tests {
         }
         assert!(!engine.aggregation.unwrap().publication_confirmed);
         let physical_size = engine.image.len();
-        let issued = std::fs::read(&path).unwrap();
+        let issued = engine.disk_bytes().unwrap();
         assert!(matches!(
             engine.commit(),
             Err(Error::AllocationPublicationUncertain)
@@ -760,7 +760,7 @@ mod tests {
             engine.force_sync(),
             Err(Error::AllocationPublicationUncertain)
         ));
-        assert_eq!(std::fs::read(&path).unwrap(), issued);
+        assert_eq!(engine.disk_bytes().unwrap(), issued);
         let after_cleanup = engine.image.len();
         drop(engine);
         let file = File::open(&path).unwrap();
@@ -836,6 +836,10 @@ mod tests {
     }
 
     impl FileImage for TransientPublicationImage {
+        fn disk_bytes(&self) -> Result<Vec<u8>, Error> {
+            self.inner.disk_bytes()
+        }
+
         fn read_disk_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
             self.inner.read_disk_at(offset, bytes)
         }

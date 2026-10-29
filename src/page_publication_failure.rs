@@ -139,6 +139,10 @@ impl PublicationFailureImage {
 }
 
 impl FileImage for PublicationFailureImage {
+    fn disk_bytes(&self) -> Result<Vec<u8>, Error> {
+        self.inner.disk_bytes()
+    }
+
     fn read_disk_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
         if self.published && matches!(self.failure, PagePublicationFailure::PublishedRead) {
             return Err(FormatError::Source(

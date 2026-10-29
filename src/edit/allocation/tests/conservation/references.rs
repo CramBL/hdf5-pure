@@ -459,7 +459,7 @@ fn run_failure(fault: FaultSpec, policy: SyncPolicy, buffered: bool, filtered: b
             assert_eq!(kind, expected_kind);
         }
     }
-    let interrupted = fs::read(&path).unwrap();
+    let interrupted = engine.disk_bytes().unwrap();
     let mut replay = workload.base.clone();
     for operation in &failed.operations {
         operation.apply(&mut replay);
@@ -1556,7 +1556,7 @@ fn record(
     let workload = Workload::record_with(path, extents::ROUNDS, |_| {
         let mut engine = open(path, policy, buffered);
         append(&mut engine).unwrap();
-        let before = fs::read(path).unwrap();
+        let before = engine.disk_bytes().unwrap();
         drop(engine);
         assert_eq!(fs::read(path).unwrap(), before);
     });

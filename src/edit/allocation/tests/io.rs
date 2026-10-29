@@ -199,7 +199,7 @@ fn an_uncertain_preallocation_drain_prevents_further_writes() {
         Err(Error::AllocationPublicationUncertain)
     ));
     assert_eq!(*events.lock().unwrap(), failed);
-    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(engine.disk_bytes().unwrap(), before);
 }
 
 #[test]
@@ -253,7 +253,7 @@ fn failed_provisional_tail_truncation_blocks_later_publication() {
         Err(Error::AllocationPublicationUncertain)
     ));
     assert_eq!(*events.lock().unwrap(), failed);
-    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(engine.disk_bytes().unwrap(), before);
     drop(engine);
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
@@ -281,7 +281,7 @@ fn failed_explicit_sync_discards_pending_staged_writes() {
         .create_group(&ObjectPathBuf::parse("pending"))
         .unwrap();
     engine.commit().unwrap();
-    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(engine.disk_bytes().unwrap(), before);
     let error = engine.force_sync().unwrap_err();
     let Error::Io(error) = error else {
         panic!("expected explicit synchronization failure, got {error:?}");
@@ -367,6 +367,10 @@ impl BoundaryImage {
 }
 
 impl FileImage for BoundaryImage {
+    fn disk_bytes(&self) -> Result<Vec<u8>, Error> {
+        self.inner.disk_bytes()
+    }
+
     fn read_disk_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), FormatError> {
         self.inner.read_disk_at(offset, bytes)
     }

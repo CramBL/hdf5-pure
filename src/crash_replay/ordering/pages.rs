@@ -286,7 +286,7 @@ fn page_initialization_errors_prevent_later_references_and_reuse(
             }
         );
     }
-    let interrupted = fs::read(&path).unwrap();
+    let interrupted = engine.disk_bytes().unwrap();
     let mut replay = observed.base.clone();
     for operation in &failed.operations {
         operation.apply(&mut replay);

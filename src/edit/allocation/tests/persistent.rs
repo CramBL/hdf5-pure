@@ -47,7 +47,7 @@ fn provisional_ownership_preserves_every_unissued_hole_interval(
             "cycle {cycle}: payload {range:?} does not reuse {hole:?}"
         );
         engine.image.flush().unwrap();
-        let provisional = fs::read(&path).unwrap();
+        let provisional = engine.disk_bytes().unwrap();
         let locations: Vec<_> = provisional
             .windows(payload.len())
             .enumerate()
@@ -98,7 +98,7 @@ fn provisional_ownership_preserves_every_unissued_hole_interval(
         );
         allocations.push(actual);
         assert_eq!(engine.context.superblock().root_group_address, root);
-        let published = fs::read(&path).unwrap();
+        let published = engine.disk_bytes().unwrap();
         let OwnershipObservation { free, metadata } = observe(&published);
         assert_conserved(hole, &allocations, &metadata, &free, cycle, "confirmed");
         assert_eq!(
@@ -171,7 +171,7 @@ fn manager_publication_preserves_unrelated_staged_edits(#[case] strategy: Persis
         )
         .unwrap();
     assert!(engine.has_staged_edits());
-    let snapshot = File::from_bytes(fs::read(&path).unwrap()).unwrap();
+    let snapshot = File::from_bytes(engine.disk_bytes().unwrap()).unwrap();
     assert_eq!(snapshot.root().groups().unwrap(), Vec::<String>::new());
     assert_eq!(
         snapshot.dataset("values").unwrap().read_i32().unwrap(),
@@ -179,7 +179,7 @@ fn manager_publication_preserves_unrelated_staged_edits(#[case] strategy: Persis
     );
     drop(snapshot);
     engine.commit().unwrap();
-    let snapshot = File::from_bytes(fs::read(&path).unwrap()).unwrap();
+    let snapshot = File::from_bytes(engine.disk_bytes().unwrap()).unwrap();
     assert_eq!(snapshot.root().groups().unwrap(), ["pending"]);
 }
 
@@ -192,7 +192,7 @@ fn a_prior_page_buffered_commit_is_issued_before_reuse(#[case] strategy: Persist
     fixture(&path, strategy);
     let mut engine = open(&path, MemoryStrategy::Bounded, SyncPolicy::OnClose);
     engine.set_page_buffer_size(1 << 20).unwrap();
-    let old = crate::superblock::read(fs::read(&path).unwrap().as_slice())
+    let old = crate::superblock::read(engine.disk_bytes().unwrap().as_slice())
         .unwrap()
         .superblock
         .root_group_address;
@@ -207,7 +207,7 @@ fn a_prior_page_buffered_commit_is_issued_before_reuse(#[case] strategy: Persist
     engine.commit().unwrap();
     let current = engine.context.superblock().root_group_address;
     assert_ne!(old, current);
-    let before = fs::read(&path).unwrap();
+    let before = engine.disk_bytes().unwrap();
     assert_ne!(
         crate::superblock::read(before.as_slice())
             .unwrap()
@@ -217,7 +217,7 @@ fn a_prior_page_buffered_commit_is_issued_before_reuse(#[case] strategy: Persist
     );
     let mut store = engine.store();
     let allocation = store.allocate(&[37; 8192], AllocationClass::Raw).unwrap();
-    let issued = fs::read(&path).unwrap();
+    let issued = engine.disk_bytes().unwrap();
     assert_eq!(
         crate::superblock::read(issued.as_slice())
             .unwrap()
@@ -264,7 +264,7 @@ fn lifecycle_operations_require_pending_allocation_confirmation(
         .store()
         .allocate(&[47; 8192], AllocationClass::Raw)
         .unwrap();
-    let before = fs::read(&path).unwrap();
+    let before = engine.disk_bytes().unwrap();
     let error = operation.apply(&mut engine).unwrap_err();
     let Error::Format(FormatError::Internal(reason)) = error else {
         panic!("expected provisional allocation rejection, got {error:?}");
@@ -273,7 +273,7 @@ fn lifecycle_operations_require_pending_allocation_confirmation(
         reason,
         "reference publication precedes allocation ownership publication"
     );
-    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(engine.disk_bytes().unwrap(), before);
     assert!(engine.has_staged_edits());
     let publication = engine.store().publish_allocations().unwrap();
     let allocation = publication.confirm(allocation).unwrap();
@@ -282,7 +282,7 @@ fn lifecycle_operations_require_pending_allocation_confirmation(
         engine.has_staged_edits(),
         !matches!(operation, Completion::Commit)
     );
-    let OwnershipObservation { free, .. } = observe(&fs::read(&path).unwrap());
+    let OwnershipObservation { free, .. } = observe(&engine.disk_bytes().unwrap());
     let range = engine.context.allocations.require(&allocation).unwrap();
     assert!(
         free.iter()
@@ -446,7 +446,7 @@ fn malformed_authoritative_managers_reject_allocation_before_mutation(
         panic!("expected malformed manager rejection, got {error:?}");
     };
     assert_eq!(actual, expected);
-    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert_eq!(engine.disk_bytes().unwrap(), bytes);
     drop(engine);
     assert_eq!(fs::read(&path).unwrap(), bytes);
 }

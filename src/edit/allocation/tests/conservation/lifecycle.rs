@@ -140,7 +140,7 @@ pub(super) fn failure_on(
         fault,
         u64::try_from(workload.base.len()).unwrap(),
     );
-    let interrupted = fs::read(path).unwrap();
+    let interrupted = file.disk_bytes().unwrap();
     reconstruct(&workload.base, &recording, &interrupted);
     let snapshot = Observation::read(&interrupted);
     assert_eq!(snapshot.values.len(), workload.initial_values);
@@ -680,7 +680,7 @@ fn terminal_failure(operation: Terminal, policy: SyncPolicy, fault: Fault, clean
     fs::write(&path, &fixture).unwrap();
     let file = open(&path, policy);
     assert_eq!(prepare_terminal(&file, cleanup), retired);
-    assert_eq!(fs::read(&path).unwrap(), workload.base);
+    assert_eq!(file.disk_bytes().unwrap(), workload.base);
     let dataset = file.dataset("d").unwrap();
     let layout = dataset.data_layout().unwrap();
     disk_log::start();
@@ -695,7 +695,7 @@ fn terminal_failure(operation: Terminal, policy: SyncPolicy, fault: Fault, clean
         fault,
         u64::try_from(workload.base.len()).unwrap(),
     );
-    let interrupted = fs::read(&path).unwrap();
+    let interrupted = file.disk_bytes().unwrap();
     reconstruct(&workload.base, &recording, &interrupted);
     let snapshot = Observation::read(&interrupted);
     snapshot.inspect(
@@ -900,7 +900,7 @@ fn actual_truncation_failure_preserves_published_source_bounds(
             operation: (point == FailurePoint::After).then_some(operation),
         }
     );
-    let interrupted = fs::read(&path).unwrap();
+    let interrupted = writer.disk_bytes().unwrap();
     reconstruct(&base, &failed, &interrupted);
     assert_eq!(
         interrupted,
@@ -1006,7 +1006,7 @@ fn unrelated_commits_preserve_active_appender_and_object_identities(
     }
     assert!(file.has_staged_edits());
     assert_eq!(
-        File::from_bytes(fs::read(&path).unwrap())
+        File::from_bytes(file.disk_bytes().unwrap())
             .unwrap()
             .root()
             .groups()

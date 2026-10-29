@@ -388,12 +388,12 @@ mod tests {
         if completed == 0 {
             engine.finalize_persist().unwrap();
         } else {
-            let issued = std::fs::read(&path).unwrap();
+            let issued = engine.disk_bytes().unwrap();
             assert!(matches!(
                 engine.finalize_persist(),
                 Err(Error::AllocationPublicationUncertain)
             ));
-            assert_eq!(std::fs::read(&path).unwrap(), issued);
+            assert_eq!(engine.disk_bytes().unwrap(), issued);
         }
         assert_eq!(engine.fsm_dirty, completed != 0);
         if completed == 0 {
