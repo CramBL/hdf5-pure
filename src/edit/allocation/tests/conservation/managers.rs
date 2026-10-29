@@ -413,7 +413,7 @@ impl PersistedManagerSource for RestrictedSource<'_> {
 pub(super) fn reject(path: &Path, kind: Damage, writer: WritePath) {
     let original = fs::read(path).unwrap();
     let observation = Observation::read(&original);
-    observation.inspect("manager rejection", 0, &observation.free, &[]);
+    observation.inspect("manager rejection", 0, &observation.free, &mut Vec::new());
     let (damaged, expected) = damage(&original, kind);
     for fact in observation
         .live

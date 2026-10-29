@@ -152,7 +152,7 @@ pub(super) fn failure_on(
         "appender actual I/O failure",
         event,
         hole,
-        &workload.published_history(workload.completed_prefix(&recording)),
+        &mut workload.published_history(workload.completed_prefix(&recording)),
     );
     disk_log::start();
     if fault.known_unpublished() {
@@ -166,7 +166,7 @@ pub(super) fn failure_on(
         reconstruct(&interrupted, &retry, &completed);
         let final_state = Observation::read(&completed);
         assert_eq!(final_state.values.len(), workload.initial_values + elements);
-        final_state.inspect("appender retry", event, hole, &[]);
+        final_state.inspect("appender retry", event, hole, &mut Vec::new());
     } else {
         assert_uncertain(file.dataset("d").unwrap().append(&values).unwrap_err());
         assert_uncertain(file.commit().unwrap_err());
@@ -710,7 +710,7 @@ fn terminal_failure(operation: Terminal, policy: SyncPolicy, fault: Fault, clean
         "terminal actual I/O failure",
         event,
         &hole,
-        &workload.published_history(workload.completed_prefix(&recording)),
+        &mut workload.published_history(workload.completed_prefix(&recording)),
     );
     assert_eq!(snapshot.values, workload.snapshots[0].values);
     let groups = File::from_bytes(interrupted.clone())
@@ -745,7 +745,7 @@ fn terminal_failure(operation: Terminal, policy: SyncPolicy, fault: Fault, clean
         assert!(!retry.events.is_empty());
         let completed = fs::read(&path).unwrap();
         reconstruct(&interrupted, &retry, &completed);
-        Observation::read(&completed).inspect("terminal retry", event, &hole, &[]);
+        Observation::read(&completed).inspect("terminal retry", event, &hole, &mut Vec::new());
         assert_eq!(
             File::from_bytes(completed)
                 .unwrap()
@@ -1037,5 +1037,10 @@ fn unrelated_commits_preserve_active_appender_and_object_identities(
     let image = fs::read(&path).unwrap();
     let observation = Observation::read(&image);
     assert_eq!(observation.values.len(), initial + 17);
-    observation.inspect("active appender after unrelated commits", 0, &hole, &[]);
+    observation.inspect(
+        "active appender after unrelated commits",
+        0,
+        &hole,
+        &mut Vec::new(),
+    );
 }

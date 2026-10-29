@@ -135,7 +135,7 @@ fn run(writer: WritePath, paged: bool, deferred: bool, encoding: Encoding) {
         "native transient resume",
         point,
         &hole,
-        &workload.owned_history(point),
+        &mut workload.owned_history(point),
     );
 }
 
