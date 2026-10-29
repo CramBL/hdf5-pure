@@ -691,12 +691,16 @@ fn corrupt_or_truncated_headers_are_rejected_before_append_writes(#[case] trunca
             .create("d")
             .unwrap();
         dataset.write_raw(&(0..20).collect::<Vec<i32>>()).unwrap();
+        drop(dataset);
+        file.close().unwrap();
     }
     let mut image = std::fs::read(&path).unwrap();
     let header = bytes::sole_signature(&image, EA_HEADER_SIGNATURE);
     let len = ExtensibleArrayHeader::serialized_size(8, 8);
-    let expected = if truncated {
-        let moved = u64::try_from(image.len()).unwrap();
+    let logical_size = u64::try_from(image.len()).unwrap();
+    let computed = checksum::lookup3(&image[header..header + len - CHECKSUM_BYTES]);
+    if truncated {
+        let moved = logical_size;
         let prefix = image[header..header + len - 1].to_vec();
         image.extend_from_slice(&prefix);
         patch_layout(&mut image, |layout, tail| {
@@ -704,25 +708,43 @@ fn corrupt_or_truncated_headers_are_rejected_before_append_writes(#[case] trunca
             let encoded = moved.to_le_bytes();
             layout[address..address + encoded.len()].copy_from_slice(&encoded);
         });
-        FormatError::UnexpectedSourceEof {
-            expected: moved + u64::try_from(len).unwrap(),
-            available: u64::try_from(image.len()).unwrap(),
-        }
     } else {
-        let computed = checksum::lookup3(&image[header..header + len - CHECKSUM_BYTES]);
         let expected = computed ^ 1;
         image[header + len - CHECKSUM_BYTES..header + len].copy_from_slice(&expected.to_le_bytes());
-        FormatError::ChecksumMismatch { expected, computed }
     };
     std::fs::write(&path, &image).unwrap();
     {
         let file = File::open_rw(&path).unwrap();
         let mut dataset = file.dataset("d").unwrap();
         let error = dataset.append(&[20]).unwrap_err();
-        let Error::Format(error) = error else {
-            panic!("expected a format error, got {error:?}");
-        };
-        assert_eq!(error, expected);
+        if truncated {
+            let Error::InvalidSpaceOwnershipExtent {
+                address,
+                length,
+                previous_end,
+                logical_size: actual_size,
+            } = error
+            else {
+                panic!("expected an invalid ownership extent, got {error:?}");
+            };
+            assert_eq!(
+                (address, length, previous_end, actual_size),
+                (logical_size, u64::try_from(len).unwrap(), 0, logical_size)
+            );
+        } else {
+            let Error::Format(error) = error else {
+                panic!("expected a format error, got {error:?}");
+            };
+            assert_eq!(
+                error,
+                FormatError::ChecksumMismatch {
+                    expected: computed ^ 1,
+                    computed,
+                }
+            );
+        }
+        drop(dataset);
+        drop(file);
     }
     assert_eq!(std::fs::read(&path).unwrap(), image);
 }

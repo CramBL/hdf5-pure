@@ -18,6 +18,7 @@ use super::WritePath;
 
 mod extents;
 mod lifecycle;
+mod metadata;
 mod transient;
 
 #[rstest]
