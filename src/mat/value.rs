@@ -598,14 +598,6 @@ impl MatValue {
 mod tests {
     use super::*;
 
-    /// Native rather than little-endian is the whole reason a big-endian host
-    /// writes the same file: the components come out of live memory, and the
-    /// writer swaps them on the way to disk.
-    ///
-    /// Written with `to_ne_bytes` on both sides, so it holds either way — but
-    /// that also means it cannot catch `from_ne_bytes` being changed to
-    /// `from_le_bytes`, and no CI target is big-endian. Reason about this one
-    /// rather than trusting it to fail.
     #[test]
     fn native_bytes_decode_at_the_host_order() {
         let pair = [1i16.to_ne_bytes(), (-2i16).to_ne_bytes()].concat();
