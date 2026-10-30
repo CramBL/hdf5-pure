@@ -185,7 +185,11 @@ impl PreparedChunk {
     }
 
     /// Returns the allocated byte capacity retained by this chunk.
-    #[cfg(test)]
+    #[cfg(all(
+        test,
+        feature = "std",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
     pub(crate) fn storage_capacity(&self) -> usize {
         self.bytes.capacity()
     }

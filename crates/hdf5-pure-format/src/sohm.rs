@@ -550,6 +550,7 @@ pub fn sohm_list_len(message_count: u16, offset_width: OffsetWidth) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "checksum")]
     use test_util::checksum::CHECKSUM;
     use test_util::image::Image;
     use test_util::sohm;

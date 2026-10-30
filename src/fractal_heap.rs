@@ -1391,7 +1391,9 @@ mod tests {
         header: FractalHeapHeader,
         image: Vec<u8>,
         block_offset: u64,
+        #[cfg(feature = "deflate")]
         encoded_len: usize,
+        #[cfg(feature = "deflate")]
         indirect_len: usize,
     }
 
@@ -1415,6 +1417,7 @@ mod tests {
             let mut image = vec![0; 0x400];
             let at = usize::try_from(FILTERED_BLOCK_AT).unwrap();
             image[at..at + encoded_len].copy_from_slice(&encoded);
+            #[cfg(feature = "deflate")]
             let mut indirect_len = 0;
             if indirect {
                 let mut root = fractal_heap::INDIRECT_BLOCK_SIGNATURE.to_vec();
@@ -1433,9 +1436,13 @@ mod tests {
                 }
                 let checksum = crate::checksum::jenkins_lookup3(&root);
                 root.extend_from_slice(&checksum.to_le_bytes());
-                indirect_len = root.len();
+                let root_len = root.len();
+                #[cfg(feature = "deflate")]
+                {
+                    indirect_len = root_len;
+                }
                 let at = usize::try_from(FILTERED_ROOT_AT).unwrap();
-                image[at..at + indirect_len].copy_from_slice(&root);
+                image[at..at + root_len].copy_from_slice(&root);
             }
             let header = FractalHeapHeader {
                 flags: hdf5_pure_format::__private::FRACTAL_HEAP_DIRECT_BLOCKS_CHECKSUMMED,
@@ -1466,7 +1473,9 @@ mod tests {
                 header,
                 image,
                 block_offset,
+                #[cfg(feature = "deflate")]
                 encoded_len,
+                #[cfg(feature = "deflate")]
                 indirect_len,
             }
         }
@@ -2441,6 +2450,7 @@ mod tests {
             }
         }
 
+        #[cfg(feature = "deflate")]
         fn region(&self) -> FileRegion<'_> {
             FileRegion::new(
                 FileRange::new(PhysicalAddress::new(0), self.image.len().to_u64()).unwrap(),
@@ -2473,6 +2483,7 @@ mod tests {
     /// of the [format specification, version 4.0][spec].
     ///
     /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_infra_btrees_v2
+    #[cfg(feature = "checksum")]
     const HUGE_NODE_PREFIX_LEN: usize = 6;
     const HUGE_TRACKER_AT: u64 = 64;
     const HUGE_NODE_AT: u64 = 128;
