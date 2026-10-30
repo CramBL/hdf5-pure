@@ -421,6 +421,12 @@ name = "metadata_cache"
 harness = false
 required-features = ["std"]
 
+# Measure version 1 chunk-node acquisition and report its allocations.
+[[bench]]
+name = "metadata_nodes"
+harness = false
+required-features = ["std"]
+
 [[bench]]
 name = "chunk_index"
 harness = false
