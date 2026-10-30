@@ -41,7 +41,7 @@ mod fixed_bytes;
 pub use fixed_ascii::FixedAscii;
 
 mod sealed {
-    use crate::{Datatype, Error};
+    use crate::{Datatype, Error, FormatError};
 
     #[expect(
         unnameable_types,
@@ -56,6 +56,17 @@ mod sealed {
         /// differs from its element width, or a byte read into
         /// [`FixedAscii`](crate::FixedAscii) is outside ASCII.
         fn convert_scalar(raw: &[u8], datatype: &Datatype) -> Result<Self, Error>;
+
+        /// Borrows encoded input bytes when the element representation permits it.
+        ///
+        /// Returns `None` when the caller must encode the elements into an append buffer.
+        ///
+        /// # Errors
+        ///
+        /// Returns `Some(Err(_))` if constructing the datatype fails.
+        fn borrowed_encoding(_data: &[Self]) -> Option<Result<(&[u8], Datatype), FormatError>> {
+            None
+        }
     }
 }
 

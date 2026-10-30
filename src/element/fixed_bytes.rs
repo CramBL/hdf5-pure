@@ -10,6 +10,10 @@ use crate::type_builders::{self, DatasetBuilder};
 use super::{ElementDecoder, H5Element, sealed};
 
 impl<const N: usize> sealed::Sealed for [u8; N] {
+    fn borrowed_encoding(data: &[Self]) -> Option<Result<(&[u8], Datatype), FormatError>> {
+        Some(datatype::<N>().map(|datatype| (data.as_flattened(), datatype)))
+    }
+
     fn convert_scalar(raw: &[u8], datatype: &Datatype) -> Result<Self, Error> {
         ByteArrayDecoder::<N>::parse_decoder(datatype)?;
         raw.try_into().map_err(|_error| {

@@ -3,6 +3,7 @@
 //! The editor checks append policy and caches dataset metadata here.
 //! [`chunk_index_inplace`] writes chunk data, updates the index, and publishes the extent.
 
+use core::mem;
 use core::num::NonZeroU64;
 use core::num::NonZeroUsize;
 
@@ -36,6 +37,7 @@ use crate::width::FormatWidths;
 
 use super::LOSSY_TAIL_REFUSAL;
 use super::allocation::{AllocationPublication, ConfirmedPublication, ProvisionalAllocation};
+use super::dataset;
 use super::staging::StagedOp;
 
 use super::{AggregateSpace, Placement, SyncPolicy, WriteEngine};
@@ -95,7 +97,7 @@ pub enum LossyTailReencoding {
 /// [`Error::AppendUnsupported`]. [`Dataset::append_staged`](crate::Dataset::append_staged) supplies
 /// this builder to its callback.
 pub struct AppendBuilder {
-    /// Element bytes in call order, encoded little-endian.
+    /// Element bytes in call order, with numeric leaves encoded little-endian.
     raw: Vec<u8>,
     /// The datatype of typed appends, or `None` for raw appends.
     elem_dt: Option<Datatype>,
@@ -212,8 +214,18 @@ impl AppendBuilder {
         self
     }
 
-    /// Appends typed elements with their datatype.
+    /// Copies typed elements into the buffer with their datatype.
+    ///
+    /// Supports the element types of [`H5Element`](crate::H5Element), including fixed byte
+    /// arrays and [`FixedAscii`](crate::FixedAscii) strings. The editor checks compatibility
+    /// with the dataset when preparing the append, as described by
+    /// [`Dataset::append`](crate::Dataset::append).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the new buffer capacity exceeds [`isize::MAX`] bytes.
     pub fn append<T: crate::element::H5Element>(&mut self, data: &[T]) -> &mut Self {
+        self.raw.reserve(mem::size_of_val(data));
         T::append_into(self, data);
         self
     }
@@ -344,10 +356,34 @@ impl WriteEngine {
                 "append mixes element types in one call; use one element type per append",
             ));
         }
-        let oh_addr = self.append_prepare(target)?;
+        self.append_inplace_bytes(target, b.options(), b.elem_dt(), b.raw(), max_phase)
+    }
 
-        let raw = b.raw();
-        let new_elems = validate_gathered_append(&self.located[&oh_addr], b)?;
+    /// Writes append batches from `raw` without accumulating an [`AppendBuilder`].
+    ///
+    /// The writer checks `datatype` against the stored datatype when provided. Raw input
+    /// without a datatype must satisfy [`datatype_is_raw_appendable`]. Batching, publication,
+    /// and empty-index initialization follow
+    /// [`append_inplace_gathered`](Self::append_inplace_gathered).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AppendInPlaceUnsupported`] for incompatible input, an unsupported
+    /// target, or conflicting staged edits. Returns [`Error::SwmrAppendUnsupported`] for
+    /// filtered or unaligned SWMR appends, or [`Error::AllocationPublicationUncertain`] if an
+    /// earlier editing outcome is uncertain. Propagates metadata, allocation, encoding, and
+    /// I/O errors.
+    pub(crate) fn append_inplace_bytes(
+        &mut self,
+        target: AppendTarget<'_>,
+        options: AppendOptions,
+        datatype: Option<&Datatype>,
+        raw: &[u8],
+        max_phase: u8,
+    ) -> Result<(), Error> {
+        self.context.allocations.available()?;
+        let oh_addr = self.append_prepare(target)?;
+        let new_elems = validate_append(&self.located[&oh_addr], datatype, raw)?;
         if new_elems == 0 {
             return Ok(());
         }
@@ -400,7 +436,7 @@ impl WriteEngine {
                         st.element_size,
                         st.pipeline.as_ref(),
                         grow_visible_tail,
-                        b.options().lossy_tail_reencoding(),
+                        options.lossy_tail_reencoding(),
                         batch,
                         take,
                         st.fill.pattern(st.element_size),
@@ -1041,22 +1077,25 @@ pub(crate) fn as_inplace_error(e: Error) -> Error {
 
 /// Returns the element count of bytes compatible with a located dataset.
 ///
-/// Typed appends require datatype equality. Raw appends require a datatype accepted by
-/// [`datatype_is_raw_appendable`].
+/// Typed appends require compatible datatypes under [`datatypes_match`]. Raw appends require
+/// a datatype accepted by [`datatype_is_raw_appendable`].
 ///
 /// # Errors
 ///
 /// Returns [`Error::AppendInPlaceUnsupported`] for an incomplete element, a datatype mismatch,
 /// or an unsupported raw datatype.
-pub(crate) fn validate_gathered_append(st: &LocatedState, b: &AppendBuilder) -> Result<u64, Error> {
-    let raw = b.raw();
+fn validate_append(
+    st: &LocatedState,
+    datatype: Option<&Datatype>,
+    raw: &[u8],
+) -> Result<u64, Error> {
     if raw.len() % st.element_size != 0 {
         return Err(Error::AppendInPlaceUnsupported(
             "appended byte length is not a whole number of elements",
         ));
     }
-    match b.elem_dt() {
-        Some(expected) if *expected != st.datatype => {
+    match datatype {
+        Some(expected) if !datatypes_match(&st.datatype, expected) => {
             return Err(Error::AppendInPlaceUnsupported(
                 "append datatype does not match the on-disk dataset (wrong element \
                  type or byte order)",
@@ -1074,6 +1113,18 @@ pub(crate) fn validate_gathered_append(st: &LocatedState, b: &AppendBuilder) -> 
         }
     }
     Ok((raw.len() / st.element_size) as u64)
+}
+
+/// Compares append datatypes, ignoring byte order for one-byte fixed-point leaves in arrays.
+///
+/// All other fields must match. Datatypes outside the array class are compared for equality.
+pub(super) fn datatypes_match(stored: &Datatype, input: &Datatype) -> bool {
+    match (stored, input) {
+        (Datatype::Array { .. }, Datatype::Array { .. }) => {
+            dataset::overwrite_datatypes_match(stored, input)
+        }
+        _ => stored == input,
+    }
 }
 
 /// Reads checked geometry, the datatype, and encoding metadata for an immediate append.
