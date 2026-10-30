@@ -63,3 +63,13 @@ fn measured_pipelines_retain_the_complete_workload_selection() {
         ]
     );
 }
+
+#[rstest]
+#[case::cycling(filtered_chunks::PipelinePattern::Cycling, &[0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0])]
+#[case::incompressible(filtered_chunks::PipelinePattern::Incompressible, &[0xa5, 0x5a, 0x98, 0x87, 0xa3, 0x24, 0x5b, 0x15, 0xc4, 0xf4, 0x20, 0x48])]
+fn pipeline_patterns_produce_independent_expected_words(
+    #[case] pattern: filtered_chunks::PipelinePattern,
+    #[case] expected: &[u8],
+) {
+    assert_eq!(pattern.data(3), expected);
+}
