@@ -37,7 +37,7 @@ fn unpublished_append_restores_space_before_a_larger_retry(
         .with_sync_policy(policy);
     let file = File::open_rw_with_options(&path, properties).unwrap();
     let mut dataset = file.dataset("values").unwrap();
-    let before = fs::read(&path).unwrap();
+    let before = file.disk_bytes().unwrap();
     let observation = File::from_bytes(before.clone()).unwrap();
     let free = observation.persisted_free_sections().unwrap().unwrap();
     assert!(
@@ -61,14 +61,14 @@ fn unpublished_append_restores_space_before_a_larger_retry(
     };
     assert_eq!(error.kind(), ErrorKind::Other);
     assert_eq!(error.to_string(), "injected disk write failure");
-    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(file.disk_bytes().unwrap(), before);
     assert_eq!(dataset.shape().unwrap(), [CHUNK_ELEMENTS as u64]);
     assert_eq!(dataset.read_i32().unwrap(), vec![0; CHUNK_ELEMENTS]);
 
     dataset.append(&vec![2; 2 * CHUNK_ELEMENTS]).unwrap();
     let mut expected = vec![0; CHUNK_ELEMENTS];
     expected.extend(vec![2; 2 * CHUNK_ELEMENTS]);
-    let retry_image = fs::read(&path).unwrap();
+    let retry_image = file.disk_bytes().unwrap();
     let chunks = assert_image(&retry_image, &expected);
     assert!(chunks[1].0 >= old_eof);
     assert_eq!(chunks[2].0, chunks[1].1);
@@ -86,7 +86,7 @@ fn unpublished_append_restores_space_before_a_larger_retry(
     assert_eq!(dataset.read_i32().unwrap(), expected);
     dataset.append(&vec![3; CHUNK_ELEMENTS]).unwrap();
     expected.extend(vec![3; CHUNK_ELEMENTS]);
-    assert_image(&fs::read(&path).unwrap(), &expected);
+    assert_image(&file.disk_bytes().unwrap(), &expected);
     drop(dataset);
     file.close().unwrap();
     assert_image(&fs::read(&path).unwrap(), &expected);
