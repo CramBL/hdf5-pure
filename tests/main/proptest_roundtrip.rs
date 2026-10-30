@@ -22,6 +22,7 @@
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::{DType, File, FileBuilder, Group};
 use proptest::prelude::*;
+use proptest::test_runner::FileFailurePersistence;
 
 /// The 8-byte HDF5 magic signature. Mirrored here (rather than imported from
 /// the crate-internal `signature` module) so the robustness tests can force the
@@ -49,6 +50,14 @@ macro_rules! shaped {
 macro_rules! roundtrip_test {
     ($name:ident, $ty:ty, $with:ident, $read:ident, $dtype:expr, $eq:expr) => {
         proptest! {
+            #![proptest_config(ProptestConfig {
+                failure_persistence: Some(Box::new(FileFailurePersistence::Direct(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/proptest-regressions/roundtrip_properties.txt"
+                )))),
+                ..ProptestConfig::default()
+            })]
+
             #[test]
             fn $name((shape, data) in shaped!(any::<$ty>())) {
                 let mut b = FileBuilder::new();
@@ -144,6 +153,14 @@ roundtrip_test!(
 );
 
 proptest! {
+    #![proptest_config(ProptestConfig {
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/proptest-regressions/roundtrip_properties.txt"
+        )))),
+        ..ProptestConfig::default()
+    })]
+
     /// Chunked + deflate layout roundtrip (lossless integer path). Exercises
     /// the B-tree v1 chunk index and the filter pipeline, not just contiguous
     /// storage. Chunk dims are clamped to the shape so the request is valid.
@@ -224,6 +241,14 @@ fn valid_sample_file() -> Vec<u8> {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig {
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/proptest-regressions/parser_properties.txt"
+        )))),
+        ..ProptestConfig::default()
+    })]
+
     /// Arbitrary bytes: the common case returns `SignatureNotFound`, but the
     /// reader must never panic regardless.
     #[test]

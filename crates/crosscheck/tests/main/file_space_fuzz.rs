@@ -35,6 +35,7 @@ use hdf5_pure::FreeSectionCoordinates;
 use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
 
 use proptest::prelude::*;
+use proptest::test_runner::FileFailurePersistence;
 
 use test_util_hdf5::{dataset::Unlimited, file_space, session};
 
@@ -83,7 +84,13 @@ fn expected_c_strategy(strategy: FileSpaceStrategy, persist: bool, threshold: u6
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(48))]
+    #![proptest_config(ProptestConfig {
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/proptest-regressions/file_space_fuzz.txt"
+        )))),
+        ..ProptestConfig::with_cases(48)
+    })]
 
     /// A file hdf5-pure writes with any `(strategy, persist, page_size, threshold)`
     /// and any datasets reads back byte-exact in the C library, which recovers the
@@ -149,7 +156,13 @@ proptest! {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(32))]
+    #![proptest_config(ProptestConfig {
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/proptest-regressions/file_space_fuzz.txt"
+        )))),
+        ..ProptestConfig::with_cases(32)
+    })]
 
     /// Growing a genuine paged persisting file through the bounded backend, for any
     /// page size and any append pattern, yields a file the C library reads back
@@ -219,7 +232,13 @@ proptest! {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(32))]
+    #![proptest_config(ProptestConfig {
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/proptest-regressions/file_space_fuzz.txt"
+        )))),
+        ..ProptestConfig::with_cases(32)
+    })]
 
     #[test]
     fn isolated_subthreshold_deletions_are_absent_from_free_sections(
