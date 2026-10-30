@@ -527,6 +527,7 @@ dependencies = [
  "flate2",
  "hdf5-pure-core",
  "heapscope",
+ "proptest",
  "rstest",
  "test-util",
 ]
