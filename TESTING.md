@@ -108,7 +108,7 @@ automated checks.
 [soundness]: scripts/soundness.just
 [portability]: scripts/portability.just
 [allocation]: crates/test-util/src/allocation.rs
-[properties]: tests/main/proptest_roundtrip.rs
+[properties]: tests/main/roundtrip_properties.rs
 [differential]: fuzz/fuzz_targets/streaming_differential.rs
 [snapshots]: crates/crosscheck/tests/main/file_space_oracle.rs
 [child]: crates/crosscheck/tests/fixtures/interrupted_writer.rs

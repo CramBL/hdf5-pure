@@ -85,7 +85,7 @@ filter = '''
 package(hdf5-pure-crosscheck) & (
     test(/^classic_aggregation::/) |
     test(/^file_space::/) |
-    test(/^file_space_fuzz::/) |
+    test(/^file_space_properties::/) |
     test(/^file_space_oracle::/) |
     test(/^page_buffer::/)
 ) | (package(hdf5-pure) & (test(/^reader::native_crosschecks::/) | test(/^fractal_heap_storage::native_crosschecks::/) | test(/^edit::allocation::tests::conservation::native_crosschecks::/)))
