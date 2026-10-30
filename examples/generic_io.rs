@@ -1,8 +1,8 @@
 //! Reading and writing datasets generically over the element type, without
 //! reaching for the per-type `with_f64_data` / `read_f64` family.
 //!
-//! The [`H5Element`] bound is implemented for `f32`/`f64` and the 8/16/32/64-bit
-//! signed and unsigned integers, so one function can serve every scalar type.
+//! [`H5Element`] supports numeric scalars and fixed byte arrays. Numeric conversions can lose
+//! precision. Byte-array reads require a matching datatype and element width.
 //!
 //! Run with:
 //!
@@ -12,15 +12,20 @@
 
 use hdf5_pure::{Error, File, FileBuilder, H5Element};
 
-/// Store a flat slice of any supported scalar. The datatype is inferred from
-/// `T`, so the caller never names it.
+/// Copies elements into a dataset with the datatype inferred from `T`.
 fn store<T: H5Element>(builder: &mut FileBuilder, name: &str, values: &[T]) {
     builder.create_dataset(name).with_data(values);
 }
 
-/// Load a dataset back as `Vec<T>`. `T` is the type you want delivered, not an
-/// assertion about the stored type (it coerces like `read_f64`), so pick `T` to
-/// match the stored type for a lossless read.
+/// Reads elements using the conversions and compatibility rules of [`Dataset::read`](hdf5_pure::Dataset::read).
+///
+/// # Errors
+///
+/// Returns the errors described by [`Dataset::read`](hdf5_pure::Dataset::read).
+///
+/// # Panics
+///
+/// Panics under the conditions described by [`Dataset::read`](hdf5_pure::Dataset::read).
 fn load<T: H5Element>(file: &File, name: &str) -> Result<Vec<T>, Error> {
     file.dataset(name)?.read::<T>()
 }

@@ -42,7 +42,7 @@ use crate::edit::StagedMeta;
 use crate::edit::StagedObject;
 use crate::edit::SyncPolicy;
 use crate::edit::WriteEngine;
-use crate::element::H5Element;
+use crate::element::{ElementDecoder, H5Element};
 use crate::type_builders::{DatasetBuilder, VL_REF_SIZE};
 
 #[cfg(any(doc, test))]
@@ -6265,6 +6265,9 @@ impl Dataset {
             let take = (total_elems - done).min(to_boundary.saturating_add(full_batch_elems));
             let mut b = AppendBuilder::with_options(options);
             fill(&mut b, done.to_usize()?..(done + take).to_usize()?);
+            if let Some(error) = b.take_error() {
+                return Err(error.into());
+            }
             self.file.with_engine_mut(Change::InPlace, |engine| {
                 engine.append_inplace_gathered(target, &b, 4)
             })?;
@@ -6435,6 +6438,9 @@ impl Dataset {
         }
         let mut builder = AppendBuilder::with_options(options);
         build(&mut builder);
+        if let Some(error) = builder.take_error() {
+            return Err(error.into());
+        }
         self.with_session_mut(|session, path| {
             if pending {
                 session.stage_dataset_append_pending(path, builder)
@@ -6940,6 +6946,21 @@ the same commit to replace it",
     /// Panics if decoding a single-window dataset requires more than [`isize::MAX`] bytes
     /// of output capacity.
     fn read_whole_typed<T: NumericReadTarget>(&self) -> Result<Vec<T>, Error> {
+        self.read_whole_decoded::<T, NumericDecoder<T>>()
+    }
+
+    /// Reads typed elements in row windows with one parsed decoder.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the datatype or input bytes are unsupported for `T`.
+    /// Returns [`FormatError::AllocationFailed`] through [`Error::Format`] if reserving
+    /// windowed output fails. Propagates errors from reading metadata and stored bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the output capacity of a single-window read exceeds [`isize::MAX`] bytes.
+    pub(crate) fn read_whole_decoded<T, D: ElementDecoder<T>>(&self) -> Result<Vec<T>, Error> {
         let dt = self.datatype()?;
         let ds = self.dataspace()?;
         let dl = self.read_layout()?;
@@ -6961,7 +6982,7 @@ the same commit to replace it",
         // enumeration's size being its base's. A crafted file where they differ
         // must not get one verdict from a sweep and another from a whole read, so
         // it is read whole.
-        let decoded_width = data_read::effective_numeric(&dt).type_size();
+        let decoded_width = D::decoded_width(&dt);
 
         let mut out = Vec::new();
         let n0 = ds.dimensions.first().copied().unwrap_or(1);
@@ -6970,7 +6991,7 @@ the same commit to replace it",
             // No reservation here: the decoder sizes the output from the bytes it
             // was handed, which is exact.
             let raw = self.file.read_dataset_raw(spec, &self.chunk_cache)?;
-            NumericDecoder::<T>::parse(&dt)?.append(&raw, &mut out)?;
+            D::parse_decoder(&dt)?.append_values(&raw, &mut out)?;
             return Ok(out);
         }
 
@@ -7003,15 +7024,15 @@ the same commit to replace it",
                 // is unavailable.
                 out.try_reserve(values)
                     .map_err(|source| FormatError::AllocationFailed { values, source })?;
-                let decoder = NumericDecoder::<T>::parse(&dt)?;
-                decoder.append(&raw, &mut out)?;
+                let decoder = D::parse_decoder(&dt)?;
+                decoder.append_values(&raw, &mut out)?;
                 decoder
             };
             let mut start = rows;
             while start < n0 {
                 let count = rows.min(n0 - start);
                 let raw = read_rows(start, count)?;
-                decoder.append(&raw, &mut out)?;
+                decoder.append_values(&raw, &mut out)?;
                 start += count;
             }
             Ok(out)

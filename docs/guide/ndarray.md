@@ -40,7 +40,8 @@ The array can be of any rank, and both owned arrays and views are accepted by re
 
 ### Memory order and non-standard layouts
 
-HDF5 stores dataset elements in row-major (C) order, which is also `ndarray`'s default layout, so in the common case a write is a flat copy with no transpose. Inputs that are not in standard layout (transposed, Fortran-order, or strided views) are repacked once into row-major order on write, and standard-layout inputs are used without copying. Either way, what you read back matches the logical array you passed in.
+The writer copies elements in row-major (C) order. For nonstandard layouts, it first copies the
+input into a temporary row-major array.
 
 ```rust
 # #[cfg(feature = "ndarray")] {
@@ -98,7 +99,9 @@ println!("runtime rank: {}", dynamic.ndim());
 # Ok::<(), hdf5_pure::Error>(())
 ```
 
-For both methods, `T` is the type you want the elements *delivered as*, not an assertion about the stored datatype. The bytes are coerced into `T` using the same rules as the scalar reads described in [Reading files](crate::_guide::reading) and [Generic element I/O](crate::_guide::generic_io), so the conversion can be lossy (reading an `f64` dataset as `i32` truncates). Pick `T` to match the stored type when you need an exact, lossless read.
+Both methods use the conversions and compatibility rules of [`Dataset::read`](crate::Dataset::read).
+Numeric conversions can lose precision. Fixed byte arrays require a matching array datatype
+and element width.
 
 ## Chaining chunking and compression
 

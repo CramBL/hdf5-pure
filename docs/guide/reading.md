@@ -267,7 +267,9 @@ A typed read costs about what its result costs. The numeric readers decode the d
 
 ### Generic reads
 
-[`Dataset::read::<T>()`](crate::Dataset::read) is the generic counterpart to the typed `read_*` methods, bounded by the sealed [`H5Element`](crate::H5Element) trait (implemented for `f32`/`f64` and the 8/16/32/64-bit signed and unsigned integers). It lets you write code generic over the element type. Like [`read_f64`](crate::Dataset::read_f64), it requests delivery as `T` and coerces, so pick `T` to match the stored type for a lossless read.
+[`Dataset::read::<T>()`](crate::Dataset::read) supports the numeric scalars and fixed byte arrays
+that implement [`H5Element`](crate::H5Element). Numeric conversions can lose precision.
+Byte-array reads require a matching array datatype and element width.
 
 ```rust
 use hdf5_pure::{File, FileBuilder, H5Element, Error};

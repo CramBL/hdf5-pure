@@ -556,6 +556,9 @@ impl BufferState {
         self.check_usable(dataset)?;
         let mark = self.pending.raw().len();
         self.pending.append(data);
+        if let Some(error) = self.pending.take_error() {
+            return Err(error.into());
+        }
         self.settle(dataset, mark)
     }
 

@@ -1,38 +1,25 @@
-//! Generic, type-parameterized dataset I/O.
+//! Typed dataset I/O for numeric scalars and fixed byte arrays.
 //!
-//! The [`H5Element`] trait is the element bound that lets you read and write
-//! datasets generically over the scalar type, instead of reaching for a
-//! type-specific method like [`DatasetBuilder::with_i64_data`] or
-//! [`Dataset::read_i64`](crate::Dataset::read_i64). It powers two entry points:
+//! [`H5Element`] is the element bound for [`DatasetBuilder::with_data`] and [`Dataset::read`].
+//! Numeric reads convert stored values to the output scalar type. Reads into fixed byte
+//! arrays require a matching array datatype and preserve each element's bytes.
 //!
-//! * [`DatasetBuilder::with_data`] — write a flat slice of any supported scalar,
-//!   inferring the datatype and shape from the slice.
-//! * [`Dataset::read`](crate::Dataset::read) — read a dataset back into a
-//!   `Vec<T>` for any supported scalar `T`.
-//!
-//! Both dispatch to the existing per-type methods, so a generic read or write
-//! has exactly the same datatype, endianness, and conversion behavior as the
-//! corresponding `with_*_data` / `read_*` call.
-//!
-//! # Example
+//! # Examples
 //!
 //! ```
-//! use hdf5_pure::{Dataset, Error, FileBuilder, H5Element};
+//! use hdf5_pure::{File, FileBuilder, H5Element};
 //!
-//! // A function generic over the element type — not possible with the
-//! // type-specific `with_*_data` / `read_*` methods.
 //! fn round_trip<T: H5Element + PartialEq + std::fmt::Debug>(name: &str, values: &[T]) {
-//!     let mut fb = FileBuilder::new();
-//!     fb.create_dataset(name).with_data(values);
-//!     let bytes = fb.finish().unwrap();
-//!
-//!     let file = hdf5_pure::File::from_bytes(bytes).unwrap();
+//!     let mut builder = FileBuilder::new();
+//!     builder.create_dataset(name).with_data(values);
+//!     let file = File::from_bytes(builder.finish().unwrap()).unwrap();
 //!     let back: Vec<T> = file.dataset(name).unwrap().read().unwrap();
 //!     assert_eq!(values, back.as_slice());
 //! }
 //!
 //! round_trip("ints", &[1i64, 2, 3]);
 //! round_trip("floats", &[1.0f32, 2.5, -3.0]);
+//! round_trip("bytes", &[[0u8, 255], [128, 42]]);
 //! ```
 
 #![expect(
@@ -40,12 +27,14 @@
     reason = "rustdoc's test mode collects a private item, so this example is compiled and run by `cargo test --doc`"
 )]
 
-use crate::data_read::NumericDecoder;
+use crate::data_read::{NumericDecoder, NumericReadTarget};
 use crate::datatype::Datatype;
 use crate::edit::AppendBuilder;
 use crate::error::Error;
 use crate::reader::Dataset;
 use crate::type_builders::DatasetBuilder;
+
+mod fixed_bytes;
 
 mod sealed {
     use crate::{Datatype, Error};
@@ -55,7 +44,7 @@ mod sealed {
         reason = "the supertrait that seals `H5Element` has no path outside the crate, so no other crate implements `H5Element`"
     )]
     pub trait Sealed: Sized {
-        /// Converts exactly one stored numeric element to `Self`.
+        /// Converts exactly one stored element to `Self`.
         ///
         /// # Errors
         ///
@@ -65,48 +54,70 @@ mod sealed {
     }
 }
 
-/// A Rust scalar type that can be stored as an HDF5 dataset element.
+/// An element type for typed dataset creation, reads, and appends.
 ///
-/// This trait is sealed: it is implemented for the fixed set of scalar types
-/// the crate's reader and writer support (`f32`, `f64`, the signed integers
-/// `i8`/`i16`/`i32`/`i64`, and the unsigned integers `u8`/`u16`/`u32`/`u64`)
-/// and cannot be implemented for other types. It is the element bound for the
-/// generic [`DatasetBuilder::with_data`] / [`Dataset::read`](crate::Dataset::read)
-/// helpers (and, with the `ndarray` feature, the
-/// [`with_ndarray`](crate::FileBuilder)/[`read_array`](crate::Dataset::read_array)
-/// family), and dispatches to the existing per-type reader/writer methods, so a
-/// generic read or write has exactly the same datatype, endianness, and
-/// conversion behavior as the corresponding
-/// [`Dataset::read_f64`](crate::Dataset::read_f64) /
-/// [`DatasetBuilder::with_f64_data`] call.
+/// Implemented for [`f32`], [`f64`], the signed integers [`i8`], [`i16`], [`i32`], and [`i64`],
+/// the unsigned integers [`u8`], [`u16`], [`u32`], and [`u64`], and fixed byte arrays
+/// ([`[u8; N]`](prim@array)). This trait is sealed and cannot be implemented outside this crate.
+///
+/// Numeric reads use the conversions of [`Dataset::read_f64`] and the other scalar readers.
+/// A byte array is stored as a one-dimensional HDF5 array of unsigned bytes. Reading a byte
+/// array requires the same width and base type, including on empty input. Array widths must
+/// be nonzero and fit in [`u32`].
+///
+/// # Examples
+///
+/// ```
+/// use hdf5_pure::{File, FileBuilder};
+///
+/// let values = [[0u8, 255, 128], [1, 2, 3]];
+/// let mut builder = FileBuilder::new();
+/// builder.create_dataset("bytes").with_data(&values);
+/// let file = File::from_bytes(builder.finish()?)?;
+/// let dataset = file.dataset("bytes")?;
+/// assert_eq!(dataset.read::<[u8; 3]>()?, values);
+/// assert_eq!(dataset.shape()?, [2]);
+/// # Ok::<(), hdf5_pure::Error>(())
+/// ```
 pub trait H5Element: sealed::Sealed + Copy {
-    /// Read every element of `ds` as `Self`, in row-major order.
-    #[doc(hidden)]
-    fn read_from(ds: &Dataset) -> Result<Vec<Self>, Error>;
-
-    /// Set `builder`'s data and datatype from a flat row-major slice.
-    #[doc(hidden)]
-    fn write_into(builder: &mut DatasetBuilder, data: &[Self]);
-
-    /// Append a flat row-major slice to `builder`, recording the implied
-    /// element datatype for the commit-time datatype-match check.
-    #[doc(hidden)]
-    fn append_into(builder: &mut AppendBuilder, data: &[Self]);
-
-    /// Encode `self` as the little-endian bytes of one dataset element, the
-    /// form a fill value is stored in.
-    #[doc(hidden)]
-    fn fill_bytes(self) -> Vec<u8>;
-
-    /// Converts stored numeric elements using the same rules as typed dataset reads.
-    ///
-    /// The reader decodes `raw` using the byte order, signedness, and precision of `dt`, then
-    /// converts each value to `Self`.
+    /// Reads every element of `ds` as `Self`, in row-major order.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Format`] if `dt` is not a supported numeric datatype or `raw` contains
-    /// an incomplete element. The reader parses `dt` even when `raw` is empty.
+    /// Returns the errors described by [`Dataset::read`].
+    ///
+    /// # Panics
+    ///
+    /// Panics under the conditions described by [`Dataset::read`].
+    #[doc(hidden)]
+    fn read_from(ds: &Dataset) -> Result<Vec<Self>, Error>;
+
+    /// Sets `builder`'s data and datatype from a flat row-major slice.
+    #[doc(hidden)]
+    fn write_into(builder: &mut DatasetBuilder, data: &[Self]);
+
+    /// Appends a flat row-major slice to `builder` with its element datatype.
+    ///
+    /// The editor checks the datatype against the dataset when preparing the append.
+    #[doc(hidden)]
+    fn append_into(builder: &mut AppendBuilder, data: &[Self]);
+
+    /// Encodes one element for storage as a fill value.
+    ///
+    /// Numeric elements are encoded little-endian. Byte arrays are copied unchanged.
+    #[doc(hidden)]
+    fn fill_bytes(self) -> Vec<u8>;
+
+    /// Converts stored elements using the same rules as typed dataset reads.
+    ///
+    /// Numeric values are converted using the byte order, signedness, and precision of `dt`.
+    /// Byte arrays require a matching datatype and width. The reader checks `dt` even when
+    /// `raw` is empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if `dt` is unsupported for `Self`, the byte-array width is
+    /// invalid, or `raw` contains an incomplete element.
     ///
     /// # Panics
     ///
@@ -166,59 +177,55 @@ impl_h5_element!(u32, read_u32, with_u32_data, append_u32);
 impl_h5_element!(u64, read_u64, with_u64_data, append_u64);
 
 impl DatasetBuilder {
-    /// Set the dataset's data and datatype from a flat slice of any supported
-    /// scalar type.
+    /// Sets the dataset's datatype from `T` and copies its elements in row-major order.
     ///
-    /// This is the generic counterpart of the type-specific `with_*_data`
-    /// methods (e.g. [`with_f64_data`](Self::with_f64_data)): it infers the
-    /// datatype from `T` and, unless [`with_shape`](Self::with_shape) has
-    /// already set one, takes the shape to be the 1-D `[data.len()]`. The
-    /// builder is returned so chunking, compression, and attributes can be
-    /// chained.
+    /// If a shape has not been set, the writer infers `[data.len()]`. An existing shape is
+    /// retained, including one inferred by an earlier data setter. A byte array is one
+    /// element, with its width stored in the datatype. The writer rejects zero-width arrays
+    /// and widths that exceed [`u32::MAX`] when preparing the dataset.
     ///
-    /// Because the element type is a generic parameter, you can write code that
-    /// is generic over the stored type:
+    /// # Examples
     ///
     /// ```
-    /// use hdf5_pure::{FileBuilder, H5Element};
+    /// use hdf5_pure::{File, FileBuilder, H5Element};
     ///
-    /// fn store<T: H5Element>(fb: &mut FileBuilder, name: &str, values: &[T]) {
-    ///     fb.create_dataset(name).with_data(values);
+    /// fn store<T: H5Element>(builder: &mut FileBuilder, name: &str, values: &[T]) {
+    ///     builder.create_dataset(name).with_data(values);
     /// }
+    ///
+    /// let mut builder = FileBuilder::new();
+    /// store(&mut builder, "bytes", &[[1u8, 2], [3, 4]]);
+    /// let file = File::from_bytes(builder.finish()?)?;
+    /// assert_eq!(file.dataset("bytes")?.read::<[u8; 2]>()?, [[1, 2], [3, 4]]);
+    /// # Ok::<(), hdf5_pure::Error>(())
     /// ```
     ///
-    /// For N-dimensional arrays, see
-    /// [`with_ndarray`](crate::FileBuilder) (the `ndarray` feature).
+    /// With the `ndarray` feature, [`with_ndarray`](Self::with_ndarray) also infers the shape
+    /// from an N-dimensional array.
     pub fn with_data<T: H5Element>(&mut self, data: &[T]) -> &mut Self {
         T::write_into(self, data);
         self
     }
 
-    /// Set the dataset's fill value — the value HDF5 reports for elements that
-    /// have never been written (for example the unwritten regions of a chunked,
-    /// extensible dataset).
+    /// Sets the value used for unwritten elements of the dataset.
     ///
-    /// The fill value is stored in the dataset's datatype, so `T` must match the
-    /// dataset's element type: its byte width is checked against the datatype
-    /// when the file is written, and a mismatch (for example a `u8` fill value on
-    /// an `i32` dataset) is refused with
+    /// The writer stores the value in the dataset's datatype and checks its byte width when
+    /// preparing the dataset. A width mismatch is reported as
     /// [`FormatError::FillValueSizeMismatch`](crate::FormatError::FillValueSizeMismatch).
-    /// Set the data or datatype (e.g. via [`with_i32_data`](Self::with_i32_data)
-    /// or [`with_data`](Self::with_data)) so the element type is known.
+    /// Use the dataset's element type to encode the fill value. The default is zero.
     ///
-    /// Without this call the crate writes HDF5's library-default fill value
-    /// (an implicit zero), unchanged from earlier releases.
+    /// # Examples
     ///
     /// ```
     /// use hdf5_pure::{File, FileBuilder};
     ///
-    /// let mut fb = FileBuilder::new();
-    /// fb.create_dataset("d")
-    ///     .with_i32_data(&[1, 2, 3])
-    ///     .with_fill_value(-1_i32);
-    /// let file = File::from_bytes(fb.finish().unwrap()).unwrap();
-    /// let fv: Option<i32> = file.dataset("d").unwrap().fill_value().unwrap();
-    /// assert_eq!(fv, Some(-1));
+    /// let mut builder = FileBuilder::new();
+    /// builder.create_dataset("bytes")
+    ///     .with_data(&[[1u8, 2]])
+    ///     .with_fill_value([255u8, 0]);
+    /// let file = File::from_bytes(builder.finish()?)?;
+    /// assert_eq!(file.dataset("bytes")?.fill_value::<[u8; 2]>()?, Some([255, 0]));
+    /// # Ok::<(), hdf5_pure::Error>(())
     /// ```
     pub fn with_fill_value<T: H5Element>(&mut self, value: T) -> &mut Self {
         self.fill = Some(T::fill_bytes(value));
@@ -227,27 +234,34 @@ impl DatasetBuilder {
 }
 
 impl Dataset {
-    /// Read the dataset into a `Vec<T>` for any supported scalar type, in
-    /// row-major order.
+    /// Reads the dataset's elements as `T`, in row-major order.
     ///
-    /// This is the generic counterpart of the type-specific `read_*` methods
-    /// (e.g. [`read_f64`](Self::read_f64)). The element type is usually inferred
-    /// from the binding, so a call site reads as
-    /// `let v: Vec<f64> = ds.read()?;`, or you can name it with turbofish:
-    /// `ds.read::<i32>()?`.
-    ///
-    /// `T` is the type you want the elements *delivered as*, not an assertion
-    /// about the dataset's stored type. The stored bytes are coerced into `T`
-    /// using the same rules as [`read_f64`](Self::read_f64) and its siblings, so
-    /// the conversion can be lossy: reading an `f64` dataset as `i32` truncates,
-    /// and reading an `i32` dataset as `f64` widens. There is no check that `T`
-    /// matches the on-disk datatype, so pick `T` to match the stored type when
-    /// you need an exact, lossless read.
+    /// Numeric reads use the conversions of [`read_f64`](Self::read_f64) and its siblings.
+    /// These conversions can lose precision. Reading into a fixed byte array requires a
+    /// one-dimensional HDF5 array of full-width unsigned bytes with the same element width.
+    /// The reader checks compatibility even for an empty dataset.
     ///
     /// # Errors
     ///
-    /// Propagates any error from the underlying typed read (see
-    /// [`read_f64`](Self::read_f64)).
+    /// Returns [`Error::Format`] if the stored datatype is unsupported for `T` or a byte-array
+    /// width is invalid. Propagates errors from reading the dataset's metadata and bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the output capacity of a single-window read exceeds [`isize::MAX`] bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure::{File, FileBuilder};
+    ///
+    /// let mut builder = FileBuilder::new();
+    /// builder.create_dataset("bytes").with_data(&[[0u8, 255], [128, 42]]);
+    /// let file = File::from_bytes(builder.finish()?)?;
+    /// let values: Vec<[u8; 2]> = file.dataset("bytes")?.read()?;
+    /// assert_eq!(values, [[0, 255], [128, 42]]);
+    /// # Ok::<(), hdf5_pure::Error>(())
+    /// ```
     pub fn read<T: H5Element>(&self) -> Result<Vec<T>, Error> {
         T::read_from(self)
     }
@@ -255,15 +269,14 @@ impl Dataset {
     /// Returns the dataset's user-defined fill value, converted to `T`.
     ///
     /// Returns `Ok(None)` when no user-defined fill value is stored. The reader converts
-    /// a defined value using the same numeric rules as [`read`](Self::read), including the
-    /// source byte order and lossy conversions. Pick `T` to match the stored datatype for
-    /// an exact value.
+    /// a defined value using the rules of [`read`](Self::read). Numeric conversions can lose
+    /// precision. Byte arrays require a matching datatype and width.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Format`] if the Fill Value message is malformed. Returns
-    /// [`Error::Format`] if a user-defined fill value is stored and the datatype is unsupported
-    /// for numeric reads. Returns
+    /// [`Error::Format`] if a user-defined fill value is stored and its datatype is unsupported
+    /// for `T`. Returns
     /// [`FormatError::DataSizeMismatch`](crate::FormatError::DataSizeMismatch) through
     /// [`Error::Format`] if the payload length differs from the stored element width.
     ///
@@ -287,5 +300,43 @@ impl Dataset {
         };
         let dt = self.datatype()?;
         Ok(Some(T::convert_scalar(&bytes, &dt)?))
+    }
+}
+
+/// A parsed element encoding shared across row windows of a typed read.
+pub(crate) trait ElementDecoder<T>: Sized {
+    /// Parses the stored datatype for conversion to `T`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if the datatype is unsupported for `T`.
+    fn parse_decoder(datatype: &Datatype) -> Result<Self, Error>;
+
+    /// Returns the stored byte width used to split input into elements.
+    fn decoded_width(datatype: &Datatype) -> u32;
+
+    /// Decodes complete elements and appends them to `output`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Format`] if `raw` contains an incomplete or unsupported element.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the new output capacity exceeds [`isize::MAX`] bytes.
+    fn append_values(&self, raw: &[u8], output: &mut Vec<T>) -> Result<(), Error>;
+}
+
+impl<T: NumericReadTarget> ElementDecoder<T> for NumericDecoder<T> {
+    fn parse_decoder(datatype: &Datatype) -> Result<Self, Error> {
+        Ok(Self::parse(datatype)?)
+    }
+
+    fn decoded_width(datatype: &Datatype) -> u32 {
+        crate::data_read::effective_numeric(datatype).type_size()
+    }
+
+    fn append_values(&self, raw: &[u8], output: &mut Vec<T>) -> Result<(), Error> {
+        Ok(self.append(raw, output)?)
     }
 }
