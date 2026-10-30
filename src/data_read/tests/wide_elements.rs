@@ -128,10 +128,13 @@ fn a_non_numeric_datatype_is_rejected_for_its_class_not_its_width() {
         16,
         "the premise: it looks like a wide one"
     );
-    assert!(matches!(
-        read_as_u64(&[0u8; 16], &vlen),
-        Err(FormatError::TypeMismatch { .. })
-    ));
+    assert_eq!(
+        read_as_u64(&[0u8; 16], &vlen).unwrap_err(),
+        FormatError::TypeMismatch {
+            expected: "numeric",
+            actual: "VariableLength",
+        }
+    );
 }
 
 #[test]

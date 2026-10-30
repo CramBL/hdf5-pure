@@ -1090,26 +1090,34 @@ mod tests {
     /// The dimensions come from the file, so this is reachable from
     /// `mat::from_bytes` on a malformed input, not just from a Rust call site.
     #[test]
-    fn shape_decomposition_refuses_a_wrapping_two_dimensional_shape() {
+    fn shape_decomposition_rejects_a_wrapping_two_dimensional_shape() {
         // Derived from `usize::MAX` rather than written out: each dimension has
         // to fit in a `usize` (or the narrowing errors first, for a different
         // reason) while the product wraps. A literal tuned to 64-bit would
         // narrow-error on the 32-bit job and pass for the wrong reason.
         let wraps_to_four = (usize::MAX / 4 + 2) as u64;
         let err = shape_decomposition(&[wraps_to_four, 4]).unwrap_err();
-        assert!(
-            matches!(&err, MatError::Custom(m) if m.contains("address space")),
-            "unexpected error: {err:?}"
+        let MatError::Custom(message) = err else {
+            panic!("expected Custom, got {err:?}");
+        };
+        assert_eq!(
+            message,
+            format!(
+                "shape [{wraps_to_four}, 4] declares more elements than the address space holds"
+            )
         );
     }
 
     /// The same rule for rank >= 3, where the product accumulates across a loop.
     #[test]
-    fn shape_decomposition_refuses_a_wrapping_high_rank_shape() {
+    fn shape_decomposition_rejects_a_wrapping_high_rank_shape() {
         let err = shape_decomposition(&[1 << 31, 1 << 31, 1 << 31, 4]).unwrap_err();
-        assert!(
-            matches!(&err, MatError::Custom(m) if m.contains("address space")),
-            "unexpected error: {err:?}"
+        let MatError::Custom(message) = err else {
+            panic!("expected Custom, got {err:?}");
+        };
+        assert_eq!(
+            message,
+            "shape [2147483648, 2147483648, 2147483648, 4] declares more elements than the address space holds"
         );
     }
 
@@ -1135,9 +1143,12 @@ mod tests {
         // An index past the member pool is corruption, not a silently-empty name.
         let pool = vec!["enum1".to_owned()];
         let err = enum_member_names(&pool, &[0, 5]).unwrap_err();
-        assert!(
-            matches!(&err, MatError::Custom(m) if m.contains("out of range")),
-            "unexpected error: {err:?}"
+        let MatError::Custom(message) = err else {
+            panic!("expected Custom, got {err:?}");
+        };
+        assert_eq!(
+            message,
+            "enum ValueIndices index 5 out of range (pool has 1 members)"
         );
     }
 
@@ -1167,6 +1178,12 @@ mod tests {
         // The dtype guard in `read_enum_indices` rejects this up front; the
         // flattener is the backstop and must not silently produce wrong indices.
         let err = enum_indices_to_usize(&MatValue::Vec1D(NumVec::F64(vec![1.0]))).unwrap_err();
-        assert!(matches!(err, MatError::Custom(_)), "unexpected: {err:?}");
+        let MatError::Custom(message) = err else {
+            panic!("expected Custom, got {err:?}");
+        };
+        assert_eq!(
+            message,
+            "enum ValueIndices is not a uint32 array (got 1-D vector)"
+        );
     }
 }

@@ -618,11 +618,14 @@ mod tests {
     /// A payload that does not divide into whole pairs would otherwise lose
     /// its tail silently, since `chunks_exact` ignores a short remainder.
     #[test]
-    fn a_partial_pair_is_refused_rather_than_truncated() {
+    fn a_partial_pair_is_rejected_rather_than_truncated() {
         let err = ComplexVec::from_native_bytes(ComplexTag::I16, &[0, 1, 2, 3, 4]).unwrap_err();
-        assert!(
-            format!("{err}").contains("whole number of 4-byte pairs"),
-            "unexpected message: {err}"
+        let MatError::Custom(message) = err else {
+            panic!("expected Custom, got {err:?}");
+        };
+        assert_eq!(
+            message,
+            "complex int16 array payload of 5 bytes is not a whole number of 4-byte pairs"
         );
     }
 

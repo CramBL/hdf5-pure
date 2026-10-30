@@ -550,6 +550,7 @@ pub fn sohm_list_len(message_count: u16, offset_width: OffsetWidth) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use test_util::checksum::CHECKSUM;
     use test_util::image::Image;
     use test_util::sohm;
     use test_util::widths::Widths;
@@ -695,10 +696,14 @@ mod tests {
         let mut image = table_image(&[sample_index()]);
         // Flip a bit in the list maximum, which no other field repeats.
         image[12] ^= 0x01;
-        assert!(matches!(
+        let (body, stored) = image.split_last_chunk::<CHECKSUM>().unwrap();
+        assert_eq!(
             SohmTable::parse(&image, 1, 8).unwrap_err(),
-            FormatError::ChecksumMismatch { .. }
-        ));
+            FormatError::ChecksumMismatch {
+                expected: u32::from_le_bytes(*stored),
+                computed: test_util::checksum::lookup3(body),
+            }
+        );
     }
 
     #[test]
@@ -715,10 +720,13 @@ mod tests {
     #[test]
     fn a_table_shorter_than_its_index_count_is_an_unexpected_eof() {
         let image = table_image(&[sample_index()]);
-        assert!(matches!(
+        assert_eq!(
             SohmTable::parse(&image, 2, 8).unwrap_err(),
-            FormatError::UnexpectedEof { .. }
-        ));
+            FormatError::UnexpectedEof {
+                expected: 68,
+                available: 38
+            }
+        );
     }
 
     #[test]
@@ -859,19 +867,26 @@ mod tests {
     fn a_list_whose_checksum_disagrees_is_a_checksum_mismatch() {
         let mut image = sohm::list(&[sohm::heap_record(0xDEAD_BEEF, 1, [0; 8], Widths::EIGHT)]);
         image[6] ^= 0x01;
-        assert!(matches!(
+        let (body, stored) = image.split_last_chunk::<CHECKSUM>().unwrap();
+        assert_eq!(
             parse_sohm_list(&image, 1, 8).unwrap_err(),
-            FormatError::ChecksumMismatch { .. }
-        ));
+            FormatError::ChecksumMismatch {
+                expected: u32::from_le_bytes(*stored),
+                computed: test_util::checksum::lookup3(body),
+            }
+        );
     }
 
     #[test]
     fn a_list_shorter_than_its_record_count_is_an_unexpected_eof() {
         let image = sohm::list(&[sohm::heap_record(0xDEAD_BEEF, 1, [0; 8], Widths::EIGHT)]);
-        assert!(matches!(
+        assert_eq!(
             parse_sohm_list(&image, 4, 8).unwrap_err(),
-            FormatError::UnexpectedEof { .. }
-        ));
+            FormatError::UnexpectedEof {
+                expected: 76,
+                available: 25
+            }
+        );
     }
 
     #[test]

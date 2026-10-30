@@ -409,7 +409,13 @@ mod tests {
     fn parse_v3_sohm_too_short() {
         let data = vec![3, REF_TYPE_SOHM, 0xAA, 0xBB];
         let err = parse_shared_ref(&data, 8, 8).unwrap_err();
-        assert!(matches!(err, FormatError::UnexpectedEof { .. }));
+        assert_eq!(
+            err,
+            FormatError::UnexpectedEof {
+                expected: 10,
+                available: 4
+            }
+        );
     }
 
     #[test]
@@ -423,7 +429,13 @@ mod tests {
     fn truncated_data() {
         let data = vec![3u8]; // too short
         let err = parse_shared_ref(&data, 8, 8).unwrap_err();
-        assert!(matches!(err, FormatError::UnexpectedEof { .. }));
+        assert_eq!(
+            err,
+            FormatError::UnexpectedEof {
+                expected: 2,
+                available: 1
+            }
+        );
     }
 
     #[test]

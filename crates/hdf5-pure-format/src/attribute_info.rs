@@ -262,7 +262,13 @@ mod tests {
     fn truncated_data() {
         let data = vec![0u8]; // too short
         let err = AttributeInfoMessage::parse(&data, 8).unwrap_err();
-        assert!(matches!(err, FormatError::UnexpectedEof { .. }));
+        assert_eq!(
+            err,
+            FormatError::UnexpectedEof {
+                expected: 2,
+                available: 1
+            }
+        );
     }
 
     #[test]

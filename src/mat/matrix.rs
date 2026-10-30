@@ -303,6 +303,8 @@ impl<'de, T: MatElement + Deserialize<'de>> Deserialize<'de> for Matrix<T> {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::error::Category as JsonCategory;
+
     use super::*;
 
     #[test]
@@ -330,9 +332,15 @@ mod tests {
         // than a panic out of a `Deserialize` impl.
         let json = format!(r#"{{"rows":{WRAPS_TO_FOUR},"cols":4,"data":[1.0,2.0,3.0,4.0]}}"#);
         let err = serde_json::from_str::<Matrix<f64>>(&json).unwrap_err();
-        assert!(
-            err.to_string().contains("overflow the address space"),
-            "unexpected error: {err}"
+        assert_eq!(err.classify(), JsonCategory::Data);
+        assert_eq!(err.line(), 1);
+        assert_eq!(err.column(), json.len());
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "Matrix dimensions {WRAPS_TO_FOUR}×4 overflow the address space at line 1 column {}",
+                json.len()
+            )
         );
     }
 
@@ -341,9 +349,12 @@ mod tests {
         // The overflow guard must not swallow the ordinary mismatch case.
         let err =
             serde_json::from_str::<Matrix<f64>>(r#"{"rows":2,"cols":3,"data":[1.0]}"#).unwrap_err();
-        assert!(
-            err.to_string().contains("does not match"),
-            "unexpected error: {err}"
+        assert_eq!(err.classify(), JsonCategory::Data);
+        assert_eq!(err.line(), 1);
+        assert_eq!(err.column(), 32);
+        assert_eq!(
+            err.to_string(),
+            "Matrix data length 1 does not match 2×3 = 6 at line 1 column 32"
         );
     }
 }

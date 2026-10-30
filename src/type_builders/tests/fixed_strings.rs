@@ -258,36 +258,21 @@ fn a_plain_attribute_takes_the_content_width_and_a_sized_one_keeps_its_slot() {
     assert!(matches!(kept.datatype, Datatype::String { size: 5, .. }));
 }
 
-#[test]
-fn an_attribute_value_past_its_declared_width_is_refused() {
-    assert!(matches!(
-        AttrValue::ascii_string_sized("north", 2),
-        Err(FormatError::FixedStringTooLong {
-            index: 0,
-            len: 5,
-            width: 2
-        })
-    ));
-    assert!(matches!(
-        AttrValue::string_sized("mètre", 5),
-        Err(FormatError::FixedStringTooLong {
-            index: 0,
-            len: 6,
-            ..
-        })
-    ));
-    assert!(matches!(
-        AttrValue::ascii_string_array_sized(vec!["ab".into(), "north".into()], 4),
-        Err(FormatError::FixedStringTooLong {
-            index: 1,
-            len: 5,
-            width: 4
-        })
-    ));
-    assert!(matches!(
-        AttrValue::string_array_sized(vec!["ab".into(), "north".into()], 4),
-        Err(FormatError::FixedStringTooLong { index: 1, .. })
-    ));
+#[rstest::rstest]
+#[case::ascii_scalar(AttrValue::ascii_string_sized("north", 2), 0, 5, 2)]
+#[case::utf8_scalar(AttrValue::string_sized("mètre", 5), 0, 6, 5)]
+#[case::ascii_array(AttrValue::ascii_string_array_sized(vec!["ab".into(), "north".into()], 4), 1, 5, 4)]
+#[case::utf8_array(AttrValue::string_array_sized(vec!["ab".into(), "north".into()], 4), 1, 5, 4)]
+fn an_attribute_value_past_its_declared_width_is_rejected(
+    #[case] outcome: Result<AttrValue, FormatError>,
+    #[case] index: usize,
+    #[case] len: usize,
+    #[case] width: u32,
+) {
+    assert_eq!(
+        outcome.unwrap_err(),
+        FormatError::FixedStringTooLong { index, len, width }
+    );
 }
 
 // Empty values isolate zero-width rejection from per-value overflow.

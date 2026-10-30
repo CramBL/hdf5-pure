@@ -386,8 +386,8 @@ impl ObjectHeader {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rstest::rstest;
+    use test_util::checksum::CHECKSUM;
     use test_util::image::Image;
     use test_util::object_header::v1 as v1_bytes;
     use test_util::object_header::v2 as v2_bytes;
@@ -396,6 +396,7 @@ mod tests {
     };
     use test_util::widths::Widths;
 
+    use super::*;
     use crate::width::LengthWidth;
     use crate::width::OffsetWidth;
 
@@ -657,13 +658,25 @@ mod tests {
             .message(Message::new(RecordType::DATASPACE, &[1, 2, 3]))
             .build();
 
-        assert_eq!(parse(&data).unwrap().messages.len(), 1);
+        let header = parse(&data).unwrap();
+        let [message] = header.messages.as_slice() else {
+            panic!("expected one message, got {:?}", header.messages);
+        };
+        assert_eq!(message.msg_type, MessageType::DATASPACE);
+        assert_eq!(message.size, 3);
+        assert_eq!(message.flags, MessageFlags::NONE);
+        assert_eq!(message.creation_order, None);
+        assert_eq!(message.data, [1, 2, 3]);
 
         *data.last_mut().unwrap() ^= 0xFF;
-        assert!(matches!(
-            parse(&data),
-            Err(FormatError::ChecksumMismatch { .. })
-        ));
+        let (body, stored) = data.split_last_chunk::<CHECKSUM>().unwrap();
+        assert_eq!(
+            parse(&data).unwrap_err(),
+            FormatError::ChecksumMismatch {
+                expected: u32::from_le_bytes(*stored),
+                computed: test_util::checksum::lookup3(body),
+            }
+        );
     }
 
     #[test]
@@ -858,14 +871,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn truncated_headers_are_rejected() {
-        for (version, data) in [("v1", vec![1, 0]), ("v2", vec![b'O', b'H', b'D', b'R', 2])] {
-            assert!(
-                matches!(parse(&data), Err(FormatError::UnexpectedEof { .. })),
-                "{version}"
-            );
-        }
+    #[rstest]
+    #[case::version_1(&[1, 0], 4)]
+    #[case::version_2(&[b'O', b'H', b'D', b'R', 2], 6)]
+    fn truncated_headers_are_rejected(#[case] data: &[u8], #[case] expected: usize) {
+        assert_eq!(
+            parse(data).unwrap_err(),
+            FormatError::UnexpectedEof {
+                expected,
+                available: data.len(),
+            }
+        );
     }
 
     #[test]
@@ -929,7 +945,7 @@ mod tests {
         );
         image.place(CONTINUATION_OFFSET, &continuation);
 
-        assert_unexpected_eof_all_parse_paths(image.as_bytes());
+        assert_unexpected_eof_all_parse_paths(image.as_bytes(), 24, 16);
     }
 
     #[test]
@@ -946,7 +962,7 @@ mod tests {
         );
         image.place(CONTINUATION_OFFSET, &continuation);
 
-        assert_unexpected_eof_all_parse_paths(image.as_bytes());
+        assert_unexpected_eof_all_parse_paths(image.as_bytes(), 8, 1);
     }
 
     #[test]
@@ -1256,7 +1272,7 @@ mod tests {
         assert_same_header(&memory, &buffered);
     }
 
-    fn assert_unexpected_eof_all_parse_paths(data: &[u8]) {
+    fn assert_unexpected_eof_all_parse_paths(data: &[u8], expected: usize, available: usize) {
         let buffered = ObjectHeader::parse_with_base(
             data,
             AccessMode::ReadOnly,
@@ -1267,8 +1283,20 @@ mod tests {
         );
         let memory = parse_from_source_for_mode(data, AccessMode::ReadOnly);
 
-        assert!(matches!(buffered, Err(FormatError::UnexpectedEof { .. })));
-        assert!(matches!(memory, Err(FormatError::UnexpectedEof { .. })));
+        assert_eq!(
+            buffered.unwrap_err(),
+            FormatError::UnexpectedEof {
+                expected,
+                available
+            }
+        );
+        assert_eq!(
+            memory.unwrap_err(),
+            FormatError::UnexpectedEof {
+                expected,
+                available
+            }
+        );
     }
 
     fn assert_invalid_v1_message_size_all_parse_paths(data: &[u8], size: u16) {
