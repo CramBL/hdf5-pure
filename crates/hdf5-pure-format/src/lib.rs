@@ -9,6 +9,7 @@
 //! The project supports `hdf5-pure` as its API entry point. A type that `hdf5-pure` re-exports
 //! follows the compatibility policy of `hdf5-pure`.
 
+#![cfg_attr(test, warn(clippy::tests_outside_test_module))]
 #![cfg_attr(not(test), no_std)]
 #![warn(unreachable_pub)]
 extern crate alloc;

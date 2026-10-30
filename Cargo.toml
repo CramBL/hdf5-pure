@@ -143,6 +143,9 @@ unnecessary_safety_doc = "warn"
 # A directory module is its mod.rs.
 self_named_module_files = "warn"
 
+# Test child processes use explicit fixture binaries.
+disallowed_methods = "warn"
+
 # Numeric casts and float comparisons. The truncating casts are denied on a 32-bit target by
 # `just portability::cast-gate`, where they can fire.
 as_ptr_cast_mut = "warn"
@@ -314,9 +317,16 @@ missing_errors_doc = "allow"
 # TODO: functions without a Panics section.
 missing_panics_doc = "allow"
 
+# Report direct assertions on `Result` states.
+assertions_on_result_states = "warn"
+# Ignored tests state why they are skipped.
+ignore_without_reason = "warn"
+# Inline test modules follow production items.
+items_after_test_module = "warn"
+# Panic tests identify the expected panic message.
+should_panic_without_expect = "warn"
+
 # Tests.
-# TODO: assertions on `is_err` or `is_ok`. The exact-error rule.
-assertions_on_result_states = "allow"
 # TODO: assertions without a message.
 missing_assert_message = "allow"
 

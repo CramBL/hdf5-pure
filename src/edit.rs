@@ -358,6 +358,7 @@ mod group;
 #[cfg(test)]
 test_util_hdf5::hdf5_1_10_tests! {
     mod group_inspection;
+    #[cfg(test)]
     mod native_crosschecks;
 }
 mod group_links;

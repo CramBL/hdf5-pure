@@ -9,6 +9,7 @@
 //! The project supports `hdf5-pure` as its public API entry point. Workspace crates use the hidden
 //! [`__private`] module, whose contents may change in any release.
 
+#![cfg_attr(test, warn(clippy::tests_outside_test_module))]
 #![no_std]
 #![warn(unreachable_pub)]
 

@@ -54,6 +54,7 @@ use crate::width::{LengthWidth, OffsetWidth};
 
 #[cfg(all(test, feature = "deflate"))]
 test_util_hdf5::hdf5_bundled_tests! {
+    #[cfg(test)]
     mod native_crosschecks;
 }
 

@@ -181,6 +181,10 @@ fn check_snapshot(snapshot: &heapscope::Snapshot) {
     );
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the executable path locates profile output without subprocess dispatch"
+)]
 fn profile_path() -> Result<PathBuf, Box<dyn StdError>> {
     let exe = std::env::current_exe()?;
     let target = exe.ancestors().nth(3).ok_or("missing target directory")?;

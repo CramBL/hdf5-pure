@@ -105,7 +105,8 @@ pub fn write_elided(f: &mut fmt::Formatter<'_>, elided: usize) -> fmt::Result {
     Ok(())
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
+#[cfg(feature = "std")]
 mod tests {
     use super::*;
 

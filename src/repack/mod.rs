@@ -167,6 +167,7 @@ mod headers;
 mod objects;
 #[cfg(test)]
 test_util_hdf5::hdf5_1_10_tests! {
+    #[cfg(test)]
     mod native_crosschecks;
 }
 #[cfg(test)]

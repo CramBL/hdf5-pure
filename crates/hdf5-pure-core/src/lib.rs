@@ -5,6 +5,7 @@
 //! versioning as `hdf5-pure`. Most users depend on `hdf5-pure`, which is the recommended entry
 //! point. The hidden `__private` module is not part of that API.
 
+#![cfg_attr(test, warn(clippy::tests_outside_test_module))]
 #![cfg_attr(not(test), no_std)]
 extern crate alloc;
 #[cfg(feature = "std")]

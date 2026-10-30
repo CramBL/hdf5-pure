@@ -6,6 +6,7 @@
 //!
 //! The project supports `hdf5-pure` as its API entry point.
 
+#![cfg_attr(test, warn(clippy::tests_outside_test_module))]
 #![cfg_attr(not(feature = "std"), no_std)]
 #![warn(unreachable_pub)]
 
