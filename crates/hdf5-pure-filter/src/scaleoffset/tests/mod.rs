@@ -2,6 +2,8 @@ use rstest::rstest;
 
 use super::*;
 
+mod properties;
+
 #[rstest]
 #[case::one_byte(1, ORDER_LE)]
 #[case::two_bytes(2, ORDER_BE)]
@@ -554,12 +556,14 @@ fn float_dscale_roundtrip_within_tolerance() {
     let f = float_filter(8, decimals, ORDER_LE, vals.len() as u32);
     let comp = compress(&raw, &f).unwrap();
     let dec = decompress(&comp, &f, None).unwrap();
+    assert_eq!(dec.len(), raw.len());
     let got: Vec<f64> = dec
         .as_chunks::<8>()
         .0
         .iter()
         .map(|c| f64::from_le_bytes(*c))
         .collect();
+    assert_eq!(got.len(), vals.len());
     let tol = 0.5 * 10f64.powi(-decimals);
     for (g, v) in got.iter().zip(vals.iter()) {
         assert!((g - v).abs() <= tol, "got {g}, want {v}");
@@ -577,12 +581,14 @@ fn float32_dscale_roundtrip_be() {
     let f = float_filter(4, decimals, ORDER_BE, vals.len() as u32);
     let comp = compress(&raw, &f).unwrap();
     let dec = decompress(&comp, &f, None).unwrap();
+    assert_eq!(dec.len(), raw.len());
     let got: Vec<f32> = dec
         .as_chunks::<4>()
         .0
         .iter()
         .map(|c| f32::from_be_bytes(*c))
         .collect();
+    assert_eq!(got.len(), vals.len());
     let tol = 0.5 * 10f32.powi(-decimals);
     for (g, v) in got.iter().zip(vals.iter()) {
         assert!((g - v).abs() <= tol, "got {g}, want {v}");
@@ -680,182 +686,6 @@ fn build_cd_values_rejects_mismatched_mode() {
         .unwrap_err(),
         Error::ScaleOffset("scaleoffset: integer mode requires an integer dataset".to_string())
     );
-}
-
-/// Deterministic xorshift64 used to drive the property-style tests below.
-/// Keeps the dev-dependency footprint minimal while still covering a wide
-/// input space. seeds are fixed so failures are reproducible.
-struct Rng(u64);
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Self(seed | 1)
-    }
-    fn next(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.0 = x;
-        x
-    }
-    fn range(&mut self, hi: u64) -> u64 {
-        // Modulo bias is fine for our coverage purposes.
-        self.next() % hi
-    }
-}
-
-#[test]
-fn pack_unpack_equivalence_random() {
-    // For every minbits in 1..=64 and across many random widths/lengths,
-    // pack(offsets) followed by unpack must return the original offsets.
-    let mut rng = Rng::new(0x00C0_FFEE_F00D_1234);
-    for _ in 0..400 {
-        let minbits = (rng.range(64) + 1) as u32; // 1..=64
-        let nelmts = (rng.range(257) + 1) as usize; // 1..=257
-        let mask = if minbits == 64 {
-            u64::MAX
-        } else {
-            (1u64 << minbits) - 1
-        };
-        let offsets: Vec<u64> = (0..nelmts).map(|_| rng.next() & mask).collect();
-        let packed = pack_offsets(&offsets, minbits, nelmts).unwrap();
-        // Reference layout reserves at least one trailing byte.
-        assert_eq!(packed.len(), nelmts * minbits as usize / 8 + 1);
-        let unpacked = unpack_bits(&packed, nelmts, minbits).unwrap();
-        assert_eq!(
-            unpacked, offsets,
-            "minbits={minbits}, nelmts={nelmts}, seed=0xC0FFEEF00D1234"
-        );
-    }
-}
-
-fn roundtrip_random<T: Copy>(
-    seed: u64,
-    size: u32,
-    signed: bool,
-    order: u32,
-    encode: impl Fn(&mut Rng) -> T,
-    to_bytes: impl Fn(T, u32) -> Vec<u8>,
-) {
-    let mut rng = Rng::new(seed);
-    for trial in 0..40 {
-        let nelmts = (rng.range(199) + 1) as usize;
-        let mut raw = Vec::with_capacity(nelmts * size as usize);
-        for _ in 0..nelmts {
-            raw.extend_from_slice(&to_bytes(encode(&mut rng), order));
-        }
-        let f = int_filter(size, signed, order, nelmts as u32);
-        let comp = compress(&raw, &f).unwrap();
-        let dec = decompress(&comp, &f, None).unwrap();
-        assert_eq!(
-            dec, raw,
-            "trial {trial}: size={size}, signed={signed}, order={order}"
-        );
-    }
-}
-
-#[test]
-fn integer_roundtrip_random_u8() {
-    roundtrip_random::<u8>(0x11, 1, false, ORDER_LE, |r| r.next() as u8, |v, _| vec![v]);
-}
-
-#[test]
-fn integer_roundtrip_random_u16_le_and_be() {
-    for &order in &[ORDER_LE, ORDER_BE] {
-        roundtrip_random::<u16>(
-            0x22 ^ order as u64,
-            2,
-            false,
-            order,
-            |r| r.next() as u16,
-            |v, o| {
-                if o == ORDER_LE {
-                    v.to_le_bytes().to_vec()
-                } else {
-                    v.to_be_bytes().to_vec()
-                }
-            },
-        );
-    }
-}
-
-#[test]
-fn integer_roundtrip_random_i32_narrow_and_wide() {
-    // Mix narrow (small span -> small minbits) and wide (forces raw path).
-    let mut rng = Rng::new(0x33);
-    for trial in 0..40 {
-        let nelmts = (rng.range(199) + 1) as usize;
-        let narrow = rng.next() & 1 == 0;
-        let mut raw = Vec::with_capacity(nelmts * 4);
-        for _ in 0..nelmts {
-            let v: i32 = if narrow {
-                (rng.range(1024) as i32) - 512 // span ~= 1024
-            } else {
-                rng.next() as i32 // full range
-            };
-            raw.extend_from_slice(&v.to_le_bytes());
-        }
-        let f = int_filter(4, true, ORDER_LE, nelmts as u32);
-        let comp = compress(&raw, &f).unwrap();
-        let dec = decompress(&comp, &f, None).unwrap();
-        assert_eq!(dec, raw, "trial {trial}: narrow={narrow}");
-    }
-}
-
-#[test]
-fn integer_roundtrip_random_i64() {
-    roundtrip_random::<i64>(
-        0x44,
-        8,
-        true,
-        ORDER_LE,
-        |r| {
-            // Bias toward narrow spans so we exercise the packing path,
-            // but include the full-range tail too.
-            let span = 1u64 << (r.range(48) as u32 + 1);
-            let v = (r.next() % span) as i64;
-            let off = (r.next() as i64) >> 1;
-            v.wrapping_add(off)
-        },
-        |v, _| v.to_le_bytes().to_vec(),
-    );
-}
-
-#[test]
-fn float_dscale_roundtrip_random_within_tolerance() {
-    let mut rng = Rng::new(0x55);
-    for trial in 0..30 {
-        let nelmts = (rng.range(99) + 1) as usize;
-        let decimals = (rng.range(5) as i32) + 1; // 1..=5
-        // Keep magnitudes modest so f64 ULP stays well below the D-scale
-        // tolerance. Avoid generating values pre-quantized to the same
-        // precision (decimals) we then round to, otherwise the input
-        // sits exactly on a rounding boundary.
-        let mut raw = Vec::with_capacity(nelmts * 8);
-        let mut vals = Vec::with_capacity(nelmts);
-        for _ in 0..nelmts {
-            let v = (rng.next() as i32 as f64) * 1e-9; // |v| <= ~2.1
-            vals.push(v);
-            raw.extend_from_slice(&v.to_le_bytes());
-        }
-        let f = float_filter(8, decimals, ORDER_LE, nelmts as u32);
-        let comp = compress(&raw, &f).unwrap();
-        let dec = decompress(&comp, &f, None).unwrap();
-        let got: Vec<f64> = dec
-            .as_chunks::<8>()
-            .0
-            .iter()
-            .map(|c| f64::from_le_bytes(*c))
-            .collect();
-        // 0.5 ULP rounding + a few ULP of float arithmetic noise.
-        let tol = 0.501 * 10f64.powi(-decimals);
-        for (g, v) in got.iter().zip(vals.iter()) {
-            assert!(
-                (g - v).abs() <= tol,
-                "trial {trial}: got {g}, want {v} (tol {tol})"
-            );
-        }
-    }
 }
 
 /// Build a synthetic chunk where `minbits == 0`, the compressed header

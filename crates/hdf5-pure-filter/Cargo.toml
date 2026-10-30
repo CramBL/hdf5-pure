@@ -23,6 +23,7 @@ flate2 = { version = "1", optional = true, default-features = false, features = 
 
 [dev-dependencies]
 heapscope.workspace = true
+proptest.workspace = true
 rstest.workspace = true
 test-util.workspace = true
 
