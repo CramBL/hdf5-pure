@@ -1702,7 +1702,7 @@ impl FileImage for SourceOnlyImage {
 
 #[cfg(test)]
 mod tests {
-    use std::io::ErrorKind;
+    use std::io::{Error as IoError, ErrorKind, Read, Write};
 
     use rstest::rstest;
 
@@ -2173,15 +2173,20 @@ mod tests {
         }
     }
 
-    #[test]
-    fn reads_past_end_of_file_are_refused() {
+    #[rstest]
+    fn reads_past_end_of_file_are_refused(
+        #[values(Backing::Mirror, Backing::Handle)] backing: Backing,
+    ) {
         let dir = tempfile::tempdir().unwrap();
-        for backing in BACKINGS {
-            let (_path, img) = image(dir.path(), b"abcd", backing);
-
-            let mut buf = [0u8; 2];
-            assert!(img.read_at(3, &mut buf).is_err(), "{backing:?}");
-        }
+        let (_path, img) = image(dir.path(), b"abcd", backing);
+        let mut buf = [0u8; 2];
+        assert_eq!(
+            img.read_at(3, &mut buf).unwrap_err(),
+            FormatError::UnexpectedSourceEof {
+                expected: 5,
+                available: 4
+            }
+        );
     }
 
     /// A 64-byte page, so a test can put two writes in one page or in two
@@ -2636,9 +2641,9 @@ mod tests {
             "the write must be held, not issued"
         );
 
-        assert!(
-            writes.set_len(8).is_err(),
-            "a read-only handle must refuse set_len, or this proves nothing"
+        assert_io_error(
+            writes.set_len(8).unwrap_err(),
+            fs::File::open(&path).unwrap().set_len(8).unwrap_err(),
         );
         assert_eq!(
             writes.pending_bytes, 200,
@@ -2700,15 +2705,10 @@ mod tests {
         let mut img = MirrorImage::new(handle, b"abcdefgh".to_vec());
         img.set_write_buffering(GATHERED).unwrap();
 
+        let write_error = || Write::write(&mut fs::File::open(&path).unwrap(), b"ZZ").unwrap_err();
         img.write_at(0, b"ZZ").unwrap();
-        assert!(
-            img.sync_all().is_err(),
-            "a write to a read-only handle must fail"
-        );
-        assert!(
-            img.sync_all().is_err(),
-            "the retry must report the failure too, not an empty buffer's success"
-        );
+        assert_io_error(img.sync_all().unwrap_err(), write_error());
+        assert_io_error(img.sync_all().unwrap_err(), write_error());
         assert_eq!(
             std::fs::read(&path).unwrap(),
             b"abcdefgh",
@@ -2724,14 +2724,15 @@ mod tests {
         gapped.set_write_buffering(GATHERED).unwrap();
         gapped.write_at(0, b"X").unwrap();
         gapped.write_at(4, b"Y").unwrap();
-        assert!(
-            gapped.sync_all().is_err(),
-            "the gap read must fail on a handle that cannot read"
-        );
-        assert!(
-            gapped.sync_all().is_err(),
-            "and the retry must still report it rather than an empty buffer"
-        );
+        let read_error = || {
+            Read::read(
+                &mut fs::OpenOptions::new().write(true).open(&path).unwrap(),
+                &mut [0],
+            )
+            .unwrap_err()
+        };
+        assert_source_error(gapped.sync_all().unwrap_err(), read_error());
+        assert_source_error(gapped.sync_all().unwrap_err(), read_error());
         assert_eq!(
             std::fs::read(&path).unwrap(),
             b"abcdefgh",
@@ -2749,7 +2750,7 @@ mod tests {
         w.set_mode(GATHERED).unwrap();
         w.write_at(0, b"X").unwrap();
         w.write_at(4, b"Y").unwrap();
-        assert!(w.flush().is_err(), "the gap read must fail");
+        assert_source_error(w.flush().unwrap_err(), read_error());
         assert_eq!(
             w.pending_bytes, 2,
             "the run kept the padding the failed gap read added"
@@ -3016,5 +3017,23 @@ mod tests {
                 }
             }
         }
+    }
+    /// Asserts [`FormatError::Source`] with the complete message from `expected`.
+    fn assert_source_error(error: Error, expected: IoError) {
+        let Error::Format(FormatError::Source(message)) = error else {
+            panic!("expected source read error, got {error:?}");
+        };
+        assert!(expected.raw_os_error().is_some(), "{expected:?}");
+        assert_eq!(message, expected.to_string());
+    }
+
+    /// Asserts [`Error::Io`] with the kind and raw OS code of `expected`.
+    fn assert_io_error(error: Error, expected: IoError) {
+        let Error::Io(error) = error else {
+            panic!("expected I/O error, got {error:?}");
+        };
+        assert!(expected.raw_os_error().is_some(), "{expected:?}");
+        assert_eq!(error.kind(), expected.kind());
+        assert_eq!(error.raw_os_error(), expected.raw_os_error());
     }
 }

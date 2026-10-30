@@ -528,9 +528,9 @@ fn failed_commit_restores_heap_collection_ownership_records() {
         db
     })
     .unwrap();
-    assert!(
-        s.commit().is_err(),
-        "a commit with an unreadable extension must fail"
+    common::assert_unsupported(
+        s.commit().unwrap_err(),
+        "an object does not use a version 2 object header",
     );
 
     assert_eq!(
@@ -602,9 +602,9 @@ fn a_failed_commit_that_reused_free_space_leaves_the_file_intact() {
         .with_chunks(&[512]);
     s.stage_created_dataset(&ObjectPathBuf::parse("/fresh"), db)
         .unwrap();
-    assert!(
-        s.commit().is_err(),
-        "a commit with an unreadable extension must fail"
+    common::assert_unsupported(
+        s.commit().unwrap_err(),
+        "an object does not use a version 2 object header",
     );
     assert_eq!(
         s.reusable_free_sections().unwrap(),
@@ -620,8 +620,16 @@ fn a_failed_commit_that_reused_free_space_leaves_the_file_intact() {
         vec![1, 2, 3]
     );
     assert_eq!(f.dataset("ceiling").unwrap().read_i32().unwrap(), ceiling);
-    assert!(f.dataset("victim").is_err());
-    assert!(f.dataset("fresh").is_err());
+    let error = f.dataset("victim").unwrap_err();
+    let Error::Format(FormatError::PathNotFound(path)) = error else {
+        panic!("expected PathNotFound, got {error:?}");
+    };
+    assert_eq!(path, "victim");
+    let error = f.dataset("fresh").unwrap_err();
+    let Error::Format(FormatError::PathNotFound(path)) = error else {
+        panic!("expected PathNotFound, got {error:?}");
+    };
+    assert_eq!(path, "fresh");
 }
 
 #[test]
@@ -658,10 +666,9 @@ fn a_failed_commit_puts_back_the_value_it_overwrote() {
         db
     })
     .unwrap();
-    let refused = s.commit();
-    assert!(
-        matches!(refused, Err(Error::EditUnsupported(_))),
-        "the refusal, not a rollback failure: {refused:?}"
+    common::assert_unsupported(
+        s.commit().unwrap_err(),
+        "an object does not use a version 2 object header",
     );
     let mut superblock = s.context.superblock().clone();
     superblock.superblock_extension_address = good_ext;
@@ -683,10 +690,11 @@ fn a_failed_commit_puts_back_the_value_it_overwrote() {
         vec![1, 2, 3],
         "the refused batch's value overwrite is in the file"
     );
-    assert!(
-        f.dataset("extra").is_err(),
-        "/extra was correctly discarded"
-    );
+    let error = f.dataset("extra").unwrap_err();
+    let Error::Format(FormatError::PathNotFound(path)) = error else {
+        panic!("expected PathNotFound, got {error:?}");
+    };
+    assert_eq!(path, "extra");
     assert_eq!(f.dataset("later").unwrap().read_i32().unwrap(), vec![7]);
 }
 
@@ -720,11 +728,12 @@ fn failed_fast_path_commit_reports_partial_rollback() {
         })
         .unwrap();
     }
-    let refused = s.commit();
-    assert!(
-        matches!(refused, Err(Error::CommitPartiallyApplied { .. })),
-        "a rollback that could not run is not an ordinary refusal: {refused:?}"
-    );
+    let error = s.commit().unwrap_err();
+    let Error::CommitPartiallyApplied { refusal, restore } = error else {
+        panic!("expected CommitPartiallyApplied, got {error:?}");
+    };
+    assert_device_write_failure(*refusal);
+    assert_device_write_failure(*restore);
     drop(s);
 
     let f = crate::reader::File::open(&path).unwrap();
@@ -775,11 +784,7 @@ fn a_commit_that_fails_past_its_repoint_keeps_the_value_it_published() {
         db
     })
     .unwrap();
-    let failed = s.commit();
-    assert!(
-        matches!(failed, Err(Error::Io(_))),
-        "the reference write is what failed, after the commit published: {failed:?}"
-    );
+    assert_device_write_failure(s.commit().unwrap_err());
     assert!(
         s.publication.attempted(),
         "the failure has to be past the publish for this test to mean anything"
@@ -974,7 +979,10 @@ fn a_stale_consistency_flag_is_rejected_then_cleared_by_a_commit() {
         );
     }
     match WriteEngine::open_with_locking(&path, FileLocking::Enabled) {
-        Err(Error::FileMarkedInUse(_)) => {}
+        Err(Error::FileMarkedInUse(reason)) => {
+            assert!(reason.contains("status flags 0x05"), "{reason}");
+            assert!(reason.contains("another writer holds it"), "{reason}");
+        }
         Err(e) => panic!("expected the flag refusal, got {e:?}"),
         Ok(_) => panic!("a flagged file must not be edited in place"),
     }
@@ -1824,10 +1832,11 @@ fn sync_policy_governs_every_barrier() {
             (0..12).collect::<Vec<_>>(),
             "the append must land under {policy:?}"
         );
-        assert!(
-            f.dataset("added").is_err(),
-            "the deleting commit must land under {policy:?}"
-        );
+        let error = f.dataset("added").unwrap_err();
+        let Error::Format(FormatError::PathNotFound(path)) = error else {
+            panic!("expected PathNotFound, got {error:?}");
+        };
+        assert_eq!(path, "added");
         [
             after_append,
             after_commit,
@@ -1926,10 +1935,11 @@ fn sync_policy_governs_the_persisting_and_flag_barriers() {
 
         drop(s);
         let f = crate::reader::File::open(&path).unwrap();
-        assert!(
-            f.dataset("victim").is_err(),
-            "the delete must land under {policy:?}"
-        );
+        let error = f.dataset("victim").unwrap_err();
+        let Error::Format(FormatError::PathNotFound(path)) = error else {
+            panic!("expected PathNotFound, got {error:?}");
+        };
+        assert_eq!(path, "victim");
         assert_eq!(
             f.dataset("d").unwrap().read_i32().unwrap(),
             (0..14).collect::<Vec<_>>(),
@@ -1990,11 +2000,7 @@ fn a_commit_whose_publish_write_fails_rolls_nothing_back() {
         db
     })
     .unwrap();
-    let failed = s.commit();
-    assert!(
-        matches!(failed, Err(Error::Io(_))),
-        "the publish write is what failed: {failed:?}"
-    );
+    assert_device_write_failure(s.commit().unwrap_err());
     drop(s);
 
     let f = crate::reader::File::open(&path).unwrap();
@@ -2076,7 +2082,10 @@ fn a_failed_commit_puts_back_every_chunk_it_overwrote() {
         db
     })
     .unwrap();
-    assert!(s.commit().is_err());
+    common::assert_unsupported(
+        s.commit().unwrap_err(),
+        "an object does not use a version 2 object header",
+    );
     drop(s);
 
     let f = crate::reader::File::open(&path).unwrap();
@@ -2125,7 +2134,10 @@ fn a_commit_does_not_replay_a_journal_it_did_not_write() {
         db
     })
     .unwrap();
-    assert!(s.commit().is_err());
+    common::assert_unsupported(
+        s.commit().unwrap_err(),
+        "an object does not use a version 2 object header",
+    );
     drop(s);
 
     let f = crate::reader::File::open(&path).unwrap();
@@ -2136,60 +2148,55 @@ fn a_commit_does_not_replay_a_journal_it_did_not_write() {
     );
 }
 
-#[test]
-fn a_rollback_orders_the_values_it_puts_back() {
+#[rstest]
+#[case::no_overwrite(false, 0)]
+#[case::overwrite(true, 1)]
+fn a_rollback_orders_the_values_it_puts_back(
+    #[case] with_overwrite: bool,
+    #[case] expected_syncs: u64,
+) {
     use crate::writer::FileBuilder;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    let mut counted = Vec::new();
-    for with_overwrite in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("rollback_syncs.h5");
-        let mut b = FileBuilder::new();
-        b.create_dataset("nums").with_i32_data(&[1, 2, 3]);
-        b.with_file_space_settings(
-            FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
-                .with_persistence(true)
-                .with_threshold(0),
-        );
-        b.write(&path).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rollback_syncs.h5");
+    let mut b = FileBuilder::new();
+    b.create_dataset("nums").with_i32_data(&[1, 2, 3]);
+    b.with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+            .with_persistence(true)
+            .with_threshold(0),
+    );
+    b.write(&path).unwrap();
 
-        let syncs = Arc::new(AtomicU64::new(0));
-        let mut s =
-            WriteEngine::open_sync_counting(&path, SyncPolicy::Always, Arc::clone(&syncs)).unwrap();
-        let mut superblock = s.context.superblock().clone();
-        superblock.superblock_extension_address = Some(StoredAddress::ZERO);
-        let proposed = s.context.propose(superblock).unwrap();
-        s.context.adopt(proposed).unwrap();
-        if with_overwrite {
-            s.stage_dataset_write(&ObjectPathBuf::parse("/nums"), {
-                let mut db = crate::type_builders::DatasetBuilder::new("");
-                db.with_i32_data(&[9, 9, 9]);
-                db
-            })
-            .unwrap();
-        }
-        s.stage_created_dataset(&ObjectPathBuf::parse("/extra"), {
+    let syncs = Arc::new(AtomicU64::new(0));
+    let mut s =
+        WriteEngine::open_sync_counting(&path, SyncPolicy::Always, Arc::clone(&syncs)).unwrap();
+    let mut superblock = s.context.superblock().clone();
+    superblock.superblock_extension_address = Some(StoredAddress::ZERO);
+    let proposed = s.context.propose(superblock).unwrap();
+    s.context.adopt(proposed).unwrap();
+    if with_overwrite {
+        s.stage_dataset_write(&ObjectPathBuf::parse("/nums"), {
             let mut db = crate::type_builders::DatasetBuilder::new("");
-            db.with_i32_data(&[42]);
+            db.with_i32_data(&[9, 9, 9]);
             db
         })
         .unwrap();
-        let before = syncs.load(Ordering::Relaxed);
-        assert!(s.commit().is_err());
-        counted.push(syncs.load(Ordering::Relaxed) - before);
     }
-
-    assert_eq!(
-        counted[0], 0,
-        "a refusal with nothing to put back reaches no barrier"
+    s.stage_created_dataset(&ObjectPathBuf::parse("/extra"), {
+        let mut db = crate::type_builders::DatasetBuilder::new("");
+        db.with_i32_data(&[42]);
+        db
+    })
+    .unwrap();
+    let before = syncs.load(Ordering::Relaxed);
+    common::assert_unsupported(
+        s.commit().unwrap_err(),
+        "an object does not use a version 2 object header",
     );
-    assert_eq!(
-        counted[1],
-        counted[0] + 1,
-        "a refusal that put values back must order them: {counted:?}"
-    );
+    assert_eq!(syncs.load(Ordering::Relaxed) - before, expected_syncs);
 }
 
 #[test]
@@ -2278,4 +2285,13 @@ fn gather_workload(session: &mut WriteEngine) -> (u64, u64) {
         after_appends - before,
         session.image.issued_writes() - after_appends,
     )
+}
+
+/// Asserts the injected device-write error's kind and complete message.
+fn assert_device_write_failure(error: Error) {
+    let Error::Io(error) = error else {
+        panic!("expected device write failure, got {error:?}");
+    };
+    assert_eq!(error.kind(), ErrorKind::Other);
+    assert_eq!(error.to_string(), "simulated device write failure");
 }

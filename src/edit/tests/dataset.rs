@@ -460,13 +460,21 @@ fn append_onto_a_lossy_partial_tail_is_rejected() {
         let f = crate::reader::File::open_rw(&p).unwrap();
         f.dataset("d").unwrap().append(&[9.5f64, 8.5, 7.5]).unwrap();
     }
-    let back = PureFile::open(&p)
-        .unwrap()
-        .dataset("d")
-        .unwrap()
-        .read_f64()
-        .unwrap();
-    assert_eq!(back[..4], committed[..4], "an untouched chunk changed");
+    {
+        let file = PureFile::open(&p).unwrap();
+        let dataset = file.dataset("d").unwrap();
+        assert_eq!(dataset.shape().unwrap(), [7]);
+        let values = dataset.read_f64().unwrap();
+        assert_eq!(values.len(), 7);
+        assert_eq!(values[..4], committed[..4], "an untouched chunk changed");
+        assert!(
+            values[4..]
+                .iter()
+                .zip([9.5, 8.5, 7.5])
+                .all(|(actual, expected)| (actual - expected).abs() <= 1.5),
+            "{values:?}"
+        );
+    }
     let p = dir.path().join("staged.h5");
     build(&p);
     let before = std::fs::read(&p).unwrap();
