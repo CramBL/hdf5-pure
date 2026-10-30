@@ -483,9 +483,15 @@ mod tests {
     #[test]
     fn ensure_len_accepts_an_exact_fit_and_rejects_one_byte_more() {
         let data = [0u8; 8];
-        assert!(ensure_len(&data, 4, 4).is_ok());
-        assert!(ensure_len(&data, 4, 5).is_err());
-        assert!(ensure_len(&data, 8, 0).is_ok());
+        ensure_len(&data, 4, 4).unwrap();
+        assert_eq!(
+            ensure_len(&data, 4, 5).unwrap_err(),
+            FormatError::UnexpectedEof {
+                expected: 9,
+                available: 8
+            }
+        );
+        ensure_len(&data, 8, 0).unwrap();
     }
 
     #[test]
@@ -495,7 +501,13 @@ mod tests {
         // admitting a read past the end of the buffer (issue #140).
         let data = [0u8; 16];
         let err = ensure_len(&data, usize::MAX - 1, 8).unwrap_err();
-        assert!(matches!(err, FormatError::UnexpectedEof { .. }));
+        assert_eq!(
+            err,
+            FormatError::UnexpectedEof {
+                expected: usize::MAX,
+                available: 16
+            }
+        );
     }
 
     #[test]
@@ -536,8 +548,14 @@ mod tests {
         // collapse merged reach this result by different routes, so the test must
         // pinning: an empty read at an impossible offset is not "fits".
         let data = [0u8; 4];
-        assert!(ensure_len(&data, 4, 0).is_ok());
-        assert!(ensure_len(&data, 5, 0).is_err());
+        ensure_len(&data, 4, 0).unwrap();
+        assert_eq!(
+            ensure_len(&data, 5, 0).unwrap_err(),
+            FormatError::UnexpectedEof {
+                expected: 5,
+                available: 4
+            }
+        );
     }
 
     #[test]

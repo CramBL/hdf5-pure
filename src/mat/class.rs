@@ -140,9 +140,10 @@ mod tests {
 
     #[test]
     fn unknown_class_is_error() {
-        assert!(matches!(
-            MatClass::parse("datetime"),
-            Err(MatError::UnknownClass(_))
-        ));
+        let err = MatClass::parse("datetime").unwrap_err();
+        let MatError::UnknownClass(class) = err else {
+            panic!("expected UnknownClass, got {err:?}");
+        };
+        assert_eq!(class, "datetime");
     }
 }

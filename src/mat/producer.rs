@@ -458,18 +458,31 @@ mod tests {
     #[test]
     fn a_shape_whose_bytes_overflow_is_refused() {
         // Refused on any target: the byte count overflows `u64` itself.
-        assert!(plan_blocking(u64::MAX, 8).is_err());
+        let err = plan_blocking(u64::MAX, 8).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                MatError::Hdf5(crate::Error::Format(
+                    FormatError::ValueTooLargeForPlatform {
+                        value: u64::MAX,
+                        target: "usize"
+                    }
+                ))
+            ),
+            "{err:?}"
+        );
 
         // The largest shape that plans is the one whose bytes still fit `usize`,
         // and one element more is refused.
         let max_elements = (usize::MAX as u64) / 8;
         let b = plan_blocking(max_elements, 8).unwrap();
         assert_eq!(b.total_len(), max_elements * 8);
+        assert_eq!(usize::try_from(b.total_len()).unwrap(), usize::MAX - 7);
+        let err = plan_blocking(max_elements + 1, 8).unwrap_err();
         assert!(
-            usize::try_from(b.total_len()).is_ok(),
-            "the largest plannable region must be one this host can address"
+            matches!(err, MatError::Hdf5(crate::Error::Format(FormatError::ValueTooLargeForPlatform { value, target: "usize" })) if value == (max_elements + 1).saturating_mul(8)),
+            "{err:?}"
         );
-        assert!(plan_blocking(max_elements + 1, 8).is_err());
 
         // Dimensions are multiplied the same way. Three of `usize::MAX` exceed
         // `u64` on every target, so this pins that they saturate rather than
@@ -478,7 +491,19 @@ mod tests {
             total_elements(&[usize::MAX, usize::MAX, usize::MAX]),
             u64::MAX
         );
-        assert!(Blocking::plan::<f64>(&[usize::MAX, usize::MAX, usize::MAX]).is_err());
+        let err = Blocking::plan::<f64>(&[usize::MAX, usize::MAX, usize::MAX]).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                MatError::Hdf5(crate::Error::Format(
+                    FormatError::ValueTooLargeForPlatform {
+                        value: u64::MAX,
+                        target: "usize"
+                    }
+                ))
+            ),
+            "{err:?}"
+        );
     }
 
     /// A complex pair is one element of two components, so it blocks exactly as

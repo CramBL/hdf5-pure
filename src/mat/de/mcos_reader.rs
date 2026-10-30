@@ -1412,10 +1412,16 @@ mod tests {
 
     #[test]
     fn rejects_short_blob() {
-        assert!(matches!(
-            FileWrapper::parse(&[0u8; 8]),
-            Err(MatError::Custom(_))
-        ));
+        let Err(err) = FileWrapper::parse(&[0u8; 8]) else {
+            panic!("expected a short FileWrapper blob to be rejected");
+        };
+        let MatError::Custom(message) = err else {
+            panic!("expected Custom, got {err:?}");
+        };
+        assert_eq!(
+            message,
+            "FileWrapper blob too short: 8 bytes (need at least 40)"
+        );
     }
 
     #[test]
@@ -1437,7 +1443,10 @@ mod tests {
     #[test]
     fn parse_opaque_metadata_rejects_bad_magic() {
         let meta = [0x1234_5678, 2, 1, 1, 1, 1];
-        assert!(parse_opaque_metadata(&meta).is_err());
+        let Err(MatError::Custom(message)) = parse_opaque_metadata(&meta) else {
+            panic!("expected an opaque metadata magic mismatch");
+        };
+        assert_eq!(message, "opaque metadata magic mismatch: 0x12345678");
     }
 
     // --- containers.Map ---

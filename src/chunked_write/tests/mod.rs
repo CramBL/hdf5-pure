@@ -38,9 +38,9 @@ fn an_unknown_fill_refuses_only_the_chunks_that_need_padding() {
     let data = vec![0u8; 8 * 4];
 
     // 8 elements in chunks of 4: two whole chunks, nothing uncovered.
-    assert!(
-        split_into_chunks(&data, &[8], &[4], elem, FillPattern::UNKNOWN).is_ok(),
-        "a write that pads nothing must not consult the fill value"
+    assert_eq!(
+        split_into_chunks(&data, &[8], &[4], elem, FillPattern::UNKNOWN).unwrap(),
+        vec![vec![0; 16], vec![0; 16]]
     );
 
     // 5 elements in chunks of 4: the second chunk has three uncovered slots.
@@ -60,14 +60,16 @@ fn an_unknown_fill_refuses_only_the_chunks_that_need_padding() {
         ),
         Err(FormatError::UnreadableFillValue)
     ));
+}
 
-    // The known patterns are unaffected either way.
-    for pattern in [
-        FillPattern::ZERO,
-        FillPattern::new(FillTime::IfSet, Some(&[7u8; 4]), elem),
-    ] {
-        assert!(split_into_chunks(&data[..5 * 4], &[5], &[4], elem, pattern).is_ok());
-    }
+#[rstest]
+#[case::zero(FillPattern::ZERO, &[0; 12])]
+#[case::defined(FillPattern::new(FillTime::IfSet, Some(&[7; 4]), convert::nz(4)), &[7; 12])]
+fn known_fill_pads_partial_chunks(#[case] fill: FillPattern<'_>, #[case] padding: &[u8]) {
+    assert_eq!(
+        split_into_chunks(&[0; 20], &[5], &[4], convert::nz(4), fill).unwrap(),
+        vec![vec![0; 16], [&[0; 4][..], padding].concat()]
+    );
 }
 
 #[test]
@@ -1030,9 +1032,14 @@ fn a_verbatim_plan_with_no_chunks_is_refused() {
         StoredAddress::new(0x1000),
         None,
     );
-    assert!(
-        matches!(result, Err(FormatError::ChunkedReadError(_))),
-        "a chunk-less plan must be refused"
+    let Err(err) = result else {
+        panic!("expected a verbatim plan without chunks to be rejected");
+    };
+    assert_eq!(
+        err,
+        FormatError::ChunkedReadError(
+            "a verbatim chunked dataset requires at least one chunk".into()
+        )
     );
 }
 
@@ -1170,7 +1177,13 @@ fn the_scale_offset_fill_availability_reaches_the_filter_parameters() {
         ScaleOffset::FloatDScale(2),
         FillAvailability::Undefined,
     )]);
-    assert!(undefined.build_pipeline(&ctx, FillPattern::UNKNOWN).is_ok());
+    let pipeline = undefined
+        .build_pipeline(&ctx, FillPattern::UNKNOWN)
+        .unwrap()
+        .unwrap();
+    assert_eq!(pipeline.filters.len(), 1);
+    assert_eq!(pipeline.filters[0].filter_id, FILTER_SCALEOFFSET);
+    assert_eq!(&pipeline.filters[0].client_data[7..10], &[0, 0, 0]);
 
     // Check the builder default independently of native feature and target availability.
     let mut db = crate::type_builders::DatasetBuilder::new("d");
@@ -1184,7 +1197,13 @@ fn the_scale_offset_fill_availability_reaches_the_filter_parameters() {
     );
     // Deflate permits an unreadable fill value.
     let plain = filtered(&[FilterKind::Deflate(DeflateLevel::Six)]);
-    assert!(plain.build_pipeline(&ctx, FillPattern::UNKNOWN).is_ok());
+    let pipeline = plain
+        .build_pipeline(&ctx, FillPattern::UNKNOWN)
+        .unwrap()
+        .unwrap();
+    assert_eq!(pipeline.filters.len(), 1);
+    assert_eq!(pipeline.filters[0].filter_id, FILTER_DEFLATE);
+    assert_eq!(pipeline.filters[0].client_data, [6]);
 }
 
 #[rstest]

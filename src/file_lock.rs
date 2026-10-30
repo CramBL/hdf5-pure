@@ -735,17 +735,27 @@ mod tests {
 
         let err = crate::File::open_swmr(&path)
             .expect_err("a SWMR reader needs a SWMR writer, not a plain one");
-        assert!(matches!(err, Error::FileMarkedInUse(_)), "got {err:?}");
+        let Error::FileMarkedInUse(reason) = err else {
+            panic!("expected FileMarkedInUse, got {err:?}");
+        };
+        assert!(reason.contains("status flags disagree (0x01)"), "{reason}");
         assert!(
-            crate::File::open(&path).is_err(),
-            "a snapshot read is refused too"
+            reason.contains("a SWMR reader needs a SWMR writer"),
+            "{reason}"
         );
+        let err = crate::File::open(&path).unwrap_err();
+        let Error::FileMarkedInUse(reason) = err else {
+            panic!("expected FileMarkedInUse, got {err:?}");
+        };
+        assert!(reason.contains("status flags 0x01"), "{reason}");
+        assert!(reason.contains("a snapshot read is not safe"), "{reason}");
 
         write_file_with(
             &path,
             SuperblockVersion::Three,
             SuperblockStatusFlags::swmr_write_marked(),
         );
-        crate::File::open_swmr(&path).expect("the full pair is the writer it follows");
+        let file = crate::File::open_swmr(&path).unwrap();
+        assert_eq!(file.root().datasets().unwrap(), Vec::<String>::new());
     }
 }
