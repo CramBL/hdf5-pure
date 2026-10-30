@@ -118,6 +118,17 @@ fn dense_root_edits_preserve_untracked_and_tracked_group_policies(
     drop(file);
     let after = group_inspection::inspect_group_links(&path, parent, source_only).unwrap();
     assert_eq!(after.links.links().len(), before.links.links().len() + 1);
+    let mut actual = after
+        .links
+        .links()
+        .iter()
+        .filter(|link| link.name() != b"added")
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut expected = before.links.links().to_vec();
+    actual.sort_by(|left, right| left.name().cmp(right.name()));
+    expected.sort_by(|left, right| left.name().cmp(right.name()));
+    assert_eq!(actual, expected);
     assert_eq!(
         after.links.info().max_creation_order,
         before

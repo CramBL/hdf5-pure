@@ -25,7 +25,7 @@ use hdf5_pure::{
 use rstest::rstest;
 
 use test_util_hdf5::chunk_filter;
-use test_util_hdf5::{absence, file, fixtures};
+use test_util_hdf5::{absence, assertion, file, fixtures};
 
 use crate::test_util::hard_link_graphs::RepeatedObjectGraph;
 use crate::test_util::hard_link_graphs::TreeGraph;
@@ -56,7 +56,7 @@ fn c_file_repacked_then_read_by_c_library() {
         f.dataset("grp/beta").unwrap().read_i32().unwrap(),
         vec![10, 20, 30, 40]
     );
-    assert!(f.dataset("doomed").is_err());
+    assertion::path_not_found(f.dataset("doomed").unwrap_err(), "doomed");
 
     // libhdf5 agrees - the real interop proof.
     let c = hdf5::File::open(&dst).unwrap();

@@ -11,6 +11,8 @@
 //! same either way, so every assertion here is about the datatype the reader is
 //! handed — which is what decides whether the C library can convert it at all.
 
+use std::collections::HashMap;
+
 use hdf5::types::{TypeDescriptor, VarLenAscii, VarLenUnicode};
 use hdf5_pure::FixedPointType;
 use hdf5_pure::VariableLengthStringType;
@@ -53,10 +55,18 @@ fn write_cases(path: &std::path::Path) {
     b.write(path).unwrap();
 }
 
-/// What the C library makes of each attribute of `object`: the conversion the
-/// issue reported failing (`read_raw::<VarLenAscii>`, `read_scalar`) and the
-/// datatype descriptor it reports.
-fn assert_c_reads_the_cases(object: &hdf5::Group, owner: &str) {
+/// Asserts the complete attribute names, string datatypes, shapes, and values through libhdf5.
+///
+/// # Panics
+///
+/// Panics if metadata or values cannot be read, or any observation differs from the expected cases.
+fn assert_c_reads_the_cases(object: &hdf5::Location, owner: &str) {
+    let mut names = object.attr_names().unwrap();
+    names.sort();
+    assert_eq!(
+        names,
+        ["ascii_array", "ascii_scalar", "utf8_array", "utf8_scalar"]
+    );
     let scalar_utf8 = object.attr("utf8_scalar").unwrap();
     assert_eq!(
         scalar_utf8.dtype().unwrap().to_descriptor().unwrap(),
@@ -78,6 +88,7 @@ fn assert_c_reads_the_cases(object: &hdf5::Group, owner: &str) {
         array_utf8.dtype().unwrap().to_descriptor().unwrap(),
         TypeDescriptor::VarLenUnicode
     );
+    assert_eq!(array_utf8.shape(), [2]);
     let got: Vec<VarLenUnicode> = array_utf8.read_raw().unwrap();
     assert_eq!(
         got.iter().map(VarLenUnicode::as_str).collect::<Vec<_>>(),
@@ -91,12 +102,18 @@ fn assert_c_reads_the_cases(object: &hdf5::Group, owner: &str) {
         TypeDescriptor::VarLenAscii,
         "{owner}: the ASCII charset is on the datatype, not inferred from the bytes"
     );
+    assert!(scalar_ascii.shape().is_empty());
     assert_eq!(
         scalar_ascii.read_scalar::<VarLenAscii>().unwrap().as_str(),
         "double"
     );
 
     let array_ascii = object.attr("ascii_array").unwrap();
+    assert_eq!(
+        array_ascii.dtype().unwrap().to_descriptor().unwrap(),
+        TypeDescriptor::VarLenAscii
+    );
+    assert_eq!(array_ascii.shape(), [2]);
     let got: Vec<VarLenAscii> = array_ascii.read_raw().unwrap();
     assert_eq!(
         got.iter().map(VarLenAscii::as_str).collect::<Vec<_>>(),
@@ -105,12 +122,24 @@ fn assert_c_reads_the_cases(object: &hdf5::Group, owner: &str) {
     );
 }
 
-/// Every case reads back as the variant it was written from, through this
-/// crate's own reader.
-fn assert_pure_reads_the_cases(attrs: &std::collections::HashMap<String, AttrValue>, owner: &str) {
-    for (name, written) in cases() {
-        assert_eq!(attrs.get(name), Some(&written), "{owner}: attribute {name}");
-    }
+/// Asserts the complete attribute map, including `filler_count` integer attributes.
+///
+/// # Panics
+///
+/// Panics if `attrs` differs from the expected cases or filler attributes.
+fn assert_pure_reads_the_cases(attrs: &HashMap<String, AttrValue>, filler_count: u32, owner: &str) {
+    assert_eq!(
+        attrs,
+        &cases()
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value))
+            .chain(
+                (0..filler_count)
+                    .map(|index| (format!("filler_{index}"), AttrValue::I64(i64::from(index))))
+            )
+            .collect::<HashMap<_, _>>(),
+        "{owner}"
+    );
 }
 
 /// The claim the issue was filed on: the C library converts these attributes
@@ -123,27 +152,15 @@ fn the_c_library_reads_every_variant_as_a_variable_length_string() {
     write_cases(&path);
 
     let c = hdf5::File::open(&path).unwrap();
-    assert_c_reads_the_cases(&c.as_group().unwrap(), "root group");
+    assert_c_reads_the_cases(&c, "root group");
     // A dataset's attributes travel a different sizing path than a group's, so
     // both are written and both are read.
     let d = c.dataset("d").unwrap();
-    for (name, _) in cases() {
-        assert!(d.attr(name).is_ok(), "dataset attribute {name}");
-    }
-    assert_eq!(
-        d.attr("ascii_array")
-            .unwrap()
-            .read_raw::<VarLenAscii>()
-            .unwrap()
-            .iter()
-            .map(VarLenAscii::as_str)
-            .collect::<Vec<_>>(),
-        ["x", "yy"]
-    );
+    assert_c_reads_the_cases(&d, "dataset");
 
     let f = File::open(&path).unwrap();
-    assert_pure_reads_the_cases(&f.root().attrs().unwrap(), "root group");
-    assert_pure_reads_the_cases(&f.dataset("d").unwrap().attrs().unwrap(), "dataset");
+    assert_pure_reads_the_cases(&f.root().attrs().unwrap(), 0, "root group");
+    assert_pure_reads_the_cases(&f.dataset("d").unwrap().attrs().unwrap(), 0, "dataset");
 }
 
 /// MATLAB's shape and the standard one carry the same text over the same
@@ -262,7 +279,11 @@ fn an_edit_session_writes_the_standard_datatype() {
     }
 
     let f = File::open(&path).unwrap();
-    assert_pure_reads_the_cases(&f.dataset("d").unwrap().attrs().unwrap(), "edited dataset");
+    assert_pure_reads_the_cases(
+        &f.dataset("d").unwrap().attrs().unwrap(),
+        0,
+        "edited dataset",
+    );
     drop(f);
 
     let c = hdf5::File::open(&path).unwrap();
@@ -315,7 +336,11 @@ fn a_dense_rebuild_keeps_the_standard_datatype() {
     }
 
     let f = File::open(&path).unwrap();
-    assert_pure_reads_the_cases(&f.dataset("d").unwrap().attrs().unwrap(), "dense dataset");
+    assert_pure_reads_the_cases(
+        &f.dataset("d").unwrap().attrs().unwrap(),
+        8,
+        "dense dataset",
+    );
     drop(f);
 
     let c = hdf5::File::open(&path).unwrap();
@@ -356,15 +381,16 @@ fn repack_keeps_the_standard_datatype() {
     hdf5_pure::repack(&src, &dst, &hdf5_pure::RepackOptions::default()).unwrap();
 
     let f = File::open(&dst).unwrap();
-    assert_pure_reads_the_cases(&f.root().attrs().unwrap(), "repacked root");
+    assert_pure_reads_the_cases(&f.root().attrs().unwrap(), 0, "repacked root");
     assert_pure_reads_the_cases(
         &f.dataset("d").unwrap().attrs().unwrap(),
+        0,
         "repacked dataset",
     );
     drop(f);
 
     let c = hdf5::File::open(&dst).unwrap();
-    assert_c_reads_the_cases(&c.as_group().unwrap(), "repacked root");
+    assert_c_reads_the_cases(&c, "repacked root");
 }
 
 /// An attribute whose datatype is a *committed* one still keeps its strings in

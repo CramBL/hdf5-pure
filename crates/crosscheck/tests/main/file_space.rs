@@ -12,6 +12,7 @@ use hdf5::dataset::Layout as CLayout;
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::plist::file_create::Sizeof;
 use hdf5::plist::file_create::SizeofInfo;
+use hdf5::types::{FixedUnicode, TypeDescriptor};
 use hdf5_pure::AttrValue;
 use hdf5_pure::ChunkIndex;
 use hdf5_pure::Error;
@@ -4313,9 +4314,20 @@ fn c_library_reads_our_paged_file_after_a_cross_page_type_claim() {
         "C library recovers our paged strategy after metadata opened a freed raw page"
     );
     for i in 0..8 {
-        assert!(
-            f.group(&format!("g{i}")).is_ok(),
-            "the C library reads a group header placed in a page a delete released"
+        let group = f.group(&format!("g{i}")).unwrap();
+        assert!(group.member_names().unwrap().is_empty());
+        assert_eq!(group.attr_names().unwrap(), ["label"]);
+        let attribute = group.attr("label").unwrap();
+        assert_eq!(
+            attribute.dtype().unwrap().to_descriptor().unwrap(),
+            TypeDescriptor::FixedUnicode(3000)
+        );
+        assert_eq!(
+            attribute
+                .read_scalar::<FixedUnicode<3000>>()
+                .unwrap()
+                .as_str(),
+            label
         );
     }
     assert_eq!(

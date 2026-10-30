@@ -13,7 +13,7 @@
 
 use hdf5_pure::{File, RepackOptions};
 
-use test_util_hdf5::file;
+use test_util_hdf5::{assertion, file};
 
 const N: usize = 16;
 
@@ -310,9 +310,9 @@ fn copy_refuses_an_external_dataset_by_name() {
     let err = f.commit().unwrap_err();
     drop(f);
     expect(err, "in-file copy");
-    assert!(
-        File::open(&src).unwrap().dataset("d_copy").is_err(),
-        "a refused copy must leave no dataset behind"
+    assertion::path_not_found(
+        File::open(&src).unwrap().dataset("d_copy").unwrap_err(),
+        "d_copy",
     );
 
     // Cross-file: the same dataset copied into a fresh file.
@@ -329,10 +329,7 @@ fn copy_refuses_an_external_dataset_by_name() {
     drop(f);
     expect(err, "cross-file copy_from");
     let after = File::open(&dst).unwrap();
-    assert!(
-        after.dataset("d_copy").is_err(),
-        "a refused cross-file copy must leave no dataset behind"
-    );
+    assertion::path_not_found(after.dataset("d_copy").unwrap_err(), "d_copy");
     assert_eq!(
         after.dataset("keep").unwrap().read_i32().unwrap(),
         vec![1, 2, 3],

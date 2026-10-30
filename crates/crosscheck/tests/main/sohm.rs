@@ -15,11 +15,13 @@
 //! index is a **list** or a **version 2 B-tree** (forced by driving the message
 //! count past the list maximum), and how many objects share one message.
 
+use std::path::{Path, PathBuf};
+
 use hdf5::file::LibraryVersion;
 use hdf5::plist::file_create::{SharedMessageIndex, SharedMessageType};
 use hdf5_pure::FixedPointType;
 use hdf5_pure::{AttrValue, Datatype, DatatypeByteOrder, File};
-use std::path::{Path, PathBuf};
+use rstest::rstest;
 use tempfile::TempDir;
 
 /// The attribute two or more objects carry identically, which is what puts it in
@@ -41,12 +43,21 @@ fn dataset_values(seed: i32) -> Vec<i32> {
     (0..ROWS as i32).map(|i| seed * 100 + i).collect()
 }
 
-/// The i32 type every fixture uses, as this crate decodes it. Sharing a datatype
-/// does not change its encoding, only where it is stored, so a resolved heap
-/// reference must produce exactly what an inline type produces.
+/// Returns the expected [`i32`] datatype in the host's byte order.
 fn i32_type() -> Datatype {
     Datatype::FixedPoint(
-        FixedPointType::new(4, DatatypeByteOrder::LittleEndian, true, 0, 32).unwrap(),
+        FixedPointType::new(
+            4,
+            if cfg!(target_endian = "big") {
+                DatatypeByteOrder::BigEndian
+            } else {
+                DatatypeByteOrder::LittleEndian
+            },
+            true,
+            0,
+            32,
+        )
+        .unwrap(),
     )
 }
 
@@ -307,27 +318,29 @@ fn shared_filter_pipelines_and_fill_values_read_back() {
 /// Neither fixture's index references an object header (libhdf5 puts
 /// even a single-user message straight in the heap here), so both commits go
 /// through; what they prove is that the walk reads both index kinds.
-#[test]
-fn a_commit_on_a_shared_message_file_walks_its_index_and_proceeds() {
-    for fixture in [list_fixture(4), btree_fixture()] {
-        {
-            // Scoped: the write session holds the file's exclusive lock, which
-            // Windows enforces, so it has to be dropped before the file is
-            // reopened for reading.
-            let session =
-                File::open_rw(&fixture.path).expect("open a shared-message file for edit");
-            session.root().create_group("added").unwrap();
-            session.commit().expect("commit on a shared-message file");
-        }
-
-        let file = File::open(&fixture.path).unwrap();
-        assert!(file.group("added").is_ok());
-        // The edit left every shared message where it was.
-        assert_eq!(
-            file.group("g0").unwrap().attrs().unwrap().get(SHARED_ATTR),
-            Some(&AttrValue::I64(SHARED_ATTR_VALUE))
-        );
+#[rstest]
+#[case::list(list_fixture(4), 4)]
+#[case::btree(btree_fixture(), BTREE_FIXTURE_OBJECTS)]
+fn a_commit_on_a_shared_message_file_walks_its_index_and_proceeds(
+    #[case] fixture: Fixture,
+    #[case] count: usize,
+) {
+    {
+        // Release the exclusive lock before reopening the completed file on Windows.
+        let session = File::open_rw(&fixture.path).expect("open a shared-message file for edit");
+        session.root().create_group("added").unwrap();
+        session.commit().expect("commit on a shared-message file");
     }
+
+    let file = File::open(&fixture.path).unwrap();
+    let added = file.group("added").unwrap();
+    assert!(added.attrs().unwrap().is_empty());
+    assert!(added.groups().unwrap().is_empty());
+    assert!(added.datasets().unwrap().is_empty());
+    assert!(added.named_datatypes().unwrap().is_empty());
+    drop(added);
+    file.close().unwrap();
+    assert_reads_back(&fixture.path, count);
 }
 
 /// `repack` rewrites a shared-message file into one that shares nothing: every

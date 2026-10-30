@@ -21,6 +21,7 @@ use hdf5_pure::DeflateLevel;
 use hdf5_pure::FilterId;
 use hdf5_pure::FilterParameters;
 use hdf5_pure::{Chunk, ChunkIndex, File, FileBuilder, Layout, MaxExtent, MessageType};
+use hdf5_pure::{Error, FormatError};
 use hdf5_pure_format::__private::{AccessMode, ObjectHeader};
 use rstest::rstest;
 use test_util::data_layout;
@@ -239,7 +240,11 @@ fn c_contiguous_classifies() {
         other => panic!("expected contiguous, got {other:?}"),
     }
     assert_eq!(ds.chunk_index().unwrap(), None);
-    assert!(ds.chunks().is_err());
+    let error = ds.chunks().unwrap_err();
+    let Error::Format(FormatError::ChunkedReadError(reason)) = error else {
+        panic!("expected ChunkedReadError, got {error:?}");
+    };
+    assert_eq!(reason, "chunk enumeration requires a chunked dataset");
 }
 
 #[test]
@@ -262,7 +267,11 @@ fn c_compact_classifies() {
     let ds = f.dataset("d").unwrap();
     assert_eq!(ds.layout().unwrap(), Layout::Compact { size: 4 * 4 });
     assert_eq!(ds.chunk_index().unwrap(), None);
-    assert!(ds.chunks().is_err());
+    let error = ds.chunks().unwrap_err();
+    let Error::Format(FormatError::ChunkedReadError(reason)) = error else {
+        panic!("expected ChunkedReadError, got {error:?}");
+    };
+    assert_eq!(reason, "chunk enumeration requires a chunked dataset");
     // The data still round-trips.
     assert_eq!(ds.read_i32().unwrap(), vec![10, 20, 30, 40]);
 }

@@ -422,7 +422,10 @@ fn combined_mixed_edits_c_readable() {
         .read_scalar()
         .unwrap();
     assert_eq!(checked, 1);
-    assert!(c.group("run").is_ok(), "created group missing");
+    let run = c.group("run").unwrap();
+    assert!(run.member_names().unwrap().is_empty());
+    assert!(run.attr_names().unwrap().is_empty());
+    drop(run);
     absence::assert_libhdf5_absent(&c.group("old").unwrap_err(), "old");
     c.close().unwrap();
 

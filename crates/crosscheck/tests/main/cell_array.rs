@@ -7,6 +7,8 @@
 //! object references. `None` becomes `struct([])` (an empty struct array)
 //! so every cell slot has a well-defined MATLAB type.
 
+use hdf5::types::{FixedAscii, TypeDescriptor};
+use hdf5::{ObjectReference1, ReferencedObject};
 use hdf5_pure::mat;
 use serde::{Deserialize, Serialize};
 
@@ -55,6 +57,7 @@ fn vec_of_struct_writes_cell_array_with_refs_group() {
     let names = refs.member_names().unwrap();
     assert_eq!(names.len(), 3, "expected one ref per cell element");
 
+    let mut observed = Vec::new();
     for ref_name in &names {
         let g = refs.group(ref_name).unwrap();
         let cls = g
@@ -68,7 +71,10 @@ fn vec_of_struct_writes_cell_array_with_refs_group() {
         assert_eq!(x.shape(), vec![1, 1]);
         let y = g.dataset("y").unwrap();
         assert_eq!(y.shape(), vec![1, 1]);
+        observed.push(read_c_point(&g));
     }
+    observed.sort_by(|left, right| left.x.total_cmp(&right.x));
+    assert_eq!(observed, root.path);
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -107,6 +113,7 @@ fn vec_of_option_with_none_uses_empty_struct_marker() {
 
     // Exactly one of the three refs is the empty-struct marker for `None`.
     let mut empty_struct_count = 0;
+    let mut observed = Vec::new();
     for ref_name in &names {
         // Try as group first (Some(struct)); fall back to dataset (None marker).
         if let Ok(g) = refs.group(ref_name) {
@@ -116,7 +123,7 @@ fn vec_of_option_with_none_uses_empty_struct_marker() {
                 .read_scalar::<hdf5::types::FixedAscii<32>>()
                 .unwrap();
             assert_eq!(cls.as_str(), "struct");
-            assert!(g.dataset("x").is_ok());
+            observed.push(read_c_point(&g));
         } else {
             let ds = refs.dataset(ref_name).unwrap();
             let cls = ds
@@ -131,10 +138,30 @@ fn vec_of_option_with_none_uses_empty_struct_marker() {
                 .read_scalar::<u32>()
                 .unwrap();
             assert_eq!(empty, 1);
+            assert_eq!(ds.shape(), [2]);
+            assert_eq!(ds.read_raw::<u64>().unwrap(), [0, 0]);
+            let mut attr_names = ds.attr_names().unwrap();
+            attr_names.sort();
+            assert_eq!(attr_names, ["H5PATH", "MATLAB_class", "MATLAB_empty"]);
+            let h5path = format!("/#refs#/{ref_name}");
+            let attribute = ds.attr("H5PATH").unwrap();
+            assert_eq!(
+                attribute.dtype().unwrap().to_descriptor().unwrap(),
+                TypeDescriptor::FixedAscii(h5path.len())
+            );
+            assert_eq!(
+                attribute.read_scalar::<FixedAscii<64>>().unwrap().as_str(),
+                h5path
+            );
             empty_struct_count += 1;
         }
     }
     assert_eq!(empty_struct_count, 1, "expected one struct([]) marker");
+    observed.sort_by(|left, right| left.x.total_cmp(&right.x));
+    assert_eq!(
+        observed,
+        root.items.into_iter().flatten().collect::<Vec<_>>()
+    );
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -301,18 +328,29 @@ fn c_library_can_open_cell_array_file() {
     .unwrap();
 
     let file = hdf5::File::open(&path).unwrap();
-    assert!(file.dataset("path").is_ok());
+    let cell = file.dataset("path").unwrap();
+    assert_eq!(cell.shape(), [1, 2]);
+    assert_eq!(
+        cell.dtype().unwrap(),
+        hdf5::Datatype::from_type::<ObjectReference1>().unwrap()
+    );
     let refs = file.group("#refs#").unwrap();
     let names = refs.member_names().unwrap();
     assert_eq!(names.len(), 2);
     // Each ref entry is a struct group with x and y datasets.
-    for name in &names {
-        let g = refs.group(name).unwrap();
-        let x = g.dataset("x").unwrap().read_raw::<f64>().unwrap();
-        let y = g.dataset("y").unwrap().read_raw::<f64>().unwrap();
-        assert_eq!(x.len(), 1);
-        assert_eq!(y.len(), 1);
-    }
+    let references = cell.read_raw::<ObjectReference1>().unwrap();
+    assert_eq!(references.len(), names.len());
+    let observed: Vec<_> = references
+        .iter()
+        .map(|reference| match file.dereference(reference).unwrap() {
+            ReferencedObject::Group(group) => read_c_point(&group),
+            other => panic!("expected a referenced struct group, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        observed,
+        [Point { x: 1.0, y: 2.0 }, Point { x: 3.0, y: 4.0 }]
+    );
 }
 
 #[test]
@@ -321,8 +359,6 @@ fn cell_references_resolve_in_element_order() {
     // dataset dereferences to the i-th input element. A bug where the
     // RefsAccumulator queued out of order, or where with_path_references
     // reordered, would surface here.
-    use hdf5::{ObjectReference1, ReferencedObject};
-
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ordered.mat");
 
@@ -351,12 +387,25 @@ fn cell_references_resolve_in_element_order() {
             ReferencedObject::Group(g) => g,
             other => panic!("ref {i} dereferenced to non-group: {other:?}"),
         };
-        let x: Vec<f64> = g.dataset("x").unwrap().read_raw().unwrap();
-        let y: Vec<f64> = g.dataset("y").unwrap().read_raw().unwrap();
-        assert_eq!(
-            (x[0], y[0]),
-            (inputs[i].x, inputs[i].y),
-            "cell slot {i} should resolve to input element {i}"
-        );
+        assert_eq!(read_c_point(&g), inputs[i], "cell slot {i}");
     }
+}
+
+/// Reads a point from `x` and `y` datasets with shape `[1, 1]`.
+///
+/// # Panics
+///
+/// Panics if `group` does not contain exactly `x` and `y`, either dataset's shape
+/// differs from `[1, 1]`, or a read fails.
+fn read_c_point(group: &hdf5::Group) -> Point {
+    let mut fields = group.member_names().unwrap();
+    fields.sort();
+    assert_eq!(fields, ["x", "y"]);
+    let x = group.dataset("x").unwrap();
+    let y = group.dataset("y").unwrap();
+    assert_eq!(x.shape(), [1, 1]);
+    assert_eq!(y.shape(), [1, 1]);
+    let [x]: [f64; 1] = x.read_raw().unwrap().try_into().unwrap();
+    let [y]: [f64; 1] = y.read_raw().unwrap().try_into().unwrap();
+    Point { x, y }
 }
