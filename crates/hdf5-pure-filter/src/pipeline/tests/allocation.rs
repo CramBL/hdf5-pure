@@ -14,9 +14,6 @@ use test_util::filtered_chunks::{self, Direction, PipelineCase, PipelineFilter};
 
 use super::*;
 
-#[global_allocator]
-static ALLOC: heapscope::Alloc = heapscope::Alloc::system();
-
 const REPEATS: usize = 8;
 
 #[rstest]
