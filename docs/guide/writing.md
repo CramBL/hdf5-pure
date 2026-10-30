@@ -72,7 +72,7 @@ Data is stored row-major (C order), which is what HDF5 uses on disk. When you pr
 
 [`with_data(&[T])`](crate::DatasetBuilder::with_data) infers the datatype from `T`, which must
 implement the sealed [`H5Element`](crate::H5Element) trait. Supported elements include numeric
-scalars and fixed byte arrays:
+scalars, fixed byte arrays, and [`FixedAscii`](crate::FixedAscii) strings:
 
 ```rust
 use hdf5_pure::{FileBuilder, H5Element};

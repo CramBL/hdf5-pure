@@ -1,8 +1,9 @@
-//! Typed dataset I/O for numeric scalars and fixed byte arrays.
+//! Typed dataset I/O for numeric scalars, fixed byte arrays, and fixed ASCII strings.
 //!
 //! [`H5Element`] is the element bound for [`DatasetBuilder::with_data`] and [`Dataset::read`].
 //! Numeric reads convert stored values to the output scalar type. Reads into fixed byte
-//! arrays require a matching array datatype and preserve each element's bytes.
+//! arrays and [`FixedAscii`] strings require compatible datatypes and preserve each
+//! element's bytes.
 //!
 //! # Examples
 //!
@@ -34,7 +35,10 @@ use crate::error::Error;
 use crate::reader::Dataset;
 use crate::type_builders::DatasetBuilder;
 
+mod fixed_ascii;
 mod fixed_bytes;
+
+pub use fixed_ascii::FixedAscii;
 
 mod sealed {
     use crate::{Datatype, Error};
@@ -48,8 +52,9 @@ mod sealed {
         ///
         /// # Errors
         ///
-        /// Returns [`Error::Format`] if the datatype is unsupported or the source byte
-        /// length differs from its element width.
+        /// Returns [`Error::Format`] if the datatype is unsupported, the source byte length
+        /// differs from its element width, or a byte read into
+        /// [`FixedAscii`](crate::FixedAscii) is outside ASCII.
         fn convert_scalar(raw: &[u8], datatype: &Datatype) -> Result<Self, Error>;
     }
 }
@@ -57,13 +62,15 @@ mod sealed {
 /// An element type for typed dataset creation, reads, and appends.
 ///
 /// Implemented for [`f32`], [`f64`], the signed integers [`i8`], [`i16`], [`i32`], and [`i64`],
-/// the unsigned integers [`u8`], [`u16`], [`u32`], and [`u64`], and fixed byte arrays
-/// ([`[u8; N]`](prim@array)). This trait is sealed and cannot be implemented outside this crate.
+/// the unsigned integers [`u8`], [`u16`], [`u32`], and [`u64`], fixed byte arrays
+/// ([`[u8; N]`](prim@array)), and [`FixedAscii`] strings. This trait is sealed and cannot be
+/// implemented outside this crate.
 ///
 /// Numeric reads use the conversions of [`Dataset::read_f64`] and the other scalar readers.
 /// A byte array is stored as a one-dimensional HDF5 array of unsigned bytes. Reading a byte
 /// array requires the same width and base type, including on empty input. Array widths must
-/// be nonzero and fit in [`u32`].
+/// be nonzero and fit in [`u32`]. The writer stores [`FixedAscii`] values as null-padded ASCII
+/// strings, with the compatibility and encoding checks described on that type.
 ///
 /// # Examples
 ///
@@ -104,20 +111,23 @@ pub trait H5Element: sealed::Sealed + Copy {
 
     /// Encodes one element for storage as a fill value.
     ///
-    /// Numeric elements are encoded little-endian. Byte arrays are copied unchanged.
+    /// Numeric elements are encoded little-endian. Byte arrays and [`FixedAscii`] storage
+    /// bytes are copied unchanged.
     #[doc(hidden)]
     fn fill_bytes(self) -> Vec<u8>;
 
     /// Converts stored elements using the same rules as typed dataset reads.
     ///
     /// Numeric values are converted using the byte order, signedness, and precision of `dt`.
-    /// Byte arrays require a matching datatype and width. The reader checks `dt` even when
-    /// `raw` is empty.
+    /// Byte arrays and [`FixedAscii`] require compatible datatypes and matching widths. The
+    /// reader checks `dt` even when `raw` is empty.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Format`] if `dt` is unsupported for `Self`, the byte-array width is
-    /// invalid, or `raw` contains an incomplete element.
+    /// Returns [`Error::Format`] if `dt` is unsupported for `Self`, the element width is
+    /// invalid, or `raw` contains an incomplete element. Returns
+    /// [`FormatError::InvalidAscii`](crate::FormatError::InvalidAscii) through [`Error::Format`]
+    /// if a byte read into [`FixedAscii`] is outside ASCII, with its offset in `raw`.
     ///
     /// # Panics
     ///
@@ -181,8 +191,9 @@ impl DatasetBuilder {
     ///
     /// If a shape has not been set, the writer infers `[data.len()]`. An existing shape is
     /// retained, including one inferred by an earlier data setter. A byte array is one
-    /// element, with its width stored in the datatype. The writer rejects zero-width arrays
-    /// and widths that exceed [`u32::MAX`] when preparing the dataset.
+    /// element, with its width stored in the datatype. [`FixedAscii`] elements retain their
+    /// storage width and null padding. The writer rejects zero-width arrays or strings and
+    /// widths that exceed [`u32::MAX`] when preparing the dataset.
     ///
     /// # Examples
     ///
@@ -239,12 +250,16 @@ impl Dataset {
     /// Numeric reads use the conversions of [`read_f64`](Self::read_f64) and its siblings.
     /// These conversions can lose precision. Reading into a fixed byte array requires a
     /// one-dimensional HDF5 array of full-width unsigned bytes with the same element width.
-    /// The reader checks compatibility even for an empty dataset.
+    /// Reading into [`FixedAscii`] requires a null-padded ASCII string datatype of the same
+    /// width. The reader checks compatibility even for an empty dataset.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Format`] if the stored datatype is unsupported for `T` or a byte-array
-    /// width is invalid. Propagates errors from reading the dataset's metadata and bytes.
+    /// Returns [`Error::Format`] if the stored datatype is unsupported for `T` or the element
+    /// width is invalid. Returns [`FormatError::InvalidAscii`](crate::FormatError::InvalidAscii)
+    /// through [`Error::Format`] if a byte read into [`FixedAscii`] is outside ASCII. The byte
+    /// offset is relative to the current decoding window. Propagates errors from reading the
+    /// dataset's metadata and bytes.
     ///
     /// # Panics
     ///
@@ -270,13 +285,13 @@ impl Dataset {
     ///
     /// Returns `Ok(None)` when no user-defined fill value is stored. The reader converts
     /// a defined value using the rules of [`read`](Self::read). Numeric conversions can lose
-    /// precision. Byte arrays require a matching datatype and width.
+    /// precision. Byte arrays and [`FixedAscii`] require compatible datatypes and matching widths.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Format`] if the Fill Value message is malformed. Returns
     /// [`Error::Format`] if a user-defined fill value is stored and its datatype is unsupported
-    /// for `T`. Returns
+    /// for `T`, or if a byte read into [`FixedAscii`] is outside ASCII. Returns
     /// [`FormatError::DataSizeMismatch`](crate::FormatError::DataSizeMismatch) through
     /// [`Error::Format`] if the payload length differs from the stored element width.
     ///

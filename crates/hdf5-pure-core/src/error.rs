@@ -327,6 +327,13 @@ pub enum FormatError {
     ///
     /// The string describes the condition.
     Internal(String),
+    /// A byte is outside the ASCII character set.
+    InvalidAscii {
+        /// The zero-based offset in the byte slice being validated.
+        index: usize,
+        /// The non-ASCII byte.
+        byte: u8,
+    },
     /// An attribute's creation index is at or above the counter for the next index.
     InvalidAttributeCreationCounter {
         /// The attribute's creation index.
@@ -2211,6 +2218,9 @@ impl fmt::Display for FormatError {
                 write!(f, "duplicate attribute creation index {index}")
             }
             Self::DuplicateAttributeName(name) => write!(f, "duplicate attribute name {name:?}"),
+            Self::InvalidAscii { index, byte } => {
+                write!(f, "non-ASCII byte {byte:#04x} at byte offset {index}")
+            }
             Self::InvalidAttributeCreationCounter { index, next } => {
                 write!(
                     f,

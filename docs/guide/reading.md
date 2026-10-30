@@ -267,9 +267,10 @@ A typed read costs about what its result costs. The numeric readers decode the d
 
 ### Generic reads
 
-[`Dataset::read::<T>()`](crate::Dataset::read) supports the numeric scalars and fixed byte arrays
-that implement [`H5Element`](crate::H5Element). Numeric conversions can lose precision.
-Byte-array reads require a matching array datatype and element width.
+[`Dataset::read::<T>()`](crate::Dataset::read) supports the numeric scalars, fixed byte arrays,
+and [`FixedAscii`](crate::FixedAscii) strings that implement [`H5Element`](crate::H5Element).
+Numeric conversions can lose precision. Byte arrays and ASCII strings require compatible
+datatypes and matching element widths.
 
 ```rust
 use hdf5_pure::{File, FileBuilder, H5Element, Error};

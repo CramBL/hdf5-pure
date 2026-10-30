@@ -1,8 +1,9 @@
 //! Reading and writing datasets generically over the element type, without
 //! reaching for the per-type `with_f64_data` / `read_f64` family.
 //!
-//! [`H5Element`] supports numeric scalars and fixed byte arrays. Numeric conversions can lose
-//! precision. Byte-array reads require a matching datatype and element width.
+//! [`H5Element`] supports numeric scalars, fixed byte arrays, and
+//! [`FixedAscii`](hdf5_pure::FixedAscii) strings. Numeric conversions can lose precision.
+//! Byte arrays and ASCII strings require compatible datatypes and matching element widths.
 //!
 //! Run with:
 //!
