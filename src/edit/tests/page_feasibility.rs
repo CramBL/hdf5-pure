@@ -12,9 +12,9 @@ use hdf5_pure_space::__private::AllocationClass;
 use hdf5_pure_space::__private::FreeClass;
 use hdf5_pure_space::__private::PageType;
 use rstest::rstest;
-#[cfg(feature = "checksum")]
 use test_util::checksum::CHECKSUM;
 use test_util::disk_log::{self, DiskOp};
+use test_util::object_header::v2 as object_header_bytes;
 use test_util::publication;
 use test_util_hdf5::userblock;
 
@@ -548,7 +548,14 @@ fn assert_preflight_refusal(engine: &mut WriteEngine) {
     disk_log::start();
     let error = engine.commit().unwrap_err();
     assert!(
-        matches!(error, Error::EditUnsupported(reason) if reason.contains("object-reference-free tree")),
+        matches!(
+            error,
+            Error::EditUnsupported(
+                "staged edits of PAGE files without persisted free space require a complete \
+             object-reference-free tree; repack the file to edit reference-bearing or \
+             unsupported attribute storage"
+            )
+        ),
         "{error:?}"
     );
     assert!(engine.has_staged_edits());
@@ -1182,6 +1189,22 @@ fn invalid_page_eoa_is_rejected_before_mutation(#[case] eoa: u64) {
     builder.create_dataset("keep").with_u8_data(&[7; 64]);
     builder.write(&path).unwrap();
     let mut bytes = fs::read(&path).unwrap();
+    let header_at = bytes
+        .windows(object_header_bytes::SIGNATURE.len())
+        .rposition(|window| window == object_header_bytes::SIGNATURE)
+        .unwrap();
+    let prefix = object_header_bytes::Header::new().build();
+    let width = object_header_bytes::HeaderFlags::default().chunk_size_width();
+    let size_at = prefix.len() - CHECKSUM - width;
+    assert_eq!(&bytes[header_at..header_at + size_at], &prefix[..size_at]);
+    let message_size = usize::try_from(test_util::bytes::uint_at(
+        &bytes,
+        header_at + size_at,
+        width,
+    ))
+    .unwrap();
+    let metadata_end =
+        u64::try_from(header_at + size_at + width + message_size + CHECKSUM).unwrap();
     let mut sb = superblock::read(bytes.as_slice()).unwrap().superblock;
     sb.eof_address = eoa;
     let encoded = hdf5_pure_format::__private::serialize_superblock(&sb).unwrap();
@@ -1211,8 +1234,8 @@ fn invalid_page_eoa_is_rejected_before_mutation(#[case] eoa: u64) {
                     address: 4_096,
                     length: 64,
                     logical_size: 4_096,
-                    ..
-                }
+                    previous_end,
+                } if previous_end == metadata_end
             ),
             "{error:?}"
         );
@@ -1264,7 +1287,13 @@ fn nonpersistent_page_swmr_is_rejected_before_mutation() {
     let original = fs::read(&path).unwrap();
     let error = File::open_swmr_writer(&path).unwrap_err();
     assert!(
-        matches!(error, Error::SwmrAppendUnsupported(reason) if reason.contains("File::commit")),
+        matches!(
+            error,
+            Error::SwmrAppendUnsupported(
+                "SWMR writing of PAGE files without persisted free space is unsupported; \
+             use File::open_rw with staged edits and File::commit"
+            )
+        ),
         "{error:?}"
     );
     assert_eq!(fs::read(&path).unwrap(), original);

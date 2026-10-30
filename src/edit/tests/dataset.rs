@@ -427,7 +427,12 @@ fn append_onto_a_lossy_partial_tail_is_rejected() {
             .append(&[99.0f64, 98.0, 97.0])
             .expect_err("a lossy pipeline must not have its trailing chunk re-encoded");
         assert!(
-            matches!(&err, Error::AppendInPlaceUnsupported(m) if m.contains("lossy")),
+            matches!(
+                &err,
+                Error::AppendInPlaceUnsupported(
+                    "this dataset's filter pipeline is lossy (ZFP, or float D-scale scale-offset), and its length is not a whole multiple of the chunk length: growing that trailing chunk would decode and re-encode values that are already committed, changing them. Append whole chunks from a chunk-aligned length instead"
+                )
+            ),
             "got: {err:?}"
         );
     }
@@ -488,7 +493,12 @@ fn append_onto_a_lossy_partial_tail_is_rejected() {
             })
             .expect_err("a staged append must not re-encode the committed tail either");
         assert!(
-            matches!(&err, Error::AppendUnsupported(m) if m.contains("lossy")),
+            matches!(
+                &err,
+                Error::AppendUnsupported(
+                    "this dataset's filter pipeline is lossy (ZFP, or float D-scale scale-offset), and its length is not a whole multiple of the chunk length: growing that trailing chunk would decode and re-encode values that are already committed, changing them. Append whole chunks from a chunk-aligned length instead"
+                )
+            ),
             "got: {err:?}"
         );
         f.close().unwrap();
@@ -507,7 +517,12 @@ fn append_onto_a_lossy_partial_tail_is_rejected() {
             .buffered_appender()
             .expect_err("its first write would re-encode the committed tail");
         assert!(
-            matches!(&err, Error::AppendInPlaceUnsupported(m) if m.contains("lossy")),
+            matches!(
+                &err,
+                Error::AppendInPlaceUnsupported(
+                    "this dataset's filter pipeline is lossy and its length is not a whole multiple of the chunk length, so a buffered appender's first write would have to re-encode already-committed values; append whole chunks from a chunk-aligned length instead"
+                )
+            ),
             "got: {err:?}"
         );
     }
@@ -540,7 +555,12 @@ fn a_lossy_scale_offset_mode_is_rejected_and_a_lossless_one_is_not() {
             .append(&[99.0f64, 98.0, 97.0])
             .expect_err("float D-scale is lossy");
         assert!(
-            matches!(&err, Error::AppendInPlaceUnsupported(m) if m.contains("lossy")),
+            matches!(
+                &err,
+                Error::AppendInPlaceUnsupported(
+                    "this dataset's filter pipeline is lossy (ZFP, or float D-scale scale-offset), and its length is not a whole multiple of the chunk length: growing that trailing chunk would decode and re-encode values that are already committed, changing them. Append whole chunks from a chunk-aligned length instead"
+                )
+            ),
             "got: {err:?}"
         );
     }

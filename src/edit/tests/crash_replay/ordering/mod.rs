@@ -575,12 +575,19 @@ fn synchronization_controls_reject_readable_completed_files(
         (
             Control::Coalesced | Control::Reference,
             OrderError::ReferenceOrder {
+                content,
                 publication,
                 reference,
-                ..
             },
         ) => {
-            assert_eq!((publication, reference), (gate.publication, gate.reference));
+            assert_eq!(
+                (content, publication, reference),
+                (
+                    *gate.content.last().unwrap(),
+                    gate.publication,
+                    gate.reference
+                )
+            );
             assert!(reference <= publication);
         }
         (
@@ -588,12 +595,16 @@ fn synchronization_controls_reject_readable_completed_files(
             OrderError::ReferenceOrder {
                 content,
                 publication,
-                ..
+                reference,
             },
         ) => {
             assert_eq!(
-                (content, publication),
-                (*gate.content.last().unwrap(), gate.publication)
+                (content, publication, reference),
+                (
+                    *gate.content.last().unwrap(),
+                    gate.publication,
+                    gate.reference
+                )
             );
             assert!(content >= publication);
         }

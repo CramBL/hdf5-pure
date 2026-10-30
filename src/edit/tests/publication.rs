@@ -5,6 +5,7 @@ use std::io::ErrorKind;
 use hdf5_pure_core::__private::PhysicalAddress;
 use rstest::rstest;
 use test_util::identity::Fixture as IdentityFixture;
+use test_util_hdf5::assertion::StatusOpen;
 use test_util_hdf5::identity;
 use test_util_hdf5::reader::ReadBackend;
 
@@ -978,14 +979,17 @@ fn a_stale_consistency_flag_is_rejected_then_cleared_by_a_commit() {
             SuperblockStatusFlags::swmr_write_marked()
         );
     }
-    match WriteEngine::open_with_locking(&path, FileLocking::Enabled) {
-        Err(Error::FileMarkedInUse(reason)) => {
-            assert!(reason.contains("status flags 0x05"), "{reason}");
-            assert!(reason.contains("another writer holds it"), "{reason}");
-        }
-        Err(e) => panic!("expected the flag refusal, got {e:?}"),
+    let error = match WriteEngine::open_with_locking(&path, FileLocking::Enabled) {
+        Err(error) => error,
         Ok(_) => panic!("a flagged file must not be edited in place"),
-    }
+    };
+    let Error::FileMarkedInUse(reason) = error else {
+        panic!("expected FileMarkedInUse, got {error:?}");
+    };
+    assert_eq!(
+        reason,
+        StatusOpen::Write(&path).message(SuperblockStatusFlags::swmr_write_marked())
+    );
     {
         let mut data = std::fs::read(&path).unwrap();
         let LocatedSuperblock {
