@@ -306,7 +306,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "Matrix::from_row_major: data length 1 does not match 2×3 = 6")]
     fn from_row_major_length_mismatch_panics() {
         let _ = Matrix::from_row_major(2, 3, vec![1.0_f64]);
     }

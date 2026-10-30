@@ -1193,62 +1193,43 @@ fn every_write_entry_point_declares_what_it_changes() {
     );
 }
 
-#[test]
-fn an_edit_that_moves_no_header_leaves_a_reference_handle_reading() {
+#[rstest::rstest]
+#[case::same_dataset(|file: &File| { file.dataset("log").unwrap().append(&[9i32]).unwrap(); }, &[0, 1, 9])]
+#[case::other_dataset(|file: &File| { file.dataset("other").unwrap().append(&[9i32]).unwrap(); }, &[0, 1])]
+#[case::sync(|file: &File| { file.sync().unwrap(); }, &[0, 1])]
+fn an_edit_that_moves_no_header_leaves_a_reference_handle_reading(
+    #[case] edit: fn(&File),
+    #[case] expected: &[i32],
+) {
     let dir = tempfile::tempdir().unwrap();
-
-    // Named for the same reason `Step` above is: a bare tuple of a name and
-    // a function pointer reads as noise at the call site.
-    type Case = (&'static str, fn(&File));
-    let cases: Vec<Case> = vec![
-        (
-            "an append through another handle to the same dataset",
-            |f| {
-                f.dataset("log").unwrap().append(&[9i32]).unwrap();
-            },
-        ),
-        ("an append to a different dataset", |f| {
-            f.dataset("other").unwrap().append(&[9i32]).unwrap();
-        }),
-        ("a durability barrier", |f| {
-            f.sync().unwrap();
-        }),
-    ];
-
-    for (name, edit) in cases {
-        let path = dir.path().join(format!("{}.h5", name.replace(' ', "_")));
-        let mut b = FileBuilder::new();
-        for ds in ["log", "other"] {
-            b.create_dataset(ds)
-                .with_i32_data(&[0, 1])
-                .with_shape(&[2])
-                .with_maxshape(&[MaxExtent::Unlimited])
-                .with_chunks(&[4]);
-        }
-        b.create_dataset("refs").with_path_references(&["log"]);
-        b.write(&path).unwrap();
-
-        let file = File::open_rw(&path).unwrap();
-        let by_ref = match file
-            .dataset("refs")
-            .unwrap()
-            .dereference()
-            .unwrap()
-            .remove(0)
-        {
-            Object::Dataset(ds) => *ds,
-            other => panic!("expected a dataset, got {other:?}"),
-        };
-        assert_eq!(by_ref.read_i32().unwrap(), vec![0, 1], "{name}: before");
-        edit(&file);
-        assert!(
-            by_ref.read_i32().is_ok(),
-            "{name} moves no object header, so it must not end a handle that \
-             names its dataset by address: {:?}",
-            by_ref.read_i32()
-        );
-        file.close().unwrap();
+    let path = dir.path().join("reference.h5");
+    let mut b = FileBuilder::new();
+    for ds in ["log", "other"] {
+        b.create_dataset(ds)
+            .with_i32_data(&[0, 1])
+            .with_shape(&[2])
+            .with_maxshape(&[MaxExtent::Unlimited])
+            .with_chunks(&[4]);
     }
+    b.create_dataset("refs").with_path_references(&["log"]);
+    b.write(&path).unwrap();
+
+    let file = File::open_rw(&path).unwrap();
+    let by_ref = match file
+        .dataset("refs")
+        .unwrap()
+        .dereference()
+        .unwrap()
+        .remove(0)
+    {
+        Object::Dataset(ds) => *ds,
+        other => panic!("expected a dataset, got {other:?}"),
+    };
+    assert_eq!(by_ref.read_i32().unwrap(), vec![0, 1], "before the edit");
+    edit(&file);
+    assert_eq!(by_ref.read_i32().unwrap(), expected);
+    drop(by_ref);
+    file.close().unwrap();
 }
 
 #[test]
@@ -1275,8 +1256,8 @@ fn a_handle_whose_path_becomes_a_group_keeps_refusing() {
             "call {call} answered {:?}",
             ds.attrs()
         );
-        assert!(matches!(ds.read_i32(), Err(Error::NotADataset(_))));
-        assert!(matches!(ds.shape(), Err(Error::NotADataset(_))));
+        assert!(matches!(ds.read_i32(), Err(Error::NotADataset(ref path)) if path == "plain"));
+        assert!(matches!(ds.shape(), Err(Error::NotADataset(ref path)) if path == "plain"));
     }
     file.close().unwrap();
 }
@@ -1344,16 +1325,19 @@ fn opening_a_dataset_as_a_group_is_refused() {
     // to the wrong kind: the second reports what is there.
     assert!(matches!(
         file.group("absent"),
-        Err(Error::Format(FormatError::PathNotFound(_)))
+        Err(Error::Format(FormatError::PathNotFound(ref path))) if path == "absent"
     ));
     assert!(matches!(
         file.root().group("absent"),
-        Err(Error::Format(FormatError::PathNotFound(_)))
+        Err(Error::Format(FormatError::PathNotFound(ref path))) if path == "absent"
     ));
 
     // And a real group still opens, by either form.
-    assert!(file.group("g").is_ok());
-    assert!(file.root().group("g").is_ok());
+    assert_eq!(file.group("g").unwrap().datasets().unwrap(), ["inner"]);
+    assert_eq!(
+        file.root().group("g").unwrap().datasets().unwrap(),
+        ["inner"]
+    );
 }
 
 // The independent image uses legacy symbol-table groups.
@@ -1374,10 +1358,10 @@ fn opening_a_named_datatype_as_a_group_is_refused() {
     let file = File::from_bytes(b.finish().unwrap()).unwrap();
 
     assert_eq!(file.root().named_datatypes().unwrap(), vec!["mytype"]);
-    assert!(matches!(file.group("mytype"), Err(Error::NotAGroup(_))));
+    assert!(matches!(file.group("mytype"), Err(Error::NotAGroup(ref path)) if path == "mytype"));
     assert!(matches!(
         file.root().group("mytype"),
-        Err(Error::NotAGroup(_))
+        Err(Error::NotAGroup(ref path)) if path == "mytype"
     ));
 }
 
@@ -1476,11 +1460,11 @@ fn a_child_that_is_not_a_committed_datatype_is_refused_by_name() {
     // wrong kind, as it is for `group` and `dataset`.
     assert!(matches!(
         root.named_datatype("absent"),
-        Err(Error::Format(FormatError::PathNotFound(_)))
+        Err(Error::Format(FormatError::PathNotFound(ref path))) if path == "absent"
     ));
     assert!(matches!(
         root.named_datatype_references("absent"),
-        Err(Error::Format(FormatError::PathNotFound(_)))
+        Err(Error::Format(FormatError::PathNotFound(ref path))) if path == "absent"
     ));
 
     // A committed type remains readable through both entry points.
@@ -1516,11 +1500,11 @@ fn a_group_handle_whose_path_becomes_a_dataset_keeps_refusing() {
             group.attrs()
         );
     }
-    assert!(matches!(group.datasets(), Err(Error::NotAGroup(_))));
-    assert!(matches!(group.groups(), Err(Error::NotAGroup(_))));
+    assert!(matches!(group.datasets(), Err(Error::NotAGroup(ref path)) if path == "g"));
+    assert!(matches!(group.groups(), Err(Error::NotAGroup(ref path)) if path == "g"));
     assert!(matches!(
         group.dataset("anything"),
-        Err(Error::NotAGroup(_))
+        Err(Error::NotAGroup(ref path)) if path == "g"
     ));
 
     // The path still names something, and that something still opens as
@@ -3054,30 +3038,31 @@ fn a_page_buffer_is_rejected_where_it_cannot_be_honored() {
             before,
             "{label}: a refused open changed the file"
         );
-        assert!(
-            File::open(path).is_ok(),
-            "{label}: a refused open left the file unopenable"
+        let file = File::open(path).unwrap();
+        assert_eq!(
+            file.dataset("d").unwrap().read_i32().unwrap(),
+            [1, 2, 3, 4],
+            "{label}"
         );
     };
 
     // An unpaged file is a supported control.
     let unpaged = fixture("unpaged.h5", false);
-    let accepted = File::open_rw_with_options(&unpaged, buffered(1 << 20));
-    assert!(
-        accepted.is_ok(),
-        "a page buffer on an unpaged file must be accepted, got {accepted:?}"
+    let accepted = File::open_rw_with_options(&unpaged, buffered(1 << 20)).unwrap();
+    assert_eq!(
+        accepted.dataset("d").unwrap().read_i32().unwrap(),
+        [1, 2, 3, 4]
     );
-    accepted.unwrap().close().unwrap();
+    accepted.close().unwrap();
 
     // The supported 256 KiB budget is below the session's 1 MiB gather budget.
     let small_budget = fixture("small_budget.h5", true);
-    let accepted = File::open_rw_with_options(&small_budget, buffered(256 * 1024));
-    assert!(
-        accepted.is_ok(),
-        "a page buffer below the byte budget a session gathers under must be \
-         accepted, got {accepted:?}"
+    let accepted = File::open_rw_with_options(&small_budget, buffered(256 * 1024)).unwrap();
+    assert_eq!(
+        accepted.dataset("d").unwrap().read_i32().unwrap(),
+        [1, 2, 3, 4]
     );
-    accepted.unwrap().close().unwrap();
+    accepted.close().unwrap();
 
     let paged = fixture("paged.h5", true);
     let before = std::fs::read(&paged).unwrap();
@@ -3122,11 +3107,10 @@ fn a_page_buffer_is_rejected_where_it_cannot_be_honored() {
         std::fs::write(&old_format, &bytes).unwrap();
     }
     let before = std::fs::read(&old_format).unwrap();
-    assert!(
-        File::open(&old_format).is_ok(),
-        "the version-2 fixture must be a readable file, or the refusal below \
-         could be about anything"
-    );
+    {
+        let file = File::open(&old_format).unwrap();
+        assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), [1, 2, 3, 4]);
+    }
     let refused = File::open_rw_with_options(&old_format, buffered(1 << 20));
     assert!(
         matches!(&refused, Err(Error::EditUnsupported(m)) if m.contains("version-3 superblock")),
@@ -3189,109 +3173,134 @@ fn a_page_buffer_is_rejected_where_it_cannot_be_honored() {
     );
     // A rejected SWMR open must leave the write-status flags clear.
     untouched("swmr", &swmr, &before);
+}
 
-    // Default access properties accept ordinary and SWMR files.
-    for (name, paged) in [("ok_unpaged.h5", false), ("ok_paged.h5", true)] {
-        let f = File::open_rw_with_options(fixture(name, paged), FileAccessProperties::new());
-        assert!(f.is_ok(), "{name}: an unset page buffer refuses nothing");
+#[derive(Clone, Copy)]
+enum DefaultOpen {
+    Paged,
+    Swmr,
+    Unpaged,
+}
+
+#[rstest]
+#[case::paged(DefaultOpen::Paged)]
+#[case::swmr(DefaultOpen::Swmr)]
+#[case::unpaged(DefaultOpen::Unpaged)]
+fn default_access_properties_open_without_a_page_buffer(#[case] mode: DefaultOpen) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("default_access.h5");
+    let mut builder = FileBuilder::new();
+    if matches!(mode, DefaultOpen::Paged) {
+        builder.with_file_space_settings(
+            FileSpaceSettings::new(FileSpaceStrategy::Page)
+                .with_persistence(true)
+                .with_page_size(FileSpacePageSize::try_from(16 * 1024).unwrap()),
+        );
     }
-    let f = File::open_swmr_writer_with_options(
-        fixture("ok_swmr.h5", false),
-        FileAccessProperties::new(),
-    );
-    assert!(f.is_ok(), "swmr: an unset page buffer refuses nothing");
+    builder
+        .create_dataset("d")
+        .with_i32_data(&[1, 2, 3, 4])
+        .with_shape(&[4]);
+    builder.write(&path).unwrap();
+    let file = match mode {
+        DefaultOpen::Swmr => {
+            File::open_swmr_writer_with_options(&path, FileAccessProperties::new())
+        }
+        DefaultOpen::Paged | DefaultOpen::Unpaged => {
+            File::open_rw_with_options(&path, FileAccessProperties::new())
+        }
+    }
+    .unwrap();
+    assert_eq!(file.dataset("d").unwrap().read_i32().unwrap(), [1, 2, 3, 4]);
+    file.close().unwrap();
 }
 
 // Invalid creation/access pairs must be rejected before creating the path.
-#[test]
-fn create_with_options_refuses_a_page_buffer_it_could_not_reopen_with() {
+#[rstest]
+#[case::page_larger_than_budget(
+    paged_create_properties(FileSpacePageSize::try_from(2 << 20).unwrap()),
+    1 << 20, SyncPolicy::OnClose,
+    "a page buffer smaller than the file's file-space page size",
+)]
+#[case::v18(
+    crate::FileCreateProperties::new().with_libver_bounds(crate::LibVer::Earliest, crate::LibVer::V18),
+    1 << 20, SyncPolicy::OnClose,
+    "a page buffer marks the file in a version-3 superblock, and these bounds write the 1.8 format",
+)]
+#[case::budget_under_one_page(
+    paged_create_properties(FileSpacePageSize::try_from(16 * 1024).unwrap()),
+    8192, SyncPolicy::OnClose,
+    "a page buffer smaller than the file's file-space page size",
+)]
+#[case::unpaged_budget_under_default_page(
+    crate::FileCreateProperties::new(),
+    2048,
+    SyncPolicy::OnClose,
+    "a page buffer smaller than the file's file-space page size"
+)]
+#[case::default_sync_policy(
+    paged_create_properties(FileSpacePageSize::try_from(16 * 1024).unwrap()),
+    1 << 20, SyncPolicy::Always,
+    "a page buffer does nothing under the default SyncPolicy::Always",
+)]
+fn create_with_options_refuses_a_page_buffer_it_could_not_reopen_with(
+    #[case] create: crate::FileCreateProperties,
+    #[case] budget: usize,
+    #[case] policy: SyncPolicy,
+    #[case] reason: &str,
+) {
     let dir = tempfile::tempdir().unwrap();
-    let paged = |page: u64| {
-        crate::FileCreateProperties::new().with_file_space_settings(
-            FileSpaceSettings::new(FileSpaceStrategy::Page)
-                .with_persistence(true)
-                .with_page_size(FileSpacePageSize::try_from(page).unwrap()),
-        )
+    let path = dir.path().join("rejected.h5");
+    let err = File::create_with_options(
+        &path,
+        create,
+        FileAccessProperties::new()
+            .with_sync_policy(policy)
+            .with_page_buffer_size(budget),
+    )
+    .unwrap_err();
+    let Error::EditUnsupported(message) = err else {
+        panic!("expected EditUnsupported, got {err:?}");
     };
-    // The 8 KiB budget exceeds the default page but is below the fixture's 16 KiB page.
-    let cases: [(&str, crate::FileCreateProperties, usize, SyncPolicy); 5] = [
-        // A page larger than the budget, on a file that does not exist yet:
-        // the page size has to come from the creation properties, which is
-        // what this pins.
-        (
-            "page larger than the budget",
-            paged(2 << 20),
-            1 << 20,
-            SyncPolicy::OnClose,
-        ),
-        (
-            "the 1.8 format",
-            crate::FileCreateProperties::new()
-                .with_libver_bounds(crate::LibVer::Earliest, crate::LibVer::V18),
-            1 << 20,
-            SyncPolicy::OnClose,
-        ),
-        (
-            "budget under one page",
-            paged(16 * 1024),
-            8192,
-            SyncPolicy::OnClose,
-        ),
-        // The 2 KiB unpaged budget is below the default 4 KiB page.
-        (
-            "unpaged budget under the default page",
-            crate::FileCreateProperties::new(),
-            2048,
-            SyncPolicy::OnClose,
-        ),
-        (
-            "the default sync policy",
-            paged(16 * 1024),
-            1 << 20,
-            SyncPolicy::Always,
-        ),
-    ];
+    assert!(
+        message.starts_with(reason),
+        "expected {reason:?}, got {message:?}"
+    );
+    assert!(!path.exists(), "the rejected creation wrote a file");
+}
 
-    for (label, create, budget, policy) in cases {
-        let path = dir
-            .path()
-            .join(std::format!("{}.h5", label.replace(' ', "_")));
-        let result = File::create_with_options(
-            &path,
-            create,
-            FileAccessProperties::new()
-                .with_sync_policy(policy)
-                .with_page_buffer_size(budget),
-        );
-        assert!(
-            matches!(result, Err(Error::EditUnsupported(_))),
-            "{label}: expected a refusal, got {result:?}"
-        );
-        assert!(
-            !path.exists(),
-            "{label}: the file was written and only then refused"
-        );
-    }
+#[rstest]
+#[case::paged(paged_create_properties(FileSpacePageSize::try_from(16 * 1024).unwrap()), 1 << 20)]
+#[case::unpaged(crate::FileCreateProperties::new(), 1 << 20)]
+#[case::paged_small_budget(paged_create_properties(FileSpacePageSize::try_from(16 * 1024).unwrap()), 256 * 1024)]
+fn create_with_options_accepts_a_supported_page_buffer(
+    #[case] create: crate::FileCreateProperties,
+    #[case] budget: usize,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("accepted.h5");
+    let file = File::create_with_options(
+        &path,
+        create,
+        FileAccessProperties::new()
+            .with_sync_policy(SyncPolicy::OnClose)
+            .with_page_buffer_size(budget),
+    )
+    .unwrap();
+    assert_eq!(file.root().datasets().unwrap(), Vec::<String>::new());
+    assert_eq!(file.root().groups().unwrap(), Vec::<String>::new());
+    file.close().unwrap();
+    let reopened = File::open(&path).unwrap();
+    assert_eq!(reopened.root().datasets().unwrap(), Vec::<String>::new());
+    assert_eq!(reopened.root().groups().unwrap(), Vec::<String>::new());
+}
 
-    // Accepted controls include unpaged creation and a 256 KiB buffer.
-    for (label, create, budget) in [
-        ("paged", paged(16 * 1024), 1 << 20),
-        ("unpaged", crate::FileCreateProperties::new(), 1 << 20),
-        ("paged_small_budget", paged(16 * 1024), 256 * 1024),
-    ] {
-        let ok = File::create_with_options(
-            dir.path().join(std::format!("ok_{label}.h5")),
-            create,
-            FileAccessProperties::new()
-                .with_sync_policy(SyncPolicy::OnClose)
-                .with_page_buffer_size(budget),
-        );
-        assert!(
-            ok.is_ok(),
-            "{label}: an honorable budget must create: {ok:?}"
-        );
-        ok.unwrap().close().unwrap();
-    }
+fn paged_create_properties(page_size: FileSpacePageSize) -> crate::FileCreateProperties {
+    crate::FileCreateProperties::new().with_file_space_settings(
+        FileSpaceSettings::new(FileSpaceStrategy::Page)
+            .with_persistence(true)
+            .with_page_size(page_size),
+    )
 }
 
 // Count synchronization calls because a missing barrier does not change file bytes.

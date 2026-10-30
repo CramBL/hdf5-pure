@@ -29,11 +29,12 @@ fn an_unreadable_message_is_unknown_not_zero() {
         PaddingFill::from_message(MessageType::FILL_VALUE, &unknown_version),
         PaddingFill::Unknown
     ));
-    assert!(
+    assert_eq!(
         PaddingFill::from_message(MessageType::FILL_VALUE, &unknown_version)
             .pattern(elem)
             .apply(&mut [0u8; 4])
-            .is_err()
+            .unwrap_err(),
+        FormatError::UnreadableFillValue
     );
 
     // Truncated before the fields it declares: likewise undetermined.
@@ -118,8 +119,11 @@ fn an_unknown_fill_refuses_to_materialize() {
         Err(FormatError::UnreadableFillValue)
     ));
     // An unknown pattern also rejects an empty materialization request.
-    assert!(FillPattern::UNKNOWN.buffer(0).is_err());
-    assert!(FillPattern::ZERO.buffer(0).is_ok());
+    assert_eq!(
+        FillPattern::UNKNOWN.buffer(0).unwrap_err(),
+        FormatError::UnreadableFillValue
+    );
+    assert_eq!(FillPattern::ZERO.buffer(0).unwrap(), Vec::<u8>::new());
 }
 
 #[test]
@@ -145,9 +149,16 @@ fn the_write_time_is_read_from_every_message_version() {
         __private::fill_value_is_written(MessageType::FILL_VALUE_OLD, &[4, 0, 0, 0, 7, 0, 0, 0],)
             .unwrap()
     );
+}
 
-    assert!(__private::fill_value_is_written(MessageType::FILL_VALUE, &[]).is_err());
-    assert!(__private::fill_value_is_written(MessageType::FILL_VALUE, &[3]).is_err());
-    assert!(__private::fill_value_is_written(MessageType::FILL_VALUE, &[2, 0]).is_err());
-    assert!(__private::fill_value_is_written(MessageType::FILL_VALUE, &[9, 0]).is_err());
+#[rstest::rstest]
+#[case::empty(&[], FormatError::UnexpectedEof { expected: 1, available: 0 })]
+#[case::v3_flags(&[3], FormatError::UnexpectedEof { expected: 2, available: 1 })]
+#[case::v2_prefix(&[2, 0], FormatError::UnexpectedEof { expected: 4, available: 2 })]
+#[case::unsupported_version(&[9, 0], FormatError::UnsupportedFillValueVersion(9))]
+fn unreadable_fill_write_times_are_rejected(#[case] bytes: &[u8], #[case] expected: FormatError) {
+    assert_eq!(
+        __private::fill_value_is_written(MessageType::FILL_VALUE, bytes).unwrap_err(),
+        expected
+    );
 }

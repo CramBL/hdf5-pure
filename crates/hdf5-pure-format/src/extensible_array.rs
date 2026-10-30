@@ -3097,7 +3097,10 @@ mod tests {
         let mut buf = vec![0u8; 256];
         buf[0..4].copy_from_slice(b"XXXX");
         let result = ExtensibleArrayHeader::parse(&buf, 0, 8, 8);
-        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            FormatError::ChunkedReadError("invalid Extensible Array header signature".into())
+        );
     }
 
     #[test]
@@ -3106,7 +3109,10 @@ mod tests {
         buf[0..4].copy_from_slice(b"EAHD");
         buf[4] = 1;
         let result = ExtensibleArrayHeader::parse(&buf, 0, 8, 8);
-        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            FormatError::ChunkedReadError("unsupported Extensible Array header version: 1".into())
+        );
     }
 
     /// Returns the records of the Extensible Array whose header is at `header_offset` in

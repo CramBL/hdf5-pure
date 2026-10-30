@@ -117,6 +117,9 @@ mod tests {
     #[test]
     fn verify_rejects_wrong_magic() {
         let buf = [0u8; 512];
-        assert!(verify_header(&buf).is_err());
+        assert_eq!(
+            verify_header(&buf).unwrap_err(),
+            "missing `MATLAB` signature at byte 0"
+        );
     }
 }
