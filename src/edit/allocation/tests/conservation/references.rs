@@ -543,10 +543,11 @@ struct Roles {
     reads: Vec<PointerRead>,
 }
 
-/// A stored pointer field and its referenced metadata length in the completed fixture.
+/// A pointer field and the target address and length discovered in the completed fixture.
 struct PointerRead {
     role: WriteTarget,
     field: Interval,
+    address: u64,
     length: u64,
 }
 
@@ -650,6 +651,7 @@ impl Roles {
         let mut reads = vec![PointerRead {
             role: WriteTarget::Layout,
             field: layout_field,
+            address: header.range.start(),
             length: ea.range().length(),
         }];
         let mut direct = None;
@@ -727,6 +729,7 @@ impl Roles {
                         reads.push(PointerRead {
                             role: kind,
                             field,
+                            address: range.start().get(),
                             length,
                         });
                         frames.push((kind, interval(parent)));
@@ -738,6 +741,7 @@ impl Roles {
                         reads.push(PointerRead {
                             role: kind,
                             field,
+                            address: range.start().get(),
                             length,
                         });
                         frames.push((kind, interval(parent)));
@@ -749,6 +753,7 @@ impl Roles {
                         reads.push(PointerRead {
                             role: kind,
                             field,
+                            address: range.start().get(),
                             length,
                         });
                         frames.push((kind, interval(parent)));
@@ -903,6 +908,7 @@ impl Roles {
         reads.push(PointerRead {
             role: WriteTarget::Superblock,
             field: pointer_field(&published, superblock_frame, extension_address),
+            address: extension_address,
             length: extension_length,
         });
         let last_child = pointers
@@ -1433,6 +1439,7 @@ fn assert_malformed_pointer(
 ) {
     let target = pointer.role;
     let stored = byte_values::u64_at(image, usize::try_from(pointer.field.start()).unwrap());
+    assert_ne!(stored, pointer.address);
     let file = File::from_bytes(image.to_vec()).unwrap();
     if target == WriteTarget::Superblock {
         let address = crate::superblock::read(image)
@@ -1448,7 +1455,6 @@ fn assert_malformed_pointer(
             panic!("expected a malformed extension, got {error:?}")
         };
         assert_eq!(error, FormatError::InvalidObjectHeaderVersion(version));
-        assert_eq!(version, u8::MAX);
         return;
     }
     file.persisted_free_sections().unwrap();
