@@ -162,11 +162,8 @@ fn a_c_written_filtered_huge_object_has_a_type_two_record(
     let decoder = records.resolve(&tree).unwrap();
     let layout = BTreeV2Layout::new(&tree, widths.offsets).unwrap();
     let root = layout.root().unwrap();
-    let view = layout
-        .parse(
-            &image[usize::try_from(root.address().get()).unwrap()..],
-            root,
-        )
+    let view = root
+        .parse(&image[usize::try_from(root.address().get()).unwrap()..])
         .unwrap();
     let HugeObjectTrackerRecord::FilteredIndirect(record) =
         decoder.parse(view.record(0).unwrap()).unwrap()
@@ -205,11 +202,8 @@ fn a_c_written_filtered_huge_object_has_a_type_two_record(
         .unwrap();
     let names = BTreeV2Layout::new(&name_index, widths.offsets).unwrap();
     let root = names.root().unwrap();
-    let view = names
-        .parse(
-            &image[usize::try_from(root.address().get()).unwrap()..],
-            root,
-        )
+    let view = root
+        .parse(&image[usize::try_from(root.address().get()).unwrap()..])
         .unwrap();
     let link_records =
         BTreeV2LinkNameIndex::new(&name_index, widths.offsets, heap.heap_id_length).unwrap();
@@ -305,11 +299,8 @@ fn c_written_filtered_huge_fixtures_expose_both_record_representations(#[case] d
     let tracker = objects.parse_tracker(region).unwrap();
     let tree = BTreeV2Layout::new(tracker.header(), widths.offsets).unwrap();
     let root = tree.root().unwrap();
-    let view = tree
-        .parse(
-            &image[usize::try_from(root.address().get()).unwrap()..],
-            root,
-        )
+    let view = root
+        .parse(&image[usize::try_from(root.address().get()).unwrap()..])
         .unwrap();
     let record = tracker.parse_record(view.record(0).unwrap()).unwrap();
     let reference = match objects.parse_id(&c_id).unwrap() {

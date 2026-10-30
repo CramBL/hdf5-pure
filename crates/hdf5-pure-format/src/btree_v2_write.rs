@@ -460,11 +460,8 @@ mod tests {
         let mut pending = vec![layout.root().unwrap()];
         let mut count = 0;
         while let Some(node) = pending.pop() {
-            let view = layout
-                .parse(
-                    &bytes[usize::try_from(node.address().get()).unwrap()..],
-                    node,
-                )
+            let view = node
+                .parse(&bytes[usize::try_from(node.address().get()).unwrap()..])
                 .unwrap();
             count += view.record_count();
             for index in 0..=view.record_count() {

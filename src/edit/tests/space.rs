@@ -559,7 +559,7 @@ fn deleting_a_filtered_heap_with_huge_objects_reclaims_its_encoded_allocations(
     let layout = BTreeV2Layout::new(&tree, widths.offsets).unwrap();
     let root = layout.root().unwrap();
     let node_at = (root.address().get() + userblock).to_usize().unwrap();
-    let node = layout.parse(&bytes[node_at..], root).unwrap();
+    let node = root.parse(&bytes[node_at..]).unwrap();
     let records: Vec<_> = (0..node.record_count())
         .map(|index| {
             let record = crate::btree_v2::BTreeV2Record {

@@ -375,8 +375,8 @@ impl RootChildFields {
         let layout = BTreeV2Layout::new(&header, OffsetWidth::Eight).unwrap();
         let node = layout.root().unwrap();
         let start = 512 + usize::try_from(node.address().get()).unwrap();
-        let length = layout.encoded_len(node).unwrap();
-        let view = layout.parse(&bytes[start..], node).unwrap();
+        let length = node.encoded_len().unwrap();
+        let view = node.parse(&bytes[start..]).unwrap();
         let records = view.record_count();
         let prefix = test_util::btree_v2::NODE_PREFIX;
         let records_length = records * usize::from(header.record_size);

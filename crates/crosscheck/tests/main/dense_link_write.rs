@@ -414,11 +414,8 @@ fn dense_links(
     assert_eq!(index.depth, 0);
     let layout = BTreeV2Layout::new(&index, offsets).unwrap();
     let root = layout.root().unwrap();
-    let view = layout
-        .parse(
-            &bytes[usize::try_from(root.address().get()).unwrap()..],
-            root,
-        )
+    let view = root
+        .parse(&bytes[usize::try_from(root.address().get()).unwrap()..])
         .unwrap();
     let ids = FractalHeapIdLayout::new(&header, offsets, lengths);
     (0..view.record_count())

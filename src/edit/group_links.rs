@@ -287,7 +287,6 @@ fn walk_index(
         IndexReader {
             source,
             addresses,
-            layout,
             visited: BTreeSet::new(),
         }
         .walk(root, &mut read_record)?;
@@ -299,20 +298,18 @@ fn walk_index(
 struct IndexReader<'a, S: Source + ?Sized> {
     source: &'a S,
     addresses: AddressContext,
-    layout: &'a BTreeV2Layout,
     visited: BTreeSet<StoredAddress>,
 }
 
 impl<S: Source + ?Sized> IndexReader<'_, S> {
     fn walk(
         &mut self,
-        node: BTreeV2Node,
+        node: BTreeV2Node<'_>,
         read_record: &mut impl FnMut(&[u8]) -> Result<(), Error>,
     ) -> Result<u64, Error> {
         let Self {
             source,
             addresses,
-            layout,
             visited,
         } = self;
         if !visited.insert(node.address()) {
@@ -320,10 +317,10 @@ impl<S: Source + ?Sized> IndexReader<'_, S> {
         }
         let range = FileRange::new(
             addresses.resolve(node.address())?,
-            layout.encoded_len(node)?.to_u64(),
+            node.encoded_len()?.to_u64(),
         )?;
         let bytes = source.read_range(range)?;
-        let view = layout.parse(&bytes, node)?;
+        let view = node.parse(&bytes)?;
         let mut count = 0u64;
         for record in 0..view.record_count() {
             if let Some(child) = view.child(record)? {

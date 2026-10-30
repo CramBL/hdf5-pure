@@ -251,11 +251,8 @@ pub fn assert_storage(file: &File, image: &[u8], fixture: Fixture, byte_order: D
     let mut pending = vec![tree.root().unwrap()];
     let mut attributes = BTreeMap::new();
     while let Some(node) = pending.pop() {
-        let node = tree
-            .parse(
-                &image[usize::try_from(node.address().get()).unwrap()..],
-                node,
-            )
+        let node = node
+            .parse(&image[usize::try_from(node.address().get()).unwrap()..])
             .unwrap();
         for index in 0..node.record_count() {
             let record = node.record(index).unwrap();

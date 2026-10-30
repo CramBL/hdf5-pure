@@ -117,7 +117,7 @@ fn borrowed_nodes_search_c_written_name_indexes(
     let found = loop {
         visited += 1;
         let start = base + usize::try_from(node.address().get()).unwrap();
-        let view = layout.parse(&bytes[start..], node).unwrap();
+        let view = node.parse(&bytes[start..]).unwrap();
         let mut left = 0;
         let mut right = view.record_count();
         let mut matched = false;
@@ -317,13 +317,11 @@ fn indexed_matches_validate_only_the_selected_path(
     assert_eq!(header.depth, 1);
     let layout = BTreeV2Layout::new(&header, OffsetWidth::Eight).unwrap();
     let root = layout.root().unwrap();
-    let view = layout
-        .parse(&bytes[root.address().get() as usize..], root)
-        .unwrap();
+    let view = root.parse(&bytes[root.address().get() as usize..]).unwrap();
     let child = view.child(0).unwrap().unwrap();
     let hash = if selected_leaf {
-        let leaf = layout
-            .parse(&bytes[child.address().get() as usize..], child)
+        let leaf = child
+            .parse(&bytes[child.address().get() as usize..])
             .unwrap();
         u32::from_le_bytes(
             leaf.record(0).unwrap()[..LINK_NAME_HASH_LEN]
@@ -348,7 +346,7 @@ fn indexed_matches_validate_only_the_selected_path(
             + test_util::btree_v2::NODE_PREFIX
             + usize::from(header.num_records_in_root) * usize::from(header.record_size);
         bytes[pointer..pointer + usize::from(OffsetWidth::Eight.get())].fill(0xff);
-        test_util::checksum::restamp(&mut bytes, start, layout.encoded_len(root).unwrap());
+        test_util::checksum::restamp(&mut bytes, start, root.encoded_len().unwrap());
     } else {
         bytes[child.address().get() as usize] = b'X';
     }
@@ -437,10 +435,7 @@ fn indexed_lookup_reports_metadata_checksums(
         )
     } else {
         let root = layout.root().unwrap();
-        (
-            root.address().get() as usize,
-            layout.encoded_len(root).unwrap(),
-        )
+        (root.address().get() as usize, root.encoded_len().unwrap())
     };
     let end = start + len - INDEX_CHECKSUM_LEN;
     let computed = hdf5_pure_format::__private::jenkins_lookup3(&bytes[start..end]);
@@ -970,11 +965,8 @@ fn c_written_managed_ids_use_the_shared_geometry_and_field_encoding(
     let tree_layout = BTreeV2Layout::new(&tree_header, OffsetWidth::Eight).unwrap();
     let root = tree_layout.root().unwrap();
     assert_eq!(tree_header.depth, 0);
-    let view = tree_layout
-        .parse(
-            &bytes[usize::try_from(root.address().get()).unwrap()..],
-            root,
-        )
+    let view = root
+        .parse(&bytes[usize::try_from(root.address().get()).unwrap()..])
         .unwrap();
     let record = view.record(0).unwrap();
     let id = if attributes {
@@ -1059,11 +1051,8 @@ fn c_written_tiny_ids_borrow_their_inline_objects(#[values(false, true)] streami
     assert_eq!(tree_header.depth, 0);
     let tree_layout = BTreeV2Layout::new(&tree_header, OffsetWidth::Two).unwrap();
     let root = tree_layout.root().unwrap();
-    let view = tree_layout
-        .parse(
-            &image[usize::try_from(root.address().get()).unwrap()..],
-            root,
-        )
+    let view = root
+        .parse(&image[usize::try_from(root.address().get()).unwrap()..])
         .unwrap();
     let id_layout = FractalHeapIdLayout::new(&header, OffsetWidth::Two, LengthWidth::Eight);
     let mut parsed_names: Vec<_> = (0..view.record_count())
