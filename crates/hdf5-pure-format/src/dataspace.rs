@@ -429,7 +429,13 @@ mod tests {
     fn truncated_data_error() {
         let data = [1u8, 2]; // too short
         let err = Dataspace::parse(&data, 8).unwrap_err();
-        assert!(matches!(err, FormatError::UnexpectedEof { .. }));
+        assert_eq!(
+            err,
+            FormatError::UnexpectedEof {
+                expected: 4,
+                available: 2
+            }
+        );
     }
 
     #[test]
@@ -540,7 +546,11 @@ mod tests {
     #[test]
     fn an_extent_rejects_a_fixed_maximum_at_the_unlimited_size() {
         let err = Extent::new(&[4], Some(&[MaxExtent::Fixed(u64::MAX)])).unwrap_err();
-        assert!(err.contains("the format's unlimited marker"), "{err}");
+        assert_eq!(
+            err,
+            "a fixed maximum of u64::MAX is the format's unlimited marker; \
+                     name MaxExtent::Unlimited for a dimension that grows without bound"
+        );
     }
 
     #[test]

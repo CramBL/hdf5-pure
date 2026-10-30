@@ -142,7 +142,13 @@ fn null_vl_element_zero_address() {
 fn parse_vl_references_truncated_error() {
     let raw = vec![0u8; 10]; // too short for 1 element with offset_size=8
     let err = parse_vl_references(&raw, 1, OffsetWidth::Eight).unwrap_err();
-    assert!(matches!(err, FormatError::UnexpectedEof { .. }));
+    assert_eq!(
+        err,
+        FormatError::UnexpectedEof {
+            expected: 16,
+            available: 10
+        }
+    );
 }
 
 #[rstest]

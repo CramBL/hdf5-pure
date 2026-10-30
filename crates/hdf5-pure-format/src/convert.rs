@@ -251,7 +251,13 @@ mod tests {
     #[test]
     fn slice_range_addition_overflow_is_caught() {
         let err = slice_range(u64::MAX, 1).unwrap_err();
-        assert!(matches!(err, FormatError::OffsetOverflow { .. }));
+        assert_eq!(
+            err,
+            FormatError::OffsetOverflow {
+                offset: u64::MAX,
+                length: 1
+            }
+        );
     }
 
     // On 64-bit hosts `u64::MAX` fits the `u64` add but not `usize`... actually

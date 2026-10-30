@@ -706,10 +706,13 @@ mod tests {
         // unsupported width both report, so neither is silently a "no address
         // here" that a caller would skip over.
         let ones = [0xFFu8; 8];
-        assert!(matches!(
-            read_optional_offset(&ones, 4, 8),
-            Err(FormatError::UnexpectedEof { .. })
-        ));
+        assert_eq!(
+            read_optional_offset(&ones, 4, 8).unwrap_err(),
+            FormatError::UnexpectedEof {
+                expected: 12,
+                available: 8
+            }
+        );
         assert_eq!(
             read_optional_offset(&ones, 0, 3).unwrap_err(),
             FormatError::InvalidOffsetSize(3)

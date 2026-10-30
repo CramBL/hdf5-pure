@@ -1120,10 +1120,13 @@ fn test_error_invalid_class() {
 fn test_error_truncated_data() {
     let buf = [0u8; 4]; // too short for header
     let err = parse_datatype(&buf).unwrap_err();
-    match err {
-        FormatError::UnexpectedEof { .. } => {}
-        other => panic!("expected UnexpectedEof, got {other:?}"),
-    }
+    assert_eq!(
+        err,
+        FormatError::UnexpectedEof {
+            expected: 8,
+            available: 4
+        }
+    );
 }
 
 #[test]

@@ -222,6 +222,12 @@ mod tests {
     fn saveobj_validates_dim_product() {
         let err =
             encode_string_saveobj_payload(&["a".to_owned(), "b".to_owned()], &[3, 1]).unwrap_err();
-        assert!(matches!(err, MatError::Custom(_)));
+        let MatError::Custom(message) = err else {
+            panic!("expected Custom, got {err:?}");
+        };
+        assert_eq!(
+            message,
+            "string payload length 2 does not match product of dims 3"
+        );
     }
 }

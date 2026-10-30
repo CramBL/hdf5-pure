@@ -275,6 +275,12 @@ mod tests {
             vec![2, 2, 0, 0],
         )]);
         let err = select_shared_message(&header, MessageType::DATATYPE, 0x320).unwrap_err();
-        assert!(matches!(err, FormatError::SharedMessageMissing { .. }));
+        assert_eq!(
+            err,
+            FormatError::SharedMessageMissing {
+                object_header_address: 0x320,
+                message_type: MessageType::DATATYPE.to_u16(),
+            }
+        );
     }
 }

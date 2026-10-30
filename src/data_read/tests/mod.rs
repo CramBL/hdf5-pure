@@ -198,7 +198,13 @@ fn type_mismatch_f64_on_string() {
     };
     let raw = vec![0u8; 8];
     let err = read_as_f64(&raw, &dt).unwrap_err();
-    assert!(matches!(err, FormatError::TypeMismatch { .. }));
+    assert_eq!(
+        err,
+        FormatError::TypeMismatch {
+            expected: "numeric",
+            actual: "String"
+        }
+    );
 }
 
 #[test]
@@ -252,7 +258,13 @@ fn string_type_mismatch_on_read_as_strings() {
     let dt = make_i32_le_type();
     let raw = vec![0u8; 8];
     let err = read_as_strings(&raw, &dt).unwrap_err();
-    assert!(matches!(err, FormatError::TypeMismatch { .. }));
+    assert_eq!(
+        err,
+        FormatError::TypeMismatch {
+            expected: "String",
+            actual: "FixedPoint"
+        }
+    );
 }
 
 #[test]
