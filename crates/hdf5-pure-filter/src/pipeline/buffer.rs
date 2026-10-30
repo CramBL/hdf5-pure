@@ -264,13 +264,15 @@ impl OutputWindow {
 #[derive(Default)]
 pub(crate) struct AppendBuffer {
     bytes: InitializedBuffer,
-    written: usize,
+    /// The number of initialized bytes beyond the written prefix.
+    tail: usize,
 }
 
 impl AppendBuffer {
     #[inline]
     fn new(bytes: InitializedBuffer) -> Self {
-        Self { bytes, written: 0 }
+        let tail = bytes.0.len();
+        Self { bytes, tail }
     }
 
     /// Moves the live bytes to the start of initialized storage.
@@ -282,16 +284,14 @@ impl AppendBuffer {
         if live.start != 0 {
             bytes.0.copy_within(live.clone(), 0);
         }
-        Self {
-            bytes,
-            written: live.len(),
-        }
+        let tail = bytes.0.len() - live.len();
+        Self { bytes, tail }
     }
 
     /// Clears live output while retaining initialized bytes and capacity.
     #[inline]
     pub(crate) fn clear(&mut self) {
-        self.written = 0;
+        self.tail = self.bytes.0.len();
     }
 
     /// Reserves room for `additional` bytes after the written prefix.
@@ -299,8 +299,8 @@ impl AppendBuffer {
     /// The live and initialized extents are unchanged.
     #[inline]
     pub(crate) fn reserve_exact(&mut self, additional: usize) {
-        let Self { bytes, written } = self;
-        let required = *written + additional;
+        let Self { bytes, tail } = self;
+        let required = bytes.0.len() - *tail + additional;
         if required > bytes.0.len() {
             bytes.0.reserve_exact(required - bytes.0.len());
         }
@@ -309,13 +309,14 @@ impl AppendBuffer {
     /// Appends one byte, overwriting retained initialized storage when available.
     #[inline]
     pub(crate) fn push(&mut self, byte: u8) {
-        let Self { bytes, written } = self;
-        if let Some(slot) = bytes.0.get_mut(*written) {
-            *slot = byte;
-        } else {
+        let Self { bytes, tail } = self;
+        if *tail == 0 {
             bytes.0.push(byte);
+        } else {
+            let written = bytes.0.len() - *tail;
+            bytes.0[written] = byte;
+            *tail -= 1;
         }
-        *written += 1;
     }
 
     /// Appends `bytes`, overwriting retained initialized storage when available.
@@ -323,12 +324,19 @@ impl AppendBuffer {
     pub(crate) fn extend_from_slice(&mut self, bytes: &[u8]) {
         let Self {
             bytes: storage,
-            written,
+            tail,
         } = self;
-        let retained = (storage.0.len() - *written).min(bytes.len());
-        storage.0[*written..*written + retained].copy_from_slice(&bytes[..retained]);
-        storage.0.extend_from_slice(&bytes[retained..]);
-        *written += bytes.len();
+        if *tail == 0 {
+            storage.0.extend_from_slice(bytes);
+            return;
+        }
+        let written = storage.0.len() - *tail;
+        let retained = (*tail).min(bytes.len());
+        storage.0[written..written + retained].copy_from_slice(&bytes[..retained]);
+        if retained < bytes.len() {
+            storage.0.extend_from_slice(&bytes[retained..]);
+        }
+        *tail -= retained;
     }
 
     /// Appends a copy of `range` from the written prefix.
@@ -336,37 +344,44 @@ impl AppendBuffer {
     /// The caller supplies a range within the bytes already written.
     #[inline]
     pub(crate) fn extend_from_within(&mut self, range: Range<usize>) {
-        let Self { bytes, written } = self;
-        let retained = (bytes.0.len() - *written).min(range.len());
+        let Self { bytes, tail } = self;
+        if *tail == 0 {
+            bytes.0.extend_from_within(range);
+            return;
+        }
+        let written = bytes.0.len() - *tail;
+        let retained = (*tail).min(range.len());
         bytes
             .0
-            .copy_within(range.start..range.start + retained, *written);
-        bytes
-            .0
-            .extend_from_within(range.start + retained..range.end);
-        *written += range.len();
+            .copy_within(range.start..range.start + retained, written);
+        if retained < range.len() {
+            bytes
+                .0
+                .extend_from_within(range.start + retained..range.end);
+        }
+        *tail -= retained;
     }
 
     /// Returns the written prefix as an owned vector.
     #[inline]
     pub(crate) fn into_owned(self) -> Vec<u8> {
-        let Self { bytes, written } = self;
+        let Self { bytes, tail } = self;
         let InitializedBuffer(mut bytes) = bytes;
-        bytes.truncate(written);
+        bytes.truncate(bytes.len() - tail);
         bytes
     }
 
     /// Returns only the written prefix.
     #[inline]
     pub(crate) fn as_slice(&self) -> &[u8] {
-        let Self { bytes, written } = self;
-        &bytes.0[..*written]
+        let Self { bytes, tail } = self;
+        &bytes.0[..bytes.0.len() - *tail]
     }
 
     /// Returns the length of the written prefix.
     #[inline]
     pub(crate) fn len(&self) -> usize {
-        self.written
+        self.bytes.0.len() - self.tail
     }
 
     #[cfg(test)]
@@ -381,7 +396,8 @@ impl AppendBuffer {
 
     #[inline]
     fn finish<'a>(self) -> FilterBuffer<'a> {
-        let Self { bytes, written } = self;
+        let written = self.len();
+        let Self { bytes, tail: _ } = self;
         FilterBuffer(Storage::Owned {
             bytes,
             live: 0..written,
@@ -603,6 +619,57 @@ mod tests {
         assert_eq!(spare.initialized_len(), initialized.max(9));
     }
 
+    #[rstest]
+    #[case::new_storage(AppendOperation::Slice, 0, b"abcdefgh")]
+    #[case::slice_without_retained_bytes(AppendOperation::Slice, 4, b"abcdefgh")]
+    #[case::slice_crossing_initialized_end(AppendOperation::Slice, 6, b"abcdefgh")]
+    #[case::slice_ending_at_initialized_end(AppendOperation::Slice, 8, b"abcdefgh")]
+    #[case::slice_within_initialized_storage(AppendOperation::Slice, 12, b"abcdefgh")]
+    #[case::copy_without_retained_bytes(AppendOperation::Within, 4, b"abcdbcd")]
+    #[case::copy_crossing_initialized_end(AppendOperation::Within, 6, b"abcdbcd")]
+    #[case::copy_ending_at_initialized_end(AppendOperation::Within, 7, b"abcdbcd")]
+    #[case::copy_within_initialized_storage(AppendOperation::Within, 12, b"abcdbcd")]
+    #[case::byte_without_retained_bytes(AppendOperation::Byte, 4, b"abcdx")]
+    #[case::byte_ending_at_initialized_end(AppendOperation::Byte, 5, b"abcdx")]
+    #[case::byte_within_initialized_storage(AppendOperation::Byte, 12, b"abcdx")]
+    fn appending_preserves_live_bytes_initialized_tails_and_allocation(
+        #[case] operation: AppendOperation,
+        #[case] initialized: usize,
+        #[case] expected: &[u8],
+    ) {
+        let mut bytes = Vec::with_capacity(32);
+        bytes.resize(initialized, 0xa5);
+        let pointer = bytes.as_ptr();
+        let capacity = bytes.capacity();
+        let mut output = AppendBuffer::new(InitializedBuffer::from_vec(bytes));
+        output.extend_from_slice(b"abcd");
+        match operation {
+            AppendOperation::Byte => output.push(b'x'),
+            AppendOperation::Slice => output.extend_from_slice(b"efgh"),
+            AppendOperation::Within => output.extend_from_within(1..4),
+        }
+        assert_eq!(output.as_slice(), expected);
+        assert_eq!(output.len(), expected.len());
+        assert_eq!(
+            output.bytes.initialized_len(),
+            initialized.max(expected.len())
+        );
+        assert_eq!(
+            &output.bytes.0[expected.len()..],
+            vec![0xa5; initialized.saturating_sub(expected.len())]
+        );
+        let output = output.into_owned();
+        assert_eq!(output, expected);
+        assert_eq!(output.as_ptr(), pointer);
+        assert_eq!(output.capacity(), capacity);
+    }
+
+    enum AppendOperation {
+        Byte,
+        Slice,
+        Within,
+    }
+
     #[test]
     fn appending_to_a_live_view_preserves_initialized_storage_and_normalizes_the_result() {
         let mut spare = InitializedBuffer::from_vec(vec![0xa5; 32]);
@@ -629,9 +696,14 @@ mod tests {
         assert_eq!(output.as_ptr(), pointer);
     }
 
-    #[test]
-    fn failed_materialization_retains_capacity_without_partial_output() {
-        let mut spare = InitializedBuffer::from_vec(Vec::with_capacity(32));
+    #[rstest]
+    #[case::new_storage(0)]
+    #[case::crossing_initialized_end(1)]
+    #[case::within_initialized_storage(4)]
+    fn failed_materialization_retains_capacity_without_partial_output(#[case] initialized: usize) {
+        let mut bytes = Vec::with_capacity(32);
+        bytes.resize(initialized, 0xa5);
+        let mut spare = InitializedBuffer::from_vec(bytes);
         let pointer = spare.as_ptr();
         let error = FilterBuffer::borrowed(&[1, 2, 3, 4])
             .materialize(&mut spare, |_, output| {
@@ -641,7 +713,7 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(error, Error::UnsupportedFilter(40000));
-        assert_eq!(spare.initialized_len(), 2);
+        assert_eq!(spare.initialized_len(), initialized.max(2));
         assert_eq!(spare.as_ptr(), pointer);
         let output = FilterBuffer::borrowed(&[5, 6])
             .materialize(&mut spare, |input, output| {
