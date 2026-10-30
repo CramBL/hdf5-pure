@@ -67,7 +67,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Performance
 
-- Chunked reads through `Dataset::read_raw` and related writes reuse intermediate shuffle and LZF storage, avoid intermediate Fletcher32 copies, and preserve scale-offset pass-through and raw-payload views. Deflate decoding reuses storage within each chunk's limit, and final chunk buffers remain independently owned.
+- Chunked reads through `Dataset::read_raw` and related writes reuse intermediate shuffle and LZF storage, avoid intermediate Fletcher32 copies, and preserve scale-offset pass-through and raw-payload views. Deflate decoding reuses storage within each chunk's limit, and final chunk buffers remain independently owned ([#983](https://github.com/CramBL/hdf5-pure/pull/983)).
 - `File::dataset` and related group operations use less memory for hard-link targets. Soft and external targets require a separate target allocation.
 - `Source::read_metadata` shares immutable metadata bytes through cached reads, including version 1 chunk-node bodies, and borrows resident input. Cache byte limits cover retained payload capacity, and external owners may extend allocation lifetime ([#958](https://github.com/CramBL/hdf5-pure/pull/958), [#981](https://github.com/CramBL/hdf5-pure/pull/981)).
 - `File::commit` transfers staged overwrite buffers into application and patches deferred variable-length references in place. Separate allocations remain for undo data, encoded output, and backend storage ([#953](https://github.com/CramBL/hdf5-pure/pull/953)).
@@ -81,7 +81,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- Fixed `Dataset::read_raw` panicking on 32-bit targets for malformed scale-offset raw payloads whose declared size is near `usize::MAX`.
+- Fixed `Dataset::read_raw` panicking on 32-bit targets for malformed scale-offset raw payloads whose declared size is near `usize::MAX` ([#983](https://github.com/CramBL/hdf5-pure/pull/983)).
 - Fixed `Dataset::append` accepting malformed Extensible Array metadata required to plan the append, including when checksum verification is disabled for reads ([#973](https://github.com/CramBL/hdf5-pure/pull/973)).
 - Fixed premature publication of Extensible Array page initialization bits in `Dataset::append`. The editor flushes page contents before writing the bit and requests a durability barrier under the Always synchronization policy ([#973](https://github.com/CramBL/hdf5-pure/pull/973)).
 - Fixed `File::open_rw` leaving complete pages inside unaligned generic-large PAGE free sections unavailable for reuse, while partial edges remain unclassified ([#973](https://github.com/CramBL/hdf5-pure/pull/973)).

@@ -1,4 +1,4 @@
-//! Deterministic dataset inputs shared by filtered-creation measurements.
+//! Deterministic inputs and filter cases for creation and pipeline measurements.
 
 /// Dataset geometry, filter selection, and value generation for one measurement.
 #[derive(Clone, Copy, Debug)]
@@ -84,4 +84,144 @@ pub const WORKLOADS: [Workload; 5] = [
         lzf: false,
         random: true,
     },
+];
+
+/// A pipeline or compressor control for allocation and throughput measurements.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PipelineCase {
+    /// Deflate without shuffle.
+    Deflate,
+    /// Deflate followed by Fletcher32, without shuffle.
+    DeflateFletcher32,
+    /// Fletcher32 alone.
+    Fletcher32,
+    /// LZF without shuffle.
+    Lzf,
+    /// Byte shuffle alone.
+    Shuffle,
+    /// Byte shuffle followed by Deflate.
+    ShuffleDeflate,
+    /// Byte shuffle, Deflate, then Fletcher32.
+    ShuffleDeflateFletcher32,
+    /// Byte shuffle followed by Fletcher32.
+    ShuffleFletcher32,
+    /// Byte shuffle followed by LZF.
+    ShuffleLzf,
+}
+
+impl PipelineCase {
+    /// Returns the label used in measurement output.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Deflate => "deflate",
+            Self::DeflateFletcher32 => "deflate_fletcher32",
+            Self::Fletcher32 => "fletcher32",
+            Self::Lzf => "lzf",
+            Self::Shuffle => "shuffle",
+            Self::ShuffleDeflate => "shuffle_deflate",
+            Self::ShuffleDeflateFletcher32 => "shuffle_deflate_fletcher32",
+            Self::ShuffleFletcher32 => "shuffle_fletcher32",
+            Self::ShuffleLzf => "shuffle_lzf",
+        }
+    }
+
+    /// Returns the stages in forward execution order.
+    pub fn filters(self) -> &'static [PipelineFilter] {
+        use PipelineFilter::{Deflate, Fletcher32, Lzf, Shuffle};
+        match self {
+            Self::Deflate => &[Deflate],
+            Self::DeflateFletcher32 => &[Deflate, Fletcher32],
+            Self::Fletcher32 => &[Fletcher32],
+            Self::Lzf => &[Lzf],
+            Self::Shuffle => &[Shuffle],
+            Self::ShuffleDeflate => &[Shuffle, Deflate],
+            Self::ShuffleDeflateFletcher32 => &[Shuffle, Deflate, Fletcher32],
+            Self::ShuffleFletcher32 => &[Shuffle, Fletcher32],
+            Self::ShuffleLzf => &[Shuffle, Lzf],
+        }
+    }
+
+    /// Returns the LZF or Deflate pipeline without shuffle.
+    ///
+    /// Checksum stages are preserved. Returns [`None`] for cases without a compressor preceded
+    /// by shuffle.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use test_util::filtered_chunks::PipelineCase;
+    ///
+    /// assert_eq!(
+    ///     PipelineCase::ShuffleLzf.codec_control(),
+    ///     Some(PipelineCase::Lzf),
+    /// );
+    /// ```
+    pub fn codec_control(self) -> Option<Self> {
+        match self {
+            Self::ShuffleDeflate => Some(Self::Deflate),
+            Self::ShuffleDeflateFletcher32 => Some(Self::DeflateFletcher32),
+            Self::ShuffleLzf => Some(Self::Lzf),
+            _ => None,
+        }
+    }
+}
+
+/// A byte stage in a measurement pipeline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PipelineFilter {
+    /// The zlib codec.
+    Deflate,
+    /// The Fletcher32 checksum.
+    Fletcher32,
+    /// The raw LZF codec.
+    Lzf,
+    /// Byte shuffling by element width.
+    Shuffle,
+}
+
+/// The direction of one filter pipeline operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Direction {
+    /// Reverses the pipeline from last stage to first.
+    Decode,
+    /// Applies the stages in forward order.
+    Encode,
+}
+
+impl Direction {
+    /// Returns the label used in measurement output.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Decode => "decode",
+            Self::Encode => "encode",
+        }
+    }
+}
+
+/// Returns `elements` four-byte little-endian values cycling from zero through 31.
+pub fn pipeline_data(elements: usize) -> Vec<u8> {
+    (0..elements)
+        .flat_map(|index| u32::try_from(index % 32).unwrap().to_le_bytes())
+        .collect()
+}
+
+/// Groups bytes of complete four-byte elements by byte position, preserving trailing bytes.
+pub fn shuffled_pipeline_data(raw: &[u8]) -> Vec<u8> {
+    let (elements, tail) = raw.as_chunks::<4>();
+    (0..4)
+        .flat_map(|byte| elements.iter().map(move |element| element[byte]))
+        .chain(tail.iter().copied())
+        .collect()
+}
+
+/// Filter combinations for the direct allocation and throughput workloads.
+///
+/// Compressor controls are selected through [`PipelineCase::codec_control`].
+pub const PIPELINES: [PipelineCase; 6] = [
+    PipelineCase::Shuffle,
+    PipelineCase::Fletcher32,
+    PipelineCase::ShuffleFletcher32,
+    PipelineCase::ShuffleLzf,
+    PipelineCase::ShuffleDeflate,
+    PipelineCase::ShuffleDeflateFletcher32,
 ];

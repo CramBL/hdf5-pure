@@ -22,7 +22,9 @@ hdf5-pure-core.workspace = true
 flate2 = { version = "1", optional = true, default-features = false, features = ["rust_backend"] }
 
 [dev-dependencies]
+heapscope.workspace = true
 rstest.workspace = true
+test-util.workspace = true
 
 [lints]
 workspace = true
