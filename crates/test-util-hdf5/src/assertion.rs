@@ -135,6 +135,48 @@ pub enum StatusOpen<'a> {
     Write(&'a Path),
 }
 
+impl StatusOpen<'_> {
+    /// Returns the expected diagnostic, including the target and recovery instructions.
+    pub fn message(self, flags: SuperblockStatusFlags) -> String {
+        let target = match self {
+            StatusOpen::Read(path) | StatusOpen::SwmrRead(path) | StatusOpen::Write(path) => {
+                path.display().to_string()
+            }
+            StatusOpen::SourceRead => "a byte source".into(),
+        };
+        let swmr = flags.contains(SuperblockStatusFlag::SwmrWriteAccess);
+        let flags = flags.bits();
+        let reason = match self {
+            StatusOpen::Write(_) => format!(
+                "the superblock marks the file as open for write (status flags {flags:#04x}), so another writer holds it. Open it read-only, or — if a writer exited without closing the file — clear the flag with File::clear_status_flags"
+            ),
+            StatusOpen::SwmrRead(_) => format!(
+                "the superblock's status flags disagree ({flags:#04x}): a SWMR reader needs a SWMR writer (both the write and SWMR-write bits) or a quiescent file (neither). Clear them with File::clear_status_flags if a writer exited without closing the file"
+            ),
+            StatusOpen::Read(_) | StatusOpen::SourceRead => {
+                let recovery = match (matches!(self, StatusOpen::SourceRead), swmr) {
+                    (false, true) => {
+                        "Use File::open_swmr to follow a live SWMR writer, or File::from_bytes to read the bytes as they stand; if a writer exited without closing the file, clear the flag with File::clear_status_flags"
+                    }
+                    (true, true) => {
+                        "Use File::from_bytes to read the bytes as they stand; following a live writer with File::open_swmr, and clearing a flag a writer left behind with File::clear_status_flags, both need a filesystem path"
+                    }
+                    (false, false) => {
+                        "No SWMR writer holds it, so no reader can follow it as one. Pass FileAccessProperties::with_write_mark_policy(WriteMarkPolicy::AllowSnapshot) to read it as it stands, which is a consistent snapshot once the writer has called File::sync or closed the file, or use File::from_bytes to read the bytes as they stand; if a writer exited without closing the file, clear the flag with File::clear_status_flags"
+                    }
+                    (true, false) => {
+                        "No SWMR writer holds it, so no reader can follow it as one. Pass FileAccessProperties::with_write_mark_policy(WriteMarkPolicy::AllowSnapshot) to read it as it stands, which is a consistent snapshot once the writer has called File::sync or closed the file, or use File::from_bytes to read the bytes as they stand; clearing a flag a writer left behind with File::clear_status_flags needs a filesystem path"
+                    }
+                };
+                format!(
+                    "the superblock marks the file as open for write (status flags {flags:#04x}), so a snapshot read is not safe. {recovery}"
+                )
+            }
+        };
+        format!("{target}: {reason}.")
+    }
+}
+
 /// Asserts [`Error::FileMarkedInUse`] with the complete diagnostic for `flags` and `open`.
 ///
 /// # Panics
@@ -146,40 +188,5 @@ pub fn file_marked_in_use(error: Error, flags: SuperblockStatusFlags, open: Stat
     let Error::FileMarkedInUse(actual) = error else {
         panic!("{error:?}");
     };
-    let target = match open {
-        StatusOpen::Read(path) | StatusOpen::SwmrRead(path) | StatusOpen::Write(path) => {
-            path.display().to_string()
-        }
-        StatusOpen::SourceRead => "a byte source".into(),
-    };
-    let swmr = flags.contains(SuperblockStatusFlag::SwmrWriteAccess);
-    let flags = flags.bits();
-    let reason = match open {
-        StatusOpen::Write(_) => format!(
-            "the superblock marks the file as open for write (status flags {flags:#04x}), so another writer holds it. Open it read-only, or — if a writer exited without closing the file — clear the flag with File::clear_status_flags"
-        ),
-        StatusOpen::SwmrRead(_) => format!(
-            "the superblock's status flags disagree ({flags:#04x}): a SWMR reader needs a SWMR writer (both the write and SWMR-write bits) or a quiescent file (neither). Clear them with File::clear_status_flags if a writer exited without closing the file"
-        ),
-        StatusOpen::Read(_) | StatusOpen::SourceRead => {
-            let recovery = match (matches!(open, StatusOpen::SourceRead), swmr) {
-                (false, true) => {
-                    "Use File::open_swmr to follow a live SWMR writer, or File::from_bytes to read the bytes as they stand; if a writer exited without closing the file, clear the flag with File::clear_status_flags"
-                }
-                (true, true) => {
-                    "Use File::from_bytes to read the bytes as they stand; following a live writer with File::open_swmr, and clearing a flag a writer left behind with File::clear_status_flags, both need a filesystem path"
-                }
-                (false, false) => {
-                    "No SWMR writer holds it, so no reader can follow it as one. Pass FileAccessProperties::with_write_mark_policy(WriteMarkPolicy::AllowSnapshot) to read it as it stands, which is a consistent snapshot once the writer has called File::sync or closed the file, or use File::from_bytes to read the bytes as they stand; if a writer exited without closing the file, clear the flag with File::clear_status_flags"
-                }
-                (true, false) => {
-                    "No SWMR writer holds it, so no reader can follow it as one. Pass FileAccessProperties::with_write_mark_policy(WriteMarkPolicy::AllowSnapshot) to read it as it stands, which is a consistent snapshot once the writer has called File::sync or closed the file, or use File::from_bytes to read the bytes as they stand; clearing a flag a writer left behind with File::clear_status_flags needs a filesystem path"
-                }
-            };
-            format!(
-                "the superblock marks the file as open for write (status flags {flags:#04x}), so a snapshot read is not safe. {recovery}"
-            )
-        }
-    };
-    assert_eq!(actual, format!("{target}: {reason}."));
+    assert_eq!(actual, open.message(flags));
 }
