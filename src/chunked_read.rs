@@ -445,8 +445,9 @@ fn collect_chunk_btree_node_spans_inner<S: Source + ?Sized>(
     }
     // Reading the node is also the bounds check: a node claiming to run past
     // end-of-file fails here rather than being recorded as reclaimable.
+    let metadata = SourceMetadata(source);
     let bytes = BTreeV1ChunkNodeBytes::read_from_source_with_offset_width(
-        &SourceMetadata(source),
+        &metadata,
         btree_address.get(),
         offset_width,
         ndims,
@@ -471,12 +472,16 @@ fn collect_chunk_btree_node_spans_inner<S: Source + ?Sized>(
     Ok(())
 }
 
-/// Traverse B-tree v1 type 1 from a [`Source`], reading each node on demand.
+/// Traverses a version 1 B-tree of node type 1 from a [`Source`], reading each node on demand.
 ///
-/// The streaming counterpart of [`collect_chunk_info`]: it reads the node header
-/// and the key/child region as two bounded windows via `read_at`, recursing into
-/// child nodes by reading their regions, so the index can be walked without a
-/// whole-file buffer.
+/// The streaming counterpart of [`collect_chunk_info`]. Reads each node's 8-byte prefix and
+/// remaining body through [`Source::read_metadata`]. Node views borrow the returned bytes while
+/// the traversal descends into children.
+///
+/// # Errors
+///
+/// Returns [`FormatError::ChunkedReadError`] if the traversal depth exceeds
+/// [`MAX_CHUNK_BTREE_DEPTH`], and errors from reading or parsing any node.
 pub fn collect_chunk_info_from_source<S: Source + ?Sized>(
     source: &S,
     btree_address: StoredAddress,
@@ -500,8 +505,9 @@ fn collect_chunk_info_from_source_inner<S: Source + ?Sized>(
             "chunk B-tree nested too deeply".into(),
         ));
     }
+    let metadata = SourceMetadata(source);
     let bytes = BTreeV1ChunkNodeBytes::read_from_source_with_offset_width(
-        &SourceMetadata(source),
+        &metadata,
         btree_address.get(),
         offset_width,
         ndims,
@@ -2894,12 +2900,16 @@ mod tests {
 
     use super::*;
     use crate::FillTime;
+    #[cfg(feature = "std")]
+    use crate::address::{BaseAddress, BaseAddressExt};
     use crate::chunked_write::ChunkArrayKind;
     use crate::convert;
     use crate::dataspace::MaxExtent;
     use crate::filter_pipeline::FilterDescription;
     #[cfg(feature = "std")]
     use crate::source::ReadSeekSource;
+    #[cfg(feature = "std")]
+    use crate::source::{BaseOffsetSource, MetadataCacheConfig, MetadataCachingSource};
 
     const FORMAT_WIDTHS: FormatWidths = FormatWidths {
         offsets: OffsetWidth::Eight,
@@ -4739,6 +4749,261 @@ mod tests {
                 (l1 as u64, leaf1.len() as u64),
                 (root as u64, internal.len() as u64),
             ]
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[rstest]
+    #[case::borrowed(0, false)]
+    #[case::borrowed_userblock(512, false)]
+    #[case::cached(0, true)]
+    #[case::cached_userblock(512, true)]
+    fn btree_v1_traversals_preserve_multilevel_nodes(#[case] base: usize, #[case] cached: bool) {
+        let chunks = vec![
+            ChunkInfo {
+                chunk_size: StoredChunkSize::btree_v1(40),
+                filter_mask: 0,
+                offsets: vec![0, 0],
+                address: StoredAddress::new(0x1000),
+            },
+            ChunkInfo {
+                chunk_size: StoredChunkSize::btree_v1(24),
+                filter_mask: 2,
+                offsets: vec![10, 0],
+                address: StoredAddress::new(0x2000),
+            },
+        ];
+        let nodes = [
+            (
+                0x100,
+                build_chunk_btree_internal(2, &[0x200, 0x300], 2, WIDTHS),
+            ),
+            (0x200, build_chunk_btree_internal(1, &[0x400], 2, WIDTHS)),
+            (0x400, build_chunk_btree_leaf(&chunks[..1], 2, WIDTHS)),
+            (0x300, build_chunk_btree_internal(1, &[0x500], 2, WIDTHS)),
+            (0x500, build_chunk_btree_leaf(&chunks[1..], 2, WIDTHS)),
+        ];
+        let mut image = test_util::image::Image::new();
+        for (address, bytes) in &nodes {
+            image.place(base + address, bytes);
+        }
+        let source: Box<dyn Source> = if cached {
+            Box::new(MetadataCachingSource::new(
+                ReadSeekSource::new(Cursor::new(image.build())).unwrap(),
+                MetadataCacheConfig::new(4096),
+            ))
+        } else {
+            Box::new(BytesSource::new(image.build()))
+        };
+        let framed = BaseOffsetSource {
+            inner: source.as_ref(),
+            base: BaseAddress::new(base.to_u64()),
+        };
+        let metadata = SourceMetadata(&framed);
+        let parent = BTreeV1ChunkNodeBytes::read_from_source(&metadata, 0x100, 8, 2).unwrap();
+        let node = parent.node();
+        let mut children = node.children();
+        assert_eq!(children.next().unwrap().unwrap(), StoredAddress::new(0x200));
+        assert_eq!(
+            collect_chunk_info_from_source(
+                &framed,
+                StoredAddress::new(0x200),
+                2,
+                OffsetWidth::Eight
+            )
+            .unwrap(),
+            chunks[..1]
+        );
+        assert_eq!(children.next().unwrap().unwrap(), StoredAddress::new(0x300));
+        assert!(children.next().is_none());
+        assert_eq!(node.stored_len(), nodes[0].1.len());
+        assert_eq!(
+            collect_chunk_info_from_source(
+                &framed,
+                StoredAddress::new(0x100),
+                2,
+                OffsetWidth::Eight
+            )
+            .unwrap(),
+            chunks
+        );
+        assert_eq!(
+            collect_chunk_btree_node_spans(
+                &framed,
+                StoredAddress::new(0x100),
+                2,
+                OffsetWidth::Eight
+            )
+            .unwrap(),
+            nodes
+                .iter()
+                .map(|(address, bytes)| (address.to_u64(), bytes.len().to_u64()))
+                .collect::<Vec<_>>()
+        );
+        let stats = source.metadata_cache_stats();
+        if cached {
+            let stats = stats.unwrap();
+            assert_eq!(
+                (stats.misses(), stats.entries(), stats.evictions()),
+                (10, 10, 0)
+            );
+            assert!(stats.hits() > 0);
+            let first = framed.read_metadata(0x108, nodes[0].1.len() - 8).unwrap();
+            let second = framed.read_metadata(0x108, nodes[0].1.len() - 8).unwrap();
+            assert_eq!(first.offset(), base.to_u64() + 0x108);
+            assert_eq!(first.as_ptr(), second.as_ptr());
+        } else {
+            assert_eq!(stats, None);
+        }
+    }
+
+    #[rstest]
+    #[case::invalid_signature(false)]
+    #[case::truncated_body(true)]
+    fn btree_v1_traversals_reject_a_failing_descendant(#[case] truncated: bool) {
+        let root = build_chunk_btree_internal(1, &[0x100, 0x200], 2, WIDTHS);
+        let leaf = build_chunk_btree_leaf(&[], 2, WIDTHS);
+        let mut image = test_util::image::Image::new();
+        image.place(0, &root);
+        image.place(0x100, &leaf);
+        let mut descendant = leaf.clone();
+        let expected = if truncated {
+            descendant.pop();
+            FormatError::UnexpectedSourceEof {
+                expected: 0x200 + leaf.len().to_u64(),
+                available: 0x200 + descendant.len().to_u64(),
+            }
+        } else {
+            descendant[0] = b'X';
+            FormatError::InvalidBTreeSignature
+        };
+        image.place(0x200, &descendant);
+        let source = BytesSource::new(image.build());
+        assert_eq!(
+            collect_chunk_info_from_source(&source, StoredAddress::new(0), 2, OffsetWidth::Eight)
+                .unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            collect_chunk_btree_node_spans(&source, StoredAddress::new(0), 2, OffsetWidth::Eight)
+                .unwrap_err(),
+            expected
+        );
+    }
+
+    #[test]
+    fn btree_v1_source_traversals_reject_excessive_depth() {
+        let bytes = build_chunk_btree_internal(1, &[0], 2, WIDTHS);
+        let source = BytesSource::new(bytes);
+        let expected = FormatError::ChunkedReadError("chunk B-tree nested too deeply".into());
+        assert_eq!(
+            collect_chunk_info_from_source(&source, StoredAddress::new(0), 2, OffsetWidth::Eight)
+                .unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            collect_chunk_btree_node_spans(&source, StoredAddress::new(0), 2, OffsetWidth::Eight)
+                .unwrap_err(),
+            expected
+        );
+    }
+
+    #[cfg(all(feature = "std", any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[rstest]
+    #[case::small(
+        2048,
+        "v1_owner_cold_small",
+        "v1_owner_warm_small",
+        "v1_owner_copy_small"
+    )]
+    #[case::large(
+        8192,
+        "v1_owner_cold_large",
+        "v1_owner_warm_large",
+        "v1_owner_copy_large"
+    )]
+    fn btree_v1_cached_acquisition_allocates_no_second_payload(
+        #[case] entries: usize,
+        #[case] cold_region: &str,
+        #[case] warm_region: &str,
+        #[case] control_region: &str,
+    ) {
+        struct NodeSource {
+            prefix: Vec<u8>,
+            body: core::cell::Cell<Option<Vec<u8>>>,
+            len: u64,
+        }
+
+        impl Source for NodeSource {
+            fn len(&self) -> u64 {
+                self.len
+            }
+
+            fn read_at(&self, _offset: u64, _buf: &mut [u8]) -> Result<(), FormatError> {
+                Err(FormatError::Source("unexpected payload read".into()))
+            }
+
+            fn read_metadata_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, FormatError> {
+                let bytes = match offset {
+                    0 => self.prefix.clone(),
+                    8 => self.body.take().unwrap(),
+                    _ => return Err(FormatError::Source("unexpected metadata offset".into())),
+                };
+                if bytes.len() != len {
+                    return Err(FormatError::DataSizeMismatch {
+                        expected: len,
+                        actual: bytes.len(),
+                    });
+                }
+                Ok(bytes)
+            }
+        }
+
+        let mut bytes = build_chunk_btree_internal(1, &vec![0x1000; entries], 2, WIDTHS);
+        let node_len = bytes.len();
+        let body = bytes.split_off(8);
+        let pointer = body.as_ptr();
+        let body_len = body.len();
+        let (copy, control) = test_util::allocation::measure(control_region, || body.clone());
+        assert_eq!(copy, body);
+        assert!(control.bytes >= body_len.to_u64(), "{control}");
+        assert!(control.blocks > 0, "{control}");
+        drop(copy);
+        let source = MetadataCachingSource::new(
+            NodeSource {
+                prefix: bytes,
+                body: core::cell::Cell::new(Some(body)),
+                len: node_len.to_u64(),
+            },
+            MetadataCacheConfig::new(node_len * 2).with_max_entry_bytes(body_len),
+        );
+        let metadata = SourceMetadata(&source);
+        let (cold, admission) = test_util::allocation::measure(cold_region, || {
+            BTreeV1ChunkNodeBytes::read_from_source(&metadata, 0, 8, 2).unwrap()
+        });
+        assert_eq!(source.read_metadata(8, body_len).unwrap().as_ptr(), pointer);
+        let (warm, measured) = test_util::allocation::measure(warm_region, || {
+            BTreeV1ChunkNodeBytes::read_from_source(&metadata, 0, 8, 2).unwrap()
+        });
+        assert_eq!(source.read_metadata(8, body_len).unwrap().as_ptr(), pointer);
+        for node in [cold.node(), warm.node()] {
+            assert_eq!(
+                (node.node_level(), node.entries_used(), node.stored_len()),
+                (1, u16::try_from(entries).unwrap(), node_len)
+            );
+            assert_eq!(
+                node.children().map(Result::unwrap).collect::<Vec<_>>(),
+                vec![StoredAddress::new(0x1000); entries]
+            );
+        }
+        assert!(admission.bytes < 16_384, "{admission}");
+        assert!(admission.peak_bytes < 16_384, "{admission}");
+        assert!(measured.bytes < 16_384, "{measured}");
+        assert!(measured.peak_bytes < 16_384, "{measured}");
+        let stats = source.metadata_cache_stats().unwrap();
+        assert_eq!(
+            (stats.misses(), stats.hits(), stats.entries(), stats.bytes()),
+            (2, 4, 2, node_len)
         );
     }
 

@@ -68,7 +68,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Performance
 
 - `File::dataset` and related group operations use less memory for hard-link targets. Soft and external targets require a separate target allocation.
-- `Source::read_metadata` shares immutable metadata bytes through cached reads and borrows resident input. Cache byte limits cover retained payload capacity, and external owners may extend allocation lifetime ([#958](https://github.com/CramBL/hdf5-pure/pull/958)).
+- `Source::read_metadata` shares immutable metadata bytes through cached reads, including version 1 chunk-node bodies, and borrows resident input. Cache byte limits cover retained payload capacity, and external owners may extend allocation lifetime ([#958](https://github.com/CramBL/hdf5-pure/pull/958)).
 - `File::commit` transfers staged overwrite buffers into application and patches deferred variable-length references in place. Separate allocations remain for undo data, encoded output, and backend storage ([#953](https://github.com/CramBL/hdf5-pure/pull/953)).
 - `repack` reduces peak metadata memory by retaining compact layout records and reconstructing one object's metadata at a time. Metadata is read again during planning and emission ([#959](https://github.com/CramBL/hdf5-pure/pull/959)).
 - `FileBuilder::finish` and in-place edits reuse dense-attribute heap and index plans through reference resolution and emission ([#947](https://github.com/CramBL/hdf5-pure/pull/947)).
