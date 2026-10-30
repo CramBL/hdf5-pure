@@ -68,10 +68,9 @@ fn bounded_batched_large_append_reads_back_in_c() {
         ds.append(&(3..total).collect::<Vec<i32>>()).unwrap();
     }
 
-    let got = dataset::read_libhdf5::<i32>(&path, "d");
-    assert_eq!(got.len(), total as usize);
-    assert!(got.iter().enumerate().all(|(i, &v)| v == i as i32));
-    assert_eq!(dataset::read_pure::<i32>(&path, "d").len(), total as usize);
+    let expected: Vec<i32> = (0..total).collect();
+    assert_eq!(dataset::read_libhdf5::<i32>(&path, "d"), expected);
+    assert_eq!(dataset::read_pure::<i32>(&path, "d"), expected);
 }
 
 /// A persisting file (this crate's writer, `persist = true`, non-paged) grown
@@ -100,16 +99,13 @@ fn bounded_persist_finalize_reads_back_in_c() {
     let f = hdf5::File::open(&path).unwrap();
     assert_eq!(f.dataset("d").unwrap().read_raw::<i32>().unwrap(), expected);
     let strategy = f.create_plist().unwrap().get_file_space_strategy().unwrap();
-    assert!(
-        matches!(
-            strategy,
-            CStrategy::FreeSpaceManager {
-                paged: false,
-                persist: true,
-                ..
-            }
-        ),
-        "C recovers our persisting FSM strategy, got {strategy:?}"
+    assert_eq!(
+        strategy,
+        CStrategy::FreeSpaceManager {
+            paged: false,
+            persist: true,
+            threshold: 1,
+        }
     );
     let free = f.free_space() as i64;
     assert!(

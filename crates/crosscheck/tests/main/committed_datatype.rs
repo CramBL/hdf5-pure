@@ -33,9 +33,10 @@ use hdf5_pure::StringPadding;
 use hdf5_pure::UserblockSize;
 use hdf5_pure::VariableLengthStringType;
 use hdf5_pure::VariableLengthType;
-use hdf5_pure::{AttrValue, Datatype, File, RepackOptions};
+use hdf5_pure::{AttrValue, Datatype, Error, File, FormatError, RepackOptions};
 use rstest::rstest;
 
+use test_util_hdf5::assertion;
 use test_util_hdf5::file;
 
 /// What a fixture puts in the file, so every assertion below names one constant
@@ -363,10 +364,9 @@ fn a_cross_file_copy_refuses_a_committed_attribute() {
     let err = dest
         .copy_from(&source, "data", "data")
         .expect_err("a committed attribute must not cross files");
-    let message = err.to_string();
-    assert!(
-        message.contains("committed"),
-        "the refusal must name the committed datatype, got: {message}"
+    assertion::edit_unsupported(
+        err,
+        "an attribute with a committed (shared) datatype cannot be copied to another file yet",
     );
 }
 
@@ -391,10 +391,9 @@ fn an_in_place_append_refuses_a_committed_element_type() {
     let err = typed
         .append(&[40i32])
         .expect_err("an append must not size its elements from a reference");
-    let message = err.to_string();
-    assert!(
-        message.contains("committed (shared) datatype"),
-        "the refusal must name the committed datatype, got: {message}"
+    assertion::append_in_place_unsupported(
+        err,
+        "dataset has a committed (shared) datatype, dataspace, or filter pipeline",
     );
 }
 
@@ -714,54 +713,37 @@ fn write_pure_committed_string_fixture(path: &Path) {
 /// produce a reference to nothing, so it is refused where the naming object is
 /// still known. The unreferenced case is the control: with nothing naming it, the
 /// same drop is an ordinary one.
-#[test]
-fn repack_refuses_dropping_a_committed_type_still_in_use() {
+#[rstest]
+#[case::dataset(Fixture { committed_dataset: true, ..Fixture::default() }, Some(r#"dataset typed: names the committed datatype "mytype", which this repack drops"#))]
+#[case::attribute(Fixture { committed_attrs: true, ..Fixture::default() }, Some(r#"dataset data attribute "shared_attr": names the committed datatype "mytype", which this repack drops"#))]
+#[case::unused(Fixture::default(), None)]
+fn repack_refuses_dropping_a_committed_type_still_in_use(
+    #[case] fixture: Fixture,
+    #[case] expected: Option<&str>,
+) {
     let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("committed.h5");
+    let dst = dir.path().join("repacked.h5");
+    write_committed_fixture(&src, fixture);
 
-    for (what, fixture, expected) in [
-        (
-            "a dataset element type",
-            Fixture {
-                committed_dataset: true,
-                ..Fixture::default()
-            },
-            Some("dataset typed: names the committed datatype"),
-        ),
-        (
-            "an attribute datatype",
-            Fixture {
-                committed_attrs: true,
-                ..Fixture::default()
-            },
-            Some("attribute \"shared_attr\": names the committed datatype"),
-        ),
-        // Nothing names it, so dropping it is just a drop.
-        ("nothing", Fixture::default(), None),
-    ] {
-        let src = dir.path().join("committed.h5");
-        let dst = dir.path().join("repacked.h5");
-        let _ = std::fs::remove_file(&src);
-        let _ = std::fs::remove_file(&dst);
-        write_committed_fixture(&src, fixture);
-
-        let options = RepackOptions::new().drop_path("mytype");
-        let result = hdf5_pure::repack(&src, &dst, &options);
-        match expected {
-            Some(expected) => {
-                let message = result
-                    .expect_err("dropping a type in use must fail")
-                    .to_string();
-                assert!(
-                    message.contains(expected),
-                    "dropping the type {what} names must say so; expected {expected:?}, \
-                     got: {message}"
-                );
-            }
-            None => {
-                result.expect("dropping an unreferenced committed type is an ordinary drop");
-                let out = File::open(&dst).unwrap();
-                assert!(out.root().named_datatypes().unwrap().is_empty());
-            }
+    let result = hdf5_pure::repack(&src, &dst, &RepackOptions::new().drop_path("mytype"));
+    match expected {
+        Some(reason) => {
+            assertion::repack_unsupported(result.unwrap_err(), reason);
+            assert!(!dst.exists());
+        }
+        None => {
+            result.unwrap();
+            let out = File::open(&dst).unwrap();
+            assert!(out.root().named_datatypes().unwrap().is_empty());
+            assert_eq!(out.dataset("data").unwrap().read_f64().unwrap(), [1.0]);
+            out.close().unwrap();
+            let native = hdf5::File::open(&dst).unwrap();
+            assert_eq!(
+                native.dataset("data").unwrap().read_raw::<f64>().unwrap(),
+                [1.0]
+            );
+            native.close().unwrap();
         }
     }
 }
@@ -927,10 +909,16 @@ fn a_dataset_naming_a_type_it_does_not_match_is_refused() {
         .create_dataset("typed")
         .with_i32_data(&DATASET_VALUES)
         .with_committed_datatype("mytype");
-    let message = builder.finish().unwrap_err().to_string();
-    assert!(
-        message.contains("names the committed datatype") && message.contains("mytype"),
-        "expected a mismatch refusal naming the type, got: {message}"
+    let error = builder.finish().unwrap_err();
+    let Error::Format(actual) = error else {
+        panic!("expected CommittedDatatypeMismatch, got {error:?}");
+    };
+    assert_eq!(
+        actual,
+        FormatError::CommittedDatatypeMismatch {
+            path: "mytype".into(),
+            user: r#"dataset "typed""#.into(),
+        }
     );
 }
 
@@ -943,10 +931,13 @@ fn a_dataset_naming_a_type_the_file_does_not_commit_is_refused() {
         .create_dataset("typed")
         .with_i32_data(&DATASET_VALUES)
         .with_committed_datatype("nosuchtype");
-    let message = builder.finish().unwrap_err().to_string();
-    assert!(
-        message.contains("no committed datatype is written at path \"nosuchtype\""),
-        "expected an unknown-path refusal, got: {message}"
+    let error = builder.finish().unwrap_err();
+    let Error::Format(actual) = error else {
+        panic!("expected UnknownCommittedDatatype, got {error:?}");
+    };
+    assert_eq!(
+        actual,
+        FormatError::UnknownCommittedDatatype("nosuchtype".into())
     );
 }
 
@@ -972,13 +963,11 @@ fn repack_refuses_dropping_the_group_a_named_type_lives_in() {
     }
 
     let options = RepackOptions::new().drop_path("types");
-    let message = hdf5_pure::repack(&src, &dst, &options)
-        .expect_err("dropping the group the type lives in must fail")
-        .to_string();
-    assert!(
-        message.contains("types/mytype") && message.contains("drops"),
-        "the refusal must name the type inside the dropped group, got: {message}"
+    assertion::repack_unsupported(
+        hdf5_pure::repack(&src, &dst, &options).unwrap_err(),
+        r#"dataset typed: names the committed datatype "types/mytype", which this repack drops"#,
     );
+    assert!(!dst.exists());
 }
 
 /// An object reference *to* a committed datatype crosses a repack, pointing at
@@ -1033,8 +1022,10 @@ fn an_object_reference_to_a_committed_type_survives_a_repack() {
 /// nowhere to place the named type object and nothing to resolve the path
 /// against. Inlining would produce a dataset that reads back correctly while no
 /// longer sharing the named type — the silent degradation this crate refuses.
-#[test]
-fn an_in_place_edit_refuses_a_committed_datatype() {
+#[rstest]
+#[case::dataset(false)]
+#[case::attribute(true)]
+fn an_in_place_edit_refuses_a_committed_datatype(#[case] attribute: bool) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("edit.h5");
 
@@ -1045,41 +1036,23 @@ fn an_in_place_edit_refuses_a_committed_datatype() {
         .with_i32_data(&DATASET_VALUES);
     builder.write(&path).expect("write the base file");
 
-    #[expect(
-        clippy::type_complexity,
-        reason = "two named edits share one loop body"
-    )]
-    let cases: [(&str, &dyn Fn(&mut hdf5_pure::DatasetBuilder)); 2] = [
-        (
-            "a dataset element type",
-            &|db: &mut hdf5_pure::DatasetBuilder| {
-                db.with_i32_data(&DATASET_VALUES)
-                    .with_committed_datatype("mytype");
-            },
-        ),
-        (
-            "an attribute datatype",
-            &|db: &mut hdf5_pure::DatasetBuilder| {
-                db.with_i32_data(&DATASET_VALUES).set_attr_committed(
-                    "a",
-                    AttrValue::I32(ATTR_VALUE),
-                    "mytype",
-                );
-            },
-        ),
-    ];
-    for (what, configure) in cases {
-        let file = File::open_rw(&path).expect("open for editing");
-        let message = file
-            .root()
-            .create_dataset("added", |db| configure(db))
-            .expect_err("naming a committed type in place must fail")
-            .to_string();
-        assert!(
-            message.contains("committed"),
-            "the refusal must name what it refused ({what}), got: {message}"
-        );
-    }
+    let file = File::open_rw(&path).expect("open for editing");
+    let error = file
+        .root()
+        .create_dataset("added", |builder| {
+            builder.with_i32_data(&DATASET_VALUES);
+            if attribute {
+                builder.set_attr_committed("a", AttrValue::I32(ATTR_VALUE), "mytype");
+            } else {
+                builder.with_committed_datatype("mytype");
+            }
+        })
+        .unwrap_err();
+    assertion::edit_unsupported(
+        error,
+        "a dataset or attribute naming a committed (shared) datatype cannot be added in place; write the file with FileBuilder instead",
+    );
+    file.close().unwrap();
 
     // The file is unchanged: a refused edit adds nothing.
     let out = File::open(&path).unwrap();
@@ -1131,17 +1104,17 @@ fn only_what_the_c_library_calls_a_named_datatype_is_accepted() {
                 committed_i32(),
                 "{name} is a named datatype to the C library"
             );
-            root.named_datatype_references(name)
-                .expect("a committed type must count");
+            assert_eq!(root.named_datatype_references(name).unwrap(), 4);
         } else {
             assert!(
                 matches!(&got, Err(hdf5_pure::Error::NotANamedDatatype(p)) if p == name),
                 "{name} is {c_says:?} to the C library, and answered {got:?}"
             );
-            assert!(matches!(
-                root.named_datatype_references(name),
-                Err(hdf5_pure::Error::NotANamedDatatype(_))
-            ));
+            let error = root.named_datatype_references(name).unwrap_err();
+            let Error::NotANamedDatatype(path) = error else {
+                panic!("expected NotANamedDatatype, got {error:?}");
+            };
+            assert_eq!(&path, name);
         }
     }
 

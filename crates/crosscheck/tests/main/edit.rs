@@ -1186,9 +1186,9 @@ fn overwriting_multiply_linked_chunked_that_relocates_is_refused() {
             })
             .unwrap();
         let err = session.commit().unwrap_err();
-        assert!(
-            err.to_string().contains("single hard link"),
-            "expected multi-link relocate refusal, got: {err}"
+        assertion::edit_unsupported(
+            err,
+            "overwriting a dataset that resizes or relocates its header is only supported when it has a single hard link",
         );
     }
     assert_eq!(
@@ -1764,9 +1764,9 @@ fn write_dataset_relocate_with_multiple_hard_links_is_refused() {
             })
             .unwrap();
         let err = session.commit().unwrap_err();
-        assert!(
-            err.to_string().contains("single hard link"),
-            "expected multi-link refusal, got: {err}"
+        assertion::edit_unsupported(
+            err,
+            "overwriting a dataset that resizes or relocates its header is only supported when it has a single hard link",
         );
     }
     assert_eq!(
@@ -1909,9 +1909,9 @@ fn editing_a_hard_linked_group_is_refused() {
         })
         .unwrap();
     let refused = session.commit().unwrap_err();
-    assert!(
-        refused.to_string().contains("single hard link"),
-        "expected the hard-link refusal, got: {refused}"
+    assertion::edit_unsupported(
+        refused,
+        "editing a group relocates its object header; only supported when it has a single hard link",
     );
     drop(session);
 
@@ -2086,14 +2086,9 @@ fn editing_a_group_is_refused_when_the_links_cannot_be_walked() {
             b.with_i32_data(&[9]);
         })
         .unwrap();
-    let refused = session.commit().unwrap_err().to_string();
-    assert!(
-        refused.contains("could not be walked"),
-        "expected the unwalkable-graph refusal, got: {refused}"
-    );
-    assert!(
-        !refused.contains("single hard link"),
-        "and not the one about aliases, which would misdirect: {refused}"
+    assertion::edit_unsupported(
+        session.commit().unwrap_err(),
+        "editing a group relocates its object header, and this file's links could not be walked to establish that nothing else names it",
     );
     drop(session);
     assert_eq!(

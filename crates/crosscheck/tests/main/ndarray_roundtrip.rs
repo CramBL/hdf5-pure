@@ -136,7 +136,10 @@ fn read_array_wrong_rank_errors() {
     let ds = file.dataset("cube").unwrap();
     // Requesting a 2-D array from a 3-D dataset must fail, not panic.
     let err = ds.read_array::<f64, ndarray::Ix2>().unwrap_err();
-    assert!(matches!(err, Error::Shape(_)), "got {err:?}");
+    let Error::Shape(reason) = err else {
+        panic!("expected Shape, got {err:?}");
+    };
+    assert_eq!(reason, "ShapeError/IncompatibleShape: incompatible shapes");
     // But read_array_dyn still works.
     assert_eq!(ds.read_array_dyn::<f64>().unwrap(), a.into_dyn());
 }

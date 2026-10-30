@@ -4,7 +4,6 @@
 use std::time::Duration;
 
 use hdf5::file::LibraryVersion;
-use hdf5_pure::Error;
 use hdf5_pure::File;
 use hdf5_pure::SuperblockStatus;
 use hdf5_pure::SuperblockStatusFlags;
@@ -12,6 +11,7 @@ use hdf5_pure::SuperblockVersion;
 use rstest::rstest;
 
 use test_util::process::{self, Fixture, Readiness};
+use test_util_hdf5::assertion;
 use test_util_hdf5::dataset::{self, Unlimited};
 
 #[test]
@@ -100,13 +100,11 @@ fn both_libraries_refuse_a_file_a_crashed_swmr_writer_left_flagged() {
     std::mem::forget(File::open_swmr_writer(&path).unwrap());
 
     let c_err = hdf5::File::open(&path).expect_err("the C library refuses a flagged file");
-    assert!(
-        c_err.to_string().contains("already open for write"),
-        "the C library refused it for some other reason: {c_err}"
-    );
-    assert!(
-        matches!(File::open(&path), Err(Error::FileMarkedInUse(_))),
-        "this crate must refuse what the C library refuses"
+    assertion::native_file_marked_in_use(&c_err);
+    assertion::file_marked_in_use(
+        File::open(&path).unwrap_err(),
+        SuperblockStatusFlags::swmr_write_marked(),
+        assertion::StatusOpen::Read(&path),
     );
 
     // A SWMR read is what the flag exists to permit, in both libraries.
@@ -154,19 +152,11 @@ fn clear_status_flags_clears_marks_from_libhdf5_writers(
             .consistency_flags(),
         flags,
     );
-    let err = File::open(&path).unwrap_err();
-    let Error::FileMarkedInUse(message) = err else {
-        panic!("expected FileMarkedInUse, got {err:?}");
-    };
-    assert!(
-        message.starts_with(&format!("{}: ", path.display())),
-        "{message}"
+    assertion::file_marked_in_use(
+        File::open(&path).unwrap_err(),
+        flags,
+        assertion::StatusOpen::Read(&path),
     );
-    assert!(
-        message.contains(&format!("status flags {:#04x}", flags.bits())),
-        "{message}"
-    );
-    assert!(message.contains("File::clear_status_flags"), "{message}");
     File::clear_status_flags(&path).unwrap();
     let file = File::open(&path).unwrap();
     assert_eq!(

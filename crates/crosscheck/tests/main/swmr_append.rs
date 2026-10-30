@@ -6,10 +6,11 @@
 
 use hdf5::file::LibraryVersion;
 use hdf5_pure::DeflateLevel;
-use hdf5_pure::{Error, File, FileBuilder};
+use hdf5_pure::{File, FileBuilder};
 
 use test_util::bytes;
 use test_util::superblock;
+use test_util_hdf5::assertion;
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
 
 /// Append to an hdf5-pure-created file, crossing every structural boundary, and
@@ -183,9 +184,9 @@ fn rejects_and_preserves_non_latest_format_file() {
         Ok(_) => panic!("expected open() to reject a v0/v1 superblock file"),
         Err(e) => e,
     };
-    assert!(
-        matches!(err, hdf5_pure::Error::SwmrAppendUnsupported(_)),
-        "expected SwmrAppendUnsupported, got {err:?}"
+    assertion::swmr_append_unsupported(
+        err,
+        "SWMR writing requires a latest-format file (v3 superblock) with no userblock and no persisted free-space",
     );
 
     let after = std::fs::read(&path).unwrap();
@@ -246,9 +247,9 @@ fn append_chunk_size_greater_than_one() {
             Ok(()) => panic!("expected an unaligned append to be rejected"),
             Err(e) => e,
         };
-        assert!(
-            matches!(err, Error::SwmrAppendUnsupported(_)),
-            "expected SwmrAppendUnsupported for an unaligned append, got {err:?}"
+        assertion::swmr_append_unsupported(
+            err,
+            "SWMR append must be chunk-aligned: the current length and the appended length must both be whole multiples of the chunk length",
         );
     }
 
@@ -400,12 +401,10 @@ fn rejects_filtered_pure_dataset() {
             Ok(()) => panic!("expected a filtered dataset to be rejected"),
             Err(e) => e,
         };
-        match err {
-            Error::SwmrAppendUnsupported(reason) => {
-                assert!(reason.contains("filtered"), "unexpected reason: {reason}");
-            }
-            other => panic!("expected SwmrAppendUnsupported, got {other:?}"),
-        }
+        assertion::swmr_append_unsupported(
+            err,
+            "filtered datasets are not supported for SWMR append",
+        );
     }
 
     // The rejected append did not corrupt the compressed dataset.
@@ -444,12 +443,10 @@ fn rejects_filtered_pure_dataset_with_a_partial_trailing_chunk() {
             .unwrap()
             .append(&(105..115).collect::<Vec<_>>())
             .expect_err("a SWMR writer must not re-encode a visible filtered chunk");
-        match err {
-            Error::SwmrAppendUnsupported(reason) => {
-                assert!(reason.contains("filtered"), "unexpected reason: {reason}");
-            }
-            other => panic!("expected SwmrAppendUnsupported, got {other:?}"),
-        }
+        assertion::swmr_append_unsupported(
+            err,
+            "filtered datasets are not supported for SWMR append",
+        );
     }
 
     assert_eq!(

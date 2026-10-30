@@ -650,13 +650,10 @@ fn repack_refuses_reference_to_dropped_object() {
     // Dropping the referenced object must fail the repack by name rather than
     // silently leave a dangling reference.
     let err = hdf5_pure::repack(&src, &dst, &RepackOptions::new().drop_path("target")).unwrap_err();
-    match err {
-        hdf5_pure::Error::RepackUnsupported(msg) => assert!(
-            msg.contains("refs") && msg.contains("target") && msg.contains("dropped"),
-            "error should name the reference dataset and the dropped target: {msg}"
-        ),
-        other => panic!("expected RepackUnsupported, got {other:?}"),
-    }
+    assertion::repack_unsupported(
+        err,
+        r#"dataset refs: object reference to dropped object "target" cannot be repacked"#,
+    );
     assert!(!dst.exists(), "dst must not be created when repack refuses");
 }
 
@@ -944,15 +941,10 @@ fn repack_refuses_an_attribute_whose_address_it_cannot_rewrite() {
     }
 
     let err = hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap_err();
-    match err {
-        hdf5_pure::Error::RepackUnsupported(msg) => {
-            assert!(
-                msg.contains("points_at") && msg.contains("data"),
-                "error should name the attribute and its dataset: {msg}"
-            );
-        }
-        other => panic!("expected RepackUnsupported, got {other:?}"),
-    }
+    assertion::repack_unsupported(
+        err,
+        r#"dataset data: attribute "points_at" has a datatype that cannot be repacked faithfully yet"#,
+    );
     assert!(!dst.exists(), "dst must not be created when repack refuses");
 }
 
@@ -1154,13 +1146,10 @@ fn c_sparse_chunked_lossy_repack_refused() {
     }
 
     let err = hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap_err();
-    match err {
-        hdf5_pure::Error::RepackUnsupported(msg) => assert!(
-            msg.contains("data") && msg.contains("scale-offset"),
-            "error should name the dataset and reason: {msg}"
-        ),
-        other => panic!("expected RepackUnsupported, got {other:?}"),
-    }
+    assertion::repack_unsupported(
+        err,
+        "dataset data: only lossless integer scale-offset can be repacked faithfully",
+    );
     assert!(!dst.exists(), "dst must not be created when repack refuses");
 }
 
@@ -1486,13 +1475,10 @@ fn repack_refuses_compound_reference_to_dropped_object() {
     }
 
     let err = hdf5_pure::repack(&src, &dst, &RepackOptions::new().drop_path("doomed")).unwrap_err();
-    match err {
-        hdf5_pure::Error::RepackUnsupported(msg) => assert!(
-            msg.contains("rows") && msg.contains("doomed"),
-            "error should name the dataset and its dropped target: {msg}"
-        ),
-        other => panic!("expected RepackUnsupported, got {other:?}"),
-    }
+    assertion::repack_unsupported(
+        err,
+        r#"dataset rows: object reference to dropped object "doomed" cannot be repacked"#,
+    );
     assert!(!dst.exists(), "dst must not be created when repack refuses");
 }
 
@@ -1609,13 +1595,10 @@ fn repack_refuses_dropped_target_in_a_compound_that_also_has_a_vlen_member() {
     }
 
     let err = hdf5_pure::repack(&src, &dst, &RepackOptions::new().drop_path("doomed")).unwrap_err();
-    match err {
-        hdf5_pure::Error::RepackUnsupported(msg) => assert!(
-            msg.contains("rows") && msg.contains("doomed"),
-            "error should name the dataset and its dropped target: {msg}"
-        ),
-        other => panic!("expected RepackUnsupported, got {other:?}"),
-    }
+    assertion::repack_unsupported(
+        err,
+        r#"dataset rows: object reference to dropped object "doomed" cannot be repacked"#,
+    );
     assert!(!dst.exists(), "dst must not be created when repack refuses");
 }
 
@@ -1664,13 +1647,10 @@ fn repack_refuses_chunked_compound_with_both_vlen_and_reference_members() {
     }
 
     let err = hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap_err();
-    match err {
-        hdf5_pure::Error::RepackUnsupported(msg) => assert!(
-            msg.contains("rows") && msg.contains("object-reference"),
-            "error should name the dataset and the reason: {msg}"
-        ),
-        other => panic!("expected RepackUnsupported, got {other:?}"),
-    }
+    assertion::repack_unsupported(
+        err,
+        "dataset rows: chunked or filtered datasets with an object-reference member cannot be repacked (their addresses live inside compressed chunks and would need rewriting in place)",
+    );
 }
 
 /// The attribute encodings libhdf5 can write and this crate
