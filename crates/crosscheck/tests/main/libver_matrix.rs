@@ -17,11 +17,22 @@ use std::path::Path;
 use hdf5::file::LibraryVersion;
 use hdf5::types::{FixedAscii, VarLenArray};
 use hdf5::{H5Type, ObjectReference, ObjectReference1, ReferencedObject};
+#[cfg(not(feature = "__hdf5-1.10"))]
+use hdf5::{MajorErrorCode, MinorErrorCode};
 use hdf5_pure::mat::{self, Options};
 use hdf5_pure::{AttrValue, FileBuilder, LibVer};
+#[cfg(not(feature = "__hdf5-1.10"))]
+use rstest::rstest;
 use serde::Serialize;
 
 use test_util::superblock;
+
+#[cfg(not(feature = "__hdf5-1.10"))]
+#[derive(Clone, Copy)]
+enum V110Fixture {
+    Mat,
+    Plain,
+}
 
 #[derive(Serialize)]
 struct Inner {
@@ -353,19 +364,40 @@ fn the_1_10_format_this_crate_writes_opens_from_1_10_on() {
     check_mat(&hdf5::File::open(&mat).expect("the C library opens the 1.10 mat file"));
 }
 
+// H5F_sblock_load in H5Fsuper_cache.c, HDF5 1.8.23, reports an unknown superblock
+// version as File/BadValue with the version diagnostic.
 #[cfg(not(feature = "__hdf5-1.10"))]
-#[test]
-fn the_1_10_format_this_crate_writes_is_rejected_before_1_10() {
+#[rstest]
+#[case::plain(V110Fixture::Plain)]
+#[case::mat(V110Fixture::Mat)]
+fn the_1_10_format_this_crate_writes_is_rejected_before_1_10(#[case] fixture: V110Fixture) {
     let dir = tempfile::tempdir().unwrap();
     let (plain, mat) = write_v110(dir.path());
-    for path in [&plain, &mat] {
-        assert!(
-            hdf5::File::open(path).is_err(),
-            "HDF5 {:?} opened {}, which carries a version 3 superblock",
-            hdf5::library_version(),
-            path.display()
-        );
-    }
+    let path = match fixture {
+        V110Fixture::Mat => &mat,
+        V110Fixture::Plain => &plain,
+    };
+    let error = hdf5::File::open(path).unwrap_err();
+    let Some(stack) = error.stack() else {
+        panic!("expected a native HDF5 error stack, got {error:?}");
+    };
+    let frame = stack.last().expect("native rejection has no error frames");
+    assert_eq!(
+        (
+            frame.major_code(),
+            frame.minor_code(),
+            frame.func(),
+            frame.desc()
+        ),
+        (
+            MajorErrorCode::File,
+            MinorErrorCode::BadValue,
+            "H5F_sblock_load",
+            "bad superblock version number"
+        ),
+        "libhdf5 {:?}: {error:?}",
+        hdf5::library_version()
+    );
 }
 
 /// libhdf5's version of the plain fixture, plus a reference dataset and
