@@ -1,16 +1,18 @@
 //! Direct pipeline allocation measurements with cold and reused scratch.
 //!
 //! Cold regions retain the first output and newly initialized scratch. Reused regions retain
-//! outputs after warming scratch. Region metrics cover allocations made inside the measured call.
-//! Output and spare capacities are reported separately. Spare capacity covers the general output
-//! vector.
+//! independent outputs after two warmup calls and include their descriptor container. Region
+//! metrics cover allocations made inside the measured call.
+//!
+//! Output capacity, general spare capacity, and initialized extent are reported separately.
+//! General spare capacity includes storage acquired during warmup and excludes codec state.
 
 use core::mem;
 
 use rstest::rstest;
 use test_util::allocation;
 use test_util::allocation::Measured;
-use test_util::filtered_chunks::{self, Direction, PipelineCase, PipelineFilter};
+use test_util::filtered_chunks::{self, Direction, PipelineCase, PipelineFilter, PipelinePattern};
 
 use super::*;
 
@@ -26,9 +28,10 @@ const REPEATS: usize = 8;
 fn pipeline_allocations_separate_setup_outputs_and_scratch(
     #[case] case: PipelineCase,
     #[values(Direction::Encode, Direction::Decode)] direction: Direction,
-    #[values(1024, 16_384)] elements: usize,
+    #[values(1023, 1024, 1025, 8191, 8192, 8193, 16_384)] elements: usize,
+    #[values(PipelinePattern::Cycling, PipelinePattern::Incompressible)] pattern: PipelinePattern,
 ) {
-    let raw = filtered_chunks::pipeline_data(elements);
+    let raw = pattern.data(elements);
     let filters = pipeline(case, 0);
     let stored = run(
         &mut FilterScratch::new(),
@@ -43,12 +46,16 @@ fn pipeline_allocations_separate_setup_outputs_and_scratch(
     } else {
         &raw
     };
-    let label = format!(
-        "pipeline_{}_{}_{}",
-        case.name(),
-        direction.name(),
-        raw.len()
-    );
+    if pattern == PipelinePattern::Incompressible {
+        assert!(stored.len() >= raw.len());
+    }
+    let measurement = PipelineMeasurement {
+        case,
+        direction,
+        pattern,
+        bytes: raw.len(),
+    };
+    let label = measurement.label();
     let ((mut scratch, first), cold) = allocation::measure(&format!("{label}_cold"), || {
         let mut scratch = FilterScratch::new();
         let output = run(&mut scratch, &raw, &stored, &filters, direction, 0);
@@ -62,15 +69,7 @@ fn pipeline_allocations_separate_setup_outputs_and_scratch(
         .checked_sub(u64::try_from(first_capacity).unwrap())
         .unwrap();
     let cold_spare = intermediate_capacity(&scratch);
-    report(
-        case,
-        direction,
-        raw.len(),
-        "cold",
-        cold,
-        first_capacity,
-        cold_spare,
-    );
+    measurement.report("cold", cold, first_capacity, &scratch);
     drop(first);
     drop(run(&mut scratch, &raw, &stored, &filters, direction, 0));
     let (outputs, warm) = allocation::measure(&format!("{label}_reused"), || {
@@ -80,7 +79,7 @@ fn pipeline_allocations_separate_setup_outputs_and_scratch(
     let escaping = outputs.iter().map(Vec::capacity).sum::<usize>();
     let container = outputs.capacity() * mem::size_of::<Vec<u8>>();
     let spare = intermediate_capacity(&scratch);
-    report(case, direction, raw.len(), "reused", warm, escaping, spare);
+    measurement.report("reused", warm, escaping, &scratch);
     assert!(warm.blocks >= u64::try_from(REPEATS).unwrap(), "{warm}");
     assert!(
         warm.live_bytes <= u64::try_from(escaping + container + spare).unwrap(),
@@ -113,6 +112,11 @@ fn pipeline_allocations_separate_setup_outputs_and_scratch(
             &shuffled
         };
         assert_eq!(&output, control_expected);
+        let control_measurement = PipelineMeasurement {
+            case: control,
+            ..measurement
+        };
+        control_measurement.report("cold", setup, output.capacity(), &control_scratch);
         let codec = setup.live_bytes - u64::try_from(output.capacity()).unwrap();
         assert_eq!(retained, codec + u64::try_from(cold_spare).unwrap());
         drop(output);
@@ -135,6 +139,12 @@ fn pipeline_allocations_separate_setup_outputs_and_scratch(
                 )
             });
         assert_outputs(&control_outputs, control_expected);
+        control_measurement.report(
+            "reused",
+            measured,
+            control_outputs.iter().map(Vec::capacity).sum(),
+            &control_scratch,
+        );
         assert!(
             measured.blocks >= u64::try_from(REPEATS).unwrap(),
             "{measured}"
@@ -288,15 +298,13 @@ fn pipeline_reuse_bounds_size_changes_masks_and_errors(#[case] case: PipelineCas
         measured.bytes <= u64::try_from((fixtures.len() + 4) * 3 * bound).unwrap(),
         "{measured}"
     );
-    report(
+    PipelineMeasurement {
         case,
-        Direction::Decode,
-        raw.len(),
-        "varied",
-        measured,
-        escaping,
-        intermediate_capacity(&scratch),
-    );
+        direction: Direction::Decode,
+        pattern: PipelinePattern::Cycling,
+        bytes: raw.len(),
+    }
+    .report("varied", measured, escaping, &scratch);
     eprintln!(
         "VARIED case={} max_spare_between_calls={} error_bytes={error_bytes}",
         case.name(),
@@ -328,15 +336,13 @@ fn pipeline_reuse_bounds_size_changes_masks_and_errors(#[case] case: PipelineCas
             <= encoded_metrics.live_bytes + u64::try_from(3 * bound).unwrap()
     );
     assert!(encoded_metrics.bytes <= u64::try_from((fixtures.len() + 4) * 3 * bound).unwrap());
-    report(
+    PipelineMeasurement {
         case,
-        Direction::Encode,
-        raw.len(),
-        "varied",
-        encoded_metrics,
-        escaping,
-        intermediate_capacity(&encoder),
-    );
+        direction: Direction::Encode,
+        pattern: PipelinePattern::Cycling,
+        bytes: raw.len(),
+    }
+    .report("varied", encoded_metrics, escaping, &encoder);
 }
 
 struct Fixture {
@@ -529,22 +535,52 @@ fn intermediate_capacity(scratch: &FilterScratch) -> usize {
     scratch.spare.capacity()
 }
 
-fn report(
+fn intermediate_initialized_len(scratch: &FilterScratch) -> usize {
+    scratch.spare.initialized_len()
+}
+
+#[derive(Clone, Copy)]
+struct PipelineMeasurement {
     case: PipelineCase,
     direction: Direction,
+    pattern: PipelinePattern,
     bytes: usize,
-    phase: &str,
-    measured: Measured,
-    output: usize,
-    spare: usize,
-) {
-    eprintln!(
-        "PIPELINE case={} direction={} bytes={bytes} phase={phase} allocations={} allocated={} live={} peak={} output_capacity={output} spare_capacity={spare}",
-        case.name(),
-        direction.name(),
-        measured.blocks,
-        measured.bytes,
-        measured.live_bytes,
-        measured.peak_bytes
-    );
+}
+
+impl PipelineMeasurement {
+    fn label(&self) -> String {
+        let Self {
+            case,
+            direction,
+            pattern,
+            bytes,
+        } = self;
+        let pattern = match pattern {
+            PipelinePattern::Cycling => "cycle",
+            PipelinePattern::Incompressible => "random",
+        };
+        format!("{}_{}_{pattern}_{bytes}", case.name(), direction.name())
+    }
+
+    fn report(&self, phase: &str, measured: Measured, output: usize, scratch: &FilterScratch) {
+        let Self {
+            case,
+            direction,
+            pattern,
+            bytes,
+        } = self;
+        let spare = intermediate_capacity(scratch);
+        let initialized = intermediate_initialized_len(scratch);
+        assert!(initialized <= spare);
+        eprintln!(
+            "PIPELINE case={} direction={} pattern={} bytes={bytes} phase={phase} allocations={} allocated={} live={} peak={} output_capacity={output} spare_capacity={spare} initialized_bytes={initialized}",
+            case.name(),
+            direction.name(),
+            pattern.name(),
+            measured.blocks,
+            measured.bytes,
+            measured.live_bytes,
+            measured.peak_bytes
+        );
+    }
 }

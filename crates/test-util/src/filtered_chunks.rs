@@ -225,3 +225,74 @@ pub const PIPELINES: [PipelineCase; 6] = [
     PipelineCase::ShuffleDeflate,
     PipelineCase::ShuffleDeflateFletcher32,
 ];
+
+/// A deterministic input sequence for direct pipeline measurements.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PipelinePattern {
+    /// Four-byte values cycling from zero through 31.
+    Cycling,
+    /// Four-byte xorshift values generated from a fixed seed.
+    Incompressible,
+}
+
+impl PipelinePattern {
+    /// Returns four-byte little-endian elements from the selected sequence.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use test_util::filtered_chunks::PipelinePattern;
+    ///
+    /// assert_eq!(PipelinePattern::Cycling.data(2), [0, 0, 0, 0, 1, 0, 0, 0]);
+    /// assert_eq!(
+    ///     PipelinePattern::Incompressible.data(1),
+    ///     [0xa5, 0x5a, 0x98, 0x87],
+    /// );
+    /// ```
+    pub fn data(self, elements: usize) -> Vec<u8> {
+        match self {
+            Self::Cycling => pipeline_data(elements),
+            Self::Incompressible => {
+                let mut state = 0x1234_5678_u32;
+                (0..elements)
+                    .flat_map(|_| {
+                        state ^= state << 13;
+                        state ^= state >> 17;
+                        state ^= state << 5;
+                        state.to_le_bytes()
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// Returns the label used in measurement output.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Cycling => "cycling",
+            Self::Incompressible => "incompressible",
+        }
+    }
+}
+
+/// The scratch acquisition policy for one measured operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScratchMode {
+    /// Acquires fresh scratch for each operation.
+    Cold,
+    /// Reuses scratch after two warmup operations.
+    Reused,
+}
+
+impl ScratchMode {
+    /// Returns the label used in measurement output.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Cold => "cold",
+            Self::Reused => "reused",
+        }
+    }
+}
+
+/// Four-byte element counts around 4 KiB and 32 KiB, with a 64 KiB case.
+pub const PIPELINE_ELEMENTS: [usize; 7] = [1023, 1024, 1025, 8191, 8192, 8193, 16_384];

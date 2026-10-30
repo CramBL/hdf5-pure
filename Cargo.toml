@@ -416,6 +416,11 @@ required-features = ["serde"]
 name = "ndarray_io"
 required-features = ["ndarray"]
 
+# Profile direct pipeline operations with independently retained outputs.
+[[example]]
+name = "filter_pipeline_profile"
+required-features = ["deflate"]
+
 [[bench]]
 name = "filtered_chunks"
 harness = false
