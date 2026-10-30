@@ -12,11 +12,13 @@ use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::SuperblockStatusFlags;
 use hdf5_pure::{
-    Error, File, FileAccessProperties, FileBuilder, FileLocking, FileSpaceStrategy, MemoryStrategy,
+    File, FileAccessProperties, FileBuilder, FileLocking, FileSpaceStrategy, MemoryStrategy,
     WriteMarkPolicy,
 };
 
 use test_util::superblock;
+use test_util_hdf5::assertion::StatusOpen;
+use test_util_hdf5::reader::ReadBackend;
 use test_util_hdf5::{dataset::Unlimited, session};
 
 /// An appendable file: rank-1, unlimited, Extensible-Array indexed, unfiltered —
@@ -36,19 +38,6 @@ fn flag_as_if_crashed(path: &std::path::Path) {
     );
 }
 
-#[track_caller]
-fn assert_marked_in_use(err: Error, what: &str) {
-    let msg = err.to_string();
-    assert!(
-        matches!(err, Error::FileMarkedInUse(_)),
-        "{what} must report the status flag, got {err:?}"
-    );
-    assert!(
-        msg.contains("clear_status_flags"),
-        "{what} must name the recovery, got: {msg}"
-    );
-}
-
 /// The issue's repro: a file left flagged by a crashed SWMR writer is refused by
 /// every open that would read a snapshot of it or write to it, where all of them
 /// used to succeed — `open_rw` going on to edit the file in place under the
@@ -60,44 +49,55 @@ fn a_flagged_file_is_refused_by_the_reading_and_writing_opens() {
     build_swmr(&path);
     flag_as_if_crashed(&path);
 
-    assert_marked_in_use(File::open(&path).unwrap_err(), "File::open");
-    assert_marked_in_use(
-        File::open_streaming(&path).unwrap_err(),
-        "File::open_streaming",
+    test_util_hdf5::assertion::file_marked_in_use(
+        File::open(&path).unwrap_err(),
+        SuperblockStatusFlags::swmr_write_marked(),
+        StatusOpen::Read(&path),
     );
-    assert_marked_in_use(File::open_rw(&path).unwrap_err(), "File::open_rw");
-    assert_marked_in_use(
+    test_util_hdf5::assertion::file_marked_in_use(
+        File::open_streaming(&path).unwrap_err(),
+        SuperblockStatusFlags::swmr_write_marked(),
+        StatusOpen::Read(&path),
+    );
+    test_util_hdf5::assertion::file_marked_in_use(
+        File::open_rw(&path).unwrap_err(),
+        SuperblockStatusFlags::swmr_write_marked(),
+        StatusOpen::Write(&path),
+    );
+    test_util_hdf5::assertion::file_marked_in_use(
         File::open_swmr_writer(&path).unwrap_err(),
-        "a second File::open_swmr_writer",
+        SuperblockStatusFlags::swmr_write_marked(),
+        StatusOpen::Write(&path),
     );
 
     // A path is what an open by path reports, not what it decides by: the same
     // superblock byte refuses a source, which names itself instead.
     let handle = std::fs::File::open(&path).unwrap();
     let err = File::from_source(hdf5_pure::ReadSeekSource::new(handle).unwrap()).unwrap_err();
-    assert!(
-        matches!(&err, Error::FileMarkedInUse(said) if said.contains("byte source")),
-        "File::from_source reported {err:?} rather than naming the source it refused"
+    test_util_hdf5::assertion::file_marked_in_use(
+        err,
+        SuperblockStatusFlags::swmr_write_marked(),
+        StatusOpen::SourceRead,
     );
-    assert_marked_in_use(err, "File::from_source");
 }
 
 /// The bounded editor reaches the same refusal as the mirrored one: both open the
 /// same engine, and a strategy that picks a backing must not pick a rule.
-#[test]
-fn both_edit_backings_refuse_a_flagged_file() {
+#[rstest::rstest]
+#[case::bounded(MemoryStrategy::Bounded)]
+#[case::mirrored(MemoryStrategy::Mirrored)]
+fn both_edit_backings_refuse_a_flagged_file(#[case] strategy: MemoryStrategy) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("flagged.h5");
     build_swmr(&path);
     flag_as_if_crashed(&path);
 
-    for strategy in [MemoryStrategy::Bounded, MemoryStrategy::Mirrored] {
-        let props = hdf5_pure::FileAccessProperties::new().with_memory_strategy(strategy);
-        assert_marked_in_use(
-            File::open_rw_with_options(&path, props).unwrap_err(),
-            &format!("open_rw under {strategy:?}"),
-        );
-    }
+    let props = FileAccessProperties::new().with_memory_strategy(strategy);
+    test_util_hdf5::assertion::file_marked_in_use(
+        File::open_rw_with_options(&path, props).unwrap_err(),
+        SuperblockStatusFlags::swmr_write_marked(),
+        StatusOpen::Write(&path),
+    );
 }
 
 /// A SWMR reader is the one open that follows the flag rather than being turned
@@ -225,9 +225,10 @@ fn a_page_buffered_session_marks_the_file_for_its_lifetime() {
         0x01,
         "the mark must be on the disk before the first buffered write, not at close"
     );
-    assert_marked_in_use(
+    test_util_hdf5::assertion::file_marked_in_use(
         File::open(&path).unwrap_err(),
-        "a read of a page-buffered file",
+        SuperblockStatusFlags::write_marked(),
+        StatusOpen::Read(&path),
     );
 
     let mut ds = file.dataset("d").unwrap();
@@ -246,9 +247,8 @@ fn a_page_buffered_session_marks_the_file_for_its_lifetime() {
             .dataset("d")
             .unwrap()
             .read_i32()
-            .unwrap()
-            .len(),
-        128,
+            .unwrap(),
+        [0i32; 64].into_iter().chain([1i32; 64]).collect::<Vec<_>>(),
         "and leave a file that reads"
     );
 }
@@ -337,12 +337,25 @@ fn a_crashed_page_buffered_session_leaves_a_file_every_open_refuses() {
         "the leaked session left the file marked"
     );
 
-    assert_marked_in_use(File::open(&path).unwrap_err(), "a buffered read");
-    assert_marked_in_use(File::open_streaming(&path).unwrap_err(), "a streaming read");
-    assert_marked_in_use(File::open_rw(&path).unwrap_err(), "an editor");
-    assert_marked_in_use(
+    test_util_hdf5::assertion::file_marked_in_use(
+        File::open(&path).unwrap_err(),
+        SuperblockStatusFlags::write_marked(),
+        StatusOpen::Read(&path),
+    );
+    test_util_hdf5::assertion::file_marked_in_use(
+        File::open_streaming(&path).unwrap_err(),
+        SuperblockStatusFlags::write_marked(),
+        StatusOpen::Read(&path),
+    );
+    test_util_hdf5::assertion::file_marked_in_use(
+        File::open_rw(&path).unwrap_err(),
+        SuperblockStatusFlags::write_marked(),
+        StatusOpen::Write(&path),
+    );
+    test_util_hdf5::assertion::file_marked_in_use(
         File::open_swmr(&path).unwrap_err(),
-        "a SWMR reader, whose pair is half-set",
+        SuperblockStatusFlags::write_marked(),
+        StatusOpen::SwmrRead(&path),
     );
 
     // And the documented recovery reaches this mark too, since it clears the
@@ -389,36 +402,30 @@ fn live_page_buffered_writer(path: &std::path::Path) {
 /// The issue's repro: every path-based read is refused, and the refusal points
 /// at a recovery that exists rather than at `File::open_swmr`, which refuses the
 /// same mark itself.
-#[test]
-fn a_write_marked_file_names_a_recovery_that_works() {
+#[rstest::rstest]
+#[case::buffered(ReadBackend::Buffered)]
+#[case::streaming(ReadBackend::Streaming)]
+#[case::source(ReadBackend::Source)]
+fn a_write_marked_file_names_a_recovery_that_works(#[case] backend: ReadBackend) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("live.h5");
     live_page_buffered_writer(&path);
 
-    for (what, err) in [
-        ("File::open", File::open(&path).unwrap_err()),
-        (
-            "File::open_streaming",
-            File::open_streaming(&path).unwrap_err(),
-        ),
-    ] {
-        let msg = err.to_string();
-        assert_marked_in_use(err, what);
-        assert!(
-            !msg.contains("open_swmr"),
-            "{what} names a reader that refuses this mark too: {msg}"
-        );
-        assert!(
-            msg.contains("with_write_mark_policy(WriteMarkPolicy::AllowSnapshot)"),
-            "{what} does not name the opt-in that reads it: {msg}"
-        );
-    }
+    let err = backend.open(&path).unwrap_err();
+    let open = match backend {
+        ReadBackend::Source => StatusOpen::SourceRead,
+        ReadBackend::Buffered | ReadBackend::Bytes | ReadBackend::Streaming => {
+            StatusOpen::Read(&path)
+        }
+    };
+    test_util_hdf5::assertion::file_marked_in_use(err, SuperblockStatusFlags::write_marked(), open);
 
     // The mark is half a pair, so the SWMR reader refuses it — the behaviour the
     // error text used to send callers into, and which stays as it is.
-    assert_marked_in_use(
+    test_util_hdf5::assertion::file_marked_in_use(
         File::open_swmr(&path).unwrap_err(),
-        "a SWMR reader following half a pair",
+        SuperblockStatusFlags::write_marked(),
+        StatusOpen::SwmrRead(&path),
     );
 }
 
@@ -469,14 +476,16 @@ fn the_opt_in_does_not_unlock_a_read_write_open() {
     // Locking off so the superblock byte is what refuses this, not the OS lock
     // the leaked session still holds.
     let props = snapshot().with_locking(FileLocking::Disabled);
-    assert_marked_in_use(
+    test_util_hdf5::assertion::file_marked_in_use(
         File::open_rw_with_options(&path, props).unwrap_err(),
-        "File::open_rw under the opt-in",
+        SuperblockStatusFlags::write_marked(),
+        StatusOpen::Write(&path),
     );
-    assert_marked_in_use(
+    test_util_hdf5::assertion::file_marked_in_use(
         File::open_rw_with_options(&path, props.with_memory_strategy(MemoryStrategy::Mirrored))
             .unwrap_err(),
-        "a mirrored File::open_rw under the opt-in",
+        SuperblockStatusFlags::write_marked(),
+        StatusOpen::Write(&path),
     );
 }
 
@@ -496,13 +505,15 @@ fn the_opt_in_does_not_unlock_a_swmr_pair() {
         .unwrap();
     assert_eq!(superblock::consistency_flags(&path), 0x05);
 
-    assert_marked_in_use(
+    test_util_hdf5::assertion::file_marked_in_use(
         File::open_with_options(&path, snapshot()).unwrap_err(),
-        "a buffered read of a SWMR pair under the opt-in",
+        SuperblockStatusFlags::swmr_write_marked(),
+        StatusOpen::Read(&path),
     );
-    assert_marked_in_use(
+    test_util_hdf5::assertion::file_marked_in_use(
         File::open_streaming_with_options(&path, snapshot()).unwrap_err(),
-        "a streaming read of a SWMR pair under the opt-in",
+        SuperblockStatusFlags::swmr_write_marked(),
+        StatusOpen::Read(&path),
     );
     File::open_swmr(&path).expect("the reader that does follow a SWMR writer");
     writer.close().unwrap();
@@ -577,9 +588,8 @@ fn dropping_a_page_buffered_session_takes_the_mark_down() {
             .dataset("d")
             .unwrap()
             .read_i32()
-            .unwrap()
-            .len(),
-        128,
+            .unwrap(),
+        [0i32; 64].into_iter().chain([4i32; 64]).collect::<Vec<_>>(),
         "and the append must be in the file it leaves"
     );
 }
