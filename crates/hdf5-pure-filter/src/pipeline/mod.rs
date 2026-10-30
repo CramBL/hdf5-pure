@@ -253,8 +253,8 @@ impl<'a> ChunkContext<'a> {
 
 /// Retains codec state, initialized intermediate bytes, and resolved ZFP settings between chunks.
 ///
-/// The spare allocation retains its initialized extent between stages. Returned chunk buffers own
-/// their storage independently of this scratch state. Resolved ZFP settings are reused while the
+/// The spare's initialized extent is tracked separately from its capacity. Returned chunk buffers
+/// own their storage independently of this scratch state. Resolved ZFP settings are reused while the
 /// pipeline position, client data, scalar type, and chunk dimensions match.
 #[derive(Default)]
 pub struct FilterScratch {
@@ -441,7 +441,7 @@ pub fn decompress_chunk_with(
     if let Some(expected) = expected {
         if current.as_slice().len() != expected {
             let actual = current.as_slice().len();
-            current.recycle(&mut scratch.spare);
+            current.recycle_larger(&mut scratch.spare);
             return Err(Error::DataSizeMismatch { expected, actual });
         }
     }
@@ -713,7 +713,7 @@ impl CompleteOutputWindow {
 
         let length = self.0.get();
         let limit = length - 1;
-        out.resize(length);
+        out.resize_exact(length);
         let status = decoder.decompress(data, out.as_mut_slice(), FlushDecompress::Finish);
         let produced = match usize::try_from(decoder.total_out()) {
             Ok(produced) => produced,
