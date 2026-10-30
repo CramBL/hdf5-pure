@@ -144,10 +144,10 @@ fn userblock_cross_file_copy_from_userblock_source_is_refused() {
     let source = File::open(&src_path).unwrap();
     let s = File::open_rw(&dst_path).unwrap();
     // The eager read happens in `copy_from`, so the refusal surfaces there.
-    let err = s.copy_from(&source, "alpha", "imported");
-    assert!(
-        err.is_err(),
-        "cross-file copy from a userblock source should be refused"
+    let error = s.copy_from(&source, "alpha", "imported").unwrap_err();
+    test_util_hdf5::assertion::edit_unsupported(
+        error,
+        "cross-file copy requires the source file to have no userblock (base address 0)",
     );
     drop(s);
 

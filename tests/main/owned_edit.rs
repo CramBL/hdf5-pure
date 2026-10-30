@@ -70,11 +70,14 @@ fn create_group_and_delete_object() {
 
     file.root().create_group("newgrp").unwrap();
     file.commit().unwrap();
-    assert!(file.group("newgrp").is_ok());
+    assert_eq!(
+        file.group("newgrp").unwrap().datasets().unwrap(),
+        Vec::<String>::new()
+    );
 
     file.root().delete("d").unwrap();
     file.commit().unwrap();
-    assert!(file.dataset("d").is_err());
+    test_util_hdf5::assertion::path_not_found(file.dataset("d").unwrap_err(), "d");
 }
 
 #[test]
@@ -131,7 +134,10 @@ fn create_file_and_build_through_handles() {
         file.dataset("d").unwrap().read_i32().unwrap(),
         vec![1, 2, 3]
     );
-    assert!(file.group("grp").is_ok());
+    assert_eq!(
+        file.group("grp").unwrap().datasets().unwrap(),
+        Vec::<String>::new()
+    );
     // Reopen read-only to confirm it persisted as a valid file.
     drop(file);
     let ro = File::open(&path).unwrap();

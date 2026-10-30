@@ -211,7 +211,7 @@ fn survives_in_place_edit() {
         f.dataset("keep").unwrap().read_i32().unwrap(),
         vec![1, 2, 3]
     );
-    assert!(f.dataset("added").is_err());
+    test_util_hdf5::assertion::path_not_found(f.dataset("added").unwrap_err(), "added");
 }
 
 #[test]

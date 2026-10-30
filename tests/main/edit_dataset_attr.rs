@@ -153,7 +153,10 @@ fn guard_refuses_append_after_staged_dataset_attr() {
     // A second in-place append is refused: commit would relocate the header this
     // append planned against.
     let err = s.dataset("d").unwrap().append(&[8]).unwrap_err();
-    assert!(matches!(err, Error::AppendInPlaceUnsupported(_)));
+    test_util_hdf5::assertion::append_in_place_unsupported(
+        err,
+        "the dataset or an ancestor has a staged edit pending in this session; commit the staged edits before appending in place, or use Dataset::append_staged",
+    );
 }
 
 #[test]

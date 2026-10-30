@@ -76,7 +76,7 @@ fn delete_then_truncate_shrinks_within_session() {
         file.dataset("keep").unwrap().read_f64().unwrap(),
         vec![1.0, 2.0, 3.0, 4.0]
     );
-    assert!(file.dataset("big").is_err());
+    test_util_hdf5::assertion::path_not_found(file.dataset("big").unwrap_err(), "big");
 }
 
 #[test]
@@ -157,7 +157,7 @@ fn reuse_keeps_survivors_byte_exact() {
         file.dataset("c").unwrap().read_i32().unwrap(),
         vec![7, 8, 9, 10]
     );
-    assert!(file.dataset("b").is_err());
+    test_util_hdf5::assertion::path_not_found(file.dataset("b").unwrap_err(), "b");
 }
 
 #[test]
@@ -196,7 +196,7 @@ fn delete_subtree_reclaims_all_members() {
 
     file_space::assert_eof_matches_physical_size(&path);
     let file = File::open(&path).unwrap();
-    assert!(file.group("grp").is_err());
+    test_util_hdf5::assertion::path_not_found(file.group("grp").unwrap_err(), "grp");
     assert_eq!(file.dataset("keep").unwrap().read_i32().unwrap(), vec![1]);
 }
 
@@ -273,7 +273,7 @@ fn trailing_slack_past_recorded_eof_stays_readable() {
         f.dataset("keep").unwrap().read_i32().unwrap(),
         vec![11, 22, 33]
     );
-    assert!(f.dataset("scratch").is_err());
+    test_util_hdf5::assertion::path_not_found(f.dataset("scratch").unwrap_err(), "scratch");
 }
 
 #[test]
@@ -321,7 +321,7 @@ fn deleting_filtered_chunked_dataset_reclaims_storage() {
         file.dataset("keep").unwrap().read_i32().unwrap(),
         vec![42, 43, 44]
     );
-    assert!(file.dataset("comp").is_err());
+    test_util_hdf5::assertion::path_not_found(file.dataset("comp").unwrap_err(), "comp");
 }
 
 #[test]
@@ -368,7 +368,7 @@ fn deleting_unfiltered_chunked_dataset_truncates_fully() {
         file.dataset("keep").unwrap().read_i32().unwrap(),
         vec![1, 2, 3]
     );
-    assert!(file.dataset("big").is_err());
+    test_util_hdf5::assertion::path_not_found(file.dataset("big").unwrap_err(), "big");
 }
 
 #[test]
@@ -410,7 +410,7 @@ fn deleting_paged_fixed_array_dataset_reclaims_storage() {
     let file = File::open(&path).unwrap();
     assert_eq!(file.root().datasets().unwrap(), vec!["keep".to_string()]);
     assert_eq!(file.dataset("keep").unwrap().read_i32().unwrap(), vec![7]);
-    assert!(file.dataset("paged").is_err());
+    test_util_hdf5::assertion::path_not_found(file.dataset("paged").unwrap_err(), "paged");
 }
 
 #[test]
@@ -453,7 +453,7 @@ fn deleting_extensible_dataset_reclaims_storage() {
     let file = File::open(&path).unwrap();
     assert_eq!(file.root().datasets().unwrap(), vec!["keep".to_string()]);
     assert_eq!(file.dataset("keep").unwrap().read_i32().unwrap(), vec![9]);
-    assert!(file.dataset("ext").is_err());
+    test_util_hdf5::assertion::path_not_found(file.dataset("ext").unwrap_err(), "ext");
 }
 
 #[test]
@@ -500,7 +500,7 @@ fn deleting_single_chunk_dataset_reclaims_storage() {
         file.dataset("keep").unwrap().read_i32().unwrap(),
         vec![5, 6]
     );
-    assert!(file.dataset("one").is_err());
+    test_util_hdf5::assertion::path_not_found(file.dataset("one").unwrap_err(), "one");
 }
 
 #[test]
@@ -584,7 +584,7 @@ fn deleting_subtree_with_chunked_members_reclaims() {
 
     file_space::assert_eof_matches_physical_size(&path);
     let file = File::open(&path).unwrap();
-    assert!(file.group("grp").is_err());
+    test_util_hdf5::assertion::path_not_found(file.group("grp").unwrap_err(), "grp");
     assert_eq!(file.dataset("keep").unwrap().read_i32().unwrap(), vec![1]);
 }
 
@@ -621,7 +621,7 @@ fn persisted_chunked_reclaim_is_disjoint_and_reusable() {
         );
     }
     assert_eq!(f.dataset("keep").unwrap().read_i32().unwrap(), vec![1; 50]);
-    assert!(f.dataset("comp").is_err());
+    test_util_hdf5::assertion::path_not_found(f.dataset("comp").unwrap_err(), "comp");
 }
 
 #[test]
@@ -659,7 +659,7 @@ fn persisted_free_space_survives_reopen_and_is_reused() {
     );
     assert_eq!(f.dataset("a").unwrap().read_i32().unwrap(), vec![1; 100]);
     assert_eq!(f.dataset("c").unwrap().read_i32().unwrap(), vec![3; 100]);
-    assert!(f.dataset("big").is_err());
+    test_util_hdf5::assertion::path_not_found(f.dataset("big").unwrap_err(), "big");
     drop(f);
 
     // Session 2: opening seeds the free list from the persisted managers, so a
@@ -872,7 +872,7 @@ fn persisted_managers_stay_consistent_across_many_commits() {
             vec![100 + round; 150]
         );
     }
-    assert!(f.dataset("d0").is_err());
+    test_util_hdf5::assertion::path_not_found(f.dataset("d0").unwrap_err(), "d0");
 }
 
 /// The bytes a chunked dataset of `elems` `f64` elements occupies, near enough:
@@ -932,7 +932,7 @@ fn chunked_dataset_reuses_the_hole_a_chunked_delete_left() {
         vec![1, 2, 3]
     );
     assert_eq!(f.dataset("tail").unwrap().read_i32().unwrap(), vec![9; 16]);
-    assert!(f.dataset("big").is_err());
+    test_util_hdf5::assertion::path_not_found(f.dataset("big").unwrap_err(), "big");
 }
 
 #[test]
@@ -2165,7 +2165,7 @@ fn deleting_a_populated_group_releases_the_end_of_a_flat_file() {
     assert_released_file_is_self_consistent(&path);
     let f = File::open(&path).unwrap();
     assert_eq!(f.dataset("keep").unwrap().read_i32().unwrap(), [1, 2, 3]);
-    assert!(f.group("scratch").is_err(), "the group is gone");
+    test_util_hdf5::assertion::path_not_found(f.group("scratch").unwrap_err(), "scratch");
 }
 
 /// The same on a paged file, where the end of allocation stays a whole number of
@@ -3136,7 +3136,7 @@ fn assert_churn_survivors(path: &std::path::Path) {
         f.group("keep").unwrap().attrs().unwrap().get("kind"),
         Some(&AttrValue::I64(1))
     );
-    assert!(f.group("scratch_0").is_err(), "every scratch group is gone");
+    test_util_hdf5::assertion::path_not_found(f.group("scratch_0").unwrap_err(), "scratch_0");
     drop(f);
     file_space::assert_eof_matches_physical_size(path);
 }

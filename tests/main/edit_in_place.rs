@@ -2,6 +2,7 @@
 //! add, delete, and copy datasets and groups at any path.
 
 use core::num::NonZeroU32;
+use std::path::Path;
 
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::VariableLengthType;
@@ -331,7 +332,10 @@ fn duplicate_name_is_rejected_without_writing() {
                 b.with_i32_data(&[1, 2]);
             })
             .unwrap_err();
-        assert!(err.to_string().contains("already exists"), "got: {err}");
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "a link with this name already exists in the target group",
+        );
     }
     assert_eq!(std::fs::read(&path).unwrap(), before);
 
@@ -354,7 +358,10 @@ fn duplicate_name_is_rejected_without_writing() {
                 b.with_f64_data(&[2.0, 3.0]).with_shape(&[2]);
             })
             .unwrap_err();
-        assert!(err.to_string().contains("already stages"), "got: {err}");
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "this session already stages an object with this name in the target group; delete it to withdraw that staging before staging another in its place",
+        );
     }
     assert_eq!(std::fs::read(&path).unwrap(), before);
 
@@ -370,7 +377,10 @@ fn duplicate_name_is_rejected_without_writing() {
             })
             .unwrap();
         let err = session.root().create_group("mixed").unwrap_err();
-        assert!(err.to_string().contains("already stages"), "got: {err}");
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "this session already stages an object with this name in the target group; delete it to withdraw that staging before staging another in its place",
+        );
     }
     {
         let session = File::open_rw(&path).unwrap();
@@ -381,7 +391,10 @@ fn duplicate_name_is_rejected_without_writing() {
                 b.with_i32_data(&[1]);
             })
             .unwrap_err();
-        assert!(err.to_string().contains("already stages"), "got: {err}");
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "this session already stages an object with this name in the target group; delete it to withdraw that staging before staging another in its place",
+        );
     }
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
@@ -407,7 +420,10 @@ fn refused_duplicate_leaves_the_first_creation_standing() {
             b.with_f64_data(&[4.0, 5.0]).with_shape(&[2]);
         })
         .unwrap_err();
-    assert!(err.to_string().contains("already stages"), "got: {err}");
+    test_util_hdf5::assertion::edit_unsupported(
+        err,
+        "this session already stages an object with this name in the target group; delete it to withdraw that staging before staging another in its place",
+    );
 
     // The surviving handle answers for what it staged, not for the refused call.
     assert_eq!(first.shape().unwrap(), vec![3]);
@@ -514,7 +530,7 @@ fn delete_dataset_from_root() {
         file.dataset("keep").unwrap().read_i32().unwrap(),
         vec![1, 2, 3]
     );
-    assert!(file.dataset("remove").is_err());
+    test_util_hdf5::assertion::path_not_found(file.dataset("remove").unwrap_err(), "remove");
 }
 
 #[test]
@@ -547,8 +563,8 @@ fn delete_nested_group_subtree() {
     }
 
     let file = File::open(&path).unwrap();
-    assert!(file.group("grp").is_err());
-    assert!(file.dataset("grp/inner").is_err());
+    test_util_hdf5::assertion::path_not_found(file.group("grp").unwrap_err(), "grp");
+    test_util_hdf5::assertion::path_not_found(file.dataset("grp/inner").unwrap_err(), "grp");
     // Siblings and original survive.
     assert_eq!(
         file.dataset("sibling").unwrap().read_i32().unwrap(),
@@ -592,7 +608,7 @@ fn delete_one_of_nested_then_keep_group() {
     }
 
     let file = File::open(&path).unwrap();
-    assert!(file.dataset("g/a").is_err());
+    test_util_hdf5::assertion::path_not_found(file.dataset("g/a").unwrap_err(), "g/a");
     assert_eq!(file.dataset("g/b").unwrap().read_i32().unwrap(), vec![2]);
     assert_eq!(
         file.group("g").unwrap().datasets().unwrap(),
@@ -622,7 +638,7 @@ fn add_and_delete_in_one_commit() {
     let file = File::open(&path).unwrap();
     assert_eq!(file.root().datasets().unwrap(), vec!["new".to_string()]);
     assert_eq!(file.dataset("new").unwrap().read_i32().unwrap(), vec![2]);
-    assert!(file.dataset("old").is_err());
+    test_util_hdf5::assertion::path_not_found(file.dataset("old").unwrap_err(), "old");
 }
 
 #[test]
@@ -660,7 +676,10 @@ fn delete_missing_or_overlapping_is_rejected() {
             })
             .unwrap();
         let err = session.commit().unwrap_err();
-        assert!(err.to_string().contains("overlaps"), "got: {err}");
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "a deletion overlaps an addition in the same commit; replace the path instead, or use separate commits",
+        );
     }
     assert_eq!(std::fs::read(&path).unwrap(), mid);
 }
@@ -797,7 +816,10 @@ fn copy_rejects_missing_source_and_cycle() {
         let session = File::open_rw(&path).unwrap();
         session.copy("g", "g/inside").unwrap();
         let err = session.commit().unwrap_err();
-        assert!(err.to_string().contains("itself"), "got: {err}");
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "cannot copy an object into itself or its own subtree",
+        );
     }
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
@@ -1266,7 +1288,10 @@ fn deleting_group_with_attribute_edit_is_rejected_without_writing() {
             .set_attr("tag", AttrValue::I64(2))
             .unwrap();
         let err = session.commit().unwrap_err();
-        assert!(err.to_string().contains("overlaps"), "got: {err}");
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "a deletion overlaps a group-attribute edit in the same commit; use separate commits",
+        );
     }
 
     assert_eq!(std::fs::read(&path).unwrap(), before);
@@ -1483,7 +1508,7 @@ fn mixed_add_delete_copy_in_one_commit() {
     let mut names = file.root().datasets().unwrap();
     names.sort();
     assert_eq!(names, vec!["fresh", "keep", "source", "source_copy"]);
-    assert!(file.dataset("remove").is_err());
+    test_util_hdf5::assertion::path_not_found(file.dataset("remove").unwrap_err(), "remove");
     assert_eq!(file.dataset("fresh").unwrap().read_i32().unwrap(), vec![42]);
     assert_eq!(
         file.dataset("source_copy").unwrap().read_f64().unwrap(),
@@ -1667,9 +1692,9 @@ fn copy_from_file_rejects_variable_length() {
         let source = File::open(&src_path).unwrap();
         let session = File::open_rw(&dst_path).unwrap();
         let err = session.copy_from(&source, "src", "dup").unwrap_err();
-        assert!(
-            err.to_string().contains("variable-length or reference"),
-            "got: {err}"
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "variable-length or reference attributes cannot be copied to another file yet",
         );
         // Nothing was staged successfully, so a commit is a no-op.
         session.commit().unwrap();
@@ -1701,9 +1726,9 @@ fn copy_from_file_rejects_reference_dataset() {
         let source = File::open(&src_path).unwrap();
         let session = File::open_rw(&dst_path).unwrap();
         let err = session.copy_from(&source, "refs", "dup").unwrap_err();
-        assert!(
-            err.to_string().contains("variable-length or reference"),
-            "got: {err}"
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "variable-length or reference datasets cannot be copied to another file yet",
         );
     }
     assert_eq!(std::fs::read(&dst_path).unwrap(), dst_before);
@@ -1748,7 +1773,10 @@ fn copy_from_file_rejects_destination_collision() {
         let session = File::open_rw(&dst_path).unwrap();
         session.copy_from(&source, "payload", "original").unwrap();
         let err = session.commit().unwrap_err();
-        assert!(err.to_string().contains("already exists"), "got: {err}");
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "a link with this name already exists in the target group",
+        );
     }
     assert_eq!(std::fs::read(&dst_path).unwrap(), dst_before);
 }
@@ -1769,7 +1797,10 @@ fn copy_from_file_rejects_streaming_source() {
     let source = File::open_streaming(&src_path).unwrap();
     let session = File::open_rw(&dst_path).unwrap();
     let err = session.copy_from(&source, "payload", "dup").unwrap_err();
-    assert!(err.to_string().contains("buffered source"), "got: {err}");
+    test_util_hdf5::assertion::edit_unsupported(
+        err,
+        "cross-file copy requires a buffered source file (File::open or File::from_bytes), not a streaming one",
+    );
 }
 
 #[test]
@@ -2164,9 +2195,9 @@ fn write_dataset_resize_keeping_shape_is_a_reshape_and_refused() {
             })
             .unwrap();
         let err = session.commit().unwrap_err();
-        assert!(
-            err.to_string().contains("shape does not match"),
-            "expected reshape refusal, got: {err}"
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "write_dataset shape does not match the on-disk dataset (overwrite, not reshape)",
         );
     }
     assert_eq!(
@@ -2221,9 +2252,9 @@ fn write_dataset_rejects_datatype_mismatch() {
             })
             .unwrap();
         let err = session.commit().unwrap_err();
-        assert!(
-            err.to_string().contains("datatype does not match"),
-            "expected datatype-mismatch refusal, got: {err}"
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "write_dataset datatype does not match the on-disk dataset (overwrite, not retype)",
         );
     }
     assert_eq!(
@@ -2256,9 +2287,9 @@ fn write_dataset_rejects_shape_mismatch() {
             })
             .unwrap();
         let err = session.commit().unwrap_err();
-        assert!(
-            err.to_string().contains("shape does not match"),
-            "expected shape-mismatch refusal, got: {err}"
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "write_dataset shape does not match the on-disk dataset (overwrite, not reshape)",
         );
     }
     assert_eq!(
@@ -2684,9 +2715,9 @@ fn write_dataset_rejects_filtered_request() {
                     .with_chunks(&[2]);
             })
             .unwrap_err();
-        assert!(
-            err.to_string().contains("overwrites values only"),
-            "expected value-only refusal, got: {err}"
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "write_dataset overwrites values only; it cannot make a dataset chunked, filtered, or extensible",
         );
         assert!(
             !session.has_staged_edits(),
@@ -2712,9 +2743,9 @@ fn write_dataset_rejects_staged_attributes() {
                     .set_attr("units", AttrValue::String("m/s".into()));
             })
             .unwrap_err();
-        assert!(
-            err.to_string().contains("cannot set attributes"),
-            "expected attribute refusal, got: {err}"
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "write_dataset overwrites values only; it cannot set attributes (set them with a separate edit)",
         );
         assert!(
             !session.has_staged_edits(),
@@ -2765,7 +2796,7 @@ fn write_dataset_alongside_other_edits() {
         file.dataset("added").unwrap().read_i32().unwrap(),
         vec![3, 4]
     );
-    assert!(file.dataset("doomed").is_err());
+    test_util_hdf5::assertion::path_not_found(file.dataset("doomed").unwrap_err(), "doomed");
 }
 
 #[test]
@@ -3274,9 +3305,9 @@ fn add_chunked_vlen_string_dataset_is_rejected_without_writing() {
                 b.with_vlen_strings(&["a", "b", "c"]).with_chunks(&[2]);
             })
             .unwrap_err();
-        assert!(
-            err.to_string().contains("variable-length-string"),
-            "got: {err}"
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "chunked or extensible variable-length-string datasets cannot be added in place yet",
         );
         session.commit().unwrap();
     }
@@ -3399,7 +3430,10 @@ fn add_reference_dataset_targeting_unprocessed_ancestor_is_rejected_without_writ
             })
             .unwrap(); // root, its own parent
         let err = session.commit().unwrap_err();
-        assert!(err.to_string().contains("still writing"), "got: {err}");
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "an object-reference dataset targets a path this commit is still writing; use separate commits",
+        );
     }
 
     assert_eq!(std::fs::read(&path).unwrap(), before);
@@ -3427,7 +3461,10 @@ fn add_reference_dataset_targeting_unprocessed_sibling_group_is_rejected_without
             })
             .unwrap();
         let err = session.commit().unwrap_err();
-        assert!(err.to_string().contains("still writing"), "got: {err}");
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "an object-reference dataset targets a path this commit is still writing; use separate commits",
+        );
     }
 
     assert_eq!(std::fs::read(&path).unwrap(), before);
@@ -3604,9 +3641,9 @@ fn add_reference_dataset_targeting_same_commit_delete_is_rejected_without_writin
             })
             .unwrap();
         let err = session.commit().unwrap_err();
-        assert!(
-            err.to_string().contains("this commit deletes"),
-            "got: {err}"
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "an object-reference dataset targets an object this commit deletes, or one under it; the reference would be left pointing at storage the delete can reclaim",
         );
     }
 
@@ -3626,8 +3663,13 @@ fn add_reference_dataset_targeting_same_commit_delete_is_rejected_without_writin
 ///
 /// Both depths are checked. A direct child catches the exact-match guard the
 /// bug shipped; a grandchild catches a fix that only descends one level.
-#[test]
-fn add_reference_dataset_targeting_a_child_of_a_same_commit_delete_is_rejected() {
+#[rstest]
+#[case::child("doomed/inner", None)]
+#[case::grandchild_after_failed_child("doomed/sub/deep", Some("doomed/inner"))]
+fn add_reference_dataset_targeting_a_child_of_a_same_commit_delete_is_rejected(
+    #[case] target: &str,
+    #[case] previous_target: Option<&str>,
+) {
     let path = temp::temp_path("hdf5_pure_edit_add_ref_deleted_child.h5");
     let mut b = FileBuilder::new();
     let mut doomed = b.create_group("doomed");
@@ -3637,33 +3679,33 @@ fn add_reference_dataset_targeting_a_child_of_a_same_commit_delete_is_rejected()
     doomed.add_group(sub.finish());
     b.add_group(doomed.finish());
     b.write(&path).unwrap();
-    // One fixture for both depths: each refusal is asserted to leave the file
-    // byte-identical, so the second pass runs against a file that has already
-    // survived a failed commit.
     let before = std::fs::read(&path).unwrap();
 
-    for target in ["doomed/inner", "doomed/sub/deep"] {
-        {
-            let session = File::open_rw(&path).unwrap();
-            session.root().delete("doomed").unwrap();
-            session
-                .root()
-                .create_dataset("refs", |b| {
-                    b.with_path_references(&[target]);
-                })
-                .unwrap();
-            let err = session.commit().unwrap_err();
-            // Assert the delete guard's own message: every other guard in
-            // `resolve_reference_target` reports "still writing", so a test
-            // that only asserted `is_err` would pass on any of them.
-            assert!(
-                err.to_string().contains("this commit deletes"),
-                "{target}: got: {err}"
-            );
-        }
-
-        assert_eq!(std::fs::read(&path).unwrap(), before, "{target}");
+    if let Some(target) = previous_target {
+        assert_deleted_child_reference_is_rejected(&path, target, &before);
     }
+    assert_deleted_child_reference_is_rejected(&path, target, &before);
+}
+
+/// Asserts a deletion-conflict rejection for `target` and unchanged file bytes.
+fn assert_deleted_child_reference_is_rejected(path: &Path, target: &str, before: &[u8]) {
+    {
+        let session = File::open_rw(path).unwrap();
+        session.root().delete("doomed").unwrap();
+        session
+            .root()
+            .create_dataset("refs", |b| {
+                b.with_path_references(&[target]);
+            })
+            .unwrap();
+        let err = session.commit().unwrap_err();
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "an object-reference dataset targets an object this commit deletes, or one under it; the reference would be left pointing at storage the delete can reclaim",
+        );
+    }
+
+    assert_eq!(std::fs::read(path).unwrap(), before, "{target}");
 }
 
 /// The floor under the guard above: a delete in the commit must not stop an
@@ -3801,7 +3843,10 @@ fn a_reference_to_an_unplaced_replacement_reports_the_ordering_not_the_delete() 
         })
         .unwrap();
     let err = session.commit().unwrap_err();
-    assert!(err.to_string().contains("still writing"), "got: {err}");
+    test_util_hdf5::assertion::edit_unsupported(
+        err,
+        "an object-reference dataset targets a path this commit is still writing; use separate commits",
+    );
     drop(session);
 }
 
@@ -3832,7 +3877,10 @@ fn add_reference_dataset_targeting_copy_destination_is_rejected_without_writing(
             })
             .unwrap();
         let err = session.commit().unwrap_err();
-        assert!(err.to_string().contains("still writing"), "got: {err}");
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "an object-reference dataset targets a path this commit is still writing; use separate commits",
+        );
     }
 
     assert_eq!(std::fs::read(&path).unwrap(), before);
@@ -3871,7 +3919,10 @@ fn add_reference_dataset_targeting_write_overwrite_target_is_rejected_without_wr
             })
             .unwrap();
         let err = session.commit().unwrap_err();
-        assert!(err.to_string().contains("still writing"), "got: {err}");
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "an object-reference dataset targets a path this commit is still writing; use separate commits",
+        );
     }
 
     assert_eq!(std::fs::read(&path).unwrap(), before);
@@ -3924,10 +3975,9 @@ fn an_added_reference_address_into_deleted_space_is_refused() {
             .unwrap();
         session.root().delete("g").unwrap();
         let err = session.commit().unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("holds the address of an object this commit deletes"),
-            "got: {err}"
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "a reference this commit writes holds the address of an object this commit deletes, or of one under it; the reference would be left pointing at storage the delete can reclaim",
         );
         // A refusal returns the whole batch to the caller (issue #316).
         assert!(session.has_staged_edits());
@@ -3957,10 +4007,9 @@ fn an_overwritten_reference_address_into_deleted_space_is_refused() {
             .unwrap();
         session.root().delete("g").unwrap();
         let err = session.commit().unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("holds the address of an object this commit deletes"),
-            "got: {err}"
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "a reference this commit writes holds the address of an object this commit deletes, or of one under it; the reference would be left pointing at storage the delete can reclaim",
         );
     }
 
@@ -4032,10 +4081,9 @@ fn a_copy_of_a_reference_dataset_beside_a_delete_is_refused() {
         session.copy("refs", "refs_copy").unwrap();
         session.root().delete("g").unwrap();
         let err = session.commit().unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("holds the address of an object this commit deletes"),
-            "got: {err}"
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "a reference this commit writes holds the address of an object this commit deletes, or of one under it; the reference would be left pointing at storage the delete can reclaim",
         );
     }
 
@@ -4154,7 +4202,10 @@ fn a_reference_address_to_a_group_this_commit_rewrites_is_refused() {
             })
             .unwrap();
         let err = session.commit().unwrap_err();
-        assert!(err.to_string().contains("rewrites elsewhere"), "got: {err}");
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "a reference this commit writes holds the pre-commit address of an object this commit rewrites elsewhere; name the target by path (`with_path_references`) so it resolves to where the object lands, or use separate commits",
+        );
     }
     assert_eq!(std::fs::read(&path).unwrap(), before);
 
@@ -4224,7 +4275,10 @@ fn a_reference_address_to_a_relocated_dataset_is_refused() {
             .set_attr("tag", AttrValue::I32(1))
             .unwrap();
         let err = session.commit().unwrap_err();
-        assert!(err.to_string().contains("rewrites elsewhere"), "got: {err}");
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "a reference this commit writes holds the pre-commit address of an object this commit rewrites elsewhere; name the target by path (`with_path_references`) so it resolves to where the object lands, or use separate commits",
+        );
     }
 
     // The refusal's first suggestion does not reach this one: a written dataset
@@ -4244,7 +4298,10 @@ fn a_reference_address_to_a_relocated_dataset_is_refused() {
             .set_attr("tag", AttrValue::I32(1))
             .unwrap();
         let err = session.commit().unwrap_err();
-        assert!(err.to_string().contains("still writing"), "got: {err}");
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "an object-reference dataset targets a path this commit is still writing; use separate commits",
+        );
     }
 
     assert_eq!(std::fs::read(&path).unwrap(), before);
@@ -4264,59 +4321,47 @@ fn a_reference_address_to_a_relocated_dataset_is_refused() {
 /// of `H5T_STD_REF_OBJ`), so a plain `copy` reaches it; the 16-byte reference is
 /// this crate's own construction. Both arrive through `with_raw_data`, which
 /// takes whatever `Datatype` it is given.
-#[test]
-fn a_datatype_mixing_locatable_and_unlocatable_references_is_refused() {
-    let object_ref = || Datatype::Reference {
-        size: 8,
-        ref_type: ReferenceType::Object,
-    };
-    let unlocatable = [
-        (
-            "wider than eight bytes",
+#[rstest]
+#[case::wide_reference(Datatype::Reference { size: 16, ref_type: ReferenceType::Object })]
+#[case::variable_length(Datatype::VariableLength(VariableLengthType::sequence(Datatype::Reference { size: 8, ref_type: ReferenceType::Object })))]
+fn a_datatype_mixing_locatable_and_unlocatable_references_is_refused(#[case] second: Datatype) {
+    let path = temp::temp_path("hdf5_pure_edit_ref_mixed.h5");
+    let inner = write_reference_fixture(&path);
+    let before = std::fs::read(&path).unwrap();
+
+    let dt = CompoundTypeBuilder::with_size(24)
+        .field(
+            "locatable",
+            0,
             Datatype::Reference {
-                size: 16,
+                size: 8,
                 ref_type: ReferenceType::Object,
             },
-        ),
-        (
-            "a variable length of them",
-            Datatype::VariableLength(VariableLengthType::sequence(object_ref())),
-        ),
-    ];
+        )
+        .field("other", 8, second)
+        .build()
+        .unwrap();
+    // The locatable reference is null. The unsupported member contains the deleted object's address.
+    let mut element = vec![0u8; 24];
+    element[8..16].copy_from_slice(&inner.to_le_bytes());
 
-    for (tag, second) in unlocatable {
-        let path = temp::temp_path("hdf5_pure_edit_ref_mixed.h5");
-        let inner = write_reference_fixture(&path);
-        let before = std::fs::read(&path).unwrap();
-
-        let dt = CompoundTypeBuilder::with_size(24)
-            .field("locatable", 0, object_ref())
-            .field("other", 8, second)
-            .build()
+    {
+        let session = File::open_rw(&path).unwrap();
+        session
+            .root()
+            .create_dataset("added", |b| {
+                b.with_raw_data(dt.clone(), element.clone(), 1);
+            })
             .unwrap();
-        // The hazardous address goes in the member the walker cannot reach; the
-        // one it can reach is left null, so only the unreachable half can refuse.
-        let mut element = vec![0u8; 24];
-        element[8..16].copy_from_slice(&inner.to_le_bytes());
-
-        {
-            let session = File::open_rw(&path).unwrap();
-            session
-                .root()
-                .create_dataset("added", |b| {
-                    b.with_raw_data(dt.clone(), element.clone(), 1);
-                })
-                .unwrap();
-            session.root().delete("g").unwrap();
-            let err = session.commit().unwrap_err();
-            assert!(
-                err.to_string().contains("this screen cannot read"),
-                "{tag}: got {err}"
-            );
-        }
-
-        assert_eq!(std::fs::read(&path).unwrap(), before, "{tag}");
+        session.root().delete("g").unwrap();
+        let err = session.commit().unwrap_err();
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "a reference this commit writes sits in a datatype whose addresses this screen cannot read — a width other than eight, a dataset-region reference, a variable length of them, or a compound holding one beside a reference it can read — so it cannot be checked against what this commit vacates; supply an 8-byte object reference (`with_reference_data`)",
+        );
     }
+
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
 /// A **dataset-region** reference is refused beside a delete, like every other
@@ -4354,9 +4399,9 @@ fn a_dataset_region_reference_is_refused_beside_a_delete() {
             .unwrap();
         session.root().delete("g").unwrap();
         let err = session.commit().unwrap_err();
-        assert!(
-            err.to_string().contains("this screen cannot read"),
-            "got: {err}"
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "a reference this commit writes sits in a datatype whose addresses this screen cannot read — a width other than eight, a dataset-region reference, a variable length of them, or a compound holding one beside a reference it can read — so it cannot be checked against what this commit vacates; supply an 8-byte object reference (`with_reference_data`)",
         );
     }
 
@@ -4372,80 +4417,63 @@ fn a_dataset_region_reference_is_refused_beside_a_delete() {
 /// Both reach `moved` from the write plan rather than from the path, so a
 /// reference supplied as the target's pre-commit address is refused where the
 /// same commit relocates it.
-#[test]
-fn a_reference_address_to_a_dataset_a_write_relocates_is_refused() {
-    #[expect(
-        clippy::type_complexity,
-        reason = "two named edits share one loop body"
-    )]
-    let cases: [(&str, fn(&File)); 2] = [
-        (
-            // A filtered chunk whose replacement compresses worse than what it
-            // replaces no longer fits its slot, so the dataset is rebuilt
-            // elsewhere and its old header vacated.
-            "refiltered",
-            (|session: &File| {
-                let incompressible: Vec<i32> = (0..64)
-                    .map(|i: i32| i.wrapping_mul(0x9E37_79B1u32 as i32))
-                    .collect();
-                session
-                    .dataset("d")
-                    .unwrap()
-                    .write_staged(|b| {
-                        b.with_i32_data(&incompressible);
-                    })
-                    .unwrap();
-            }),
-        ),
-        (
-            "append",
-            (|session: &File| {
-                session
-                    .dataset("d")
-                    .unwrap()
-                    .append_staged(|a| {
-                        a.append_i32(&[9]);
-                    })
-                    .unwrap();
-            }),
-        ),
-    ];
-    for (tag, relocate) in cases {
-        let path = temp::temp_path(&format!("hdf5_pure_edit_ref_moved_{tag}.h5"));
-        let mut b = FileBuilder::new();
-        // Zeros so every chunk compresses to almost nothing, leaving slots the
-        // replacement below cannot fit back into.
-        Unlimited::new("d", &[0i32; 64], 16)
-            .filters(&[Filter::Deflate(DeflateLevel::Six)])
-            .add_to(&mut b);
-        b.create_dataset("refs").with_path_references(&["d"]);
-        b.write(&path).unwrap();
+#[rstest]
+#[case::refiltered(|session: &File| {
+    let incompressible: Vec<i32> = (0..64)
+        .map(|i: i32| i.wrapping_mul(0x9E37_79B1u32 as i32))
+        .collect();
+    session
+        .dataset("d")
+        .unwrap()
+        .write_staged(|b| {
+            b.with_i32_data(&incompressible);
+        })
+        .unwrap();
+})]
+#[case::append(|session: &File| {
+    session
+        .dataset("d")
+        .unwrap()
+        .append_staged(|a| {
+            a.append_i32(&[9]);
+        })
+        .unwrap();
+})]
+fn a_reference_address_to_a_dataset_a_write_relocates_is_refused(#[case] relocate: fn(&File)) {
+    let path = temp::temp_path("hdf5_pure_edit_ref_moved.h5");
+    let mut b = FileBuilder::new();
+    // Zeros so every chunk compresses to almost nothing, leaving slots the
+    // replacement cannot fit back into.
+    Unlimited::new("d", &[0i32; 64], 16)
+        .filters(&[Filter::Deflate(DeflateLevel::Six)])
+        .add_to(&mut b);
+    b.create_dataset("refs").with_path_references(&["d"]);
+    b.write(&path).unwrap();
 
-        let d_addr = {
-            let file = File::open(&path).unwrap();
-            let raw = file.dataset("refs").unwrap().read_raw().unwrap();
-            u64::from_le_bytes(raw[..8].try_into().unwrap())
-        };
-        let before = std::fs::read(&path).unwrap();
+    let d_addr = {
+        let file = File::open(&path).unwrap();
+        let raw = file.dataset("refs").unwrap().read_raw().unwrap();
+        u64::from_le_bytes(raw[..8].try_into().unwrap())
+    };
+    let before = std::fs::read(&path).unwrap();
 
-        {
-            let session = File::open_rw(&path).unwrap();
-            session
-                .root()
-                .create_dataset("added", |b| {
-                    b.with_reference_data(&[d_addr]);
-                })
-                .unwrap();
-            relocate(&session);
-            let err = session.commit().unwrap_err();
-            assert!(
-                err.to_string().contains("rewrites elsewhere"),
-                "{tag}: got {err}"
-            );
-        }
-
-        assert_eq!(std::fs::read(&path).unwrap(), before, "{tag}");
+    {
+        let session = File::open_rw(&path).unwrap();
+        session
+            .root()
+            .create_dataset("added", |b| {
+                b.with_reference_data(&[d_addr]);
+            })
+            .unwrap();
+        relocate(&session);
+        let err = session.commit().unwrap_err();
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "a reference this commit writes holds the pre-commit address of an object this commit rewrites elsewhere; name the target by path (`with_path_references`) so it resolves to where the object lands, or use separate commits",
+        );
     }
+
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
 /// An address naming an object the commit leaves alone still commits, even
@@ -4525,10 +4553,9 @@ fn a_hazardous_reference_past_the_first_element_is_found() {
             .unwrap();
         session.root().delete("g").unwrap();
         let err = session.commit().unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("holds the address of an object this commit deletes"),
-            "got: {err}"
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "a reference this commit writes holds the address of an object this commit deletes, or of one under it; the reference would be left pointing at storage the delete can reclaim",
         );
     }
 
@@ -4557,10 +4584,9 @@ fn a_copied_groups_subtree_is_screened() {
         session.copy("holder", "holder_copy").unwrap();
         session.root().delete("g").unwrap();
         let err = session.commit().unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("holds the address of an object this commit deletes"),
-            "got: {err}"
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "a reference this commit writes holds the address of an object this commit deletes, or of one under it; the reference would be left pointing at storage the delete can reclaim",
         );
     }
 
@@ -4621,9 +4647,9 @@ fn a_chunked_reference_copy_beside_a_delete_is_refused() {
         session.copy("crefs", "dup").unwrap();
         session.root().delete("g").unwrap();
         let err = session.commit().unwrap_err();
-        assert!(
-            err.to_string().contains("chunked object-reference dataset"),
-            "got: {err}"
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "a chunked object-reference dataset cannot be copied in a commit that also deletes objects: its addresses live inside chunks this path does not decode; use separate commits",
         );
     }
 
@@ -4712,10 +4738,9 @@ fn a_copy_of_a_committed_reference_datatype_is_screened() {
         session.copy("crefs", "dup").unwrap();
         session.root().delete("g").unwrap();
         let err = session.commit().unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("holds the address of an object this commit deletes"),
-            "got: {err}"
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "a reference this commit writes holds the address of an object this commit deletes, or of one under it; the reference would be left pointing at storage the delete can reclaim",
         );
     }
 
@@ -4764,7 +4789,7 @@ fn a_copy_of_a_committed_ordinary_datatype_still_commits_beside_a_delete() {
         file.dataset("dup").unwrap().attrs().unwrap(),
         file.dataset("src").unwrap().attrs().unwrap()
     );
-    assert!(file.group("g").is_err(), "g was deleted");
+    test_util_hdf5::assertion::path_not_found(file.group("g").unwrap_err(), "g");
     drop(file);
 }
 
@@ -4787,9 +4812,9 @@ fn add_extensible_vlen_string_dataset_is_rejected_without_writing() {
                     .with_maxshape(&[MaxExtent::Unlimited]);
             })
             .unwrap_err();
-        assert!(
-            err.to_string().contains("variable-length-string"),
-            "got: {err}"
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "chunked or extensible variable-length-string datasets cannot be added in place yet",
         );
         session.commit().unwrap();
     }
@@ -4907,9 +4932,9 @@ fn write_dataset_rejects_object_references_without_writing() {
                 b.with_path_references(&["bb"]);
             })
             .unwrap_err();
-        assert!(
-            err.to_string().contains("object-reference"),
-            "expected an object-reference refusal, got: {err}"
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "write_dataset cannot overwrite an object-reference dataset's data in place yet",
         );
         assert!(
             !session.has_staged_edits(),
@@ -5317,10 +5342,7 @@ fn replacing_a_group_replaces_its_whole_subtree() {
     let file = File::open(&path).unwrap();
     // The replacement is a new, empty group configured in the same commit: the
     // original's child is gone rather than inherited.
-    assert!(
-        file.dataset("g/inner").is_err(),
-        "the replaced group kept the original's child"
-    );
+    test_util_hdf5::assertion::path_not_found(file.dataset("g/inner").unwrap_err(), "g/inner");
     assert_eq!(
         file.dataset("g/fresh").unwrap().read_i32().unwrap(),
         vec![1, 2, 3]
@@ -5424,10 +5446,7 @@ fn an_addition_below_a_path_needs_that_path_replaced_too() {
         file.dataset("g/added").unwrap().read_i32().unwrap(),
         vec![1, 2]
     );
-    assert!(
-        file.dataset("g/inner").is_err(),
-        "the addition landed in the group being removed rather than its replacement"
-    );
+    test_util_hdf5::assertion::path_not_found(file.dataset("g/inner").unwrap_err(), "g/inner");
     drop(file);
 
     // Without that replacement it is the ambiguity the refusal exists for: the
@@ -5444,9 +5463,9 @@ fn an_addition_below_a_path_needs_that_path_replaced_too() {
         })
         .unwrap();
     let err = session.commit().unwrap_err();
-    assert!(
-        matches!(&err, Error::EditUnsupported(m) if m.contains("overlaps an addition")),
-        "unexpected error: {err:?}"
+    test_util_hdf5::assertion::edit_unsupported(
+        err,
+        "a deletion overlaps an addition in the same commit; replace the path instead, or use separate commits",
     );
     // The refusal is a preflight, so not a byte of the file changed.
     drop(session);
@@ -5480,11 +5499,19 @@ fn a_group_and_a_dataset_replace_each_other() {
         // lookup (issue #352) rather than handed back as a handle whose calls
         // fail one at a time.
         assert!(
-            matches!(file.group("g"), Err(Error::NotAGroup(_))),
+            matches!(file.group("g"), Err(Error::NotAGroup(p)) if p == "g"),
             "`g` still opens as a group"
         );
-        assert!(file.dataset("g/inner").is_err());
-        assert!(file.group("g/sub").is_err());
+        let error = file.dataset("g/inner").unwrap_err();
+        assert!(
+            matches!(&error, Error::NotAGroup(path) if path == "g"),
+            "{error:?}"
+        );
+        let error = file.group("g/sub").unwrap_err();
+        assert!(
+            matches!(&error, Error::NotAGroup(path) if path == "g"),
+            "{error:?}"
+        );
     }
 
     // And a group back over that dataset.
@@ -5505,7 +5532,7 @@ fn a_group_and_a_dataset_replace_each_other() {
     // The mirror of the refusal above, and the same shape: a kind, not an
     // absence.
     assert!(
-        matches!(file.dataset("g"), Err(Error::NotADataset(_))),
+        matches!(file.dataset("g"), Err(Error::NotADataset(p)) if p == "g"),
         "`g` still resolves as a dataset"
     );
     assert_eq!(file.dataset("g/back").unwrap().read_i32().unwrap(), vec![7]);
@@ -5533,14 +5560,14 @@ fn a_staged_edit_to_a_replaced_object_is_refused() {
         })
         .unwrap();
     assert!(
-        matches!(session.group("g"), Err(Error::NotAGroup(_))),
+        matches!(session.group("g"), Err(Error::NotAGroup(p)) if p == "g"),
         "`g` names the staged dataset before the commit, not the group it replaces"
     );
     doomed.set_attr("generation", AttrValue::I64(1)).unwrap();
     let err = session.commit().unwrap_err();
-    assert!(
-        matches!(&err, Error::EditUnsupported(m) if m.contains("at or under a replaced path")),
-        "unexpected error: {err:?}"
+    test_util_hdf5::assertion::edit_unsupported(
+        err,
+        "a staged edit names a group at or under a replaced path that this commit does not itself create; create it in the same commit, or use separate commits",
     );
     // A handle keeps the session (and its exclusive lock) alive until it is
     // dropped; on Windows that lock is mandatory, so the reopen below needs
@@ -5569,9 +5596,9 @@ fn a_staged_edit_to_a_replaced_object_is_refused() {
         .set_attr("generation", AttrValue::I64(1))
         .unwrap();
     let err = session.commit().unwrap_err();
-    assert!(
-        matches!(&err, Error::EditUnsupported(m) if m.contains("at or under a replaced path")),
-        "unexpected error: {err:?}"
+    test_util_hdf5::assertion::edit_unsupported(
+        err,
+        "a staged edit names a group at or under a replaced path that this commit does not itself create; create it in the same commit, or use separate commits",
     );
     drop(session);
     assert_eq!(std::fs::read(&path).unwrap(), before);
@@ -5627,9 +5654,9 @@ fn a_copy_reading_from_a_replaced_path_is_refused() {
             .unwrap();
         session.copy("slot", "backup").unwrap();
         let err = session.commit().unwrap_err();
-        assert!(
-            matches!(&err, Error::EditUnsupported(m) if m.contains("reads from a path the same commit replaces")),
-            "unexpected error: {err:?}"
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "a copy in this commit reads from a path the same commit replaces; use separate commits",
         );
         drop(session);
         assert_eq!(std::fs::read(&path).unwrap(), before);
@@ -5649,9 +5676,9 @@ fn a_copy_reading_from_a_replaced_path_is_refused() {
             .unwrap();
         session.copy("g/inner", "backup").unwrap();
         let err = session.commit().unwrap_err();
-        assert!(
-            matches!(&err, Error::EditUnsupported(m) if m.contains("reads from a path the same commit replaces")),
-            "unexpected error: {err:?}"
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "a copy in this commit reads from a path the same commit replaces; use separate commits",
         );
         drop(session);
         assert_eq!(std::fs::read(&path).unwrap(), before);
@@ -5670,7 +5697,7 @@ fn a_copy_reading_from_a_replaced_path_is_refused() {
         file.dataset("moved").unwrap().read_f64().unwrap(),
         vec![1.0, 2.0, 3.0]
     );
-    assert!(file.dataset("slot").is_err());
+    test_util_hdf5::assertion::path_not_found(file.dataset("slot").unwrap_err(), "slot");
     drop(file);
 }
 
@@ -5773,13 +5800,14 @@ fn a_refused_commit_does_not_apply_its_survivors_later() {
         .unwrap();
 
     let err = session.commit().unwrap_err();
-    assert!(
-        matches!(&err, Error::EditUnsupported(m) if m.contains("shape does not match")),
-        "unexpected error: {err:?}"
+    let first = format!("{err:?}");
+    test_util_hdf5::assertion::edit_unsupported(
+        err,
+        "write_dataset shape does not match the on-disk dataset (overwrite, not reshape)",
     );
     let again = session.commit().unwrap_err();
     assert_eq!(
-        format!("{err:?}"),
+        first,
         format!("{again:?}"),
         "the second commit applied the refused batch's survivors"
     );
@@ -5791,10 +5819,7 @@ fn a_refused_commit_does_not_apply_its_survivors_later() {
         "a refused commit wrote to the file"
     );
     let file = File::open(&path).unwrap();
-    assert!(
-        file.dataset("added_a").is_err(),
-        "an edit from a refused batch reached the file"
-    );
+    test_util_hdf5::assertion::path_not_found(file.dataset("added_a").unwrap_err(), "added_a");
 }
 
 /// The restore a refused commit performs covers *every* kind of staged edit,
@@ -5971,11 +5996,8 @@ fn a_refused_staging_call_stages_none_of_its_batch() {
     // Only the edit staged before the refused call reached the file.
     let file = File::open(&path).unwrap();
     assert_eq!(file.dataset("kept").unwrap().read_i32().unwrap(), vec![1]);
-    assert!(file.group("batch").is_err(), "the refused group was staged");
-    assert!(
-        file.dataset("batch/good").is_err(),
-        "a dataset from the refused call was staged"
-    );
+    test_util_hdf5::assertion::path_not_found(file.group("batch").unwrap_err(), "batch");
+    test_util_hdf5::assertion::path_not_found(file.dataset("batch/good").unwrap_err(), "batch");
     drop(file);
     assert_ne!(std::fs::read(&path).unwrap(), before);
 }
@@ -6771,9 +6793,18 @@ fn a_staged_subtree_is_addressable_before_the_commit() {
 
     // Reachable by name from the file, from the root, and from the returned
     // handle — all before the commit.
-    assert!(session.group("epoch").is_ok());
-    assert!(session.dataset("epoch/sys_time").is_ok());
-    assert!(session.root().group("epoch").is_ok());
+    assert_eq!(
+        session.group("epoch").unwrap().datasets().unwrap(),
+        vec!["sys_time"]
+    );
+    assert_eq!(
+        session.dataset("epoch/sys_time").unwrap().shape().unwrap(),
+        vec![0]
+    );
+    assert_eq!(
+        session.root().group("epoch").unwrap().datasets().unwrap(),
+        vec!["sys_time"]
+    );
     let mut col = epoch.dataset("sys_time").unwrap();
 
     // What the builder settled is answered from the staged record.
@@ -6858,12 +6889,12 @@ fn reading_a_staged_object_reports_that_it_is_not_committed() {
         matches!(col.read_i32(), Err(Error::NotCommitted(p)) if p == "run/col"),
         "a staged dataset must not read as fill values"
     );
-    assert!(matches!(col.read_raw(), Err(Error::NotCommitted(_))));
-    assert!(matches!(col.attrs(), Err(Error::NotCommitted(_))));
-    assert!(matches!(grp.attrs(), Err(Error::NotCommitted(_))));
+    assert!(matches!(col.read_raw(), Err(Error::NotCommitted(p)) if p == "run/col"));
+    assert!(matches!(col.attrs(), Err(Error::NotCommitted(p)) if p == "run/col"));
+    assert!(matches!(grp.attrs(), Err(Error::NotCommitted(p)) if p == "run"));
 
     // In-place growth has no bytes to grow.
-    assert!(matches!(col.append(&[9i32]), Err(Error::NotCommitted(_))));
+    assert!(matches!(col.append(&[9i32]), Err(Error::NotCommitted(p)) if p == "run/col"));
     assert!(matches!(
         col.append_raw(&[0u8; 4]),
         Err(Error::NotCommitted(_))
@@ -6874,7 +6905,7 @@ fn reading_a_staged_object_reports_that_it_is_not_committed() {
     ));
 
     // So do the staged edits that rewrite an object the file already holds.
-    assert!(matches!(col.write(&[1i32, 2]), Err(Error::NotCommitted(_))));
+    assert!(matches!(col.write(&[1i32, 2]), Err(Error::NotCommitted(p)) if p == "run/col"));
     assert!(matches!(
         col.write_staged(|b| {
             b.with_i32_data(&[1, 2]);
@@ -7002,7 +7033,7 @@ fn a_refused_commit_leaves_the_staged_handle_pending() {
     // A deletion of a path that does not exist refuses the whole commit, so the
     // addition beside it stays staged (issue #316).
     session.root().delete("no_such_object").unwrap();
-    assert!(session.commit().is_err());
+    test_util_hdf5::assertion::path_not_found(session.commit().unwrap_err(), "no_such_object");
     assert!(
         matches!(ds.read_i32(), Err(Error::NotCommitted(p)) if p == "added"),
         "a refused commit leaves the object staged"
@@ -7013,7 +7044,7 @@ fn a_refused_commit_leaves_the_staged_handle_pending() {
     // alive, so the object stays staged and the handle keeps saying so. The
     // file itself never received it.
     drop(session);
-    assert!(matches!(ds.read_i32(), Err(Error::NotCommitted(_))));
+    assert!(matches!(ds.read_i32(), Err(Error::NotCommitted(p)) if p == "added"));
     drop(ds);
     let reopened = File::open(&path).unwrap();
     assert!(matches!(
@@ -7036,8 +7067,8 @@ fn a_lookup_of_a_staged_object_of_the_other_kind_is_refused() {
         })
         .unwrap();
 
-    assert!(matches!(session.dataset("grp"), Err(Error::NotADataset(_))));
-    assert!(matches!(session.group("set"), Err(Error::NotAGroup(_))));
+    assert!(matches!(session.dataset("grp"), Err(Error::NotADataset(p)) if p == "grp"));
+    assert!(matches!(session.group("set"), Err(Error::NotAGroup(p)) if p == "set"));
     assert!(matches!(
         session.root().dataset("grp"),
         Err(Error::NotADataset(_))
@@ -7110,9 +7141,9 @@ fn appending_through_a_handle_onto_a_replaced_dataset_is_refused() {
             a.append_i32(&[200]);
         })
         .unwrap_err();
-    assert!(
-        matches!(&err, Error::EditUnsupported(m) if m.contains("could only grow the object being replaced")),
-        "unexpected error: {err:?}"
+    test_util_hdf5::assertion::edit_unsupported(
+        err,
+        "a dataset is staged at this path in the same commit, so an append through a handle onto the object the file holds there could only grow the object being replaced; append through the handle that staged the creation, or commit first",
     );
 
     session.commit().unwrap();
@@ -7141,11 +7172,17 @@ fn a_creation_colliding_with_a_surviving_link_is_refused_at_the_call() {
             b.with_i32_data(&[9]);
         })
         .unwrap_err();
-    assert!(err.to_string().contains("already exists"), "got: {err}");
+    test_util_hdf5::assertion::edit_unsupported(
+        err,
+        "a link with this name already exists in the target group",
+    );
     // The same rule when the creation would change the object's kind, which a
     // listing would otherwise report as a dataset becoming a group.
     let err = session.root().create_group("original").unwrap_err();
-    assert!(err.to_string().contains("already exists"), "got: {err}");
+    test_util_hdf5::assertion::edit_unsupported(
+        err,
+        "a link with this name already exists in the target group",
+    );
 
     // Nothing was staged, so `original` still means the object in the file and
     // there is nothing left for the commit to refuse.
@@ -7192,7 +7229,10 @@ fn a_creation_under_a_deleted_group_does_not_hide_the_files_own_child() {
             b.with_i32_data(&[9]);
         })
         .unwrap_err();
-    assert!(err.to_string().contains("already exists"), "got: {err}");
+    test_util_hdf5::assertion::edit_unsupported(
+        err,
+        "a link with this name already exists in the target group",
+    );
     session
         .root()
         .create_dataset("g/other", |b| {
@@ -7211,7 +7251,10 @@ fn a_creation_under_a_deleted_group_does_not_hide_the_files_own_child() {
         "it must not vanish from its group's listing either"
     );
     // The batch itself is still the commit's to refuse.
-    assert!(session.commit().is_err());
+    test_util_hdf5::assertion::edit_unsupported(
+        session.commit().unwrap_err(),
+        "a deletion overlaps an addition in the same commit; replace the path instead, or use separate commits",
+    );
 }
 
 #[test]

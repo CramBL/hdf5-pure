@@ -5,8 +5,11 @@
 //! bytes can be read back via the hdf5-pure reader (and will eventually be
 //! deserialized back into the original struct).
 
-use hdf5_pure::mat::{self, Complex32, Complex64, Matrix};
+use std::fmt::Debug;
+
+use hdf5_pure::mat::{self, Complex32, Complex64, MatError, Matrix};
 use hdf5_pure::{AttrValue, File};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use test_util::bytes;
 use test_util::superblock;
@@ -87,7 +90,7 @@ fn serialize_top_level_struct_produces_three_variables() {
 #[test]
 fn root_must_be_struct_errors_for_primitives() {
     let r = mat::to_bytes(&42u32);
-    assert!(matches!(r, Err(mat::MatError::RootMustBeStruct)));
+    assert!(matches!(r, Err(MatError::RootMustBeStruct)));
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -242,7 +245,10 @@ fn option_none_becomes_an_empty_struct_array() {
         maybe: None,
     };
     let file = File::from_bytes(mat::to_bytes(&v).unwrap()).unwrap();
-    assert!(file.dataset("required").is_ok());
+    assert_eq!(
+        file.dataset("required").unwrap().read_f64().unwrap(),
+        vec![1.0]
+    );
     assert_empty_struct_array(&file, "maybe");
 }
 
@@ -262,7 +268,10 @@ fn option_none_agrees_across_both_emitters() {
     assert_eq!(no_options, with_options);
 
     let file = File::from_bytes(with_options).unwrap();
-    assert!(file.dataset("required").is_ok());
+    assert_eq!(
+        file.dataset("required").unwrap().read_f64().unwrap(),
+        vec![1.0]
+    );
     assert_empty_struct_array(&file, "maybe");
 }
 
@@ -276,8 +285,11 @@ fn option_none_is_omitted_under_the_omit_policy() {
     let mut options = mat::Options::default();
     options.null_policy = mat::NullPolicy::Omit;
     let file = File::from_bytes(mat::to_bytes_with_options(&v, &options).unwrap()).unwrap();
-    assert!(file.dataset("required").is_ok());
-    assert!(file.dataset("maybe").is_err());
+    assert_eq!(
+        file.dataset("required").unwrap().read_f64().unwrap(),
+        vec![1.0]
+    );
+    test_util_hdf5::assertion::path_not_found(file.dataset("maybe").unwrap_err(), "maybe");
 }
 
 #[test]
@@ -288,7 +300,14 @@ fn option_none_is_rejected_under_the_error_policy() {
     };
     let mut options = mat::Options::default();
     options.null_policy = mat::NullPolicy::Error;
-    assert!(mat::to_bytes_with_options(&v, &options).is_err());
+    let error = mat::to_bytes_with_options(&v, &options).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            MatError::UnsupportedType("null value under NullPolicy::Error")
+        ),
+        "{error:?}"
+    );
 }
 
 /// The root names no slot, so a null there is an empty variable namespace, not a
@@ -352,15 +371,37 @@ fn a_root_null_writes_the_same_empty_workspace_every_legitimate_route_does() {
         "the empty workspace must contain no variables"
     );
 
-    // `Error` is the one policy expressible at the root, and it must fire.
     let mut error = mat::Options::default();
     error.null_policy = mat::NullPolicy::Error;
-    assert!(mat::to_bytes_with_options(&none, &error).is_err());
-    assert!(mat::to_bytes_with_options(&(), &error).is_err());
-    assert!(mat::to_bytes_with_options(&serde_json::Value::Null, &error).is_err());
-    // ...without catching the legitimate empty-workspace requests.
-    assert!(mat::to_bytes_with_options(&BTreeMap::<String, f64>::new(), &error).is_ok());
-    assert!(mat::to_bytes_with_options(&Fieldless {}, &error).is_ok());
+    let file = File::from_bytes(
+        mat::to_bytes_with_options(&BTreeMap::<String, f64>::new(), &error).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(file.root().datasets().unwrap(), Vec::<String>::new());
+    assert_eq!(file.root().groups().unwrap(), Vec::<String>::new());
+    let file =
+        File::from_bytes(mat::to_bytes_with_options(&Fieldless {}, &error).unwrap()).unwrap();
+    assert_eq!(file.root().datasets().unwrap(), Vec::<String>::new());
+    assert_eq!(file.root().groups().unwrap(), Vec::<String>::new());
+}
+
+#[rstest::rstest]
+#[case::none(|options: &mat::Options| mat::to_bytes_with_options(&Option::<f64>::None, options))]
+#[case::unit(|options: &mat::Options| mat::to_bytes_with_options(&(), options))]
+#[case::json_null(|options: &mat::Options| mat::to_bytes_with_options(&serde_json::Value::Null, options))]
+fn root_null_is_rejected_under_the_error_policy(
+    #[case] write: fn(&mat::Options) -> Result<Vec<u8>, MatError>,
+) {
+    let mut options = mat::Options::default();
+    options.null_policy = mat::NullPolicy::Error;
+    let error = write(&options).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            MatError::UnsupportedType("null value under NullPolicy::Error")
+        ),
+        "{error:?}"
+    );
 }
 
 /// `Matrix::data` is the sentinel's own payload, not a sequence the caller
@@ -498,25 +539,6 @@ fn an_empty_struct_array_field_reads_back_only_into_these_targets() {
     reads_as!(serde_json::Value, serde_json::Value::Null);
     reads_as!((), ());
 
-    macro_rules! rejects {
-        ($ty:ty) => {{
-            #[derive(Deserialize, Debug)]
-            struct R {
-                #[allow(dead_code)]
-                v: $ty,
-            }
-            assert!(
-                mat::from_bytes::<R>(&bytes).is_err(),
-                "{} must not silently accept struct([])",
-                stringify!($ty)
-            );
-        }};
-    }
-    rejects!(f64);
-    rejects!(u32);
-    rejects!(bool);
-    rejects!(String);
-
     // `#[serde(default)]` does not rescue a scalar: the field is present, not
     // missing, so serde never reaches for the default. This is the hazard.
     #[derive(Deserialize, Debug)]
@@ -525,10 +547,41 @@ fn an_empty_struct_array_field_reads_back_only_into_these_targets() {
         #[allow(dead_code)]
         v: u32,
     }
+    let error = mat::from_bytes::<WithDefault>(&bytes).unwrap_err();
     assert!(
-        mat::from_bytes::<WithDefault>(&bytes).is_err(),
-        "#[serde(default)] must not appear to rescue a present null field"
+        matches!(&error, MatError::Custom(reason) if reason == "expected u32, got empty struct array"),
+        "{error:?}"
     );
+}
+
+#[rstest::rstest]
+#[case::float(reject_empty_struct_field::<f64>, "expected f64, got empty struct array")]
+#[case::integer(reject_empty_struct_field::<u32>, "expected u32, got empty struct array")]
+#[case::boolean(reject_empty_struct_field::<bool>, "expected bool, got empty struct array")]
+#[case::string(reject_empty_struct_field::<String>, "expected string, got empty struct array")]
+fn empty_struct_array_rejects_scalar_fields(
+    #[case] read: fn(&[u8]) -> MatError,
+    #[case] expected: &str,
+) {
+    #[derive(Serialize)]
+    struct Writer {
+        v: Option<f64>,
+    }
+    let bytes = mat::to_bytes(&Writer { v: None }).unwrap();
+    let error = read(&bytes);
+    assert!(
+        matches!(&error, MatError::Custom(reason) if reason == expected),
+        "{error:?}"
+    );
+}
+
+fn reject_empty_struct_field<T: DeserializeOwned + Debug>(bytes: &[u8]) -> MatError {
+    #[derive(Debug, Deserialize)]
+    struct Reader<T> {
+        #[allow(dead_code)]
+        v: T,
+    }
+    mat::from_bytes::<Reader<T>>(bytes).unwrap_err()
 }
 
 #[test]
@@ -562,7 +615,7 @@ fn null_field_lowers_like_none() {
     // `UnsupportedType("() / unit")`.
     let bytes = mat::to_bytes(&v).expect("Null field must not abort the encode");
     let file = File::from_bytes(bytes.clone()).unwrap();
-    assert!(file.dataset("id").is_ok());
+    assert_eq!(file.dataset("id").unwrap().read_u32().unwrap(), vec![7]);
     assert_empty_struct_array(&file, "meta");
     // `struct([])` reads back as a unit, so `Value::Null` survives the trip.
     let back: WithNullMeta = mat::from_bytes(&bytes).unwrap();
@@ -620,7 +673,7 @@ fn some_null_lowers_like_none() {
         meta: Some(serde_json::Value::Null),
     };
     let file = File::from_bytes(mat::to_bytes(&v).unwrap()).unwrap();
-    assert!(file.dataset("id").is_ok());
+    assert_eq!(file.dataset("id").unwrap().read_u32().unwrap(), vec![3]);
     assert_empty_struct_array(&file, "meta");
 }
 
@@ -641,7 +694,7 @@ fn unit_struct_field_lowers_like_none() {
         .unwrap(),
     )
     .unwrap();
-    assert!(file.dataset("id").is_ok());
+    assert_eq!(file.dataset("id").unwrap().read_u32().unwrap(), vec![5]);
     assert_empty_struct_array(&file, "marker");
 }
 
@@ -1629,19 +1682,19 @@ fn non_unit_enum_variants_are_unsupported() {
         mat::to_bytes(&HoldsNewtype {
             v: NewtypeVariant::N(1)
         }),
-        Err(mat::MatError::UnsupportedType(_))
+        Err(MatError::UnsupportedType(_))
     ));
     assert!(matches!(
         mat::to_bytes(&HoldsTuple {
             v: TupleVariant::T(1, 2)
         }),
-        Err(mat::MatError::UnsupportedType(_))
+        Err(MatError::UnsupportedType(_))
     ));
     assert!(matches!(
         mat::to_bytes(&HoldsStruct {
             v: StructVariant::S { a: 1 }
         }),
-        Err(mat::MatError::UnsupportedType(_))
+        Err(MatError::UnsupportedType(_))
     ));
 }
 

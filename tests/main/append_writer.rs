@@ -406,7 +406,7 @@ fn refuse_nonexistent_dataset() {
     // Resolving the handle is where a missing dataset is reported now, rather
     // than at open time.
     with_writer(&path, |w| {
-        assert!(w.dataset("missing").is_err());
+        test_util_hdf5::assertion::path_not_found(w.dataset("missing").unwrap_err(), "missing");
     });
     assert_eq!(
         dataset::read_pure::<i32>(&path, "d"),

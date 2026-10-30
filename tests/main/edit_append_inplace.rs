@@ -314,7 +314,7 @@ fn interleave_append_stage_commit_append() {
     let f = File::open(&p).unwrap();
     let attrs = f.group("run2").unwrap().attrs().unwrap();
     assert_eq!(attrs.get("count"), Some(&AttrValue::I64(7)));
-    assert!(f.dataset("doomed").is_err(), "doomed should be gone");
+    test_util_hdf5::assertion::path_not_found(f.dataset("doomed").unwrap_err(), "doomed");
 }
 
 // ---- pending-conflict guard -------------------------------------------------
@@ -328,7 +328,10 @@ fn guard_refuses_pending_delete() {
     let s = File::open_rw(&p).unwrap();
     s.root().delete("d").unwrap();
     let err = s.dataset("d").unwrap().append(&[4]).unwrap_err();
-    assert!(matches!(err, Error::AppendInPlaceUnsupported(_)));
+    test_util_hdf5::assertion::append_in_place_unsupported(
+        err,
+        "the dataset or an ancestor has a staged edit pending in this session; commit the staged edits before appending in place, or use Dataset::append_staged",
+    );
 }
 
 #[test]
@@ -350,7 +353,10 @@ fn guard_refuses_append_after_staged_write() {
         })
         .unwrap();
     let err = s.dataset("d").unwrap().append(&[6]).unwrap_err();
-    assert!(matches!(err, Error::AppendInPlaceUnsupported(_)));
+    test_util_hdf5::assertion::append_in_place_unsupported(
+        err,
+        "the dataset or an ancestor has a staged edit pending in this session; commit the staged edits before appending in place, or use Dataset::append_staged",
+    );
 }
 
 #[test]
@@ -401,7 +407,10 @@ fn fallback_non_extensible_array_refused() {
 
     let s = File::open_rw(&p).unwrap();
     let err = s.dataset("d").unwrap().append(&[5]).unwrap_err();
-    assert!(matches!(err, Error::AppendInPlaceUnsupported(_)));
+    test_util_hdf5::assertion::append_in_place_unsupported(
+        err,
+        "dataset has no unlimited (maxshape) dimension",
+    );
 }
 
 #[test]
@@ -420,7 +429,10 @@ fn userblock_refuses_inplace_but_staged_append_dataset_works() {
         // Fast path refuses a userblock (base address != 0), with the distinct,
         // catchable error.
         let err = s.dataset("d").unwrap().append(&[8, 9, 10, 11]).unwrap_err();
-        assert!(matches!(err, Error::AppendInPlaceUnsupported(_)));
+        test_util_hdf5::assertion::append_in_place_unsupported(
+            err,
+            "in-place append does not support a file with a userblock (non-zero base address); use Dataset::append_staged",
+        );
         // The staged fallback handles it: rebuild the index, repoint last.
         s.dataset("d")
             .unwrap()
@@ -447,7 +459,10 @@ fn refusal_leaves_session_usable() {
         let s = File::open_rw(&p).unwrap();
         // A datatype mismatch is refused...
         let err = s.dataset("d").unwrap().append(&[1.0]).unwrap_err();
-        assert!(matches!(err, Error::AppendInPlaceUnsupported(_)));
+        test_util_hdf5::assertion::append_in_place_unsupported(
+            err,
+            "append datatype does not match the on-disk dataset (wrong element type or byte order)",
+        );
         // ...and the session keeps working for a correct append afterward.
         s.dataset("d").unwrap().append(&[4, 5, 6]).unwrap();
     }

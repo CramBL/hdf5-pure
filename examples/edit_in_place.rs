@@ -13,7 +13,7 @@
 //! ```
 
 use hdf5_pure::DeflateLevel;
-use hdf5_pure::{AttrValue, File, FileBuilder};
+use hdf5_pure::{AttrValue, Error, File, FileBuilder, FormatError};
 
 fn main() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -126,6 +126,10 @@ fn main() {
     // overwrite was applied, so it keeps the original values.
     assert_eq!(backup, vec![22.5, 23.1, 21.8]);
     assert_eq!(calibration, vec![0.99, 1.00, 1.01]);
-    assert!(file.dataset("sensors/pressure").is_err());
+    let error = file.dataset("sensors/pressure").unwrap_err();
+    assert!(
+        matches!(&error, Error::Format(FormatError::PathNotFound(actual)) if actual == "sensors/pressure"),
+        "{error:?}"
+    );
     println!("in-place edits verified");
 }

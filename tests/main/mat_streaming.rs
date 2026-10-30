@@ -218,7 +218,11 @@ fn a_refused_value_leaves_the_destination_alone() {
     let mut refused: HashMap<i32, f64> = HashMap::new();
     refused.insert(1, 2.0);
 
-    assert!(hdf5_pure::mat::to_file(&refused, &path).is_err());
+    let error = hdf5_pure::mat::to_file(&refused, &path).unwrap_err();
+    assert!(
+        matches!(&error, MatError::Custom(reason) if reason == "root map keys must be strings, got scalar"),
+        "{error:?}"
+    );
     assert_eq!(
         std::fs::read(&path).unwrap(),
         b"an earlier file",
@@ -226,7 +230,11 @@ fn a_refused_value_leaves_the_destination_alone() {
     );
 
     let options = Options::default();
-    assert!(hdf5_pure::mat::to_file_with_options(&refused, &path, &options).is_err());
+    let error = hdf5_pure::mat::to_file_with_options(&refused, &path, &options).unwrap_err();
+    assert!(
+        matches!(&error, MatError::Custom(reason) if reason == "root map keys must be strings, got scalar"),
+        "{error:?}"
+    );
     assert_eq!(std::fs::read(&path).unwrap(), b"an earlier file");
 }
 
@@ -429,7 +437,10 @@ fn a_produced_dataset_can_live_inside_a_struct() {
 
     assert_eq!(read_f64(&path, "top"), ramp_elements(6));
     let file = File::open(&path).unwrap();
-    assert!(file.dataset("outer/tag").is_ok());
+    assert_eq!(
+        file.dataset("outer/tag").unwrap().read_i32().unwrap(),
+        vec![1]
+    );
 }
 
 /// A block of the wrong size shifts every address after it, so it is refused

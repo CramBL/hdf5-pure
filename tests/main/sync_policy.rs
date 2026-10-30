@@ -145,9 +145,9 @@ fn a_closed_file_refuses_sync_and_does_not_need_one() {
         f.dataset("d").unwrap().read_i32().unwrap(),
         (0..12).collect::<Vec<_>>()
     );
-    assert!(
-        f.group("g").is_ok(),
-        "close must have applied the staged group"
+    assert_eq!(
+        f.group("g").unwrap().datasets().unwrap(),
+        Vec::<String>::new()
     );
 }
 

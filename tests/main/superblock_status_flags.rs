@@ -307,7 +307,11 @@ fn a_commit_in_a_page_buffered_session_leaves_the_mark_standing() {
 
     file.close().unwrap();
     assert_eq!(superblock::consistency_flags(&path), 0x00);
-    assert!(File::open(&path).is_ok(), "and the file must open again");
+    let reopened = File::open(&path).unwrap();
+    assert_eq!(
+        reopened.dataset("again").unwrap().read_f64().unwrap(),
+        vec![3.5; 32]
+    );
 }
 
 /// The case the mark exists for: a page-buffered session that never closes.

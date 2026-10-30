@@ -404,7 +404,7 @@ fn userblock_chunked_add_reuses_a_freed_chunk_hole() {
         file.dataset("ceiling").unwrap().read_i32().unwrap(),
         vec![11, 22, 33]
     );
-    assert!(file.dataset("victim").is_err());
+    test_util_hdf5::assertion::path_not_found(file.dataset("victim").unwrap_err(), "victim");
     userblock.assert_unchanged(&path);
 }
 

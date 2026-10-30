@@ -95,7 +95,7 @@ fn drops_object_and_shrinks_file() {
         f.dataset("keep").unwrap().read_i32().unwrap(),
         vec![1, 2, 3]
     );
-    assert!(f.dataset("bulk").is_err());
+    test_util_hdf5::assertion::path_not_found(f.dataset("bulk").unwrap_err(), "bulk");
 }
 
 /// `repack_into` and `repack_to_path` write the bytes `repack` writes.
@@ -307,8 +307,8 @@ fn drops_whole_group_subtree() {
 
     let f = hdf5_pure::File::open(&dst).unwrap();
     assert_eq!(f.root().datasets().unwrap(), vec!["root_ds".to_string()]);
-    assert!(f.group("doomed").is_err());
-    assert!(f.dataset("doomed/a").is_err());
+    test_util_hdf5::assertion::path_not_found(f.group("doomed").unwrap_err(), "doomed");
+    test_util_hdf5::assertion::path_not_found(f.dataset("doomed/a").unwrap_err(), "doomed");
 }
 
 #[rstest]

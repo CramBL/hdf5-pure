@@ -194,7 +194,7 @@ fn staged_surface_works_on_a_bounded_file() {
         file.dataset("d2").unwrap().read_i32().unwrap(),
         vec![9, 9, 9, 9, 7]
     );
-    assert!(file.group("g").is_err(), "the deleted group must be gone");
+    test_util_hdf5::assertion::path_not_found(file.group("g").unwrap_err(), "g");
 }
 
 #[test]
@@ -600,5 +600,8 @@ fn a_bounded_commit_truncates_when_the_freed_run_reaches_the_end() {
         dataset::read_pure::<i32>(&p, "d"),
         (0..4).collect::<Vec<_>>()
     );
-    assert!(File::open(&p).unwrap().dataset("big").is_err());
+    test_util_hdf5::assertion::path_not_found(
+        File::open(&p).unwrap().dataset("big").unwrap_err(),
+        "big",
+    );
 }
