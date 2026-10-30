@@ -1,6 +1,8 @@
 //! Physical-byte checks for empty appends and rejected input during a locked editing session.
 
 use hdf5_pure_format::__private::AccessMode;
+use hdf5_pure_format::__private::ChunkIndexLayout;
+use hdf5_pure_format::__private::DataLayout;
 use hdf5_pure_format::__private::ObjectHeader;
 use rstest::rstest;
 use test_util::object_header::MessageType as FixtureMessage;
@@ -37,7 +39,7 @@ fn unreadable_padding_rejection_preserves_issued_bytes(#[case] filtered: bool) {
     }
     builder.write(&path).unwrap();
     let mut image = std::fs::read(&path).unwrap();
-    test_util_hdf5::__private::clear_index_header(&mut image);
+    assert_index_allocation(&image, false);
     let (header, fill) = test_util::bytes::signature_offsets(&image, v2::SIGNATURE)
         .into_iter()
         .find_map(|at| {
@@ -103,12 +105,8 @@ fn empty_append_operations_preserve_issued_bytes(
         dataset.with_fletcher32();
     }
     builder.write(&path).unwrap();
-    if unallocated {
-        let mut image = std::fs::read(&path).unwrap();
-        test_util_hdf5::__private::clear_index_header(&mut image);
-        std::fs::write(&path, image).unwrap();
-    }
     let original = std::fs::read(&path).unwrap();
+    assert_index_allocation(&original, !unallocated);
     let file = File::open_rw_with_options(
         &path,
         FileAccessProperties::new().with_memory_strategy(backing),
@@ -222,12 +220,8 @@ fn incompatible_append_rejections_preserve_issued_bytes(
         .with_chunks(&[4])
         .with_maxshape(&[MaxExtent::Unlimited]);
     builder.write(&path).unwrap();
-    if unallocated {
-        let mut image = std::fs::read(&path).unwrap();
-        test_util_hdf5::__private::clear_index_header(&mut image);
-        std::fs::write(&path, image).unwrap();
-    }
     let original = std::fs::read(&path).unwrap();
+    assert_index_allocation(&original, !unallocated);
     let file = File::open_rw(&path).unwrap();
     let mut target = file.dataset("d").unwrap();
     let error = operation(&mut target).unwrap_err();
@@ -260,12 +254,8 @@ fn empty_lossy_appenders_preserve_issued_bytes(
         .with_maxshape(&[MaxExtent::Unlimited])
         .with_scale_offset(ScaleOffset::FloatDScale(1));
     builder.write(&path).unwrap();
-    if unallocated {
-        let mut image = std::fs::read(&path).unwrap();
-        test_util_hdf5::__private::clear_index_header(&mut image);
-        std::fs::write(&path, image).unwrap();
-    }
     let original = std::fs::read(&path).unwrap();
+    assert_index_allocation(&original, !unallocated);
     let file = File::open_rw(&path).unwrap();
     let mut target = file.dataset("d").unwrap();
     if owned {
@@ -283,4 +273,27 @@ fn empty_lossy_appenders_preserve_issued_bytes(
     assert_eq!(file.disk_bytes().unwrap(), original);
     file.close().unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), original);
+}
+
+fn assert_index_allocation(image: &[u8], allocated: bool) {
+    let layouts: Vec<_> = test_util::bytes::signature_offsets(image, v2::SIGNATURE)
+        .into_iter()
+        .flat_map(|at| {
+            ObjectHeader::parse(image, AccessMode::ReadOnly, at, 8, 8)
+                .unwrap()
+                .messages
+        })
+        .filter(|message| message.msg_type == MessageType::DATA_LAYOUT)
+        .collect();
+    assert_eq!(layouts.len(), 1);
+    let layout = &layouts[0].data;
+    let DataLayout::Chunked {
+        index: ChunkIndexLayout::ExtensibleArray { address, .. },
+        ..
+    } = DataLayout::parse(layout, 8, 8).unwrap()
+    else {
+        panic!("expected an Extensible Array layout");
+    };
+    assert_eq!(address.is_some(), allocated);
+    assert_eq!(layout[layout.len() - 8..] == [u8::MAX; 8], !allocated);
 }
