@@ -521,7 +521,10 @@ fn a_staged_edit_on_a_dataset_with_a_live_appender_is_refused() {
         "got: {err:?}"
     );
     // Deleting it is the same conflict.
-    assert!(session.root().delete("d").is_err());
+    test_util_hdf5::assertion::edit_unsupported(
+        session.root().delete("d").unwrap_err(),
+        "this dataset has a live buffered appender holding elements only its own flush can write, and this edit would stop that flush; finish or discard the appender first",
+    );
 
     // So the drop-time flush still works and the elements are not lost.
     drop(app);
@@ -678,7 +681,16 @@ fn a_failed_write_keeps_the_unwritten_elements() {
     assert_eq!(app.buffered_elements(), 8); // 32 bytes / 4-byte elements
     assert_eq!(app.unwritten().len(), 32);
     // Poisoned: further use is refused rather than half-working.
-    assert!(app.append(&[1i32]).is_err());
+    let error = app.append(&[1i32]).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Error::AppendInPlaceUnsupported(
+                "this buffered appender failed a write and holds unwritten elements; read them back with BufferedAppender::unwritten and start a new appender"
+            )
+        ),
+        "{error:?}"
+    );
     drop(app);
     drop(ds);
     drop(session);

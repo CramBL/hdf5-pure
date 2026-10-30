@@ -13,7 +13,7 @@
 
 #![cfg(feature = "serde")]
 
-use hdf5_pure::mat::{self, MatCategorical, MatDatetime, MatDuration};
+use hdf5_pure::mat::{self, MatCategorical, MatDatetime, MatDuration, MatError};
 use serde::Deserialize;
 use test_util::mcos::{self, FileWrapper};
 use test_util_hdf5::mat_file::{self, Cell};
@@ -228,5 +228,9 @@ fn dangling_heap_reference_is_an_error_not_a_panic() {
         ts: MatDatetime,
     }
     let result: Result<Doc, _> = mat::from_bytes(&bytes);
-    assert!(result.is_err(), "dangling heap reference must error");
+    let error = result.err().unwrap();
+    assert!(
+        matches!(&error, MatError::Custom(reason) if reason == "MCOS heap value 5 maps to cell 7, but the store has 2 cells"),
+        "{error:?}"
+    );
 }

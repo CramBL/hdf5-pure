@@ -36,7 +36,7 @@ fn userblock_delete_dataset_roundtrip() {
     }
 
     let file = File::open(&path).unwrap();
-    assert!(file.dataset("alpha").is_err(), "alpha should be deleted");
+    test_util_hdf5::assertion::path_not_found(file.dataset("alpha").unwrap_err(), "alpha");
     // Neighbours survive.
     assert_eq!(
         file.dataset("beta").unwrap().read_i32().unwrap(),
@@ -67,8 +67,8 @@ fn userblock_delete_group_subtree_roundtrip() {
     }
 
     let file = File::open(&path).unwrap();
-    assert!(file.group("grp").is_err(), "grp should be deleted");
-    assert!(file.dataset("grp/inner").is_err());
+    test_util_hdf5::assertion::path_not_found(file.group("grp").unwrap_err(), "grp");
+    test_util_hdf5::assertion::path_not_found(file.dataset("grp/inner").unwrap_err(), "grp");
     assert!(file.root().groups().unwrap().is_empty());
     assert_eq!(
         file.dataset("alpha").unwrap().read_f64().unwrap(),
@@ -100,7 +100,7 @@ fn userblock_delete_chunked_dataset_roundtrip() {
     }
 
     let file = File::open(&path).unwrap();
-    assert!(file.dataset("c").is_err(), "c should be deleted");
+    test_util_hdf5::assertion::path_not_found(file.dataset("c").unwrap_err(), "c");
     assert_eq!(
         file.dataset("keep").unwrap().read_i32().unwrap(),
         vec![1, 2, 3]
@@ -144,7 +144,7 @@ fn userblock_delete_then_reuse_freed_space() {
     }
 
     let file = File::open(&path).unwrap();
-    assert!(file.dataset("big").is_err());
+    test_util_hdf5::assertion::path_not_found(file.dataset("big").unwrap_err(), "big");
     assert_eq!(file.dataset("reuse").unwrap().read_f64().unwrap(), reuse);
     assert_eq!(
         file.dataset("keep").unwrap().read_i32().unwrap(),
@@ -174,7 +174,7 @@ fn userblock_delete_one_of_several_then_read_attr() {
     }
 
     let file = File::open(&path).unwrap();
-    assert!(file.dataset("doomed").is_err());
+    test_util_hdf5::assertion::path_not_found(file.dataset("doomed").unwrap_err(), "doomed");
     assert_eq!(
         file.dataset("survivor").unwrap().read_i32().unwrap(),
         vec![5, 6]

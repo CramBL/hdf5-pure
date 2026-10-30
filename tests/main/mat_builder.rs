@@ -212,7 +212,11 @@ fn invalid_name_errors_by_default() {
         s.write_scalar_u32("end", 1)?;
         Ok(())
     });
-    assert!(err.is_err());
+    let error = err.err().unwrap();
+    assert!(
+        matches!(&error, MatError::Custom(reason) if reason == "invalid MATLAB name: end"),
+        "{error:?}"
+    );
 }
 
 /// The default empty marker is the one MATLAB itself writes: a two-element
@@ -303,5 +307,9 @@ fn compression_under_the_1_8_default_is_refused_by_name() {
     options.libver = LibVer::V110;
     let mut mb = MatBuilder::new(options);
     mb.write_f64("values", &[3, 1], &[1.0, 2.0, 3.0]).unwrap();
-    assert!(mb.finish().is_ok());
+    let file = File::from_bytes(mb.finish().unwrap()).unwrap();
+    assert_eq!(
+        file.dataset("values").unwrap().read_f64().unwrap(),
+        vec![1.0, 2.0, 3.0]
+    );
 }

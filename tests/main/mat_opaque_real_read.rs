@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 
-use hdf5_pure::mat::{self, MatCategorical, MatDatetime, MatDuration};
+use hdf5_pure::mat::{self, MatCategorical, MatDatetime, MatDuration, MatError};
 use serde::Deserialize;
 use test_util_hdf5::mat_file;
 
@@ -298,7 +298,11 @@ fn malformed_mcos_is_handled_without_panicking() {
     let meta = mat_file::read_fixture(test_util::data(
         "matlab/test_corrupted_mcos_object_metadata.mat",
     ));
-    assert!(mat::from_bytes::<HashMap<String, serde_json::Value>>(&meta).is_err());
+    let error = mat::from_bytes::<HashMap<String, serde_json::Value>>(&meta).unwrap_err();
+    assert!(
+        matches!(&error, MatError::Custom(reason) if reason == "MCOS object id 3 out of range (1 objects)"),
+        "{error:?}"
+    );
 
     let subsys = mat_file::read_fixture(test_util::data("matlab/test_corrupted_subsystem.mat"));
     // Tolerated by our parser; must return (Ok or Err) rather than panic.

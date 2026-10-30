@@ -2,6 +2,8 @@
 //! `is_hdf5` / `is_hdf5_bytes`, `File::file_size`, `File::libver_bound`, and
 //! `FileBuilder::with_libver_bounds`.
 
+use std::io::ErrorKind;
+
 use hdf5_pure::SuperblockVersion;
 use hdf5_pure::{File, FileBuilder, LibVer};
 
@@ -38,7 +40,8 @@ fn is_hdf5_path_roundtrip() {
     assert!(!hdf5_pure::is_hdf5(&other).unwrap());
 
     // A missing file is an I/O error, not `Ok(false)`.
-    assert!(hdf5_pure::is_hdf5(dir.join("hdf5_pure_definitely_missing.h5")).is_err());
+    let error = hdf5_pure::is_hdf5(dir.join("hdf5_pure_definitely_missing.h5")).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::NotFound);
 }
 
 #[test]
@@ -71,7 +74,11 @@ fn libver_bounds_accept_straddling_range() {
     builder.with_libver_bounds(LibVer::Earliest, LibVer::LATEST);
     builder.create_dataset("data").with_i32_data(&[1, 2, 3]);
     // Earliest..=Latest straddles the produced 1.10 format → accepted.
-    assert!(builder.finish().is_ok());
+    let file = File::from_bytes(builder.finish().unwrap()).unwrap();
+    assert_eq!(
+        file.dataset("data").unwrap().read_i32().unwrap(),
+        vec![1, 2, 3]
+    );
 }
 
 #[test]

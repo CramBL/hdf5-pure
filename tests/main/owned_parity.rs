@@ -156,7 +156,10 @@ fn open_rw_with_locking_disabled_edits() {
     .unwrap();
     file.root().create_group("g").unwrap();
     file.commit().unwrap();
-    assert!(file.group("g").is_ok());
+    assert_eq!(
+        file.group("g").unwrap().datasets().unwrap(),
+        Vec::<String>::new()
+    );
 }
 
 /// After `File::close`, a surviving handle's writes are refused with

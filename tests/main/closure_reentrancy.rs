@@ -100,7 +100,10 @@ fn create_group_with_closure_may_read_the_same_file() {
                 let n = file.dataset("existing").unwrap().read_i32().unwrap().len();
                 g.set_attr("source_len", AttrValue::I64(n as i64));
                 g.create_group_with("nested", |inner| {
-                    assert!(file.group("grp").is_ok());
+                    assert_eq!(
+                        file.group("grp").unwrap().datasets().unwrap(),
+                        Vec::<String>::new()
+                    );
                     inner.set_attr("depth", AttrValue::I64(2));
                     inner.create_dataset("leaf", |b| {
                         b.with_i32_data(&[9, 9]);

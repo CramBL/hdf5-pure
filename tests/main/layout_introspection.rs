@@ -9,8 +9,10 @@
 //! reference-C-library files in `crates/crosscheck/tests/main/layout_introspection.rs`.
 
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::Error;
 use hdf5_pure::FilterDisposition;
 use hdf5_pure::FilterId;
+use hdf5_pure::FormatError;
 use hdf5_pure::UserblockSize;
 use hdf5_pure::{ChunkIndex, Dataset, File, FileBuilder, Layout, MaxExtent};
 
@@ -71,9 +73,10 @@ fn contiguous_fixed_dataset() {
     }
     assert!(!ds.is_chunked());
     assert_eq!(ds.chunk_index().unwrap(), None);
+    let error = ds.chunks().unwrap_err();
     assert!(
-        ds.chunks().is_err(),
-        "chunks() errors on a non-chunked dataset"
+        matches!(&error, Error::Format(FormatError::ChunkedReadError(reason)) if reason == "chunk enumeration requires a chunked dataset"),
+        "{error:?}"
     );
     assert!(ds.filter_pipeline().unwrap().is_empty());
     assert!(ds.filters().unwrap().is_empty());

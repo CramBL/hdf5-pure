@@ -12,7 +12,7 @@
 //! cargo run --example repack
 //! ```
 
-use hdf5_pure::{File, FileBuilder, RepackOptions};
+use hdf5_pure::{Error, File, FileBuilder, FormatError, RepackOptions};
 
 fn main() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -55,8 +55,16 @@ fn main() {
     );
 
     assert_eq!(keep, vec![1.0, 2.0, 3.0]);
-    assert!(file.dataset("scratch").is_err());
-    assert!(file.group("runs").is_err());
+    let error = file.dataset("scratch").unwrap_err();
+    assert!(
+        matches!(&error, Error::Format(FormatError::PathNotFound(actual)) if actual == "scratch"),
+        "{error:?}"
+    );
+    let error = file.group("runs").unwrap_err();
+    assert!(
+        matches!(&error, Error::Format(FormatError::PathNotFound(actual)) if actual == "runs"),
+        "{error:?}"
+    );
     assert!(after < before);
     println!("\nrepack shrank the file and preserved the kept data");
 }

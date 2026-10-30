@@ -121,10 +121,8 @@ fn the_bounded_engine_still_locks_by_default() {
 
     let bounded = FileAccessProperties::new().with_memory_strategy(MemoryStrategy::Bounded);
     let _held = File::open_rw_with_options(&path, bounded).unwrap();
-    assert!(
-        File::open_rw_with_options(&path, bounded).is_err(),
-        "the default policy must still take an exclusive lock"
-    );
+    let error = File::open_rw_with_options(&path, bounded).unwrap_err();
+    test_util_hdf5::assertion::file_locked(error, &path);
 }
 
 /// #205: the same creation properties, applied as a value or one at a time, must
@@ -217,7 +215,10 @@ fn create_with_options_records_creation_properties() {
     drop(file);
 
     let file = File::open(&path).unwrap();
-    assert!(file.group("g").is_ok());
+    assert_eq!(
+        file.group("g").unwrap().datasets().unwrap(),
+        Vec::<String>::new()
+    );
     let info = file
         .file_space_info()
         .unwrap()
@@ -347,7 +348,18 @@ fn a_refused_build_does_not_touch_the_destination_file() {
     b.create_dataset("d")
         .with_i32_data(&(0..100).collect::<Vec<_>>())
         .with_chunks(&[10]);
-    assert!(b.write(&fresh).is_err());
+    let error = b.write(&fresh).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Error::Format(FormatError::LibverTooOldForContent {
+                content: "a chunked, filtered, or resizable dataset",
+                needs: "v1.10",
+                writing: "v1.8"
+            })
+        ),
+        "{error:?}"
+    );
     assert!(!fresh.exists(), "the refused build created an empty file");
 
     // The same path still writes normally when the build is accepted.
@@ -408,7 +420,7 @@ fn an_editing_session_honors_the_library_version_bound() {
     // The commit is all-or-nothing: the refusal left the file as it was.
     {
         let file = File::open(&path).unwrap();
-        assert!(file.dataset("added").is_err(), "the refusal wrote anyway");
+        test_util_hdf5::assertion::path_not_found(file.dataset("added").unwrap_err(), "added");
         assert_eq!(
             file.dataset("values").unwrap().read_f64().unwrap(),
             vec![1.0, 2.0, 3.0]
