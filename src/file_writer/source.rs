@@ -1458,7 +1458,7 @@ mod tests {
     #[case::page(Some(FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true)))]
     fn empty_index_emission_uses_retained_geometry(
         #[case] settings: Option<FileSpaceSettings>,
-        #[values(8, 9, 32)] count: usize,
+        #[values(8, 9, 32, 128)] count: usize,
         #[values(false, true)] filtered: bool,
         #[values(false, true)] unallocated: bool,
     ) {

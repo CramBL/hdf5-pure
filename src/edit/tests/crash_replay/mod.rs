@@ -17,7 +17,6 @@ use std::path::Path;
 use hdf5_pure_core::__private::FileRegion;
 use hdf5_pure_format::__private::ExtensibleArrayHeaderLocator;
 use test_util::disk_log::{self, DiskOp};
-use test_util::object_header::MessageType as FixtureMessage;
 use test_util::object_header::v2;
 
 use crate::FileSpaceSettings;
@@ -328,7 +327,12 @@ impl Tally {
 }
 
 #[rstest::rstest]
+#[case::immediate(InitializationWrite::Immediate)]
+#[case::borrowed(InitializationWrite::Borrowed)]
+#[case::owned(InitializationWrite::Owned)]
 fn deferred_initialization_survives_every_completed_write(
+    #[case] operation: InitializationWrite,
+    #[values(false, true)] staged_creation: bool,
     #[values(false, true)] filtered: bool,
     #[values(false, true)] paged: bool,
     #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] backing: MemoryStrategy,
@@ -336,7 +340,7 @@ fn deferred_initialization_survives_every_completed_write(
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("initialize.h5");
-    let header = deferred_base(&path, filtered, paged);
+    let header = deferred_base_with_creation(&path, filtered, paged, staged_creation);
     let recording = Recording::of("initialize", &path, |path| {
         let file = crate::File::open_rw_with_options(
             path,
@@ -345,10 +349,7 @@ fn deferred_initialization_survives_every_completed_write(
                 .with_sync_policy(sync),
         )
         .unwrap();
-        file.dataset("d")
-            .unwrap()
-            .append(&(0..11).collect::<Vec<i32>>())
-            .unwrap();
+        operation.run(file.dataset("d").unwrap());
         file.close().unwrap();
     });
     let states = std::cell::Cell::new(0_u8);
@@ -394,7 +395,41 @@ fn deferred_initialization_survives_every_completed_write(
     );
 }
 
+enum InitializationWrite {
+    Borrowed,
+    Immediate,
+    Owned,
+}
+
+impl InitializationWrite {
+    fn run(self, mut target: crate::Dataset) {
+        let values: Vec<i32> = (0..11).collect();
+        match self {
+            Self::Borrowed => {
+                let mut appender = target.buffered_appender().unwrap();
+                appender.append(&values).unwrap();
+                appender.finish().unwrap();
+            }
+            Self::Immediate => target.append(&values).unwrap(),
+            Self::Owned => {
+                let mut appender = target.into_buffered_appender().unwrap();
+                appender.append(&values).unwrap();
+                appender.finish().unwrap();
+            }
+        }
+    }
+}
+
 fn deferred_base(path: &Path, filtered: bool, paged: bool) -> usize {
+    deferred_base_with_creation(path, filtered, paged, false)
+}
+
+fn deferred_base_with_creation(
+    path: &Path,
+    filtered: bool,
+    paged: bool,
+    staged_creation: bool,
+) -> usize {
     let mut builder = FileBuilder::new();
     builder.with_file_space_settings(
         FileSpaceSettings::new(if paged {
@@ -404,17 +439,27 @@ fn deferred_base(path: &Path, filtered: bool, paged: bool) -> usize {
         })
         .with_persistence(true),
     );
-    let dataset = builder
-        .create_dataset("d")
-        .with_unallocated_storage(crate::make_i32_type(), &[0])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[4]);
-    if filtered {
-        dataset.with_fletcher32();
+    let configure = |dataset: &mut DatasetBuilder| {
+        dataset
+            .with_unallocated_storage(crate::make_i32_type(), &[0])
+            .with_maxshape(&[MaxExtent::Unlimited])
+            .with_chunks(&[4]);
+        if filtered {
+            dataset.with_fletcher32();
+        }
+    };
+    if staged_creation {
+        builder.write(path).unwrap();
+        let file = crate::File::open_rw(path).unwrap();
+        file.root().create_dataset("d", configure).unwrap();
+        file.commit().unwrap();
+        file.close().unwrap();
+    } else {
+        configure(builder.create_dataset("d"));
+        builder.write(path).unwrap();
     }
-    builder.write(path).unwrap();
-    let mut bytes = std::fs::read(path).unwrap();
-    let (header, mut layout) = test_util::bytes::signature_offsets(&bytes, v2::SIGNATURE)
+    let bytes = std::fs::read(path).unwrap();
+    let (header, layout) = test_util::bytes::signature_offsets(&bytes, v2::SIGNATURE)
         .into_iter()
         .find_map(|at| {
             ObjectHeader::parse(&bytes, AccessMode::ReadOnly, at, 8, 8)
@@ -425,12 +470,13 @@ fn deferred_base(path: &Path, filtered: bool, paged: bool) -> usize {
                 .map(|message| (at, message.data))
         })
         .unwrap();
-    let (_, range) =
-        DataLayout::parse_with_ea_address(&layout, FormatWidths::from_sizes(8, 8).unwrap())
-            .unwrap();
-    layout[range.unwrap()].fill(u8::MAX);
-    v2::replace_message(&mut bytes, header, FixtureMessage::DATA_LAYOUT, &layout);
-    std::fs::write(path, bytes).unwrap();
+    assert!(matches!(
+        DataLayout::parse(&layout, 8, 8).unwrap(),
+        DataLayout::Chunked {
+            index: ChunkIndexLayout::ExtensibleArray { address: None, .. },
+            ..
+        }
+    ));
     assert!(!inspect_deferred_pair(path, header).unwrap());
     header
 }

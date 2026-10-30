@@ -24,8 +24,6 @@ use test_util::allocation_oracle::Violation;
 use test_util::disk_log;
 use test_util::disk_log::DiskOp;
 use test_util::disk_log::IoEvent;
-use test_util::object_header::MessageType as FixtureMessage;
-use test_util::object_header::v2;
 
 use crate::File;
 use crate::FileAccessProperties;
@@ -1094,8 +1092,8 @@ enum Control {
 
 /// Writes a fixture with an interior free hole and live contiguous storage above it.
 ///
-/// Selects PAGE when `paged` is `true`, and FSM_AGGR otherwise. Sets the layout's EA header address
-/// to undefined when `deferred` is `true`, and enables Fletcher32 when `filtered` is `true`.
+/// Selects PAGE when `paged` is `true`, and FSM_AGGR otherwise. Creates an empty dataset with an
+/// unallocated index when `deferred` is `true`, and enables Fletcher32 when `filtered` is `true`.
 pub(super) fn pure_fixture(path: &Path, paged: bool, deferred: bool, filtered: bool) -> Coverage {
     pure_fixture_with(path, paged, deferred, |target| {
         if filtered {
@@ -1175,34 +1173,6 @@ fn pure_fixture_with_threshold(
     editor.commit().unwrap();
     editor.finalize_persist().unwrap();
     drop(editor);
-    if deferred {
-        let mut bytes = fs::read(path).unwrap();
-        let (header, mut layout) = test_util::bytes::signature_offsets(&bytes, v2::SIGNATURE)
-            .into_iter()
-            .find_map(|at| {
-                ObjectHeader::parse(&bytes, AccessMode::ReadOnly, at, 8, 8)
-                    .unwrap()
-                    .messages
-                    .into_iter()
-                    .find(|message| {
-                        message.msg_type == MessageType::DATA_LAYOUT
-                            && matches!(
-                                DataLayout::parse(&message.data, 8, 8).unwrap(),
-                                DataLayout::Chunked { .. }
-                            )
-                    })
-                    .map(|message| (at, message.data))
-            })
-            .unwrap();
-        let (_, pointer) = DataLayout::parse_with_ea_address(
-            &layout,
-            crate::width::FormatWidths::from_sizes(8, 8).unwrap(),
-        )
-        .unwrap();
-        layout[pointer.unwrap()].fill(u8::MAX);
-        v2::replace_message(&mut bytes, header, FixtureMessage::DATA_LAYOUT, &layout);
-        fs::write(path, bytes).unwrap();
-    }
     let snapshot = Observation::read_with_threshold(&fs::read(path).unwrap(), threshold);
     assert_eq!(snapshot.index_defined, !deferred);
     assert!(hole.difference(&snapshot.free).is_empty());
