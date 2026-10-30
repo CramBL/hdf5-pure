@@ -1,32 +1,10 @@
 #![cfg(feature = "__hdf5-1.10")]
-//! Property-based cross-validation of the file-space (`fcpl`) and bounded-mutation
-//! (`fapl`) surface against the reference HDF5 C library (issue #178).
+//! File-space strategy, append, and deletion properties checked against libhdf5.
 //!
-//! The hand-written crosschecks in `crates/crosscheck/tests/main/file_space.rs` spot-check a few
-//! fixed configurations. These properties fuzz the same invariants across a
-//! generated space of **strategy**, **persist**, **page size**, **threshold**,
-//! and **append patterns**, diffing every generated file against libhdf5:
-//!
-//! 1. **Strategy round-trip.** For any strategy / persist / page size / threshold
-//!    and any set of datasets, a file hdf5-pure writes reads back byte-exact in
-//!    the C library, and the C library recovers the same strategy. For a
-//!    persisting *paged* file the strong invariant also holds: the C library's
-//!    `H5Fget_freespace` (which can only answer by parsing our on-disk
-//!    `FSHD`/`FSSE` managers) equals the sum of the free sections we wrote.
-//!
-//! 2. **Bounded paged mutation.** For any page size and any sequence of appends,
-//!    growing a genuine paged persisting file through the bounded engine
-//!    yields a file whose every row, recorded strategy, and manager free-space
-//!    total the C library reads back exactly.
-//!
-//! 3. **Subthreshold deletion.** Under [`FileSpaceStrategy::FsmAggr`], checks that an isolated
-//!    deleted extent below the threshold is absent from reusable and persisted free sections.
-//!    Checks session-reusable and persisted sections and persistence configuration. libhdf5
-//!    reads surviving values and reports matching free-space totals.
-//!
-//! A failing case is shrunk to its minimal reproducer and recorded under
-//! `tests/proptest-regressions/`; commit that file so the reproducer travels
-//! with the fix.
+//! Tests compare strategy metadata, complete surviving values, and free-space totals with
+//! libhdf5’s observations.
+//! Proptest records and replays seeds in `tests/proptest-regressions/file_space_fuzz.txt`
+//! under the crosscheck package.
 
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5_pure::FileSpacePageSize;
