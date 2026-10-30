@@ -402,8 +402,9 @@ pub fn decompress_chunk_with(
             }
             FILTER_LZF => {
                 let cap = pipeline.inner_output_cap(scratch, expected, i, ctx)?;
-                let output = lzf::decompress(current.as_slice(), cap)?;
-                current.replace(&mut scratch.spare, output)
+                current.materialize(&mut scratch.spare, |input, output| {
+                    lzf::decompress_into(input, cap, output)
+                })?
             }
             FILTER_FLETCHER32 => {
                 let len = fletcher32_verify(current.as_slice())?.len();
@@ -566,10 +567,10 @@ pub fn compress_chunk_with(
                 let output = deflate_compress(scratch, current.as_slice(), level)?;
                 current.replace(&mut scratch.spare, output)
             }
-            FILTER_LZF => {
-                let output = lzf::compress(current.as_slice());
-                current.replace(&mut scratch.spare, output)
-            }
+            FILTER_LZF => current.materialize(&mut scratch.spare, |input, output| {
+                lzf::compress_into(input, output);
+                Ok(())
+            })?,
             FILTER_FLETCHER32 => {
                 let checksum = fletcher32_compute(current.as_slice());
                 current.append(&mut scratch.spare, &checksum.to_le_bytes())
@@ -944,6 +945,100 @@ mod tests {
         assert_eq!(output, expected);
         assert_eq!(scratch.spare.capacity(), 0);
         assert_eq!(data, [1, 2, 3, 4]);
+    }
+
+    #[rstest]
+    #[case::lzf_only(&[FILTER_LZF], 1, &[3, 1, 2, 3, 4])]
+    #[case::shuffle_lzf(&[FILTER_SHUFFLE, FILTER_LZF], 2, &[3, 1, 3, 2, 4])]
+    #[case::shuffle_lzf_checksum(&[FILTER_SHUFFLE, FILTER_LZF, FILTER_FLETCHER32], 2, &[3, 1, 3, 2, 4, 3, 10, 7, 19])]
+    fn lzf_pipeline_reuses_intermediate_storage_and_preserves_returned_chunks(
+        #[case] ids: &[u16],
+        #[case] width: u32,
+        #[case] expected: &[u8],
+    ) {
+        let filters: Vec<_> = ids
+            .iter()
+            .map(|&filter_id| FilterDescription {
+                filter_id,
+                flags: 0,
+                client_data: vec![],
+            })
+            .collect();
+        let dims = [u64::from(4 / width)];
+        let context = ChunkContext::basic(&dims, width);
+        let mut encoder = FilterScratch::new();
+        encoder.spare = Vec::with_capacity(64);
+        let encoded_pointer = encoder.spare.as_ptr();
+        let encoded = compress_chunk_with(&mut encoder, &[1, 2, 3, 4], &filters, context).unwrap();
+        assert_eq!(encoded, expected);
+        let mut decoder = FilterScratch::new();
+        decoder.spare = Vec::with_capacity(64);
+        let decoded_pointer = decoder.spare.as_ptr();
+        let decoded = decompress_chunk_with(&mut decoder, &encoded, &filters, context, 0).unwrap();
+        assert_eq!(decoded, [1, 2, 3, 4]);
+        if ids.contains(&FILTER_SHUFFLE) {
+            assert_eq!(encoder.spare.as_ptr(), encoded_pointer);
+            assert_eq!(decoder.spare.as_ptr(), decoded_pointer);
+            assert_ne!(encoded.as_ptr(), encoded_pointer);
+            assert_ne!(decoded.as_ptr(), decoded_pointer);
+        } else {
+            assert_eq!(encoded.as_ptr(), encoded_pointer);
+            assert_eq!(decoded.as_ptr(), decoded_pointer);
+            assert_eq!(encoder.spare.capacity(), 0);
+            assert_eq!(decoder.spare.capacity(), 0);
+        }
+        let other = compress_chunk_with(&mut encoder, &[5, 6, 7, 8], &filters, context).unwrap();
+        assert_eq!(
+            decompress_chunk_with(&mut decoder, &other, &filters, context, 0).unwrap(),
+            [5, 6, 7, 8]
+        );
+        assert_eq!(encoded, expected);
+        assert_eq!(decoded, [1, 2, 3, 4]);
+        assert!(encoder.spare.is_empty());
+        assert!(decoder.spare.is_empty());
+    }
+
+    #[test]
+    fn lzf_pipeline_clears_failed_output_and_reuses_size_rejections() {
+        let filters = [FilterDescription {
+            filter_id: FILTER_LZF,
+            flags: 0,
+            client_data: vec![],
+        }];
+        let context = ChunkContext::basic(&[4], 1);
+        let mut scratch = FilterScratch::new();
+        scratch.spare = Vec::with_capacity(64);
+        let pointer = scratch.spare.as_ptr();
+        assert_eq!(
+            decompress_chunk_with(&mut scratch, &[0, b'a', 0x20], &filters, context, 0),
+            Err(Error::InvalidLzfStream("truncated match offset"))
+        );
+        assert!(scratch.spare.is_empty());
+        assert_eq!(scratch.spare.as_ptr(), pointer);
+        let retained =
+            decompress_chunk_with(&mut scratch, &[3, 1, 2, 3, 4], &filters, context, 0).unwrap();
+        assert_eq!(retained.as_ptr(), pointer);
+        assert_eq!(retained, [1, 2, 3, 4]);
+        assert_eq!(
+            decompress_chunk_with(&mut scratch, &[1, 5, 6], &filters, context, 0),
+            Err(Error::DataSizeMismatch {
+                expected: 4,
+                actual: 2
+            })
+        );
+        assert!(scratch.spare.is_empty());
+        let pointer = scratch.spare.as_ptr();
+        let decoded = decompress_chunk_with(
+            &mut scratch,
+            &[1, 7, 8],
+            &filters,
+            ChunkContext::basic(&[2], 1),
+            0,
+        )
+        .unwrap();
+        assert_eq!(decoded.as_ptr(), pointer);
+        assert_eq!(decoded, [7, 8]);
+        assert_eq!(retained, [1, 2, 3, 4]);
     }
 
     #[rstest]

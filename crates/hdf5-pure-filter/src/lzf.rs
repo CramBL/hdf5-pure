@@ -72,8 +72,29 @@ fn corrupt(reason: &'static str) -> Error {
 /// Returns [`Error::InvalidLzfStream`] if a token is truncated or a match refers to bytes before
 /// the output. Returns [`Error::LzfSizeExceeded`] if decoding exceeds `max_output`.
 pub fn decompress(input: &[u8], max_output: Option<usize>) -> Result<Vec<u8>, Error> {
+    let mut out = Vec::new();
+    decompress_into(input, max_output, &mut out)?;
+    Ok(out)
+}
+
+/// Replaces `out` with decoded bytes from a raw LZF stream.
+///
+/// Retains the output allocation when it has sufficient capacity. `max_output` bounds the decoded
+/// length independently of retained capacity, and `None` leaves it unbounded. An error may leave a
+/// decoded prefix in `out`.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidLzfStream`] if a token is truncated or a match refers to bytes before
+/// the output. Returns [`Error::LzfSizeExceeded`] if decoding exceeds `max_output`.
+pub(crate) fn decompress_into(
+    input: &[u8],
+    max_output: Option<usize>,
+    out: &mut Vec<u8>,
+) -> Result<(), Error> {
     let cap = max_output.unwrap_or(usize::MAX);
-    let mut out = Vec::with_capacity(crate::decode_reservation(
+    out.clear();
+    out.reserve_exact(crate::decode_reservation(
         max_output,
         input.len(),
         MAX_EXPANSION,
@@ -140,7 +161,7 @@ pub fn decompress(input: &[u8], max_output: Option<usize>) -> Result<Vec<u8>, Er
         }
     }
 
-    Ok(out)
+    Ok(())
 }
 
 /// Encodes chunk bytes as a raw LZF stream.
@@ -148,6 +169,16 @@ pub fn decompress(input: &[u8], max_output: Option<usize>) -> Result<Vec<u8>, Er
 /// The compressor uses greedy single-probe matching. It may produce more
 /// bytes than it receives for incompressible input.
 pub fn compress(input: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    compress_into(input, &mut out);
+    out
+}
+
+/// Replaces `out` with an encoded raw LZF stream.
+///
+/// Retains the output allocation when it has sufficient capacity. Allocates a match table for each
+/// call. The encoded output may be larger than `input` for incompressible bytes.
+pub(crate) fn compress_into(input: &[u8], out: &mut Vec<u8>) {
     /// Hash of a 3-byte window → slot in the table of `position + 1`.
     fn hash(a: u8, b: u8, c: u8) -> usize {
         let v = (usize::from(a) << 16) | (usize::from(b) << 8) | usize::from(c);
@@ -159,14 +190,18 @@ pub fn compress(input: &[u8]) -> Vec<u8> {
         let mut i = from;
         while i < to {
             let n = (to - i).min(MAX_LITERAL_RUN);
-            #[expect(clippy::cast_possible_truncation)]
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "n is in 1..=32, so n - 1 fits in u8"
+            )]
             out.push((n - 1) as u8);
             out.extend_from_slice(&input[i..i + n]);
             i += n;
         }
     }
 
-    let mut out = Vec::with_capacity(input.len() + input.len() / MAX_LITERAL_RUN + 2);
+    out.clear();
+    out.reserve_exact(input.len() + input.len() / MAX_LITERAL_RUN + 2);
     // Slots hold `position + 1`; 0 marks an empty slot, which is why the
     // candidate check below is `> 0`.
     //
@@ -194,17 +229,23 @@ pub fn compress(input: &[u8]) -> Vec<u8> {
                     len += 1;
                 }
 
-                flush_literals(&mut out, input, literal_start, ip);
+                flush_literals(out, input, literal_start, ip);
                 let off = distance - 1;
                 let encoded_len = len - 2;
-                #[expect(clippy::cast_possible_truncation)]
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "encoded_len <= 262 and off < 8192, so token bytes fit in u8"
+                )]
                 if encoded_len < 7 {
                     out.push(((encoded_len << 5) | (off >> 8)) as u8);
                 } else {
                     out.push(((7 << 5) | (off >> 8)) as u8);
                     out.push((encoded_len - 7) as u8);
                 }
-                #[expect(clippy::cast_possible_truncation)]
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "the mask limits the offset byte to 0..=255"
+                )]
                 out.push((off & 0xff) as u8);
 
                 ip += len;
@@ -215,13 +256,87 @@ pub fn compress(input: &[u8]) -> Vec<u8> {
         ip += 1;
     }
 
-    flush_literals(&mut out, input, literal_start, input.len());
-    out
+    flush_literals(out, input, literal_start, input.len());
 }
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
+
+    #[rstest]
+    #[case::empty(&[], b"")]
+    #[case::literal(&[2, b'a', b'b', b'c'], b"abc")]
+    #[case::disjoint_match(&[4, b'a', b'b', b'c', b'd', b'e', 0x60, 4], b"abcdeabcde")]
+    #[case::overlapping_match(&[0, b'a', 0x20, 0], b"aaaa")]
+    #[case::maximum_match(&[0, b'a', 0xe0, 255, 0], &[b'a'; 265])]
+    fn decoding_reuses_storage_and_preserves_token_values(
+        #[case] stored: &[u8],
+        #[case] expected: &[u8],
+        #[values(None, Some(1024))] limit: Option<usize>,
+    ) {
+        let mut output = Vec::with_capacity(4096);
+        output.extend_from_slice(&[99; 32]);
+        let capacity = output.capacity();
+        let pointer = output.as_ptr();
+        decompress_into(stored, limit, &mut output).unwrap();
+        assert_eq!(output, expected);
+        assert_eq!(output.as_ptr(), pointer);
+        assert_eq!(output.capacity(), capacity);
+    }
+
+    #[rstest]
+    #[case::empty(b"", &[])]
+    #[case::one_literal(b"a", &[0, b'a'])]
+    #[case::three_literals(b"abc", &[2, b'a', b'b', b'c'])]
+    #[case::overlapping_match(b"aaaa", &[0, b'a', 0x20, 0])]
+    #[case::disjoint_match(b"abcdeabcde", &[4, b'a', b'b', b'c', b'd', b'e', 0x60, 4])]
+    #[case::maximum_match(&[b'a'; 265], &[0, b'a', 0xe0, 255, 0])]
+    #[case::match_then_literal(&[b'a'; 266], &[0, b'a', 0xe0, 255, 0, 0, b'a'])]
+    fn encoding_reuses_storage_and_preserves_encoded_bytes(
+        #[case] input: &[u8],
+        #[case] expected: &[u8],
+    ) {
+        let mut output = Vec::with_capacity(4096);
+        output.extend_from_slice(&[99; 32]);
+        let pointer = output.as_ptr();
+        let capacity = output.capacity();
+        compress_into(input, &mut output);
+        assert_eq!(output, expected);
+        assert_eq!(output.as_ptr(), pointer);
+        assert_eq!(output.capacity(), capacity);
+        assert_eq!(compress(input), expected);
+    }
+
+    #[rstest]
+    #[case::literal_truncated(&[0], None, Error::InvalidLzfStream("truncated literal run"))]
+    #[case::literal_truncated_before_limit(&[31, b'a'], Some(0), Error::InvalidLzfStream("truncated literal run"))]
+    #[case::match_length_truncated(&[0xe0], None, Error::InvalidLzfStream("truncated match length"))]
+    #[case::match_offset_truncated(&[0x20], None, Error::InvalidLzfStream("truncated match offset"))]
+    #[case::extended_offset_truncated(&[0xe0, 0], None, Error::InvalidLzfStream("truncated match offset"))]
+    #[case::match_before_output(&[0x20, 0], None, Error::InvalidLzfStream("match reaches before start of output"))]
+    #[case::match_before_output_before_limit(&[0x20, 0], Some(0), Error::InvalidLzfStream("match reaches before start of output"))]
+    #[case::literal_limit(&[2, b'a', b'b', b'c'], Some(2), Error::LzfSizeExceeded { limit: 2, required: 3 })]
+    #[case::match_limit(&[0, b'a', 0x20, 0], Some(3), Error::LzfSizeExceeded { limit: 3, required: 4 })]
+    #[case::extended_match_limit(&[0, b'a', 0xe0, 255, 0], Some(264), Error::LzfSizeExceeded { limit: 264, required: 265 })]
+    #[case::failure_after_literal(&[0, b'a', 0x20], None, Error::InvalidLzfStream("truncated match offset"))]
+    fn reused_storage_preserves_decode_errors_and_resets_on_the_next_operation(
+        #[case] input: &[u8],
+        #[case] limit: Option<usize>,
+        #[case] expected: Error,
+    ) {
+        let mut output = Vec::with_capacity(4096);
+        output.extend_from_slice(&[99; 32]);
+        let pointer = output.as_ptr();
+        assert_eq!(decompress_into(input, limit, &mut output), Err(expected));
+        decompress_into(&[1, b'x', b'y'], Some(2), &mut output).unwrap();
+        assert_eq!(output, b"xy");
+        assert_eq!(output.as_ptr(), pointer);
+        compress_into(b"z", &mut output);
+        assert_eq!(output, [0, b'z']);
+        assert_eq!(output.as_ptr(), pointer);
+    }
 
     fn round_trip(data: &[u8]) {
         let compressed = compress(data);
