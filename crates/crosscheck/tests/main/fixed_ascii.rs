@@ -1,3 +1,5 @@
+#![cfg(feature = "hdf5")]
+
 use hdf5::types::{FixedAscii as NativeAscii, TypeDescriptor};
 use hdf5_pure::{CharacterSet, Datatype, File, FileBuilder, FixedAscii, StringPadding};
 use rstest::rstest;

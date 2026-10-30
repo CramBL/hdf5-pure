@@ -29,12 +29,15 @@ fn fixed_ascii_rejects_invalid_input(#[case] bytes: &[u8], #[case] expected: For
 }
 
 #[rstest]
-#[case::width_one(ascii::<1>(&["", "A", "\x7f"]))]
-#[case::width_four(ascii::<4>(&["ab", "", "wxyz", "a\0b"]))]
-#[case::empty(Vec::<FixedAscii<7>>::new())]
+#[case::contiguous_width_one(ascii::<1>(&["", "A", "\x7f"]), false)]
+#[case::chunked_width_one(ascii::<1>(&["", "A", "\x7f"]), true)]
+#[case::contiguous_width_four(ascii::<4>(&["ab", "", "wxyz", "a\0b"]), false)]
+#[case::chunked_width_four(ascii::<4>(&["ab", "", "wxyz", "a\0b"]), true)]
+#[case::contiguous_empty(Vec::<FixedAscii<7>>::new(), false)]
+#[case::chunked_empty(Vec::<FixedAscii<7>>::new(), true)]
 fn typed_ascii_preserves_elements_and_datatype<const N: usize>(
     #[case] values: Vec<FixedAscii<N>>,
-    #[values(false, true)] chunked: bool,
+    #[case] chunked: bool,
 ) {
     let mut builder = FileBuilder::new();
     let fill = FixedAscii::<N>::new("?").unwrap();

@@ -548,7 +548,7 @@ impl WriteEngine {
             ));
         }
         match ab.elem_dt() {
-            Some(expected) if *expected != disk_dt => {
+            Some(expected) if !append::datatypes_match(&disk_dt, expected) => {
                 return Err(Error::AppendUnsupported(
                     "append datatype does not match the on-disk dataset (wrong element \
                      type or byte order)",
@@ -1131,7 +1131,7 @@ impl WriteEngine {
             ));
         }
         if let Some(dt) = builder.elem_dt() {
-            if *dt != fd.dt {
+            if !append::datatypes_match(&fd.dt, dt) {
                 return Err(Error::AppendUnsupported(
                     "appended element datatype does not match the staged dataset's datatype",
                 ));

@@ -8,8 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- `H5Element` supports fixed byte-array and fixed ASCII dataset creation and reads, preserving each datatype and element width.
-
+- `H5Element` supports fixed byte-array and fixed ASCII dataset creation, reads, and appends, preserving each datatype and element width ([#979](https://github.com/CramBL/hdf5-pure/pull/979)).
 - `Dataset::append` initializes eligible empty datasets with an unallocated Extensible Array index, including through buffered appenders. Empty operations leave index and element storage unallocated ([#973](https://github.com/CramBL/hdf5-pure/pull/973)).
 - `Error::AllocationPublicationUncertain` reports append, commit, or synchronization requests rejected after an unconfirmed editing operation ([#973](https://github.com/CramBL/hdf5-pure/pull/973)).
 - `Dataset::into_buffered_appender` creates an owned buffered appender that can be stored without a lifetime parameter and retains the editing session after the original file handle is dropped. Explicit file closure makes further appender writes fail ([#945](https://github.com/CramBL/hdf5-pure/pull/945)).

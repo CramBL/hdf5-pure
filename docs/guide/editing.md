@@ -339,7 +339,17 @@ Like every staged edit, an append commits by writing the new chunks and a rebuil
 
 The engine supports the Extensible-Array chunk index, which libhdf5 and h5py select for a single unlimited dimension under the latest format and this crate writes for every unlimited dataset, on rank-1 datasets that have a single hard link. A dataset that is not chunked, not unlimited along axis 0, not Extensible-Array indexed, higher than rank 1, uses a filter this engine cannot re-encode, or has a sparse chunk grid is rejected with [`Error::AppendUnsupported`](crate::Error::AppendUnsupported) before any file bytes change. Check eligibility up front with the read-side accessors [`is_chunked`](crate::Dataset::is_chunked), [`maxshape`](crate::Dataset::maxshape), [`chunk_shape`](crate::Dataset::chunk_shape), and [`filters`](crate::Dataset::filters), which report it without an attempted append (the [reading guide](crate::_guide::reading#chunking-filters-and-append-eligibility) has the four in one table).
 
-Element types are checked, never coerced: each typed `append_*` call records the datatype it implies, and [`commit`](crate::File::commit) rejects a mismatch against the dataset's on-disk datatype, a mix of element types in one builder included. [`append_raw`](crate::Dataset::append_raw) appends already-little-endian element bytes verbatim. Its length must be a whole multiple of the element size. One-byte fixed-point leaves (`u8`/`i8`) are byte-order agnostic, all other numeric leaves must be little-endian. Variable-length and reference leaves are not raw-appendable.
+Typed appends require compatible datatypes and preserve the stored datatype. Fixed byte arrays
+require matching dimensions and base types, with byte order ignored for one-byte fixed-point
+leaves. [`FixedAscii`](crate::FixedAscii) strings require null-padded ASCII storage of the same
+width. Other typed datatypes must match exactly. Mixing element types in one builder is rejected.
+The [generic I/O guide](crate::_guide::generic_io#appending-fixed-width-elements) has examples for
+fixed-width elements.
+
+[`append_raw`](crate::Dataset::append_raw) appends element bytes in the dataset's datatype.
+Its length must be a whole multiple of the element size. One-byte fixed-point leaves are
+byte-order agnostic. Other numeric leaves must be little-endian. Variable-length and reference
+leaves are rejected.
 
 This section mirrors [`examples/append_dataset.rs`](https://github.com/CramBL/hdf5-pure/blob/main/examples/append_dataset.rs). Run it with `cargo run --example append_dataset`.
 

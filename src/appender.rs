@@ -137,10 +137,12 @@ impl<'a> BufferedAppender<'a> {
         })
     }
 
-    /// Buffers scalar elements and writes complete chunks automatically.
+    /// Buffers typed elements and writes complete chunks automatically.
     ///
-    /// The element type must match the dataset's on-disk datatype exactly. A mismatch is
-    /// reported when this call or a later operation writes the buffered elements.
+    /// Supports the element types of [`H5Element`], including fixed byte arrays and
+    /// [`FixedAscii`](crate::FixedAscii) strings. Datatype compatibility follows
+    /// [`Dataset::append`]. A mismatch is reported when this call or a later operation writes
+    /// the buffered elements.
     ///
     /// # Errors
     ///
@@ -148,7 +150,12 @@ impl<'a> BufferedAppender<'a> {
     /// [`Error::AppendInPlaceUnsupported`] if a write has already failed. Propagates errors
     /// from the immediate append. See [`BufferedAppender`] for recovery after an error.
     /// Returns [`Error::AllocationPublicationUncertain`] if an earlier editing outcome
-    /// is uncertain.
+    /// is uncertain. Returns [`Error::Format`] if the element width is invalid, including for
+    /// empty input.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the new buffer capacity exceeds [`isize::MAX`] bytes.
     pub fn append<T: H5Element>(&mut self, data: &[T]) -> Result<(), Error> {
         self.state.append(self.dataset, data)
     }
@@ -379,10 +386,12 @@ impl OwnedBufferedAppender {
         })
     }
 
-    /// Buffers scalar elements and writes complete chunks automatically.
+    /// Buffers typed elements and writes complete chunks automatically.
     ///
-    /// The element type must match the dataset's on-disk datatype exactly. A mismatch is
-    /// reported when this call or a later operation writes the buffered elements.
+    /// Supports the element types of [`H5Element`], including fixed byte arrays and
+    /// [`FixedAscii`](crate::FixedAscii) strings. Datatype compatibility follows
+    /// [`Dataset::append`]. A mismatch is reported when this call or a later operation writes
+    /// the buffered elements.
     ///
     /// # Errors
     ///
@@ -390,7 +399,12 @@ impl OwnedBufferedAppender {
     /// [`Error::AppendInPlaceUnsupported`] if a write has already failed. Propagates errors
     /// from the immediate append. See [`OwnedBufferedAppender`] for recovery after an error.
     /// Returns [`Error::AllocationPublicationUncertain`] if an earlier editing outcome
-    /// is uncertain.
+    /// is uncertain. Returns [`Error::Format`] if the element width is invalid, including for
+    /// empty input.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the new buffer capacity exceeds [`isize::MAX`] bytes.
     pub fn append<T: H5Element>(&mut self, data: &[T]) -> Result<(), Error> {
         self.state.append(&mut self.dataset, data)
     }

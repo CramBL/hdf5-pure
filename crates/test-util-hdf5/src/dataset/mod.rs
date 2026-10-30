@@ -1,5 +1,7 @@
-//! The rank-1 unlimited dataset the append tests grow, built and read by `hdf5-pure` and, behind
-//! the `hdf5` feature, by libhdf5.
+//! Dataset fixtures, append modes, and filter pipelines shared by tests.
+//!
+//! [`Unlimited`] fixtures have rank one and an unlimited dimension. Native construction through
+//! libhdf5 requires the `__hdf5-1.10` feature.
 
 use std::path::Path;
 
@@ -18,6 +20,10 @@ use hdf5_pure::H5Element;
 use hdf5_pure::MaxExtent;
 use hdf5_pure::PartialEdgeFiltering;
 use hdf5_pure::ScaleOffset;
+
+mod append;
+
+pub use append::{AppendFilters, AppendMode};
 
 /// One stage of a filter pipeline. A dataset applies its stages in the order it lists them.
 #[derive(Clone, Copy, Debug, PartialEq)]

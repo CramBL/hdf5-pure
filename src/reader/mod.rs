@@ -5892,6 +5892,12 @@ impl Dataset {
     ///
     /// Every handle onto the dataset reads the new length afterwards.
     ///
+    /// Supports numeric scalars, fixed byte arrays, and [`FixedAscii`](crate::FixedAscii)
+    /// strings through [`H5Element`]. Numeric datatypes must match exactly. Array dimensions
+    /// and base types must match, with byte order ignored for one-byte fixed-point leaves.
+    /// Fixed ASCII strings require null-padded ASCII storage of the same width. The writer
+    /// preserves the stored datatype and checks compatibility even for empty input.
+    ///
     /// The file must have been opened for writing with [`File::open_rw`];
     /// a read-only file returns
     /// [`Error::ReadOnly`]. The target must be a chunked,
@@ -5974,6 +5980,40 @@ impl Dataset {
     /// metadata, allocation, encoding, and I/O errors.
     /// Returns [`Error::AllocationPublicationUncertain`] if an earlier editing outcome
     /// is uncertain.
+    ///
+    /// # Performance
+    ///
+    /// For byte-array input, the writer borrows the flattened slice and allocates buffers for
+    /// chunk encoding and storage. Bounded sessions limit the full-chunk portion of each
+    /// batch, allowing at least one chunk and space to complete an existing partial tail.
+    /// ASCII and numeric inputs are encoded into a temporary buffer per batch.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure::{File, FileBuilder, FixedAscii, MaxExtent};
+    /// # let directory = tempfile::tempdir()?;
+    /// # let path = directory.path().join("fixed.h5");
+    /// let mut builder = FileBuilder::new();
+    /// builder.create_dataset("bytes")
+    ///     .with_data(&[[0u8, 255]])
+    ///     .with_maxshape(&[MaxExtent::Unlimited])
+    ///     .with_chunks(&[4]);
+    /// builder.create_dataset("labels")
+    ///     .with_data(&[FixedAscii::<4>::new("ab")?])
+    ///     .with_maxshape(&[MaxExtent::Unlimited])
+    ///     .with_chunks(&[4]);
+    /// builder.write(&path)?;
+    ///
+    /// let file = File::open_rw(&path)?;
+    /// file.dataset("bytes")?.append(&[[128u8, 42]])?;
+    /// file.dataset("labels")?.append(&[FixedAscii::<4>::new("xyz")?])?;
+    /// assert_eq!(file.dataset("bytes")?.read::<[u8; 2]>()?, [[0, 255], [128, 42]]);
+    /// let labels = file.dataset("labels")?.read::<FixedAscii<4>>()?;
+    /// assert_eq!(labels, [FixedAscii::new("ab")?, FixedAscii::new("xyz")?]);
+    /// drop(file);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn append<T: H5Element>(&mut self, data: &[T]) -> Result<(), Error> {
         self.append_with_options(AppendOptions::new(), data)
     }
@@ -6004,6 +6044,13 @@ impl Dataset {
         data: &[T],
     ) -> Result<(), Error> {
         let g = self.append_geometry()?;
+        if let Some(encoded) = T::borrowed_encoding(data) {
+            let (bytes, datatype) = encoded?;
+            let target = self.append_target()?;
+            return self.file.with_engine_mut(Change::InPlace, |engine| {
+                engine.append_inplace_bytes(target, options, Some(&datatype), bytes, 4)
+            });
+        }
         self.append_batches(g, options, data.len() as u64, |b, r| {
             b.append(&data[r]);
         })

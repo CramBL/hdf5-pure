@@ -58,6 +58,7 @@ mod fill_value;
 mod filter_options;
 mod fixed_ascii;
 mod fixed_byte_arrays;
+mod fixed_element_append;
 mod fixed_strings;
 mod fuzz_regressions;
 mod generic_element;

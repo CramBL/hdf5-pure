@@ -1,3 +1,5 @@
+#![cfg(feature = "hdf5")]
+
 use hdf5::types::{IntSize, TypeDescriptor};
 use hdf5_pure::{Datatype, File, FileBuilder};
 use rstest::rstest;

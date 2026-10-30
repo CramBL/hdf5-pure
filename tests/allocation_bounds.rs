@@ -21,6 +21,7 @@
 // startup.
 #![cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 
+use std::fmt::Debug;
 use std::fs::File as StdFile;
 use std::path::Path;
 
@@ -30,6 +31,8 @@ use hdf5_pure::ChunkIndex;
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
+use hdf5_pure::FixedAscii;
+use hdf5_pure::H5Element;
 use hdf5_pure::MessageType as ParsedMessageType;
 use hdf5_pure::OffsetWidth;
 use hdf5_pure::RepackOptions;
@@ -63,6 +66,7 @@ use test_util::object_header::v2::Header;
 use test_util::superblock::v2::Superblock;
 use test_util::temp::TempPath;
 use test_util::widths::Widths;
+use test_util_hdf5::dataset::Unlimited;
 use test_util_hdf5::file_space;
 use test_util_hdf5::reader::ReadBackend;
 
@@ -750,7 +754,7 @@ fn typed_byte_arrays_keep_only_one_read_window_beside_output() {
 #[test]
 fn typed_ascii_keeps_only_one_read_window_beside_output() {
     const COUNT: usize = 1_048_576;
-    let value = hdf5_pure::FixedAscii::<7>::new("abcdefg").unwrap();
+    let value = FixedAscii::<7>::new("abcdefg").unwrap();
     let values = vec![value; COUNT];
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("ascii.h5");
@@ -765,7 +769,7 @@ fn typed_ascii_keeps_only_one_read_window_beside_output() {
     let file = File::open_streaming(&path).unwrap();
     let dataset = file.dataset("values").unwrap();
     let (output, measured) = allocation::measure("typed_ascii_read", || {
-        dataset.read::<hdf5_pure::FixedAscii<7>>().unwrap()
+        dataset.read::<FixedAscii<7>>().unwrap()
     });
     assert_eq!(output, values);
     assert!(measured.live_bytes >= payload, "{measured}");
@@ -778,6 +782,116 @@ fn typed_ascii_keeps_only_one_read_window_beside_output() {
     assert_eq!(raw, b"abcdefg".repeat(COUNT));
     assert_eq!(copied, raw);
     assert!(control.peak_bytes >= 2 * payload, "{control}");
+}
+
+#[rstest]
+#[case::byte_arrays([0u8, 127, 128, 255, 42, 19, 5], "bounded_byte_array_append")]
+#[case::ascii(FixedAscii::<7>::new("abcdefg").unwrap(), "bounded_ascii_append")]
+fn fixed_element_appends_bound_memory_to_one_batch<T>(
+    #[case] value: T,
+    #[case] region: &str,
+    #[values(2_097_152, 4_194_304)] count: usize,
+) where
+    T: H5Element + Debug + PartialEq,
+{
+    const MAX_PEAK_BYTES: u64 = 5 * 1_024 * 1_024;
+    let region = format!("{region}_{count}");
+    let values = vec![value; count];
+    let (copied, control) =
+        allocation::measure(&format!("{region}_copy_control"), || values.clone());
+    assert_eq!(copied, values);
+    let payload = std::mem::size_of_val(values.as_slice()) as u64;
+    assert!(control.peak_bytes >= payload, "{control}");
+    drop(copied);
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("bounded-fixed.h5");
+    Unlimited::new("values", &values[..1], 4_096).pure_create(&path);
+    let file = File::open_rw_with_options(
+        &path,
+        FileAccessProperties::new()
+            .with_memory_strategy(MemoryStrategy::Bounded)
+            .with_sync_policy(SyncPolicy::OnClose),
+    )
+    .unwrap();
+    let mut target = file.dataset("values").unwrap();
+    target.append::<T>(&[]).unwrap();
+    let ((), measured) = allocation::measure(&region, || target.append(&values).unwrap());
+    assert!(measured.bytes >= payload, "{measured}");
+    assert!(measured.peak_bytes < MAX_PEAK_BYTES, "{measured}");
+    assert!(
+        measured.peak_bytes < control.peak_bytes,
+        "append: {measured}; copy: {control}"
+    );
+    let mut expected = vec![value];
+    expected.extend_from_slice(&values);
+    assert_eq!(target.shape().unwrap(), [expected.len() as u64]);
+    assert_eq!(target.read::<T>().unwrap(), expected);
+    drop(target);
+    file.close().unwrap();
+    let file = File::open_streaming(&path).unwrap();
+    assert_eq!(
+        file.dataset("values").unwrap().read::<T>().unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn byte_array_appends_borrow_input_instead_of_packing_a_full_batch() {
+    const COUNT: usize = 262_144;
+    let (probe, positive) =
+        allocation::measure("byte_array_append_profiler_control", || vec![0u8; 4_096]);
+    assert_eq!(probe, [0; 4_096]);
+    assert!(positive.blocks > 0, "{positive}");
+    assert!(positive.peak_bytes >= 4_096, "{positive}");
+    drop(probe);
+    let values = vec![[0u8, 127, 128, 255, 42, 19, 5]; COUNT];
+    let directory = tempfile::tempdir().unwrap();
+    let measure_append = |name, typed| {
+        let path = directory.path().join(name);
+        Unlimited::new("values", &values[..0], 4_096).pure_create(&path);
+        let file = File::open_rw_with_options(
+            &path,
+            FileAccessProperties::new()
+                .with_memory_strategy(MemoryStrategy::Mirrored)
+                .with_sync_policy(SyncPolicy::OnClose),
+        )
+        .unwrap();
+        let mut target = file.dataset("values").unwrap();
+        target.append(&values[..4_096]).unwrap();
+        let ((), measured) = allocation::measure(name, || {
+            if typed {
+                target.append(&values).unwrap();
+            } else {
+                let packed = values.clone();
+                target.append(&packed).unwrap();
+            }
+        });
+        let mut expected = values[..4_096].to_vec();
+        expected.extend_from_slice(&values);
+        assert_eq!(target.shape().unwrap(), [expected.len() as u64]);
+        assert_eq!(target.read::<[u8; 7]>().unwrap(), expected);
+        drop(target);
+        file.close().unwrap();
+        let file = File::open_streaming(&path).unwrap();
+        assert_eq!(
+            file.dataset("values").unwrap().read::<[u8; 7]>().unwrap(),
+            expected
+        );
+        measured
+    };
+    let borrowed = measure_append("borrowed_byte_append", true);
+    let packed = measure_append("packed_byte_append", false);
+    let payload = (COUNT * 7) as u64;
+    assert!(borrowed.bytes >= payload, "{borrowed}");
+    assert!(borrowed.peak_bytes < payload * 5 / 2, "{borrowed}");
+    assert!(
+        packed.bytes >= borrowed.bytes + payload,
+        "borrowed: {borrowed}; packed: {packed}"
+    );
+    assert!(
+        packed.peak_bytes >= borrowed.peak_bytes + payload / 2,
+        "borrowed: {borrowed}; packed: {packed}"
+    );
 }
 
 #[test]

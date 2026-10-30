@@ -4,13 +4,18 @@ use hdf5_pure::{
 };
 use rstest::rstest;
 
+use test_util_hdf5::dataset::AppendMode;
+
 #[rstest]
-#[case::width_one(vec![[0], [255], [128]])]
-#[case::width_three(vec![[0, 255, 128], [17, 23, 42], [1, 2, 3], [4, 5, 6]])]
-#[case::empty(Vec::<[u8; 7]>::new())]
+#[case::contiguous_width_one(vec![[0], [255], [128]], false)]
+#[case::chunked_width_one(vec![[0], [255], [128]], true)]
+#[case::contiguous_width_three(vec![[0, 255, 128], [17, 23, 42], [1, 2, 3], [4, 5, 6]], false)]
+#[case::chunked_width_three(vec![[0, 255, 128], [17, 23, 42], [1, 2, 3], [4, 5, 6]], true)]
+#[case::contiguous_empty(Vec::<[u8; 7]>::new(), false)]
+#[case::chunked_empty(Vec::<[u8; 7]>::new(), true)]
 fn typed_byte_arrays_preserve_elements_and_datatype<const N: usize>(
     #[case] values: Vec<[u8; N]>,
-    #[values(false, true)] chunked: bool,
+    #[case] chunked: bool,
 ) {
     let mut builder = FileBuilder::new();
     let dataset = builder.create_dataset("values");
@@ -284,14 +289,6 @@ fn zero_width_appends_preserve_buffered_input_and_allow_recovery() {
     appender.append(&[44u8]).unwrap();
     appender.finish().unwrap();
     assert_eq!(dataset.read::<u8>().unwrap(), [11, 22, 33, 44]);
-}
-
-#[derive(Clone, Copy, Debug)]
-enum AppendMode {
-    Buffered,
-    Immediate,
-    OwnedBuffered,
-    Staged,
 }
 
 fn assert_format_error(error: Error, expected: FormatError) {

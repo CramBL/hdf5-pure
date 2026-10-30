@@ -93,6 +93,53 @@ unsigned bytes with the same element width. For [`FixedAscii`](crate::FixedAscii
 requires a null-padded ASCII string datatype of the same width and validates every stored byte.
 The reader rejects incompatible datatypes even for an empty dataset.
 
+## Appending fixed-width elements
+
+[`Dataset::append`](crate::Dataset::append), [`AppendBuilder::append`](crate::AppendBuilder::append),
+and both buffered appenders accept fixed byte arrays and [`FixedAscii`](crate::FixedAscii) strings.
+The writer checks datatype compatibility and preserves the stored datatype and element width.
+Array base types and dimensions must match, with byte order ignored for one-byte fixed-point
+leaves. ASCII strings require null-padded ASCII storage of the same width.
+
+The following example stages an ASCII append, then appends through both buffered APIs:
+
+```rust
+use hdf5_pure::{File, FileBuilder, FixedAscii, MaxExtent};
+# let directory = tempfile::tempdir()?;
+# let path = directory.path().join("labels.h5");
+let mut builder = FileBuilder::new();
+builder.create_dataset("labels")
+    .with_data(&[FixedAscii::<4>::new("ab")?])
+    .with_maxshape(&[MaxExtent::Unlimited])
+    .with_chunks(&[4]);
+builder.write(&path)?;
+
+let file = File::open_rw(&path)?;
+let mut labels = file.dataset("labels")?;
+let staged = FixedAscii::<4>::new("cd")?;
+labels.append_staged(|append| {
+    append.append(&[staged]);
+})?;
+file.commit()?;
+let mut buffered = labels.buffered_appender()?;
+buffered.append(&[FixedAscii::<4>::new("ef")?])?;
+buffered.finish()?;
+let mut owned = labels.into_buffered_appender()?;
+owned.append(&[FixedAscii::<4>::new("gh")?])?;
+owned.finish()?;
+let values = file.dataset("labels")?.read::<FixedAscii<4>>()?;
+assert_eq!(values, [
+    FixedAscii::new("ab")?, FixedAscii::new("cd")?,
+    FixedAscii::new("ef")?, FixedAscii::new("gh")?,
+]);
+drop(file);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+For byte-array input, the immediate writer borrows the flattened slice. Chunk encoding and storage
+require their own buffers. ASCII input is encoded per batch. The bounded-memory limits and append
+policies are described in [Editing files](crate::_guide::editing#bounded-memory-appends).
+
 ## Cross-type coercion
 
 Numeric reads through [`read::<T>()`](crate::Dataset::read) use the widening and truncation

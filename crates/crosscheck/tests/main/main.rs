@@ -60,6 +60,7 @@ mod fill_value;
 mod fixed_array;
 mod fixed_ascii;
 mod fixed_byte_arrays;
+mod fixed_element_append;
 mod fixed_string;
 mod fractal_heap_dense_links;
 mod fractal_heap_filtered_header;
