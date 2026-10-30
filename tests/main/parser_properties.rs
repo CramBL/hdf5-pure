@@ -17,18 +17,18 @@ fn exercise(file: &File) {
     if let Ok(names) = root.datasets() {
         for name in names.iter().take(16) {
             if let Ok(ds) = root.dataset(name) {
-                let _ = ds.shape();
-                let _ = ds.dtype();
-                let _ = ds.read_f64();
-                let _ = ds.read_i64();
-                let _ = ds.read_u8();
-                let _ = ds.read_string();
+                ds.shape().ok();
+                ds.dtype().ok();
+                ds.read_f64().ok();
+                ds.read_i64().ok();
+                ds.read_u8().ok();
+                ds.read_string().ok();
             }
         }
     }
     if let Ok(groups) = root.groups() {
         for name in groups.iter().take(16) {
-            let _ = root.group(name);
+            root.group(name).ok();
         }
     }
 }
