@@ -72,6 +72,7 @@ allocation-coverage: filtered-chunk-memory
     cargo nextest run --locked -p hdf5-pure --features std --test allocation_bounds --no-tests fail --ignore-default-filter
     cargo nextest run --locked -p hdf5-pure --features std --lib --no-tests fail --ignore-default-filter -E 'test(/^edit::object_header::tests::a_growing_extension_rewrite_keeps_the_allocation_count/)'
     cargo nextest run --locked -p hdf5-pure --features std --lib --no-tests fail --ignore-default-filter -E 'test(/^file_writer::tests::allocation::/)'
+    cargo nextest run --locked -p hdf5-pure --features std --lib --no-tests fail --ignore-default-filter -E 'test(/^chunked_read::tests::btree_v1_cached_acquisition_allocates_no_second_payload/)'
 
 # Measure filtered creation and direct pipeline throughput.
 filtered-chunk-bench *ARGS:

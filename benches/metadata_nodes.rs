@@ -191,6 +191,7 @@ impl Fixture {
         assert_eq!(node.node_level(), 0);
         assert_eq!(node.entries_used(), self.entries);
         assert_eq!(node.stored_len(), self.node_len);
+        let mut count = 0;
         for (index, entry) in node.entries().enumerate() {
             // A checked node view contains a complete key and child address for every entry.
             let (key, child) = entry.unwrap();
@@ -198,7 +199,9 @@ impl Fixture {
             assert_eq!(key.filter_mask, 0);
             assert_eq!(key.offsets().collect::<Vec<_>>(), [index.to_u64(), 0]);
             assert_eq!(child, StoredAddress::new(0x1000 + index.to_u64() * 4));
+            count += 1;
         }
+        assert_eq!(count, usize::from(self.entries));
     }
 
     fn check_cache(&self, expected_hits: u64, expected_misses: u64) {
