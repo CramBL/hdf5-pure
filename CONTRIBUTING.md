@@ -43,10 +43,10 @@ The same rules apply here as for bug reports and feature requests. Plus:
 Before pushing, run the checks CI runs on every pull request:
 
 ```sh
-just ci-essentials   # fmt, clippy, docs, tests and doctests with every feature
+just ci-essentials   # fmt, clippy, docs, tests and doctests with the full public feature profile
 ```
 
-`just ci-local` runs the rest as well: portability, hygiene, prose, the API checks and the crosschecks against the supported releases of the HDF5 C library. GitHub Actions additionally runs the QEMU, cross-target and full HDF5 matrix jobs, the WASM tests, and fuzzing. `just --list` shows every recipe, and [TESTING.md](TESTING.md) explains the suites and the evidence a change needs.
+`just ci-local` also runs feature, portability, hygiene, prose, API, native, Miri, and allocation checks. Its portability recipes compile and lint. GitHub Actions additionally runs QEMU and WASM tests and [fuzzing](scripts/fuzz.just). `just --list` shows every recipe, and [TESTING.md](TESTING.md) explains the suites and the evidence a change needs.
 
 ## Crate features
 

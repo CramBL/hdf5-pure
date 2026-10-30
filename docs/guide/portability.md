@@ -23,6 +23,10 @@ complete file as a `Vec<u8>` to hand to JavaScript, and
 [`File::from_bytes`](crate::File::from_bytes) parses the bytes that come back.
 CI runs this round trip on `wasm32-unknown-unknown` under Node.
 
+`just portability::check-wasm` checks compilation and lints the separate WASM
+suite. `just portability::test-wasm` executes it under Node, with the
+`wasm-bindgen-test-runner` version pinned by `Cargo.lock`.
+
 ```rust
 use hdf5_pure::FileBuilder;
 

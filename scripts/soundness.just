@@ -67,7 +67,7 @@ filtered-chunk-memory:
     cargo nextest run --locked -p hdf5-pure --features std --lib --no-tests fail --ignore-default-filter --success-output immediate -E 'test(/^chunked_write::tests::allocation::/)'
     cargo nextest run --locked -p hdf5-pure-filter --features deflate --lib --no-tests fail --ignore-default-filter --success-output immediate -E 'test(/^pipeline::tests::allocation::/)'
 
-# Execute each supported-host allocation suite and fail if its selection is empty.
+# Execute each allocation suite on std x86_64/aarch64 hosts and fail if its selection is empty.
 allocation-coverage: filtered-chunk-memory
     cargo nextest run --locked -p hdf5-pure --features std --test allocation_bounds --no-tests fail --ignore-default-filter
     cargo nextest run --locked -p hdf5-pure --features std --lib --no-tests fail --ignore-default-filter -E 'test(/^edit::object_header::tests::a_growing_extension_rewrite_keeps_the_allocation_count/)'

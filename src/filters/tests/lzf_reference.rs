@@ -1,17 +1,19 @@
 //! LZF decoder vectors and pipeline metadata produced by h5py.
 //!
-//! Extracted single-filter streams decode to the expected raw bytes. Masked
-//! chunks match the raw bytes directly. The writer's pipeline parameters are
-//! compared with the manifest, and its encoded streams are checked by round trips.
+//! The codec in `crates/hdf5-pure-filter/src/lzf.rs` decodes extracted single-filter streams
+//! to the expected raw bytes. Masked chunks are compared directly with those bytes. Tests
+//! compare writer pipeline parameters with the manifest and check encoded streams by round trips.
 //!
-//! Fresh writer output is read and rewritten through the native codec in
-//! `crates/crosscheck/tests/main/lzf.rs`. Chained reference files and files with multiple chunks
-//! are checked through the complete reader in `tests/main/lzf_roundtrip.rs`.
+//! Native tests in `crates/crosscheck/tests/main/lzf.rs` check fresh writer output through
+//! liblzf. Tests in `tests/main/lzf_roundtrip.rs` read chained pipelines and files with multiple
+//! chunks. LZF permits different compressed representations of the same
+//! values, so native write conformance checks decoded values and pipeline metadata.
 //!
-//! Regenerate the reference vectors with the pinned producer:
+//! Regenerate on a little-endian host with the producer dependencies pinned in
+//! `tests/data/h5py/lzf/regen.py`:
 //!
 //! ```console
-//! uv run tests/data/h5py/lzf/regen.py
+//! just test-data::lzf
 //! ```
 
 use std::fs;

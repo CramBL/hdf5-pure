@@ -1,6 +1,17 @@
 The `parse-file` corpus supplies HDF5 inputs for parser mutations. The
 [fuzz recipes][recipes] also pass it to `streaming-differential`.
 
+`parse-file` checks arbitrary inputs for panics. `streaming-differential` compares
+buffered and streaming metadata outcomes. `roundtrip-simple` checks generated
+writer/reader pairs.
+
+The recipes build cargo-fuzz instrumentation before execution. Keep minimized
+failures as ordinary regression tests.
+
+Run `just fuzz::fuzz-all` from the repository root. The [workflow][workflow]
+sets a per-target time budget of 30 seconds on pull requests and 600 seconds
+on other configured events.
+
 These are frozen mutation starting points, retained byte for byte. Their original
 producers and producer versions are unknown. No regeneration procedure or
 fixture-specific license is recorded.
@@ -21,3 +32,4 @@ bytes. The two SOHM inputs have separate import history.
 | `sohm_btree.h5` | Import `2a9f356afd7b77f931ec10625f3dfd1a5983b66c`, source and producer unknown | Shared object-header messages with a B-tree index |
 
 [recipes]: ../../scripts/fuzz.just
+[workflow]: ../../.github/workflows/fuzz.yml

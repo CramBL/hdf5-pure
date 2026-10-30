@@ -1,26 +1,6 @@
-# cargo-nextest configuration (issue #269).
-#
-# Why nextest at all: `cargo test` runs the integration binaries one after
-# another, so a suite spread over 100+ of them spends most of its wall clock on
-# one core. Measured here on a 10-core machine at `--all-features`, after the
-# per-append `fsync` fix in the same issue: 46.1s under `cargo test` (115% CPU)
-# against 17.9s under nextest (421% CPU). The work is identical; only the
-# scheduling differs.
-#
-# nextest does not run doctests -- it has no way to, since they are compiled by
-# `rustdoc` rather than into a test binary. The pre-push gate is therefore
-# `cargo nextest run` *and* `cargo test --doc` -- `just ci-essentials` runs both,
-# as does CI, in separate steps so a doctest failure is not silently dropped.
-#
-# One property this scheduling now depends on: tests in *different* binaries run
-# at the same time, which `cargo test` never did (it ran binaries one at a time,
-# concurrent only within each). Most tests here work in a `tempdir()` and are
-# unaffected, but 225 of them write a hardcoded name into the shared system
-# temp directory, and those were previously serialized by binary. They are all
-# distinct -- each file prefixes its own (`hdf5_pure_ub_`, `hdf5_pure_fs_`, ...)
-# -- so nothing collides. Keep it that way: a name reused across two test files
-# would now be two processes writing one path, which fails only sometimes and,
-# because the locks are mandatory there, mostly on Windows.
+# Nextest schedules workspace tests concurrently, including bundled integration suites.
+# Tests own temporary paths or directories so parallel processes use separate files.
+# Rustdoc runs doctests separately. `just ci-essentials` and CI execute both classes.
 
 # Require a version that understands this file's schema, so an older nextest
 # fails loudly instead of ignoring settings the gate depends on.
