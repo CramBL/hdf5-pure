@@ -21,7 +21,7 @@ use crate::scaleoffset::ScaleOffsetType;
 #[cfg(feature = "zfp")]
 use crate::zfp::ZfpElementType;
 
-mod buffer;
+pub(crate) mod buffer;
 mod zfp;
 
 /// Supplies the identifier, flags, and parameters for one pipeline filter.
@@ -412,9 +412,7 @@ pub fn decompress_chunk_with(
             }
             FILTER_SCALEOFFSET => {
                 let cap = pipeline.inner_output_cap(scratch, expected, i, ctx)?;
-                let output =
-                    scaleoffset::decompress(current.as_slice(), filters.client_data(i), cap)?;
-                current.replace(&mut scratch.spare, output)
+                scaleoffset::decompress(current, filters.client_data(i), cap, &mut scratch.spare)?
             }
             #[cfg(feature = "zfp")]
             FILTER_ZFP => {
@@ -576,8 +574,7 @@ pub fn compress_chunk_with(
                 current.append(&mut scratch.spare, &checksum.to_le_bytes())
             }
             FILTER_SCALEOFFSET => {
-                let output = scaleoffset::compress(current.as_slice(), filters.client_data(i))?;
-                current.replace(&mut scratch.spare, output)
+                scaleoffset::compress(current, filters.client_data(i), &mut scratch.spare)?
             }
             #[cfg(feature = "zfp")]
             FILTER_ZFP => {
@@ -1039,6 +1036,114 @@ mod tests {
         assert_eq!(decoded.as_ptr(), pointer);
         assert_eq!(decoded, [7, 8]);
         assert_eq!(retained, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn full_width_scale_offset_views_keep_the_final_size_check() {
+        let parameters = scaleoffset::build_cd_values(
+            ScaleOffset::Integer(8),
+            ScaleOffsetType::integer(false, ScaleOffsetByteOrder::LittleEndian),
+            1,
+            2,
+            ScaleOffsetFill::Undefined,
+        )
+        .unwrap();
+        let filters = [FilterDescription {
+            filter_id: FILTER_SCALEOFFSET,
+            flags: 0,
+            client_data: parameters,
+        }];
+        let context = ChunkContext::basic(&[2], 1);
+        let mut scratch = FilterScratch::new();
+        scratch.spare = Vec::with_capacity(64);
+        let pointer = scratch.spare.as_ptr();
+        let encoded = compress_chunk_with(&mut scratch, &[1, 2, 3], &filters, context).unwrap();
+        assert_eq!(encoded, [1, 2, 3]);
+        assert_eq!(scratch.spare.as_ptr(), pointer);
+        assert_eq!(
+            decompress_chunk_with(&mut scratch, &encoded, &filters, context, 0),
+            Err(Error::DataSizeMismatch {
+                expected: 2,
+                actual: 3
+            })
+        );
+        let decoded = decompress_chunk_with(&mut scratch, &[4, 5], &filters, context, 0).unwrap();
+        assert_eq!(decoded, [4, 5]);
+        assert_eq!(encoded, [1, 2, 3]);
+        assert_eq!(scratch.spare.as_ptr(), pointer);
+        assert!(scratch.spare.is_empty());
+    }
+
+    #[rstest]
+    #[case::borrowed_input(false)]
+    #[case::owned_lzf_output(true)]
+    fn scale_offset_raw_views_preserve_owned_results_and_recover_after_size_errors(
+        #[case] lzf: bool,
+    ) {
+        let parameters = scaleoffset::build_cd_values(
+            ScaleOffset::Integer(0),
+            ScaleOffsetType::integer(false, ScaleOffsetByteOrder::LittleEndian),
+            1,
+            2,
+            ScaleOffsetFill::Undefined,
+        )
+        .unwrap();
+        let mut filters = vec![FilterDescription {
+            filter_id: FILTER_SCALEOFFSET,
+            flags: 0,
+            client_data: parameters,
+        }];
+        if lzf {
+            filters.push(FilterDescription {
+                filter_id: FILTER_LZF,
+                flags: 0,
+                client_data: vec![],
+            });
+        }
+        let context = ChunkContext::basic(&[2], 1);
+        let mut encoder = FilterScratch::new();
+        let encoded = compress_chunk_with(&mut encoder, &[0, 255], &filters, context).unwrap();
+        let first_encoded = encoded.clone();
+        if !lzf {
+            assert_eq!(
+                encoded,
+                [
+                    8, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255
+                ]
+            );
+        }
+        let mut decoder = FilterScratch::new();
+        decoder.spare = Vec::with_capacity(128);
+        let pointer = decoder.spare.as_ptr();
+        let decoded = decompress_chunk_with(&mut decoder, &encoded, &filters, context, 0).unwrap();
+        assert_eq!(decoded, [0, 255]);
+        if lzf {
+            assert_eq!(decoded.as_ptr(), pointer);
+            assert_eq!(decoder.spare.capacity(), 0);
+        } else {
+            assert_eq!(decoder.spare.as_ptr(), pointer);
+        }
+        assert_eq!(
+            decompress_chunk_with(
+                &mut decoder,
+                &encoded,
+                &filters,
+                ChunkContext::basic(&[3], 1),
+                0
+            ),
+            Err(Error::DataSizeMismatch {
+                expected: 3,
+                actual: 2
+            })
+        );
+        assert!(decoder.spare.is_empty());
+        let other = compress_chunk_with(&mut encoder, &[255, 0], &filters, context).unwrap();
+        assert_eq!(
+            decompress_chunk_with(&mut decoder, &other, &filters, context, 0).unwrap(),
+            [255, 0]
+        );
+        assert_eq!(decoded, [0, 255]);
+        assert_eq!(encoded, first_encoded);
     }
 
     #[rstest]

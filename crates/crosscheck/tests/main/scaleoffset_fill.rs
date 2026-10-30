@@ -12,8 +12,9 @@ use hdf5::File as NativeFile;
 use hdf5::H5Type;
 #[cfg(target_endian = "little")]
 use hdf5::dataset::FillTime as NativeFillTime;
-#[cfg(target_endian = "little")]
+use hdf5::filters::Filter as NativeFilter;
 use hdf5::filters::ScaleOffset as NativeScaleOffset;
+use hdf5::{MajorErrorCode, MinorErrorCode};
 #[cfg(target_endian = "little")]
 use hdf5_pure::FillTime;
 use hdf5_pure::FilterId;
@@ -946,4 +947,57 @@ fn scale_offset_fill_policies_match_native_parameters_and_values<T>(
     let reference = hdf5_pure::File::open(&reference_path).unwrap();
     assert_eq!(pure.dataset("col").unwrap().chunks().unwrap().len(), 1);
     assert_eq!(reference.dataset("col").unwrap().chunks().unwrap().len(), 1);
+}
+
+#[rstest::rstest]
+#[case::full_width_pass_through(8, &[1, 255])]
+#[case::raw_payload(0, &[8, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 255])]
+fn c_written_full_width_and_raw_scale_offset_chunks_decode(
+    #[case] precision: u32,
+    #[case] expected: &[u8],
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("scale-offset.h5");
+    let data = [1_u8, 255];
+    c_create_typed(
+        &path,
+        &data,
+        data.len(),
+        ScaleOffset::Integer(precision),
+        None,
+    );
+    {
+        let native = hdf5::File::open(&path).unwrap();
+        let values = native.dataset("col").unwrap();
+        assert_eq!(
+            values.filters(),
+            [NativeFilter::ScaleOffset(NativeScaleOffset::Integer(
+                u16::try_from(precision).unwrap()
+            ))]
+        );
+        assert_eq!(values.num_chunks(), Some(1));
+        assert_eq!(values.chunk_info(0).unwrap().filter_mask, 0);
+        assert_native_scale_offset_read(&values, precision, &data);
+        drop(values);
+        native.close().unwrap();
+    }
+    assert_eq!(raw_chunks(&path), [expected.to_vec()]);
+    assert_eq!(dataset::read_pure::<u8>(&path, "col"), data);
+}
+
+// `H5Z__filter_scaleoffset` rejects full-precision raw payloads
+// (`H5Zscaleoffset.c`, HDF5 1.14.6).
+fn assert_native_scale_offset_read(values: &hdf5::Dataset, precision: u32, expected: &[u8]) {
+    let result = values.read_raw::<u8>();
+    if precision == 0 && hdf5::library_version() == (1, 14, 6) {
+        let error = result.unwrap_err();
+        let stack = error.stack().unwrap();
+        let frame = stack.last().unwrap();
+        assert_eq!(frame.major_code(), MajorErrorCode::Pipeline);
+        assert_eq!(frame.minor_code(), MinorErrorCode::ReadError);
+        assert_eq!(frame.func(), "H5Z_pipeline");
+        assert_eq!(frame.desc(), "filter returned failure during read");
+        return;
+    }
+    assert_eq!(result.unwrap(), expected);
 }
