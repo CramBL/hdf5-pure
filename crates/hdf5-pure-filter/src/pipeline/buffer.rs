@@ -1,3 +1,5 @@
+//! Borrowed and owned storage for filter execution.
+
 use alloc::vec::Vec;
 use core::mem;
 use core::ops::Range;
@@ -10,16 +12,16 @@ use crate::error::Error;
 ///
 /// Views into owned storage retain the allocation. The constructors and consuming transitions
 /// keep the live range within the initialized bytes.
-pub(super) struct FilterBuffer<'a>(Storage<'a>);
+pub(crate) struct FilterBuffer<'a>(Storage<'a>);
 
 impl<'a> FilterBuffer<'a> {
     /// Borrows the input without acquiring storage.
-    pub(super) fn borrowed(bytes: &'a [u8]) -> Self {
+    pub(crate) fn borrowed(bytes: &'a [u8]) -> Self {
         Self(Storage::Borrowed(bytes))
     }
 
     /// Replaces the live bytes and recycles the displaced owned allocation.
-    pub(super) fn replace(self, spare: &mut Vec<u8>, bytes: Vec<u8>) -> Self {
+    pub(crate) fn replace(self, spare: &mut Vec<u8>, bytes: Vec<u8>) -> Self {
         self.recycle(spare);
         Self::owned(bytes)
     }
@@ -52,7 +54,7 @@ impl<'a> FilterBuffer<'a> {
     /// # Errors
     ///
     /// Returns [`Error::Pipeline`] if `range` extends beyond the live bytes or is reversed.
-    pub(super) fn narrow(self, range: Range<usize>) -> Result<Self, Error> {
+    pub(crate) fn narrow(self, range: Range<usize>) -> Result<Self, Error> {
         if self.as_slice().get(range.clone()).is_none() {
             return Err(Error::Pipeline(FormatError::Internal(
                 "filter view extends beyond its input".into(),
@@ -92,7 +94,7 @@ impl<'a> FilterBuffer<'a> {
     }
 
     /// Returns only the live bytes, copying borrowed input and compacting owned views in place.
-    pub(super) fn into_owned(self) -> Vec<u8> {
+    pub(crate) fn into_owned(self) -> Vec<u8> {
         match self.0 {
             Storage::Borrowed(bytes) => bytes.to_vec(),
             Storage::Owned { bytes, live } => Self::normalize(bytes, live),
@@ -100,7 +102,7 @@ impl<'a> FilterBuffer<'a> {
     }
 
     /// Returns only the live bytes.
-    pub(super) fn as_slice(&self) -> &[u8] {
+    pub(crate) fn as_slice(&self) -> &[u8] {
         match &self.0 {
             Storage::Borrowed(bytes) => bytes,
             Storage::Owned { bytes, live } => &bytes[live.clone()],

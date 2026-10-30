@@ -15,6 +15,7 @@ use hdf5_pure_core::FormatError;
 
 use crate::error::Error;
 use crate::pipeline::FILTER_SCALEOFFSET;
+use crate::pipeline::buffer::FilterBuffer;
 
 // `cd_values` indices (H5Z_SCALEOFFSET_PARM_*).
 const PARM_SCALETYPE: usize = 0;
@@ -422,17 +423,23 @@ fn integer_scale_factor_is_full_width(p: &Parms) -> Result<bool, Error> {
 /// `max_output` bounds the declared decoded size before allocation. Pass the maximum number of bytes
 /// the chunk can hold when its parameters come from a file.
 ///
+/// Full-width integer mode preserves the input view. Raw full-precision payloads return a view of
+/// the element bytes alone. The declared-size bound is checked before either view is returned.
+/// Other modes replace the input with owned output and recycle displaced owned storage into `spare`.
+///
 /// # Errors
 ///
 /// Returns [`Error::ScaleOffset`] if the parameters or encoded bytes are invalid, or the
 /// decoded size exceeds `max_output`. Returns
 /// [`Error::ScaleOffsetValueTooLargeForPlatform`] if an element count or output size does not
 /// fit `usize`.
-pub(crate) fn decompress(
-    input: &[u8],
+pub(crate) fn decompress<'a>(
+    current: FilterBuffer<'a>,
     cd: &[u32],
     max_output: Option<usize>,
-) -> Result<Vec<u8>, Error> {
+    spare: &mut Vec<u8>,
+) -> Result<FilterBuffer<'a>, Error> {
+    let input = current.as_slice();
     let p = Parms::parse(cd)?;
 
     if p.scale_type == SO_FLOAT_ESCALE {
@@ -471,7 +478,7 @@ pub(crate) fn decompress(
     // Pass-through mode, and the width rejection beside it. see
     // [`integer_scale_factor_is_full_width`].
     if integer_scale_factor_is_full_width(&p)? {
-        return Ok(input.to_vec());
+        return Ok(current);
     }
 
     // Header: minbits + minval.
@@ -499,12 +506,13 @@ pub(crate) fn decompress(
     // Raw payload (no per-element packing): minbits at full precision.
     if minbits == full_bits {
         let start = HEADER_LEN;
-        if input.len() < start + size_out {
-            return Err(Error::ScaleOffset(
-                "scaleoffset: chunk too short for raw payload".to_string(),
-            ));
-        }
-        return Ok(input[start..start + size_out].to_vec());
+        let end = start
+            .checked_add(size_out)
+            .filter(|&end| end <= input.len())
+            .ok_or_else(|| {
+                Error::ScaleOffset("scaleoffset: chunk too short for raw payload".to_string())
+            })?;
+        return current.narrow(start..end);
     }
 
     // minbits == 0: there is no payload, so every element takes the same value.
@@ -536,7 +544,7 @@ pub(crate) fn decompress(
         for _ in 0..p.nelmts {
             write_value(&mut out, bits, p.size, p.order);
         }
-        return Ok(out);
+        return Ok(current.replace(spare, out));
     }
 
     if input.len() < HEADER_LEN {
@@ -561,13 +569,14 @@ pub(crate) fn decompress(
     } else {
         reconstruct_float(&mut out, &mut reader, &p, minbits, minval, cd)?;
     }
-    Ok(out)
+    Ok(current.replace(spare, out))
 }
 
 /// Encodes one full chunk of scalar element bytes.
 ///
 /// Encoded modes require an input length equal to the element count times the size recorded in
-/// `cd`. A full-width integer scale factor returns the input unchanged. The encoder uses a
+/// `cd`. A full-width integer scale factor preserves the input view. Other modes replace the input
+/// with encoded bytes and recycle displaced owned storage into `spare`. The encoder uses a
 /// reserved offset code for defined fill values, so matching elements do not contribute to the
 /// chunk's value range.
 ///
@@ -578,7 +587,12 @@ pub(crate) fn decompress(
 /// Returns
 /// [`Error::ScaleOffsetValueTooLargeForPlatform`] if an element count or encoded size does not
 /// fit `usize`.
-pub(crate) fn compress(input: &[u8], cd: &[u32]) -> Result<Vec<u8>, Error> {
+pub(crate) fn compress<'a>(
+    current: FilterBuffer<'a>,
+    cd: &[u32],
+    spare: &mut Vec<u8>,
+) -> Result<FilterBuffer<'a>, Error> {
+    let input = current.as_slice();
     let p = Parms::parse(cd)?;
 
     // The class/scale-type agreement is checked first, matching the reference's
@@ -596,7 +610,7 @@ pub(crate) fn compress(input: &[u8], cd: &[u32]) -> Result<Vec<u8>, Error> {
     }
 
     if integer_scale_factor_is_full_width(&p)? {
-        return Ok(input.to_vec());
+        return Ok(current);
     }
 
     // `nelmts * size` in `u64` (cannot overflow there) narrowed to `usize`,
@@ -609,7 +623,7 @@ pub(crate) fn compress(input: &[u8], cd: &[u32]) -> Result<Vec<u8>, Error> {
         ));
     }
     if p.nelmts == 0 {
-        return Ok(emit(0, 0, &[]));
+        return Ok(current.replace(spare, emit(0, 0, &[])));
     }
 
     let signed = cd[PARM_SIGN] == SGN_2;
@@ -635,10 +649,11 @@ pub(crate) fn compress(input: &[u8], cd: &[u32]) -> Result<Vec<u8>, Error> {
 
     // Raw path: store the original element bytes after the header.
     if minbits >= full_bits {
-        return Ok(emit_raw(full_bits, minval, input));
+        let output = emit_raw(full_bits, minval, input);
+        return Ok(current.replace(spare, output));
     }
     let payload = pack_offsets(&offsets, minbits, p.nelmts)?;
-    Ok(emit(minbits, minval, &payload))
+    Ok(current.replace(spare, emit(minbits, minval, &payload)))
 }
 
 // --- integer reconstruction / pre-compression ----------------------------
@@ -1478,7 +1493,162 @@ fn ceil_log2(num: u64) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
+
+    #[rstest]
+    #[case::one_byte(1, ORDER_LE)]
+    #[case::two_bytes(2, ORDER_BE)]
+    #[case::four_bytes(4, ORDER_LE)]
+    #[case::eight_bytes(8, ORDER_BE)]
+    fn full_width_modes_keep_storage_and_preserve_input_length(
+        #[case] size: u32,
+        #[case] order: u32,
+        #[values(false, true)] owned: bool,
+    ) {
+        let raw = [1, 2, 3];
+        let mut cd = int_filter(size, false, order, 1);
+        cd[PARM_SCALEFACTOR] = size * 8;
+        let input = view_input(&raw, owned);
+        let pointer = input.as_slice().as_ptr();
+        let mut spare = Vec::with_capacity(64);
+        let spare_pointer = spare.as_ptr();
+        let encoded = super::compress(input, &cd, &mut spare).unwrap();
+        assert_eq!(encoded.as_slice(), raw);
+        assert_eq!(encoded.as_slice().as_ptr(), pointer);
+        let decoded = super::decompress(encoded, &cd, Some(8), &mut spare).unwrap();
+        assert_eq!(decoded.as_slice(), raw);
+        assert_eq!(decoded.as_slice().as_ptr(), pointer);
+        assert_eq!(spare.as_ptr(), spare_pointer);
+        assert!(spare.is_empty());
+        let output = decoded.into_owned();
+        assert_eq!(output, raw);
+        if owned {
+            assert_eq!(output.as_ptr(), pointer.wrapping_sub(2));
+        } else {
+            assert_ne!(output.as_ptr(), raw.as_ptr());
+        }
+    }
+
+    #[rstest]
+    #[case::integer_one_byte(int_filter(1, false, ORDER_LE, 8), 8)]
+    #[case::integer_two_bytes(int_filter(2, true, ORDER_BE, 4), 16)]
+    #[case::integer_four_bytes(int_filter(4, false, ORDER_LE, 2), 32)]
+    #[case::integer_eight_bytes(int_filter(8, true, ORDER_BE, 1), 64)]
+    #[case::float_four_bytes(float_filter(4, 0, ORDER_LE, 2), 32)]
+    #[case::float_eight_bytes(float_filter(8, 0, ORDER_BE, 1), 64)]
+    fn raw_payload_views_retain_storage_and_exclude_headers_and_trailing_bytes(
+        #[case] cd: Vec<u32>,
+        #[case] bits: u8,
+        #[values(false, true)] owned: bool,
+    ) {
+        let raw = [
+            bits, 0, 0, 0, 8, 99, 99, 99, 99, 99, 99, 99, 99, 88, 88, 88, 88, 88, 88, 88, 88, 1, 2,
+            3, 4, 5, 6, 7, 8, 77, 66,
+        ];
+        let input = view_input(&raw, owned);
+        let pointer = input.as_slice().as_ptr();
+        let mut spare = Vec::with_capacity(64);
+        let spare_pointer = spare.as_ptr();
+        let output = super::decompress(input, &cd, Some(8), &mut spare).unwrap();
+        assert_eq!(output.as_slice(), [1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(output.as_slice().as_ptr(), pointer.wrapping_add(21));
+        assert_eq!(spare.as_ptr(), spare_pointer);
+        assert!(spare.is_empty());
+        let bytes = output.into_owned();
+        assert_eq!(bytes, [1, 2, 3, 4, 5, 6, 7, 8]);
+        if owned {
+            assert_eq!(bytes.as_ptr(), pointer.wrapping_sub(2));
+        }
+    }
+
+    #[rstest]
+    #[case::short_header(&[8, 0, 0, 0], "scaleoffset: chunk shorter than header")]
+    #[case::width_before_minval(&[9, 0, 0, 0, 8], "scaleoffset: minbits exceeds datatype size")]
+    #[case::short_minval(&[8, 0, 0, 0, 8], "scaleoffset: chunk too short for minval")]
+    #[case::short_raw_header(&[8, 0, 0, 0, 0], "scaleoffset: chunk too short for raw payload")]
+    #[case::short_raw_payload(&[8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7], "scaleoffset: chunk too short for raw payload")]
+    fn raw_payload_views_preserve_header_error_order(
+        #[case] input: &[u8],
+        #[case] expected: &str,
+        #[values(false, true)] owned: bool,
+    ) {
+        let cd = int_filter(1, false, ORDER_LE, 2);
+        let mut spare = Vec::with_capacity(64);
+        let pointer = spare.as_ptr();
+        let error = super::decompress(view_input(input, owned), &cd, Some(2), &mut spare)
+            .err()
+            .unwrap();
+        assert_eq!(error, Error::ScaleOffset(expected.into()));
+        assert_eq!(spare.as_ptr(), pointer);
+        assert!(spare.is_empty());
+        let valid = [
+            8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 8,
+        ];
+        let output =
+            super::decompress(view_input(&valid, owned), &cd, Some(2), &mut spare).unwrap();
+        assert_eq!(output.as_slice(), [7, 8]);
+        assert_eq!(spare.as_ptr(), pointer);
+        assert!(spare.is_empty());
+    }
+
+    #[rstest]
+    #[case::full_width(8)]
+    #[case::above_full_width(9)]
+    fn full_width_decode_checks_the_declared_size_before_the_width(#[case] bits: u32) {
+        let mut cd = int_filter(1, false, ORDER_LE, 2);
+        cd[PARM_SCALEFACTOR] = bits;
+        assert_eq!(
+            decompress(&[], &cd, Some(1)).unwrap_err(),
+            Error::ScaleOffset(
+                "scaleoffset: chunk declares 2 decoded bytes, more than the 1 the chunk can hold"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn raw_payload_size_cannot_overflow_the_header_end() {
+        let cd = int_filter(1, false, ORDER_LE, u32::MAX);
+        let input = [
+            8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        assert_eq!(
+            decompress(&input, &cd, None).unwrap_err(),
+            Error::ScaleOffset("scaleoffset: chunk too short for raw payload".into())
+        );
+    }
+
+    fn view_input(input: &[u8], owned: bool) -> FilterBuffer<'_> {
+        if owned {
+            let mut bytes = Vec::with_capacity(input.len() + 4);
+            bytes.extend_from_slice(&[55, 44]);
+            bytes.extend_from_slice(input);
+            bytes.extend_from_slice(&[33, 22]);
+            FilterBuffer::borrowed(&[])
+                .replace(&mut Vec::new(), bytes)
+                .narrow(2..input.len() + 2)
+                .unwrap()
+        } else {
+            FilterBuffer::borrowed(input)
+        }
+    }
+
+    fn compress(input: &[u8], cd: &[u32]) -> Result<Vec<u8>, Error> {
+        super::compress(FilterBuffer::borrowed(input), cd, &mut Vec::new())
+            .map(FilterBuffer::into_owned)
+    }
+
+    fn decompress(input: &[u8], cd: &[u32], max_output: Option<usize>) -> Result<Vec<u8>, Error> {
+        super::decompress(
+            FilterBuffer::borrowed(input),
+            cd,
+            max_output,
+            &mut Vec::new(),
+        )
+        .map(FilterBuffer::into_owned)
+    }
 
     fn int_filter(size: u32, signed: bool, order: u32, nelmts: u32) -> Vec<u32> {
         let ty = ScaleOffsetType {
