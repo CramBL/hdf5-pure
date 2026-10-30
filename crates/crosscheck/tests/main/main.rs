@@ -58,6 +58,7 @@ mod file_space_oracle;
 mod file_writer_dense_links;
 mod fill_value;
 mod fixed_array;
+mod fixed_byte_arrays;
 mod fixed_string;
 mod fractal_heap_dense_links;
 mod fractal_heap_filtered_header;

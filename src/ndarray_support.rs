@@ -1,25 +1,12 @@
-//! Ergonomic N-dimensional array I/O via the [`ndarray`] crate.
+//! Typed N-dimensional array I/O through [`ndarray`].
 //!
-//! Enabled by the `ndarray` feature. This module adds:
+//! The `ndarray` feature adds [`DatasetBuilder::with_ndarray`], [`Dataset::read_array`], and
+//! [`Dataset::read_array_dyn`]. Element types and conversions follow [`H5Element`].
 //!
-//! * [`DatasetBuilder::with_ndarray`](crate::writer::FileBuilder) — write any
-//!   [`ndarray`] array (owned or a view) of a supported scalar type, inferring
-//!   both the dataset shape and datatype from the array.
-//! * [`Dataset::read_array`](crate::Dataset::read_array) /
-//!   [`Dataset::read_array_dyn`](crate::Dataset::read_array_dyn) — read a
-//!   dataset back into a typed [`ndarray::Array`] (fixed rank) or
-//!   [`ndarray::ArrayD`] (runtime rank).
+//! The writer copies elements in row-major (C) order. For nonstandard layouts, it first copies
+//! the input into a temporary row-major array.
 //!
-//! # Memory order
-//!
-//! HDF5 stores dataset elements in row-major (C) order, which is also
-//! `ndarray`'s default layout, so reads and writes are a flat copy with no
-//! transpose. On write, non-standard-layout inputs (Fortran-order, transposed,
-//! or strided views) are repacked into row-major order via
-//! [`ndarray::ArrayRef::as_standard_layout`]. Arrays that are already standard
-//! layout are borrowed without copying.
-//!
-//! # Example
+//! # Examples
 //!
 //! ```
 //! use hdf5_pure::{File, FileBuilder};
@@ -50,39 +37,42 @@ use crate::reader::Dataset;
 use crate::type_builders::DatasetBuilder;
 
 impl Dataset {
-    /// Read the dataset into a statically-ranked [`ndarray::Array`].
+    /// Reads the dataset into an [`ndarray::Array`] with rank `D`.
     ///
-    /// The dimensionality `D` (e.g. [`ndarray::Ix2`](tyalias@ndarray::Ix2)) is usually inferred from
-    /// the binding, so a call site reads as `let m: Array2<f64> =
-    /// ds.read_array()?;`.
+    /// The rank `D`, such as [`ndarray::Ix2`](tyalias@ndarray::Ix2), is usually inferred
+    /// from the binding: `let values: Array2<f64> = dataset.read_array()?;`.
     ///
-    /// `T` is the type you want the elements *delivered as*, not an assertion
-    /// about the dataset's stored type. The stored bytes are coerced into `T`
-    /// using the same rules as [`Dataset::read_f64`](crate::Dataset::read_f64)
-    /// and its siblings, so the conversion can be lossy: reading an `f64`
-    /// dataset as `i32` truncates, and reading an `i32` dataset as `f64`
-    /// widens. There is no check that `T` matches the on-disk datatype, so pick
-    /// `T` to match the stored type when you need an exact, lossless read.
+    /// Element conversion follows [`Dataset::read`]. Numeric conversions can lose precision.
+    /// Byte arrays require a matching array datatype and element width.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Shape`] if the dataset's runtime rank does not match
-    /// `D`. Use [`read_array_dyn`](Self::read_array_dyn) when the rank is not
-    /// known at compile time.
+    /// Returns [`Error::Shape`] if the dataset's rank differs from `D` or its dimensions
+    /// cannot describe an array of the decoded elements. Propagates errors from
+    /// [`Dataset::read`] and reading the shape.
+    ///
+    /// # Panics
+    ///
+    /// Panics under the conditions described by [`Dataset::read`].
     pub fn read_array<T: H5Element, D: Dimension>(&self) -> Result<Array<T, D>, Error> {
         self.read_array_dyn::<T>()?
             .into_dimensionality::<D>()
             .map_err(|e| Error::Shape(e.to_string()))
     }
 
-    /// Read the dataset into a dynamically-ranked [`ndarray::ArrayD`].
+    /// Reads the dataset into an [`ndarray::ArrayD`] with the stored shape.
     ///
-    /// The array's shape is taken from the dataset's dataspace, so this works
-    /// for any rank without naming it at compile time. As with
-    /// [`read_array`](Self::read_array), `T` is the requested element type and
-    /// the stored bytes are coerced into it (possibly lossily) following the
-    /// [`Dataset::read_f64`](crate::Dataset::read_f64) conversion rules, with
-    /// no check that `T` matches the on-disk datatype.
+    /// Element conversion follows [`Dataset::read`]. Numeric conversions can lose precision.
+    /// Byte arrays require a matching array datatype and element width.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Shape`] if the stored dimensions cannot describe an array of the
+    /// decoded elements. Propagates errors from [`Dataset::read`] and reading the shape.
+    ///
+    /// # Panics
+    ///
+    /// Panics under the conditions described by [`Dataset::read`].
     pub fn read_array_dyn<T: H5Element>(&self) -> Result<ArrayD<T>, Error> {
         let shape: Vec<usize> = self
             .shape()?
@@ -95,18 +85,14 @@ impl Dataset {
 }
 
 impl DatasetBuilder {
-    /// Set the dataset's data, datatype, and shape from an [`ndarray`] array.
+    /// Sets the dataset's datatype and shape from an [`ndarray`] array.
     ///
-    /// Accepts any owned array or view of a supported scalar type by reference
-    /// (e.g. `&Array2<f64>`, `&arr.view()`). The dataset's shape is taken from
-    /// the array's shape and its datatype from the element type, so this is the
-    /// N-dimensional counterpart of the flat `with_*_data` methods.
+    /// Accepts owned arrays and views by reference. The writer infers the datatype from the
+    /// element type and the dataset's shape from the array's dimensions. Byte-array elements
+    /// retain their width within the datatype.
     ///
-    /// Data is written in row-major (C) order. Inputs that are not already in
-    /// standard layout (transposed, Fortran-order, or strided views) are
-    /// repacked once into row-major order; standard-layout inputs are used
-    /// without copying. The builder is returned so chunking and compression
-    /// can be chained, e.g. `b.with_ndarray(&a).with_chunks(&[64, 64])`.
+    /// The writer copies elements in row-major (C) order. For nonstandard layouts, it first
+    /// copies the input into a temporary row-major array.
     pub fn with_ndarray<T, S, D>(&mut self, arr: &ArrayBase<S, D>) -> &mut Self
     where
         T: H5Element,

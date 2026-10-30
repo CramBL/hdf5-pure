@@ -146,8 +146,8 @@ println!("version: {:?}", attrs.get("version"));  // Some(I64(2))
 ### Generic over the element type
 
 `DatasetBuilder::with_data(&[T])` and `Dataset::read::<T>()` let code work over the
-supported scalar types through the sealed `H5Element` trait. `read::<T>()` requests
-a delivery type and may coerce the stored datatype.
+numeric scalar and fixed byte-array types through the sealed `H5Element` trait. Numeric reads
+can lose precision during conversion. Byte-array reads require a matching datatype and width.
 
 See the [generic element I/O guide](https://docs.rs/hdf5-pure/latest/hdf5_pure/_guide/generic_io/index.html)
 for supported element types, coercion behavior, and examples.
@@ -271,7 +271,7 @@ subset. The [compatibility matrix](docs/guide/compatibility.md) records the supp
 
 | Method                                                               | HDF5 type                            |
 | -------------------------------------------------------------------- | ------------------------------------ |
-| `with_data` (generic, any scalar below)                              | Inferred from the element type       |
+| `with_data` (numeric scalars and fixed byte arrays)                              | Inferred from the element type       |
 | `with_f64_data`                                                      | IEEE 64-bit float                    |
 | `with_f32_data`                                                      | IEEE 32-bit float                    |
 | `with_i8_data` / `with_i16_data` / `with_i32_data` / `with_i64_data` | Signed integers                      |

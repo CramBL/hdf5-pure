@@ -73,10 +73,9 @@
 //!
 //! # Generic over the element type
 //!
-//! The typed `with_*_data` / `read_*` methods have generic counterparts bounded
-//! by [`H5Element`]: [`DatasetBuilder::with_data`] writes a flat slice of any
-//! supported scalar and [`Dataset::read`] reads one back, so you can write code
-//! generic over the stored type.
+//! [`H5Element`] is the element bound for [`DatasetBuilder::with_data`] and [`Dataset::read`].
+//! These methods support numeric scalars and fixed byte arrays. Numeric reads convert stored
+//! values to the output element type. Byte arrays retain their array datatype and element width.
 //!
 //! ```rust
 //! use hdf5_pure::{File, FileBuilder, H5Element};
@@ -87,9 +86,11 @@
 //!
 //! let mut fb = FileBuilder::new();
 //! store(&mut fb, "counts", &[1u32, 2, 3]);
+//! store(&mut fb, "bytes", &[[0u8, 255], [128, 42]]);
 //! let file = File::from_bytes(fb.finish()?)?;
 //! let counts: Vec<u32> = file.dataset("counts")?.read()?;
 //! assert_eq!(counts, vec![1, 2, 3]);
+//! assert_eq!(file.dataset("bytes")?.read::<[u8; 2]>()?, [[0, 255], [128, 42]]);
 //! # Ok::<(), hdf5_pure::Error>(())
 //! ```
 //!

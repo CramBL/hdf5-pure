@@ -716,6 +716,38 @@ fn typed_contiguous_sweeps_allocate_the_output_and_windows() {
 }
 
 #[test]
+fn typed_byte_arrays_keep_only_one_read_window_beside_output() {
+    const COUNT: usize = 1_048_576;
+    let values = vec![[0, 127, 128, 255, 42, 19, 5]; COUNT];
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("byte_arrays.h5");
+    let mut builder = FileBuilder::new();
+    let ((), staged) = allocation::measure("typed_byte_array_staging", || {
+        builder.create_dataset("values").with_data(&values);
+    });
+    let payload = (COUNT * 7) as u64;
+    assert!(staged.live_bytes >= payload, "{staged}");
+    assert!(staged.peak_bytes < payload + payload / 2, "{staged}");
+    builder.write(&path).unwrap();
+    let file = File::open_streaming(&path).unwrap();
+    let dataset = file.dataset("values").unwrap();
+    let (output, measured) = allocation::measure("typed_byte_array_read", || {
+        dataset.read::<[u8; 7]>().unwrap()
+    });
+    assert_eq!(output, values);
+    assert!(measured.live_bytes >= payload, "{measured}");
+    assert!(measured.peak_bytes < payload + payload / 2, "{measured}");
+    let ((raw, copied), control) = allocation::measure("typed_byte_array_copy_control", || {
+        let raw = dataset.read_raw().unwrap();
+        let copied = raw.clone();
+        (raw, copied)
+    });
+    assert_eq!(raw, values.as_flattened());
+    assert_eq!(copied, raw);
+    assert!(control.peak_bytes >= 2 * payload, "{control}");
+}
+
+#[test]
 fn windowed_row_read_allocates_on_the_order_of_the_window() {
     // 4 MiB of f64 rows with inner-split storage chunks: [2048, 32, 8] in
     // [64, 16, 4] chunks — a 2x2 inner chunk grid per 64-row band, deflated so

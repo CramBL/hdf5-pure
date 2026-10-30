@@ -70,7 +70,9 @@ Data is stored row-major (C order), which is what HDF5 uses on disk. When you pr
 
 ## Generic writing over the element type
 
-The typed setters have a generic counterpart, [`with_data(&[T])`](crate::DatasetBuilder::with_data), bounded by the sealed [`H5Element`](crate::H5Element) trait. It infers the datatype from `T`, letting you write code that is generic over any supported scalar:
+[`with_data(&[T])`](crate::DatasetBuilder::with_data) infers the datatype from `T`, which must
+implement the sealed [`H5Element`](crate::H5Element) trait. Supported elements include numeric
+scalars and fixed byte arrays:
 
 ```rust
 use hdf5_pure::{FileBuilder, H5Element};

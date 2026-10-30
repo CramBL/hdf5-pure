@@ -101,6 +101,8 @@ pub struct AppendBuilder {
     elem_dt: Option<Datatype>,
     /// Whether typed calls used different element datatypes.
     dt_conflict: bool,
+    /// The first element-encoding error recorded while accumulating input.
+    error: Option<Box<FormatError>>,
     /// Policy retained through staging and copied append batches.
     options: AppendOptions,
 }
@@ -117,7 +119,20 @@ impl AppendBuilder {
             raw: Vec::new(),
             elem_dt: None,
             dt_conflict: false,
+            error: None,
             options,
+        }
+    }
+
+    /// Removes and returns the first element-encoding error.
+    pub(crate) fn take_error(&mut self) -> Option<FormatError> {
+        self.error.take().map(|error| *error)
+    }
+
+    /// Records an element-encoding error if none has been recorded.
+    pub(crate) fn set_error(&mut self, error: FormatError) {
+        if self.error.is_none() {
+            self.error = Some(Box::new(error));
         }
     }
 
@@ -150,12 +165,14 @@ impl AppendBuilder {
             raw,
             elem_dt,
             dt_conflict,
+            error,
             options,
         } = self;
         Self {
             raw: raw[..byte_len.min(raw.len())].to_vec(),
             elem_dt: elem_dt.clone(),
             dt_conflict: *dt_conflict,
+            error: error.clone(),
             options: *options,
         }
     }
@@ -177,7 +194,7 @@ impl AppendBuilder {
     }
 
     /// Records a typed append's datatype and any conflict with earlier calls.
-    fn set_dt(&mut self, dt: Datatype) {
+    pub(crate) fn set_dt(&mut self, dt: Datatype) {
         match &self.elem_dt {
             Some(prev) if *prev != dt => self.dt_conflict = true,
             Some(_) => {}
@@ -195,7 +212,7 @@ impl AppendBuilder {
         self
     }
 
-    /// Appends scalar values with their element datatype.
+    /// Appends typed elements with their datatype.
     pub fn append<T: crate::element::H5Element>(&mut self, data: &[T]) -> &mut Self {
         T::append_into(self, data);
         self

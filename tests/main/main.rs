@@ -56,6 +56,7 @@ mod file_space_settings;
 mod file_space_strategy;
 mod fill_value;
 mod filter_options;
+mod fixed_byte_arrays;
 mod fixed_strings;
 mod fuzz_regressions;
 mod generic_element;
