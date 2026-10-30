@@ -1,5 +1,10 @@
 msrv = "1.89"
 
+# Test child processes use Cargo's paths to explicit fixture binaries.
+disallowed-methods = [
+    { path = "std::env::current_exe", reason = "Use explicit CARGO_BIN_EXE helper binaries for test subprocesses" },
+]
+
 allow-dbg-in-tests = true
 allow-expect-in-tests = true
 allow-indexing-slicing-in-tests = true

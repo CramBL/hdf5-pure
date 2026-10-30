@@ -1,6 +1,7 @@
 //! Helpers shared by the crate's integration tests and by the crosscheck
 //! package, and the path to the committed test data.
 
+#![cfg_attr(test, warn(clippy::tests_outside_test_module))]
 use std::path::{Path, PathBuf};
 
 pub mod allocation;

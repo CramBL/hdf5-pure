@@ -44,6 +44,10 @@ const APPENDS: u64 = 512;
 
 /// `<target>/heap-profile.html`, found from this binary rather than assumed to
 /// be `./target`: a `build.target-dir` in the user's cargo config moves it.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the executable path locates profile output without subprocess dispatch"
+)]
 fn profile_path() -> std::path::PathBuf {
     std::env::current_exe()
         .ok()

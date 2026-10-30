@@ -173,7 +173,8 @@ fn candidate_overrun(held: FileRange) -> FormatError {
     ))
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
+#[cfg(feature = "std")]
 mod tests {
     use core::cell::RefCell;
 

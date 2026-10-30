@@ -423,6 +423,7 @@
 //!
 //! [readme-install]: https://github.com/CramBL/hdf5-pure#installation
 
+#![cfg_attr(test, warn(clippy::tests_outside_test_module))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(not(feature = "std"), allow(dead_code))]
