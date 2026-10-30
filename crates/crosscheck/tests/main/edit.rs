@@ -19,7 +19,7 @@ use hdf5_pure::SuperblockVersion;
 
 use rstest::rstest;
 use test_util_hdf5::numeric::ByteOrder;
-use test_util_hdf5::{absence, file, fixtures};
+use test_util_hdf5::{absence, assertion, file, fixtures};
 
 use crate::test_util::hard_link_graphs::RepeatedObjectGraph;
 use crate::test_util::hard_link_graphs::TreeGraph;
@@ -171,10 +171,7 @@ fn assert_edits_applied(path: &std::path::Path) {
         f.dataset("grp/gamma").unwrap().read_i32().unwrap(),
         vec![1, 2, 3]
     );
-    assert!(
-        f.dataset("doomed").is_err(),
-        "deleted dataset still present (pure)"
-    );
+    assertion::path_not_found(f.dataset("doomed").unwrap_err(), "doomed");
 
     // Reference C library reader — the real interop proof.
     let c = hdf5::File::open(path).unwrap();
@@ -372,7 +369,7 @@ fn c_v0_symboltable_file_edited_then_read_by_c_library() {
         f.dataset("grp/gamma").unwrap().read_i32().unwrap(),
         vec![1, 2, 3]
     );
-    assert!(f.dataset("doomed").is_err());
+    assertion::path_not_found(f.dataset("doomed").unwrap_err(), "doomed");
 
     // libhdf5 reads the edited version-0 file and agrees.
     let c = hdf5::File::open(&path).unwrap();
@@ -542,7 +539,7 @@ fn free_space_reuse_and_truncation_stay_c_readable() {
     // hdf5-pure: end-of-file matches the truncated physical size.
     let f = File::open(&path).unwrap();
     assert_eq!(f.file_size(), std::fs::metadata(&path).unwrap().len());
-    assert!(f.dataset("bulk").is_err());
+    assertion::path_not_found(f.dataset("bulk").unwrap_err(), "bulk");
 
     // libhdf5 reads the shrunken file and the survivors intact.
     let c = hdf5::File::open(&path).unwrap();
@@ -844,7 +841,7 @@ fn deleting_chunked_datasets_in_place_stays_c_readable() {
     // and the recorded end-of-file matches the physical size.
     let f = File::open(&path).unwrap();
     assert_eq!(f.file_size(), std::fs::metadata(&path).unwrap().len());
-    assert!(f.dataset("c_chunked").is_err());
+    assertion::path_not_found(f.dataset("c_chunked").unwrap_err(), "c_chunked");
     assert_eq!(
         f.dataset("keep").unwrap().read_f64().unwrap(),
         vec![1.0, 2.0, 3.0]
@@ -1253,8 +1250,8 @@ fn deleting_one_of_several_hard_links_keeps_the_survivor() {
     // The surviving aliases must still read their data through both readers; the
     // deleted link names are gone.
     let f = File::open(&path).unwrap();
-    assert!(f.dataset("chunked_orig").is_err());
-    assert!(f.dataset("contig_orig").is_err());
+    assertion::path_not_found(f.dataset("chunked_orig").unwrap_err(), "chunked_orig");
+    assertion::path_not_found(f.dataset("contig_orig").unwrap_err(), "contig_orig");
     assert_eq!(
         f.dataset("chunked_alias").unwrap().read_i32().unwrap(),
         chunked
@@ -1315,8 +1312,8 @@ fn deleting_all_hard_links_to_an_object_in_one_commit_is_safe() {
         session.commit().unwrap();
     }
     let f = File::open(&path).unwrap();
-    assert!(f.dataset("orig").is_err());
-    assert!(f.dataset("alias").is_err());
+    assertion::path_not_found(f.dataset("orig").unwrap_err(), "orig");
+    assertion::path_not_found(f.dataset("alias").unwrap_err(), "alias");
     assert_eq!(
         f.dataset("keep").unwrap().read_f64().unwrap(),
         vec![9.0, 8.0]
@@ -1956,9 +1953,9 @@ fn editing_below_a_hard_linked_group_is_refused() {
             b.with_i32_data(&[1]);
         })
         .unwrap();
-    assert!(
-        session.commit().is_err(),
-        "rebuilding `child` rebuilds `g` above it, which is the hard-linked one"
+    assertion::edit_unsupported(
+        session.commit().unwrap_err(),
+        "editing a group relocates its object header; only supported when it has a single hard link",
     );
     drop(session);
     assert_eq!(std::fs::read(&path).unwrap(), before);
@@ -2034,7 +2031,7 @@ fn deleting_a_link_to_a_hard_linked_group_still_works() {
     drop(session);
 
     let c = hdf5::File::open(&path).unwrap();
-    assert!(c.group("alias").is_err(), "the removed link is gone");
+    absence::assert_libhdf5_absent(&c.group("alias").unwrap_err(), "alias");
     assert_eq!(
         c.group("g").unwrap().member_names().unwrap(),
         vec!["inner".to_string()],
@@ -2333,10 +2330,7 @@ fn a_never_written_reference_dataset_copies_beside_a_delete() {
             "{label}: the copy materialized storage the source never had: {:?}",
             ds.layout().unwrap()
         );
-        assert!(
-            f.dataset("doomed").is_err(),
-            "{label}: the delete went through"
-        );
+        assertion::path_not_found(f.dataset("doomed").unwrap_err(), "doomed");
     }
 }
 

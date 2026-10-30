@@ -312,10 +312,20 @@ impl Fixture {
             assert!(dataset.filter_pipeline().unwrap().is_empty());
             if name != "victim" {
                 assert_eq!(dataset.chunk_shape().unwrap(), None);
-                assert!(matches!(
-                    dataset.layout().unwrap(),
-                    Layout::Contiguous { .. }
-                ));
+                let Layout::Contiguous { address, size } = dataset.layout().unwrap() else {
+                    panic!("expected contiguous storage for {name:?}");
+                };
+                assert!(address.is_some());
+                assert_eq!(
+                    size,
+                    match self {
+                        Self::CommittedDatatypeV1 => 8,
+                        Self::GenericLarge => 512,
+                        Self::HardLinkUndo => 12,
+                        Self::HugeLinks12 => 4,
+                        Self::PagedIndex => 16,
+                    }
+                );
             }
         }
         if let Some(persistence) = self.persistence() {

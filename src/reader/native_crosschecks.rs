@@ -1,5 +1,6 @@
 //! Dataset read and PAGE publication recovery crosschecks against libhdf5.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -194,12 +195,8 @@ fn assert_page_recovery_state(file: &File, additional: &[(&str, u8)]) {
     }
     assert_eq!(file.root().groups().unwrap(), ["group"]);
     assert_eq!(
-        file.group("group")
-            .unwrap()
-            .attrs()
-            .unwrap()
-            .get("attribute"),
-        Some(&AttrValue::I32(9))
+        file.group("group").unwrap().attrs().unwrap(),
+        HashMap::from([("attribute".into(), AttrValue::I32(9))])
     );
     let info = file.file_space_info().unwrap().unwrap();
     assert_eq!(info.strategy, FileSpaceStrategy::Page);

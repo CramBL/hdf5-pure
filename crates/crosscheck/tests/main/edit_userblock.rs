@@ -11,7 +11,7 @@ use hdf5_pure::DeflateLevel;
 use hdf5_pure::UserblockSize;
 use hdf5_pure::{File, FileBuilder, MaxExtent};
 
-use test_util_hdf5::absence;
+use test_util_hdf5::{absence, assertion};
 
 const UB: u64 = 512;
 
@@ -417,8 +417,8 @@ fn userblock_delete_then_reuse_read_by_c_library() {
     }
 
     let f = File::open(&path).unwrap();
-    assert!(f.dataset("doomed").is_err());
-    assert!(f.dataset("c").is_err());
+    assertion::path_not_found(f.dataset("doomed").unwrap_err(), "doomed");
+    assertion::path_not_found(f.dataset("c").unwrap_err(), "c");
     assert_eq!(f.dataset("reuse").unwrap().read_f64().unwrap(), reuse);
 
     let c = hdf5::File::open(&path).unwrap();

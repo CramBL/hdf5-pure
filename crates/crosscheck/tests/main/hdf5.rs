@@ -4,6 +4,7 @@
 //! These tests verify that files produced by hdf5-pure are valid HDF5 files
 //! readable by the reference C implementation.
 
+use hdf5::types::{FixedAscii, FixedUnicode, TypeDescriptor};
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::UserblockSize;
 use hdf5_pure::{
@@ -400,8 +401,21 @@ fn crosscheck_string_attribute() {
     builder.write(&path).unwrap();
 
     let file = hdf5::File::open(&path).unwrap();
-    let attr_names = file.attr_names().unwrap();
-    assert!(attr_names.contains(&"description".to_string()));
+    let mut attr_names = file.attr_names().unwrap();
+    attr_names.sort();
+    assert_eq!(attr_names, ["description"]);
+    let description = file.attr("description").unwrap();
+    assert_eq!(
+        description.dtype().unwrap().to_descriptor().unwrap(),
+        TypeDescriptor::FixedUnicode(9)
+    );
+    assert_eq!(
+        description
+            .read_scalar::<FixedUnicode<9>>()
+            .unwrap()
+            .as_str(),
+        "test data"
+    );
 }
 
 #[test]
@@ -415,8 +429,18 @@ fn crosscheck_ascii_string_attribute() {
     builder.write(&path).unwrap();
 
     let file = hdf5::File::open(&path).unwrap();
-    let attr_names = file.attr_names().unwrap();
-    assert!(attr_names.contains(&"MATLAB_class".to_string()));
+    let mut attr_names = file.attr_names().unwrap();
+    attr_names.sort();
+    assert_eq!(attr_names, ["MATLAB_class"]);
+    let class = file.attr("MATLAB_class").unwrap();
+    assert_eq!(
+        class.dtype().unwrap().to_descriptor().unwrap(),
+        TypeDescriptor::FixedAscii(6)
+    );
+    assert_eq!(
+        class.read_scalar::<FixedAscii<6>>().unwrap().as_str(),
+        "double"
+    );
 }
 
 #[test]
@@ -434,12 +458,23 @@ fn crosscheck_dataset_attributes() {
 
     let file = hdf5::File::open(&path).unwrap();
     let ds = file.dataset("data").unwrap();
-    let attr_names = ds.attr_names().unwrap();
-    assert!(attr_names.contains(&"unit".to_string()));
-    assert!(attr_names.contains(&"scale".to_string()));
+    let mut attr_names = ds.attr_names().unwrap();
+    attr_names.sort();
+    assert_eq!(attr_names, ["scale", "unit"]);
 
-    let scale = ds.attr("scale").unwrap().read_scalar::<f64>().unwrap();
-    assert!((scale - 0.001).abs() < 1e-15);
+    let unit = ds.attr("unit").unwrap();
+    assert_eq!(
+        unit.dtype().unwrap().to_descriptor().unwrap(),
+        TypeDescriptor::FixedUnicode(3)
+    );
+    assert_eq!(
+        unit.read_scalar::<FixedUnicode<3>>().unwrap().as_str(),
+        "m/s"
+    );
+    assert_eq!(
+        ds.attr("scale").unwrap().read_scalar::<f64>().unwrap(),
+        0.001
+    );
 }
 
 #[test]
@@ -456,8 +491,18 @@ fn crosscheck_group_attributes() {
 
     let file = hdf5::File::open(&path).unwrap();
     let grp = file.group("sensors").unwrap();
-    let attr_names = grp.attr_names().unwrap();
-    assert!(attr_names.contains(&"location".to_string()));
+    let mut attr_names = grp.attr_names().unwrap();
+    attr_names.sort();
+    assert_eq!(attr_names, ["location"]);
+    let location = grp.attr("location").unwrap();
+    assert_eq!(
+        location.dtype().unwrap().to_descriptor().unwrap(),
+        TypeDescriptor::FixedUnicode(3)
+    );
+    assert_eq!(
+        location.read_scalar::<FixedUnicode<3>>().unwrap().as_str(),
+        "lab"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1157,19 +1202,15 @@ fn crosscheck_matlab_refs_subsystem_pattern() {
     let file = hdf5::File::open(&path).unwrap();
 
     // Group structure
-    let root_members = file.member_names().unwrap();
-    assert!(root_members.contains(&"#refs#".to_string()));
-    assert!(root_members.contains(&"#subsystem#".to_string()));
-    assert!(root_members.contains(&"data".to_string()));
+    let mut root_members = file.member_names().unwrap();
+    root_members.sort();
+    assert_eq!(root_members, ["#refs#", "#subsystem#", "data"]);
 
     // #refs# children
     let refs = file.group("#refs#").unwrap();
-    let refs_members = refs.member_names().unwrap();
-    assert!(refs_members.contains(&"a".to_string()));
-    assert!(refs_members.contains(&"b".to_string()));
-    assert!(refs_members.contains(&"c".to_string()));
-    assert!(refs_members.contains(&"cell_data".to_string()));
-    assert!(refs_members.contains(&"type_info".to_string()));
+    let mut refs_members = refs.member_names().unwrap();
+    refs_members.sort();
+    assert_eq!(refs_members, ["a", "b", "c", "cell_data", "type_info"]);
 
     // Data shapes
     let a = file.dataset("#refs#/a").unwrap();
@@ -1245,10 +1286,9 @@ fn crosscheck_varlen_ascii_array_encoding_vs_metno() {
 
     // Verify the encoded datatype matches the MATLAB-expected shape
     // (`H5T_VLEN { H5T_STRING { STRSIZE 1 } }`).
-    let descr = format!("{:?}", attr.dtype().unwrap().to_descriptor().unwrap());
-    assert!(
-        descr.contains("VarLenArray") && descr.contains("FixedAscii(1)"),
-        "unexpected dtype: {descr}"
+    assert_eq!(
+        attr.dtype().unwrap().to_descriptor().unwrap(),
+        TypeDescriptor::VarLenArray(Box::new(TypeDescriptor::FixedAscii(1)))
     );
 }
 
@@ -1394,9 +1434,9 @@ fn crosscheck_group_only_no_datasets() {
 
     // outer group has only sub-groups, no datasets
     let outer = file.group("outer").unwrap();
-    let members = outer.member_names().unwrap();
-    assert!(members.contains(&"a".to_string()));
-    assert!(members.contains(&"b".to_string()));
+    let mut members = outer.member_names().unwrap();
+    members.sort();
+    assert_eq!(members, ["a", "b"]);
 
     let class = outer.attr("MATLAB_class").unwrap();
     let cv = class.read_scalar::<hdf5::types::FixedAscii<32>>().unwrap();
@@ -1445,10 +1485,9 @@ fn crosscheck_long_ascii_class_attr() {
     let attr = ds.attr("MATLAB_class").unwrap();
 
     // Must be fixed-length string, not variable-length
-    let dtype = attr.dtype().unwrap();
-    assert!(
-        format!("{dtype:?}").contains("string") || format!("{dtype:?}").contains("String"),
-        "dtype = {dtype:?}"
+    assert_eq!(
+        attr.dtype().unwrap().to_descriptor().unwrap(),
+        TypeDescriptor::FixedAscii(15)
     );
 
     let val = attr.read_scalar::<hdf5::types::FixedAscii<32>>().unwrap();

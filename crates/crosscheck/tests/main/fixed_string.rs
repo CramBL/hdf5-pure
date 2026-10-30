@@ -18,7 +18,9 @@
 //! own C calls through an internal lock, so these tests need no extra guard.
 
 use hdf5::types::{FixedAscii, FixedUnicode, TypeDescriptor};
+use hdf5::{Conversion, Datatype};
 use hdf5_pure::FileBuilder;
+use rstest::rstest;
 
 use test_util_hdf5::fixed_string;
 
@@ -103,11 +105,19 @@ fn the_c_library_reads_back_every_value() {
     );
 }
 
-/// The charset bit is load-bearing on the C side, not decoration: `FixedAscii`
-/// and `FixedUnicode` are separate C-side types, and the library will not hand a
-/// dataset over as the one it was not written as.
-#[test]
-fn the_c_library_holds_each_charset_to_its_own_reader() {
+/// libhdf5 reports an identity conversion within each charset and no conversion between them.
+#[rstest]
+#[case::ascii(
+    "ascii",
+    TypeDescriptor::FixedAscii(5),
+    TypeDescriptor::FixedUnicode(5)
+)]
+#[case::utf8("utf8", TypeDescriptor::FixedUnicode(5), TypeDescriptor::FixedAscii(5))]
+fn the_c_library_holds_each_charset_to_its_own_reader(
+    #[case] dataset_name: &str,
+    #[case] source: TypeDescriptor,
+    #[case] destination: TypeDescriptor,
+) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("charsets.h5");
 
@@ -119,20 +129,37 @@ fn the_c_library_holds_each_charset_to_its_own_reader() {
     b.write(&path).unwrap();
 
     let file = hdf5::File::open(&path).unwrap();
-    assert!(
-        file.dataset("utf8")
-            .unwrap()
-            .read_1d::<FixedAscii<5>>()
-            .is_err(),
-        "a UTF-8 dataset was handed over as ASCII"
+    let dataset = file.dataset(dataset_name).unwrap();
+    let datatype = dataset.dtype().unwrap();
+    assert_eq!(datatype.to_descriptor().unwrap(), source);
+    assert_eq!(
+        datatype.conv_path(Datatype::from_descriptor(&source).unwrap()),
+        Some(Conversion::NoOp)
     );
-    assert!(
-        file.dataset("ascii")
-            .unwrap()
-            .read_1d::<FixedUnicode<5>>()
-            .is_err(),
-        "an ASCII dataset was handed over as UTF-8"
-    );
+    let destination = Datatype::from_descriptor(&destination).unwrap();
+    assert_eq!(datatype.conv_path(&destination), None);
+    assert_eq!(dataset.shape(), [1]);
+    match source {
+        TypeDescriptor::FixedAscii(5) => assert_eq!(
+            dataset
+                .read_raw::<FixedAscii<5>>()
+                .unwrap()
+                .iter()
+                .map(FixedAscii::as_str)
+                .collect::<Vec<_>>(),
+            ["north"]
+        ),
+        TypeDescriptor::FixedUnicode(5) => assert_eq!(
+            dataset
+                .read_raw::<FixedUnicode<5>>()
+                .unwrap()
+                .iter()
+                .map(FixedUnicode::as_str)
+                .collect::<Vec<_>>(),
+            ["north"]
+        ),
+        other => panic!("unexpected source datatype {other:?}"),
+    }
 }
 
 /// A multi-byte value is stored as bytes and read back as characters. The width

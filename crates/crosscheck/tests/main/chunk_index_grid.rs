@@ -17,7 +17,7 @@ use hdf5_pure::DeflateLevel;
 use hdf5_pure::{ChunkIndex, File, FileBuilder, MaxExtent};
 
 use test_util::extensible_array;
-use test_util_hdf5::{dataset, file};
+use test_util_hdf5::{assertion, dataset, file};
 
 /// One swept combination: a label for the assertion messages, then the shape,
 /// the chunk dimensions and the maximum shape.
@@ -465,10 +465,7 @@ fn two_unlimited_dimensions_are_refused_in_a_session_too() {
         vec![1, 2, 3],
         "a refused commit must leave the file as it was"
     );
-    assert!(
-        hdf5_pure::File::open(&path).unwrap().dataset("d").is_err(),
-        "the refused dataset must not be present"
-    );
+    assertion::path_not_found(File::open(&path).unwrap().dataset("d").unwrap_err(), "d");
 }
 
 /// A maximum shape whose chunk index would be mostly empty is refused rather
