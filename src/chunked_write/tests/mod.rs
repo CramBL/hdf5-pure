@@ -175,17 +175,17 @@ fn an_unallocated_dataset_plans_no_chunks_over_the_shape_it_declares() {
     )
     .expect("an unallocated plan");
     assert!(
-        matches!(kind, ChunkIndexKind::Unallocated),
+        matches!(
+            kind,
+            ChunkIndexKind::Unallocated(ChunkArrayKind::FixedArray)
+        ),
         "a fixed-shape dataset that stores nothing carries the undefined \
          address, not an index over an empty grid: {kind:?}"
     );
     assert!(slots.is_empty(), "no chunk has a slot");
     assert_eq!(span, 0, "and the index spans none");
 
-    // A dataset that is allowed to grow keeps the growable index either
-    // way, which is the same choice an empty resizable dataset gets: the
-    // in-place append path needs the index to exist before the first chunk
-    // arrives, so "stores nothing" does not mean "indexes nothing" here.
+    // A nonempty unlimited dataspace has an allocated empty index.
     let (kind, slots, _) = plan_index_slots(
         &shape,
         &chunk,
@@ -197,6 +197,68 @@ fn an_unallocated_dataset_plans_no_chunks_over_the_shape_it_declares() {
     .expect("an unallocated resizable plan");
     assert!(matches!(kind, ChunkIndexKind::ExtensibleArray), "{kind:?}");
     assert!(slots.is_empty());
+}
+
+#[rstest]
+#[case::explicit_empty(StorageAllocation::Unallocated, &[0], &[4], Some(&[MaxExtent::Unlimited][..]), true)]
+#[case::rotated_empty(StorageAllocation::Unallocated, &[3, 0], &[2, 4], Some(&[MaxExtent::Fixed(3), MaxExtent::Unlimited][..]), true)]
+#[case::ordinary_empty(StorageAllocation::Allocated, &[0], &[4], Some(&[MaxExtent::Unlimited][..]), false)]
+#[case::nonempty_schema(StorageAllocation::Unallocated, &[7], &[4], Some(&[MaxExtent::Unlimited][..]), false)]
+#[case::fixed_schema(StorageAllocation::Unallocated, &[0], &[4], None, true)]
+fn chunk_index_storage_matches_the_requested_allocation(
+    #[case] allocation: StorageAllocation,
+    #[case] shape: &[u64],
+    #[case] chunks: &[u64],
+    #[case] maxshape: Option<&[MaxExtent]>,
+    #[case] deferred: bool,
+    #[values(false, true)] filtered: bool,
+) {
+    let mut options = ChunkOptions::default();
+    if filtered {
+        options.set_filter(FilterKind::Fletcher32);
+    }
+    let set = compress_chunks(
+        &[],
+        shape,
+        ChunkContext::basic(chunks, 4),
+        &options,
+        maxshape,
+        FillPattern::ZERO,
+        allocation,
+    )
+    .unwrap();
+    assert!(set.chunks.is_empty());
+    let length = chunked_data_len(&set).unwrap();
+    let plan = plan_chunked_at(&set, StoredAddress::new(512)).unwrap();
+    assert_eq!(length, plan.data_len);
+    assert_eq!(plan.index.len() as u64, length);
+    let layout = DataLayout::parse(&plan.layout_message, 8, 8).unwrap();
+    let DataLayout::Chunked { index, .. } = layout else {
+        panic!("expected chunked storage, got {layout:?}");
+    };
+    if deferred {
+        assert_eq!(length, 0);
+        assert!(set.empty_index().is_none());
+        assert!(plan.index.is_empty());
+        assert_eq!(
+            &plan.layout_message[plan.layout_message.len() - 8..],
+            &[u8::MAX; 8]
+        );
+    } else {
+        assert!(length > 0);
+        assert!(set.empty_index().is_some());
+    }
+    match index {
+        ChunkIndexLayout::ExtensibleArray { address, .. } => {
+            assert!(maxshape.is_some());
+            assert_eq!(address, (!deferred).then_some(StoredAddress::new(512)));
+        }
+        ChunkIndexLayout::FixedArray { address, .. } => {
+            assert!(maxshape.is_none());
+            assert_eq!(address, None);
+        }
+        other => panic!("unexpected index {other:?}"),
+    }
 }
 
 #[rstest]

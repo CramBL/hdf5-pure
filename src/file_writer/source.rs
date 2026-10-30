@@ -1460,12 +1460,14 @@ mod tests {
         #[case] settings: Option<FileSpaceSettings>,
         #[values(8, 9, 32)] count: usize,
         #[values(false, true)] filtered: bool,
+        #[values(false, true)] unallocated: bool,
     ) {
         let loads = Arc::new((0..=count).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>());
         let plan = Plan::new(
             EmptyTree {
                 count,
                 filtered,
+                unallocated,
                 loads: Arc::clone(&loads),
             },
             settings,
@@ -1478,10 +1480,15 @@ mod tests {
             .iter()
             .take(count)
             .map(|record| {
-                assert!(record.empty_index.is_some());
-                let allocation = record.data.unwrap();
-                assert!(allocation.length > 0);
-                allocation.address
+                assert_eq!(record.empty_index.is_none(), unallocated);
+                if unallocated {
+                    assert_eq!(record.data.unwrap().length, 0);
+                    None
+                } else {
+                    let allocation = record.data.unwrap();
+                    assert!(allocation.length > 0);
+                    Some(allocation.address)
+                }
             })
             .collect();
         assert_eq!(
@@ -1525,13 +1532,12 @@ mod tests {
             let DataLayout::Chunked {
                 index:
                     ChunkIndexLayout::ExtensibleArray {
-                        address: Some(actual),
-                        ..
+                        address: actual, ..
                     },
                 ..
             } = layout
             else {
-                panic!("expected an allocated extensible array, got {layout:?}");
+                panic!("expected an extensible array, got {layout:?}");
             };
             assert_eq!(actual, address);
         }
@@ -1540,6 +1546,7 @@ mod tests {
     struct EmptyTree {
         count: usize,
         filtered: bool,
+        unallocated: bool,
         loads: Arc<Vec<AtomicUsize>>,
     }
 
@@ -1552,6 +1559,7 @@ mod tests {
             let Self {
                 count,
                 filtered,
+                unallocated,
                 loads,
             } = self;
             loads[index].fetch_add(1, Ordering::Relaxed);
@@ -1559,8 +1567,12 @@ mod tests {
                 return Ok(Object::group(&GroupBuilder::new("root").finish().attrs)?);
             }
             let mut builder = DatasetBuilder::new(&format!("d{index:04}"));
+            if *unallocated {
+                builder.with_unallocated_storage(crate::make_i32_type(), &[0]);
+            } else {
+                builder.with_i32_data(&[]).with_shape(&[0]);
+            }
             builder
-                .with_unallocated_storage(crate::make_i32_type(), &[0])
                 .with_chunks(&[2])
                 .with_maxshape(&[MaxExtent::Unlimited])
                 .set_attr("index", AttrValue::I32(i32::try_from(index).unwrap()));

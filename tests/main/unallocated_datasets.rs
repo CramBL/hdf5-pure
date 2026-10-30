@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use hdf5_pure::AttrValue;
 use hdf5_pure::Dataset;
 use hdf5_pure::DatasetBuilder;
@@ -17,39 +19,48 @@ use hdf5_pure::MessageType;
 use hdf5_pure::ScaleOffset;
 use hdf5_pure::SyncPolicy;
 use hdf5_pure_format::__private::AccessMode;
+use hdf5_pure_format::__private::ChunkIndexLayout;
+use hdf5_pure_format::__private::DataLayout;
 use hdf5_pure_format::__private::ObjectHeader;
 use rstest::rstest;
+use test_util::extensible_array;
 use test_util::object_header::MessageType as FixtureMessage;
 use test_util::object_header::v2;
 
 #[rstest]
-#[case::immediate(FirstAppend::Immediate)]
-#[case::borrowed(FirstAppend::Borrowed)]
-#[case::owned(FirstAppend::Owned)]
+#[case::immediate(AppendMethod::Immediate)]
+#[case::borrowed(AppendMethod::Borrowed)]
+#[case::owned(AppendMethod::Owned)]
 fn first_and_subsequent_appends_materialize_deferred_indexes(
-    #[case] operation: FirstAppend,
+    #[case] operation: AppendMethod,
     #[values(false, true)] filtered: bool,
     #[values(FileSpaceStrategy::FsmAggr, FileSpaceStrategy::Page)] strategy: FileSpaceStrategy,
     #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] backing: MemoryStrategy,
     #[values(SyncPolicy::Always, SyncPolicy::OnClose)] sync: SyncPolicy,
+    #[values(
+        SchemaCreation::Buffered,
+        SchemaCreation::Streaming,
+        SchemaCreation::Edit
+    )]
+    creation: SchemaCreation,
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("first.h5");
-    let mut builder = FileBuilder::new();
-    builder.with_file_space_settings(FileSpaceSettings::new(strategy).with_persistence(true));
-    let target = builder.create_dataset("schema");
-    target
-        .with_unallocated_storage(hdf5_pure::make_i32_type(), &[0])
-        .with_chunks(&[4])
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_fill_value(-7_i32);
-    if filtered {
-        target.with_fletcher32();
-    }
-    builder.write(&path).unwrap();
-    let mut bytes = std::fs::read(&path).unwrap();
-    test_util_hdf5::__private::clear_index_header(&mut bytes);
-    std::fs::write(&path, bytes).unwrap();
+    creation.write(
+        &path,
+        FileSpaceSettings::new(strategy).with_persistence(true),
+        |target| {
+            target
+                .with_unallocated_storage(hdf5_pure::make_i32_type(), &[0])
+                .with_chunks(&[4])
+                .with_maxshape(&[MaxExtent::Unlimited])
+                .with_fill_value(-7_i32);
+            if filtered {
+                target.with_fletcher32();
+            }
+        },
+    );
+    assert_deferred_layout(&std::fs::read(&path).unwrap());
     let file = File::open_rw_with_options(
         &path,
         FileAccessProperties::new()
@@ -57,10 +68,13 @@ fn first_and_subsequent_appends_materialize_deferred_indexes(
             .with_sync_policy(sync),
     )
     .unwrap();
-    operation.run(file.dataset("schema").unwrap());
-    let mut target = file.dataset("schema").unwrap();
+    operation.run(file.dataset("schema").unwrap(), &(0..7).collect::<Vec<_>>());
+    let target = file.dataset("schema").unwrap();
     assert_eq!(target.read_i32().unwrap(), (0..7).collect::<Vec<_>>());
-    target.append(&(7..11).collect::<Vec<i32>>()).unwrap();
+    operation.run(
+        file.dataset("schema").unwrap(),
+        &(7..11).collect::<Vec<_>>(),
+    );
     assert_eq!(target.read_i32().unwrap(), (0..11).collect::<Vec<_>>());
     assert_eq!(target.shape().unwrap(), [11]);
     assert_eq!(target.chunks().unwrap().len(), 3);
@@ -87,9 +101,7 @@ fn first_append_uses_the_layouts_encoded_dimension_width(#[case] chunk_elements:
         .with_maxshape(&[MaxExtent::Unlimited])
         .with_fill_value(-7_i32);
     builder.write(&path).unwrap();
-    let mut bytes = std::fs::read(&path).unwrap();
-    test_util_hdf5::__private::clear_index_header(&mut bytes);
-    std::fs::write(&path, bytes).unwrap();
+    assert_deferred_layout(&std::fs::read(&path).unwrap());
     let file = File::open_rw(&path).unwrap();
     file.dataset("schema")
         .unwrap()
@@ -105,28 +117,90 @@ fn first_append_uses_the_layouts_encoded_dimension_width(#[case] chunk_elements:
 }
 
 #[derive(Clone, Copy)]
-enum FirstAppend {
+enum AppendMethod {
     Borrowed,
     Immediate,
     Owned,
 }
 
-impl FirstAppend {
-    fn run(self, mut target: Dataset) {
+impl AppendMethod {
+    fn run(self, mut target: Dataset, values: &[i32]) {
         match self {
-            Self::Immediate => target.append(&(0..7).collect::<Vec<i32>>()).unwrap(),
+            Self::Immediate => target.append(values).unwrap(),
             Self::Borrowed => {
                 let mut appender = target.buffered_appender().unwrap();
-                appender.append(&(0..7).collect::<Vec<i32>>()).unwrap();
+                appender.append(values).unwrap();
                 appender.finish().unwrap();
             }
             Self::Owned => {
                 let mut appender = target.into_buffered_appender().unwrap();
-                appender.append(&(0..7).collect::<Vec<i32>>()).unwrap();
+                appender.append(values).unwrap();
                 appender.finish().unwrap();
             }
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum SchemaCreation {
+    Buffered,
+    Edit,
+    Streaming,
+}
+
+impl SchemaCreation {
+    fn write(
+        self,
+        path: &Path,
+        settings: FileSpaceSettings,
+        configure: impl FnOnce(&mut DatasetBuilder),
+    ) {
+        let mut builder = FileBuilder::new();
+        builder.with_file_space_settings(settings);
+        match self {
+            Self::Buffered => {
+                configure(builder.create_dataset("schema"));
+                std::fs::write(path, builder.finish().unwrap()).unwrap();
+            }
+            Self::Streaming => {
+                configure(builder.create_dataset("schema"));
+                builder.write(path).unwrap();
+            }
+            Self::Edit => {
+                builder.write(path).unwrap();
+                let file = File::open_rw(path).unwrap();
+                file.root().create_dataset("schema", configure).unwrap();
+                file.commit().unwrap();
+                file.close().unwrap();
+            }
+        }
+    }
+}
+
+fn assert_deferred_layout(image: &[u8]) {
+    assert!(test_util::bytes::signature_offsets(image, extensible_array::SIGNATURE).is_empty());
+    assert!(
+        test_util::bytes::signature_offsets(image, extensible_array::INDEX_SIGNATURE).is_empty()
+    );
+    let layout = test_util::bytes::signature_offsets(image, v2::SIGNATURE)
+        .into_iter()
+        .find_map(|at| {
+            ObjectHeader::parse(image, AccessMode::ReadOnly, at, 8, 8)
+                .unwrap()
+                .messages
+                .into_iter()
+                .find(|message| message.msg_type == MessageType::DATA_LAYOUT)
+                .map(|message| message.data)
+        })
+        .unwrap();
+    assert_eq!(&layout[layout.len() - 8..], &[u8::MAX; 8]);
+    assert!(matches!(
+        DataLayout::parse(&layout, 8, 8).unwrap(),
+        DataLayout::Chunked {
+            index: ChunkIndexLayout::ExtensibleArray { address: None, .. },
+            ..
+        }
+    ));
 }
 
 #[rstest]
@@ -146,7 +220,7 @@ fn first_append_rejects_unreadable_padding_before_initialization(#[case] filtere
     }
     builder.write(&path).unwrap();
     let mut image = std::fs::read(&path).unwrap();
-    test_util_hdf5::__private::clear_index_header(&mut image);
+    assert_deferred_layout(&image);
     let (header, fill) = test_util::bytes::signature_offsets(&image, v2::SIGNATURE)
         .into_iter()
         .find_map(|at| {
@@ -191,32 +265,36 @@ fn empty_append_operations_preserve_index_storage(
     #[values(false, true)] unallocated: bool,
     #[values(false, true)] filtered: bool,
     #[values(MemoryStrategy::Mirrored, MemoryStrategy::Bounded)] backing: MemoryStrategy,
+    #[values(
+        SchemaCreation::Buffered,
+        SchemaCreation::Streaming,
+        SchemaCreation::Edit
+    )]
+    creation: SchemaCreation,
 ) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("schema.h5");
-    let mut builder = FileBuilder::new();
-    builder.with_file_space_settings(
+    creation.write(
+        &path,
         FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_persistence(true),
+        |dataset| {
+            if unallocated {
+                dataset.with_unallocated_storage(hdf5_pure::make_i32_type(), &[0]);
+            } else {
+                dataset.with_i32_data(&[]).with_shape(&[0]);
+            }
+            dataset
+                .with_maxshape(&[MaxExtent::Unlimited])
+                .with_chunks(&[4]);
+            if filtered {
+                dataset.with_fletcher32();
+            }
+        },
     );
-    let dataset = builder.create_dataset("schema");
-    if unallocated {
-        dataset.with_unallocated_storage(hdf5_pure::make_i32_type(), &[0]);
-    } else {
-        dataset.with_i32_data(&[]).with_shape(&[0]);
-    }
-    dataset
-        .with_maxshape(&[MaxExtent::Unlimited])
-        .with_chunks(&[4]);
-    if filtered {
-        dataset.with_fletcher32();
-    }
-    builder.write(&path).unwrap();
-    if unallocated {
-        let mut image = std::fs::read(&path).unwrap();
-        test_util_hdf5::__private::clear_index_header(&mut image);
-        std::fs::write(&path, image).unwrap();
-    }
     let original = std::fs::read(&path).unwrap();
+    if unallocated {
+        assert_deferred_layout(&original);
+    }
     let file = File::open_rw_with_options(
         &path,
         FileAccessProperties::new().with_memory_strategy(backing),
@@ -330,11 +408,6 @@ fn empty_indexes_reject_incompatible_append_input_before_mutation(
         .with_chunks(&[4])
         .with_maxshape(&[MaxExtent::Unlimited]);
     builder.write(&path).unwrap();
-    if unallocated {
-        let mut image = std::fs::read(&path).unwrap();
-        test_util_hdf5::__private::clear_index_header(&mut image);
-        std::fs::write(&path, image).unwrap();
-    }
     let original = std::fs::read(&path).unwrap();
     let file = File::open_rw(&path).unwrap();
     let mut target = file.dataset("d").unwrap();
@@ -367,11 +440,6 @@ fn empty_lossy_appender_operations_preserve_index_storage(
         .with_maxshape(&[MaxExtent::Unlimited])
         .with_scale_offset(ScaleOffset::FloatDScale(1));
     builder.write(&path).unwrap();
-    if unallocated {
-        let mut image = std::fs::read(&path).unwrap();
-        test_util_hdf5::__private::clear_index_header(&mut image);
-        std::fs::write(&path, image).unwrap();
-    }
     let original = std::fs::read(&path).unwrap();
     let file = File::open_rw(&path).unwrap();
     let mut target = file.dataset("d").unwrap();
@@ -540,6 +608,50 @@ fn schemas_reject_incompatible_settings(
         panic!("expected a format error, got {error:?}");
     };
     assert_eq!(error, expected);
+}
+
+#[rstest]
+#[case::fill_width(|schema: &mut DatasetBuilder| { schema.with_fill_value(1_u8); }, FormatError::FillValueSizeMismatch { expected: 4, actual: 1 })]
+#[case::chunk_rank(|schema: &mut DatasetBuilder| { schema.with_chunks(&[2]); }, FormatError::InvalidChunkGeometry("chunk dimensions must have the same rank as the dataset shape"))]
+#[case::zero_chunk(|schema: &mut DatasetBuilder| { schema.with_chunks(&[0, 2]); }, FormatError::InvalidChunkGeometry("chunk dimensions must all be non-zero"))]
+#[case::large_chunk(|schema: &mut DatasetBuilder| { schema.with_chunks(&[65_536, 65_536]); }, FormatError::InvalidChunkGeometry("chunk logical byte size exceeds the reader's single-chunk allocation limit"))]
+#[case::maximum_shape(|schema: &mut DatasetBuilder| { schema.with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Fixed(3)]); }, FormatError::InvalidChunkGeometry("maxshape must be at least the current shape in every dimension"))]
+#[case::unlimited_dimensions(|schema: &mut DatasetBuilder| { schema.with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Unlimited]); }, FormatError::InvalidChunkGeometry("at most one dimension of a maxshape may be unlimited; the chunk index for more than one is a version-2 B-tree, which this crate cannot write"))]
+#[case::zero_width_type(|schema: &mut DatasetBuilder| { schema.with_dtype(Datatype::String { size: 0, padding: hdf5_pure::StringPadding::NullPad, charset: hdf5_pure::CharacterSet::Ascii }); }, FormatError::ZeroSizedDatatype { class: 3 })]
+#[case::filter_type(|schema: &mut DatasetBuilder| { schema.with_dtype(Datatype::String { size: 4, padding: hdf5_pure::StringPadding::NullPad, charset: hdf5_pure::CharacterSet::Ascii }).with_scale_offset(ScaleOffset::Integer(0)); }, FormatError::FilterError("scale-offset requires an integer or floating-point scalar datatype with a definite (little/big endian) byte order".into()))]
+fn empty_resizable_schemas_reject_incompatible_settings_before_allocation(
+    #[case] configure: fn(&mut DatasetBuilder),
+    #[case] expected: FormatError,
+    #[values(
+        SchemaCreation::Buffered,
+        SchemaCreation::Streaming,
+        SchemaCreation::Edit
+    )]
+    creation: SchemaCreation,
+) {
+    let configure_schema = |schema: &mut DatasetBuilder| {
+        schema
+            .with_unallocated_storage(hdf5_pure::make_i32_type(), &[0, 4])
+            .with_chunks(&[2, 2])
+            .with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Fixed(4)]);
+        configure(schema);
+    };
+    let error = match creation {
+        SchemaCreation::Edit => edit_schema(configure_schema).unwrap_err(),
+        SchemaCreation::Buffered | SchemaCreation::Streaming => {
+            let mut builder = FileBuilder::new();
+            configure_schema(builder.create_dataset("schema"));
+            if matches!(creation, SchemaCreation::Buffered) {
+                builder.finish().unwrap_err()
+            } else {
+                builder.finish_to(&mut Vec::new()).unwrap_err()
+            }
+        }
+    };
+    let Error::Format(actual) = error else {
+        panic!("expected {expected:?}, got {error:?}");
+    };
+    assert_eq!(actual, expected);
 }
 
 #[cfg(feature = "provenance")]

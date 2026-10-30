@@ -716,82 +716,37 @@ pub(crate) fn full_chunk_bytes(
         .fold(element_size.get() as u64, |acc, d| acc.saturating_mul(d))
 }
 
-/// Whether a dataset's storage is allocated at all.
+/// Whether the writer allocates element storage for the declared dataspace.
 ///
-/// By default the reference library does not allocate a *contiguous or chunked*
-/// dataset's storage until something is written to it — compact data is inline
-/// in the layout message and is always present — so one created and never
-/// written holds no chunks over a non-empty dataspace. Its layout message still
-/// names an index *type*; what it carries for that index is the undefined
-/// address, so no index structure exists. A contiguous dataset created the same
-/// way is the same story without an index in it.
-///
-/// This has to be said rather than derived, because the element count cannot
-/// tell the two apart: a shape of 1,000 means "ten chunks of fill value" for one
-/// dataset and "nothing stored" for the other, and reading the second answers the
-/// fill value for every element exactly as the first does (issue #292). Deriving
-/// it from the staged bytes would be worse still, since "no bytes" is also what a
-/// caller who simply forgot the data looks like.
-///
-/// There is deliberately no `Default`: like the `fill` parameter above, every
-/// caller names it, so a new write path cannot inherit "allocated" by omission.
+/// An unallocated dataset can have a nonempty shape. Reads return the fill value for elements
+/// without storage. Callers select the allocation policy independently of the shape and payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StorageAllocation {
     /// Storage covers the dataspace: a chunk in every grid slot the shape
     /// implies, or a contiguous run of every element's bytes.
     Allocated,
-    /// No chunk, and no run of element bytes: the dataset declares its shape
-    /// and stores none of it.
+    /// Declares the dataspace without allocating chunks or contiguous element bytes.
     ///
-    /// What that leaves in the file depends on the layout. A contiguous or
-    /// fixed-shape chunked dataset carries the undefined address and occupies
-    /// nothing. A *resizable* one still gets the eagerly built Extensible Array
-    /// this crate gives every empty resizable dataset — an index over no chunk,
-    /// at a defined address, costing a few hundred bytes — because an in-place
-    /// append needs the index to exist before the first chunk arrives.
+    /// Contiguous and fixed-grid chunked layouts store an undefined address. An unlimited
+    /// chunked dataset with zero elements also has an undefined index address. For a nonempty
+    /// unlimited dataspace, the writer allocates an empty Extensible Array index.
     Unallocated,
 }
 
-/// Which chunk index a chunk set gets.
-///
-/// One rule, read by everything that has to agree on it: the writers that emit
-/// the index, and [`chunk_index_len`], which sizes it without emitting. Two
-/// copies of this `if` chain is how a length ends up describing a different
-/// structure from the one written.
-///
-/// The variant names match [`layout_info::ChunkIndex`](crate::layout_info::ChunkIndex),
-/// which classifies the same three shapes on the read side.
+/// The chunk indexing type and allocation state used for layout sizing and emission.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ChunkIndexKind {
-    /// No index structure and no chunk address: a fixed-shape dataset with no
-    /// chunks at all, whose layout message carries the undefined address.
-    ///
-    /// This is libhdf5's convention for a chunked dataset with
-    /// nothing stored. For a fixed-shape dataset of *zero* slots it is the only
-    /// encoding that library accepts: a Fixed Array declaring zero entries makes
-    /// `H5Dget_num_chunks` fail on the dataset, where the undefined address
-    /// reads back as zero chunks.
-    ///
-    /// Over a non-empty dataspace — the never-written dataset of issue #293 —
-    /// that argument does not apply: measured, the library reads a Fixed Array
-    /// whose slots are all empty perfectly well, and reports zero chunks for it.
-    /// The undefined address is preferred there for the two weaker reasons, that
-    /// it is what the library itself writes and that it costs no index at all. An *extensible* empty dataset is the opposite case and keeps its
-    /// (eagerly built) array — the C library reads and grows that happily, and
-    /// this crate's in-place append needs the index to already exist.
-    Unallocated,
-    /// No index structure at all: the single chunk's address rides in the
-    /// layout message.
-    SingleChunk,
-    /// A Fixed Array, for a fixed-shape dataset of more than one chunk.
-    FixedArray,
     /// An Extensible Array, for a dataset with an unlimited dimension.
     ExtensibleArray,
+    /// A Fixed Array, for a finite maximum chunk grid with more than one slot.
+    FixedArray,
+    /// A single chunk whose address is stored in the layout message.
+    SingleChunk,
+    /// An index type stored with an undefined address and no allocated index structure.
+    Unallocated(ChunkArrayKind),
 }
 
-/// The two kinds that are an actual on-disk structure, and so have a length and
-/// bytes. [`ChunkIndexKind::SingleChunk`] is not one of them, and this type is
-/// how that is said once rather than re-checked at every use.
+/// The array indexing types that have a separate on-disk structure when allocated.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ChunkArrayKind {
     FixedArray,
@@ -833,22 +788,27 @@ impl ChunkArrayKind {
 }
 
 impl ChunkIndexKind {
-    /// The on-disk array this kind writes, or `None` for the single-chunk
-    /// layout, which writes nothing after the chunk bytes.
+    /// Returns the array type to serialize, or [`None`] for unallocated and single-chunk layouts.
     pub(crate) fn array_kind(self) -> Option<ChunkArrayKind> {
         match self {
-            Self::Unallocated | Self::SingleChunk => None,
+            Self::Unallocated(_) | Self::SingleChunk => None,
             Self::FixedArray => Some(ChunkArrayKind::FixedArray),
             Self::ExtensibleArray => Some(ChunkArrayKind::ExtensibleArray),
         }
     }
 
-    /// Returns the body of the version 4 data layout message of chunks indexed
-    /// by this kind, with `flags` as its layout flags and `index_address` as the
-    /// address of a Fixed Array or an Extensible Array.
+    /// Encodes the version 4 Data Layout message for this index type and allocation state.
     ///
-    /// A Single Chunk layout stores the address of the first of `chunks`, and an
-    /// unallocated layout a Fixed Array index at the undefined address.
+    /// A single-chunk layout stores the address of the first of `chunks`. An unallocated layout
+    /// stores its array type and an undefined address, as defined in "The Data Layout Message"
+    /// of the [format specification, version 4.0][spec].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Internal`] if a single-chunk layout has no chunk or `element_size`
+    /// exceeds [`u32::MAX`]. Propagates layout serialization errors.
+    ///
+    /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsubsec_fmt4_dataobject_hdr_msg_layout
     fn layout_message(
         self,
         flags: ChunkedLayoutFlags,
@@ -859,7 +819,13 @@ impl ChunkIndexKind {
         has_filters: bool,
     ) -> Result<Vec<u8>, FormatError> {
         let (info, address) = match self {
-            Self::Unallocated => (ChunkIndexInfo::FixedArray, StoredAddress::new(HADDR_UNDEF)),
+            Self::Unallocated(kind) => (
+                match kind {
+                    ChunkArrayKind::FixedArray => ChunkIndexInfo::FixedArray,
+                    ChunkArrayKind::ExtensibleArray => ChunkIndexInfo::ExtensibleArray,
+                },
+                StoredAddress::new(HADDR_UNDEF),
+            ),
             Self::SingleChunk => {
                 let chunk = chunks.first().ok_or_else(|| {
                     FormatError::Internal("a single-chunk layout was planned with no chunk".into())
@@ -903,7 +869,7 @@ pub(crate) fn chunk_index_kind(grid: &ChunkGrid, num_chunks: usize) -> ChunkInde
     match grid.slots() {
         // An unlimited dimension: no fixed slot count, so the extensible index.
         None => ChunkIndexKind::ExtensibleArray,
-        _ if num_chunks == 0 => ChunkIndexKind::Unallocated,
+        _ if num_chunks == 0 => ChunkIndexKind::Unallocated(ChunkArrayKind::FixedArray),
         Some(1) => ChunkIndexKind::SingleChunk,
         Some(_) => ChunkIndexKind::FixedArray,
     }
@@ -1158,19 +1124,16 @@ pub(crate) fn compress_chunks(
     })
 }
 
-/// Decide a chunked dataset's index and where each of its chunks sits in it:
-/// the index kind, the element slot of each chunk in dense grid order, and how
-/// many slots the index spans.
+/// Plans the indexing type, each chunk's element slot in dense grid order, and the index span.
 ///
-/// One function because the three answers are one decision. The grid the slots
-/// are numbered over is the same grid whose size picks between a single-chunk
-/// layout and a Fixed Array, and a caller that derived them separately could
-/// number chunks for one index while declaring another.
+/// With [`StorageAllocation::Unallocated`], the plan contains no chunks. Fixed-grid datasets and
+/// zero-element unlimited datasets have no index allocation. A nonempty unlimited dataset has
+/// an empty Extensible Array index.
 ///
-/// `allocation` says whether the dataset stores anything at all. Every other
-/// input describes the *dataspace*, which an unallocated dataset declares in
-/// full; only this distinguishes a grid of chunks from none, and a fixed-shape
-/// dataset that stores none is the [`ChunkIndexKind::Unallocated`] layout.
+/// # Errors
+///
+/// Returns [`FormatError::ChunkedReadError`] if the index exceeds its addressable capacity or the
+/// unused-element byte budget. Propagates chunk-grid and platform-size conversion errors.
 pub(crate) fn plan_index_slots(
     shape: &[u64],
     chunk_dims: &[u64],
@@ -1200,7 +1163,14 @@ pub(crate) fn plan_index_slots(
         StorageAllocation::Allocated => counts.iter().product::<u64>().to_usize()?,
         StorageAllocation::Unallocated => 0,
     };
-    let kind = chunk_index_kind(&grid, num_chunks);
+    let kind = if allocation == StorageAllocation::Unallocated
+        && shape.contains(&0)
+        && grid.slots().is_none()
+    {
+        ChunkIndexKind::Unallocated(ChunkArrayKind::ExtensibleArray)
+    } else {
+        chunk_index_kind(&grid, num_chunks)
+    };
 
     let mut slot_of_chunk = Vec::with_capacity(num_chunks);
     let mut coords = vec![0u64; shape.len()];
@@ -1219,7 +1189,7 @@ pub(crate) fn plan_index_slots(
     // slots at all: the single-chunk layout carries its address in the layout
     // message, and an unallocated one has no address to carry.
     let index_slots = match kind {
-        ChunkIndexKind::Unallocated | ChunkIndexKind::SingleChunk => 0,
+        ChunkIndexKind::Unallocated(_) | ChunkIndexKind::SingleChunk => 0,
         ChunkIndexKind::FixedArray => grid.slots().ok_or_else(|| {
             FormatError::ChunkedReadError(
                 "a Fixed Array cannot index an unlimited dimension".into(),
@@ -1253,7 +1223,7 @@ pub(crate) fn plan_index_slots(
         has_filters,
     );
     let allocated = match kind {
-        ChunkIndexKind::Unallocated | ChunkIndexKind::SingleChunk => 0,
+        ChunkIndexKind::Unallocated(_) | ChunkIndexKind::SingleChunk => 0,
         ChunkIndexKind::FixedArray => index_slots,
         ChunkIndexKind::ExtensibleArray => {
             // An Extensible Array with this crate's creation parameters can

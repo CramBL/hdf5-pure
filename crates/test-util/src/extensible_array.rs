@@ -84,8 +84,11 @@ pub fn large_secondary_blocks(
 ///
 /// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_extarr
 pub const CHECKSUM_BYTES: usize = 4;
-// Section `subsec_fmt4_appendixc_extarr`, version 4.0, defines the index signature.
-const INDEX_SIGNATURE: &[u8; 4] = b"EAIB";
+/// The version 0 index block signature defined in "The Extensible Array Index" of the
+/// [format specification, version 4.0][spec].
+///
+/// [spec]: https://support.hdfgroup.org/documentation/hdf5/latest/_f_m_t4.html#subsec_fmt4_appendixc_extarr
+pub const INDEX_SIGNATURE: &[u8; 4] = b"EAIB";
 // Section `subsec_fmt4_appendixc_extarr`, version 4.0, defines the secondary-block signature.
 const SECONDARY_SIGNATURE: &[u8; 4] = b"EASB";
 // Section `subsec_fmt4_appendixc_extarr`, version 4.0, defines version zero.
