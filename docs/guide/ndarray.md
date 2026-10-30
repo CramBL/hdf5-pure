@@ -100,8 +100,8 @@ println!("runtime rank: {}", dynamic.ndim());
 ```
 
 Both methods use the conversions and compatibility rules of [`Dataset::read`](crate::Dataset::read).
-Numeric conversions can lose precision. Fixed byte arrays require a matching array datatype
-and element width.
+Numeric conversions can lose precision. Fixed byte arrays and ASCII strings require compatible
+datatypes and matching element widths.
 
 ## Chaining chunking and compression
 

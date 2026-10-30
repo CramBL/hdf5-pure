@@ -748,6 +748,39 @@ fn typed_byte_arrays_keep_only_one_read_window_beside_output() {
 }
 
 #[test]
+fn typed_ascii_keeps_only_one_read_window_beside_output() {
+    const COUNT: usize = 1_048_576;
+    let value = hdf5_pure::FixedAscii::<7>::new("abcdefg").unwrap();
+    let values = vec![value; COUNT];
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("ascii.h5");
+    let mut builder = FileBuilder::new();
+    let ((), staged) = allocation::measure("typed_ascii_staging", || {
+        builder.create_dataset("values").with_data(&values);
+    });
+    let payload = (COUNT * 7) as u64;
+    assert!(staged.live_bytes >= payload, "{staged}");
+    assert!(staged.peak_bytes < payload + payload / 2, "{staged}");
+    builder.write(&path).unwrap();
+    let file = File::open_streaming(&path).unwrap();
+    let dataset = file.dataset("values").unwrap();
+    let (output, measured) = allocation::measure("typed_ascii_read", || {
+        dataset.read::<hdf5_pure::FixedAscii<7>>().unwrap()
+    });
+    assert_eq!(output, values);
+    assert!(measured.live_bytes >= payload, "{measured}");
+    assert!(measured.peak_bytes < payload + payload / 2, "{measured}");
+    let ((raw, copied), control) = allocation::measure("typed_ascii_copy_control", || {
+        let raw = dataset.read_raw().unwrap();
+        let copied = raw.clone();
+        (raw, copied)
+    });
+    assert_eq!(raw, b"abcdefg".repeat(COUNT));
+    assert_eq!(copied, raw);
+    assert!(control.peak_bytes >= 2 * payload, "{control}");
+}
+
+#[test]
 fn windowed_row_read_allocates_on_the_order_of_the_window() {
     // 4 MiB of f64 rows with inner-split storage chunks: [2048, 32, 8] in
     // [64, 16, 4] chunks — a 2x2 inner chunk grid per 64-row band, deflated so

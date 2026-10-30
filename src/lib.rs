@@ -74,8 +74,9 @@
 //! # Generic over the element type
 //!
 //! [`H5Element`] is the element bound for [`DatasetBuilder::with_data`] and [`Dataset::read`].
-//! These methods support numeric scalars and fixed byte arrays. Numeric reads convert stored
-//! values to the output element type. Byte arrays retain their array datatype and element width.
+//! These methods support numeric scalars, fixed byte arrays, and [`FixedAscii`] strings. Numeric
+//! reads convert stored values to the output element type. Byte arrays and ASCII strings
+//! retain their datatypes and element widths.
 //!
 //! ```rust
 //! use hdf5_pure::{File, FileBuilder, H5Element};
@@ -634,7 +635,7 @@ pub use edit::{
 pub use repack::{RepackOptions, repack, repack_into, repack_to_path};
 
 #[cfg(feature = "std")]
-pub use element::H5Element;
+pub use element::{FixedAscii, H5Element};
 
 pub use scaleoffset::ScaleOffset;
 

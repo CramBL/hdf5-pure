@@ -43,7 +43,7 @@ impl Dataset {
     /// from the binding: `let values: Array2<f64> = dataset.read_array()?;`.
     ///
     /// Element conversion follows [`Dataset::read`]. Numeric conversions can lose precision.
-    /// Byte arrays require a matching array datatype and element width.
+    /// Byte arrays and fixed ASCII strings require compatible datatypes and matching widths.
     ///
     /// # Errors
     ///
@@ -63,7 +63,7 @@ impl Dataset {
     /// Reads the dataset into an [`ndarray::ArrayD`] with the stored shape.
     ///
     /// Element conversion follows [`Dataset::read`]. Numeric conversions can lose precision.
-    /// Byte arrays require a matching array datatype and element width.
+    /// Byte arrays and fixed ASCII strings require compatible datatypes and matching widths.
     ///
     /// # Errors
     ///
@@ -88,8 +88,8 @@ impl DatasetBuilder {
     /// Sets the dataset's datatype and shape from an [`ndarray`] array.
     ///
     /// Accepts owned arrays and views by reference. The writer infers the datatype from the
-    /// element type and the dataset's shape from the array's dimensions. Byte-array elements
-    /// retain their width within the datatype.
+    /// element type and the dataset's shape from the array's dimensions. Byte arrays and fixed
+    /// ASCII strings retain their widths within their datatypes.
     ///
     /// The writer copies elements in row-major (C) order. For nonstandard layouts, it first
     /// copies the input into a temporary row-major array.
