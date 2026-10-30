@@ -1,4 +1,4 @@
-//! Fill patterns for unallocated dataset storage.
+//! Fill patterns for dataset initialization and filter parameters.
 //!
 //! The format crate parses and serializes Fill Value messages. This module
 //! applies their bytes to unallocated storage and translates serialization
@@ -18,18 +18,10 @@ pub(crate) use hdf5_pure_format::__private::FillValueView;
 use crate::error::FormatError;
 use crate::message_type::MessageType;
 
-/// What storage a dataset has never had written to it reads as.
+/// A dataset's fill bytes, with zero and unknown patterns represented separately.
 ///
-/// HDF5 allocates a dataset's storage lazily, so a dataset can be *created* with
-/// a shape and then read before anything is written — as a whole, when no chunk
-/// index or contiguous block exists at all, or in parts, when some chunks of a
-/// chunked dataset exist and others do not. libhdf5 fills
-/// those regions with the dataset's fill value. This implementation
-/// uses the same fill behavior.
-///
-/// `None` means the library default, which is the type's implicit zero. Keeping
-/// that case as `None` lets the common path stay a plain zeroed allocation with
-/// nothing to tile.
+/// Readers and writers use the pattern to initialize unwritten storage. Writers also use the
+/// configured pattern to construct scale-offset filter parameters.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct FillPattern<'a> {
     /// Exactly one element's worth of fill bytes, or `None` for zeros.
@@ -66,16 +58,10 @@ impl<'a> FillPattern<'a> {
         unknown: true,
     };
 
-    /// The pattern for a dataset whose Fill Value message carried `bytes`, over
-    /// a datatype of `elem_size` bytes per element.
+    /// Creates an initialization pattern according to the fill-write policy.
     ///
-    /// A fill value is one element wide by definition — it is stored in the
-    /// dataset's own datatype — so a message declaring some other length is
-    /// malformed. Rather than tile it and shift every element after the first,
-    /// such a value is dropped and the region reads as zeros: the fill pattern
-    /// is consulted only where there is no data, so falling back there cannot
-    /// corrupt a value that was actually written, and it leaves a dataset whose
-    /// storage *is* allocated reading exactly as it did before.
+    /// Returns [`Self::ZERO`] for [`FillTime::Never`]. Otherwise, uses
+    /// [`Self::from_value`] to interpret `bytes`.
     pub(crate) fn new(
         fill_time: FillTime,
         bytes: Option<&'a [u8]>,
@@ -84,6 +70,14 @@ impl<'a> FillPattern<'a> {
         if fill_time.is_never() {
             return Self::ZERO;
         }
+        Self::from_value(bytes, elem_size)
+    }
+
+    /// Creates the configured fill pattern independently of the fill-write policy.
+    ///
+    /// Returns [`Self::ZERO`] if `bytes` is absent, all zero, or differs in length from
+    /// `elem_size`.
+    pub(crate) fn from_value(bytes: Option<&'a [u8]>, elem_size: NonZeroUsize) -> Self {
         match bytes {
             Some(b) if b.len() == elem_size.get() && b.iter().any(|&x| x != 0) => Self {
                 element: Some(b),
