@@ -1,5 +1,6 @@
 #[cfg(feature = "deflate")]
 use alloc::format;
+#[cfg(test)]
 use alloc::vec;
 use alloc::vec::Vec;
 use core::num::NonZeroU32;
@@ -11,12 +12,14 @@ use hdf5_pure_core::FormatError;
 
 use crate::error::Error;
 use crate::lzf;
+use crate::pipeline::buffer::FilterBuffer;
 use crate::scaleoffset;
 use crate::scaleoffset::ScaleOffset;
 use crate::scaleoffset::ScaleOffsetType;
 #[cfg(feature = "zfp")]
 use crate::zfp::ZfpElementType;
 
+mod buffer;
 mod zfp;
 
 /// Supplies the identifier, flags, and parameters for one pipeline filter.
@@ -242,12 +245,14 @@ impl<'a> ChunkContext<'a> {
     }
 }
 
-/// Holds reusable codec state and resolved ZFP settings between chunks.
+/// Retains codec state, intermediate byte capacity, and resolved ZFP settings between chunks.
 ///
-/// Codec buffers are allocated on first use. Resolved ZFP settings are reused while the
-/// pipeline position, client data, scalar type, and chunk dimensions match.
+/// The pipeline reuses one spare byte allocation for intermediate output. Returned chunk buffers
+/// own their storage independently of this scratch state. Resolved ZFP settings are reused while
+/// the pipeline position, client data, scalar type, and chunk dimensions match.
 #[derive(Default)]
 pub struct FilterScratch {
+    spare: Vec<u8>,
     #[cfg(feature = "zfp")]
     zfp: Vec<zfp::PreparedZfpFilter>,
     #[cfg(all(feature = "zfp", test))]
@@ -323,6 +328,7 @@ pub fn decompress_chunk(
 ///
 /// Bit `i` of `filter_mask` skips the filter at index `i` in forward order. Bits outside the
 /// pipeline are ignored.
+/// The returned vector owns its storage independently of subsequent scratch use.
 ///
 /// # Errors
 ///
@@ -345,7 +351,7 @@ pub fn decompress_chunk_with(
     // and checks the decoded length when its nonzero byte count fits in usize.
     let expected = expected_chunk_len(&ctx);
 
-    let mut owned: Option<Vec<u8>> = None;
+    let mut current = FilterBuffer::borrowed(compressed);
     // Filters are listed in application order. Decoding reverses them.
     // `i` is the filter's forward index and its bit position in `filter_mask`.
     // A set bit means the filter was skipped for this chunk.
@@ -353,45 +359,60 @@ pub fn decompress_chunk_with(
         if skipped {
             continue;
         }
-        let input: &[u8] = owned.as_deref().unwrap_or(compressed);
-        let next = match filters.id(i) {
-            FILTER_SHUFFLE => shuffle_decompress(input, ctx.element_size.get() as usize),
+        current = match filters.id(i) {
+            FILTER_SHUFFLE => {
+                if ctx.element_size.get() == 1 {
+                    current
+                } else {
+                    current.materialize(&mut scratch.spare, |input, output| {
+                        shuffle_decompress_into(input, ctx.element_size.get() as usize, output);
+                        Ok(())
+                    })?
+                }
+            }
             FILTER_DEFLATE => {
                 let cap = pipeline.inner_output_cap(scratch, expected, i, ctx)?;
-                deflate_decompress(scratch, input, cap)?
+                let output = deflate_decompress(scratch, current.as_slice(), cap)?;
+                current.replace(&mut scratch.spare, output)
             }
             FILTER_LZF => {
-                lzf::decompress(input, pipeline.inner_output_cap(scratch, expected, i, ctx)?)?
+                let cap = pipeline.inner_output_cap(scratch, expected, i, ctx)?;
+                let output = lzf::decompress(current.as_slice(), cap)?;
+                current.replace(&mut scratch.spare, output)
             }
-            FILTER_FLETCHER32 => fletcher32_verify(input)?,
-            FILTER_SCALEOFFSET => scaleoffset::decompress(
-                input,
-                filters.client_data(i),
-                pipeline.inner_output_cap(scratch, expected, i, ctx)?,
-            )?,
+            FILTER_FLETCHER32 => {
+                let len = fletcher32_verify(current.as_slice())?.len();
+                current.narrow(0..len)?
+            }
+            FILTER_SCALEOFFSET => {
+                let cap = pipeline.inner_output_cap(scratch, expected, i, ctx)?;
+                let output =
+                    scaleoffset::decompress(current.as_slice(), filters.client_data(i), cap)?;
+                current.replace(&mut scratch.spare, output)
+            }
             #[cfg(feature = "zfp")]
-            FILTER_ZFP => scratch
-                .zfp_settings(ctx, filters.client_data(i), i)?
-                .decompress(input)?,
+            FILTER_ZFP => {
+                let output = scratch
+                    .zfp_settings(ctx, filters.client_data(i), i)?
+                    .decompress(current.as_slice())?;
+                current.replace(&mut scratch.spare, output)
+            }
             other => return Err(Error::UnsupportedFilter(other)),
         };
-        owned = Some(next);
     }
-    let result = owned.unwrap_or_else(|| compressed.to_vec());
 
     // A valid chunk always decodes to exactly the full chunk size. A mismatch
     // means a corrupt or hostile filter stream. The error prevents silently
     // zero-filling (when short) or dropping (when long) data during chunk
     // assembly, which copies only the in-range overlap.
     if let Some(expected) = expected {
-        if result.len() != expected {
-            return Err(Error::DataSizeMismatch {
-                expected,
-                actual: result.len(),
-            });
+        if current.as_slice().len() != expected {
+            let actual = current.as_slice().len();
+            current.recycle(&mut scratch.spare);
+            return Err(Error::DataSizeMismatch { expected, actual });
         }
     }
-    Ok(result)
+    Ok(current.into_owned())
 }
 
 fn expected_chunk_len(ctx: &ChunkContext<'_>) -> Option<usize> {
@@ -483,6 +504,8 @@ fn compress_chunk(
 
 /// Applies the filters in pipeline order using reusable scratch state.
 ///
+/// The returned vector owns its storage independently of subsequent scratch use.
+///
 /// # Errors
 ///
 /// Returns [`Error::InvalidDeflateLevel`] if a Deflate parameter exceeds `9`.
@@ -496,31 +519,51 @@ pub fn compress_chunk_with(
     ctx: ChunkContext<'_>,
 ) -> Result<Vec<u8>, Error> {
     let pipeline = MaskedFilters::new(filters, 0)?;
-    let mut owned: Option<Vec<u8>> = None;
+    let mut current = FilterBuffer::borrowed(data);
     for (i, _) in pipeline.mask.positions() {
-        let input: &[u8] = owned.as_deref().unwrap_or(data);
-        let next = match filters.id(i) {
-            FILTER_SHUFFLE => shuffle_compress(input, ctx.element_size.get() as usize),
+        current = match filters.id(i) {
+            FILTER_SHUFFLE => {
+                if ctx.element_size.get() == 1 {
+                    current
+                } else {
+                    current.materialize(&mut scratch.spare, |input, output| {
+                        shuffle_compress_into(input, ctx.element_size.get() as usize, output);
+                        Ok(())
+                    })?
+                }
+            }
             FILTER_DEFLATE => {
                 let level = match filters.client_data(i).first() {
                     Some(&level) => DeflateLevel::try_from(level)
                         .map_err(|_error| Error::InvalidDeflateLevel { level })?,
                     None => DeflateLevel::Six,
                 };
-                deflate_compress(scratch, input, level)?
+                let output = deflate_compress(scratch, current.as_slice(), level)?;
+                current.replace(&mut scratch.spare, output)
             }
-            FILTER_LZF => lzf::compress(input),
-            FILTER_FLETCHER32 => fletcher32_append(input)?,
-            FILTER_SCALEOFFSET => scaleoffset::compress(input, filters.client_data(i))?,
+            FILTER_LZF => {
+                let output = lzf::compress(current.as_slice());
+                current.replace(&mut scratch.spare, output)
+            }
+            FILTER_FLETCHER32 => {
+                let checksum = fletcher32_compute(current.as_slice());
+                current.append(&mut scratch.spare, &checksum.to_le_bytes())
+            }
+            FILTER_SCALEOFFSET => {
+                let output = scaleoffset::compress(current.as_slice(), filters.client_data(i))?;
+                current.replace(&mut scratch.spare, output)
+            }
             #[cfg(feature = "zfp")]
-            FILTER_ZFP => scratch
-                .zfp_settings(ctx, filters.client_data(i), i)?
-                .compress(input)?,
+            FILTER_ZFP => {
+                let output = scratch
+                    .zfp_settings(ctx, filters.client_data(i), i)?
+                    .compress(current.as_slice())?;
+                current.replace(&mut scratch.spare, output)
+            }
             other => return Err(Error::UnsupportedFilter(other)),
         };
-        owned = Some(next);
     }
-    Ok(owned.unwrap_or_else(|| data.to_vec()))
+    Ok(current.into_owned())
 }
 
 #[cfg(feature = "deflate")]
@@ -655,12 +698,14 @@ fn shuffle_n<const N: usize>(data: &[u8], result: &mut [u8], num_elements: usize
 /// Preserves trailing bytes while reversing byte shuffling of complete elements.
 ///
 /// `H5Z__filter_shuffle` preserves trailing bytes in both directions (`H5Zshuffle.c`, HDF5 2.2.0).
-fn shuffle_decompress(data: &[u8], element_size: usize) -> Vec<u8> {
+fn shuffle_decompress_into(data: &[u8], element_size: usize, result: &mut Vec<u8>) {
+    result.clear();
+    result.resize(data.len(), 0);
     if element_size <= 1 {
-        return data.to_vec();
+        result.copy_from_slice(data);
+        return;
     }
     let num_elements = data.len() / element_size;
-    let mut result = vec![0u8; data.len()];
     let prefix_len = data.len() - data.len() % element_size;
     result[prefix_len..].copy_from_slice(&data[prefix_len..]);
 
@@ -668,10 +713,10 @@ fn shuffle_decompress(data: &[u8], element_size: usize) -> Vec<u8> {
     // element is written as one contiguous store. The generic loop handles
     // unusual widths (compound members, wide types).
     match element_size {
-        2 => unshuffle_n::<2>(data, &mut result, num_elements),
-        4 => unshuffle_n::<4>(data, &mut result, num_elements),
-        8 => unshuffle_n::<8>(data, &mut result, num_elements),
-        16 => unshuffle_n::<16>(data, &mut result, num_elements),
+        2 => unshuffle_n::<2>(data, result, num_elements),
+        4 => unshuffle_n::<4>(data, result, num_elements),
+        8 => unshuffle_n::<8>(data, result, num_elements),
+        16 => unshuffle_n::<16>(data, result, num_elements),
         _ => {
             for i in 0..num_elements {
                 for j in 0..element_size {
@@ -680,25 +725,25 @@ fn shuffle_decompress(data: &[u8], element_size: usize) -> Vec<u8> {
             }
         }
     }
-
-    result
 }
 
 /// Preserves trailing bytes while grouping complete elements by byte position.
-fn shuffle_compress(data: &[u8], element_size: usize) -> Vec<u8> {
+fn shuffle_compress_into(data: &[u8], element_size: usize, result: &mut Vec<u8>) {
+    result.clear();
+    result.resize(data.len(), 0);
     if element_size <= 1 {
-        return data.to_vec();
+        result.copy_from_slice(data);
+        return;
     }
     let num_elements = data.len() / element_size;
-    let mut result = vec![0u8; data.len()];
     let prefix_len = data.len() - data.len() % element_size;
     result[prefix_len..].copy_from_slice(&data[prefix_len..]);
 
     match element_size {
-        2 => shuffle_n::<2>(data, &mut result, num_elements),
-        4 => shuffle_n::<4>(data, &mut result, num_elements),
-        8 => shuffle_n::<8>(data, &mut result, num_elements),
-        16 => shuffle_n::<16>(data, &mut result, num_elements),
+        2 => shuffle_n::<2>(data, result, num_elements),
+        4 => shuffle_n::<4>(data, result, num_elements),
+        8 => shuffle_n::<8>(data, result, num_elements),
+        16 => shuffle_n::<16>(data, result, num_elements),
         _ => {
             for i in 0..num_elements {
                 for j in 0..element_size {
@@ -707,8 +752,6 @@ fn shuffle_compress(data: &[u8], element_size: usize) -> Vec<u8> {
             }
         }
     }
-
-    result
 }
 
 fn fletcher32_compute(data: &[u8]) -> u32 {
@@ -744,7 +787,7 @@ fn fletcher32_compute(data: &[u8]) -> u32 {
     (sum2 << 16) | sum1
 }
 
-fn fletcher32_verify(data: &[u8]) -> Result<Vec<u8>, Error> {
+fn fletcher32_verify(data: &[u8]) -> Result<&[u8], Error> {
     if data.len() < 4 {
         return Err(Error::FilterError(
             "fletcher32: data too short for checksum".into(),
@@ -764,14 +807,7 @@ fn fletcher32_verify(data: &[u8]) -> Result<Vec<u8>, Error> {
             computed,
         });
     }
-    Ok(payload.to_vec())
-}
-
-fn fletcher32_append(data: &[u8]) -> Result<Vec<u8>, Error> {
-    let checksum = fletcher32_compute(data);
-    let mut result = data.to_vec();
-    result.extend_from_slice(&checksum.to_le_bytes());
-    Ok(result)
+    Ok(payload)
 }
 
 /// The reserved filter identifier.
@@ -840,6 +876,233 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, Error::InvalidDeflateLevel { level });
+    }
+
+    #[rstest]
+    #[case::one_byte(1, &[1, 2, 3, 4], &[1, 2, 3, 4, 6, 4, 8, 5])]
+    #[case::two_bytes(2, &[1, 2, 3, 4], &[1, 3, 2, 4, 7, 3, 10, 4])]
+    fn shuffle_checksum_encoding_returns_the_reused_allocation(
+        #[case] width: u32,
+        #[case] data: &[u8],
+        #[case] expected: &[u8],
+    ) {
+        let filters = [
+            FilterDescription {
+                filter_id: FILTER_SHUFFLE,
+                flags: 0,
+                client_data: vec![],
+            },
+            FilterDescription {
+                filter_id: FILTER_FLETCHER32,
+                flags: 0,
+                client_data: vec![],
+            },
+        ];
+        let mut scratch = FilterScratch::new();
+        scratch.spare = Vec::with_capacity(64);
+        let pointer = scratch.spare.as_ptr();
+        let context = ChunkContext::basic(&[2], width);
+        let output = compress_chunk_with(&mut scratch, data, &filters, context).unwrap();
+        assert_eq!(output.as_ptr(), pointer);
+        assert_eq!(output, expected);
+        assert_eq!(scratch.spare.capacity(), 0);
+        assert_eq!(data, [1, 2, 3, 4]);
+    }
+
+    #[rstest]
+    #[case::empty_pipeline(&[], 0)]
+    #[case::one_byte_shuffle(&[FILTER_SHUFFLE], 0)]
+    #[case::skipped_unknown(&[40000], u32::MAX)]
+    fn borrowed_final_output_is_copied_only_at_the_owned_boundary(
+        #[case] ids: &[u16],
+        #[case] mask: u32,
+    ) {
+        let filters: Vec<_> = ids
+            .iter()
+            .map(|&filter_id| FilterDescription {
+                filter_id,
+                flags: 0,
+                client_data: vec![],
+            })
+            .collect();
+        let mut scratch = FilterScratch::new();
+        scratch.spare = Vec::with_capacity(64);
+        let pointer = scratch.spare.as_ptr();
+        let input = [1, 2, 3, 4];
+        let output = decompress_chunk_with(
+            &mut scratch,
+            &input,
+            &filters,
+            ChunkContext::basic(&[4], 1),
+            mask,
+        )
+        .unwrap();
+        assert_eq!(output, input);
+        assert_ne!(output.as_ptr(), input.as_ptr());
+        assert_eq!(scratch.spare.as_ptr(), pointer);
+        assert_eq!(scratch.spare.capacity(), 64);
+        assert!(scratch.spare.is_empty());
+    }
+
+    #[rstest]
+    #[case::none_skipped(0)]
+    #[case::first_shuffle_skipped(1)]
+    #[case::middle_shuffle_skipped(4)]
+    #[case::last_shuffle_skipped(16)]
+    #[case::middle_checksum_skipped(8)]
+    #[case::high_bits_ignored(0xffff_ffe0)]
+    fn masked_transitions_follow_owned_storage(#[case] mask: u32) {
+        let filters: Vec<_> = [
+            FILTER_SHUFFLE,
+            FILTER_FLETCHER32,
+            FILTER_SHUFFLE,
+            FILTER_FLETCHER32,
+            FILTER_SHUFFLE,
+        ]
+        .into_iter()
+        .map(|filter_id| FilterDescription {
+            filter_id,
+            flags: 0,
+            client_data: vec![],
+        })
+        .collect();
+        let data = [1, 2, 3, 4];
+        let mut stored = data.to_vec();
+        for (i, filter) in filters.iter().enumerate() {
+            if mask & (1 << i) != 0 {
+                continue;
+            }
+            stored = if filter.filter_id == FILTER_SHUFFLE {
+                shuffle_compress(&stored, 2)
+            } else {
+                fletcher32_append(&stored).unwrap()
+            };
+        }
+        let mut scratch = FilterScratch::new();
+        scratch.spare = Vec::with_capacity(128);
+        let result = decompress_chunk_with(
+            &mut scratch,
+            &stored,
+            &filters,
+            ChunkContext::basic(&[2], 2),
+            mask,
+        )
+        .unwrap();
+        assert_eq!(result, data);
+        assert!(scratch.spare.is_empty());
+        assert!(scratch.spare.capacity() <= 128);
+    }
+
+    #[rstest]
+    #[case::short_checksum(&[1, 2, 3], Error::FilterError("fletcher32: data too short for checksum".into()))]
+    #[case::wrong_checksum(&[1, 2, 3, 4, 0, 0, 0, 0], Error::Fletcher32Mismatch { expected: 0, computed: 84_411_398 })]
+    fn scratch_recovers_after_checksum_errors(
+        #[case] input: &[u8],
+        #[case] expected: Error,
+        #[values(false, true)] outer_shuffle: bool,
+    ) {
+        let mut filters = vec![FilterDescription {
+            filter_id: FILTER_FLETCHER32,
+            flags: 0,
+            client_data: vec![],
+        }];
+        let stored = if outer_shuffle {
+            filters.push(FilterDescription {
+                filter_id: FILTER_SHUFFLE,
+                flags: 0,
+                client_data: vec![],
+            });
+            shuffle_compress(input, 2)
+        } else {
+            input.to_vec()
+        };
+        let mut scratch = FilterScratch::new();
+        scratch.spare = Vec::with_capacity(64);
+        let context = ChunkContext::basic(&[2], 2);
+        assert_eq!(
+            decompress_chunk_with(&mut scratch, &stored, &filters, context, 0),
+            Err(expected)
+        );
+        assert!(scratch.spare.is_empty());
+        let encoded =
+            compress_chunk_with(&mut scratch, &[9, 10, 11, 12], &filters, context).unwrap();
+        assert_eq!(
+            decompress_chunk_with(&mut scratch, &encoded, &filters, context, 0).unwrap(),
+            [9, 10, 11, 12]
+        );
+        assert_eq!(
+            encoded,
+            if outer_shuffle {
+                [9, 11, 22, 32, 10, 12, 20, 29]
+            } else {
+                [9, 10, 11, 12, 22, 20, 32, 29]
+            }
+        );
+    }
+
+    #[test]
+    fn scratch_recovers_after_size_rejection_without_changing_retained_results() {
+        let filters = [
+            FilterDescription {
+                filter_id: FILTER_SHUFFLE,
+                flags: 0,
+                client_data: vec![],
+            },
+            FilterDescription {
+                filter_id: FILTER_FLETCHER32,
+                flags: 0,
+                client_data: vec![],
+            },
+        ];
+        let context = ChunkContext::basic(&[2], 2);
+        let mut scratch = FilterScratch::new();
+        let encoded = compress_chunk_with(&mut scratch, &[1, 2, 3, 4], &filters, context).unwrap();
+        let decoded = decompress_chunk_with(&mut scratch, &encoded, &filters, context, 0).unwrap();
+        assert_eq!(
+            decompress_chunk_with(
+                &mut scratch,
+                &encoded,
+                &filters,
+                ChunkContext::basic(&[3], 2),
+                0
+            ),
+            Err(Error::DataSizeMismatch {
+                expected: 6,
+                actual: 4
+            })
+        );
+        assert!(scratch.spare.is_empty());
+        assert!(scratch.spare.capacity() >= 4);
+        let other_encoded = compress_chunk_with(&mut scratch, &[5, 6], &filters, context).unwrap();
+        let other_decoded = decompress_chunk_with(
+            &mut scratch,
+            &other_encoded,
+            &filters,
+            ChunkContext::basic(&[1], 2),
+            0,
+        )
+        .unwrap();
+        assert_eq!(other_decoded, [5, 6]);
+        assert_eq!(decoded, [1, 2, 3, 4]);
+        assert_eq!(encoded, [1, 3, 2, 4, 7, 3, 10, 4]);
+    }
+
+    fn shuffle_compress(data: &[u8], element_size: usize) -> Vec<u8> {
+        let mut output = Vec::new();
+        shuffle_compress_into(data, element_size, &mut output);
+        output
+    }
+
+    fn shuffle_decompress(data: &[u8], element_size: usize) -> Vec<u8> {
+        let mut output = Vec::new();
+        shuffle_decompress_into(data, element_size, &mut output);
+        output
+    }
+
+    fn fletcher32_append(data: &[u8]) -> Result<Vec<u8>, Error> {
+        Ok(FilterBuffer::borrowed(data)
+            .append(&mut Vec::new(), &fletcher32_compute(data).to_le_bytes())
+            .into_owned())
     }
 
     struct FilterDescription {
