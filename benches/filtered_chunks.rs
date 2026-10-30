@@ -1,4 +1,7 @@
-//! Filtered dataset creation throughput with builder setup excluded from each timed batch.
+//! Filtered creation and direct pipeline throughput.
+//!
+//! Creation measurements exclude builder setup. Pipeline calls are timed with fresh and reused
+//! scratch.
 
 use core::time::Duration;
 
@@ -11,6 +14,9 @@ use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use test_util::filtered_chunks::WORKLOADS;
 use test_util::filtered_chunks::Workload;
+
+#[path = "filtered_chunks/pipeline.rs"]
+mod pipeline;
 
 fn filtered_creation(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("filtered_creation");
@@ -64,5 +70,5 @@ fn builder(workload: Workload, data: &[u32]) -> FileBuilder {
     builder
 }
 
-criterion_group!(benches, filtered_creation);
+criterion_group!(benches, filtered_creation, pipeline::benchmark);
 criterion_main!(benches);

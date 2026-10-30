@@ -62,9 +62,10 @@ heap-profile:
 repack-profile MODE="memory" SUBTREES="512" ROUNDS="5":
     CARGO_PROFILE_RELEASE_DEBUG=line-tables-only cargo run --locked --release --example repack_profile -- {{ MODE }} {{ SUBTREES }} {{ ROUNDS }}
 
-# Measure raw staging, retained encoding, and completed output for filtered creation.
+# Measure filtered creation and direct pipeline buffers.
 filtered-chunk-memory:
     cargo nextest run --locked -p hdf5-pure --features std --lib --no-tests fail --ignore-default-filter --success-output immediate -E 'test(/^chunked_write::tests::allocation::/)'
+    cargo nextest run --locked -p hdf5-pure-filter --features deflate --lib --no-tests fail --ignore-default-filter --success-output immediate -E 'test(/^pipeline::tests::allocation::/)'
 
 # Execute each supported-host allocation suite and fail if its selection is empty.
 allocation-coverage: filtered-chunk-memory
@@ -72,6 +73,6 @@ allocation-coverage: filtered-chunk-memory
     cargo nextest run --locked -p hdf5-pure --features std --lib --no-tests fail --ignore-default-filter -E 'test(/^edit::object_header::tests::a_growing_extension_rewrite_keeps_the_allocation_count/)'
     cargo nextest run --locked -p hdf5-pure --features std --lib --no-tests fail --ignore-default-filter -E 'test(/^file_writer::tests::allocation::/)'
 
-# Measure filtered dataset creation throughput for the shared chunk workloads.
+# Measure filtered creation and direct pipeline throughput.
 filtered-chunk-bench *ARGS:
     cargo bench --locked --bench filtered_chunks -- {{ ARGS }}

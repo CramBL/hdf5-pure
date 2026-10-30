@@ -526,7 +526,9 @@ version = "0.47.0"
 dependencies = [
  "flate2",
  "hdf5-pure-core",
+ "heapscope",
  "rstest",
+ "test-util",
 ]
 
 [[package]]
