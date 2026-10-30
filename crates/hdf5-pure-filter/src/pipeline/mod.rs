@@ -6,6 +6,8 @@ use alloc::vec::Vec;
 #[cfg(feature = "deflate")]
 use core::mem;
 use core::num::NonZeroU32;
+#[cfg(feature = "deflate")]
+use core::num::NonZeroUsize;
 
 use hdf5_pure_core::__private::PipelineFilterMask;
 use hdf5_pure_core::DeflateLevel;
@@ -628,6 +630,132 @@ fn deflate_decompress_into(
     max_output: Option<usize>,
     out: &mut OutputWindow,
 ) -> Result<usize, Error> {
+    match DeflateMode::parse(max_output, data.len()) {
+        DeflateMode::Complete(window) => window.decompress(decoder, data, out),
+        DeflateMode::Streaming { reservation, limit } => {
+            deflate_decompress_streaming(decoder, data, limit, reservation, out)
+        }
+    }
+}
+
+/// A decode strategy selected from the output limit and input-derived reservation.
+#[cfg(feature = "deflate")]
+enum DeflateMode {
+    /// Uses one complete call with a detection byte beyond the decoded limit.
+    Complete(CompleteOutputWindow),
+    /// Grows output from the initial reservation as decoding progresses.
+    Streaming {
+        reservation: usize,
+        limit: Option<usize>,
+    },
+}
+
+#[cfg(feature = "deflate")]
+impl DeflateMode {
+    /// Selects a decode mode from the reservation and backend call limits.
+    ///
+    /// A complete call requires a bounded decoded limit covered by the initial reservation, plus
+    /// one detection byte. The input and complete window must fit one C backend call.
+    // `Inflate::decompress_inner` caps C backend slices at `c_uint::MAX`
+    // (`src/ffi/c.rs`, flate2 1.1.9). Cargo feature unification can select that backend.
+    fn parse(max_output: Option<usize>, input_len: usize) -> Self {
+        let reservation = crate::decode_reservation(max_output, input_len, MAX_DEFLATE_EXPANSION);
+        if let Some(limit) = max_output
+            && reservation == limit
+            && let Some(length) = limit.checked_add(1).and_then(NonZeroUsize::new)
+        {
+            #[cfg(target_pointer_width = "64")]
+            if core::ffi::c_uint::try_from(length.get()).is_err()
+                || core::ffi::c_uint::try_from(input_len).is_err()
+            {
+                return Self::Streaming {
+                    reservation,
+                    limit: max_output,
+                };
+            }
+            return Self::Complete(CompleteOutputWindow(length));
+        }
+        Self::Streaming {
+            reservation,
+            limit: max_output,
+        }
+    }
+}
+
+/// A nonzero output-window length for one complete Deflate call.
+///
+/// Includes one byte beyond a decoded limit covered by the input-derived reservation.
+/// [`DeflateMode::parse`] checks the input length and backend call bounds before construction.
+// `inflate` writes directly into the caller's output on the first `MZFlush::Finish` call
+// (`src/inflate/stream.rs`, `miniz_oxide` 0.8.9).
+#[cfg(feature = "deflate")]
+struct CompleteOutputWindow(NonZeroUsize);
+
+#[cfg(feature = "deflate")]
+impl CompleteOutputWindow {
+    /// Decodes one complete stream with [`flate2::FlushDecompress::Finish`].
+    ///
+    /// The caller supplies a freshly reset `decoder`. Output beyond the decoded limit is reported
+    /// before a codec error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::DeflateSizeExceeded`] if the decoded length exceeds the limit.
+    /// Returns [`Error::FilterError`] if the stream is malformed or incomplete.
+    /// Returns [`Error::Pipeline`] if the output count exceeds the platform index width.
+    fn decompress(
+        self,
+        decoder: &mut flate2::Decompress,
+        data: &[u8],
+        out: &mut OutputWindow,
+    ) -> Result<usize, Error> {
+        use flate2::{FlushDecompress, Status};
+
+        let length = self.0.get();
+        let limit = length - 1;
+        out.resize(length);
+        let status = decoder.decompress(data, out.as_mut_slice(), FlushDecompress::Finish);
+        let produced = match usize::try_from(decoder.total_out()) {
+            Ok(produced) => produced,
+            Err(_error) => {
+                status.ok();
+                return Err(Error::Pipeline(FormatError::Internal(
+                    "deflate output count exceeds the platform index width".into(),
+                )));
+            }
+        };
+        if produced > limit {
+            status.ok();
+            return Err(Error::DeflateSizeExceeded {
+                limit,
+                required: length,
+            });
+        }
+        let status = status.map_err(|e| deflate_corrupt(&e.to_string()))?;
+        if status != Status::StreamEnd {
+            return Err(deflate_corrupt(
+                "stream ended before the chunk was complete",
+            ));
+        }
+        Ok(produced)
+    }
+}
+
+/// Decodes with incremental writable-window growth.
+///
+/// The caller resets `decoder` and supplies the input-derived `reservation`.
+///
+/// # Errors
+///
+/// Returns the errors described by [`deflate_decompress_into`].
+#[cfg(feature = "deflate")]
+fn deflate_decompress_streaming(
+    decoder: &mut flate2::Decompress,
+    data: &[u8],
+    max_output: Option<usize>,
+    reservation: usize,
+    out: &mut OutputWindow,
+) -> Result<usize, Error> {
     use flate2::{FlushDecompress, Status};
 
     let bomb = || Error::DeflateSizeExceeded {
@@ -636,9 +764,6 @@ fn deflate_decompress_into(
     };
     let truncated = || deflate_corrupt("stream ended before the chunk was complete");
 
-    // The decoded size follows from the chunk dimensions. Reserve only as much
-    // as the stream can produce, so a declared size alone cannot drive allocation.
-    let reservation = crate::decode_reservation(max_output, data.len(), MAX_DEFLATE_EXPANSION);
     // One past the limit lets the decoder detect an overlong stream.
     let ceiling = max_output.map(|limit| limit.saturating_add(1));
 
@@ -1811,6 +1936,187 @@ mod tests {
         let decoded = decompress_chunk(&stored, &pipeline.filters, ctx, mask).unwrap();
         assert_eq!(decoded, data);
     }
+
+    #[rstest]
+    #[cfg(feature = "deflate")]
+    #[case::unbounded(None, 10, None)]
+    #[case::empty_limit_and_input(Some(0), 0, Some(1))]
+    #[case::empty_input(Some(1), 0, None)]
+    #[case::below_estimate(Some(10_319), 10, Some(10_320))]
+    #[case::at_estimate(Some(10_320), 10, Some(10_321))]
+    #[case::above_estimate(Some(10_321), 10, None)]
+    #[case::largest_limit_with_small_input(Some(usize::MAX), 10, None)]
+    #[cfg_attr(
+        not(target_pointer_width = "64"),
+        case::largest_complete_window(Some(usize::MAX - 1), usize::MAX, Some(usize::MAX))
+    )]
+    #[cfg_attr(
+        target_pointer_width = "64",
+        case::backend_limited_window(Some(usize::MAX - 1), usize::MAX, None)
+    )]
+    #[case::overflowing_window(Some(usize::MAX), usize::MAX, None)]
+    fn deflate_selects_complete_windows_only_with_a_sufficient_reservation(
+        #[case] limit: Option<usize>,
+        #[case] input_len: usize,
+        #[case] complete_length: Option<usize>,
+    ) {
+        let observed = match DeflateMode::parse(limit, input_len) {
+            DeflateMode::Complete(window) => Some(window.0.get()),
+            DeflateMode::Streaming {
+                limit: retained, ..
+            } => {
+                assert_eq!(retained, limit);
+                None
+            }
+        };
+        assert_eq!(observed, complete_length);
+    }
+
+    #[rstest]
+    #[cfg(all(feature = "deflate", target_pointer_width = "64"))]
+    #[case::largest_call(usize::try_from(u32::MAX - 1).unwrap(), usize::try_from(u32::MAX).unwrap(), Some(usize::try_from(u32::MAX).unwrap()))]
+    #[case::output_window(usize::try_from(u32::MAX).unwrap(), usize::try_from(u32::MAX).unwrap(), None)]
+    #[case::input_window(0, usize::MAX, None)]
+    fn c_backend_call_limits_select_complete_or_streaming_windows(
+        #[case] limit: usize,
+        #[case] input_len: usize,
+        #[case] complete_length: Option<usize>,
+    ) {
+        let observed = match DeflateMode::parse(Some(limit), input_len) {
+            DeflateMode::Complete(window) => Some(window.0.get()),
+            DeflateMode::Streaming { .. } => None,
+        };
+        assert_eq!(observed, complete_length);
+    }
+
+    #[rstest]
+    #[cfg(feature = "deflate")]
+    #[case::no_trailing_bytes(&[])]
+    #[case::trailing_bytes(&[0xff, 0, 33])]
+    #[case::another_stream(&ZLIB_TEN_BYTES)]
+    fn complete_and_streaming_decodes_return_only_the_first_stream(
+        #[case] trailing: &[u8],
+        #[values(None, Some(10))] limit: Option<usize>,
+        #[values(false, true)] retained: bool,
+    ) {
+        let mut stored = ZLIB_TEN_BYTES.to_vec();
+        stored.extend_from_slice(trailing);
+        let mut scratch = FilterScratch::new();
+        if retained {
+            scratch.spare = InitializedBuffer::from_vec(vec![0xa5; 64 * 1024]);
+        }
+        let output = deflate_decompress(&mut scratch, &stored, limit).unwrap();
+        assert_eq!(output, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(scratch.decoder.as_ref().unwrap().total_out(), 10);
+        assert_eq!(scratch.spare.capacity(), 0);
+        if retained {
+            assert_eq!(output.capacity(), 64 * 1024);
+        }
+    }
+
+    #[rstest]
+    #[cfg(feature = "deflate")]
+    #[case::zero_limit(Some(0))]
+    #[case::bounded(Some(10))]
+    #[case::unbounded(None)]
+    fn deflate_empty_streams_return_empty_output(
+        #[case] limit: Option<usize>,
+        #[values(false, true)] retained: bool,
+    ) {
+        let stored = [120, 156, 3, 0, 0, 0, 0, 1];
+        let mut scratch = FilterScratch::new();
+        if retained {
+            scratch.spare = InitializedBuffer::from_vec(vec![0xa5; 64 * 1024]);
+        }
+        let output = deflate_decompress(&mut scratch, &stored, limit).unwrap();
+        assert_eq!(output, []);
+        assert_eq!(scratch.decoder.as_ref().unwrap().total_out(), 0);
+        assert_eq!(scratch.spare.capacity(), 0);
+        if retained {
+            assert_eq!(output.capacity(), 64 * 1024);
+        }
+    }
+
+    #[rstest]
+    #[cfg(feature = "deflate")]
+    #[case::excess_before_checksum(9)]
+    #[case::checksum_within_limit(10)]
+    fn complete_decode_reports_excess_output_before_a_codec_error(
+        #[case] limit: usize,
+        #[values(false, true)] retained: bool,
+    ) {
+        let mut stored = ZLIB_TEN_BYTES;
+        *stored.last_mut().unwrap() ^= 0xff;
+        let mut decoder = flate2::Decompress::new(true);
+        let mut output = vec![0; limit + 1];
+        let codec_error = decoder
+            .decompress(&stored, &mut output, flate2::FlushDecompress::Finish)
+            .unwrap_err();
+        assert_eq!(decoder.total_out(), 10);
+        let expected = if limit == 9 {
+            Error::DeflateSizeExceeded {
+                limit,
+                required: 10,
+            }
+        } else {
+            Error::FilterError(format!("deflate: {codec_error}"))
+        };
+        let mut scratch = FilterScratch::new();
+        if retained {
+            scratch.spare = InitializedBuffer::from_vec(vec![0xa5; 64 * 1024]);
+        }
+        assert_eq!(
+            deflate_decompress(&mut scratch, &stored, Some(limit)),
+            Err(expected)
+        );
+        assert_eq!(scratch.decoder.as_ref().unwrap().total_out(), 10);
+        if retained {
+            assert_eq!(scratch.spare.initialized_len(), 64 * 1024);
+        }
+        let streaming = deflate_decompress(&mut scratch, &ZLIB_TEN_BYTES, None).unwrap();
+        let complete = deflate_decompress(&mut scratch, &ZLIB_TEN_BYTES, Some(10)).unwrap();
+        assert_eq!(complete, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(streaming, complete);
+        assert_eq!(scratch.decoder.as_ref().unwrap().total_out(), 10);
+    }
+
+    #[test]
+    #[cfg(feature = "deflate")]
+    fn streaming_fallback_retains_the_input_bound_and_the_final_size_check() {
+        let filters = [FilterDescription {
+            filter_id: FILTER_DEFLATE,
+            flags: 0,
+            client_data: vec![],
+        }];
+        let mut scratch = FilterScratch::new();
+        let retained = deflate_decompress(&mut scratch, &ZLIB_TEN_BYTES, Some(10)).unwrap();
+        assert_eq!(
+            decompress_chunk_with(
+                &mut scratch,
+                &ZLIB_TEN_BYTES,
+                &filters,
+                ChunkContext::basic(&[100_000], 1),
+                0,
+            ),
+            Err(Error::DataSizeMismatch {
+                expected: 100_000,
+                actual: 10
+            })
+        );
+        let reservation = ZLIB_TEN_BYTES.len() * MAX_DEFLATE_EXPANSION;
+        assert_eq!(scratch.spare.initialized_len(), reservation);
+        assert!(scratch.spare.capacity() <= reservation);
+        let pointer = scratch.spare.as_ptr();
+        let output = deflate_decompress(&mut scratch, &ZLIB_TEN_BYTES, Some(10)).unwrap();
+        assert_eq!(output, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(output.as_ptr(), pointer);
+        assert_eq!(retained, output);
+    }
+
+    #[cfg(feature = "deflate")]
+    const ZLIB_TEN_BYTES: [u8; 18] = [
+        120, 156, 99, 96, 100, 98, 102, 97, 101, 99, 231, 224, 4, 0, 0, 175, 0, 46,
+    ];
 
     #[rstest]
     #[cfg(feature = "deflate")]
