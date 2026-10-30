@@ -1518,21 +1518,25 @@ fn a_group_handle_whose_path_becomes_a_dataset_keeps_refusing() {
 // -----------------------------------------------------------------------
 
 // Errors report the complete prefix through the first non-group component.
-#[test]
-fn a_path_through_a_non_group_names_the_object_that_stopped_it() {
+#[rstest]
+#[case::plain_group("plain/sub", "plain", PathLookup::Group)]
+#[case::plain_dataset("plain/sub", "plain", PathLookup::Dataset)]
+#[case::nested_group("g/inner/deeper", "g/inner", PathLookup::Group)]
+#[case::nested_dataset("g/inner/deeper", "g/inner", PathLookup::Dataset)]
+fn a_path_through_a_non_group_reports_the_object_that_stopped_it(
+    #[case] asked: &str,
+    #[case] stopper: &str,
+    #[case] lookup: PathLookup,
+) {
     let file = File::from_bytes(nested_dataset_bytes()).unwrap();
-
-    for (asked, stopper) in [("plain/sub", "plain"), ("g/inner/deeper", "g/inner")] {
-        for (entry, got) in [
-            ("File::group", file.group(asked).map(|_| ())),
-            ("File::dataset", file.dataset(asked).map(|_| ())),
-        ] {
-            assert!(
-                matches!(&got, Err(Error::NotAGroup(p)) if p == stopper),
-                "{entry}({asked:?}) answered {got:?}, expected the stop at {stopper:?}"
-            );
-        }
-    }
+    let result = match lookup {
+        PathLookup::Dataset => file.dataset(asked).map(|_| ()),
+        PathLookup::Group => file.group(asked).map(|_| ()),
+    };
+    assert!(
+        matches!(&result, Err(Error::NotAGroup(path)) if path == stopper),
+        "{asked:?}: {result:?}"
+    );
 
     assert!(matches!(
         file.group("absent/sub"),
@@ -1552,7 +1556,7 @@ fn a_path_through_a_non_group_names_the_object_that_stopped_it() {
         .map(|_| ())
         .unwrap_err()
         .to_string();
-    assert!(printed.contains("g/inner"), "the message read {printed:?}");
+    assert_eq!(printed, "not a group: g/inner");
 
     assert_eq!(file.dataset("g/inner").unwrap().read_i32().unwrap(), [2]);
 
@@ -1566,6 +1570,11 @@ fn a_path_through_a_non_group_names_the_object_that_stopped_it() {
         typed.group("mytype/sub"),
         Err(Error::NotAGroup(ref p)) if p == "mytype"
     ));
+}
+
+enum PathLookup {
+    Dataset,
+    Group,
 }
 
 #[test]
@@ -3068,7 +3077,12 @@ fn a_page_buffer_is_rejected_where_it_cannot_be_honored() {
     let before = std::fs::read(&paged).unwrap();
     let refused = File::open_rw_with_options(&paged, buffered(8192));
     assert!(
-        matches!(&refused, Err(Error::EditUnsupported(m)) if m.contains("page size")),
+        matches!(
+            &refused,
+            Err(Error::EditUnsupported(
+                "a page buffer must be at least the file's file-space page size"
+            ))
+        ),
         "a budget below one page must be refused, got {refused:?}"
     );
     untouched("budget under one page", &paged, &before);
@@ -3080,7 +3094,12 @@ fn a_page_buffer_is_rejected_where_it_cannot_be_honored() {
         FileAccessProperties::new().with_page_buffer_size(1 << 20),
     );
     assert!(
-        matches!(&refused, Err(Error::EditUnsupported(m)) if m.contains("SyncPolicy::Always")),
+        matches!(
+            &refused,
+            Err(Error::EditUnsupported(
+                "a page buffer does nothing under SyncPolicy::Always, whose every barrier is an fsync that flushes it; pair with_page_buffer_size with with_sync_policy(SyncPolicy::OnClose), or drop it"
+            ))
+        ),
         "a page buffer under SyncPolicy::Always must be refused, got {refused:?}"
     );
     untouched("page buffer under Always", &paged, &before);
@@ -3113,7 +3132,12 @@ fn a_page_buffer_is_rejected_where_it_cannot_be_honored() {
     }
     let refused = File::open_rw_with_options(&old_format, buffered(1 << 20));
     assert!(
-        matches!(&refused, Err(Error::EditUnsupported(m)) if m.contains("version-3 superblock")),
+        matches!(
+            &refused,
+            Err(Error::EditUnsupported(
+                "a page buffer marks the file for the life of the session, so that a session that crashes leaves one every reader refuses rather than one that reads clean; only a version-3 superblock carries a status-flags byte any library reads back, and this file's is older. Rewrite it at the 1.10 format (repack, or FileBuilder's default bounds), or drop the page buffer"
+            ))
+        ),
         "a page buffer on a pre-v3 superblock must be refused, got {refused:?}"
     );
     untouched("version-2 superblock", &old_format, &before);
@@ -3162,13 +3186,22 @@ fn a_page_buffer_is_rejected_where_it_cannot_be_honored() {
     b.write(&paged_userblock).unwrap();
     let accepted = File::open_rw_with_options(&paged_userblock, buffered(1 << 20)).unwrap();
     assert_eq!(accepted.edit_backing(), Some(EditBacking::Mirrored));
+    assert_eq!(
+        accepted.dataset("d").unwrap().read_i32().unwrap(),
+        [1, 2, 3, 4]
+    );
     accepted.close().unwrap();
 
     let swmr = fixture("swmr.h5", false);
     let before = std::fs::read(&swmr).unwrap();
     let refused = File::open_swmr_writer_with_options(&swmr, buffered(1 << 20));
     assert!(
-        matches!(&refused, Err(Error::EditUnsupported(m)) if m.contains("SWMR")),
+        matches!(
+            &refused,
+            Err(Error::EditUnsupported(
+                "the SWMR writer cannot buffer its writes: its readers observe the order they become visible in; leave FileAccessProperties::with_page_buffer_size unset to open it"
+            ))
+        ),
         "the SWMR writer must refuse a page buffer, got {refused:?}"
     );
     // A rejected SWMR open must leave the write-status flags clear.
@@ -3220,30 +3253,30 @@ fn default_access_properties_open_without_a_page_buffer(#[case] mode: DefaultOpe
 #[case::page_larger_than_budget(
     paged_create_properties(FileSpacePageSize::try_from(2 << 20).unwrap()),
     1 << 20, SyncPolicy::OnClose,
-    "a page buffer smaller than the file's file-space page size",
+    "a page buffer smaller than the file's file-space page size would be refused at open — so creating one this way would write the file and then fail to open it; raise with_page_buffer_size",
 )]
 #[case::v18(
     crate::FileCreateProperties::new().with_libver_bounds(crate::LibVer::Earliest, crate::LibVer::V18),
     1 << 20, SyncPolicy::OnClose,
-    "a page buffer marks the file in a version-3 superblock, and these bounds write the 1.8 format",
+    "a page buffer marks the file in a version-3 superblock, and these bounds write the 1.8 format, so creating one this way would write the file and then fail to open it; raise with_libver_bounds to admit LibVer::V110, or drop the page buffer",
 )]
 #[case::budget_under_one_page(
     paged_create_properties(FileSpacePageSize::try_from(16 * 1024).unwrap()),
     8192, SyncPolicy::OnClose,
-    "a page buffer smaller than the file's file-space page size",
+    "a page buffer smaller than the file's file-space page size would be refused at open — so creating one this way would write the file and then fail to open it; raise with_page_buffer_size",
 )]
 #[case::unpaged_budget_under_default_page(
     crate::FileCreateProperties::new(),
     2048,
     SyncPolicy::OnClose,
-    "a page buffer smaller than the file's file-space page size"
+    "a page buffer smaller than the file's file-space page size would be refused at open — so creating one this way would write the file and then fail to open it; raise with_page_buffer_size"
 )]
 #[case::default_sync_policy(
     paged_create_properties(FileSpacePageSize::try_from(16 * 1024).unwrap()),
     1 << 20, SyncPolicy::Always,
-    "a page buffer does nothing under the default SyncPolicy::Always",
+    "a page buffer does nothing under the default SyncPolicy::Always, whose every barrier is an fsync that flushes it, so creating one this way would write the file and then fail to open it; add with_sync_policy(SyncPolicy::OnClose) to the access properties, or drop the page buffer",
 )]
-fn create_with_options_refuses_a_page_buffer_it_could_not_reopen_with(
+fn create_with_options_rejects_a_page_buffer_it_could_not_reopen_with(
     #[case] create: crate::FileCreateProperties,
     #[case] budget: usize,
     #[case] policy: SyncPolicy,
@@ -3262,10 +3295,7 @@ fn create_with_options_refuses_a_page_buffer_it_could_not_reopen_with(
     let Error::EditUnsupported(message) = err else {
         panic!("expected EditUnsupported, got {err:?}");
     };
-    assert!(
-        message.starts_with(reason),
-        "expected {reason:?}, got {message:?}"
-    );
+    assert_eq!(message, reason);
     assert!(!path.exists(), "the rejected creation wrote a file");
 }
 

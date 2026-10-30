@@ -25,6 +25,7 @@ use rstest::rstest;
 use test_util::btree_v2;
 use test_util::fractal_heap;
 use test_util::widths::Widths;
+use test_util_hdf5::file_space::persisted::ManagerSlot;
 
 use super::common;
 use crate::DatatypeByteOrder;
@@ -162,9 +163,25 @@ fn strict_persisted_failure_precedes_image_construction() {
     ) else {
         panic!("expected a manager checksum error");
     };
-    let Error::PersistedFreeSpace { source, .. } = error else {
+    let Error::PersistedFreeSpace {
+        manager_slot,
+        header_address,
+        section_list_address,
+        section,
+        source,
+    } = error
+    else {
         panic!("{error:?}");
     };
+    assert_eq!(
+        (manager_slot, header_address, section_list_address, section),
+        (
+            ManagerSlot::Raw.index(),
+            StoredAddress::new(u64::try_from(at).unwrap()),
+            None,
+            None
+        )
+    );
     let Error::Format(crate::FormatError::ChecksumMismatch { expected, computed }) = *source else {
         panic!("{source:?}");
     };

@@ -400,6 +400,7 @@ pub(crate) fn clear_status_flags_at(path: &Path) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use hdf5_pure_core::__private::SuperblockFields;
+    use test_util_hdf5::assertion::StatusOpen;
 
     use super::*;
     use crate::SuperblockStatus;
@@ -485,163 +486,41 @@ mod tests {
         #[values((OpenIntent::Write, 0), (READ, 1), (OpenIntent::Read(WriteMarkPolicy::AllowSnapshot), 2), (OpenIntent::SwmrRead, 3))]
         (intent, index): (OpenIntent, usize),
     ) {
-        let result = check_status_flags(
-            &flagged(
-                version,
-                hdf5_pure_core::__private::superblock_status_flags(bits),
-            ),
-            intent,
-            OpenTarget::Source,
-        );
+        let flags = hdf5_pure_core::__private::superblock_status_flags(bits);
+        let result = check_status_flags(&flagged(version, flags), intent, OpenTarget::Source);
         if version != SuperblockVersion::Three || allowed[index] {
             result.unwrap();
         } else {
-            let err = result.unwrap_err();
-            assert!(matches!(err, Error::FileMarkedInUse(_)), "{err:?}");
+            assert_source_status_error(result.unwrap_err(), flags, intent);
         }
     }
 
-    /// The refusal has to say what to do next: the path, the flags, and the
-    /// recovery a user would otherwise have to find in the C library's docs.
-    #[test]
-    fn the_refusal_names_the_recovery() {
-        let err = check_status_flags(
-            &flagged(
-                SuperblockVersion::Three,
-                SuperblockStatusFlags::swmr_write_marked(),
-            ),
-            READ,
-            OpenTarget::Path(Path::new("d.h5")),
-        )
-        .expect_err("a flagged file is refused for a snapshot read");
-        let msg = err.to_string();
-        assert!(matches!(err, Error::FileMarkedInUse(_)), "got {err:?}");
-        // `from_bytes` is named because it is the only way through for a flagged
-        // file on a read-only mount, where `clear_status_flags` cannot get the write
-        // access it needs.
-        for part in [
-            "d.h5",
-            "0x05",
-            "clear_status_flags",
-            "open_swmr",
-            "from_bytes",
-        ] {
-            assert!(msg.contains(part), "refusal does not mention {part}: {msg}");
-        }
-    }
-
-    /// The recovery a source is offered is the one a source can reach.
-    ///
-    /// Two of the three the path refusal names — `open_swmr` to follow the
-    /// writer, `clear_status_flags` to clear what one left behind - take a path,
-    /// so handing them to a caller that opened a byte source would be advice it
-    /// cannot take. The refusal has to say which half applies, and the check
-    /// below is that it does: the path wording contains none of this text, so
-    /// a `Source` target falling back to it fails here.
-    #[test]
-    fn a_source_is_told_which_recovery_it_can_reach() {
-        let err = check_status_flags(
-            &flagged(
-                SuperblockVersion::Three,
-                SuperblockStatusFlags::swmr_write_marked(),
-            ),
-            READ,
-            OpenTarget::Source,
-        )
-        .expect_err("a flagged file is refused for a snapshot read");
-        let msg = err.to_string();
-        assert!(
-            msg.starts_with("file is marked in use: a byte source:"),
-            "the refusal does not name the source it refused: {msg}"
-        );
-        assert!(
-            msg.contains("File::from_bytes to read the bytes as they stand"),
-            "the refusal does not name the one recovery a source can reach: {msg}"
-        );
-        assert!(
-            msg.contains("both need a filesystem path"),
-            "the refusal offers path-only recoveries without saying they need a path: {msg}"
-        );
-    }
-
-    /// The mark a page-buffered writer leaves is the write bit alone, which no
-    /// SWMR reader can follow — so the refusal must not send the caller to
-    /// `File::open_swmr`, which refuses the same file in its turn (issue #419).
-    /// What applies instead is the opt-in, named in full so it can be pasted.
-    #[test]
-    fn a_write_only_mark_names_the_snapshot_opt_in() {
-        let err = check_status_flags(
-            &flagged(
-                SuperblockVersion::Three,
-                SuperblockStatusFlags::write_marked(),
-            ),
-            READ,
-            OpenTarget::Path(Path::new("buffered.h5")),
-        )
-        .expect_err("a marked file is refused for a snapshot read");
-        let msg = err.to_string();
-        assert!(matches!(err, Error::FileMarkedInUse(_)), "got {err:?}");
-        for part in [
-            "buffered.h5",
-            "0x01",
-            "FileAccessProperties::with_write_mark_policy(WriteMarkPolicy::AllowSnapshot)",
-            "File::sync",
-            "from_bytes",
-            "clear_status_flags",
-        ] {
-            assert!(msg.contains(part), "refusal does not mention {part}: {msg}");
-        }
-        assert!(
-            !msg.contains("open_swmr"),
-            "refusal names a reader that refuses this mark too: {msg}"
-        );
-    }
-
-    /// A source refused by the same mark is offered the opt-in, which it can
-    /// take — it is a property of the open, not of the path — and told that the
-    /// recovery it cannot take needs one.
-    #[test]
-    fn a_source_refused_by_a_write_only_mark_is_offered_the_opt_in() {
-        let err = check_status_flags(
-            &flagged(
-                SuperblockVersion::Three,
-                SuperblockStatusFlags::write_marked(),
-            ),
-            READ,
-            OpenTarget::Source,
-        )
-        .expect_err("a marked file is refused for a snapshot read");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("with_write_mark_policy(WriteMarkPolicy::AllowSnapshot)"),
-            "the refusal does not name the opt-in a source can take: {msg}"
-        );
-        assert!(
-            msg.contains("File::clear_status_flags needs a filesystem path"),
-            "the refusal offers a path-only recovery without saying it needs a path: {msg}"
-        );
-        assert!(!msg.contains("open_swmr"), "got {msg}");
-    }
-
-    /// The other half: the pair a SWMR writer leaves keeps the wording that
-    /// names its reader, and does not offer an opt-in that would refuse it.
-    #[test]
-    fn a_swmr_pair_names_its_reader_and_not_the_opt_in() {
-        let err = check_status_flags(
-            &flagged(
-                SuperblockVersion::Three,
-                SuperblockStatusFlags::swmr_write_marked(),
-            ),
-            READ,
-            OpenTarget::Path(Path::new("swmr.h5")),
-        )
-        .expect_err("a marked file is refused for a snapshot read");
-        let msg = err.to_string();
-        assert!(msg.contains("File::open_swmr"), "got {msg}");
-        assert!(
-            !msg.contains("write_mark_policy"),
-            "the opt-in does not admit a SWMR pair, so the refusal must not name it: {msg}"
-        );
+    #[rstest::rstest]
+    #[case::swmr_path_d(
+        SuperblockStatusFlags::swmr_write_marked(),
+        OpenTarget::Path(Path::new("d.h5"))
+    )]
+    #[case::swmr_source(SuperblockStatusFlags::swmr_write_marked(), OpenTarget::Source)]
+    #[case::write_mark_path(
+        SuperblockStatusFlags::write_marked(),
+        OpenTarget::Path(Path::new("buffered.h5"))
+    )]
+    #[case::write_mark_source(SuperblockStatusFlags::write_marked(), OpenTarget::Source)]
+    #[case::swmr_path_swmr(
+        SuperblockStatusFlags::swmr_write_marked(),
+        OpenTarget::Path(Path::new("swmr.h5"))
+    )]
+    fn a_marked_read_reports_complete_recovery(
+        #[case] flags: SuperblockStatusFlags,
+        #[case] target: OpenTarget<'_>,
+    ) {
+        let error = check_status_flags(&flagged(SuperblockVersion::Three, flags), READ, target)
+            .unwrap_err();
+        let open = match target {
+            OpenTarget::Path(path) => StatusOpen::Read(path),
+            OpenTarget::Source => StatusOpen::SourceRead,
+        };
+        assert_status_error(error, flags, open);
     }
 
     /// Write a file at `path` whose superblock carries `version` and `flags`,
@@ -666,11 +545,6 @@ mod tests {
         std::fs::write(path, &bytes).unwrap();
     }
 
-    /// The version gate is checked against a real file, not only against a
-    /// hand-built `Superblock`: a v2 file whose write flag is set still opens
-    /// through `File::open`, which is the C-library parity the gate exists for.
-    /// (v2 and v3 superblocks share a byte layout, so the rewrite above is the
-    /// whole difference between them.)
     #[test]
     fn a_flagged_v2_file_still_opens() {
         let dir = tempfile::tempdir().unwrap();
@@ -688,11 +562,8 @@ mod tests {
         );
     }
 
-    /// The other half of the version gate: nothing this crate does raises a flag
-    /// on a superblock the gate skips, because the SWMR writer — the only path
-    /// that raises one — refuses a pre-v3 file outright, as the C library does.
     #[test]
-    fn the_swmr_writer_refuses_a_superblock_the_gate_would_skip() {
+    fn the_swmr_writer_rejects_a_superblock_the_gate_skips() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("v2.h5");
         write_file_with(&path, SuperblockVersion::Two, SuperblockStatusFlags::new());
@@ -700,8 +571,13 @@ mod tests {
         let err = crate::File::open_swmr_writer(&path)
             .expect_err("SWMR writing requires a v3 superblock");
         assert!(
-            matches!(err, Error::SwmrAppendUnsupported(_)),
-            "got {err:?}"
+            matches!(
+                err,
+                Error::SwmrAppendUnsupported(
+                    "SWMR writing requires a latest-format file (v3 superblock) with no userblock and no persisted free-space"
+                )
+            ),
+            "{err:?}"
         );
         let bytes = std::fs::read(&path).unwrap();
         let off = usize::try_from(
@@ -718,13 +594,8 @@ mod tests {
         );
     }
 
-    /// Half a flag pair is what a *plain* (non-SWMR) C-library writer leaves, and
-    /// a SWMR reader has no protocol for following one, so `File::open_swmr`
-    /// refuses it where it accepts the full pair. Exercised on a real file
-    /// because the mismatch rule is the one branch a caller can reach only
-    /// through a file another library wrote.
     #[test]
-    fn a_swmr_reader_refuses_write_access_without_the_swmr_bit() {
+    fn a_swmr_reader_rejects_write_access_without_the_swmr_bit() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("half.h5");
         write_file_with(
@@ -735,20 +606,16 @@ mod tests {
 
         let err = crate::File::open_swmr(&path)
             .expect_err("a SWMR reader needs a SWMR writer, not a plain one");
-        let Error::FileMarkedInUse(reason) = err else {
-            panic!("expected FileMarkedInUse, got {err:?}");
-        };
-        assert!(reason.contains("status flags disagree (0x01)"), "{reason}");
-        assert!(
-            reason.contains("a SWMR reader needs a SWMR writer"),
-            "{reason}"
+        assert_status_error(
+            err,
+            SuperblockStatusFlags::write_marked(),
+            StatusOpen::SwmrRead(&path),
         );
-        let err = crate::File::open(&path).unwrap_err();
-        let Error::FileMarkedInUse(reason) = err else {
-            panic!("expected FileMarkedInUse, got {err:?}");
-        };
-        assert!(reason.contains("status flags 0x01"), "{reason}");
-        assert!(reason.contains("a snapshot read is not safe"), "{reason}");
+        assert_status_error(
+            crate::File::open(&path).unwrap_err(),
+            SuperblockStatusFlags::write_marked(),
+            StatusOpen::Read(&path),
+        );
 
         write_file_with(
             &path,
@@ -757,5 +624,33 @@ mod tests {
         );
         let file = crate::File::open_swmr(&path).unwrap();
         assert_eq!(file.root().datasets().unwrap(), Vec::<String>::new());
+    }
+    fn assert_source_status_error(error: Error, flags: SuperblockStatusFlags, intent: OpenIntent) {
+        let bits = flags.bits();
+        let reason = match intent {
+            OpenIntent::Read(_) => {
+                assert_status_error(error, flags, StatusOpen::SourceRead);
+                return;
+            }
+            OpenIntent::Write => format!(
+                "a byte source: the superblock marks the file as open for write (status flags {bits:#04x}), so another writer holds it. Open it read-only, or — if a writer exited without closing the file — clear the flag with File::clear_status_flags."
+            ),
+            OpenIntent::SwmrRead => format!(
+                "a byte source: the superblock's status flags disagree ({bits:#04x}): a SWMR reader needs a SWMR writer (both the write and SWMR-write bits) or a quiescent file (neither). Clear them with File::clear_status_flags if a writer exited without closing the file."
+            ),
+        };
+        let Error::FileMarkedInUse(actual) = error else {
+            panic!("expected FileMarkedInUse, got {error:?}");
+        };
+        assert_eq!(actual, reason);
+    }
+    fn assert_status_error(error: Error, flags: SuperblockStatusFlags, open: StatusOpen<'_>) {
+        let printed = error.to_string();
+        let Error::FileMarkedInUse(actual) = error else {
+            panic!("expected FileMarkedInUse, got {error:?}");
+        };
+        let expected = open.message(flags);
+        assert_eq!(actual, expected);
+        assert_eq!(printed, format!("file is marked in use: {expected}"));
     }
 }
