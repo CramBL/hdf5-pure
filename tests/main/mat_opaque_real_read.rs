@@ -291,10 +291,6 @@ fn datetime_subms_double_double_against_real_matlab() {
 
 #[test]
 fn malformed_mcos_is_handled_without_panicking() {
-    // Deliberately damaged real-MATLAB subsystems. The invariant is that the
-    // reader never panics on them. The fixture with an out-of-range object id
-    // surfaces a typed error; the other's damage is tolerated and its variable
-    // still decodes (as matio also reads it). Both complete without panicking.
     let meta = mat_file::read_fixture(test_util::data(
         "matlab/test_corrupted_mcos_object_metadata.mat",
     ));
@@ -305,6 +301,13 @@ fn malformed_mcos_is_handled_without_panicking() {
     );
 
     let subsys = mat_file::read_fixture(test_util::data("matlab/test_corrupted_subsystem.mat"));
-    // Tolerated by our parser; must return (Ok or Err) rather than panic.
-    let _ = mat::from_bytes::<HashMap<String, serde_json::Value>>(&subsys);
+    // h5py reads these millisecond and residual values from the stored compound.
+    let value = mat::from_bytes::<HashMap<String, serde_json::Value>>(&subsys).unwrap();
+    assert_eq!(
+        value,
+        HashMap::from([(
+            "var".into(),
+            serde_json::json!({ "millis_utc": [1_765_060_960_050.211], "sub_ms": [0.000_062_495_470_046_997_07] })
+        )])
+    );
 }

@@ -136,9 +136,12 @@ fn appending_by_reference_dereferenced_after_staging_is_refused_by_the_session()
     // Dereferenced now, so its address is the file's current one.
     let mut by_ref = deref_dataset(&file);
     let err = by_ref.append(&[8i32]).unwrap_err();
-    assert!(
-        matches!(err, Error::AppendInPlaceUnsupported(_)),
-        "unexpected error: {err:?}"
+    let Error::AppendInPlaceUnsupported(actual) = err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(
+        actual,
+        "this append target was reached by object reference, so it names a dataset by object-header address, and this session has staged or committed edits that can move that header; re-open the dataset by path to append to it"
     );
 }
 

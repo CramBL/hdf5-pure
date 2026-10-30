@@ -7,7 +7,9 @@
 //! Fixed-Array / Extensible-Array chunked data reads — all from a `Read + Seek`
 //! source that never buffers the whole file.
 
-use hdf5_pure::{ChunkCacheConfig, File, FileAccessProperties, FileBuilder, MetadataCacheConfig};
+use hdf5_pure::{
+    ChunkCacheConfig, Error, File, FileAccessProperties, FileBuilder, MetadataCacheConfig,
+};
 use rstest::rstest;
 use test_util::dense_attributes::Fixture as DenseAttributeFixture;
 use test_util_hdf5::dataset::Unlimited;
@@ -500,9 +502,11 @@ fn a_source_that_returns_a_short_buffer_is_refused() {
             .and_then(|d| d.read_f64())
             .expect_err("a source returning short buffers read a dataset successfully"),
     };
-    let msg = err.to_string();
-    assert!(
-        msg.contains("bytes for a") && msg.contains("read at offset"),
-        "the refusal does not say the source came back short: {msg}"
+    let Error::Format(FormatError::Source(actual)) = err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(
+        actual,
+        "the source returned 47 bytes for a 48-byte read at offset 0"
     );
 }

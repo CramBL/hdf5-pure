@@ -23,7 +23,7 @@
 
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::UserblockSize;
-use hdf5_pure::{File, FileBuilder};
+use hdf5_pure::{Error, File, FileBuilder, FormatError};
 
 /// Comfortably more than the read's own window budget, and not a round number of
 /// windows: 2.3 MiB of `f64` against a 1 MiB window.
@@ -159,9 +159,15 @@ fn a_numeric_read_of_an_empty_string_dataset_still_fails() {
     let err = ds
         .read_f64()
         .expect_err("a string dataset must not decode as f64, empty or not");
-    assert!(
-        format!("{err}").contains("mismatch") || format!("{err:?}").contains("TypeMismatch"),
-        "expected a type mismatch, got {err:?}"
+    let Error::Format(actual) = err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(
+        actual,
+        FormatError::TypeMismatch {
+            expected: "numeric",
+            actual: "VariableLength"
+        }
     );
 }
 

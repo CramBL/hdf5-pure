@@ -86,7 +86,7 @@ fn synthetic_userblock_file_roundtrip() {
     // New group and its attribute.
     let mut groups = file.root().groups().unwrap();
     groups.sort();
-    assert!(groups.contains(&"newgrp".to_string()));
+    assert_eq!(groups, vec!["grp", "newgrp"]);
     let attrs = file.group("newgrp").unwrap().attrs().unwrap();
     assert_eq!(
         attrs.get("tag"),
@@ -440,21 +440,19 @@ fn real_mat_add_dataset_preserves_userblock_and_data() {
         before
     );
     // The original variables and MATLAB's MCOS groups are still present.
-    let datasets = file.root().datasets().unwrap();
-    for name in [
-        "string_array",
-        "string_empty",
-        "string_scalar",
-        "hdf5_pure_probe",
-    ] {
-        assert!(
-            datasets.contains(&name.to_string()),
-            "missing dataset {name}"
-        );
-    }
+    let mut datasets = file.root().datasets().unwrap();
+    datasets.sort();
+    assert_eq!(
+        datasets,
+        vec![
+            "hdf5_pure_probe",
+            "string_array",
+            "string_empty",
+            "string_scalar"
+        ]
+    );
     let groups = file.root().groups().unwrap();
-    assert!(groups.contains(&"#refs#".to_string()));
-    assert!(groups.contains(&"#subsystem#".to_string()));
+    assert_eq!(groups, vec!["#refs#", "#subsystem#"]);
 
     // The MATLAB userblock (signature, version, endian indicator) is unchanged.
     userblock.assert_unchanged(&path);

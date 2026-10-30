@@ -96,33 +96,26 @@ fn swmr_refuses_the_staged_surface() {
     ds.append(&[4i32, 5, 6, 7]).unwrap();
 }
 
-#[test]
-fn swmr_refuses_filtered_and_unaligned_appends() {
+#[rstest::rstest]
+#[case::unaligned(&[], &[4, 5, 6], "SWMR append must be chunk-aligned: the current length and the appended length must both be whole multiples of the chunk length")]
+#[case::filtered(&[Filter::Deflate(DeflateLevel::Six)], &[4, 5, 6, 7], "filtered datasets are not supported for SWMR append")]
+fn swmr_refuses_filtered_and_unaligned_appends(
+    #[case] filters: &[Filter],
+    #[case] values: &[i32],
+    #[case] expected: &str,
+) {
     let dir = tempfile::tempdir().unwrap();
-
-    // Unaligned: length 4 (chunk 4, aligned), append 3 -> not a whole chunk.
-    let upath = dir.path().join("u.h5");
-    Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&upath);
-    {
-        let file = File::open_swmr_writer(&upath).unwrap();
-        let mut ds = file.dataset("d").unwrap();
-        assert!(matches!(
-            ds.append(&[4i32, 5, 6]),
-            Err(Error::SwmrAppendUnsupported(_))
-        ));
-    }
-
-    // Filtered: opening is fine (the filter is per dataset), the append is refused.
-    let fpath = dir.path().join("f.h5");
+    let path = dir.path().join("d.h5");
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4)
-        .filters(&[Filter::Deflate(DeflateLevel::Six)])
-        .pure_create(&fpath);
-    let file = File::open_swmr_writer(&fpath).unwrap();
+        .filters(filters)
+        .pure_create(&path);
+    let file = File::open_swmr_writer(&path).unwrap();
     let mut ds = file.dataset("d").unwrap();
-    assert!(matches!(
-        ds.append(&[4i32, 5, 6, 7]),
-        Err(Error::SwmrAppendUnsupported(_))
-    ));
+    let error = ds.append(values).unwrap_err();
+    let Error::SwmrAppendUnsupported(actual) = error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(actual, expected);
 }
 
 #[test]

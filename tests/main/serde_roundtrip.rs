@@ -652,10 +652,10 @@ fn omitted_unit_field_without_default_fails_to_deserialize() {
     )
     .unwrap();
     let err = mat::from_bytes::<ReaderNoDefault>(&bytes).unwrap_err();
-    assert!(
-        err.to_string().contains("meta"),
-        "expected a missing-field error naming `meta`, got: {err}"
-    );
+    let MatError::Custom(actual) = err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(actual, "missing field `meta`");
 }
 
 #[test]
@@ -874,8 +874,13 @@ fn unit_variant_index_out_of_range_is_an_error() {
     let mut mb = mat::MatBuilder::new(mat::Options::default());
     mb.write_scalar_u32("width", 99).unwrap();
     let err = mat::from_bytes::<WithWidth>(&mb.finish().unwrap()).unwrap_err();
-    let msg = err.to_string();
-    assert!(msg.contains("99"), "unexpected error: {msg}");
+    let MatError::Custom(actual) = err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(
+        actual,
+        "invalid value: integer `99`, expected variant index 0 <= i < 2"
+    );
 }
 
 #[derive(Serialize)]
@@ -1676,26 +1681,19 @@ struct HoldsStruct {
     v: StructVariant,
 }
 
-#[test]
-fn non_unit_enum_variants_are_unsupported() {
-    assert!(matches!(
-        mat::to_bytes(&HoldsNewtype {
-            v: NewtypeVariant::N(1)
-        }),
-        Err(MatError::UnsupportedType(_))
-    ));
-    assert!(matches!(
-        mat::to_bytes(&HoldsTuple {
-            v: TupleVariant::T(1, 2)
-        }),
-        Err(MatError::UnsupportedType(_))
-    ));
-    assert!(matches!(
-        mat::to_bytes(&HoldsStruct {
-            v: StructVariant::S { a: 1 }
-        }),
-        Err(MatError::UnsupportedType(_))
-    ));
+#[rstest::rstest]
+#[case::newtype(mat::to_bytes(&HoldsNewtype { v: NewtypeVariant::N(1) }), "newtype enum variant")]
+#[case::tuple(mat::to_bytes(&HoldsTuple { v: TupleVariant::T(1, 2) }), "tuple enum variant")]
+#[case::struct_variant(mat::to_bytes(&HoldsStruct { v: StructVariant::S { a: 1 } }), "struct enum variant")]
+fn non_unit_enum_variants_are_unsupported(
+    #[case] result: Result<Vec<u8>, MatError>,
+    #[case] expected: &str,
+) {
+    let error = result.unwrap_err();
+    let MatError::UnsupportedType(actual) = error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(actual, expected);
 }
 
 #[derive(Serialize)]
@@ -1717,11 +1715,10 @@ fn deserialize_unknown_enum_variant_errors() {
     })
     .unwrap();
     let err = mat::from_bytes::<StateFlag>(&bytes).unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        msg.contains("unknown variant") && msg.contains("Maybe"),
-        "expected an unknown-variant error mentioning \"Maybe\", got: {msg}"
-    );
+    let MatError::Custom(actual) = err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(actual, "unknown variant `Maybe`, expected `On` or `Off`");
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]

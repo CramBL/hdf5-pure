@@ -14,7 +14,7 @@ object metadata or malformed conditions. Ordinary tests never regenerate these f
 |---|---|---|
 | `matjl_struct_table_datetime.mat` | `mat_opaque_real_read.rs` | Datetime double-double residual in version 1 compound `{real, imag}` storage |
 | `test_corrupted_mcos_object_metadata.mat` | `mat_opaque_real_read.rs` | Out-of-range MCOS object ID returns an error without panic |
-| `test_corrupted_subsystem.mat` | `mat_opaque_real_read.rs` | The reader returns success or an error without panic |
+| `test_corrupted_subsystem.mat` | `mat_opaque_real_read.rs` | Complete decoded datetime for `var` despite subsystem damage |
 | `test_enum_v73.mat` | `mat_enum_read.rs`, `src/superblock.rs` | Scalar enums, uint32 bases, arrays, nested enums, and user-block-relative parsing |
 | `test_maps_v73.mat` | `mat_containers_map_read.rs` | Map and dictionary keys and values, including nested mappings |
 | `test_string_v73.mat` | `mat_opaque_real_read.rs`, `edit_userblock.rs`, `edit_userblock_chunked.rs`, `crates/crosscheck/tests/main/edit_userblock.rs` | MCOS strings and user-block preservation |

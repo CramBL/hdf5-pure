@@ -6,7 +6,7 @@
 //! `crates/crosscheck/tests/main/edit.rs`; edits that land in dense (fractal-heap) storage live in
 //! `edit_dense_attr.rs`.
 
-use hdf5_pure::{AttrValue, Error, File, FileBuilder, FormatError};
+use hdf5_pure::{AttrValue, Error, File, FileBuilder};
 
 use test_util::fractal_heap;
 use test_util_hdf5::dataset::Unlimited;
@@ -177,7 +177,13 @@ fn attr_edit_plus_append_dataset_same_commit_refused() {
         })
         .unwrap();
     let err = s.commit().unwrap_err();
-    assert!(matches!(err, Error::EditUnsupported(_)));
+    let Error::EditUnsupported(actual) = err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(
+        actual,
+        "the same dataset is edited more than once in one commit (an attribute edit plus another edit); use separate commits"
+    );
 }
 
 #[test]
@@ -242,10 +248,7 @@ fn set_attr_on_missing_dataset_refused() {
     // Resolving the handle is where a missing dataset is now caught, rather than
     // at commit — the edit never gets staged at all.
     let err = s.dataset("nope").unwrap_err();
-    assert!(
-        matches!(err, Error::Format(FormatError::PathNotFound(_))),
-        "expected PathNotFound, got {err:?}"
-    );
+    test_util_hdf5::assertion::path_not_found(err, "nope");
     assert!(!s.has_staged_edits());
     s.commit().unwrap();
 }

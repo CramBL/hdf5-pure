@@ -11,7 +11,8 @@
 
 use std::collections::BTreeMap;
 
-use hdf5_pure::mat;
+use hdf5_pure::FormatError;
+use hdf5_pure::mat::{self, MatError};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
@@ -185,8 +186,8 @@ fn self_referential_cell_errors_instead_of_overflowing() {
     let result: Result<Any, _> = mat::from_bytes(&bytes);
     let err = result.expect_err("a self-referential cell must be rejected");
     assert!(
-        err.to_string().contains("depth"),
-        "expected a nesting-depth error, got: {err}"
+        matches!(err, MatError::Format(FormatError::NestingDepthExceeded)),
+        "{err:?}"
     );
 }
 

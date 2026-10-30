@@ -923,10 +923,10 @@ fn rejects_nonexistent_drop_path() {
     b.write(&src).unwrap();
 
     let err = hdf5_pure::repack(&src, &dst, &RepackOptions::new().drop_path("absent")).unwrap_err();
-    assert!(
-        matches!(err, hdf5_pure::Error::RepackUnsupported(_)),
-        "expected RepackUnsupported, got {err:?}"
-    );
+    let Error::RepackUnsupported(actual) = err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(actual, "drop path does not exist in the source: absent");
     // Nothing should have been written to dst.
     assert!(
         !dst.exists(),
@@ -1189,14 +1189,16 @@ fn an_explicit_bound_refuses_content_it_cannot_express() {
 
     // Re-target down to 1.8: the chunked dataset cannot be written there.
     let to_v18 = RepackOptions::new().with_libver_bounds(LibVer::Earliest, LibVer::V18);
-    assert!(
-        matches!(
-            hdf5_pure::repack(&src, &dst, &to_v18),
-            Err(hdf5_pure::Error::Format(
-                hdf5_pure::FormatError::LibverTooOldForContent { .. }
-            ))
-        ),
-        "a chunked dataset must not be silently upgraded past the requested bound"
+    let Error::Format(actual) = hdf5_pure::repack(&src, &dst, &to_v18).unwrap_err() else {
+        panic!("expected a format error");
+    };
+    assert_eq!(
+        actual,
+        FormatError::LibverTooOldForContent {
+            content: "a chunked, filtered, or resizable dataset",
+            needs: "v1.10",
+            writing: "v1.8"
+        }
     );
 
     // And the same bound raised to 1.10 succeeds, so the refusal is about the

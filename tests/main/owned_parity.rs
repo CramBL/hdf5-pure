@@ -79,10 +79,10 @@ fn copy_from_another_file() {
 
     // A streaming source has no in-memory image and is refused.
     let streaming = File::open_streaming(&src_path).unwrap();
-    assert!(matches!(
-        file.copy_from(&streaming, "cal", "cal_copy2"),
-        Err(Error::EditUnsupported(_))
-    ));
+    test_util_hdf5::assertion::edit_unsupported(
+        file.copy_from(&streaming, "cal", "cal_copy2").unwrap_err(),
+        "cross-file copy requires a buffered source file (File::open or File::from_bytes), not a streaming one",
+    );
 }
 
 #[test]
