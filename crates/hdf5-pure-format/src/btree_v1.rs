@@ -1,7 +1,7 @@
 //! The version 1 B-tree node: the header layout both node types share, and the parsers of a
 //! group's node, node type 0, and of a chunk node, node type 1.
 
-use core::ops::Range;
+use core::ops::{Deref, Range};
 
 use alloc::vec::Vec;
 
@@ -220,25 +220,28 @@ impl BTreeV1Node {
 /// The bytes of a version 1 B-tree chunk node after its 8-byte prefix, read from a
 /// [`MetadataSource`].
 ///
-/// [`node`](Self::node) returns a [`BTreeV1ChunkNode`] that borrows them.
+/// Retains the source's byte owner, which may borrow resident bytes or share an immutable
+/// allocation. The body includes the sibling addresses, the entries in use, and the trailing key.
+/// [`node`](Self::node) returns a [`BTreeV1ChunkNode`] that borrows these bytes.
 #[derive(Clone, Debug)]
-pub struct BTreeV1ChunkNodeBytes {
+pub struct BTreeV1ChunkNodeBytes<B> {
     layout: ChunkNodeLayout,
     entries: Range<usize>,
-    body: Vec<u8>,
+    body: B,
 }
 
-impl BTreeV1ChunkNodeBytes {
+impl<B: Deref<Target = [u8]>> BTreeV1ChunkNodeBytes<B> {
     /// Reads the chunk node at `address` in `source`.
     ///
-    /// Reads the 8-byte prefix for the number of entries in use, then the rest of the node.
+    /// Reads the 8-byte prefix for the number of entries in use, then the rest of the node through
+    /// [`MetadataSource::read_metadata`]. Retains the returned body bytes.
     ///
     /// # Errors
     ///
     /// Returns the errors [`BTreeV1ChunkNode::parse`] returns, and the error `source` returns if
     /// a read fails.
-    pub fn read_from_source(
-        source: &(impl MetadataSource + ?Sized),
+    pub fn read_from_source<'a>(
+        source: &'a (impl MetadataSource<Bytes<'a> = B> + ?Sized),
         address: u64,
         offset_size: u8,
         ndims: usize,
@@ -253,14 +256,15 @@ impl BTreeV1ChunkNodeBytes {
 
     /// Reads the chunk node at `address` in `source` using a validated address width.
     ///
-    /// Reads the 8-byte prefix for the number of entries in use, then the rest of the node.
+    /// Reads the 8-byte prefix for the number of entries in use, then the rest of the node through
+    /// [`MetadataSource::read_metadata`]. Retains the returned body bytes.
     ///
     /// # Errors
     ///
     /// Returns the errors [`BTreeV1ChunkNode::parse_with_offset_width`] returns, and the error
     /// `source` returns if a read fails.
-    pub fn read_from_source_with_offset_width(
-        source: &(impl MetadataSource + ?Sized),
+    pub fn read_from_source_with_offset_width<'a>(
+        source: &'a (impl MetadataSource<Bytes<'a> = B> + ?Sized),
         address: u64,
         offset_width: OffsetWidth,
         ndims: usize,
@@ -277,9 +281,13 @@ impl BTreeV1ChunkNodeBytes {
                 offset: address,
                 length: BTREE_V1_NODE_PREFIX_LEN.to_u64(),
             })?;
-        let body = source.read_metadata_at(body_address, layout.body_len())?;
+        let body = source.read_metadata(body_address, layout.body_len())?;
         let entries = layout.entries();
-        if body.len() < entries.end {
+        if body
+            .get(..layout.body_len())
+            .and_then(|body| body.get(entries.clone()))
+            .is_none()
+        {
             return Err(FormatError::UnexpectedEof {
                 expected: layout.node_len,
                 available: BTREE_V1_NODE_PREFIX_LEN + body.len(),
@@ -585,6 +593,7 @@ const BTREE_V1_CHUNK_NODE_TYPE: u8 = 1;
 mod tests {
     use core::cell::RefCell;
 
+    use hdf5_pure_core::MetadataBytes;
     use rstest::rstest;
     use test_util::btree_v1;
     use test_util::widths::Widths;
@@ -730,9 +739,8 @@ mod tests {
             self.bytes.read_at(offset, buf)
         }
 
-        fn read_metadata_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, FormatError> {
-            self.reads.borrow_mut().push((offset, len));
-            self.bytes.read_metadata_at(offset, len)
+        fn read_metadata_at(&self, _offset: u64, _len: usize) -> Result<Vec<u8>, FormatError> {
+            Err(FormatError::Source("unexpected vector read".into()))
         }
     }
 
@@ -779,7 +787,15 @@ mod tests {
             reads: RefCell::new(Vec::new()),
         };
         let read = BTreeV1ChunkNodeBytes::read_from_source(&source, 0, offset_size, 2).unwrap();
+        assert_eq!(
+            read.body.as_ptr(),
+            node[BTREE_V1_NODE_PREFIX_LEN..].as_ptr()
+        );
         let read = read.node();
+        assert_eq!(
+            read.entries.as_ptr(),
+            node[btree_v1_node_header_size(offset_size)..].as_ptr()
+        );
         assert_eq!(
             (read.node_level(), read.entries_used(), read.stored_len()),
             (level, 2, node.len())
@@ -846,6 +862,163 @@ mod tests {
                 expected: full.to_u64(),
                 available: (full - 1).to_u64(),
             }
+        );
+    }
+
+    struct PartialSource<'a> {
+        bytes: &'a [u8],
+        address: u64,
+    }
+
+    impl MetadataSource for PartialSource<'_> {
+        type Bytes<'a>
+            = &'a [u8]
+        where
+            Self: 'a;
+
+        fn read_metadata(&self, offset: u64, len: usize) -> Result<Self::Bytes<'_>, FormatError> {
+            let start = usize::try_from(offset.checked_sub(self.address).unwrap()).unwrap();
+            let rest = self.bytes.get(start..).unwrap_or_default();
+            Ok(&rest[..rest.len().min(len)])
+        }
+
+        fn len(&self) -> u64 {
+            self.bytes.len().to_u64()
+        }
+
+        fn read_at(&self, _offset: u64, _buf: &mut [u8]) -> Result<(), FormatError> {
+            Err(FormatError::Source("unexpected payload read".into()))
+        }
+
+        fn read_metadata_at(&self, _offset: u64, _len: usize) -> Result<Vec<u8>, FormatError> {
+            Err(FormatError::Source("unexpected vector read".into()))
+        }
+    }
+
+    #[rstest]
+    #[case::empty_prefix(0, 8)]
+    #[case::short_prefix(7, 8)]
+    #[case::missing_body(8, 80)]
+    #[case::missing_entries(24, 80)]
+    #[case::missing_trailing_key(56, 80)]
+    #[case::short_trailing_key(79, 80)]
+    fn a_short_source_result_is_rejected(#[case] available: usize, #[case] expected: usize) {
+        let node = btree_v1::node(
+            btree_v1::NodeType::CHUNK,
+            0,
+            &[
+                btree_v1::chunk_key(160, 0, &[0, 0]),
+                btree_v1::chunk_key(0, 0, &[20, 0]),
+            ],
+            &[0x1000],
+            WIDTHS,
+        );
+        assert_eq!(node.len(), 80);
+        let source = PartialSource {
+            bytes: &node[..available],
+            address: 0,
+        };
+        assert_eq!(
+            BTreeV1ChunkNodeBytes::read_from_source(&source, 0, 8, 2).unwrap_err(),
+            FormatError::UnexpectedEof {
+                expected,
+                available
+            }
+        );
+    }
+
+    #[test]
+    fn a_chunk_node_retains_its_shared_body_allocation() {
+        struct SharedSource {
+            prefix: MetadataBytes<'static>,
+            body: MetadataBytes<'static>,
+        }
+
+        impl MetadataSource for SharedSource {
+            type Bytes<'a> = MetadataBytes<'a>;
+
+            fn read_metadata(
+                &self,
+                offset: u64,
+                len: usize,
+            ) -> Result<Self::Bytes<'_>, FormatError> {
+                let bytes = match offset {
+                    0 => &self.prefix,
+                    8 => &self.body,
+                    _ => return Err(FormatError::Source("unexpected metadata offset".into())),
+                };
+                if bytes.len() != len {
+                    return Err(FormatError::DataSizeMismatch {
+                        expected: len,
+                        actual: bytes.len(),
+                    });
+                }
+                Ok(bytes.clone())
+            }
+
+            fn len(&self) -> u64 {
+                80
+            }
+
+            fn read_at(&self, _offset: u64, _buf: &mut [u8]) -> Result<(), FormatError> {
+                Err(FormatError::Source("unexpected payload read".into()))
+            }
+
+            fn read_metadata_at(&self, _offset: u64, _len: usize) -> Result<Vec<u8>, FormatError> {
+                Err(FormatError::Source("unexpected vector read".into()))
+            }
+        }
+
+        let mut node = btree_v1::node(
+            btree_v1::NodeType::CHUNK,
+            0,
+            &[
+                btree_v1::chunk_key(160, 2, &[20, 0]),
+                btree_v1::chunk_key(0, 0, &[40, 0]),
+            ],
+            &[0x1000],
+            WIDTHS,
+        );
+        let body = node.split_off(BTREE_V1_NODE_PREFIX_LEN);
+        let pointer = body.as_ptr();
+        let source = SharedSource {
+            prefix: MetadataBytes::from_vec(0, node).unwrap(),
+            body: MetadataBytes::from_vec(8, body).unwrap(),
+        };
+        let first = BTreeV1ChunkNodeBytes::read_from_source(&source, 0, 8, 2).unwrap();
+        let second = BTreeV1ChunkNodeBytes::read_from_source(&source, 0, 8, 2).unwrap();
+        assert_eq!(first.body.as_ptr(), pointer);
+        assert_eq!(second.body.as_ptr(), pointer);
+        assert_eq!(first.node().stored_len(), 80);
+        assert_eq!(
+            entries(first.node()),
+            vec![(160, 2, vec![20, 0], StoredAddress::new(0x1000))]
+        );
+        assert_eq!(entries(second.node()), entries(first.node()));
+    }
+
+    #[rstest]
+    #[case::body_address(u64::MAX, 2, u64::MAX)]
+    #[case::key_size(0, usize::MAX, usize::MAX.to_u64())]
+    fn a_chunk_node_rejects_overflow(
+        #[case] address: u64,
+        #[case] ndims: usize,
+        #[case] offset: u64,
+    ) {
+        let node = btree_v1::node(
+            btree_v1::NodeType::CHUNK,
+            0,
+            &[btree_v1::chunk_key(0, 0, &[0, 0])],
+            &[],
+            WIDTHS,
+        );
+        let source = PartialSource {
+            bytes: &node,
+            address,
+        };
+        assert_eq!(
+            BTreeV1ChunkNodeBytes::read_from_source(&source, address, 8, ndims).unwrap_err(),
+            FormatError::OffsetOverflow { offset, length: 8 }
         );
     }
 }
