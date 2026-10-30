@@ -14,7 +14,9 @@ use hdf5_pure_core::FormatError;
 
 use crate::error::Error;
 use crate::lzf;
-use crate::pipeline::buffer::FilterBuffer;
+#[cfg(feature = "deflate")]
+use crate::pipeline::buffer::OutputWindow;
+use crate::pipeline::buffer::{FilterBuffer, InitializedBuffer};
 use crate::scaleoffset;
 use crate::scaleoffset::ScaleOffset;
 use crate::scaleoffset::ScaleOffsetType;
@@ -247,14 +249,14 @@ impl<'a> ChunkContext<'a> {
     }
 }
 
-/// Retains codec state, intermediate byte capacity, and resolved ZFP settings between chunks.
+/// Retains codec state, initialized intermediate bytes, and resolved ZFP settings between chunks.
 ///
-/// The pipeline reuses one spare byte allocation for intermediate output. Returned chunk buffers
-/// own their storage independently of this scratch state. Resolved ZFP settings are reused while
-/// the pipeline position, client data, scalar type, and chunk dimensions match.
+/// The spare allocation retains its initialized extent between stages. Returned chunk buffers own
+/// their storage independently of this scratch state. Resolved ZFP settings are reused while the
+/// pipeline position, client data, scalar type, and chunk dimensions match.
 #[derive(Default)]
 pub struct FilterScratch {
-    spare: Vec<u8>,
+    spare: InitializedBuffer,
     #[cfg(feature = "zfp")]
     zfp: Vec<zfp::PreparedZfpFilter>,
     #[cfg(all(feature = "zfp", test))]
@@ -279,7 +281,7 @@ impl FilterScratch {
     ) -> Result<FilterBuffer<'a>, Error> {
         let mut spare = mem::take(&mut self.spare);
         let decoder = self.zlib_decoder();
-        let result = current.materialize(&mut spare, |input, output| {
+        let result = current.overwrite(&mut spare, |input, output| {
             deflate_decompress_into(decoder, input, max_output, output)
         });
         self.spare = spare;
@@ -390,9 +392,14 @@ pub fn decompress_chunk_with(
                 if ctx.element_size.get() == 1 {
                     current
                 } else {
-                    current.materialize(&mut scratch.spare, |input, output| {
-                        shuffle_decompress_into(input, ctx.element_size.get() as usize, output);
-                        Ok(())
+                    current.overwrite(&mut scratch.spare, |input, output| {
+                        output.resize(input.len());
+                        shuffle_decompress_into(
+                            input,
+                            ctx.element_size.get() as usize,
+                            output.as_mut_slice(),
+                        );
+                        Ok(input.len())
                     })?
                 }
             }
@@ -550,9 +557,14 @@ pub fn compress_chunk_with(
                 if ctx.element_size.get() == 1 {
                     current
                 } else {
-                    current.materialize(&mut scratch.spare, |input, output| {
-                        shuffle_compress_into(input, ctx.element_size.get() as usize, output);
-                        Ok(())
+                    current.overwrite(&mut scratch.spare, |input, output| {
+                        output.resize(input.len());
+                        shuffle_compress_into(
+                            input,
+                            ctx.element_size.get() as usize,
+                            output.as_mut_slice(),
+                        );
+                        Ok(input.len())
                     })?
                 }
             }
@@ -601,6 +613,7 @@ const DEFLATE_GROWTH_FLOOR: usize = 4096;
 ///
 /// The caller resets `decoder` before each stream. When bounded, the writable output includes at
 /// most one byte beyond `max_output` for over-limit detection, independently of retained capacity.
+/// The caller uses the returned length as the live prefix.
 ///
 /// # Errors
 ///
@@ -613,8 +626,8 @@ fn deflate_decompress_into(
     decoder: &mut flate2::Decompress,
     data: &[u8],
     max_output: Option<usize>,
-    out: &mut Vec<u8>,
-) -> Result<(), Error> {
+    out: &mut OutputWindow,
+) -> Result<usize, Error> {
     use flate2::{FlushDecompress, Status};
 
     let bomb = || Error::DeflateSizeExceeded {
@@ -629,8 +642,7 @@ fn deflate_decompress_into(
     // One past the limit lets the decoder detect an overlong stream.
     let ceiling = max_output.map(|limit| limit.saturating_add(1));
 
-    out.clear();
-    out.resize(reservation, 0);
+    out.resize(reservation);
     let mut produced = 0;
 
     loop {
@@ -638,7 +650,7 @@ fn deflate_decompress_into(
         let input = data.get(consumed..).unwrap_or(&[]);
         let before_in = decoder.total_in();
         let before_out = produced;
-        let output = out.get_mut(produced..).ok_or_else(|| {
+        let output = out.as_mut_slice().get_mut(produced..).ok_or_else(|| {
             Error::Pipeline(FormatError::Internal(
                 "deflate output count exceeds its writable range".into(),
             ))
@@ -665,17 +677,16 @@ fn deflate_decompress_into(
                 Some(cap) => want.min(cap - out.len()),
                 None => want,
             };
-            out.resize(out.len().saturating_add(growth), 0);
+            out.resize(out.len().saturating_add(growth));
         } else if decoder.total_in() == before_in && produced == before_out {
             return Err(truncated());
         }
     }
 
-    out.truncate(produced);
-    if max_output.is_some_and(|limit| out.len() > limit) {
+    if max_output.is_some_and(|limit| produced > limit) {
         return Err(bomb());
     }
-    Ok(())
+    Ok(produced)
 }
 
 #[cfg(feature = "deflate")]
@@ -733,9 +744,8 @@ fn shuffle_n<const N: usize>(data: &[u8], result: &mut [u8], num_elements: usize
 /// Preserves trailing bytes while reversing byte shuffling of complete elements.
 ///
 /// `H5Z__filter_shuffle` preserves trailing bytes in both directions (`H5Zshuffle.c`, HDF5 2.2.0).
-fn shuffle_decompress_into(data: &[u8], element_size: usize, result: &mut Vec<u8>) {
-    result.clear();
-    result.resize(data.len(), 0);
+/// The caller supplies output with the same length as `data`.
+fn shuffle_decompress_into(data: &[u8], element_size: usize, result: &mut [u8]) {
     if element_size <= 1 {
         result.copy_from_slice(data);
         return;
@@ -763,9 +773,9 @@ fn shuffle_decompress_into(data: &[u8], element_size: usize, result: &mut Vec<u8
 }
 
 /// Preserves trailing bytes while grouping complete elements by byte position.
-fn shuffle_compress_into(data: &[u8], element_size: usize, result: &mut Vec<u8>) {
-    result.clear();
-    result.resize(data.len(), 0);
+///
+/// The caller supplies output with the same length as `data`.
+fn shuffle_compress_into(data: &[u8], element_size: usize, result: &mut [u8]) {
     if element_size <= 1 {
         result.copy_from_slice(data);
         return;
@@ -940,7 +950,7 @@ mod tests {
             },
         ];
         let mut scratch = FilterScratch::new();
-        scratch.spare = Vec::with_capacity(64);
+        scratch.spare = InitializedBuffer::from_vec(Vec::with_capacity(64));
         let pointer = scratch.spare.as_ptr();
         let context = ChunkContext::basic(&[2], width);
         let output = compress_chunk_with(&mut scratch, data, &filters, context).unwrap();
@@ -970,12 +980,12 @@ mod tests {
         let dims = [u64::from(4 / width)];
         let context = ChunkContext::basic(&dims, width);
         let mut encoder = FilterScratch::new();
-        encoder.spare = Vec::with_capacity(64);
+        encoder.spare = InitializedBuffer::from_vec(Vec::with_capacity(64));
         let encoded_pointer = encoder.spare.as_ptr();
         let encoded = compress_chunk_with(&mut encoder, &[1, 2, 3, 4], &filters, context).unwrap();
         assert_eq!(encoded, expected);
         let mut decoder = FilterScratch::new();
-        decoder.spare = Vec::with_capacity(64);
+        decoder.spare = InitializedBuffer::from_vec(Vec::with_capacity(64));
         let decoded_pointer = decoder.spare.as_ptr();
         let decoded = decompress_chunk_with(&mut decoder, &encoded, &filters, context, 0).unwrap();
         assert_eq!(decoded, [1, 2, 3, 4]);
@@ -997,8 +1007,14 @@ mod tests {
         );
         assert_eq!(encoded, expected);
         assert_eq!(decoded, [1, 2, 3, 4]);
-        assert!(encoder.spare.is_empty());
-        assert!(decoder.spare.is_empty());
+        assert_eq!(
+            encoder.spare.initialized_len(),
+            if ids.contains(&FILTER_SHUFFLE) { 4 } else { 0 }
+        );
+        assert_eq!(
+            decoder.spare.initialized_len(),
+            if ids.contains(&FILTER_SHUFFLE) { 4 } else { 0 }
+        );
     }
 
     #[test]
@@ -1010,13 +1026,13 @@ mod tests {
         }];
         let context = ChunkContext::basic(&[4], 1);
         let mut scratch = FilterScratch::new();
-        scratch.spare = Vec::with_capacity(64);
+        scratch.spare = InitializedBuffer::from_vec(Vec::with_capacity(64));
         let pointer = scratch.spare.as_ptr();
         assert_eq!(
             decompress_chunk_with(&mut scratch, &[0, b'a', 0x20], &filters, context, 0),
             Err(Error::InvalidLzfStream("truncated match offset"))
         );
-        assert!(scratch.spare.is_empty());
+        assert_eq!(scratch.spare.initialized_len(), 1);
         assert_eq!(scratch.spare.as_ptr(), pointer);
         let retained =
             decompress_chunk_with(&mut scratch, &[3, 1, 2, 3, 4], &filters, context, 0).unwrap();
@@ -1029,7 +1045,7 @@ mod tests {
                 actual: 2
             })
         );
-        assert!(scratch.spare.is_empty());
+        assert_eq!(scratch.spare.initialized_len(), 2);
         let pointer = scratch.spare.as_ptr();
         let decoded = decompress_chunk_with(
             &mut scratch,
@@ -1061,7 +1077,7 @@ mod tests {
         }];
         let context = ChunkContext::basic(&[2], 1);
         let mut scratch = FilterScratch::new();
-        scratch.spare = Vec::with_capacity(64);
+        scratch.spare = InitializedBuffer::from_vec(Vec::with_capacity(64));
         let pointer = scratch.spare.as_ptr();
         let encoded = compress_chunk_with(&mut scratch, &[1, 2, 3], &filters, context).unwrap();
         assert_eq!(encoded, [1, 2, 3]);
@@ -1077,7 +1093,7 @@ mod tests {
         assert_eq!(decoded, [4, 5]);
         assert_eq!(encoded, [1, 2, 3]);
         assert_eq!(scratch.spare.as_ptr(), pointer);
-        assert!(scratch.spare.is_empty());
+        assert_eq!(scratch.spare.initialized_len(), 0);
     }
 
     #[rstest]
@@ -1119,7 +1135,7 @@ mod tests {
             );
         }
         let mut decoder = FilterScratch::new();
-        decoder.spare = Vec::with_capacity(128);
+        decoder.spare = InitializedBuffer::from_vec(Vec::with_capacity(128));
         let pointer = decoder.spare.as_ptr();
         let decoded = decompress_chunk_with(&mut decoder, &encoded, &filters, context, 0).unwrap();
         assert_eq!(decoded, [0, 255]);
@@ -1142,7 +1158,7 @@ mod tests {
                 actual: 2
             })
         );
-        assert!(decoder.spare.is_empty());
+        assert_eq!(decoder.spare.initialized_len(), if lzf { 23 } else { 0 });
         let other = compress_chunk_with(&mut encoder, &[255, 0], &filters, context).unwrap();
         assert_eq!(
             decompress_chunk_with(&mut decoder, &other, &filters, context, 0).unwrap(),
@@ -1169,7 +1185,7 @@ mod tests {
             })
             .collect();
         let mut scratch = FilterScratch::new();
-        scratch.spare = Vec::with_capacity(64);
+        scratch.spare = InitializedBuffer::from_vec(Vec::with_capacity(64));
         let pointer = scratch.spare.as_ptr();
         let input = [1, 2, 3, 4];
         let output = decompress_chunk_with(
@@ -1184,7 +1200,7 @@ mod tests {
         assert_ne!(output.as_ptr(), input.as_ptr());
         assert_eq!(scratch.spare.as_ptr(), pointer);
         assert_eq!(scratch.spare.capacity(), 64);
-        assert!(scratch.spare.is_empty());
+        assert_eq!(scratch.spare.initialized_len(), 0);
     }
 
     #[rstest]
@@ -1222,7 +1238,7 @@ mod tests {
             };
         }
         let mut scratch = FilterScratch::new();
-        scratch.spare = Vec::with_capacity(128);
+        scratch.spare = InitializedBuffer::from_vec(Vec::with_capacity(128));
         let result = decompress_chunk_with(
             &mut scratch,
             &stored,
@@ -1232,7 +1248,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result, data);
-        assert!(scratch.spare.is_empty());
+        assert!(scratch.spare.initialized_len() <= 128);
         assert!(scratch.spare.capacity() <= 128);
     }
 
@@ -1260,13 +1276,13 @@ mod tests {
             input.to_vec()
         };
         let mut scratch = FilterScratch::new();
-        scratch.spare = Vec::with_capacity(64);
+        scratch.spare = InitializedBuffer::from_vec(Vec::with_capacity(64));
         let context = ChunkContext::basic(&[2], 2);
         assert_eq!(
             decompress_chunk_with(&mut scratch, &stored, &filters, context, 0),
             Err(expected)
         );
-        assert!(scratch.spare.is_empty());
+        assert_eq!(scratch.spare.initialized_len(), 0);
         let encoded =
             compress_chunk_with(&mut scratch, &[9, 10, 11, 12], &filters, context).unwrap();
         assert_eq!(
@@ -1314,7 +1330,7 @@ mod tests {
                 actual: 4
             })
         );
-        assert!(scratch.spare.is_empty());
+        assert!(scratch.spare.initialized_len() >= 4);
         assert!(scratch.spare.capacity() >= 4);
         let other_encoded = compress_chunk_with(&mut scratch, &[5, 6], &filters, context).unwrap();
         let other_decoded = decompress_chunk_with(
@@ -1342,20 +1358,23 @@ mod tests {
     }
 
     fn shuffle_compress(data: &[u8], element_size: usize) -> Vec<u8> {
-        let mut output = Vec::new();
+        let mut output = vec![0; data.len()];
         shuffle_compress_into(data, element_size, &mut output);
         output
     }
 
     fn shuffle_decompress(data: &[u8], element_size: usize) -> Vec<u8> {
-        let mut output = Vec::new();
+        let mut output = vec![0; data.len()];
         shuffle_decompress_into(data, element_size, &mut output);
         output
     }
 
     fn fletcher32_append(data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(FilterBuffer::borrowed(data)
-            .append(&mut Vec::new(), &fletcher32_compute(data).to_le_bytes())
+            .append(
+                &mut InitializedBuffer::default(),
+                &fletcher32_compute(data).to_le_bytes(),
+            )
             .into_owned())
     }
 
@@ -1811,7 +1830,7 @@ mod tests {
         .unwrap();
         let mut scratch = FilterScratch::new();
         if retained {
-            scratch.spare = Vec::with_capacity(128 * 1024);
+            scratch.spare = InitializedBuffer::from_vec(vec![0xa5; 128 * 1024]);
         }
         let capacity = scratch.spare.capacity();
         let pointer = scratch.spare.as_ptr();
@@ -1826,9 +1845,10 @@ mod tests {
             scratch.decoder.as_ref().unwrap().total_out(),
             u64::try_from(limit + 1).unwrap()
         );
-        assert!(scratch.spare.is_empty());
+        assert!(scratch.spare.initialized_len() > limit);
         if retained {
             assert_eq!(scratch.spare.capacity(), capacity);
+            assert_eq!(scratch.spare.initialized_len(), 128 * 1024);
             assert_eq!(scratch.spare.as_ptr(), pointer);
         }
         let valid =
@@ -1853,7 +1873,7 @@ mod tests {
         ];
         let mut scratch = FilterScratch::new();
         if retained {
-            scratch.spare = Vec::with_capacity(64 * 1024);
+            scratch.spare = InitializedBuffer::from_vec(vec![0xa5; 64 * 1024]);
         }
         assert_eq!(
             deflate_decompress(&mut scratch, &stored[..stored.len() - removed], Some(10)),
@@ -1862,7 +1882,7 @@ mod tests {
             ))
         );
         assert_eq!(scratch.decoder.as_ref().unwrap().total_out(), 10);
-        assert!(scratch.spare.is_empty());
+        assert!(scratch.spare.initialized_len() >= 10);
         let pointer = scratch.spare.as_ptr();
         let decoded = deflate_decompress(&mut scratch, &stored, Some(10)).unwrap();
         assert_eq!(decoded, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
@@ -1905,7 +1925,7 @@ mod tests {
                 actual: 64
             })
         );
-        assert!(scratch.spare.is_empty());
+        assert!(scratch.spare.initialized_len() >= 64);
         let pointer = scratch.spare.as_ptr();
         let last = decompress_chunk_with(
             &mut scratch,
@@ -1942,7 +1962,7 @@ mod tests {
         let context = ChunkContext::basic(&[16], 1);
         let encoded = compress_chunk(&[1; 16], &filters, context).unwrap();
         let mut scratch = FilterScratch::new();
-        scratch.spare = Vec::with_capacity(64 * 1024);
+        scratch.spare = InitializedBuffer::from_vec(vec![0xa5; 64 * 1024]);
         let decoded = decompress_chunk_with(&mut scratch, &encoded, &filters, context, mask);
         if mask & 1 != 0 {
             assert_eq!(
@@ -1953,7 +1973,7 @@ mod tests {
                 })
             );
             assert_eq!(scratch.decoder.as_ref().unwrap().total_out(), 17);
-            assert!(scratch.spare.is_empty());
+            assert!(scratch.spare.initialized_len() >= 17);
         } else {
             assert_eq!(decoded.unwrap(), [1; 16]);
         }

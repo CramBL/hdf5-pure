@@ -19,7 +19,7 @@ fn full_width_modes_keep_storage_and_preserve_input_length(
     cd[PARM_SCALEFACTOR] = size * 8;
     let input = view_input(&raw, owned);
     let pointer = input.as_slice().as_ptr();
-    let mut spare = Vec::with_capacity(64);
+    let mut spare = InitializedBuffer::from_vec(Vec::with_capacity(64));
     let spare_pointer = spare.as_ptr();
     let encoded = super::compress(input, &cd, &mut spare).unwrap();
     assert_eq!(encoded.as_slice(), raw);
@@ -28,7 +28,7 @@ fn full_width_modes_keep_storage_and_preserve_input_length(
     assert_eq!(decoded.as_slice(), raw);
     assert_eq!(decoded.as_slice().as_ptr(), pointer);
     assert_eq!(spare.as_ptr(), spare_pointer);
-    assert!(spare.is_empty());
+    assert_eq!(spare.initialized_len(), 0);
     let output = decoded.into_owned();
     assert_eq!(output, raw);
     if owned {
@@ -56,13 +56,13 @@ fn raw_payload_views_retain_storage_and_exclude_headers_and_trailing_bytes(
     ];
     let input = view_input(&raw, owned);
     let pointer = input.as_slice().as_ptr();
-    let mut spare = Vec::with_capacity(64);
+    let mut spare = InitializedBuffer::from_vec(Vec::with_capacity(64));
     let spare_pointer = spare.as_ptr();
     let output = super::decompress(input, &cd, Some(8), &mut spare).unwrap();
     assert_eq!(output.as_slice(), [1, 2, 3, 4, 5, 6, 7, 8]);
     assert_eq!(output.as_slice().as_ptr(), pointer.wrapping_add(21));
     assert_eq!(spare.as_ptr(), spare_pointer);
-    assert!(spare.is_empty());
+    assert_eq!(spare.initialized_len(), 0);
     let bytes = output.into_owned();
     assert_eq!(bytes, [1, 2, 3, 4, 5, 6, 7, 8]);
     if owned {
@@ -82,21 +82,21 @@ fn raw_payload_views_preserve_header_error_order(
     #[values(false, true)] owned: bool,
 ) {
     let cd = int_filter(1, false, ORDER_LE, 2);
-    let mut spare = Vec::with_capacity(64);
+    let mut spare = InitializedBuffer::from_vec(Vec::with_capacity(64));
     let pointer = spare.as_ptr();
     let error = super::decompress(view_input(input, owned), &cd, Some(2), &mut spare)
         .err()
         .unwrap();
     assert_eq!(error, Error::ScaleOffset(expected.into()));
     assert_eq!(spare.as_ptr(), pointer);
-    assert!(spare.is_empty());
+    assert_eq!(spare.initialized_len(), 0);
     let valid = [
         8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 8,
     ];
     let output = super::decompress(view_input(&valid, owned), &cd, Some(2), &mut spare).unwrap();
     assert_eq!(output.as_slice(), [7, 8]);
     assert_eq!(spare.as_ptr(), pointer);
-    assert!(spare.is_empty());
+    assert_eq!(spare.initialized_len(), 0);
 }
 
 #[rstest]
@@ -133,7 +133,7 @@ fn view_input(input: &[u8], owned: bool) -> FilterBuffer<'_> {
         bytes.extend_from_slice(input);
         bytes.extend_from_slice(&[33, 22]);
         FilterBuffer::borrowed(&[])
-            .replace(&mut Vec::new(), bytes)
+            .replace(&mut InitializedBuffer::default(), bytes)
             .narrow(2..input.len() + 2)
             .unwrap()
     } else {
@@ -142,8 +142,12 @@ fn view_input(input: &[u8], owned: bool) -> FilterBuffer<'_> {
 }
 
 fn compress(input: &[u8], cd: &[u32]) -> Result<Vec<u8>, Error> {
-    super::compress(FilterBuffer::borrowed(input), cd, &mut Vec::new())
-        .map(FilterBuffer::into_owned)
+    super::compress(
+        FilterBuffer::borrowed(input),
+        cd,
+        &mut InitializedBuffer::default(),
+    )
+    .map(FilterBuffer::into_owned)
 }
 
 fn decompress(input: &[u8], cd: &[u32], max_output: Option<usize>) -> Result<Vec<u8>, Error> {
@@ -151,7 +155,7 @@ fn decompress(input: &[u8], cd: &[u32], max_output: Option<usize>) -> Result<Vec
         FilterBuffer::borrowed(input),
         cd,
         max_output,
-        &mut Vec::new(),
+        &mut InitializedBuffer::default(),
     )
     .map(FilterBuffer::into_owned)
 }
