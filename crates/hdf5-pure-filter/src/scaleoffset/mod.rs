@@ -15,7 +15,7 @@ use hdf5_pure_core::FormatError;
 
 use crate::error::Error;
 use crate::pipeline::FILTER_SCALEOFFSET;
-use crate::pipeline::buffer::FilterBuffer;
+use crate::pipeline::buffer::{FilterBuffer, InitializedBuffer};
 
 // `cd_values` indices (H5Z_SCALEOFFSET_PARM_*).
 const PARM_SCALETYPE: usize = 0;
@@ -437,7 +437,7 @@ pub(crate) fn decompress<'a>(
     current: FilterBuffer<'a>,
     cd: &[u32],
     max_output: Option<usize>,
-    spare: &mut Vec<u8>,
+    spare: &mut InitializedBuffer,
 ) -> Result<FilterBuffer<'a>, Error> {
     let input = current.as_slice();
     let p = Parms::parse(cd)?;
@@ -590,7 +590,7 @@ pub(crate) fn decompress<'a>(
 pub(crate) fn compress<'a>(
     current: FilterBuffer<'a>,
     cd: &[u32],
-    spare: &mut Vec<u8>,
+    spare: &mut InitializedBuffer,
 ) -> Result<FilterBuffer<'a>, Error> {
     let input = current.as_slice();
     let p = Parms::parse(cd)?;

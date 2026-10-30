@@ -11,6 +11,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::error::Error;
+use crate::pipeline::buffer::AppendBuffer;
 
 /// Longest literal run one control byte can introduce.
 const MAX_LITERAL_RUN: usize = 32;
@@ -72,9 +73,9 @@ fn corrupt(reason: &'static str) -> Error {
 /// Returns [`Error::InvalidLzfStream`] if a token is truncated or a match refers to bytes before
 /// the output. Returns [`Error::LzfSizeExceeded`] if decoding exceeds `max_output`.
 pub fn decompress(input: &[u8], max_output: Option<usize>) -> Result<Vec<u8>, Error> {
-    let mut out = Vec::new();
+    let mut out = AppendBuffer::default();
     decompress_into(input, max_output, &mut out)?;
-    Ok(out)
+    Ok(out.into_owned())
 }
 
 /// Replaces `out` with decoded bytes from a raw LZF stream.
@@ -90,7 +91,7 @@ pub fn decompress(input: &[u8], max_output: Option<usize>) -> Result<Vec<u8>, Er
 pub(crate) fn decompress_into(
     input: &[u8],
     max_output: Option<usize>,
-    out: &mut Vec<u8>,
+    out: &mut AppendBuffer,
 ) -> Result<(), Error> {
     let cap = max_output.unwrap_or(usize::MAX);
     out.clear();
@@ -149,12 +150,11 @@ pub(crate) fn decompress_into(
             }
             let start = out.len() - distance;
             if distance >= len {
-                // Disjoint source and destination: one reservation + memcpy.
                 out.extend_from_within(start..start + len);
             } else {
                 // Overlapping (RLE-style) match must materialize byte by byte.
                 for i in start..start + len {
-                    let byte = out[i];
+                    let byte = out.as_slice()[i];
                     out.push(byte);
                 }
             }
@@ -169,16 +169,16 @@ pub(crate) fn decompress_into(
 /// The compressor uses greedy single-probe matching. It may produce more
 /// bytes than it receives for incompressible input.
 pub fn compress(input: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
+    let mut out = AppendBuffer::default();
     compress_into(input, &mut out);
-    out
+    out.into_owned()
 }
 
 /// Replaces `out` with an encoded raw LZF stream.
 ///
 /// Retains the output allocation when it has sufficient capacity. Allocates a match table for each
 /// call. The encoded output may be larger than `input` for incompressible bytes.
-pub(crate) fn compress_into(input: &[u8], out: &mut Vec<u8>) {
+pub(crate) fn compress_into(input: &[u8], out: &mut AppendBuffer) {
     /// Hash of a 3-byte window → slot in the table of `position + 1`.
     fn hash(a: u8, b: u8, c: u8) -> usize {
         let v = (usize::from(a) << 16) | (usize::from(b) << 8) | usize::from(c);
@@ -186,7 +186,7 @@ pub(crate) fn compress_into(input: &[u8], out: &mut Vec<u8>) {
     }
 
     /// Emit `input[from..to]` as literal runs.
-    fn flush_literals(out: &mut Vec<u8>, input: &[u8], from: usize, to: usize) {
+    fn flush_literals(out: &mut AppendBuffer, input: &[u8], from: usize, to: usize) {
         let mut i = from;
         while i < to {
             let n = (to - i).min(MAX_LITERAL_RUN);
@@ -276,12 +276,13 @@ mod tests {
         #[case] expected: &[u8],
         #[values(None, Some(1024))] limit: Option<usize>,
     ) {
-        let mut output = Vec::with_capacity(4096);
+        let mut output = AppendBuffer::default();
+        output.reserve_exact(4096);
         output.extend_from_slice(&[99; 32]);
         let capacity = output.capacity();
         let pointer = output.as_ptr();
         decompress_into(stored, limit, &mut output).unwrap();
-        assert_eq!(output, expected);
+        assert_eq!(output.as_slice(), expected);
         assert_eq!(output.as_ptr(), pointer);
         assert_eq!(output.capacity(), capacity);
     }
@@ -298,12 +299,13 @@ mod tests {
         #[case] input: &[u8],
         #[case] expected: &[u8],
     ) {
-        let mut output = Vec::with_capacity(4096);
+        let mut output = AppendBuffer::default();
+        output.reserve_exact(4096);
         output.extend_from_slice(&[99; 32]);
         let pointer = output.as_ptr();
         let capacity = output.capacity();
         compress_into(input, &mut output);
-        assert_eq!(output, expected);
+        assert_eq!(output.as_slice(), expected);
         assert_eq!(output.as_ptr(), pointer);
         assert_eq!(output.capacity(), capacity);
         assert_eq!(compress(input), expected);
@@ -326,15 +328,16 @@ mod tests {
         #[case] limit: Option<usize>,
         #[case] expected: Error,
     ) {
-        let mut output = Vec::with_capacity(4096);
+        let mut output = AppendBuffer::default();
+        output.reserve_exact(4096);
         output.extend_from_slice(&[99; 32]);
         let pointer = output.as_ptr();
         assert_eq!(decompress_into(input, limit, &mut output), Err(expected));
         decompress_into(&[1, b'x', b'y'], Some(2), &mut output).unwrap();
-        assert_eq!(output, b"xy");
+        assert_eq!(output.as_slice(), b"xy");
         assert_eq!(output.as_ptr(), pointer);
         compress_into(b"z", &mut output);
-        assert_eq!(output, [0, b'z']);
+        assert_eq!(output.as_slice(), [0, b'z']);
         assert_eq!(output.as_ptr(), pointer);
     }
 
