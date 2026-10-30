@@ -136,6 +136,19 @@ impl<'a> FilterBuffer<'a> {
         }
     }
 
+    /// Replaces `spare` only when the owned allocation has greater capacity.
+    ///
+    /// Keeps `spare` for borrowed input or equal capacities. The initialized extent of the retained
+    /// allocation is unchanged.
+    #[inline]
+    pub(super) fn recycle_larger(self, spare: &mut InitializedBuffer) {
+        if let Storage::Owned { bytes, .. } = self.0
+            && bytes.0.capacity() > spare.0.capacity()
+        {
+            *spare = bytes;
+        }
+    }
+
     /// Returns only the live bytes, copying borrowed input and compacting owned views in place.
     #[inline]
     pub(crate) fn into_owned(self) -> Vec<u8> {
@@ -231,6 +244,22 @@ impl OutputWindow {
             bytes.0.resize(end, 0);
         }
         *window_end = end;
+    }
+
+    /// Sets the writable prefix length, reserving missing capacity with [`Vec::reserve_exact`].
+    ///
+    /// Preserves the initialized extent when shrinking and zeroes newly initialized bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `end` exceeds [`isize::MAX`].
+    #[inline]
+    #[cfg(any(feature = "deflate", test))]
+    pub(super) fn resize_exact(&mut self, end: usize) {
+        if end > self.bytes.0.capacity() {
+            self.bytes.0.reserve_exact(end - self.bytes.0.len());
+        }
+        self.resize(end);
     }
 
     /// Returns the initialized writable prefix.
@@ -462,6 +491,87 @@ mod tests {
             assert_eq!(spare.capacity(), 0);
         }
         assert_eq!(bytes, [1, 2, 3, 4]);
+    }
+
+    #[rstest]
+    #[case::borrowed(false, 4, 8, false)]
+    #[case::smaller_owned(true, 4, 8, false)]
+    #[case::equal_capacity(true, 8, 8, false)]
+    #[case::larger_owned(true, 16, 8, true)]
+    fn rejected_output_retains_the_larger_allocation(
+        #[case] owned: bool,
+        #[case] current_capacity: usize,
+        #[case] spare_capacity: usize,
+        #[case] replace: bool,
+    ) {
+        let input = [1, 2, 3, 4];
+        let mut bytes = Vec::with_capacity(current_capacity);
+        bytes.extend_from_slice(&input);
+        let current_pointer = bytes.as_ptr();
+        let current = if owned {
+            FilterBuffer::owned(bytes)
+        } else {
+            FilterBuffer::borrowed(&input)
+        }
+        .narrow(1..3)
+        .unwrap();
+        let mut bytes = Vec::with_capacity(spare_capacity);
+        bytes.extend_from_slice(&[9, 10]);
+        let spare_pointer = bytes.as_ptr();
+        let mut spare = InitializedBuffer::from_vec(bytes);
+        current.recycle_larger(&mut spare);
+        if replace {
+            assert_eq!(spare.as_ptr(), current_pointer);
+            assert_eq!(spare.capacity(), current_capacity);
+            assert_eq!(spare.0, input);
+        } else {
+            assert_eq!(spare.as_ptr(), spare_pointer);
+            assert_eq!(spare.capacity(), spare_capacity);
+            assert_eq!(spare.0, [9, 10]);
+        }
+        assert_eq!(input, [1, 2, 3, 4]);
+    }
+
+    #[rstest]
+    #[case::new_initialized_suffix(64, 64, 65)]
+    #[case::empty_retained_storage(0, 64, 65)]
+    #[case::adequate_capacity(64, 128, 65)]
+    #[case::larger_initialized_extent(96, 128, 65)]
+    #[case::chunk_detection_byte(65_536, 65_536, 65_537)]
+    fn exact_windows_grow_only_to_the_required_capacity(
+        #[case] initialized: usize,
+        #[case] capacity: usize,
+        #[case] length: usize,
+    ) {
+        let mut bytes = Vec::with_capacity(capacity);
+        bytes.resize(initialized, 0xa5);
+        let mut spare = InitializedBuffer::from_vec(bytes);
+        let result = FilterBuffer::borrowed(&[])
+            .overwrite(&mut spare, |_, output| {
+                output.resize_exact(length);
+                assert_eq!(output.len(), length);
+                assert_eq!(output.bytes.capacity(), capacity.max(length));
+                assert_eq!(output.bytes.initialized_len(), initialized.max(length));
+                let bytes = output.as_mut_slice();
+                assert_eq!(bytes.len(), length);
+                assert_eq!(
+                    &bytes[..initialized.min(length)],
+                    vec![0xa5; initialized.min(length)]
+                );
+                assert_eq!(
+                    &bytes[initialized.min(length)..],
+                    vec![0; length.saturating_sub(initialized)]
+                );
+                output.resize_exact(7);
+                assert_eq!(output.as_mut_slice().len(), 7);
+                assert_eq!(output.bytes.capacity(), capacity.max(length));
+                assert_eq!(output.bytes.initialized_len(), initialized.max(length));
+                Ok(7)
+            })
+            .unwrap();
+        assert_eq!(result.as_slice().len(), 7);
+        let result = result.into_owned();
+        assert_eq!(result.capacity(), capacity.max(length));
     }
 
     #[test]
