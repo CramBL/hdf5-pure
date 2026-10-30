@@ -3,11 +3,13 @@ use alloc::format;
 #[cfg(test)]
 use alloc::vec;
 use alloc::vec::Vec;
+#[cfg(feature = "deflate")]
+use core::mem;
 use core::num::NonZeroU32;
 
 use hdf5_pure_core::__private::PipelineFilterMask;
 use hdf5_pure_core::DeflateLevel;
-#[cfg(test)]
+#[cfg(any(feature = "deflate", test))]
 use hdf5_pure_core::FormatError;
 
 use crate::error::Error;
@@ -270,6 +272,30 @@ impl FilterScratch {
     }
 
     #[cfg(feature = "deflate")]
+    fn deflate_decompress<'a>(
+        &mut self,
+        current: FilterBuffer<'a>,
+        max_output: Option<usize>,
+    ) -> Result<FilterBuffer<'a>, Error> {
+        let mut spare = mem::take(&mut self.spare);
+        let decoder = self.zlib_decoder();
+        let result = current.materialize(&mut spare, |input, output| {
+            deflate_decompress_into(decoder, input, max_output, output)
+        });
+        self.spare = spare;
+        result
+    }
+
+    #[cfg(not(feature = "deflate"))]
+    fn deflate_decompress<'a>(
+        &mut self,
+        _current: FilterBuffer<'a>,
+        _max_output: Option<usize>,
+    ) -> Result<FilterBuffer<'a>, Error> {
+        Err(Error::UnsupportedFilter(FILTER_DEFLATE))
+    }
+
+    #[cfg(feature = "deflate")]
     fn zlib_encoder(&mut self, level: DeflateLevel) -> &mut flate2::write::ZlibEncoder<Vec<u8>> {
         let stale = self.encoder.as_ref().is_none_or(|(have, _)| *have != level);
         if stale {
@@ -372,8 +398,7 @@ pub fn decompress_chunk_with(
             }
             FILTER_DEFLATE => {
                 let cap = pipeline.inner_output_cap(scratch, expected, i, ctx)?;
-                let output = deflate_decompress(scratch, current.as_slice(), cap)?;
-                current.replace(&mut scratch.spare, output)
+                scratch.deflate_decompress(current, cap)?
             }
             FILTER_LZF => {
                 let cap = pipeline.inner_output_cap(scratch, expected, i, ctx)?;
@@ -574,12 +599,24 @@ fn deflate_corrupt(reason: &str) -> Error {
 #[cfg(feature = "deflate")]
 const DEFLATE_GROWTH_FLOOR: usize = 4096;
 
+/// Decodes a complete zlib stream into reusable output storage.
+///
+/// The caller resets `decoder` before each stream. When bounded, the writable output includes at
+/// most one byte beyond `max_output` for over-limit detection, independently of retained capacity.
+///
+/// # Errors
+///
+/// Returns [`Error::DeflateSizeExceeded`] if the decoded bytes exceed `max_output`.
+/// Returns [`Error::FilterError`] if the stream is malformed or incomplete.
+/// Returns [`Error::Pipeline`] if the decoder's output count exceeds the platform index width or
+/// writable range.
 #[cfg(feature = "deflate")]
-fn deflate_decompress(
-    scratch: &mut FilterScratch,
+fn deflate_decompress_into(
+    decoder: &mut flate2::Decompress,
     data: &[u8],
     max_output: Option<usize>,
-) -> Result<Vec<u8>, Error> {
+    out: &mut Vec<u8>,
+) -> Result<(), Error> {
     use flate2::{FlushDecompress, Status};
 
     let bomb = || Error::DeflateSizeExceeded {
@@ -594,53 +631,53 @@ fn deflate_decompress(
     // One past the limit lets the decoder detect an overlong stream.
     let ceiling = max_output.map(|limit| limit.saturating_add(1));
 
-    let decoder = scratch.zlib_decoder();
-    let mut out = Vec::with_capacity(match ceiling {
-        Some(cap) => reservation.min(cap),
-        None => reservation,
-    });
+    out.clear();
+    out.resize(reservation, 0);
+    let mut produced = 0;
 
     loop {
         let consumed = usize::try_from(decoder.total_in()).unwrap_or(usize::MAX);
         let input = data.get(consumed..).unwrap_or(&[]);
         let before_in = decoder.total_in();
-        let before_out = out.len();
-
+        let before_out = produced;
+        let output = out.get_mut(produced..).ok_or_else(|| {
+            Error::Pipeline(FormatError::Internal(
+                "deflate output count exceeds its writable range".into(),
+            ))
+        })?;
         let status = decoder
-            .decompress_vec(input, &mut out, FlushDecompress::None)
+            .decompress(input, output, FlushDecompress::None)
             .map_err(|e| deflate_corrupt(&e.to_string()))?;
+        produced = usize::try_from(decoder.total_out()).map_err(|_error| {
+            Error::Pipeline(FormatError::Internal(
+                "deflate output count exceeds the platform index width".into(),
+            ))
+        })?;
 
         if status == Status::StreamEnd {
             break;
         }
 
-        if out.len() == out.capacity() {
-            if ceiling.is_some_and(|cap| out.len() >= cap) {
+        if produced == out.len() {
+            if ceiling.is_some_and(|cap| produced >= cap) {
                 return Err(bomb());
             }
-            let want = out.capacity().max(DEFLATE_GROWTH_FLOOR);
-            out.reserve(match ceiling {
+            let want = out.len().max(DEFLATE_GROWTH_FLOOR);
+            let growth = match ceiling {
                 Some(cap) => want.min(cap - out.len()),
                 None => want,
-            });
-        } else if decoder.total_in() == before_in && out.len() == before_out {
+            };
+            out.resize(out.len().saturating_add(growth), 0);
+        } else if decoder.total_in() == before_in && produced == before_out {
             return Err(truncated());
         }
     }
 
+    out.truncate(produced);
     if max_output.is_some_and(|limit| out.len() > limit) {
         return Err(bomb());
     }
-    Ok(out)
-}
-
-#[cfg(not(feature = "deflate"))]
-fn deflate_decompress(
-    _scratch: &mut FilterScratch,
-    _data: &[u8],
-    _max_output: Option<usize>,
-) -> Result<Vec<u8>, Error> {
-    Err(Error::UnsupportedFilter(FILTER_DEFLATE))
+    Ok(())
 }
 
 #[cfg(feature = "deflate")]
@@ -1085,6 +1122,17 @@ mod tests {
         assert_eq!(other_decoded, [5, 6]);
         assert_eq!(decoded, [1, 2, 3, 4]);
         assert_eq!(encoded, [1, 3, 2, 4, 7, 3, 10, 4]);
+    }
+
+    #[cfg(feature = "deflate")]
+    fn deflate_decompress(
+        scratch: &mut FilterScratch,
+        data: &[u8],
+        max_output: Option<usize>,
+    ) -> Result<Vec<u8>, Error> {
+        scratch
+            .deflate_decompress(FilterBuffer::borrowed(data), max_output)
+            .map(FilterBuffer::into_owned)
     }
 
     fn shuffle_compress(data: &[u8], element_size: usize) -> Vec<u8> {
@@ -1537,6 +1585,172 @@ mod tests {
         let mask = 1u32 << 0; // bit 0 => shuffle (index 0) skipped
         let decoded = decompress_chunk(&stored, &pipeline.filters, ctx, mask).unwrap();
         assert_eq!(decoded, data);
+    }
+
+    #[rstest]
+    #[cfg(feature = "deflate")]
+    #[case::zero_limit(0)]
+    #[case::one_byte_limit(1)]
+    #[case::small_limit(16)]
+    #[case::above_growth_floor(4097)]
+    fn deflate_writes_only_through_the_operation_limit(
+        #[case] limit: usize,
+        #[values(false, true)] retained: bool,
+    ) {
+        let compressed = deflate_compress(
+            &mut FilterScratch::new(),
+            &vec![7; 100_000],
+            DeflateLevel::Six,
+        )
+        .unwrap();
+        let mut scratch = FilterScratch::new();
+        if retained {
+            scratch.spare = Vec::with_capacity(128 * 1024);
+        }
+        let capacity = scratch.spare.capacity();
+        let pointer = scratch.spare.as_ptr();
+        assert_eq!(
+            deflate_decompress(&mut scratch, &compressed, Some(limit)),
+            Err(Error::DeflateSizeExceeded {
+                limit,
+                required: limit + 1
+            })
+        );
+        assert_eq!(
+            scratch.decoder.as_ref().unwrap().total_out(),
+            u64::try_from(limit + 1).unwrap()
+        );
+        assert!(scratch.spare.is_empty());
+        if retained {
+            assert_eq!(scratch.spare.capacity(), capacity);
+            assert_eq!(scratch.spare.as_ptr(), pointer);
+        }
+        let valid =
+            deflate_compress(&mut FilterScratch::new(), &[9; 32], DeflateLevel::Six).unwrap();
+        assert_eq!(
+            deflate_decompress(&mut scratch, &valid, Some(32)).unwrap(),
+            [9; 32]
+        );
+    }
+
+    #[rstest]
+    #[cfg(feature = "deflate")]
+    #[case::missing_checksum(4)]
+    #[case::partial_checksum(2)]
+    #[case::missing_last_byte(1)]
+    fn deflate_rejects_a_missing_trailer_after_producing_the_full_payload(
+        #[case] removed: usize,
+        #[values(false, true)] retained: bool,
+    ) {
+        let stored = [
+            120, 156, 99, 96, 100, 98, 102, 97, 101, 99, 231, 224, 4, 0, 0, 175, 0, 46,
+        ];
+        let mut scratch = FilterScratch::new();
+        if retained {
+            scratch.spare = Vec::with_capacity(64 * 1024);
+        }
+        assert_eq!(
+            deflate_decompress(&mut scratch, &stored[..stored.len() - removed], Some(10)),
+            Err(Error::FilterError(
+                "deflate: stream ended before the chunk was complete".into()
+            ))
+        );
+        assert_eq!(scratch.decoder.as_ref().unwrap().total_out(), 10);
+        assert!(scratch.spare.is_empty());
+        let pointer = scratch.spare.as_ptr();
+        let decoded = deflate_decompress(&mut scratch, &stored, Some(10)).unwrap();
+        assert_eq!(decoded, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(decoded.as_ptr(), pointer);
+    }
+
+    #[test]
+    #[cfg(feature = "deflate")]
+    fn deflate_reuses_rejected_output_without_changing_retained_chunks() {
+        let filters = [FilterDescription {
+            filter_id: FILTER_DEFLATE,
+            flags: 0,
+            client_data: vec![],
+        }];
+        let first =
+            deflate_compress(&mut FilterScratch::new(), &[1; 256], DeflateLevel::Six).unwrap();
+        let second =
+            deflate_compress(&mut FilterScratch::new(), &[2; 64], DeflateLevel::Six).unwrap();
+        let third =
+            deflate_compress(&mut FilterScratch::new(), &[3; 32], DeflateLevel::Six).unwrap();
+        let mut scratch = FilterScratch::new();
+        let retained = decompress_chunk_with(
+            &mut scratch,
+            &first,
+            &filters,
+            ChunkContext::basic(&[256], 1),
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            decompress_chunk_with(
+                &mut scratch,
+                &second,
+                &filters,
+                ChunkContext::basic(&[128], 1),
+                0
+            ),
+            Err(Error::DataSizeMismatch {
+                expected: 128,
+                actual: 64
+            })
+        );
+        assert!(scratch.spare.is_empty());
+        let pointer = scratch.spare.as_ptr();
+        let last = decompress_chunk_with(
+            &mut scratch,
+            &third,
+            &filters,
+            ChunkContext::basic(&[32], 1),
+            0,
+        )
+        .unwrap();
+        assert_eq!(last.as_ptr(), pointer);
+        assert_eq!(last, [3; 32]);
+        assert_eq!(retained, [1; 256]);
+        assert_eq!(scratch.spare.capacity(), 0);
+    }
+
+    #[rstest]
+    #[cfg(feature = "deflate")]
+    #[case::checksum_active(0)]
+    #[case::checksum_skipped(1)]
+    #[case::outside_bits_ignored(0xffff_fffc)]
+    fn deflate_uses_the_limit_from_active_inner_stages(#[case] mask: u32) {
+        let filters = [
+            FilterDescription {
+                filter_id: FILTER_FLETCHER32,
+                flags: 0,
+                client_data: vec![],
+            },
+            FilterDescription {
+                filter_id: FILTER_DEFLATE,
+                flags: 0,
+                client_data: vec![],
+            },
+        ];
+        let context = ChunkContext::basic(&[16], 1);
+        let encoded = compress_chunk(&[1; 16], &filters, context).unwrap();
+        let mut scratch = FilterScratch::new();
+        scratch.spare = Vec::with_capacity(64 * 1024);
+        let decoded = decompress_chunk_with(&mut scratch, &encoded, &filters, context, mask);
+        if mask & 1 != 0 {
+            assert_eq!(
+                decoded,
+                Err(Error::DeflateSizeExceeded {
+                    limit: 16,
+                    required: 17
+                })
+            );
+            assert_eq!(scratch.decoder.as_ref().unwrap().total_out(), 17);
+            assert!(scratch.spare.is_empty());
+        } else {
+            assert_eq!(decoded.unwrap(), [1; 16]);
+        }
     }
 
     #[test]
