@@ -1,25 +1,34 @@
 #![cfg(feature = "hdf5")]
 
 use hdf5::types::{IntSize, TypeDescriptor};
-use hdf5_pure::{Datatype, File, FileBuilder};
+use hdf5_pure::{Datatype, File, FileBuilder, LibVer};
 use rstest::rstest;
 
 #[rstest]
-#[case::width_one(vec![[0], [255], [128]])]
-#[case::width_three(vec![[0, 255, 128], [1, 2, 3], [4, 5, 6], [7, 8, 9]])]
-#[case::empty(Vec::<[u8; 7]>::new())]
-fn libhdf5_reads_typed_byte_arrays<const N: usize>(#[case] values: Vec<[u8; N]>) {
+#[case::width_one_v18(vec![[0], [255], [128]], LibVer::V18)]
+#[case::width_three_v18(vec![[0, 255, 128], [1, 2, 3], [4, 5, 6], [7, 8, 9]], LibVer::V18)]
+#[case::empty_v18(Vec::<[u8; 7]>::new(), LibVer::V18)]
+#[cfg_attr(feature = "__hdf5-1.10", case::width_one_v110(vec![[0], [255], [128]], LibVer::V110))]
+#[cfg_attr(feature = "__hdf5-1.10", case::width_three_v110(vec![[0, 255, 128], [1, 2, 3], [4, 5, 6], [7, 8, 9]], LibVer::V110))]
+#[cfg_attr(feature = "__hdf5-1.10", case::empty_v110(Vec::<[u8; 7]>::new(), LibVer::V110))]
+fn libhdf5_reads_typed_byte_arrays<const N: usize>(
+    #[case] values: Vec<[u8; N]>,
+    #[case] libver: LibVer,
+) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("values.h5");
     let mut builder = FileBuilder::new();
-    builder
-        .create_dataset("values")
-        .with_data(&values)
-        .with_chunks(&[3]);
+    builder.with_libver_bounds(LibVer::Earliest, libver);
+    let dataset = builder.create_dataset("values").with_data(&values);
+    if libver >= LibVer::V110 {
+        dataset.with_chunks(&[3]);
+    }
     builder.write(&path).unwrap();
+    assert_eq!(File::open(&path).unwrap().libver_bound(), libver);
     let file = hdf5::File::open(&path).unwrap();
     let dataset = file.dataset("values").unwrap();
     assert_eq!(dataset.shape(), [values.len()]);
+    assert_eq!(dataset.chunk(), (libver >= LibVer::V110).then(|| vec![3]));
     assert_eq!(
         dataset.dtype().unwrap().to_descriptor().unwrap(),
         TypeDescriptor::FixedArray(Box::new(TypeDescriptor::Unsigned(IntSize::U1)), N)
