@@ -1172,7 +1172,7 @@ fn commit_base(path: &Path, paged: bool) {
 fn read_optional(f: &crate::reader::File, path: &str) -> Result<Option<Vec<i32>>, Error> {
     match f.dataset(path) {
         Ok(ds) => ds.read_i32().map(Some),
-        Err(Error::Format(FormatError::PathNotFound { .. })) => Ok(None),
+        Err(Error::Format(FormatError::PathNotFound(missing))) if missing == path => Ok(None),
         Err(e) => Err(e),
     }
 }
@@ -1327,17 +1327,20 @@ fn every_round_committed(path: &Path) -> Result<(), String> {
         .and_then(|d| d.read_i32())
         .map_err(|e| std::format!("the finished `d` does not read: {e:?}"))?;
     let want = COMMIT_BASE + CHURN * COMMIT_STEP;
-    if d.len() as i32 != want {
-        return Err(std::format!(
-            "`d` holds {} elements rather than {want}",
-            d.len()
-        ));
+    if d.iter().copied().ne(0..want) {
+        return Err(std::format!("the finished `d` does not hold 0..{want}"));
     }
     for r in 0..CHURN {
-        if f.dataset(&std::format!("added{r}")).is_err() {
-            return Err(std::format!("`added{r}` was never created"));
+        let added = read_optional(&f, &std::format!("added{r}"))
+            .map_err(|error| std::format!("the finished `added{r}` does not read: {error:?}"))?;
+        if added != Some(added_values(r)) {
+            return Err(std::format!(
+                "`added{r}` does not hold its committed values"
+            ));
         }
-        if f.dataset(&std::format!("doomed{r}")).is_ok() {
+        let doomed = read_optional(&f, &std::format!("doomed{r}"))
+            .map_err(|error| std::format!("the finished `doomed{r}` does not read: {error:?}"))?;
+        if doomed.is_some() {
             return Err(std::format!("`doomed{r}` was never deleted"));
         }
     }

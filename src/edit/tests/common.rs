@@ -1,4 +1,4 @@
-//! Shared fixtures for bounded sessions and gathered writes.
+//! Shared fixtures and error assertions for editor tests.
 
 use std::path::Path;
 
@@ -8,6 +8,7 @@ use crate::access_mode::AccessMode;
 use crate::dataspace::MaxExtent;
 use crate::edit::MemoryStrategy;
 use crate::edit::WriteEngine;
+use crate::error::Error;
 use crate::file_lock::FileLocking;
 use crate::file_space_info::FileSpacePageSize;
 use crate::file_space_info::FileSpaceStrategy;
@@ -71,4 +72,12 @@ pub(super) fn gather_fixture(path: &std::path::Path, tables: usize, paged: bool)
             .with_chunks(&[64]);
     }
     b.write(path).unwrap();
+}
+
+/// Asserts [`Error::EditUnsupported`] with the complete expected reason.
+pub(super) fn assert_unsupported(error: Error, expected: &str) {
+    let Error::EditUnsupported(reason) = error else {
+        panic!("expected EditUnsupported, got {error:?}");
+    };
+    assert_eq!(reason, expected);
 }

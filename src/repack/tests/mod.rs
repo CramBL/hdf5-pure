@@ -492,9 +492,12 @@ fn lzf_plus_deflate_pipeline_is_refused() {
         ],
     };
     let err = check_pipeline(Some(&pipeline), &ObjectPathBuf::parse("d")).unwrap_err();
-    assert!(
-        matches!(&err, Error::RepackUnsupported(msg) if msg.contains("lzf + deflate")),
-        "unexpected error: {err:?}"
+    let Error::RepackUnsupported(reason) = err else {
+        panic!("expected RepackUnsupported, got {err:?}");
+    };
+    assert_eq!(
+        reason,
+        "dataset d: an lzf + deflate pipeline cannot be re-encoded faithfully"
     );
 }
 

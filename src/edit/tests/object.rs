@@ -14,6 +14,7 @@ use test_util::object_header::v2 as v2_bytes;
 use test_util::object_header::v2::HeaderFlags;
 use test_util::widths::Widths;
 
+use super::common;
 use crate::UserblockSize;
 use crate::VariableLengthType;
 use crate::access_mode::AccessMode;
@@ -27,13 +28,16 @@ use crate::attribute_info::AttributeInfoMessage;
 use crate::checksum;
 use crate::data_layout::COMPACT_DATA_OFFSET;
 use crate::datatype;
+use crate::datatype::CharacterSet;
 use crate::datatype::Datatype;
+use crate::datatype::ReferenceType;
 use crate::edit;
 use crate::edit::InvalidatedAddresses;
 use crate::edit::LinkCreationOrder;
 use crate::edit::Node;
 use crate::edit::OhRegion;
 use crate::edit::REFERENCE_INTO_RECLAIMED_SPACE;
+use crate::edit::REFERENCE_TO_A_MOVED_OBJECT;
 use crate::edit::SHARED_MESSAGE_INDEX_NAMES_A_MOVED_OBJECT;
 use crate::edit::UNDEF;
 use crate::edit::WriteEngine;
@@ -132,25 +136,40 @@ fn a_hard_link_with_bytes_past_its_address_is_unsupported() {
     );
 }
 
-#[test]
-fn a_copied_compact_reference_dataset_is_screened() {
+#[rstest]
+#[case::start(248, true)]
+#[case::last_byte(318, true)]
+#[case::end(319, false)]
+fn a_copied_compact_reference_dataset_is_screened(#[case] address: u64, #[case] rejected: bool) {
     let empty = BytesSource::new(Vec::new());
     let invalidated = InvalidatedAddresses {
         removed: vec![(248, 71)],
         moved: Vec::new(),
         base: AddressContext::from_effective_base(BaseAddress::ZERO),
     };
-    for (address, refused) in [(248u64, true), (318, true), (319, false)] {
-        let tree = verbatim_copy(compact_reference_region(address), DenseAttrSet::default());
-        let got = copy::screen_copied_references(
-            &tree,
-            AddressContext::from_effective_base(BaseAddress::ZERO),
-            crate::file_writer::WIDTHS,
-            &invalidated,
-            &empty,
-        );
-        assert_eq!(got.is_err(), refused, "compact element {address}: {got:?}");
+    let tree = verbatim_copy(compact_reference_region(address), DenseAttrSet::default());
+    let got = copy::screen_copied_references(
+        &tree,
+        AddressContext::from_effective_base(BaseAddress::ZERO),
+        crate::file_writer::WIDTHS,
+        &invalidated,
+        &empty,
+    );
+    if rejected {
+        common::assert_unsupported(got.unwrap_err(), REFERENCE_INTO_RECLAIMED_SPACE);
+    } else {
+        got.unwrap();
     }
+}
+
+#[test]
+fn a_copied_reference_dataset_without_layout_is_rejected() {
+    let empty = BytesSource::new(Vec::new());
+    let invalidated = InvalidatedAddresses {
+        removed: vec![(248, 71)],
+        moved: Vec::new(),
+        base: AddressContext::from_effective_base(BaseAddress::ZERO),
+    };
     let no_layout = verbatim_copy(
         plain_region(message_record(
             MessageType::DATATYPE,
@@ -168,9 +187,10 @@ fn a_copied_compact_reference_dataset_is_screened() {
         &empty,
     )
     .unwrap_err();
-    assert!(
-        err.to_string().contains("could not be read to screen"),
-        "got: {err}"
+    common::assert_unsupported(
+        err,
+        "a compact object-reference dataset's elements could not be read to screen \
+         them against this commit's deletions; use separate commits",
     );
 }
 
@@ -213,101 +233,46 @@ fn a_copy_whose_committed_datatype_cannot_be_read_reports_the_read_failure() {
     );
 }
 
-#[test]
-fn a_datatype_whose_reference_slots_do_not_fit_is_rejected() {
-    use crate::datatype::ReferenceType;
-    let dt = Datatype::Compound {
-        size: 8,
-        members: vec![crate::datatype::__private::compound_member(
-            "r".to_string(),
-            4,
-            Datatype::Reference {
-                size: 8,
-                ref_type: ReferenceType::Object,
-            },
-        )],
-    };
+#[rstest]
+#[case::compound_with_deletions(UnreadableReference::Compound, vec![(248, 71)])]
+#[case::compound_without_deletions(UnreadableReference::Compound, Vec::new())]
+#[case::variable_length(UnreadableReference::VariableLength, vec![(248, 71)])]
+#[case::wide_with_deletions(UnreadableReference::Wide, vec![(248, 71)])]
+#[case::wide_without_deletions(UnreadableReference::Wide, Vec::new())]
+fn unreadable_reference_slots_are_rejected(
+    #[case] reference: UnreadableReference,
+    #[case] removed: Vec<(u64, u64)>,
+) {
+    let (datatype, raw) = reference.into_fixture();
     assert!(
-        datatype::embedded_reference_slots(&dt).is_none(),
-        "the fixture must be one the walker cannot map"
+        datatype::embedded_reference_slots(&datatype).is_none(),
+        "the reference slots must be unreadable, not an empty slot list"
     );
-
-    let raw = [0u8; 8];
     let invalidated = InvalidatedAddresses {
-        removed: vec![(248, 71)],
+        removed,
         moved: Vec::new(),
         base: AddressContext::from_effective_base(BaseAddress::ZERO),
     };
-    let err = edit::screen_resolved_references(&dt, &raw, &invalidated).unwrap_err();
-    assert!(
-        err.to_string().contains("this screen cannot read"),
-        "got: {err}"
+    common::assert_unsupported(
+        edit::screen_resolved_references(&datatype, &raw, &invalidated).unwrap_err(),
+        "a reference this commit writes sits in a datatype whose addresses this screen \
+         cannot read — a width other than eight, a dataset-region reference, a \
+         variable length of them, or a compound holding one beside a reference it can \
+         read — so it cannot be checked against what this commit vacates; supply an \
+         8-byte object reference (`with_reference_data`)",
     );
-    let nothing = InvalidatedAddresses {
-        removed: Vec::new(),
-        moved: Vec::new(),
-        base: AddressContext::from_effective_base(BaseAddress::ZERO),
-    };
-    assert!(edit::screen_resolved_references(&dt, &raw, &nothing).is_err());
 }
 
 #[test]
-fn a_variable_length_of_object_references_is_rejected() {
-    use crate::datatype::{CharacterSet, ReferenceType};
-    let of_references =
-        Datatype::VariableLength(VariableLengthType::sequence(Datatype::Reference {
-            size: 8,
-            ref_type: ReferenceType::Object,
-        }));
-    let of_strings = crate::type_builders::make_vlen_string_type(CharacterSet::Utf8);
+fn a_variable_length_string_is_screened_without_object_references() {
+    let datatype = crate::type_builders::make_vlen_string_type(CharacterSet::Utf8);
     let raw = vec![0u8; 32];
     let invalidated = InvalidatedAddresses {
         removed: vec![(248, 71)],
         moved: Vec::new(),
         base: AddressContext::from_effective_base(BaseAddress::ZERO),
     };
-
-    let err = edit::screen_resolved_references(&of_references, &raw, &invalidated).unwrap_err();
-    assert!(
-        err.to_string().contains("this screen cannot read"),
-        "got: {err}"
-    );
-    assert!(
-        edit::screen_resolved_references(&of_strings, &raw, &invalidated).is_ok(),
-        "a variable-length string points at a heap no delete reclaims"
-    );
-}
-
-#[test]
-fn an_object_reference_wider_than_eight_bytes_is_rejected() {
-    use crate::datatype::ReferenceType;
-    let dt = Datatype::Reference {
-        size: 16,
-        ref_type: ReferenceType::Object,
-    };
-    assert!(
-        datatype::embedded_reference_slots(&dt).is_none(),
-        "the walker must report a width it cannot map, not an empty slot list"
-    );
-
-    let mut raw = vec![0u8; 16];
-    raw[..8].copy_from_slice(&300u64.to_le_bytes());
-    let invalidated = InvalidatedAddresses {
-        removed: vec![(248, 71)],
-        moved: Vec::new(),
-        base: AddressContext::from_effective_base(BaseAddress::ZERO),
-    };
-    let err = edit::screen_resolved_references(&dt, &raw, &invalidated).unwrap_err();
-    assert!(
-        err.to_string().contains("this screen cannot read"),
-        "got: {err}"
-    );
-    let nothing = InvalidatedAddresses {
-        removed: Vec::new(),
-        moved: Vec::new(),
-        base: AddressContext::from_effective_base(BaseAddress::ZERO),
-    };
-    assert!(edit::screen_resolved_references(&dt, &raw, &nothing).is_err());
+    edit::screen_resolved_references(&datatype, &raw, &invalidated).unwrap();
 }
 
 #[test]
@@ -386,13 +351,13 @@ fn a_raw_reference_target_is_screened_like_a_path_one() {
         )
     };
 
-    assert!(
-        resolve(300, vec![(248, 71)], Vec::new()).is_err(),
-        "an address inside a reclaimed span is refused"
+    common::assert_unsupported(
+        resolve(300, vec![(248, 71)], Vec::new()).unwrap_err(),
+        REFERENCE_INTO_RECLAIMED_SPACE,
     );
-    assert!(
-        resolve(300, Vec::new(), vec![300]).is_err(),
-        "an address this commit rewrites elsewhere is refused"
+    common::assert_unsupported(
+        resolve(300, Vec::new(), vec![300]).unwrap_err(),
+        REFERENCE_TO_A_MOVED_OBJECT,
     );
     assert_eq!(
         resolve(300, vec![(400, 71)], vec![299, 301]).unwrap(),
@@ -461,35 +426,42 @@ fn reference_targets_resolve_equivalent_path_spellings(#[case] spelling: &str) {
     );
 }
 
-#[test]
-fn a_copied_reference_attribute_is_screened_in_both_storages() {
+#[rstest]
+#[case::start(248, true)]
+#[case::last_byte(318, true)]
+#[case::end(319, false)]
+#[case::before(247, false)]
+fn a_copied_reference_attribute_is_screened_in_both_storages(
+    #[case] address: u64,
+    #[case] rejected: bool,
+    #[values(false, true)] dense: bool,
+) {
     let empty = BytesSource::new(Vec::new());
     let invalidated = InvalidatedAddresses {
         removed: vec![(248, 71)],
         moved: Vec::new(),
         base: AddressContext::from_effective_base(BaseAddress::ZERO),
     };
-    for (address, refused) in [(248u64, true), (318, true), (319, false), (247, false)] {
-        let attr = reference_attr("target", address);
-        let dense = verbatim_copy(
+    let attr = reference_attr("target", address);
+    let tree = if dense {
+        verbatim_copy(
             OhRegion::default(),
-            DenseAttrSet::new(vec![attr.clone()], DenseAttrCreationOrder::Untracked, []).unwrap(),
-        );
-        let inline = verbatim_copy(inline_attr_region(&attr), DenseAttrSet::default());
-        for (storage, tree) in [("dense", &dense), ("inline", &inline)] {
-            let got = copy::screen_copied_references(
-                tree,
-                AddressContext::from_effective_base(BaseAddress::ZERO),
-                crate::file_writer::WIDTHS,
-                &invalidated,
-                &empty,
-            );
-            assert_eq!(
-                got.is_err(),
-                refused,
-                "{storage} attribute at {address}: {got:?}"
-            );
-        }
+            DenseAttrSet::new(vec![attr], DenseAttrCreationOrder::Untracked, []).unwrap(),
+        )
+    } else {
+        verbatim_copy(inline_attr_region(&attr), DenseAttrSet::default())
+    };
+    let result = copy::screen_copied_references(
+        &tree,
+        AddressContext::from_effective_base(BaseAddress::ZERO),
+        crate::file_writer::WIDTHS,
+        &invalidated,
+        &empty,
+    );
+    if rejected {
+        common::assert_unsupported(result.unwrap_err(), REFERENCE_INTO_RECLAIMED_SPACE);
+    } else {
+        result.unwrap();
     }
 }
 
@@ -816,7 +788,10 @@ fn reject_foreign_addresses_rejects_any_shared_message() {
     let mut shared = message_record(MessageType::DATASPACE, &[0u8; 8]);
     shared[3] = MessageFlags::SHARED.get(); // set the message's shared flag
     let err = copy::reject_foreign_addresses(&plain_region(shared)).unwrap_err();
-    assert!(err.to_string().contains("shared"), "got: {err}");
+    common::assert_unsupported(
+        err,
+        "a shared (committed/SOHM) object-header message cannot be copied to another file yet",
+    );
 
     let plain = message_record(MessageType::DATASPACE, &[0u8; 8]);
     copy::reject_foreign_addresses(&plain_region(plain)).unwrap();
@@ -954,8 +929,29 @@ fn a_rebuild_stamps_the_modification_and_change_times() {
     );
 }
 
-#[test]
-fn a_prefix_truncated_inside_an_optional_block_is_rejected() {
+#[rstest]
+#[case::length_6(6)]
+#[case::length_7(7)]
+#[case::length_8(8)]
+#[case::length_9(9)]
+#[case::length_10(10)]
+#[case::length_11(11)]
+#[case::length_12(12)]
+#[case::length_13(13)]
+#[case::length_14(14)]
+#[case::length_15(15)]
+#[case::length_16(16)]
+#[case::length_17(17)]
+#[case::length_18(18)]
+#[case::length_19(19)]
+#[case::length_20(20)]
+#[case::length_21(21)]
+#[case::length_22(22)]
+#[case::length_23(23)]
+#[case::length_24(24)]
+#[case::length_25(25)]
+#[case::length_26(26)]
+fn a_truncated_prefix_with_optional_blocks_is_rejected(#[case] cut: usize) {
     let props = ObjectHeaderPrefix {
         times: Some(FIXTURE_TIMES),
         attribute_phase_change: Some(FIXTURE_PHASE),
@@ -963,12 +959,10 @@ fn a_prefix_truncated_inside_an_optional_block_is_rejected() {
     };
     let region = attr_region_in(props, &[("alpha", 0)], 1);
     let header = v2_header_bytes(props, &region);
-    for cut in 6..6 + 16 + 4 + 1 {
-        assert!(
-            edit::object_header::oh_region_at(&header[..cut], 0, header.len() as u64).is_err(),
-            "a {cut}-byte prefix must not parse as a whole header",
-        );
-    }
+    common::assert_unsupported(
+        edit::object_header::oh_region_at(&header[..cut], 0, header.len() as u64).unwrap_err(),
+        "truncated object header",
+    );
 }
 
 #[test]
@@ -1407,10 +1401,7 @@ fn malformed_message_region_returns_a_header_build_error() {
         ObjectHeaderPrefix::PLAIN,
     ))
     .unwrap_err();
-    assert!(
-        matches!(err, Error::EditUnsupported(_)),
-        "an unwalkable region gave {err:?}"
-    );
+    common::assert_unsupported(err, "malformed object header message");
 }
 
 #[test]
@@ -1431,6 +1422,52 @@ fn rebuilt_inline_attributes_include_attribute_info() {
         oh.len() > 8 + region.len() + 4,
         "the wrapped header did not grow by an Attribute Info message"
     );
+}
+
+/// Reference layouts whose object addresses cannot be screened.
+enum UnreadableReference {
+    Compound,
+    VariableLength,
+    Wide,
+}
+
+impl UnreadableReference {
+    fn into_fixture(self) -> (Datatype, Vec<u8>) {
+        match self {
+            Self::Compound => (
+                Datatype::Compound {
+                    size: 8,
+                    members: vec![crate::datatype::__private::compound_member(
+                        "r".to_string(),
+                        4,
+                        Datatype::Reference {
+                            size: 8,
+                            ref_type: ReferenceType::Object,
+                        },
+                    )],
+                },
+                vec![0; 8],
+            ),
+            Self::VariableLength => (
+                Datatype::VariableLength(VariableLengthType::sequence(Datatype::Reference {
+                    size: 8,
+                    ref_type: ReferenceType::Object,
+                })),
+                vec![0; 32],
+            ),
+            Self::Wide => {
+                let mut raw = vec![0; 16];
+                raw[..8].copy_from_slice(&300u64.to_le_bytes());
+                (
+                    Datatype::Reference {
+                        size: 16,
+                        ref_type: ReferenceType::Object,
+                    },
+                    raw,
+                )
+            }
+        }
+    }
 }
 
 /// Constructs an object-reference attribute by replacing a `u64` attribute's datatype.

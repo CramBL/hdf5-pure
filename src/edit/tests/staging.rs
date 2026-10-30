@@ -4,6 +4,7 @@ use std::path::Path;
 
 use rstest::rstest;
 
+use super::common;
 use crate::DeflateLevel;
 use crate::PersistedFreeSpacePolicy;
 use crate::access_mode::AccessMode;
@@ -13,6 +14,8 @@ use crate::edit::MemoryStrategy;
 use crate::edit::WriteEngine;
 use crate::edit::staging::StagedKind;
 use crate::error::Error;
+use crate::error::FormatError;
+use crate::error::ResolveError;
 use crate::file_lock::FileLocking;
 use crate::layout_info::FilterId;
 use crate::object_path::ObjectPath;
@@ -37,10 +40,7 @@ fn overwriting_the_root_group_is_rejected_at_staging() {
     let err = s
         .stage_dataset_write(&ObjectPathBuf::parse("/"), db)
         .unwrap_err();
-    assert!(
-        matches!(&err, Error::EditUnsupported(m) if m.contains("root group")),
-        "unexpected error: {err:?}"
-    );
+    common::assert_unsupported(err, "cannot overwrite the root group");
     assert!(!s.has_staged_edits());
 }
 
@@ -208,11 +208,15 @@ fn a_creation_colliding_with_a_surviving_link_is_rejected_where_it_is_staged() {
     let err = e
         .stage_created_dataset(&ObjectPathBuf::parse("existing"), i32_dataset(&[9]))
         .unwrap_err();
-    assert!(
-        matches!(&err, Error::EditUnsupported(m) if m.contains("already exists")),
-        "got: {err}"
+    common::assert_unsupported(
+        err,
+        "a link with this name already exists in the target group",
     );
-    assert!(e.create_group(&ObjectPathBuf::parse("existing")).is_err());
+    common::assert_unsupported(
+        e.create_group(&ObjectPathBuf::parse("existing"))
+            .unwrap_err(),
+        "a link with this name already exists in the target group",
+    );
     assert_eq!(kind(&e, "existing"), None);
     assert!(
         e.staged_dataset_meta(&ObjectPathBuf::parse("existing"))
@@ -231,9 +235,10 @@ fn a_second_creation_at_a_staged_path_is_rejected_where_it_is_staged() {
     let err = e
         .stage_created_dataset(&ObjectPathBuf::parse("fresh"), i32_dataset(&[9]))
         .unwrap_err();
-    assert!(
-        matches!(&err, Error::EditUnsupported(m) if m.contains("already stages")),
-        "got: {err}"
+    common::assert_unsupported(
+        err,
+        "this session already stages an object with this name in the target group; \
+         delete it to withdraw that staging before staging another in its place",
     );
     assert_eq!(
         e.staged_dataset_meta(&ObjectPathBuf::parse("fresh"))
@@ -245,11 +250,17 @@ fn a_second_creation_at_a_staged_path_is_rejected_where_it_is_staged() {
         child_names(&e, ""),
         vec![("fresh".to_string(), StagedKind::Dataset)]
     );
-    assert!(e.create_group(&ObjectPathBuf::parse("fresh")).is_err());
+    common::assert_unsupported(
+        e.create_group(&ObjectPathBuf::parse("fresh")).unwrap_err(),
+        "this session already stages an object with this name in the target group; \
+         delete it to withdraw that staging before staging another in its place",
+    );
     e.create_group(&ObjectPathBuf::parse("g")).unwrap();
-    assert!(
+    common::assert_unsupported(
         e.stage_created_dataset(&ObjectPathBuf::parse("g"), i32_dataset(&[9]))
-            .is_err()
+            .unwrap_err(),
+        "this session already stages an object with this name in the target group; \
+         delete it to withdraw that staging before staging another in its place",
     );
     assert_eq!(kind(&e, "g"), Some(StagedKind::Group));
 
@@ -263,9 +274,11 @@ fn a_replacement_is_staged_once_and_a_withdrawal_frees_the_name_again() {
     e.delete(&ObjectPathBuf::parse("existing")).unwrap();
     e.stage_created_dataset(&ObjectPathBuf::parse("existing"), i32_dataset(&[9]))
         .unwrap();
-    assert!(
+    common::assert_unsupported(
         e.stage_created_dataset(&ObjectPathBuf::parse("existing"), i32_dataset(&[8, 8]))
-            .is_err()
+            .unwrap_err(),
+        "this session already stages an object with this name in the target group; \
+         delete it to withdraw that staging before staging another in its place",
     );
     assert_eq!(
         e.staged_dataset_meta(&ObjectPathBuf::parse("existing"))
@@ -323,9 +336,9 @@ fn deleting_an_ancestor_alone_preserves_committed_child_visibility() {
     let err = e
         .stage_created_dataset(&ObjectPathBuf::parse("g/inner"), i32_dataset(&[9]))
         .unwrap_err();
-    assert!(
-        matches!(&err, Error::EditUnsupported(m) if m.contains("already exists")),
-        "got: {err}"
+    common::assert_unsupported(
+        err,
+        "a link with this name already exists in the target group",
     );
     assert_eq!(kind(&e, "g/inner"), None, "the file's own dataset");
     e.stage_created_dataset(&ObjectPathBuf::parse("g/other"), i32_dataset(&[9]))
@@ -334,7 +347,11 @@ fn deleting_an_ancestor_alone_preserves_committed_child_visibility() {
         !e.staged_children(&ObjectPathBuf::parse("g"))[0].replaces_link,
         "nothing rebuilds `g`, so its names are not handed over"
     );
-    assert!(e.commit().is_err(), "a deletion overlapping an addition");
+    common::assert_unsupported(
+        e.commit().unwrap_err(),
+        "a deletion overlaps an addition in the same commit; \
+         replace the path instead, or use separate commits",
+    );
 }
 
 #[test]
@@ -453,10 +470,13 @@ fn an_append_through_a_handle_onto_the_replaced_object_is_rejected() {
         .unwrap();
     let mut b = AppendBuilder::new();
     b.append_i32(&[200]);
-    assert!(matches!(
-        e.stage_dataset_append(&ObjectPathBuf::parse("existing"), b),
-        Err(Error::EditUnsupported(_))
-    ));
+    common::assert_unsupported(
+        e.stage_dataset_append(&ObjectPathBuf::parse("existing"), b)
+            .unwrap_err(),
+        "a dataset is staged at this path in the same commit, so an append through a \
+         handle onto the object the file holds there could only grow the object being \
+         replaced; append through the handle that staged the creation, or commit first",
+    );
     assert_eq!(
         e.staged_dataset_meta(&ObjectPathBuf::parse("existing"))
             .unwrap()
@@ -476,17 +496,29 @@ fn incompatible_staged_appends_preserve_pending_dataset_shape() {
 
     let mut wrong_type = AppendBuilder::new();
     wrong_type.append_f64(&[1.0]);
-    assert!(matches!(
-        e.stage_dataset_append_pending(&ObjectPathBuf::parse("col"), wrong_type),
-        Err(Error::AppendUnsupported(_))
-    ));
+    let error = e
+        .stage_dataset_append_pending(&ObjectPathBuf::parse("col"), wrong_type)
+        .unwrap_err();
+    let Error::AppendUnsupported(reason) = error else {
+        panic!("expected AppendUnsupported, got {error:?}");
+    };
+    assert_eq!(
+        reason,
+        "appended element datatype does not match the staged dataset's datatype"
+    );
 
     let mut partial = AppendBuilder::new();
     partial.append_raw(&[0u8, 1, 2]);
-    assert!(matches!(
-        e.stage_dataset_append_pending(&ObjectPathBuf::parse("col"), partial),
-        Err(Error::AppendUnsupported(_))
-    ));
+    let error = e
+        .stage_dataset_append_pending(&ObjectPathBuf::parse("col"), partial)
+        .unwrap_err();
+    let Error::AppendUnsupported(reason) = error else {
+        panic!("expected AppendUnsupported, got {error:?}");
+    };
+    assert_eq!(
+        reason,
+        "appended byte length is not a whole number of rows of the staged dataset"
+    );
     let mut capped = DatasetBuilder::new("");
     capped
         .with_i32_data(&[1, 2])
@@ -496,10 +528,16 @@ fn incompatible_staged_appends_preserve_pending_dataset_shape() {
         .unwrap();
     let mut over = AppendBuilder::new();
     over.append_i32(&[3, 4]);
-    assert!(matches!(
-        e.stage_dataset_append_pending(&ObjectPathBuf::parse("capped"), over),
-        Err(Error::AppendUnsupported(_))
-    ));
+    let error = e
+        .stage_dataset_append_pending(&ObjectPathBuf::parse("capped"), over)
+        .unwrap_err();
+    let Error::AppendUnsupported(reason) = error else {
+        panic!("expected AppendUnsupported, got {error:?}");
+    };
+    assert_eq!(
+        reason,
+        "appending would grow the staged dataset past its maximum shape"
+    );
     assert_eq!(
         e.staged_dataset_meta(&ObjectPathBuf::parse("col"))
             .unwrap()
@@ -576,17 +614,19 @@ fn deleting_a_staged_replacement_leaves_the_plain_deletion() {
     assert_eq!(kind(&e, "existing"), None);
     assert_eq!(e.staged.deletes().len(), 1);
     e.commit().unwrap();
-    assert!(
-        crate::group_v2::resolve_path_any_from_source(
-            &e.image(),
-            AccessMode::ReadWrite,
-            e.superblock(),
-            e.widths(),
-            e.addresses(),
-            &ObjectPath::parse("existing")
-        )
-        .is_err()
-    );
+    let error = crate::group_v2::resolve_path_any_from_source(
+        &e.image(),
+        AccessMode::ReadWrite,
+        e.superblock(),
+        e.widths(),
+        e.addresses(),
+        &ObjectPath::parse("existing"),
+    )
+    .unwrap_err();
+    let ResolveError::Format(FormatError::PathNotFound(path)) = error else {
+        panic!("expected PathNotFound, got {error:?}");
+    };
+    assert_eq!(path, "existing");
 }
 
 #[test]
@@ -600,7 +640,7 @@ fn a_batch_that_fails_leaves_the_staged_index_matching_the_staged_set() {
         s.stage_created_dataset(&ObjectPathBuf::parse("gone/col"), i32_dataset(&[2]))?;
         Err(Error::EditUnsupported("refused on purpose"))
     });
-    assert!(refused.is_err());
+    common::assert_unsupported(refused.unwrap_err(), "refused on purpose");
     assert_eq!(kind(&e, "gone"), None);
     assert_eq!(kind(&e, "gone/col"), None);
     assert_eq!(kind(&e, "kept"), Some(StagedKind::Dataset));
@@ -633,10 +673,18 @@ fn an_edit_that_changes_staged_work_is_rejected_inside_a_batch() {
         b.append_i32(&[3]);
         s.stage_dataset_append_pending(&ObjectPathBuf::parse("col"), b)
     });
-    assert!(matches!(folded, Err(Error::EditUnsupported(_))));
+    common::assert_unsupported(
+        folded.unwrap_err(),
+        "an edit that changes or withdraws an already-staged object cannot be made \
+         inside an atomic staging batch, whose undo drops additions only",
+    );
     let withdrawn: Result<(), Error> =
         e.stage_atomically(|s| s.delete(&ObjectPathBuf::parse("col")));
-    assert!(matches!(withdrawn, Err(Error::EditUnsupported(_))));
+    common::assert_unsupported(
+        withdrawn.unwrap_err(),
+        "an edit that changes or withdraws an already-staged object cannot be made \
+         inside an atomic staging batch, whose undo drops additions only",
+    );
     assert_eq!(
         e.staged_dataset_meta(&ObjectPathBuf::parse("col"))
             .unwrap()

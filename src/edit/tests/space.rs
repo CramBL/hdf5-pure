@@ -1289,9 +1289,9 @@ fn failed_paged_commit_leaves_the_free_lists_untouched() {
     let proposed = s.context.propose(superblock).unwrap();
     s.context.adopt(proposed).unwrap();
     s.delete(&ObjectPathBuf::parse("/drop")).unwrap();
-    assert!(
-        s.commit().is_err(),
-        "a commit with an unreadable extension must fail"
+    common::assert_unsupported(
+        s.commit().unwrap_err(),
+        "an object does not use a version 2 object header",
     );
 
     assert_eq!(
@@ -1455,9 +1455,9 @@ fn a_failed_commit_leaves_no_reusable_span_the_image_names() {
         db
     })
     .unwrap();
-    assert!(
-        s.commit().is_err(),
-        "a commit with an unreadable extension must fail"
+    common::assert_unsupported(
+        s.commit().unwrap_err(),
+        "an object does not use a version 2 object header",
     );
     let mut superblock = s.context.superblock().clone();
     superblock.superblock_extension_address = good_ext;
@@ -1475,11 +1475,9 @@ fn a_failed_commit_leaves_no_reusable_span_the_image_names() {
     drop(s);
 
     let f = crate::reader::File::open(&path).unwrap();
-    let got = f.dataset("labels").unwrap().read_string();
-    assert!(
-        got.as_ref()
-            .is_ok_and(|v| v.iter().map(String::as_str).eq(round_one)),
-        "/labels reads another dataset's heap objects: {got:?}"
+    assert_eq!(
+        f.dataset("labels").unwrap().read_string().unwrap(),
+        round_one
     );
 }
 
