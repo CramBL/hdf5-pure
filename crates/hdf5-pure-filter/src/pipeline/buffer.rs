@@ -16,11 +16,13 @@ pub(crate) struct FilterBuffer<'a>(Storage<'a>);
 
 impl<'a> FilterBuffer<'a> {
     /// Borrows the input without acquiring storage.
+    #[inline]
     pub(crate) fn borrowed(bytes: &'a [u8]) -> Self {
         Self(Storage::Borrowed(bytes))
     }
 
     /// Replaces the live bytes and recycles the displaced owned allocation.
+    #[inline]
     pub(crate) fn replace(self, spare: &mut InitializedBuffer, bytes: Vec<u8>) -> Self {
         self.recycle(spare);
         Self::owned(bytes)
@@ -34,6 +36,7 @@ impl<'a> FilterBuffer<'a> {
     /// # Errors
     ///
     /// Returns the writer's error if writing fails.
+    #[inline]
     pub(super) fn materialize(
         self,
         spare: &mut InitializedBuffer,
@@ -57,6 +60,7 @@ impl<'a> FilterBuffer<'a> {
     ///
     /// Returns the writer's error if writing fails. Returns [`Error::Pipeline`] if the produced
     /// prefix exceeds the writable window.
+    #[inline]
     pub(super) fn overwrite(
         self,
         spare: &mut InitializedBuffer,
@@ -92,6 +96,7 @@ impl<'a> FilterBuffer<'a> {
     /// # Errors
     ///
     /// Returns [`Error::Pipeline`] if `range` extends beyond the live bytes or is reversed.
+    #[inline]
     pub(crate) fn narrow(self, range: Range<usize>) -> Result<Self, Error> {
         if self.as_slice().get(range.clone()).is_none() {
             return Err(Error::Pipeline(FormatError::Internal(
@@ -108,6 +113,7 @@ impl<'a> FilterBuffer<'a> {
     }
 
     /// Appends to owned live bytes, copying borrowed input into the spare allocation first.
+    #[inline]
     pub(super) fn append(self, spare: &mut InitializedBuffer, suffix: &[u8]) -> Self {
         let mut output = match self.0 {
             Storage::Borrowed(input) => {
@@ -116,19 +122,14 @@ impl<'a> FilterBuffer<'a> {
                 output.extend_from_slice(input);
                 output
             }
-            Storage::Owned { mut bytes, live } => {
-                bytes.0.copy_within(live.clone(), 0);
-                AppendBuffer {
-                    bytes,
-                    written: live.len(),
-                }
-            }
+            Storage::Owned { bytes, live } => AppendBuffer::from_live(bytes, live),
         };
         output.extend_from_slice(suffix);
         output.finish()
     }
 
     /// Replaces the spare with the owned initialized allocation, if present.
+    #[inline]
     pub(super) fn recycle(self, spare: &mut InitializedBuffer) {
         if let Storage::Owned { bytes, .. } = self.0 {
             *spare = bytes;
@@ -136,14 +137,16 @@ impl<'a> FilterBuffer<'a> {
     }
 
     /// Returns only the live bytes, copying borrowed input and compacting owned views in place.
+    #[inline]
     pub(crate) fn into_owned(self) -> Vec<u8> {
         match self.0 {
             Storage::Borrowed(bytes) => bytes.to_vec(),
-            Storage::Owned { bytes, live } => Self::normalize(bytes, live),
+            Storage::Owned { bytes, live } => AppendBuffer::from_live(bytes, live).into_owned(),
         }
     }
 
     /// Returns only the live bytes.
+    #[inline]
     pub(crate) fn as_slice(&self) -> &[u8] {
         match &self.0 {
             Storage::Borrowed(bytes) => bytes,
@@ -151,21 +154,13 @@ impl<'a> FilterBuffer<'a> {
         }
     }
 
+    #[inline]
     fn owned(bytes: Vec<u8>) -> Self {
         let live = 0..bytes.len();
         Self(Storage::Owned {
             bytes: InitializedBuffer::from_vec(bytes),
             live,
         })
-    }
-
-    fn normalize(bytes: InitializedBuffer, live: Range<usize>) -> Vec<u8> {
-        let mut bytes = bytes.0;
-        if live.start != 0 {
-            bytes.copy_within(live.clone(), 0);
-        }
-        bytes.truncate(live.len());
-        bytes
     }
 }
 
@@ -186,6 +181,7 @@ pub(crate) struct InitializedBuffer(Vec<u8>);
 
 impl InitializedBuffer {
     /// Preserves the vector's initialized extent and allocation.
+    #[inline]
     pub(crate) fn from_vec(bytes: Vec<u8>) -> Self {
         Self(bytes)
     }
@@ -217,6 +213,7 @@ pub(super) struct OutputWindow {
 
 impl OutputWindow {
     /// Sets the writable prefix length, zeroing only newly initialized bytes.
+    #[inline]
     pub(super) fn resize(&mut self, end: usize) {
         let Self {
             bytes,
@@ -229,12 +226,14 @@ impl OutputWindow {
     }
 
     /// Returns the initialized writable prefix.
+    #[inline]
     pub(super) fn as_mut_slice(&mut self) -> &mut [u8] {
         let Self { bytes, end } = self;
         &mut bytes.0[..*end]
     }
 
     /// Returns the writable bound for this operation.
+    #[inline]
     #[cfg(any(feature = "deflate", test))]
     pub(super) fn len(&self) -> usize {
         self.end
@@ -245,6 +244,7 @@ impl OutputWindow {
     /// # Errors
     ///
     /// Returns this window if `produced` exceeds its writable length.
+    #[inline]
     fn finish<'a>(self, produced: usize) -> Result<FilterBuffer<'a>, Self> {
         let Self { bytes, end } = self;
         if produced > end {
@@ -268,11 +268,28 @@ pub(crate) struct AppendBuffer {
 }
 
 impl AppendBuffer {
+    #[inline]
     fn new(bytes: InitializedBuffer) -> Self {
         Self { bytes, written: 0 }
     }
 
+    /// Moves the live bytes to the start of initialized storage.
+    ///
+    /// The caller supplies a range within the initialized bytes. Bytes beyond the written prefix
+    /// remain initialized.
+    #[inline]
+    fn from_live(mut bytes: InitializedBuffer, live: Range<usize>) -> Self {
+        if live.start != 0 {
+            bytes.0.copy_within(live.clone(), 0);
+        }
+        Self {
+            bytes,
+            written: live.len(),
+        }
+    }
+
     /// Clears live output while retaining initialized bytes and capacity.
+    #[inline]
     pub(crate) fn clear(&mut self) {
         self.written = 0;
     }
@@ -280,6 +297,7 @@ impl AppendBuffer {
     /// Reserves room for `additional` bytes after the written prefix.
     ///
     /// The live and initialized extents are unchanged.
+    #[inline]
     pub(crate) fn reserve_exact(&mut self, additional: usize) {
         let Self { bytes, written } = self;
         let required = *written + additional;
@@ -289,6 +307,7 @@ impl AppendBuffer {
     }
 
     /// Appends one byte, overwriting retained initialized storage when available.
+    #[inline]
     pub(crate) fn push(&mut self, byte: u8) {
         let Self { bytes, written } = self;
         if let Some(slot) = bytes.0.get_mut(*written) {
@@ -300,6 +319,7 @@ impl AppendBuffer {
     }
 
     /// Appends `bytes`, overwriting retained initialized storage when available.
+    #[inline]
     pub(crate) fn extend_from_slice(&mut self, bytes: &[u8]) {
         let Self {
             bytes: storage,
@@ -314,6 +334,7 @@ impl AppendBuffer {
     /// Appends a copy of `range` from the written prefix.
     ///
     /// The caller supplies a range within the bytes already written.
+    #[inline]
     pub(crate) fn extend_from_within(&mut self, range: Range<usize>) {
         let Self { bytes, written } = self;
         let retained = (bytes.0.len() - *written).min(range.len());
@@ -327,17 +348,23 @@ impl AppendBuffer {
     }
 
     /// Returns the written prefix as an owned vector.
+    #[inline]
     pub(crate) fn into_owned(self) -> Vec<u8> {
-        self.finish().into_owned()
+        let Self { bytes, written } = self;
+        let InitializedBuffer(mut bytes) = bytes;
+        bytes.truncate(written);
+        bytes
     }
 
     /// Returns only the written prefix.
+    #[inline]
     pub(crate) fn as_slice(&self) -> &[u8] {
         let Self { bytes, written } = self;
         &bytes.0[..*written]
     }
 
     /// Returns the length of the written prefix.
+    #[inline]
     pub(crate) fn len(&self) -> usize {
         self.written
     }
@@ -352,6 +379,7 @@ impl AppendBuffer {
         self.bytes.as_ptr()
     }
 
+    #[inline]
     fn finish<'a>(self) -> FilterBuffer<'a> {
         let Self { bytes, written } = self;
         FilterBuffer(Storage::Owned {
