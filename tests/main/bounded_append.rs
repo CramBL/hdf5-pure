@@ -218,7 +218,7 @@ fn bounded_open_takes_the_exclusive_lock() {
     Unlimited::new("d", &(0..4).collect::<Vec<i32>>(), 4).pure_create(&p);
     let bounded = session::open_bounded(&p).unwrap();
     let err = File::open_rw(&p).unwrap_err();
-    assert!(matches!(err, Error::FileLocked(_)), "got: {err:?}");
+    test_util_hdf5::assertion::file_locked(err, &p);
     drop(bounded);
     File::open_rw(&p).unwrap();
 }
@@ -232,7 +232,13 @@ fn userblock_file_is_refused_at_open() {
     Unlimited::new("d", &[1, 2, 3], 2).add_to(&mut b);
     b.write(&p).unwrap();
     let err = session::open_bounded(&p).unwrap_err();
-    assert!(matches!(err, Error::EditUnsupported(_)), "got: {err:?}");
+    let Error::EditUnsupported(actual) = err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(
+        actual,
+        "bounded read-write access does not support a file with a userblock (non-zero base address); leave MemoryStrategy unset, or pass MemoryStrategy::Auto, to fall back to the whole-file mirror here"
+    );
 }
 
 /// A file that persists its free space (non-paged) is now supported by the
@@ -384,17 +390,12 @@ fn paged_non_persist_is_refused_at_open() {
     Unlimited::new("d", &[1, 2, 3], 2).add_to(&mut b);
     b.write(&p).unwrap();
     let err = session::open_bounded(&p).unwrap_err();
-    let Error::EditUnsupported(msg) = err else {
-        panic!("paged non-persist should be refused with EditUnsupported, got: {err:?}");
+    let Error::EditUnsupported(actual) = err else {
+        panic!("unexpected error: {err:?}");
     };
-    // The guidance must be actionable: a paged file is grown in place only when it
-    // persists its free space, so the message points at recreating with persist=true
-    // rather than at another entry point. There is none to point at — the mirror
-    // cannot commit such a file either, which is why `MemoryStrategy::Auto` does not
-    // fall back for it.
-    assert!(
-        msg.contains("persist"),
-        "refusal should guide toward persisted free space, got: {msg:?}"
+    assert_eq!(
+        actual,
+        "bounded editing of PAGE files without persisted free space is unsupported; use MemoryStrategy::Auto or MemoryStrategy::Mirrored for staged edits"
     );
 }
 
@@ -535,9 +536,12 @@ fn unaligned_filtered_multi_batch_append_lands_every_element() {
         let mut bytes = vec![0u8; 2 * 1024 * 1024];
         bytes.push(0); // not a whole i32
         let err = ds.append_raw(&bytes).unwrap_err();
-        assert!(
-            matches!(&err, Error::AppendInPlaceUnsupported(m) if m.contains("whole number of elements")),
-            "got: {err:?}"
+        let Error::AppendInPlaceUnsupported(actual) = err else {
+            panic!("unexpected error: {err:?}");
+        };
+        assert_eq!(
+            actual,
+            "appended byte length is not a whole number of elements"
         );
     }
     assert_eq!(std::fs::read(&p).unwrap(), before);

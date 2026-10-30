@@ -7,7 +7,7 @@
 //! editor still holds its lock, because that read is permitted on Unix but
 //! blocked by the OS on Windows.
 
-use hdf5_pure::{Error, File, FileAccessProperties, FileBuilder, FileLocking};
+use hdf5_pure::{File, FileAccessProperties, FileBuilder, FileLocking};
 
 use test_util_hdf5::dataset::Unlimited;
 
@@ -32,10 +32,7 @@ fn editor_lock_blocks_a_second_editor() {
     let session = File::open_rw(&path).unwrap(); // holds the exclusive lock
 
     // A second editor cannot open the file while the first is alive.
-    assert!(
-        matches!(File::open_rw(&path), Err(Error::FileLocked(_))),
-        "second File::open_rw should be FileLocked"
-    );
+    test_util_hdf5::assertion::file_locked(File::open_rw(&path).unwrap_err(), &path);
 
     drop(session); // releases the lock
 
@@ -98,14 +95,7 @@ fn clear_status_flags_rejects_a_locked_file() {
     let before = std::fs::read(&path).unwrap();
     let writer = File::open_rw(&path).unwrap();
     let err = File::clear_status_flags(&path).unwrap_err();
-    let Error::FileLocked(message) = err else {
-        panic!("expected FileLocked, got {err:?}");
-    };
-    assert!(
-        message.starts_with(&format!("{}: ", path.display())),
-        "{message}"
-    );
-    assert!(message.contains("File::clear_status_flags"), "{message}");
+    test_util_hdf5::assertion::file_locked(err, &path);
     writer.close().unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), before);
     File::clear_status_flags(&path).unwrap();

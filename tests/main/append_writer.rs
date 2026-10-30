@@ -321,18 +321,14 @@ fn generic_and_raw_append() {
 
 // ---- refusals ----------------------------------------------------------------
 
-/// The immediate in-place append refuses with `AppendInPlaceUnsupported`; the
-/// staged, index-rebuilding path (`Dataset::append_staged`) reports
-/// `AppendUnsupported` at commit. Either is a refusal that leaves the file
-/// untouched, which is what these tests pin.
-fn assert_unsupported(r: Result<(), Error>) {
-    assert!(
-        matches!(
-            r,
-            Err(Error::AppendInPlaceUnsupported(_) | Error::AppendUnsupported(_))
-        ),
-        "expected an append refusal, got {r:?}"
-    );
+/// Asserts [`Error::AppendInPlaceUnsupported`] with the complete expected reason.
+///
+/// # Panics
+///
+/// Panics if `r` is successful, contains another error variant, or contains a reason
+/// that differs from `expected`.
+fn assert_unsupported(r: Result<(), Error>, expected: &str) {
+    test_util_hdf5::assertion::append_in_place_unsupported(r.unwrap_err(), expected);
 }
 
 #[test]
@@ -342,7 +338,10 @@ fn refuse_contiguous() {
     let fixture = dataset::AppendRefusalFixture::Contiguous;
     fixture.write(&path);
     with_writer(&path, |w| {
-        assert_unsupported(w.dataset("d").unwrap().append(&[4, 5]))
+        assert_unsupported(
+            w.dataset("d").unwrap().append(&[4, 5]),
+            "dataset has no unlimited (maxshape) dimension",
+        )
     });
     assert_eq!(
         dataset::read_pure::<i32>(&path, "d"),
@@ -357,7 +356,10 @@ fn refuse_fixed_not_unlimited() {
     let fixture = dataset::AppendRefusalFixture::FixedChunked;
     fixture.write(&path);
     with_writer(&path, |w| {
-        assert_unsupported(w.dataset("d").unwrap().append(&[6, 7]))
+        assert_unsupported(
+            w.dataset("d").unwrap().append(&[6, 7]),
+            "dataset has no unlimited (maxshape) dimension",
+        )
     });
     assert_eq!(
         dataset::read_pure::<i32>(&path, "d"),
@@ -372,7 +374,10 @@ fn refuse_datatype_mismatch() {
     let fixture = dataset::AppendRefusalFixture::UnlimitedI32;
     fixture.write(&path);
     with_writer(&path, |w| {
-        assert_unsupported(w.dataset("d").unwrap().append(&[4.0, 5.0]))
+        assert_unsupported(
+            w.dataset("d").unwrap().append(&[4.0, 5.0]),
+            "append datatype does not match the on-disk dataset (wrong element type or byte order)",
+        )
     });
     assert_eq!(
         dataset::read_pure::<i32>(&path, "d"),
@@ -389,7 +394,10 @@ fn refuse_mixed_element_types() {
     // append() with a single call cannot mix types; drive the conflict through
     // append_raw of a wrong-length buffer instead: 3 bytes is not a whole i32.
     with_writer(&path, |w| {
-        assert_unsupported(w.dataset("d").unwrap().append_raw(&[1, 2, 3]))
+        assert_unsupported(
+            w.dataset("d").unwrap().append_raw(&[1, 2, 3]),
+            "appended byte length is not a whole number of elements",
+        )
     });
     assert_eq!(
         dataset::read_pure::<i32>(&path, "d"),

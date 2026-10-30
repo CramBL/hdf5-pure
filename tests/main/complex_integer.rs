@@ -14,7 +14,7 @@ use hdf5_pure::DeflateLevel;
 use hdf5_pure::mat::options::{Compression, OneDimensionalMode};
 use hdf5_pure::mat::{
     self, Complex32, Complex64, ComplexI8, ComplexI16, ComplexI32, ComplexI64, ComplexU8,
-    ComplexU16, ComplexU32, ComplexU64, Matrix, Options,
+    ComplexU16, ComplexU32, ComplexU64, MatError, Matrix, Options,
 };
 use hdf5_pure::{
     AttrValue, CompoundTypeBuilder, Datatype, DatatypeByteOrder, File, FileBuilder, LibVer,
@@ -359,10 +359,12 @@ fn an_integer_capture_does_not_deserialize_as_float_complex() {
     })
     .unwrap();
     let err = mat::from_bytes::<AsF64>(&bytes).unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        msg.contains("complex double"),
-        "error should name the class it wanted: {msg}"
+    let MatError::Custom(actual) = err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(
+        actual,
+        "expected a complex double value, got complex scalar"
     );
 }
 
@@ -374,11 +376,10 @@ fn a_float_capture_does_not_deserialize_as_integer_complex() {
     })
     .unwrap();
     let err = mat::from_bytes::<AsI16>(&bytes).unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        msg.contains("complex int16"),
-        "error should name the class it wanted: {msg}"
-    );
+    let MatError::Custom(actual) = err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(actual, "expected a complex int16 value, got complex scalar");
 }
 
 // ---------------------------------------------------------------------------
@@ -408,10 +409,12 @@ fn complex_f64_labelled(class: Option<&str>) -> Vec<u8> {
 fn a_class_attribute_that_contradicts_the_compound_is_refused() {
     let bytes = complex_f64_labelled(Some("int16"));
     let err = mat::from_bytes::<AsI16>(&bytes).unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        msg.contains("int16") && msg.contains("f64"),
-        "error should name both the claimed class and the stored one: {msg}"
+    let MatError::Custom(actual) = err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(
+        actual,
+        "complex int16 dataset stores its real component as f64, which is a different class than MATLAB_class claims"
     );
 }
 
@@ -442,10 +445,12 @@ fn an_unlabelled_complex_integer_array_is_not_decoded_as_double() {
     // The bytes are i64 pairs; the absent attribute makes the reader guess
     // `double`, which is the same element size and would decode as garbage.
     let err = mat::from_bytes::<AsF64>(&bytes).unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        msg.contains("double") && msg.contains("i64"),
-        "error should name the guessed class and the stored one: {msg}"
+    let MatError::Custom(actual) = err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(
+        actual,
+        "complex double dataset stores its real component as i64, which is a different class than MATLAB_class claims"
     );
 }
 
@@ -752,9 +757,8 @@ fn a_real_scalar_of_another_class_is_not_promoted() {
 
     let bytes = mat::to_bytes(&Real { x: 42.0 }).unwrap();
     let err = mat::from_bytes::<Cplx>(&bytes).unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        msg.contains("complex int16"),
-        "error should name the class it wanted: {msg}"
-    );
+    let MatError::Custom(actual) = err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(actual, "expected a complex int16 value, got scalar");
 }

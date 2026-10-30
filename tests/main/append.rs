@@ -6,9 +6,7 @@
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::FilterId;
 use hdf5_pure::UserblockSize;
-use hdf5_pure::{
-    AppendBuilder, AttrValue, Error, File, FileBuilder, FormatError, MaxExtent, ScaleOffset,
-};
+use hdf5_pure::{AppendBuilder, AttrValue, Error, File, FileBuilder, MaxExtent, ScaleOffset};
 
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
 
@@ -173,9 +171,12 @@ fn a_staged_append_onto_a_lossy_partial_tail_is_refused() {
                 b.append_f64(&[1.0, 2.0]);
             })
             .expect_err("a lossy pipeline must not have its trailing chunk re-encoded");
-        assert!(
-            matches!(&err, Error::AppendUnsupported(m) if m.contains("lossy")),
-            "got: {err:?}"
+        let Error::AppendUnsupported(actual) = err else {
+            panic!("unexpected error: {err:?}");
+        };
+        assert_eq!(
+            actual,
+            "this dataset's filter pipeline is lossy (ZFP, or float D-scale scale-offset), and its length is not a whole multiple of the chunk length: growing that trailing chunk would decode and re-encode values that are already committed, changing them. Append whole chunks from a chunk-aligned length instead"
         );
         // Nothing was staged by the refused call, so the session still commits —
         // and closes, which is what a commit-time refusal took away.
@@ -417,11 +418,12 @@ fn commit_append(
     file.commit()
 }
 
-fn assert_append_unsupported(res: Result<(), Error>) {
-    match res {
-        Err(Error::AppendUnsupported(_)) => {}
-        other => panic!("expected AppendUnsupported, got {other:?}"),
-    }
+fn assert_append_unsupported(res: Result<(), Error>, expected: &str) {
+    let error = res.unwrap_err();
+    let Error::AppendUnsupported(actual) = error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(actual, expected);
 }
 
 #[test]
@@ -430,9 +432,12 @@ fn refuse_contiguous() {
     let path = dir.path().join("d.h5");
     let fixture = dataset::AppendRefusalFixture::Contiguous;
     fixture.write(&path);
-    assert_append_unsupported(commit_append(&path, "d", |a| {
-        a.append_i32(&[4, 5]);
-    }));
+    assert_append_unsupported(
+        commit_append(&path, "d", |a| {
+            a.append_i32(&[4, 5]);
+        }),
+        "append requires a chunked dataset",
+    );
     assert_eq!(
         dataset::read_pure::<i32>(&path, "d"),
         fixture.expected_i32()
@@ -446,9 +451,12 @@ fn refuse_fixed_chunked_not_unlimited() {
     // Chunked but a finite maximum (not unlimited) => fixed-array index, refused.
     let fixture = dataset::AppendRefusalFixture::FixedChunked;
     fixture.write(&path);
-    assert_append_unsupported(commit_append(&path, "d", |a| {
-        a.append_i32(&[6, 7, 8]);
-    }));
+    assert_append_unsupported(
+        commit_append(&path, "d", |a| {
+            a.append_i32(&[6, 7, 8]);
+        }),
+        "append requires an Extensible-Array-indexed chunked dataset (a single unlimited dimension under the latest format)",
+    );
     assert_eq!(
         dataset::read_pure::<i32>(&path, "d"),
         fixture.expected_i32()
@@ -461,9 +469,12 @@ fn refuse_rank2() {
     let path = dir.path().join("d.h5");
     // 2-D dataset with one unlimited axis (EA index) — refused as rank > 1.
     dataset::AppendRefusalFixture::Rank2.write(&path);
-    assert_append_unsupported(commit_append(&path, "d", |a| {
-        a.append_i32(&[0, 0, 0, 0]);
-    }));
+    assert_append_unsupported(
+        commit_append(&path, "d", |a| {
+            a.append_i32(&[0, 0, 0, 0]);
+        }),
+        "append requires a rank-1 dataset in this release",
+    );
 }
 
 #[test]
@@ -472,9 +483,12 @@ fn refuse_datatype_mismatch() {
     let path = dir.path().join("d.h5");
     let fixture = dataset::AppendRefusalFixture::UnlimitedI32;
     fixture.write(&path);
-    assert_append_unsupported(commit_append(&path, "d", |a| {
-        a.append_f64(&[1.0, 2.0]); // f64 onto i32
-    }));
+    assert_append_unsupported(
+        commit_append(&path, "d", |a| {
+            a.append_f64(&[1.0, 2.0]); // f64 onto i32
+        }),
+        "append datatype does not match the on-disk dataset (wrong element type or byte order)",
+    );
     assert_eq!(
         dataset::read_pure::<i32>(&path, "d"),
         fixture.expected_i32()
@@ -487,9 +501,12 @@ fn refuse_raw_wrong_length() {
     let path = dir.path().join("d.h5");
     let fixture = dataset::AppendRefusalFixture::UnlimitedI32;
     fixture.write(&path);
-    assert_append_unsupported(commit_append(&path, "d", |a| {
-        a.append_raw(&[1, 2, 3]); // 3 bytes, elem size 4
-    }));
+    assert_append_unsupported(
+        commit_append(&path, "d", |a| {
+            a.append_raw(&[1, 2, 3]); // 3 bytes, elem size 4
+        }),
+        "appended byte length is not a whole number of elements",
+    );
     assert_eq!(
         dataset::read_pure::<i32>(&path, "d"),
         fixture.expected_i32()
@@ -502,9 +519,12 @@ fn refuse_mixed_element_types() {
     let path = dir.path().join("d.h5");
     let fixture = dataset::AppendRefusalFixture::UnlimitedI32;
     fixture.write(&path);
-    assert_append_unsupported(commit_append(&path, "d", |a| {
-        a.append_i32(&[4, 5]).append_i64(&[6]);
-    }));
+    assert_append_unsupported(
+        commit_append(&path, "d", |a| {
+            a.append_i32(&[4, 5]).append_i64(&[6]);
+        }),
+        "append mixes element types in one builder; use one element type per append_dataset call",
+    );
     assert_eq!(
         dataset::read_pure::<i32>(&path, "d"),
         fixture.expected_i32()
@@ -523,8 +543,5 @@ fn refuse_nonexistent_dataset() {
         a.append_i32(&[1]);
     })
     .unwrap_err();
-    assert!(
-        matches!(err, Error::Format(FormatError::PathNotFound(_))),
-        "expected PathNotFound, got {err:?}"
-    );
+    test_util_hdf5::assertion::path_not_found(err, "missing");
 }

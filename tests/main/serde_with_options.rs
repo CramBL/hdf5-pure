@@ -3,7 +3,7 @@
 
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::mat::{
-    self, Compression, EmptyMarkerEncoding, EmptySequencePolicy, InvalidNamePolicy,
+    self, Compression, EmptyMarkerEncoding, EmptySequencePolicy, InvalidNamePolicy, MatError,
     OneDimensionalMode, Options, StringClass,
 };
 use hdf5_pure::{AttrValue, File, LibVer};
@@ -77,7 +77,10 @@ fn error_policy_rejects_keywords() {
     let mut opts = Options::default();
     opts.invalid_name_policy = InvalidNamePolicy::Error;
     let err = mat::to_bytes_with_options(&doc, &opts).unwrap_err();
-    assert!(err.to_string().contains("invalid MATLAB name"));
+    let MatError::Custom(actual) = err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(actual, "invalid MATLAB name: end");
 }
 
 #[derive(Serialize)]

@@ -978,7 +978,10 @@ fn remove_missing_group_attribute_is_rejected_without_writing() {
             .remove_attr("missing")
             .unwrap();
         let err = session.commit().unwrap_err();
-        assert!(err.to_string().contains("not found"), "got: {err}");
+        let Error::EditUnsupported(actual) = err else {
+            panic!("{err:?}");
+        };
+        assert_eq!(actual, "attribute to remove was not found");
     }
 
     assert_eq!(std::fs::read(&path).unwrap(), before);
@@ -2885,7 +2888,17 @@ fn add_empty_dataset_with_mismatched_data_is_rejected_without_writing() {
                 b.with_f64_data(&[9.0, 9.0, 9.0]).with_shape(&[0, 3]);
             })
             .unwrap_err();
-        assert!(err.to_string().contains("shape"), "got: {err}");
+        let Error::Format(actual) = err else {
+            panic!("{err:?}");
+        };
+        assert_eq!(
+            actual,
+            FormatError::LogicalShapeDataMismatch {
+                expected: 0,
+                actual: 24,
+                element_size: NonZeroU32::new(8).unwrap().into()
+            }
+        );
         session.commit().unwrap();
     }
 
@@ -3404,10 +3417,10 @@ fn add_reference_dataset_targeting_nonexistent_path_becomes_undefined() {
     let file = File::open(&path).unwrap();
     let ds = file.dataset("refs").unwrap();
     let err = ds.dereference().unwrap_err();
-    assert!(err.to_string().contains("null/undefined"), "got: {err}");
-    // The dereference error alone doesn't distinguish an undefined reference
-    // (`u64::MAX`) from address 0 or any other unresolvable garbage address —
-    // check the stored 8-byte element directly.
+    let Error::Format(actual) = err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(actual, FormatError::InvalidObjectReference(u64::MAX));
     assert_eq!(ds.read_raw().unwrap(), u64::MAX.to_le_bytes());
 }
 
@@ -5743,9 +5756,12 @@ fn a_refused_commit_leaves_its_other_staged_edits_alone() {
         .unwrap();
 
     let err = session.commit().unwrap_err();
-    assert!(
-        matches!(&err, Error::EditUnsupported(m) if m.contains("deletion overlaps an addition")),
-        "unexpected error: {err:?}"
+    let Error::EditUnsupported(actual) = err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(
+        actual,
+        "a deletion overlaps an addition in the same commit; replace the path instead, or use separate commits"
     );
     assert!(
         session.has_staged_edits(),
@@ -5830,62 +5846,59 @@ fn a_refused_commit_does_not_apply_its_survivors_later() {
 /// there. A second `commit()` therefore discriminates: with the staged set put
 /// back whole it refuses identically, and with that one kind dropped it would
 /// see a lone deletion and *succeed*, taking `g` with it.
-#[test]
-fn a_refused_commit_restores_every_kind_of_staged_edit() {
-    /// Stages the one edit this case is about, against a session whose batch
-    /// already holds `delete("g")`.
-    type Stage = fn(&File, &File);
-
-    let cases: &[(&str, Stage)] = &[
-        ("dataset addition", |s, _| {
+#[rstest::rstest]
+#[case::dataset_addition("dataset addition", |s: &File, _: &File| {
             s.root()
                 .create_dataset("g/added", |b| {
                     b.with_i32_data(&[1]);
                 })
                 .unwrap();
-        }),
-        ("group creation", |s, _| {
+        }, "a deletion overlaps an addition in the same commit; replace the path instead, or use separate commits")]
+#[case::group_creation("group creation", |s: &File, _: &File| {
             s.root().create_group("g/sub").unwrap();
-        }),
-        ("group attribute", |s, _| {
+        }, "a deletion overlaps an addition in the same commit; replace the path instead, or use separate commits")]
+#[case::group_attribute("group attribute", |s: &File, _: &File| {
             s.group("g")
                 .unwrap()
                 .set_attr("tag", AttrValue::I32(1))
                 .unwrap();
-        }),
-        ("in-file copy", |s, _| {
+        }, "a deletion overlaps a group-attribute edit in the same commit; use separate commits")]
+#[case::in_file_copy("in-file copy", |s: &File, _: &File| {
             s.copy("original", "g/copied").unwrap();
-        }),
-        ("cross-file copy", |s, other| {
+        }, "a deletion overlaps an addition in the same commit; replace the path instead, or use separate commits")]
+#[case::cross_file_copy("cross-file copy", |s: &File, other: &File| {
             s.copy_from(other, "donor", "g/from_other").unwrap();
-        }),
-        ("value overwrite", |s, _| {
+        }, "a deletion overlaps an addition in the same commit; replace the path instead, or use separate commits")]
+#[case::value_overwrite("value overwrite", |s: &File, _: &File| {
             s.dataset("g/inner")
                 .unwrap()
                 .write_staged(|b| {
                     b.with_i32_data(&[9, 9, 9, 9]);
                 })
                 .unwrap();
-        }),
-        ("dataset attribute", |s, _| {
+        }, "a deletion overlaps a staged edit to a dataset in the same commit; use separate commits")]
+#[case::dataset_attribute("dataset attribute", |s: &File, _: &File| {
             s.dataset("g/inner")
                 .unwrap()
                 .set_attr("tag", AttrValue::I32(1))
                 .unwrap();
-        }),
-        ("append", |s, _| {
+        }, "a deletion overlaps a staged edit to a dataset in the same commit; use separate commits")]
+#[case::append("append", |s: &File, _: &File| {
             s.dataset("g/inner")
                 .unwrap()
                 .append_staged(|b| {
                     b.append_i32(&[5, 6]);
                 })
                 .unwrap();
-        }),
-        ("second deletion", |s, _| {
+        }, "a deletion overlaps a staged edit to a dataset in the same commit; use separate commits")]
+#[case::second_deletion("second deletion", |s: &File, _: &File| {
             s.root().delete("g/inner").unwrap();
-        }),
-    ];
-
+        }, "overlapping deletions in one commit; delete the common parent only")]
+fn a_refused_commit_restores_every_kind_of_staged_edit(
+    #[case] what: &str,
+    #[case] stage: fn(&File, &File),
+    #[case] reason: &str,
+) {
     let donor_path = temp::temp_path("hdf5_pure_restore_kinds_donor.h5");
     {
         let mut b = FileBuilder::new();
@@ -5893,53 +5906,46 @@ fn a_refused_commit_restores_every_kind_of_staged_edit() {
         b.write(&donor_path).unwrap();
     }
 
-    for (what, stage) in cases {
-        let path = temp::temp_path(&format!("hdf5_pure_restore_{}.h5", what.replace(' ', "_")));
-        {
-            let mut b = FileBuilder::new();
-            b.create_dataset("original").with_i32_data(&[0]);
-            let mut g = b.create_group("g");
-            g.create_dataset("inner")
-                .with_i32_data(&[1, 2, 3, 4])
-                .with_chunks(&[2])
-                .with_maxshape(&[MaxExtent::Unlimited]);
-            b.add_group(g.finish());
-            b.write(&path).unwrap();
-        }
-        let before = std::fs::read(&path).unwrap();
+    let path = temp::temp_path(&format!("hdf5_pure_restore_{}.h5", what.replace(' ', "_")));
+    {
+        let mut b = FileBuilder::new();
+        b.create_dataset("original").with_i32_data(&[0]);
+        let mut g = b.create_group("g");
+        g.create_dataset("inner")
+            .with_i32_data(&[1, 2, 3, 4])
+            .with_chunks(&[2])
+            .with_maxshape(&[MaxExtent::Unlimited]);
+        b.add_group(g.finish());
+        b.write(&path).unwrap();
+    }
+    let before = std::fs::read(&path).unwrap();
 
-        {
-            let donor = File::open(&donor_path).unwrap();
-            let session = File::open_rw(&path).unwrap();
-            session.root().delete("g").unwrap();
-            stage(&session, &donor);
+    {
+        let donor = File::open(&donor_path).unwrap();
+        let session = File::open_rw(&path).unwrap();
+        session.root().delete("g").unwrap();
+        stage(&session, &donor);
 
-            let Err(first) = session.commit() else {
-                panic!("[{what}] the commit was expected to refuse");
-            };
-            assert!(
-                matches!(
-                    &first,
-                    Error::EditUnsupported(_) | Error::AppendUnsupported(_)
-                ),
-                "[{what}] unexpected error: {first:?}"
-            );
-            let Err(second) = session.commit() else {
-                panic!("[{what}] the second commit applied the batch the first refused");
-            };
-            assert_eq!(
-                format!("{first:?}"),
-                format!("{second:?}"),
-                "[{what}] the refusal did not put this edit back"
-            );
-        }
-
+        let Err(first) = session.commit() else {
+            panic!("[{what}] the commit was expected to refuse");
+        };
+        let diagnostic = format!("{first:?}");
+        test_util_hdf5::assertion::edit_unsupported(first, reason);
+        let Err(second) = session.commit() else {
+            panic!("[{what}] the second commit applied the batch the first refused");
+        };
         assert_eq!(
-            std::fs::read(&path).unwrap(),
-            before,
-            "[{what}] a refused commit wrote to the file"
+            diagnostic,
+            format!("{second:?}"),
+            "[{what}] the refusal did not put this edit back"
         );
     }
+
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "[{what}] a refused commit wrote to the file"
+    );
 }
 
 /// A staging call that refuses stages nothing, even when it carries a batch.
@@ -6280,7 +6286,10 @@ fn a_refused_commit_places_no_collection_for_a_staged_vlen_overwrite() {
             .unwrap();
 
         let err = session.commit().unwrap_err();
-        assert!(err.to_string().contains("shape"), "got: {err}");
+        test_util_hdf5::assertion::edit_unsupported(
+            err,
+            "write_dataset shape does not match the on-disk dataset (overwrite, not reshape)",
+        );
         assert!(
             session.has_staged_edits(),
             "a refused commit must give the staged set back (issue #316)"
@@ -6897,11 +6906,11 @@ fn reading_a_staged_object_reports_that_it_is_not_committed() {
     assert!(matches!(col.append(&[9i32]), Err(Error::NotCommitted(p)) if p == "run/col"));
     assert!(matches!(
         col.append_raw(&[0u8; 4]),
-        Err(Error::NotCommitted(_))
+        Err(Error::NotCommitted(p)) if p == "run/col"
     ));
     assert!(matches!(
         col.buffered_appender().map(|_| ()),
-        Err(Error::NotCommitted(_))
+        Err(Error::NotCommitted(p)) if p == "run/col"
     ));
 
     // So do the staged edits that rewrite an object the file already holds.
@@ -6910,11 +6919,11 @@ fn reading_a_staged_object_reports_that_it_is_not_committed() {
         col.write_staged(|b| {
             b.with_i32_data(&[1, 2]);
         }),
-        Err(Error::NotCommitted(_))
+        Err(Error::NotCommitted(p)) if p == "run/col"
     ));
     assert!(matches!(
         col.set_attr("units", AttrValue::I64(1)),
-        Err(Error::NotCommitted(_))
+        Err(Error::NotCommitted(p)) if p == "run/col"
     ));
 
     // A staged group takes attributes, which is what `create_group_with`'s
@@ -6947,7 +6956,7 @@ fn a_replaced_path_resolves_to_the_object_replacing_it() {
     assert_eq!(replacement.shape().unwrap(), vec![2]);
     assert!(matches!(
         replacement.read_i32(),
-        Err(Error::NotCommitted(_))
+        Err(Error::NotCommitted(p)) if p == "original"
     ));
     // Listed once, not twice.
     assert_eq!(
@@ -7049,7 +7058,7 @@ fn a_refused_commit_leaves_the_staged_handle_pending() {
     let reopened = File::open(&path).unwrap();
     assert!(matches!(
         reopened.dataset("added"),
-        Err(Error::Format(FormatError::PathNotFound(_)))
+        Err(Error::Format(FormatError::PathNotFound(p))) if p == "added"
     ));
 }
 
@@ -7071,11 +7080,11 @@ fn a_lookup_of_a_staged_object_of_the_other_kind_is_refused() {
     assert!(matches!(session.group("set"), Err(Error::NotAGroup(p)) if p == "set"));
     assert!(matches!(
         session.root().dataset("grp"),
-        Err(Error::NotADataset(_))
+        Err(Error::NotADataset(p)) if p == "grp"
     ));
     assert!(matches!(
         session.root().group("set"),
-        Err(Error::NotAGroup(_))
+        Err(Error::NotAGroup(p)) if p == "set"
     ));
 }
 
@@ -7091,12 +7100,18 @@ fn appending_to_a_staged_dataset_of_the_wrong_type_is_refused() {
             b.with_i32_data(&[1, 2]);
         })
         .unwrap();
-    assert!(matches!(
-        col.append_staged(|a| {
+    let err = col
+        .append_staged(|a| {
             a.append_f64(&[1.0]);
-        }),
-        Err(Error::AppendUnsupported(_))
-    ));
+        })
+        .unwrap_err();
+    let Error::AppendUnsupported(actual) = err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(
+        actual,
+        "appended element datatype does not match the staged dataset's datatype"
+    );
     // The refusal staged nothing: the dataset is the one the builder described.
     assert_eq!(col.shape().unwrap(), vec![2]);
 
@@ -7246,8 +7261,9 @@ fn a_creation_under_a_deleted_group_does_not_hide_the_files_own_child() {
         vec![1, 2],
         "a live, readable dataset must not be reported as staged"
     );
-    assert!(
-        g.datasets().unwrap().contains(&"inner".to_string()),
+    assert_eq!(
+        g.datasets().unwrap(),
+        vec!["inner", "other"],
         "it must not vanish from its group's listing either"
     );
     // The batch itself is still the commit's to refuse.
@@ -7326,26 +7342,26 @@ fn deleting_a_staged_object_withdraws_it() {
         grp.create_dataset("late", |b| {
             b.with_i32_data(&[1]);
         }),
-        Err(Error::StagingWithdrawn(_))
+        Err(Error::StagingWithdrawn(p)) if p == "nested"
     ));
     assert!(matches!(
         grp.set_attr("kind", AttrValue::I64(2)),
-        Err(Error::StagingWithdrawn(_))
+        Err(Error::StagingWithdrawn(p)) if p == "nested"
     ));
     assert!(matches!(
         grp.delete("leaf"),
-        Err(Error::StagingWithdrawn(_))
+        Err(Error::StagingWithdrawn(p)) if p == "nested"
     ));
     assert!(!session.has_staged_edits(), "and none of them recorded");
     // A fresh lookup of the same name is a different question, and answers the
     // way a lookup of anything absent does.
     assert!(matches!(
         session.dataset("added"),
-        Err(Error::Format(FormatError::PathNotFound(_)))
+        Err(Error::Format(FormatError::PathNotFound(p))) if p == "added"
     ));
     assert!(matches!(
         session.group("nested"),
-        Err(Error::Format(FormatError::PathNotFound(_)))
+        Err(Error::Format(FormatError::PathNotFound(p))) if p == "nested"
     ));
     assert_eq!(
         session.root().datasets().unwrap(),
@@ -7391,21 +7407,21 @@ fn deleting_a_staged_replacement_leaves_the_deletion_it_replaced() {
     );
     assert!(matches!(
         replacement.read_f64(),
-        Err(Error::StagingWithdrawn(_))
+        Err(Error::StagingWithdrawn(p)) if p == "original"
     ));
     assert!(matches!(
         replacement.append_staged(|a| {
             a.append_i32(&[1]);
         }),
-        Err(Error::StagingWithdrawn(_))
+        Err(Error::StagingWithdrawn(p)) if p == "original"
     ));
     assert!(matches!(
         replacement.write(&[1i32]),
-        Err(Error::StagingWithdrawn(_))
+        Err(Error::StagingWithdrawn(p)) if p == "original"
     ));
     assert!(matches!(
         replacement.set_attr("kind", AttrValue::I64(1)),
-        Err(Error::StagingWithdrawn(_))
+        Err(Error::StagingWithdrawn(p)) if p == "original"
     ));
     // A staged deletion hides nothing, so a fresh lookup still means the object
     // in the file until the commit removes it — the answer it gave before the

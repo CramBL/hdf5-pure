@@ -122,9 +122,12 @@ fn lzf_plus_deflate_refused() {
     let err = builder
         .finish()
         .expect_err("lzf + deflate should error, not succeed");
-    assert!(
-        matches!(err, Error::Format(FormatError::FilterError(_))),
-        "unexpected error variant: {err:?}",
+    let Error::Format(actual) = err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(
+        actual,
+        FormatError::FilterError("lzf and deflate cannot be combined on one dataset".into())
     );
 }
 

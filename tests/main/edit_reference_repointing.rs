@@ -134,10 +134,11 @@ fn a_reference_to_the_root_group_follows_the_rebuilt_root() {
     match &objects[0] {
         Object::Group(g) => {
             let names = sorted_datasets(g);
-            assert!(
-                names.contains(&"alpha".to_string()) && names.contains(&"churn4".to_string()),
-                "the reference must resolve to the current root, which holds every \
-                 committed dataset; got {names:?}"
+            assert_eq!(
+                names,
+                vec![
+                    "alpha", "churn0", "churn1", "churn2", "churn3", "churn4", "refs"
+                ]
             );
         }
         other => panic!("expected the root group, got {other:?}"),

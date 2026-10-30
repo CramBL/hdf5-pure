@@ -6,7 +6,7 @@
 //! through the typed integer readers (via the base type) while the datatype
 //! itself preserves the member name/value pairs. See issue #129.
 
-use hdf5_pure::{DType, Datatype, EnumTypeBuilder, File, FileBuilder, FormatError};
+use hdf5_pure::{DType, Datatype, EnumTypeBuilder, Error, File, FileBuilder, FormatError};
 use test_util_hdf5::file_builder;
 
 #[test]
@@ -189,12 +189,15 @@ fn non_enum_reads_are_unaffected_by_the_enum_unwrap() {
         vec![10, 20, 30]
     );
     let err = file.dataset("text").unwrap().read_i32().unwrap_err();
-    assert!(
-        matches!(
-            err,
-            hdf5_pure::Error::Format(FormatError::TypeMismatch { .. })
-        ),
-        "reading a vlen-string dataset as i32 should still be a TypeMismatch, got {err:?}"
+    let Error::Format(actual) = err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(
+        actual,
+        FormatError::TypeMismatch {
+            expected: "numeric",
+            actual: "VariableLength"
+        }
     );
 }
 
@@ -283,7 +286,7 @@ fn build_refuses_a_negative_value_for_an_unsigned_base() {
         .build()
         .expect_err("an unsigned base cannot hold -1");
     assert!(
-        matches!(err, FormatError::EnumMemberValueRange(..)),
+        matches!(err, FormatError::EnumMemberValueRange(ref name, -1, 2) if name == "negative"),
         "got {err:?}"
     );
 }

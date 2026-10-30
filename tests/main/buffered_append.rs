@@ -452,10 +452,10 @@ fn an_ineligible_dataset_is_refused_at_construction() {
     let err = ds
         .buffered_appender()
         .expect_err("contiguous is ineligible");
-    assert!(
-        matches!(err, Error::AppendInPlaceUnsupported(_)),
-        "got: {err:?}"
-    );
+    let Error::AppendInPlaceUnsupported(actual) = err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(actual, "dataset has no unlimited (maxshape) dimension");
 }
 
 /// A read-only file has nothing to append to.
@@ -516,9 +516,12 @@ fn a_staged_edit_on_a_dataset_with_a_live_appender_is_refused() {
         .unwrap()
         .set_attr("units", AttrValue::I32(1))
         .expect_err("staging onto a dataset with a live appender must be refused");
-    assert!(
-        matches!(&err, Error::EditUnsupported(m) if m.contains("live buffered appender")),
-        "got: {err:?}"
+    let Error::EditUnsupported(actual) = err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(
+        actual,
+        "this dataset has a live buffered appender holding elements only its own flush can write, and this edit would stop that flush; finish or discard the appender first"
     );
     // Deleting it is the same conflict.
     test_util_hdf5::assertion::edit_unsupported(
@@ -620,9 +623,12 @@ fn a_second_appender_on_the_same_dataset_is_refused() {
     let err = second
         .buffered_appender()
         .expect_err("a second appender on one dataset must be refused");
-    assert!(
-        matches!(&err, Error::EditUnsupported(m) if m.contains("already has a live buffered appender")),
-        "got: {err:?}"
+    let Error::EditUnsupported(actual) = err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(
+        actual,
+        "this dataset already has a live buffered appender; two of them would interleave their buffers a chunk at a time"
     );
 
     drop(app);
@@ -651,9 +657,12 @@ fn a_swmr_writer_is_refused_at_construction() {
     let file = File::open_swmr_writer(&p).unwrap();
     let mut ds = file.dataset("d").unwrap();
     let err = ds.buffered_appender().unwrap_err();
-    assert!(
-        matches!(&err, Error::SwmrAppendUnsupported(m) if m.contains("partial trailing chunk")),
-        "got: {err:?}"
+    let Error::SwmrAppendUnsupported(actual) = err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(
+        actual,
+        "a SWMR writer cannot write a partial trailing chunk, which is what a buffered appender exists to do; append whole chunks with Dataset::append instead"
     );
     // The SWMR writer itself still appends whole chunks.
     ds.append(&(8..16i32).collect::<Vec<_>>()).unwrap();
@@ -735,9 +744,12 @@ fn a_partial_trailing_element_is_refused_at_the_flush() {
     let mut app = ds.buffered_appender().unwrap();
     app.append_raw(&[1u8, 2, 3]).unwrap();
     let err = app.flush().unwrap_err();
-    assert!(
-        matches!(&err, Error::AppendInPlaceUnsupported(m) if m.contains("whole number of elements")),
-        "got: {err:?}"
+    let Error::AppendInPlaceUnsupported(actual) = err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(
+        actual,
+        "the buffered byte length is not a whole number of elements; append the rest of the trailing element before flushing"
     );
 }
 
@@ -866,9 +878,12 @@ fn a_partial_flush_on_a_lossy_dataset_is_refused_with_the_buffer_intact() {
     let err = app
         .flush()
         .expect_err("a lossy dataset must not be left off a chunk boundary mid-stream");
-    assert!(
-        matches!(&err, Error::AppendInPlaceUnsupported(m) if m.contains("lossy")),
-        "got: {err:?}"
+    let Error::AppendInPlaceUnsupported(actual) = err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(
+        actual,
+        "this dataset's filter pipeline is lossy, and flushing these elements would leave its length short of a chunk boundary — a later write would then have to re-encode already-committed values; buffer until the elements complete a chunk, or end the appender with BufferedAppender::finish, which writes the partial tail"
     );
     // Refused before any write, so nothing landed and nothing was lost.
     assert_eq!(app.buffered_elements(), 2);

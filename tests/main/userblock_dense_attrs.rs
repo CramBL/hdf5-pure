@@ -13,7 +13,7 @@
 //! own (#195).
 
 use hdf5_pure::UserblockSize;
-use hdf5_pure::{AttrValue, File, FileBuilder, RepackOptions};
+use hdf5_pure::{AttrValue, Error, File, FileBuilder, RepackOptions};
 
 use test_util::fractal_heap;
 
@@ -174,9 +174,11 @@ fn cross_file_copy_still_refuses_a_userblock_source() {
     let err = session
         .copy_from(&source, "payload", "payload")
         .expect_err("a userblock source is refused cross-file");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("userblock"),
-        "unexpected refusal message: {msg}"
+    let Error::EditUnsupported(actual) = err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(
+        actual,
+        "cross-file copy requires the source file to have no userblock (base address 0)"
     );
 }

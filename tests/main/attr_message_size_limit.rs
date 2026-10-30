@@ -10,7 +10,7 @@
 //! still overflows the field is a message with no dense alternative, and the last
 //! test here is that one.
 
-use hdf5_pure::{AttrValue, Error, File, FileBuilder, FormatError, OBJECT_HEADER_MESSAGE_MAX};
+use hdf5_pure::{AttrValue, Error, File, FileBuilder, FormatError, MessageType};
 use test_util::fractal_heap;
 use test_util_hdf5::attr;
 
@@ -112,10 +112,16 @@ fn write_to_disk_refuses_without_touching_the_destination() {
         .create_dataset(&"a".repeat(70_000))
         .with_f64_data(&[1.0]);
 
-    assert!(matches!(
-        builder.write(&path).unwrap_err(),
-        Error::Format(FormatError::ObjectHeaderMessageTooLarge { .. })
-    ));
+    let Error::Format(actual) = builder.write(&path).unwrap_err() else {
+        panic!("expected a format error");
+    };
+    assert_eq!(
+        actual,
+        FormatError::ObjectHeaderMessageTooLarge {
+            message_type: MessageType::LINK.to_u16(),
+            size: 70_014
+        }
+    );
     assert_eq!(
         std::fs::read(&path).unwrap(),
         previous,
@@ -158,12 +164,17 @@ fn oversized_link_message_hits_the_writer_backstop() {
         .create_dataset(&"a".repeat(70_000))
         .with_f64_data(&[1.0]);
 
-    match builder.finish().unwrap_err() {
-        Error::Format(FormatError::ObjectHeaderMessageTooLarge { size, .. }) => {
-            assert!(size > OBJECT_HEADER_MESSAGE_MAX);
+    let err = builder.finish().unwrap_err();
+    let Error::Format(actual) = err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(
+        actual,
+        FormatError::ObjectHeaderMessageTooLarge {
+            message_type: MessageType::LINK.to_u16(),
+            size: 70_014
         }
-        other => panic!("expected ObjectHeaderMessageTooLarge, got {other:?}"),
-    }
+    );
 }
 
 /// The refusal must bite only past the limit: a large attribute that still fits

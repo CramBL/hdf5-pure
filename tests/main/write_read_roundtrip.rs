@@ -6,6 +6,7 @@ use hdf5_pure::{
     AttrValue, CompoundTypeBuilder, DType, Datatype, Error, File, FileBuilder, FormatError,
     MaxExtent,
 };
+use test_util_hdf5::dataset::InvalidGeometryCase;
 use test_util_hdf5::{dataset, fixtures};
 
 #[test]
@@ -317,36 +318,26 @@ fn nested_compound_tuple_roundtrip() {
     assert_eq!(ds.read_compound::<((i8, u64), f32)>().unwrap(), values);
 }
 
-#[test]
-fn chunked_builder_rejects_invalid_geometry() {
-    // Each malformed chunk-geometry request must be refused with
-    // `InvalidChunkGeometry` rather than panicking in the chunk splitter or
-    // producing an unreadable dataset. The editor exercises the shared cases
-    // independently. The writer adds two format-only edge cases.
-    let bad = dataset::INVALID_GEOMETRY_CASES
-        .iter()
-        .chain(dataset::WRITER_ONLY_INVALID_GEOMETRY_CASES);
-
-    for case in bad {
-        let mut builder = FileBuilder::new();
-        (case.configure)(builder.create_dataset("bad"));
-        let err = builder.finish().unwrap_err();
-        let Error::Format(FormatError::InvalidChunkGeometry(reason)) = &err else {
-            panic!(
-                "[{}] expected InvalidChunkGeometry, got {err:?}",
-                case.label
-            );
-        };
-        // Each case names its own reason: a wildcard payload passes on a refusal
-        // from any *other* geometry guard, which makes the case under test
-        // unreachable without anything going red.
-        assert!(
-            reason.contains(case.expected),
-            "[{}] refusal must name {:?}, got {reason:?}",
-            case.label,
-            case.expected
-        );
-    }
+#[rstest::rstest]
+#[case::empty_shape(&dataset::INVALID_GEOMETRY_CASES[0], "a zero-element dataset must be given explicit chunk dimensions (its shape has none to derive)")]
+#[case::chunk_rank(&dataset::INVALID_GEOMETRY_CASES[1], "chunk dimensions must have the same rank as the dataset shape")]
+#[case::zero_chunk(&dataset::INVALID_GEOMETRY_CASES[2], "chunk dimensions must all be non-zero")]
+#[case::maximum_rank(&dataset::INVALID_GEOMETRY_CASES[3], "maxshape must have the same rank as the dataset shape")]
+#[case::scalar(&dataset::INVALID_GEOMETRY_CASES[4], "a scalar dataset cannot be chunked, filtered, or extensible")]
+#[case::maximum_below_shape(&dataset::INVALID_GEOMETRY_CASES[5], "maxshape must be at least the current shape in every dimension")]
+#[case::empty_inner_dimension(&dataset::WRITER_ONLY_INVALID_GEOMETRY_CASES[0], "a zero-element dataset must be given explicit chunk dimensions (its shape has none to derive)")]
+#[case::unlimited_marker(&dataset::WRITER_ONLY_INVALID_GEOMETRY_CASES[1], "a fixed maximum of u64::MAX is the format's unlimited marker; name MaxExtent::Unlimited for a dimension that grows without bound")]
+fn chunked_builder_rejects_invalid_geometry(
+    #[case] case: &InvalidGeometryCase,
+    #[case] expected: &str,
+) {
+    let mut builder = FileBuilder::new();
+    (case.configure)(builder.create_dataset("bad"));
+    let error = builder.finish().unwrap_err();
+    let Error::Format(FormatError::InvalidChunkGeometry(actual)) = error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(actual, expected);
 }
 
 #[test]
@@ -839,8 +830,7 @@ fn roundtrip_matlab_refs_subsystem_pattern() {
     // Root children
     let root = file.root();
     let groups = root.groups().unwrap();
-    assert!(groups.contains(&"#refs#".to_string()));
-    assert!(groups.contains(&"#subsystem#".to_string()));
+    assert_eq!(groups, ["#refs#", "#subsystem#"]);
 
     // #refs# children are readable
     let a = file.dataset("#refs#/a").unwrap();
@@ -876,8 +866,7 @@ fn roundtrip_varlen_ascii_on_nested_group() {
     // Verify group children
     let g = file.group("my_struct").unwrap();
     let datasets = g.datasets().unwrap();
-    assert!(datasets.contains(&"x".to_string()));
-    assert!(datasets.contains(&"y".to_string()));
+    assert_eq!(datasets, ["x", "y"]);
 
     // Verify data
     assert_eq!(
@@ -899,8 +888,7 @@ fn roundtrip_group_only_no_datasets() {
 
     let outer_grp = file.group("outer").unwrap();
     let groups = outer_grp.groups().unwrap();
-    assert!(groups.contains(&"a".to_string()));
-    assert!(groups.contains(&"b".to_string()));
+    assert_eq!(groups, ["a", "b"]);
     assert_eq!(outer_grp.datasets().unwrap().len(), 0);
 
     assert_eq!(

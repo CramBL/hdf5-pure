@@ -5,7 +5,7 @@
 use std::io::ErrorKind;
 
 use hdf5_pure::SuperblockVersion;
-use hdf5_pure::{File, FileBuilder, LibVer};
+use hdf5_pure::{Error, File, FileBuilder, FormatError, LibVer};
 
 use test_util::temp;
 
@@ -89,9 +89,16 @@ fn libver_bounds_reject_too_old_upper_bound() {
     builder.with_libver_bounds(LibVer::Earliest, LibVer::Earliest);
     builder.create_dataset("data").with_i32_data(&[1, 2, 3]);
     let err = builder.finish().unwrap_err();
-    assert!(
-        err.to_string().contains("library-version bounds"),
-        "unexpected error: {err}"
+    let Error::Format(actual) = err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(
+        actual,
+        FormatError::LibverBoundsUnsatisfiable {
+            writes: "v1.10",
+            requested_low: "earliest",
+            requested_high: "earliest"
+        }
     );
 }
 

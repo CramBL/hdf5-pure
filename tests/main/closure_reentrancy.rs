@@ -67,7 +67,7 @@ fn create_dataset_closure_may_read_the_same_file() {
                 let existing = file.dataset("existing").unwrap();
                 let values = existing.read_i32().unwrap();
                 assert_eq!(values, vec![1, 2, 3, 4]);
-                assert!(root.datasets().unwrap().contains(&"existing".to_string()));
+                assert_eq!(root.datasets().unwrap(), vec!["existing"]);
                 // The staged dataset's contents genuinely depend on the read —
                 // the case the issue calls out as natural to write.
                 let doubled: Vec<i32> = values.iter().map(|v| v * 2).collect();

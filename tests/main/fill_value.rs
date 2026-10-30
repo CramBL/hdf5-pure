@@ -293,9 +293,12 @@ fn write_dataset_refuses_a_fill_value() {
             b.with_i32_data(&[4, 5, 6]).with_fill_value(-1_i32);
         })
         .unwrap_err();
-    assert!(
-        matches!(&err, Error::EditUnsupported(m) if m.contains("fill value")),
-        "expected a fill-value refusal, got {err:?}"
+    let Error::EditUnsupported(actual) = err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(
+        actual,
+        "write_dataset overwrites values only; it cannot change the fill value (set it when the dataset is created)"
     );
     assert!(
         !s.has_staged_edits(),

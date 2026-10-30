@@ -330,10 +330,17 @@ fn a_refused_build_does_not_touch_the_destination_file() {
     b.create_dataset("d")
         .with_i32_data(&(0..100).collect::<Vec<_>>())
         .with_chunks(&[10]);
-    assert!(matches!(
-        b.write(&path),
-        Err(Error::Format(FormatError::LibverTooOldForContent { .. }))
-    ));
+    let Error::Format(actual) = b.write(&path).unwrap_err() else {
+        panic!("expected a format error");
+    };
+    assert_eq!(
+        actual,
+        FormatError::LibverTooOldForContent {
+            content: "a chunked, filtered, or resizable dataset",
+            needs: "v1.10",
+            writing: "v1.8"
+        }
+    );
     assert_eq!(
         std::fs::read(&path).unwrap(),
         previous,
@@ -408,12 +415,16 @@ fn an_editing_session_honors_the_library_version_bound() {
         let session = File::open_rw_with_options(&path, bounded).unwrap();
         stage_chunked(&session);
         let err = session.commit().unwrap_err();
-        assert!(
-            matches!(
-                err,
-                Error::Format(FormatError::LibverTooOldForContent { .. })
-            ),
-            "a chunked addition under a 1.8 bound gave {err:?}"
+        let Error::Format(actual) = err else {
+            panic!("expected a format error");
+        };
+        assert_eq!(
+            actual,
+            FormatError::LibverTooOldForContent {
+                content: "a chunked, filtered, or resizable dataset",
+                needs: "v1.10",
+                writing: "v1.8"
+            }
         );
     }
 

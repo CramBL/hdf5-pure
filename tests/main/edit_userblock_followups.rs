@@ -13,7 +13,7 @@
 
 use hdf5_pure::DeflateLevel;
 use hdf5_pure::UserblockSize;
-use hdf5_pure::{AttrValue, File, FileBuilder};
+use hdf5_pure::{AttrValue, Error, File, FileBuilder};
 
 use test_util::temp;
 use test_util_hdf5::userblock;
@@ -372,10 +372,12 @@ fn userblock_reference_into_deleted_space_is_refused() {
             .unwrap();
         s.root().delete("grp").unwrap();
         let err = s.commit().unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("holds the address of an object this commit deletes"),
-            "got: {err}"
+        let Error::EditUnsupported(actual) = err else {
+            panic!("unexpected error: {err:?}");
+        };
+        assert_eq!(
+            actual,
+            "a reference this commit writes holds the address of an object this commit deletes, or of one under it; the reference would be left pointing at storage the delete can reclaim"
         );
     }
 

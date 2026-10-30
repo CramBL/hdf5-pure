@@ -303,7 +303,7 @@ fn zfp_on_unsupported_scalar_errors_not_panics() {
         .finish()
         .expect_err("ZFP on u8 should error, not succeed");
     assert!(
-        matches!(err, Error::Format(FormatError::UnsupportedZfp(_))),
+        matches!(err, Error::Format(FormatError::UnsupportedZfp(ref reason)) if reason == "ZFP compression requires the dataset's datatype to be one of f32, f64, i32, or i64"),
         "unexpected error variant: {err:?}",
     );
 }
@@ -357,7 +357,7 @@ fn zfp_with_5d_chunks_errors_not_panics() {
         .finish()
         .expect_err("ZFP with 5D chunks should error, not succeed");
     assert!(
-        matches!(err, Error::Format(FormatError::UnsupportedZfp(_))),
+        matches!(err, Error::Format(FormatError::UnsupportedZfp(ref reason)) if reason == "only 1D-4D chunks are supported, got rank 5"),
         "unexpected error variant: {err:?}",
     );
 }
