@@ -348,7 +348,7 @@ fn measure_persistent_appends(
     file.commit().unwrap();
     file.close().unwrap();
     if initial == 0 {
-        defer_resource_index(path);
+        assert_resource_index_unallocated(path);
     }
     let file = File::open_rw_with_options(path, options).unwrap();
     assert_eq!(
@@ -435,8 +435,7 @@ fn measure_persistent_appends(
     }
 }
 
-/// Sets the empty fixture's stored EA header address to undefined before reopening.
-fn defer_resource_index(path: &Path) {
+fn assert_resource_index_unallocated(path: &Path) {
     let file = File::open(path).unwrap();
     let dataset = file.dataset("d").unwrap();
     assert_eq!(dataset.shape().unwrap(), [0]);
@@ -447,7 +446,7 @@ fn defer_resource_index(path: &Path) {
     .unwrap();
     drop(dataset);
     drop(file);
-    let mut bytes = std::fs::read(path).unwrap();
+    let bytes = std::fs::read(path).unwrap();
     let mut candidates = test_util::bytes::signature_offsets(&bytes, v2::SIGNATURE)
         .into_iter()
         .filter_map(|header_at| {
@@ -475,28 +474,16 @@ fn defer_resource_index(path: &Path) {
         })
         .collect::<Vec<_>>();
     assert_eq!(candidates.len(), 1);
-    let (header_at, mut layout) = candidates.pop().unwrap();
+    let (_, layout) = candidates.pop().unwrap();
     let (original, pointer) = DataLayout::parse_with_ea_address(&layout, widths).unwrap();
     assert!(matches!(
         original,
-        DataLayout::Chunked {
-            index: ChunkIndexLayout::ExtensibleArray {
-                address: Some(_),
-                ..
-            },
-            ..
-        }
-    ));
-    layout[pointer.unwrap()].copy_from_slice(&data_layout::UNDEFINED_ADDRESS.to_le_bytes());
-    assert!(matches!(
-        DataLayout::parse_with_widths(&layout, widths).unwrap(),
         DataLayout::Chunked {
             index: ChunkIndexLayout::ExtensibleArray { address: None, .. },
             ..
         }
     ));
-    v2::replace_message(&mut bytes, header_at, MessageType::DATA_LAYOUT, &layout);
-    std::fs::write(path, bytes).unwrap();
+    assert_eq!(&layout[pointer.unwrap()], &[u8::MAX; 8]);
 }
 
 #[rstest]

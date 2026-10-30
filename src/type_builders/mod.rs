@@ -2779,6 +2779,11 @@ impl DatasetBuilder {
     /// File builders and [`Group::create_dataset`](crate::Group::create_dataset) support these
     /// declarations in new and writable files.
     ///
+    /// For a zero-element chunked dataset with one unlimited dimension, the writer also defers
+    /// index allocation. The layout stores an undefined Extensible Array address until the first
+    /// nonempty [`Dataset::append`](crate::Dataset::append) or buffered flush. Empty appends leave
+    /// storage unallocated. Dataset creation checks the schema before allocating storage.
+    ///
     /// File finalization and editor staging return [`FormatError::ConflictingDatasetStorage`]
     /// if element data or a data provider is also supplied. Element checksums require data for a
     /// nonempty dataset.
@@ -2801,14 +2806,40 @@ impl DatasetBuilder {
     ///         .with_fill_value(-273.15_f64);
     ///     let file = File::from_bytes(builder.finish()?)?;
     ///     let dataset = file.dataset("temperature")?;
-    ///     println!("Shape: {:?}", dataset.shape()?);
-    ///     println!("Allocated chunks: {}", dataset.chunks()?.len());
-    ///     println!(
-    ///         "First three values: {:?}",
-    ///         dataset.read_f64_region(&[0, 0], &[1, 3])?
-    ///     );
+    ///     assert_eq!(dataset.shape()?, [100, 8]);
+    ///     assert!(dataset.chunks()?.is_empty());
+    ///     assert_eq!(dataset.read_f64_region(&[0, 0], &[1, 3])?, [-273.15; 3]);
     ///     Ok(())
     /// }
+    /// ```
+    ///
+    /// Creates an empty dataset and appends its first values:
+    ///
+    /// ```
+    /// use hdf5_pure::File;
+    /// use hdf5_pure::FileBuilder;
+    /// use hdf5_pure::MaxExtent;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let directory = tempfile::tempdir()?;
+    /// # let path = directory.path().join("temperature.h5");
+    /// let mut builder = FileBuilder::new();
+    /// builder
+    ///     .create_dataset("temperature")
+    ///     .with_unallocated_storage(hdf5_pure::make_f64_type(), &[0])
+    ///     .with_chunks(&[512])
+    ///     .with_maxshape(&[MaxExtent::Unlimited]);
+    /// builder.write(&path)?;
+    /// let file = File::open_rw(&path)?;
+    /// let mut dataset = file.dataset("temperature")?;
+    /// assert_eq!(dataset.shape()?, [0]);
+    /// assert!(dataset.chunks()?.is_empty());
+    /// dataset.append(&[18.5_f64, 19.0])?;
+    /// assert_eq!(dataset.read_f64()?, [18.5, 19.0]);
+    /// drop(dataset);
+    /// file.close()?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn with_unallocated_storage(&mut self, datatype: Datatype, dims: &[u64]) -> &mut Self {
         self.datatype = Some(datatype);

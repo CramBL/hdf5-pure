@@ -11,7 +11,14 @@ use hdf5_pure::DeflateLevel;
 use hdf5_pure::File;
 use hdf5_pure::FileBuilder;
 use hdf5_pure::MaxExtent;
+use hdf5_pure::MessageType;
+use hdf5_pure_format::__private::AccessMode;
+use hdf5_pure_format::__private::ChunkIndexLayout;
+use hdf5_pure_format::__private::DataLayout;
+use hdf5_pure_format::__private::ObjectHeader;
 use rstest::rstest;
+use test_util::extensible_array;
+use test_util_hdf5::__private::c_object;
 use test_util_hdf5::file;
 use test_util_hdf5::numeric::ByteOrder;
 
@@ -45,14 +52,17 @@ impl Creation {
 }
 
 #[rstest]
-#[case::contiguous(false, false, false)]
-#[case::chunked(true, false, false)]
-#[case::filtered(true, true, false)]
-#[case::extensible(true, false, true)]
+#[case::contiguous(false, false, false, &[3, 4])]
+#[case::chunked(true, false, false, &[3, 4])]
+#[case::filtered(true, true, false, &[3, 4])]
+#[case::extensible(true, false, true, &[3, 4])]
+#[case::empty_extensible(true, false, true, &[0, 4])]
+#[case::empty_filtered_extensible(true, true, true, &[0, 4])]
 fn schemas_match_reference_unallocated_storage(
     #[case] chunked: bool,
     #[case] filtered: bool,
     #[case] extensible: bool,
+    #[case] shape: &[usize],
     #[values(None, Some(-7_i32))] fill: Option<i32>,
     #[values(Creation::Buffered, Creation::Streaming, Creation::Edit)] creation: Creation,
     #[values(ByteOrder::BigEndian, ByteOrder::LittleEndian)] reference_order: ByteOrder,
@@ -75,10 +85,10 @@ fn schemas_match_reference_unallocated_storage(
         }
         let dataset = if extensible {
             schema
-                .shape((Extent::resizable(3), Extent::fixed(4)))
+                .shape((Extent::resizable(shape[0]), Extent::fixed(shape[1])))
                 .create("schema")
         } else {
-            schema.shape((3, 4)).create("schema")
+            schema.shape((shape[0], shape[1])).create("schema")
         }
         .unwrap();
         assert_eq!(dataset.storage_size(), 0);
@@ -86,7 +96,13 @@ fn schemas_match_reference_unallocated_storage(
         reference.close().unwrap();
     }
     let configure = |schema: &mut DatasetBuilder| {
-        schema.with_unallocated_storage(hdf5_pure::make_i32_type(), &[3, 4]);
+        schema.with_unallocated_storage(
+            hdf5_pure::make_i32_type(),
+            &shape
+                .iter()
+                .map(|&dimension| u64::try_from(dimension).unwrap())
+                .collect::<Vec<_>>(),
+        );
         if let Some(fill) = fill {
             schema.with_fill_value(fill);
         }
@@ -101,6 +117,10 @@ fn schemas_match_reference_unallocated_storage(
         }
     };
     creation.write(&pure_path, configure);
+    if shape.contains(&0) {
+        assert_deferred_layout(&reference_path);
+        assert_deferred_layout(&pure_path);
+    }
     let reference = hdf5::File::open(&reference_path)
         .unwrap()
         .dataset("schema")
@@ -109,8 +129,8 @@ fn schemas_match_reference_unallocated_storage(
         .unwrap()
         .dataset("schema")
         .unwrap();
-    assert_eq!(reference.shape(), [3, 4]);
-    assert_eq!(dataset.shape(), [3, 4]);
+    assert_eq!(reference.shape(), shape);
+    assert_eq!(dataset.shape(), shape);
     let reference_datatype = reference.dtype().unwrap();
     let datatype = dataset.dtype().unwrap();
     assert_eq!(
@@ -125,11 +145,11 @@ fn schemas_match_reference_unallocated_storage(
     assert_eq!(datatype, ByteOrder::LittleEndian.i32_datatype());
     assert_eq!(
         reference.read_raw::<i32>().unwrap(),
-        vec![fill.unwrap_or(0); 12]
+        vec![fill.unwrap_or(0); shape.iter().product()]
     );
     assert_eq!(
         dataset.read_raw::<i32>().unwrap(),
-        vec![fill.unwrap_or(0); 12]
+        vec![fill.unwrap_or(0); shape.iter().product()]
     );
     assert_eq!(reference.storage_size(), 0);
     assert_eq!(dataset.storage_size(), 0);
@@ -170,7 +190,7 @@ fn schemas_match_reference_unallocated_storage(
             .unwrap()
             .read_i32()
             .unwrap(),
-        vec![fill.unwrap_or(0); 12]
+        vec![fill.unwrap_or(0); shape.iter().product()]
     );
     assert_eq!(
         File::open(&pure_path)
@@ -179,7 +199,33 @@ fn schemas_match_reference_unallocated_storage(
             .unwrap()
             .read_i32()
             .unwrap(),
-        vec![fill.unwrap_or(0); 12]
+        vec![fill.unwrap_or(0); shape.iter().product()]
+    );
+}
+
+fn assert_deferred_layout(path: &Path) {
+    let native = hdf5::File::open(path).unwrap();
+    let address = usize::try_from(c_object::header_address(&native, "schema")).unwrap();
+    native.close().unwrap();
+    let bytes = std::fs::read(path).unwrap();
+    let header = ObjectHeader::parse(&bytes, AccessMode::ReadOnly, address, 8, 8).unwrap();
+    let layout = header
+        .messages
+        .into_iter()
+        .find(|message| message.msg_type == MessageType::DATA_LAYOUT)
+        .unwrap()
+        .data;
+    assert_eq!(&layout[layout.len() - 8..], &[u8::MAX; 8]);
+    assert!(matches!(
+        DataLayout::parse(&layout, 8, 8).unwrap(),
+        DataLayout::Chunked {
+            index: ChunkIndexLayout::ExtensibleArray { address: None, .. },
+            ..
+        }
+    ));
+    assert!(test_util::bytes::signature_offsets(&bytes, extensible_array::SIGNATURE).is_empty());
+    assert!(
+        test_util::bytes::signature_offsets(&bytes, extensible_array::INDEX_SIGNATURE).is_empty()
     );
 }
 
