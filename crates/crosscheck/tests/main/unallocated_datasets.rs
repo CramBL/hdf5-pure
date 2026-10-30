@@ -46,6 +46,7 @@ impl Creation {
                 let file = File::open_rw(path).unwrap();
                 file.root().create_dataset("schema", configure).unwrap();
                 file.commit().unwrap();
+                file.close().unwrap();
             }
         }
     }
