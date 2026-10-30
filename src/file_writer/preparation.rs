@@ -193,7 +193,7 @@ impl PreparedDataset {
                     &self.ds.dimensions,
                     ctx,
                     self.maxshape.as_deref(),
-                    FillPattern::new(self.fill_time, self.fill.as_deref(), elem),
+                    FillPattern::from_value(self.fill.as_deref(), elem),
                     self.storage.allocation(),
                 )?;
                 (0, Some((header.layout_message, header.pipeline_message)))
@@ -294,7 +294,8 @@ impl PreparedDataset {
             ctx,
             &self.chunk_options,
             self.maxshape.as_deref(),
-            FillPattern::new(self.fill_time, self.fill.as_deref(), elem),
+            FillPattern::from_value(self.fill.as_deref(), elem),
+            self.fill_time,
             self.storage.allocation(),
         )
     }

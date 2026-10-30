@@ -55,6 +55,7 @@ fn a_chunk_set_skipping_partial_edge_filtering_stores_only_its_partial_edge_chun
         &options,
         None,
         fill,
+        FillTime::IfSet,
         StorageAllocation::Allocated,
     )
     .unwrap();
@@ -83,6 +84,7 @@ fn a_raw_partial_edge_chunk_holds_a_whole_chunk_padded_with_the_fill_value(
         &EdgeFilters::Deflate.options(&[4], Some(PartialEdgeFiltering::Skip)),
         None,
         i32_fill(fill_bytes.as_ref()),
+        FillTime::IfSet,
         StorageAllocation::Allocated,
     )
     .unwrap();
@@ -104,6 +106,7 @@ fn the_default_policy_filters_every_chunk_and_stores_no_layout_flag() {
         &options,
         None,
         FillPattern::ZERO,
+        FillTime::IfSet,
         StorageAllocation::Allocated,
     )
     .unwrap();
@@ -153,6 +156,7 @@ fn the_sizing_and_assembly_passes_store_the_same_layout_flags(
         &options,
         maxshape,
         FillPattern::ZERO,
+        FillTime::IfSet,
         allocation,
     )
     .unwrap();
@@ -182,6 +186,7 @@ fn a_raw_single_chunk_stores_its_size_in_the_filtered_single_chunk_index() {
         &EdgeFilters::Deflate.options(&[8], Some(PartialEdgeFiltering::Skip)),
         None,
         FillPattern::ZERO,
+        FillTime::IfSet,
         StorageAllocation::Allocated,
     )
     .unwrap();

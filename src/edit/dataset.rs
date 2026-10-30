@@ -967,7 +967,7 @@ impl WriteEngine {
         let ctx = ChunkContext::from_datatype(&chunk_dims, &fd.dt)?;
         let elem = ctx.element_size.narrow::<NonZeroUsize>()?;
         let fill_time = fd.fill_time;
-        let fill = FillPattern::new(fill_time, fd.fill.as_deref(), elem);
+        let fill = FillPattern::from_value(fd.fill.as_deref(), elem);
         let set = chunked_write::compress_chunks(
             fd.storage.raw(),
             &fd.ds.dimensions,
@@ -975,6 +975,7 @@ impl WriteEngine {
             &fd.chunk_options,
             fd.maxshape.as_deref(),
             fill,
+            fill_time,
             fd.storage.allocation(),
         )?;
         let (_addr, (layout_message, pipeline_message)) = self.place_relocatable(
@@ -1468,10 +1469,7 @@ pub(super) fn flatten_dataset(db: DatasetBuilder, name: LinkNameBuf) -> Result<F
         let chunk_dims = chunk_options.resolve_chunk_dims(&ds.dimensions);
         let ctx = ChunkContext::from_datatype(&chunk_dims, &dt)?;
         chunked_read::bounded_chunk_len(&chunk_dims, elem_size)?;
-        chunk_options.build_pipeline(
-            &ctx,
-            FillPattern::new(fill_time, fill.as_deref(), elem_size),
-        )?;
+        chunk_options.build_pipeline(&ctx, FillPattern::from_value(fill.as_deref(), elem_size))?;
     }
 
     let mut sized = file_writer::make_link(name.as_str(), StoredAddress::new(0));

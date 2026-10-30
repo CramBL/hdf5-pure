@@ -1,22 +1,28 @@
 #![cfg(feature = "__hdf5-1.10")]
-//! Scale-offset encoding with a **defined fill value** (issue #287).
-//!
-//! The reference library sets `H5Z_SCALEOFFSET_PARM_FILAVAIL` to `FILL_DEFINED`
-//! whenever the dataset carries a fill value, which is the shape libhdf5 and
-//! h5py produce by default. In that mode an element equal to the fill value is
-//! stored as the all-ones offset rather than as `value - min`, and the encoder
-//! reserves that code point by widening `minbits` — both of which this crate's
-//! encoder refused outright before this issue.
-//!
-//! Every test builds its fixture with the C library so the `cd_values` under
-//! test are the reference library's own, then checks that what hdf5-pure
-//! encodes is what the C library reads back.
+//! Crosschecks scale-offset fill parameters, decoded values, and encoded chunks against libhdf5.
 
+#[cfg(target_endian = "little")]
+use std::fmt::Debug;
+
+#[cfg(target_endian = "little")]
+use hdf5::Extent;
+#[cfg(target_endian = "little")]
+use hdf5::File as NativeFile;
+#[cfg(target_endian = "little")]
+use hdf5::H5Type;
+#[cfg(target_endian = "little")]
+use hdf5::dataset::FillTime as NativeFillTime;
+#[cfg(target_endian = "little")]
+use hdf5::filters::ScaleOffset as NativeScaleOffset;
+#[cfg(target_endian = "little")]
+use hdf5_pure::FillTime;
 use hdf5_pure::FilterId;
 use hdf5_pure::FilterParameters;
 use hdf5_pure::{H5Element, ScaleOffset};
 
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
+#[cfg(target_endian = "little")]
+use test_util_hdf5::dataset_writer::ScaleOffsetWriter;
 
 /// Appends `values` to `col` through a staged append.
 fn append_to_col<T: H5Element>(path: &std::path::Path, values: &[T]) {
@@ -866,4 +872,78 @@ fn a_full_width_minbits_stores_the_chunk_unfiltered() {
 
     assert_eq!(dataset::read_pure::<i32>(&path, "col"), data);
     assert_eq!(dataset::read_libhdf5::<i32>(&path, "col"), data);
+}
+
+#[cfg(target_endian = "little")]
+#[rstest::rstest]
+#[case::f32(99.125_f32)]
+#[case::f64(99.125_f64)]
+fn scale_offset_fill_policies_match_native_parameters_and_values<T>(
+    #[case] fill: T,
+    #[values(FillTime::IfSet, FillTime::Alloc, FillTime::Never)] fill_time: FillTime,
+    #[values(
+        ScaleOffsetWriter::Buffered,
+        ScaleOffsetWriter::Streaming,
+        ScaleOffsetWriter::CreateAppend,
+        ScaleOffsetWriter::CreateAppendStaged,
+        ScaleOffsetWriter::StagedAppend
+    )]
+    writer: ScaleOffsetWriter,
+) where
+    T: H5Element + H5Type + From<f32> + Copy + PartialEq + Debug,
+{
+    let directory = tempfile::tempdir().unwrap();
+    let reference_path = directory.path().join("reference.h5");
+    let pure_path = directory.path().join("pure.h5");
+    let values = [T::from(1.0), fill, T::from(12.0), T::from(2.0)];
+    let native_fill_time = match fill_time {
+        FillTime::Alloc => NativeFillTime::Alloc,
+        FillTime::IfSet => NativeFillTime::IfSet,
+        FillTime::Never => NativeFillTime::Never,
+    };
+    {
+        let reference = test_util_hdf5::file::libhdf5_create_v110(&reference_path);
+        {
+            let dataset = reference
+                .new_dataset::<T>()
+                .shape(Extent::resizable(4))
+                .chunk((4,))
+                .fill_value(fill)
+                .fill_time(native_fill_time)
+                .scale_offset(NativeScaleOffset::FloatDScale(1))
+                .create("col")
+                .unwrap();
+            dataset.write_raw(&values).unwrap();
+        }
+        reference.close().unwrap();
+    }
+    writer.write(&pure_path, &values, fill, fill_time);
+    {
+        let reference = NativeFile::open(&reference_path).unwrap();
+        let pure = NativeFile::open(&pure_path).unwrap();
+        let expected = reference.dataset("col").unwrap();
+        let actual = pure.dataset("col").unwrap();
+        assert_eq!(expected.shape(), [4]);
+        assert_eq!(actual.shape(), expected.shape());
+        assert_eq!(expected.chunk(), Some(vec![4]));
+        assert_eq!(actual.chunk(), expected.chunk());
+        assert_eq!(
+            expected.dcpl().unwrap().get_fill_value_as::<T>().unwrap(),
+            Some(fill)
+        );
+        assert_eq!(
+            actual.dcpl().unwrap().get_fill_value_as::<T>().unwrap(),
+            Some(fill)
+        );
+        assert_eq!(actual.dcpl().unwrap().fill_time(), native_fill_time);
+        assert_eq!(expected.read_raw::<T>().unwrap(), values);
+        assert_eq!(actual.read_raw::<T>().unwrap(), values);
+    }
+    assert_eq!(filter_parms(&pure_path), filter_parms(&reference_path));
+    assert_eq!(dataset::read_pure::<T>(&reference_path, "col"), values);
+    assert_eq!(dataset::read_pure::<T>(&pure_path, "col"), values);
+    let pure = hdf5_pure::File::open(&pure_path).unwrap();
+    let reference = hdf5_pure::File::open(&reference_path).unwrap();
+    assert_eq!(pure.dataset("col").unwrap().chunks().unwrap().len(), 1);
+    assert_eq!(reference.dataset("col").unwrap().chunks().unwrap().len(), 1);
 }

@@ -6,6 +6,8 @@
 //! value" default, the datatype/size validation, and that a fill value set on an
 //! `File::open_rw`-created dataset is honored.
 
+use std::fmt::Debug;
+
 use hdf5_pure::{
     Dataset, Datatype, DatatypeByteOrder, Error, File, FileBuilder, FillTime, FixedPointType,
     FormatError, H5Element, MaxExtent, RepackOptions,
@@ -19,6 +21,7 @@ use test_util::image::Image;
 use test_util::object_header::{Message, MessageType};
 use test_util::superblock::v2::Superblock;
 use test_util::widths::Widths;
+use test_util_hdf5::dataset_writer::ScaleOffsetWriter;
 use test_util_hdf5::file_builder;
 
 #[test]
@@ -709,4 +712,35 @@ fn preserves_scalar_f32_fill_bits(#[case] bits: u32) {
         bits
     );
     assert_eq!(dataset.read_f32().unwrap()[0].to_bits(), bits);
+}
+
+#[rstest]
+#[case::f32(99.125_f32)]
+#[case::f64(99.125_f64)]
+fn scale_offset_preserves_explicit_fill_values_under_every_fill_policy<T>(
+    #[case] fill: T,
+    #[values(FillTime::IfSet, FillTime::Alloc, FillTime::Never)] fill_time: FillTime,
+    #[values(
+        ScaleOffsetWriter::Buffered,
+        ScaleOffsetWriter::Streaming,
+        ScaleOffsetWriter::CreateAppend,
+        ScaleOffsetWriter::CreateAppendStaged,
+        ScaleOffsetWriter::StagedAppend
+    )]
+    writer: ScaleOffsetWriter,
+) where
+    T: H5Element + From<f32> + PartialEq + Debug,
+{
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("scale_offset.h5");
+    let values = [T::from(1.0), fill, T::from(12.0), T::from(2.0)];
+    writer.write(&path, &values, fill, fill_time);
+    let file = File::open(&path).unwrap();
+    let dataset = file.dataset("col").unwrap();
+    assert_eq!(dataset.shape().unwrap(), [4]);
+    assert_eq!(dataset.chunk_shape().unwrap(), Some(vec![4]));
+    assert_eq!(dataset.chunks().unwrap().len(), 1);
+    assert_eq!(dataset.fill_value::<T>().unwrap(), Some(fill));
+    assert_eq!(dataset.fill_time().unwrap(), fill_time);
+    assert_eq!(dataset.read::<T>().unwrap(), values);
 }

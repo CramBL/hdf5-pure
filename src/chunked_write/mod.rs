@@ -20,6 +20,7 @@ use hdf5_pure_format::__private::IndexSlots;
 use hdf5_pure_format::__private::SlotOccupancy;
 
 use crate::DeflateLevel;
+use crate::FillTime;
 #[cfg(test)]
 use crate::FloatingPointType;
 #[cfg(feature = "zfp")]
@@ -1027,6 +1028,10 @@ impl EmptyChunkIndex {
 /// [`PartialEdgeFiltering::Skip`]. [`assemble_chunked_at`] lays the set out at an address without
 /// encoding the chunks again. An unallocated dataset has no chunks.
 ///
+/// `fill` is the configured fill value used in filter parameters. The writer initializes partial
+/// edge chunks with zeros under [`FillTime::Never`] and with `fill` under the other policies
+/// before copying available elements.
+///
 /// # Errors
 ///
 /// Returns [`FormatError::ChunkedReadError`] if the chunk index of the geometry is unsupported or
@@ -1041,13 +1046,12 @@ pub(crate) fn compress_chunks(
     options: &ChunkOptions,
     maxshape: Option<&[MaxExtent]>,
     fill: FillPattern<'_>,
+    fill_time: FillTime,
     allocation: StorageAllocation,
 ) -> Result<CompressedChunkSet, FormatError> {
     let chunk_dims = ctx.chunk_dims;
     let element_size = ctx.element_size.narrow::<NonZeroUsize>()?;
     crate::chunked_read::bounded_chunk_len(chunk_dims, element_size)?;
-    // The same pattern the unwritten slots are padded with: a filter that
-    // records the fill value has to record the one this write pads with.
     let mut scratch = FilterScratch::new();
     let pipeline = match allocation {
         StorageAllocation::Allocated => options.build_pipeline_with(&mut scratch, &ctx, fill)?,
@@ -1098,7 +1102,11 @@ pub(crate) fn compress_chunks(
             ctx,
             flags,
             shape,
-            fill,
+            if fill_time.is_never() {
+                FillPattern::ZERO
+            } else {
+                fill
+            },
             raw_data,
         )?,
         StorageAllocation::Unallocated => Vec::new(),
@@ -1563,6 +1571,7 @@ pub fn build_chunked_data_at_ext(
         options,
         maxshape,
         fill,
+        FillTime::IfSet,
         StorageAllocation::Allocated,
     )?;
     assemble_chunked_at(&set, data_address)

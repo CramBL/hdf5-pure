@@ -134,6 +134,7 @@ fn a_created_chunk_larger_than_u32_max_bytes_is_rejected(
         },
         None,
         FillPattern::ZERO,
+        FillTime::IfSet,
         allocation,
     ) else {
         panic!("expected InvalidChunkGeometry");
@@ -224,6 +225,7 @@ fn chunk_index_storage_matches_the_requested_allocation(
         &options,
         maxshape,
         FillPattern::ZERO,
+        FillTime::IfSet,
         allocation,
     )
     .unwrap();
@@ -327,6 +329,7 @@ fn incremental_encoding_matches_collected_chunk_bytes(
         &options,
         None,
         fill,
+        FillTime::IfSet,
         StorageAllocation::Allocated,
     )
     .unwrap();
@@ -369,6 +372,7 @@ fn filtered_datasets_without_chunks_skip_gathering(
         &options,
         None,
         FillPattern::UNKNOWN,
+        FillTime::IfSet,
         allocation,
     )
     .unwrap();
@@ -392,6 +396,7 @@ fn an_unallocated_dataset_encodes_no_chunk_bytes() {
         &ChunkOptions::default(),
         None,
         FillPattern::new(FillTime::IfSet, Some(&fill), elem),
+        FillTime::IfSet,
         StorageAllocation::Unallocated,
     )
     .expect("an unallocated set");
@@ -423,6 +428,7 @@ fn an_unallocated_dataset_encodes_no_chunk_bytes() {
         &ChunkOptions::default(),
         None,
         FillPattern::new(FillTime::IfSet, Some(&fill), elem),
+        FillTime::IfSet,
         StorageAllocation::Allocated,
     )
     .expect("a dense set");
@@ -627,6 +633,7 @@ fn header_lengths_and_filter_parameters_match_geometry(
         &options,
         maxshape,
         FillPattern::ZERO,
+        FillTime::IfSet,
         allocation,
     )
     .unwrap();
@@ -680,6 +687,7 @@ fn measuring_a_chunked_region_agrees_with_assembling_it() {
             &ChunkOptions::default(),
             maxshape,
             FillPattern::ZERO,
+            FillTime::IfSet,
             StorageAllocation::Allocated,
         )
         .unwrap();
@@ -1476,6 +1484,7 @@ fn chunked_data_len_matches_what_assemble_produces() {
                     &options,
                     maxshape.as_ref().map(<[MaxExtent; 1]>::as_slice),
                     FillPattern::ZERO,
+                    FillTime::IfSet,
                     StorageAllocation::Allocated,
                 )
                 .unwrap();
@@ -1528,6 +1537,7 @@ fn direct_emission_uses_retained_chunks_and_matches_assembly(
         &options,
         maxshape,
         FillPattern::ZERO,
+        FillTime::IfSet,
         allocation,
     )
     .unwrap();
@@ -1589,6 +1599,7 @@ fn chunk_planning_rejects_region_address_overflow(#[case] indexed: bool) {
         &ChunkOptions::default(),
         None,
         FillPattern::ZERO,
+        FillTime::IfSet,
         StorageAllocation::Allocated,
     )
     .unwrap();
@@ -1622,6 +1633,7 @@ fn chunk_emission_stops_at_the_sink_error(
         &ChunkOptions::default(),
         None,
         FillPattern::ZERO,
+        FillTime::IfSet,
         StorageAllocation::Allocated,
     )
     .unwrap();
