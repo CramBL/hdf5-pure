@@ -2118,11 +2118,24 @@ fn vlen_sequence_rejects_string_datatype() {
     // Pass a VL-string datatype to the sequence builder.
     use crate::type_builders::VlStringElement;
     let dt = crate::type_builders::make_vlen_string_type(CharacterSet::Utf8);
+    assert!(matches!(
+        &dt,
+        Datatype::VariableLength(VariableLengthType::String(_))
+    ));
     let mut fw = FileWriter::new();
     let res = fw
         .create_dataset("x")
         .with_vlen_sequence_elements(dt, &[VlStringElement::Bytes(b"hi".to_vec())]);
-    assert!(matches!(res, Err(FormatError::TypeMismatch { .. })));
+    let Err(error) = res else {
+        panic!("a variable-length string was accepted as a sequence");
+    };
+    assert_eq!(
+        error,
+        FormatError::TypeMismatch {
+            expected: "non-string VariableLength",
+            actual: "non-VariableLength",
+        }
+    );
 }
 
 // ---- library-version bounds select the on-disk format ----
@@ -2251,71 +2264,87 @@ fn v18_and_v110_outputs_differ_only_in_versions_and_checksums() {
 }
 
 // Include inverted ranges with otherwise supported upper bounds.
-#[test]
-fn bounds_admitting_no_format_this_crate_writes_are_refused() {
-    for (low, high) in [
-        (LibVer::Earliest, LibVer::Earliest),
-        (LibVer::LATEST, LibVer::V18),
-        (LibVer::V114, LibVer::V110),
-        (LibVer::LATEST, LibVer::V112),
-        (LibVer::V112, LibVer::V110),
-    ] {
-        let err = write_bounded(Some((low, high))).unwrap_err();
-        assert!(
-            matches!(err, FormatError::LibverBoundsUnsatisfiable { .. }),
-            "bounds [{}, {}] gave {err:?}",
-            low.name(),
-            high.name()
-        );
-    }
+#[rstest]
+#[case::earliest_only(LibVer::Earliest, LibVer::Earliest, "earliest", "earliest")]
+#[case::latest_below_v18(LibVer::LATEST, LibVer::V18, "v1.14", "v1.8")]
+#[case::v114_below_v110(LibVer::V114, LibVer::V110, "v1.14", "v1.10")]
+#[case::latest_below_v112(LibVer::LATEST, LibVer::V112, "v1.14", "v1.12")]
+#[case::v112_below_v110(LibVer::V112, LibVer::V110, "v1.12", "v1.10")]
+fn bounds_admitting_no_format_this_crate_writes_are_rejected(
+    #[case] low: LibVer,
+    #[case] high: LibVer,
+    #[case] requested_low: &'static str,
+    #[case] requested_high: &'static str,
+) {
+    assert_eq!(
+        write_bounded(Some((low, high))).unwrap_err(),
+        FormatError::LibverBoundsUnsatisfiable {
+            writes: "v1.10",
+            requested_low,
+            requested_high,
+        }
+    );
 }
 
-#[test]
-fn content_the_older_format_cannot_carry_is_refused_not_upgraded() {
+#[rstest]
+#[case::chunked(
+    OlderFormatContent::Chunked,
+    "a chunked, filtered, or resizable dataset"
+)]
+#[case::paged(OlderFormatContent::Paged, "a file-space setting")]
+#[case::fsm(OlderFormatContent::Fsm, "a file-space setting")]
+#[case::resizable(
+    OlderFormatContent::Resizable,
+    "a chunked, filtered, or resizable dataset"
+)]
+fn content_the_older_format_cannot_carry_is_rejected(
+    #[case] fixture: OlderFormatContent,
+    #[case] content: &'static str,
+) {
     let mut fw = FileWriter::new();
     fw.with_libver_bounds(LibVer::Earliest, LibVer::V18);
-    fw.create_dataset("d")
-        .with_i32_data(&(0..100).collect::<Vec<_>>())
-        .with_chunks(&[10]);
-    assert!(matches!(
+    match fixture {
+        OlderFormatContent::Chunked => {
+            fw.create_dataset("d")
+                .with_i32_data(&(0..100).collect::<Vec<_>>())
+                .with_chunks(&[10]);
+        }
+        OlderFormatContent::Paged => {
+            fw.with_file_space_settings(
+                FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true),
+            );
+            fw.create_dataset("d").with_i32_data(&[1]);
+        }
+        OlderFormatContent::Fsm => {
+            fw.with_file_space_settings(
+                FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
+                    .with_page_size(FileSpacePageSize::DEFAULT),
+            );
+            fw.create_dataset("d").with_i32_data(&[1]);
+        }
+        OlderFormatContent::Resizable => {
+            // An unlimited dimension requires chunked storage under the same format bound.
+            fw.create_dataset("d")
+                .with_i32_data(&[1, 2, 3])
+                .with_shape(&[3])
+                .with_maxshape(&[MaxExtent::Unlimited]);
+        }
+    }
+    assert_eq!(
         fw.finish().unwrap_err(),
-        FormatError::LibverTooOldForContent { .. }
-    ));
-
-    let mut fw = FileWriter::new();
-    fw.with_libver_bounds(LibVer::Earliest, LibVer::V18);
-    fw.with_file_space_settings(
-        FileSpaceSettings::new(FileSpaceStrategy::Page).with_persistence(true),
+        FormatError::LibverTooOldForContent {
+            content,
+            needs: "v1.10",
+            writing: "v1.8"
+        }
     );
-    fw.create_dataset("d").with_i32_data(&[1]);
-    assert!(matches!(
-        fw.finish().unwrap_err(),
-        FormatError::LibverTooOldForContent { .. }
-    ));
+}
 
-    let mut fw = FileWriter::new();
-    fw.with_libver_bounds(LibVer::Earliest, LibVer::V18);
-    fw.with_file_space_settings(
-        FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
-            .with_page_size(FileSpacePageSize::DEFAULT),
-    );
-    fw.create_dataset("d").with_i32_data(&[1]);
-    assert!(matches!(
-        fw.finish().unwrap_err(),
-        FormatError::LibverTooOldForContent { .. }
-    ));
-
-    // An unlimited dimension requires chunked storage under the same format bound.
-    let mut fw = FileWriter::new();
-    fw.with_libver_bounds(LibVer::Earliest, LibVer::V18);
-    fw.create_dataset("d")
-        .with_i32_data(&[1, 2, 3])
-        .with_shape(&[3])
-        .with_maxshape(&[MaxExtent::Unlimited]);
-    assert!(matches!(
-        fw.finish().unwrap_err(),
-        FormatError::LibverTooOldForContent { .. }
-    ));
+enum OlderFormatContent {
+    Chunked,
+    Fsm,
+    Paged,
+    Resizable,
 }
 // "The Attribute Message" in format specification, version 4.0, defines message
 // versions 2 and 3 and the version 3 Name Character Set Encoding field.

@@ -656,29 +656,22 @@ mod tests {
             GridOrder::UnlimitedFirst,
         )
         .unwrap_err();
-        assert!(
-            format!("{err}").contains("only one unlimited dimension"),
-            "{err}"
-        );
+        assert_eq!(err, FormatError::ChunkedReadError("a chunked dataset may have only one unlimited dimension, and it must be the one the index grows along".into()));
     }
 
-    /// A dimension of no chunks at all makes every multiplier below it zero, and
-    /// the decode divides by those. A crafted file can name a maximum extent of
-    /// zero beside a non-zero current one, and this used to reach the division:
-    /// before the maximum shape entered the numbering at all, the same file read
-    /// as ordinary data.
-    #[test]
-    fn a_zero_maximum_extent_is_refused_rather_than_divided_by() {
-        // Constructing it is fine: a zero-element dataset of shape [4, 0] builds
-        // exactly this grid, has no chunks, and never asks for a slot.
+    #[rstest]
+    #[case::decode_slot(EmptyGridQuery::Offsets)]
+    #[case::encode_coordinates(EmptyGridQuery::Slot)]
+    fn a_zero_maximum_extent_is_rejected_before_division(#[case] query: EmptyGridQuery) {
+        // Both queries use a grid with an empty trailing dimension.
         let g = ChunkGrid::new(&[2, 8], &[4, 0], None, GridOrder::RowMajor).unwrap();
-        // Asking for one is where the division would be, so that is refused.
-        let err = g.offsets_in_extent(0).unwrap_err();
-        assert!(format!("{err}").contains("numbers nothing"), "{err}");
-        assert!(format!("{}", g.slot_of(&[0, 0]).unwrap_err()).contains("numbers nothing"));
+        let result = match query {
+            EmptyGridQuery::Offsets => g.offsets_in_extent(0).map(|_| ()),
+            EmptyGridQuery::Slot => g.slot_of(&[0, 0]).map(|_| ()),
+        };
+        assert_eq!(result.unwrap_err(), FormatError::ChunkedReadError("this chunked dataset has a dimension of no chunks at all, so its chunk index numbers nothing; a slot in it cannot be resolved".into()));
 
-        // The *leading* dimension is the one no multiplier crosses, so a zero
-        // count there divides nothing and stays numberable.
+        // The leading-dimension control has no zero divisor.
         let g = ChunkGrid::new(
             &[2, 2],
             &[3, 4],
@@ -689,11 +682,13 @@ mod tests {
         assert_eq!(g.offsets_in_extent(0).unwrap(), Some(vec![0, 0]));
     }
 
-    /// A maximum shape can describe more chunks than a `u64` can number. The
-    /// multiplier has to refuse rather than wrap, since a wrapped multiplier
-    /// numbers two different chunks the same.
+    enum EmptyGridQuery {
+        Offsets,
+        Slot,
+    }
+
     #[test]
-    fn an_unnumberable_maximum_shape_is_refused() {
+    fn an_unnumberable_maximum_shape_is_rejected() {
         let err = ChunkGrid::new(
             &[1, 1, 1],
             &[2, 2, 2],
@@ -705,15 +700,17 @@ mod tests {
             GridOrder::RowMajor,
         )
         .unwrap_err();
-        assert!(format!("{err}").contains("can be numbered"), "{err}");
+        assert_eq!(
+            err,
+            FormatError::ChunkedReadError(
+                "maximum shape describes more chunks than can be numbered".into()
+            )
+        );
     }
 
-    /// The slot *count* multiplies the same dimensions the multipliers do, and
-    /// a rank whose multipliers all fit can still have a product that does not.
-    /// It has to refuse rather than report `None`, which a Fixed Array caller
-    /// reads as "unlimited, so declare no count" — the opposite of the truth.
+    // Each multiplier fits u64, but the total slot count overflows it.
     #[test]
-    fn an_unnumberable_slot_count_is_refused_not_reported_as_unlimited() {
+    fn an_unnumberable_slot_count_is_rejected_instead_of_reported_as_unlimited() {
         let err = ChunkGrid::new(
             &[1, 1],
             &[2, 2],
@@ -724,7 +721,12 @@ mod tests {
             GridOrder::RowMajor,
         )
         .unwrap_err();
-        assert!(format!("{err}").contains("can be numbered"), "{err}");
+        assert_eq!(
+            err,
+            FormatError::ChunkedReadError(
+                "maximum shape describes more chunks than can be numbered".into()
+            )
+        );
     }
 
     #[rstest]

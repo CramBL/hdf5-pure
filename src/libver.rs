@@ -211,37 +211,26 @@ mod tests {
         }
     }
 
-    /// What is left unsatisfiable: an upper bound older than the 1.8 format, and
-    /// an inverted range whose upper bound sits below the lower one.
-    ///
-    /// The inverted pairs here all carry a `high` of 1.10 or newer, so the only
-    /// thing that can refuse them is the inversion itself. `(LATEST, V18)` would
-    /// pass this test with the inversion check gone, since a `high` of 1.8 is
-    /// below the format the writer defaults to and is refused on that ground
-    /// alone.
-    #[test]
-    fn bounds_admitting_no_format_this_crate_writes_are_refused() {
-        for (low, high) in [
-            (LibVer::Earliest, LibVer::Earliest),
-            (LibVer::LATEST, LibVer::V18),
-            (LibVer::V114, LibVer::V110),
-            (LibVer::LATEST, LibVer::V112),
-            (LibVer::V112, LibVer::V110),
-            (LibVer::V110, LibVer::V18),
-        ] {
-            let err = LibVer::resolve_writable(Some((low, high))).unwrap_err();
-            assert!(
-                matches!(
-                    err,
-                    FormatError::LibverBoundsUnsatisfiable {
-                        writes: "v1.10",
-                        ..
-                    }
-                ),
-                "bounds [{}, {}] gave {err:?}",
-                low.name(),
-                high.name()
-            );
-        }
+    #[rstest::rstest]
+    #[case::earliest_only(LibVer::Earliest, LibVer::Earliest, "earliest", "earliest")]
+    #[case::latest_below_v18(LibVer::LATEST, LibVer::V18, "v1.14", "v1.8")]
+    #[case::v114_below_v110(LibVer::V114, LibVer::V110, "v1.14", "v1.10")]
+    #[case::latest_below_v112(LibVer::LATEST, LibVer::V112, "v1.14", "v1.12")]
+    #[case::v112_below_v110(LibVer::V112, LibVer::V110, "v1.12", "v1.10")]
+    #[case::v110_below_v18(LibVer::V110, LibVer::V18, "v1.10", "v1.8")]
+    fn bounds_admitting_no_format_this_crate_writes_are_rejected(
+        #[case] low: LibVer,
+        #[case] high: LibVer,
+        #[case] requested_low: &'static str,
+        #[case] requested_high: &'static str,
+    ) {
+        assert_eq!(
+            LibVer::resolve_writable(Some((low, high))).unwrap_err(),
+            FormatError::LibverBoundsUnsatisfiable {
+                writes: "v1.10",
+                requested_low,
+                requested_high,
+            }
+        );
     }
 }
