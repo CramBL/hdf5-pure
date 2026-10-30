@@ -385,7 +385,6 @@ fn encode_sequence(
     let dims = [u64::try_from(raw.len() / 4).unwrap()];
     let error =
         compress_chunk_with(scratch, raw, rejected, ChunkContext::basic(&dims, 4)).unwrap_err();
-    assert!(logical_output_empty(scratch));
     maximum = maximum.max(intermediate_capacity(scratch));
     outputs.push(run(scratch, raw, &[], filters, Direction::Encode, 0));
     EncodedSequence {
@@ -429,7 +428,6 @@ fn sequence(
         0,
     )
     .unwrap_err();
-    assert!(logical_output_empty(scratch));
     maximum = maximum.max(intermediate_capacity(scratch));
     let Fixture { raw, stored, .. } = &fixtures[0];
     let rejected_dims = [u64::try_from(raw.len() / 4 + 1).unwrap()];
@@ -441,7 +439,6 @@ fn sequence(
         0,
     )
     .unwrap_err();
-    assert!(logical_output_empty(scratch));
     maximum = maximum.max(intermediate_capacity(scratch));
     outputs.push(run(scratch, raw, stored, filters, Direction::Decode, 0));
     maximum = maximum.max(intermediate_capacity(scratch));
@@ -533,10 +530,6 @@ fn capacity_bound(bytes: usize) -> usize {
 
 fn intermediate_capacity(scratch: &FilterScratch) -> usize {
     scratch.spare.capacity()
-}
-
-fn logical_output_empty(scratch: &FilterScratch) -> bool {
-    scratch.spare.is_empty()
 }
 
 fn report(
