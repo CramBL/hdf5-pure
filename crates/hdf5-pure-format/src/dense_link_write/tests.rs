@@ -503,27 +503,18 @@ fn records(
     let layout = BTreeV2Layout::new(&header, offsets).unwrap();
     let mut records = Vec::new();
     if let Some(root) = layout.root() {
-        collect(&layout, root, bytes, base, &mut records);
+        collect(root, bytes, base, &mut records);
     }
     records
 }
 
-fn collect(
-    layout: &BTreeV2Layout,
-    node: BTreeV2Node,
-    bytes: &[u8],
-    base: StoredAddress,
-    records: &mut Vec<Vec<u8>>,
-) {
-    let view = layout
-        .parse(
-            &bytes[usize::try_from(node.address().get() - base.get()).unwrap()..],
-            node,
-        )
+fn collect(node: BTreeV2Node<'_>, bytes: &[u8], base: StoredAddress, records: &mut Vec<Vec<u8>>) {
+    let view = node
+        .parse(&bytes[usize::try_from(node.address().get() - base.get()).unwrap()..])
         .unwrap();
     for index in 0..=view.record_count() {
         if let Some(child) = view.child(index).unwrap() {
-            collect(layout, child, bytes, base, records);
+            collect(child, bytes, base, records);
         }
         if index < view.record_count() {
             records.push(view.record(index).unwrap().to_vec());

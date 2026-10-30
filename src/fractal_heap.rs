@@ -267,7 +267,7 @@ impl HugeObjectIndex {
             HugeObjectReadLimits::require(limits.index_nodes, visited.len().to_u64())?;
             let range = FileRange::new(
                 addresses.resolve(node.address())?,
-                nodes.encoded_len(node)?.to_u64(),
+                node.encoded_len()?.to_u64(),
             )?;
             metadata_bytes =
                 metadata_bytes
@@ -278,7 +278,7 @@ impl HugeObjectIndex {
                     })?;
             HugeObjectReadLimits::require(limits.metadata_bytes, metadata_bytes)?;
             let bytes = read(range)?;
-            let view = nodes.parse(&bytes, node)?;
+            let view = node.parse(&bytes)?;
             let count = entries
                 .len()
                 .to_u64()

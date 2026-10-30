@@ -541,7 +541,7 @@ impl<S: Source + ?Sized> HugeStorageWalk<'_, '_, S> {
             let allocation =
                 extent_in_source(*source, node.address().get(), u64::from(header.node_size))?;
             let bytes = source.read_metadata(allocation.start(), allocation.len().to_usize()?)?;
-            let view = nodes.parse(&bytes, node)?;
+            let view = node.parse(&bytes)?;
             allocations.push((allocation, FractalHeapAllocation::HugeObjectIndex));
             *count = count
                 .checked_add(view.record_count().to_u64())

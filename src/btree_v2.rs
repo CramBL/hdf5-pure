@@ -62,10 +62,10 @@ pub(crate) fn search_btree_v2(
         }
         let range = FileRange::new(
             addresses.resolve(node.address())?,
-            layout.encoded_len(node)?.to_u64(),
+            node.encoded_len()?.to_u64(),
         )?;
         let bytes = reader.read_range(range)?;
-        let view = layout.parse(&bytes, node)?;
+        let view = node.parse(&bytes)?;
         let mut left = 0;
         let mut right = view.record_count();
         while left < right {
@@ -754,7 +754,7 @@ mod tests {
         let tree = depth_3_tree();
         let header = BTreeV2Header::parse(&tree.file, 0, OFFSET_SIZE, LENGTH_SIZE).unwrap();
         let layout = BTreeV2Layout::new(&header, OffsetWidth::Eight).unwrap();
-        let expected = tree.nodes[14] + layout.encoded_len(layout.root().unwrap()).unwrap() as u64;
+        let expected = tree.nodes[14] + layout.root().unwrap().encoded_len().unwrap() as u64;
         let bytes = &tree.file[..usize::try_from(expected - 1).unwrap()];
         let addresses = AddressContext::from_effective_base(BaseAddress::ZERO);
         assert_eq!(
