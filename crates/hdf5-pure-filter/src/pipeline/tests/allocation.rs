@@ -345,6 +345,110 @@ fn pipeline_reuse_bounds_size_changes_masks_and_errors(#[case] case: PipelineCas
     .report("varied", encoded_metrics, escaping, &encoder);
 }
 
+#[rstest]
+#[case::shuffle_deflate(PipelineCase::ShuffleDeflate)]
+#[case::checksum(PipelineCase::ShuffleDeflateFletcher32)]
+fn complete_windows_retain_capacity_through_size_rejection_and_recovery(
+    #[case] case: PipelineCase,
+) {
+    let raw = filtered_chunks::pipeline_data(16_384);
+    let filters = pipeline(case, 0);
+    let stored = run(
+        &mut FilterScratch::new(),
+        &raw,
+        &[],
+        &filters,
+        Direction::Encode,
+        0,
+    );
+    let next_raw: Vec<_> = raw.iter().map(|&byte| byte ^ 0xff).collect();
+    let next_stored = run(
+        &mut FilterScratch::new(),
+        &next_raw,
+        &[],
+        &filters,
+        Direction::Encode,
+        0,
+    );
+    let mut scratch = FilterScratch::new();
+    let retained = run(&mut scratch, &raw, &stored, &filters, Direction::Decode, 0);
+    assert_eq!(retained, raw);
+    assert_eq!(scratch.spare.capacity(), raw.len() + 1);
+    let wrong_dims = [16_385];
+    let wrong = ChunkContext {
+        chunk_dims: &wrong_dims,
+        element_size: NonZeroU32::new(4).unwrap(),
+        element_type: None,
+        scale_offset_type: None,
+    };
+    let expected = 65_540;
+    let deflate_input = if case == PipelineCase::ShuffleDeflateFletcher32 {
+        fletcher32_verify(&stored).unwrap()
+    } else {
+        &stored
+    };
+    assert!(matches!(
+        DeflateMode::parse(Some(expected), deflate_input.len()),
+        DeflateMode::Complete(_)
+    ));
+    let next_deflate_input = if case == PipelineCase::ShuffleDeflateFletcher32 {
+        fletcher32_verify(&next_stored).unwrap()
+    } else {
+        &next_stored
+    };
+    assert!(matches!(
+        DeflateMode::parse(Some(raw.len()), next_deflate_input.len()),
+        DeflateMode::Complete(_)
+    ));
+    let (error, rejected) = allocation::measure(&format!("complete_wrong_{}", case.name()), || {
+        decompress_chunk_with(&mut scratch, &stored, &filters, wrong, 0)
+    });
+    assert_eq!(
+        error.unwrap_err(),
+        Error::DataSizeMismatch {
+            expected,
+            actual: raw.len(),
+        }
+    );
+    let rejected_capacity = scratch.spare.capacity();
+    let rejected_pointer = scratch.spare.as_ptr();
+    let (recovered, recovery) =
+        allocation::measure(&format!("complete_recover_{}", case.name()), || {
+            run(
+                &mut scratch,
+                &next_raw,
+                &next_stored,
+                &filters,
+                Direction::Decode,
+                0,
+            )
+        });
+    assert_eq!(recovered, next_raw);
+    assert_eq!(retained, raw);
+    eprintln!(
+        "COMPLETE_CAPACITY case={} rejected_allocations={} rejected_bytes={} rejected_spare={} recovery_allocations={} recovery_bytes={} recovery_spare={}",
+        case.name(),
+        rejected.blocks,
+        rejected.bytes,
+        rejected_capacity,
+        recovery.blocks,
+        recovery.bytes,
+        scratch.spare.capacity()
+    );
+    assert!((1..=2).contains(&rejected.blocks), "{rejected}");
+    assert!(
+        rejected.bytes <= u64::try_from(expected + 1 + raw.len()).unwrap(),
+        "{rejected}"
+    );
+    assert_eq!(rejected_capacity, expected + 1);
+    assert_eq!(recovery.blocks, 1, "{recovery}");
+    assert_eq!(recovery.bytes, u64::try_from(recovered.capacity()).unwrap());
+    assert_eq!(recovery.live_bytes, recovery.bytes);
+    assert_eq!(scratch.spare.capacity(), rejected_capacity);
+    assert_eq!(scratch.spare.as_ptr(), rejected_pointer);
+    assert!(scratch.spare.capacity() <= capacity_bound(raw.len()));
+}
+
 struct Fixture {
     raw: Vec<u8>,
     stored: Vec<u8>,
