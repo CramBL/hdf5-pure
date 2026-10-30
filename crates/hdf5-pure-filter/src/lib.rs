@@ -18,6 +18,12 @@ mod error;
 mod lzf;
 mod pipeline;
 mod scaleoffset;
+#[cfg(all(
+    test,
+    feature = "deflate",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod test_util;
 mod zfp;
 
 /// Returns an initial allocation size bounded by the output cap and the input
