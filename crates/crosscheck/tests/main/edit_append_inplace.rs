@@ -14,10 +14,11 @@ use hdf5::Extent;
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::types::FixedAscii;
 use hdf5_pure::DeflateLevel;
-use hdf5_pure::{AttrValue, Error, File};
+use hdf5_pure::{AttrValue, File};
 use rstest::rstest;
 
 use test_util_hdf5::absence;
+use test_util_hdf5::assertion;
 use test_util_hdf5::dataset::{self, Filter, Unlimited};
 use test_util_hdf5::file;
 use test_util_hdf5::session;
@@ -342,10 +343,9 @@ fn set_dataset_attr_multi_hard_link_refused() {
             .set_attr("x", AttrValue::I64(1))
             .unwrap();
         let err = s.commit().unwrap_err();
-        assert!(
-            matches!(err, Error::EditUnsupported(_))
-                && err.to_string().contains("single hard link"),
-            "expected single-hard-link refusal, got: {err}"
+        assertion::edit_unsupported(
+            err,
+            "editing a dataset attribute relocates its header; only supported when it has a single hard link",
         );
     }
     assert_eq!(

@@ -14,7 +14,7 @@
 
 use hdf5::dataset::AllocTime;
 use hdf5_pure::DeflateLevel;
-use hdf5_pure::{ChunkIndex, File, FileBuilder, MaxExtent};
+use hdf5_pure::{ChunkIndex, Error, File, FileBuilder, FormatError, MaxExtent};
 
 use test_util::extensible_array;
 use test_util_hdf5::{assertion, dataset, file};
@@ -421,7 +421,15 @@ fn two_unlimited_dimensions_are_refused() {
         .with_maxshape(&[MaxExtent::Unlimited, MaxExtent::Unlimited])
         .with_chunks(&[2, 2]);
     let err = b.write(&path).unwrap_err();
-    assert!(format!("{err}").contains("at most one dimension"), "{err}");
+    let Error::Format(error) = err else {
+        panic!("expected InvalidChunkGeometry, got {err:?}");
+    };
+    assert_eq!(
+        error,
+        FormatError::InvalidChunkGeometry(
+            "at most one dimension of a maxshape may be unlimited; the chunk index for more than one is a version-2 B-tree, which this crate cannot write"
+        )
+    );
 }
 
 /// The refusal covers the in-place session path too, not only the whole-file
@@ -450,7 +458,15 @@ fn two_unlimited_dimensions_are_refused_in_a_session_too() {
                     .with_chunks(&[2, 2]);
             })
             .unwrap_err();
-        assert!(format!("{err}").contains("at most one dimension"), "{err}");
+        let Error::Format(error) = err else {
+            panic!("expected InvalidChunkGeometry, got {err:?}");
+        };
+        assert_eq!(
+            error,
+            FormatError::InvalidChunkGeometry(
+                "at most one dimension of a maxshape may be unlimited; the chunk index for more than one is a version-2 B-tree, which this crate cannot write"
+            )
+        );
         assert!(
             !session.has_staged_edits(),
             "a refused addition must not be left staged"
@@ -485,9 +501,12 @@ fn a_maximum_shape_needing_a_mostly_empty_index_is_refused() {
         .with_maxshape(&[MaxExtent::Fixed(2_000_000), MaxExtent::Fixed(2_000_000)])
         .with_chunks(&[2, 2]);
     let err = b.write(&path).unwrap_err();
-    let text = format!("{err}");
-    assert!(text.contains("chunk index"), "{text}");
-    assert!(text.contains("unused"), "{text}");
+    let Error::Format(error) = err else {
+        panic!("expected ChunkedReadError, got {err:?}");
+    };
+    assert_eq!(error, FormatError::ChunkedReadError(
+        "this shape and maximum shape need a chunk index holding 1000000000000 elements for 4 chunk(s), so 7999999999968 bytes of it describe no chunk, past the 33554432 this writer will emit. The unused elements come from the maximum shape exceeding the shape in a dimension other than the one the dataset grows along — chunk those dimensions more coarsely, or declare no maximum for them".into()
+    ));
 
     // Room to grow along the dimension the dataset grows in costs no unused
     // elements at all, however far it reaches — that is the shape the refusal

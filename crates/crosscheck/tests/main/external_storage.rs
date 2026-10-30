@@ -74,13 +74,10 @@ fn repack_refuses_external_data_storage() {
     }
 
     let err = hdf5_pure::repack(&src, &dst, &RepackOptions::new()).unwrap_err();
-    match err {
-        hdf5_pure::Error::RepackUnsupported(msg) => assert!(
-            msg.contains('d') && msg.contains("external"),
-            "the refusal must name the dataset and the reason: {msg}"
-        ),
-        other => panic!("expected RepackUnsupported, got {other:?}"),
-    }
+    assertion::repack_unsupported(
+        err,
+        "dataset d: external data storage (H5Pset_external) cannot be repacked -- its element bytes live in files this crate does not read",
+    );
     assert!(!dst.exists(), "dst must not be created when repack refuses");
 }
 
@@ -186,21 +183,16 @@ fn no_write_reaches_an_external_dataset() {
     write_external_fixture(&src, payload.to_str().unwrap());
     let before = std::fs::metadata(&src).unwrap().len();
 
-    let refusal = |what: &str, err: hdf5_pure::Error| match err {
-        hdf5_pure::Error::EditUnsupported(msg) => assert!(
-            msg.contains("external files"),
-            "{what}: the refusal must name external storage: {msg}"
-        ),
-        other => panic!("{what}: expected EditUnsupported, got {other:?}"),
+    let refusal = |error| {
+        assertion::edit_unsupported(
+            error,
+            "this dataset's elements live in external files (H5Pset_external), which this engine does not write; writing them into the HDF5 file would leave it disagreeing with the external files about where the data is. Delete the dataset and create it again in the same commit to replace it",
+        );
     };
 
     let f = File::open_rw(&src).unwrap();
+    refusal(f.dataset("d").unwrap().write(&[100i32; N]).unwrap_err());
     refusal(
-        "write",
-        f.dataset("d").unwrap().write(&[100i32; N]).unwrap_err(),
-    );
-    refusal(
-        "write_staged",
         f.dataset("d")
             .unwrap()
             .write_staged(|b| {
@@ -209,7 +201,6 @@ fn no_write_reaches_an_external_dataset() {
             .unwrap_err(),
     );
     refusal(
-        "append_staged",
         f.dataset("d")
             .unwrap()
             .append_staged(|b| {
@@ -297,11 +288,10 @@ fn copy_refuses_an_external_dataset_by_name() {
     let payload = dir.path().join("copy_payload.bin");
     write_external_fixture(&src, payload.to_str().unwrap());
 
-    let expect = |err: hdf5_pure::Error, what: &str| {
-        let text = err.to_string();
-        assert!(
-            text.contains("external files") && text.contains("H5Pset_external"),
-            "{what}: expected external storage to be named, got {text}"
+    let expect = |err| {
+        assertion::edit_unsupported(
+            err,
+            "a dataset stores its elements in external files (H5Pset_external), which a copy cannot reproduce -- its data lives in files this crate does not read",
         );
     };
 
@@ -309,7 +299,7 @@ fn copy_refuses_an_external_dataset_by_name() {
     f.copy("d", "d_copy").unwrap();
     let err = f.commit().unwrap_err();
     drop(f);
-    expect(err, "in-file copy");
+    expect(err);
     assertion::path_not_found(
         File::open(&src).unwrap().dataset("d_copy").unwrap_err(),
         "d_copy",
@@ -327,7 +317,7 @@ fn copy_refuses_an_external_dataset_by_name() {
     let err = f.copy_from(&source, "d", "d_copy").unwrap_err();
     f.commit().unwrap();
     drop(f);
-    expect(err, "cross-file copy_from");
+    expect(err);
     let after = File::open(&dst).unwrap();
     assertion::path_not_found(after.dataset("d_copy").unwrap_err(), "d_copy");
     assert_eq!(

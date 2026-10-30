@@ -89,8 +89,21 @@ fn rejects_unsuccessful_exit_with_valid_response(#[case] code: i32) {
     .unwrap_err();
     assert!(matches!(error.kind, FailureKind::Exit), "{error}");
     let diagnostic = error.to_string();
-    assert!(diagnostic.contains("reader diagnostic"), "{diagnostic}");
-    assert!(diagnostic.contains("HDF5_SWMR_READER"), "{diagnostic}");
+    assert_eq!(error.output.status.code(), Some(code));
+    assert_eq!(
+        error.output.stdout,
+        [super::START, br#"{"mode":"Swmr","shape":[0],"values":[]}"#].concat()
+    );
+    assert_eq!(error.output.stderr, b"reader diagnostic");
+    assert_eq!(
+        diagnostic,
+        format!(
+            "Exit; status: {}; stdout: {:?}; stderr: {:?}",
+            output(code, b"").status,
+            "HDF5_SWMR_READER\n{\"mode\":\"Swmr\",\"shape\":[0],\"values\":[]}",
+            "reader diagnostic",
+        )
+    );
 }
 
 fn output(code: i32, body: &[u8]) -> Output {

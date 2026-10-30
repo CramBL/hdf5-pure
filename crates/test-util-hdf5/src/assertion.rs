@@ -1,7 +1,9 @@
-//! Assertions for facade error variants and their complete payloads.
+//! Assertions for facade error payloads and native rejection frames.
 
 use std::path::Path;
 
+#[cfg(feature = "hdf5")]
+use hdf5::{MajorErrorCode, MinorErrorCode};
 use hdf5_pure::{Error, FormatError, SuperblockStatusFlag, SuperblockStatusFlags};
 
 /// Asserts [`FormatError::PathNotFound`] with the complete expected path.
@@ -59,6 +61,64 @@ pub fn file_locked(error: Error, path: &Path) {
             "{}: file is already locked by another process. If a previous writer crashed, the OS lock is released automatically (try again); leftover on-disk status flags can be cleared with File::clear_status_flags. Set HDF5_USE_FILE_LOCKING=FALSE or pass FileLocking::Disabled to bypass locking.",
             path.display()
         )
+    );
+}
+
+/// Asserts [`Error::RepackUnsupported`] with the complete expected reason.
+///
+/// # Panics
+///
+/// Panics if `error` is another variant or its reason differs from `reason`.
+#[track_caller]
+pub fn repack_unsupported(error: Error, reason: &str) {
+    let Error::RepackUnsupported(actual) = error else {
+        panic!("expected RepackUnsupported, got {error:?}");
+    };
+    assert_eq!(actual, reason);
+}
+
+/// Asserts [`Error::SwmrAppendUnsupported`] with the complete expected reason.
+///
+/// # Panics
+///
+/// Panics if `error` is another variant or its reason differs from `reason`.
+#[track_caller]
+pub fn swmr_append_unsupported(error: Error, reason: &str) {
+    let Error::SwmrAppendUnsupported(actual) = error else {
+        panic!("expected SwmrAppendUnsupported, got {error:?}");
+    };
+    assert_eq!(actual, reason);
+}
+
+// H5F_open in H5Fint.c, HDF5 1.10.11, 1.12.3, 1.14.6 and 2.2.0, reports
+// this error when a normal reader encounters superblock write access flags.
+/// Asserts libhdf5's innermost write-mark rejection frame.
+///
+/// # Panics
+///
+/// Panics if `error` has no native error frame or its innermost frame differs from the
+/// expected error categories, function, or diagnostic.
+#[cfg(feature = "hdf5")]
+#[track_caller]
+pub fn native_file_marked_in_use(error: &hdf5::Error) {
+    let Some(stack) = error.stack() else {
+        panic!("expected a native HDF5 error stack, got {error:?}");
+    };
+    let frame = stack.last().expect("native rejection has no error frames");
+    assert_eq!(
+        (
+            frame.major_code(),
+            frame.minor_code(),
+            frame.func(),
+            frame.desc()
+        ),
+        (
+            MajorErrorCode::File,
+            MinorErrorCode::CantOpenFile,
+            "H5F_open",
+            "file is already open for write (may use <h5clear file> to clear file consistency flags)"
+        ),
+        "{error:?}"
     );
 }
 

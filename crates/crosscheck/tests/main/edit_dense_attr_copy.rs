@@ -15,6 +15,7 @@ use hdf5_pure::{AttrValue, File, FileBuilder};
 use std::collections::HashMap;
 
 use test_util::fractal_heap;
+use test_util_hdf5::assertion;
 use test_util_hdf5::file;
 
 /// Number of attributes that forces the whole-file writer into dense storage
@@ -370,9 +371,8 @@ fn cross_file_copy_refuses_variable_length_dense_attrs() {
     let err = session
         .copy_from(&source, "vds", "vds")
         .expect_err("variable-length dense attrs must be refused cross-file");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("variable-length") && msg.contains("dense"),
-        "unexpected refusal message: {msg}",
+    assertion::edit_unsupported(
+        err,
+        "variable-length or reference dense (fractal-heap) attributes cannot be copied to another file yet",
     );
 }

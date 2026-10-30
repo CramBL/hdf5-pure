@@ -75,11 +75,11 @@ fn assert_observation(path: &Path, mode: Mode, end: i32) {
 }
 
 #[rstest::rstest]
-#[case::missing_path(&[], "missing fixture path")]
-#[case::missing_mode(&["unused"], "missing reader mode")]
-#[case::unknown_mode(&["unused", r#""Other""#], "unknown variant")]
-#[case::extra_argument(&["unused", r#""Swmr""#, "extra"], "unexpected fixture argument")]
-fn fixture_rejects_malformed_arguments(#[case] args: &[&str], #[case] expected: &str) {
+#[case::missing_path(&[], b"Error: \"missing fixture path\"\n")]
+#[case::missing_mode(&["unused"], b"Error: \"missing reader mode\"\n")]
+#[case::unknown_mode(&["unused", r#""Other""#], b"Error: Error(\"unknown variant `Other`, expected `Normal` or `Swmr`\", line: 1, column: 7)\n")]
+#[case::extra_argument(&["unused", r#""Swmr""#, "extra"], b"Error: \"unexpected fixture argument\"\n")]
+fn fixture_rejects_malformed_arguments(#[case] args: &[&str], #[case] expected: &[u8]) {
     let mut command = process::command(env!("CARGO_BIN_EXE_swmr-reader")).unwrap();
     command.args(args);
     let output = Fixture::spawn(command, Duration::from_secs(20))
@@ -88,8 +88,5 @@ fn fixture_rejects_malformed_arguments(#[case] args: &[&str], #[case] expected: 
         .unwrap_or_else(|error| panic!("native reader failed: {error}"));
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert!(output.stdout.is_empty(), "{output:?}");
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains(expected),
-        "{output:?}"
-    );
+    assert_eq!(output.stderr, expected, "{output:?}");
 }

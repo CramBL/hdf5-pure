@@ -15,6 +15,7 @@ use hdf5_pure::FileSpacePageSize;
 use hdf5_pure::FileSpaceSettings;
 use hdf5_pure::{File, FileBuilder, FileSpaceStrategy};
 
+use test_util_hdf5::assertion;
 use test_util_hdf5::{dataset::Unlimited, session};
 
 /// An appendable file, paged or not. A page buffer requires neither (issue
@@ -58,10 +59,7 @@ fn the_c_library_refuses_a_file_a_crashed_page_buffered_session_left_marked() {
     // crate refuses it and recovers from it, are `superblock_status_flags`'
     // to assert — repeating them here costs a libhdf5 link to learn nothing.
     let c_err = hdf5::File::open(&path).expect_err("the C library refuses a marked file");
-    assert!(
-        c_err.to_string().contains("already open for write"),
-        "the C library refused it for some other reason: {c_err}"
-    );
+    assertion::native_file_marked_in_use(&c_err);
 
     File::clear_status_flags(&path).unwrap();
     hdf5::File::open(&path)

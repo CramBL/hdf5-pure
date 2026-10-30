@@ -15,6 +15,7 @@ use hdf5_pure::{
 };
 
 use test_util::fractal_heap;
+use test_util_hdf5::assertion;
 use test_util_hdf5::file;
 
 /// Past the writer's eight-attribute compact threshold.
@@ -623,12 +624,17 @@ fn an_attribute_name_past_its_length_field_is_refused_without_writing() {
         .set_attr(&name, AttrValue::I64(1))
         .unwrap();
     let err = s.commit().unwrap_err();
-    assert!(
-        matches!(
-            err,
-            Error::Format(FormatError::AttributeFieldTooLong { field: "name", .. })
-        ),
-        "expected the name-length refusal, got {err:?}",
+    let Error::Format(error) = err else {
+        panic!("expected AttributeFieldTooLong, got {err:?}");
+    };
+    assert_eq!(
+        error,
+        FormatError::AttributeFieldTooLong {
+            name: name.clone(),
+            field: "name",
+            size: name.len() + 1,
+            limit: usize::from(u16::MAX),
+        }
     );
     drop(s);
     assert_eq!(std::fs::read(&p).unwrap(), before);
@@ -695,9 +701,9 @@ fn an_attribute_holding_an_object_reference_is_not_moved_to_a_heap() {
         d.set_attr(&format!("a{i}"), AttrValue::I64(i)).unwrap();
     }
     let err = s.commit().unwrap_err();
-    assert!(
-        err.to_string().contains("object reference"),
-        "expected the reference refusal, got: {err}",
+    assertion::edit_unsupported(
+        err,
+        "an attribute holding an object reference cannot be moved to dense (fractal-heap) storage, where a later commit could no longer repoint it when its target moves; keep this object within compact attribute storage",
     );
     // The dataset handle keeps the session — and its exclusive lock on the file —
     // alive, so it has to go before the read below: mandatory on Windows,
