@@ -6,9 +6,11 @@
 //! unfiltered, chunk-aligned SWMR subset), and the staged edit surface refused.
 
 use hdf5_pure::DeflateLevel;
+use hdf5_pure::SuperblockStatusFlags;
 use hdf5_pure::{AttrValue, Error, File};
 
 use test_util::superblock;
+use test_util_hdf5::assertion::StatusOpen;
 use test_util_hdf5::dataset::{Filter, Unlimited};
 
 const SWMR_WRITE_FLAGS: u32 = 0x05;
@@ -166,10 +168,10 @@ fn swmr_holds_no_os_lock() {
 
     let writer = File::open_swmr_writer(&path).unwrap();
     let err = File::open_rw(&path).expect_err("a live SWMR writer holds the file");
-    assert!(
-        matches!(err, Error::FileMarkedInUse(_)),
-        "a SWMR writer must not hold an exclusive OS lock, so the refusal must come \
-         from the superblock flag rather than the lock; got {err:?}"
+    test_util_hdf5::assertion::file_marked_in_use(
+        err,
+        SuperblockStatusFlags::swmr_write_marked(),
+        StatusOpen::Write(&path),
     );
     drop(writer);
 }

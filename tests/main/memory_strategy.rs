@@ -106,9 +106,9 @@ fn open_rw_falls_back_to_the_mirror_and_says_so() {
     let err = ds
         .append(&[4i32])
         .expect_err("in-place append needs no userblock");
-    assert!(
-        matches!(&err, hdf5_pure::Error::AppendInPlaceUnsupported(m) if m.contains("append_staged")),
-        "the refusal should name append_staged as the fallback, got: {err:?}"
+    test_util_hdf5::assertion::append_in_place_unsupported(
+        err,
+        "in-place append does not support a file with a userblock (non-zero base address); use Dataset::append_staged",
     );
     ds.append_staged(|b| {
         b.append_i32(&[4, 5]);
@@ -135,10 +135,9 @@ fn bounded_refuses_the_file_open_rw_would_mirror() {
 
     let err = File::open_rw_with_options(&path, with_strategy(MemoryStrategy::Bounded))
         .expect_err("Bounded must not silently spend O(file size) memory");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("userblock"),
-        "the refusal should name the userblock, got: {msg}"
+    test_util_hdf5::assertion::edit_unsupported(
+        err,
+        "bounded read-write access does not support a file with a userblock (non-zero base address); leave MemoryStrategy unset, or pass MemoryStrategy::Auto, to fall back to the whole-file mirror here",
     );
 }
 
@@ -168,9 +167,9 @@ fn an_explicit_strategy_overrides_either_entry_point() {
     // open_rw defaults to falling back; asking for Bounded refuses instead.
     let err = File::open_rw_with_options(&path, with_strategy(MemoryStrategy::Bounded))
         .expect_err("an explicit Bounded must override open_rw's fallback");
-    assert!(
-        err.to_string().contains("userblock"),
-        "the refusal should name what the bounded engine cannot edit, got: {err}"
+    test_util_hdf5::assertion::edit_unsupported(
+        err,
+        "bounded read-write access does not support a file with a userblock (non-zero base address); leave MemoryStrategy unset, or pass MemoryStrategy::Auto, to fall back to the whole-file mirror here",
     );
 
     // ...and an explicit Auto falls back where Bounded refuses.
@@ -185,9 +184,9 @@ fn nonpersistent_page_uses_the_mirror_unless_bounded_is_required() {
     paged_nonpersist_file(&path);
     let error =
         File::open_rw_with_options(&path, with_strategy(MemoryStrategy::Bounded)).unwrap_err();
-    assert!(
-        matches!(error, Error::EditUnsupported(reason) if reason.contains("MemoryStrategy::Mirrored")),
-        "{error:?}"
+    test_util_hdf5::assertion::edit_unsupported(
+        error,
+        "bounded editing of PAGE files without persisted free space is unsupported; use MemoryStrategy::Auto or MemoryStrategy::Mirrored for staged edits",
     );
     let file = File::open_rw(&path).unwrap();
     assert_eq!(file.edit_backing(), Some(EditBacking::Mirrored));
@@ -281,31 +280,29 @@ fn an_outcome_converts_back_into_the_request_that_pins_it() {
 /// they must keep opening; only `Bounded` is a guarantee it cannot meet, and
 /// meeting a guarantee by ignoring it is how a caller silently spends the memory
 /// it asked not to.
-#[test]
-fn the_swmr_writer_refuses_a_bounded_guarantee_it_cannot_meet() {
+#[rstest::rstest]
+#[case::default(None)]
+#[case::auto(Some(MemoryStrategy::Auto))]
+#[case::mirrored(Some(MemoryStrategy::Mirrored))]
+fn the_swmr_writer_refuses_a_bounded_guarantee_it_cannot_meet(
+    #[case] satisfied: Option<MemoryStrategy>,
+) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("swmr.h5");
     plain_file(&path);
 
     let err = File::open_swmr_writer_with_options(&path, with_strategy(MemoryStrategy::Bounded))
         .expect_err("the SWMR writer cannot honor a bounded guarantee");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("whole-file mirror") && msg.contains("MemoryStrategy::Auto"),
-        "the refusal must name the backing it uses and a strategy that works, got: {msg}"
+    test_util_hdf5::assertion::edit_unsupported(
+        err,
+        "the SWMR writer always holds the file in a whole-file mirror; leave MemoryStrategy unset, or pass MemoryStrategy::Auto or MemoryStrategy::Mirrored, to open it",
     );
 
-    for satisfied in [
-        None,
-        Some(MemoryStrategy::Auto),
-        Some(MemoryStrategy::Mirrored),
-    ] {
-        let props = satisfied.map_or_else(FileAccessProperties::new, with_strategy);
-        let file = File::open_swmr_writer_with_options(&path, props)
-            .unwrap_or_else(|e| panic!("{satisfied:?} is satisfied by the mirror, got: {e}"));
-        assert_eq!(file.edit_backing(), Some(EditBacking::Mirrored));
-        file.close().unwrap();
-    }
+    let props = satisfied.map_or_else(FileAccessProperties::new, with_strategy);
+    let file = File::open_swmr_writer_with_options(&path, props)
+        .unwrap_or_else(|e| panic!("{satisfied:?} is satisfied by the mirror, got: {e}"));
+    assert_eq!(file.edit_backing(), Some(EditBacking::Mirrored));
+    file.close().unwrap();
 }
 
 /// `create_with_options` promises a file *and* an open handle. A pair that the
@@ -346,9 +343,9 @@ fn create_refuses_a_pair_it_could_not_reopen_before_writing_anything() {
         FileAccessProperties::new().with_memory_strategy(MemoryStrategy::Bounded),
     )
     .expect_err("a userblock and a bounded guarantee cannot both hold");
-    assert!(
-        err.to_string().contains("userblock") && err.to_string().contains("Bounded"),
-        "the refusal must name both halves of the contradiction: {err}"
+    test_util_hdf5::assertion::edit_unsupported(
+        err,
+        "a userblock cannot be combined with MemoryStrategy::Bounded: the bounded engine cannot edit a file with a non-zero base address, so creating one this way would write the file and then refuse to open it; drop the userblock, or leave MemoryStrategy unset to mirror this file",
     );
     assert!(!ub.exists(), "nothing may be written for a refused pair");
 
@@ -562,111 +559,67 @@ fn create_with_options_of_a_persisting_fsm_file_opens_bounded() {
 
     let reopened = File::open(&path).unwrap();
     assert_eq!(
-        reopened
-            .dataset("samples")
-            .unwrap()
-            .read_u64()
-            .unwrap()
-            .len(),
-        256 + 64 * 256
+        reopened.dataset("samples").unwrap().read_u64().unwrap(),
+        core::iter::repeat_n(0u64, 256)
+            .chain(batch.iter().copied().cycle().take(64 * 256))
+            .collect::<Vec<_>>()
     );
 }
 
-/// The invariant behind `Auto`, stated over the property space rather than over
-/// one file: `Auto` mirrors only where `Bounded` refuses.
+/// Creation and reopening agree on the backing selected by `Auto`.
 ///
-/// One direction alone would not pin it. "Bounded succeeds implies Auto is
-/// bounded" is satisfied by an engine that never mirrors anything, and "Auto
-/// mirrored implies Bounded refuses" by one that always mirrors; together they
-/// say the fallback set is exactly the bounded-ineligible set, which is what
-/// makes the fallback list in `MemoryStrategy::Auto`'s documentation exhaustive
-/// rather than illustrative.
-#[test]
-fn auto_matches_bounded_on_every_pair_bounded_accepts() {
-    let fcpls = [
-        ("default", FileCreateProperties::new()),
-        (
-            "fsm_aggr-persisting",
-            FileCreateProperties::new().with_file_space_settings(
+/// Each case specifies whether the bounded engine accepts its creation properties.
+#[rstest::rstest]
+#[case::default(FileCreateProperties::new(), BoundedOutcome::Eligible)]
+#[case::fsm_aggr_persisting(FileCreateProperties::new().with_file_space_settings(
                 FileSpaceSettings::new(FileSpaceStrategy::FsmAggr)
                     .with_persistence(true)
                     .with_threshold(0),
-            ),
-        ),
-        (
-            "fsm_aggr-transient",
-            FileCreateProperties::new().with_file_space_settings(
+            ), BoundedOutcome::Eligible)]
+#[case::fsm_aggr_transient(FileCreateProperties::new().with_file_space_settings(
                 FileSpaceSettings::new(FileSpaceStrategy::FsmAggr).with_threshold(0),
-            ),
-        ),
-        (
-            "aggr-persisting",
-            FileCreateProperties::new().with_file_space_settings(
+            ), BoundedOutcome::Eligible)]
+#[case::aggr_persisting(FileCreateProperties::new().with_file_space_settings(
                 FileSpaceSettings::new(FileSpaceStrategy::Aggr)
                     .with_persistence(true)
                     .with_threshold(0),
-            ),
-        ),
-        (
-            "aggr-transient",
-            FileCreateProperties::new().with_file_space_settings(
+            ), BoundedOutcome::Eligible)]
+#[case::aggr_transient(FileCreateProperties::new().with_file_space_settings(
                 FileSpaceSettings::new(FileSpaceStrategy::Aggr).with_threshold(0),
-            ),
-        ),
-        (
-            "none-persisting",
-            FileCreateProperties::new().with_file_space_settings(
+            ), BoundedOutcome::Eligible)]
+#[case::none_persisting(FileCreateProperties::new().with_file_space_settings(
                 FileSpaceSettings::new(FileSpaceStrategy::None)
                     .with_persistence(true)
                     .with_threshold(0),
-            ),
-        ),
-        (
-            "none-transient",
-            FileCreateProperties::new().with_file_space_settings(
+            ), BoundedOutcome::Eligible)]
+#[case::none_transient(FileCreateProperties::new().with_file_space_settings(
                 FileSpaceSettings::new(FileSpaceStrategy::None).with_threshold(0),
-            ),
-        ),
-        (
-            "page-persisting",
-            FileCreateProperties::new().with_file_space_settings(
+            ), BoundedOutcome::Eligible)]
+#[case::page_persisting(FileCreateProperties::new().with_file_space_settings(
                 FileSpaceSettings::new(FileSpaceStrategy::Page)
                     .with_persistence(true)
                     .with_threshold(0)
                     .with_page_size(FileSpacePageSize::DEFAULT),
-            ),
-        ),
-        (
-            "page-transient",
-            FileCreateProperties::new().with_file_space_settings(
+            ), BoundedOutcome::Eligible)]
+#[case::page_transient(FileCreateProperties::new().with_file_space_settings(
                 FileSpaceSettings::new(FileSpaceStrategy::Page)
                     .with_threshold(0)
                     .with_page_size(FileSpacePageSize::DEFAULT),
-            ),
-        ),
-        (
-            "userblock",
-            FileCreateProperties::new().with_userblock(UserblockSize::MIN),
-        ),
-        (
-            "page-persisting-userblock",
-            FileCreateProperties::new()
+            ), BoundedOutcome::NonpersistentPage)]
+#[case::userblock(FileCreateProperties::new().with_userblock(UserblockSize::MIN), BoundedOutcome::Userblock)]
+#[case::page_persisting_userblock(FileCreateProperties::new()
                 .with_userblock(UserblockSize::try_from(4096).unwrap())
                 .with_file_space_settings(
                     FileSpaceSettings::new(FileSpaceStrategy::Page)
                         .with_persistence(true)
                         .with_threshold(0)
                         .with_page_size(FileSpacePageSize::DEFAULT),
-                ),
-        ),
-        (
-            "libver-1.8",
-            FileCreateProperties::new().with_libver_bounds(LibVer::Earliest, LibVer::V18),
-        ),
-    ];
-
-    // One barrier per close rather than one per operation: this matrix creates
-    // and reopens two files per row, and measures none of it.
+                ), BoundedOutcome::Userblock)]
+#[case::libver_1_8(FileCreateProperties::new().with_libver_bounds(LibVer::Earliest, LibVer::V18), BoundedOutcome::Eligible)]
+fn auto_matches_bounded_on_every_pair_bounded_accepts(
+    #[case] create: FileCreateProperties,
+    #[case] outcome: BoundedOutcome,
+) {
     let access = |strategy| {
         FileAccessProperties::new()
             .with_sync_policy(SyncPolicy::OnClose)
@@ -677,97 +630,86 @@ fn auto_matches_bounded_on_every_pair_bounded_accepts() {
         file.close().unwrap();
         backing
     };
-
-    // A biconditional both of whose branches are unreachable holds vacuously, so
-    // the rows that took each one are counted and the counts are asserted below.
-    let (mut checked, mut mirrored) = (0, 0);
-
     let dir = tempfile::tempdir().unwrap();
-    for (label, create) in fcpls {
-        let path = dir.path().join(format!("{label}.h5"));
-        let bounded_path = dir.path().join(format!("{label}-bounded.h5"));
-
-        // A pair no strategy can create says nothing about the fallback, and is
-        // pinned by `create_refuses_a_pair_it_could_not_reopen_before_writing_anything`.
-        let Ok(auto) =
-            File::create_with_options(&path, create, access(MemoryStrategy::Auto)).map(backing_of)
-        else {
-            continue;
-        };
-        let bounded =
-            File::create_with_options(&bounded_path, create, access(MemoryStrategy::Bounded))
-                .map(backing_of);
-        assert_matches_bounded(label, "create_with_options", auto, &bounded);
-
-        // Create and open share one dispatch, and this is what says so: the same
-        // file, reopened, resolves the same way.
-        let auto_reopened = File::open_rw_with_options(&path, access(MemoryStrategy::Auto))
-            .map(backing_of)
-            .unwrap_or_else(|e| panic!("{label}: Auto created this file and must reopen it: {e}"));
-        assert_eq!(
-            auto_reopened, auto,
-            "{label}: reopening must resolve to the backing the create resolved to"
-        );
-        let bounded_reopened =
-            File::open_rw_with_options(&path, access(MemoryStrategy::Bounded)).map(backing_of);
-        assert_matches_bounded(
-            label,
-            "open_rw_with_options",
-            auto_reopened,
-            &bounded_reopened,
-        );
-
-        checked += 1;
-        mirrored += usize::from(auto == Some(EditBacking::Mirrored));
-    }
-
+    let path = dir.path().join("auto.h5");
+    let bounded_path = dir.path().join("bounded.h5");
+    let expected = match outcome {
+        BoundedOutcome::Eligible => EditBacking::Bounded,
+        BoundedOutcome::NonpersistentPage | BoundedOutcome::Userblock => EditBacking::Mirrored,
+    };
+    let auto = File::create_with_options(&path, create, access(MemoryStrategy::Auto))
+        .map(backing_of)
+        .unwrap();
+    assert_eq!(auto, Some(expected));
+    let bounded = File::create_with_options(&bounded_path, create, access(MemoryStrategy::Bounded))
+        .map(backing_of);
+    outcome.assert_created(bounded);
     assert_eq!(
-        mirrored, 3,
-        "the userblock is the only creatable property here the bounded engine \
-         rejects; another row reaching the mirror is a fallback set that grew"
+        bounded_path.exists(),
+        matches!(outcome, BoundedOutcome::Eligible)
     );
-    assert!(
-        checked >= 10,
-        "only {checked} of the property rows were creatable at all, so this \
-         matrix is no longer covering the space it names"
-    );
+    let reopened = File::open_rw_with_options(&path, access(MemoryStrategy::Auto))
+        .map(backing_of)
+        .unwrap();
+    assert_eq!(reopened, Some(expected));
+    let bounded =
+        File::open_rw_with_options(&path, access(MemoryStrategy::Bounded)).map(backing_of);
+    outcome.assert_opened(bounded);
 }
 
-/// The biconditional shared by both halves of the matrix above: `Auto` is
-/// bounded wherever `Bounded` is accepted, and mirrors only where it is refused.
-#[track_caller]
-fn assert_matches_bounded(
-    label: &str,
-    entry_point: &str,
-    auto: Option<EditBacking>,
-    bounded: &Result<Option<EditBacking>, hdf5_pure::Error>,
-) {
-    match bounded {
-        Ok(backing) => {
-            assert_eq!(
-                *backing,
-                Some(EditBacking::Bounded),
-                "{label}: an explicit Bounded that opens must report the bounded backing"
-            );
-            assert_eq!(
-                auto,
-                Some(EditBacking::Bounded),
-                "{label}: {entry_point} under Auto mirrored a file Bounded edits, which \
-                 is the O(file size) memory tax of issue #389"
-            );
-        }
-        Err(e) => {
-            assert_eq!(
-                auto,
-                Some(EditBacking::Mirrored),
-                "{label}: {entry_point} under Bounded refused ({e}), so Auto's only way \
-                 to open this file is the mirror"
-            );
-            assert!(
-                matches!(e, hdf5_pure::Error::EditUnsupported(_)),
-                "{label}: a bounded-only limitation must be reported as EditUnsupported, \
-                 got: {e:?}"
-            );
-        }
+/// The expected bounded-engine result for a creation-property case.
+#[derive(Clone, Copy)]
+enum BoundedOutcome {
+    /// The bounded engine can create and reopen the file.
+    Eligible,
+    /// PAGE allocation without persisted free-space managers.
+    NonpersistentPage,
+    /// A nonzero userblock before the HDF5 superblock.
+    Userblock,
+}
+
+impl BoundedOutcome {
+    /// Asserts a bounded backing or the complete creation rejection for this case.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an eligible case does not return a bounded backing, or if an ineligible case
+    /// does not return [`Error::EditUnsupported`] with the expected reason.
+    fn assert_created(self, result: Result<Option<EditBacking>, Error>) {
+        let reason = match self {
+            Self::Eligible => {
+                assert_eq!(result.unwrap(), Some(EditBacking::Bounded));
+                return;
+            }
+            Self::NonpersistentPage => {
+                "bounded editing of PAGE files without persisted free space is unsupported; use MemoryStrategy::Auto or MemoryStrategy::Mirrored for staged edits"
+            }
+            Self::Userblock => {
+                "a userblock cannot be combined with MemoryStrategy::Bounded: the bounded engine cannot edit a file with a non-zero base address, so creating one this way would write the file and then refuse to open it; drop the userblock, or leave MemoryStrategy unset to mirror this file"
+            }
+        };
+        test_util_hdf5::assertion::edit_unsupported(result.unwrap_err(), reason);
+    }
+
+    /// Asserts a bounded backing or the complete reopen rejection for this case.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an eligible case does not return a bounded backing, or if an ineligible case
+    /// does not return [`Error::EditUnsupported`] with the expected reason.
+    fn assert_opened(self, result: Result<Option<EditBacking>, Error>) {
+        let reason = match self {
+            Self::Eligible => {
+                assert_eq!(result.unwrap(), Some(EditBacking::Bounded));
+                return;
+            }
+            Self::NonpersistentPage => {
+                "bounded editing of PAGE files without persisted free space is unsupported; use MemoryStrategy::Auto or MemoryStrategy::Mirrored for staged edits"
+            }
+            Self::Userblock => {
+                "bounded read-write access does not support a file with a userblock (non-zero base address); leave MemoryStrategy unset, or pass MemoryStrategy::Auto, to fall back to the whole-file mirror here"
+            }
+        };
+        test_util_hdf5::assertion::edit_unsupported(result.unwrap_err(), reason);
     }
 }
