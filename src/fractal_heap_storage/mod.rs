@@ -2244,6 +2244,7 @@ mod tests {
         assert_eq!(error, expected);
     }
 
+    #[cfg(feature = "deflate")]
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum FilteredDamage {
         BadChecksum,
@@ -2299,6 +2300,7 @@ mod tests {
         len_u64(bytes.len())
     }
 
+    #[cfg(feature = "deflate")]
     fn checksummed_direct_block(heap_offset: u64, size: usize) -> Vec<u8> {
         let mut block = direct_block(heap_offset, size);
         block[fractal_heap::DIRECT_BLOCK_DATA_AT..].fill(0x5A);
