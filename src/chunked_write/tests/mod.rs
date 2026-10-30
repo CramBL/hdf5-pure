@@ -438,9 +438,8 @@ fn an_unallocated_dataset_encodes_no_chunk_bytes() {
     assert!(chunked_data_len(&dense).unwrap() >= 4000);
 }
 
-// Exercise the byte bound through index planning without serializing a file.
 #[test]
-fn the_index_bound_counts_unused_bytes_rather_than_slots() {
+fn a_dense_index_has_no_unused_byte_bound() {
     // A dense index is never bounded, however large: every slot holds a
     // chunk, so none of its bytes describe nothing.
     let many = (MAX_UNUSED_INDEX_BYTES / 8 + 1) as usize;
@@ -454,48 +453,61 @@ fn the_index_bound_counts_unused_bytes_rather_than_slots() {
     )
     .expect("a dense index is not bounded");
     assert!(matches!(kind, ChunkIndexKind::FixedArray));
-    assert_eq!(slots.len(), many);
+    assert!(slots.iter().copied().eq(0..many as u64));
     assert_eq!(span, many as u64);
+}
 
+// Exercise the byte bound through index planning without serializing a file.
+// With offsets of 8 bytes, `H5D__farray_idx_create` in `H5Dfarray.c`, HDF5 2.2.0,
+// stores 15 bytes per filtered element for version 4 chunks of 4096 bytes:
+// 8 address bytes, 3 size bytes, and 4 filter mask bytes.
+#[rstest]
+#[case::unfiltered(false, 8)]
+#[case::filtered(true, 15)]
+fn the_index_bound_counts_unused_bytes_rather_than_slots(
+    #[case] has_filters: bool,
+    #[case] elem: u64,
+) {
     // Filtered entries are wider, so the same unused-byte bound permits fewer slots.
     let chunk_bytes = 4096;
-    for has_filters in [false, true] {
-        let elem = u64::from(
-            hdf5_pure_format::__private::chunk_element_encoding(
-                chunk_bytes,
-                INDEX_OFFSET_SIZE,
-                has_filters,
-            )
-            .elem_size as u32,
-        );
-        let widest = MAX_UNUSED_INDEX_BYTES / elem + 1;
-        plan_index_slots(
-            &[1],
-            &[1],
-            Some(&[MaxExtent::Fixed(widest)]),
-            chunk_bytes,
-            has_filters,
-            StorageAllocation::Allocated,
-        )
-        .expect("an index exactly at the budget is written");
-        let err = plan_index_slots(
-            &[1],
-            &[1],
-            Some(&[MaxExtent::Fixed(widest + 1)]),
-            chunk_bytes,
-            has_filters,
-            StorageAllocation::Allocated,
-        )
-        .unwrap_err();
-        assert!(
-            format!("{err}").contains("describe no chunk"),
-            "filtered={has_filters}: {err}"
-        );
-    }
+    let widest = MAX_UNUSED_INDEX_BYTES / elem + 1;
+    let (kind, slots, span) = plan_index_slots(
+        &[1],
+        &[1],
+        Some(&[MaxExtent::Fixed(widest)]),
+        chunk_bytes,
+        has_filters,
+        StorageAllocation::Allocated,
+    )
+    .unwrap();
+    assert!(matches!(kind, ChunkIndexKind::FixedArray));
+    assert_eq!(slots, [0]);
+    assert_eq!(span, widest);
+    let err = plan_index_slots(
+        &[1],
+        &[1],
+        Some(&[MaxExtent::Fixed(widest + 1)]),
+        chunk_bytes,
+        has_filters,
+        StorageAllocation::Allocated,
+    )
+    .unwrap_err();
+    assert_eq!(
+        err,
+        FormatError::ChunkedReadError(format!(
+            "this shape and maximum shape need a chunk index holding {} elements for 1 chunk(s), so {} bytes of it describe no chunk, past the {} this writer will emit. The unused elements come from the maximum shape exceeding the shape in a dimension other than the one the dataset grows along — chunk those dimensions more coarsely, or declare no maximum for them",
+            widest + 1,
+            widest * elem,
+            MAX_UNUSED_INDEX_BYTES,
+        ))
+    );
+}
 
+#[test]
+fn growth_along_the_indexed_dimension_leaves_no_unused_slots() {
     // Room to grow along the dimension the dataset grows in costs no unused
     // slots however far it reaches, so it stays accepted.
-    plan_index_slots(
+    let (kind, slots, span) = plan_index_slots(
         &[8, 8],
         &[4, 4],
         Some(&[MaxExtent::Unlimited, MaxExtent::Fixed(8)]),
@@ -504,11 +516,14 @@ fn the_index_bound_counts_unused_bytes_rather_than_slots() {
         StorageAllocation::Allocated,
     )
     .expect("growth along the indexed dimension leaves no gaps");
+    assert!(matches!(kind, ChunkIndexKind::ExtensibleArray));
+    assert_eq!(slots, [0, 1, 2, 3]);
+    assert_eq!(span, 4);
 }
 
 // Two sparse chunks exercise the last addressable slot and the first slot beyond capacity.
 #[test]
-fn an_extensible_array_refuses_a_chunk_past_the_slots_it_can_address() {
+fn an_extensible_array_rejects_a_chunk_past_the_slots_it_can_address() {
     let capacity = hdf5_pure_format::__private::extensible_array_capacity();
     assert_eq!(
         capacity, 8_589_934_580,
@@ -526,40 +541,45 @@ fn an_extensible_array_refuses_a_chunk_past_the_slots_it_can_address() {
             StorageAllocation::Allocated,
         )
     };
-    at(capacity - 1).expect("the last addressable slot is written");
+    let (kind, slots, span) = at(capacity - 1).expect("the last addressable slot is written");
+    assert!(matches!(kind, ChunkIndexKind::ExtensibleArray));
+    assert_eq!(slots, [0, capacity - 1]);
+    assert_eq!(span, capacity);
     let err = at(capacity).unwrap_err();
-    assert!(format!("{err}").contains("can address"), "{err}");
+    assert_eq!(
+        err,
+        FormatError::ChunkedReadError(format!(
+            "this shape and maximum shape number a chunk at element {capacity} of the chunk index, past the {capacity} an extensible array can address; the chunk would be dropped. Chunk the dimensions the dataset does not grow along more coarsely, or give them a smaller maximum"
+        ))
+    );
 }
 
-#[test]
-fn auto_chunking_a_zero_element_shape_is_refused() {
+#[rstest]
+#[case::one_dimensional(&[0])]
+#[case::zero_last(&[4, 0])]
+#[case::zero_first(&[0, 4])]
+fn auto_chunking_a_zero_element_shape_is_rejected(#[case] shape: &[u64]) {
     let auto = ChunkOptions {
         chunk_dims: None,
         ..Default::default()
     };
-    for shape in [vec![0u64], vec![4, 0], vec![0, 4]] {
-        let unlimited = vec![MaxExtent::Unlimited; shape.len()];
-        let extent = Extent::new(&shape, Some(&unlimited)).unwrap();
-        let err = auto.validate_geometry(extent).unwrap_err();
-        assert!(
-            err.contains("explicit chunk dimensions"),
-            "shape {shape:?}: {err}"
-        );
-        // The resolved dimensions are what the splitter would divide by, and
-        // this is the value the guard exists to keep away from it.
-        assert!(auto.resolve_chunk_dims(&shape).contains(&0));
-    }
+    let unlimited = vec![MaxExtent::Unlimited; shape.len()];
+    let extent = Extent::new(shape, Some(&unlimited)).unwrap();
+    assert_eq!(
+        auto.validate_geometry(extent).unwrap_err(),
+        "a zero-element dataset must be given explicit chunk dimensions (its shape has none to derive)"
+    );
+    assert_eq!(auto.resolve_chunk_dims(shape), shape);
 
-    // Named chunk dimensions make the same shape legal: it produces zero
-    // chunks, which is what an extensible dataset is created as.
+    // The explicit control uses shape [0] with chunks of 512 elements.
     let explicit = ChunkOptions {
         chunk_dims: Some(vec![512]),
         ..Default::default()
     };
     let unlimited = Extent::new(&[0], Some(&[MaxExtent::Unlimited])).unwrap();
-    assert_eq!(explicit.validate_geometry(unlimited), Ok(()));
+    explicit.validate_geometry(unlimited).unwrap();
     let bounded = Extent::new(&[0], None).unwrap();
-    assert_eq!(explicit.validate_geometry(bounded), Ok(()));
+    explicit.validate_geometry(bounded).unwrap();
 }
 
 /// Sets filters through the builder switches in their canonical order.
@@ -1304,33 +1324,17 @@ fn a_pushed_pipeline_keeps_its_order_and_its_optional_flags() {
     );
 }
 
-#[test]
-fn conflicting_filter_requests_report_both_filter_names() {
-    let so = ScaleOffset::FloatDScale(2);
-    let fill = FillAvailability::Defined;
-    let cases: &[(&str, &str, ChunkOptions)] = &[
-        (
-            "lzf",
-            "deflate",
-            filtered(&[FilterKind::Lzf, FilterKind::Deflate(DeflateLevel::Six)]),
-        ),
-        (
-            "shuffle",
-            "scale-offset",
-            filtered(&[FilterKind::Shuffle, FilterKind::ScaleOffset(so, fill)]),
-        ),
-    ];
-
-    for (a, b, options) in cases {
-        // Use a valid datatype so the error discriminates filter conflicts.
-        let Err(err) = options.build_pipeline(&f64_ctx(&[64]), FillPattern::ZERO) else {
-            panic!("{a} + {b} was accepted");
-        };
-        let FormatError::FilterError(msg) = &err else {
-            panic!("{a} + {b}: expected a filter error, got {err}");
-        };
-        assert!(msg.contains(a) && msg.contains(b), "{a} + {b}: {msg}");
-    }
+#[rstest]
+#[case::lzf_deflate(&[FilterKind::Lzf, FilterKind::Deflate(DeflateLevel::Six)], "lzf and deflate cannot be combined on one dataset")]
+#[case::shuffle_scale_offset(&[FilterKind::Shuffle, FilterKind::ScaleOffset(ScaleOffset::FloatDScale(2), FillAvailability::Defined)], "shuffle and scale-offset cannot be combined on one dataset")]
+fn conflicting_filter_requests_report_both_filter_names(
+    #[case] filters: &[FilterKind],
+    #[case] expected: &str,
+) {
+    let error = filtered(filters)
+        .build_pipeline(&f64_ctx(&[64]), FillPattern::ZERO)
+        .unwrap_err();
+    assert_eq!(error, FormatError::FilterError(expected.into()));
 }
 
 /// Supplies valid floating-point metadata for ZFP and scale-offset conflict cases.

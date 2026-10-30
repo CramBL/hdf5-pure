@@ -642,24 +642,37 @@ fn file_builder_keeps_its_auto_traits() {
     assert_auto_traits::<FileBuilder>();
 }
 
-#[test]
-fn streaming_writer_rejects_provider_size_mismatch() {
-    // Exercise a short first chunk and a short later chunk.
-    for short_slot in [0usize, 2] {
-        let chunks = vec![
-            f64_chunk(&[1.0, 2.0]),
-            f64_chunk(&[3.0, 4.0]),
-            f64_chunk(&[5.0, 6.0]),
-        ];
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let err = build_lazy(chunks, &[6], &[2], None, calls, Some(short_slot))
-            .finish()
-            .unwrap_err();
-        match err {
-            Error::Format(FormatError::ChunkedReadError(_)) => {}
-            other => panic!("slot {short_slot}: expected ChunkedReadError, got {other:?}"),
-        }
-    }
+#[rstest::rstest]
+#[case::first_chunk(0)]
+#[case::later_chunk(2)]
+fn streaming_writer_rejects_provider_size_mismatch(#[case] short_slot: usize) {
+    let chunks = vec![
+        f64_chunk(&[1.0, 2.0]),
+        f64_chunk(&[3.0, 4.0]),
+        f64_chunk(&[5.0, 6.0]),
+    ];
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let error = build_lazy(
+        chunks,
+        &[6],
+        &[2],
+        None,
+        Arc::clone(&calls),
+        Some(short_slot),
+    )
+    .finish()
+    .unwrap_err();
+    let Error::Format(error) = error else {
+        panic!("expected Format, got {error:?}");
+    };
+    assert_eq!(
+        error,
+        FormatError::ChunkedReadError(
+            "verbatim chunk provider returned a chunk whose size differs from the planned size"
+                .into()
+        )
+    );
+    assert_eq!(*calls.lock().unwrap(), (0..=short_slot).collect::<Vec<_>>());
 }
 
 /// Asserts equal buffered and streamed bytes and the expected decoded values.
@@ -759,10 +772,12 @@ fn streaming_io_error_surfaces_as_error_io() {
     let err = builder
         .finish_to(FailAfter { remaining: 4096 })
         .unwrap_err();
-    assert!(
-        matches!(err, Error::Io(_)),
-        "a failing sink must surface as Error::Io, got {err:?}"
-    );
+    let Error::Io(error) = err else {
+        panic!("expected Io, got {err:?}");
+    };
+    assert_eq!(error.kind(), io::ErrorKind::Other);
+    assert_eq!(error.raw_os_error(), None);
+    assert_eq!(error.to_string(), "write limit reached");
 }
 
 #[test]
@@ -976,38 +991,49 @@ fn a_produced_dataset_is_placed_correctly_in_a_paged_file() {
         materialized, produced,
         "a paged file must place a produced region exactly where it places a materialized one"
     );
-    assert_eq!(read_back_f64(&produced, "d").len(), 4096);
+    let values = read_back_f64(&produced, "d");
+    assert_eq!(values.len(), 4096);
+    assert!(
+        values.into_iter().map(f64::to_bits).eq(expected
+            .as_chunks::<{ size_of::<f64>() }>()
+            .0
+            .iter()
+            .map(|bytes| u64::from_le_bytes(*bytes)))
+    );
 }
 
 // Stage the producer directly to exercise the emitter's own block-length check.
-#[test]
-fn a_produced_block_of_the_wrong_size_is_refused_by_the_emitter() {
+#[rstest::rstest]
+#[case::first_block(0)]
+#[case::later_block(2)]
+fn a_produced_block_of_the_wrong_size_is_rejected_by_the_emitter(#[case] short: usize) {
     const TOTAL: usize = 8 * 1000;
     const BLOCK: usize = 8 * 256;
-    for short in [0usize, 2] {
-        let mut b = FileBuilder::new();
-        b.create_dataset("d").with_produced_data(
-            crate::type_builders::make_f64_type(),
-            &[1000],
-            TOTAL as u64,
-            BLOCK as u64,
-            Box::new(BlockProvider {
-                total: TOTAL,
-                block: BLOCK,
-                calls: Calls::default(),
-                short_block: Some(short),
-            }),
-        );
-        match b.finish() {
-            Err(Error::Format(FormatError::SerializationError(msg))) => {
-                assert!(
-                    msg.contains("planned size"),
-                    "expected the block-size refusal, got {msg:?}"
-                );
-            }
-            other => panic!("expected a refusal for a short block {short}, got {other:?}"),
-        }
-    }
+    let calls = Calls::default();
+    let mut b = FileBuilder::new();
+    b.create_dataset("d").with_produced_data(
+        crate::type_builders::make_f64_type(),
+        &[1000],
+        TOTAL as u64,
+        BLOCK as u64,
+        Box::new(BlockProvider {
+            total: TOTAL,
+            block: BLOCK,
+            calls: Arc::clone(&calls),
+            short_block: Some(short),
+        }),
+    );
+    let error = b.finish().unwrap_err();
+    let Error::Format(error) = error else {
+        panic!("expected Format, got {error:?}");
+    };
+    assert_eq!(
+        error,
+        FormatError::SerializationError(
+            "a produced dataset's block does not match its planned size".into()
+        )
+    );
+    assert_eq!(*calls.lock().unwrap(), (0..=short).collect::<Vec<_>>());
 }
 
 #[rstest::rstest]

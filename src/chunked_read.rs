@@ -3933,18 +3933,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn chunk_bytes_over_limit_are_refused() {
-        // The issue #185 shape: 10 elements of a ~2.86 GB fixed-length string
-        // (0xAAAAAAAA bytes) is ~28.6 GB per chunk — impossible for the format.
-        let err = bounded_chunk_len(&[10], convert::nz(0xAAAA_AAAA)).unwrap_err();
-        assert!(matches!(err, FormatError::InvalidChunkGeometry(_)));
-
+    #[rstest]
+    #[case::large_string(&[10], convert::nz(0xAAAA_AAAA))]
+    #[case::overflowing_product(&[u64::MAX, u64::MAX], convert::nz(usize::MAX))]
+    fn chunk_bytes_over_limit_are_rejected(
+        #[case] dims: &[u64],
+        #[case] element_size: NonZeroUsize,
+    ) {
         assert_eq!(
-            bounded_chunk_len(&[u64::MAX, u64::MAX], convert::nz(usize::MAX)).unwrap_err(),
+            bounded_chunk_len(dims, element_size).unwrap_err(),
             FormatError::InvalidChunkGeometry(
                 "chunk logical byte size exceeds the reader's single-chunk allocation limit",
-            ),
+            )
         );
     }
 
@@ -5086,7 +5086,10 @@ mod tests {
             OffsetWidth::try_from(os).unwrap(),
         )
         .unwrap_err();
-        assert!(matches!(err, FormatError::ChunkedReadError(_)));
+        assert_eq!(
+            err,
+            FormatError::ChunkedReadError("chunk B-tree nested too deeply".into())
+        );
     }
 
     // --- Chunked read tests (synthetic) ---
@@ -5874,7 +5877,10 @@ mod tests {
         let FormatError::FilterError(reason) = &err else {
             panic!("expected FilterError, got {err:?}");
         };
-        assert!(reason.starts_with("deflate: "), "{reason:?}");
+        assert!(
+            crate::test_data::DEFLATE_HEADER_ERRORS.contains(&reason.as_str()),
+            "{reason:?}"
+        );
     }
 
     #[test]
@@ -6570,14 +6576,9 @@ mod tests {
         );
     }
 
-    /// A chunk whose edges declare an impossible logical byte size, here a
-    /// `(2^22)^3` element chunk of `f64` far past the read-allocation limit, must
-    /// be refused up front, even when the dataset itself is small. The per-chunk
-    /// geometry guard catches it before the windowed reader sizes any allocation
-    /// or builds strides, so a crafted chunk extent cannot drive an out-of-memory
-    /// abort. Checked before any I/O: the empty source would otherwise EOF first.
     #[test]
-    fn windowed_rows_huge_chunk_geometry_refused() {
+    fn windowed_rows_huge_chunk_geometry_is_rejected() {
+        // The source is empty, so the geometry error precedes a read failure.
         let big: u64 = 1 << 22;
         let layout = DataLayout::Chunked {
             flags: ChunkedLayoutFlags::NONE,
@@ -6603,9 +6604,11 @@ mod tests {
             1,
         )
         .expect_err("an impossible chunk geometry must error");
-        assert!(
-            matches!(err, FormatError::InvalidChunkGeometry(_)),
-            "expected InvalidChunkGeometry, got {err:?}"
+        assert_eq!(
+            err,
+            FormatError::InvalidChunkGeometry(
+                "chunk logical byte size exceeds the reader's single-chunk allocation limit",
+            )
         );
     }
 
