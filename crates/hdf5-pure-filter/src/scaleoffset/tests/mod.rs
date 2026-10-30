@@ -51,8 +51,8 @@ fn raw_payload_views_retain_storage_and_exclude_headers_and_trailing_bytes(
     #[values(false, true)] owned: bool,
 ) {
     let raw = [
-        bits, 0, 0, 0, 8, 99, 99, 99, 99, 99, 99, 99, 99, 88, 88, 88, 88, 88, 88, 88, 88, 1, 2,
-        3, 4, 5, 6, 7, 8, 77, 66,
+        bits, 0, 0, 0, 8, 99, 99, 99, 99, 99, 99, 99, 99, 88, 88, 88, 88, 88, 88, 88, 88, 1, 2, 3,
+        4, 5, 6, 7, 8, 77, 66,
     ];
     let input = view_input(&raw, owned);
     let pointer = input.as_slice().as_ptr();
@@ -93,8 +93,7 @@ fn raw_payload_views_preserve_header_error_order(
     let valid = [
         8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 8,
     ];
-    let output =
-        super::decompress(view_input(&valid, owned), &cd, Some(2), &mut spare).unwrap();
+    let output = super::decompress(view_input(&valid, owned), &cd, Some(2), &mut spare).unwrap();
     assert_eq!(output.as_slice(), [7, 8]);
     assert_eq!(spare.as_ptr(), pointer);
     assert!(spare.is_empty());

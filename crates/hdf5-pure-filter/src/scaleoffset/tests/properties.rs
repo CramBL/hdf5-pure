@@ -137,10 +137,7 @@ fn integer_roundtrip_boundaries(#[case] values: IntegerValues, #[case] minbits: 
     if minbits == filter[scaleoffset::PARM_SIZE] * 8 {
         assert_eq!(&encoded[scaleoffset::HEADER_LEN..], raw);
     }
-    assert_eq!(
-        tests::decompress(&encoded, &filter, None).unwrap(),
-        raw
-    );
+    assert_eq!(tests::decompress(&encoded, &filter, None).unwrap(), raw);
 }
 
 /// Integer payloads with matching signedness, width, and byte order.
@@ -159,10 +156,7 @@ impl IntegerValues {
     fn assert_roundtrip(&self) {
         let (raw, filter) = self.encode();
         let encoded = tests::compress(&raw, &filter).unwrap();
-        assert_eq!(
-            tests::decompress(&encoded, &filter, None).unwrap(),
-            raw
-        );
+        assert_eq!(tests::decompress(&encoded, &filter, None).unwrap(), raw);
     }
 
     /// Returns element bytes and lossless filter parameters for the selected scalar type.
