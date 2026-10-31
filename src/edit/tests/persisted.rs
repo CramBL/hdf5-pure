@@ -86,7 +86,7 @@ fn strict_persisted_adjacent_sections_are_admitted(#[case] separate: bool) {
     let engine = strict_engine(&path);
     assert_eq!(
         engine.space.reusable_sections().collect::<Vec<_>>(),
-        [Extent::new(SECTION, 64).unwrap()]
+        [Extent::new(StoredAddress::new(SECTION), 64).unwrap()]
     );
     assert_eq!(
         engine.persist.as_ref().unwrap().old_blocks.len(),
@@ -115,7 +115,7 @@ fn strict_persisted_page_roles_preserve_admission(
     let bytes = fixture.write(&path);
     let engine = strict_engine(&path);
     let pages = engine.space.paged_sections().unwrap();
-    let extent = [Extent::new(address, length).unwrap()];
+    let extent = [Extent::new(StoredAddress::new(address), length).unwrap()];
     assert_eq!(
         pages.metadata(),
         if matches!(admission, Admission::Metadata) {

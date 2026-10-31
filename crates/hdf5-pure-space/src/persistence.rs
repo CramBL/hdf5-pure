@@ -90,11 +90,11 @@ impl ManagerSections {
             let mut start = extent.start();
             while start < extent.end() {
                 let boundary = start
-                    .checked_add(page_size - start % page_size)
+                    .checked_add(page_size - start.get() % page_size)
                     .unwrap_or(extent.end());
                 let end = extent.end().min(boundary);
                 debug_assert!(start < end && end <= extent.end());
-                let piece = Extent::new(start, end - start)
+                let piece = Extent::between(start, end)
                     .expect("the split piece is a non-empty range inside its parent extent");
                 if piece.len() < page_size {
                     small.push(piece);
@@ -112,11 +112,14 @@ pub const TRAILING_RESERVE_TAILS: u64 = 4;
 
 #[cfg(test)]
 mod tests {
+    use hdf5_pure_core::__private::StoredAddressExt;
+    use hdf5_pure_core::StoredAddress;
+
     use super::*;
     use crate::paged::{PageType, PagedEdit};
 
     fn extent(addr: u64, len: u64) -> Extent {
-        Extent::new(addr, len).unwrap()
+        Extent::new(StoredAddress::new(addr), len).unwrap()
     }
 
     #[test]

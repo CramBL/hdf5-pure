@@ -31,7 +31,7 @@ impl ChunkAllocation {
         chunk: &ChunkInfo,
     ) -> Result<Self, FormatError> {
         let range = FileRange::new(addresses.resolve(chunk.address)?, chunk.chunk_size.get())?;
-        let extent = Extent::new(chunk.address.get(), range.length()).ok_or(
+        let extent = Extent::new(chunk.address, range.length()).ok_or(
             FormatError::InvalidChunkGeometry("chunk allocation is empty"),
         )?;
         Ok(Self {

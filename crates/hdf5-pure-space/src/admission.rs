@@ -79,6 +79,8 @@ pub enum Release {
 mod tests {
     use alloc::vec::Vec;
 
+    use hdf5_pure_core::__private::StoredAddressExt;
+    use hdf5_pure_core::StoredAddress;
     use rstest::rstest;
 
     use super::{Release, TrackedSpace};
@@ -104,10 +106,14 @@ mod tests {
         #[case] expected: &[(u64, u64)],
     ) {
         let mut fl = FreeList::new();
-        fl.free(Extent::new(0, 100).unwrap());
+        fl.free(Extent::new(StoredAddress::new(0), 100).unwrap());
 
         assert_eq!(
-            fl.release(THRESHOLD, Extent::new(500, len).unwrap(), ()),
+            fl.release(
+                THRESHOLD,
+                Extent::new(StoredAddress::new(500), len).unwrap(),
+                ()
+            ),
             release
         );
         assert_eq!(regions(&fl), expected);
@@ -124,11 +130,15 @@ mod tests {
     ) {
         let mut fl = FreeList::new();
         for &(addr, len) in tracked {
-            fl.free(Extent::new(addr, len).unwrap());
+            fl.free(Extent::new(StoredAddress::new(addr), len).unwrap());
         }
 
         assert_eq!(
-            fl.release(THRESHOLD, Extent::new(addr, len).unwrap(), ()),
+            fl.release(
+                THRESHOLD,
+                Extent::new(StoredAddress::new(addr), len).unwrap(),
+                ()
+            ),
             Release::Merge
         );
         assert_eq!(regions(&fl), expected);
@@ -140,10 +150,14 @@ mod tests {
 
         assert_eq!(
             [
-                fl.release(THRESHOLD, Extent::new(0, THRESHOLD - 1).unwrap(), ()),
                 fl.release(
                     THRESHOLD,
-                    Extent::new(THRESHOLD - 1, THRESHOLD - 1).unwrap(),
+                    Extent::new(StoredAddress::new(0), THRESHOLD - 1).unwrap(),
+                    ()
+                ),
+                fl.release(
+                    THRESHOLD,
+                    Extent::new(StoredAddress::new(THRESHOLD - 1), THRESHOLD - 1).unwrap(),
                     ()
                 ),
             ],

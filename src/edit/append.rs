@@ -20,8 +20,6 @@ use hdf5_pure_core::PhysicalAddress;
 use crate::DatatypeByteOrder;
 use crate::SuperblockVersion;
 use crate::access_mode::AccessMode;
-use crate::address::StoredAddress;
-use crate::address::StoredAddressExt;
 use crate::address::{AddressContext, BaseAddressExt};
 use crate::chunk_index_inplace::{self, AppendIndex, Located, RetiredChunk, Store};
 use crate::convert::Narrow;
@@ -833,8 +831,7 @@ impl EditStore<'_> {
             .engine
             .context
             .addresses()
-            .relative(self.engine.image.len())?
-            .get();
+            .relative(self.engine.image.len())?;
         let transition = self.engine.space.plan_transition(eoa, PageType::Raw)?;
         let padding = match transition {
             Some(PageTransition::Pad { extent, .. }) => extent.len(),
@@ -874,11 +871,7 @@ impl EditStore<'_> {
             None
         };
         if let Some(extent) = extent {
-            let at = self
-                .engine
-                .context
-                .addresses()
-                .resolve(StoredAddress::new(extent.start()))?;
+            let at = self.engine.context.addresses().resolve(extent.start())?;
             let bytes = Self::prepare_allocation_bytes(length, at, prepare)?;
             self.engine.image.write_at(at.get(), bytes.as_ref())?;
             return Ok(at.get());
@@ -1018,9 +1011,9 @@ impl Store for EditStore<'_> {
         // Opening checks the base against the image length, and editor truncation preserves it.
         let eoa = self
             .engine
-            .image
-            .len()
-            .checked_sub(self.engine.context.addresses().effective_base().get())
+            .context
+            .addresses()
+            .relative(self.engine.image.len())
             .expect("the image includes its base address");
         self.engine.space.record_freed(eoa, extent, class);
         if self.engine.persist.is_some() {

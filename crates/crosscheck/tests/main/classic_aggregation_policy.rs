@@ -4,8 +4,10 @@ use core::num::NonZeroU64;
 
 use hdf5::plist::file_create::FileSpaceStrategy as CStrategy;
 use hdf5::types::VarLenUnicode;
+use hdf5_pure_core::__private::BaseAddressExt;
 use hdf5_pure_core::__private::FileRange;
 use hdf5_pure_core::__private::FileRegion;
+use hdf5_pure_core::BaseAddress;
 use hdf5_pure_core::PhysicalAddress;
 use hdf5_pure_format::__private::GlobalHeapCollectionLocator;
 use hdf5_pure_format::__private::LengthWidth;
@@ -52,7 +54,8 @@ fn raw_policy_matches_libhdf5_workload_allocations(#[case] workload: Workload) {
             Step::Delete(_) => {}
         }
     }
-    let mut eoa = file.size();
+    let base = BaseAddress::ZERO;
+    let mut eoa = base.relative(file.size()).unwrap();
     let mut observations = Vec::new();
     for &step in workload.steps {
         let allocation = match step {
@@ -61,7 +64,13 @@ fn raw_policy_matches_libhdf5_workload_allocations(#[case] workload: Workload) {
                 dataset
                     .write(&vec![aggregation::DATASET_VALUE; len])
                     .unwrap();
-                Some(Extent::new(dataset.offset().unwrap(), dataset.storage_size()).unwrap())
+                Some(
+                    Extent::new(
+                        base.relative(dataset.offset().unwrap()).unwrap(),
+                        dataset.storage_size(),
+                    )
+                    .unwrap(),
+                )
             }
             Step::Create(Object::Strings(name)) => {
                 let dataset = file.dataset(name).unwrap();
@@ -73,7 +82,13 @@ fn raw_policy_matches_libhdf5_workload_allocations(#[case] workload: Workload) {
                             .collect::<Vec<_>>(),
                     )
                     .unwrap();
-                Some(Extent::new(dataset.offset().unwrap(), dataset.storage_size()).unwrap())
+                Some(
+                    Extent::new(
+                        base.relative(dataset.offset().unwrap()).unwrap(),
+                        dataset.storage_size(),
+                    )
+                    .unwrap(),
+                )
             }
             Step::Create(Object::Group(_)) => None,
             Step::Delete(name) => {
@@ -105,7 +120,10 @@ fn raw_policy_matches_libhdf5_workload_allocations(#[case] workload: Workload) {
             assert_eq!(allocation.released(), None);
             eoa = allocation.end_of_allocation();
             if let Step::Create(Object::Strings(_)) = step {
-                let address = aggregation::collection_address(&bytes, expected.start());
+                let address = aggregation::collection_address(
+                    &bytes,
+                    base.absolute(expected.start()).unwrap(),
+                );
                 let locator = GlobalHeapCollectionLocator::new(
                     PhysicalAddress::new(address),
                     LengthWidth::Eight,
@@ -120,12 +138,12 @@ fn raw_policy_matches_libhdf5_workload_allocations(#[case] workload: Workload) {
                         AllocationClass::Raw,
                     )
                     .unwrap();
-                assert_eq!(allocation.extent().start(), address);
+                assert_eq!(allocation.extent().start(), base.relative(address).unwrap());
                 assert_eq!(allocation.released(), None);
                 eoa = allocation.end_of_allocation();
             }
         }
-        assert_eq!(eoa, end, "{step:?}");
+        assert_eq!(base.absolute(eoa).unwrap(), end, "{step:?}");
         assert_eq!(
             aggregates
                 .unused(AllocationClass::Raw)
@@ -137,7 +155,7 @@ fn raw_policy_matches_libhdf5_workload_allocations(#[case] workload: Workload) {
     }
     let released = aggregates.reset(eoa).unwrap();
     assert_eq!(
-        released.end_of_allocation(),
+        base.absolute(released.end_of_allocation()).unwrap(),
         std::fs::metadata(&path).unwrap().len()
     );
     assert_eq!(released.released(AllocationClass::Raw), None);

@@ -212,7 +212,7 @@ pub(in crate::edit) fn assert_huge_subtree_reclaimed(path: &Path) {
     );
     for &(extent, kind) in heap.allocations() {
         let span = (
-            extent.start(),
+            session.addresses().absolute(extent.start()).unwrap(),
             extent.len(),
             FreeClass::Page(kind.allocation_class().into()),
         );
@@ -445,7 +445,8 @@ pub(in crate::edit) fn assert_generic_large_sections(
         .to_vec();
     let reusable: Vec<_> = s.space.reusable_sections().collect();
     for &(addr, size) in &fragments {
-        let fragment = FreeExtent::new(addr, size).expect("wire sections are non-empty");
+        let fragment =
+            FreeExtent::new(StoredAddress::new(addr), size).expect("wire sections are non-empty");
         assert!(
             unclassified.contains(&fragment),
             "fragment ({addr}, {size}) must be recorded as unclassified, not lost"

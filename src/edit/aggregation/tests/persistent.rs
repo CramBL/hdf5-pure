@@ -71,7 +71,10 @@ fn persistent_reuse_precedes_aggregates(
         let placement = engine.reserve(64, class).unwrap();
         engine.place(placement, &[19; 64]).unwrap()
     };
-    assert_eq!(address, expected.start() + userblock);
+    assert_eq!(
+        address,
+        engine.addresses().absolute(expected.start()).unwrap()
+    );
     if !immediate {
         assert_eq!(engine.aggregation, Some(policy));
     } else {
@@ -159,10 +162,7 @@ fn active_spare_is_excluded_until_persistent_settlement(
             .free_sections()
             .sections()
             .iter()
-            .any(|section| {
-                section.address().get() <= interior.start()
-                    && section.end_address().get() >= interior.end()
-            })
+            .any(|section| { section.range().contains(interior.range()) })
     );
 }
 
@@ -265,9 +265,10 @@ fn persistent_settlement_failure_preserves_publication_order(
     engine.delete(&ObjectPathBuf::parse("scratch")).unwrap();
     engine.commit().unwrap();
     let vacant = engine.image.append(&[0; 16_384]).unwrap();
-    engine
-        .space
-        .return_allocation(Extent::new(vacant, 16_384).unwrap(), AllocationClass::Raw);
+    engine.space.return_allocation(
+        Extent::new(StoredAddress::new(vacant), 16_384).unwrap(),
+        AllocationClass::Raw,
+    );
     engine.synchronize_aggregates().unwrap();
     let before = engine.aggregation;
     let prior = engine.image.len();
@@ -329,7 +330,7 @@ fn abandoned_persistent_spare_uses_threshold(#[case] threshold: u64, #[case] tra
             .unwrap();
         engine.place(placement, &bytes).unwrap();
     }
-    let extent = Extent::new(start + 2000, 48).unwrap();
+    let extent = Extent::new(StoredAddress::new(start + 2000), 48).unwrap();
     assert_eq!(
         engine.space.reusable_sections().collect::<Vec<_>>(),
         if tracked { vec![extent] } else { vec![] }
@@ -343,8 +344,7 @@ fn abandoned_persistent_spare_uses_threshold(#[case] threshold: u64, #[case] tra
         free.free_sections()
             .sections()
             .iter()
-            .any(|section| section.address().get() <= extent.start()
-                && section.end_address().get() >= extent.end()),
+            .any(|section| section.range().contains(extent.range())),
         tracked
     );
 }
@@ -626,7 +626,7 @@ fn assert_spare_excluded(engine: &WriteEngine, spare: &[Extent]) {
         let start = engine
             .context
             .addresses()
-            .resolve(StoredAddress::new(extent.start()))
+            .resolve(extent.start())
             .unwrap()
             .get();
         assert!(
@@ -649,10 +649,7 @@ fn assert_spare_excluded(engine: &WriteEngine, spare: &[Extent]) {
                 .free_sections()
                 .sections()
                 .iter()
-                .all(|section| {
-                    extent.end() <= section.address().get()
-                        || section.end_address().get() <= extent.start()
-                })
+                .all(|section| { !section.range().overlaps(extent.range()) })
         );
     }
 }

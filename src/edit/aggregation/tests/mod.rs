@@ -10,6 +10,7 @@ use crate::MaxExtent;
 use crate::MemoryStrategy;
 use crate::PersistedFreeSpacePolicy;
 use crate::UserblockSize;
+use crate::address::{StoredAddress, StoredAddressExt};
 use crate::error::Error;
 use crate::error::FormatError;
 use crate::image::FileImage;
@@ -68,7 +69,10 @@ fn staged_reservations_use_classic_windows(
     }
     assert_eq!(engine.image.len(), start + reserved);
     let state = engine.aggregation.unwrap();
-    assert_eq!(state.eoa(), start + reserved - userblock);
+    assert_eq!(
+        state.eoa(),
+        StoredAddress::new(start + reserved - userblock)
+    );
     assert_eq!(
         engine.reusable_space_stats().unwrap().reusable_free_bytes(),
         state.unused().map(|extent| extent.len()).sum::<u64>()
@@ -103,11 +107,17 @@ fn aggregate_tail_release_preserves_committed_data(#[case] backing: MemoryStrate
         .aggregation
         .unwrap()
         .unused()
-        .find(|extent| extent.end() == before)
+        .find(|extent| extent.end() == StoredAddress::new(before))
         .unwrap();
     engine.finalize_persist().unwrap();
-    assert_eq!(engine.image.len(), tail.start());
-    assert_eq!(engine.context.superblock().eof_address, tail.start());
+    assert_eq!(
+        engine.image.len(),
+        engine.addresses().absolute(tail.start()).unwrap()
+    );
+    assert_eq!(
+        engine.context.superblock().eof_address,
+        engine.addresses().absolute(tail.start()).unwrap()
+    );
     assert!(engine.aggregation.unwrap().unused().next().is_none());
     let order = engine.image.issued_write_order();
     assert_eq!(order.last().unwrap().0, engine.context.signature().get());
@@ -357,7 +367,7 @@ fn immediate_growth_keeps_previous_reserves_disjoint() {
     );
     assert_eq!(
         after.policy.unused(AllocationClass::Raw).unwrap().start(),
-        raw.start() + 16
+        raw.start().checked_add(16).unwrap()
     );
     engine
         .create_group(&ObjectPathBuf::parse("/second"))

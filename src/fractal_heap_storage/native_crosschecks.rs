@@ -49,7 +49,10 @@ fn c_written_filtered_huge_objects_have_exact_storage_and_contents(#[case] direc
                 AllocationKind::HugeObject => FractalHeapAllocation::HugeObject,
                 kind => panic!("unexpected heap allocation: {kind:?}"),
             };
-            (Extent::new(at, length).unwrap(), kind)
+            (
+                Extent::new(file.addresses().relative(at).unwrap(), length).unwrap(),
+                kind,
+            )
         })
         .collect();
     assert_eq!(storage.allocations(), expected);

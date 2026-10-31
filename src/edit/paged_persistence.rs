@@ -3,7 +3,7 @@
 use hdf5_pure_format::__private as format;
 use hdf5_pure_space::__private::{Extent, FreeClass, ManagerSections, PagedTail, SessionSpace};
 
-use crate::address::{StoredAddress, StoredAddressExt};
+use crate::address::StoredAddress;
 use crate::error::FormatError;
 use crate::file_space_info::NUM_FILE_FSM_MANAGERS;
 use crate::free_space_manager;
@@ -34,7 +34,7 @@ impl PagedPersistencePlan {
     /// managers cannot be serialized at `widths`.
     pub fn new(
         space: &SessionSpace,
-        eoa: u64,
+        eoa: StoredAddress,
         freed: &[(Extent, FreeClass)],
         old_blocks: &[Extent],
         extension_len: u64,
@@ -111,13 +111,8 @@ impl PagedPersistencePlan {
                 "the PAGE manager capacity does not contain the final manager set".into(),
             ));
         }
-        let start = tail.allocation.start().checked_add(extension_len).ok_or(
-            FormatError::OffsetOverflow {
-                offset: tail.allocation.start(),
-                length: extension_len,
-            },
-        )?;
-        let plan = free_space_manager::plan_managers(&managers, StoredAddress::new(start), widths);
+        let start = tail.allocation.start().checked_add(extension_len)?;
+        let plan = free_space_manager::plan_managers(&managers, start, widths);
         let last = plan.blocks.len() - 1;
         let blocks = plan
             .blocks
@@ -166,6 +161,8 @@ mod tests {
     use hdf5_pure_space::__private::{ManagerKind, PageType};
     use rstest::rstest;
 
+    use crate::AddressRange;
+    use crate::address::{StoredAddress, StoredAddressExt};
     use crate::file_space_info::{FileSpacePageSize, FileSpaceStrategy};
 
     use super::*;
@@ -178,13 +175,13 @@ mod tests {
             FileSpacePageSize::DEFAULT,
         );
         let freed = [(
-            Extent::new(100, 3_801).unwrap(),
+            Extent::new(StoredAddress::new(100), 3_801).unwrap(),
             FreeClass::Page(PageType::Meta),
         )];
         let widths = FormatWidths::from_sizes(8, 8).unwrap();
         let measure = |capacity| {
             let tail = space
-                .plan_paged_tail(8_192, &freed, &[], capacity, true)
+                .plan_paged_tail(StoredAddress::new(8_192), &freed, &[], capacity, true)
                 .unwrap()
                 .unwrap();
             let managers =
@@ -192,9 +189,17 @@ mod tests {
             160 + free_space_manager::manager_blocks_len(&managers, widths)
         };
         assert_eq!((measure(286), measure(295)), (295, 286));
-        let plan = PagedPersistencePlan::new(&space, 8_192, &freed, &[], 160, widths, false)
-            .unwrap()
-            .unwrap();
+        let plan = PagedPersistencePlan::new(
+            &space,
+            StoredAddress::new(8_192),
+            &freed,
+            &[],
+            160,
+            widths,
+            false,
+        )
+        .unwrap()
+        .unwrap();
         assert!(plan.tail.appended);
         assert_eq!(plan.tail.post.sections().metadata().len(), 2);
         assert_complete_capacity(&plan, widths, 160);
@@ -244,16 +249,25 @@ mod tests {
         );
         space.seed_persisted(
             Some(ManagerKind::PagedSmallMetadata),
-            Extent::new(4_096, hole).unwrap(),
+            Extent::new(StoredAddress::new(4_096), hole).unwrap(),
         );
         let before = space.paged_sections().unwrap().metadata().to_vec();
         let widths = FormatWidths::from_sizes(8, 8).unwrap();
-        let plan = PagedPersistencePlan::new(&space, 12_288, &[], &[], 100, widths, true).unwrap();
+        let plan = PagedPersistencePlan::new(
+            &space,
+            StoredAddress::new(12_288),
+            &[],
+            &[],
+            100,
+            widths,
+            true,
+        )
+        .unwrap();
         assert_eq!(space.paged_sections().unwrap().metadata(), before);
         assert_eq!(plan.is_some(), hole >= 470);
         if let Some(plan) = plan {
             assert!(!plan.tail.appended);
-            assert_eq!(plan.tail.allocation.start(), 4_096);
+            assert_eq!(plan.tail.allocation.start(), StoredAddress::new(4_096));
             assert_complete_capacity(&plan, widths, 100);
             let sections = plan.tail.post.sections();
             assert_eq!(
@@ -288,17 +302,26 @@ mod tests {
         );
         space.seed_persisted(
             Some(ManagerKind::PagedSmallMetadata),
-            Extent::new(4_096, hole).unwrap(),
+            Extent::new(StoredAddress::new(4_096), hole).unwrap(),
         );
         let before = space.paged_sections().unwrap().metadata().to_vec();
         let widths = FormatWidths::from_sizes(8, 8).unwrap();
-        let plan = PagedPersistencePlan::new(&space, 12_288, &[], &[], 160, widths, true).unwrap();
+        let plan = PagedPersistencePlan::new(
+            &space,
+            StoredAddress::new(12_288),
+            &[],
+            &[],
+            160,
+            widths,
+            true,
+        )
+        .unwrap();
         assert_eq!(plan.is_some(), fits);
         assert_eq!(space.paged_sections().unwrap().metadata(), before);
         if let Some(plan) = plan {
             assert!(!plan.tail.appended);
             assert_complete_capacity(&plan, widths, 160);
-            assert_eq!(plan.tail.allocation.start(), 4_096);
+            assert_eq!(plan.tail.allocation.start(), StoredAddress::new(4_096));
         }
     }
 
@@ -314,10 +337,17 @@ mod tests {
         let space =
             SessionSpace::from_strategy(Some(FileSpaceStrategy::Page), page.get() * 2, page);
         let widths = FormatWidths::from_sizes(8, 8).unwrap();
-        let plan =
-            PagedPersistencePlan::new(&space, page.get() * 2, &[], &[], extension, widths, false)
-                .unwrap()
-                .unwrap();
+        let plan = PagedPersistencePlan::new(
+            &space,
+            StoredAddress::new(page.get() * 2),
+            &[],
+            &[],
+            extension,
+            widths,
+            false,
+        )
+        .unwrap()
+        .unwrap();
         assert_complete_capacity(&plan, widths, extension);
         let tail = plan.tail.post.sections();
         assert_eq!(tail.metadata().len(), 1);
@@ -334,12 +364,20 @@ mod tests {
         );
         space.seed_persisted(
             Some(ManagerKind::PagedSmallMetadata),
-            Extent::new(4_096, 160).unwrap(),
+            Extent::new(StoredAddress::new(4_096), 160).unwrap(),
         );
         let widths = FormatWidths::from_sizes(8, 8).unwrap();
-        let plan = PagedPersistencePlan::new(&space, 8_192, &[], &[], 160, widths, true)
-            .unwrap()
-            .unwrap();
+        let plan = PagedPersistencePlan::new(
+            &space,
+            StoredAddress::new(8_192),
+            &[],
+            &[],
+            160,
+            widths,
+            true,
+        )
+        .unwrap()
+        .unwrap();
         assert!(plan.blocks.is_empty());
         assert_eq!(plan.tail.allocation.len(), 160);
         assert!(
@@ -356,25 +394,33 @@ mod tests {
             1,
             FileSpacePageSize::DEFAULT,
         );
-        let fragment = Extent::new(5_694, 450).unwrap();
+        let fragment = Extent::new(StoredAddress::new(5_694), 450).unwrap();
         space.seed_persisted(Some(ManagerKind::PagedLargeGeneric), fragment);
         let widths = FormatWidths::from_sizes(8, 8).unwrap();
-        let plan = PagedPersistencePlan::new(&space, 8_192, &[], &[], 160, widths, false)
-            .unwrap()
-            .unwrap();
+        let plan = PagedPersistencePlan::new(
+            &space,
+            StoredAddress::new(8_192),
+            &[],
+            &[],
+            160,
+            widths,
+            false,
+        )
+        .unwrap()
+        .unwrap();
         assert!(plan.tail.appended);
         assert_eq!(plan.tail.post.sections().unclassified(), [fragment]);
         assert_complete_capacity(&plan, widths, 160);
     }
 
     fn assert_complete_capacity(plan: &PagedPersistencePlan, widths: FormatWidths, extension: u64) {
-        let mut cursor = plan.tail.allocation.start() + extension;
+        let mut cursor = plan.tail.allocation.start().checked_add(extension).unwrap();
         let mut padded = false;
         for block in &plan.blocks {
-            assert_eq!(block.header_address.get(), cursor);
-            cursor += block.header.len() as u64;
-            assert_eq!(block.section_list_address.get(), cursor);
-            cursor += block.section_list.len() as u64;
+            assert_eq!(block.header_address, cursor);
+            cursor = cursor.checked_add(block.header.len() as u64).unwrap();
+            assert_eq!(block.section_list_address, cursor);
+            cursor = cursor.checked_add(block.section_list.len() as u64).unwrap();
             let header = format::FreeSpaceManagerHeader::parse(widths, &block.header).unwrap();
             assert_eq!(
                 header.section_list_allocated(),
@@ -390,13 +436,11 @@ mod tests {
             .unwrap();
             padded |= format::free_space_manager_len(widths, &sections)
                 < (block.header.len() + block.section_list.len()) as u64;
-            assert!(
-                sections
-                    .iter()
-                    .all(|section| section.addr.get() + section.size
-                        <= plan.tail.allocation.start()
-                        || section.addr.get() >= plan.tail.allocation.end())
-            );
+            assert!(sections.iter().all(|section| {
+                !AddressRange::new(section.addr, section.size)
+                    .unwrap()
+                    .overlaps(plan.tail.allocation.range())
+            }));
         }
         assert_eq!(cursor, plan.tail.allocation.end());
         assert!(padded);

@@ -1,33 +1,71 @@
-/// Represents a non-empty range of file addresses.
+use core::num::NonZeroU64;
+
+use hdf5_pure_core::__private::{NonEmptyRange, StoredAddressExt};
+use hdf5_pure_core::{AddressRange, StoredAddress};
+
+/// A nonempty interval of stored HDF5 addresses.
 ///
-/// The end is exclusive and always greater than the start, so a constructed extent cannot wrap the
-/// `u64` address space.
+/// The start is inclusive and the end is exclusive. Both endpoints are [`StoredAddress`] values
+/// relative to the file's address base. Construction rejects empty intervals and exclusive ends
+/// beyond [`u64::MAX`].
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Extent {
-    start: u64,
-    end: u64,
+    range: AddressRange<StoredAddress>,
 }
 
 impl Extent {
     /// Constructs `[start, start + len)`, or returns `None` for an empty or overflowing range.
-    pub fn new(start: u64, len: u64) -> Option<Self> {
-        let end = start.checked_add(len)?;
-        (end > start).then_some(Self { start, end })
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hdf5_pure_core::__private::StoredAddressExt;
+    /// use hdf5_pure_core::StoredAddress;
+    /// use hdf5_pure_space::__private::Extent;
+    ///
+    /// let start = StoredAddress::new(512);
+    /// let extent = Extent::new(start, 32).unwrap();
+    /// assert_eq!(extent.start(), start);
+    /// assert_eq!(extent.end(), start.checked_add(32).unwrap());
+    /// assert_eq!(extent.len(), 32);
+    /// assert_eq!(Extent::new(start, 0), None);
+    /// ```
+    ///
+    /// A physical position cannot be used as a stored address:
+    ///
+    /// ```compile_fail,E0308
+    /// use hdf5_pure_core::PhysicalAddress;
+    /// use hdf5_pure_space::__private::Extent;
+    ///
+    /// let _ = Extent::new(PhysicalAddress::new(512), 32);
+    /// ```
+    pub fn new(start: StoredAddress, len: u64) -> Option<Self> {
+        Some(Self {
+            range: NonEmptyRange::new(start, NonZeroU64::new(len)?)
+                .ok()?
+                .range(),
+        })
+    }
+
+    /// Returns the nonempty interval from `start` to `end`, or `None` if `end` is at or before
+    /// `start`.
+    pub fn between(start: StoredAddress, end: StoredAddress) -> Option<Self> {
+        Self::new(start, end.checked_distance_from(start)?)
     }
 
     /// Returns the first byte of the extent.
-    pub fn start(self) -> u64 {
-        self.start
+    pub fn start(self) -> StoredAddress {
+        self.range.start()
     }
 
     /// Returns one past the last byte of the extent.
-    pub fn end(self) -> u64 {
-        self.end
+    pub fn end(self) -> StoredAddress {
+        self.range.end()
     }
 
     /// Returns the number of bytes in the extent.
     pub fn len(self) -> u64 {
-        self.end - self.start
+        self.range.length()
     }
 
     /// Returns whether the extent contains no bytes.
@@ -39,14 +77,18 @@ impl Extent {
 
     /// Returns `true` if this extent touches `other` without overlapping it.
     pub fn adjoins(self, other: Self) -> bool {
-        self.end == other.start || self.start == other.end
+        self.range.adjoins(other.range)
     }
 
     /// Returns the overlap of this extent and `other`, or `None` when they are disjoint.
     pub(super) fn intersection(self, other: Self) -> Option<Self> {
-        let start = self.start.max(other.start);
-        let end = self.end.min(other.end);
-        (end > start).then_some(Self { start, end })
+        let common = self.range().intersection(other.range())?;
+        Self::new(common.start(), common.length())
+    }
+
+    /// Returns the checked interval with the same stored endpoints and positive length.
+    pub fn range(self) -> AddressRange<StoredAddress> {
+        self.range
     }
 
     /// Returns the whole `align`-sized units inside this extent, or `None` when it contains none.
@@ -60,49 +102,78 @@ impl Extent {
         if align == 0 {
             return None;
         }
-        let start = self.start.checked_next_multiple_of(align)?;
-        let end = (self.end / align) * align;
-        (end > start).then_some(Self { start, end })
+        let start = StoredAddress::new(self.start().get().checked_next_multiple_of(align)?);
+        let end = StoredAddress::new((self.end().get() / align) * align);
+        Self::between(start, end)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use hdf5_pure_core::__private::StoredAddressExt;
+    use hdf5_pure_core::{AddressRange, StoredAddress};
+    use rstest::rstest;
+
     use super::Extent;
 
     #[test]
     fn extent_rejects_zero_length() {
-        assert_eq!(Extent::new(100, 0), None);
+        assert_eq!(Extent::new(StoredAddress::new(100), 0), None);
     }
 
     #[test]
     fn extent_rejects_a_range_crossing_u64_max() {
-        assert_eq!(Extent::new(u64::MAX - 4, 5), None);
+        assert_eq!(Extent::new(StoredAddress::new(u64::MAX - 4), 5), None);
     }
 
-    #[test]
-    fn extent_start_end_and_len_round_trip() {
-        let extent = Extent::new(100, 50).unwrap();
-        assert_eq!(extent.start(), 100);
-        assert_eq!(extent.end(), 150);
-        assert_eq!(extent.len(), 50);
+    #[rstest]
+    #[case::ordinary(100, 50, 150)]
+    #[case::last_byte(u64::MAX - 1, 1, u64::MAX)]
+    #[case::whole_address_space(0, u64::MAX, u64::MAX)]
+    fn extent_endpoints_preserve_stored_coordinates(
+        #[case] start: u64,
+        #[case] length: u64,
+        #[case] end: u64,
+    ) {
+        let start = StoredAddress::new(start);
+        let end = StoredAddress::new(end);
+        let extent = Extent::new(start, length).unwrap();
+        let range: AddressRange<StoredAddress> = extent.range();
+        assert_eq!(extent.start(), start);
+        assert_eq!(extent.end(), end);
+        assert_eq!(extent.len(), length);
+        assert!(!extent.is_empty());
+        assert_eq!(range, AddressRange::new(start, length).unwrap());
+        assert_eq!(Extent::between(start, end), Some(extent));
+    }
+
+    #[rstest]
+    #[case::empty(100, 100)]
+    #[case::empty_at_maximum(u64::MAX, u64::MAX)]
+    #[case::reversed(101, 100)]
+    #[case::reversed_maximum(u64::MAX, 0)]
+    fn extent_endpoints_reject_empty_and_reversed_intervals(#[case] start: u64, #[case] end: u64) {
+        assert_eq!(
+            Extent::between(StoredAddress::new(start), StoredAddress::new(end)),
+            None
+        );
     }
 
     #[test]
     fn extents_adjoin_at_an_exact_boundary() {
         assert!(
-            Extent::new(100, 50)
+            Extent::new(StoredAddress::new(100), 50)
                 .unwrap()
-                .adjoins(Extent::new(150, 25).unwrap())
+                .adjoins(Extent::new(StoredAddress::new(150), 25).unwrap())
         );
     }
 
     #[test]
     fn extents_with_a_one_byte_gap_do_not_adjoin() {
         assert!(
-            !Extent::new(100, 50)
+            !Extent::new(StoredAddress::new(100), 50)
                 .unwrap()
-                .adjoins(Extent::new(151, 25).unwrap())
+                .adjoins(Extent::new(StoredAddress::new(151), 25).unwrap())
         );
     }
 }

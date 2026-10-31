@@ -28,6 +28,7 @@ use test_util::widths::Widths;
 use test_util_hdf5::file_space::persisted::ManagerSlot;
 
 use super::common;
+use crate::AddressRange;
 use crate::DatatypeByteOrder;
 use crate::FileSpaceSettings;
 use crate::MemoryStrategy;
@@ -133,6 +134,10 @@ fn strict_persisted_recovery_retains_complete_metadata_allocations() {
         .map(|extent| (extent.start(), extent.len()))
         .collect();
     actual.sort_unstable();
+    let expected: Vec<_> = expected
+        .into_iter()
+        .map(|(at, len)| (engine.addresses().relative(at).unwrap(), len))
+        .collect();
     assert_eq!(actual, expected);
     drop(engine);
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
@@ -201,10 +206,11 @@ fn reusable_space_stats_check_aggregate_byte_sums() {
         1,
         FileSpacePageSize::DEFAULT,
     );
-    session
-        .space
-        .seed_persisted(None, FreeExtent::new(0, u64::MAX).unwrap());
-    let mut aggregation = AggregateSpace::new(session.end_of_allocation().unwrap().get());
+    session.space.seed_persisted(
+        None,
+        FreeExtent::new(StoredAddress::new(0), u64::MAX).unwrap(),
+    );
+    let mut aggregation = AggregateSpace::new(session.end_of_allocation().unwrap());
     aggregation
         .reserve(
             session.context.addresses(),
@@ -250,12 +256,12 @@ fn array_append_preserves_raw_page_reuse(#[case] class: AllocationClass) {
             .start()
             .get()
     };
-    assert_eq!(at, raw.start());
+    assert_eq!(at, engine.addresses().absolute(raw.start()).unwrap());
     let after = engine.space.paged_sections().unwrap();
     assert_eq!(after.metadata(), before.metadata());
     assert_eq!(
         after.raw(),
-        [FreeExtent::new(raw.start() + 8, raw.len() - 8).unwrap()]
+        [FreeExtent::new(raw.start().checked_add(8).unwrap(), raw.len() - 8).unwrap()]
     );
 }
 
@@ -452,7 +458,11 @@ fn reclamation_retains_storage_after_heap_validation_fails(
     }
     for (extent, _) in heap.allocations() {
         assert!(
-            !reusable_overlaps(&session, extent.start(), extent.len()),
+            !reusable_overlaps(
+                &session,
+                session.addresses().absolute(extent.start()).unwrap(),
+                extent.len()
+            ),
             "the rejected heap allocation {extent:?} must stay allocated"
         );
     }
@@ -510,7 +520,7 @@ fn deleting_the_owner_of_a_filtered_attribute_heap_reclaims_its_storage(
         .chain(storage.into_iter().map(|(addr, len, _)| (addr, len)))
     {
         assert!(
-            reusable_covers(&session, addr - userblock, len),
+            reusable_covers(&session, addr, len),
             "({addr}, {len}) of the deleted object is reusable"
         );
     }
@@ -632,7 +642,11 @@ fn deleting_a_filtered_heap_with_huge_objects_reclaims_its_encoded_allocations(
     assert!(session.space_ownership().unwrap().analysis_complete);
     for (extent, _) in heap.allocations() {
         assert!(
-            reusable_covers(&session, extent.start(), extent.len()),
+            reusable_covers(
+                &session,
+                session.addresses().absolute(extent.start()).unwrap(),
+                extent.len()
+            ),
             "{extent:?}"
         );
     }
@@ -710,11 +724,28 @@ fn page_zero_detection_checks_each_index_span() {
     const PAGE: FileSpacePageSize = FileSpacePageSize::MIN;
     let c_written = [(48u64, 80u64), (512, 512)];
     assert!(reclaim::index_abuts_chunk_data(&[(1024, 512)], &c_written));
-    assert!(reclaim::touches_page_zero(PAGE, c_written.iter().copied()));
-    assert!(!reclaim::touches_page_zero(PAGE, [(1024, 200)]));
-    assert!(reclaim::touches_page_zero(PAGE, [(511, 200)]));
-    assert!(!reclaim::touches_page_zero(PAGE, [(512, 200)]));
-    assert!(!reclaim::touches_page_zero(PAGE, [(0, 0)]));
+    assert!(reclaim::touches_page_zero(
+        PAGE,
+        c_written
+            .iter()
+            .map(|&(addr, len)| (StoredAddress::new(addr), len))
+    ));
+    assert!(!reclaim::touches_page_zero(
+        PAGE,
+        [(StoredAddress::new(1024), 200)]
+    ));
+    assert!(reclaim::touches_page_zero(
+        PAGE,
+        [(StoredAddress::new(511), 200)]
+    ));
+    assert!(!reclaim::touches_page_zero(
+        PAGE,
+        [(StoredAddress::new(512), 200)]
+    ));
+    assert!(!reclaim::touches_page_zero(
+        PAGE,
+        [(StoredAddress::new(0), 0)]
+    ));
     assert!(!reclaim::touches_page_zero(PAGE, []));
 }
 
@@ -802,7 +833,7 @@ fn paged_open_seeds_each_manager_by_slot(
         "the split lists hold exactly the file's free space"
     );
     all.sort_by_key(|extent| extent.start());
-    let mut prev_end = 0u64;
+    let mut prev_end = StoredAddress::ZERO;
     for extent in all {
         assert!(
             extent.start() >= prev_end,
@@ -923,13 +954,13 @@ fn a_paged_allocation_only_crosses_page_types_over_whole_free_pages() {
         if let Some((addr, len)) = meta {
             s.space.seed_persisted(
                 Some(ManagerKind::PagedSmallMetadata),
-                FreeExtent::new(addr, len).unwrap(),
+                FreeExtent::new(StoredAddress::new(addr), len).unwrap(),
             );
         }
         if let Some((addr, len)) = raw {
             s.space.seed_persisted(
                 Some(ManagerKind::PagedSmallRaw),
-                FreeExtent::new(addr, len).unwrap(),
+                FreeExtent::new(StoredAddress::new(addr), len).unwrap(),
             );
         }
         s
@@ -983,7 +1014,7 @@ fn a_paged_allocation_only_crosses_page_types_over_whole_free_pages() {
     let sections = s.space.paged_sections().expect("still paged");
     assert_eq!(
         sections.raw(),
-        [FreeExtent::new(PAGE + 1024, PAGE - 1024).unwrap()],
+        [FreeExtent::new(StoredAddress::new(PAGE + 1024), PAGE - 1024).unwrap()],
         "the rest of the claimed page is free space of the claiming type"
     );
     assert!(
@@ -1007,14 +1038,14 @@ fn a_paged_allocation_only_crosses_page_types_over_whole_free_pages() {
     assert_eq!(
         sections.raw(),
         [
-            FreeExtent::new(PAGE + 512, PAGE - 512).unwrap(),
-            FreeExtent::new(3 * PAGE, PAGE).unwrap(),
+            FreeExtent::new(StoredAddress::new(PAGE + 512), PAGE - 512).unwrap(),
+            FreeExtent::new(StoredAddress::new(3 * PAGE), PAGE).unwrap(),
         ],
         "the fragment below the claimed page and the page above it both stay free"
     );
     assert_eq!(
         sections.metadata(),
-        [FreeExtent::new(2 * PAGE + 1024, PAGE - 1024).unwrap()],
+        [FreeExtent::new(StoredAddress::new(2 * PAGE + 1024), PAGE - 1024).unwrap()],
         "the rest of the claimed page is free space of the claiming type"
     );
 }
@@ -1107,12 +1138,12 @@ fn a_flat_tail_takes_exactly_the_extent_it_records() {
         );
         s.space.seed_persisted(
             Some(ManagerKind::Flat),
-            FreeExtent::new(HOLE_AT, hole).unwrap(),
+            FreeExtent::new(StoredAddress::new(HOLE_AT), hole).unwrap(),
         );
         let free_before = free_total(&s);
         let eoa = s.end_of_allocation().unwrap().get();
         let (post, at, tail_len, _) = s.flat_tail_layout(
-            eoa,
+            StoredAddress::new(eoa),
             &[],
             &[],
             EXT_LEN,
@@ -1129,7 +1160,7 @@ fn a_flat_tail_takes_exactly_the_extent_it_records() {
                 assert_eq!(
                     free_before - free_after,
                     tail_len,
-                    "hole {hole}: the tail took {} bytes at {at} for an extent of \
+                    "hole {hole}: the tail took {} bytes at {at:?} for an extent of \
                      {tail_len}",
                     free_before - free_after
                 );
@@ -1203,14 +1234,14 @@ fn paged_tail_allocation_releases_unused_page_bytes() {
         .metadata()
         .iter()
         .copied()
-        .find(|extent| extent.end() == after)
+        .find(|extent| extent.end() == StoredAddress::new(after))
         .expect("the page the tail opened leaves a free remainder at end-of-file");
     assert!(
-        extent.len() < PAGE && extent.start() >= before,
+        extent.len() < PAGE && extent.start() >= StoredAddress::new(before),
         "the tail's blocks take the front of the page it opened and the rest is free ({} of \
          {PAGE} at {}, file {before} -> {after})",
         extent.len(),
-        extent.start()
+        extent.start().get()
     );
 }
 
@@ -1263,12 +1294,12 @@ fn deleted_chunk_index_is_freed_into_a_raw_manager() {
         .paged_sections()
         .expect("a paged file installs paged state");
     for &extent in sections.metadata() {
-        for p in (extent.start() / page)..=((extent.end() - 1) / page) {
+        for p in (extent.start().get() / page)..=((extent.end().get() - 1) / page) {
             assert!(
                 !live_raw_pages.contains(&p),
                 "metadata free section ({}, {}) sits in page {p}, which still holds live raw \
                  chunk data",
-                extent.start(),
+                extent.start().get(),
                 extent.len()
             );
         }
@@ -1545,10 +1576,10 @@ fn a_commit_after_an_append_preserves_published_raw_page_tails() {
     );
     for extent in raw_free {
         assert_eq!(
-            extent.end() % PAGE,
+            extent.end().get() % PAGE,
             0,
             "padding {}+{} does not reach a page boundary",
-            extent.start(),
+            extent.start().get(),
             extent.len()
         );
     }
@@ -1663,12 +1694,12 @@ fn gather_page_size_matches_file_space_properties() {
 }
 
 fn section_covers(sections: &[FreeExtent], addr: u64, len: u64) -> bool {
-    let Some(end) = addr.checked_add(len) else {
+    let Ok(required) = AddressRange::new(StoredAddress::new(addr), len) else {
         return false;
     };
     sections
         .iter()
-        .any(|extent| extent.start() <= addr && extent.end() >= end)
+        .any(|extent| extent.range().contains(required))
 }
 
 fn write_dense_attribute_owner(path: &Path, huge_attrs: usize, strategy: FileSpaceStrategy) {
@@ -1745,17 +1776,21 @@ fn attribute_heap_address(session: &WriteEngine, addr: u64) -> u64 {
 }
 
 fn reusable_covers(session: &WriteEngine, addr: u64, len: u64) -> bool {
+    let start = session.addresses().relative(addr).unwrap();
+    let required = AddressRange::new(start, len).unwrap();
     session
         .space
         .reusable_sections()
-        .any(|extent| extent.start() <= addr && extent.end() >= addr + len)
+        .any(|extent| extent.range().contains(required))
 }
 
 fn reusable_overlaps(session: &WriteEngine, addr: u64, len: u64) -> bool {
+    let start = session.addresses().relative(addr).unwrap();
+    let required = AddressRange::new(start, len).unwrap();
     session
         .space
         .reusable_sections()
-        .any(|extent| extent.start() < addr + len && addr < extent.end())
+        .any(|extent| extent.range().overlaps(required))
 }
 
 /// Returns whether each page intersection is free metadata or part of a whole free raw page.
@@ -1887,9 +1922,9 @@ fn write_rejected_heap_owner(
     let index: Vec<(u64, u64, FreeClass)> = storage
         .into_iter()
         .filter(|&(addr, len, _)| {
-            heap.allocations()
-                .iter()
-                .all(|(extent, _)| (extent.start(), extent.len()) != (addr, len))
+            heap.allocations().iter().all(|(extent, _)| {
+                (extent.start(), extent.len()) != (StoredAddress::new(addr), len)
+            })
         })
         .collect();
     let session = WriteEngine::open_with_locking(path, FileLocking::Enabled).unwrap();

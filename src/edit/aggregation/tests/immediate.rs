@@ -5,6 +5,7 @@ use std::path::Path;
 
 use rstest::rstest;
 
+use crate::AddressRange;
 use crate::DeflateLevel;
 use crate::File;
 use crate::FileBuilder;
@@ -71,7 +72,7 @@ fn staged_and_immediate_edits_share_aggregate_windows(
         } else {
             assert_eq!(
                 after.policy.unused(AllocationClass::Raw).unwrap().start(),
-                raw.start() + 16
+                raw.start().checked_add(16).unwrap()
             );
         }
     } else {
@@ -163,8 +164,10 @@ fn immediate_phase_stops_keep_reservations_consumed(
     assert!(
         reusable.sections().iter().any(
             |section| section.address().get() <= start && finish <= section.end_address().get()
-        ) || (spare.start() <= start && finish <= spare.end())
-            || consumed.eoa <= start
+        ) || (spare
+            .range()
+            .contains(AddressRange::new(record.addr, length).unwrap()))
+            || consumed.eoa <= record.addr
     );
     engine.located.insert(address, state);
     assert_eq!(engine.context.superblock().eof_address, engine.image.len());

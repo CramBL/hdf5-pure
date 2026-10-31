@@ -896,8 +896,11 @@ impl FileWriter {
         };
         let aggregated = reuse_threshold.is_some()
             || file_space.is_some_and(|settings| settings.strategy() == FileSpaceStrategy::Aggr);
-        let mut allocation =
-            FileAllocation::new(SUPERBLOCK_SIZE as u64, aggregated, reuse_threshold);
+        let mut allocation = FileAllocation::new(
+            StoredAddress::new(SUPERBLOCK_SIZE as u64),
+            aggregated,
+            reuse_threshold,
+        );
 
         // File-space settings are recorded in a File Space Info message, which
         // arrived with HDF5 1.10. Refused beside the bounds themselves rather
@@ -1474,7 +1477,7 @@ impl FileWriter {
                 all_ds[i].storage.restore_vl_string_staging(staging)?;
                 early_gcol.push(i);
             }
-            allocation.end() - SUPERBLOCK_SIZE as u64
+            allocation.end().get() - SUPERBLOCK_SIZE as u64
         };
 
         #[cfg(feature = "provenance")]
@@ -1719,7 +1722,11 @@ impl FileWriter {
             Ok(StoredAddress::new(addr))
         };
         if paged.is_some() {
-            allocation = FileAllocation::new(SUPERBLOCK_SIZE as u64 + early_gcol_size, false, None);
+            allocation = FileAllocation::new(
+                StoredAddress::new(SUPERBLOCK_SIZE as u64 + early_gcol_size),
+                false,
+                None,
+            );
         }
         let reserve = |allocation: &mut FileAllocation,
                        header: u64,
@@ -2050,7 +2057,7 @@ impl FileWriter {
             } = layout::PagedLayout::new(
                 page_size,
                 persist_paged,
-                allocation.end(),
+                allocation.end().get(),
                 ext_oh.as_ref().map_or(0, |bytes| bytes.len() as u64),
                 measurements,
                 collection_sections,
@@ -2321,7 +2328,7 @@ impl FileWriter {
                 .iter()
                 .any(|d| d.storage.vl_string_staging().is_some());
 
-        let gcol_start = allocation.end();
+        let gcol_start = allocation.end().get();
         if has_vl {
             for patch in &vl_root {
                 let addrs = place_collections(

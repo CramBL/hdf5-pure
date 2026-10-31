@@ -349,12 +349,7 @@ impl WriteEngine {
         let eof = self.image.len();
         let index_spans = index
             .iter()
-            .map(|extent| {
-                Some((
-                    base.absolute(StoredAddress::new(extent.start())).ok()?,
-                    extent.len(),
-                ))
-            })
+            .map(|extent| Some((base.absolute(extent.start()).ok()?, extent.len())))
             .collect::<Option<Vec<_>>>()?;
         let mut proven = owned.to_vec();
         proven.extend(index_spans.iter().copied());
@@ -403,9 +398,7 @@ impl WriteEngine {
             .collect();
         fractal_heap_free_spans(self.space.page_size(), &allocations)
             .into_iter()
-            .map(|(addr, len, class)| {
-                Some((base.absolute(StoredAddress::new(addr)).ok()?, len, class))
-            })
+            .map(|(addr, len, class)| Some((base.absolute(addr).ok()?, len, class)))
             .collect()
     }
 
@@ -684,7 +677,7 @@ impl WriteEngine {
                 Ok((
                     address,
                     length,
-                    self.space.object_header_free_class(stored.get(), length),
+                    self.space.object_header_free_class(stored, length),
                 ))
             })
             .collect()
@@ -792,7 +785,7 @@ impl WriteEngine {
                 Some((
                     address,
                     len,
-                    collection_free_class(self.space.page_size(), stored.get(), len),
+                    collection_free_class(self.space.page_size(), stored, len),
                 ))
             })
             .collect()
@@ -996,9 +989,10 @@ impl WriteEngine {
             Some(page_size) => {
                 index_abuts_chunk_data(data, index)
                     && index.iter().all(|&(at, len)| {
-                        self.context.addresses().relative(at).is_ok_and(|stored| {
-                            !touches_page_zero(page_size, [(stored.get(), len)])
-                        })
+                        self.context
+                            .addresses()
+                            .relative(at)
+                            .is_ok_and(|stored| !touches_page_zero(page_size, [(stored, len)]))
                     })
             }
         }
@@ -1233,8 +1227,22 @@ impl WriteEngine {
                     &dataspace,
                     self.widths(),
                 )?;
-                raw.extend(self.absolute_owned_spans(storage.data)?);
-                metadata.extend(self.absolute_owned_spans(storage.index)?);
+                raw.extend(
+                    self.absolute_owned_spans(
+                        storage
+                            .data
+                            .into_iter()
+                            .map(|(addr, len)| (StoredAddress::new(addr), len)),
+                    )?,
+                );
+                metadata.extend(
+                    self.absolute_owned_spans(
+                        storage
+                            .index
+                            .into_iter()
+                            .map(|(addr, len)| (StoredAddress::new(addr), len)),
+                    )?,
+                );
             }
             DataLayout::Virtual => complete = false,
         }
@@ -1348,18 +1356,11 @@ impl WriteEngine {
 
     fn absolute_owned_spans(
         &self,
-        spans: impl IntoIterator<Item = (u64, u64)>,
+        spans: impl IntoIterator<Item = (StoredAddress, u64)>,
     ) -> Result<Vec<(u64, u64)>, Error> {
         spans
             .into_iter()
-            .map(|(addr, len)| {
-                Ok((
-                    self.context
-                        .addresses()
-                        .absolute(StoredAddress::new(addr))?,
-                    len,
-                ))
-            })
+            .map(|(addr, len)| Ok((self.context.addresses().absolute(addr)?, len)))
             .collect()
     }
 
@@ -1397,9 +1398,7 @@ impl WriteEngine {
         };
         for &(extent, _) in storage.allocations() {
             metadata.push((
-                self.context
-                    .addresses()
-                    .absolute(StoredAddress::new(extent.start()))?,
+                self.context.addresses().absolute(extent.start())?,
                 extent.len(),
             ));
         }
@@ -1456,7 +1455,11 @@ pub(super) fn index_abuts_chunk_data(data: &[(u64, u64)], index: &[(u64, u64)]) 
 /// (`H5FDdevelop.h`) files with raw data. On a paged file, `H5MF_xfree` (`H5MF.c`, libhdf5 2.2.0)
 /// files freed space of a page or more in the generic large manager by its size alone, whatever
 /// its type.
-fn collection_free_class(page_size: Option<FileSpacePageSize>, stored: u64, len: u64) -> FreeClass {
+fn collection_free_class(
+    page_size: Option<FileSpacePageSize>,
+    stored: StoredAddress,
+    len: u64,
+) -> FreeClass {
     match page_size {
         Some(page_size) if touches_page_zero(page_size, [(stored, len)]) => FreeClass::Dead,
         Some(page_size) if len >= page_size.get() => FreeClass::Dead,
@@ -1473,11 +1476,11 @@ fn collection_free_class(page_size: Option<FileSpacePageSize>, stored: u64, len:
 /// [`collection_free_class`] a global heap collection.
 pub(super) fn touches_page_zero(
     page_size: FileSpacePageSize,
-    spans: impl IntoIterator<Item = (u64, u64)>,
+    spans: impl IntoIterator<Item = (StoredAddress, u64)>,
 ) -> bool {
     spans
         .into_iter()
-        .any(|(addr, len)| len > 0 && addr < page_size.get())
+        .any(|(addr, len)| len > 0 && addr.get() < page_size.get())
 }
 
 /// Tags each fractal heap allocation with the free class of the page it occupies.
@@ -1493,8 +1496,8 @@ pub(super) fn touches_page_zero(
 /// [`FractalHeapStorage::allocations`]: crate::fractal_heap_storage::FractalHeapStorage::allocations
 fn fractal_heap_free_spans(
     page_size: Option<FileSpacePageSize>,
-    allocations: &[(u64, u64, FractalHeapAllocation)],
-) -> Vec<(u64, u64, FreeClass)> {
+    allocations: &[(StoredAddress, u64, FractalHeapAllocation)],
+) -> Vec<(StoredAddress, u64, FreeClass)> {
     let Some(page_size) = page_size else {
         return allocations
             .iter()
@@ -1502,7 +1505,7 @@ fn fractal_heap_free_spans(
             .collect();
     };
     allocations
-        .chunk_by(|&(addr, len, _), &(next, _, _)| addr.checked_add(len) == Some(next))
+        .chunk_by(|&(addr, len, _), &(next, _, _)| addr.checked_add(len).ok() == Some(next))
         .flat_map(|run| {
             let huge_object_class = huge_object_free_class(page_size, run);
             run.iter().map(move |&(addr, len, kind)| {
@@ -1511,7 +1514,9 @@ fn fractal_heap_free_spans(
                     // page or more to the generic large manager whatever its type, and
                     // `H5MF__alloc_pagefs` starts it on a page boundary and files the rest of its
                     // last page in that manager, so no small allocation belongs in that page.
-                    _ if len >= page_size.get() && addr % page_size.get() == 0 => FreeClass::Dead,
+                    _ if len >= page_size.get() && addr.get() % page_size.get() == 0 => {
+                        FreeClass::Dead
+                    }
                     FractalHeapAllocation::Header
                     | FractalHeapAllocation::DirectBlock
                     | FractalHeapAllocation::IndirectBlock
@@ -1538,9 +1543,9 @@ fn fractal_heap_free_spans(
 /// unproven.
 fn huge_object_free_class(
     page_size: FileSpacePageSize,
-    run: &[(u64, u64, FractalHeapAllocation)],
+    run: &[(StoredAddress, u64, FractalHeapAllocation)],
 ) -> FreeClass {
-    let is_huge_object = |&(_, _, kind): &(u64, u64, FractalHeapAllocation)| {
+    let is_huge_object = |&(_, _, kind): &(StoredAddress, u64, FractalHeapAllocation)| {
         kind == FractalHeapAllocation::HugeObject
     };
     if run.iter().all(is_huge_object) {
@@ -1555,7 +1560,8 @@ fn huge_object_free_class(
     // huge object joined to heap metadata inside a page shares an allocation with that metadata,
     // as in the blob `place_dense_attrs` writes.
     let joined_inside_a_page = run.windows(2).any(|pair| {
-        is_huge_object(&pair[0]) != is_huge_object(&pair[1]) && pair[1].0 % page_size.get() != 0
+        is_huge_object(&pair[0]) != is_huge_object(&pair[1])
+            && pair[1].0.get() % page_size.get() != 0
     });
     if joined_inside_a_page {
         FreeClass::Page(PageType::Meta)
@@ -1633,8 +1639,16 @@ mod tests {
     ) {
         let page_size = FileSpacePageSize::try_from(0x1000).unwrap();
 
+        let allocations: Vec<_> = allocations
+            .iter()
+            .map(|&(address, length, kind)| (StoredAddress::new(address), length, kind))
+            .collect();
+        let expected: Vec<_> = expected
+            .iter()
+            .map(|&(address, length, class)| (StoredAddress::new(address), length, class))
+            .collect();
         assert_eq!(
-            fractal_heap_free_spans(Some(page_size), allocations),
+            fractal_heap_free_spans(Some(page_size), &allocations),
             expected
         );
     }
@@ -1642,17 +1656,17 @@ mod tests {
     #[test]
     fn without_pages_each_fractal_heap_allocation_takes_its_libhdf5_page_type() {
         let allocations = [
-            (0x0f80, 0x80, HUGE),
-            (0x1000, 0x100, HEADER),
-            (0x1100, 0x80, HUGE),
+            (StoredAddress::new(0x0f80), 0x80, HUGE),
+            (StoredAddress::new(0x1000), 0x100, HEADER),
+            (StoredAddress::new(0x1100), 0x80, HUGE),
         ];
 
         assert_eq!(
             fractal_heap_free_spans(None, &allocations),
             [
-                (0x0f80, 0x80, RAW),
-                (0x1000, 0x100, META),
-                (0x1100, 0x80, RAW)
+                (StoredAddress::new(0x0f80), 0x80, RAW),
+                (StoredAddress::new(0x1000), 0x100, META),
+                (StoredAddress::new(0x1100), 0x80, RAW)
             ]
         );
     }
@@ -1672,7 +1686,10 @@ mod tests {
     ) {
         let page_size = page_size.map(|size| FileSpacePageSize::try_from(size).unwrap());
 
-        assert_eq!(collection_free_class(page_size, stored, len), expected);
+        assert_eq!(
+            collection_free_class(page_size, StoredAddress::new(stored), len),
+            expected
+        );
     }
 
     const HEADER: FractalHeapAllocation = FractalHeapAllocation::Header;

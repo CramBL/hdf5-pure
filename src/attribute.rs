@@ -660,11 +660,15 @@ mod tests {
         file[root_at..root_at + leaf.len()].copy_from_slice(&leaf);
         vec![
             Extent::new(
-                u64::try_from(header_at).unwrap(),
+                StoredAddress::new(u64::try_from(header_at).unwrap()),
                 u64::try_from(header.len()).unwrap(),
             )
             .unwrap(),
-            Extent::new(u64::try_from(root_at).unwrap(), NODE_SIZE).unwrap(),
+            Extent::new(
+                StoredAddress::new(u64::try_from(root_at).unwrap()),
+                NODE_SIZE,
+            )
+            .unwrap(),
         ]
     }
 

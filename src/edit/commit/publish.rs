@@ -16,7 +16,7 @@ use hdf5_pure_space::__private::{
 
 use super::{PublicationPurpose, PublicationState};
 use crate::SuperblockVersion;
-use crate::address::{StoredAddress, StoredAddressExt};
+use crate::address::StoredAddress;
 use crate::edit::SyncPolicy;
 use crate::edit::context::SuperblockPublication;
 use crate::edit::object_header;
@@ -86,10 +86,7 @@ impl WriteEngine {
         let snapshot = self.snapshot_free();
         let mut trunc_to = self.release_freed(to_free)?;
         if let Some(aggregation) = self.aggregation {
-            let end = self
-                .context
-                .addresses()
-                .resolve(StoredAddress::new(aggregation.eoa()))?;
+            let end = self.context.addresses().resolve(aggregation.eoa())?;
             if end.get() < self.image.len() {
                 trunc_to = Some(end);
             }
@@ -157,7 +154,7 @@ impl WriteEngine {
         };
         // A flat tail may have published reusable space above it. That space contains no live
         // allocations and can be released by the same manager rewrite.
-        let eoa = self.end_of_allocation()?.get();
+        let eoa = self.end_of_allocation()?;
         if tail_end != eoa
             && (self.space.is_paged() || self.space.trailing_run_start(eoa) != tail_end)
         {
@@ -166,7 +163,13 @@ impl WriteEngine {
         // Apply the retention threshold of `FreeList::release_trailing_run` to the combined
         // free run and old tail before attempting a rewrite.
         let run_start = self.space.trailing_run_start(tail_start);
-        if eoa - run_start < 2 * free_space::TRAILING_RESERVE_TAILS * (tail_end - tail_start) {
+        let required = tail_end
+            .checked_distance_from(tail_start)
+            .and_then(|length| length.checked_mul(2 * free_space::TRAILING_RESERVE_TAILS));
+        if required
+            .zip(eoa.checked_distance_from(run_start))
+            .is_none_or(|(required, available)| available < required)
+        {
             return Ok(());
         }
         self.commit_persisting(new_root, Vec::new(), TailPlacement::ReuseOnly)
@@ -287,19 +290,19 @@ impl WriteEngine {
                     &mut self.space,
                     to_free
                         .into_iter()
-                        .filter_map(|(addr, len, _)| FreeExtent::new(addr.get(), len)),
+                        .filter_map(|(addr, len, _)| FreeExtent::new(addr, len)),
                 )?
-                .map(|cut| self.context.addresses().resolve(StoredAddress::new(cut)))
+                .map(|cut| self.context.addresses().resolve(cut))
                 .transpose();
         }
         self.space
             .release_freed(
-                eoa.get(),
+                eoa,
                 to_free
                     .into_iter()
-                    .filter_map(|(addr, len, _)| FreeExtent::new(addr.get(), len)),
+                    .filter_map(|(addr, len, _)| FreeExtent::new(addr, len)),
             )
-            .map(|cut| self.context.addresses().resolve(StoredAddress::new(cut)))
+            .map(|cut| self.context.addresses().resolve(cut))
             .transpose()
     }
 
@@ -455,7 +458,7 @@ impl WriteEngine {
 
         // Reserve from previously reusable space. This commit's pending frees remain live
         // until the root publication and cannot supply the tail reservation.
-        let current_eoa = self.end_of_allocation()?.get();
+        let current_eoa = self.end_of_allocation()?;
         let limit = (placement == TailPlacement::ReuseOnly)
             .then(|| old_blocks.iter().map(|extent| extent.start()).min())
             .flatten();
@@ -487,23 +490,18 @@ impl WriteEngine {
         let reused = placed_at.is_some();
         let ext_addr = placed_at.unwrap_or(current_eoa);
         let managers = ManagerSections::flat(post.extents().iter().copied());
-        let plan = free_space_manager::plan_managers(
-            &managers,
-            StoredAddress::new(ext_addr).offset(ext_len),
-            widths,
-        );
+        let plan =
+            free_space_manager::plan_managers(&managers, ext_addr.checked_add(ext_len)?, widths);
         // For a reused tail, truncate to the planned EOA after publication. The post-commit
         // free list excludes dropped trailing regions and the suffix released by
         // `FreeList::release_trailing_run`. An appended tail ends the file itself.
-        let final_eoa = if reused { eoa } else { ext_addr + tail_len };
+        let tail_end = ext_addr.checked_add(tail_len)?;
+        let final_eoa = if reused { eoa } else { tail_end };
         debug_assert!(
-            ext_addr + tail_len <= final_eoa,
+            tail_end <= final_eoa,
             "the tail must end at or below the end-of-allocation it was placed under"
         );
-        let final_eof = self
-            .context
-            .addresses()
-            .resolve(StoredAddress::new(final_eoa))?;
+        let final_eof = self.context.addresses().resolve(final_eoa)?;
         let aggregation = self
             .aggregation
             .map(|state| state.reconcile(final_eoa))
@@ -537,7 +535,7 @@ impl WriteEngine {
                 threshold,
                 page_size,
                 block.fshd_addr.get(),
-                eoa_pre_fsm,
+                eoa_pre_fsm.get(),
             );
             object_header::build_v2_object_header(
                 &self.rewrite_extension_region(old_ext_addr, &info)?,
@@ -550,7 +548,7 @@ impl WriteEngine {
                 strategy,
                 threshold,
                 page_size,
-                final_eoa,
+                final_eoa.get(),
             );
             object_header::build_v2_object_header(
                 &self.rewrite_extension_region(old_ext_addr, &info)?,
@@ -563,16 +561,16 @@ impl WriteEngine {
             "extension length must be stable across the placeholder and real messages"
         );
 
-        let new_old_blocks = vec![FreeExtent::new(ext_addr, tail_len).ok_or(Error::Format(
+        let region = FreeExtent::new(ext_addr, tail_len).ok_or(Error::Format(
             FormatError::OffsetOverflow {
-                offset: ext_addr,
+                offset: ext_addr.get(),
                 length: tail_len,
             },
-        ))?];
+        ))?;
+        let new_old_blocks = vec![region];
 
         // The extension and manager blocks remain unreferenced until superblock publication.
-        let region = (ext_addr, tail_len);
-        self.write_tail_block(region, StoredAddress::new(ext_addr), &ext_oh)?;
+        self.write_tail_block(region, ext_addr, &ext_oh)?;
         if let Some(block) = flat_block {
             let fshd_len = hdf5_pure_format::__private::free_space_manager_header_len(widths);
             let fsse_allocated = tail_len
@@ -598,7 +596,7 @@ impl WriteEngine {
         let mut new_sb = self.context.superblock().clone();
         new_sb.root_group_address = self.context.addresses().relative(new_root.get())?;
         new_sb.eof_address = final_eof.get();
-        new_sb.superblock_extension_address = Some(StoredAddress::new(ext_addr));
+        new_sb.superblock_extension_address = Some(ext_addr);
         // Preserve any status flags held by this session.
         new_sb.set_consistency_flags(self.held_status_flags)?;
         let publication = self.context.propose(new_sb)?.encode()?;
@@ -648,13 +646,13 @@ impl WriteEngine {
     /// Panics if the session does not use a flat free-space strategy.
     pub(in crate::edit) fn flat_post_free(
         &self,
-        eof: u64,
+        eof: StoredAddress,
         to_free: &[(StoredAddress, u64, FreeClass)],
         old_blocks: &[FreeExtent],
-    ) -> (FreeList, u64) {
+    ) -> (FreeList, StoredAddress) {
         let extents = to_free
             .iter()
-            .filter_map(|&(addr, len, _)| FreeExtent::new(addr.get(), len))
+            .filter_map(|&(addr, len, _)| FreeExtent::new(addr, len))
             .chain(old_blocks.iter().copied());
         // PAGE sessions are dispatched before a flat tail is planned.
         self.space
@@ -681,14 +679,14 @@ impl WriteEngine {
     /// The caller restores its allocation snapshot after a failure before publication.
     pub(in crate::edit) fn flat_tail_layout(
         &mut self,
-        current_eoa: u64,
+        current_eoa: StoredAddress,
         to_free: &[(StoredAddress, u64, FreeClass)],
         old_blocks: &[FreeExtent],
         ext_len: u64,
         widths: FormatWidths,
-        limit: Option<u64>,
+        limit: Option<StoredAddress>,
         purpose: PublicationPurpose,
-    ) -> (FreeList, Option<u64>, u64, u64) {
+    ) -> (FreeList, Option<StoredAddress>, u64, StoredAddress) {
         /// Limits reservation retries when the serialized manager length increases.
         const ROUNDS: usize = 4;
 
@@ -722,9 +720,9 @@ impl WriteEngine {
             }
             if len <= proposed {
                 debug_assert!(
-                    at + proposed <= eoa,
-                    "a reused tail at {at} of {proposed} bytes runs past the end-of-allocation \
-                     {eoa} it was placed under"
+                    reserved.end() <= eoa,
+                    "a reused tail at {at:?} of {proposed} bytes runs past the end-of-allocation \
+                     {eoa:?} it was placed under"
                 );
                 return (post, Some(at), proposed, eoa);
             }
@@ -808,11 +806,11 @@ impl WriteEngine {
         )?
         .len() as u64;
 
-        let current_eoa = self.end_of_allocation()?.get();
+        let current_eoa = self.end_of_allocation()?;
         let freed: Vec<_> = to_free
             .iter()
             .filter_map(|&(addr, len, class)| {
-                FreeExtent::new(addr.get(), len).map(|extent| (extent, class))
+                FreeExtent::new(addr, len).map(|extent| (extent, class))
             })
             .collect();
         let Some(plan) = paged_persistence::PagedPersistencePlan::new(
@@ -847,10 +845,7 @@ impl WriteEngine {
         } else {
             self.begin_page(PageType::Meta)?;
         }
-        let final_eof = self
-            .context
-            .addresses()
-            .resolve(StoredAddress::new(final_eoa))?;
+        let final_eof = self.context.addresses().resolve(final_eoa)?;
 
         let info = if blocks.is_empty() {
             file_space_info::persistent_empty(
@@ -858,7 +853,7 @@ impl WriteEngine {
                 strategy,
                 threshold,
                 page_size,
-                final_eoa,
+                final_eoa.get(),
             )
         } else {
             file_space_info::persistent_managers(
@@ -866,7 +861,7 @@ impl WriteEngine {
                 threshold,
                 page_size,
                 slots.map(StoredAddress::get),
-                final_eoa,
+                final_eoa.get(),
             )
         };
         let ext_oh = object_header::build_v2_object_header(
@@ -879,16 +874,16 @@ impl WriteEngine {
         );
 
         // Include section-list padding in the allocation recorded for future reclamation.
-        let new_old_blocks = vec![FreeExtent::new(ext_addr, blocks_len).ok_or(Error::Format(
+        let region = FreeExtent::new(ext_addr, blocks_len).ok_or(Error::Format(
             FormatError::OffsetOverflow {
-                offset: ext_addr,
+                offset: ext_addr.get(),
                 length: blocks_len,
             },
-        ))?];
+        ))?;
+        let new_old_blocks = vec![region];
 
         // The extension and manager blocks remain unreferenced until superblock publication.
-        let region = (ext_addr, blocks_len);
-        self.write_tail_block(region, StoredAddress::new(ext_addr), &ext_oh)?;
+        self.write_tail_block(region, ext_addr, &ext_oh)?;
         for block in &blocks {
             self.write_tail_block(region, block.header_address, &block.header)?;
             self.write_tail_block(region, block.section_list_address, &block.section_list)?;
@@ -902,7 +897,7 @@ impl WriteEngine {
         let mut new_sb = self.context.superblock().clone();
         new_sb.root_group_address = self.context.addresses().relative(new_root.get())?;
         new_sb.eof_address = final_eof.get();
-        new_sb.superblock_extension_address = Some(StoredAddress::new(ext_addr));
+        new_sb.superblock_extension_address = Some(ext_addr);
         // Preserve the crash mark throughout a page-buffered session.
         new_sb.set_consistency_flags(self.held_status_flags)?;
         self.publish_persistent_superblock(self.context.propose(new_sb)?.encode()?, purpose)?;
@@ -1075,6 +1070,7 @@ mod tests {
     use rstest::rstest;
 
     use super::PublicationPurpose;
+    use crate::address::{StoredAddress, StoredAddressExt};
     use crate::free_space_manager;
     use crate::width::FormatWidths;
 
@@ -1092,7 +1088,9 @@ mod tests {
         #[case] capacity: Option<u64>,
     ) {
         let widths = FormatWidths::from_sizes(8, lengths).unwrap();
-        let managers = ManagerSections::flat((0..sections).map(|i| Extent::new(i * 2, 1).unwrap()));
+        let managers = ManagerSections::flat(
+            (0..sections).map(|i| Extent::new(StoredAddress::new(i * 2), 1).unwrap()),
+        );
         let minimum = ext_len + free_space_manager::manager_blocks_len(&managers, widths);
         let actual = super::flat_tail_capacity(ext_len, &managers, widths, purpose);
         assert_eq!(actual, capacity.unwrap_or(minimum));

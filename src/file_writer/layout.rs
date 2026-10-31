@@ -163,7 +163,7 @@ impl ClassicLayout {
         };
         Ok(Self {
             extension,
-            end,
+            end: end.get(),
             manager,
         })
     }
@@ -610,7 +610,7 @@ mod tests {
     #[case::direct(false)]
     #[case::aggregated(true)]
     fn object_metadata_reservations_keep_header_attribute_and_link_order(#[case] aggregated: bool) {
-        let mut allocation = FileAllocation::new(48, aggregated, None);
+        let mut allocation = FileAllocation::new(StoredAddress::new(48), aggregated, None);
         let placed = ObjectMeasure {
             header: 80,
             attributes: Some(24),
@@ -639,7 +639,7 @@ mod tests {
         #[case] expected: Option<(u64, u64)>,
         #[case] end: u64,
     ) {
-        let mut allocation = FileAllocation::new(48, false, None);
+        let mut allocation = FileAllocation::new(StoredAddress::new(48), false, None);
         let placed = DataMeasure::new(length, kind)
             .reserve(&mut allocation)
             .unwrap();
@@ -647,7 +647,7 @@ mod tests {
             placed,
             expected.map(|(address, length)| span(address, length))
         );
-        assert_eq!(allocation.end(), end);
+        assert_eq!(allocation.end(), StoredAddress::new(end));
     }
 
     #[rstest]
