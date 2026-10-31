@@ -28,7 +28,7 @@ pub const DEFAULT_METADATA_CACHE_MAX_ENTRY_BYTES: usize = 64 * 1024;
 /// This is the `hdf5-pure` counterpart to the memory-budget portion of HDF5's
 /// `H5Pset_mdc_config`: it bounds the bytes retained for parsed metadata reads
 /// while a file is opened through [`crate::File::open_streaming_with_options`].
-/// Raw dataset payload reads use `Source::read_exact_at` and are not
+/// Raw dataset payload reads use [`Source::read_exact_at`] and are not
 /// admitted to this cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MetadataCacheConfig {
@@ -37,12 +37,10 @@ pub struct MetadataCacheConfig {
 }
 
 impl MetadataCacheConfig {
-    /// Create a metadata cache with the given total byte budget.
+    /// Creates a metadata-cache configuration with a total byte budget.
     ///
-    /// Individual cached reads are capped at
-    /// `DEFAULT_METADATA_CACHE_MAX_ENTRY_BYTES` (64 KiB) by default so one large
-    /// heap or index block cannot monopolize the cache. Use
-    /// [`with_max_entry_bytes`](Self::with_max_entry_bytes) to change that.
+    /// The default entry cap is the smaller of 64 KiB and the total byte budget. Use
+    /// [`with_max_entry_bytes`](Self::with_max_entry_bytes) to change the entry cap.
     pub const fn new(max_bytes: usize) -> Self {
         let max_entry_bytes = if max_bytes < DEFAULT_METADATA_CACHE_MAX_ENTRY_BYTES {
             max_bytes
@@ -55,7 +53,7 @@ impl MetadataCacheConfig {
         }
     }
 
-    /// Disable metadata read caching.
+    /// Returns a configuration that disables metadata caching.
     pub const fn disabled() -> Self {
         Self {
             max_bytes: 0,
@@ -63,23 +61,23 @@ impl MetadataCacheConfig {
         }
     }
 
-    /// Set the maximum size of a single metadata read admitted to the cache.
+    /// Sets the maximum size of a single metadata read admitted to the cache.
     pub const fn with_max_entry_bytes(mut self, max_entry_bytes: usize) -> Self {
         self.max_entry_bytes = max_entry_bytes;
         self
     }
 
-    /// Return the total metadata-cache byte budget.
+    /// Returns the total metadata-cache byte budget.
     pub const fn max_bytes(&self) -> usize {
         self.max_bytes
     }
 
-    /// Return the maximum size of one cached metadata entry.
+    /// Returns the maximum size of one cached metadata entry.
     pub const fn max_entry_bytes(&self) -> usize {
         self.max_entry_bytes
     }
 
-    /// Whether metadata read caching is enabled.
+    /// Returns whether metadata caching is enabled.
     pub const fn is_enabled(&self) -> bool {
         self.max_bytes > 0 && self.max_entry_bytes > 0
     }
@@ -91,28 +89,12 @@ impl Default for MetadataCacheConfig {
     }
 }
 
-/// What a file's metadata cache has done, and what it is holding.
+/// Cumulative metadata-cache counters and current occupancy.
 ///
-/// Returned by [`crate::File::metadata_cache_stats`]. This is the `hdf5-pure`
-/// counterpart to HDF5's `H5Fget_mdc_hit_rate` and `H5Fget_mdc_size`:
-/// [`entries`](Self::entries) and [`bytes`](Self::bytes) are a point-in-time
-/// view of occupancy, and the counters are cumulative since the file was
-/// opened or since the last
-/// [`reset_metadata_cache_stats`](crate::File::reset_metadata_cache_stats).
-///
-/// The reason to look is that [`MetadataCacheConfig`] is a budget chosen before
-/// a single read has happened, and nothing else reports whether it was the
-/// right one:
-///
-/// - [`hit_rate`](Self::hit_rate) says whether the cache is earning its memory.
-/// - [`evictions`](Self::evictions) says whether the budget is the binding
-///   constraint. A hit rate below expectations with no evictions is not a
-///   budget problem, and raising it will not help.
-/// - [`oversize_reads`](Self::oversize_reads) says whether
-///   [`max_entry_bytes`](MetadataCacheConfig::max_entry_bytes) is turning reads
-///   away before they reach the cache at all.
-/// - [`invalidations`](Self::invalidations) says how much of the cache a
-///   read-write session is throwing away with its own writes.
+/// Returned by [`File::metadata_cache_stats`](crate::File::metadata_cache_stats). Counters
+/// accumulate from file opening or the last call to
+/// [`File::reset_metadata_cache_stats`](crate::File::reset_metadata_cache_stats).
+/// [`entries`](Self::entries) and [`bytes`](Self::bytes) describe the currently retained entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MetadataCacheStats {
     hits: u64,
@@ -125,47 +107,40 @@ pub struct MetadataCacheStats {
 }
 
 impl MetadataCacheStats {
-    /// Metadata reads served from the cache.
+    /// Returns the number of metadata reads served from the cache.
     pub const fn hits(&self) -> u64 {
         self.hits
     }
 
-    /// Metadata reads eligible for the cache that were not in it.
+    /// Returns the number of eligible metadata reads absent from the cache.
     pub const fn misses(&self) -> u64 {
         self.misses
     }
 
-    /// Metadata reads that bypassed the cache because they exceed
-    /// [`MetadataCacheConfig::max_entry_bytes`] (or the whole budget).
+    /// Returns the number of metadata reads exceeding the entry or total byte budget.
     ///
-    /// These are counted apart from [`misses`](Self::misses) rather than folded
-    /// into them: the cache was never offered the read, so charging it as a miss
-    /// would report a failure at work it could not have done. They still show up
-    /// in [`reads`](Self::reads).
+    /// These reads are included in [`reads`](Self::reads) and excluded from
+    /// [`misses`](Self::misses) and [`hit_rate`](Self::hit_rate).
     pub const fn oversize_reads(&self) -> u64 {
         self.oversize_reads
     }
 
-    /// Entries dropped to stay inside [`MetadataCacheConfig::max_bytes`].
+    /// Returns the number of entries evicted to satisfy [`MetadataCacheConfig::max_bytes`].
     pub const fn evictions(&self) -> u64 {
         self.evictions
     }
 
-    /// Entries dropped because an in-place write overlapped them.
+    /// Returns the number of entries invalidated by overlapping in-place writes.
     ///
-    /// Only a read-write session invalidates; this stays zero on a read-only
-    /// open. Invalidations approaching [`misses`](Self::misses) mean the session
-    /// is rewriting the metadata it is caching, and a larger budget will not
-    /// change that.
+    /// Returns zero for a read-only session. Increasing the byte budget does not prevent
+    /// invalidation when the caller rewrites cached metadata.
     pub const fn invalidations(&self) -> u64 {
         self.invalidations
     }
 
-    /// Entries currently held.
+    /// Returns the number of cached entries.
     ///
-    /// Against [`bytes`](Self::bytes) this is the mean entry size, which is what
-    /// says whether a few large reads are spending the budget; pair it with
-    /// [`oversize_reads`](Self::oversize_reads) to see the ones already refused.
+    /// Dividing [`bytes`](Self::bytes) by this count gives the mean retained capacity per entry.
     pub const fn entries(&self) -> usize {
         self.entries
     }
@@ -178,24 +153,18 @@ impl MetadataCacheStats {
         self.bytes
     }
 
-    /// Every metadata read through this source: hits, misses, and reads too
-    /// large to admit.
+    /// Returns the sum of hits, misses, and reads too large to admit.
     ///
-    /// The last of those three is not in [`hit_rate`](Self::hit_rate)'s
-    /// denominator, so `hits() / reads()` is a different figure and a lower one.
+    /// [`hit_rate`](Self::hit_rate) excludes reads too large to admit from its denominator.
     pub const fn reads(&self) -> u64 {
         self.hits
             .saturating_add(self.misses)
             .saturating_add(self.oversize_reads)
     }
 
-    /// The fraction of *eligible* metadata reads served from the cache, or
-    /// `None` before any eligible read has happened.
+    /// Returns the fraction of eligible metadata reads served from the cache.
     ///
-    /// `None` rather than C's `0.0`, which `H5Fget_mdc_hit_rate` also returns
-    /// for a cache that has missed every access: the two mean opposite things to
-    /// a caller deciding whether to raise the budget, and only one of them is a
-    /// reason to.
+    /// Returns `None` before the first eligible read. Reads too large to admit are excluded.
     pub fn hit_rate(&self) -> Option<f64> {
         let eligible = self.hits.saturating_add(self.misses);
         if eligible == 0 {
@@ -203,7 +172,7 @@ impl MetadataCacheStats {
         }
         #[expect(
             clippy::cast_precision_loss,
-            reason = "a hit rate is a ratio; f64 holds these counts exactly far past any \
+            reason = "a hit rate is a ratio, and f64 holds these counts exactly far past any \
                       read count a process will reach"
         )]
         Some(self.hits as f64 / eligible as f64)
@@ -212,26 +181,18 @@ impl MetadataCacheStats {
 
 /// A random-access, read-only source of the bytes of an HDF5 file.
 ///
-/// Offsets are `u64` (HDF5's native address width); lengths of individual reads
-/// are `usize` (they must fit in a caller-provided buffer). Implementations must
-/// either fill the whole request or return an error — a short read is always an
-/// error, never silently truncated.
+/// Read offsets are byte positions measured from the beginning of the source. Implementations
+/// fill the complete requested buffer or return an error.
 ///
 /// # Implementing one
 ///
-/// Two methods carry the whole trait: [`len`](Source::len) and
-/// [`read_at`](Source::read_at). The rest are conveniences with default bodies,
-/// and every method added later will have one too, so an implementation written
-/// today keeps compiling.
+/// Implement [`len`](Source::len) and [`read_at`](Source::read_at). The other methods have default
+/// implementations.
 ///
-/// The reader treats a source as an immutable file for as long as it holds one:
-/// [`len`](Source::len) is expected to stay put and to be true — the reader
-/// bounds allocations with it — and bytes already read are expected to read
-/// back the same. A source over something that grows underneath it — a file a
-/// writer is appending to — is what [`File::open_swmr`](crate::File::open_swmr)
-/// is for instead. `read_at` takes `&self` so a `File` can be shared, so an
-/// implementation over a mutable handle owns its own synchronisation, the way
-/// [`ReadSeekSource`] wraps its reader in a mutex.
+/// The reader treats a source as immutable. Its length must remain accurate and constant, and
+/// repeated reads must return the same bytes. Use [`File::open_swmr`](crate::File::open_swmr) to
+/// read a file that another process is appending to. Implementations over mutable handles must
+/// synchronize access, as [`ReadSeekSource`] does with a mutex.
 ///
 /// Metadata parsers call [`read_metadata`](Source::read_metadata), which may borrow resident
 /// bytes or share an immutable allocation. Its default calls
@@ -251,18 +212,11 @@ impl MetadataCacheStats {
               an implementation could contradict its own `len` with"
 )]
 pub trait Source {
-    /// Total number of bytes the source can supply.
+    /// Returns the number of readable bytes in the source.
     ///
-    /// Report the true length: the reader bounds allocations with it. Metadata
-    /// lengths come out of the file being read, and
-    /// [`read_exact_at`](Source::read_exact_at) rejects one that runs past the
-    /// end *before* reserving a buffer for it, so a malformed file cannot name
-    /// a multi-gigabyte read and have it reserved. A `len` larger than what the
-    /// source can actually serve passes that check and the reservation happens,
-    /// which leaves the file choosing the size of an allocation. A length that
-    /// arrives over a channel the caller does not control — a `Content-Length`
-    /// header, a size a host reports — should be held to what the source can
-    /// really serve before it is reported here.
+    /// Report the actual readable extent. The default [`read_exact_at`](Self::read_exact_at)
+    /// checks this bound before allocating a buffer whose length may come from an untrusted
+    /// file. An overstated extent permits allocations larger than the readable data.
     fn len(&self) -> u64;
 
     /// Reads exactly `buf.len()` bytes at `offset` into `buf`.
@@ -346,27 +300,18 @@ pub trait Source {
         MetadataBytes::owned(metadata_range(self.metadata_origin()?, offset, len)?, bytes)
     }
 
-    /// What the metadata cache in front of this source has done, or `None` when
-    /// it has none.
+    /// Returns metadata-cache statistics, or `None` if caching is disabled.
     ///
-    /// The observation half of [`read_metadata_at`](Self::read_metadata_at):
-    /// that method exists so an implementation *may* cache a metadata read, and
-    /// this one reports whether doing so paid. The default is `None`, since most
-    /// sources cache nothing.
-    ///
-    /// A wrapper that forwards `read_metadata_at` to an inner source must
-    /// forward this too. Leaving it defaulted would have it report *no* cache
-    /// where there is a full one, which reads as "caching is off" rather than as
-    /// the missing forward it is.
+    /// The default returns `None`. A wrapper that forwards metadata reads to an inner source
+    /// must also forward this method and
+    /// [`reset_metadata_cache_stats`](Self::reset_metadata_cache_stats).
     fn metadata_cache_stats(&self) -> Option<MetadataCacheStats> {
         None
     }
 
-    /// Zero that cache's cumulative counters, leaving its contents alone.
+    /// Resets cumulative metadata-cache counters, retaining cached entries.
     ///
-    /// The counterpart of HDF5's `H5Freset_mdc_hit_rate_stats`, for measuring
-    /// one phase of a program rather than a whole run. A no-op where there is no
-    /// cache, and it evicts nothing: occupancy is not a counter.
+    /// The default does nothing. Cache implementations preserve the current entry and byte counts.
     fn reset_metadata_cache_stats(&self) {}
 }
 
@@ -460,7 +405,11 @@ impl<S> ValidatedSource<S> {
         Self(inner)
     }
 
-    /// Refuse a buffer whose length is not the one that was asked for.
+    /// Rejects a buffer whose length differs from the request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Source`] if `bytes.len()` differs from `len`.
     fn check(offset: u64, len: usize, bytes: Vec<u8>) -> Result<Vec<u8>, FormatError> {
         if bytes.len() == len {
             return Ok(bytes);
@@ -531,10 +480,7 @@ pub(crate) struct BaseOffsetSource<'a, S: Source + ?Sized> {
     pub(crate) base: BaseAddress,
 }
 
-/// A base-relative view of an in-memory file: `bytes` with its first `base` bytes
-/// (the userblock) cut off, so every address stored relative to the base address
-/// indexes it directly. The in-memory counterpart of [`BaseOffsetSource`], and the
-/// identity for a plain file.
+/// Borrows the bytes after `base` so stored addresses index the slice directly.
 ///
 /// # Errors
 ///
@@ -760,16 +706,14 @@ pub(crate) fn unexpected_eof(range: FileRange, extent: u64) -> FormatError {
 // In-memory backend
 // ---------------------------------------------------------------------------
 
-/// A [`Source`] over an in-memory byte buffer: anything that is
-/// `AsRef<[u8]>` (`Vec<u8>`, `&[u8]`, `Box<[u8]>`, `Arc<[u8]>`, …).
+/// A [`Source`] over an owned or borrowed byte buffer.
 ///
-/// This is the always-available backend that mirrors the crate's current
-/// in-memory model, usable on WASM and `no_std`.
+/// This backend is available without the `std` feature.
 #[derive(Debug, Clone, Copy)]
 pub struct BytesSource<T>(pub T);
 
 impl<T: AsRef<[u8]>> BytesSource<T> {
-    /// Wrap an in-memory byte buffer.
+    /// Wraps an in-memory byte buffer.
     pub fn new(bytes: T) -> Self {
         BytesSource(bytes)
     }
@@ -819,33 +763,15 @@ struct CachedMetadataRead {
     last_access: u64,
 }
 
-/// The bounded LRU store behind [`MetadataCachingSource`], also embedded
-/// directly by the mirrorless write image (`crate::image::HandleImage`), which
-/// must invalidate entries that overlap an in-place write.
+/// A bounded least-recently-used cache of owned metadata reads.
 ///
-/// # Why this is indexed rather than scanned (issue #367)
-///
-/// It held a `Vec` walked end to end by every operation, which made a *hit*
-/// cost O(entries) and put the budget's useful range at a few thousand of them.
-/// Measured against the positioned read a hit replaces: 9x faster at 64
-/// entries, 3.2x at 1,024, then 1.2x **slower** at 4,096 and 21.9x slower at
-/// 65,536. An 8 MiB budget, the figure `README.md` recommends, admits over
-/// 100,000 metadata-sized reads, so the knob documented as a way to make a file
-/// of many datasets read faster made one read about 30% slower.
-///
-/// Both maps below are therefore keyed, not searched, and the budget is a dial
-/// over its whole range rather than only below a cliff.
+/// Entries are indexed by their requested range and access order. In-place writers invalidate
+/// entries that overlap a write.
 #[cfg(feature = "std")]
 pub(crate) struct MetadataReadCache {
-    /// Entries by the `(offset, len)` the caller asked for. Two reads may share
-    /// an offset at different lengths, so the length is part of the key.
-    ///
-    /// Ordered by offset first, which is what lets
-    /// [`invalidate_overlapping`](Self::invalidate_overlapping) look at one
-    /// bounded key range instead of every entry.
+    /// Entries indexed by `(offset, len)`, ordered by offset for overlap queries.
     entries: BTreeMap<(u64, usize), CachedMetadataRead>,
-    /// `last_access` -> the key stamped with it, one row per entry. Its first
-    /// row is the least recently used entry, which is what eviction wants.
+    /// Entry keys indexed by access tick, with the least recently used entry first.
     by_access: BTreeMap<u64, (u64, usize)>,
     current_bytes: usize,
     tick: u64,
@@ -878,9 +804,7 @@ impl MetadataReadCache {
         }
     }
 
-    /// Take the cache's lock, treating a poisoned one as held rather than
-    /// panicking: a cache is a performance aid, and a reader that panicked
-    /// elsewhere leaves no invariant here for a later caller to trip over.
+    /// Acquires the cache lock, recovering the guard after poisoning.
     pub(crate) fn locked(lock: &std::sync::Mutex<Self>) -> std::sync::MutexGuard<'_, Self> {
         lock.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -905,8 +829,7 @@ impl MetadataReadCache {
         len: usize,
         read: impl FnOnce() -> Result<MetadataBytes<'a>, FormatError>,
     ) -> Result<MetadataBytes<'a>, FormatError> {
-        // A zero-length read is not a read of anything, and a disabled cache has
-        // no counters worth keeping; neither is worth a lock.
+        // Zero-length reads and a disabled cache bypass locking and counters.
         if len == 0 || !config.is_enabled() {
             return read();
         }
@@ -927,7 +850,7 @@ impl MetadataReadCache {
         Ok(bytes)
     }
 
-    /// Snapshot the counters and the current occupancy.
+    /// Returns cumulative counters and current occupancy.
     pub(crate) fn stats(&self) -> MetadataCacheStats {
         MetadataCacheStats {
             hits: self.hits,
@@ -940,9 +863,7 @@ impl MetadataReadCache {
         }
     }
 
-    /// Zero the counters, keeping every entry. Occupancy is a measurement of the
-    /// cache's contents rather than a tally of its history, so resetting the
-    /// history must not disturb it.
+    /// Resets cumulative counters, retaining cached entries and occupancy counts.
     pub(crate) fn reset_stats(&mut self) {
         self.hits = 0;
         self.misses = 0;
@@ -951,8 +872,7 @@ impl MetadataReadCache {
         self.invalidations = 0;
     }
 
-    /// Drop one entry and its access row together, keeping the two maps and the
-    /// byte total in step. Every removal goes through here for that reason.
+    /// Removes an entry and its access index, updating retained capacity.
     fn remove(&mut self, key: (u64, usize)) {
         if let Some(entry) = self.entries.remove(&key) {
             self.by_access.remove(&entry.last_access);
@@ -965,24 +885,19 @@ impl MetadataReadCache {
         );
     }
 
-    /// Drop every cached entry that overlaps `[offset, offset + len)`, so a
-    /// read after an in-place write never observes stale bytes.
+    /// Removes cached entries overlapping `[offset, offset + len)`.
     pub(crate) fn invalidate_overlapping(&mut self, offset: u64, len: usize) {
         if len == 0 {
             return;
         }
         let end = offset.saturating_add(len as u64);
-        // An entry starting before this cannot reach `offset` at any length the
-        // cache has admitted, so the search starts here rather than at the map's
-        // first key. It is never above `end`, which is what `BTreeMap::range`
-        // requires of its bounds: it is at most `offset`, and `end` is at least
-        // `offset` even where the addition above saturates.
+        // Entries before this bound end before `offset`. The bound is at most `offset`,
+        // and `end` is at least `offset`, as required by `BTreeMap::range`.
         let first = offset.saturating_sub(self.longest_entry as u64);
         let doomed: Vec<(u64, usize)> = self
             .entries
             .range((first, 0)..(end, 0))
-            // The range settles `entry_offset < end`; this settles the other
-            // half, that the entry reaches forward as far as `offset`.
+            // The range checks `entry_offset < end`. Also require `entry_end > offset`.
             .filter(|((entry_offset, entry_len), _)| {
                 entry_offset.saturating_add(*entry_len as u64) > offset
             })
@@ -996,9 +911,6 @@ impl MetadataReadCache {
 
     pub(crate) fn get(&mut self, offset: u64, len: usize) -> Option<MetadataBytes<'static>> {
         let key = (offset, len);
-        // One tick per cached read, so a `u64` outlasts any process that could
-        // run. The counter formerly wrapped, which would have inverted the very
-        // ordering it exists to record.
         let tick = self.tick + 1;
         let Some(entry) = self.entries.get_mut(&key) else {
             self.misses += 1;
@@ -1032,8 +944,6 @@ impl MetadataReadCache {
         }
 
         let key = (offset, len);
-        // Re-reading a key replaces it. Removing first means the byte total and
-        // the access index never keep a row for the value being displaced.
         self.remove(key);
 
         self.tick += 1;
@@ -1061,9 +971,7 @@ impl MetadataReadCache {
             let Some((_, &key)) = self.by_access.first_key_value() else {
                 break;
             };
-            // Counted here rather than in `remove`, which also serves
-            // invalidation and replacement. Only a drop the *budget* forced is
-            // an eviction, and that is the one that says to raise it.
+            // Count budget-driven removals as evictions. Invalidation and replacement use `remove`.
             self.evictions += 1;
             self.remove(key);
         }
@@ -1089,7 +997,7 @@ pub struct MetadataCachingSource<S> {
 
 #[cfg(feature = "std")]
 impl<S> MetadataCachingSource<S> {
-    /// Wrap a source with the supplied metadata-cache configuration.
+    /// Wraps a source with the supplied metadata-cache configuration.
     pub fn new(inner: S, config: MetadataCacheConfig) -> Self {
         Self {
             inner,
@@ -1127,8 +1035,7 @@ impl<S: Source> Source for MetadataCachingSource<S> {
         })
     }
 
-    /// `None` when the configuration disabled the cache, which is what the
-    /// wrapper being present but inert means to a caller.
+    /// Returns cache statistics, or `None` if the configuration disables caching.
     fn metadata_cache_stats(&self) -> Option<MetadataCacheStats> {
         self.config
             .is_enabled()
@@ -1144,18 +1051,10 @@ impl<S: Source> Source for MetadataCachingSource<S> {
 // Read + Seek backend (std)
 // ---------------------------------------------------------------------------
 
-/// A lazy [`Source`] over any [`std::io::Read`] + [`std::io::Seek`] (a
-/// [`std::fs::File`], an in-memory `Cursor`, etc.).
+/// A [`Source`] that seeks before each read from a [`std::io::Read`] and [`std::io::Seek`] backend.
 ///
-/// Each [`read_at`](Source::read_at) performs a `seek` + `read_exact`, so no
-/// more than the requested bytes are ever held in memory. This is the backend
-/// that lets a 32-bit host read a file larger than its address space: the
-/// metadata and one working chunk fit even when the whole file does not.
-///
-/// The reader is wrapped in a [`std::sync::Mutex`] so the source is `Sync` and
-/// `read_at` can take `&self` (seeking needs `&mut` access). This serializes
-/// concurrent reads, which is correct though not maximally parallel; a future
-/// backend can use positioned reads (`pread`/`seek_read`) to avoid the lock.
+/// [`Source::read_at`] reads directly into the caller's buffer. Access to the backend is serialized
+/// with a [`std::sync::Mutex`].
 #[cfg(feature = "std")]
 pub struct ReadSeekSource<R> {
     inner: std::sync::Mutex<R>,
@@ -1164,8 +1063,13 @@ pub struct ReadSeekSource<R> {
 
 #[cfg(feature = "std")]
 impl<R: std::io::Read + std::io::Seek> ReadSeekSource<R> {
-    /// Wrap a `Read + Seek`, measuring its length by seeking to the end (then
-    /// restoring nothing — every `read_at` seeks absolutely anyway).
+    /// Wraps a backend, measuring its length by seeking to the end.
+    ///
+    /// Leaves the cursor at the end. Each read seeks to its requested offset.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FormatError::Source`] if seeking to the end fails.
     pub fn new(mut reader: R) -> Result<Self, FormatError> {
         let len = reader
             .seek(std::io::SeekFrom::End(0))
@@ -1184,8 +1088,7 @@ impl<R: std::io::Read + std::io::Seek> Source for ReadSeekSource<R> {
     }
 
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), FormatError> {
-        // Bound-check up front so a request past EOF is a clean error rather
-        // than a backend-specific short read.
+        // Check bounds before reading so a request past EOF returns an error.
         let end = offset
             .checked_add(buf.len() as u64)
             .ok_or(FormatError::OffsetOverflow {
@@ -1212,8 +1115,7 @@ impl<R: std::io::Read + std::io::Seek> Source for ReadSeekSource<R> {
     }
 }
 
-/// Render an `std::io::Error` to a short owned string for [`FormatError::Source`]
-/// (which is `no_std`-friendly and cannot hold the error itself).
+/// Formats an [`std::io::Error`] for [`FormatError::Source`].
 #[cfg(feature = "std")]
 fn format_io(e: &std::io::Error) -> std::string::String {
     std::format!("{e}")
@@ -1624,15 +1526,15 @@ mod tests {
     #[case::short(2, 0)]
     #[case::long(4, 0)]
     #[case::wrong_origin(3, 1)]
-    fn validated_metadata_rejects_a_source_owner_outside_the_request(
+    fn validated_metadata_rejects_mismatched_lengths_and_origins(
         #[case] len: usize,
         #[case] origin: u64,
     ) {
-        struct BadSource {
+        struct MismatchedMetadataSource {
             len: usize,
             origin: u64,
         }
-        impl Source for BadSource {
+        impl Source for MismatchedMetadataSource {
             fn len(&self) -> u64 {
                 16
             }
@@ -1647,7 +1549,7 @@ mod tests {
                 MetadataBytes::from_vec(self.origin, vec![0; self.len])
             }
         }
-        let source = ValidatedSource::new(BadSource { len, origin });
+        let source = ValidatedSource::new(MismatchedMetadataSource { len, origin });
         let err = source.read_metadata(0, 3).unwrap_err();
         let expected = if len != 3 {
             format!("the source returned {len} bytes for a 3-byte read at offset 0")
@@ -1691,7 +1593,7 @@ mod tests {
     }
 
     #[test]
-    fn bytes_source_offset_past_end_is_eof() {
+    fn bytes_source_reads_at_end_require_an_empty_buffer() {
         let src = BytesSource::new(vec![0u8; 8]);
         let mut buf = [0u8; 1];
         assert_eq!(
@@ -1846,7 +1748,7 @@ mod tests {
     }
 
     #[test]
-    fn forwarding_through_reference() {
+    fn source_references_forward_payload_reads() {
         let src = BytesSource::new(vec![9u8, 8, 7]);
         let r: &dyn Source = &src;
         let mut buf = [0u8; 2];
@@ -1855,7 +1757,7 @@ mod tests {
     }
 
     #[test]
-    fn forwarding_through_reference_preserves_metadata_reads() {
+    fn source_references_forward_metadata_reads() {
         use core::cell::Cell;
 
         struct MetadataSource {
@@ -1941,7 +1843,6 @@ mod tests {
         let seek = ReadSeekSource::new(Cursor::new(data.clone())).unwrap();
         assert_eq!(seek.len(), mem.len());
 
-        // Every read_at against the lazy source matches the in-memory source.
         for &(off, len) in &[(0u64, 1usize), (5, 10), (199, 1), (100, 50)] {
             let a = mem.read_exact_at(off, len).unwrap();
             let b = seek.read_exact_at(off, len).unwrap();
@@ -1978,7 +1879,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn eviction_drops_the_least_recently_used_entry_not_the_oldest() {
+    fn cache_eviction_uses_last_access_order() {
         // Room for three ten-byte entries, so the fourth displaces exactly one.
         let budget = 30;
         let mut cache = MetadataReadCache::new();
@@ -2001,14 +1902,13 @@ mod tests {
     }
 
     #[test]
-    fn invalidation_takes_every_overlap_and_spares_the_neighbours() {
+    fn cache_invalidation_removes_overlapping_entries() {
         let budget = 1024;
         let mut cache = MetadataReadCache::new();
         for offset in [0u64, 10, 20, 30] {
             cache.insert(offset, 10, vec![offset as u8; 10], budget);
         }
-        // One long entry starting well before the write below and reaching well
-        // past it. Nothing but its own length says it can be reached from there.
+        // The [5, 45) entry starts before [20, 25) and overlaps it.
         cache.insert(5, 40, vec![9u8; 40], budget);
 
         cache.invalidate_overlapping(20, 5);
@@ -2028,7 +1928,7 @@ mod tests {
     }
 
     #[test]
-    fn re_inserting_a_key_replaces_it_rather_than_counting_it_twice() {
+    fn cache_replacement_updates_payload_and_preserves_occupancy() {
         // Exactly two ten-byte entries fit.
         let budget = 20;
         let mut cache = MetadataReadCache::new();
@@ -2062,8 +1962,7 @@ mod tests {
     // What the cache reports about itself (issue #353)
     // -----------------------------------------------------------------------
 
-    /// A source of `len` bytes that serves every metadata read, so a cache in
-    /// front of it is the only thing that can make a read not happen.
+    /// Creates a seek source whose byte at each offset is that offset truncated to [`u8`].
     #[cfg(feature = "std")]
     fn ramp(len: usize) -> ReadSeekSource<io::Cursor<Vec<u8>>> {
         ReadSeekSource::new(io::Cursor::new(
@@ -2074,9 +1973,8 @@ mod tests {
 
     #[cfg(feature = "std")]
     #[test]
-    fn a_read_too_large_to_admit_is_not_charged_as_a_miss() {
-        // 64-byte entries are eligible; anything above that is turned away
-        // before it reaches the cache.
+    fn oversized_metadata_reads_increment_the_oversize_counter() {
+        // The 64-byte entry cap excludes both 256-byte reads.
         let config = MetadataCacheConfig::new(4096).with_max_entry_bytes(64);
         let source = MetadataCachingSource::new(ramp(4096), config);
 
@@ -2090,17 +1988,11 @@ mod tests {
         assert_eq!(stats.misses(), 1);
         assert_eq!(stats.oversize_reads(), 2);
         assert_eq!(stats.reads(), 4);
-        // The two oversize reads are the caller's to fix by raising
-        // `max_entry_bytes`, and folding them in would report the cache at 25%
-        // rather than saying which knob is turning them away.
         assert_eq!(stats.hit_rate(), Some(0.5));
 
-        // The other half of the same rule. `with_max_entry_bytes` can name a cap
-        // above the whole budget, and a read between the two would pass the entry
-        // check only for `insert` to refuse it every time -- a permanent miss
-        // reported as an ordinary one. The budget turns it away up front instead.
-        let lopsided = MetadataCacheConfig::new(128).with_max_entry_bytes(512);
-        let source = MetadataCachingSource::new(ramp(4096), lopsided);
+        // The total byte budget is smaller than the per-entry cap.
+        let budget_below_entry_cap = MetadataCacheConfig::new(128).with_max_entry_bytes(512);
+        let source = MetadataCachingSource::new(ramp(4096), budget_below_entry_cap);
         source.read_metadata_at(0, 256).unwrap();
         source.read_metadata_at(0, 256).unwrap();
         let stats = source.metadata_cache_stats().unwrap();
@@ -2111,7 +2003,7 @@ mod tests {
 
     #[cfg(feature = "std")]
     #[test]
-    fn no_eligible_read_yet_is_not_a_hit_rate_of_zero() {
+    fn cache_hit_rate_requires_an_eligible_read() {
         let config = MetadataCacheConfig::new(4096).with_max_entry_bytes(64);
         let source = MetadataCachingSource::new(ramp(4096), config);
 
@@ -2135,15 +2027,13 @@ mod tests {
 
     #[cfg(feature = "std")]
     #[test]
-    fn the_budget_and_a_write_drop_entries_for_different_reasons() {
-        // Two 64-byte entries fit; a third forces one out.
+    fn cache_counts_evictions_and_invalidations_separately() {
+        // Two 64-byte entries fit. A third forces one out.
         const BUDGET: usize = 128;
         let mut cache = MetadataReadCache::new();
         cache.insert(0, 64, vec![1u8; 64], BUDGET);
         cache.insert(64, 64, vec![2u8; 64], BUDGET);
 
-        // Re-reading a key replaces it. Nothing was dropped for want of room or
-        // because the bytes changed, so neither counter moves.
         cache.insert(0, 64, vec![1u8; 64], BUDGET);
         let replaced = cache.stats();
         assert_eq!(replaced.entries(), 2);
@@ -2188,9 +2078,6 @@ mod tests {
         assert_eq!(stats.hits(), 0);
         assert_eq!(stats.misses(), 0);
         assert_eq!(stats.hit_rate(), None);
-        // Occupancy measures the cache rather than tallying its history, so a
-        // reset that emptied it would answer a different question than the one
-        // `H5Freset_mdc_hit_rate_stats` asks.
         assert_eq!(stats.entries(), 1);
         assert_eq!(stats.bytes(), 64);
         assert!(cache.get(0, 64).is_some(), "the entry is still servable");
@@ -2198,7 +2085,7 @@ mod tests {
 
     #[cfg(feature = "std")]
     #[test]
-    fn a_disabled_cache_reports_nothing_rather_than_zeroes() {
+    fn disabled_cache_statistics_are_none() {
         let source = MetadataCachingSource::new(ramp(4096), MetadataCacheConfig::disabled());
         assert_eq!(
             source.read_metadata_at(0, 64).unwrap(),
@@ -2219,7 +2106,7 @@ mod tests {
 
     #[cfg(feature = "std")]
     #[test]
-    fn a_wrapper_reports_the_cache_it_reads_through() {
+    fn base_offset_source_forwards_cache_statistics_and_resets() {
         let config = MetadataCacheConfig::new(4096);
         let source = MetadataCachingSource::new(ramp(4096), config);
         // The base-relative view a userblock file reads through forwards its
