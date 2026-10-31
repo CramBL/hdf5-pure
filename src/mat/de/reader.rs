@@ -7,7 +7,7 @@ use crate::display::EscapedName;
 use crate::error::FormatError;
 use crate::file_writer::AttrValue;
 use crate::mat::class::MatClass;
-use crate::mat::de::mcos_reader::{self, ClassId, Mcos, NameIndex, PropValue};
+use crate::mat::de::mcos_reader::{self, ClassId, Mcos, NameIndex, ObjectId, PropValue};
 use crate::mat::error::MatError;
 use crate::mat::string_object::MCOS_MAGIC_NUMBER;
 use crate::mat::utf16;
@@ -635,6 +635,7 @@ fn decode_opaque_object(mcos: &Mcos, object_id: u32, depth: usize) -> Result<Mat
     if depth > MAX_NESTING_DEPTH {
         return Err(MatError::Format(FormatError::NestingDepthExceeded));
     }
+    let object_id = ObjectId::parse(object_id)?;
     let class_name = mcos.object_class_name(object_id)?;
     let mut fields = Vec::new();
     for prop in mcos.properties(object_id)? {
